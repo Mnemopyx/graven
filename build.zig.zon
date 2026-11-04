@@ -1,0 +1,8 @@
+.{
+    .name = .graven,
+    .version = "0.0.0",
+    .fingerprint = 0x46477ad73823d04c,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "lib", "apps", "bridge", "scripts", "README.md" },
+}
