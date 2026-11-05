@@ -7,6 +7,8 @@
 pub const geom = @import("graven_geom");
 pub const font = @import("graven_font");
 pub const render = @import("render.zig");
+pub const markup = @import("markup.zig");
+pub const entities = @import("entities.zig");
 
 pub const Face = font.Face;
 pub const Render = render.Render;

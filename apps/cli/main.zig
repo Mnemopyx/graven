@@ -7,7 +7,9 @@ const engine = @import("graven_engine");
 
 const usage =
     \\usage: graven svg <font file> <text> <cap height mm> <out.svg>
-    \\  Renders one run of text in one face and writes its outlines as SVG.
+    \\         Renders one run of text in one face and writes its outlines as SVG.
+    \\       graven parse <markup>
+    \\         Parses label markup and prints its tree, or where it went wrong.
     \\
 ;
 
@@ -15,6 +17,9 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 6 and std.mem.eql(u8, args[1], "svg")) {
         return svg(init, args[2], args[3], args[4], args[5]);
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
+        return parse(init, args[2]);
     }
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
@@ -45,4 +50,21 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     const doc = try layout.output.svg(arena.allocator(), outlines, r.design.join(r.ink), .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
+}
+
+fn parse(init: std.process.Init, src: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena.deinit();
+    var diag: engine.markup.Diagnostic = undefined;
+    const tree = engine.markup.parse(arena.allocator(), src, &diag) catch |err| switch (err) {
+        error.Syntax => {
+            std.debug.print("{s}\n{s}\n", .{ src, diag.kind.message() });
+            std.debug.print("at byte {d}: {s}\u{25B8}{s}\n", .{ diag.offset, src[0..diag.offset], src[diag.offset..] });
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    var out: std.Io.Writer.Allocating = .init(arena.allocator());
+    try engine.markup.dump(&out.writer, tree.items);
+    std.debug.print("{s}\n", .{out.written()});
 }
