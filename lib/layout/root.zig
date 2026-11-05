@@ -1,10 +1,9 @@
-//! Graven layout library: from parsed legends to output geometry.
+//! Graven layout library: worksheets, panels, slots and reflow, union per
+//! colour, DRC and output. Labels themselves are rendered by the engine.
 //!
-//! Modules depend one way only, in this order. Each stage's result is a plain
-//! data structure that can be dumped, diffed and tested.
+//! Modules depend one way only. Each stage's result is a plain data
+//! structure that can be dumped, diffed and tested.
 
-pub const core = @import("core.zig");
-pub const text = @import("text.zig");
 pub const layout = @import("layout.zig");
 pub const geometry = @import("geometry.zig");
 pub const drc = @import("drc.zig");

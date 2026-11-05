@@ -13,14 +13,17 @@ The full design is in the [Graven design blueprint](https://claude.ai/artifact/Q
 
 ## Status
 
-Scaffold only. The library modules are empty; the OCCT bridge is a tested starting point.
+Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. Markup, styles, fallback and containers come next. The OCCT bridge is a tested starting point.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `lib/font` | Font library: a thin Zig layer over HarfBuzz (outlines, measured metrics) |
-| `lib/layout` | Layout library: `core`, `text`, `layout`, `geometry`, `drc`, `output`, dependencies one way only |
+| `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic), contours, exact areas and bounds |
+| `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
+| `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
+| `lib/layout` | Layout library: `layout`, `geometry`, `drc`, `output` (SVG so far) |
+| `lib/testdata` | Test fonts with known glyph areas, made by `tools/make-test-fonts.py` |
 | `apps/cli` | `graven` command-line tool |
 | `bridge/occt` | Optional OCCT bridge: a C shim over OCCT that writes STEP with XDE names and colours |
 | `scripts/build-occt.sh` | Builds a minimal static OCCT 8.0.1 with `zig c++` |
@@ -34,8 +37,10 @@ Requires Zig 0.17.0.
 ```sh
 zig build            # builds the graven CLI
 zig build test       # library tests
-zig build run -- …   # runs the CLI
+zig build run -- svg <font file> "<text>" <cap mm> out.svg   # one run of text as SVG
 ```
+
+HarfBuzz 15.1.0 is fetched by `zig build` (pinned in `build.zig.zon`) and built from its amalgamated source with `zig c++`, so no system HarfBuzz is needed.
 
 ### OCCT bridge (optional)
 

@@ -3,6 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0x46477ad73823d04c,
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "lib", "apps", "bridge", "scripts", "README.md" },
+    .dependencies = .{
+        // HarfBuzz 15.1.0 (tag 15.1.0, commit 3df40d9b98d6b32f0e4288d4ecfbb158ddb3a372).
+        .harfbuzz = .{
+            .url = "git+https://github.com/harfbuzz/harfbuzz#3df40d9b98d6b32f0e4288d4ecfbb158ddb3a372",
+            .hash = "N-V-__8AABCJSwZ_b-_pzs_bdrf6CKkC58JNxsp0b1FfvNqV",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "lib", "apps", "bridge", "scripts", "tools", "README.md" },
 }

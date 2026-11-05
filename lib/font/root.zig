@@ -1,15 +1,16 @@
 //! Graven font library: a thin Zig layer over HarfBuzz.
 //!
-//! Planned contents (see the design blueprint, Modules and integration):
-//! - owns font bytes; HarfBuzz is the only font parser
-//! - glyph outlines as line, quadratic and cubic segments, in font units
-//! - metrics measured from glyphs (x-height, cap height, stem widths)
-//! - glyph-ID lookups shared with shaping
-//!
+//! HarfBuzz is the only font parser. Font bytes are owned here; glyph
+//! outlines come in font units, as lines, native quadratics and cubics;
+//! metrics such as cap height are measured from glyphs, not read from OS/2.
 //! Libraries never touch the file system or the console: callers pass bytes in.
 
-const std = @import("std");
+const face = @import("face.zig");
+
+pub const Face = face.Face;
+pub const Error = face.Error;
 
 test {
-    std.testing.refAllDecls(@This());
+    @import("std").testing.refAllDecls(@This());
+    _ = face;
 }
