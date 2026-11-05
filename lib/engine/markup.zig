@@ -476,7 +476,7 @@ const Run = struct {
 
 /// Combining marks, variation selectors and joiners: they belong to the
 /// cluster before them. (Full UAX #29 segmentation comes with the text stage.)
-fn extendsCluster(cp: u21) bool {
+pub fn extendsCluster(cp: u21) bool {
     return (cp >= 0x0300 and cp <= 0x036F) or (cp >= 0x1AB0 and cp <= 0x1AFF) or
         (cp >= 0x1DC0 and cp <= 0x1DFF) or (cp >= 0x20D0 and cp <= 0x20FF) or
         (cp >= 0xFE20 and cp <= 0xFE2F) or (cp >= 0xFE00 and cp <= 0xFE0F) or

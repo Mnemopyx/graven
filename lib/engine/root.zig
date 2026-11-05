@@ -9,11 +9,15 @@ pub const font = @import("graven_font");
 pub const render = @import("render.zig");
 pub const markup = @import("markup.zig");
 pub const entities = @import("entities.zig");
+pub const style = @import("style.zig");
+pub const label = @import("label.zig");
+pub const shape = @import("shape.zig");
 
 pub const Face = font.Face;
 pub const Render = render.Render;
 pub const Anchor = render.Anchor;
 pub const renderRun = render.renderRun;
+pub const renderLabel = label.renderLabel;
 
 /// The engine's version, recorded with every render it caches.
 pub const version = "0.0.0";

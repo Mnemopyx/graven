@@ -10,6 +10,8 @@ const usage =
     \\         Renders one run of text in one face and writes its outlines as SVG.
     \\       graven parse <markup>
     \\         Parses label markup and prints its tree, or where it went wrong.
+    \\       graven label <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
+    \\         Renders label markup; with an italic font, letters default to italic.
     \\
 ;
 
@@ -20,6 +22,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
         return parse(init, args[2]);
+    }
+    if (args.len >= 7 and std.mem.eql(u8, args[1], "label")) {
+        return label(init, args[2..]);
     }
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
@@ -42,7 +47,7 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
 
     var r = try engine.renderRun(gpa, &faces, 0, text, .{ .cap_height = cap });
     defer r.deinit();
-    for (r.diagnostics) |d| std.debug.print("warning: {s} at byte {d}\n", .{ @tagName(d.kind), d.cluster });
+    for (r.diagnostics) |d| std.debug.print("warning: {s} at byte {d}\n", .{ @tagName(d.kind), d.offset });
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -50,6 +55,63 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     const doc = try layout.output.svg(arena.allocator(), outlines, r.design.join(r.ink), .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
+}
+
+fn label(init: std.process.Init, args: []const [:0]const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cap = std.fmt.parseFloat(f64, args[2]) catch {
+        std.debug.print("cap height must be a number of mm, not {s}\n", .{args[2]});
+        std.process.exit(2);
+    };
+    const src = args[3];
+    const out_path = args[4];
+
+    // Faces: upright, then italic if given, then fallbacks.
+    var faces: std.ArrayList(*engine.Face) = .empty;
+    defer for (faces.items) |f| f.deinit();
+    var paths: std.ArrayList([]const u8) = .empty;
+    try paths.append(a, args[0]);
+    const has_italic = !std.mem.eql(u8, args[1], "-");
+    if (has_italic) try paths.append(a, args[1]);
+    for (args[5..]) |fb| try paths.append(a, fb);
+    for (paths.items) |path| {
+        const bytes = try cwd.readFileAlloc(io, path, a, .limited(64 << 20));
+        try faces.append(a, try engine.Face.init(gpa, bytes, 0));
+    }
+    var fallbacks: std.ArrayList(engine.render.FaceId) = .empty;
+    const first_fallback: u32 = if (has_italic) 2 else 1;
+    for (first_fallback..faces.items.len) |k| try fallbacks.append(a, @intCast(k));
+
+    const ctx = try engine.style.Context.init(faces.items, .{
+        .upright = 0,
+        .italic = if (has_italic) 1 else null,
+        .fallbacks = fallbacks.items,
+        .cap_height = cap,
+        .letters = if (has_italic) .italic else .upright,
+    });
+    var diag: engine.markup.Diagnostic = undefined;
+    var r = engine.renderLabel(gpa, &ctx, src, .{}, &diag) catch |err| switch (err) {
+        error.Syntax => {
+            std.debug.print("{s}\n{s} at byte {d}\n", .{ src, diag.kind.message(), diag.offset });
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    defer r.deinit();
+    for (r.diagnostics) |d| std.debug.print("warning: {s} at byte {d}\n", .{ @tagName(d.kind), d.offset });
+
+    const outlines = try r.outlines(a, faces.items);
+    const doc = try layout.output.svg(a, outlines, r.design.join(r.ink), .{});
+    try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
+    std.debug.print("{s}: {d} elements, script scale {d:.3}, raise {d:.3}, drop {d:.3}\n", .{
+        out_path, r.elements.len, ctx.script_scale, ctx.sup_raise, ctx.sub_drop,
+    });
 }
 
 fn parse(init: std.process.Init, src: []const u8) !void {

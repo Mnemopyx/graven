@@ -16,6 +16,12 @@ Glyphs, in font units (1000 per em):
 
 OS/2 sCapHeight is deliberately wrong (650, not 700), so tests can check that
 cap height is measured from outlines rather than read from OS/2.
+
+GravenTest-Fallback.ttf has what the others lack, at a different cap height,
+so tests can check fallback and cap-height matching:
+  space  advance 250
+  H      rectangle (50,0)-(450,500): cap height 500
+  x      rectangle (50,0)-(350,300)                      area 90000
 """
 
 import sys
@@ -27,6 +33,8 @@ from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 UPEM = 1000
+# A fixed head.created/modified, so the fonts are byte-identical on every run.
+TIMESTAMP = 0x80000000
 ORDER = [".notdef", "space", "H", "O", "D", "A"]
 CMAP = {0x20: "space", ord("H"): "H", ord("O"): "O", ord("D"): "D", ord("A"): "A"}
 ADVANCE = {".notdef": 500, "space": 250, "H": 600, "O": 600, "D": 700, "A": 600}
@@ -73,6 +81,7 @@ def common(fb, family):
     fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200,
                 sCapHeight=650, sxHeight=500, fsType=0)
     fb.setupPost()
+    fb.updateHead(created=TIMESTAMP, modified=TIMESTAMP)
 
 
 def truetype(path):
@@ -100,11 +109,38 @@ def cff(path):
     fb.save(str(path))
 
 
+def fallback(path):
+    order = [".notdef", "space", "H", "x"]
+    advance = {".notdef": 500, "space": 250, "H": 500, "x": 400}
+    fb = FontBuilder(UPEM, isTTF=True)
+    glyphs = {}
+    for g in order:
+        pen = TTGlyphPen(None)
+        rev = ReverseContourPen(pen)
+        if g == "H":
+            rect(rev, 50, 0, 450, 500)
+        elif g == "x":
+            rect(rev, 50, 0, 350, 300)
+        glyphs[g] = pen.glyph()
+    fb.setupGlyphOrder(order)
+    fb.setupCharacterMap({0x20: "space", ord("H"): "H", ord("x"): "x"})
+    fb.setupHorizontalMetrics({g: (advance[g], 50 if g in ("H", "x") else 0) for g in order})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Graven Test Fallback", "styleName": "Regular"})
+    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200,
+                sCapHeight=500, sxHeight=300, fsType=0)
+    fb.setupPost()
+    fb.updateHead(created=TIMESTAMP, modified=TIMESTAMP)
+    fb.setupGlyf(glyphs)
+    fb.save(str(path))
+
+
 def main():
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "lib/engine/testdata")
     out.mkdir(parents=True, exist_ok=True)
     truetype(out / "GravenTest-TT.ttf")
     cff(out / "GravenTest-CFF.otf")
+    fallback(out / "GravenTest-Fallback.ttf")
 
 
 if __name__ == "__main__":

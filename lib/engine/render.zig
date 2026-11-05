@@ -64,9 +64,33 @@ pub const Anchor = union(enum) {
 };
 
 pub const Diagnostic = struct {
-    kind: enum { missing_glyph },
-    /// Byte offset in the markup of the cluster concerned.
-    cluster: u32,
+    kind: enum {
+        /// No face in the chain has the cluster; the main face's .notdef is drawn.
+        missing_glyph,
+        /// Parsed but not rendered yet (accents, breaks): the content is
+        /// drawn without it.
+        not_rendered,
+        /// Italic asked for, but the style has no italic face.
+        no_italic,
+    },
+    /// Byte offset in the source of what is concerned.
+    offset: u32,
+};
+
+/// A contiguous run sharing one resolved style and face, as placed.
+pub const Element = struct {
+    face: FaceId,
+    /// The source bytes it came from.
+    start: u32,
+    end: u32,
+    /// Script depth: 0 for the label's own text, 1 for its scripts, and so on.
+    level: u8,
+    /// Cap height at this element's size, mm.
+    cap_height: f64,
+    /// Baseline origin in the label frame.
+    origin: geom.Point,
+    advance: f64,
+    ink: Box,
 };
 
 pub const Render = struct {
@@ -77,6 +101,7 @@ pub const Render = struct {
     /// The tight box of the ink.
     ink: Box,
     diagnostics: []const Diagnostic,
+    elements: []const Element = &.{},
 
     pub fn deinit(self: *Render) void {
         self.arena.deinit();
@@ -131,7 +156,7 @@ pub fn renderRun(gpa: Allocator, faces: []const *Face, face_id: FaceId, text: []
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     var pen: f64 = 0;
     for (infos[0..n], positions[0..n]) |info, pos| {
-        if (info.codepoint == 0) try diagnostics.append(a, .{ .kind = .missing_glyph, .cluster = info.cluster });
+        if (info.codepoint == 0) try diagnostics.append(a, .{ .kind = .missing_glyph, .offset = info.cluster });
         const x: f64 = pen + @as(f64, @floatFromInt(pos.x_offset));
         const y: f64 = @floatFromInt(pos.y_offset);
         try items.append(a, .{ .glyph = .{
@@ -166,7 +191,7 @@ pub fn renderRun(gpa: Allocator, faces: []const *Face, face_id: FaceId, text: []
 /// A placed glyph's ink: its font-unit bounds mapped directly when the
 /// transform only scales and moves, else the exact bounds of the
 /// transformed outline.
-fn glyphInk(scratch: Allocator, face: *Face, g: GlyphItem) !Box {
+pub fn glyphInk(scratch: Allocator, face: *Face, g: GlyphItem) !Box {
     const o = try face.outline(g.gid);
     const m = g.transform;
     if (m.b == 0 and m.c == 0) {
@@ -237,7 +262,7 @@ test "a character the face lacks is reported, not dropped" {
     var r = try renderRun(testing.allocator, &faces, 0, "HxO", .{ .cap_height = 7 });
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.diagnostics.len);
-    try testing.expectEqual(@as(u32, 1), r.diagnostics[0].cluster);
+    try testing.expectEqual(@as(u32, 1), r.diagnostics[0].offset);
 }
 
 test "rendering is deterministic, bit for bit" {

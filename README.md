@@ -13,7 +13,7 @@ The full design is in the [Graven design blueprint](https://claude.ai/artifact/Q
 
 ## Status
 
-Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`). Styles, fallback and containers come next. The OCCT bridge is a tested starting point.
+Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`), and `graven label` renders it in a style context: upright and italic faces with a fallback chain matched by cap height, superscripts and subscripts (settings from the font's `MATH` table when it has one) and math spaces. Accents, breaks, operator spacing and contact profiles come next. The OCCT bridge is a tested starting point.
 
 ## Layout
 
@@ -39,6 +39,7 @@ zig build            # builds the graven CLI
 zig build test       # library tests
 zig build run -- svg <font file> "<text>" <cap mm> out.svg   # one run of text as SVG
 zig build run -- parse 'x_i^2'                                  # label markup as a tree
+zig build run -- label <upright> <italic|-> <cap mm> 'x_i^2' out.svg [fallback ...]   # a rendered label
 ```
 
 HarfBuzz 15.1.0 is fetched by `zig build` (pinned in `build.zig.zon`) and built from its amalgamated source with `zig c++`, so no system HarfBuzz is needed.
