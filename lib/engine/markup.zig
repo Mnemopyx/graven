@@ -128,15 +128,20 @@ pub const Diagnostic = struct {
 
 pub const Error = error{ Syntax, OutOfMemory };
 
-/// Parses `src` into a tree allocated from `arena`. On error.Syntax,
-/// `diag` says what and where.
+/// Parses `src` into a tree allocated from `arena`, with the built-in
+/// entity table. On error.Syntax, `diag` says what and where.
 pub fn parse(arena: Allocator, src: []const u8, diag: *Diagnostic) Error!Group {
+    return parseWith(arena, src, &entities.Table.builtin, diag);
+}
+
+/// As `parse`, with a configured entity table.
+pub fn parseWith(arena: Allocator, src: []const u8, names: *const entities.Table, diag: *Diagnostic) Error!Group {
     if (src.len > std.math.maxInt(u32)) return error.OutOfMemory;
     if (!std.unicode.utf8ValidateSlice(src)) {
         diag.* = .{ .kind = .invalid_utf8, .offset = 0 };
         return error.Syntax;
     }
-    var p: Parser = .{ .a = arena, .src = src, .diag = diag };
+    var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = diag };
     const items = try p.list(.default, false, false);
     return .{ .items = items, .span = .{ .start = 0, .end = @intCast(src.len) } };
 }
@@ -158,6 +163,7 @@ const Parser = struct {
     a: Allocator,
     src: []const u8,
     i: u32 = 0,
+    names: *const entities.Table,
     diag: *Diagnostic,
 
     fn fail(p: *Parser, kind: ErrorKind, at: u32) Error {
@@ -254,7 +260,7 @@ const Parser = struct {
         }
         const span: Span = .{ .start = at, .end = @intCast(@min(p.i, at + 1 + name.len)) };
 
-        if (entities.table.get(name)) |ent| return run.add(p.a, ent.cp, at);
+        if (p.names.get(name)) |ent| return run.add(p.a, ent.cp, at);
         if (name.len == 1) {
             if (entities.escaped(name[0])) |cp| return run.add(p.a, cp, at);
             if (name[0] == ' ') return run.add(p.a, ' ', at);
@@ -633,4 +639,16 @@ test "errors are data, with the offset of the problem" {
     try expectError("a\tb", .control_character, 1);
     try expectError("ab\\", .backslash_at_end, 2);
     try expectError("\xff", .invalid_utf8, 0);
+}
+
+test "a configured entity table changes what a name resolves to" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var names: entities.Table = .{};
+    try names.set(arena.allocator(), "micro", .{ .cp = 0x00B5, .class = .unit });
+    var diag: Diagnostic = undefined;
+    const tree = try parseWith(arena.allocator(), "5\\micro F", &names, &diag);
+    try testing.expectEqualStrings("5\u{00B5}F", tree.items[0].text.utf8);
+    const default = try parse(arena.allocator(), "5\\micro F", &diag);
+    try testing.expectEqualStrings("5\u{03BC}F", default.items[0].text.utf8);
 }

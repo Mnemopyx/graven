@@ -84,6 +84,39 @@ pub const table = std.StaticStringMap(Entity).initComptime(.{
     .{ "degree", e(0x00B0, .unit) },           .{ "angstrom", e(0x00C5, .unit) },
 });
 
+/// The entities a parse uses: the built-in table, with configured names
+/// taking precedence. Configuration can remap a built-in name (\\micro to
+/// U+00B5) or add new ones; the parser does not change.
+pub const Table = struct {
+    overrides: std.StringHashMapUnmanaged(Entity) = .empty,
+
+    /// The built-in table alone.
+    pub const builtin: Table = .{};
+
+    pub fn get(t: *const Table, name: []const u8) ?Entity {
+        if (t.overrides.get(name)) |ent| return ent;
+        return table.get(name);
+    }
+
+    /// Adds or remaps `name`; the name is copied.
+    pub fn set(t: *Table, gpa: std.mem.Allocator, name: []const u8, ent: Entity) !void {
+        const gop = try t.overrides.getOrPut(gpa, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = gpa.dupe(u8, name) catch |err| {
+                t.overrides.removeByPtr(gop.key_ptr);
+                return err;
+            };
+        }
+        gop.value_ptr.* = ent;
+    }
+
+    pub fn deinit(t: *Table, gpa: std.mem.Allocator) void {
+        var it = t.overrides.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        t.overrides.deinit(gpa);
+    }
+};
+
 /// The named characters written by escaping them: \{ \} \_ \^ \& \% \# \$ \~
 pub fn escaped(c: u8) ?u21 {
     return switch (c) {
@@ -98,4 +131,15 @@ test "look-alike choices are made once" {
     try std.testing.expectEqual(Class.unit, table.get("ohm").?.class);
     try std.testing.expectEqual(@as(u21, 0x03BC), table.get("micro").?.cp);
     try std.testing.expect(table.get("sqrt") == null);
+}
+
+test "configuration remaps a built-in name and adds new ones" {
+    var t: Table = .{};
+    defer t.deinit(std.testing.allocator);
+    try t.set(std.testing.allocator, "micro", .{ .cp = 0x00B5, .class = .unit });
+    try t.set(std.testing.allocator, "mho", .{ .cp = 0x2127, .class = .unit });
+    try std.testing.expectEqual(@as(u21, 0x00B5), t.get("micro").?.cp);
+    try std.testing.expectEqual(@as(u21, 0x2127), t.get("mho").?.cp);
+    try std.testing.expectEqual(@as(u21, 0x03A9), t.get("ohm").?.cp);
+    try std.testing.expectEqual(@as(u21, 0x03BC), Table.builtin.get("micro").?.cp);
 }
