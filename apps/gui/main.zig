@@ -14,6 +14,7 @@ const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const engine = @import("graven_engine");
 const samples = @import("graven_samples");
+const desktop = @import("desktop.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -243,6 +244,11 @@ var state: State = undefined;
 fn init(win: *dvui.Window) !void {
     const gpa = win.gpa;
     initWindowFrame(win);
+    // Match the desktop now, then follow its changes.
+    main_window = win;
+    const settings = desktop.read(gpa, dvui.io);
+    applyDesktop(win, settings);
+    desktop.watch(dvui.io, settings, wakeGui);
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
     const installed: []Font = listFonts(gpa) catch &.{};
     if (std.Io.Dir.cwd().access(dvui.io, example_font, .{})) |_| {
@@ -406,6 +412,7 @@ fn onSheet(pi: usize, b: geom.Box) geom.Box {
 }
 
 fn frame() !dvui.App.Result {
+    if (desktop.take()) |s| applyDesktop(dvui.currentWindow(), s);
     try update();
 
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .style = .window });
@@ -541,6 +548,10 @@ fn titleBar() ?dvui.App.Result {
     const ws = win.backend.windowSize();
     frame_density = if (ws.w > 0) px.w / ws.w else 1;
 
+    const native_frame = dvui.backend.kind != .sdl3 or std.c.getenv("GRAVEN_NATIVE_FRAME") != null;
+    // Window buttons on the left, when the desktop puts them there.
+    if (!native_frame) if (windowButtons(desk.layout.leftSide())) |r| return r;
+
     if (menu()) |r| return r;
 
     // The title fills the middle and is part of the draggable bar.
@@ -555,15 +566,30 @@ fn titleBar() ?dvui.App.Result {
         dvui.labelNoFmt(@src(), state.model.sheet.name, .{}, .{ .font = styled(.theme(.body), state.model.sheet.default_name), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
     }
 
-    if (dvui.backend.kind == .sdl3 and std.c.getenv("GRAVEN_NATIVE_FRAME") == null) {
-        const c = dvui.backend.c;
-        const window = win.backend.impl.window;
-        if (windowButton(.minimize)) _ = c.SDL_MinimizeWindow(window);
-        if (windowButton(.maximize)) {
-            const maximized = (c.SDL_GetWindowFlags(window) & c.SDL_WINDOW_MAXIMIZED) != 0;
-            _ = if (maximized) c.SDL_RestoreWindow(window) else c.SDL_MaximizeWindow(window);
+    if (!native_frame) if (windowButtons(desk.layout.rightSide())) |r| return r;
+    return null;
+}
+
+/// The window buttons in the desktop's order.
+fn windowButtons(buttons: []const desktop.Button) ?dvui.App.Result {
+    if (dvui.backend.kind != .sdl3) return null;
+    const c = dvui.backend.c;
+    const window = dvui.currentWindow().backend.impl.window;
+    for (buttons) |b| {
+        const kind: WindowButton = switch (b) {
+            .minimize => .minimize,
+            .maximize => .maximize,
+            .close => .close,
+        };
+        if (!windowButton(kind)) continue;
+        switch (kind) {
+            .minimize => _ = c.SDL_MinimizeWindow(window),
+            .maximize => {
+                const maximized = (c.SDL_GetWindowFlags(window) & c.SDL_WINDOW_MAXIMIZED) != 0;
+                _ = if (maximized) c.SDL_RestoreWindow(window) else c.SDL_MaximizeWindow(window);
+            },
+            .close => return .close,
         }
-        if (windowButton(.close)) return .close;
     }
     return null;
 }
@@ -714,21 +740,61 @@ fn zoomToContext() void {
     state.view.fit = contextExtents();
 }
 
-const colors = struct {
-    const desk: dvui.Color = .{ .r = 0xd9, .g = 0xd7, .b = 0xd2 };
-    const paper: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
-    const panel_edge: dvui.Color = .{ .r = 0x5c, .g = 0x5a, .b = 0x55 };
-    const margin: dvui.Color = .{ .r = 0x9c, .g = 0x8a, .b = 0x6e };
-    const ruler: dvui.Color = .{ .r = 0xe9, .g = 0xe7, .b = 0xe2 };
-    const titlebar: dvui.Color = .{ .r = 0xeb, .g = 0xea, .b = 0xe7 };
-    const ruler_ink: dvui.Color = .{ .r = 0x4a, .g = 0x48, .b = 0x44 };
-    const body: dvui.Color = .{ .r = 0xe4, .g = 0xe2, .b = 0xdc };
-    const edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f };
-    const face: dvui.Color = .{ .r = 0xf6, .g = 0xf5, .b = 0xf1 };
-    const ink: dvui.Color = .{ .r = 0x1d, .g = 0x1d, .b = 0x1b };
-    const missing: dvui.Color = .{ .r = 0xf6, .g = 0xd5, .b = 0xcf };
-    const overflow: dvui.Color = .{ .r = 0xc2, .g = 0x41, .b = 0x2d };
+/// Graven's own colours. The artwork (sheet, tiles, legends) keeps light
+/// paper colours in either scheme, as drawing apps do; the chrome around it
+/// (desk, rulers, title bar) follows the desktop's dark or light setting.
+const Palette = struct {
+    desk: dvui.Color,
+    paper: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 },
+    panel_edge: dvui.Color = .{ .r = 0x5c, .g = 0x5a, .b = 0x55 },
+    margin: dvui.Color = .{ .r = 0x9c, .g = 0x8a, .b = 0x6e },
+    ruler: dvui.Color,
+    titlebar: dvui.Color,
+    ruler_ink: dvui.Color,
+    body: dvui.Color = .{ .r = 0xe4, .g = 0xe2, .b = 0xdc },
+    edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f },
+    face: dvui.Color = .{ .r = 0xf6, .g = 0xf5, .b = 0xf1 },
+    ink: dvui.Color = .{ .r = 0x1d, .g = 0x1d, .b = 0x1b },
+    missing: dvui.Color = .{ .r = 0xf6, .g = 0xd5, .b = 0xcf },
+    overflow: dvui.Color = .{ .r = 0xc2, .g = 0x41, .b = 0x2d },
 };
+
+const light_palette: Palette = .{
+    .desk = .{ .r = 0xd9, .g = 0xd7, .b = 0xd2 },
+    .ruler = .{ .r = 0xe9, .g = 0xe7, .b = 0xe2 },
+    .titlebar = .{ .r = 0xeb, .g = 0xea, .b = 0xe7 },
+    .ruler_ink = .{ .r = 0x4a, .g = 0x48, .b = 0x44 },
+};
+
+const dark_palette: Palette = .{
+    .desk = .{ .r = 0x2b, .g = 0x2b, .b = 0x2d },
+    .ruler = .{ .r = 0x38, .g = 0x38, .b = 0x3b },
+    .titlebar = .{ .r = 0x30, .g = 0x30, .b = 0x33 },
+    .ruler_ink = .{ .r = 0xc8, .g = 0xc6, .b = 0xc2 },
+    .edge = .{ .r = 0x6a, .g = 0x68, .b = 0x64 },
+};
+
+var colors: Palette = light_palette;
+
+/// The desktop settings in effect, for the title bar's button layout.
+var desk: desktop.Settings = .{};
+
+/// Matches the desktop: DVUI's Adwaita theme in the desktop's scheme with
+/// its accent as the focus colour, and Graven's palette to suit.
+fn applyDesktop(win: *dvui.Window, s: desktop.Settings) void {
+    desk = s;
+    const dark = s.scheme == .dark;
+    var theme = if (dark) dvui.Theme.builtin.adwaita_dark else dvui.Theme.builtin.adwaita_light;
+    if (s.accent) |a| theme.focus = .{ .r = @intFromFloat(a[0] * 255), .g = @intFromFloat(a[1] * 255), .b = @intFromFloat(a[2] * 255) };
+    win.themeSet(theme);
+    colors = if (dark) dark_palette else light_palette;
+}
+
+var main_window: ?*dvui.Window = null;
+
+fn wakeGui() void {
+    if (main_window) |w| dvui.refresh(w, @src(), null);
+}
 
 /// The canvas: the worksheet at true proportions, with every panel on it.
 /// Wheel zooms about the pointer and dragging pans. With the select tool a
