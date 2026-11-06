@@ -152,9 +152,20 @@ pub const Sheet = struct {
     h: f64 = 420,
     /// True while the size is the app's default.
     default_size: bool = true,
+    /// Ink keep-out bands along the sheet's edges, mm. Panels may reach
+    /// into them; ink inside a panel may not. ISO 5457's drawing-sheet
+    /// margins (20 mm on the binding side, 10 mm elsewhere) until the user
+    /// sets their own.
+    margins: Sides = .{ .left = 20, .right = 10, .top = 10, .bottom = 10 },
+    default_margins: bool = true,
 
     pub fn box(s: Sheet) geom.Box {
         return .{ .x0 = 0, .y0 = 0, .x1 = s.w, .y1 = s.h };
+    }
+
+    /// Where ink may go: the sheet less its margins.
+    pub fn inkArea(s: Sheet) geom.Box {
+        return s.margins.inset(s.box());
     }
 
     /// A standard paper in an orientation.
@@ -247,12 +258,22 @@ pub const Model = struct {
     /// partly off a smaller sheet is reported by the checks, not moved.
     pub fn setSheet(m: *Model, sheet: Sheet) Error!void {
         if (!(sheet.w > 0 and sheet.h > 0)) return error.BadSize;
-        const name = m.sheet.name;
-        const default_name = m.sheet.default_name;
+        const old = m.sheet;
         m.sheet = sheet;
-        // Size changes keep the worksheet's name.
-        m.sheet.name = name;
-        m.sheet.default_name = default_name;
+        // Size changes keep the worksheet's name and margins.
+        m.sheet.name = old.name;
+        m.sheet.default_name = old.default_name;
+        m.sheet.margins = old.margins;
+        m.sheet.default_margins = old.default_margins;
+        m.revision += 1;
+    }
+
+    /// Sets the worksheet's margins, mm.
+    pub fn setMargins(m: *Model, margins: Sides) Error!void {
+        const ok = margins.left >= 0 and margins.right >= 0 and margins.top >= 0 and margins.bottom >= 0;
+        if (!ok or margins.left + margins.right >= m.sheet.w or margins.top + margins.bottom >= m.sheet.h) return error.BadSize;
+        m.sheet.margins = margins;
+        m.sheet.default_margins = false;
         m.revision += 1;
     }
 

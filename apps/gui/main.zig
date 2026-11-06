@@ -71,6 +71,8 @@ const State = struct {
     /// One solve per panel, in the panel's own frame.
     placed: std.ArrayList(layout.place.Placed) = .empty,
     placed_rev: u64 = std.math.maxInt(u64),
+    /// Labels whose ink reaches into the worksheet's margins.
+    intrusions: []layout.drc.MarginIntrusion = &.{},
     /// The canvas tool, and a rectangle being dragged out with it.
     tool: Tool = .select,
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
@@ -342,12 +344,15 @@ fn update() !void {
     for (0..state.model.panels.items.len) |pi| {
         try state.placed.append(state.gpa, try layout.solve(state.gpa, &state.model, pi, labels));
     }
+    state.intrusions = try layout.drc.marginIntrusions(state.gpa, &state.model, state.placed.items);
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
 }
 
 fn clearPlaced() void {
+    state.gpa.free(state.intrusions);
+    state.intrusions = &.{};
     for (state.placed.items) |*p| p.deinit();
     state.placed.clearRetainingCapacity();
     state.placed_rev = std.math.maxInt(u64);
@@ -528,6 +533,7 @@ const colors = struct {
     const desk: dvui.Color = .{ .r = 0xd9, .g = 0xd7, .b = 0xd2 };
     const paper: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
     const panel_edge: dvui.Color = .{ .r = 0x5c, .g = 0x5a, .b = 0x55 };
+    const margin: dvui.Color = .{ .r = 0x9c, .g = 0x8a, .b = 0x6e };
     const body: dvui.Color = .{ .r = 0xe4, .g = 0xe2, .b = 0xdc };
     const edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f };
     const face: dvui.Color = .{ .r = 0xf6, .g = 0xf5, .b = 0xf1 };
@@ -562,6 +568,7 @@ fn canvas() void {
     const px = dvui.windowNaturalScale();
     const sheet_rect = state.view.rect(area, sheet.box());
     sheet_rect.fill(.square, .{ .color = .{ .color = colors.paper } });
+    drawMargins(area, sheet);
     sheet_rect.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge } });
 
     // Re-flatten label outlines when the zoom has moved more than 2x.
@@ -593,6 +600,29 @@ fn canvas() void {
     }
 }
 
+/// The margins as translucent bands inside the sheet's edge, and the ink
+/// area's boundary as a thin line.
+fn drawMargins(area: dvui.Rect.Physical, sheet: layout.model.Sheet) void {
+    const px = dvui.windowNaturalScale();
+    const s = sheet.box();
+    const ink = sheet.inkArea();
+    const band: dvui.ColorOrGradient = .{ .color = colors.margin.opacity(0.35) };
+    for ([_]geom.Box{
+        .{ .x0 = s.x0, .y0 = s.y0, .x1 = ink.x0, .y1 = s.y1 },
+        .{ .x0 = ink.x1, .y0 = s.y0, .x1 = s.x1, .y1 = s.y1 },
+        .{ .x0 = ink.x0, .y0 = ink.y1, .x1 = ink.x1, .y1 = s.y1 },
+        .{ .x0 = ink.x0, .y0 = s.y0, .x1 = ink.x1, .y1 = ink.y0 },
+    }) |b| {
+        if (b.width() > 0 and b.height() > 0) state.view.rect(area, b).fill(.square, .{ .color = band });
+    }
+    state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.margin } });
+}
+
+fn inMargin(tile: TileId, slot: usize) bool {
+    for (state.intrusions) |i| if (i.tile == tile and i.slot == slot) return true;
+    return false;
+}
+
 /// Tiles and legends of panel `pi`, moved onto the worksheet.
 fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
@@ -622,7 +652,8 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             p.* = .{ .points = pts };
             made += 1;
         }
-        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = colors.ink }, .fade = 1 });
+        // Ink in the sheet's margins is drawn in the warning colour.
+        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = if (inMargin(l.tile, l.slot)) colors.overflow else colors.ink }, .fade = 1 });
     }
 }
 
@@ -846,7 +877,9 @@ fn worksheetProperties() !void {
         const changed = te.text_changed;
         const text = te.textGet();
         te.deinit();
-        if (changed) try state.model.nameWorksheet(text);
+        // A text entry reports a change on its first frame; only a
+        // different text is an edit.
+        if (changed and !std.mem.eql(u8, text, state.model.sheet.name)) try state.model.nameWorksheet(text);
     }
 
     const sheet = state.model.sheet;
@@ -901,6 +934,26 @@ fn worksheetProperties() !void {
         }
     } else {
         propValue("Size", sheet.default_size, "{d} × {d} mm", .{ sheet.w, sheet.h }, 50);
+    }
+
+    // Margins: ink keep-out bands. Panels may reach into them; their ink
+    // may not.
+    heading("Margins", .{}, 60);
+    var m = sheet.margins;
+    var changed = false;
+    inline for (.{ .{ "Left, mm", "left" }, .{ "Right, mm", "right" }, .{ "Top, mm", "top" }, .{ "Bottom, mm", "bottom" } }, 0..) |side, i| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 61 + i });
+        defer row.deinit();
+        propName(side[0]);
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(m, side[1]), .min = 0, .max = 1000 }, .{
+            .expand = .horizontal,
+            .font = styled(.theme(.body), sheet.default_margins),
+        });
+        changed = r.changed or changed;
+    }
+    if (changed) state.model.setMargins(m) catch {};
+    if (state.intrusions.len > 0) {
+        propValue("Ink in margins", false, "{d} labels", .{state.intrusions.len}, 70);
     }
 }
 
@@ -997,13 +1050,16 @@ fn tileProperties(id: TileId) !void {
             const changed = te.text_changed;
             const text = te.textGet();
             te.deinit();
-            if (changed) try state.model.setContent(id, slot.name, text);
+            if (changed and !std.mem.eql(u8, text, slot.content)) try state.model.setContent(id, slot.name, text);
         }
         propText("Style", "{s}", .{state.model.styles.items[slot.style].name}, n + 2);
         try propFont("Font", n + 3);
         if (found) |f| {
             for (state.placed.items[f.panel].issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
                 propText("Issue", "{s}", .{@tagName(i.kind)}, n + 4 + k);
+            };
+            for (state.intrusions) |i| if (i.tile == id and i.slot == si) {
+                propText("Issue", "ink {d:.2} mm into the sheet margin", .{i.amount}, n + 9);
             };
         }
     }
@@ -1030,7 +1086,7 @@ fn statusBar() void {
         .select => "",
         .add_panel => "Add panel: drag out its outline · Esc cancels · ",
     };
-    dvui.label(@src(), "{s}{s} · {d} panels · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · zoom {d:.2} px/mm", .{
-        tool, font, state.model.panels.items.len, tiles, labels, state.solve_ms, missing, overflow, state.view.ppm,
+    dvui.label(@src(), "{s}{s} · {d} panels · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
+        tool, font, state.model.panels.items.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
     }, .{});
 }
