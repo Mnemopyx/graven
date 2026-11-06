@@ -202,7 +202,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchSlot, NoSuchRow, BadSize };
+    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchSlot, NoSuchRow, BadSize, OffSheet };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -246,6 +246,7 @@ pub const Model = struct {
     /// the name is the app's choice are taken from `panel`.
     pub fn placePanel(m: *Model, panel: Panel) Error!usize {
         if (!(panel.w > 0 and panel.h > 0)) return error.BadSize;
+        if (!m.onSheet(panel.box())) return error.OffSheet;
         var p = panel;
         p.name = try m.a().dupe(u8, panel.name);
         p.regions = .empty;
@@ -255,7 +256,8 @@ pub const Model = struct {
     }
 
     /// Sets the worksheet's sheet. Panels keep their positions; one left
-    /// partly off a smaller sheet is reported by the checks, not moved.
+    /// partly off a smaller sheet is reported by the checks (drc.offSheet),
+    /// not moved.
     pub fn setSheet(m: *Model, sheet: Sheet) Error!void {
         if (!(sheet.w > 0 and sheet.h > 0)) return error.BadSize;
         const old = m.sheet;
@@ -285,9 +287,21 @@ pub const Model = struct {
     }
 
     /// Moves a panel on the worksheet.
-    pub fn movePanel(m: *Model, panel: usize, origin: geom.Point) void {
+    pub fn movePanel(m: *Model, panel: usize, origin: geom.Point) Error!void {
+        var p = m.panels.items[panel];
+        p.origin = origin;
+        if (!m.onSheet(p.box())) return error.OffSheet;
         m.panels.items[panel].origin = origin;
         m.revision += 1;
+    }
+
+    /// Whether a box lies on the sheet. Panels are placed and moved only
+    /// within it (they may overlap each other); a sheet change that leaves
+    /// one hanging over the edge is reported by the checks instead.
+    pub fn onSheet(m: *const Model, b: geom.Box) bool {
+        const s = m.sheet.box();
+        const tol = 1e-9;
+        return b.x0 >= s.x0 - tol and b.y0 >= s.y0 - tol and b.x1 <= s.x1 + tol and b.y1 <= s.y1 + tol;
     }
 
     /// The first "<prefix> N" not yet used as a panel name.
@@ -383,6 +397,17 @@ pub const Model = struct {
         return null;
     }
 };
+
+test "panels are placed and moved only on the sheet; a smaller sheet does not move them" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    try std.testing.expectError(error.OffSheet, m.placePanel(.{ .name = "big", .w = 700, .h = 100 }));
+    const p = try m.placePanel(.{ .name = "P", .origin = .{ .x = 400, .y = 10 }, .w = 150, .h = 100 });
+    try std.testing.expectError(error.OffSheet, m.movePanel(p, .{ .x = 500, .y = 10 }));
+    try m.setSheet(.standard(1, .portrait)); // A3 portrait: 297 wide
+    try std.testing.expectEqual(400, m.panels.items[p].origin.x);
+    try std.testing.expect(!m.onSheet(m.panels.items[p].box()));
+}
 
 test "standard sheets turn with their orientation" {
     const a3 = Sheet.standard(1, .landscape);

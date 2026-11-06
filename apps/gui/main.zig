@@ -73,6 +73,8 @@ const State = struct {
     placed_rev: u64 = std.math.maxInt(u64),
     /// Labels whose ink reaches into the worksheet's margins.
     intrusions: []layout.drc.MarginIntrusion = &.{},
+    /// Panels extending past the sheet, as a sheet change can leave them.
+    off_sheet: []layout.drc.OffSheet = &.{},
     /// The canvas tool, and a rectangle being dragged out with it.
     tool: Tool = .select,
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
@@ -247,7 +249,7 @@ fn loadSample() !void {
     const pi = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
     // Top-left of the sheet, 20 mm in.
     const panel = state.model.panels.items[pi];
-    state.model.movePanel(pi, .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
+    try state.model.movePanel(pi, .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
     state.context = .{ .panel = pi };
     state.view.fit = state.model.panels.items[pi].box();
 }
@@ -345,6 +347,7 @@ fn update() !void {
         try state.placed.append(state.gpa, try layout.solve(state.gpa, &state.model, pi, labels));
     }
     state.intrusions = try layout.drc.marginIntrusions(state.gpa, &state.model, state.placed.items);
+    state.off_sheet = try layout.drc.offSheet(state.gpa, &state.model);
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
@@ -353,6 +356,8 @@ fn update() !void {
 fn clearPlaced() void {
     state.gpa.free(state.intrusions);
     state.intrusions = &.{};
+    state.gpa.free(state.off_sheet);
+    state.off_sheet = &.{};
     for (state.placed.items) |*p| p.deinit();
     state.placed.clearRetainingCapacity();
     state.placed_rev = std.math.maxInt(u64);
@@ -399,7 +404,9 @@ fn menu() ?dvui.App.Result {
         defer fw.deinit();
         if (state.model.panels.items.len == 0) {
             if (dvui.menuItemLabel(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
-                loadSample() catch |err| dvui.log.err("loading the sample: {s}", .{@errorName(err)});
+                loadSample() catch |err| {
+                    state.status = if (err == error.OffSheet) "The sample keyboard does not fit on this sheet. " else "The sample did not load. ";
+                };
                 m.close();
             }
         }
@@ -474,7 +481,12 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 16 } });
     }
     const selected = state.context.eql(ctx);
+    const flagged = switch (ctx) {
+        .panel => |pi| offSheetBy(pi) != null,
+        else => false,
+    };
     if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
+        .color_text = if (flagged) .{ .color = colors.overflow } else null,
         .expand = .horizontal,
         .background = selected,
         .color_fill = if (selected) .{ .color = dvui.themeGet().focus.opacity(0.25) } else null,
@@ -581,7 +593,10 @@ fn canvas() void {
             .panel => |c| c == pi,
             else => false,
         };
-        outline.stroke(.square, .{ .thickness = if (is_context) 2 * px else px, .color = .{ .color = if (is_context) dvui.themeGet().focus else colors.panel_edge } });
+        const off = offSheetBy(pi) != null;
+        // A panel past the sheet's edge is outlined in the warning colour.
+        const edge = if (is_context) dvui.themeGet().focus else if (off) colors.overflow else colors.panel_edge;
+        outline.stroke(.square, .{ .thickness = if (is_context or off) 2 * px else px, .color = .{ .color = edge } });
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
 
@@ -616,6 +631,12 @@ fn drawMargins(area: dvui.Rect.Physical, sheet: layout.model.Sheet) void {
         if (b.width() > 0 and b.height() > 0) state.view.rect(area, b).fill(.square, .{ .color = band });
     }
     state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.margin } });
+}
+
+/// How far panel `pi` reaches past the sheet, if it does.
+fn offSheetBy(pi: usize) ?f64 {
+    for (state.off_sheet) |o| if (o.panel == pi) return o.amount;
+    return null;
 }
 
 fn inMargin(tile: TileId, slot: usize) bool {
@@ -657,9 +678,11 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     }
 }
 
-/// Snaps a worksheet point to the 1 mm grid the add panel tool uses.
+/// Snaps a worksheet point to the 1 mm grid the add panel tool uses, and
+/// keeps it on the sheet: panels may not extend past it.
 fn snap(p: geom.Point) geom.Point {
-    return .{ .x = @round(p.x), .y = @round(p.y) };
+    const s = state.model.sheet.box();
+    return .{ .x = std.math.clamp(@round(p.x), s.x0, s.x1), .y = std.math.clamp(@round(p.y), s.y0, s.y1) };
 }
 
 fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
@@ -955,6 +978,9 @@ fn worksheetProperties() !void {
     if (state.intrusions.len > 0) {
         propValue("Ink in margins", false, "{d} labels", .{state.intrusions.len}, 70);
     }
+    if (state.off_sheet.len > 0) {
+        propValue("Off the sheet", false, "{d} panels", .{state.off_sheet.len}, 71);
+    }
 }
 
 /// The font property: a list of installed fonts, with arrows to step
@@ -1003,6 +1029,7 @@ fn properties() !void {
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
             propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
+            if (offSheetBy(pi)) |amount| propText("Issue", "extends {d:.2} mm past the sheet", .{amount}, 6);
             try propFont("Legend font", 5);
         },
         .region => |r| {
@@ -1086,7 +1113,7 @@ fn statusBar() void {
         .select => "",
         .add_panel => "Add panel: drag out its outline · Esc cancels · ",
     };
-    dvui.label(@src(), "{s}{s} · {d} panels · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
-        tool, font, state.model.panels.items.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
+    dvui.label(@src(), "{s}{s}{s} · {d} panels ({d} off the sheet) · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
+        state.status, tool, font, state.model.panels.items.len, state.off_sheet.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
     }, .{});
 }

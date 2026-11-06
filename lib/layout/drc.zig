@@ -12,6 +12,42 @@ const place = @import("place.zig");
 const geom = engine.geom;
 const Box = geom.Box;
 
+/// A panel extending past the sheet's edge, as a sheet change can leave
+/// one: panels are never moved to fit.
+pub const OffSheet = struct {
+    panel: usize,
+    /// How far it reaches past the sheet, mm: the largest overhang.
+    amount: f64,
+};
+
+/// Panels extending past the sheet.
+pub fn offSheet(gpa: std.mem.Allocator, m: *const model.Model) ![]OffSheet {
+    var out: std.ArrayList(OffSheet) = .empty;
+    errdefer out.deinit(gpa);
+    const s = m.sheet.box();
+    for (m.panels.items, 0..) |p, pi| {
+        const b = p.box();
+        const amount = @max(@max(s.x0 - b.x0, b.x1 - s.x1), @max(s.y0 - b.y0, b.y1 - s.y1));
+        if (amount > 1e-9) try out.append(gpa, .{ .panel = pi, .amount = amount });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "a sheet change that leaves a panel over the edge is reported" {
+    const gpa = std.testing.allocator;
+    var m: model.Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.placePanel(.{ .name = "P", .origin = .{ .x = 400, .y = 10 }, .w = 150, .h = 100 });
+    const none = try offSheet(gpa, &m);
+    defer gpa.free(none);
+    try std.testing.expectEqual(0, none.len);
+    try m.setSheet(.standard(1, .portrait)); // 297 x 420
+    const found = try offSheet(gpa, &m);
+    defer gpa.free(found);
+    try std.testing.expectEqual(1, found.len);
+    try std.testing.expectApproxEqAbs(253, found[0].amount, 1e-9);
+}
+
 /// A label whose ink reaches into the worksheet's margins.
 pub const MarginIntrusion = struct {
     panel: usize,
