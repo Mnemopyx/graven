@@ -18,6 +18,12 @@ const Allocator = std.mem.Allocator;
 const geom = engine.geom;
 
 pub const TileId = enum(u32) { _ };
+
+/// Whether box `a` lies inside box `b`, to within rounding.
+pub fn within(a: geom.Box, b: geom.Box) bool {
+    const tol = 1e-9;
+    return a.x0 >= b.x0 - tol and a.y0 >= b.y0 - tol and a.x1 <= b.x1 + tol and a.y1 <= b.y1 + tol;
+}
 pub const StyleId = u16;
 
 pub const Sides = struct {
@@ -106,10 +112,19 @@ pub const Panel = struct {
     w: f64,
     h: f64,
     regions: std.ArrayList(TileRegion) = .empty,
+    /// Ink keep-out bands inside the panel's edges, mm: its ink area is the
+    /// outline less these. 5 mm on each side until the user sets them.
+    margins: Sides = .all(5),
+    default_margins: bool = true,
 
     /// The panel's outline on the worksheet.
     pub fn box(p: Panel) geom.Box {
         return .{ .x0 = p.origin.x, .y0 = p.origin.y, .x1 = p.origin.x + p.w, .y1 = p.origin.y + p.h };
+    }
+
+    /// Where the panel's ink may go, on the worksheet.
+    pub fn inkArea(p: Panel) geom.Box {
+        return p.margins.inset(p.box());
     }
 };
 
@@ -202,7 +217,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchSlot, NoSuchRow, BadSize, OffSheet };
+    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchSlot, NoSuchRow, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -288,13 +303,33 @@ pub const Model = struct {
 
     /// Moves a panel on the worksheet.
     pub fn movePanel(m: *Model, panel: usize, origin: geom.Point) Error!void {
-        var p = m.panels.items[panel];
-        const was_on = m.onSheet(p.box());
-        p.origin = origin;
-        // A panel on the sheet must stay on it. One already off it (a sheet
-        // change left it there) may move anywhere: it is still reported.
-        if (was_on and !m.onSheet(p.box())) return error.OffSheet;
+        // A compliant panel must stay compliant. One that is not (a sheet or
+        // margin change left it so) may move anywhere: it is still reported.
+        if (m.compliant(panel) and !m.compliantAt(panel, origin)) return error.NotCompliant;
         m.panels.items[panel].origin = origin;
+        m.revision += 1;
+    }
+
+    /// Whether a panel complies: its outline on the sheet, and its ink area
+    /// inside the sheet's ink area (its outline may reach into the sheet's
+    /// margins).
+    pub fn compliant(m: *const Model, panel: usize) bool {
+        return m.compliantAt(panel, m.panels.items[panel].origin);
+    }
+
+    pub fn compliantAt(m: *const Model, panel: usize, origin: geom.Point) bool {
+        var p = m.panels.items[panel];
+        p.origin = origin;
+        return m.onSheet(p.box()) and within(p.inkArea(), m.sheet.inkArea());
+    }
+
+    /// Sets a panel's margins, mm.
+    pub fn setPanelMargins(m: *Model, panel: usize, margins: Sides) Error!void {
+        const p = &m.panels.items[panel];
+        const ok = margins.left >= 0 and margins.right >= 0 and margins.top >= 0 and margins.bottom >= 0;
+        if (!ok or margins.left + margins.right >= p.w or margins.top + margins.bottom >= p.h) return error.BadSize;
+        p.margins = margins;
+        p.default_margins = false;
         m.revision += 1;
     }
 
@@ -315,11 +350,16 @@ pub const Model = struct {
         return false;
     }
 
-    /// The origin nearest `origin` that keeps the panel on the sheet; the
-    /// sheet's bottom-left corner when the panel is larger than the sheet.
-    pub fn clampToSheet(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
+    /// The origin nearest `origin` at which the panel complies. When no
+    /// origin can (the panel's ink area is larger than the sheet's), the
+    /// nearest that keeps its outline on the sheet.
+    pub fn clampCompliant(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
         const p = m.panels.items[panel];
         const s = m.sheet;
+        const ink = s.inkArea();
+        const xs = [2]f64{ @max(0, ink.x0 - p.margins.left), @min(s.w - p.w, ink.x1 - p.w + p.margins.right) };
+        const ys = [2]f64{ @max(0, ink.y0 - p.margins.bottom), @min(s.h - p.h, ink.y1 - p.h + p.margins.top) };
+        if (xs[0] <= xs[1] and ys[0] <= ys[1]) return .{ .x = std.math.clamp(origin.x, xs[0], xs[1]), .y = std.math.clamp(origin.y, ys[0], ys[1]) };
         return .{
             .x = std.math.clamp(origin.x, 0, @max(0, s.w - p.w)),
             .y = std.math.clamp(origin.y, 0, @max(0, s.h - p.h)),
@@ -330,9 +370,7 @@ pub const Model = struct {
     /// within it (they may overlap each other); a sheet change that leaves
     /// one hanging over the edge is reported by the checks instead.
     pub fn onSheet(m: *const Model, b: geom.Box) bool {
-        const s = m.sheet.box();
-        const tol = 1e-9;
-        return b.x0 >= s.x0 - tol and b.y0 >= s.y0 - tol and b.x1 <= s.x1 + tol and b.y1 <= s.y1 + tol;
+        return within(b, m.sheet.box());
     }
 
     /// The first "<prefix> N" not yet used as a panel name.
@@ -434,16 +472,23 @@ test "panels are placed and moved only on the sheet; a smaller sheet does not mo
     defer m.deinit();
     try std.testing.expectError(error.OffSheet, m.placePanel(.{ .name = "big", .w = 700, .h = 100 }));
     const p = try m.placePanel(.{ .name = "P", .origin = .{ .x = 400, .y = 10 }, .w = 150, .h = 100 });
-    try std.testing.expectError(error.OffSheet, m.movePanel(p, .{ .x = 500, .y = 10 }));
+    try std.testing.expectError(error.NotCompliant, m.movePanel(p, .{ .x = 500, .y = 10 }));
     try m.setSheet(.standard(1, .portrait)); // A3 portrait: 297 wide
     try std.testing.expectEqual(400, m.panels.items[p].origin.x);
     try std.testing.expect(!m.onSheet(m.panels.items[p].box()));
     // Off the sheet already, it may move anywhere, on or off.
     try m.movePanel(p, .{ .x = 600, .y = 10 });
     try m.movePanel(p, .{ .x = 100, .y = 10 });
-    // Back on the sheet, it must stay on it.
-    try std.testing.expectError(error.OffSheet, m.movePanel(p, .{ .x = 200, .y = 10 }));
-    try std.testing.expectEqual(147, m.clampToSheet(p, .{ .x = 200, .y = 10 }).x);
+    // Compliant again, it must stay compliant: ink area 105..245 inside the
+    // sheet's 20..287.
+    try std.testing.expect(m.compliant(p));
+    try std.testing.expectError(error.NotCompliant, m.movePanel(p, .{ .x = 200, .y = 10 }));
+    // Its outline could reach 147 (297 - 150), but its ink area must stop
+    // at the 10 mm right margin: 287 - 145 = 142.
+    try std.testing.expectEqual(142, m.clampCompliant(p, .{ .x = 200, .y = 10 }).x);
+    // Its outline may reach into the sheet's margins, its ink area may not.
+    try std.testing.expect(m.compliantAt(p, .{ .x = 15, .y = 10 }));
+    try std.testing.expect(!m.compliantAt(p, .{ .x = 14, .y = 10 }));
 }
 
 test "removing a panel removes its tiles and frees their designators" {
