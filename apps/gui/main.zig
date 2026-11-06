@@ -35,12 +35,20 @@ pub const main = dvui.App.main;
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{ .logFn = dvui.App.logFn };
 
-/// The bundled example font, relative to the repository root, used first
-/// when present; otherwise a system Inter, otherwise the first font found.
+/// The bundled example font, relative to the repository root. The GUI opens
+/// with an installed Inter Medium if fontconfig finds one (system or user
+/// fonts), else this file when run from the repository root, else the first
+/// font found.
 const example_font = "examples/fonts/Inter-Medium.otf";
-const system_font = "/usr/share/fonts/opentype/inter/Inter-Medium.otf";
 
-const Font = struct { name: []const u8, path: []const u8 };
+const Font = struct {
+    name: []const u8,
+    path: []const u8,
+    /// Face index within a collection (.ttc, .otc); 0 for a single font.
+    index: u32 = 0,
+    family: []const u8 = "",
+    style: []const u8 = "",
+};
 
 const State = struct {
     gpa: std.mem.Allocator,
@@ -164,15 +172,13 @@ fn init(win: *dvui.Window) !void {
     const installed: []Font = listFonts(gpa) catch &.{};
     if (std.Io.Dir.cwd().access(dvui.io, example_font, .{})) |_| {
         const fonts = try gpa.alloc(Font, installed.len + 1);
-        fonts[0] = .{ .name = "Inter Medium (examples)", .path = example_font };
+        fonts[0] = .{ .name = "Inter Medium (examples)", .path = example_font, .family = "Inter", .style = "Medium" };
         @memcpy(fonts[1..], installed);
         state.fonts = fonts;
     } else |_| {
         state.fonts = installed;
-        for (state.fonts, 0..) |f, i| if (std.mem.eql(u8, f.path, system_font)) {
-            state.font_choice = i;
-        };
     }
+    state.font_choice = defaultFont(state.fonts);
     const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
     const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
     state.panel = try samples.pc_keyboard.build(gpa, &state.model, .{ .main = main_style, .small = small });
@@ -186,17 +192,55 @@ fn deinit(_: *dvui.Window) void {
     state.model.deinit();
 }
 
-/// Installed outline fonts from fontconfig, sorted by name.
+/// The best match for Inter Medium, preferring installed fonts (they come
+/// after the bundled one) and exact names: Inter Medium, then any Inter
+/// family in Medium, then any Inter, then the first font.
+fn defaultFont(fonts: []const Font) usize {
+    var best: usize = 0;
+    var best_score: u8 = 0;
+    for (fonts, 0..) |f, i| {
+        const inter = std.mem.startsWith(u8, f.family, "Inter") and !std.mem.startsWith(u8, f.family, "Inter Display");
+        const medium = std.mem.eql(u8, f.style, "Medium");
+        const installed: u8 = if (std.mem.eql(u8, f.path, example_font)) 0 else 1;
+        const score: u8 = if (inter and medium and std.mem.eql(u8, f.family, "Inter"))
+            6 + installed
+        else if (inter and medium)
+            4 + installed
+        else if (inter)
+            2 + installed
+        else
+            0;
+        if (score > best_score) {
+            best = i;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+/// Installed outline fonts from fontconfig (system and user folders, such
+/// as ~/.local/share/fonts), sorted by name. Each face of a collection is
+/// listed; a variable font is listed once, at its default instance.
 fn listFonts(gpa: std.mem.Allocator) ![]Font {
-    const r = try std.process.run(gpa, dvui.io, .{ .argv = &.{ "fc-list", "--format", "%{family[0]} %{style[0]}\t%{file}\n" } });
+    const r = try std.process.run(gpa, dvui.io, .{ .argv = &.{ "fc-list", "--format", "%{family[0]}\t%{style[0]}\t%{index}\t%{file}\n" } });
     defer gpa.free(r.stderr);
     var list: std.ArrayList(Font) = .empty;
     var lines = std.mem.splitScalar(u8, r.stdout, '\n');
     while (lines.next()) |line| {
-        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-        const path = line[tab + 1 ..];
-        if (!std.mem.endsWith(u8, path, ".otf") and !std.mem.endsWith(u8, path, ".ttf")) continue;
-        try list.append(gpa, .{ .name = line[0..tab], .path = path });
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        const family = fields.next() orelse continue;
+        const style = fields.next() orelse continue;
+        const index = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+        const path = fields.rest();
+        const ext = std.fs.path.extension(path);
+        const known = for ([_][]const u8{ ".otf", ".ttf", ".ttc", ".otc" }) |e| {
+            if (std.ascii.eqlIgnoreCase(ext, e)) break true;
+        } else false;
+        // Named instances of a variable font carry the instance above bit 16.
+        if (!known or index >> 16 != 0) continue;
+        const user = std.mem.indexOf(u8, path, "/.local/share/fonts/") != null or std.mem.indexOf(u8, path, "/.fonts/") != null;
+        const name = try std.fmt.allocPrint(gpa, "{s} {s}{s}", .{ family, style, if (user) " (user)" else "" });
+        try list.append(gpa, .{ .name = name, .path = path, .index = index, .family = family, .style = style });
     }
     std.mem.sort(Font, list.items, {}, struct {
         fn less(_: void, x: Font, y: Font) bool {
@@ -213,7 +257,7 @@ fn update() !void {
         const f = state.fonts[state.font_choice];
         const bytes = try std.Io.Dir.cwd().readFileAlloc(dvui.io, f.path, state.gpa, .limited(64 << 20));
         defer state.gpa.free(bytes);
-        const face = try engine.Face.init(state.gpa, bytes, 0);
+        const face = try engine.Face.init(state.gpa, bytes, f.index);
         if (state.placed) |*p| p.deinit();
         state.placed = null;
         if (state.labels) |*l| l.deinit();
