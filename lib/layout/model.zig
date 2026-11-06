@@ -151,6 +151,22 @@ pub const papers = [_]Paper{
 
 pub const Orientation = enum { landscape, portrait };
 
+/// Where rulers and shown coordinates put zero, and which way they count.
+pub const RulerOrigin = enum {
+    bottom_left,
+    top_left,
+    bottom_right,
+    top_right,
+
+    pub fn fromRight(o: RulerOrigin) bool {
+        return o == .bottom_right or o == .top_right;
+    }
+
+    pub fn fromTop(o: RulerOrigin) bool {
+        return o == .top_left or o == .top_right;
+    }
+};
+
 /// The units a context shows and takes values in. Values are stored in mm
 /// as doubles whatever the units; units convert only at display and entry
 /// (1 in = 25.4 mm exactly).
@@ -198,9 +214,29 @@ pub const Sheet = struct {
     /// The worksheet's display and entry units; mm until the user picks.
     units: Units = .mm,
     default_units: bool = true,
+    /// The corner the rulers and shown coordinates count from: bottom-left
+    /// (the worksheet frame, y up) until the user picks; a right-hand
+    /// origin suits right-to-left page design such as Hebrew. Stored
+    /// positions are always in the worksheet frame.
+    ruler_origin: RulerOrigin = .bottom_left,
+    default_ruler_origin: bool = true,
 
     pub fn box(s: Sheet) geom.Box {
         return .{ .x0 = 0, .y0 = 0, .x1 = s.w, .y1 = s.h };
+    }
+
+    /// A worksheet point as the rulers count it, mm: from the ruler origin,
+    /// increasing away from it.
+    pub fn toRuler(s: Sheet, p: geom.Point) geom.Point {
+        return .{
+            .x = if (s.ruler_origin.fromRight()) s.w - p.x else p.x,
+            .y = if (s.ruler_origin.fromTop()) s.h - p.y else p.y,
+        };
+    }
+
+    /// The inverse of `toRuler`.
+    pub fn fromRuler(s: Sheet, r: geom.Point) geom.Point {
+        return s.toRuler(r);
     }
 
     /// Where ink may go: the sheet less its margins.
@@ -309,6 +345,8 @@ pub const Model = struct {
         m.sheet.default_margins = old.default_margins;
         m.sheet.units = old.units;
         m.sheet.default_units = old.default_units;
+        m.sheet.ruler_origin = old.ruler_origin;
+        m.sheet.default_ruler_origin = old.default_ruler_origin;
         m.revision += 1;
     }
 
@@ -318,6 +356,13 @@ pub const Model = struct {
         if (!ok or margins.left + margins.right >= m.sheet.w or margins.top + margins.bottom >= m.sheet.h) return error.BadSize;
         m.sheet.margins = margins;
         m.sheet.default_margins = false;
+        m.revision += 1;
+    }
+
+    /// Sets the corner the rulers count from.
+    pub fn setRulerOrigin(m: *Model, origin: RulerOrigin) void {
+        m.sheet.ruler_origin = origin;
+        m.sheet.default_ruler_origin = false;
         m.revision += 1;
     }
 
@@ -539,6 +584,17 @@ test "removing a panel removes its tiles and frees their designators" {
     try std.testing.expectEqual(0, m.panels.items.len);
     try std.testing.expect(m.findTile("K1") == null);
     _ = try m.addTile(.{ .designator = "K1" });
+}
+
+test "ruler coordinates count from the chosen corner" {
+    var s: Sheet = .{};
+    const p: geom.Point = .{ .x = 100, .y = 50 };
+    try std.testing.expectEqual(p, s.toRuler(p));
+    s.ruler_origin = .top_right;
+    const r = s.toRuler(p);
+    try std.testing.expectEqual(494, r.x);
+    try std.testing.expectEqual(370, r.y);
+    try std.testing.expectEqual(p, s.fromRuler(r));
 }
 
 test "standard sheets turn with their orientation" {
