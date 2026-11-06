@@ -557,7 +557,9 @@ fn titleBar() ?dvui.App.Result {
     // The title fills the middle and is part of the draggable bar.
     {
         // Each name italic while it is the app's choice.
-        var middle = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        // Fills the bar's height too, so the title centres against the
+        // menus and window buttons rather than sitting at the top.
+        var middle = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
         defer middle.deinit();
         var title = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
         defer title.deinit();
