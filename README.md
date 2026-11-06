@@ -24,6 +24,7 @@ Early. The label engine renders a plain run of text in one face: HarfBuzz shapin
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
 | `lib/layout` | Layout library: `model` (panels, tile regions, tiles, slots, actions), `place` (solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
+| `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
 | `apps/samples` | Sample models built through the library actions (PC keyboard) |
 | `lib/testdata` | Test fonts with known glyph areas, made by `tools/make-test-fonts.py` |
 | `apps/cli` | `graven` command-line tool |
@@ -42,7 +43,7 @@ zig build test       # library tests
 zig build run -- svg <font file> "<text>" <cap mm> out.svg   # one run of text as SVG
 zig build run -- parse 'x_i^2'                                  # label markup as a tree
 zig build run -- label <upright> <italic|-> <cap mm> 'x_i^2' out.svg [fallback ...]   # a rendered label
-zig build run -- keyboard <font file> out.svg                                     # the sample PC keyboard
+zig build run -- keyboard examples/fonts/Inter-Medium.otf out.svg                 # the sample PC keyboard
 zig build gui        # builds and runs the GUI editor (fetches DVUI and SDL3 on first use)
 zig build run -- label --width 12 --centre <upright> - 3 'CAPS LOCK' out.svg         # wrapped in a 12 mm box
 ```

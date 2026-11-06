@@ -35,7 +35,10 @@ pub const main = dvui.App.main;
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{ .logFn = dvui.App.logFn };
 
-const default_font = "/usr/share/fonts/opentype/inter/Inter-Medium.otf";
+/// The bundled example font, relative to the repository root, used first
+/// when present; otherwise a system Inter, otherwise the first font found.
+const example_font = "examples/fonts/Inter-Medium.otf";
+const system_font = "/usr/share/fonts/opentype/inter/Inter-Medium.otf";
 
 const Font = struct { name: []const u8, path: []const u8 };
 
@@ -158,10 +161,18 @@ var state: State = undefined;
 fn init(win: *dvui.Window) !void {
     const gpa = win.gpa;
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
-    state.fonts = listFonts(gpa) catch &.{};
-    for (state.fonts, 0..) |f, i| if (std.mem.eql(u8, f.path, default_font)) {
-        state.font_choice = i;
-    };
+    const installed: []Font = listFonts(gpa) catch &.{};
+    if (std.Io.Dir.cwd().access(dvui.io, example_font, .{})) |_| {
+        const fonts = try gpa.alloc(Font, installed.len + 1);
+        fonts[0] = .{ .name = "Inter Medium (examples)", .path = example_font };
+        @memcpy(fonts[1..], installed);
+        state.fonts = fonts;
+    } else |_| {
+        state.fonts = installed;
+        for (state.fonts, 0..) |f, i| if (std.mem.eql(u8, f.path, system_font)) {
+            state.font_choice = i;
+        };
+    }
     const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
     const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
     state.panel = try samples.pc_keyboard.build(gpa, &state.model, .{ .main = main_style, .small = small });
