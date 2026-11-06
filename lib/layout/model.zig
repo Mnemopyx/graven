@@ -97,10 +97,34 @@ pub const TileRegion = struct {
 
 pub const Panel = struct {
     name: []const u8,
+    /// True while the name is one the app gave it (Panel 1), not the user.
+    default_name: bool = false,
+    /// Where the panel's frame origin (its bottom-left corner) sits on the
+    /// worksheet, mm.
+    origin: geom.Point = .{ .x = 0, .y = 0 },
     /// Outline size, mm; the frame's origin is the bottom-left corner.
     w: f64,
     h: f64,
     regions: std.ArrayList(TileRegion) = .empty,
+
+    /// The panel's outline on the worksheet.
+    pub fn box(p: Panel) geom.Box {
+        return .{ .x0 = p.origin.x, .y0 = p.origin.y, .x1 = p.origin.x + p.w, .y1 = p.origin.y + p.h };
+    }
+};
+
+/// The worksheet: paper in drawing units, holding panels. Its frame's
+/// origin is the sheet's bottom-left corner, y up.
+pub const Sheet = struct {
+    /// Sheet size, mm; A2 landscape until the user picks another.
+    w: f64 = 594,
+    h: f64 = 420,
+    /// True while the size is the app's default.
+    default_size: bool = true,
+
+    pub fn box(s: Sheet) geom.Box {
+        return .{ .x0 = 0, .y0 = 0, .x1 = s.w, .y1 = s.h };
+    }
 };
 
 pub const LabelStyle = struct {
@@ -112,6 +136,7 @@ pub const LabelStyle = struct {
 pub const Model = struct {
     /// Owns every string and list in the model.
     arena: std.heap.ArenaAllocator,
+    sheet: Sheet = .{},
     panels: std.ArrayList(Panel) = .empty,
     tiles: std.ArrayList(Tile) = .empty,
     styles: std.ArrayList(LabelStyle) = .empty,
@@ -155,10 +180,36 @@ pub const Model = struct {
     }
 
     pub fn addPanel(m: *Model, name: []const u8, w: f64, h: f64) Error!usize {
-        if (!(w > 0 and h > 0)) return error.BadSize;
-        try m.panels.append(m.a(), .{ .name = try m.a().dupe(u8, name), .w = w, .h = h });
+        return m.placePanel(.{ .name = name, .w = w, .h = h });
+    }
+
+    /// Adds a panel on the worksheet: its name, size, origin and whether
+    /// the name is the app's choice are taken from `panel`.
+    pub fn placePanel(m: *Model, panel: Panel) Error!usize {
+        if (!(panel.w > 0 and panel.h > 0)) return error.BadSize;
+        var p = panel;
+        p.name = try m.a().dupe(u8, panel.name);
+        p.regions = .empty;
+        try m.panels.append(m.a(), p);
         m.revision += 1;
         return m.panels.items.len - 1;
+    }
+
+    /// Moves a panel on the worksheet.
+    pub fn movePanel(m: *Model, panel: usize, origin: geom.Point) void {
+        m.panels.items[panel].origin = origin;
+        m.revision += 1;
+    }
+
+    /// The first "<prefix> N" not yet used as a panel name.
+    pub fn nextPanelName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
+        var n: usize = m.panels.items.len + 1;
+        while (true) : (n += 1) {
+            const name = std.fmt.bufPrint(buf, "{s} {d}", .{ prefix, n }) catch return prefix;
+            for (m.panels.items) |p| {
+                if (std.mem.eql(u8, p.name, name)) break;
+            } else return name;
+        }
     }
 
     pub fn addRegion(m: *Model, panel: usize, region: TileRegion) Error!usize {

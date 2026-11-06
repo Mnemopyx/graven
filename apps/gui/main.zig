@@ -67,10 +67,13 @@ const State = struct {
     face: ?*engine.Face = null,
     faces: [1]*engine.Face = undefined,
     model: Model,
-    panel: usize = 0,
     labels: ?layout.Labels = null,
-    placed: ?layout.place.Placed = null,
+    /// One solve per panel, in the panel's own frame.
+    placed: std.ArrayList(layout.place.Placed) = .empty,
     placed_rev: u64 = std.math.maxInt(u64),
+    /// The canvas tool, and a rectangle being dragged out with it.
+    tool: Tool = .select,
+    drag: ?struct { start: geom.Point, at: geom.Point } = null,
     solve_ms: f64 = 0,
     flat: Flat,
     view: View = .{},
@@ -81,15 +84,18 @@ const State = struct {
     file_name_set: bool = false,
     font_set: bool = false,
     /// What the tree, canvas, tools and properties are about.
-    context: Context = .file,
+    context: Context = .worksheet,
     /// Tree nodes the user has opened or closed, by context key.
     expanded: std.AutoHashMapUnmanaged(u64, bool) = .empty,
     status: []const u8 = "",
 };
 
+/// What a canvas drag does: pick things, or draw out a new panel.
+const Tool = enum { select, add_panel };
+
 /// The current context: a node of the component tree.
 const Context = union(enum) {
-    file,
+    worksheet,
     panel: usize,
     region: struct { panel: usize, region: usize },
     row: struct { panel: usize, region: usize, row: usize },
@@ -107,7 +113,7 @@ const Context = union(enum) {
 
     fn kindName(c: Context) []const u8 {
         return switch (c) {
-            .file => "File",
+            .worksheet => "Worksheet",
             .panel => "Panel",
             .region => "Region",
             .row => "Row",
@@ -233,13 +239,17 @@ fn init(win: *dvui.Window) !void {
 fn loadSample() !void {
     const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
     const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
-    state.panel = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
-    state.context = .{ .panel = state.panel };
-    state.view = .{};
+    const pi = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
+    // Top-left of the sheet, 20 mm in.
+    const panel = state.model.panels.items[pi];
+    state.model.movePanel(pi, .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
+    state.context = .{ .panel = pi };
+    state.view.fit = state.model.panels.items[pi].box();
 }
 
 fn deinit(_: *dvui.Window) void {
-    if (state.placed) |*p| p.deinit();
+    clearPlaced();
+    state.placed.deinit(state.gpa);
     if (state.labels) |*l| l.deinit();
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
@@ -313,8 +323,7 @@ fn update() !void {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(dvui.io, f.path, state.gpa, .limited(64 << 20));
         defer state.gpa.free(bytes);
         const face = try engine.Face.init(state.gpa, bytes, f.index);
-        if (state.placed) |*p| p.deinit();
-        state.placed = null;
+        clearPlaced();
         if (state.labels) |*l| l.deinit();
         if (state.face) |old| old.deinit();
         state.face = face;
@@ -324,19 +333,35 @@ fn update() !void {
         state.placed_rev = std.math.maxInt(u64);
     }
     const labels = if (state.labels) |*l| l else return;
-    if (state.model.panels.items.len == 0) {
-        if (state.placed) |*p| p.deinit();
-        state.placed = null;
-        return;
-    }
-    if (state.placed_rev == state.model.revision and state.placed != null) return;
+    if (state.placed_rev == state.model.revision) return;
     const t0: std.Io.Timestamp = .now(dvui.io, .awake);
-    const placed = try layout.solve(state.gpa, &state.model, state.panel, labels);
+    clearPlaced();
+    for (0..state.model.panels.items.len) |pi| {
+        try state.placed.append(state.gpa, try layout.solve(state.gpa, &state.model, pi, labels));
+    }
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
-    if (state.placed) |*p| p.deinit();
-    state.placed = placed;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
+}
+
+fn clearPlaced() void {
+    for (state.placed.items) |*p| p.deinit();
+    state.placed.clearRetainingCapacity();
+    state.placed_rev = std.math.maxInt(u64);
+}
+
+/// A placed tile and the panel it is on.
+const Found = struct { panel: usize, tile: *const layout.place.PlacedTile };
+
+fn findTile(id: TileId) ?Found {
+    for (state.placed.items, 0..) |*p, pi| if (p.findTile(id)) |t| return .{ .panel = pi, .tile = t };
+    return null;
+}
+
+/// A box in panel `pi`'s frame, moved onto the worksheet.
+fn onSheet(pi: usize, b: geom.Box) geom.Box {
+    const o = state.model.panels.items[pi].origin;
+    return .{ .x0 = b.x0 + o.x, .y0 = b.y0 + o.y, .x1 = b.x1 + o.x, .y1 = b.y1 + o.y };
 }
 
 fn frame() !dvui.App.Result {
@@ -392,9 +417,9 @@ fn treePane() void {
     defer scroll.deinit();
 
     var name_buf: [64]u8 = undefined;
-    if (!treeNode(.file, state.file_name, 0, state.model.panels.items.len > 0, !state.file_name_set)) return;
+    if (!treeNode(.worksheet, state.file_name, 0, state.model.panels.items.len > 0, !state.file_name_set)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!treeNode(.{ .panel = pi }, panel.name, 1, panel.regions.items.len > 0, false)) continue;
+        if (!treeNode(.{ .panel = pi }, panel.name, 1, panel.regions.items.len > 0, panel.default_name)) continue;
         for (panel.regions.items, 0..) |region, ri| {
             if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 2, region.rows.items.len > 0, false)) continue;
             for (region.rows.items, 0..) |row, rowi| {
@@ -418,7 +443,7 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
     const key = ctx.key();
     const id: usize = @truncate(key);
     const open = state.expanded.get(key) orelse switch (ctx) {
-        .file, .panel, .region => true,
+        .worksheet, .panel, .region => true,
         else => false,
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });
@@ -449,52 +474,53 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
 
 /// Opens the tree down to `ctx`, so a context chosen on the canvas shows.
 fn revealInTree(ctx: Context) void {
-    const placed = if (state.placed) |*p| p else return;
     const id = switch (ctx) {
         .tile => |t| t,
         else => return,
     };
-    const pt = placed.findTile(id) orelse return;
-    const pi = state.panel;
+    const f = findTile(id) orelse return;
     for ([_]Context{
-        .file,
-        .{ .panel = pi },
-        .{ .region = .{ .panel = pi, .region = pt.region } },
-        .{ .row = .{ .panel = pi, .region = pt.region, .row = pt.row } },
+        .worksheet,
+        .{ .panel = f.panel },
+        .{ .region = .{ .panel = f.panel, .region = f.tile.region } },
+        .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } },
     }) |c| state.expanded.put(state.gpa, c.key(), true) catch {};
 }
 
-/// Whether a placed tile belongs to the context, for canvas highlighting.
-fn inContext(t: layout.place.PlacedTile) bool {
+/// Whether a placed tile on panel `pi` belongs to the context, for canvas
+/// highlighting.
+fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
     return switch (state.context) {
         .tile => |id| t.id == id,
-        .row => |r| r.panel == state.panel and t.region == r.region and t.row == r.row,
-        .region => |r| r.panel == state.panel and t.region == r.region,
-        .file, .panel => false,
+        .row => |r| r.panel == pi and t.region == r.region and t.row == r.row,
+        .region => |r| r.panel == pi and t.region == r.region,
+        .worksheet, .panel => false,
     };
 }
 
-/// The context's extents in the panel frame, mm.
-fn contextExtents(placed: *const layout.place.Placed) geom.Box {
-    const panel = state.model.panels.items[state.panel];
-    var b: geom.Box = .empty;
+/// The context's extents on the worksheet, mm.
+fn contextExtents() geom.Box {
     switch (state.context) {
-        .file, .panel => return .{ .x0 = 0, .y0 = 0, .x1 = panel.w, .y1 = panel.h },
-        else => for (placed.tiles) |t| {
-            if (inContext(t)) b = b.join(t.pitch_box);
-        },
+        .worksheet => return state.model.sheet.box(),
+        .panel => |pi| return state.model.panels.items[pi].box(),
+        else => {},
     }
-    return if (b.isEmpty()) placed.bounds else b;
+    var b: geom.Box = .empty;
+    for (state.placed.items, 0..) |*p, pi| for (p.tiles) |t| {
+        if (inContext(pi, t)) b = b.join(onSheet(pi, t.pitch_box));
+    };
+    return if (b.isEmpty()) state.model.sheet.box() else b;
 }
 
 /// Centres the context in the canvas and zooms it to fill the canvas.
 fn zoomToContext() void {
-    const placed = if (state.placed) |*p| p else return;
-    state.view.fit = contextExtents(placed);
+    state.view.fit = contextExtents();
 }
 
 const colors = struct {
+    const desk: dvui.Color = .{ .r = 0xd9, .g = 0xd7, .b = 0xd2 };
     const paper: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
+    const panel_edge: dvui.Color = .{ .r = 0x5c, .g = 0x5a, .b = 0x55 };
     const body: dvui.Color = .{ .r = 0xe4, .g = 0xe2, .b = 0xdc };
     const edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f };
     const face: dvui.Color = .{ .r = 0xf6, .g = 0xf5, .b = 0xf1 };
@@ -503,25 +529,19 @@ const colors = struct {
     const overflow: dvui.Color = .{ .r = 0xc2, .g = 0x41, .b = 0x2d };
 };
 
-/// The canvas: the placed panel at true proportions. Wheel zooms about the
-/// pointer, dragging pans, a click makes a tile (or the panel) the context,
-/// and the context's tiles are outlined.
+/// The canvas: the worksheet at true proportions, with every panel on it.
+/// Wheel zooms about the pointer and dragging pans. With the select tool a
+/// click makes a tile, panel or the worksheet the context; with the add
+/// panel tool a drag draws out a new panel. The context is outlined.
 fn canvas() void {
-    var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper } });
+    var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.desk } });
     defer box.deinit();
-    const placed = if (state.placed) |*p| p else {
-        dvui.labelNoFmt(@src(), "Nothing here yet. File › Add sample: PC keyboard", .{}, .{
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.5) },
-        });
-        return;
-    };
     const area = box.data().contentRectScale().r;
     if (area.w <= 0 or area.h <= 0) return;
+    const sheet = state.model.sheet;
 
-    // The first frame fits the file's extents.
-    if (state.view.ppm == 0 and state.view.fit == null) state.view.fit = contextExtents(placed);
+    // The first frame fits the worksheet.
+    if (state.view.ppm == 0 and state.view.fit == null) state.view.fit = sheet.box();
     if (state.view.fit) |b| {
         state.view.cx = (b.x0 + b.x1) / 2;
         state.view.cy = (b.y0 + b.y1) / 2;
@@ -530,11 +550,102 @@ fn canvas() void {
     const clip = dvui.clip(area);
     defer dvui.clipSet(clip);
 
+    canvasEvents(box, area);
+
+    const px = dvui.windowNaturalScale();
+    const sheet_rect = state.view.rect(area, sheet.box());
+    sheet_rect.fill(.square, .{ .color = .{ .color = colors.paper } });
+    sheet_rect.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge } });
+
+    // Re-flatten label outlines when the zoom has moved more than 2x.
+    const tol = 0.2 / state.view.ppm;
+    if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
+
+    for (state.model.panels.items, 0..) |panel, pi| {
+        const outline = state.view.rect(area, panel.box());
+        const is_context = switch (state.context) {
+            .panel => |c| c == pi,
+            else => false,
+        };
+        outline.stroke(.square, .{ .thickness = if (is_context) 2 * px else px, .color = .{ .color = if (is_context) dvui.themeGet().focus else colors.panel_edge } });
+        if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
+    }
+
+    // The panel being drawn out: a translucent fill and its outline.
+    if (state.drag) |d| {
+        const r = state.view.rect(area, dragBox(d.start, d.at));
+        r.fill(.square, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.12) } });
+        r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+    }
+    if (state.tool == .add_panel and state.model.panels.items.len == 0 and state.drag == null) {
+        dvui.labelNoFmt(@src(), "Drag out the new panel on the sheet. Esc cancels.", .{}, .{
+            .gravity_x = 0.5,
+            .gravity_y = 0.05,
+            .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.6) },
+        });
+    }
+}
+
+/// Tiles and legends of panel `pi`, moved onto the worksheet.
+fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
+    const px = dvui.windowNaturalScale();
+    const radius: f32 = @floatCast(1.0 * state.view.ppm);
+    for (placed.tiles) |t| {
+        const flagged = tileFlag(placed, t.id);
+        const body = state.view.rect(area, onSheet(pi, t.body));
+        const face = state.view.rect(area, onSheet(pi, t.face));
+        body.fill(.round(radius), .{ .color = .{ .color = colors.body } });
+        const in_context = inContext(pi, t);
+        body.stroke(.round(radius), .{ .thickness = px, .color = .{ .color = if (in_context) dvui.themeGet().focus else colors.edge } });
+        face.fill(.round(radius), .{ .color = .{ .color = if (flagged.missing) colors.missing else colors.face } });
+        if (flagged.overflow) face.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
+        if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = dvui.themeGet().focus } });
+    }
+    const o = state.model.panels.items[pi].origin;
+    const lifo = dvui.currentWindow().lifo();
+    for (placed.labels) |l| {
+        const contours = state.flat.get(l.render, &state.faces) catch continue;
+        const paths = lifo.alloc(dvui.Path, contours.len) catch continue;
+        defer lifo.free(paths);
+        var made: usize = 0;
+        defer for (paths[0..made]) |p| lifo.free(p.points);
+        for (contours, paths) |c, *p| {
+            const pts = lifo.alloc(dvui.Point.Physical, c.len) catch break;
+            for (c, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + l.origin.x + o.x, .y = q.y + l.origin.y + o.y });
+            p.* = .{ .points = pts };
+            made += 1;
+        }
+        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = colors.ink }, .fade = 1 });
+    }
+}
+
+/// Snaps a worksheet point to the 1 mm grid the add panel tool uses.
+fn snap(p: geom.Point) geom.Point {
+    return .{ .x = @round(p.x), .y = @round(p.y) };
+}
+
+fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
+    return .{ .x0 = @min(a.x, b.x), .y0 = @min(a.y, b.y), .x1 = @max(a.x, b.x), .y1 = @max(a.y, b.y) };
+}
+
+fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
+    const drawing = state.tool == .add_panel;
     for (dvui.events()) |*e| {
+        if (e.evt == .key and drawing) {
+            const k = e.evt.key;
+            if (k.code == .escape and k.action == .down) {
+                e.handle(@src(), box.data());
+                state.tool = .select;
+                state.drag = null;
+                dvui.refresh(null, @src(), box.data().id);
+            }
+            continue;
+        }
         if (!dvui.eventMatchSimple(e, box.data())) continue;
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
         switch (me.action) {
+            .position => if (drawing) dvui.cursorSet(.crosshair),
             .wheel_y => |dy| {
                 e.handle(@src(), box.data());
                 const at = state.view.toMm(area, me.p);
@@ -549,10 +660,19 @@ fn canvas() void {
             .press => if (me.button.pointer() or me.button == .middle) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
-                dvui.dragPreStart(me.button, me.p, .{});
+                if (drawing and me.button.pointer()) {
+                    const at = snap(state.view.toMm(area, me.p));
+                    state.drag = .{ .start = at, .at = at };
+                } else {
+                    dvui.dragPreStart(me.button, me.p, .{});
+                }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (dvui.dragging(me, null)) |d| {
+                if (state.drag) |*d| {
+                    e.handle(@src(), box.data());
+                    d.at = snap(state.view.toMm(area, me.p));
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (dvui.dragging(me, null)) |d| {
                     e.handle(@src(), box.data());
                     state.view.fit = null;
                     state.view.cx -= d.x / state.view.ppm;
@@ -562,53 +682,56 @@ fn canvas() void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
-                if (dvui.dragging(me, null) == null) {
-                    // A click on a tile makes it the context; elsewhere, the panel.
-                    const at = state.view.toMm(area, me.p);
-                    state.context = .{ .panel = state.panel };
-                    for (placed.tiles) |t| {
-                        if (at.x >= t.body.x0 and at.x <= t.body.x1 and at.y >= t.body.y0 and at.y <= t.body.y1) state.context = .{ .tile = t.id };
-                    }
-                    revealInTree(state.context);
-                    dvui.refresh(null, @src(), box.data().id);
+                if (state.drag) |d| {
+                    state.drag = null;
+                    addPanelFromDrag(dragBox(d.start, d.at));
+                } else if (dvui.dragging(me, null) == null) {
+                    pick(state.view.toMm(area, me.p));
                 }
                 dvui.captureMouse(null, e.num);
                 dvui.dragEnd(me.button);
+                dvui.refresh(null, @src(), box.data().id);
             },
             else => {},
         }
     }
+}
 
-    const radius: f32 = @floatCast(1.0 * state.view.ppm);
-    for (placed.tiles) |t| {
-        const flagged = tileFlag(placed, t.id);
-        const body = state.view.rect(area, t.body);
-        body.fill(.round(radius), .{ .color = .{ .color = colors.body } });
-        const in_context = inContext(t);
-        body.stroke(.round(radius), .{ .thickness = 1, .color = .{ .color = if (in_context) dvui.themeGet().focus else colors.edge } });
-        state.view.rect(area, t.face).fill(.round(radius), .{ .color = .{ .color = if (flagged.missing) colors.missing else colors.face } });
-        if (flagged.overflow) state.view.rect(area, t.face).stroke(.round(radius), .{ .thickness = 1.5, .color = .{ .color = colors.overflow } });
-        if (in_context) body.stroke(.round(radius), .{ .thickness = if (state.context == .tile) 3 else 2, .color = .{ .color = dvui.themeGet().focus } });
-    }
-
-    // Re-flatten when the zoom has moved more than 2x since the last time.
-    const tol = 0.2 / state.view.ppm;
-    if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
-    const lifo = dvui.currentWindow().lifo();
-    for (placed.labels) |l| {
-        const contours = state.flat.get(l.render, &state.faces) catch continue;
-        const paths = lifo.alloc(dvui.Path, contours.len) catch continue;
-        defer lifo.free(paths);
-        var made: usize = 0;
-        defer for (paths[0..made]) |p| lifo.free(p.points);
-        for (contours, paths) |c, *p| {
-            const pts = lifo.alloc(dvui.Point.Physical, c.len) catch break;
-            for (c, pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + l.origin.x, .y = q.y + l.origin.y });
-            p.* = .{ .points = pts };
-            made += 1;
+/// Makes what is under worksheet point `at` the context: a tile, else a
+/// panel, else the worksheet.
+fn pick(at: geom.Point) void {
+    state.context = .worksheet;
+    for (state.model.panels.items, 0..) |panel, pi| {
+        const b = panel.box();
+        if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
+        if (pi >= state.placed.items.len) continue;
+        for (state.placed.items[pi].tiles) |t| {
+            const body = onSheet(pi, t.body);
+            if (at.x >= body.x0 and at.x <= body.x1 and at.y >= body.y0 and at.y <= body.y1) state.context = .{ .tile = t.id };
         }
-        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = colors.ink }, .fade = 1 });
     }
+    revealInTree(state.context);
+}
+
+/// Adds the panel drawn out with the add panel tool. A drag under 1 mm on
+/// either side is taken as a slip and ignored; the tool stays on.
+fn addPanelFromDrag(b: geom.Box) void {
+    if (b.width() < 1 or b.height() < 1) return;
+    var buf: [32]u8 = undefined;
+    const name = state.model.nextPanelName(&buf, "Panel");
+    const pi = state.model.placePanel(.{
+        .name = name,
+        .default_name = true,
+        .origin = .{ .x = b.x0, .y = b.y0 },
+        .w = b.width(),
+        .h = b.height(),
+    }) catch |err| {
+        dvui.log.err("adding a panel: {s}", .{@errorName(err)});
+        return;
+    };
+    state.context = .{ .panel = pi };
+    state.expanded.put(state.gpa, Context.key(.worksheet), true) catch {};
+    state.tool = .select;
 }
 
 const Flags = struct { missing: bool = false, overflow: bool = false };
@@ -647,11 +770,25 @@ fn toolPalette() void {
     var wd: dvui.WidgetData = undefined;
     if (dvui.buttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
+
+    if (state.context == .worksheet) {
+        // A mode tool: shown pressed while active; pressing again cancels.
+        const on = state.tool == .add_panel;
+        var awd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Add panel", dvui.entypo.squared_plus, .{}, .{}, .{
+            .data_out = &awd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.tool = if (on) .select else .add_panel;
+            state.drag = null;
+        }
+        dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add panel: drag out its outline on the sheet", .{}, .{});
+    }
 }
 
 fn lowerKind() []const u8 {
     return switch (state.context) {
-        .file => "file",
+        .worksheet => "worksheet",
         .panel => "panel",
         .region => "region",
         .row => "row",
@@ -713,18 +850,21 @@ fn propFont(name: []const u8, n: usize) !void {
 fn properties() !void {
     heading("{s}", .{state.context.kindName()}, 0);
     switch (state.context) {
-        .file => {
+        .worksheet => {
+            const sheet = state.model.sheet;
             propValue("Name", !state.file_name_set, "{s}", .{state.file_name}, 1);
-            propText("Panels", "{d}", .{state.model.panels.items.len}, 2);
-            propText("Tiles", "{d}", .{state.model.tiles.items.len}, 3);
-            try propFont("Legend font", 4);
+            propValue("Sheet", sheet.default_size, "{d} × {d} mm{s}", .{ sheet.w, sheet.h, if (sheet.w == 594 and sheet.h == 420) " (A2 landscape)" else "" }, 2);
+            propText("Panels", "{d}", .{state.model.panels.items.len}, 3);
+            propText("Tiles", "{d}", .{state.model.tiles.items.len}, 4);
+            try propFont("Legend font", 5);
         },
         .panel => |pi| {
             const panel = state.model.panels.items[pi];
-            propText("Name", "{s}", .{panel.name}, 1);
-            propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 2);
-            propText("Regions", "{d}", .{panel.regions.items.len}, 3);
-            try propFont("Legend font", 4);
+            propValue("Name", panel.default_name, "{s}", .{panel.name}, 1);
+            propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
+            propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
+            propText("Regions", "{d}", .{panel.regions.items.len}, 4);
+            try propFont("Legend font", 5);
         },
         .region => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
@@ -749,11 +889,13 @@ fn tileProperties(id: TileId) !void {
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
     propText("Size", "{d} × {d} u", .{ t.w, t.h }, 2);
-    if (state.placed) |*p| if (p.findTile(id)) |pt| {
+    const found = findTile(id);
+    if (found) |f| {
+        const pt = f.tile;
         propText("Body", "{d:.2} × {d:.2} mm", .{ pt.body.width(), pt.body.height() }, 3);
-        propText("Position", "({d:.2}, {d:.2}) mm", .{ pt.body.x0, pt.body.y0 }, 4);
+        propText("Position", "({d:.2}, {d:.2}) mm in panel", .{ pt.body.x0, pt.body.y0 }, 4);
         propText("Row", "{d}", .{pt.row + 1}, 5);
-    };
+    }
 
     for (t.slots.items, 0..) |slot, si| {
         const n = 100 + si * 10;
@@ -773,8 +915,8 @@ fn tileProperties(id: TileId) !void {
         }
         propText("Style", "{s}", .{state.model.styles.items[slot.style].name}, n + 2);
         try propFont("Font", n + 3);
-        if (state.placed) |*p| {
-            for (p.issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
+        if (found) |f| {
+            for (state.placed.items[f.panel].issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
                 propText("Issue", "{s}", .{@tagName(i.kind)}, n + 4 + k);
             };
         }
@@ -784,19 +926,25 @@ fn tileProperties(id: TileId) !void {
 fn statusBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .border = .{ .y = 1 }, .padding = .{ .x = 8, .y = 3, .w = 8, .h = 3 } });
     defer bar.deinit();
-    const p = if (state.placed) |*p| p else {
-        dvui.labelNoFmt(@src(), "No panels", .{}, .{});
-        return;
-    };
+    var tiles: usize = 0;
+    var labels: usize = 0;
     var missing: usize = 0;
     var overflow: usize = 0;
-    for (p.issues) |i| switch (i.kind) {
-        .missing_glyph => missing += 1,
-        .label_overflow, .row_overflow => overflow += 1,
-        else => {},
-    };
+    for (state.placed.items) |*p| {
+        tiles += p.tiles.len;
+        labels += p.labels.len;
+        for (p.issues) |i| switch (i.kind) {
+            .missing_glyph => missing += 1,
+            .label_overflow, .row_overflow => overflow += 1,
+            else => {},
+        };
+    }
     const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
-    dvui.label(@src(), "{s} · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · zoom {d:.2} px/mm", .{
-        font, p.tiles.len, p.labels.len, state.solve_ms, missing, overflow, state.view.ppm,
+    const tool = switch (state.tool) {
+        .select => "",
+        .add_panel => "Add panel: drag out its outline · Esc cancels · ",
+    };
+    dvui.label(@src(), "{s}{s} · {d} panels · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · zoom {d:.2} px/mm", .{
+        tool, font, state.model.panels.items.len, tiles, labels, state.solve_ms, missing, overflow, state.view.ppm,
     }, .{});
 }
