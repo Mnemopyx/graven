@@ -55,10 +55,22 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("lib/layout/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "graven_engine", .module = engine }},
+        .imports = &.{
+            .{ .name = "graven_engine", .module = engine },
+            .{ .name = "graven_testdata", .module = testdata },
+        },
     });
 
-    // Applications.
+    // Applications. Samples build models through the libraries' actions.
+    const samples = b.createModule(.{
+        .root_source_file = b.path("apps/samples/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "graven_layout", .module = layout },
+            .{ .name = "graven_engine", .module = engine },
+        },
+    });
     const cli = b.addExecutable(.{
         .name = "graven",
         .root_module = b.createModule(.{
@@ -68,6 +80,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "graven_layout", .module = layout },
                 .{ .name = "graven_engine", .module = engine },
+                .{ .name = "graven_samples", .module = samples },
             },
         }),
     });
@@ -78,7 +91,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
 

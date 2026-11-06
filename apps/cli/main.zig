@@ -4,6 +4,7 @@
 const std = @import("std");
 const layout = @import("graven_layout");
 const engine = @import("graven_engine");
+const samples = @import("graven_samples");
 
 const usage =
     \\usage: graven svg <font file> <text> <cap height mm> <out.svg>
@@ -14,6 +15,8 @@ const usage =
     \\         Renders label markup; with an italic font, letters default to italic.
     \\         Neighbours are placed by their ink unless --advance is given. --width gives a
     \\         hard box that wide, so lines wrap; --centre centres each line on the anchor.
+    \\       graven keyboard <font> <out.svg>
+    \\         Lays out the sample PC keyboard in one font and writes it as SVG.
     \\
 ;
 
@@ -21,6 +24,9 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 6 and std.mem.eql(u8, args[1], "svg")) {
         return svg(init, args[2], args[3], args[4], args[5]);
+    }
+    if (args.len == 4 and std.mem.eql(u8, args[1], "keyboard")) {
+        return keyboard(init, args[2], args[3]);
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
         return parse(init, args[2]);
@@ -69,6 +75,38 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     const doc = try layout.output.svg(arena.allocator(), outlines, r.design.join(r.ink), .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
+}
+
+fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
+    defer gpa.free(bytes);
+    const face = try engine.Face.init(gpa, bytes, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+
+    var m: layout.Model = .init(gpa);
+    defer m.deinit();
+    const main_style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
+    const small = try m.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
+    const p = try samples.pc_keyboard.build(gpa, &m, .{ .main = main_style, .small = small });
+
+    var labels: layout.Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    const t0: std.Io.Timestamp = .now(io, .awake);
+    var placed = try layout.solve(gpa, &m, p, &labels);
+    defer placed.deinit();
+    const ms = @as(f64, @floatFromInt(t0.untilNow(io, .awake).toNanoseconds())) / 1e6;
+    for (placed.issues) |i| {
+        const name = if (i.tile) |t| m.tileConst(t).designator else "-";
+        std.debug.print("{s}: {s}\n", .{ name, @tagName(i.kind) });
+    }
+    const doc = try layout.output.panelSvg(gpa, &placed, &faces, .{});
+    defer gpa.free(doc);
+    try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
+    std.debug.print("{s}: {d} tiles, {d} labels ({d} renders) in {d:.1} ms\n", .{ out_path, placed.tiles.len, placed.labels.len, labels.cache.count(), ms });
 }
 
 const LabelFlags = struct {

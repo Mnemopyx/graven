@@ -4,10 +4,17 @@
 //! Modules depend one way only. Each stage's result is a plain data
 //! structure that can be dumped, diffed and tested.
 
+pub const model = @import("model.zig");
+pub const place = @import("place.zig");
 pub const layout = @import("layout.zig");
 pub const geometry = @import("geometry.zig");
 pub const drc = @import("drc.zig");
 pub const output = @import("output.zig");
+
+pub const Model = model.Model;
+pub const TileId = model.TileId;
+pub const Labels = place.Labels;
+pub const solve = place.solve;
 
 test {
     @import("std").testing.refAllDecls(@This());

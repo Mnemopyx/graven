@@ -194,7 +194,7 @@ const Solver = struct {
         }
         const span_items: [2]?usize = if (end > first) .{ first, end - 1 } else .{ null, null };
 
-        if (least > room) {
+        if (least > room + tolerance(b - a)) {
             // Overflow: everything but finite links at its least, finite
             // links share the rest (below their minimums) by tension.
             for (links, len) |l, *out| out.* = l.least();
@@ -220,7 +220,7 @@ const Solver = struct {
             return;
         }
 
-        if (resting > room) {
+        if (resting > room + tolerance(b - a)) {
             // Slack links close to their minimums; finite links squeeze.
             for (links, len) |l, *out| out.* = l.least();
             try s.fill(links, len, room, true);
