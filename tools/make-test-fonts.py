@@ -13,6 +13,10 @@ Glyphs, in font units (1000 per em):
                                                          area 120000
   A      two overlapping rectangles (50..350, 250..550) x (0..700)
                                                          union 350000, raw sum 420000
+  plus   (U+002B) bars (250,100)-(350,500) and (100,250)-(500,350): a binary operator
+  equal  (U+003D) bars (100,200)-(500,280) and (100,420)-(500,500): a relation
+  circumflex  (U+02C6, spacing) rectangle (100,0)-(500,100), advance 600: drawn accents
+  uni0302     (U+0302, combining) rectangle (-450,750)-(-150,850), advance 0: marks
 
 OS/2 sCapHeight is deliberately wrong (650, not 700), so tests can check that
 cap height is measured from outlines rather than read from OS/2.
@@ -35,10 +39,13 @@ from fontTools.pens.ttGlyphPen import TTGlyphPen
 UPEM = 1000
 # A fixed head.created/modified, so the fonts are byte-identical on every run.
 TIMESTAMP = 0x80000000
-ORDER = [".notdef", "space", "H", "O", "D", "A"]
-CMAP = {0x20: "space", ord("H"): "H", ord("O"): "O", ord("D"): "D", ord("A"): "A"}
-ADVANCE = {".notdef": 500, "space": 250, "H": 600, "O": 600, "D": 700, "A": 600}
-LSB = {".notdef": 0, "space": 0, "H": 50, "O": 50, "D": 50, "A": 50}
+ORDER = [".notdef", "space", "H", "O", "D", "A", "plus", "equal", "circumflex", "uni0302"]
+CMAP = {0x20: "space", ord("H"): "H", ord("O"): "O", ord("D"): "D", ord("A"): "A",
+        ord("+"): "plus", ord("="): "equal", 0x02C6: "circumflex", 0x0302: "uni0302"}
+ADVANCE = {".notdef": 500, "space": 250, "H": 600, "O": 600, "D": 700, "A": 600,
+           "plus": 600, "equal": 600, "circumflex": 600, "uni0302": 0}
+LSB = {".notdef": 0, "space": 0, "H": 50, "O": 50, "D": 50, "A": 50,
+       "plus": 100, "equal": 100, "circumflex": 100, "uni0302": -450}
 
 
 def rect(pen, x0, y0, x1, y1, ccw=True):
@@ -70,6 +77,16 @@ def draw(name, pen, cubic):
     elif name == "A":
         rect(pen, 50, 0, 350, 700)
         rect(pen, 250, 0, 550, 700)
+    elif name == "plus":
+        rect(pen, 250, 100, 350, 500)
+        rect(pen, 100, 250, 500, 350)
+    elif name == "equal":
+        rect(pen, 100, 200, 500, 280)
+        rect(pen, 100, 420, 500, 500)
+    elif name == "circumflex":
+        rect(pen, 100, 0, 500, 100)
+    elif name == "uni0302":
+        rect(pen, -450, 750, -150, 850)
 
 
 def common(fb, family):

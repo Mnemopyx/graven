@@ -77,9 +77,10 @@ pub const Diagnostic = struct {
     offset: u32,
 };
 
-/// A contiguous run sharing one resolved style and face, as placed.
+/// A contiguous run sharing one resolved style and face, as placed; or a
+/// drawn mark (an overbar), which has no face.
 pub const Element = struct {
-    face: FaceId,
+    face: ?FaceId,
     /// The source bytes it came from.
     start: u32,
     end: u32,

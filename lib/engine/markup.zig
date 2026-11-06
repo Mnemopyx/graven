@@ -287,7 +287,14 @@ const Parser = struct {
             if (std.mem.eql(u8, name, "allowbreak")) break :blk .{ .line_break = .{ .kind = .soft, .span = span } };
             if (operators.has(name)) break :blk try p.operatorText(name, at, span);
             if (std.mem.eql(u8, name, "operatorname")) {
+                // One run of text becomes an operator name, like \ln.
                 const g = try p.braced(.upright, true);
+                if (g.items.len == 1 and g.items[0] == .text) {
+                    var t = g.items[0].text;
+                    t.operator = true;
+                    t.span = .{ .start = at, .end = g.span.end };
+                    break :blk .{ .text = t };
+                }
                 break :blk .{ .group = g };
             }
             if (std.mem.eql(u8, name, "mathrm") or std.mem.eql(u8, name, "mathup"))
@@ -388,8 +395,9 @@ const Parser = struct {
         if (items.items.len == 0) return p.fail(.script_without_base, at);
         var base = items.items[items.items.len - 1];
         switch (base) {
-            .text => |t| {
-                // The base is the last grapheme cluster of a run.
+            .text => |t| if (!t.operator) {
+                // The base is the last grapheme cluster of a run; an operator
+                // name (\sin) is a base as a whole.
                 const cut = lastCluster(t.utf8);
                 if (isSpace(t.utf8[cut..])) return p.fail(.script_without_base, at);
                 if (cut > 0) {
@@ -596,11 +604,12 @@ test "named characters, raw codepoints, units and escapes" {
 
 test "operators, variants and text" {
     try expectTree("\\ln x", "(op upright \"ln\") (text \"x\")");
+    try expectTree("\\sin^{\\minus 1}", "(scripts (op upright \"sin\") ^{(text \"−1\")})");
     try expectTree("\\ln\\ x", "(op upright \"ln\") (text \" x\")");
     try expectTree("\\mathrm{H.MS}", "{(text upright \"H.MS\")}");
     try expectTree("\\mathit{x}y", "{(text italic \"x\")} (text \"y\")");
     try expectTree("\\text{R/S}", "{(text text \"R/S\")}");
-    try expectTree("\\operatorname{sgn}", "{(text upright \"sgn\")}");
+    try expectTree("\\operatorname{sgn}", "(op upright \"sgn\")");
 }
 
 test "accents, spaces and breaks" {

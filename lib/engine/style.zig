@@ -35,11 +35,38 @@ pub const Spec = struct {
     sub_drop: ?f64 = null,
     /// Space between a base and its scripts, as a fraction of cap height.
     script_gap: f64 = 0.05,
+    /// Space between atoms by their classes, in mu (1/18 of the upright
+    /// face's em). Inside scripts only operator spacing applies.
+    spacing: Spacing = .{},
+    /// How \bar is drawn: a rule over the ink, or a combining macron on a
+    /// single character when the face has one.
+    bar: enum { rule, combining } = .rule,
+    /// Clearance between a body's ink and an accent or overbar, and the
+    /// overbar's thickness, as fractions of cap height; null for the upright
+    /// face's MATH table (OverbarVerticalGap, OverbarRuleThickness), or 0.1
+    /// and 0.08 without one.
+    accent_gap: ?f64 = null,
+    rule_thickness: ?f64 = null,
+};
+
+/// Automatic space beside operators, in mu. Tighter than TeX's 3, 4, 5 and 3
+/// by default, so legends read as one shape; set TeX's values for typeset math.
+pub const Spacing = struct {
+    /// Beside operator names (\ln) and large operators.
+    operator: f64 = 3,
+    /// Beside binary operators (+, ×).
+    binary: f64 = 2,
+    /// Beside relations (=, \to).
+    relation: f64 = 3,
+    /// After punctuation (, ;).
+    punctuation: f64 = 0,
 };
 
 pub const default_script_scale = 0.7;
 pub const default_sup_raise = 0.55;
 pub const default_sub_drop = 0.25;
+pub const default_accent_gap = 0.1;
+pub const default_rule_thickness = 0.08;
 
 pub const Context = struct {
     faces: []const *Face,
@@ -47,6 +74,8 @@ pub const Context = struct {
     script_scale: f64,
     sup_raise: f64,
     sub_drop: f64,
+    accent_gap: f64,
+    rule_thickness: f64,
 
     pub const Error = font.Error || error{ NoCapHeight, InvalidSize };
 
@@ -76,6 +105,14 @@ pub const Context = struct {
                 k.constant(main, hb.HB_OT_MATH_CONSTANT_SUBSCRIPT_SHIFT_DOWN) / cap
             else
                 default_sub_drop,
+            .accent_gap = spec.accent_gap orelse if (has_math)
+                k.constant(main, hb.HB_OT_MATH_CONSTANT_OVERBAR_VERTICAL_GAP) / cap
+            else
+                default_accent_gap,
+            .rule_thickness = spec.rule_thickness orelse if (has_math)
+                k.constant(main, hb.HB_OT_MATH_CONSTANT_OVERBAR_RULE_THICKNESS) / cap
+            else
+                default_rule_thickness,
         };
     }
 
