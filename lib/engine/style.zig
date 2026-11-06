@@ -63,6 +63,9 @@ pub const Spec = struct {
     /// Contact profile band height, as a fraction of cap height: the
     /// placement tolerance.
     contact_band: f64 = 0.02,
+    /// Baseline-to-baseline distance between lines, as a fraction of cap
+    /// height; null for the upright face's ascender to descender.
+    line_pitch: ?f64 = null,
 };
 
 /// Automatic space beside operators, in mu. Tighter than TeX's 3, 4, 5 and 3
@@ -142,6 +145,13 @@ pub const Context = struct {
         const main_cap = (try main.capHeight()).?;
         const em_mm = cap_mm / main_cap * @as(f64, @floatFromInt(main.upem));
         return em_mm / @as(f64, @floatFromInt(f.upem));
+    }
+
+    /// Baseline-to-baseline distance between lines, mm.
+    pub fn linePitch(c: *const Context) font.Error!f64 {
+        if (c.spec.line_pitch) |f| return f * c.spec.cap_height;
+        const ext = c.faces[c.spec.upright].extents();
+        return (ext.ascender - ext.descender) * try c.scaleFor(c.spec.upright, c.spec.cap_height);
     }
 
     /// The upright face's em at cap height `cap_mm`, for math spaces (mu).

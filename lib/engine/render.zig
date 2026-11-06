@@ -72,6 +72,9 @@ pub const Diagnostic = struct {
         not_rendered,
         /// Italic asked for, but the style has no italic face.
         no_italic,
+        /// Content larger than its hard box: a word longer than its line,
+        /// or a block wider or taller than the box. Nothing is shrunk.
+        overflow,
     },
     /// Byte offset in the source of what is concerned.
     offset: u32,
@@ -86,6 +89,8 @@ pub const Element = struct {
     end: u32,
     /// Script depth: 0 for the label's own text, 1 for its scripts, and so on.
     level: u8,
+    /// The line it sits on, from 0.
+    line: u16 = 0,
     /// Cap height at this element's size, mm.
     cap_height: f64,
     /// Baseline origin in the label frame.
@@ -103,6 +108,12 @@ pub const Render = struct {
     ink: Box,
     diagnostics: []const Diagnostic,
     elements: []const Element = &.{},
+    /// With a hard box: where the anchor (the label frame's origin) ended up,
+    /// in the box's coordinates, after shifting away from its edges.
+    anchor_at: ?geom.Point = null,
+    /// Source offsets where lines broke, hard and soft, in order.
+    breaks: []const u32 = &.{},
+    lines: u16 = 1,
 
     pub fn deinit(self: *Render) void {
         self.arena.deinit();

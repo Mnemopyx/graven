@@ -13,7 +13,7 @@ The full design is in the [Graven design blueprint](https://claude.ai/artifact/Q
 
 ## Status
 
-Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`), and `graven label` renders it in a style context: upright and italic faces with a fallback chain matched by cap height, superscripts and subscripts (settings from the font's `MATH` table when it has one), accents (`\hat`, `\bar`, `\overline`), math spaces, and space between operators by TeX's atom classes with amounts from the style. Neighbours and scripts are placed by their ink, through contact profiles (`--advance` places them by the fonts' advances instead). Breaks and the hard box come next. The OCCT bridge is a tested starting point.
+Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`), and `graven label` renders it in a style context: upright and italic faces with a fallback chain matched by cap height, superscripts and subscripts (settings from the font's `MATH` table when it has one), accents (`\hat`, `\bar`, `\overline`), math spaces, and space between operators by TeX's atom classes with amounts from the style. Neighbours and scripts are placed by their ink, through contact profiles (`--advance` places them by the fonts' advances instead). Lines break at `\\` and, within a hard box width, at spaces and `\allowbreak` (never at `~`); each line is aligned by the anchor, the block is moved inside the box when it fits, and anything that cannot fit overflows with a diagnostic instead of shrinking. The OCCT bridge is a tested starting point.
 
 ## Layout
 
@@ -40,6 +40,7 @@ zig build test       # library tests
 zig build run -- svg <font file> "<text>" <cap mm> out.svg   # one run of text as SVG
 zig build run -- parse 'x_i^2'                                  # label markup as a tree
 zig build run -- label <upright> <italic|-> <cap mm> 'x_i^2' out.svg [fallback ...]   # a rendered label
+zig build run -- label --width 12 --centre <upright> - 3 'CAPS LOCK' out.svg         # wrapped in a 12 mm box
 ```
 
 HarfBuzz 15.1.0 is fetched by `zig build` (pinned in `build.zig.zon`) and built from its amalgamated source with `zig c++`, so no system HarfBuzz is needed.

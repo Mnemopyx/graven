@@ -31,6 +31,12 @@ const Render = render.Render;
 pub const Options = struct {
     anchor: render.Anchor = .start,
     names: *const entities.Table = &entities.Table.builtin,
+    /// The most space the label may use, in the slot's coordinates; null
+    /// for no limit. Lines wrap at its width, and the block shifts away from
+    /// its edges before anything overflows.
+    hard_box: ?Box = null,
+    /// Where the anchor starts, in the hard box's coordinates.
+    anchor_at: geom.Point = .{ .x = 0, .y = 0 },
 };
 
 pub const Error = style.Context.Error || markup.Error || error{InvalidTension};
@@ -44,20 +50,49 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
 
     const tree = try markup.parseWith(a, src, opts.names, syntax);
     var b: Builder = .{ .a = a, .ctx = ctx, .band = ctx.spec.cap_height * ctx.spec.contact_band };
-    const width = try b.nodes(tree.items, ctx.spec.cap_height, 0, 0, 0);
+    const cap = ctx.spec.cap_height;
+    const pitch = try ctx.linePitch();
+    var design = Box.empty;
+    var breaks: std.ArrayList(u32) = .empty;
 
-    // The origin goes to the anchor on the baseline.
-    const shift = -(try opts.anchor.offset(width));
-    const move = Affine.translate(shift, 0);
-    for (b.items.items) |*item| switch (item.*) {
-        .glyph => |*g| g.transform = g.transform.then(move),
-        .path => |*p| p.outline = try p.outline.transformed(a, move),
-    };
-    var design: Box = .{ .x0 = shift, .y0 = 0, .x1 = shift + width, .y1 = 0 };
+    // Hard breaks at the top level split the label into paragraphs; each
+    // fills lines greedily within the hard box's width.
+    var rest = tree.items;
+    while (true) {
+        const cut = for (rest, 0..) |n, k| {
+            if (n == .line_break and n.line_break.kind == .hard) break k;
+        } else rest.len;
+        var atoms: std.ArrayList(Atom) = .empty;
+        for (rest[0..cut]) |n| try atomsOf(a, n, &atoms);
+        applyTexRules(atoms.items);
+
+        var start: usize = 0;
+        while (true) {
+            const line = atoms.items[start..];
+            var overflow = false;
+            const take = if (opts.hard_box) |hb| try b.fit(line, cap, hb.width(), &overflow) else line.len;
+            if (overflow) try b.diagnose(.overflow, atomOffset(line[0]));
+            const item0 = b.items.items.len;
+            const elem0 = b.elements.items.len;
+            const y = -@as(f64, @floatFromInt(b.line)) * pitch;
+            const width = try b.atomsLine(line[0..take], cap, 0, 0, y);
+            // Each line sits on the anchor by its own width.
+            const dx = -(try opts.anchor.offset(width));
+            try b.shiftSince(item0, elem0, dx);
+            design = design.join(.{ .x0 = dx, .y0 = y, .x1 = dx + width, .y1 = y });
+            b.line += 1;
+            if (take >= line.len) break;
+            try breaks.append(a, atomOffset(line[take]));
+            start += take + 1; // the break opportunity itself is dropped
+            if (start >= atoms.items.len) break;
+        }
+        if (cut >= rest.len) break;
+        try breaks.append(a, rest[cut].span().start);
+        rest = rest[cut + 1 ..];
+    }
+
     var ink = Box.empty;
     for (b.elements.items) |*e| {
-        e.origin.x += shift;
-        e.ink = moved(e.ink, shift);
         ink = ink.join(e.ink);
         const face = e.face orelse {
             design = design.join(e.ink);
@@ -73,6 +108,39 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
         });
     }
 
+    // Fit the block in the hard box: shift away from an edge first; only
+    // a block larger than the box overflows. Geometry stays in the label
+    // frame; what moves is the anchor's place in the box.
+    var anchor_at: ?geom.Point = null;
+    if (opts.hard_box) |hb| {
+        var at = opts.anchor_at;
+        if (!ink.isEmpty()) {
+            if (ink.width() > hb.width()) {
+                // A line that overflowed has said so already.
+                const said = for (b.diagnostics.items) |d| {
+                    if (d.kind == .overflow) break true;
+                } else false;
+                if (!said) try b.diagnose(.overflow, if (b.elements.items.len > 0) b.elements.items[0].start else 0);
+                const lean = try opts.anchor.offset(1);
+                at.x = hb.x0 + (hb.width() - ink.width()) * lean - ink.x0;
+            } else if (ink.x0 + at.x < hb.x0) {
+                at.x = hb.x0 - ink.x0;
+            } else if (ink.x1 + at.x > hb.x1) {
+                at.x = hb.x1 - ink.x1;
+            }
+            if (ink.height() > hb.height()) {
+                try b.diagnose(.overflow, if (b.elements.items.len > 0) b.elements.items[0].start else 0);
+                at.y = hb.y1 - ink.y1; // keep the first line in the box
+            } else if (ink.y0 + at.y < hb.y0) {
+                at.y = hb.y0 - ink.y0;
+            } else if (ink.y1 + at.y > hb.y1) {
+                at.y = hb.y1 - ink.y1;
+            }
+        }
+        anchor_at = at;
+    }
+    if (design.isEmpty()) design = .{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
+
     return .{
         .arena = arena,
         .items = try b.items.toOwnedSlice(a),
@@ -80,6 +148,17 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
         .ink = ink,
         .diagnostics = try b.diagnostics.toOwnedSlice(a),
         .elements = try b.elements.toOwnedSlice(a),
+        .anchor_at = anchor_at,
+        .breaks = try breaks.toOwnedSlice(a),
+        .lines = b.line,
+    };
+}
+
+/// The source offset an atom starts at.
+fn atomOffset(atom: Atom) u32 {
+    return switch (atom.node) {
+        .text => |t| t.source[atom.start],
+        else => |n| n.span().start,
     };
 }
 
@@ -98,6 +177,9 @@ const Atom = struct {
     start: usize = 0,
     end: usize = 0,
     class: Class,
+    /// A line may break here: a breaking space (U+0020) or \allowbreak.
+    /// The atom is dropped when the line breaks at it.
+    breakable: bool = false,
 };
 
 const Builder = struct {
@@ -110,6 +192,43 @@ const Builder = struct {
     diagnostics: std.ArrayList(render.Diagnostic) = .empty,
     /// Profile band height for the whole label, mm.
     band: f64,
+    /// The line being laid out, from 0.
+    line: u16 = 0,
+
+    /// How many of `atoms` fit on one line `width` wide (by ink), breaking
+    /// at the last opportunity that fits. If none fits, the first
+    /// opportunity is taken (or none, when there is none) and `overflow` is
+    /// set: a word longer than its line is reported, never shrunk.
+    fn fit(b: *Builder, atoms: []const Atom, cap: f64, width: f64, overflow: *bool) Error!usize {
+        if (try b.measure(atoms, cap) <= width) return atoms.len;
+        var best: ?usize = null;
+        var first: ?usize = null;
+        for (atoms, 0..) |atom, k| {
+            if (!atom.breakable or k == 0) continue;
+            if (first == null) first = k;
+            if (try b.measure(atoms[0..k], cap) <= width) best = k else break;
+        }
+        if (best) |k| return k;
+        overflow.* = true;
+        return first orelse atoms.len;
+    }
+
+    /// The ink width of `atoms` laid out as one line, leaving nothing behind.
+    fn measure(b: *Builder, atoms: []const Atom, cap: f64) Error!f64 {
+        const items0 = b.items.items.len;
+        const elem0 = b.elements.items.len;
+        const diag0 = b.diagnostics.items.len;
+        defer {
+            b.items.shrinkRetainingCapacity(items0);
+            b.elements.shrinkRetainingCapacity(elem0);
+            b.profiles.shrinkRetainingCapacity(elem0);
+            b.diagnostics.shrinkRetainingCapacity(diag0);
+        }
+        _ = try b.atomsLine(atoms, cap, 0, 0, 0);
+        var ink = Box.empty;
+        for (b.elements.items[elem0..]) |e| ink = ink.join(e.ink);
+        return ink.width();
+    }
 
     fn inkContact(b: *const Builder) bool {
         return b.ctx.spec.contact == .ink;
@@ -178,12 +297,16 @@ const Builder = struct {
         var atoms: std.ArrayList(Atom) = .empty;
         for (list) |n| try atomsOf(b.a, n, &atoms);
         applyTexRules(atoms.items);
+        return b.atomsLine(atoms.items, cap, level, x, y);
+    }
 
+    /// Lays out atoms as one line; see `nodes`.
+    fn atomsLine(b: *Builder, atoms: []const Atom, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
         const mu = (try b.ctx.em(cap)) / 18;
         const line0 = b.elements.items.len;
         var pen = x;
         var prev: ?Class = null;
-        for (atoms.items) |atom| {
+        for (atoms) |atom| {
             var space: f64 = 0;
             if (prev) |p| {
                 if (spacing(b.ctx.spec.spacing, p, atom.class, level)) |amount| space = amount * mu;
@@ -252,7 +375,9 @@ const Builder = struct {
             },
             .accent => |acc| return b.accent(acc, cap, level, x, y),
             .line_break => |br| {
-                try b.diagnose(.not_rendered, br.span.start);
+                // A soft break not taken is nothing. A hard break inside a
+                // group or script cannot start a line there.
+                if (br.kind == .hard) try b.diagnose(.not_rendered, br.span.start);
                 return x;
             },
         }
@@ -301,6 +426,7 @@ const Builder = struct {
                     .start = acc.span.start,
                     .end = acc.span.end,
                     .level = level,
+                    .line = b.line,
                     .cap_height = cap,
                     .origin = .{ .x = bar.x0, .y = bar.y0 },
                     .advance = 0,
@@ -345,6 +471,7 @@ const Builder = struct {
             .start = span.start,
             .end = span.end,
             .level = level,
+            .line = b.line,
             .cap_height = cap,
             .origin = .{ .x = dx, .y = dy },
             .advance = 0,
@@ -427,6 +554,7 @@ const Builder = struct {
             .start = t.source[start],
             .end = t.source[end - 1] + 1,
             .level = level,
+            .line = b.line,
             .cap_height = cap,
             .origin = .{ .x = x, .y = y },
             .advance = advance,
@@ -481,21 +609,25 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
             var i: usize = 0;
             while (i < t.utf8.len) {
                 const next = clusterEnd(t.utf8, i);
-                const class = clusterClass(firstCodepoint(t.utf8[i..next]));
+                const cp = firstCodepoint(t.utf8[i..next]);
+                const class = clusterClass(cp);
+                const breakable = cp == ' ';
                 const last = if (out.items.len > 0) &out.items[out.items.len - 1] else null;
                 const joins = last != null and last.?.node == .text and last.?.node.text.utf8.ptr == t.utf8.ptr and
-                    last.?.end == i and last.?.class == class and (class == .ord or class == .space);
+                    last.?.end == i and last.?.class == class and last.?.breakable == breakable and
+                    (class == .ord or class == .space);
                 if (joins) {
                     last.?.end = next;
                 } else {
-                    try out.append(a, .{ .node = n, .start = i, .end = next, .class = class });
+                    try out.append(a, .{ .node = n, .start = i, .end = next, .class = class, .breakable = breakable });
                 }
                 i = next;
             }
         },
         .scripts => |s| try out.append(a, .{ .node = n, .class = nucleusClass(s.base.*) }),
         .group, .accent => try out.append(a, .{ .node = n, .class = .ord }),
-        .space, .line_break => try out.append(a, .{ .node = n, .class = .space }),
+        .space => try out.append(a, .{ .node = n, .class = .space }),
+        .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind == .soft }),
     }
 }
 
@@ -738,10 +870,11 @@ test "missing glyphs and unrendered constructs are reported at their source" {
     try testing.expect(r.diagnostics[0].kind == .missing_glyph);
     try testing.expectEqual(@as(u32, 1), r.diagnostics[0].offset);
 
-    var br = try renderTest(&ctx, "H\\\\H");
+    // A hard break inside a script cannot start a line there.
+    var br = try renderTest(&ctx, "H^{H\\\\H}");
     defer br.deinit();
     try testing.expect(br.diagnostics[0].kind == .not_rendered);
-    try testing.expectEqual(@as(usize, 2), br.items.len); // both lines' text is still drawn
+    try testing.expectEqual(@as(usize, 3), br.items.len); // the text is still drawn
 }
 
 test "math spaces are sized from the em; the anchor moves the origin" {
@@ -931,4 +1064,113 @@ test "by ink, operator spacing is added to the ink gap; hand spacing keeps advan
     var hand = try renderTest(&ctx, "H H");
     defer hand.deinit();
     try testing.expectApproxEqAbs(@as(f64, 8.5), hand.elements[hand.elements.len - 1].origin.x, eps);
+}
+
+fn renderBox(ctx: *const style.Context, src: []const u8, opts: Options) !Render {
+    var diag: markup.Diagnostic = undefined;
+    return renderLabel(testing.allocator, ctx, src, opts, &diag);
+}
+
+fn hasOverflow(r: Render) bool {
+    for (r.diagnostics) |d| {
+        if (d.kind == .overflow) return true;
+    }
+    return false;
+}
+
+test "a hard break starts a new line one pitch down" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderTest(&ctx, "H\\\\H");
+    defer r.deinit();
+    try testing.expectEqual(@as(u16, 2), r.lines);
+    try testing.expectEqual(@as(u16, 1), r.elements[1].line);
+    try testing.expectApproxEqAbs(@as(f64, 0), r.elements[1].origin.x, eps);
+    try testing.expectApproxEqAbs(@as(f64, -10), r.elements[1].origin.y, eps); // ascender 800 to descender -200
+    try testing.expectEqualSlices(u32, &.{1}, r.breaks);
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
+test "lines wrap at a breaking space or \\allowbreak when the hard box is too narrow" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    const box: Box = .{ .x0 = 0, .y0 = -20, .x1 = 13, .y1 = 10 };
+
+    // "HH HH" is 25.5 mm of ink; "HH" alone is 11 mm, so it breaks at the space.
+    var r = try renderBox(&ctx, "HH HH", .{ .hard_box = box });
+    defer r.deinit();
+    try testing.expectEqual(@as(u16, 2), r.lines);
+    try testing.expectEqualSlices(u32, &.{2}, r.breaks);
+    try testing.expectApproxEqAbs(@as(f64, 0), r.elements[1].origin.x, eps); // the space is dropped
+    try testing.expectApproxEqAbs(@as(f64, -10), r.elements[1].origin.y, eps);
+    try testing.expect(!hasOverflow(r));
+
+    var soft = try renderBox(&ctx, "HH\\allowbreak HH", .{ .hard_box = box });
+    defer soft.deinit();
+    try testing.expectEqual(@as(u16, 2), soft.lines);
+
+    // Without a hard box, nothing wraps.
+    var free = try renderTest(&ctx, "HH HH");
+    defer free.deinit();
+    try testing.expectEqual(@as(u16, 1), free.lines);
+}
+
+test "a non-breaking space or a long word overflows instead of shrinking" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    const box: Box = .{ .x0 = 0, .y0 = -20, .x1 = 13, .y1 = 10 };
+
+    var nb = try renderBox(&ctx, "HH~HH", .{ .hard_box = box });
+    defer nb.deinit();
+    try testing.expectEqual(@as(u16, 1), nb.lines);
+    try testing.expect(hasOverflow(nb));
+
+    var long = try renderBox(&ctx, "HHH", .{ .hard_box = box });
+    defer long.deinit();
+    try testing.expect(hasOverflow(long));
+    try testing.expectApproxEqAbs(@as(f64, 6), long.elements[0].advance / 3, eps); // full size
+}
+
+test "each line sits on the anchor by its own width" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderBox(&ctx, "HH HHH", .{
+        .anchor = render.Anchor.centre,
+        .hard_box = .{ .x0 = -9, .y0 = -20, .x1 = 9, .y1 = 10 },
+    });
+    defer r.deinit();
+    try testing.expectEqual(@as(u16, 2), r.lines);
+    try testing.expectApproxEqAbs(@as(f64, -6), r.elements[0].origin.x, eps); // 12 mm line, centred
+    try testing.expectApproxEqAbs(@as(f64, -9), r.elements[1].origin.x, eps); // 18 mm line, centred
+}
+
+test "the block shifts away from a hard-box edge before it overflows" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+
+    // Started 18 mm in, "HH"'s ink (0.5 to 11.5) would pass the right edge at 20.
+    var r = try renderBox(&ctx, "HH", .{
+        .hard_box = .{ .x0 = 0, .y0 = -5, .x1 = 20, .y1 = 10 },
+        .anchor_at = .{ .x = 18, .y = 0 },
+    });
+    defer r.deinit();
+    try testing.expect(!hasOverflow(r));
+    try testing.expectApproxEqAbs(@as(f64, 8.5), r.anchor_at.?.x, eps);
+
+    // Two lines' ink spans -10 to 7 mm; a box from -8 lifts the anchor by 2.
+    var two = try renderBox(&ctx, "H\\\\H", .{ .hard_box = .{ .x0 = 0, .y0 = -8, .x1 = 10, .y1 = 12 } });
+    defer two.deinit();
+    try testing.expect(!hasOverflow(two));
+    try testing.expectApproxEqAbs(@as(f64, 2), two.anchor_at.?.y, eps);
+
+    // A box shorter than the block overflows; the first line stays inside.
+    var tall = try renderBox(&ctx, "H\\\\H", .{ .hard_box = .{ .x0 = 0, .y0 = 0, .x1 = 10, .y1 = 10 } });
+    defer tall.deinit();
+    try testing.expect(hasOverflow(tall));
+    try testing.expectApproxEqAbs(@as(f64, 3), tall.anchor_at.?.y, eps); // ink top 7 + 3 = box top 10
 }

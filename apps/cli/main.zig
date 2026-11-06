@@ -10,9 +10,10 @@ const usage =
     \\         Renders one run of text in one face and writes its outlines as SVG.
     \\       graven parse <markup>
     \\         Parses label markup and prints its tree, or where it went wrong.
-    \\       graven label [--advance] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
+    \\       graven label [--advance] [--width mm] [--centre] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
     \\         Renders label markup; with an italic font, letters default to italic.
-    \\         Neighbours are placed by their ink unless --advance is given.
+    \\         Neighbours are placed by their ink unless --advance is given. --width gives a
+    \\         hard box that wide, so lines wrap; --centre centres each line on the anchor.
     \\
 ;
 
@@ -24,11 +25,20 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
         return parse(init, args[2]);
     }
-    if (args.len >= 8 and std.mem.eql(u8, args[1], "label") and std.mem.eql(u8, args[2], "--advance")) {
-        return label(init, args[3..], .advance);
-    }
-    if (args.len >= 7 and std.mem.eql(u8, args[1], "label")) {
-        return label(init, args[2..], .ink);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "label")) {
+        var flags: LabelFlags = .{};
+        var k: usize = 2;
+        while (k < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 1) {
+            if (std.mem.eql(u8, args[k], "--advance")) {
+                flags.contact = .advance;
+            } else if (std.mem.eql(u8, args[k], "--centre")) {
+                flags.centre = true;
+            } else if (std.mem.eql(u8, args[k], "--width") and k + 1 < args.len) {
+                k += 1;
+                flags.width = std.fmt.parseFloat(f64, args[k]) catch null;
+            } else break;
+        }
+        if (args.len - k >= 5) return label(init, args[k..], flags);
     }
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
@@ -61,7 +71,13 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
 }
 
-fn label(init: std.process.Init, args: []const [:0]const u8, contact: @FieldType(engine.style.Spec, "contact")) !void {
+const LabelFlags = struct {
+    contact: @FieldType(engine.style.Spec, "contact") = .ink,
+    width: ?f64 = null,
+    centre: bool = false,
+};
+
+fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
@@ -98,10 +114,14 @@ fn label(init: std.process.Init, args: []const [:0]const u8, contact: @FieldType
         .fallbacks = fallbacks.items,
         .cap_height = cap,
         .letters = if (has_italic) .italic else .upright,
-        .contact = contact,
+        .contact = flags.contact,
     });
     var diag: engine.markup.Diagnostic = undefined;
-    var r = engine.renderLabel(gpa, &ctx, src, .{}, &diag) catch |err| switch (err) {
+    const opts: engine.label.Options = .{
+        .anchor = if (flags.centre) engine.Anchor.centre else .start,
+        .hard_box = if (flags.width) |w| .{ .x0 = if (flags.centre) -w / 2 else 0, .y0 = -1e6, .x1 = if (flags.centre) w / 2 else w, .y1 = 1e6 } else null,
+    };
+    var r = engine.renderLabel(gpa, &ctx, src, opts, &diag) catch |err| switch (err) {
         error.Syntax => {
             std.debug.print("{s}\n{s} at byte {d}\n", .{ src, diag.kind.message(), diag.offset });
             std.process.exit(1);
