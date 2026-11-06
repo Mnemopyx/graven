@@ -5,6 +5,8 @@
 
 const std = @import("std");
 
+pub const spring = @import("spring.zig");
+
 pub const Point = struct {
     x: f64,
     y: f64,
@@ -307,4 +309,8 @@ test "affine composition applies left to right" {
     try testing.expectEqual(@as(f64, 2), p.y);
     try testing.expect(!m.mirrors());
     try testing.expect((Affine{ .a = -1 }).mirrors());
+}
+
+test {
+    _ = spring;
 }
