@@ -20,17 +20,26 @@ const Model = layout.Model;
 const TileId = layout.TileId;
 
 pub const dvui_app: dvui.App = .{
-    .config = .{ .options = .{
+    .config = .{ .startFn = start },
+    .frameFn = frame,
+    .initFn = init,
+    .deinitFn = deinit,
+};
+/// Runs before SDL starts. SDL 3.4 falls back to XWayland on compositors
+/// without the fifo-v1 protocol (COSMIC, for one), where it cannot see the
+/// display scale; an editor wants correct scaling over frame pacing, so
+/// Wayland comes first. SDL_VIDEO_DRIVER in the environment still wins.
+fn start() dvui.App.StartOptions {
+    if (dvui.backend.kind == .sdl3) _ = dvui.backend.c.SDL_SetHint(dvui.backend.c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+    return .{
         .size = .{ .w = 1500, .h = 820 },
         .min_size = .{ .w = 800, .h = 500 },
         .title = "Graven",
         .app = "Graven",
         .org = "com.mnemopyx.graven",
-    } },
-    .frameFn = frame,
-    .initFn = init,
-    .deinitFn = deinit,
-};
+    };
+}
+
 pub const main = dvui.App.main;
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{ .logFn = dvui.App.logFn };
