@@ -421,14 +421,107 @@ fn frame() !dvui.App.Result {
     if (titleBar()) |r| return r;
 
     {
-        var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
-        defer body.deinit();
-        treePane();
-        canvas();
-        try propertiesPane();
+        // The body and the status bar are placed explicitly, so a tall pane
+        // can never push the status bar off the bottom of the window.
+        var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+        defer rest.deinit();
+        const size = rest.data().contentRect();
+        const status_h: f32 = if (panes.status == .docked) status_height else 0;
+        {
+            var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .rect = .{ .x = 0, .y = 0, .w = size.w, .h = @max(0, size.h - status_h) } });
+            defer body.deinit();
+            if (panes.tree == .docked) treePane();
+            canvas();
+            if (panes.properties == .docked) try propertiesPane();
+        }
+        if (panes.status == .docked) {
+            var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .rect = .{ .x = 0, .y = size.h - status_h, .w = size.w, .h = status_h },
+                .background = true,
+                .border = .{ .y = 1 },
+            });
+            defer bar.deinit();
+            statusContent();
+        }
     }
-    statusBar();
+    try overlays();
     return .ok;
+}
+
+// Pane display -------------------------------------------------------------
+//
+// The tree, the tool palette with properties, and the status bar each show
+// docked beside the canvas, over it as translucent overlays (the default),
+// or not at all.
+
+const PaneMode = enum { overlay, docked, hidden };
+
+var panes: struct {
+    tree: PaneMode = .overlay,
+    properties: PaneMode = .overlay,
+    status: PaneMode = .overlay,
+} = .{};
+
+const tree_width = 240;
+const properties_width = 320;
+const status_height = 26;
+/// Space between an overlay and the canvas edge, logical pixels.
+const overlay_gap = 6;
+/// How opaque an overlay's background is.
+const overlay_alpha = 0.84;
+
+/// The canvas's rectangle in logical pixels, from the last frame: overlays
+/// anchor to it.
+var canvas_rect: dvui.Rect = .{};
+
+/// How much of each canvas edge overlays cover, logical pixels, so fitting
+/// a view keeps its subject clear of them.
+fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
+    return .{
+        .left = if (panes.tree == .overlay) tree_width + 2 * overlay_gap else 0,
+        .right = if (panes.properties == .overlay) properties_width + 2 * overlay_gap else 0,
+        .bottom = if (panes.status == .overlay) status_height + 2 * overlay_gap else 0,
+    };
+}
+
+fn overlayOptions(id: usize) dvui.Options {
+    return .{
+        .id_extra = id,
+        .background = true,
+        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(overlay_alpha) },
+        .border = .all(1),
+        .color_border = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.12) },
+        .corners = .all(8),
+        .box_shadow = null,
+    };
+}
+
+/// The panes shown as overlays, anchored to the canvas's edges.
+fn overlays() !void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const g: f32 = overlay_gap;
+    const bottom: f32 = if (panes.status == .overlay) status_height + g else 0;
+    if (panes.tree == .overlay) {
+        var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + g, .w = tree_width, .h = @max(60, c.h - 2 * g - bottom) };
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(1));
+        defer fw.deinit();
+        treeContent();
+    }
+    if (panes.properties == .overlay) {
+        var r: dvui.Rect = .{ .x = c.x + c.w - properties_width - g, .y = c.y + g, .w = properties_width, .h = @max(60, c.h - 2 * g - bottom) };
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(2));
+        defer fw.deinit();
+        try propertiesContent();
+    }
+    if (panes.status == .overlay) {
+        var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + c.h - status_height - g, .w = c.w - 2 * g, .h = status_height };
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(3));
+        defer fw.deinit();
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+        defer bar.deinit();
+        statusContent();
+    }
 }
 
 // The title bar -----------------------------------------------------------
@@ -620,6 +713,19 @@ fn menu() ?dvui.App.Result {
             zoomToContext();
             m.close();
         }
+        // Pane display: overlay (the default), docked or hidden.
+        inline for (.{ .{ "Tree", "tree" }, .{ "Tools and properties", "properties" }, .{ "Status line", "status" } }, 0..) |pane, pi| {
+            _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = pi });
+            inline for (.{ PaneMode.overlay, PaneMode.docked, PaneMode.hidden }, 0..) |mode, mi| {
+                var buf: [64]u8 = undefined;
+                const on = @field(panes, pane[1]) == mode;
+                const text = std.fmt.bufPrint(&buf, "{s}: {s}{s}", .{ pane[0], @tagName(mode), if (on) "  ✓" else "" }) catch pane[0];
+                if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 3 + mi }) != null) {
+                    @field(panes, pane[1]) = mode;
+                    m.close();
+                }
+            }
+        }
     }
     return null;
 }
@@ -627,9 +733,14 @@ fn menu() ?dvui.App.Result {
 /// The component tree: file, panels, regions, rows, tiles. Clicking a node
 /// makes it the context; its arrow opens or closes it.
 fn treePane() void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 240 }, .max_size_content = .width(240), .expand = .vertical, .border = .{ .w = 1 } });
+    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_width }, .max_size_content = .width(tree_width), .expand = .vertical, .border = .{ .w = 1 } });
     defer pane.deinit();
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
+    treeContent();
+}
+
+/// The tree itself, in whatever holds it; scrolls by wheel, with no bars.
+fn treeContent() void {
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
 
     var name_buf: [64]u8 = undefined;
@@ -812,10 +923,17 @@ fn canvas() void {
 
     // The first frame fits the worksheet, leaving room for its rulers.
     if (state.view.ppm == 0 and state.view.fit == null) state.view.fit = sheet.box();
+    const ns = dvui.windowNaturalScale();
+    canvas_rect = .{ .x = area.x / ns, .y = area.y / ns, .w = area.w / ns, .h = area.h / ns };
     if (state.view.fit) |b| {
-        state.view.cx = (b.x0 + b.x1) / 2;
-        state.view.cy = (b.y0 + b.y1) / 2;
-        state.view.ppm = 0.96 * @min((area.w - 2.5 * rw) / b.width(), (area.h - 2.5 * rw) / b.height());
+        // Fit into the part of the canvas overlays leave clear.
+        const ins = overlayInsets();
+        const free: dvui.Rect.Physical = .{ .x = area.x + ins.left * ns, .y = area.y, .w = @max(1, area.w - (ins.left + ins.right) * ns), .h = @max(1, area.h - ins.bottom * ns) };
+        state.view.ppm = 0.96 * @min((free.w - 2.5 * rw) / b.width(), (free.h - 2.5 * rw) / b.height());
+        const dx = (free.x + free.w / 2) - (area.x + area.w / 2);
+        const dy = (free.y + free.h / 2) - (area.y + area.h / 2);
+        state.view.cx = (b.x0 + b.x1) / 2 - dx / state.view.ppm;
+        state.view.cy = (b.y0 + b.y1) / 2 + dy / state.view.ppm;
     }
     // Drawn last, over everything.
     defer drawRulers(area);
@@ -1345,11 +1463,16 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
 /// The right side: a tool palette for the current context, then its
 /// properties.
 fn propertiesPane() !void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 320 }, .max_size_content = .width(320), .expand = .vertical, .border = .{ .x = 1 } });
+    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = properties_width }, .max_size_content = .width(properties_width), .expand = .vertical, .border = .{ .x = 1 } });
     defer pane.deinit();
+    try propertiesContent();
+}
+
+/// The tool palette and the properties, in whatever holds them.
+fn propertiesContent() !void {
     toolPalette();
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
     defer body.deinit();
@@ -1358,7 +1481,7 @@ fn propertiesPane() !void {
 
 /// Tools for the current context, as icon buttons.
 fn toolPalette() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4), .background = true });
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4) });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
     if (dvui.buttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
@@ -1668,9 +1791,10 @@ fn tileProperties(id: TileId) !void {
     }
 }
 
-fn statusBar() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .border = .{ .y = 1 }, .padding = .{ .x = 8, .y = 3, .w = 8, .h = 3 } });
-    defer bar.deinit();
+/// The status line's fields, each always in the same place so nothing
+/// jumps as values come and go: the pointer position (a dash off the
+/// sheet), the counts, any tool hint or message, then the font and zoom.
+fn statusContent() void {
     var tiles: usize = 0;
     var labels: usize = 0;
     var missing: usize = 0;
@@ -1684,23 +1808,36 @@ fn statusBar() void {
             else => {},
         };
     }
-    const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
+    const field: dvui.Options = .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 8, .y = 2, .h = 2 } };
+    const muted: dvui.Options = .{ .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } };
+
     var pos_buf: [64]u8 = undefined;
+    const u = state.model.sheet.units;
     const pos = if (state.mouse) |m_sheet| blk: {
         // Shown as the rulers count: from the ruler origin.
         const m = state.model.sheet.toRuler(m_sheet);
-        const u = state.model.sheet.units;
         const k = u.perMm();
         break :blk switch (u) {
-            .mm => std.fmt.bufPrint(&pos_buf, "x {d:.2}  y {d:.2} mm · ", .{ m.x * k, m.y * k }),
-            .inch => std.fmt.bufPrint(&pos_buf, "x {d:.3}  y {d:.3} in · ", .{ m.x * k, m.y * k }),
+            .mm => std.fmt.bufPrint(&pos_buf, "x {d:.2}   y {d:.2} mm", .{ m.x * k, m.y * k }),
+            .inch => std.fmt.bufPrint(&pos_buf, "x {d:.3}   y {d:.3} in", .{ m.x * k, m.y * k }),
         } catch "";
-    } else "";
-    const tool = switch (state.tool) {
-        .select => "",
-        .add_panel => "Add panel: drag out its outline · Esc cancels · ",
+    } else std.fmt.bufPrint(&pos_buf, "x –   y – {s}", .{u.symbol()}) catch "";
+    dvui.labelNoFmt(@src(), pos, .{}, field.override(.{ .min_size_content = .{ .w = 190 }, .font = .theme(.mono) }));
+
+    var counts_buf: [160]u8 = undefined;
+    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs · {d} overflows · {d} in margins", .{
+        state.model.panels.items.len, state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len,
+    }) catch "";
+    dvui.labelNoFmt(@src(), counts, .{}, field);
+
+    const hint = switch (state.tool) {
+        .select => state.status,
+        .add_panel => "Add panel: drag out its outline · Esc cancels",
     };
-    dvui.label(@src(), "{s}{s}{s}{s} · {d} panels ({d} out of compliance) · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
-        pos, state.status, tool, font, state.model.panels.items.len, state.panel_issues.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
-    }, .{});
+    dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
+
+    var right_buf: [160]u8 = undefined;
+    const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
+    const right = std.fmt.bufPrint(&right_buf, "{s} · zoom {d:.2} px/mm · {d:.1} ms", .{ font, state.view.ppm, state.solve_ms }) catch "";
+    dvui.labelNoFmt(@src(), right, .{}, field.override(muted));
 }
