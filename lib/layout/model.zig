@@ -139,6 +139,10 @@ pub const Orientation = enum { landscape, portrait };
 /// The worksheet: paper in drawing units, holding panels. Its frame's
 /// origin is the sheet's bottom-left corner, y up.
 pub const Sheet = struct {
+    /// A short description for reference; the app's "Worksheet 1" until
+    /// the user names it.
+    name: []const u8 = "Worksheet 1",
+    default_name: bool = true,
     /// Index into `papers`, or null for a custom size.
     paper: ?usize = 2,
     orientation: Orientation = .landscape,
@@ -243,7 +247,19 @@ pub const Model = struct {
     /// partly off a smaller sheet is reported by the checks, not moved.
     pub fn setSheet(m: *Model, sheet: Sheet) Error!void {
         if (!(sheet.w > 0 and sheet.h > 0)) return error.BadSize;
+        const name = m.sheet.name;
+        const default_name = m.sheet.default_name;
         m.sheet = sheet;
+        // Size changes keep the worksheet's name.
+        m.sheet.name = name;
+        m.sheet.default_name = default_name;
+        m.revision += 1;
+    }
+
+    /// Names the worksheet.
+    pub fn nameWorksheet(m: *Model, name: []const u8) Error!void {
+        m.sheet.name = try m.a().dupe(u8, name);
+        m.sheet.default_name = false;
         m.revision += 1;
     }
 

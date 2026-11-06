@@ -82,7 +82,6 @@ const State = struct {
     /// Whether the user has given the file name and the legend font. Until
     /// then they are the app's choices, shown in italic.
     file_name_set: bool = false,
-    file_name_buf: std.ArrayList(u8) = .empty,
     font_set: bool = false,
     /// What the tree, canvas, tools and properties are about.
     context: Context = .worksheet,
@@ -96,6 +95,8 @@ const Tool = enum { select, add_panel };
 
 /// The current context: a node of the component tree.
 const Context = union(enum) {
+    /// The file: everything, the worksheet included.
+    file,
     worksheet,
     panel: usize,
     region: struct { panel: usize, region: usize },
@@ -114,6 +115,7 @@ const Context = union(enum) {
 
     fn kindName(c: Context) []const u8 {
         return switch (c) {
+            .file => "File",
             .worksheet => "Worksheet",
             .panel => "Panel",
             .region => "Region",
@@ -255,7 +257,6 @@ fn deinit(_: *dvui.Window) void {
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
     state.expanded.deinit(state.gpa);
-    state.file_name_buf.deinit(state.gpa);
     state.model.deinit();
 }
 
@@ -419,19 +420,22 @@ fn treePane() void {
     defer scroll.deinit();
 
     var name_buf: [64]u8 = undefined;
-    if (!treeNode(.worksheet, state.file_name, 0, state.model.panels.items.len > 0, !state.file_name_set)) return;
+    // The file holds everything; the worksheet is its one child for now.
+    if (!treeNode(.file, state.file_name, 0, true, !state.file_name_set)) return;
+    const sheet = state.model.sheet;
+    if (!treeNode(.worksheet, sheet.name, 1, state.model.panels.items.len > 0, sheet.default_name)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!treeNode(.{ .panel = pi }, panel.name, 1, panel.regions.items.len > 0, panel.default_name)) continue;
+        if (!treeNode(.{ .panel = pi }, panel.name, 2, panel.regions.items.len > 0, panel.default_name)) continue;
         for (panel.regions.items, 0..) |region, ri| {
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 2, region.rows.items.len > 0, false)) continue;
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, region.rows.items.len > 0, false)) continue;
             for (region.rows.items, 0..) |row, rowi| {
                 const title = std.fmt.bufPrint(&name_buf, "Row {d}", .{rowi + 1}) catch "Row";
-                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 3, row.places.items.len > 0, false)) continue;
+                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, row.places.items.len > 0, false)) continue;
                 for (row.places.items) |p| {
                     const t = state.model.tileConst(p.tile);
                     const legend = if (t.slots.items.len > 0) t.slots.items[0].content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
-                    _ = treeNode(.{ .tile = p.tile }, text, 4, false, false);
+                    _ = treeNode(.{ .tile = p.tile }, text, 5, false, false);
                 }
             }
         }
@@ -445,7 +449,7 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
     const key = ctx.key();
     const id: usize = @truncate(key);
     const open = state.expanded.get(key) orelse switch (ctx) {
-        .worksheet, .panel, .region => true,
+        .file, .worksheet, .panel, .region => true,
         else => false,
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });
@@ -487,6 +491,7 @@ fn revealInTree(ctx: Context) void {
         .{ .region = .{ .panel = f.panel, .region = f.tile.region } },
         .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } },
     }) |c| state.expanded.put(state.gpa, c.key(), true) catch {};
+    state.expanded.put(state.gpa, Context.key(.file), true) catch {};
 }
 
 /// Whether a placed tile on panel `pi` belongs to the context, for canvas
@@ -496,14 +501,14 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .tile => |id| t.id == id,
         .row => |r| r.panel == pi and t.region == r.region and t.row == r.row,
         .region => |r| r.panel == pi and t.region == r.region,
-        .worksheet, .panel => false,
+        .file, .worksheet, .panel => false,
     };
 }
 
 /// The context's extents on the worksheet, mm.
 fn contextExtents() geom.Box {
     switch (state.context) {
-        .worksheet => return state.model.sheet.box(),
+        .file, .worksheet => return state.model.sheet.box(),
         .panel => |pi| return state.model.panels.items[pi].box(),
         else => {},
     }
@@ -790,6 +795,7 @@ fn toolPalette() void {
 
 fn lowerKind() []const u8 {
     return switch (state.context) {
+        .file => "file",
         .worksheet => "worksheet",
         .panel => "panel",
         .region => "region",
@@ -828,23 +834,19 @@ fn propName(name: []const u8) void {
     dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
 }
 
-/// The worksheet's editable properties: its name, and its sheet as a
+/// The worksheet's editable properties: its name (a short description for
+/// reference, separate from the file name), and its sheet as a
 /// standard paper and orientation or a custom size.
 fn worksheetProperties() !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer row.deinit();
         propName("Name");
-        var te = dvui.textEntry(@src(), .{ .text_initial = state.file_name }, .{ .expand = .horizontal, .font = styled(.theme(.body), !state.file_name_set) });
+        var te = dvui.textEntry(@src(), .{ .text_initial = state.model.sheet.name }, .{ .expand = .horizontal, .font = styled(.theme(.body), state.model.sheet.default_name) });
         const changed = te.text_changed;
         const text = te.textGet();
         te.deinit();
-        if (changed) {
-            state.file_name_buf.clearRetainingCapacity();
-            try state.file_name_buf.appendSlice(state.gpa, text);
-            state.file_name = state.file_name_buf.items;
-            state.file_name_set = true;
-        }
+        if (changed) try state.model.nameWorksheet(text);
     }
 
     const sheet = state.model.sheet;
@@ -931,6 +933,11 @@ fn propFont(name: []const u8, n: usize) !void {
 fn properties() !void {
     heading("{s}", .{state.context.kindName()}, 0);
     switch (state.context) {
+        .file => {
+            // The file's name is its path, set by saving; it is not a property.
+            propValue("Saved", true, "not yet", .{}, 1);
+            propText("Engine", "{s}", .{engine.version}, 2);
+        },
         .worksheet => {
             try worksheetProperties();
             propText("Panels", "{d}", .{state.model.panels.items.len}, 3);
