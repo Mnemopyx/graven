@@ -89,6 +89,31 @@ pub fn build(b: *std.Build) void {
     run_cli.addPassthruArgs();
     b.step("run", "Run the graven CLI").dependOn(&run_cli.step);
 
+    // GUI editor: zig build gui (fetches DVUI and SDL3 on first use).
+    const gui_step = b.step("gui", "Build and run the GUI editor");
+    if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui_dep| {
+        const gui = b.addExecutable(.{
+            .name = "graven-gui",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("apps/gui/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "dvui", .module = dvui_dep.module("dvui_sdl3") },
+                    .{ .name = "graven_layout", .module = layout },
+                    .{ .name = "graven_engine", .module = engine },
+                    .{ .name = "graven_samples", .module = samples },
+                },
+            }),
+        });
+        const install_gui = b.addInstallArtifact(gui, .{});
+        const run_gui = b.addRunArtifact(gui);
+        run_gui.step.dependOn(&install_gui.step);
+        run_gui.addPassthruArgs();
+        gui_step.dependOn(&run_gui.step);
+        b.step("gui-build", "Build the GUI editor without running it").dependOn(&install_gui.step);
+    }
+
     // Library tests.
     const test_step = b.step("test", "Run library tests");
     for ([_]*std.Build.Module{ geom, font, engine, layout, samples }) |mod| {

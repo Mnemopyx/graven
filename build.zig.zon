@@ -9,6 +9,12 @@
             .url = "git+https://github.com/harfbuzz/harfbuzz#3df40d9b98d6b32f0e4288d4ecfbb158ddb3a372",
             .hash = "N-V-__8AABCJSwZ_b-_pzs_bdrf6CKkC58JNxsp0b1FfvNqV",
         },
+        // DVUI (pre-1.0, pinned to a commit) for the GUI; fetched only by `zig build gui`.
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui#76b90d415f2da915b1593feab601417e5519e687",
+            .hash = "dvui-0.6.0-dev-AQFJmR-tBAG86_97fGflee6tz_1SK8j2tDLyK-UAqYDC",
+            .lazy = true,
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "lib", "apps", "bridge", "scripts", "tools", "README.md" },
 }

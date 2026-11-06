@@ -425,3 +425,26 @@ test "labels render once per identical legend and sit in their slots" {
     try testing.expectEqual(1, labels.cache.count());
     try testing.expectApproxEqAbs(s2.labels[0].box.y1 - 2.5, s2.labels[0].origin.y, 1e-12);
 }
+
+test "a legend with characters no face covers is reported on its tile" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
+    const p = try m.addPanel("board", 100, 50);
+    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
+    _ = try m.addRow(p, r, 0);
+    const t = try m.addTile(.{ .designator = "K1" });
+    try m.addSlot(t, .{ .name = "top", .style = style, .content = "HQ" });
+    try m.place(p, r, 0, null, .{ .tile = t });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectEqual(1, s.issues.len);
+    try testing.expectEqual(.missing_glyph, s.issues[0].kind);
+    try testing.expectEqual(t, s.issues[0].tile.?);
+}

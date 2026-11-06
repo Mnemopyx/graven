@@ -13,22 +13,24 @@ The full design is in the [Graven design blueprint](https://claude.ai/artifact/Q
 
 ## Status
 
-Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`), and `graven label` renders it in a style context: upright and italic faces with a fallback chain matched by cap height, superscripts and subscripts (settings from the font's `MATH` table when it has one), accents (`\hat`, `\bar`, `\overline`), math spaces, and space between operators by TeX's atom classes with amounts from the style. Neighbours and scripts are placed by their ink, through contact profiles (`--advance` places them by the fonts' advances instead). Lines break at `\\` and, within a hard box width, at spaces and `\allowbreak` (never at `~`); each line is aligned by the anchor, the block is moved inside the box when it fits, and anything that cannot fit overflows with a diagnostic instead of shrinking. The OCCT bridge is a tested starting point.
+Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`), and `graven label` renders it in a style context: upright and italic faces with a fallback chain matched by cap height, superscripts and subscripts (settings from the font's `MATH` table when it has one), accents (`\hat`, `\bar`, `\overline`), math spaces, and space between operators by TeX's atom classes with amounts from the style. Neighbours and scripts are placed by their ink, through contact profiles (`--advance` places them by the fonts' advances instead). Lines break at `\\` and, within a hard box width, at spaces and `\allowbreak` (never at `~`); each line is aligned by the anchor, the block is moved inside the box when it fits, and anything that cannot fit overflows with a diagnostic instead of shrinking. The layout library has a first tile model (panels, tile regions, rows, tiles, slots) changed through action functions, placed by a 1-D spring solver, with labels rendered through a cache that identical legends share. A GUI editor on DVUI and SDL3 opens a sample PC keyboard: pan and zoom, select tiles, edit legends live, and step through installed fonts. Features are built in the order real workflows need them. The OCCT bridge is a tested starting point.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic), contours, exact areas and bounds |
+| `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic), contours, exact areas and bounds; `spring`, the 1-D tension solver |
 | `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
-| `lib/layout` | Layout library: `layout`, `geometry`, `drc`, `output` (SVG so far) |
+| `lib/layout` | Layout library: `model` (panels, tile regions, tiles, slots, actions), `place` (solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
+| `apps/gui` | GUI editor on DVUI over SDL3 |
+| `apps/samples` | Sample models built through the library actions (PC keyboard) |
 | `lib/testdata` | Test fonts with known glyph areas, made by `tools/make-test-fonts.py` |
 | `apps/cli` | `graven` command-line tool |
 | `bridge/occt` | Optional OCCT bridge: a C shim over OCCT that writes STEP with XDE names and colours |
 | `scripts/build-occt.sh` | Builds a minimal static OCCT 8.0.1 with `zig c++` |
 
-Planned applications not yet started: the GUI editor and the proof sheet. Libraries never touch the file system or console; applications do.
+Planned application not yet started: the proof sheet. Libraries never touch the file system or console; applications do.
 
 ## Building
 
@@ -40,10 +42,14 @@ zig build test       # library tests
 zig build run -- svg <font file> "<text>" <cap mm> out.svg   # one run of text as SVG
 zig build run -- parse 'x_i^2'                                  # label markup as a tree
 zig build run -- label <upright> <italic|-> <cap mm> 'x_i^2' out.svg [fallback ...]   # a rendered label
+zig build run -- keyboard <font file> out.svg                                     # the sample PC keyboard
+zig build gui        # builds and runs the GUI editor (fetches DVUI and SDL3 on first use)
 zig build run -- label --width 12 --centre <upright> - 3 'CAPS LOCK' out.svg         # wrapped in a 12 mm box
 ```
 
 HarfBuzz 15.1.0 is fetched by `zig build` (pinned in `build.zig.zon`) and built from its amalgamated source with `zig c++`, so no system HarfBuzz is needed.
+
+The GUI needs an X11 or Wayland display. DVUI is pre-1.0, so it is pinned to a commit in `build.zig.zon` as a lazy dependency: plain `zig build` and `zig build test` never fetch it.
 
 ### OCCT bridge (optional)
 
