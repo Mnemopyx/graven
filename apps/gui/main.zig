@@ -779,11 +779,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     dvui.cursorSet(.crosshair);
                 } else if (state.moving != null) {
                     dvui.cursorSet(.arrow_all);
-                } else if (state.context == .panel) {
-                    // Over the selected panel, show that it can be dragged.
-                    const at = state.view.toMm(area, me.p);
-                    const b = state.model.panels.items[state.context.panel].box();
-                    if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) dvui.cursorSet(.arrow_all);
+                } else if (panelToMove(state.view.toMm(area, me.p)) != null) {
+                    // Over a panel a drag would move, show that it can be.
+                    dvui.cursorSet(.arrow_all);
                 }
             },
             .wheel_y => |dy| {
@@ -852,13 +850,31 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
 
 /// The selected panel, when the pointer went down on it: a drag then moves it.
 fn grabbedPanel() ?usize {
-    const at = state.press_at orelse return null;
-    const pi = switch (state.context) {
-        .panel => |p| p,
+    return panelToMove(state.press_at orelse return null);
+}
+
+/// The panel a drag from worksheet point `at` would move: the selected
+/// panel when `at` is on it; from the worksheet context, the one panel
+/// under `at`, if exactly one is (where panels overlap, select one first).
+/// The context does not change.
+fn panelToMove(at: geom.Point) ?usize {
+    switch (state.context) {
+        .panel => |pi| return if (contains(state.model.panels.items[pi].box(), at)) pi else null,
+        .worksheet => {
+            var found: ?usize = null;
+            for (state.model.panels.items, 0..) |p, pi| {
+                if (!contains(p.box(), at)) continue;
+                if (found != null) return null;
+                found = pi;
+            }
+            return found;
+        },
         else => return null,
-    };
-    const b = state.model.panels.items[pi].box();
-    return if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) pi else null;
+    }
+}
+
+fn contains(b: geom.Box, p: geom.Point) bool {
+    return p.x >= b.x0 and p.x <= b.x1 and p.y >= b.y0 and p.y <= b.y1;
 }
 
 /// Commits a panel drag. A panel that started compliant ends compliant,
