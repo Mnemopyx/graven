@@ -30,7 +30,13 @@ pub const dvui_app: dvui.App = .{
 /// display scale; an editor wants correct scaling over frame pacing, so
 /// Wayland comes first. SDL_VIDEO_DRIVER in the environment still wins.
 fn start() dvui.App.StartOptions {
-    if (dvui.backend.kind == .sdl3) _ = dvui.backend.c.SDL_SetHint(dvui.backend.c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+    if (dvui.backend.kind == .sdl3) {
+        const c = dvui.backend.c;
+        _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+        // The identifier becomes the Wayland app id, which the desktop uses
+        // to find Graven's .desktop file and icon.
+        _ = c.SDL_SetAppMetadata("Graven", engine.version, "com.mnemopyx.graven");
+    }
     return .{
         .size = .{ .w = 1500, .h = 820 },
         .min_size = .{ .w = 800, .h = 500 },
@@ -236,6 +242,7 @@ var state: State = undefined;
 
 fn init(win: *dvui.Window) !void {
     const gpa = win.gpa;
+    initWindowFrame(win);
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
     const installed: []Font = listFonts(gpa) catch &.{};
     if (std.Io.Dir.cwd().access(dvui.io, example_font, .{})) |_| {
@@ -404,7 +411,7 @@ fn frame() !dvui.App.Result {
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .style = .window });
     defer root.deinit();
 
-    if (menu()) |r| return r;
+    if (titleBar()) |r| return r;
 
     {
         var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
@@ -417,8 +424,153 @@ fn frame() !dvui.App.Result {
     return .ok;
 }
 
+// The title bar -----------------------------------------------------------
+//
+// Like a GTK header bar: the window has no native frame, and Graven draws
+// one bar holding its menus, the title, and at the right end the window
+// controls in a plain native style. SDL's hit test tells the window manager
+// which parts of the bar drag the window and which window edges resize it.
+
+/// The title bar's rectangle and the controls on it, in physical pixels,
+/// from the last frame: the hit test reads them.
+var frame_bar: dvui.Rect.Physical = .{};
+var frame_holes: [16]dvui.Rect.Physical = undefined;
+var frame_hole_count: usize = 0;
+/// Physical pixels per window coordinate (SDL's hit test gives points).
+var frame_density: f32 = 1;
+
+const title_height = 34;
+/// Width of the window edges that resize it, window coordinates.
+const resize_edge = 6;
+
+fn initWindowFrame(win: *dvui.Window) void {
+    if (dvui.backend.kind != .sdl3) return;
+    const c = dvui.backend.c;
+    const window = win.backend.impl.window;
+    _ = c.SDL_SetWindowTitle(window, "untitled — Graven");
+    if (std.c.getenv("GRAVEN_NATIVE_FRAME") != null) return;
+    _ = c.SDL_SetWindowBordered(window, false);
+    _ = c.SDL_SetWindowHitTest(window, hitTest, null);
+}
+
+/// Where a point in the window drags or resizes it: resize along the
+/// edges (unless maximised), drag on the title bar away from its controls.
+fn hitTest(win: ?*dvui.backend.c.SDL_Window, area: [*c]const dvui.backend.c.SDL_Point, _: ?*anyopaque) callconv(.c) dvui.backend.c.SDL_HitTestResult {
+    const c = dvui.backend.c;
+    const p = area.*;
+    var w: c_int = 0;
+    var h: c_int = 0;
+    _ = c.SDL_GetWindowSize(win, &w, &h);
+    const maximized = (c.SDL_GetWindowFlags(win) & c.SDL_WINDOW_MAXIMIZED) != 0;
+    if (!maximized) {
+        const l = p.x < resize_edge;
+        const r = p.x >= w - resize_edge;
+        const t = p.y < resize_edge;
+        const b = p.y >= h - resize_edge;
+        if (t and l) return c.SDL_HITTEST_RESIZE_TOPLEFT;
+        if (t and r) return c.SDL_HITTEST_RESIZE_TOPRIGHT;
+        if (b and l) return c.SDL_HITTEST_RESIZE_BOTTOMLEFT;
+        if (b and r) return c.SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+        if (t) return c.SDL_HITTEST_RESIZE_TOP;
+        if (b) return c.SDL_HITTEST_RESIZE_BOTTOM;
+        if (l) return c.SDL_HITTEST_RESIZE_LEFT;
+        if (r) return c.SDL_HITTEST_RESIZE_RIGHT;
+    }
+    const pp: dvui.Point.Physical = .{ .x = @as(f32, @floatFromInt(p.x)) * frame_density, .y = @as(f32, @floatFromInt(p.y)) * frame_density };
+    if (!frame_bar.contains(pp)) return c.SDL_HITTEST_NORMAL;
+    for (frame_holes[0..frame_hole_count]) |hole| if (hole.contains(pp)) return c.SDL_HITTEST_NORMAL;
+    return c.SDL_HITTEST_DRAGGABLE;
+}
+
+/// Marks a control on the title bar, so pressing it is not a window drag.
+fn frameHole(r: dvui.Rect.Physical) void {
+    if (frame_hole_count < frame_holes.len) {
+        frame_holes[frame_hole_count] = r;
+        frame_hole_count += 1;
+    }
+}
+
+const WindowButton = enum { minimize, maximize, close };
+
+/// A window control: a round button showing only on hover, with a thin
+/// glyph, as GTK and COSMIC draw them.
+fn windowButton(kind: WindowButton) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{
+        .id_extra = @backingInt(kind),
+        .min_size_content = .{ .w = 18, .h = 18 },
+        .padding = .all(5),
+        .margin = .{ .x = 3, .w = 3 },
+        .corners = .round(14),
+        .gravity_y = 0.5,
+        .background = false,
+        .border = .all(0),
+    });
+    bw.processEvents();
+    if (bw.hovered() or bw.pressed()) bw.data().borderRectScale().r.fill(.round(14 * dvui.windowNaturalScale()), .{ .color = .{ .color = dvui.themeGet().color(.control, .text).opacity(if (bw.pressed()) 0.2 else 0.1) } });
+    const clicked = bw.clicked();
+    const r = bw.data().contentRectScale().r;
+    frameHole(bw.data().borderRectScale().r);
+    const ns = dvui.windowNaturalScale();
+    const ink: dvui.ColorOrGradient = .{ .color = dvui.themeGet().color(.control, .text) };
+    const cx = r.x + r.w / 2;
+    const cy = r.y + r.h / 2;
+    const k = 4.5 * ns;
+    switch (kind) {
+        .minimize => dvui.Path.stroke(.{ .points = &.{ .{ .x = cx - k, .y = cy + k * 0.6 }, .{ .x = cx + k, .y = cy + k * 0.6 } } }, .{ .thickness = 1.3 * ns, .color = ink }),
+        .maximize => (dvui.Rect.Physical{ .x = cx - k, .y = cy - k, .w = 2 * k, .h = 2 * k }).stroke(.square, .{ .thickness = 1.3 * ns, .color = ink }),
+        .close => {
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = cx - k, .y = cy - k }, .{ .x = cx + k, .y = cy + k } } }, .{ .thickness = 1.3 * ns, .color = ink });
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = cx - k, .y = cy + k }, .{ .x = cx + k, .y = cy - k } } }, .{ .thickness = 1.3 * ns, .color = ink });
+        },
+    }
+    bw.deinit();
+    return clicked;
+}
+
+/// The title bar: menus at the left, the file and worksheet in the middle,
+/// window controls at the right. Everything that is not a control drags
+/// the window.
+fn titleBar() ?dvui.App.Result {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = colors.titlebar }, .min_size_content = .{ .h = title_height }, .border = .{ .h = 1 } });
+    defer bar.deinit();
+    frame_bar = bar.data().borderRectScale().r;
+    frame_hole_count = 0;
+    const win = dvui.currentWindow();
+    const px = win.backend.pixelSize();
+    const ws = win.backend.windowSize();
+    frame_density = if (ws.w > 0) px.w / ws.w else 1;
+
+    if (menu()) |r| return r;
+
+    // The title fills the middle and is part of the draggable bar.
+    {
+        // Each name italic while it is the app's choice.
+        var middle = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer middle.deinit();
+        var title = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
+        defer title.deinit();
+        dvui.labelNoFmt(@src(), state.file_name, .{}, .{ .font = styled(.theme(.body), !state.file_name_set), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        dvui.labelNoFmt(@src(), "  —  ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        dvui.labelNoFmt(@src(), state.model.sheet.name, .{}, .{ .font = styled(.theme(.body), state.model.sheet.default_name), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+    }
+
+    if (dvui.backend.kind == .sdl3 and std.c.getenv("GRAVEN_NATIVE_FRAME") == null) {
+        const c = dvui.backend.c;
+        const window = win.backend.impl.window;
+        if (windowButton(.minimize)) _ = c.SDL_MinimizeWindow(window);
+        if (windowButton(.maximize)) {
+            const maximized = (c.SDL_GetWindowFlags(window) & c.SDL_WINDOW_MAXIMIZED) != 0;
+            _ = if (maximized) c.SDL_RestoreWindow(window) else c.SDL_MaximizeWindow(window);
+        }
+        if (windowButton(.close)) return .close;
+    }
+    return null;
+}
+
 fn menu() ?dvui.App.Result {
-    var m = dvui.menu(@src(), .horizontal, .{ .expand = .horizontal, .background = true });
+    var m = dvui.menu(@src(), .horizontal, .{ .gravity_y = 0.5 });
+    frameHole(m.data().borderRectScale().r);
     defer m.deinit();
     if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -568,6 +720,7 @@ const colors = struct {
     const panel_edge: dvui.Color = .{ .r = 0x5c, .g = 0x5a, .b = 0x55 };
     const margin: dvui.Color = .{ .r = 0x9c, .g = 0x8a, .b = 0x6e };
     const ruler: dvui.Color = .{ .r = 0xe9, .g = 0xe7, .b = 0xe2 };
+    const titlebar: dvui.Color = .{ .r = 0xeb, .g = 0xea, .b = 0xe7 };
     const ruler_ink: dvui.Color = .{ .r = 0x4a, .g = 0x48, .b = 0x44 };
     const body: dvui.Color = .{ .r = 0xe4, .g = 0xe2, .b = 0xdc };
     const edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f };
