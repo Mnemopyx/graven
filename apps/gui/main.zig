@@ -82,6 +82,7 @@ const State = struct {
     /// Whether the user has given the file name and the legend font. Until
     /// then they are the app's choices, shown in italic.
     file_name_set: bool = false,
+    file_name_buf: std.ArrayList(u8) = .empty,
     font_set: bool = false,
     /// What the tree, canvas, tools and properties are about.
     context: Context = .worksheet,
@@ -254,6 +255,7 @@ fn deinit(_: *dvui.Window) void {
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
     state.expanded.deinit(state.gpa);
+    state.file_name_buf.deinit(state.gpa);
     state.model.deinit();
 }
 
@@ -821,6 +823,85 @@ fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: an
     dvui.label(@src(), fmt, args, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
 }
 
+/// The left-hand name of a property row.
+fn propName(name: []const u8) void {
+    dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
+}
+
+/// The worksheet's editable properties: its name, and its sheet as a
+/// standard paper and orientation or a custom size.
+fn worksheetProperties() !void {
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Name");
+        var te = dvui.textEntry(@src(), .{ .text_initial = state.file_name }, .{ .expand = .horizontal, .font = styled(.theme(.body), !state.file_name_set) });
+        const changed = te.text_changed;
+        const text = te.textGet();
+        te.deinit();
+        if (changed) {
+            state.file_name_buf.clearRetainingCapacity();
+            try state.file_name_buf.appendSlice(state.gpa, text);
+            state.file_name = state.file_name_buf.items;
+            state.file_name_set = true;
+        }
+    }
+
+    const sheet = state.model.sheet;
+    const papers = layout.model.papers;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Sheet");
+        var names: [papers.len + 1][]const u8 = undefined;
+        for (papers, 0..) |p, i| names[i] = p.name;
+        names[papers.len] = "Custom";
+        var choice: usize = sheet.paper orelse papers.len;
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
+            try state.model.setSheet(if (choice < papers.len) .standard(choice, sheet.orientation) else .custom(sheet.w, sheet.h));
+            zoomToContext();
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Orientation");
+        const names = [_][]const u8{ "Landscape", "Portrait" };
+        var choice: usize = @backingInt(sheet.orientation);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
+            const o: layout.model.Orientation = @fromBackingInt(@intCast(choice));
+            if (o != sheet.orientation) {
+                try state.model.setSheet(if (sheet.paper) |p| .standard(p, o) else .custom(sheet.h, sheet.w));
+                zoomToContext();
+            }
+        }
+    }
+    if (sheet.paper == null) {
+        // A custom sheet takes its size as typed.
+        var w = sheet.w;
+        var h = sheet.h;
+        var changed = false;
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            propName("Width, mm");
+            changed = dvui.textEntryNumber(@src(), f64, .{ .value = &w, .min = 1, .max = 10000 }, .{ .expand = .horizontal }).changed or changed;
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            propName("Height, mm");
+            changed = dvui.textEntryNumber(@src(), f64, .{ .value = &h, .min = 1, .max = 10000 }, .{ .expand = .horizontal }).changed or changed;
+        }
+        if (changed) {
+            try state.model.setSheet(.custom(w, h));
+            zoomToContext();
+        }
+    } else {
+        propValue("Size", sheet.default_size, "{d} × {d} mm", .{ sheet.w, sheet.h }, 50);
+    }
+}
+
 /// The font property: a list of installed fonts, with arrows to step
 /// through them. All labels share one face for now; per-style fonts come
 /// with the style editor.
@@ -851,9 +932,7 @@ fn properties() !void {
     heading("{s}", .{state.context.kindName()}, 0);
     switch (state.context) {
         .worksheet => {
-            const sheet = state.model.sheet;
-            propValue("Name", !state.file_name_set, "{s}", .{state.file_name}, 1);
-            propValue("Sheet", sheet.default_size, "{d} × {d} mm{s}", .{ sheet.w, sheet.h, if (sheet.w == 594 and sheet.h == 420) " (A2 landscape)" else "" }, 2);
+            try worksheetProperties();
             propText("Panels", "{d}", .{state.model.panels.items.len}, 3);
             propText("Tiles", "{d}", .{state.model.tiles.items.len}, 4);
             try propFont("Legend font", 5);

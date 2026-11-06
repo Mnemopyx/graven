@@ -113,10 +113,37 @@ pub const Panel = struct {
     }
 };
 
+/// A standard paper size, portrait (w <= h), mm.
+pub const Paper = struct {
+    name: []const u8,
+    w: f64,
+    h: f64,
+};
+
+/// ISO 216 A sizes and ANSI/ASME Y14.1 sizes (1 in = 25.4 mm exactly).
+pub const papers = [_]Paper{
+    .{ .name = "A4", .w = 210, .h = 297 },
+    .{ .name = "A3", .w = 297, .h = 420 },
+    .{ .name = "A2", .w = 420, .h = 594 },
+    .{ .name = "A1", .w = 594, .h = 841 },
+    .{ .name = "A0", .w = 841, .h = 1189 },
+    .{ .name = "ANSI A (letter)", .w = 215.9, .h = 279.4 },
+    .{ .name = "ANSI B (tabloid)", .w = 279.4, .h = 431.8 },
+    .{ .name = "ANSI C", .w = 431.8, .h = 558.8 },
+    .{ .name = "ANSI D", .w = 558.8, .h = 863.6 },
+    .{ .name = "ANSI E", .w = 863.6, .h = 1117.6 },
+};
+
+pub const Orientation = enum { landscape, portrait };
+
 /// The worksheet: paper in drawing units, holding panels. Its frame's
 /// origin is the sheet's bottom-left corner, y up.
 pub const Sheet = struct {
-    /// Sheet size, mm; A2 landscape until the user picks another.
+    /// Index into `papers`, or null for a custom size.
+    paper: ?usize = 2,
+    orientation: Orientation = .landscape,
+    /// Sheet size, mm. For a standard paper it follows from the paper and
+    /// orientation; A2 landscape until the user picks another.
     w: f64 = 594,
     h: f64 = 420,
     /// True while the size is the app's default.
@@ -124,6 +151,23 @@ pub const Sheet = struct {
 
     pub fn box(s: Sheet) geom.Box {
         return .{ .x0 = 0, .y0 = 0, .x1 = s.w, .y1 = s.h };
+    }
+
+    /// A standard paper in an orientation.
+    pub fn standard(paper: usize, orientation: Orientation) Sheet {
+        const p = papers[paper];
+        return .{
+            .paper = paper,
+            .orientation = orientation,
+            .w = if (orientation == .landscape) p.h else p.w,
+            .h = if (orientation == .landscape) p.w else p.h,
+            .default_size = false,
+        };
+    }
+
+    /// A custom size; its orientation follows from its proportions.
+    pub fn custom(w: f64, h: f64) Sheet {
+        return .{ .paper = null, .orientation = if (w >= h) .landscape else .portrait, .w = w, .h = h, .default_size = false };
     }
 };
 
@@ -193,6 +237,14 @@ pub const Model = struct {
         try m.panels.append(m.a(), p);
         m.revision += 1;
         return m.panels.items.len - 1;
+    }
+
+    /// Sets the worksheet's sheet. Panels keep their positions; one left
+    /// partly off a smaller sheet is reported by the checks, not moved.
+    pub fn setSheet(m: *Model, sheet: Sheet) Error!void {
+        if (!(sheet.w > 0 and sheet.h > 0)) return error.BadSize;
+        m.sheet = sheet;
+        m.revision += 1;
     }
 
     /// Moves a panel on the worksheet.
@@ -294,6 +346,16 @@ pub const Model = struct {
         return null;
     }
 };
+
+test "standard sheets turn with their orientation" {
+    const a3 = Sheet.standard(1, .landscape);
+    try std.testing.expectEqual(420, a3.w);
+    try std.testing.expectEqual(297, a3.h);
+    const letter = Sheet.standard(5, .portrait);
+    try std.testing.expectEqual(215.9, letter.w);
+    const default: Sheet = .{};
+    try std.testing.expectEqual(Sheet.standard(2, .landscape).w, default.w);
+}
 
 test "designators are unique and actions bump the revision" {
     var m: Model = .init(std.testing.allocator);
