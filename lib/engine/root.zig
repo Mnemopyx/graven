@@ -12,6 +12,7 @@ pub const entities = @import("entities.zig");
 pub const style = @import("style.zig");
 pub const label = @import("label.zig");
 pub const shape = @import("shape.zig");
+pub const profile = @import("profile.zig");
 
 pub const Face = font.Face;
 pub const Render = render.Render;

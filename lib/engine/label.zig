@@ -20,6 +20,7 @@ const style = @import("style.zig");
 const markup = @import("markup.zig");
 const entities = @import("entities.zig");
 const shaping = @import("shape.zig");
+const Profile = @import("profile.zig").Profile;
 
 const Allocator = std.mem.Allocator;
 const Affine = geom.Affine;
@@ -42,7 +43,7 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
     const a = arena.allocator();
 
     const tree = try markup.parseWith(a, src, opts.names, syntax);
-    var b: Builder = .{ .a = a, .ctx = ctx };
+    var b: Builder = .{ .a = a, .ctx = ctx, .band = ctx.spec.cap_height * ctx.spec.contact_band };
     const width = try b.nodes(tree.items, ctx.spec.cap_height, 0, 0, 0);
 
     // The origin goes to the anchor on the baseline.
@@ -104,7 +105,67 @@ const Builder = struct {
     ctx: *const style.Context,
     items: std.ArrayList(render.Item) = .empty,
     elements: std.ArrayList(render.Element) = .empty,
+    /// Each element's contact profile, by element index.
+    profiles: std.ArrayList(Profile) = .empty,
     diagnostics: std.ArrayList(render.Diagnostic) = .empty,
+    /// Profile band height for the whole label, mm.
+    band: f64,
+
+    fn inkContact(b: *const Builder) bool {
+        return b.ctx.spec.contact == .ink;
+    }
+
+    /// The profile of items `from..` (one element's), appended to `profiles`.
+    fn addProfile(b: *Builder, from: usize) !void {
+        var p = Profile.empty;
+        for (b.items.items[from..]) |item| {
+            const outline = switch (item) {
+                .glyph => |g| try (try b.ctx.faces[g.face].outline(g.gid)).transformed(b.a, g.transform),
+                .path => |q| q.outline,
+            };
+            p = try Profile.join(b.a, p, try Profile.fromOutline(b.a, outline, b.band));
+        }
+        try b.profiles.append(b.a, p);
+    }
+
+    /// Moves everything laid out since item `item0` and element `elem0`
+    /// right by `dx`.
+    fn shiftSince(b: *Builder, item0: usize, elem0: usize, dx: f64) !void {
+        const move = Affine.translate(dx, 0);
+        for (b.items.items[item0..]) |*item| switch (item.*) {
+            .glyph => |*g| g.transform = g.transform.then(move),
+            .path => |*q| q.outline = try q.outline.transformed(b.a, move),
+        };
+        for (b.elements.items[elem0..], b.profiles.items[elem0..]) |*e, *p| {
+            e.origin.x += dx;
+            e.ink = moved(e.ink, dx);
+            p.shift(dx);
+        }
+    }
+
+    /// How far to move elements `next0..next1` right (or left, if negative)
+    /// so their ink clears elements `prev0..prev1` by exactly `gap`, at the
+    /// heights both have ink. Where they share no height, their ink boxes
+    /// decide. Null when either side has no ink.
+    fn contactShift(b: *Builder, prev0: usize, prev1: usize, next0: usize, next1: usize, gap: f64) !?f64 {
+        var prev = Profile.empty;
+        var prev_ink = Box.empty;
+        for (b.profiles.items[prev0..prev1], b.elements.items[prev0..prev1]) |p, e| {
+            prev = try Profile.join(b.a, prev, p);
+            prev_ink = prev_ink.join(e.ink);
+        }
+        var next = Profile.empty;
+        var next_ink = Box.empty;
+        for (b.profiles.items[next0..next1], b.elements.items[next0..next1]) |p, e| {
+            next = try Profile.join(b.a, next, p);
+            next_ink = next_ink.join(e.ink);
+        }
+        if (prev_ink.isEmpty() or next_ink.isEmpty()) return null;
+        const reach: usize = @intFromFloat(@round(b.ctx.spec.contact_reach * b.ctx.spec.cap_height / b.band));
+        prev = try Profile.reached(b.a, prev, reach);
+        if (Profile.clearance(prev, next)) |c| return gap - c;
+        return gap - (next_ink.x0 - prev_ink.x1);
+    }
 
     fn diagnose(b: *Builder, kind: @FieldType(render.Diagnostic, "kind"), offset: u32) !void {
         try b.diagnostics.append(b.a, .{ .kind = kind, .offset = offset });
@@ -119,16 +180,32 @@ const Builder = struct {
         applyTexRules(atoms.items);
 
         const mu = (try b.ctx.em(cap)) / 18;
+        const line0 = b.elements.items.len;
         var pen = x;
         var prev: ?Class = null;
         for (atoms.items) |atom| {
+            var space: f64 = 0;
             if (prev) |p| {
-                if (spacing(b.ctx.spec.spacing, p, atom.class, level)) |amount| pen += amount * mu;
+                if (spacing(b.ctx.spec.spacing, p, atom.class, level)) |amount| space = amount * mu;
             }
-            pen = switch (atom.node) {
+            pen += space;
+            const item0 = b.items.items.len;
+            const elem0 = b.elements.items.len;
+            var end = switch (atom.node) {
                 .text => |t| try b.text(t, atom.start, atom.end, cap, level, pen, y),
                 else => try b.node(atom.node, cap, level, pen, y),
             };
+            // By ink: clear everything earlier on this line by the target
+            // gap, unless hand spacing comes between.
+            const touching = prev != null and prev.? != .space and atom.class != .space;
+            if (b.inkContact() and touching and elem0 > line0 and b.elements.items.len > elem0) {
+                const target = space + b.ctx.spec.contact_gap * cap;
+                if (try b.contactShift(line0, elem0, elem0, b.elements.items.len, target)) |d| {
+                    try b.shiftSince(item0, elem0, d);
+                    end += d;
+                }
+            }
+            pen = end;
             prev = atom.class;
         }
         return pen;
@@ -139,12 +216,26 @@ const Builder = struct {
             .text => |t| return b.text(t, 0, t.utf8.len, cap, level, x, y),
             .group => |g| return b.nodes(g.items, cap, level, x, y),
             .scripts => |s| {
+                const base0 = b.elements.items.len;
                 const base_end = try b.node(s.base.*, cap, level, x, y);
+                const base1 = b.elements.items.len;
                 const script_cap = cap * b.ctx.script_scale;
-                const sx = base_end + b.ctx.spec.script_gap * cap;
+                const gap = b.ctx.spec.script_gap * cap;
                 var end = base_end;
-                if (s.sup) |sup| end = @max(end, try b.node(sup.*, script_cap, level + 1, sx, y + b.ctx.sup_raise * cap));
-                if (s.sub) |sub| end = @max(end, try b.node(sub.*, script_cap, level + 1, sx, y - b.ctx.sub_drop * cap));
+                for ([_]?*const markup.Node{ s.sup, s.sub }, [_]f64{ b.ctx.sup_raise, -b.ctx.sub_drop }) |script, rise| {
+                    const node_ = script orelse continue;
+                    const item0 = b.items.items.len;
+                    const elem0 = b.elements.items.len;
+                    var script_end = try b.node(node_.*, script_cap, level + 1, base_end + gap, y + rise * cap);
+                    // By ink: each script clears its base's ink by the gap.
+                    if (b.inkContact() and base1 > base0 and b.elements.items.len > elem0) {
+                        if (try b.contactShift(base0, base1, elem0, b.elements.items.len, gap)) |d| {
+                            try b.shiftSince(item0, elem0, d);
+                            script_end += d;
+                        }
+                    }
+                    end = @max(end, script_end);
+                }
                 return end;
             },
             .space => |sp| {
@@ -199,10 +290,12 @@ const Builder = struct {
             .bar, .overline => {
                 const thick = b.ctx.rule_thickness * cap;
                 const bar: Box = .{ .x0 = body.x0, .y0 = body.y1 + gap, .x1 = body.x1, .y1 = body.y1 + gap + thick };
+                const item0 = b.items.items.len;
                 try b.items.append(b.a, .{ .path = .{
                     .outline = try rectangle(b.a, bar),
                     .element = @intCast(b.elements.items.len),
                 } });
+                try b.addProfile(item0);
                 try b.elements.append(b.a, .{
                     .face = null,
                     .start = acc.span.start,
@@ -244,7 +337,9 @@ const Builder = struct {
             .transform = Affine.scale(s).then(Affine.translate(dx, dy)),
             .element = @intCast(b.elements.items.len),
         };
+        const item0 = b.items.items.len;
         try b.items.append(b.a, .{ .glyph = item });
+        try b.addProfile(item0);
         try b.elements.append(b.a, .{
             .face = face_id,
             .start = span.start,
@@ -310,6 +405,7 @@ const Builder = struct {
 
         var pen: f64 = 0;
         var ink = Box.empty;
+        const item0 = b.items.items.len;
         for (glyphs) |g| {
             if (g.gid == 0) try b.diagnose(.missing_glyph, t.source[start + g.cluster]);
             const gx = x + (pen + @as(f64, @floatFromInt(g.x_offset))) * s;
@@ -325,6 +421,7 @@ const Builder = struct {
             pen += @floatFromInt(g.x_advance);
         }
         const advance = pen * s;
+        try b.addProfile(item0);
         try b.elements.append(b.a, .{
             .face = face_id,
             .start = t.source[start],
@@ -532,8 +629,14 @@ const Fonts = struct {
 
 /// The test fonts have no MATH table, so the defaults apply: scripts at 0.7,
 /// superscripts raised 0.55 cap, subscripts dropped 0.25 cap. No gap.
+/// Placement by advances, so positions follow from the fonts' metrics alone.
 fn testSpec() style.Spec {
-    return .{ .upright = 0, .cap_height = 7, .script_gap = 0 };
+    return .{ .upright = 0, .cap_height = 7, .script_gap = 0, .contact = .advance };
+}
+
+/// Placement by ink, with no gaps, so positions follow from the ink alone.
+fn inkSpec() style.Spec {
+    return .{ .upright = 0, .cap_height = 7, .script_gap = 0, .contact = .ink, .contact_gap = 0, .contact_reach = 0 };
 }
 
 fn renderTest(ctx: *const style.Context, src: []const u8) !Render {
@@ -774,4 +877,58 @@ test "bars and overlines are rules across the ink" {
     try testing.expectEqual(@as(usize, 2), outlines.len);
     try testing.expectApproxEqAbs(c.elements[1].ink.x1, outlines[1].bounds().x1, eps);
     try testing.expectApproxEqAbs(@as(f64, -0.5), outlines[1].bounds().x1, eps); // H's ink ends 0.5 mm before its advance
+}
+
+test "by ink, a superscript clears its base's ink where they share height" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, inkSpec());
+
+    // H's ink ends at 5.5 mm; the raised O (3.85 to 8.75 mm) overlaps it from
+    // 3.85 to 7 mm, so O's ink (0.35 mm into it) starts at 5.5.
+    var r = try renderTest(&ctx, "H^O");
+    defer r.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 5.15), r.elements[1].origin.x, eps);
+    try testing.expectApproxEqAbs(@as(f64, 5.5), r.elements[1].ink.x0, eps);
+
+    // D is 3 mm tall, wholly below the raised O: their ink boxes decide.
+    var low = try renderTest(&ctx, "D^O");
+    defer low.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 6.5), low.elements[1].ink.x0, eps);
+}
+
+test "by ink, a neighbour clears what it overlaps and tucks under what it does not" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, inkSpec());
+
+    // The next H (0 to 7 mm) overlaps the raised O, so it clears O's ink.
+    var high = try renderTest(&ctx, "H^OH");
+    defer high.deinit();
+    try testing.expectApproxEqAbs(high.elements[1].ink.x1, high.elements[2].ink.x0, eps);
+
+    // D (0 to 3 mm) shares no height with the raised O: it tucks under it and
+    // only clears the base H.
+    var tuck = try renderTest(&ctx, "H^OD");
+    defer tuck.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 5.5), tuck.elements[2].ink.x0, eps);
+    try testing.expect(tuck.elements[2].ink.x0 < tuck.elements[1].ink.x1);
+}
+
+test "by ink, operator spacing is added to the ink gap; hand spacing keeps advances" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = inkSpec();
+    spec.contact_gap = 0.1; // 0.7 mm
+    const ctx = try style.Context.init(&f.faces, spec);
+    const mu = 10.0 / 18.0;
+
+    var bin = try renderTest(&ctx, "H+H");
+    defer bin.deinit();
+    try testing.expectApproxEqAbs(bin.elements[0].ink.x1 + 0.7 + 2 * mu, bin.elements[1].ink.x0, eps);
+    try testing.expectApproxEqAbs(bin.elements[1].ink.x1 + 0.7 + 2 * mu, bin.elements[2].ink.x0, eps);
+
+    var hand = try renderTest(&ctx, "H H");
+    defer hand.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 8.5), hand.elements[hand.elements.len - 1].origin.x, eps);
 }

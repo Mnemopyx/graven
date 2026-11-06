@@ -10,8 +10,9 @@ const usage =
     \\         Renders one run of text in one face and writes its outlines as SVG.
     \\       graven parse <markup>
     \\         Parses label markup and prints its tree, or where it went wrong.
-    \\       graven label <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
+    \\       graven label [--advance] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
     \\         Renders label markup; with an italic font, letters default to italic.
+    \\         Neighbours are placed by their ink unless --advance is given.
     \\
 ;
 
@@ -23,8 +24,11 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
         return parse(init, args[2]);
     }
+    if (args.len >= 8 and std.mem.eql(u8, args[1], "label") and std.mem.eql(u8, args[2], "--advance")) {
+        return label(init, args[3..], .advance);
+    }
     if (args.len >= 7 and std.mem.eql(u8, args[1], "label")) {
-        return label(init, args[2..]);
+        return label(init, args[2..], .ink);
     }
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
@@ -57,7 +61,7 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
 }
 
-fn label(init: std.process.Init, args: []const [:0]const u8) !void {
+fn label(init: std.process.Init, args: []const [:0]const u8, contact: @FieldType(engine.style.Spec, "contact")) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
@@ -94,6 +98,7 @@ fn label(init: std.process.Init, args: []const [:0]const u8) !void {
         .fallbacks = fallbacks.items,
         .cap_height = cap,
         .letters = if (has_italic) .italic else .upright,
+        .contact = contact,
     });
     var diag: engine.markup.Diagnostic = undefined;
     var r = engine.renderLabel(gpa, &ctx, src, .{}, &diag) catch |err| switch (err) {

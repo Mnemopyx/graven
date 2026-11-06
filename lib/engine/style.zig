@@ -34,7 +34,7 @@ pub const Spec = struct {
     sup_raise: ?f64 = null,
     sub_drop: ?f64 = null,
     /// Space between a base and its scripts, as a fraction of cap height.
-    script_gap: f64 = 0.05,
+    script_gap: f64 = 0.08,
     /// Space between atoms by their classes, in mu (1/18 of the upright
     /// face's em). Inside scripts only operator spacing applies.
     spacing: Spacing = .{},
@@ -47,6 +47,22 @@ pub const Spec = struct {
     /// and 0.08 without one.
     accent_gap: ?f64 = null,
     rule_thickness: ?f64 = null,
+    /// How neighbours are placed: by their ink (contact profiles), or by the
+    /// fonts' advances. Hand spacing (a literal or explicit space) always
+    /// keeps advances.
+    contact: enum { ink, advance } = .ink,
+    /// The ink-to-ink gap between neighbouring atoms, before any operator
+    /// spacing, as a fraction of cap height. (Scripts use script_gap.)
+    contact_gap: f64 = 0.12,
+    /// How far up and down a neighbour's ink still counts when measuring
+    /// clearance, as a fraction of cap height: concavities narrower than
+    /// about twice this are bridged, so nothing tucks into the middle of a
+    /// Sigma, while ink further away (a raised superscript) can still be
+    /// tucked under.
+    contact_reach: f64 = 0.25,
+    /// Contact profile band height, as a fraction of cap height: the
+    /// placement tolerance.
+    contact_band: f64 = 0.02,
 };
 
 /// Automatic space beside operators, in mu. Tighter than TeX's 3, 4, 5 and 3
