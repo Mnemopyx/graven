@@ -732,9 +732,28 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             continue;
         }
         if (!dvui.eventMatchSimple(e, box.data())) continue;
+        if (e.evt == .key) {
+            // Keys reach the canvas only while it has focus.
+            const k = e.evt.key;
+            if (k.code == .delete and k.action == .down and state.moving == null) {
+                if (state.context == .panel) {
+                    e.handle(@src(), box.data());
+                    state.model.removePanel(state.context.panel);
+                    state.context = .worksheet;
+                    dvui.refresh(null, @src(), box.data().id);
+                }
+            }
+            continue;
+        }
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
         switch (me.action) {
+            // A press first sends a focus event; taking it gives the canvas
+            // keyboard focus, for Delete and the like.
+            .focus => {
+                e.handle(@src(), box.data());
+                dvui.focusWidget(box.data().id, null, e.num);
+            },
             .position => {
                 if (drawing) {
                     dvui.cursorSet(.crosshair);
@@ -849,7 +868,7 @@ fn pick(at: geom.Point) void {
 }
 
 /// Adds the panel drawn out with the add panel tool. A drag under 1 mm on
-/// either side is taken as a slip and ignored. The tool stays on either way.
+/// either side is taken as a slip and ignored, leaving the tool ready.
 fn addPanelFromDrag(b: geom.Box) void {
     if (b.width() < 1 or b.height() < 1) return;
     var buf: [32]u8 = undefined;
@@ -864,9 +883,10 @@ fn addPanelFromDrag(b: geom.Box) void {
         dvui.log.err("adding a panel: {s}", .{@errorName(err)});
         return;
     };
-    // Stay at the worksheet with the tool on, so panels can be drawn one
-    // after another; the tree shows each new one.
+    // Tools are not modes: a use ends the tool, and the context it was
+    // chosen in stays, so the next panel is one press away.
     _ = pi;
+    state.tool = .select;
     state.expanded.put(state.gpa, Context.key(.file), true) catch {};
     state.expanded.put(state.gpa, Context.key(.worksheet), true) catch {};
 }
@@ -1187,7 +1207,7 @@ fn statusBar() void {
     const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
     const tool = switch (state.tool) {
         .select => "",
-        .add_panel => "Add panel: drag out outlines, one after another · Esc ends · ",
+        .add_panel => "Add panel: drag out its outline · Esc cancels · ",
     };
     dvui.label(@src(), "{s}{s}{s} · {d} panels ({d} off the sheet) · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
         state.status, tool, font, state.model.panels.items.len, state.off_sheet.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,

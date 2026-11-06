@@ -298,6 +298,23 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Removes a panel with its regions; tiles placed only on it are
+    /// removed too. Later panels move down one index.
+    pub fn removePanel(m: *Model, panel: usize) void {
+        const p = m.panels.orderedRemove(panel);
+        for (p.regions.items) |region| for (region.rows.items) |row| for (row.places.items) |place_| {
+            if (!m.placedElsewhere(place_.tile)) m.tile(place_.tile).removed = true;
+        };
+        m.revision += 1;
+    }
+
+    fn placedElsewhere(m: *const Model, id: TileId) bool {
+        for (m.panels.items) |p| for (p.regions.items) |region| for (region.rows.items) |row| for (row.places.items) |pl| {
+            if (pl.tile == id) return true;
+        };
+        return false;
+    }
+
     /// The origin nearest `origin` that keeps the panel on the sheet; the
     /// sheet's bottom-left corner when the panel is larger than the sheet.
     pub fn clampToSheet(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
@@ -427,6 +444,22 @@ test "panels are placed and moved only on the sheet; a smaller sheet does not mo
     // Back on the sheet, it must stay on it.
     try std.testing.expectError(error.OffSheet, m.movePanel(p, .{ .x = 200, .y = 10 }));
     try std.testing.expectEqual(147, m.clampToSheet(p, .{ .x = 200, .y = 10 }).x);
+}
+
+test "removing a panel removes its tiles and frees their designators" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.placePanel(.{ .name = "A", .w = 50, .h = 50 });
+    const b = try m.placePanel(.{ .name = "B", .origin = .{ .x = 100, .y = 0 }, .w = 50, .h = 50 });
+    const r = try m.addRegion(b, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 2, .h = 1, .pitch = 19.05 });
+    _ = try m.addRow(b, r, 0);
+    try m.place(b, r, 0, null, .{ .tile = try m.addTile(.{ .designator = "K1" }) });
+    m.removePanel(0);
+    try std.testing.expectEqualStrings("B", m.panels.items[0].name);
+    m.removePanel(0);
+    try std.testing.expectEqual(0, m.panels.items.len);
+    try std.testing.expect(m.findTile("K1") == null);
+    _ = try m.addTile(.{ .designator = "K1" });
 }
 
 test "standard sheets turn with their orientation" {
