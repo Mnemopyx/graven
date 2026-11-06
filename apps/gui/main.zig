@@ -20,13 +20,17 @@ const Model = layout.Model;
 const TileId = layout.TileId;
 
 pub const dvui_app: dvui.App = .{
-    .config = .{ .options = .{
-        .size = .{ .w = 1500, .h = 820 },
-        .min_size = .{ .w = 800, .h = 500 },
-        .title = "Graven",
-        .app = "Graven",
-        .org = "com.mnemopyx.graven",
-    } },
+    .config = .{
+        .options = .{
+            .size = .{ .w = 1500, .h = 820 },
+            .min_size = .{ .w = 800, .h = 500 },
+            .title = "Graven",
+            .app = "Graven",
+            .org = "com.mnemopyx.graven",
+            // Ctrl+= and Ctrl+- change the interface scale, as in a browser.
+            .window_init_options = .{ .keybinds_zoom = true },
+        },
+    },
     .frameFn = frame,
     .initFn = init,
     .deinitFn = deinit,
@@ -168,6 +172,13 @@ var state: State = undefined;
 
 fn init(win: *dvui.Window) !void {
     const gpa = win.gpa;
+    // SDL reports the desktop's scale where it can find one (Xft.dpi,
+    // XSETTINGS, GDK_SCALE, Wayland). GRAVEN_UI_SCALE multiplies it, for
+    // desktops that report none.
+    if (std.c.getenv("GRAVEN_UI_SCALE")) |v| {
+        const scale = std.fmt.parseFloat(f32, std.mem.span(v)) catch 1;
+        if (scale >= 0.5 and scale <= 4) win.content_scale = scale;
+    }
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
     const installed: []Font = listFonts(gpa) catch &.{};
     if (std.Io.Dir.cwd().access(dvui.io, example_font, .{})) |_| {
@@ -313,6 +324,18 @@ fn menu() ?dvui.App.Result {
             state.view.fit = true;
             m.close();
         }
+        _ = dvui.separator(@src(), .{ .expand = .horizontal });
+        const win = dvui.currentWindow();
+        for ([_]f32{ 1, 1.25, 1.5, 2, 2.5 }, 0..) |scale, i| {
+            var buf: [32]u8 = undefined;
+            const mark = if (@abs(win.content_scale - scale) < 0.01) "  ✓" else "";
+            const text = std.fmt.bufPrint(&buf, "Interface {d}x{s}", .{ scale, mark }) catch "Interface";
+            if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = i }) != null) {
+                win.content_scale = scale;
+                state.view.fit = true;
+                m.close();
+            }
+        }
     }
     return null;
 }
@@ -425,14 +448,16 @@ fn canvas() void {
     }
 
     const radius: f32 = @floatCast(1.0 * state.view.ppm);
+    // Line widths follow the interface scale, so they read the same on HiDPI.
+    const px = dvui.windowNaturalScale();
     for (placed.tiles) |t| {
         const flagged = tileFlag(placed, t.id);
         const body = state.view.rect(area, t.body);
         body.fill(.round(radius), .{ .color = .{ .color = colors.body } });
-        body.stroke(.round(radius), .{ .thickness = 1, .color = .{ .color = if (state.selected == t.id) dvui.themeGet().focus else colors.edge } });
+        body.stroke(.round(radius), .{ .thickness = px, .color = .{ .color = if (state.selected == t.id) dvui.themeGet().focus else colors.edge } });
         state.view.rect(area, t.face).fill(.round(radius), .{ .color = .{ .color = if (flagged.missing) colors.missing else colors.face } });
-        if (flagged.overflow) state.view.rect(area, t.face).stroke(.round(radius), .{ .thickness = 1.5, .color = .{ .color = colors.overflow } });
-        if (state.selected == t.id) body.stroke(.round(radius), .{ .thickness = 3, .color = .{ .color = dvui.themeGet().focus } });
+        if (flagged.overflow) state.view.rect(area, t.face).stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
+        if (state.selected == t.id) body.stroke(.round(radius), .{ .thickness = 3 * px, .color = .{ .color = dvui.themeGet().focus } });
     }
 
     // Re-flatten when the zoom has moved more than 2x since the last time.
