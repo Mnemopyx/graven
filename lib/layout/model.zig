@@ -151,6 +151,28 @@ pub const papers = [_]Paper{
 
 pub const Orientation = enum { landscape, portrait };
 
+/// The units a context shows and takes values in. Values are stored in mm
+/// as doubles whatever the units; units convert only at display and entry
+/// (1 in = 25.4 mm exactly).
+pub const Units = enum {
+    mm,
+    inch,
+
+    pub fn perMm(u: Units) f64 {
+        return switch (u) {
+            .mm => 1,
+            .inch => 1.0 / 25.4,
+        };
+    }
+
+    pub fn symbol(u: Units) []const u8 {
+        return switch (u) {
+            .mm => "mm",
+            .inch => "in",
+        };
+    }
+};
+
 /// The worksheet: paper in drawing units, holding panels. Its frame's
 /// origin is the sheet's bottom-left corner, y up.
 pub const Sheet = struct {
@@ -173,6 +195,9 @@ pub const Sheet = struct {
     /// sets their own.
     margins: Sides = .{ .left = 20, .right = 10, .top = 10, .bottom = 10 },
     default_margins: bool = true,
+    /// The worksheet's display and entry units; mm until the user picks.
+    units: Units = .mm,
+    default_units: bool = true,
 
     pub fn box(s: Sheet) geom.Box {
         return .{ .x0 = 0, .y0 = 0, .x1 = s.w, .y1 = s.h };
@@ -282,6 +307,8 @@ pub const Model = struct {
         m.sheet.default_name = old.default_name;
         m.sheet.margins = old.margins;
         m.sheet.default_margins = old.default_margins;
+        m.sheet.units = old.units;
+        m.sheet.default_units = old.default_units;
         m.revision += 1;
     }
 
@@ -291,6 +318,13 @@ pub const Model = struct {
         if (!ok or margins.left + margins.right >= m.sheet.w or margins.top + margins.bottom >= m.sheet.h) return error.BadSize;
         m.sheet.margins = margins;
         m.sheet.default_margins = false;
+        m.revision += 1;
+    }
+
+    /// Sets the worksheet's units.
+    pub fn setUnits(m: *Model, units: Units) void {
+        m.sheet.units = units;
+        m.sheet.default_units = false;
         m.revision += 1;
     }
 

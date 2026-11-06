@@ -78,6 +78,8 @@ const State = struct {
     /// The canvas tool, and a rectangle being dragged out with it.
     tool: Tool = .select,
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
+    /// The pointer's position on the worksheet, mm; null off the canvas.
+    mouse: ?geom.Point = null,
     /// Where the pointer went down on the canvas, mm.
     press_at: ?geom.Point = null,
     /// A selected panel being dragged to a new place: shown at its preview
@@ -565,6 +567,9 @@ const colors = struct {
     const paper: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
     const panel_edge: dvui.Color = .{ .r = 0x5c, .g = 0x5a, .b = 0x55 };
     const margin: dvui.Color = .{ .r = 0x9c, .g = 0x8a, .b = 0x6e };
+    const ruler: dvui.Color = .{ .r = 0xe9, .g = 0xe7, .b = 0xe2 };
+    const ruler_sheet: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
+    const ruler_ink: dvui.Color = .{ .r = 0x4a, .g = 0x48, .b = 0x44 };
     const body: dvui.Color = .{ .r = 0xe4, .g = 0xe2, .b = 0xdc };
     const edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f };
     const face: dvui.Color = .{ .r = 0xf6, .g = 0xf5, .b = 0xf1 };
@@ -580,7 +585,10 @@ const colors = struct {
 fn canvas() void {
     var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.desk } });
     defer box.deinit();
-    const area = box.data().contentRectScale().r;
+    // Rulers run along the top and left; the worksheet is drawn in the rest.
+    const full = box.data().contentRectScale().r;
+    const rw: f32 = ruler_size * dvui.windowNaturalScale();
+    const area: dvui.Rect.Physical = .{ .x = full.x + rw, .y = full.y + rw, .w = full.w - rw, .h = full.h - rw };
     if (area.w <= 0 or area.h <= 0) return;
     const sheet = state.model.sheet;
 
@@ -591,6 +599,8 @@ fn canvas() void {
         state.view.cy = (b.y0 + b.y1) / 2;
         state.view.ppm = 0.92 * @min(area.w / b.width(), area.h / b.height());
     }
+    // Drawn last, over everything and outside the worksheet's clip.
+    defer drawRulers(full, area);
     const clip = dvui.clip(area);
     defer dvui.clipSet(clip);
 
@@ -718,6 +728,140 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     }
 }
 
+/// Ruler thickness, logical pixels.
+const ruler_size = 24;
+
+/// One kind of ruler tick: every `step` mm, `len` of the ruler's depth
+/// long, numbered or not.
+const Tick = struct { step: f64, len: f32, label: bool };
+
+/// The ticks for the worksheet's units at the current zoom. Metric: numbered
+/// centimetres (thinned out to 2, 5, 10 cm … when crowded), then 5 mm and
+/// 1 mm ticks where they fit. Imperial: numbered inches (thinned the same
+/// way), then halves, quarters, eighths … to the finest that fits.
+fn ticks(buf: []Tick) []Tick {
+    const ns = dvui.windowNaturalScale();
+    const ppm = state.view.ppm;
+    const min_tick = 4 * ns;
+    const min_label = 44 * ns;
+    var n: usize = 0;
+    switch (state.model.sheet.units) {
+        .mm => {
+            var label: f64 = 10;
+            for ([_]f64{ 10, 20, 50, 100, 200, 500, 1000, 2000 }) |st| {
+                label = st;
+                if (st * ppm >= min_label) break;
+            }
+            buf[n] = .{ .step = label, .len = 0.7, .label = true };
+            n += 1;
+            for ([_]Tick{ .{ .step = 10, .len = 0.5, .label = false }, .{ .step = 5, .len = 0.35, .label = false }, .{ .step = 1, .len = 0.2, .label = false } }) |t| {
+                if (t.step < label and t.step * ppm >= min_tick and n < buf.len) {
+                    buf[n] = t;
+                    n += 1;
+                }
+            }
+        },
+        .inch => {
+            var label: f64 = 1;
+            for ([_]f64{ 1, 2, 5, 10, 20, 50, 100 }) |st| {
+                label = st;
+                if (st * 25.4 * ppm >= min_label) break;
+            }
+            buf[n] = .{ .step = label * 25.4, .len = 0.7, .label = true };
+            n += 1;
+            if (label > 1 and 25.4 * ppm >= min_tick) {
+                buf[n] = .{ .step = 25.4, .len = 0.5, .label = false };
+                n += 1;
+            }
+            var k: u6 = 1;
+            while (n < buf.len) : (k += 1) {
+                const step = 25.4 / @as(f64, @floatFromInt(@as(u64, 1) << k));
+                if (step * ppm < min_tick) break;
+                buf[n] = .{ .step = step, .len = @max(0.14, 0.45 - 0.07 * @as(f32, @floatFromInt(k))), .label = false };
+                n += 1;
+            }
+        },
+    }
+    return buf[0..n];
+}
+
+/// The horizontal and vertical rulers, marking out the sheet from its
+/// bottom-left corner (the worksheet frame, y up) in the worksheet's units,
+/// with the pointer's position marked on each.
+fn drawRulers(full: dvui.Rect.Physical, area: dvui.Rect.Physical) void {
+    const ns = dvui.windowNaturalScale();
+    const prev = dvui.clip(full);
+    defer dvui.clipSet(prev);
+    const top: dvui.Rect.Physical = .{ .x = area.x, .y = full.y, .w = area.w, .h = area.y - full.y };
+    const left: dvui.Rect.Physical = .{ .x = full.x, .y = area.y, .w = area.x - full.x, .h = area.h };
+    const corner: dvui.Rect.Physical = .{ .x = full.x, .y = full.y, .w = area.x - full.x, .h = area.y - full.y };
+    for ([_]dvui.Rect.Physical{ top, left, corner }) |r| r.fill(.square, .{ .color = .{ .color = colors.ruler } });
+
+    // The sheet's extent is lighter on each ruler.
+    const sheet = state.model.sheet;
+    const sx0 = state.view.toPx(area, .{ .x = 0, .y = 0 });
+    const sx1 = state.view.toPx(area, .{ .x = sheet.w, .y = sheet.h });
+    (dvui.Rect.Physical{ .x = sx0.x, .y = top.y, .w = sx1.x - sx0.x, .h = top.h }).fill(.square, .{ .color = .{ .color = colors.ruler_sheet } });
+    (dvui.Rect.Physical{ .x = left.x, .y = sx1.y, .w = left.w, .h = sx0.y - sx1.y }).fill(.square, .{ .color = .{ .color = colors.ruler_sheet } });
+
+    var buf: [12]Tick = undefined;
+    const list = ticks(&buf);
+    rulerAxis(top, area, list, true);
+    rulerAxis(left, area, list, false);
+
+    const line: dvui.ColorOrGradient = .{ .color = colors.edge };
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = top.x, .y = top.y + top.h }, .{ .x = top.x + top.w, .y = top.y + top.h } } }, .{ .thickness = ns, .color = line });
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = left.x + left.w, .y = left.y }, .{ .x = left.x + left.w, .y = left.y + left.h } } }, .{ .thickness = ns, .color = line });
+
+    if (state.mouse) |m| {
+        const p = state.view.toPx(area, m);
+        const mark: dvui.ColorOrGradient = .{ .color = dvui.themeGet().focus };
+        dvui.Path.stroke(.{ .points = &.{ .{ .x = p.x, .y = top.y }, .{ .x = p.x, .y = top.y + top.h } } }, .{ .thickness = ns, .color = mark });
+        dvui.Path.stroke(.{ .points = &.{ .{ .x = left.x, .y = p.y }, .{ .x = left.x + left.w, .y = p.y } } }, .{ .thickness = ns, .color = mark });
+    }
+}
+
+/// One ruler's ticks and numbers over the sheet's extent along it.
+fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick, horizontal: bool) void {
+    const ns = dvui.windowNaturalScale();
+    const sheet = state.model.sheet;
+    const length = if (horizontal) sheet.w else sheet.h;
+    const a = if (horizontal) state.view.toMm(area, .{ .x = r.x, .y = 0 }).x else state.view.toMm(area, .{ .x = 0, .y = r.y + r.h }).y;
+    const b = if (horizontal) state.view.toMm(area, .{ .x = r.x + r.w, .y = 0 }).x else state.view.toMm(area, .{ .x = 0, .y = r.y }).y;
+    const lo = @max(0, a);
+    const hi = @min(length, b);
+    if (lo > hi) return;
+    const ink: dvui.ColorOrGradient = .{ .color = colors.ruler_ink };
+    const font = dvui.Font.theme(.body).withSize(7);
+    const depth = if (horizontal) r.h else r.w;
+    for (list) |t| {
+        var i: f64 = @ceil(lo / t.step - 1e-9);
+        while (i * t.step <= hi + 1e-9) : (i += 1) {
+            const pos = i * t.step;
+            const p = state.view.toPx(area, if (horizontal) .{ .x = pos, .y = 0 } else .{ .x = 0, .y = pos });
+            const len = depth * t.len;
+            const pts: [2]dvui.Point.Physical = if (horizontal)
+                .{ .{ .x = p.x, .y = r.y + r.h }, .{ .x = p.x, .y = r.y + r.h - len } }
+            else
+                .{ .{ .x = r.x + r.w, .y = p.y }, .{ .x = r.x + r.w - len, .y = p.y } };
+            dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = ns, .color = ink });
+            if (!t.label) continue;
+            var text_buf: [16]u8 = undefined;
+            const value = pos * sheet.units.perMm();
+            // @round(-0.0) prints as "-0".
+            const rounded = @round(value);
+            const text = std.fmt.bufPrint(&text_buf, "{d}", .{if (rounded == 0) 0 else rounded}) catch continue;
+            const rs: dvui.RectScale = .{ .r = r, .s = ns };
+            if (horizontal) {
+                dvui.renderText(.{ .font = font, .text = text, .rs = rs, .p = .{ .x = p.x + 2 * ns, .y = r.y + ns }, .color = colors.ruler_ink }) catch {};
+            } else {
+                // Read bottom to top, beside the tick.
+                dvui.renderText(.{ .font = font, .text = text, .rs = rs, .p = .{ .x = r.x + ns, .y = p.y - 2 * ns }, .color = colors.ruler_ink, .rotation = -std.math.pi / 2.0 }) catch {};
+            }
+        }
+    }
+}
+
 /// Snaps a worksheet point to the 1 mm grid the add panel tool uses, and
 /// keeps it on the sheet: panels may not extend past it.
 fn snap(p: geom.Point) geom.Point {
@@ -775,6 +919,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 dvui.focusWidget(box.data().id, null, e.num);
             },
             .position => {
+                // The pointer's worksheet position, for the rulers and readout.
+                state.mouse = if (area.contains(me.p)) state.view.toMm(area, me.p) else null;
                 if (drawing) {
                     dvui.cursorSet(.crosshair);
                 } else if (state.moving != null) {
@@ -795,7 +941,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 state.view.cy = at.y - (at.y - state.view.cy) / z;
                 dvui.refresh(null, @src(), box.data().id);
             },
-            .press => if (me.button.pointer() or me.button == .middle) {
+            .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
                 if (drawing and me.button.pointer()) {
@@ -1065,6 +1211,16 @@ fn worksheetProperties() !void {
             }
         }
     }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Units");
+        const names = [_][]const u8{ "Millimetres", "Inches" };
+        var choice: usize = @backingInt(sheet.units);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_units) })) {
+            state.model.setUnits(@fromBackingInt(@intCast(choice)));
+        }
+    }
     if (sheet.paper == null) {
         // A custom sheet takes its size as typed.
         var w = sheet.w;
@@ -1264,11 +1420,20 @@ fn statusBar() void {
         };
     }
     const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
+    var pos_buf: [64]u8 = undefined;
+    const pos = if (state.mouse) |m| blk: {
+        const u = state.model.sheet.units;
+        const k = u.perMm();
+        break :blk switch (u) {
+            .mm => std.fmt.bufPrint(&pos_buf, "x {d:.2}  y {d:.2} mm · ", .{ m.x * k, m.y * k }),
+            .inch => std.fmt.bufPrint(&pos_buf, "x {d:.3}  y {d:.3} in · ", .{ m.x * k, m.y * k }),
+        } catch "";
+    } else "";
     const tool = switch (state.tool) {
         .select => "",
         .add_panel => "Add panel: drag out its outline · Esc cancels · ",
     };
-    dvui.label(@src(), "{s}{s}{s} · {d} panels ({d} out of compliance) · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
-        state.status, tool, font, state.model.panels.items.len, state.panel_issues.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
+    dvui.label(@src(), "{s}{s}{s}{s} · {d} panels ({d} out of compliance) · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
+        pos, state.status, tool, font, state.model.panels.items.len, state.panel_issues.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
     }, .{});
 }
