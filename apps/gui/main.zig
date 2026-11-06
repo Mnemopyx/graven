@@ -74,8 +74,12 @@ const State = struct {
     solve_ms: f64 = 0,
     flat: Flat,
     view: View = .{},
-    /// The file's name; a new file is untitled until saved.
+    /// The file's name; a new file is untitled until saved or renamed.
     file_name: []const u8 = "untitled",
+    /// Whether the user has given the file name and the legend font. Until
+    /// then they are the app's choices, shown in italic.
+    file_name_set: bool = false,
+    font_set: bool = false,
     /// What the tree, canvas, tools and properties are about.
     context: Context = .file,
     /// Tree nodes the user has opened or closed, by context key.
@@ -223,9 +227,15 @@ fn init(win: *dvui.Window) !void {
         state.fonts = installed;
     }
     state.font_choice = defaultFont(state.fonts);
+}
+
+/// Adds the sample PC keyboard as a new panel and makes it the context.
+fn loadSample() !void {
     const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
     const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
-    state.panel = try samples.pc_keyboard.build(gpa, &state.model, .{ .main = main_style, .small = small });
+    state.panel = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
+    state.context = .{ .panel = state.panel };
+    state.view = .{};
 }
 
 fn deinit(_: *dvui.Window) void {
@@ -314,6 +324,11 @@ fn update() !void {
         state.placed_rev = std.math.maxInt(u64);
     }
     const labels = if (state.labels) |*l| l else return;
+    if (state.model.panels.items.len == 0) {
+        if (state.placed) |*p| p.deinit();
+        state.placed = null;
+        return;
+    }
     if (state.placed_rev == state.model.revision and state.placed != null) return;
     const t0: std.Io.Timestamp = .now(dvui.io, .awake);
     const placed = try layout.solve(state.gpa, &state.model, state.panel, labels);
@@ -349,6 +364,12 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
+        if (state.model.panels.items.len == 0) {
+            if (dvui.menuItemLabel(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
+                loadSample() catch |err| dvui.log.err("loading the sample: {s}", .{@errorName(err)});
+                m.close();
+            }
+        }
         if (dvui.menuItemLabel(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) return .close;
     }
     if (dvui.menuItemLabel(@src(), "View", .{ .submenu = true }, .{})) |r| {
@@ -371,19 +392,19 @@ fn treePane() void {
     defer scroll.deinit();
 
     var name_buf: [64]u8 = undefined;
-    if (!treeNode(.file, state.file_name, 0, true)) return;
+    if (!treeNode(.file, state.file_name, 0, state.model.panels.items.len > 0, !state.file_name_set)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!treeNode(.{ .panel = pi }, panel.name, 1, panel.regions.items.len > 0)) continue;
+        if (!treeNode(.{ .panel = pi }, panel.name, 1, panel.regions.items.len > 0, false)) continue;
         for (panel.regions.items, 0..) |region, ri| {
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 2, region.rows.items.len > 0)) continue;
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 2, region.rows.items.len > 0, false)) continue;
             for (region.rows.items, 0..) |row, rowi| {
                 const title = std.fmt.bufPrint(&name_buf, "Row {d}", .{rowi + 1}) catch "Row";
-                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 3, row.places.items.len > 0)) continue;
+                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 3, row.places.items.len > 0, false)) continue;
                 for (row.places.items) |p| {
                     const t = state.model.tileConst(p.tile);
                     const legend = if (t.slots.items.len > 0) t.slots.items[0].content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
-                    _ = treeNode(.{ .tile = p.tile }, text, 4, false);
+                    _ = treeNode(.{ .tile = p.tile }, text, 4, false, false);
                 }
             }
         }
@@ -391,8 +412,9 @@ fn treePane() void {
 }
 
 /// One tree row: an open/close arrow when it has children, and its name,
-/// highlighted when it is the context. Returns whether it is open.
-fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool) bool {
+/// highlighted when it is the context and in italic when the app chose it.
+/// Returns whether it is open.
+fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, default: bool) bool {
     const key = ctx.key();
     const id: usize = @truncate(key);
     const open = state.expanded.get(key) orelse switch (ctx) {
@@ -420,7 +442,7 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool) bo
         .expand = .horizontal,
         .background = selected,
         .color_fill = if (selected) .{ .color = dvui.themeGet().focus.opacity(0.25) } else null,
-        .font = if (depth == 0) .theme(.heading) else null,
+        .font = styled(if (depth == 0) .theme(.heading) else .theme(.body), default),
     })) state.context = ctx;
     return open;
 }
@@ -487,7 +509,14 @@ const colors = struct {
 fn canvas() void {
     var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper } });
     defer box.deinit();
-    const placed = if (state.placed) |*p| p else return;
+    const placed = if (state.placed) |*p| p else {
+        dvui.labelNoFmt(@src(), "Nothing here yet. File › Add sample: PC keyboard", .{}, .{
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.5) },
+        });
+        return;
+    };
     const area = box.data().contentRectScale().r;
     if (area.w <= 0 or area.h <= 0) return;
 
@@ -638,11 +667,21 @@ fn heading(comptime fmt: []const u8, args: anytype, n: usize) void {
     dvui.label(@src(), fmt, args, .{ .font = .theme(.heading), .id_extra = n, .padding = .{ .y = 8, .h = 4 } });
 }
 
+/// UI style rule: a value the app chose, and the user has not, is italic.
+fn styled(font: dvui.Font, default: bool) dvui.Font {
+    return if (default) font.withStyle(.italic) else font;
+}
+
 fn propText(name: []const u8, comptime fmt: []const u8, args: anytype, n: usize) void {
+    propValue(name, false, fmt, args, n);
+}
+
+/// A read-only property; `default` marks a value the app chose.
+fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: anytype, n: usize) void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
     dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
-    dvui.label(@src(), fmt, args, .{ .expand = .horizontal });
+    dvui.label(@src(), fmt, args, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
 }
 
 /// The font property: a list of installed fonts, with arrows to step
@@ -660,12 +699,14 @@ fn propFont(name: []const u8, n: usize) !void {
     const names = try lifo.alloc([]const u8, state.fonts.len);
     defer lifo.free(names);
     for (state.fonts, 0..) |f, i| names[i] = f.name;
-    _ = dvui.dropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120) });
+    if (dvui.dropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120), .font = styled(.theme(.body), !state.font_set) })) state.font_set = true;
     if (dvui.buttonIcon(@src(), "Previous font", dvui.entypo.chevron_left, .{}, .{}, .{})) {
         state.font_choice = (state.font_choice + state.fonts.len - 1) % state.fonts.len;
+        state.font_set = true;
     }
     if (dvui.buttonIcon(@src(), "Next font", dvui.entypo.chevron_right, .{}, .{}, .{})) {
         state.font_choice = (state.font_choice + 1) % state.fonts.len;
+        state.font_set = true;
     }
 }
 
@@ -673,7 +714,7 @@ fn properties() !void {
     heading("{s}", .{state.context.kindName()}, 0);
     switch (state.context) {
         .file => {
-            propText("Name", "{s}", .{state.file_name}, 1);
+            propValue("Name", !state.file_name_set, "{s}", .{state.file_name}, 1);
             propText("Panels", "{d}", .{state.model.panels.items.len}, 2);
             propText("Tiles", "{d}", .{state.model.tiles.items.len}, 3);
             try propFont("Legend font", 4);
@@ -743,7 +784,10 @@ fn tileProperties(id: TileId) !void {
 fn statusBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .border = .{ .y = 1 }, .padding = .{ .x = 8, .y = 3, .w = 8, .h = 3 } });
     defer bar.deinit();
-    const p = if (state.placed) |*p| p else return;
+    const p = if (state.placed) |*p| p else {
+        dvui.labelNoFmt(@src(), "No panels", .{}, .{});
+        return;
+    };
     var missing: usize = 0;
     var overflow: usize = 0;
     for (p.issues) |i| switch (i.kind) {
