@@ -289,10 +289,24 @@ pub const Model = struct {
     /// Moves a panel on the worksheet.
     pub fn movePanel(m: *Model, panel: usize, origin: geom.Point) Error!void {
         var p = m.panels.items[panel];
+        const was_on = m.onSheet(p.box());
         p.origin = origin;
-        if (!m.onSheet(p.box())) return error.OffSheet;
+        // A panel on the sheet must stay on it. One already off it (a sheet
+        // change left it there) may move anywhere: it is still reported.
+        if (was_on and !m.onSheet(p.box())) return error.OffSheet;
         m.panels.items[panel].origin = origin;
         m.revision += 1;
+    }
+
+    /// The origin nearest `origin` that keeps the panel on the sheet; the
+    /// sheet's bottom-left corner when the panel is larger than the sheet.
+    pub fn clampToSheet(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
+        const p = m.panels.items[panel];
+        const s = m.sheet;
+        return .{
+            .x = std.math.clamp(origin.x, 0, @max(0, s.w - p.w)),
+            .y = std.math.clamp(origin.y, 0, @max(0, s.h - p.h)),
+        };
     }
 
     /// Whether a box lies on the sheet. Panels are placed and moved only
@@ -407,6 +421,12 @@ test "panels are placed and moved only on the sheet; a smaller sheet does not mo
     try m.setSheet(.standard(1, .portrait)); // A3 portrait: 297 wide
     try std.testing.expectEqual(400, m.panels.items[p].origin.x);
     try std.testing.expect(!m.onSheet(m.panels.items[p].box()));
+    // Off the sheet already, it may move anywhere, on or off.
+    try m.movePanel(p, .{ .x = 600, .y = 10 });
+    try m.movePanel(p, .{ .x = 100, .y = 10 });
+    // Back on the sheet, it must stay on it.
+    try std.testing.expectError(error.OffSheet, m.movePanel(p, .{ .x = 200, .y = 10 }));
+    try std.testing.expectEqual(147, m.clampToSheet(p, .{ .x = 200, .y = 10 }).x);
 }
 
 test "standard sheets turn with their orientation" {

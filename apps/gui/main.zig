@@ -78,6 +78,11 @@ const State = struct {
     /// The canvas tool, and a rectangle being dragged out with it.
     tool: Tool = .select,
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
+    /// Where the pointer went down on the canvas, mm.
+    press_at: ?geom.Point = null,
+    /// A selected panel being dragged to a new place: shown at its preview
+    /// position, committed on release.
+    moving: ?struct { panel: usize, start: geom.Point, at: geom.Point } = null,
     solve_ms: f64 = 0,
     flat: Flat,
     view: View = .{},
@@ -371,9 +376,23 @@ fn findTile(id: TileId) ?Found {
     return null;
 }
 
+/// Where panel `pi` sits on the worksheet: its origin, or its preview
+/// position while it is being dragged (whole millimetres of travel).
+fn panelOrigin(pi: usize) geom.Point {
+    const o = state.model.panels.items[pi].origin;
+    if (state.moving) |mv| if (mv.panel == pi) return .{ .x = o.x + @round(mv.at.x - mv.start.x), .y = o.y + @round(mv.at.y - mv.start.y) };
+    return o;
+}
+
+fn panelBox(pi: usize) geom.Box {
+    const p = state.model.panels.items[pi];
+    const o = panelOrigin(pi);
+    return .{ .x0 = o.x, .y0 = o.y, .x1 = o.x + p.w, .y1 = o.y + p.h };
+}
+
 /// A box in panel `pi`'s frame, moved onto the worksheet.
 fn onSheet(pi: usize, b: geom.Box) geom.Box {
-    const o = state.model.panels.items[pi].origin;
+    const o = panelOrigin(pi);
     return .{ .x0 = b.x0 + o.x, .y0 = b.y0 + o.y, .x1 = b.x1 + o.x, .y1 = b.y1 + o.y };
 }
 
@@ -587,13 +606,14 @@ fn canvas() void {
     const tol = 0.2 / state.view.ppm;
     if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
 
-    for (state.model.panels.items, 0..) |panel, pi| {
-        const outline = state.view.rect(area, panel.box());
+    for (0..state.model.panels.items.len) |pi| {
+        const outline = state.view.rect(area, panelBox(pi));
         const is_context = switch (state.context) {
             .panel => |c| c == pi,
             else => false,
         };
-        const off = offSheetBy(pi) != null;
+        // While dragged, compliance is shown live for the preview position.
+        const off = if (state.moving != null and state.moving.?.panel == pi) !state.model.onSheet(panelBox(pi)) else offSheetBy(pi) != null;
         // A panel past the sheet's edge is outlined in the warning colour.
         const edge = if (is_context) dvui.themeGet().focus else if (off) colors.overflow else colors.panel_edge;
         outline.stroke(.square, .{ .thickness = if (is_context or off) 2 * px else px, .color = .{ .color = edge } });
@@ -659,7 +679,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         if (flagged.overflow) face.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = dvui.themeGet().focus } });
     }
-    const o = state.model.panels.items[pi].origin;
+    const o = panelOrigin(pi);
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
         const contours = state.flat.get(l.render, &state.faces) catch continue;
@@ -692,6 +712,15 @@ fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
 fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     const drawing = state.tool == .add_panel;
     for (dvui.events()) |*e| {
+        if (e.evt == .key and state.moving != null) {
+            const k = e.evt.key;
+            if (k.code == .escape and k.action == .down) {
+                e.handle(@src(), box.data());
+                state.moving = null;
+                dvui.refresh(null, @src(), box.data().id);
+            }
+            continue;
+        }
         if (e.evt == .key and drawing) {
             const k = e.evt.key;
             if (k.code == .escape and k.action == .down) {
@@ -706,7 +735,18 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
         switch (me.action) {
-            .position => if (drawing) dvui.cursorSet(.crosshair),
+            .position => {
+                if (drawing) {
+                    dvui.cursorSet(.crosshair);
+                } else if (state.moving != null) {
+                    dvui.cursorSet(.arrow_all);
+                } else if (state.context == .panel) {
+                    // Over the selected panel, show that it can be dragged.
+                    const at = state.view.toMm(area, me.p);
+                    const b = state.model.panels.items[state.context.panel].box();
+                    if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) dvui.cursorSet(.arrow_all);
+                }
+            },
             .wheel_y => |dy| {
                 e.handle(@src(), box.data());
                 const at = state.view.toMm(area, me.p);
@@ -725,6 +765,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     const at = snap(state.view.toMm(area, me.p));
                     state.drag = .{ .start = at, .at = at };
                 } else {
+                    state.press_at = if (me.button.pointer()) state.view.toMm(area, me.p) else null;
                     dvui.dragPreStart(me.button, me.p, .{});
                 }
             },
@@ -733,11 +774,20 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     e.handle(@src(), box.data());
                     d.at = snap(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
+                } else if (state.moving) |*mv| {
+                    e.handle(@src(), box.data());
+                    mv.at = state.view.toMm(area, me.p);
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (dvui.dragging(me, null)) |d| {
                     e.handle(@src(), box.data());
-                    state.view.fit = null;
-                    state.view.cx -= d.x / state.view.ppm;
-                    state.view.cy += d.y / state.view.ppm;
+                    // Dragging the selected panel moves it; anything else pans.
+                    if (grabbedPanel()) |pi| {
+                        state.moving = .{ .panel = pi, .start = state.press_at.?, .at = state.view.toMm(area, me.p) };
+                    } else {
+                        state.view.fit = null;
+                        state.view.cx -= d.x / state.view.ppm;
+                        state.view.cy += d.y / state.view.ppm;
+                    }
                     dvui.refresh(null, @src(), box.data().id);
                 }
             },
@@ -746,9 +796,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 if (state.drag) |d| {
                     state.drag = null;
                     addPanelFromDrag(dragBox(d.start, d.at));
+                } else if (state.moving) |mv| {
+                    finishMove(mv.panel);
                 } else if (dvui.dragging(me, null) == null) {
                     pick(state.view.toMm(area, me.p));
                 }
+                state.press_at = null;
                 dvui.captureMouse(null, e.num);
                 dvui.dragEnd(me.button);
                 dvui.refresh(null, @src(), box.data().id);
@@ -756,6 +809,27 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             else => {},
         }
     }
+}
+
+/// The selected panel, when the pointer went down on it: a drag then moves it.
+fn grabbedPanel() ?usize {
+    const at = state.press_at orelse return null;
+    const pi = switch (state.context) {
+        .panel => |p| p,
+        else => return null,
+    };
+    const b = state.model.panels.items[pi].box();
+    return if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) pi else null;
+}
+
+/// Commits a panel drag. A panel that started on the sheet ends on it,
+/// stopped at the edge; one that started off it may end anywhere.
+fn finishMove(pi: usize) void {
+    const target = panelOrigin(pi);
+    state.moving = null;
+    const was_on = state.model.onSheet(state.model.panels.items[pi].box());
+    const origin = if (was_on) state.model.clampToSheet(pi, target) else target;
+    state.model.movePanel(pi, origin) catch |err| dvui.log.err("moving a panel: {s}", .{@errorName(err)});
 }
 
 /// Makes what is under worksheet point `at` the context: a tile, else a
@@ -775,7 +849,7 @@ fn pick(at: geom.Point) void {
 }
 
 /// Adds the panel drawn out with the add panel tool. A drag under 1 mm on
-/// either side is taken as a slip and ignored; the tool stays on.
+/// either side is taken as a slip and ignored. The tool stays on either way.
 fn addPanelFromDrag(b: geom.Box) void {
     if (b.width() < 1 or b.height() < 1) return;
     var buf: [32]u8 = undefined;
@@ -790,9 +864,11 @@ fn addPanelFromDrag(b: geom.Box) void {
         dvui.log.err("adding a panel: {s}", .{@errorName(err)});
         return;
     };
-    state.context = .{ .panel = pi };
+    // Stay at the worksheet with the tool on, so panels can be drawn one
+    // after another; the tree shows each new one.
+    _ = pi;
+    state.expanded.put(state.gpa, Context.key(.file), true) catch {};
     state.expanded.put(state.gpa, Context.key(.worksheet), true) catch {};
-    state.tool = .select;
 }
 
 const Flags = struct { missing: bool = false, overflow: bool = false };
@@ -1111,7 +1187,7 @@ fn statusBar() void {
     const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
     const tool = switch (state.tool) {
         .select => "",
-        .add_panel => "Add panel: drag out its outline · Esc cancels · ",
+        .add_panel => "Add panel: drag out outlines, one after another · Esc ends · ",
     };
     dvui.label(@src(), "{s}{s}{s} · {d} panels ({d} off the sheet) · {d} tiles · {d} labels · solved in {d:.1} ms · {d} missing glyphs · {d} overflows · {d} in margins · zoom {d:.2} px/mm", .{
         state.status, tool, font, state.model.panels.items.len, state.off_sheet.len, tiles, labels, state.solve_ms, missing, overflow, state.intrusions.len, state.view.ppm,
