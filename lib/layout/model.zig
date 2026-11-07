@@ -25,6 +25,12 @@ pub const TileId = enum(u32) { _ };
 
 pub const PrototypeId = u16;
 
+/// Whether boxes `a` and `b` share any area (touching edges do not).
+pub fn overlaps(a: geom.Box, b: geom.Box) bool {
+    const tol = 1e-9;
+    return a.x0 < b.x1 - tol and b.x0 < a.x1 - tol and a.y0 < b.y1 - tol and b.y0 < a.y1 - tol;
+}
+
 /// Whether box `a` lies inside box `b`, to within rounding.
 pub fn within(a: geom.Box, b: geom.Box) bool {
     const tol = 1e-9;
@@ -181,12 +187,18 @@ pub const Place = struct {
     blank: f64 = 0,
 };
 
-/// A track: a row, or a column.
+/// A track: a row, or a column. Tracks are laid out one after another
+/// across their region, but each may be moved on its own, tiles and all.
 pub const Row = struct {
     /// Space before the track across the region (above a row, left of a
-    /// column), u.
+    /// column), u, while it follows the track before it.
     gap: f64 = 0,
-    /// How far along the track its first place starts, u.
+    /// Where the track starts across the region, u from its start edge,
+    /// once it has been placed on its own; null follows the track before
+    /// (one track's thickness on, plus `gap`).
+    across: ?f64 = null,
+    /// How far the track, tiles and all, is shifted along from the
+    /// region's start, u; either way.
     offset: f64 = 0,
     places: std.ArrayList(Place) = .empty,
 };
@@ -216,6 +228,28 @@ pub const TileRegion = struct {
     /// A track's length, u.
     pub fn trackLength(r: TileRegion) f64 {
         return if (r.major == .row) r.w else r.h;
+    }
+
+    /// Where track `t` starts across the region, u from its start edge.
+    pub fn trackAcross(r: TileRegion, t: usize) f64 {
+        var at: f64 = 0;
+        for (r.rows.items[0 .. t + 1], 0..) |row, i| {
+            const follows = if (i == 0) 0 else at + 1;
+            at = row.across orelse follows + row.gap;
+        }
+        return at;
+    }
+
+    /// Track `t`'s band in the panel frame, mm: its length along, one
+    /// pitch across, moved as the track has been.
+    pub fn trackBox(r: TileRegion, t: usize) geom.Box {
+        const across = r.trackAcross(t) * r.pitch;
+        const shift = r.rows.items[t].offset * r.pitch;
+        const length = r.trackLength() * r.pitch;
+        return if (r.major == .row)
+            .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
+        else
+            .{ .x0 = r.origin.x + across, .x1 = r.origin.x + across + r.pitch, .y1 = r.origin.y - shift, .y0 = r.origin.y - shift - length };
     }
 };
 
@@ -843,23 +877,34 @@ pub const Model = struct {
         return true;
     }
 
-    /// Moves a track `along` u along its length and `across` u across the
-    /// region (down for a row, right for a column), as a whole. Across, the
-    /// next track keeps its place: the space between them changes. A move
-    /// that would start the track before the region's start, or run it
-    /// into a neighbour, is refused with `NoRoom`.
+    /// Moves a track, tiles and all, `along` u along its length and
+    /// `across` u across the region (down for a row, right for a column),
+    /// either way. Every other track keeps its place. It may move past its
+    /// region or its panel (flagged when placed), but not onto another
+    /// track's band anywhere on the panel: that is refused with `NoRoom`.
     pub fn moveTrack(m: *Model, panel: usize, region: usize, track_: usize, along: f64, across: f64) Error!void {
-        const rows = m.panels.items[panel].regions.items[region].rows.items;
+        const r = &m.panels.items[panel].regions.items[region];
+        const rows = r.rows.items;
         if (track_ >= rows.len) return error.NoSuchRow;
-        const tol = 1e-9;
-        const row = &rows[track_];
-        const offset = row.offset + along;
-        const gap = row.gap + across;
-        if (offset < -tol or gap < -tol) return error.NoRoom;
-        if (track_ + 1 < rows.len and rows[track_ + 1].gap - across < -tol) return error.NoRoom;
-        row.offset = @max(0, offset);
-        row.gap = @max(0, gap);
-        if (track_ + 1 < rows.len) rows[track_ + 1].gap = @max(0, rows[track_ + 1].gap - across);
+        // Where it would go, with the others where they are now.
+        var row = rows[track_];
+        row.across = r.trackAcross(track_) + across;
+        row.offset += along;
+        const saved = rows[track_];
+        rows[track_] = row;
+        const target = r.trackBox(track_);
+        rows[track_] = saved;
+        for (m.panels.items[panel].regions.items, 0..) |other, oi| for (0..other.rows.items.len) |ot| {
+            if (oi == region and ot == track_) continue;
+            if (overlaps(target, other.trackBox(ot))) return error.NoRoom;
+        };
+        // Every track of the region placed on its own from now on, so its
+        // neighbours stay where they are.
+        var places: [256]f64 = undefined;
+        if (rows.len > places.len) return error.NoRoom;
+        for (0..rows.len) |t| places[t] = r.trackAcross(t);
+        for (rows, 0..) |*t, i| t.across = places[i];
+        rows[track_] = row;
         m.revision += 1;
     }
 

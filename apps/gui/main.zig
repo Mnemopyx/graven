@@ -2768,8 +2768,8 @@ fn properties() !void {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
             const row = region.rows.items[r.row];
             propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, region.rows.items.len, region.name }, 1);
-            propText(if (region.major == .row) "Gap above" else "Gap before", "{d} u", .{row.gap}, 2);
-            propText("Offset along", "{d} u", .{row.offset}, 4);
+            var where_buf: [96]u8 = undefined;
+            propText("Placed", "{s}", .{trackWhere(&where_buf, region, r.row)}, 2);
             propText("Tiles", "{d}", .{row.places.items.len}, 3);
         },
         .tile => |id| try tileProperties(id),
@@ -3688,7 +3688,6 @@ fn movePalette() void {
         else => return,
     };
     const region = state.model.panels.items[t.panel].regions.items[t.region];
-    const row = region.rows.items[t.row];
     const s = moveStep(t.panel, t.region);
     const word = trackWord(region.major);
     var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
@@ -3710,8 +3709,23 @@ fn movePalette() void {
     var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5 });
     defer info.deinit();
     dvui.label(@src(), "Move {s} {d} of {s} in {d} u steps", .{ word, t.row + 1, region.name, s }, .{ .font = dvui.Font.theme(.heading) });
-    dvui.label(@src(), "Arrow keys or these buttons move it; its neighbours stay where they are.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
-    dvui.label(@src(), "{d} u along · {d} u {s}", .{ row.offset, row.gap, if (region.major == .row) "below the row above" else "right of the column before" }, .{ .font = dvui.Font.theme(.mono) });
+    dvui.label(@src(), "Arrow keys or these buttons move it, tiles and all; other tracks stay where they are.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
+    var where_buf: [96]u8 = undefined;
+    dvui.labelNoFmt(@src(), trackWhere(&where_buf, region, t.row), .{}, .{ .font = dvui.Font.theme(.mono) });
+}
+
+/// Where a track sits from where its region was drawn, in plain words:
+/// "0.25 u up · 1.5 u left" (a row) or "1 u right · 0.5 u down" (a column).
+fn trackWhere(buf: []u8, region: layout.model.TileRegion, t: usize) []const u8 {
+    // Where it would be had it never moved: after the tracks before it.
+    var drawn: f64 = 0;
+    for (0..t) |_| drawn += 1;
+    const across = region.trackAcross(t) - drawn;
+    const along = region.rows.items[t].offset;
+    const rows = region.major == .row;
+    const across_word = if (rows) (if (across < 0) "up" else "down") else (if (across < 0) "left" else "right");
+    const along_word = if (rows) (if (along < 0) "left" else "right") else (if (along < 0) "up" else "down");
+    return std.fmt.bufPrint(buf, "{d} u {s} · {d} u {s}", .{ @abs(across), across_word, @abs(along), along_word }) catch "";
 }
 
 /// One arrow key of the move palette: its arrow, drawn as a keycap.

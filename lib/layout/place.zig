@@ -269,15 +269,16 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
 
     const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
-        // A region may be drawn past its panel's edge, to be fitted later:
-        // flagged, not refused.
+        // A region's tracks may run or be moved past its panel's edge, to
+        // be fitted later: flagged, not refused.
         {
-            const b: Box = .{
+            var b: Box = if (region.rows.items.len == 0) .{
                 .x0 = region.origin.x,
                 .x1 = region.origin.x + region.w * region.pitch,
                 .y1 = region.origin.y,
                 .y0 = region.origin.y - region.h * region.pitch,
-            };
+            } else .empty;
+            for (0..region.rows.items.len) |t| b = b.join(region.trackBox(t));
             const past = @max(@max(outline.x0 - b.x0, b.x1 - outline.x1), @max(outline.y0 - b.y0, b.y1 - outline.y1));
             if (past > 1e-9) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
         }
@@ -289,24 +290,22 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var placed_at: std.AutoHashMapUnmanaged(TileId, f64) = .empty;
         var items: std.ArrayList(spring.Item) = .empty;
         var links: std.ArrayList(spring.Link) = .empty;
-        // How far across the region the current track starts, mm.
-        var across: f64 = 0;
         for (region.rows.items, 0..) |row, rowi| {
-            across += row.gap * region.pitch;
+            // The track's band, wherever it has been moved: tiles flow
+            // along it from its start.
+            const band = region.trackBox(rowi);
             items.clearRetainingCapacity();
             links.clearRetainingCapacity();
-            for (row.places.items, 0..) |p, pi_| {
-                // The track's offset holds its first place off its start.
-                const lead = if (pi_ == 0) row.offset * region.pitch else 0;
+            for (row.places.items) |p| {
                 const id = p.tile orelse {
                     // A blank: a spacer of its length.
-                    try links.append(a, .{ .min = lead + p.gap * region.pitch });
+                    try links.append(a, .{ .min = p.gap * region.pitch });
                     try items.append(a, .{ .size = p.blank * region.pitch });
                     continue;
                 };
                 const t = m.tileConst(id);
                 const pin = placed_at.get(id);
-                try links.append(a, .{ .min = if (pin == null) lead + p.gap * region.pitch else 0 });
+                try links.append(a, .{ .min = if (pin == null) p.gap * region.pitch else 0 });
                 try items.append(a, .{ .size = (if (rows) t.w else t.h) * region.pitch, .pin = pin });
             }
             try links.append(a, .{});
@@ -316,15 +315,11 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
 
             const spans = try a.alloc([2]f64, row.places.items.len);
             for (spans, items.items, chain.at) |*sp, item, at| sp.* = .{ at, at + item.size };
-            const length = region.trackLength() * region.pitch;
             try tracks.append(a, .{
                 .region = ri,
                 .track = rowi,
                 .major = region.major,
-                .box = if (rows)
-                    .{ .x0 = region.origin.x, .x1 = region.origin.x + length, .y1 = region.origin.y - across, .y0 = region.origin.y - across - region.pitch }
-                else
-                    .{ .x0 = region.origin.x + across, .x1 = region.origin.x + across + region.pitch, .y1 = region.origin.y, .y0 = region.origin.y - length },
+                .box = band,
                 .spans = spans,
             });
 
@@ -337,8 +332,8 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 const h = t.h * region.pitch;
                 // Rows run right and stack down; columns run down and set
                 // to the right.
-                const x0 = region.origin.x + if (rows) along else across;
-                const y1 = region.origin.y - if (rows) across else along;
+                const x0 = if (rows) band.x0 + along else band.x0;
+                const y1 = if (rows) band.y1 else band.y1 - along;
                 const pitch_box: Box = .{ .x0 = x0, .x1 = x0 + w, .y1 = y1, .y0 = y1 - h };
                 const proto = &m.prototypes.items[t.prototype];
                 const body = proto.body_inset.inset(pitch_box);
@@ -361,7 +356,6 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = rowi });
                 bounds = bounds.join(pitch_box);
             }
-            across += region.pitch;
         }
     }
 
@@ -820,7 +814,7 @@ test "blanks take their length in a track, and every place's span is reported" {
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
 }
 
-test "a track moves as a whole along and across; its neighbour stays" {
+test "a track moves as a whole, either way; others stay; it may not overlap one" {
     const gpa = testing.allocator;
     const face = try engine.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
@@ -829,30 +823,34 @@ test "a track moves as a whole along and across; its neighbour stays" {
     defer m.deinit();
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 4, .pitch = 10 });
-    for (0..2) |t| for (0..2) |i| {
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 100 }, .prototype = key, .count = 3, .length = 4, .pitch = 10 });
+    for (0..3) |t| for (0..2) |i| {
         _ = try m.insertTile(p, r, t, i, key, 1);
     };
-    // Row 2 down 0.5 u, then row 1 0.5 u along and 0.25 u down: row 2
-    // stays where it was.
-    try m.moveTrack(p, r, 1, 0, 0.5);
-    try m.moveTrack(p, r, 0, 0.5, 0.25);
+    // Row 3 down 0.5 u, then row 2 down 0.25 u and 0.5 u left: rows 1 and
+    // 3 stay where they were.
+    try m.moveTrack(p, r, 2, 0, 0.5);
+    try m.moveTrack(p, r, 1, -0.5, 0.25);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectApproxEqAbs(@as(f64, 5), s.tiles[0].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 97.5), s.tiles[0].pitch_box.y1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 0), s.tiles[2].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 85), s.tiles[2].pitch_box.y1, 1e-9);
-    // Not before the region's start, and not into row 2.
-    try testing.expectError(error.NoRoom, m.moveTrack(p, r, 0, -1, 0));
-    try m.moveTrack(p, r, 0, 0, 0.25);
-    try testing.expectError(error.NoRoom, m.moveTrack(p, r, 0, 0, 0.25));
+    // Row 1 as drawn; row 2's band and tiles 5 mm left and 2.5 mm down.
+    try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[0].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), s.tiles[2].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 87.5), s.tiles[2].pitch_box.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), s.tracks[1].box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 75), s.tiles[4].pitch_box.y1, 1e-9);
+    // Up 0.25 u it touches row 1 again; any further would overlap it.
+    try m.moveTrack(p, r, 1, 0, -0.25);
     try testing.expectError(error.NoRoom, m.moveTrack(p, r, 1, 0, -0.25));
-    try m.moveTrack(p, r, 0, 0, -0.25);
-    try m.moveTrack(p, r, 0, -0.5, -0.25);
-    try testing.expectEqual(0, m.panels.items[p].regions.items[r].rows.items[0].offset);
+    // Past the panel's left edge: allowed, and flagged.
+    try m.moveTrack(p, r, 1, -1, 0);
+    var t = try solve(gpa, &m, p, &labels);
+    defer t.deinit();
+    var outside = false;
+    for (t.issues) |i| outside = outside or i.kind == .region_outside;
+    try testing.expect(outside);
 }
 
 test "a region past its panel is flagged, and fitting it to its tiles can bring it back" {
