@@ -271,14 +271,15 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     .y1 = top,
                     .y0 = top - t.h * region.pitch,
                 };
-                const body = t.body_inset.inset(pitch_box);
+                const proto = &m.prototypes.items[t.prototype];
+                const body = proto.body_inset.inset(pitch_box);
                 try tiles.append(a, .{
                     .id = p.tile,
                     .region = ri,
                     .row = rowi,
                     .pitch_box = pitch_box,
                     .body = body,
-                    .face = t.face_inset.inset(body),
+                    .face = proto.face_inset.inset(body),
                 });
                 bounds = bounds.join(pitch_box);
             }
@@ -443,8 +444,9 @@ test "labels render once per identical legend and sit in their slots" {
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     _ = try m.addRow(p, r, 0);
+    const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2) });
     for ([_][]const u8{ "K1", "K2" }) |d| {
-        const t = try m.addTile(.{ .designator = d, .body_inset = .all(0.5), .face_inset = .all(2) });
+        const t = try m.addTile(.{ .designator = d, .prototype = key });
         try m.addSlot(t, .{ .name = "top", .style = style, .content = "H", .place = .{ .inset = .all(1) } });
         try m.place(p, r, 0, null, .{ .tile = t });
     }
@@ -542,4 +544,35 @@ test "a legend with characters no face covers is reported on its tile" {
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.missing_glyph, s.issues[0].kind);
     try testing.expectEqual(t, s.issues[0].tile.?);
+}
+
+test "changing a prototype changes every tile made from it" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 100, 50);
+    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
+    _ = try m.addRow(p, r, 0);
+    const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2) });
+    const flat = try m.addPrototype(.{ .name = "flat" });
+    for ([_][]const u8{ "K1", "K2", "K3" }) |d| try m.place(p, r, 0, null, .{ .tile = try m.addTile(.{ .designator = d, .prototype = key }) });
+    try m.setTilePrototype(m.findTile("K3").?, flat);
+
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var before = try solve(gpa, &m, p, &labels);
+    defer before.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 2.5), before.tiles[0].face.x0 - before.tiles[0].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), before.tiles[2].face.x0 - before.tiles[2].pitch_box.x0, 1e-9);
+
+    // A wider face inset on the prototype: K1 and K2 follow, K3 does not.
+    try m.setPrototype(key, .{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(3) });
+    var after = try solve(gpa, &m, p, &labels);
+    defer after.deinit();
+    for (after.tiles[0..2]) |t| try testing.expectApproxEqAbs(@as(f64, 3.5), t.face.x0 - t.pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), after.tiles[2].face.x0 - after.tiles[2].pitch_box.x0, 1e-9);
+    try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, 9));
 }

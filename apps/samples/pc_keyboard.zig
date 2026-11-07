@@ -184,10 +184,13 @@ pub const Styles = struct {
     small: StyleId,
 };
 
-/// Keycap proportions for a cylindrical profile: an 18.1 mm body and a top
-/// surface about 12.7 mm wide, offset toward the back.
-const body_inset: layout.model.Sides = .all((pitch - 18.1) / 2.0);
-const face_inset: layout.model.Sides = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 };
+/// The one tile prototype: keycap proportions for a cylindrical profile, an
+/// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back.
+const key_prototype: layout.model.TilePrototype = .{
+    .name = "key",
+    .body_inset = .all((pitch - 18.1) / 2.0),
+    .face_inset = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 },
+};
 const slot_inset: layout.model.Sides = .all(0.8);
 
 /// Adds the keyboard as a new panel; returns its index. Tiles are named K1,
@@ -205,6 +208,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
         .pitch = pitch,
     });
 
+    const key = try m.addPrototype(key_prototype);
     var markup: std.Io.Writer.Allocating = .init(gpa);
     defer markup.deinit();
     var name_buf: [16]u8 = undefined;
@@ -216,7 +220,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
         for (row.entries) |e| {
             n += 1;
             const name = try std.fmt.bufPrint(&name_buf, "K{d}", .{n});
-            const t = try m.addTile(.{ .designator = name, .w = e.w, .h = e.h, .body_inset = body_inset, .face_inset = face_inset });
+            const t = try m.addTile(.{ .designator = name, .w = e.w, .h = e.h, .prototype = key });
             markup.clearRetainingCapacity();
             const w = &markup.writer;
             var style = styles.main;

@@ -4,7 +4,9 @@
 //! This first slice covers what a PC keyboard needs: a panel holding tile
 //! regions, each a list of rows of tiles at a pitch. A tile spanning rows
 //! takes a place in each row it crosses; its first row places it. Each tile
-//! has one face (its labelling surface) and named slots on it.
+//! is an instance of a tile prototype, which sets what tiles of its kind
+//! share: so far the body and the face (the labelling surface) as insets.
+//! Each tile has named slots on its face.
 //!
 //! Lengths are mm; tile sizes and gaps in a tile region are in pitch units
 //! (u), so a 1.25u tile at 19.05 mm pitch is 23.8125 mm. Frames are y up.
@@ -18,6 +20,8 @@ const Allocator = std.mem.Allocator;
 const geom = engine.geom;
 
 pub const TileId = enum(u32) { _ };
+
+pub const PrototypeId = u16;
 
 /// Whether box `a` lies inside box `b`, to within rounding.
 pub fn within(a: geom.Box, b: geom.Box) bool {
@@ -61,16 +65,25 @@ pub const Slot = struct {
     content: []const u8 = "",
 };
 
+/// A kind of tile (a keyboard key, a calculator key): what every tile made
+/// from it shares. Tiles refer to their prototype, never copy it, so a
+/// change to it changes them all.
+pub const TilePrototype = struct {
+    name: []const u8,
+    /// A tile's body: its pitch box less this inset, mm.
+    body_inset: Sides = .{},
+    /// Its labelling face: the body less this inset, mm.
+    face_inset: Sides = .{},
+};
+
 pub const Tile = struct {
     /// The visible name, unique within its panel (K23, ENTER).
     designator: []const u8,
     /// Width and height in pitch units of its region.
     w: f64 = 1,
     h: f64 = 1,
-    /// The tile's body: its pitch box less this inset, mm.
-    body_inset: Sides = .{},
-    /// Its labelling face: the body less this inset, mm.
-    face_inset: Sides = .{},
+    /// The kind of tile it is.
+    prototype: PrototypeId = 0,
     slots: std.ArrayList(Slot) = .empty,
     removed: bool = false,
 };
@@ -290,11 +303,12 @@ pub const Model = struct {
     sheet: Sheet = .{},
     panels: std.ArrayList(Panel) = .empty,
     tiles: std.ArrayList(Tile) = .empty,
+    prototypes: std.ArrayList(TilePrototype) = .empty,
     styles: std.ArrayList(LabelStyle) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchSlot, NoSuchRow, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchPrototype, NoSuchSlot, NoSuchRow, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -315,6 +329,11 @@ pub const Model = struct {
 
     pub fn tileConst(m: *const Model, id: TileId) *const Tile {
         return &m.tiles.items[@backingInt(id)];
+    }
+
+    /// The prototype tile `id` is an instance of.
+    pub fn prototypeOf(m: *const Model, id: TileId) *const TilePrototype {
+        return &m.prototypes.items[m.tileConst(id).prototype];
     }
 
     // Actions -----------------------------------------------------------
@@ -538,10 +557,37 @@ pub const Model = struct {
         return rows.items.len - 1;
     }
 
-    /// Adds a tile with a designator unique among the model's tiles.
+    pub fn addPrototype(m: *Model, p: TilePrototype) Error!PrototypeId {
+        var copy = p;
+        copy.name = try m.a().dupe(u8, p.name);
+        try m.prototypes.append(m.a(), copy);
+        m.revision += 1;
+        return @intCast(m.prototypes.items.len - 1);
+    }
+
+    /// Changes a prototype, and with it every tile made from it.
+    pub fn setPrototype(m: *Model, id: PrototypeId, p: TilePrototype) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        var copy = p;
+        copy.name = try m.a().dupe(u8, p.name);
+        m.prototypes.items[id] = copy;
+        m.revision += 1;
+    }
+
+    /// Makes tile `id` an instance of another prototype.
+    pub fn setTilePrototype(m: *Model, id: TileId, prototype: PrototypeId) Error!void {
+        if (prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        m.tile(id).prototype = prototype;
+        m.revision += 1;
+    }
+
+    /// Adds a tile with a designator unique among the model's tiles. A tile
+    /// added before any prototype gets a plain one, with no insets.
     pub fn addTile(m: *Model, t: Tile) Error!TileId {
         if (!(t.w > 0 and t.h > 0)) return error.BadSize;
         if (m.findTile(t.designator) != null) return error.DuplicateDesignator;
+        if (m.prototypes.items.len == 0 and t.prototype == 0) _ = try m.addPrototype(.{ .name = "Plain" });
+        if (t.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
         var copy = t;
         copy.designator = try m.a().dupe(u8, t.designator);
         copy.slots = .empty;
@@ -672,6 +718,7 @@ test "designators are unique and actions bump the revision" {
     _ = try m.addRow(p, r, 0);
     const q = try m.addTile(.{ .designator = "Q" });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
+    try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = 7 }));
     try m.place(p, r, 0, null, .{ .tile = q });
     try m.addSlot(q, .{ .name = "top", .content = "Q" });
     const before = m.revision;
