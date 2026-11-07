@@ -609,6 +609,41 @@ fn exprTarget() ?ExprTarget {
 var expr_prev: std.ArrayList(u8) = .empty;
 var expr_prev_key: u64 = 0;
 
+/// Command completion: the list shown while a command is being typed, the
+/// highlighted entry, and a pending acceptance or dismissal.
+var expr_entry_id: ?dvui.Id = null;
+var comp: std.ArrayList(engine.markup.Completion) = .empty;
+var comp_index: usize = 0;
+var comp_accept: ?usize = null;
+/// The cursor position at which Esc dismissed the list, until it moves.
+var comp_dismissed_at: ?usize = null;
+const comp_max = 8;
+
+/// The command name being typed just before the cursor: the backslash's
+/// offset and the letters after it.
+fn partialCommand(text: []const u8, cur: usize) ?struct { at: usize, prefix: []const u8 } {
+    var i = @min(cur, text.len);
+    while (i > 0 and std.ascii.isAlphabetic(text[i - 1])) i -= 1;
+    if (i == 0 or text[i - 1] != '\\') return null;
+    // An escaped backslash (\\) is a line break, not a command.
+    if (i >= 2 and text[i - 2] == '\\') return null;
+    return .{ .at = i - 1, .prefix = text[i..@min(cur, text.len)] };
+}
+
+/// Replaces the partial command before the cursor with a completion, and
+/// leaves the cursor inside its first argument, or after it.
+fn acceptCompletion(te: *dvui.TextEntryWidget, c: engine.markup.Completion) void {
+    const cur = te.textLayout.selection.cursor;
+    const part = partialCommand(te.textGet(), cur) orelse return;
+    setCursor(te, part.at + 1);
+    te.textLayout.selection.end = cur;
+    var buf: [96]u8 = undefined;
+    const insert = std.fmt.bufPrint(&buf, "{s}{s}", .{ c.name, c.args }) catch return;
+    te.textTyped(insert, false);
+    const after_name = part.at + 1 + c.name.len;
+    setCursor(te, if (c.args.len > 0) after_name + 1 else after_name);
+}
+
 fn expressionLine() !void {
     const muted: dvui.Options = .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 6 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } };
     dvui.labelNoFmt(@src(), "Expression", .{}, muted);
@@ -623,6 +658,23 @@ fn expressionLine() !void {
         try expr_prev.appendSlice(state.gpa, content);
         expr_prev_key = key;
     }
+
+    // While the completion list shows, its keys are taken before the entry
+    // sees them: Up and Down move, Tab or Enter accepts, Esc dismisses.
+    const was_focused = expr_entry_id != null and expr_entry_id.? == dvui.focusedWidgetId();
+    if (was_focused and comp.items.len > 0) for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down and k.action != .repeat) continue;
+        switch (k.code) {
+            .up => comp_index = if (comp_index == 0) comp.items.len - 1 else comp_index - 1,
+            .down => comp_index = (comp_index + 1) % comp.items.len,
+            .tab, .enter, .kp_enter => comp_accept = comp_index,
+            .escape => comp_dismissed_at = std.math.maxInt(usize),
+            else => continue,
+        }
+        e.handle(@src(), dvui.currentWindow().data());
+    };
 
     // Tab moves to the next argument slot, before the entry sees it.
     var te = dvui.textEntry(@src(), .{ .text_initial = content }, .{
@@ -642,7 +694,26 @@ fn expressionLine() !void {
     };
     // Kept in step with edits made elsewhere (the Text property).
     if (!focused and !std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
+    expr_entry_id = te.data().id;
     if (te.text_changed and !std.mem.eql(u8, te.textGet(), expr_prev.items)) pairBraces(te, expr_prev.items);
+    if (comp_accept) |i| {
+        if (i < comp.items.len) acceptCompletion(te, comp.items[i]);
+        comp_accept = null;
+    }
+    // The list for the command being typed, unless dismissed here.
+    const cursor = te.textLayout.selection.cursor;
+    if (comp_dismissed_at) |d| {
+        if (d == std.math.maxInt(usize)) comp_dismissed_at = cursor else if (d != cursor) comp_dismissed_at = null;
+    }
+    comp.clearRetainingCapacity();
+    if (focused and comp_dismissed_at == null) if (partialCommand(te.textGet(), cursor)) |part| {
+        try engine.markup.completions(state.gpa, &engine.entities.Table.builtin, part.prefix, &comp);
+        if (comp.items.len > comp_max) comp.shrinkRetainingCapacity(comp_max);
+        // Nothing to offer once the name is complete and alone.
+        if (comp.items.len == 1 and std.mem.eql(u8, comp.items[0].name, part.prefix)) comp.clearRetainingCapacity();
+    };
+    if (comp_index >= comp.items.len) comp_index = 0;
+    const entry_rect = te.data().borderRectScale().r;
     const text = te.textGet();
     const changed = !std.mem.eql(u8, text, content);
     if (changed) try target.store(text);
@@ -650,11 +721,53 @@ fn expressionLine() !void {
     try expr_prev.appendSlice(state.gpa, text);
     te.deinit();
 
+    if (comp.items.len > 0) completionList(entry_rect);
+
     // The first problem, if any, at the line's end.
     if (firstSyntaxProblem(target)) |d| {
         var buf: [96]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{s} (at {d})", .{ d.kind.message(), d.offset }) catch "";
         dvui.labelNoFmt(@src(), msg, .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 8 }, .color_text = .{ .color = colors.overflow } });
+    }
+}
+
+/// The completion list, floating just above the expression line.
+fn completionList(entry: dvui.Rect.Physical) void {
+    const ns = dvui.windowNaturalScale();
+    const font = dvui.Font.theme(.mono);
+    const row_pad: f32 = 3;
+    const row_h: f32 = font.textHeight() + 2 * row_pad;
+    const h = row_h * @as(f32, @floatFromInt(comp.items.len)) + 10;
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{}, .{
+        .rect = .{ .x = entry.x / ns + 8, .y = entry.y / ns - h - 4, .w = 360, .h = h },
+        .background = true,
+        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
+        .border = .all(1),
+        .corners = .all(6),
+        .padding = .all(4),
+    });
+    defer fw.deinit();
+    for (comp.items, 0..) |c, i| {
+        var buf: [96]u8 = undefined;
+        var cp_buf: [4]u8 = undefined;
+        // The character with its code point: the interface font may lack it.
+        var code_buf: [16]u8 = undefined;
+        const glyph = if (c.cp) |cp| cp_buf[0 .. std.unicode.utf8Encode(cp, &cp_buf) catch 0] else "";
+        const code = if (c.cp) |cp| std.fmt.bufPrint(&code_buf, "  U+{X:0>4}", .{cp}) catch "" else "";
+        const line = std.fmt.bufPrint(&buf, "\\{s}{s}    {s}{s}{s}", .{ c.name, c.args, glyph, code, c.note }) catch c.name;
+        const selected = i == comp_index;
+        if (dvui.labelClick(@src(), "{s}", .{line}, .{}, .{
+            .id_extra = i,
+            .expand = .horizontal,
+            .font = font,
+            .padding = .{ .x = 6, .w = 6, .y = row_pad, .h = row_pad },
+            .background = selected,
+            .color_fill = if (selected) .{ .color = dvui.themeGet().focus.opacity(0.3) } else null,
+        })) {
+            comp_index = i;
+            comp_accept = i;
+        }
     }
 }
 

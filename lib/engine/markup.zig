@@ -187,6 +187,62 @@ const operators = std.StaticStringMap(void).initComptime(.{
     .{"lim"},    .{"mod"},    .{"gcd"},    .{"Re"},   .{"Im"},   .{"arg"},
 });
 
+/// Commands that take arguments or shape the label, with what follows their
+/// name when completed: "{}" for each braced argument.
+const structural = [_]struct { name: []const u8, args: []const u8, note: []const u8 }{
+    .{ .name = "text", .args = "{}", .note = "text, not math" },
+    .{ .name = "mathrm", .args = "{}", .note = "upright" },
+    .{ .name = "mathup", .args = "{}", .note = "upright" },
+    .{ .name = "mathit", .args = "{}", .note = "italic" },
+    .{ .name = "operatorname", .args = "{}", .note = "operator name" },
+    .{ .name = "hat", .args = "{}", .note = "circumflex accent" },
+    .{ .name = "bar", .args = "{}", .note = "bar accent" },
+    .{ .name = "overline", .args = "{}", .note = "overline" },
+    .{ .name = "u", .args = "{}", .note = "code point, hex" },
+    .{ .name = "quad", .args = "", .note = "space, 1 em" },
+    .{ .name = "qquad", .args = "", .note = "space, 2 em" },
+    .{ .name = "allowbreak", .args = "", .note = "break here if needed" },
+};
+
+pub const Completion = struct {
+    /// The command's name, without the backslash.
+    name: []const u8,
+    /// What completing it inserts after the name: "{}" per argument.
+    args: []const u8 = "",
+    /// The character it stands for, for a named character.
+    cp: ?u21 = null,
+    /// A short description, for anything else.
+    note: []const u8 = "",
+};
+
+/// Commands starting with `prefix` (no backslash), for completing a command
+/// as it is typed: named characters (the configured table first, then the
+/// built-in), operator names and structural commands, shortest first, then
+/// in alphabetical order.
+pub fn completions(gpa: Allocator, names: *const entities.Table, prefix: []const u8, out: *std.ArrayList(Completion)) Allocator.Error!void {
+    const start = out.items.len;
+    var it = names.overrides.iterator();
+    while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, prefix)) {
+        try out.append(gpa, .{ .name = e.key_ptr.*, .cp = e.value_ptr.cp });
+    };
+    for (entities.table.keys(), entities.table.values()) |k, v| {
+        if (!std.mem.startsWith(u8, k, prefix) or names.overrides.contains(k)) continue;
+        try out.append(gpa, .{ .name = k, .cp = v.cp });
+    }
+    for (operators.keys()) |k| if (std.mem.startsWith(u8, k, prefix)) {
+        try out.append(gpa, .{ .name = k, .note = "operator name" });
+    };
+    for (structural) |c| if (std.mem.startsWith(u8, c.name, prefix)) {
+        try out.append(gpa, .{ .name = c.name, .args = c.args, .note = c.note });
+    };
+    std.mem.sort(Completion, out.items[start..], {}, struct {
+        fn less(_: void, x: Completion, y: Completion) bool {
+            if (x.name.len != y.name.len) return x.name.len < y.name.len;
+            return std.mem.lessThan(u8, x.name, y.name);
+        }
+    }.less);
+}
+
 /// Commands reserved for constructs to be adopted one at a time.
 const not_adopted = std.StaticStringMap(void).initComptime(.{
     .{"sqrt"}, .{"frac"}, .{"dfrac"}, .{"tfrac"}, .{"sfrac"}, .{"overlay"},
@@ -829,4 +885,26 @@ test "valid input parses the same strictly and in preview" {
         try testing.expectEqualStrings(s1.written(), try previewDump(src, &problems, a));
         try testing.expectEqual(0, problems.items.len);
     }
+}
+
+test "completions offer named characters, operators and commands with their arguments" {
+    var list: std.ArrayList(Completion) = .empty;
+    defer list.deinit(testing.allocator);
+    try completions(testing.allocator, &entities.Table.builtin, "si", &list);
+    var saw_sin = false;
+    var saw_sigma = false;
+    for (list.items) |c| {
+        try testing.expect(std.mem.startsWith(u8, c.name, "si"));
+        if (std.mem.eql(u8, c.name, "sin")) saw_sin = true;
+        if (std.mem.eql(u8, c.name, "sigma")) saw_sigma = c.cp == 0x03C3;
+    }
+    try testing.expect(saw_sin and saw_sigma);
+    // Shortest first (\\sim and \\sin before \\sigma), then alphabetical.
+    try testing.expectEqualStrings("sim", list.items[0].name);
+    try testing.expectEqualStrings("sin", list.items[1].name);
+
+    list.clearRetainingCapacity();
+    try completions(testing.allocator, &entities.Table.builtin, "tex", &list);
+    try testing.expectEqualStrings("text", list.items[0].name);
+    try testing.expectEqualStrings("{}", list.items[0].args);
 }
