@@ -188,9 +188,15 @@ const View = struct {
 /// Label outlines flattened to polylines in mm, per render, at a tolerance
 /// matched to the zoom. Rebuilt when the zoom changes a lot or the panel is
 /// re-solved (renders may be freed then).
+/// What a flattened contour came from: ink, faint preview text (source shown
+/// literally while it is not valid), or a placeholder for what is to come.
+const PieceKind = enum { ink, faint, placeholder };
+
+const Piece = struct { points: []const geom.Point, kind: PieceKind };
+
 const Flat = struct {
     arena: std.heap.ArenaAllocator,
-    map: std.AutoHashMapUnmanaged(*const engine.Render, []const []const geom.Point) = .empty,
+    map: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
     tol: f64 = 0,
 
     fn reset(f: *Flat, tol: f64) void {
@@ -199,15 +205,22 @@ const Flat = struct {
         f.tol = tol;
     }
 
-    fn get(f: *Flat, r: *const engine.Render, faces: []const *engine.Face) ![]const []const geom.Point {
+    fn get(f: *Flat, r: *const engine.Render, faces: []const *engine.Face) ![]const Piece {
         if (f.map.get(r)) |c| return c;
         const a = f.arena.allocator();
-        var contours: std.ArrayList([]const geom.Point) = .empty;
-        for (try r.outlines(a, faces)) |o| for (o.contours) |c| {
-            var pts: std.ArrayList(geom.Point) = .empty;
-            for (c.segments) |s| try flatten(a, &pts, s, f.tol);
-            try contours.append(a, pts.items);
-        };
+        var contours: std.ArrayList(Piece) = .empty;
+        // `outlines` is item for item.
+        for (try r.outlines(a, faces), r.items) |o, item| {
+            const kind: PieceKind = switch (item) {
+                .glyph => |g| if (g.faint) .faint else .ink,
+                .path => |p| if (p.role == .placeholder) .placeholder else .ink,
+            };
+            for (o.contours) |c| {
+                var pts: std.ArrayList(geom.Point) = .empty;
+                for (c.segments) |s| try flatten(a, &pts, s, f.tol);
+                try contours.append(a, .{ .points = pts.items, .kind = kind });
+            }
+        }
         const out = contours.items;
         try f.map.put(a, r, out);
         return out;
@@ -447,13 +460,13 @@ fn frame() !dvui.App.Result {
             if (panes.properties == .docked) try propertiesPane();
         }
         if (panes.status == .docked) {
-            var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            var bottom = dvui.box(@src(), .{ .dir = .vertical }, .{
                 .rect = .{ .x = 0, .y = size.h - status_h, .w = size.w, .h = status_h },
                 .background = true,
                 .border = .{ .y = 1 },
             });
-            defer bar.deinit();
-            statusContent();
+            defer bottom.deinit();
+            try bottomContent();
         }
     }
     try overlays();
@@ -476,7 +489,10 @@ var panes: struct {
 
 const tree_width = 240;
 const properties_width = 320;
-const status_height = 26;
+/// The bottom area: the expression line above the status line.
+const expression_height = 38;
+const status_line_height = 32;
+const status_height = expression_height + status_line_height;
 /// Space between an overlay and the canvas edge, logical pixels.
 const overlay_gap = 6;
 /// How opaque an overlay's background is.
@@ -530,10 +546,178 @@ fn overlays() !void {
         var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + c.h - status_height - g, .w = c.w - 2 * g, .h = status_height };
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(3));
         defer fw.deinit();
-        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
-        defer bar.deinit();
-        statusContent();
+        try bottomContent();
     }
+}
+
+/// The bottom area: the expression line, then the status line.
+fn bottomContent() !void {
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = expression_height - 2 } });
+        defer line.deinit();
+        try expressionLine();
+    }
+    _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer bar.deinit();
+    statusContent();
+}
+
+// The expression line -----------------------------------------------------
+//
+// Shows and edits the selected label's markup as typed. Whatever is typed
+// is stored, valid or not; the canvas draws it from the engine's lenient
+// parse (placeholders for what is still to come, unfinished commands
+// faint), and the first problem shows at the line's end. Braces pair as in
+// a code editor, so partial input stays renderable.
+
+/// What the expression line edits.
+const ExprTarget = union(enum) {
+    panel_label: struct { panel: usize, index: usize },
+    tile_slot: struct { tile: TileId, slot: usize },
+
+    fn content(t: ExprTarget) []const u8 {
+        return switch (t) {
+            .panel_label => |l| state.model.panels.items[l.panel].labels.items[l.index].content,
+            .tile_slot => |ts| state.model.tileConst(ts.tile).slots.items[ts.slot].content,
+        };
+    }
+
+    fn store(t: ExprTarget, text: []const u8) !void {
+        switch (t) {
+            .panel_label => |l| try state.model.setLabelContent(l.panel, l.index, text),
+            .tile_slot => |ts| try state.model.setContent(ts.tile, state.model.tileConst(ts.tile).slots.items[ts.slot].name, text),
+        }
+    }
+
+    fn key(t: ExprTarget) u64 {
+        var h: std.hash.Wyhash = .init(7);
+        std.hash.autoHash(&h, t);
+        return h.final();
+    }
+};
+
+fn exprTarget() ?ExprTarget {
+    return switch (state.context) {
+        .label => |l| .{ .panel_label = .{ .panel = l.panel, .index = l.index } },
+        .tile => |id| if (state.model.tileConst(id).slots.items.len > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
+        else => null,
+    };
+}
+
+/// The line's text before this frame's edits, for the pairing rules.
+var expr_prev: std.ArrayList(u8) = .empty;
+var expr_prev_key: u64 = 0;
+
+fn expressionLine() !void {
+    const muted: dvui.Options = .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 6 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } };
+    dvui.labelNoFmt(@src(), "Expression", .{}, muted);
+    const target = exprTarget() orelse {
+        dvui.labelNoFmt(@src(), "Select a label or tile to edit its expression.", .{}, muted.override(.{ .expand = .horizontal, .font = dvui.Font.theme(.body).withStyle(.italic) }));
+        return;
+    };
+    const key = target.key();
+    const content = target.content();
+    if (key != expr_prev_key) {
+        expr_prev.clearRetainingCapacity();
+        try expr_prev.appendSlice(state.gpa, content);
+        expr_prev_key = key;
+    }
+
+    // Tab moves to the next argument slot, before the entry sees it.
+    var te = dvui.textEntry(@src(), .{ .text_initial = content }, .{
+        .expand = .horizontal,
+        .gravity_y = 0.5,
+        .font = .theme(.mono),
+        .id_extra = @truncate(key),
+    });
+    const focused = te.data().id == dvui.focusedWidgetId();
+    if (focused) for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.code == .tab and (k.action == .down or k.action == .repeat)) {
+            e.handle(@src(), te.data());
+            nextSlot(te);
+        }
+    };
+    // Kept in step with edits made elsewhere (the Text property).
+    if (!focused and !std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
+    if (te.text_changed and !std.mem.eql(u8, te.textGet(), expr_prev.items)) pairBraces(te, expr_prev.items);
+    const text = te.textGet();
+    const changed = !std.mem.eql(u8, text, content);
+    if (changed) try target.store(text);
+    expr_prev.clearRetainingCapacity();
+    try expr_prev.appendSlice(state.gpa, text);
+    te.deinit();
+
+    // The first problem, if any, at the line's end.
+    if (firstSyntaxProblem(target)) |d| {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} (at {d})", .{ d.kind.message(), d.offset }) catch "";
+        dvui.labelNoFmt(@src(), msg, .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 8 }, .color_text = .{ .color = colors.overflow } });
+    }
+}
+
+fn firstSyntaxProblem(target: ExprTarget) ?engine.markup.Diagnostic {
+    for (state.placed.items, 0..) |*p, pi| for (p.issues) |i| {
+        if (i.kind != .markup_error) continue;
+        const hit = switch (target) {
+            .panel_label => |l| l.panel == pi and i.label == l.index,
+            .tile_slot => |ts| i.tile == ts.tile and i.slot == ts.slot,
+        };
+        if (hit) return i.syntax;
+    };
+    return null;
+}
+
+/// The pairing rules, applied after the entry has taken a keystroke:
+/// typing '{' adds its '}' (after \frac, "{}{}"), with the cursor inside;
+/// typing '}' where the text has one too many steps over the next '}';
+/// deleting the '{' of an empty "{}" deletes both.
+fn pairBraces(te: *dvui.TextEntryWidget, prev: []const u8) void {
+    const text = te.textGet();
+    const sel = te.textLayout.selection;
+    const cur = sel.cursor;
+    if (text.len == prev.len + 1 and cur > 0 and cur <= text.len) {
+        const typed = text[cur - 1];
+        if (typed == '{') {
+            const two = std.mem.endsWith(u8, text[0 .. cur - 1], "\\frac") or std.mem.endsWith(u8, text[0 .. cur - 1], "\\dfrac") or std.mem.endsWith(u8, text[0 .. cur - 1], "\\tfrac");
+            te.textTyped(if (two) "}{}" else "}", false);
+            setCursor(te, cur);
+        } else if (typed == '}' and cur < text.len and text[cur] == '}' and count(text, '}') > count(text, '{')) {
+            // Remove the '}' just typed: the cursor steps over the next one.
+            setCursor(te, cur - 1);
+            te.textLayout.selection.end = cur;
+            te.textTyped("", false);
+            setCursor(te, cur);
+        }
+    } else if (text.len + 1 == prev.len and cur < prev.len and prev[cur] == '{' and cur + 1 < prev.len and prev[cur + 1] == '}' and
+        std.mem.eql(u8, text[0..cur], prev[0..cur]) and std.mem.eql(u8, text[cur..], prev[cur + 1 ..]))
+    {
+        // The '{' of an empty pair was deleted: take its '}' too.
+        setCursor(te, cur);
+        te.textLayout.selection.end = cur + 1;
+        te.textTyped("", false);
+        setCursor(te, cur);
+    }
+}
+
+fn count(text: []const u8, c: u8) usize {
+    return std.mem.count(u8, text, &.{c});
+}
+
+fn setCursor(te: *dvui.TextEntryWidget, at: usize) void {
+    te.textLayout.selection.cursor = at;
+    te.textLayout.selection.start = at;
+    te.textLayout.selection.end = at;
+}
+
+/// Tab: the cursor goes just inside the next '{' after it, or to the end.
+fn nextSlot(te: *dvui.TextEntryWidget) void {
+    const text = te.textGet();
+    const cur = te.textLayout.selection.cursor;
+    const next = if (cur < text.len) std.mem.indexOfScalarPos(u8, text, cur, '{') else null;
+    setCursor(te, if (next) |n| n + 1 else text.len);
 }
 
 // The title bar -----------------------------------------------------------
@@ -1123,27 +1307,37 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
         const d = if (l.tile == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
-        const contours = state.flat.get(l.render, &state.faces) catch continue;
-        const paths = lifo.alloc(dvui.Path, contours.len) catch continue;
-        defer lifo.free(paths);
-        var made: usize = 0;
-        defer for (paths[0..made]) |p| lifo.free(p.points);
-        for (contours, paths) |c, *p| {
-            const pts = lifo.alloc(dvui.Point.Physical, c.len) catch break;
-            for (c, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + l.origin.x + o.x + d.x, .y = q.y + l.origin.y + o.y + d.y });
-            p.* = .{ .points = pts };
-            made += 1;
-        }
+        const pieces = state.flat.get(l.render, &state.faces) catch continue;
         // Ink in the sheet's margins is drawn in the warning colour.
         const ink = if (inMargin(pi, l.tile, l.slot)) colors.overflow else colors.ink;
-        if (show_construction) {
-            // Outlines over a translucent fill, so the lines show through.
-            dvui.Path.fill(paths[0..made], .{ .color = .{ .color = ink.opacity(0.18) }, .fade = 1 });
-            for (paths[0..made]) |path| path.stroke(.{ .thickness = px, .color = .{ .color = ink }, .closed = true });
-            drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
-        } else {
-            dvui.Path.fill(paths[0..made], .{ .color = .{ .color = ink }, .fade = 1 });
+        // Each kind fills as one shape, so overlapping contours stay nonzero.
+        for ([_]PieceKind{ .ink, .faint, .placeholder }) |kind| {
+            const paths = lifo.alloc(dvui.Path, pieces.len) catch continue;
+            defer lifo.free(paths);
+            var made: usize = 0;
+            defer for (paths[0..made]) |p| lifo.free(p.points);
+            for (pieces) |piece| {
+                if (piece.kind != kind) continue;
+                const pts = lifo.alloc(dvui.Point.Physical, piece.points.len) catch break;
+                for (piece.points, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + l.origin.x + o.x + d.x, .y = q.y + l.origin.y + o.y + d.y });
+                paths[made] = .{ .points = pts };
+                made += 1;
+            }
+            if (made == 0) continue;
+            const color: dvui.Color = switch (kind) {
+                .ink => ink,
+                .faint => ink.opacity(0.35),
+                .placeholder => dvui.themeGet().focus.opacity(0.7),
+            };
+            if (show_construction and kind == .ink) {
+                // Outlines over a translucent fill, so the lines show through.
+                dvui.Path.fill(paths[0..made], .{ .color = .{ .color = color.opacity(0.18) }, .fade = 1 });
+                for (paths[0..made]) |path| path.stroke(.{ .thickness = px, .color = .{ .color = color }, .closed = true });
+            } else {
+                dvui.Path.fill(paths[0..made], .{ .color = .{ .color = color }, .fade = 1 });
+            }
         }
+        if (show_construction) drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
     }
     // The selected panel label: its ink box, with a little room.
     switch (state.context) {
@@ -1985,6 +2179,8 @@ fn labelProperties(pi: usize, index: usize) !void {
             .font = styled(.theme(.body), label.default_content),
             .id_extra = pi * 1000 + index,
         });
+        // Kept in step with the expression line while not being edited here.
+        if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), label.content)) te.textSet(label.content, false);
         const changed = te.text_changed;
         const text = te.textGet();
         te.deinit();
@@ -2059,6 +2255,7 @@ fn tileProperties(id: TileId) !void {
                 .expand = .horizontal,
                 .id_extra = @backingInt(id) * 16 + si,
             });
+            if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), slot.content)) te.textSet(slot.content, false);
             const changed = te.text_changed;
             const text = te.textGet();
             te.deinit();
