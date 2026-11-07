@@ -172,10 +172,13 @@ pub const Tile = struct {
     removed: bool = false,
 };
 
-/// One place in a row: a tile and the gap before it, in u.
+/// One place in a track, in flow order: a tile, or a blank (a spacer
+/// `blank` u long), with any gap before it, u.
 pub const Place = struct {
-    tile: TileId,
+    tile: ?TileId = null,
     gap: f64 = 0,
+    /// A blank's length along the track, u, when there is no tile.
+    blank: f64 = 0,
 };
 
 pub const Row = struct {
@@ -642,14 +645,15 @@ pub const Model = struct {
     pub fn removePanel(m: *Model, panel: usize) void {
         const p = m.panels.orderedRemove(panel);
         for (p.regions.items) |region| for (region.rows.items) |row| for (row.places.items) |place_| {
-            if (!m.placedElsewhere(place_.tile)) m.tile(place_.tile).removed = true;
+            const id = place_.tile orelse continue;
+            if (!m.placedElsewhere(id)) m.tile(id).removed = true;
         };
         m.revision += 1;
     }
 
     fn placedElsewhere(m: *const Model, id: TileId) bool {
         for (m.panels.items) |p| for (p.regions.items) |region| for (region.rows.items) |row| for (row.places.items) |pl| {
-            if (pl.tile == id) return true;
+            if (pl.tile != null and pl.tile.? == id) return true;
         };
         return false;
     }
@@ -753,6 +757,64 @@ pub const Model = struct {
             }
         }
         return r;
+    }
+
+    /// The lowest-numbered designator `prefix`1, `prefix`2 … not taken.
+    fn nextDesignator(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
+        var n: usize = 1;
+        while (true) : (n += 1) {
+            const candidate = std.fmt.bufPrint(buf, "{s}{d}", .{ prefix, n }) catch return prefix;
+            if (m.findTile(candidate) == null) return candidate;
+        }
+    }
+
+    fn trackRow(m: *Model, panel: usize, region: usize, track_: usize) Error!*Row {
+        const rows = m.panels.items[panel].regions.items[region].rows.items;
+        if (track_ >= rows.len) return error.NoSuchRow;
+        return &rows[track_];
+    }
+
+    /// Inserts a new tile made from `prototype` at position `index` of a
+    /// track (0 before the first place): `along` u long in the track's
+    /// direction and the prototype's smallest size across. Returns it.
+    pub fn insertTile(m: *Model, panel: usize, region: usize, track_: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
+        if (prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const row = try m.trackRow(panel, region, track_);
+        if (index > row.places.items.len) return error.NoSuchRow;
+        const major = m.panels.items[panel].regions.items[region].major;
+        const across = m.prototypes.items[prototype].smallest(major, .across);
+        var buf: [64]u8 = undefined;
+        const id = try m.addTile(.{
+            .designator = m.nextDesignator(&buf, "T"),
+            .prototype = prototype,
+            .w = if (major == .row) along else across,
+            .h = if (major == .row) across else along,
+        });
+        try row.places.insert(m.a(), index, .{ .tile = id });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Inserts a blank `length` u long at position `index` of a track.
+    pub fn insertBlank(m: *Model, panel: usize, region: usize, track_: usize, index: usize, length: f64) Error!void {
+        if (!(length > 0)) return error.BadSize;
+        const row = try m.trackRow(panel, region, track_);
+        if (index > row.places.items.len) return error.NoSuchRow;
+        try row.places.insert(m.a(), index, .{ .blank = length });
+        m.revision += 1;
+    }
+
+    /// Removes place `index` of a track: a blank, or a tile, which leaves
+    /// every track it is in.
+    pub fn removeAt(m: *Model, panel: usize, region: usize, track_: usize, index: usize) Error!void {
+        const row = try m.trackRow(panel, region, track_);
+        if (index >= row.places.items.len) return error.NoSuchRow;
+        if (row.places.items[index].tile) |id| {
+            m.removeTile(id);
+        } else {
+            _ = row.places.orderedRemove(index);
+            m.revision += 1;
+        }
     }
 
     /// Removes tile `id`: it leaves every track it is in, which reflows.
@@ -988,7 +1050,8 @@ pub const Model = struct {
         for (m.panels.items) |*panel| for (panel.regions.items) |*region| for (region.rows.items) |*row| {
             var i: usize = 0;
             while (i < row.places.items.len) {
-                if (row.places.items[i].tile == id) _ = row.places.orderedRemove(i) else i += 1;
+                const here = row.places.items[i].tile;
+                if (here != null and here.? == id) _ = row.places.orderedRemove(i) else i += 1;
             }
         };
         m.revision += 1;
@@ -1242,4 +1305,32 @@ test "tracks are added filled with the prototype's smallest tiles; a removed til
     m.removeTile(t1);
     try std.testing.expectEqual(null, m.findTile("T1"));
     try std.testing.expectEqual(3, m.panels.items[p].regions.items[r].rows.items[0].places.items.len);
+}
+
+test "tiles and blanks are inserted and removed in flow order" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.25, 1.5 } });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 1, .length = 2, .pitch = 19.05 });
+    // T1 T2; insert a 1.5 u tile between them, and a blank before it.
+    const t = try m.insertTile(p, r, 0, 1, key, 1.5);
+    try m.insertBlank(p, r, 0, 1, 0.25);
+    const places = m.panels.items[p].regions.items[r].rows.items[0].places.items;
+    try std.testing.expectEqual(4, places.len);
+    try std.testing.expectEqual(null, places[1].tile);
+    try std.testing.expectEqual(0.25, places[1].blank);
+    try std.testing.expectEqual(t, places[2].tile.?);
+    try std.testing.expectEqualStrings("T3", m.tileConst(t).designator);
+    try std.testing.expectEqual(1.5, m.tileConst(t).w);
+    // Removing the blank, then the tile.
+    try m.removeAt(p, r, 0, 1);
+    try m.removeAt(p, r, 0, 1);
+    const left = m.panels.items[p].regions.items[r].rows.items[0].places.items;
+    try std.testing.expectEqual(2, left.len);
+    try std.testing.expectEqual(null, m.findTile("T3"));
+    try std.testing.expectError(error.NoSuchRow, m.removeAt(p, r, 0, 5));
+    // A new tile takes the lowest free designator.
+    _ = try m.insertTile(p, r, 0, 0, key, 1);
+    try std.testing.expect(m.findTile("T3") != null);
 }

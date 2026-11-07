@@ -616,6 +616,16 @@ fn overlays() !void {
         defer fw.deinit();
         try propertiesContent();
     }
+    if (track_cursor != null) {
+        // The insert palette: across the top of the canvas, between the
+        // panes.
+        const left: f32 = if (panes.tree == .overlay) tree_width + 2 * g else g;
+        const right: f32 = if (panes.properties == .overlay) properties_width + 2 * g else g;
+        var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = palette_height };
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4));
+        defer fw.deinit();
+        trackPalette();
+    }
     if (panes.status == .overlay) {
         var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + c.h - status_height - g, .w = c.w - 2 * g, .h = status_height };
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(3));
@@ -1169,10 +1179,12 @@ fn worksheetTree() void {
                 const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), rowi + 1 }) catch "Row";
                 if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, row.places.items.len > 0, false)) continue;
                 for (row.places.items) |p| {
-                    const t = state.model.tileConst(p.tile);
-                    const legend = if (state.model.slotCount(p.tile) > 0) state.model.slot(p.tile, 0).content else "";
+                    // Blanks are spacers, not things to select.
+                    const id = p.tile orelse continue;
+                    const t = state.model.tileConst(id);
+                    const legend = if (state.model.slotCount(id) > 0) state.model.slot(id, 0).content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
-                    _ = treeNode(.{ .tile = p.tile }, text, 5, false, false);
+                    _ = treeNode(.{ .tile = id }, text, 5, false, false);
                 }
             }
         }
@@ -1560,6 +1572,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
         }
     }
+    if (track_cursor) |c| if (c.panel == pi) drawCursor(area, pi, placed, c);
     // The selected panel label: its ink box, with a little room.
     switch (state.context) {
         .label => |sel| if (sel.panel == pi) if (labelBox(pi, sel.index)) |b| {
@@ -1913,7 +1926,19 @@ fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
 fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
     const drawing = state.tool != .select;
+    canvas_id = box.data().id;
+    validateCursor();
     for (dvui.events()) |*e| {
+        // The flow cursor's keys, while the canvas or the palette has the
+        // keyboard: never from a text entry.
+        if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and cursorKey(k.code)) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         if (e.evt == .key and (state.moving != null or state.moving_label != null)) {
             const k = e.evt.key;
             if (k.code == .escape and k.action == .down) {
@@ -2145,6 +2170,13 @@ fn finishMove(pi: usize) void {
 /// Makes what is under worksheet point `at` the context: a tile, else a
 /// panel, else the worksheet.
 fn pick(at: geom.Point) void {
+    // In a region's context, a click in its tracks puts the flow cursor
+    // there; anywhere else picks as usual.
+    if (cursorAt(at)) |c| {
+        track_cursor = c;
+        return;
+    }
+    track_cursor = null;
     state.context = .worksheet;
     for (state.model.panels.items, 0..) |panel, pi| {
         const b = panel.box();
@@ -3271,4 +3303,255 @@ fn statusContent() void {
     const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
     const right = std.fmt.bufPrint(&right_buf, "{s} · zoom {d:.2} px/mm · {d:.1} ms", .{ font, state.view.ppm, state.solve_ms }) catch "";
     dvui.labelNoFmt(@src(), right, .{}, field.override(muted));
+}
+
+// Populating tracks --------------------------------------------------------
+//
+// With a region (or one of its tracks) as the context, a click in its
+// tracks puts a flow cursor between places. Tiles and blanks go in at the
+// cursor from the insert palette, or by its keys: digits for tiles, the
+// row below them for blanks. Backspace removes the place before the
+// cursor, Delete the one after; arrows move it along and across tracks.
+
+/// Where tiles and blanks go in: before place `index` of a track.
+const TrackCursor = struct { panel: usize, region: usize, track: usize, index: usize };
+var track_cursor: ?TrackCursor = null;
+/// The canvas, and the palette's buttons, from the last frame: the
+/// cursor's keys work while one of them has the keyboard.
+var canvas_id: ?dvui.Id = null;
+var palette_ids: [24]dvui.Id = undefined;
+var palette_id_count: usize = 0;
+const palette_height = 168;
+
+const tile_keys = "1234567890";
+const blank_keys = "QWERTYUIOP";
+
+/// The palette's choices for a region: tile lengths along its tracks (the
+/// prototype's allowed sizes, or its steps from the smallest) and blank
+/// lengths (multiples of its step), ten of each at most.
+const InsertPalette = struct {
+    prototype: layout.model.PrototypeId,
+    tiles: [10]f64 = undefined,
+    tile_count: usize = 0,
+    blanks: [10]f64 = undefined,
+};
+
+fn paletteFor(panel: usize, region: usize) ?InsertPalette {
+    if (state.model.prototypes.items.len == 0) return null;
+    const r = state.model.panels.items[panel].regions.items[region];
+    const id = r.prototype orelse 0;
+    const p = state.model.prototypes.items[id];
+    var out: InsertPalette = .{ .prototype = id };
+    const sizes = if (r.major == .row) p.widths else p.heights;
+    const grows = if (r.major == .row) p.expand.horizontal else p.expand.vertical;
+    const step_ = p.step(r.major, .along);
+    if (grows and sizes.len > 0) {
+        out.tile_count = @min(10, sizes.len);
+        @memcpy(out.tiles[0..out.tile_count], sizes[0..out.tile_count]);
+    } else if (grows) {
+        const smallest = p.smallest(r.major, .along);
+        out.tile_count = 10;
+        for (&out.tiles, 0..) |*t, k| t.* = smallest + @as(f64, @floatFromInt(k)) * step_;
+    } else {
+        out.tile_count = 1;
+        out.tiles[0] = 1;
+    }
+    for (&out.blanks, 1..) |*b, k| b.* = @as(f64, @floatFromInt(k)) * step_;
+    return out;
+}
+
+/// The region the context is, or holds the context's track.
+fn contextRegion() ?struct { panel: usize, region: usize } {
+    return switch (state.context) {
+        .region => |r| .{ .panel = r.panel, .region = r.region },
+        .row => |r| .{ .panel = r.panel, .region = r.region },
+        else => null,
+    };
+}
+
+/// The cursor a click at worksheet point `at` puts in the context region's
+/// tracks: the track under it, before the first place whose middle lies
+/// beyond it.
+fn cursorAt(at: geom.Point) ?TrackCursor {
+    const cr = contextRegion() orelse return null;
+    if (cr.panel >= state.placed.items.len) return null;
+    for (state.placed.items[cr.panel].tracks) |t| {
+        if (t.region != cr.region) continue;
+        const b = onSheet(cr.panel, t.box);
+        if (!contains(b, at)) continue;
+        const along = if (t.major == .row) at.x - b.x0 else b.y1 - at.y;
+        var index: usize = 0;
+        for (t.spans) |sp| {
+            if ((sp[0] + sp[1]) / 2 < along) index += 1;
+        }
+        return .{ .panel = cr.panel, .region = cr.region, .track = t.track, .index = index };
+    }
+    return null;
+}
+
+/// Drops the cursor when its region stops being the context, and keeps it
+/// inside its track as places come and go.
+fn validateCursor() void {
+    const c = track_cursor orelse return;
+    const cr = contextRegion() orelse {
+        track_cursor = null;
+        return;
+    };
+    if (cr.panel != c.panel or cr.region != c.region or c.panel >= state.model.panels.items.len) {
+        track_cursor = null;
+        return;
+    }
+    const rows = state.model.panels.items[c.panel].regions.items[c.region].rows.items;
+    if (rows.len == 0) {
+        track_cursor = null;
+        return;
+    }
+    var fixed = c;
+    fixed.track = @min(c.track, rows.len - 1);
+    fixed.index = @min(c.index, rows[fixed.track].places.items.len);
+    track_cursor = fixed;
+}
+
+fn cursorKeysReach() bool {
+    const focused = dvui.focusedWidgetId() orelse return true;
+    if (canvas_id != null and focused == canvas_id.?) return true;
+    for (palette_ids[0..palette_id_count]) |id| if (id == focused) return true;
+    return false;
+}
+
+/// Acts on a key for the flow cursor; whether it was one.
+fn cursorKey(code: dvui.enums.Key) bool {
+    const c = track_cursor orelse return false;
+    const tile_codes = [_]dvui.enums.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
+    const blank_codes = [_]dvui.enums.Key{ .q, .w, .e, .r, .t, .y, .u, .i, .o, .p };
+    const pal = paletteFor(c.panel, c.region) orelse return false;
+    for (tile_codes, 0..) |k, i| if (code == k) {
+        if (i < pal.tile_count) insertAtCursor(.tile, pal.tiles[i]);
+        return true;
+    };
+    for (blank_codes, 0..) |k, i| if (code == k) {
+        insertAtCursor(.blank, pal.blanks[i]);
+        return true;
+    };
+    const region = state.model.panels.items[c.panel].regions.items[c.region];
+    const len = region.rows.items[c.track].places.items.len;
+    const rows = region.major == .row;
+    var next = c;
+    switch (code) {
+        .backspace => {
+            if (c.index == 0) return true;
+            state.model.removeAt(c.panel, c.region, c.track, c.index - 1) catch {};
+            next.index -= 1;
+        },
+        .delete => if (c.index < len) state.model.removeAt(c.panel, c.region, c.track, c.index) catch {},
+        .escape => {
+            track_cursor = null;
+            return true;
+        },
+        .left, .right, .up, .down => {
+            const forward = code == .right or code == .down;
+            const along_key = if (rows) code == .left or code == .right else code == .up or code == .down;
+            if (along_key) {
+                if (forward and c.index < len) next.index += 1;
+                if (!forward and c.index > 0) next.index -= 1;
+            } else {
+                if (forward and c.track + 1 < region.rows.items.len) next.track += 1;
+                if (!forward and c.track > 0) next.track -= 1;
+            }
+        },
+        else => return false,
+    }
+    track_cursor = next;
+    validateCursor();
+    return true;
+}
+
+/// Inserts a tile or a blank `size` u long at the cursor, which moves past it.
+fn insertAtCursor(kind: enum { tile, blank }, size: f64) void {
+    const c = track_cursor orelse return;
+    const pal = paletteFor(c.panel, c.region) orelse return;
+    switch (kind) {
+        .tile => _ = state.model.insertTile(c.panel, c.region, c.track, c.index, pal.prototype, size) catch return,
+        .blank => state.model.insertBlank(c.panel, c.region, c.track, c.index, size) catch return,
+    }
+    track_cursor.?.index += 1;
+}
+
+/// The cursor: a bar across its track between places.
+fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
+    for (placed.tracks) |t| {
+        if (t.region != c.region or t.track != c.track) continue;
+        const n = t.spans.len;
+        const pos: f64 = if (n == 0 or c.index == 0) (if (n > 0) t.spans[0][0] else 0) else if (c.index >= n) t.spans[n - 1][1] else (t.spans[c.index - 1][1] + t.spans[c.index][0]) / 2;
+        const b = onSheet(pi, t.box);
+        const px = dvui.windowNaturalScale();
+        const focus = dvui.themeGet().focus;
+        // The track, faintly, then the bar a little past its edges.
+        state.view.rect(area, b).fill(.square, .{ .color = .{ .color = focus.opacity(0.06) } });
+        const over = 1.0;
+        const p0: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y0 - over } else .{ .x = b.x0 - over, .y = b.y1 - pos };
+        const p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
+        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 3 * px, .color = .{ .color = focus } });
+        return;
+    }
+}
+
+/// The insert palette: a row of tile buttons and a row of blank buttons,
+/// each drawn to scale, with its key and its size. A click inserts at the
+/// cursor, as the key does.
+fn trackPalette() void {
+    palette_id_count = 0;
+    const c = track_cursor orelse return;
+    const pal = paletteFor(c.panel, c.region) orelse return;
+    const name = state.model.prototypes.items[pal.prototype].name;
+    dvui.label(@src(), "Insert {s} tiles and blanks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
+    inline for (.{ .tile, .blank }) |kind| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @backingInt(@as(enum { tile, blank }, kind)) });
+        defer row.deinit();
+        const keys = if (kind == .tile) tile_keys else blank_keys;
+        const n = if (kind == .tile) pal.tile_count else pal.blanks.len;
+        for (0..n) |i| {
+            const size = if (kind == .tile) pal.tiles[i] else pal.blanks[i];
+            if (paletteButton(kind == .tile, keys[i], size, i)) {
+                insertAtCursor(if (kind == .tile) .tile else .blank, size);
+                if (canvas_id) |id| dvui.focusWidget(id, null, null);
+            }
+        }
+    }
+}
+
+/// One palette button: the tile or blank drawn to scale, its key, its size.
+fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{ .id_extra = i, .margin = .all(2), .padding = .all(4), .min_size_content = .{ .w = 44, .h = 56 }, .corners = .all(4) });
+    bw.processEvents();
+    bw.drawBackground();
+    const clicked = bw.clicked();
+    if (palette_id_count < palette_ids.len) {
+        palette_ids[palette_id_count] = bw.data().id;
+        palette_id_count += 1;
+    }
+    {
+        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5 });
+        defer col.deinit();
+        // To scale: 18 px a unit.
+        const w: f32 = @floatCast(@max(4, size * 18));
+        _ = dvui.box(@src(), .{}, .{
+            .min_size_content = .{ .w = w, .h = 16 },
+            .max_size_content = .{ .w = w, .h = 16 },
+            .gravity_x = 0.5,
+            .background = tile,
+            .border = .all(1),
+            .corners = .all(3),
+            .color_fill = if (tile) .{ .color = colors.face } else null,
+            .color_border = .{ .color = if (tile) colors.edge else colors.edge.opacity(0.5) },
+        }).deinit();
+        var kb: [1]u8 = .{key};
+        dvui.labelNoFmt(@src(), &kb, .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .y = 2 } });
+        var sb: [16]u8 = undefined;
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&sb, "{d} u", .{size}) catch "", .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-3), .padding = .{} });
+    }
+    bw.drawFocus();
+    bw.deinit();
+    return clicked;
 }

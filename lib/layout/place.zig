@@ -84,9 +84,23 @@ pub const Issue = struct {
     syntax: ?engine.markup.Diagnostic = null,
 };
 
+/// A track as placed: where it lies, and where each of its places (tiles
+/// and blanks, in flow order) starts and ends along it.
+pub const PlacedTrack = struct {
+    region: usize,
+    track: usize,
+    major: model.Major,
+    /// The track's band, mm in the panel frame: its length along, one pitch
+    /// across.
+    box: Box,
+    /// Each place's start and end along the track, mm from its start.
+    spans: []const [2]f64,
+};
+
 pub const Placed = struct {
     arena: std.heap.ArenaAllocator,
     tiles: []const PlacedTile,
+    tracks: []const PlacedTrack = &.{},
     labels: []const PlacedLabel,
     issues: []const Issue,
     /// The union of the tiles' pitch boxes.
@@ -246,6 +260,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     try labels.sync(m);
 
     var tiles: std.ArrayList(PlacedTile) = .empty;
+    var tracks: std.ArrayList(PlacedTrack) = .empty;
     var issues: std.ArrayList(Issue) = .empty;
     var bounds: Box = .empty;
 
@@ -265,8 +280,14 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             items.clearRetainingCapacity();
             links.clearRetainingCapacity();
             for (row.places.items) |p| {
-                const t = m.tileConst(p.tile);
-                const pin = placed_at.get(p.tile);
+                const id = p.tile orelse {
+                    // A blank: a spacer of its length.
+                    try links.append(a, .{ .min = p.gap * region.pitch });
+                    try items.append(a, .{ .size = p.blank * region.pitch });
+                    continue;
+                };
+                const t = m.tileConst(id);
+                const pin = placed_at.get(id);
                 try links.append(a, .{ .min = if (pin == null) p.gap * region.pitch else 0 });
                 try items.append(a, .{ .size = (if (rows) t.w else t.h) * region.pitch, .pin = pin });
             }
@@ -275,10 +296,25 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             defer chain.deinit(gpa);
             for (chain.issues) |ci| try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = rowi, .amount = ci.amount });
 
+            const spans = try a.alloc([2]f64, row.places.items.len);
+            for (spans, items.items, chain.at) |*sp, item, at| sp.* = .{ at, at + item.size };
+            const length = region.trackLength() * region.pitch;
+            try tracks.append(a, .{
+                .region = ri,
+                .track = rowi,
+                .major = region.major,
+                .box = if (rows)
+                    .{ .x0 = region.origin.x, .x1 = region.origin.x + length, .y1 = region.origin.y - across, .y0 = region.origin.y - across - region.pitch }
+                else
+                    .{ .x0 = region.origin.x + across, .x1 = region.origin.x + across + region.pitch, .y1 = region.origin.y, .y0 = region.origin.y - length },
+                .spans = spans,
+            });
+
             for (row.places.items, chain.at) |p, along| {
-                if (placed_at.contains(p.tile)) continue;
-                try placed_at.put(a, p.tile, along);
-                const t = m.tileConst(p.tile);
+                const pid = p.tile orelse continue;
+                if (placed_at.contains(pid)) continue;
+                try placed_at.put(a, pid, along);
+                const t = m.tileConst(pid);
                 const w = t.w * region.pitch;
                 const h = t.h * region.pitch;
                 // Rows run right and stack down; columns run down and set
@@ -290,13 +326,13 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 const body = proto.body_inset.inset(pitch_box);
                 const shapes = if (proto.art) |pa| art.stretch(a, pa, region.pitch, pitch_box) catch |err| switch (err) {
                     error.CurveCrossesCut => blk: {
-                        try issues.append(a, .{ .kind = .tile_art, .tile = p.tile, .region = ri, .row = rowi });
+                        try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = rowi });
                         break :blk try art.plainShapes(a, proto.*, region.pitch, pitch_box);
                     },
                     else => |e| return e,
                 } else try art.plainShapes(a, proto.*, region.pitch, pitch_box);
                 try tiles.append(a, .{
-                    .id = p.tile,
+                    .id = pid,
                     .region = ri,
                     .row = rowi,
                     .pitch_box = pitch_box,
@@ -304,7 +340,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     .face = proto.face_inset.inset(body),
                     .shapes = shapes,
                 });
-                if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = p.tile, .region = ri, .row = rowi });
+                if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = rowi });
                 bounds = bounds.join(pitch_box);
             }
             across += region.pitch;
@@ -395,6 +431,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     return .{
         .arena = arena,
         .tiles = try tiles.toOwnedSlice(a),
+        .tracks = try tracks.toOwnedSlice(a),
         .labels = try placed_labels.toOwnedSlice(a),
         .issues = try issues.toOwnedSlice(a),
         .bounds = bounds,
@@ -717,7 +754,7 @@ test "columns run down from the region's top and set to the right" {
     const key = try m.addPrototype(.{ .name = "key", .heights = &.{ 1, 2 } });
     const r = try m.addTracks(p, .{ .name = "col", .origin = .{ .x = 10, .y = 90 }, .major = .column, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
     // The first tile of the first column twice as tall: the rest move down.
-    const first = m.panels.items[p].regions.items[r].rows.items[0].places.items[0].tile;
+    const first = m.panels.items[p].regions.items[r].rows.items[0].places.items[0].tile.?;
     try m.setTileSize(first, 1, 2);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
@@ -734,4 +771,29 @@ test "columns run down from the region's top and set to the right" {
     var overflow = false;
     for (s.issues) |i| overflow = overflow or i.kind == .row_overflow;
     try testing.expect(overflow);
+}
+
+test "blanks take their length in a track, and every place's span is reported" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 100, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 1, .length = 4, .pitch = 10 });
+    try m.insertBlank(p, r, 0, 1, 0.5);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectEqual(1, s.tracks.len);
+    const spans = s.tracks[0].spans;
+    try testing.expectEqual(5, spans.len);
+    try testing.expectApproxEqAbs(@as(f64, 10), spans[1][0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 15), spans[1][1], 1e-9);
+    // The second tile starts after the blank.
+    try testing.expectApproxEqAbs(@as(f64, 15), s.tiles[1].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
 }
