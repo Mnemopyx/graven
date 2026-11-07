@@ -118,6 +118,33 @@ pub const TilePrototype = struct {
     /// body and face drawn from the insets.
     art: ?art_.Art = null,
 
+    /// The size of tiles along `major`'s tracks (`.along`) or across them:
+    /// widths for rows, heights for columns, and the reverse across.
+    fn sizesFor(p: TilePrototype, major: Major, axis: Axis) struct { grows: bool, sizes: []const f64 } {
+        const horizontal = (major == .row) == (axis == .along);
+        return if (horizontal) .{ .grows = p.expand.horizontal, .sizes = p.widths } else .{ .grows = p.expand.vertical, .sizes = p.heights };
+    }
+
+    /// The smallest size its tiles take along or across `major`'s tracks, u.
+    pub fn smallest(p: TilePrototype, major: Major, axis: Axis) f64 {
+        const s = p.sizesFor(major, axis);
+        if (!s.grows or s.sizes.len == 0) return 1;
+        return std.mem.min(f64, s.sizes);
+    }
+
+    /// The finest step between the sizes its tiles take along or across
+    /// `major`'s tracks, u: the largest step every allowed size is a whole
+    /// multiple of (to 0.01 u). 1 where they do not grow; 0.25 where any
+    /// size is allowed.
+    pub fn step(p: TilePrototype, major: Major, axis: Axis) f64 {
+        const s = p.sizesFor(major, axis);
+        if (!s.grows) return 1;
+        if (s.sizes.len == 0) return 0.25;
+        var g: u64 = 0;
+        for (s.sizes) |v| g = std.math.gcd(g, @as(u64, @intFromFloat(@round(v * 100))));
+        return if (g == 0) 1 else @as(f64, @floatFromInt(g)) / 100;
+    }
+
     /// Whether a tile `w` × `h` u keeps to the prototype's sizing rules. A
     /// tile that does not is flagged, not refused.
     pub fn allows(p: TilePrototype, w: f64, h: f64) bool {
@@ -157,19 +184,36 @@ pub const Row = struct {
     places: std.ArrayList(Place) = .empty,
 };
 
-/// A region whose content is rows of tiles, placed in order from the
-/// region's top-left corner.
+/// Which way a region's tracks run: rows, filled left to right and stacked
+/// top to bottom, or columns, filled top to bottom and set left to right.
+pub const Major = enum { row, column };
+
+/// A region whose content is tracks of tiles (rows, or columns), placed in
+/// order from the region's top-left corner.
 pub const TileRegion = struct {
     name: []const u8,
     /// The region's top-left corner in the panel frame, mm.
     origin: geom.Point,
-    /// Its size in u: rows longer than `w` overflow.
+    /// Its size in u: tracks longer than the region overflow.
     w: f64,
     h: f64,
     /// mm per u.
     pitch: f64,
+    major: Major = .row,
+    /// The kind of tile it was made for: what new tiles in it are.
+    prototype: ?PrototypeId = null,
+    /// Its tracks, in order: rows top to bottom, or columns left to right.
+    /// A track's gap is the space before it.
     rows: std.ArrayList(Row) = .empty,
+
+    /// A track's length, u.
+    pub fn trackLength(r: TileRegion) f64 {
+        return if (r.major == .row) r.w else r.h;
+    }
 };
+
+/// The length along a track, or across tracks.
+pub const Axis = enum { along, across };
 
 /// A label placed directly on a panel (a faceplate legend, say), rather
 /// than in a tile's slot. It is set as one line from its anchor, without a
@@ -655,6 +699,69 @@ pub const Model = struct {
         return regions.items.len - 1;
     }
 
+    pub const Tracks = struct {
+        name: []const u8,
+        /// The region's top-left corner in the panel frame, mm.
+        origin: geom.Point,
+        major: Major = .row,
+        prototype: PrototypeId,
+        /// How many tracks, and each one's length, u.
+        count: usize,
+        length: f64,
+        pitch: f64,
+        /// Designators for the tiles it makes: this and a number, the
+        /// lowest not taken.
+        prefix: []const u8 = "T",
+    };
+
+    /// Adds a region of `count` tracks of tiles made from `prototype`, each
+    /// track as thick as its smallest tile and filled with its smallest
+    /// tiles. Returns the region's index.
+    pub fn addTracks(m: *Model, panel: usize, t: Tracks) Error!usize {
+        if (t.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const proto = m.prototypes.items[t.prototype];
+        const along = proto.smallest(t.major, .along);
+        const across = proto.smallest(t.major, .across);
+        if (t.count == 0 or !(t.length >= along - 1e-9)) return error.BadSize;
+        const thickness = @as(f64, @floatFromInt(t.count)) * across;
+        const r = try m.addRegion(panel, .{
+            .name = t.name,
+            .origin = t.origin,
+            .w = if (t.major == .row) t.length else thickness,
+            .h = if (t.major == .row) thickness else t.length,
+            .pitch = t.pitch,
+            .major = t.major,
+            .prototype = t.prototype,
+        });
+        const per_track: usize = @intFromFloat(@floor(t.length / along + 1e-9));
+        var name_buf: [64]u8 = undefined;
+        var n: usize = 1;
+        for (0..t.count) |track| {
+            _ = try m.addRow(panel, r, 0);
+            for (0..per_track) |_| {
+                const name = while (true) : (n += 1) {
+                    const candidate = std.fmt.bufPrint(&name_buf, "{s}{d}", .{ t.prefix, n }) catch return error.BadSize;
+                    if (m.findTile(candidate) == null) break candidate;
+                };
+                const id = try m.addTile(.{
+                    .designator = name,
+                    .prototype = t.prototype,
+                    .w = if (t.major == .row) along else across,
+                    .h = if (t.major == .row) across else along,
+                });
+                try m.place(panel, r, track, null, .{ .tile = id });
+            }
+        }
+        return r;
+    }
+
+    /// Removes tile `id`: it leaves every track it is in, which reflows.
+    pub fn removeTile(m: *Model, id: TileId) void {
+        m.unplace(id);
+        m.tile(id).removed = true;
+        m.revision += 1;
+    }
+
     pub fn addRow(m: *Model, panel: usize, region: usize, gap: f64) Error!usize {
         const rows = &m.panels.items[panel].regions.items[region].rows;
         try rows.append(m.a(), .{ .gap = gap });
@@ -1093,4 +1200,46 @@ test "prototypes are duplicated, have slots renamed and removed, and are removed
     try m.removePrototype(key);
     try std.testing.expectEqual(spare - 1, m.tileConst(k).prototype);
     try std.testing.expectEqualStrings("spare", m.prototypeOf(k).name);
+}
+
+test "a prototype's smallest size and size step follow which way its tracks run" {
+    const key: TilePrototype = .{ .name = "key", .widths = &.{ 1, 1.25, 1.5, 2.25, 6.25 }, .heights = &.{ 1, 2 } };
+    try std.testing.expectEqual(1, key.smallest(.row, .along));
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), key.step(.row, .along), 1e-9);
+    try std.testing.expectEqual(1, key.step(.row, .across));
+    // Columns run the other way: heights along, widths across.
+    try std.testing.expectEqual(1, key.step(.column, .along));
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), key.step(.column, .across), 1e-9);
+    const bar: TilePrototype = .{ .name = "bar", .widths = &.{ 2, 3 }, .expand = .{ .vertical = false } };
+    try std.testing.expectEqual(2, bar.smallest(.row, .along));
+    try std.testing.expectEqual(1, bar.step(.row, .along));
+    try std.testing.expectEqual(1, bar.step(.row, .across));
+}
+
+test "tracks are added filled with the prototype's smallest tiles; a removed tile leaves them" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.5 }, .slots = &.{.{ .name = "top" }} });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 2, .length = 4.5, .pitch = 19.05 });
+    const region = m.panels.items[p].regions.items[r];
+    try std.testing.expectEqual(4.5, region.w);
+    try std.testing.expectEqual(2, region.h);
+    try std.testing.expectEqual(2, region.rows.items.len);
+    // 4.5 u of 1 u keys: four to a row, the rest slack.
+    try std.testing.expectEqual(4, region.rows.items[0].places.items.len);
+    try std.testing.expect(m.findTile("T8") != null);
+
+    // Columns: as thick as the smallest width, as long as asked.
+    const c = try m.addTracks(p, .{ .name = "side", .origin = .{ .x = 120, .y = 95 }, .major = .column, .prototype = key, .count = 3, .length = 2, .pitch = 19.05 });
+    const side = m.panels.items[p].regions.items[c];
+    try std.testing.expectEqual(3, side.w);
+    try std.testing.expectEqual(2, side.h);
+    try std.testing.expect(m.findTile("T9") != null);
+    try std.testing.expectError(error.BadSize, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .prototype = key, .count = 1, .length = 0.5, .pitch = 19.05 }));
+
+    const t1 = m.findTile("T1").?;
+    m.removeTile(t1);
+    try std.testing.expectEqual(null, m.findTile("T1"));
+    try std.testing.expectEqual(3, m.panels.items[p].regions.items[r].rows.items[0].places.items.len);
 }

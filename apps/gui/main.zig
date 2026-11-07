@@ -118,7 +118,14 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_label };
+const Tool = enum { select, add_panel, add_label, add_tracks };
+
+/// The Add tracks tool's choices: the kind of tile, and which way the
+/// tracks run.
+var tracks_tool: struct {
+    prototype: layout.model.PrototypeId = 0,
+    major: layout.model.Major = .row,
+} = .{};
 
 /// The current context: a node of the component tree.
 const Context = union(enum) {
@@ -1159,7 +1166,7 @@ fn worksheetTree() void {
         for (panel.regions.items, 0..) |region, ri| {
             if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, region.rows.items.len > 0, false)) continue;
             for (region.rows.items, 0..) |row, rowi| {
-                const title = std.fmt.bufPrint(&name_buf, "Row {d}", .{rowi + 1}) catch "Row";
+                const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), rowi + 1 }) catch "Row";
                 if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, row.places.items.len > 0, false)) continue;
                 for (row.places.items) |p| {
                     const t = state.model.tileConst(p.tile);
@@ -1383,12 +1390,15 @@ fn canvas() void {
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
 
-    // The panel being drawn out: a translucent fill and its outline.
-    if (state.drag) |d| {
+    // Tracks being drawn out: the region they snap to, divided into them,
+    // and their count and length.
+    if (state.drag) |d| if (state.tool == .add_tracks) {
+        if (planTracks(d.start, d.at)) |plan| drawTrackPlan(area, plan);
+    } else {
         const r = state.view.rect(area, dragBox(d.start, d.at));
         r.fill(.square, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.12) } });
         r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
-    }
+    };
     if (state.tool == .add_panel and state.model.panels.items.len == 0 and state.drag == null) {
         dvui.labelNoFmt(@src(), "Drag out the new panel on the sheet. Esc cancels.", .{}, .{
             .gravity_x = 0.5,
@@ -1942,6 +1952,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         state.context = .{ .panel = l.panel };
                         dvui.refresh(null, @src(), box.data().id);
                     },
+                    // A tile leaves its track, which closes up behind it.
+                    .tile => |id| {
+                        e.handle(@src(), box.data());
+                        const found = findTile(id);
+                        state.model.removeTile(id);
+                        state.context = if (found) |f| .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } } else .worksheet;
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
                     else => {},
                 }
             }
@@ -1994,6 +2012,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         // The release that follows is part of this click, not a pick.
                         state.press_consumed = true;
                     }
+                } else if (state.tool == .add_tracks and me.button.pointer()) {
+                    // Tracks are drawn from a point on the panel chosen for them.
+                    const at = state.view.toMm(area, me.p);
+                    if (state.context == .panel and contains(state.model.panels.items[state.context.panel].box(), at)) {
+                        const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
+                        state.drag = .{ .start = p, .at = p };
+                    }
                 } else if (drawing and me.button.pointer()) {
                     const at = snap(state.view.toMm(area, me.p));
                     state.drag = .{ .start = at, .at = at };
@@ -2005,7 +2030,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .motion => if (dvui.captured(box.data().id)) {
                 if (state.drag) |*d| {
                     e.handle(@src(), box.data());
-                    d.at = snap(state.view.toMm(area, me.p));
+                    d.at = if (state.tool == .add_tracks) state.view.toMm(area, me.p) else snap(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
                 } else if (state.moving) |*mv| {
                     e.handle(@src(), box.data());
@@ -2034,7 +2059,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 e.handle(@src(), box.data());
                 if (state.drag) |d| {
                     state.drag = null;
-                    addPanelFromDrag(dragBox(d.start, d.at));
+                    if (state.tool == .add_tracks) addTracksFromDrag(d.start, d.at) else addPanelFromDrag(dragBox(d.start, d.at));
                 } else if (state.moving) |mv| {
                     finishMove(mv.panel);
                 } else if (state.moving_label) |mv| {
@@ -2195,7 +2220,160 @@ fn propertiesContent() !void {
     defer scroll.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
     defer body.deinit();
+    if (state.tool == .add_tracks) try tracksToolOptions();
     try properties();
+}
+
+/// The Add tracks tool's choices, above the context's properties while it
+/// is active.
+fn tracksToolOptions() !void {
+    heading("Add tracks", .{}, 9000);
+    const protos = state.model.prototypes.items;
+    if (tracks_tool.prototype >= protos.len) tracks_tool.prototype = 0;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9001 });
+        defer row.deinit();
+        propName("Prototype");
+        const lifo = dvui.currentWindow().lifo();
+        const names = try lifo.alloc([]const u8, protos.len);
+        defer lifo.free(names);
+        for (protos, names) |p, *nm| nm.* = p.name;
+        var choice: usize = tracks_tool.prototype;
+        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.prototype = @intCast(choice);
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9002 });
+        defer row.deinit();
+        propName("Tracks");
+        const names = [_][]const u8{ "Rows (row-major)", "Columns (column-major)" };
+        var choice: usize = @backingInt(tracks_tool.major);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
+    }
+    if (protos.len > 0) {
+        const p = protos[tracks_tool.prototype];
+        var buf: [96]u8 = undefined;
+        const along = p.smallest(tracks_tool.major, .along);
+        const step_ = p.step(tracks_tool.major, .along);
+        const across = p.smallest(tracks_tool.major, .across);
+        propText("Snaps to", "{s}", .{std.fmt.bufPrint(&buf, "{d} u thick; {d} u long or more, in {d} u steps", .{ across, along, step_ }) catch ""}, 9003);
+    }
+    _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = 6, .h = 6 } });
+}
+
+/// "Row" or "Column".
+fn trackWord(major: layout.model.Major) []const u8 {
+    return if (major == .row) "Row" else "Column";
+}
+
+/// A prototype to draw tracks of: the first, made as a plain keycap when
+/// there is none.
+fn ensurePrototype() !void {
+    if (state.model.prototypes.items.len > 0) return;
+    var p: layout.model.TilePrototype = .{
+        .name = "Key",
+        .body_inset = .all(0.5),
+        .face_inset = .all(2),
+        .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
+    };
+    p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, 19.05);
+    _ = try state.model.addPrototype(p);
+}
+
+/// Tracks a drag from `start` to `at` (worksheet, mm) would make on the
+/// context panel: the region snapped to whole tracks across, as thick as
+/// the prototype's smallest tile, and along to its size step, no shorter
+/// than its smallest tile; set out from `start` the way the drag went.
+const TrackPlan = struct {
+    panel: usize,
+    count: usize,
+    length: f64,
+    pitch: f64,
+    major: layout.model.Major,
+    /// On the worksheet, mm.
+    box: geom.Box,
+};
+
+fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
+    const pi = switch (state.context) {
+        .panel => |pi| pi,
+        else => return null,
+    };
+    if (tracks_tool.prototype >= state.model.prototypes.items.len) return null;
+    const p = state.model.prototypes.items[tracks_tool.prototype];
+    const major = tracks_tool.major;
+    const pitch = if (p.art) |art| art.pitch else 19.05;
+    const along_min = p.smallest(major, .along);
+    const step_ = p.step(major, .along);
+    const across = p.smallest(major, .across);
+    const dx = at.x - from.x;
+    const dy = at.y - from.y;
+    const d_along = @abs(if (major == .row) dx else dy) / pitch;
+    const d_across = @abs(if (major == .row) dy else dx) / pitch;
+    const length = @max(along_min, @round(d_along / step_) * step_);
+    const tracks: usize = @max(1, @as(usize, @intFromFloat(@round(d_across / across))));
+    const thickness = @as(f64, @floatFromInt(tracks)) * across;
+    const w = (if (major == .row) length else thickness) * pitch;
+    const h = (if (major == .row) thickness else length) * pitch;
+    const x0 = if (dx >= 0) from.x else from.x - w;
+    const y0 = if (dy >= 0) from.y else from.y - h;
+    return .{ .panel = pi, .count = tracks, .length = length, .pitch = pitch, .major = major, .box = .{ .x0 = x0, .y0 = y0, .x1 = x0 + w, .y1 = y0 + h } };
+}
+
+fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
+    const px = dvui.windowNaturalScale();
+    const fits = layout.model.within(plan.box, state.model.panels.items[plan.panel].box());
+    const colour = if (fits) dvui.themeGet().focus else colors.overflow;
+    const r = state.view.rect(area, plan.box);
+    r.fill(.square, .{ .color = .{ .color = colour.opacity(0.12) } });
+    r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colour } });
+    // The lines between tracks.
+    const n = plan.count;
+    for (1..n) |i| {
+        const f = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n));
+        const b = plan.box;
+        const a_pt: geom.Point = if (plan.major == .row) .{ .x = b.x0, .y = b.y1 - f * b.height() } else .{ .x = b.x0 + f * b.width(), .y = b.y1 };
+        const b_pt: geom.Point = if (plan.major == .row) .{ .x = b.x1, .y = a_pt.y } else .{ .x = a_pt.x, .y = b.y0 };
+        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, a_pt), state.view.toPx(area, b_pt) } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.6) } });
+    }
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d} {s}{s} × {d} u", .{ n, if (plan.major == .row) "row" else "column", if (n == 1) "" else "s", plan.length }) catch "";
+    const corner = state.view.toPx(area, .{ .x = plan.box.x0, .y = plan.box.y1 });
+    const ns = dvui.windowNaturalScale();
+    dvui.labelNoFmt(@src(), text, .{}, .{
+        // In the canvas's own coordinates, just above the region.
+        .rect = .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - 26, .w = 220, .h = 22 },
+        .color_text = .{ .color = colour },
+        .background = true,
+        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.85) },
+    });
+}
+
+/// Makes the tracks a finished drag planned, filled with the prototype's
+/// smallest tiles, and makes their region the context. One use ends the tool.
+fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
+    defer state.tool = .select;
+    const plan = planTracks(from, at) orelse return;
+    const panel = state.model.panels.items[plan.panel];
+    if (!layout.model.within(plan.box, panel.box())) {
+        state.status = "The tracks do not fit on the panel. ";
+        return;
+    }
+    var name_buf: [32]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "Tracks {d}", .{panel.regions.items.len + 1}) catch "Tracks";
+    const r = state.model.addTracks(plan.panel, .{
+        .name = name,
+        .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
+        .major = plan.major,
+        .prototype = tracks_tool.prototype,
+        .count = plan.count,
+        .length = plan.length,
+        .pitch = plan.pitch,
+    }) catch {
+        state.status = "The tracks were not added. ";
+        return;
+    };
+    state.context = .{ .region = .{ .panel = plan.panel, .region = r } };
+    state.expanded.put(state.gpa, Context.key(.{ .panel = plan.panel }), true) catch {};
 }
 
 /// Tools for the current context, as icon buttons.
@@ -2242,6 +2420,18 @@ fn toolPalette() void {
             state.tool = if (on) .select else .add_label;
         }
         dvui.tooltip(@src(), .{ .active_rect = lwd.borderRectScale().r }, "Add label: click on the panel to place it", .{}, .{});
+
+        const tracks_on = state.tool == .add_tracks;
+        var twd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Add tracks", dvui.entypo.grid, .{}, .{}, .{
+            .data_out = &twd,
+            .color_fill = if (tracks_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.tool = if (tracks_on) .select else .add_tracks;
+            state.drag = null;
+            if (!tracks_on) ensurePrototype() catch {};
+        }
+        dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, "Add tracks: rows or columns of tiles, drawn out on the panel", .{}, .{});
     }
     if (state.context == .worksheet) {
         // A mode tool: shown pressed while active; pressing again cancels.
@@ -2497,13 +2687,14 @@ fn properties() !void {
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ region.origin.x, region.origin.y }, 2);
             propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
             propText("Pitch", "{d} mm", .{region.pitch}, 4);
-            propText("Rows", "{d}", .{region.rows.items.len}, 5);
+            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{region.rows.items.len}, 5);
+            if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
         },
         .row => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
             const row = region.rows.items[r.row];
-            propText("Row", "{d} of {d} in {s}", .{ r.row + 1, region.rows.items.len, region.name }, 1);
-            propText("Gap above", "{d} u", .{row.gap}, 2);
+            propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, region.rows.items.len, region.name }, 1);
+            propText(if (region.major == .row) "Gap above" else "Gap before", "{d} u", .{row.gap}, 2);
             propText("Tiles", "{d}", .{row.places.items.len}, 3);
         },
         .tile => |id| try tileProperties(id),
@@ -2787,7 +2978,7 @@ fn addPrototype() !void {
         .name = name,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
-        .slots = &.{.{ .name = "top", .place = .{ .inset = .all(0.8) } }},
+        .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch());
     const id = try state.model.addPrototype(p);
@@ -2990,7 +3181,19 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
     const grows = if (horizontal) proto.expand.horizontal else proto.expand.vertical;
     const sizes = if (horizontal) proto.widths else proto.heights;
     const n: usize = if (horizontal) 2 else 7;
-    if (!grows or sizes.len == 0 or sizes.len > 15) {
+    if (grows and sizes.len == 0) {
+        // Any size goes: typed.
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+        defer row.deinit();
+        propName(if (horizontal) "Width, u" else "Height, u");
+        var v = size;
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = 0.25, .max = 100 }, .{ .expand = .horizontal, .id_extra = n });
+        if (r.changed and v > 0) {
+            if (horizontal) try state.model.setTileSize(id, v, t.h) else try state.model.setTileSize(id, t.w, v);
+        }
+        return;
+    }
+    if (!grows or sizes.len > 15) {
         const ok = proto.allows(if (horizontal) size else 1, if (horizontal) 1 else size);
         propText(name, "{d} u{s}", .{ size, if (!grows and ok) " (fixed)" else if (!ok) " (not allowed)" else "" }, n);
         return;
@@ -3060,6 +3263,7 @@ fn statusContent() void {
         .select => state.status,
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_label => "Add label: click on the panel to place it · Esc cancels",
+        .add_tracks => "Add tracks: drag them out on the panel · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
 

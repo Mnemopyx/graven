@@ -250,36 +250,42 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     var bounds: Box = .empty;
 
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
-        // Where each tile placed so far starts, along its region's rows.
+        // Tracks are rows or columns: each is a spring chain along its
+        // length, and tracks follow one another across. A tile's size along
+        // is its width in a row and its height in a column.
+        const rows = region.major == .row;
+        // Where each tile placed so far starts, along its region's tracks.
         var placed_at: std.AutoHashMapUnmanaged(TileId, f64) = .empty;
         var items: std.ArrayList(spring.Item) = .empty;
         var links: std.ArrayList(spring.Link) = .empty;
-        var top = region.origin.y;
+        // How far across the region the current track starts, mm.
+        var across: f64 = 0;
         for (region.rows.items, 0..) |row, rowi| {
-            top -= row.gap * region.pitch;
+            across += row.gap * region.pitch;
             items.clearRetainingCapacity();
             links.clearRetainingCapacity();
             for (row.places.items) |p| {
                 const t = m.tileConst(p.tile);
                 const pin = placed_at.get(p.tile);
                 try links.append(a, .{ .min = if (pin == null) p.gap * region.pitch else 0 });
-                try items.append(a, .{ .size = t.w * region.pitch, .pin = pin });
+                try items.append(a, .{ .size = (if (rows) t.w else t.h) * region.pitch, .pin = pin });
             }
             try links.append(a, .{});
-            var chain = try spring.solve(gpa, region.w * region.pitch, items.items, links.items);
+            var chain = try spring.solve(gpa, region.trackLength() * region.pitch, items.items, links.items);
             defer chain.deinit(gpa);
             for (chain.issues) |ci| try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = rowi, .amount = ci.amount });
 
-            for (row.places.items, chain.at) |p, x| {
+            for (row.places.items, chain.at) |p, along| {
                 if (placed_at.contains(p.tile)) continue;
-                try placed_at.put(a, p.tile, x);
+                try placed_at.put(a, p.tile, along);
                 const t = m.tileConst(p.tile);
-                const pitch_box: Box = .{
-                    .x0 = region.origin.x + x,
-                    .x1 = region.origin.x + x + t.w * region.pitch,
-                    .y1 = top,
-                    .y0 = top - t.h * region.pitch,
-                };
+                const w = t.w * region.pitch;
+                const h = t.h * region.pitch;
+                // Rows run right and stack down; columns run down and set
+                // to the right.
+                const x0 = region.origin.x + if (rows) along else across;
+                const y1 = region.origin.y - if (rows) across else along;
+                const pitch_box: Box = .{ .x0 = x0, .x1 = x0 + w, .y1 = y1, .y0 = y1 - h };
                 const proto = &m.prototypes.items[t.prototype];
                 const body = proto.body_inset.inset(pitch_box);
                 const shapes = if (proto.art) |pa| art.stretch(a, pa, region.pitch, pitch_box) catch |err| switch (err) {
@@ -301,7 +307,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = p.tile, .region = ri, .row = rowi });
                 bounds = bounds.join(pitch_box);
             }
-            top -= region.pitch;
+            across += region.pitch;
         }
     }
 
@@ -698,4 +704,34 @@ test "tiles are drawn from their prototype's art, stretched; bad art is drawn pl
     var flagged = false;
     for (s.issues) |i| flagged = flagged or i.kind == .tile_art;
     try testing.expect(flagged);
+}
+
+test "columns run down from the region's top and set to the right" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 100, 100);
+    const key = try m.addPrototype(.{ .name = "key", .heights = &.{ 1, 2 } });
+    const r = try m.addTracks(p, .{ .name = "col", .origin = .{ .x = 10, .y = 90 }, .major = .column, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
+    // The first tile of the first column twice as tall: the rest move down.
+    const first = m.panels.items[p].regions.items[r].rows.items[0].places.items[0].tile;
+    try m.setTileSize(first, 1, 2);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    // Column 1: tiles at 90..70 and 70..60; the third overflows past 60.
+    try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[0].pitch_box.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 70), s.tiles[0].pitch_box.y0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 70), s.tiles[1].pitch_box.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[1].pitch_box.x0, 1e-9);
+    // Column 2 sits to the right, from the top.
+    try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[3].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[3].pitch_box.y1, 1e-9);
+    var overflow = false;
+    for (s.issues) |i| overflow = overflow or i.kind == .row_overflow;
+    try testing.expect(overflow);
 }
