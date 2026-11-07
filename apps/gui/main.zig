@@ -622,7 +622,10 @@ fn overlays() !void {
         const left: f32 = if (panes.tree == .overlay) tree_width + 2 * g else g;
         const right: f32 = if (panes.properties == .overlay) properties_width + 2 * g else g;
         var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = palette_height };
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4));
+        // Lighter than the panes: the tracks being filled show through.
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4).override(.{
+            .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(palette_alpha) },
+        }));
         defer fw.deinit();
         trackPalette();
     }
@@ -3329,6 +3332,9 @@ var canvas_id: ?dvui.Id = null;
 var palette_ids: [24]dvui.Id = undefined;
 var palette_id_count: usize = 0;
 const palette_height = 168;
+/// How opaque the palette and its buttons are over the canvas.
+const palette_alpha = 0.6;
+const palette_button_alpha = 0.45;
 
 const tile_keys = "1234567890";
 const blank_keys = "QWERTYUIOP";
@@ -3530,7 +3536,14 @@ fn trackPalette() void {
 /// One palette button: the tile or blank drawn to scale, its key, its size.
 fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{}, .{ .id_extra = i, .margin = .all(2), .padding = .all(4), .min_size_content = .{ .w = 44, .h = 56 }, .corners = .all(4) });
+    bw.init(@src(), .{}, .{
+        .id_extra = i,
+        .margin = .all(2),
+        .padding = .all(4),
+        .min_size_content = .{ .w = 44, .h = 56 },
+        .corners = .all(4),
+        .color_fill = .{ .color = dvui.themeGet().color(.control, .fill).opacity(palette_button_alpha) },
+    });
     bw.processEvents();
     bw.drawBackground();
     const clicked = bw.clicked();
