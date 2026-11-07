@@ -2288,7 +2288,7 @@ fn propertiesContent() !void {
 /// The Add tracks tool's choices, above the context's properties while it
 /// is active.
 fn tracksToolOptions() !void {
-    heading("Add tracks", .{}, 9000);
+    heading("{s}", .{if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
     const protos = state.model.prototypes.items;
     if (tracks_tool.prototype >= protos.len) tracks_tool.prototype = 0;
     {
@@ -2483,17 +2483,30 @@ fn toolPalette() void {
         }
         dvui.tooltip(@src(), .{ .active_rect = lwd.borderRectScale().r }, "Add label: click on the panel to place it", .{}, .{});
 
-        const tracks_on = state.tool == .add_tracks;
-        var twd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Add tracks", dvui.entypo.grid, .{}, .{}, .{
-            .data_out = &twd,
-            .color_fill = if (tracks_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.tool = if (tracks_on) .select else .add_tracks;
-            state.drag = null;
-            if (!tracks_on) ensurePrototype() catch {};
+        // Two track modes, one button each: rows (tiles flow left to right)
+        // and columns (top to bottom).
+        inline for (.{
+            .{ layout.model.Major.row, "Add rows", dvui.entypo.menu, "Add rows: tracks of tiles running left to right, drawn out on the panel" },
+            .{ layout.model.Major.column, "Add columns", dvui.entypo.bar_graph, "Add columns: tracks of tiles running top to bottom, drawn out on the panel" },
+        }, 0..) |mode, mi| {
+            const mode_on = state.tool == .add_tracks and tracks_tool.major == mode[0];
+            var twd: dvui.WidgetData = undefined;
+            if (dvui.buttonIcon(@src(), mode[1], mode[2], .{}, .{}, .{
+                .id_extra = mi,
+                .data_out = &twd,
+                .color_fill = if (mode_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+            })) {
+                state.drag = null;
+                if (mode_on) {
+                    state.tool = .select;
+                } else {
+                    state.tool = .add_tracks;
+                    tracks_tool.major = mode[0];
+                    ensurePrototype() catch {};
+                }
+            }
+            dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, mode[3], .{}, .{ .id_extra = mi });
         }
-        dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, "Add tracks: rows or columns of tiles, drawn out on the panel", .{}, .{});
     }
     if (state.context == .region) {
         // Fit to tiles: the tracks shrink to what has been put in them.
@@ -3338,7 +3351,7 @@ fn statusContent() void {
         .select => state.status,
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_label => "Add label: click on the panel to place it · Esc cancels",
-        .add_tracks => "Add tracks: drag them out on the panel · Esc cancels",
+        .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
 
