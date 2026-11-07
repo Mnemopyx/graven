@@ -27,6 +27,8 @@ pub const GlyphItem = struct {
     /// Font units to the label frame: size, any style transform, placement.
     transform: Affine,
     element: u32,
+    /// The source byte its cluster starts at.
+    source: u32 = 0,
     /// Preview only: source shown literally because it is not (yet) valid;
     /// not ink.
     faint: bool = false,
@@ -104,6 +106,16 @@ pub const Element = struct {
     ink: Box,
 };
 
+pub const Caret = struct {
+    x: f64,
+    y0: f64,
+    y1: f64,
+
+    fn at(e: Element, x: f64) Caret {
+        return .{ .x = x, .y0 = e.origin.y - 0.25 * e.cap_height, .y1 = e.origin.y + 1.15 * e.cap_height };
+    }
+};
+
 pub const Render = struct {
     arena: std.heap.ArenaAllocator,
     items: []const Item,
@@ -122,6 +134,48 @@ pub const Render = struct {
     /// Source offsets where lines broke, hard and soft, in order.
     breaks: []const u32 = &.{},
     lines: u16 = 1,
+
+    /// Where a text cursor at source byte `offset` goes in the drawing: a
+    /// vertical bar at `x`, from `y0` to `y1` (label frame, mm), sized to the
+    /// text it sits in. Null for an empty render.
+    pub fn caret(self: Render, offset: u32) ?Caret {
+        // Stops: the start of each glyph and drawn mark, and the end of each
+        // element. The cursor goes to the stop at its offset, else the
+        // nearest one before it; a glyph's start wins a tie over an end.
+        var best: ?Caret = null;
+        var best_source: u32 = 0;
+        var best_start = false;
+        const consider = struct {
+            fn f(b: *?Caret, bs: *u32, bst: *bool, c: Caret, source: u32, is_start: bool, at: u32) void {
+                if (source > at) return;
+                if (b.* != null) {
+                    if (source < bs.*) return;
+                    if (source == bs.* and (bst.* or !is_start)) return;
+                }
+                b.* = c;
+                bs.* = source;
+                bst.* = is_start;
+            }
+        }.f;
+        for (self.items) |item| switch (item) {
+            .glyph => |g| {
+                const e = self.elements[g.element];
+                consider(&best, &best_source, &best_start, .at(e, g.transform.e), g.source, true, offset);
+            },
+            .path => |q| {
+                const e = self.elements[q.element];
+                const bounds = q.outline.bounds();
+                // A slot takes the cursor in its middle.
+                const x = if (q.role == .placeholder) (bounds.x0 + bounds.x1) / 2 else bounds.x0;
+                consider(&best, &best_source, &best_start, .at(e, x), e.start, true, offset);
+            },
+        };
+        for (self.elements) |e| {
+            const x = if (e.face == null) e.ink.x1 else e.origin.x + e.advance;
+            consider(&best, &best_source, &best_start, .at(e, x), e.end, false, offset);
+        }
+        return best;
+    }
 
     pub fn deinit(self: *Render) void {
         self.arena.deinit();

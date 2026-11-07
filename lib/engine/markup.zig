@@ -399,7 +399,19 @@ const Parser = struct {
             items[0] = placeholder(p.i);
             return .{ .items = items, .span = .{ .start = p.i, .end = p.i } };
         }
-        return p.group(variant, text_mode);
+        return p.argGroup(variant, text_mode);
+    }
+
+    /// A braced argument. In a preview an empty one holds a slot, so where
+    /// its content goes shows while it is typed.
+    fn argGroup(p: *Parser, variant: Variant, text_mode: bool) Error!Group {
+        var g = try p.group(variant, text_mode);
+        if (p.problems != null and g.items.len == 0) {
+            const items = try p.a.alloc(Node, 1);
+            items[0] = placeholder(g.span.start + 1);
+            g.items = items;
+        }
+        return g;
     }
 
     fn command(p: *Parser, items: *std.ArrayList(Node), run: *Run, variant: Variant, text_mode: bool) Error!void {
@@ -547,7 +559,7 @@ const Parser = struct {
             return placeholder(p.i);
         };
         switch (c) {
-            '{' => return .{ .group = try p.group(variant, text_mode) },
+            '{' => return .{ .group = try p.argGroup(variant, text_mode) },
             '}', '^', '_', ' ', '~', '%' => {
                 try p.problem(.missing_argument, p.i);
                 return placeholder(p.i);
@@ -910,8 +922,9 @@ test "a preview parse never fails and shows what is still to come" {
         .{ .src = "^2", .tree = "(scripts (slot) ^(text \"2\"))", .problem = .script_without_base },
         .{ .src = "\\text", .tree = "{(slot)}", .problem = .expected_brace },
         .{ .src = "x^{2}", .tree = "(scripts (text \"x\") ^{(text \"2\")})", .problem = null },
-        .{ .src = "\\sqrt{", .tree = "(sqrt {})", .problem = .missing_close },
+        .{ .src = "\\sqrt{", .tree = "(sqrt {(slot)})", .problem = .missing_close },
         .{ .src = "\\sqrt", .tree = "(sqrt (slot))", .problem = .missing_argument },
+        .{ .src = "\\frac{}{}", .tree = "(frac {(slot)} {(slot)})", .problem = null },
         .{ .src = "\\frac{1}", .tree = "(frac {(text \"1\")} (slot))", .problem = .missing_argument },
     };
     for (cases) |c| {

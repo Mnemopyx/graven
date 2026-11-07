@@ -619,6 +619,10 @@ var comp_accept: ?usize = null;
 var comp_dismissed_at: ?usize = null;
 const comp_max = 8;
 
+/// While the expression line has focus: what it edits and where its cursor
+/// is, so the canvas draws the cursor in the rendered label too.
+var expr_caret: ?struct { target: ExprTarget, offset: usize } = null;
+
 /// The command name being typed just before the cursor: the backslash's
 /// offset and the letters after it.
 fn partialCommand(text: []const u8, cur: usize) ?struct { at: usize, prefix: []const u8 } {
@@ -676,7 +680,17 @@ fn expressionLine() !void {
         e.handle(@src(), dvui.currentWindow().data());
     };
 
-    // Tab moves to the next argument slot, before the entry sees it.
+    // Otherwise Tab moves to the next argument slot, taken before the
+    // entry sees it, as the entry would move focus.
+    var next_slot = false;
+    if (was_focused) for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.code == .tab and (k.action == .down or k.action == .repeat)) {
+            e.handle(@src(), dvui.currentWindow().data());
+            next_slot = true;
+        }
+    };
     var te = dvui.textEntry(@src(), .{ .text_initial = content }, .{
         .expand = .horizontal,
         .gravity_y = 0.5,
@@ -684,14 +698,7 @@ fn expressionLine() !void {
         .id_extra = @truncate(key),
     });
     const focused = te.data().id == dvui.focusedWidgetId();
-    if (focused) for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.code == .tab and (k.action == .down or k.action == .repeat)) {
-            e.handle(@src(), te.data());
-            nextSlot(te);
-        }
-    };
+    if (next_slot) nextSlot(te);
     // Kept in step with edits made elsewhere (the Text property).
     if (!focused and !std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
     expr_entry_id = te.data().id;
@@ -714,6 +721,10 @@ fn expressionLine() !void {
     };
     if (comp_index >= comp.items.len) comp_index = 0;
     const entry_rect = te.data().borderRectScale().r;
+    // The canvas caret follows; redraw when it moves.
+    const caret: @TypeOf(expr_caret) = if (focused) .{ .target = target, .offset = te.textLayout.selection.cursor } else null;
+    if (!std.meta.eql(caret, expr_caret)) dvui.refresh(null, @src(), null);
+    expr_caret = caret;
     const text = te.textGet();
     const changed = !std.mem.eql(u8, text, content);
     if (changed) try target.store(text);
@@ -1451,6 +1462,13 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             }
         }
         if (show_construction) drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
+        if (caretIn(pi, l)) |c| {
+            const x = l.origin.x + o.x + d.x + c.x;
+            const y = l.origin.y + o.y + d.y;
+            const a = state.view.toPx(area, .{ .x = x, .y = y + c.y0 });
+            const b = state.view.toPx(area, .{ .x = x, .y = y + c.y1 });
+            dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+        }
     }
     // The selected panel label: its ink box, with a little room.
     switch (state.context) {
@@ -1460,6 +1478,18 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         },
         else => {},
     }
+}
+
+/// The expression line's cursor in placed label `l` of panel `pi`, if it
+/// is the one being edited.
+fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
+    const c = expr_caret orelse return null;
+    const mine = switch (c.target) {
+        .panel_label => |t| t.panel == pi and l.tile == null and l.slot == t.index,
+        .tile_slot => |t| l.tile != null and std.meta.eql(l.tile.?, t.tile) and l.slot == t.slot,
+    };
+    if (!mine) return null;
+    return l.render.caret(@intCast(c.offset));
 }
 
 /// View › Show text construction: text as outlines over a translucent fill,

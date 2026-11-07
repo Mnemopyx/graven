@@ -16,6 +16,7 @@ pub const profile = @import("profile.zig");
 
 pub const Face = font.Face;
 pub const Render = render.Render;
+pub const Caret = render.Caret;
 pub const Anchor = render.Anchor;
 pub const renderRun = render.renderRun;
 pub const renderLabel = label.renderLabel;

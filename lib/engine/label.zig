@@ -701,6 +701,7 @@ const Builder = struct {
                 .gid = g.gid,
                 .transform = Affine.scale(s).then(Affine.translate(gx, gy)),
                 .element = element_id,
+                .source = t.source[start + g.cluster],
                 .faint = t.faint,
             };
             ink = ink.join(try render.glyphInk(b.a, face, item));
@@ -1429,4 +1430,23 @@ test "a fraction centres its parts on a rule on the axis, clear by the gap" {
     try testing.expect(rule.x0 < den.x0 and rule.x1 > den.x1);
     // Parts at script size: the H is a scaled capital.
     try testing.expectApproxEqAbs(7 * ctx.script_scale, num.y1 - num.y0, 0.05);
+}
+
+test "the caret follows the source offset through the drawing" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderTest(&ctx, "AB^{2}");
+    defer r.deinit();
+    const a = r.caret(0).?;
+    const b = r.caret(1).?;
+    const after_b = r.caret(2).?;
+    const in_script = r.caret(5).?;
+    try testing.expect(a.x < b.x and b.x <= after_b.x);
+    // Inside the superscript, after the 2: further right, and smaller.
+    try testing.expect(in_script.x > b.x);
+    try testing.expect(in_script.y1 - in_script.y0 < a.y1 - a.y0);
+    try testing.expect(in_script.y0 > a.y0);
+    // Past the end stays at the end.
+    try testing.expectApproxEqAbs(in_script.x, r.caret(99).?.x, 1e-9);
 }
