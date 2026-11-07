@@ -181,9 +181,13 @@ pub const Place = struct {
     blank: f64 = 0,
 };
 
+/// A track: a row, or a column.
 pub const Row = struct {
-    /// Space above the row, in u.
+    /// Space before the track across the region (above a row, left of a
+    /// column), u.
     gap: f64 = 0,
+    /// How far along the track its first place starts, u.
+    offset: f64 = 0,
     places: std.ArrayList(Place) = .empty,
 };
 
@@ -412,7 +416,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -794,6 +798,26 @@ pub const Model = struct {
             _ = row.places.orderedRemove(index);
             m.revision += 1;
         }
+    }
+
+    /// Moves a track `along` u along its length and `across` u across the
+    /// region (down for a row, right for a column), as a whole. Across, the
+    /// next track keeps its place: the space between them changes. A move
+    /// that would start the track before the region's start, or run it
+    /// into a neighbour, is refused with `NoRoom`.
+    pub fn moveTrack(m: *Model, panel: usize, region: usize, track_: usize, along: f64, across: f64) Error!void {
+        const rows = m.panels.items[panel].regions.items[region].rows.items;
+        if (track_ >= rows.len) return error.NoSuchRow;
+        const tol = 1e-9;
+        const row = &rows[track_];
+        const offset = row.offset + along;
+        const gap = row.gap + across;
+        if (offset < -tol or gap < -tol) return error.NoRoom;
+        if (track_ + 1 < rows.len and rows[track_ + 1].gap - across < -tol) return error.NoRoom;
+        row.offset = @max(0, offset);
+        row.gap = @max(0, gap);
+        if (track_ + 1 < rows.len) rows[track_ + 1].gap = @max(0, rows[track_ + 1].gap - across);
+        m.revision += 1;
     }
 
     /// Removes tile `id`: it leaves every track it is in, which reflows.

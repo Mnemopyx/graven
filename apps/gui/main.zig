@@ -616,18 +616,20 @@ fn overlays() !void {
         defer fw.deinit();
         try propertiesContent();
     }
-    if (track_cursor != null) {
-        // The insert palette: across the top of the canvas, between the
-        // panes.
+    // A key palette across the top of the canvas, between the panes: the
+    // insert palette while there is a flow cursor, the move palette for a
+    // selected track.
+    const moving_track = track_cursor == null and state.context == .row;
+    if (track_cursor != null or moving_track) {
         const left: f32 = if (panes.tree == .overlay) tree_width + 2 * g else g;
         const right: f32 = if (panes.properties == .overlay) properties_width + 2 * g else g;
-        var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = palette_height };
+        var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = if (moving_track) move_palette_height else palette_height };
         // Lighter than the panes: the tracks being filled show through.
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4).override(.{
             .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(palette_alpha) },
         }));
         defer fw.deinit();
-        trackPalette();
+        if (moving_track) movePalette() else trackPalette();
     }
     if (panes.status == .overlay) {
         var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + c.h - status_height - g, .w = c.w - 2 * g, .h = status_height };
@@ -1231,7 +1233,12 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
         .background = selected,
         .color_fill = if (selected) .{ .color = dvui.themeGet().focus.opacity(0.25) } else null,
         .font = styled(if (depth == 0) .theme(.heading) else .theme(.body), default),
-    })) state.context = ctx;
+    })) {
+        state.context = ctx;
+        // The keyboard goes to the canvas, where keys act on the context
+        // (Delete, arrows moving a track).
+        if (canvas_id) |cid| dvui.focusWidget(cid, null, null);
+    }
     return open;
 }
 
@@ -1936,6 +1943,16 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     canvas_id = box.data().id;
     validateCursor();
     for (dvui.events()) |*e| {
+        // A selected track's arrow keys move it, while the canvas or the
+        // palette has the keyboard.
+        if (e.evt == .key and track_cursor == null and state.context == .row and !e.handled and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and moveTrackKey(k.code)) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         // The flow cursor's keys, while the canvas or the palette has the
         // keyboard: never from a text entry.
         if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
@@ -2737,6 +2754,7 @@ fn properties() !void {
             const row = region.rows.items[r.row];
             propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, region.rows.items.len, region.name }, 1);
             propText(if (region.major == .row) "Gap above" else "Gap before", "{d} u", .{row.gap}, 2);
+            propText("Offset along", "{d} u", .{row.offset}, 4);
             propText("Tiles", "{d}", .{row.places.items.len}, 3);
         },
         .tile => |id| try tileProperties(id),
@@ -3317,7 +3335,7 @@ fn statusContent() void {
 
 // Populating tracks --------------------------------------------------------
 //
-// With a region (or one of its tracks) as the context, a click in its
+// With a region as the context, a click in its
 // tracks puts a flow cursor between places. Tiles and blanks go in at the
 // cursor from the insert palette, or by its keys: digits for tiles, the
 // row below them for blanks. Backspace removes the place before the
@@ -3332,6 +3350,7 @@ var canvas_id: ?dvui.Id = null;
 var palette_ids: [24]dvui.Id = undefined;
 var palette_id_count: usize = 0;
 const palette_height = 168;
+const move_palette_height = 124;
 /// How opaque the palette and its buttons are over the canvas.
 const palette_alpha = 0.6;
 const palette_button_alpha = 0.45;
@@ -3373,11 +3392,11 @@ fn paletteFor(panel: usize, region: usize) ?InsertPalette {
     return out;
 }
 
-/// The region the context is, or holds the context's track.
+/// The region the context is, which the flow cursor belongs to. A track
+/// as the context is for moving it, not filling it.
 fn contextRegion() ?struct { panel: usize, region: usize } {
     return switch (state.context) {
         .region => |r| .{ .panel = r.panel, .region = r.region },
-        .row => |r| .{ .panel = r.panel, .region = r.region },
         else => null,
     };
 }
@@ -3573,5 +3592,141 @@ fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
     }
     bw.drawFocus();
     bw.deinit();
+    return clicked;
+}
+
+// Moving tracks ------------------------------------------------------------
+//
+// With a track (a row or a column) as the context, the arrow keys, or the
+// move palette's inverted-T buttons, move it in its prototype's smallest
+// step: along its length, or across the region, its neighbours staying put.
+
+/// The step a region's tracks move in: the finer of its prototype's size
+/// steps along and across (0.25 u for keyboard keys).
+fn moveStep(panel: usize, region: usize) f64 {
+    const r = state.model.panels.items[panel].regions.items[region];
+    if (state.model.prototypes.items.len == 0) return 0.25;
+    const p = state.model.prototypes.items[r.prototype orelse 0];
+    return @min(p.step(r.major, .along), p.step(r.major, .across));
+}
+
+const Arrow = enum { up, left, down, right };
+
+/// Moves the selected track one step the way an arrow points, on screen.
+fn moveTrackArrow(arrow: Arrow) void {
+    const t = switch (state.context) {
+        .row => |r| r,
+        else => return,
+    };
+    const major = state.model.panels.items[t.panel].regions.items[t.region].major;
+    const s = moveStep(t.panel, t.region);
+    // Rows run right and stack down; columns run down and set right.
+    var along: f64 = 0;
+    var across: f64 = 0;
+    switch (arrow) {
+        .left => if (major == .row) {
+            along = -s;
+        } else {
+            across = -s;
+        },
+        .right => if (major == .row) {
+            along = s;
+        } else {
+            across = s;
+        },
+        .up => if (major == .row) {
+            across = -s;
+        } else {
+            along = -s;
+        },
+        .down => if (major == .row) {
+            across = s;
+        } else {
+            along = s;
+        },
+    }
+    state.model.moveTrack(t.panel, t.region, t.row, along, across) catch |err| {
+        state.status = if (err == error.NoRoom) "No room to move it that way. " else "It did not move. ";
+        return;
+    };
+    state.status = "";
+}
+
+fn moveTrackKey(code: dvui.enums.Key) bool {
+    const arrow: Arrow = switch (code) {
+        .up => .up,
+        .left => .left,
+        .down => .down,
+        .right => .right,
+        else => return false,
+    };
+    moveTrackArrow(arrow);
+    return true;
+}
+
+/// The move palette: the arrow keys as an inverted T, each moving the
+/// selected track one step, and where it now sits.
+fn movePalette() void {
+    palette_id_count = 0;
+    const t = switch (state.context) {
+        .row => |r| r,
+        else => return,
+    };
+    const region = state.model.panels.items[t.panel].regions.items[t.region];
+    const row = region.rows.items[t.row];
+    const s = moveStep(t.panel, t.region);
+    const word = trackWord(region.major);
+    var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer body.deinit();
+    {
+        var keys = dvui.box(@src(), .{ .dir = .vertical }, .{ .padding = .{ .x = 6, .y = 4, .w = 12 } });
+        defer keys.deinit();
+        {
+            var top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+            defer top.deinit();
+            if (arrowButton(.up, 0)) moveTrackArrow(.up);
+        }
+        var bottom = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+        defer bottom.deinit();
+        for ([_]Arrow{ .left, .down, .right }, 1..) |a, i| {
+            if (arrowButton(a, i)) moveTrackArrow(a);
+        }
+    }
+    var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5 });
+    defer info.deinit();
+    dvui.label(@src(), "Move {s} {d} of {s} in {d} u steps", .{ word, t.row + 1, region.name, s }, .{ .font = dvui.Font.theme(.heading) });
+    dvui.label(@src(), "Arrow keys or these buttons move it; its neighbours stay where they are.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
+    dvui.label(@src(), "{d} u along · {d} u {s}", .{ row.offset, row.gap, if (region.major == .row) "below the row above" else "right of the column before" }, .{ .font = dvui.Font.theme(.mono) });
+}
+
+/// One arrow key of the move palette: its arrow, drawn as a keycap.
+fn arrowButton(arrow: Arrow, i: usize) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{
+        .id_extra = i,
+        .margin = .all(2),
+        .padding = .all(6),
+        .min_size_content = .{ .w = 34, .h = 34 },
+        .corners = .all(5),
+        .border = .all(1),
+        .color_fill = .{ .color = dvui.themeGet().color(.control, .fill).opacity(palette_button_alpha) },
+    });
+    bw.processEvents();
+    bw.drawBackground();
+    const clicked = bw.clicked();
+    if (palette_id_count < palette_ids.len) {
+        palette_ids[palette_id_count] = bw.data().id;
+        palette_id_count += 1;
+    }
+    const icon = switch (arrow) {
+        .up => dvui.entypo.arrow_bold_up,
+        .left => dvui.entypo.arrow_bold_left,
+        .down => dvui.entypo.arrow_bold_down,
+        .right => dvui.entypo.arrow_bold_right,
+    };
+    dvui.icon(@src(), @tagName(arrow), icon, .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .min_size_content = .{ .w = 20, .h = 20 } });
+    bw.drawFocus();
+    bw.deinit();
+    if (clicked) if (canvas_id) |id| dvui.focusWidget(id, null, null);
     return clicked;
 }

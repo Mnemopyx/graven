@@ -279,16 +279,18 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             across += row.gap * region.pitch;
             items.clearRetainingCapacity();
             links.clearRetainingCapacity();
-            for (row.places.items) |p| {
+            for (row.places.items, 0..) |p, pi_| {
+                // The track's offset holds its first place off its start.
+                const lead = if (pi_ == 0) row.offset * region.pitch else 0;
                 const id = p.tile orelse {
                     // A blank: a spacer of its length.
-                    try links.append(a, .{ .min = p.gap * region.pitch });
+                    try links.append(a, .{ .min = lead + p.gap * region.pitch });
                     try items.append(a, .{ .size = p.blank * region.pitch });
                     continue;
                 };
                 const t = m.tileConst(id);
                 const pin = placed_at.get(id);
-                try links.append(a, .{ .min = if (pin == null) p.gap * region.pitch else 0 });
+                try links.append(a, .{ .min = if (pin == null) lead + p.gap * region.pitch else 0 });
                 try items.append(a, .{ .size = (if (rows) t.w else t.h) * region.pitch, .pin = pin });
             }
             try links.append(a, .{});
@@ -800,4 +802,39 @@ test "blanks take their length in a track, and every place's span is reported" {
     // The second tile starts after the blank.
     try testing.expectApproxEqAbs(@as(f64, 15), s.tiles[1].pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
+}
+
+test "a track moves as a whole along and across; its neighbour stays" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 100, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 4, .pitch = 10 });
+    for (0..2) |t| for (0..2) |i| {
+        _ = try m.insertTile(p, r, t, i, key, 1);
+    };
+    // Row 2 down 0.5 u, then row 1 0.5 u along and 0.25 u down: row 2
+    // stays where it was.
+    try m.moveTrack(p, r, 1, 0, 0.5);
+    try m.moveTrack(p, r, 0, 0.5, 0.25);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 5), s.tiles[0].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 97.5), s.tiles[0].pitch_box.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), s.tiles[2].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 85), s.tiles[2].pitch_box.y1, 1e-9);
+    // Not before the region's start, and not into row 2.
+    try testing.expectError(error.NoRoom, m.moveTrack(p, r, 0, -1, 0));
+    try m.moveTrack(p, r, 0, 0, 0.25);
+    try testing.expectError(error.NoRoom, m.moveTrack(p, r, 0, 0, 0.25));
+    try testing.expectError(error.NoRoom, m.moveTrack(p, r, 1, 0, -0.25));
+    try m.moveTrack(p, r, 0, 0, -0.25);
+    try m.moveTrack(p, r, 0, -0.5, -0.25);
+    try testing.expectEqual(0, m.panels.items[p].regions.items[r].rows.items[0].offset);
 }
