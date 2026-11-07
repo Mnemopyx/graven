@@ -713,13 +713,10 @@ pub const Model = struct {
         count: usize,
         length: f64,
         pitch: f64,
-        /// Designators for the tiles it makes: this and a number, the
-        /// lowest not taken.
-        prefix: []const u8 = "T",
     };
 
-    /// Adds a region of `count` tracks of tiles made from `prototype`, each
-    /// track as thick as its smallest tile and filled with its smallest
+    /// Adds a region of `count` empty tracks for tiles made from
+    /// `prototype`, each as thick as its smallest tile; the user adds the
     /// tiles. Returns the region's index.
     pub fn addTracks(m: *Model, panel: usize, t: Tracks) Error!usize {
         if (t.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
@@ -737,25 +734,7 @@ pub const Model = struct {
             .major = t.major,
             .prototype = t.prototype,
         });
-        const per_track: usize = @intFromFloat(@floor(t.length / along + 1e-9));
-        var name_buf: [64]u8 = undefined;
-        var n: usize = 1;
-        for (0..t.count) |track| {
-            _ = try m.addRow(panel, r, 0);
-            for (0..per_track) |_| {
-                const name = while (true) : (n += 1) {
-                    const candidate = std.fmt.bufPrint(&name_buf, "{s}{d}", .{ t.prefix, n }) catch return error.BadSize;
-                    if (m.findTile(candidate) == null) break candidate;
-                };
-                const id = try m.addTile(.{
-                    .designator = name,
-                    .prototype = t.prototype,
-                    .w = if (t.major == .row) along else across,
-                    .h = if (t.major == .row) across else along,
-                });
-                try m.place(panel, r, track, null, .{ .tile = id });
-            }
-        }
+        for (0..t.count) |_| _ = try m.addRow(panel, r, 0);
         return r;
     }
 
@@ -1279,7 +1258,7 @@ test "a prototype's smallest size and size step follow which way its tracks run"
     try std.testing.expectEqual(1, bar.step(.row, .across));
 }
 
-test "tracks are added filled with the prototype's smallest tiles; a removed tile leaves them" {
+test "tracks are added empty; a removed tile leaves them" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
@@ -1289,18 +1268,17 @@ test "tracks are added filled with the prototype's smallest tiles; a removed til
     try std.testing.expectEqual(4.5, region.w);
     try std.testing.expectEqual(2, region.h);
     try std.testing.expectEqual(2, region.rows.items.len);
-    // 4.5 u of 1 u keys: four to a row, the rest slack.
-    try std.testing.expectEqual(4, region.rows.items[0].places.items.len);
-    try std.testing.expect(m.findTile("T8") != null);
+    try std.testing.expectEqual(0, region.rows.items[0].places.items.len);
+    try std.testing.expectEqual(0, m.tiles.items.len);
 
     // Columns: as thick as the smallest width, as long as asked.
     const c = try m.addTracks(p, .{ .name = "side", .origin = .{ .x = 120, .y = 95 }, .major = .column, .prototype = key, .count = 3, .length = 2, .pitch = 19.05 });
     const side = m.panels.items[p].regions.items[c];
     try std.testing.expectEqual(3, side.w);
     try std.testing.expectEqual(2, side.h);
-    try std.testing.expect(m.findTile("T9") != null);
     try std.testing.expectError(error.BadSize, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .prototype = key, .count = 1, .length = 0.5, .pitch = 19.05 }));
 
+    for (0..4) |i| _ = try m.insertTile(p, r, 0, i, key, 1);
     const t1 = m.findTile("T1").?;
     m.removeTile(t1);
     try std.testing.expectEqual(null, m.findTile("T1"));
@@ -1313,6 +1291,8 @@ test "tiles and blanks are inserted and removed in flow order" {
     const p = try m.addPanel("board", 200, 100);
     const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.25, 1.5 } });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 1, .length = 2, .pitch = 19.05 });
+    _ = try m.insertTile(p, r, 0, 0, key, 1);
+    _ = try m.insertTile(p, r, 0, 1, key, 1);
     // T1 T2; insert a 1.5 u tile between them, and a blank before it.
     const t = try m.insertTile(p, r, 0, 1, key, 1.5);
     try m.insertBlank(p, r, 0, 1, 0.25);

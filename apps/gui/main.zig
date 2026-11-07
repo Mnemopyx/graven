@@ -1518,6 +1518,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     const px = dvui.windowNaturalScale();
     const radius: f32 = @floatCast(1.0 * state.view.ppm);
     const o = panelOrigin(pi);
+    // Every track's band, faintly, so empty tracks show where tiles go.
+    for (placed.tracks) |t| {
+        state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge.opacity(0.35) } });
+    }
     for (placed.tiles) |t| {
         const flagged = tileFlag(placed, t.id);
         const body = state.view.rect(area, onSheet(pi, t.body));
@@ -2380,8 +2384,9 @@ fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
     });
 }
 
-/// Makes the tracks a finished drag planned, filled with the prototype's
-/// smallest tiles, and makes their region the context. One use ends the tool.
+/// Makes the empty tracks a finished drag planned, makes their region the
+/// context and puts the flow cursor at the start of the first, ready for
+/// tiles. One use ends the tool.
 fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     defer state.tool = .select;
     const plan = planTracks(from, at) orelse return;
@@ -2404,7 +2409,9 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         state.status = "The tracks were not added. ";
         return;
     };
+    // Empty tracks, the user fills them: the cursor waits at the start.
     state.context = .{ .region = .{ .panel = plan.panel, .region = r } };
+    track_cursor = .{ .panel = plan.panel, .region = r, .track = 0, .index = 0 };
     state.expanded.put(state.gpa, Context.key(.{ .panel = plan.panel }), true) catch {};
 }
 

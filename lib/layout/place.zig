@@ -753,6 +753,9 @@ test "columns run down from the region's top and set to the right" {
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key", .heights = &.{ 1, 2 } });
     const r = try m.addTracks(p, .{ .name = "col", .origin = .{ .x = 10, .y = 90 }, .major = .column, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
+    for (0..2) |c| for (0..3) |i| {
+        _ = try m.insertTile(p, r, c, i, key, 1);
+    };
     // The first tile of the first column twice as tall: the rest move down.
     const first = m.panels.items[p].regions.items[r].rows.items[0].places.items[0].tile.?;
     try m.setTileSize(first, 1, 2);
@@ -783,6 +786,7 @@ test "blanks take their length in a track, and every place's span is reported" {
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key" });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 1, .length = 4, .pitch = 10 });
+    for (0..4) |i| _ = try m.insertTile(p, r, 0, i, key, 1);
     try m.insertBlank(p, r, 0, 1, 0.5);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
