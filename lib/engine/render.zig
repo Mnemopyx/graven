@@ -27,12 +27,17 @@ pub const GlyphItem = struct {
     /// Font units to the label frame: size, any style transform, placement.
     transform: Affine,
     element: u32,
+    /// Preview only: source shown literally because it is not (yet) valid;
+    /// not ink.
+    faint: bool = false,
 };
 
 pub const PathItem = struct {
     /// Already in the label frame, mm.
     outline: Outline,
     element: u32,
+    /// `placeholder` marks an empty slot in a preview: not ink.
+    role: enum { ink, placeholder } = .ink,
 };
 
 pub const Item = union(enum) {
@@ -108,6 +113,9 @@ pub const Render = struct {
     ink: Box,
     diagnostics: []const Diagnostic,
     elements: []const Element = &.{},
+    /// From a preview render: what the lenient parse found wrong. Empty for
+    /// valid markup.
+    syntax: []const @import("markup.zig").Diagnostic = &.{},
     /// With a hard box: where the anchor (the label frame's origin) ended up,
     /// in the box's coordinates, after shifting away from its edges.
     anchor_at: ?geom.Point = null,

@@ -14,6 +14,12 @@
 //! - Constructs not yet adopted (\sqrt, \frac, ...) are errors, as are
 //!   unknown commands: nothing passes through unparsed.
 //!
+//! A preview parse (`parsePreview`) never fails, for showing text while it
+//! is typed: each problem is recorded and recovered from locally. A missing
+//! argument becomes a placeholder, an unknown or unfinished command (\sq)
+//! faint literal text, an unclosed '{' is closed at the end, and a stray
+//! '}' is literal. Valid input gives the same tree either way.
+//!
 //! Every node records the byte range of source it came from, and every
 //! byte of resolved text records the source byte it came from, so a
 //! problem found later (a missing glyph) can be reported in the source.
@@ -35,6 +41,8 @@ pub const Node = union(enum) {
     accent: Accent,
     space: Space,
     line_break: Break,
+    /// Preview only: an empty slot where an argument is still to come.
+    placeholder: Placeholder,
 
     pub fn span(n: Node) Span {
         return switch (n) {
@@ -51,6 +59,13 @@ pub const Text = struct {
     variant: Variant,
     /// An operator name such as \ln: upright, and spaced as an operator.
     operator: bool = false,
+    /// Preview only: source shown literally because it is not (yet) valid,
+    /// an unfinished command say; drawn faint.
+    faint: bool = false,
+    span: Span,
+};
+
+pub const Placeholder = struct {
     span: Span,
 };
 
@@ -134,6 +149,25 @@ pub fn parse(arena: Allocator, src: []const u8, diag: *Diagnostic) Error!Group {
     return parseWith(arena, src, &entities.Table.builtin, diag);
 }
 
+/// A parse that never fails, for previewing text as it is typed; every
+/// problem is appended to `problems` and recovered from. See the file's
+/// documentation.
+pub fn parsePreview(arena: Allocator, src: []const u8, names: *const entities.Table, problems: *std.ArrayList(Diagnostic)) Allocator.Error!Group {
+    if (src.len > std.math.maxInt(u32)) return error.OutOfMemory;
+    if (!std.unicode.utf8ValidateSlice(src)) {
+        try problems.append(arena, .{ .kind = .invalid_utf8, .offset = 0 });
+        return .{ .items = &.{}, .span = .{ .start = 0, .end = @intCast(src.len) } };
+    }
+    var unused: Diagnostic = undefined;
+    var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = &unused, .problems = problems };
+    const items = p.list(.default, false, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Every failure is recovered from in preview.
+        error.Syntax => unreachable,
+    };
+    return .{ .items = items, .span = .{ .start = 0, .end = @intCast(src.len) } };
+}
+
 /// As `parse`, with a configured entity table.
 pub fn parseWith(arena: Allocator, src: []const u8, names: *const entities.Table, diag: *Diagnostic) Error!Group {
     if (src.len > std.math.maxInt(u32)) return error.OutOfMemory;
@@ -165,10 +199,37 @@ const Parser = struct {
     i: u32 = 0,
     names: *const entities.Table,
     diag: *Diagnostic,
+    /// Set for a preview parse: problems are recorded here and recovered
+    /// from, rather than failing.
+    problems: ?*std.ArrayList(Diagnostic) = null,
 
     fn fail(p: *Parser, kind: ErrorKind, at: u32) Error {
         p.diag.* = .{ .kind = kind, .offset = at };
         return error.Syntax;
+    }
+
+    /// In a strict parse, fails; in a preview, records the problem so the
+    /// caller can recover.
+    fn problem(p: *Parser, kind: ErrorKind, at: u32) Error!void {
+        const found = p.problems orelse return p.fail(kind, at);
+        try found.append(p.a, .{ .kind = kind, .offset = at });
+    }
+
+    /// Source shown literally and faint (preview only).
+    fn faint(p: *Parser, start: u32, end: u32) Error!Node {
+        const source = try p.a.alloc(u32, end - start);
+        for (source, 0..) |*s, k| s.* = start + @as(u32, @intCast(k));
+        return .{ .text = .{
+            .utf8 = p.src[start..end],
+            .source = source,
+            .variant = .upright,
+            .faint = true,
+            .span = .{ .start = start, .end = end },
+        } };
+    }
+
+    fn placeholder(at: u32) Node {
+        return .{ .placeholder = .{ .span = .{ .start = at, .end = at } } };
     }
 
     fn peek(p: *Parser) ?u8 {
@@ -182,12 +243,19 @@ const Parser = struct {
         var run: Run = .{};
         while (true) {
             const c = p.peek() orelse {
-                if (closing) return p.fail(.missing_close, open_at);
+                // In a preview an unclosed group closes at the end.
+                if (closing) try p.problem(.missing_close, open_at);
                 break;
             };
             switch (c) {
                 '}' => {
-                    if (!closing) return p.fail(.unmatched_close, p.i);
+                    if (!closing) {
+                        try p.problem(.unmatched_close, p.i);
+                        try run.flush(p.a, &items, variant);
+                        try items.append(p.a, try p.faint(p.i, p.i + 1));
+                        p.i += 1;
+                        continue;
+                    }
                     p.i += 1;
                     break;
                 },
@@ -196,8 +264,13 @@ const Parser = struct {
                     try items.append(p.a, .{ .group = try p.group(variant, text_mode) });
                 },
                 '^', '_' => {
-                    if (text_mode) return p.fail(.script_in_text, p.i);
                     try run.flush(p.a, &items, variant);
+                    if (text_mode) {
+                        try p.problem(.script_in_text, p.i);
+                        try items.append(p.a, try p.faint(p.i, p.i + 1));
+                        p.i += 1;
+                        continue;
+                    }
                     try p.attach(&items, variant);
                 },
                 '%' => while (p.peek()) |d| : (p.i += 1) {
@@ -211,7 +284,11 @@ const Parser = struct {
                 else => {
                     const at = p.i;
                     const cp = p.char() orelse return p.fail(.invalid_utf8, at);
-                    if (cp < 0x20 or cp == 0x7F) return p.fail(.control_character, at);
+                    if (cp < 0x20 or cp == 0x7F) {
+                        // In a preview the control character is skipped.
+                        try p.problem(.control_character, at);
+                        continue;
+                    }
                     try run.add(p.a, cp, at);
                 },
             }
@@ -237,14 +314,23 @@ const Parser = struct {
     }
 
     fn braced(p: *Parser, variant: Variant, text_mode: bool) Error!Group {
-        if (p.peek() != '{') return p.fail(.expected_brace, p.i);
+        if (p.peek() != '{') {
+            try p.problem(.expected_brace, p.i);
+            const items = try p.a.alloc(Node, 1);
+            items[0] = placeholder(p.i);
+            return .{ .items = items, .span = .{ .start = p.i, .end = p.i } };
+        }
         return p.group(variant, text_mode);
     }
 
     fn command(p: *Parser, items: *std.ArrayList(Node), run: *Run, variant: Variant, text_mode: bool) Error!void {
         const at = p.i;
         p.i += 1; // the backslash
-        const first = p.peek() orelse return p.fail(.backslash_at_end, at);
+        const first = p.peek() orelse {
+            try p.problem(.backslash_at_end, at);
+            try run.flush(p.a, items, variant);
+            return items.append(p.a, try p.faint(at, p.i));
+        };
         var name: []const u8 = undefined;
         if (std.ascii.isAlphabetic(first)) {
             const s = p.i;
@@ -280,7 +366,8 @@ const Parser = struct {
                 };
                 if (kind) |k| break :blk .{ .space = .{ .kind = k, .span = span } };
                 if (name[0] == '\\') break :blk .{ .line_break = .{ .kind = .hard, .span = span } };
-                return p.fail(.unknown_command, at);
+                try p.problem(.unknown_command, at);
+                break :blk try p.faint(at, span.end);
             }
             if (std.mem.eql(u8, name, "quad")) break :blk .{ .space = .{ .kind = .quad, .span = span } };
             if (std.mem.eql(u8, name, "qquad")) break :blk .{ .space = .{ .kind = .qquad, .span = span } };
@@ -315,8 +402,9 @@ const Parser = struct {
                 const body = try p.one(try p.argument(variant, text_mode, at));
                 break :blk .{ .accent = .{ .kind = k, .body = body, .span = .{ .start = at, .end = p.i } } };
             }
-            if (not_adopted.has(name)) return p.fail(.not_adopted, at);
-            return p.fail(.unknown_command, at);
+            // In a preview an unknown or unfinished command shows as typed.
+            try p.problem(if (not_adopted.has(name)) .not_adopted else .unknown_command, at);
+            break :blk try p.faint(at, span.end);
         };
         try items.append(p.a, node);
     }
@@ -330,11 +418,17 @@ const Parser = struct {
             if (!std.ascii.isHex(d)) break;
         }
         const hex = p.src[s..p.i];
-        if (p.peek() != '}') return p.fail(.missing_close, s - 1);
+        // In a preview a bad codepoint is the replacement character.
+        if (p.peek() != '}') {
+            try p.problem(.missing_close, s - 1);
+            return 0xFFFD;
+        }
         p.i += 1;
-        if (hex.len == 0 or hex.len > 6) return p.fail(.invalid_codepoint, at);
-        const v = std.fmt.parseInt(u32, hex, 16) catch return p.fail(.invalid_codepoint, at);
-        if (v > 0x10FFFF or (v >= 0xD800 and v <= 0xDFFF)) return p.fail(.invalid_codepoint, at);
+        const v = std.fmt.parseInt(u32, hex, 16) catch 0x110000;
+        if (hex.len == 0 or hex.len > 6 or v > 0x10FFFF or (v >= 0xD800 and v <= 0xDFFF)) {
+            try p.problem(.invalid_codepoint, at);
+            return 0xFFFD;
+        }
         return @intCast(v);
     }
 
@@ -353,24 +447,38 @@ const Parser = struct {
     /// A script's or accent's argument: a braced group, one command, or one
     /// grapheme cluster.
     fn argument(p: *Parser, variant: Variant, text_mode: bool, owner: u32) Error!Node {
-        const c = p.peek() orelse return p.fail(.missing_argument, owner);
+        // In a preview a missing argument is a placeholder.
+        const c = p.peek() orelse {
+            try p.problem(.missing_argument, owner);
+            return placeholder(p.i);
+        };
         switch (c) {
             '{' => return .{ .group = try p.group(variant, text_mode) },
-            '}', '^', '_', ' ', '~', '%' => return p.fail(.missing_argument, p.i),
+            '}', '^', '_', ' ', '~', '%' => {
+                try p.problem(.missing_argument, p.i);
+                return placeholder(p.i);
+            },
             '\\' => {
                 var items: std.ArrayList(Node) = .empty;
                 var run: Run = .{};
                 const at = p.i;
                 try p.command(&items, &run, variant, text_mode);
                 try run.flush(p.a, &items, variant);
-                if (items.items.len != 1) return p.fail(.missing_argument, at);
+                if (items.items.len != 1) {
+                    try p.problem(.missing_argument, at);
+                    if (items.items.len == 0) return placeholder(p.i);
+                    return .{ .group = .{ .items = try items.toOwnedSlice(p.a), .span = .{ .start = at, .end = p.i } } };
+                }
                 return items.items[0];
             },
             else => {
                 var run: Run = .{};
                 const at = p.i;
                 const cp = p.char() orelse return p.fail(.invalid_utf8, at);
-                if (cp < 0x20 or cp == 0x7F) return p.fail(.control_character, at);
+                if (cp < 0x20 or cp == 0x7F) {
+                    try p.problem(.control_character, at);
+                    return placeholder(at);
+                }
                 try run.add(p.a, cp, at);
                 // Keep combining marks and joiners with their base.
                 while (p.i < p.src.len) {
@@ -392,14 +500,22 @@ const Parser = struct {
     /// Turns the last item into a base with scripts.
     fn attach(p: *Parser, items: *std.ArrayList(Node), variant: Variant) Error!void {
         const at = p.i;
-        if (items.items.len == 0) return p.fail(.script_without_base, at);
+        if (items.items.len == 0) {
+            // In a preview a script with no base gets a placeholder base.
+            try p.problem(.script_without_base, at);
+            try items.append(p.a, placeholder(at));
+        }
         var base = items.items[items.items.len - 1];
         switch (base) {
             .text => |t| if (!t.operator) {
                 // The base is the last grapheme cluster of a run; an operator
                 // name (\sin) is a base as a whole.
                 const cut = lastCluster(t.utf8);
-                if (isSpace(t.utf8[cut..])) return p.fail(.script_without_base, at);
+                if (isSpace(t.utf8[cut..])) {
+                    try p.problem(.script_without_base, at);
+                    try items.append(p.a, placeholder(at));
+                    return p.attach(items, variant);
+                }
                 if (cut > 0) {
                     items.items[items.items.len - 1] = .{ .text = .{
                         .utf8 = t.utf8[0..cut],
@@ -418,7 +534,11 @@ const Parser = struct {
                     } };
                 }
             },
-            .space, .line_break => return p.fail(.script_without_base, at),
+            .space, .line_break => {
+                try p.problem(.script_without_base, at);
+                try items.append(p.a, placeholder(at));
+                return p.attach(items, variant);
+            },
             .scripts => {},
             else => {},
         }
@@ -436,11 +556,12 @@ const Parser = struct {
             const mark = p.i;
             p.i += 1;
             const arg = try p.one(try p.argument(variant, false, mark));
+            // In a preview a second script of a kind replaces the first.
             if (c == '^') {
-                if (sup != null) return p.fail(.double_superscript, mark);
+                if (sup != null) try p.problem(.double_superscript, mark);
                 sup = arg;
             } else {
-                if (sub != null) return p.fail(.double_subscript, mark);
+                if (sub != null) try p.problem(.double_subscript, mark);
                 sub = arg;
             }
         }
@@ -519,7 +640,7 @@ pub fn dump(w: *std.Io.Writer, items: []const Node) std.Io.Writer.Error!void {
 fn dumpNode(w: *std.Io.Writer, n: Node) std.Io.Writer.Error!void {
     switch (n) {
         .text => |t| {
-            try w.writeAll(if (t.operator) "(op " else "(text ");
+            try w.writeAll(if (t.operator) "(op " else if (t.faint) "(faint " else "(text ");
             if (t.variant != .default) try w.print("{s} ", .{@tagName(t.variant)});
             try w.print("\"{s}\")", .{t.utf8});
         },
@@ -548,6 +669,7 @@ fn dumpNode(w: *std.Io.Writer, n: Node) std.Io.Writer.Error!void {
         },
         .space => |s| try w.print("(space {s})", .{@tagName(s.kind)}),
         .line_break => |b| try w.print("(break {s})", .{@tagName(b.kind)}),
+        .placeholder => try w.writeAll("(slot)"),
     }
 }
 
@@ -660,4 +782,51 @@ test "a configured entity table changes what a name resolves to" {
     try testing.expectEqualStrings("5\u{00B5}F", tree.items[0].text.utf8);
     const default = try parse(arena.allocator(), "5\\micro F", &diag);
     try testing.expectEqualStrings("5\u{03BC}F", default.items[0].text.utf8);
+}
+
+fn previewDump(src: []const u8, problems: *std.ArrayList(Diagnostic), arena: Allocator) ![]const u8 {
+    const tree = try parsePreview(arena, src, &entities.Table.builtin, problems);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try dump(&out.writer, tree.items);
+    return out.written();
+}
+
+test "a preview parse never fails and shows what is still to come" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { src: []const u8, tree: []const u8, problem: ?ErrorKind }{
+        .{ .src = "x^", .tree = "(scripts (text \"x\") ^(slot))", .problem = .missing_argument },
+        .{ .src = "x^{2", .tree = "(scripts (text \"x\") ^{(text \"2\")})", .problem = .missing_close },
+        .{ .src = "\\sq", .tree = "(faint upright \"\\sq\")", .problem = .unknown_command },
+        .{ .src = "a\\", .tree = "(text \"a\") (faint upright \"\\\")", .problem = .backslash_at_end },
+        .{ .src = "a}b", .tree = "(text \"a\") (faint upright \"}\") (text \"b\")", .problem = .unmatched_close },
+        .{ .src = "^2", .tree = "(scripts (slot) ^(text \"2\"))", .problem = .script_without_base },
+        .{ .src = "\\text", .tree = "{(slot)}", .problem = .expected_brace },
+        .{ .src = "x^{2}", .tree = "(scripts (text \"x\") ^{(text \"2\")})", .problem = null },
+    };
+    for (cases) |c| {
+        var problems: std.ArrayList(Diagnostic) = .empty;
+        const got = try previewDump(c.src, &problems, a);
+        try testing.expectEqualStrings(c.tree, got);
+        if (c.problem) |k| {
+            try testing.expect(problems.items.len >= 1);
+            try testing.expectEqual(k, problems.items[0].kind);
+        } else try testing.expectEqual(0, problems.items.len);
+    }
+}
+
+test "valid input parses the same strictly and in preview" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "CAPS LOCK", "x_i^2", "\\hat{x} + \\sin^{-1} y", "A\\\\B", "\\text{ab} \\ohm" }) |src| {
+        var diag: Diagnostic = undefined;
+        const strict = try parse(a, src, &diag);
+        var s1: std.Io.Writer.Allocating = .init(a);
+        try dump(&s1.writer, strict.items);
+        var problems: std.ArrayList(Diagnostic) = .empty;
+        try testing.expectEqualStrings(s1.written(), try previewDump(src, &problems, a));
+        try testing.expectEqual(0, problems.items.len);
+    }
 }

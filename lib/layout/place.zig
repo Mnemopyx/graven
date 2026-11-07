@@ -56,7 +56,9 @@ pub const Issue = struct {
         label_overflow,
         /// A label has characters no face covers.
         missing_glyph,
-        /// A label's markup does not parse.
+        /// A label's markup does not parse. It is stored as typed and drawn
+        /// from a lenient parse, with placeholders and faint text; `syntax`
+        /// says what and where.
         markup_error,
         /// A style cannot be used (its face has no cap height, say).
         style_error,
@@ -69,6 +71,8 @@ pub const Issue = struct {
     row: ?usize = null,
     /// How far too long, mm, for overflows.
     amount: f64 = 0,
+    /// For a markup error, the first problem the parse found.
+    syntax: ?engine.markup.Diagnostic = null,
 };
 
 pub const Placed = struct {
@@ -202,9 +206,12 @@ pub const Labels = struct {
         };
         var syntax: engine.markup.Diagnostic = undefined;
         const render: ?*engine.Render = blk: {
+            // Always the lenient parse: markup being typed still draws, and
+            // its problems come back in the render's `syntax`.
             const r = engine.renderLabel(l.gpa, ctx, k.markup, .{
                 .anchor = anchor,
                 .hard_box = if (k.box) |b| .{ .x0 = b[0], .y0 = b[1], .x1 = b[2], .y1 = b[3] } else null,
+                .preview = true,
             }, &syntax) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blk null,
@@ -310,6 +317,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 try issues.append(a, .{ .kind = .markup_error, .tile = pt.id, .slot = si });
                 continue;
             };
+            if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .tile = pt.id, .slot = si, .syntax = render.syntax[0] });
             const shift = render.anchor_at orelse Point{ .x = 0, .y = 0 };
             try placed_labels.append(a, .{
                 .tile = pt.id,
@@ -342,6 +350,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             try issues.append(a, .{ .kind = .markup_error, .label = li });
             continue;
         };
+        if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .label = li, .syntax = render.syntax[0] });
         const ink = render.ink;
         try placed_labels.append(a, .{
             .tile = null,
@@ -480,6 +489,36 @@ test "a panel label sits on its anchor, aligned as asked" {
     try testing.expectApproxEqAbs(50, (l.box.x0 + l.box.x1) / 2, 0.5);
     try testing.expectApproxEqAbs(20, l.box.y0, 1e-9);
     try testing.expectApproxEqAbs(23, l.box.y1, 1e-9);
+}
+
+test "a label being typed is stored as typed, flagged, and still drawn" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const p = try m.addPanel("board", 100, 50);
+    _ = try m.addLabel(p, .{ .at = .{ .x = 10, .y = 10 }, .style = style, .content = "H^" });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectEqualStrings("H^", m.panels.items[p].labels.items[0].content);
+    try testing.expectEqual(1, s.labels.len);
+    try testing.expectEqual(1, s.issues.len);
+    try testing.expectEqual(.markup_error, s.issues[0].kind);
+    try testing.expectEqual(.missing_argument, s.issues[0].syntax.?.kind);
+    // The H and a placeholder for the superscript still to come.
+    var placeholders: usize = 0;
+    for (s.labels[0].render.items) |item| switch (item) {
+        .path => |pth| if (pth.role == .placeholder) {
+            placeholders += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(1, placeholders);
 }
 
 test "a legend with characters no face covers is reported on its tile" {

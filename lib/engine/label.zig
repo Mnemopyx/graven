@@ -37,6 +37,10 @@ pub const Options = struct {
     hard_box: ?Box = null,
     /// Where the anchor starts, in the hard box's coordinates.
     anchor_at: geom.Point = .{ .x = 0, .y = 0 },
+    /// Parse leniently, for showing markup as it is typed: problems become
+    /// placeholders and faint text, listed in the render's `syntax`, and
+    /// the render never fails on syntax.
+    preview: bool = false,
 };
 
 pub const Error = style.Context.Error || markup.Error || error{InvalidTension};
@@ -48,7 +52,11 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    const tree = try markup.parseWith(a, src, opts.names, syntax);
+    var problems: std.ArrayList(markup.Diagnostic) = .empty;
+    const tree = if (opts.preview)
+        try markup.parsePreview(a, src, opts.names, &problems)
+    else
+        try markup.parseWith(a, src, opts.names, syntax);
     var b: Builder = .{ .a = a, .ctx = ctx, .band = ctx.spec.cap_height * ctx.spec.contact_band };
     const cap = ctx.spec.cap_height;
     const pitch = try ctx.linePitch();
@@ -151,6 +159,7 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
         .anchor_at = anchor_at,
         .breaks = try breaks.toOwnedSlice(a),
         .lines = b.line,
+        .syntax = try problems.toOwnedSlice(a),
     };
 }
 
@@ -374,6 +383,7 @@ const Builder = struct {
                 return x + width * mu;
             },
             .accent => |acc| return b.accent(acc, cap, level, x, y),
+            .placeholder => |ph| return b.placeholder(ph, cap, level, x, y),
             .line_break => |br| {
                 // A soft break not taken is nothing. A hard break inside a
                 // group or script cannot start a line there.
@@ -381,6 +391,47 @@ const Builder = struct {
                 return x;
             },
         }
+    }
+
+    /// An empty slot in a preview: a frame the size of a capital, on the
+    /// baseline, so where the next character goes shows.
+    fn placeholder(b: *Builder, ph: markup.Placeholder, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+        const w = 0.6 * cap;
+        const t = 0.07 * cap;
+        const outer: Box = .{ .x0 = x, .y0 = y, .x1 = x + w, .y1 = y + cap };
+        const inner: Box = .{ .x0 = x + t, .y0 = y + t, .x1 = x + w - t, .y1 = y + cap - t };
+        const a = try rectangle(b.a, outer);
+        const hole = try rectangle(b.a, inner);
+        // The hole runs the other way, so the frame fills nonzero.
+        const segs = try b.a.alloc(geom.Segment, 4);
+        const hs = hole.contours[0].segments;
+        for (segs, 0..) |*seg, k| {
+            const sg = hs[3 - k].line;
+            seg.* = .{ .line = .{ sg[1], sg[0] } };
+        }
+        const contours = try b.a.alloc(geom.Contour, 2);
+        contours[0] = a.contours[0];
+        contours[1] = .{ .segments = segs };
+        const item0 = b.items.items.len;
+        try b.items.append(b.a, .{ .path = .{
+            .outline = .{ .contours = contours },
+            .element = @intCast(b.elements.items.len),
+            .role = .placeholder,
+        } });
+        // Every element has a contact profile, so neighbours clear it.
+        try b.addProfile(item0);
+        try b.elements.append(b.a, .{
+            .face = null,
+            .start = ph.span.start,
+            .end = ph.span.end,
+            .level = level,
+            .line = b.line,
+            .cap_height = cap,
+            .origin = .{ .x = x, .y = y },
+            .advance = w,
+            .ink = outer,
+        });
+        return x + w;
     }
 
     /// An accent over its body. A circumflex (or, by the style, a bar) on a
@@ -542,6 +593,7 @@ const Builder = struct {
                 .gid = g.gid,
                 .transform = Affine.scale(s).then(Affine.translate(gx, gy)),
                 .element = element_id,
+                .faint = t.faint,
             };
             ink = ink.join(try render.glyphInk(b.a, face, item));
             try b.items.append(b.a, .{ .glyph = item });
@@ -625,7 +677,7 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
             }
         },
         .scripts => |s| try out.append(a, .{ .node = n, .class = nucleusClass(s.base.*) }),
-        .group, .accent => try out.append(a, .{ .node = n, .class = .ord }),
+        .group, .accent, .placeholder => try out.append(a, .{ .node = n, .class = .ord }),
         .space => try out.append(a, .{ .node = n, .class = .space }),
         .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind == .soft }),
     }
