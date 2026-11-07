@@ -6,6 +6,7 @@
 
 pub const model = @import("model.zig");
 pub const place = @import("place.zig");
+pub const art = @import("art.zig");
 pub const layout = @import("layout.zig");
 pub const geometry = @import("geometry.zig");
 pub const drc = @import("drc.zig");

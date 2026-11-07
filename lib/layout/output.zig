@@ -3,6 +3,7 @@
 const std = @import("std");
 const engine = @import("graven_engine");
 const place = @import("place.zig");
+const art = @import("art.zig");
 
 const geom = engine.geom;
 
@@ -50,17 +51,13 @@ pub fn svg(gpa: std.mem.Allocator, outlines: []const geom.Outline, box: geom.Box
 
 pub const PanelSvgOptions = struct {
     margin: f64 = 2,
-    body: []const u8 = "#e8e6e1",
-    face: []const u8 = "#f7f6f3",
-    edge: []const u8 = "#9a978f",
     ink: []const u8 = "#1d1d1b",
-    /// Corner radius of tile bodies and faces, mm.
-    radius: f64 = 1,
 };
 
-/// A placed panel for display: tile bodies and faces as rounded rectangles,
-/// labels as their exact outlines (Q and C kept). Display output only;
-/// production geometry goes through union and DRC.
+/// A placed panel for display: each tile drawn from its prototype's art as
+/// placement stretched it (gradients as SVG gradients), labels as their
+/// exact outlines (Q and C kept). Display output only; production geometry
+/// goes through union and DRC.
 pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []const *engine.Face, opts: PanelSvgOptions) ![]u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -78,10 +75,32 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
         .{ width, height, width, height },
     );
     try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\">\n", .{ -x0, y1 });
-    for (placed.tiles) |t| {
-        try rect(w, t.body, opts.radius, opts.body, opts.edge);
-        try rect(w, t.face, opts.radius, opts.face, null);
-    }
+    var gradients: usize = 0;
+    for (placed.tiles) |t| for (t.shapes) |s| {
+        if (s.outline.contours.len == 0) continue;
+        var fill_buf: [32]u8 = undefined;
+        const fill: []const u8 = switch (s.paint.fill) {
+            .none => "none",
+            .solid => |c| try colour(&fill_buf, c),
+            .linear => |l| blk: {
+                // In user space, so it sits where placement put it.
+                var b0: [16]u8 = undefined;
+                var b1: [16]u8 = undefined;
+                try w.print("<linearGradient id=\"g{d}\" gradientUnits=\"userSpaceOnUse\" x1=\"{d}\" y1=\"{d}\" x2=\"{d}\" y2=\"{d}\">", .{ gradients, l.from.x, l.from.y, l.to.x, l.to.y });
+                try w.print("<stop offset=\"0\" stop-color=\"{s}\"/><stop offset=\"1\" stop-color=\"{s}\"/></linearGradient>\n", .{ try colour(&b0, l.start), try colour(&b1, l.end) });
+                gradients += 1;
+                break :blk try std.fmt.bufPrint(&fill_buf, "url(#g{d})", .{gradients - 1});
+            },
+        };
+        try w.print("<path fill=\"{s}\"", .{fill});
+        if (s.paint.edge) |e| {
+            var b: [16]u8 = undefined;
+            try w.print(" stroke=\"{s}\" stroke-width=\"{d}\"", .{ try colour(&b, e), s.paint.edge_width });
+        }
+        try w.writeAll(" d=\"");
+        try pathData(w, s.outline);
+        try w.writeAll("\"/>\n");
+    };
     try w.print("<g fill=\"{s}\" fill-rule=\"nonzero\">\n", .{opts.ink});
     for (placed.labels) |l| {
         const outlines = try l.render.outlines(a, faces);
@@ -94,15 +113,20 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     return out.toOwnedSlice();
 }
 
-fn rect(w: *std.Io.Writer, b: geom.Box, r: f64, fill: []const u8, stroke: ?[]const u8) !void {
-    try w.print("<rect x=\"{d}\" y=\"{d}\" width=\"{d}\" height=\"{d}\" rx=\"{d}\" fill=\"{s}\"", .{ b.x0, b.y0, b.width(), b.height(), r, fill });
-    if (stroke) |s| try w.print(" stroke=\"{s}\" stroke-width=\"0.2\"", .{s});
-    try w.writeAll("/>\n");
+/// "#rrggbb", with "rgba(…)" only for a translucent colour.
+fn colour(buf: []u8, c: art.Color) ![]const u8 {
+    if (c.a == 255) return std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ c.r, c.g, c.b });
+    return std.fmt.bufPrint(buf, "rgba({d},{d},{d},{d:.3})", .{ c.r, c.g, c.b, @as(f64, @floatFromInt(c.a)) / 255 });
 }
 
 fn path(w: *std.Io.Writer, o: geom.Outline) !void {
     if (o.contours.len == 0) return;
     try w.writeAll("<path d=\"");
+    try pathData(w, o);
+    try w.writeAll("\"/>\n");
+}
+
+fn pathData(w: *std.Io.Writer, o: geom.Outline) !void {
     for (o.contours) |c| {
         const s0 = c.segments[0].start();
         try w.print("M{d} {d}", .{ s0.x, s0.y });
@@ -113,7 +137,6 @@ fn path(w: *std.Io.Writer, o: geom.Outline) !void {
         };
         try w.writeAll("Z");
     }
-    try w.writeAll("\"/>\n");
 }
 
 test "svg writes native quadratics and closes every contour" {

@@ -22,7 +22,7 @@ Early. The label engine renders a plain run of text in one face: HarfBuzz shapin
 | `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic), contours, exact areas and bounds; `spring`, the 1-D tension solver |
 | `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
-| `lib/layout` | Layout library: `model` (panels, tile regions, tile prototypes, tiles, slots, actions), `place` (solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
+| `lib/layout` | Layout library: `model` (panels, tile regions, tile prototypes, tiles, slots, actions), `art` (tile art drawn at 1u and stretched), `place` (solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
 | `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
 | `apps/samples` | Sample models built through the library actions (PC keyboard) |

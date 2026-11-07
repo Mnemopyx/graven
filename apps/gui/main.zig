@@ -196,13 +196,25 @@ const Piece = struct { region: geom.fill.Region, kind: PieceKind };
 /// Label outlines flattened to polylines in mm and triangulated, per
 /// render, at a tolerance matched to the zoom. Rebuilt when the zoom
 /// changes a lot or the panel is re-solved (renders may be freed then).
+/// One shape of a tile's art, flattened: its region for the fill and its
+/// contours as drawn for the edge.
+const TilePiece = struct {
+    shape: *const layout.art.Shape,
+    region: geom.fill.Region,
+    lines: []const []const geom.Point,
+};
+
 const Flat = struct {
     arena: std.heap.ArenaAllocator,
     map: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
+    /// Tile art, by its placed shapes (owned by the placement, which resets
+    /// this cache when it changes).
+    tiles: std.AutoHashMapUnmanaged([*]const layout.art.Shape, []const TilePiece) = .empty,
     tol: f64 = 0,
 
     fn reset(f: *Flat, tol: f64) void {
         f.map = .empty;
+        f.tiles = .empty;
         _ = f.arena.reset(.retain_capacity);
         f.tol = tol;
     }
@@ -233,6 +245,36 @@ const Flat = struct {
         return out;
     }
 };
+
+/// A tile's art shapes flattened and resolved, made once per placement and
+/// zoom.
+fn flatTile(f: *Flat, shapes: []const layout.art.Shape) ![]const TilePiece {
+    if (shapes.len == 0) return &.{};
+    if (f.tiles.get(shapes.ptr)) |c| return c;
+    const a = f.arena.allocator();
+    const out = try a.alloc(TilePiece, shapes.len);
+    for (shapes, out) |*s, *piece| {
+        const lines = try a.alloc([]const geom.Point, s.outline.contours.len);
+        for (s.outline.contours, lines) |c, *line| {
+            var pts: std.ArrayList(geom.Point) = .empty;
+            for (c.segments) |seg| try flatten(a, &pts, seg, f.tol);
+            line.* = pts.items;
+        }
+        piece.* = .{ .shape = s, .region = try geom.fill.nonzero(a, lines, f.tol * 0.1), .lines = lines };
+    }
+    try f.tiles.put(a, shapes.ptr, out);
+    return out;
+}
+
+/// Strokes a closed polyline placed at worksheet point `at`.
+fn strokeLoop(area: dvui.Rect.Physical, line: []const geom.Point, at: geom.Point, width: f32, color: dvui.Color) void {
+    if (line.len < 2) return;
+    const lifo = dvui.currentWindow().lifo();
+    const pts = lifo.alloc(dvui.Point.Physical, line.len) catch return;
+    defer lifo.free(pts);
+    for (line, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+    dvui.Path.stroke(.{ .points = pts }, .{ .thickness = width, .color = .{ .color = color }, .closed = true });
+}
 
 /// Appends a segment's points after its start, within `tol` of the curve.
 fn flatten(a: std.mem.Allocator, pts: *std.ArrayList(geom.Point), s: geom.Segment, tol: f64) !void {
@@ -1436,20 +1478,26 @@ fn addLabelAt(pi: usize, at: geom.Point) void {
 fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
     const radius: f32 = @floatCast(1.0 * state.view.ppm);
+    const o = panelOrigin(pi);
     for (placed.tiles) |t| {
         const flagged = tileFlag(placed, t.id);
         const body = state.view.rect(area, onSheet(pi, t.body));
         const face = state.view.rect(area, onSheet(pi, t.face));
-        body.fill(.round(radius), .{ .color = .{ .color = colors.body } });
         const in_context = inContext(pi, t);
-        body.stroke(.round(radius), .{ .thickness = px, .color = .{ .color = if (in_context) dvui.themeGet().focus else colors.edge } });
-        face.fill(.round(radius), .{ .color = .{ .color = if (flagged.missing) colors.missing else colors.face } });
+        // The tile's art, as placement stretched it: fills, then edges.
+        const pieces = flatTile(&state.flat, t.shapes) catch &.{};
+        for (pieces) |piece| {
+            if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
+            const edge = piece.shape.paint.edge orelse continue;
+            const width: f32 = @max(px, @as(f32, @floatCast(piece.shape.paint.edge_width * state.view.ppm)));
+            for (piece.lines) |line| strokeLoop(area, line, o, width, .{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a });
+        }
+        if (flagged.missing) face.fill(.round(radius), .{ .color = .{ .color = colors.missing } });
         if (flagged.overflow) face.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         // A size its prototype does not allow: the body outlined in warning.
         if (flagged.size and !in_context) body.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = dvui.themeGet().focus } });
     }
-    const o = panelOrigin(pi);
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
         const d = if (l.tile == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
@@ -1465,7 +1513,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             };
             if (show_construction and piece.kind == .ink) {
                 // Outlines over a translucent fill, so the lines show through.
-                fillRegion(area, piece.region, at, color.opacity(0.18));
+                fillRegion(area, piece.region, at, .{ .flat = color.opacity(0.18) });
                 for (piece.region.loops) |loop| {
                     const pts = lifo.alloc(dvui.Point.Physical, loop.len) catch break;
                     defer lifo.free(pts);
@@ -1473,7 +1521,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
                     dvui.Path.stroke(.{ .points = pts }, .{ .thickness = px, .color = .{ .color = color }, .closed = true });
                 }
             } else {
-                fillRegion(area, piece.region, at, color);
+                fillRegion(area, piece.region, at, .{ .flat = color });
             }
         }
         if (show_construction) drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
@@ -1498,9 +1546,8 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
 /// Fills a resolved region placed at worksheet point `at`: its triangles as
 /// they are, then a band one pixel wide fading out past each loop, for
 /// antialiasing.
-fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point, color: dvui.Color) void {
+fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point, paint: Paint) void {
     const lifo = dvui.currentWindow().lifo();
-    const col: dvui.Color.PMA = .fromColor(color.opacity(dvui.currentWindow().alpha));
     const Index = dvui.Vertex.Index;
     // Vertex indices may be 16-bit: the triangles go in batches.
     const batch = 20000;
@@ -1512,7 +1559,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         for (tris, 0..) |t, k| {
             var v: [3]dvui.Point.Physical = undefined;
             for (t, &v) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
-            for (v) |pos| b.appendVertex(.{ .pos = pos, .col = col });
+            for (v, t) |pos, q| b.appendVertex(.{ .pos = pos, .col = paint.at(q) });
             const i: Index = @intCast(3 * k);
             b.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
         }
@@ -1544,7 +1591,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
                 nx *= 2 / len;
                 ny *= 2 / len;
             }
-            b.appendVertex(.{ .pos = p, .col = col });
+            b.appendVertex(.{ .pos = p, .col = paint.at(loop[i]) });
             b.appendVertex(.{ .pos = .{ .x = p.x + nx, .y = p.y + ny }, .col = .transparent });
         }
         for (0..n) |i| {
@@ -1558,6 +1605,22 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         dvui.renderTriangles(b.build_unowned(), null) catch {};
     }
 }
+
+/// What fills a region: one colour, or a tile art fill, whose gradient is
+/// in the region's own frame (before `at` moves it).
+const Paint = union(enum) {
+    flat: dvui.Color,
+    art: layout.art.Fill,
+
+    /// The premultiplied colour at `q`, in the region's frame.
+    fn at(p: Paint, q: geom.Point) dvui.Color.PMA {
+        const c: dvui.Color = switch (p) {
+            .flat => |c| c,
+            .art => |f| if (f.at(q)) |ac| .{ .r = ac.r, .g = ac.g, .b = ac.b, .a = ac.a } else .transparent,
+        };
+        return .fromColor(c.opacity(dvui.currentWindow().alpha));
+    }
+};
 
 /// The unit normal to the right of the edge from `p` to `q`, on screen.
 fn outward(p: dvui.Point.Physical, q: dvui.Point.Physical) dvui.Point.Physical {

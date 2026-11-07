@@ -188,12 +188,29 @@ pub const Styles = struct {
 /// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back,
 /// with one slot, `top`, for the legend. Word legends override its style.
 /// Keys grow from 1u × 1u to the standard widths, and to 2u tall for the
-/// keypad + and Enter.
-fn keyPrototype(styles: Styles) layout.model.TilePrototype {
+/// keypad + and Enter. Its art is one 1u keycap, shaded darker toward the
+/// front where a cylindrical cap slopes away, stretched to every key.
+fn keyPrototype(a: std.mem.Allocator, styles: Styles) !layout.model.TilePrototype {
+    const body_inset: layout.model.Sides = .all((pitch - 18.1) / 2.0);
+    const face_inset: layout.model.Sides = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 };
+    const art = layout.art;
+    const back_to_front = struct {
+        fn f(start: art.Color, end: art.Color) art.Fill {
+            return .{ .linear = .{ .from = .{ .x = 0.5, .y = 1 }, .to = .{ .x = 0.5, .y = 0 }, .start = start, .end = end } };
+        }
+    }.f;
     return .{
         .name = "key",
-        .body_inset = .all((pitch - 18.1) / 2.0),
-        .face_inset = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 },
+        .body_inset = body_inset,
+        .face_inset = face_inset,
+        .art = try art.keycap(a, .{
+            .pitch = pitch,
+            .body_inset = body_inset,
+            .face_inset = face_inset,
+            .body = back_to_front(.hex("#e9e7e1"), .hex("#cfccc3")),
+            .edge = .hex("#9a978f"),
+            .face = back_to_front(.hex("#faf9f6"), .hex("#efede8")),
+        }),
         .slots = &.{.{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } }},
         .widths = &.{ 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25 },
         .heights = &.{ 1, 2 },
@@ -215,7 +232,9 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
         .pitch = pitch,
     });
 
-    const key = try m.addPrototype(keyPrototype(styles));
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const key = try m.addPrototype(try keyPrototype(scratch.allocator(), styles));
     var markup: std.Io.Writer.Allocating = .init(gpa);
     defer markup.deinit();
     var name_buf: [16]u8 = undefined;

@@ -19,6 +19,7 @@ const engine = @import("graven_engine");
 
 const Allocator = std.mem.Allocator;
 const geom = engine.geom;
+const art_ = @import("art.zig");
 
 pub const TileId = enum(u32) { _ };
 
@@ -113,6 +114,9 @@ pub const TilePrototype = struct {
     /// empty allows any.
     widths: []const f64 = &.{},
     heights: []const f64 = &.{},
+    /// How its tiles look, drawn for 1u × 1u and stretched; null for a flat
+    /// body and face drawn from the insets.
+    art: ?art_.Art = null,
 
     /// Whether a tile `w` × `h` u keeps to the prototype's sizing rules. A
     /// tile that does not is flagged, not refused.
@@ -692,6 +696,7 @@ pub const Model = struct {
             out.name = try m.a().dupe(u8, sp.name);
         }
         copy.slots = slots;
+        if (p.art) |art| copy.art = try art_.dupe(m.a(), art);
         copy.widths = try m.a().dupe(f64, p.widths);
         copy.heights = try m.a().dupe(f64, p.heights);
         return copy;

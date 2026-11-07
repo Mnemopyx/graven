@@ -9,6 +9,7 @@
 const std = @import("std");
 const engine = @import("graven_engine");
 const model = @import("model.zig");
+const art = @import("art.zig");
 
 const Allocator = std.mem.Allocator;
 const geom = engine.geom;
@@ -29,6 +30,9 @@ pub const PlacedTile = struct {
     pitch_box: Box,
     body: Box,
     face: Box,
+    /// How it looks: its prototype's art stretched onto it, back to front,
+    /// mm in the panel frame.
+    shapes: []const art.Shape,
 };
 
 pub const PlacedLabel = struct {
@@ -64,6 +68,9 @@ pub const Issue = struct {
         style_error,
         /// A tile's size is not one its prototype allows.
         tile_size,
+        /// A tile's art cannot be stretched exactly (a curve crosses a cut);
+        /// it is drawn plain.
+        tile_art,
     },
     tile: ?TileId = null,
     slot: ?usize = null,
@@ -275,6 +282,13 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 };
                 const proto = &m.prototypes.items[t.prototype];
                 const body = proto.body_inset.inset(pitch_box);
+                const shapes = if (proto.art) |pa| art.stretch(a, pa, region.pitch, pitch_box) catch |err| switch (err) {
+                    error.CurveCrossesCut => blk: {
+                        try issues.append(a, .{ .kind = .tile_art, .tile = p.tile, .region = ri, .row = rowi });
+                        break :blk try art.plainShapes(a, proto.*, region.pitch, pitch_box);
+                    },
+                    else => |e| return e,
+                } else try art.plainShapes(a, proto.*, region.pitch, pitch_box);
                 try tiles.append(a, .{
                     .id = p.tile,
                     .region = ri,
@@ -282,6 +296,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     .pitch_box = pitch_box,
                     .body = body,
                     .face = proto.face_inset.inset(body),
+                    .shapes = shapes,
                 });
                 if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = p.tile, .region = ri, .row = rowi });
                 bounds = bounds.join(pitch_box);
@@ -616,4 +631,71 @@ test "changing a prototype's slot moves every legend in it, but not a tile's own
         const dx = a.box.x0 - b.box.x0;
         try testing.expectApproxEqAbs(@as(f64, if (i < 2) 2 else 0), dx, 1e-9);
     }
+}
+
+test "tiles are drawn from their prototype's art, stretched; bad art is drawn plain and flagged" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 120, 50);
+    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 1, .pitch = 19.05 });
+    _ = try m.addRow(p, r, 0);
+
+    // A calculator key: a dark body, a lighter top, and a gold band across
+    // its front, from the same drawing code as any other art.
+    var calc_art = try art.keycap(sa, .{
+        .pitch = 19.05,
+        .body_inset = .all(1),
+        .face_inset = .{ .left = 1.5, .right = 1.5, .top = 1.5, .bottom = 5 },
+        .body = .{ .solid = .hex("#2b2b2b") },
+        .edge = null,
+        .face = .{ .solid = .hex("#3c3c3c") },
+    });
+    const band = try art.roundedRect(sa, .{ .x0 = 1, .y0 = 1, .x1 = 18.05, .y1 = 5 }, 0.5);
+    const layers = try sa.alloc(art.Layer, 3);
+    @memcpy(layers[0..2], calc_art.layers);
+    layers[2] = .{ .name = "gold", .outline = band, .paint = .{ .fill = .{ .solid = .hex("#c8a24a") } } };
+    calc_art.layers = layers;
+
+    const calc = try m.addPrototype(.{ .name = "calculator key", .art = calc_art });
+    const plain = try m.addPrototype(.{ .name = "plain", .body_inset = .all(0.5), .face_inset = .all(2) });
+    // Art whose corner arcs reach across a cut placed off centre cannot
+    // stretch exactly.
+    const blob = try m.addPrototype(.{ .name = "blob", .art = .{ .pitch = 19.05, .cut = .{ .x = 6, .y = 6 }, .layers = &.{.{
+        .name = "dot",
+        .outline = try art.roundedRect(sa, .{ .x0 = 0, .y0 = 0, .x1 = 19.05, .y1 = 19.05 }, 9.525),
+        .paint = .{ .fill = .{ .solid = .hex("#ff0000") } },
+    }} } });
+    try m.place(p, r, 0, null, .{ .tile = try m.addTile(.{ .designator = "C", .prototype = calc, .w = 2 }) });
+    try m.place(p, r, 0, null, .{ .tile = try m.addTile(.{ .designator = "P", .prototype = plain }) });
+    try m.place(p, r, 0, null, .{ .tile = try m.addTile(.{ .designator = "B", .prototype = blob }) });
+
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+
+    // The calculator key: three layers, the gold band stretched across its
+    // 2u width with its rounded ends kept.
+    const c = s.tiles[0];
+    try testing.expectEqual(3, c.shapes.len);
+    try testing.expectEqualStrings("gold", c.shapes[2].name);
+    try testing.expectEqual(art.Color.hex("#c8a24a"), c.shapes[2].paint.fill.solid);
+    const gold = c.shapes[2].outline.bounds();
+    try testing.expectApproxEqAbs(c.pitch_box.width() - 2, gold.width(), 1e-9);
+    // The plain key: its body and face, flat, from its insets.
+    const pl = s.tiles[1];
+    try testing.expectEqual(2, pl.shapes.len);
+    try testing.expectApproxEqAbs(pl.body.width(), pl.shapes[0].outline.bounds().width(), 1e-9);
+    // The blob: drawn plain, and flagged.
+    try testing.expectEqualStrings("body", s.tiles[2].shapes[0].name);
+    var flagged = false;
+    for (s.issues) |i| flagged = flagged or i.kind == .tile_art;
+    try testing.expect(flagged);
 }
