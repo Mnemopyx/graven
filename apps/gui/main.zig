@@ -1530,7 +1530,12 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     const o = panelOrigin(pi);
     // Every track's band, faintly, so empty tracks show where tiles go.
     for (placed.tracks) |t| {
-        state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge.opacity(0.35) } });
+        // Past the panel's edge: in the warning colour.
+        const outside = for (placed.issues) |i| {
+            if (i.kind == .region_outside and i.region == t.region) break true;
+        } else false;
+        const colour = if (outside) colors.overflow else colors.edge.opacity(0.35);
+        state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
     for (placed.tiles) |t| {
         const flagged = tileFlag(placed, t.id);
@@ -2411,10 +2416,8 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     defer state.tool = .select;
     const plan = planTracks(from, at) orelse return;
     const panel = state.model.panels.items[plan.panel];
-    if (!layout.model.within(plan.box, panel.box())) {
-        state.status = "The tracks do not fit on the panel. ";
-        return;
-    }
+    // Tracks may run past the panel: flagged, to be fitted or the panel
+    // resized once their tiles show what is needed.
     var name_buf: [32]u8 = undefined;
     const name = std.fmt.bufPrint(&name_buf, "Tracks {d}", .{panel.regions.items.len + 1}) catch "Tracks";
     const r = state.model.addTracks(plan.panel, .{
@@ -2491,6 +2494,15 @@ fn toolPalette() void {
             if (!tracks_on) ensurePrototype() catch {};
         }
         dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, "Add tracks: rows or columns of tiles, drawn out on the panel", .{}, .{});
+    }
+    if (state.context == .region) {
+        // Fit to tiles: the tracks shrink to what has been put in them.
+        const r = state.context.region;
+        var fwd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Fit to tiles", dvui.entypo.crop, .{}, .{}, .{ .data_out = &fwd })) {
+            state.status = if (state.model.fitRegion(r.panel, r.region)) "" else "The tracks already fit their tiles (or hold none). ";
+        }
+        dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: shorten the tracks to what is in them", .{}, .{});
     }
     if (state.context == .worksheet) {
         // A mode tool: shown pressed while active; pressing again cancels.
@@ -2747,6 +2759,9 @@ fn properties() !void {
             propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
             propText("Pitch", "{d} mm", .{region.pitch}, 4);
             propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{region.rows.items.len}, 5);
+            if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
+                if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
+            };
             if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
         },
         .row => |r| {
@@ -3293,7 +3308,7 @@ fn statusContent() void {
         labels += p.labels.len;
         for (p.issues) |i| switch (i.kind) {
             .missing_glyph => missing += 1,
-            .label_overflow, .row_overflow => overflow += 1,
+            .label_overflow, .row_overflow, .region_outside => overflow += 1,
             else => {},
         };
     }

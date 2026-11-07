@@ -68,6 +68,9 @@ pub const Issue = struct {
         style_error,
         /// A tile's size is not one its prototype allows.
         tile_size,
+        /// A region's tracks reach past its panel's outline; `amount` says
+        /// how far, mm.
+        region_outside,
         /// A tile's art cannot be stretched exactly (a curve crosses a cut);
         /// it is drawn plain.
         tile_art,
@@ -264,7 +267,20 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     var issues: std.ArrayList(Issue) = .empty;
     var bounds: Box = .empty;
 
+    const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
+        // A region may be drawn past its panel's edge, to be fitted later:
+        // flagged, not refused.
+        {
+            const b: Box = .{
+                .x0 = region.origin.x,
+                .x1 = region.origin.x + region.w * region.pitch,
+                .y1 = region.origin.y,
+                .y0 = region.origin.y - region.h * region.pitch,
+            };
+            const past = @max(@max(outline.x0 - b.x0, b.x1 - outline.x1), @max(outline.y0 - b.y0, b.y1 - outline.y1));
+            if (past > 1e-9) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+        }
         // Tracks are rows or columns: each is a spring chain along its
         // length, and tracks follow one another across. A tile's size along
         // is its width in a row and its height in a column.
@@ -837,4 +853,39 @@ test "a track moves as a whole along and across; its neighbour stays" {
     try m.moveTrack(p, r, 0, 0, -0.25);
     try m.moveTrack(p, r, 0, -0.5, -0.25);
     try testing.expectEqual(0, m.panels.items[p].regions.items[r].rows.items[0].offset);
+}
+
+test "a region past its panel is flagged, and fitting it to its tiles can bring it back" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 60, 30);
+    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.5 } });
+    // 8 u at 10 mm runs 20 mm past the 60 mm panel.
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 30 }, .prototype = key, .count = 2, .length = 8, .pitch = 10 });
+    _ = try m.insertTile(p, r, 0, 0, key, 1.5);
+    _ = try m.insertTile(p, r, 0, 1, key, 1);
+    _ = try m.insertTile(p, r, 1, 0, key, 1);
+    try m.insertBlank(p, r, 1, 1, 0.5);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        var past: f64 = 0;
+        for (s.issues) |i| if (i.kind == .region_outside) {
+            past = i.amount;
+        };
+        try testing.expectApproxEqAbs(@as(f64, 20), past, 1e-9);
+    }
+    // The longest track holds 2.5 u: the region shrinks to that, inside.
+    try testing.expect(m.fitRegion(p, r));
+    try testing.expectEqual(2.5, m.panels.items[p].regions.items[r].w);
+    try testing.expect(!m.fitRegion(p, r));
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    for (s.issues) |i| try testing.expect(i.kind != .region_outside);
 }

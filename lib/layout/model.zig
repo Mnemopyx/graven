@@ -800,6 +800,35 @@ pub const Model = struct {
         }
     }
 
+    /// How far a track's places reach along it, u: its offset, and every
+    /// gap and place.
+    pub fn trackExtent(m: *const Model, panel: usize, region: usize, track_: usize) f64 {
+        const r = m.panels.items[panel].regions.items[region];
+        const row = r.rows.items[track_];
+        var len = row.offset;
+        for (row.places.items) |p| {
+            len += p.gap;
+            if (p.tile) |id| {
+                const t = m.tileConst(id);
+                len += if (r.major == .row) t.w else t.h;
+            } else len += p.blank;
+        }
+        return len;
+    }
+
+    /// Fits a region's tracks to what has been put in them: their length
+    /// becomes the longest track's extent. A region with nothing in it is
+    /// left as it is. Returns whether it changed.
+    pub fn fitRegion(m: *Model, panel: usize, region: usize) bool {
+        const r = &m.panels.items[panel].regions.items[region];
+        var longest: f64 = 0;
+        for (0..r.rows.items.len) |t| longest = @max(longest, m.trackExtent(panel, region, t));
+        if (!(longest > 0) or @abs(longest - r.trackLength()) < 1e-9) return false;
+        if (r.major == .row) r.w = longest else r.h = longest;
+        m.revision += 1;
+        return true;
+    }
+
     /// Moves a track `along` u along its length and `across` u across the
     /// region (down for a row, right for a column), as a whole. Across, the
     /// next track keeps its place: the space between them changes. A move
