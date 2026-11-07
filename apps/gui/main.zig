@@ -721,8 +721,13 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "View", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (dvui.menuItemLabel(@src(), "Zoom to context", .{}, .{ .expand = .horizontal }) != null) {
+        if (dvui.menuItemLabel(@src(), "    Zoom to context", .{}, .{ .expand = .horizontal }) != null) {
             zoomToContext();
+            m.close();
+        }
+        // DVUI's interface font has no check mark; a bullet marks what is on.
+        if (dvui.menuItemLabel(@src(), if (show_construction) "•  Show text construction" else "    Show text construction", .{}, .{ .expand = .horizontal }) != null) {
+            show_construction = !show_construction;
             m.close();
         }
         // Pane display: overlay (the default), docked or hidden.
@@ -731,7 +736,7 @@ fn menu() ?dvui.App.Result {
             inline for (.{ PaneMode.overlay, PaneMode.docked, PaneMode.hidden }, 0..) |mode, mi| {
                 var buf: [64]u8 = undefined;
                 const on = @field(panes, pane[1]) == mode;
-                const text = std.fmt.bufPrint(&buf, "{s}: {s}{s}", .{ pane[0], @tagName(mode), if (on) "  ✓" else "" }) catch pane[0];
+                const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane[0], @tagName(mode) }) catch pane[0];
                 if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 3 + mi }) != null) {
                     @field(panes, pane[1]) = mode;
                     m.close();
@@ -1130,7 +1135,15 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             made += 1;
         }
         // Ink in the sheet's margins is drawn in the warning colour.
-        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = if (inMargin(pi, l.tile, l.slot)) colors.overflow else colors.ink }, .fade = 1 });
+        const ink = if (inMargin(pi, l.tile, l.slot)) colors.overflow else colors.ink;
+        if (show_construction) {
+            // Outlines over a translucent fill, so the lines show through.
+            dvui.Path.fill(paths[0..made], .{ .color = .{ .color = ink.opacity(0.18) }, .fade = 1 });
+            for (paths[0..made]) |path| path.stroke(.{ .thickness = px, .color = .{ .color = ink }, .closed = true });
+            drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
+        } else {
+            dvui.Path.fill(paths[0..made], .{ .color = .{ .color = ink }, .fade = 1 });
+        }
     }
     // The selected panel label: its ink box, with a little room.
     switch (state.context) {
@@ -1140,6 +1153,62 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         },
         else => {},
     }
+}
+
+/// View › Show text construction: text as outlines over a translucent fill,
+/// with every element's frame lines, the anchor and the ink box.
+var show_construction = false;
+
+const construction = struct {
+    const ascender: dvui.Color = .{ .r = 0x7a, .g = 0x5c, .b = 0xc4 };
+    const cap: dvui.Color = .{ .r = 0x2e, .g = 0x7d, .b = 0xc2 };
+    const x_height: dvui.Color = .{ .r = 0x2a, .g = 0x9d, .b = 0x8f };
+    const baseline: dvui.Color = .{ .r = 0xd1, .g = 0x4b, .b = 0x2a };
+    const descender: dvui.Color = .{ .r = 0xb0, .g = 0x7a, .b = 0x2c };
+    const box: dvui.Color = .{ .r = 0x88, .g = 0x88, .b = 0x88 };
+};
+
+/// One label's construction: for each element (a run in one face and size,
+/// scripts included), its ascender, cap height, x-height, baseline and
+/// descender across its advance; the label's ink box; and its anchor, the
+/// label frame's origin, as a small cross. `at` is where the label frame's
+/// panel sits on the worksheet.
+fn drawConstruction(area: dvui.Rect.Physical, l: layout.place.PlacedLabel, at: geom.Point) void {
+    const px = dvui.windowNaturalScale();
+    const ox = at.x + l.origin.x;
+    const oy = at.y + l.origin.y;
+    for (l.render.elements) |e| {
+        const face = state.faces[e.face orelse 0];
+        const cap_units = (face.capHeight() catch null) orelse continue;
+        const k = e.cap_height / cap_units;
+        const ext = face.extents();
+        const x0 = ox + e.origin.x;
+        const x1 = x0 + e.advance;
+        const base = oy + e.origin.y;
+        const xh = face.xHeight() catch null;
+        const lines = [_]struct { y: ?f64, color: dvui.Color }{
+            .{ .y = base + ext.ascender * k, .color = construction.ascender },
+            .{ .y = base + e.cap_height, .color = construction.cap },
+            .{ .y = if (xh) |v| base + v * k else null, .color = construction.x_height },
+            .{ .y = base, .color = construction.baseline },
+            .{ .y = base + ext.descender * k, .color = construction.descender },
+        };
+        for (lines) |line| {
+            const y = line.y orelse continue;
+            const a = state.view.toPx(area, .{ .x = x0, .y = y });
+            const b = state.view.toPx(area, .{ .x = x1, .y = y });
+            dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = px, .color = .{ .color = line.color.opacity(0.8) } });
+        }
+    }
+    if (!l.render.ink.isEmpty()) {
+        const ink = l.render.ink;
+        state.view.rect(area, .{ .x0 = ox + ink.x0, .y0 = oy + ink.y0, .x1 = ox + ink.x1, .y1 = oy + ink.y1 }).stroke(.square, .{ .thickness = px, .color = .{ .color = construction.box.opacity(0.7) } });
+    }
+    const c = state.view.toPx(area, .{ .x = ox, .y = oy });
+    const r: f32 = 4 * px;
+    const mark: dvui.ColorOrGradient = .{ .color = construction.baseline };
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = c.x - r, .y = c.y }, .{ .x = c.x + r, .y = c.y } } }, .{ .thickness = 1.5 * px, .color = mark });
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = c.x, .y = c.y - r }, .{ .x = c.x, .y = c.y + r } } }, .{ .thickness = 1.5 * px, .color = mark });
 }
 
 /// Ruler depth, logical pixels.

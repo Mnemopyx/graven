@@ -119,6 +119,14 @@ pub const Face = struct {
         const b = (try self.outline(gid)).bounds();
         return if (b.isEmpty()) null else b.y1;
     }
+
+    /// x-height measured from the top of x's outline, likewise. Null if the
+    /// face has no x.
+    pub fn xHeight(self: *Face) Error!?f64 {
+        const gid = self.glyph('x') orelse return null;
+        const b = (try self.outline(gid)).bounds();
+        return if (b.isEmpty()) null else b.y1;
+    }
 };
 
 /// Collects HarfBuzz draw calls into closed contours. Degenerate segments

@@ -8,9 +8,20 @@
 const face = @import("face.zig");
 
 pub const Face = face.Face;
+const std = @import("std");
 pub const Error = face.Error;
 
 test {
     @import("std").testing.refAllDecls(@This());
     _ = face;
+}
+
+test "x-height is measured from x's outline" {
+    const testdata = @import("graven_testdata");
+    const fallback = try Face.init(std.testing.allocator, testdata.fallback, 0);
+    defer fallback.deinit();
+    try std.testing.expectEqual(@as(?f64, 300), try fallback.xHeight());
+    const main = try Face.init(std.testing.allocator, testdata.truetype, 0);
+    defer main.deinit();
+    try std.testing.expectEqual(@as(?f64, null), try main.xHeight());
 }
