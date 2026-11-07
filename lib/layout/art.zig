@@ -42,6 +42,19 @@ pub const Color = struct {
         return .{ .r = @truncate(v >> 16), .g = @truncate(v >> 8), .b = @truncate(v) };
     }
 
+    /// From "#rrggbb" typed at run time; null when it is not one.
+    pub fn parse(text: []const u8) ?Color {
+        const t = std.mem.trim(u8, text, " ");
+        if (t.len != 7 or t[0] != '#') return null;
+        const v = std.fmt.parseInt(u24, t[1..], 16) catch return null;
+        return .{ .r = @truncate(v >> 16), .g = @truncate(v >> 8), .b = @truncate(v) };
+    }
+
+    /// "#rrggbb" (alpha is not written).
+    pub fn format(c: Color, buf: *[7]u8) []const u8 {
+        return std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ c.r, c.g, c.b }) catch unreachable;
+    }
+
     /// The colour `t` of the way from `a` to `b`, t in 0..1.
     pub fn mix(a: Color, b: Color, t: f64) Color {
         const k = std.math.clamp(t, 0, 1);
@@ -352,6 +365,15 @@ test "a curve across a cut cannot be stretched exactly and is refused" {
     const art: Art = .{ .pitch = 10, .cut = .{ .x = 4, .y = 4 }, .layers = &layers };
     try testing.expectError(error.CurveCrossesCut, check(art));
     try testing.expectError(error.CurveCrossesCut, stretch(a, art, 10, .{ .x0 = 0, .y0 = 0, .x1 = 20, .y1 = 10 }));
+}
+
+test "colours read and write as #rrggbb" {
+    var buf: [7]u8 = undefined;
+    const c = Color.parse(" #C8a24A ").?;
+    try testing.expectEqual(Color.hex("#c8a24a"), c);
+    try testing.expectEqualStrings("#c8a24a", c.format(&buf));
+    try testing.expectEqual(null, Color.parse("#c8a24"));
+    try testing.expectEqual(null, Color.parse("c8a24a0"));
 }
 
 test "a gradient's colour runs from start to end" {

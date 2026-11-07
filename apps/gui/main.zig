@@ -131,6 +131,9 @@ const Context = union(enum) {
     tile: TileId,
     /// A label placed directly on a panel.
     label: struct { panel: usize, index: usize },
+    /// The file's tile prototypes, and one of them.
+    prototypes,
+    prototype: layout.model.PrototypeId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -151,6 +154,8 @@ const Context = union(enum) {
             .row => "Row",
             .tile => "Tile",
             .label => "Label",
+            .prototypes => "Tile prototypes",
+            .prototype => "Tile prototype",
         };
     }
 };
@@ -1130,9 +1135,19 @@ fn treeContent() void {
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
 
-    var name_buf: [64]u8 = undefined;
-    // The file holds everything; the worksheet is its one child for now.
+    // The file holds everything: its worksheet, and the tile prototypes its
+    // tiles are made from.
     if (!treeNode(.file, state.file_name, 0, true, !state.file_name_set)) return;
+    worksheetTree();
+    if (treeNode(.prototypes, "Tile prototypes", 1, state.model.prototypes.items.len > 0, false)) {
+        for (state.model.prototypes.items, 0..) |p, i| _ = treeNode(.{ .prototype = @intCast(i) }, p.name, 2, false, false);
+    }
+}
+
+/// The worksheet's branch: its panels, their labels, regions, rows and
+/// tiles.
+fn worksheetTree() void {
+    var name_buf: [64]u8 = undefined;
     const sheet = state.model.sheet;
     if (!treeNode(.worksheet, sheet.name, 1, state.model.panels.items.len > 0, sheet.default_name)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
@@ -1164,7 +1179,7 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
     const key = ctx.key();
     const id: usize = @truncate(key);
     const open = state.expanded.get(key) orelse switch (ctx) {
-        .file, .worksheet, .panel, .region => true,
+        .file, .worksheet, .panel, .region, .prototypes => true,
         else => false,
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });
@@ -1225,14 +1240,16 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .tile => |id| t.id == id,
         .row => |r| r.panel == pi and t.region == r.region and t.row == r.row,
         .region => |r| r.panel == pi and t.region == r.region,
-        .file, .worksheet, .panel, .label => false,
+        // Every tile made from the prototype.
+        .prototype => |p| state.model.tileConst(t.id).prototype == p,
+        .file, .worksheet, .panel, .label, .prototypes => false,
     };
 }
 
 /// The context's extents on the worksheet, mm.
 fn contextExtents() geom.Box {
     switch (state.context) {
-        .file, .worksheet => return state.model.sheet.box(),
+        .file, .worksheet, .prototypes => return state.model.sheet.box(),
         .panel => |pi| return state.model.panels.items[pi].box(),
         .label => |l| if (labelBox(l.panel, l.index)) |b| return b,
         else => {},
@@ -2225,6 +2242,8 @@ fn lowerKind() []const u8 {
         .row => "row",
         .tile => "tile",
         .label => "label",
+        .prototypes => "tile prototypes",
+        .prototype => "tiles of the prototype",
     };
 }
 
@@ -2464,6 +2483,8 @@ fn properties() !void {
         },
         .tile => |id| try tileProperties(id),
         .label => |l| try labelProperties(l.panel, l.index),
+        .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
+        .prototype => |id| try prototypeProperties(id),
     }
 }
 
@@ -2566,10 +2587,25 @@ fn tileProperties(id: TileId) !void {
             te.deinit();
             if (changed and !std.mem.eql(u8, text, slot.content)) try state.model.setContent(id, slot.name, text);
         }
-        // A style the tile sets for itself, not its prototype's.
-        const own_style = if (state.model.fillConst(id, slot.name)) |f| f.style != null else false;
-        propText("Style", "{s}{s}", .{ state.model.styles.items[slot.style].name, if (own_style) " (this tile)" else "" }, n + 2);
+        // Style and placement: the prototype's, or the tile's own.
+        const own = state.model.fillConst(id, slot.name);
+        const proto_slot = state.model.prototypeOf(id).slots[si];
+        if (styleChoice(if (own) |f| f.style else null, proto_slot.style, n + 2)) |c| try state.model.setSlotStyle(id, slot.name, c);
         try propFont("Font", n + 3);
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 5 });
+            defer row.deinit();
+            propName("Placement");
+            const names = [_][]const u8{ "Prototype's", "This tile's" };
+            const has_own = own != null and own.?.place != null;
+            var choice: usize = if (has_own) 1 else 0;
+            if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 5 })) {
+                try state.model.setSlotPlace(id, slot.name, if (choice == 1) slot.place else null);
+            }
+        }
+        if (own != null and own.?.place != null) {
+            if (slotPlaceEditor(slot.place, 1000 + n * 10)) |p| try state.model.setSlotPlace(id, slot.name, p);
+        }
         if (found) |f| {
             for (state.placed.items[f.panel].issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
                 propText("Issue", "{s}", .{@tagName(i.kind)}, n + 4 + k);
@@ -2579,6 +2615,173 @@ fn tileProperties(id: TileId) !void {
             };
         }
     }
+}
+
+/// A tile prototype: what its tiles share, and the parts of it that can be
+/// changed here: where its labels go and how its art is painted. Its art's
+/// outlines are left as drawn. Every tile made from it is outlined on the
+/// canvas.
+fn prototypeProperties(id: layout.model.PrototypeId) !void {
+    const p = state.model.prototypes.items[id];
+    propText("Name", "{s}", .{p.name}, 1);
+    propText("Used by", "{d} tiles", .{state.model.prototypeUses(id)}, 2);
+    const grows: []const u8 = if (p.expand.horizontal and p.expand.vertical) "wider and taller" else if (p.expand.horizontal) "wider" else if (p.expand.vertical) "taller" else "no; 1 × 1 u only";
+    propText("Grows", "{s}", .{grows}, 3);
+    var buf: [160]u8 = undefined;
+    if (p.expand.horizontal) propText("Widths", "{s}", .{sizeList(&buf, p.widths)}, 4);
+    if (p.expand.vertical) propText("Heights", "{s}", .{sizeList(&buf, p.heights)}, 5);
+
+    for (p.slots, 0..) |sp, si| {
+        const n = 100 + si * 20;
+        heading("Slot {s}", .{sp.name}, n);
+        var next = sp;
+        var changed = false;
+        if (styleChoice(sp.style, null, n + 1)) |c| {
+            next.style = c.?;
+            changed = true;
+        }
+        if (slotPlaceEditor(sp.place, n + 2)) |pl| {
+            next.place = pl;
+            changed = true;
+        }
+        if (changed) try state.model.setPrototypeSlot(id, si, next);
+    }
+
+    heading("Art", .{}, 600);
+    const art = p.art orelse {
+        propText("Look", "plain, from the insets", .{}, 601);
+        return;
+    };
+    for (art.layers, 0..) |layer, li| {
+        const n = 700 + li * 20;
+        heading("Layer {s}", .{layer.name}, n);
+        if (paintEditor(layer.paint, n + 1)) |paint| try state.model.setLayerPaint(id, li, paint);
+    }
+}
+
+/// "1, 1.25, 2 u", or "any" for an empty list.
+fn sizeList(buf: []u8, sizes: []const f64) []const u8 {
+    if (sizes.len == 0) return "any";
+    var w: std.Io.Writer = .fixed(buf);
+    for (sizes, 0..) |s, i| w.print("{s}{d}", .{ if (i > 0) ", " else "", s }) catch break;
+    w.writeAll(" u") catch {};
+    return w.buffered();
+}
+
+/// A style choice. With `inherited` (a tile's slot), the first entry takes
+/// the prototype's style and `own` is the tile's, if any; without, `own` is
+/// the style itself. Returns the choice when it changes: a style, or null
+/// for the prototype's.
+fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: usize) ??layout.model.StyleId {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName("Style");
+    const styles = state.model.styles.items;
+    if (styles.len == 0 or styles.len > 31) {
+        dvui.labelNoFmt(@src(), "none", .{}, .{});
+        return null;
+    }
+    var bufs: [32][64]u8 = undefined;
+    var names: [32][]const u8 = undefined;
+    const first: usize = if (inherited != null) 1 else 0;
+    if (inherited) |s| names[0] = std.fmt.bufPrint(&bufs[0], "Prototype's: {s}", .{styles[s].name}) catch "Prototype's";
+    for (styles, 0..) |s, i| names[first + i] = std.fmt.bufPrint(&bufs[first + i], "{s}", .{s.name}) catch "?";
+    var choice: usize = if (own) |s| first + s else 0;
+    const before = choice;
+    if (!dvui.dropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
+    if (choice < first) return @as(?layout.model.StyleId, null);
+    return @as(?layout.model.StyleId, @intCast(choice - first));
+}
+
+/// Edits a slot's place: its inset from the face on each side, and how the
+/// label aligns across and down. Returns the new place when it changes.
+fn slotPlaceEditor(place: layout.model.SlotPlace, n: usize) ?layout.model.SlotPlace {
+    var p = place;
+    var changed = false;
+    inline for (.{ .{ "Inset left, mm", "left" }, .{ "Inset right, mm", "right" }, .{ "Inset top, mm", "top" }, .{ "Inset bottom, mm", "bottom" } }, 0..) |side, i| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
+        defer row.deinit();
+        propName(side[0]);
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(p.inset, side[1]), .min = 0, .max = 100 }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
+        changed = r.changed or changed;
+    }
+    inline for (.{ .{ "Across", "h", [_][]const u8{ "Start", "Centre", "End" } }, .{ "Down", "v", [_][]const u8{ "Top", "Centre", "Bottom" } } }, 0..) |axis, i| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n * 8 + 4 + i });
+        defer row.deinit();
+        propName(axis[0]);
+        var choice: usize = @backingInt(@field(p, axis[1]));
+        const names = axis[2];
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n * 8 + 4 + i })) {
+            @field(p, axis[1]) = @fromBackingInt(@intCast(choice));
+            changed = true;
+        }
+    }
+    return if (changed) p else null;
+}
+
+/// Edits how an art layer is painted: its fill's colours (one, or a
+/// gradient's two ends) and its edge's colour and width. Returns the new
+/// paint when it changes.
+fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
+    var p = paint;
+    var changed = false;
+    switch (p.fill) {
+        .none => propText("Fill", "none", .{}, n),
+        .solid => |c| if (colourEntry("Fill", c, false, n)) |v| {
+            p.fill = .{ .solid = v.? };
+            changed = true;
+        },
+        .linear => |l| {
+            if (colourEntry("Gradient from", l.start, false, n)) |v| {
+                p.fill.linear.start = v.?;
+                changed = true;
+            }
+            if (colourEntry("Gradient to", l.end, false, n + 1)) |v| {
+                p.fill.linear.end = v.?;
+                changed = true;
+            }
+        },
+    }
+    if (colourEntry("Edge", p.edge, true, n + 2)) |v| {
+        p.edge = v;
+        changed = true;
+    }
+    if (p.edge != null) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
+        defer row.deinit();
+        propName("Edge width, mm");
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &p.edge_width, .min = 0, .max = 5 }, .{ .expand = .horizontal, .id_extra = n + 3 });
+        changed = r.changed or changed;
+    }
+    return if (changed) p else null;
+}
+
+/// A colour as "#rrggbb", with a swatch. Returns a new colour once what is
+/// typed is one, or null (`allow_none`, emptied) for no colour.
+fn colourEntry(name: []const u8, colour: ?layout.art.Color, allow_none: bool, n: usize) ??layout.art.Color {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    var swatch = dvui.box(@src(), .{}, .{
+        .min_size_content = .{ .w = 16, .h = 16 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = 6 },
+        .border = .all(1),
+        .background = colour != null,
+        .color_fill = if (colour) |c| .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } } else null,
+    });
+    swatch.deinit();
+    var buf: [7]u8 = undefined;
+    const text: []const u8 = if (colour) |c| c.format(&buf) else "";
+    var te = dvui.textEntry(@src(), .{ .text_initial = text }, .{ .expand = .horizontal, .font = .theme(.mono), .id_extra = n });
+    defer te.deinit();
+    if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), text)) te.textSet(text, false);
+    if (!te.text_changed) return null;
+    const typed = std.mem.trim(u8, te.textGet(), " ");
+    if (typed.len == 0) return if (allow_none and colour != null) @as(?layout.art.Color, null) else null;
+    const c = layout.art.Color.parse(typed) orelse return null;
+    if (colour != null and std.meta.eql(c, colour.?)) return null;
+    return @as(?layout.art.Color, c);
 }
 
 /// A tile's width or height: a choice of the sizes its prototype allows

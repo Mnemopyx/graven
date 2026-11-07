@@ -365,7 +365,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchRow, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, NoSuchRow, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -675,6 +675,42 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Changes slot `i` of a prototype (its place, default style or name),
+    /// and so that slot on every tile made from it, except where a tile has
+    /// its own.
+    pub fn setPrototypeSlot(m: *Model, id: PrototypeId, i: usize, sp: SlotPrototype) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const p = &m.prototypes.items[id];
+        if (i >= p.slots.len) return error.NoSuchSlot;
+        const slots = try m.a().dupe(SlotPrototype, p.slots);
+        slots[i] = sp;
+        slots[i].name = try m.a().dupe(u8, sp.name);
+        p.slots = slots;
+        m.revision += 1;
+    }
+
+    /// Changes how layer `i` of a prototype's art is painted. Its outline is
+    /// left as drawn.
+    pub fn setLayerPaint(m: *Model, id: PrototypeId, i: usize, paint: art_.Paint) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const p = &m.prototypes.items[id];
+        const art = p.art orelse return error.NoSuchLayer;
+        if (i >= art.layers.len) return error.NoSuchLayer;
+        const layers = try m.a().dupe(art_.Layer, art.layers);
+        layers[i].paint = paint;
+        p.art.?.layers = layers;
+        m.revision += 1;
+    }
+
+    /// How many tiles are made from prototype `id`.
+    pub fn prototypeUses(m: *const Model, id: PrototypeId) usize {
+        var n: usize = 0;
+        for (m.tiles.items) |t| {
+            if (!t.removed and t.prototype == id) n += 1;
+        }
+        return n;
+    }
+
     /// Adds a slot to a prototype, and so to every tile made from it.
     pub fn addPrototypeSlot(m: *Model, id: PrototypeId, sp: SlotPrototype) Error!void {
         if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
@@ -916,6 +952,13 @@ test "a tile's slots are its prototype's, with its own labels and overrides" {
     try std.testing.expectEqual(1, m.slot(k, 0).style);
     try std.testing.expectEqual(1, m.slot(k, 0).place.inset.left);
 
+    // Changing the prototype's slot changes the tile's, where it has no own.
+    var top = m.prototypes.items[key].slots[0];
+    top.place.h = .centre;
+    try m.setPrototypeSlot(key, 0, top);
+    try std.testing.expectEqual(Align.centre, m.slot(k, 0).place.h);
+    try std.testing.expectEqual(1, m.prototypeUses(key));
+
     // A slot added to the prototype appears on its tiles, empty.
     try m.addPrototypeSlot(key, .{ .name = "side" });
     try std.testing.expectEqual(3, m.slotCount(k));
@@ -927,4 +970,28 @@ test "a tile's slots are its prototype's, with its own labels and overrides" {
     try std.testing.expectError(error.NoSuchSlot, m.setContent(k, "top", "x"));
     try m.setTilePrototype(k, key);
     try std.testing.expectEqualStrings("Q", m.slot(k, 0).content);
+}
+
+test "a layer's paint changes; its outline does not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const look = try art_.keycap(arena.allocator(), .{
+        .pitch = 19.05,
+        .body_inset = .all(0.5),
+        .face_inset = .all(3),
+        .body = .{ .solid = .hex("#ffffff") },
+        .edge = null,
+        .face = .{ .solid = .hex("#eeeeee") },
+    });
+    const key = try m.addPrototype(.{ .name = "key", .art = look });
+    const before = m.prototypes.items[key].art.?.layers[0].outline.contours.ptr;
+    try m.setLayerPaint(key, 0, .{ .fill = .{ .solid = .hex("#202020") }, .edge = .hex("#000000") });
+    const layer = m.prototypes.items[key].art.?.layers[0];
+    try std.testing.expectEqual(art_.Color.hex("#202020"), layer.paint.fill.solid);
+    try std.testing.expectEqual(before, layer.outline.contours.ptr);
+    try std.testing.expectError(error.NoSuchLayer, m.setLayerPaint(key, 5, .{}));
+    const plain = try m.addPrototype(.{ .name = "plain" });
+    try std.testing.expectError(error.NoSuchLayer, m.setLayerPaint(plain, 0, .{}));
 }
