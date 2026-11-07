@@ -494,7 +494,8 @@ fn findTile(id: TileId) ?Found {
 /// position while it is being dragged (whole millimetres of travel).
 fn panelOrigin(pi: usize) geom.Point {
     const o = state.model.panels.items[pi].origin;
-    if (state.moving) |mv| if (mv.panel == pi) return .{ .x = o.x + @round(mv.at.x - mv.start.x), .y = o.y + @round(mv.at.y - mv.start.y) };
+    // It may be dragged past the sheet's edge, but keeps a grip on it.
+    if (state.moving) |mv| if (mv.panel == pi) return state.model.clampOnSheet(pi, .{ .x = o.x + @round(mv.at.x - mv.start.x), .y = o.y + @round(mv.at.y - mv.start.y) });
     return o;
 }
 
@@ -1931,11 +1932,10 @@ fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick
     }
 }
 
-/// Snaps a worksheet point to the 1 mm grid the add panel tool uses, and
-/// keeps it on the sheet: panels may not extend past it.
+/// Snaps a worksheet point to the 1 mm grid the add panel tool uses. A
+/// panel starts on the sheet but may be drawn past its edge, flagged.
 fn snap(p: geom.Point) geom.Point {
-    const s = state.model.sheet.box();
-    return .{ .x = std.math.clamp(@round(p.x), s.x0, s.x1), .y = std.math.clamp(@round(p.y), s.y0, s.y1) };
+    return .{ .x = @round(p.x), .y = @round(p.y) };
 }
 
 fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
@@ -2074,8 +2074,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         state.drag = .{ .start = p, .at = p };
                     }
                 } else if (drawing and me.button.pointer()) {
+                    // A panel is drawn from a point on the sheet.
                     const at = snap(state.view.toMm(area, me.p));
-                    state.drag = .{ .start = at, .at = at };
+                    if (contains(state.model.sheet.box(), at)) state.drag = .{ .start = at, .at = at };
                 } else {
                     state.press_at = if (me.button.pointer()) state.view.toMm(area, me.p) else null;
                     dvui.dragPreStart(me.button, me.p, .{});
@@ -2192,8 +2193,7 @@ fn contains(b: geom.Box, p: geom.Point) bool {
 fn finishMove(pi: usize) void {
     const target = panelOrigin(pi);
     state.moving = null;
-    const origin = if (state.model.compliant(pi)) state.model.clampCompliant(pi, target) else target;
-    state.model.movePanel(pi, origin) catch |err| dvui.log.err("moving a panel: {s}", .{@errorName(err)});
+    state.model.movePanel(pi, target) catch |err| dvui.log.err("moving a panel: {s}", .{@errorName(err)});
 }
 
 /// Makes what is under worksheet point `at` the context: a tile, else a
@@ -2238,7 +2238,7 @@ fn addPanelFromDrag(b: geom.Box) void {
         .w = b.width(),
         .h = b.height(),
     }) catch |err| {
-        dvui.log.err("adding a panel: {s}", .{@errorName(err)});
+        state.status = if (err == error.OffSheet) "Too little of it is on the sheet: start further in. " else "The panel was not added. ";
         return;
     };
     // Tools are not modes: a use ends the tool, and the context it was

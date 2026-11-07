@@ -513,7 +513,9 @@ pub const Model = struct {
     /// the name is the app's choice are taken from `panel`.
     pub fn placePanel(m: *Model, panel: Panel) Error!usize {
         if (!(panel.w > 0 and panel.h > 0)) return error.BadSize;
-        if (!m.onSheet(panel.box())) return error.OffSheet;
+        // It may hang past the sheet's edge (it is flagged), but not lie
+        // off it.
+        if (!m.gripsSheet(panel.box())) return error.OffSheet;
         var p = panel;
         p.name = try m.a().dupe(u8, panel.name);
         p.regions = .empty;
@@ -573,10 +575,12 @@ pub const Model = struct {
     }
 
     /// Moves a panel on the worksheet.
+    /// Moves a panel. Like tracks on a panel, it may hang past the sheet's
+    /// edge, flagged, but a grip of it must stay on the sheet.
     pub fn movePanel(m: *Model, panel: usize, origin: geom.Point) Error!void {
-        // A compliant panel must stay compliant. One that is not (a sheet or
-        // margin change left it so) may move anywhere: it is still reported.
-        if (m.compliant(panel) and !m.compliantAt(panel, origin)) return error.NotCompliant;
+        var p = m.panels.items[panel];
+        p.origin = origin;
+        if (!m.gripsSheet(p.box())) return error.OffSheet;
         m.panels.items[panel].origin = origin;
         m.revision += 1;
     }
@@ -662,20 +666,30 @@ pub const Model = struct {
         return false;
     }
 
-    /// The origin nearest `origin` at which the panel complies. When no
-    /// origin can (the panel's ink area is larger than the sheet's), the
-    /// nearest that keeps its outline on the sheet.
-    pub fn clampCompliant(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
+    /// How much of a panel stays on the sheet however it is moved, mm on
+    /// each axis: enough to grab it again (all of it, if it is smaller).
+    pub const panel_grip = 5.0;
+
+    /// The origin nearest `origin` that keeps a grip of panel `panel` on
+    /// the sheet; past that, it may hang off any edge.
+    pub fn clampOnSheet(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
         const p = m.panels.items[panel];
         const s = m.sheet;
-        const ink = s.inkArea();
-        const xs = [2]f64{ @max(0, ink.x0 - p.margins.left), @min(s.w - p.w, ink.x1 - p.w + p.margins.right) };
-        const ys = [2]f64{ @max(0, ink.y0 - p.margins.bottom), @min(s.h - p.h, ink.y1 - p.h + p.margins.top) };
-        if (xs[0] <= xs[1] and ys[0] <= ys[1]) return .{ .x = std.math.clamp(origin.x, xs[0], xs[1]), .y = std.math.clamp(origin.y, ys[0], ys[1]) };
+        const gx = @min(panel_grip, p.w);
+        const gy = @min(panel_grip, p.h);
         return .{
-            .x = std.math.clamp(origin.x, 0, @max(0, s.w - p.w)),
-            .y = std.math.clamp(origin.y, 0, @max(0, s.h - p.h)),
+            .x = std.math.clamp(origin.x, gx - p.w, s.w - gx),
+            .y = std.math.clamp(origin.y, gy - p.h, s.h - gy),
         };
+    }
+
+    /// Whether box `b` keeps a grip on the sheet (see `panel_grip`).
+    pub fn gripsSheet(m: *const Model, b: geom.Box) bool {
+        const s = m.sheet.box();
+        const tol = 1e-9;
+        const ox = @min(b.x1, s.x1) - @max(b.x0, s.x0);
+        const oy = @min(b.y1, s.y1) - @max(b.y0, s.y0);
+        return ox >= @min(panel_grip, b.width()) - tol and oy >= @min(panel_grip, b.height()) - tol;
     }
 
     /// Whether a box lies on the sheet. Panels are placed and moved only
@@ -1097,25 +1111,27 @@ pub const Model = struct {
     }
 };
 
-test "panels are placed and moved only on the sheet; a smaller sheet does not move them" {
+test "panels may hang off the sheet, flagged, but keep a grip on it; a smaller sheet does not move them" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    try std.testing.expectError(error.OffSheet, m.placePanel(.{ .name = "big", .w = 700, .h = 100 }));
+    // A2 landscape is 594 wide: a 700 mm panel hangs off, but is placed.
+    const big = try m.placePanel(.{ .name = "big", .w = 700, .h = 100 });
+    try std.testing.expect(!m.compliant(big));
+    try std.testing.expectError(error.OffSheet, m.placePanel(.{ .name = "away", .origin = .{ .x = 600, .y = 10 }, .w = 50, .h = 50 }));
     const p = try m.placePanel(.{ .name = "P", .origin = .{ .x = 400, .y = 10 }, .w = 150, .h = 100 });
-    try std.testing.expectError(error.NotCompliant, m.movePanel(p, .{ .x = 500, .y = 10 }));
+    // Past the right edge: allowed, and flagged.
+    try m.movePanel(p, .{ .x = 500, .y = 10 });
+    try std.testing.expect(!m.compliant(p));
+    // But not off it: 5 mm must stay on.
+    try std.testing.expectError(error.OffSheet, m.movePanel(p, .{ .x = 590, .y = 10 }));
+    try std.testing.expectEqual(589, m.clampOnSheet(p, .{ .x = 700, .y = 10 }).x);
+    try std.testing.expectEqual(-145, m.clampOnSheet(p, .{ .x = -400, .y = 10 }).x);
     try m.setSheet(.standard(1, .portrait)); // A3 portrait: 297 wide
-    try std.testing.expectEqual(400, m.panels.items[p].origin.x);
-    try std.testing.expect(!m.onSheet(m.panels.items[p].box()));
-    // Off the sheet already, it may move anywhere, on or off.
-    try m.movePanel(p, .{ .x = 600, .y = 10 });
+    try std.testing.expectEqual(500, m.panels.items[p].origin.x);
+    // Left entirely off by the smaller sheet, it can be brought back.
     try m.movePanel(p, .{ .x = 100, .y = 10 });
-    // Compliant again, it must stay compliant: ink area 105..245 inside the
-    // sheet's 20..287.
+    // Ink area 105..245 inside the sheet's 20..287: compliant.
     try std.testing.expect(m.compliant(p));
-    try std.testing.expectError(error.NotCompliant, m.movePanel(p, .{ .x = 200, .y = 10 }));
-    // Its outline could reach 147 (297 - 150), but its ink area must stop
-    // at the 10 mm right margin: 287 - 145 = 142.
-    try std.testing.expectEqual(142, m.clampCompliant(p, .{ .x = 200, .y = 10 }).x);
     // Its outline may reach into the sheet's margins, its ink area may not.
     try std.testing.expect(m.compliantAt(p, .{ .x = 15, .y = 10 }));
     try std.testing.expect(!m.compliantAt(p, .{ .x = 14, .y = 10 }));
