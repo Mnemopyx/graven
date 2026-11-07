@@ -87,11 +87,20 @@ const State = struct {
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
     /// The pointer's position on the worksheet, mm; null off the canvas.
     mouse: ?geom.Point = null,
+    /// The press was used by a tool (placing a label), so its release does
+    /// not pick.
+    press_consumed: bool = false,
     /// Where the pointer went down on the canvas, mm.
     press_at: ?geom.Point = null,
     /// A selected panel being dragged to a new place: shown at its preview
     /// position, committed on release.
     moving: ?struct { panel: usize, start: geom.Point, at: geom.Point } = null,
+    /// A selected panel label being dragged, likewise.
+    moving_label: ?struct { panel: usize, index: usize, start: geom.Point, at: geom.Point } = null,
+    /// The style new panel labels get, made with the first one; its size
+    /// is the app's choice until the user sets it.
+    label_style: ?layout.model.StyleId = null,
+    label_style_set: bool = false,
     solve_ms: f64 = 0,
     flat: Flat,
     view: View = .{},
@@ -109,7 +118,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel };
+const Tool = enum { select, add_panel, add_label };
 
 /// The current context: a node of the component tree.
 const Context = union(enum) {
@@ -120,6 +129,8 @@ const Context = union(enum) {
     region: struct { panel: usize, region: usize },
     row: struct { panel: usize, region: usize, row: usize },
     tile: TileId,
+    /// A label placed directly on a panel.
+    label: struct { panel: usize, index: usize },
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -139,6 +150,7 @@ const Context = union(enum) {
             .region => "Region",
             .row => "Row",
             .tile => "Tile",
+            .label => "Label",
         };
     }
 };
@@ -749,7 +761,11 @@ fn treeContent() void {
     const sheet = state.model.sheet;
     if (!treeNode(.worksheet, sheet.name, 1, state.model.panels.items.len > 0, sheet.default_name)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!treeNode(.{ .panel = pi }, panel.name, 2, panel.regions.items.len > 0, panel.default_name)) continue;
+        if (!treeNode(.{ .panel = pi }, panel.name, 2, panel.regions.items.len > 0 or panel.labels.items.len > 0, panel.default_name)) continue;
+        for (panel.labels.items, 0..) |label, li| {
+            const text = std.fmt.bufPrint(&name_buf, "“{s}”", .{label.content}) catch label.content;
+            _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, 3, false, label.default_content);
+        }
         for (panel.regions.items, 0..) |region, ri| {
             if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, region.rows.items.len > 0, false)) continue;
             for (region.rows.items, 0..) |row, rowi| {
@@ -811,6 +827,10 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
 fn revealInTree(ctx: Context) void {
     const id = switch (ctx) {
         .tile => |t| t,
+        .label => |l| {
+            for ([_]Context{ .file, .worksheet, .{ .panel = l.panel } }) |c| state.expanded.put(state.gpa, c.key(), true) catch {};
+            return;
+        },
         else => return,
     };
     const f = findTile(id) orelse return;
@@ -830,7 +850,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .tile => |id| t.id == id,
         .row => |r| r.panel == pi and t.region == r.region and t.row == r.row,
         .region => |r| r.panel == pi and t.region == r.region,
-        .file, .worksheet, .panel => false,
+        .file, .worksheet, .panel, .label => false,
     };
 }
 
@@ -839,6 +859,7 @@ fn contextExtents() geom.Box {
     switch (state.context) {
         .file, .worksheet => return state.model.sheet.box(),
         .panel => |pi| return state.model.panels.items[pi].box(),
+        .label => |l| if (labelBox(l.panel, l.index)) |b| return b,
         else => {},
     }
     var b: geom.Box = .empty;
@@ -1028,9 +1049,54 @@ fn drawPanelMargins(area: dvui.Rect.Physical, pi: usize) void {
     if (ink.width() > 0 and ink.height() > 0) state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.margin.opacity(0.6) } });
 }
 
-fn inMargin(tile: TileId, slot: usize) bool {
-    for (state.intrusions) |i| if (i.tile == tile and i.slot == slot) return true;
+fn inMargin(pi: usize, tile: ?TileId, slot: usize) bool {
+    for (state.intrusions) |i| if (i.panel == pi and i.tile == tile and i.slot == slot) return true;
     return false;
+}
+
+/// A panel label's ink box on the worksheet, from the last solve, moved to
+/// its preview place while dragged.
+fn labelBox(pi: usize, index: usize) ?geom.Box {
+    if (pi >= state.placed.items.len) return null;
+    for (state.placed.items[pi].labels) |l| {
+        if (l.tile != null or l.slot != index) continue;
+        const d = labelDelta(pi, index);
+        const b = onSheet(pi, l.box);
+        return .{ .x0 = b.x0 + d.x, .y0 = b.y0 + d.y, .x1 = b.x1 + d.x, .y1 = b.y1 + d.y };
+    }
+    return null;
+}
+
+/// How far a dragged panel label has travelled, in 0.5 mm steps.
+fn labelDelta(pi: usize, index: usize) geom.Point {
+    if (state.moving_label) |mv| if (mv.panel == pi and mv.index == index) return .{
+        .x = @round((mv.at.x - mv.start.x) * 2) / 2,
+        .y = @round((mv.at.y - mv.start.y) * 2) / 2,
+    };
+    return .{ .x = 0, .y = 0 };
+}
+
+/// The style for new panel labels: "Label", 3 mm cap height in the legend
+/// font, made the first time it is needed.
+fn labelStyle() !layout.model.StyleId {
+    if (state.label_style) |s| return s;
+    const s = try state.model.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    state.label_style = s;
+    return s;
+}
+
+/// Places a new label on panel `pi` at worksheet point `at` (on a 0.5 mm
+/// grid), with placeholder text; the context stays the panel.
+fn addLabelAt(pi: usize, at: geom.Point) void {
+    const o = state.model.panels.items[pi].origin;
+    const style = labelStyle() catch return;
+    _ = state.model.addLabel(pi, .{
+        .at = .{ .x = @round((at.x - o.x) * 2) / 2, .y = @round((at.y - o.y) * 2) / 2 },
+        .style = style,
+        .content = "LABEL",
+        .default_content = true,
+    }) catch return;
+    state.expanded.put(state.gpa, Context.key(.{ .panel = pi }), true) catch {};
 }
 
 /// Tiles and legends of panel `pi`, moved onto the worksheet.
@@ -1051,6 +1117,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     const o = panelOrigin(pi);
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
+        const d = if (l.tile == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
         const contours = state.flat.get(l.render, &state.faces) catch continue;
         const paths = lifo.alloc(dvui.Path, contours.len) catch continue;
         defer lifo.free(paths);
@@ -1058,12 +1125,20 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         defer for (paths[0..made]) |p| lifo.free(p.points);
         for (contours, paths) |c, *p| {
             const pts = lifo.alloc(dvui.Point.Physical, c.len) catch break;
-            for (c, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + l.origin.x + o.x, .y = q.y + l.origin.y + o.y });
+            for (c, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + l.origin.x + o.x + d.x, .y = q.y + l.origin.y + o.y + d.y });
             p.* = .{ .points = pts };
             made += 1;
         }
         // Ink in the sheet's margins is drawn in the warning colour.
-        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = if (inMargin(l.tile, l.slot)) colors.overflow else colors.ink }, .fade = 1 });
+        dvui.Path.fill(paths[0..made], .{ .color = .{ .color = if (inMargin(pi, l.tile, l.slot)) colors.overflow else colors.ink }, .fade = 1 });
+    }
+    // The selected panel label: its ink box, with a little room.
+    switch (state.context) {
+        .label => |sel| if (sel.panel == pi) if (labelBox(pi, sel.index)) |b| {
+            const pad = 0.6;
+            state.view.rect(area, .{ .x0 = b.x0 - pad, .y0 = b.y0 - pad, .x1 = b.x1 + pad, .y1 = b.y1 + pad }).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+        },
+        else => {},
     }
 }
 
@@ -1246,13 +1321,15 @@ fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
 }
 
 fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
-    const drawing = state.tool == .add_panel;
+    // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
+    const drawing = state.tool != .select;
     for (dvui.events()) |*e| {
-        if (e.evt == .key and state.moving != null) {
+        if (e.evt == .key and (state.moving != null or state.moving_label != null)) {
             const k = e.evt.key;
             if (k.code == .escape and k.action == .down) {
                 e.handle(@src(), box.data());
                 state.moving = null;
+                state.moving_label = null;
                 dvui.refresh(null, @src(), box.data().id);
             }
             continue;
@@ -1272,11 +1349,20 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             // Keys reach the canvas only while it has focus.
             const k = e.evt.key;
             if (k.code == .delete and k.action == .down and state.moving == null) {
-                if (state.context == .panel) {
-                    e.handle(@src(), box.data());
-                    state.model.removePanel(state.context.panel);
-                    state.context = .worksheet;
-                    dvui.refresh(null, @src(), box.data().id);
+                switch (state.context) {
+                    .panel => |pi| {
+                        e.handle(@src(), box.data());
+                        state.model.removePanel(pi);
+                        state.context = .worksheet;
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
+                    .label => |l| if (state.moving_label == null) {
+                        e.handle(@src(), box.data());
+                        state.model.removeLabel(l.panel, l.index);
+                        state.context = .{ .panel = l.panel };
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
+                    else => {},
                 }
             }
             continue;
@@ -1296,7 +1382,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 state.mouse = if (area.contains(me.p) and contains(state.model.sheet.box(), at)) at else null;
                 if (drawing) {
                     dvui.cursorSet(.crosshair);
-                } else if (state.moving != null) {
+                } else if (state.moving != null or state.moving_label != null) {
+                    dvui.cursorSet(.arrow_all);
+                } else if (labelUnder(state.view.toMm(area, me.p))) {
                     dvui.cursorSet(.arrow_all);
                 } else if (panelToMove(state.view.toMm(area, me.p)) != null) {
                     // Over a panel a drag would move, show that it can be.
@@ -1317,7 +1405,16 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
-                if (drawing and me.button.pointer()) {
+                if (state.tool == .add_label and me.button.pointer()) {
+                    // One click places a label on the panel it was chosen for.
+                    const at = state.view.toMm(area, me.p);
+                    if (state.context == .panel and contains(state.model.panels.items[state.context.panel].box(), at)) {
+                        addLabelAt(state.context.panel, at);
+                        state.tool = .select;
+                        // The release that follows is part of this click, not a pick.
+                        state.press_consumed = true;
+                    }
+                } else if (drawing and me.button.pointer()) {
                     const at = snap(state.view.toMm(area, me.p));
                     state.drag = .{ .start = at, .at = at };
                 } else {
@@ -1334,10 +1431,16 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     e.handle(@src(), box.data());
                     mv.at = state.view.toMm(area, me.p);
                     dvui.refresh(null, @src(), box.data().id);
+                } else if (state.moving_label) |*mv| {
+                    e.handle(@src(), box.data());
+                    mv.at = state.view.toMm(area, me.p);
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (dvui.dragging(me, null)) |d| {
                     e.handle(@src(), box.data());
                     // Dragging the selected panel moves it; anything else pans.
-                    if (grabbedPanel()) |pi| {
+                    if (grabbedLabel()) |l| {
+                        state.moving_label = .{ .panel = l.panel, .index = l.index, .start = state.press_at.?, .at = state.view.toMm(area, me.p) };
+                    } else if (grabbedPanel()) |pi| {
                         state.moving = .{ .panel = pi, .start = state.press_at.?, .at = state.view.toMm(area, me.p) };
                     } else {
                         state.view.fit = null;
@@ -1354,6 +1457,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     addPanelFromDrag(dragBox(d.start, d.at));
                 } else if (state.moving) |mv| {
                     finishMove(mv.panel);
+                } else if (state.moving_label) |mv| {
+                    const d = labelDelta(mv.panel, mv.index);
+                    state.moving_label = null;
+                    const at = state.model.panels.items[mv.panel].labels.items[mv.index].at;
+                    state.model.moveLabel(mv.panel, mv.index, .{ .x = at.x + d.x, .y = at.y + d.y });
+                } else if (state.press_consumed) {
+                    state.press_consumed = false;
                 } else if (dvui.dragging(me, null) == null) {
                     pick(state.view.toMm(area, me.p));
                 }
@@ -1368,6 +1478,28 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
 }
 
 /// The selected panel, when the pointer went down on it: a drag then moves it.
+/// Whether `at` is on the selected panel label, which a drag would move.
+fn labelUnder(at: geom.Point) bool {
+    const l = switch (state.context) {
+        .label => |l| l,
+        else => return false,
+    };
+    const b = labelBox(l.panel, l.index) orelse return false;
+    return contains(.{ .x0 = b.x0 - 1, .y0 = b.y0 - 1, .x1 = b.x1 + 1, .y1 = b.y1 + 1 }, at);
+}
+
+/// The selected panel label, when the pointer went down on it.
+fn grabbedLabel() ?struct { panel: usize, index: usize } {
+    const at = state.press_at orelse return null;
+    const l = switch (state.context) {
+        .label => |l| l,
+        else => return null,
+    };
+    const b = labelBox(l.panel, l.index) orelse return null;
+    if (!contains(.{ .x0 = b.x0 - 1, .y0 = b.y0 - 1, .x1 = b.x1 + 1, .y1 = b.y1 + 1 }, at)) return null;
+    return .{ .panel = l.panel, .index = l.index };
+}
+
 fn grabbedPanel() ?usize {
     return panelToMove(state.press_at orelse return null);
 }
@@ -1416,6 +1548,12 @@ fn pick(at: geom.Point) void {
         for (state.placed.items[pi].tiles) |t| {
             const body = onSheet(pi, t.body);
             if (at.x >= body.x0 and at.x <= body.x1 and at.y >= body.y0 and at.y <= body.y1) state.context = .{ .tile = t.id };
+        }
+        for (state.placed.items[pi].labels) |l| {
+            if (l.tile != null) continue;
+            if (labelBox(pi, l.slot)) |lb| if (contains(.{ .x0 = lb.x0 - 1, .y0 = lb.y0 - 1, .x1 = lb.x1 + 1, .y1 = lb.y1 + 1 }, at)) {
+                state.context = .{ .label = .{ .panel = pi, .index = l.slot } };
+            };
         }
     }
     revealInTree(state.context);
@@ -1487,6 +1625,18 @@ fn toolPalette() void {
     if (dvui.buttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
 
+    if (state.context == .panel) {
+        // Add label: the next click on the panel places one.
+        const on = state.tool == .add_label;
+        var lwd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Add label", dvui.entypo.text, .{}, .{}, .{
+            .data_out = &lwd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.tool = if (on) .select else .add_label;
+        }
+        dvui.tooltip(@src(), .{ .active_rect = lwd.borderRectScale().r }, "Add label: click on the panel to place it", .{}, .{});
+    }
     if (state.context == .worksheet) {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
@@ -1510,6 +1660,7 @@ fn lowerKind() []const u8 {
         .region => "region",
         .row => "row",
         .tile => "tile",
+        .label => "label",
     };
 }
 
@@ -1724,6 +1875,7 @@ fn properties() !void {
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
             propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
+            propText("Labels", "{d}", .{panel.labels.items.len}, 7);
             try panelMargins(pi);
             if (panelIssue(pi)) |i| {
                 if (i.off_sheet > 0) propText("Issue", "{d:.2} mm off the sheet", .{i.off_sheet}, 20);
@@ -1747,7 +1899,72 @@ fn properties() !void {
             propText("Tiles", "{d}", .{row.places.items.len}, 3);
         },
         .tile => |id| try tileProperties(id),
+        .label => |l| try labelProperties(l.panel, l.index),
     }
+}
+
+/// A panel label's properties: its text, how it aligns on its anchor, the
+/// anchor's position, and its style's size.
+fn labelProperties(pi: usize, index: usize) !void {
+    const label = state.model.panels.items[pi].labels.items[index];
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Text");
+        var te = dvui.textEntry(@src(), .{ .text_initial = label.content }, .{
+            .expand = .horizontal,
+            .font = styled(.theme(.body), label.default_content),
+            .id_extra = pi * 1000 + index,
+        });
+        const changed = te.text_changed;
+        const text = te.textGet();
+        te.deinit();
+        if (changed and !std.mem.eql(u8, text, label.content)) try state.model.setLabelContent(pi, index, text);
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Alignment");
+        const names = [_][]const u8{ "Start", "Centre", "End" };
+        var choice: usize = @backingInt(label.alignment);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+            state.model.alignLabel(pi, index, @fromBackingInt(@intCast(choice)));
+        }
+    }
+    {
+        // The anchor, on the baseline, in the panel's frame.
+        var at = label.at;
+        var changed = false;
+        inline for (.{ .{ "Anchor x, mm", "x" }, .{ "Anchor y, mm", "y" } }, 0..) |axis, i| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
+            defer row.deinit();
+            propName(axis[0]);
+            const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(at, axis[1]), .min = -10000, .max = 10000 }, .{ .expand = .horizontal, .id_extra = pi * 1000 + index });
+            changed = r.changed or changed;
+        }
+        if (changed) state.model.moveLabel(pi, index, at);
+    }
+    const style = state.model.styles.items[label.style];
+    propText("Style", "{s}", .{style.name}, 20);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Cap height, mm");
+        var cap = style.spec.cap_height;
+        const default = state.label_style == label.style and !state.label_style_set;
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &cap, .min = 0.1, .max = 200 }, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
+        if (r.changed) {
+            state.model.setCapHeight(label.style, cap) catch {};
+            if (state.label_style == label.style) state.label_style_set = true;
+        }
+    }
+    try propFont("Font", 21);
+    for (state.intrusions) |i| if (i.panel == pi and i.tile == null and i.slot == index) {
+        propText("Issue", "ink {d:.2} mm in margin", .{i.amount}, 22);
+    };
+    if (pi < state.placed.items.len) for (state.placed.items[pi].issues, 0..) |i, k| if (i.label == index) {
+        propText("Issue", "{s}", .{@tagName(i.kind)}, 23 + k);
+    };
 }
 
 fn tileProperties(id: TileId) !void {
@@ -1833,6 +2050,7 @@ fn statusContent() void {
     const hint = switch (state.tool) {
         .select => state.status,
         .add_panel => "Add panel: drag out its outline · Esc cancels",
+        .add_label => "Add label: click on the panel to place it · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
 

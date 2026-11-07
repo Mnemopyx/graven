@@ -32,9 +32,13 @@ pub const PlacedTile = struct {
 };
 
 pub const PlacedLabel = struct {
-    tile: TileId,
+    /// The tile whose slot holds it; null for a label placed directly on
+    /// the panel.
+    tile: ?TileId,
+    /// The slot's index on the tile, or the label's index on the panel.
     slot: usize,
-    /// The slot's box, mm in the panel frame.
+    /// The slot's box, mm in the panel frame; for a panel label, its ink
+    /// box there.
     box: Box,
     /// Where the label frame's origin sits in the panel frame; the render's
     /// geometry is relative to it.
@@ -59,6 +63,8 @@ pub const Issue = struct {
     },
     tile: ?TileId = null,
     slot: ?usize = null,
+    /// A label placed directly on the panel, by index.
+    label: ?usize = null,
     region: ?usize = null,
     row: ?usize = null,
     /// How far too long, mm, for overflows.
@@ -96,8 +102,8 @@ pub const Labels = struct {
     const Key = struct {
         style: StyleId,
         anchor: model.Align,
-        /// The hard box relative to the anchor point.
-        box: [4]f64,
+        /// The hard box relative to the anchor point; null for none.
+        box: ?[4]f64,
         markup: []const u8,
     };
 
@@ -110,13 +116,14 @@ pub const Labels = struct {
             var h: std.hash.Wyhash = .init(0);
             h.update(std.mem.asBytes(&k.style));
             h.update(std.mem.asBytes(&k.anchor));
-            h.update(std.mem.asBytes(&k.box));
+            h.update(std.mem.asBytes(&(k.box orelse [4]f64{ 0, 0, 0, 0 })));
+            h.update(&.{@intFromBool(k.box != null)});
             h.update(k.markup);
             return h.final();
         }
         pub fn eql(_: KeyContext, x: Key, y: Key) bool {
-            return x.style == y.style and x.anchor == y.anchor and
-                std.mem.eql(f64, &x.box, &y.box) and std.mem.eql(u8, x.markup, y.markup);
+            const boxes = if (x.box) |xb| (if (y.box) |yb| std.mem.eql(f64, &xb, &yb) else false) else y.box == null;
+            return x.style == y.style and x.anchor == y.anchor and boxes and std.mem.eql(u8, x.markup, y.markup);
         }
     };
 
@@ -197,7 +204,7 @@ pub const Labels = struct {
         const render: ?*engine.Render = blk: {
             const r = engine.renderLabel(l.gpa, ctx, k.markup, .{
                 .anchor = anchor,
-                .hard_box = .{ .x0 = k.box[0], .y0 = k.box[1], .x1 = k.box[2], .y1 = k.box[3] },
+                .hard_box = if (k.box) |b| .{ .x0 = b[0], .y0 = b[1], .x1 = b[2], .y1 = b[3] } else null,
             }, &syntax) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blk null,
@@ -324,6 +331,32 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         }
     }
 
+    // Labels placed directly on the panel: one line from their anchor.
+    for (m.panels.items[panel].labels.items, 0..) |pl, li| {
+        if (pl.content.len == 0) continue;
+        if (labels.context(pl.style) == null) {
+            try issues.append(a, .{ .kind = .style_error, .label = li });
+            continue;
+        }
+        const render = (try labels.get(.{ .style = pl.style, .anchor = pl.alignment, .box = null, .markup = pl.content })) orelse {
+            try issues.append(a, .{ .kind = .markup_error, .label = li });
+            continue;
+        };
+        const ink = render.ink;
+        try placed_labels.append(a, .{
+            .tile = null,
+            .slot = li,
+            .box = if (ink.isEmpty()) .{ .x0 = pl.at.x, .y0 = pl.at.y, .x1 = pl.at.x, .y1 = pl.at.y } else .{ .x0 = pl.at.x + ink.x0, .y0 = pl.at.y + ink.y0, .x1 = pl.at.x + ink.x1, .y1 = pl.at.y + ink.y1 },
+            .origin = pl.at,
+            .style = pl.style,
+            .render = render,
+        });
+        for (render.diagnostics) |d| if (d.kind == .missing_glyph) {
+            try issues.append(a, .{ .kind = .missing_glyph, .label = li });
+            break;
+        };
+    }
+
     return .{
         .arena = arena,
         .tiles = try tiles.toOwnedSlice(a),
@@ -424,6 +457,29 @@ test "labels render once per identical legend and sit in their slots" {
     defer s2.deinit();
     try testing.expectEqual(1, labels.cache.count());
     try testing.expectApproxEqAbs(s2.labels[0].box.y1 - 2.5, s2.labels[0].origin.y, 1e-12);
+}
+
+test "a panel label sits on its anchor, aligned as asked" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const p = try m.addPanel("board", 100, 50);
+    _ = try m.addLabel(p, .{ .at = .{ .x = 50, .y = 20 }, .alignment = .centre, .style = style, .content = "HH" });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectEqual(1, s.labels.len);
+    const l = s.labels[0];
+    try testing.expect(l.tile == null);
+    // Centred: the ink straddles the anchor; on the baseline: it rises from it.
+    try testing.expectApproxEqAbs(50, (l.box.x0 + l.box.x1) / 2, 0.5);
+    try testing.expectApproxEqAbs(20, l.box.y0, 1e-9);
+    try testing.expectApproxEqAbs(23, l.box.y1, 1e-9);
 }
 
 test "a legend with characters no face covers is reported on its tile" {

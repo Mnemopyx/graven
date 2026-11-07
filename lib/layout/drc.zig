@@ -78,7 +78,9 @@ test "a panel reaching only into the sheet's margins complies; its ink area ther
 /// A label whose ink reaches into the worksheet's margins.
 pub const MarginIntrusion = struct {
     panel: usize,
-    tile: model.TileId,
+    /// The tile whose slot holds the label; null for a label placed
+    /// directly on the panel, `slot` then being its index there.
+    tile: ?model.TileId,
     slot: usize,
     /// The label's ink box on the worksheet, mm.
     ink: Box,

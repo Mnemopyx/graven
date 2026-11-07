@@ -101,6 +101,21 @@ pub const TileRegion = struct {
     rows: std.ArrayList(Row) = .empty,
 };
 
+/// A label placed directly on a panel (a faceplate legend, say), rather
+/// than in a tile's slot. It is set as one line from its anchor, without a
+/// hard box: it sits exactly where it was put.
+pub const PanelLabel = struct {
+    /// The anchor on the label's baseline, mm in the panel frame.
+    at: geom.Point,
+    /// Which part of the line the anchor is: its start, centre or end.
+    alignment: Align = .start,
+    style: StyleId = 0,
+    /// Label markup.
+    content: []const u8,
+    /// True while the content is the app's placeholder.
+    default_content: bool = false,
+};
+
 pub const Panel = struct {
     name: []const u8,
     /// True while the name is one the app gave it (Panel 1), not the user.
@@ -112,6 +127,7 @@ pub const Panel = struct {
     w: f64,
     h: f64,
     regions: std.ArrayList(TileRegion) = .empty,
+    labels: std.ArrayList(PanelLabel) = .empty,
     /// Ink keep-out bands inside the panel's edges, mm: its ink area is the
     /// outline less these. 5 mm on each side until the user sets them.
     margins: Sides = .all(5),
@@ -326,6 +342,7 @@ pub const Model = struct {
         var p = panel;
         p.name = try m.a().dupe(u8, panel.name);
         p.regions = .empty;
+        p.labels = .empty;
         try m.panels.append(m.a(), p);
         m.revision += 1;
         return m.panels.items.len - 1;
@@ -400,6 +417,46 @@ pub const Model = struct {
         var p = m.panels.items[panel];
         p.origin = origin;
         return m.onSheet(p.box()) and within(p.inkArea(), m.sheet.inkArea());
+    }
+
+    /// Adds a label to a panel; returns its index on the panel.
+    pub fn addLabel(m: *Model, panel: usize, label: PanelLabel) Error!usize {
+        var l = label;
+        l.content = try m.a().dupe(u8, label.content);
+        const list = &m.panels.items[panel].labels;
+        try list.append(m.a(), l);
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    pub fn setLabelContent(m: *Model, panel: usize, label: usize, content: []const u8) Error!void {
+        const l = &m.panels.items[panel].labels.items[label];
+        l.content = try m.a().dupe(u8, content);
+        l.default_content = false;
+        m.revision += 1;
+    }
+
+    pub fn moveLabel(m: *Model, panel: usize, label: usize, at: geom.Point) void {
+        m.panels.items[panel].labels.items[label].at = at;
+        m.revision += 1;
+    }
+
+    pub fn alignLabel(m: *Model, panel: usize, label: usize, alignment: Align) void {
+        m.panels.items[panel].labels.items[label].alignment = alignment;
+        m.revision += 1;
+    }
+
+    /// Removes a label; later labels on the panel move down one index.
+    pub fn removeLabel(m: *Model, panel: usize, label: usize) void {
+        _ = m.panels.items[panel].labels.orderedRemove(label);
+        m.revision += 1;
+    }
+
+    /// Sets a style's size as cap height, mm; every label using it changes.
+    pub fn setCapHeight(m: *Model, style: StyleId, cap_height: f64) Error!void {
+        if (!(cap_height > 0)) return error.BadSize;
+        m.styles.items[style].spec.cap_height = cap_height;
+        m.revision += 1;
     }
 
     /// Sets a panel's margins, mm.
