@@ -45,6 +45,8 @@ pub const Node = union(enum) {
     placeholder: Placeholder,
     /// \sqrt: a radical over its body.
     radical: Radical,
+    /// \frac, \tfrac, \dfrac: a numerator over a denominator.
+    fraction: Fraction,
 
     pub fn span(n: Node) Span {
         return switch (n) {
@@ -73,6 +75,14 @@ pub const Placeholder = struct {
 
 pub const Radical = struct {
     body: *const Node,
+    span: Span,
+};
+
+pub const Fraction = struct {
+    num: *const Node,
+    den: *const Node,
+    /// \frac and \tfrac set their parts at script size, \dfrac at full size.
+    size: enum { text, display },
     span: Span,
 };
 
@@ -206,6 +216,9 @@ const structural = [_]struct { name: []const u8, args: []const u8, note: []const
     .{ .name = "bar", .args = "{}", .note = "bar accent" },
     .{ .name = "overline", .args = "{}", .note = "overline" },
     .{ .name = "sqrt", .args = "{}", .note = "square root" },
+    .{ .name = "frac", .args = "{}{}", .note = "fraction" },
+    .{ .name = "tfrac", .args = "{}{}", .note = "fraction" },
+    .{ .name = "dfrac", .args = "{}{}", .note = "fraction, full size" },
     .{ .name = "u", .args = "{}", .note = "code point, hex" },
     .{ .name = "quad", .args = "", .note = "space, 1 em" },
     .{ .name = "qquad", .args = "", .note = "space, 2 em" },
@@ -253,9 +266,10 @@ pub fn completions(gpa: Allocator, names: *const entities.Table, prefix: []const
 
 /// Commands reserved for constructs to be adopted one at a time.
 const not_adopted = std.StaticStringMap(void).initComptime(.{
-    .{"frac"},  .{"dfrac"}, .{"tfrac"}, .{"sfrac"}, .{"overlay"},
-    .{"rlap"},  .{"llap"},  .{"vec"},   .{"dot"},   .{"ddot"},
-    .{"tilde"},
+    .{"sfrac"}, .{"overlay"},
+    .{"rlap"},  .{"llap"},
+    .{"vec"},   .{"dot"},
+    .{"ddot"},  .{"tilde"},
 });
 
 const Parser = struct {
@@ -463,6 +477,17 @@ const Parser = struct {
                 .hat
             else
                 null;
+            const frac_size: ?@FieldType(Fraction, "size") = if (std.mem.eql(u8, name, "frac") or std.mem.eql(u8, name, "tfrac"))
+                .text
+            else if (std.mem.eql(u8, name, "dfrac"))
+                .display
+            else
+                null;
+            if (frac_size) |size| {
+                const num = try p.one(try p.argument(variant, text_mode, at));
+                const den = try p.one(try p.argument(variant, text_mode, at));
+                break :blk .{ .fraction = .{ .num = num, .den = den, .size = size, .span = .{ .start = at, .end = p.i } } };
+            }
             if (std.mem.eql(u8, name, "sqrt")) {
                 const body = try p.one(try p.argument(variant, text_mode, at));
                 break :blk .{ .radical = .{ .body = body, .span = .{ .start = at, .end = p.i } } };
@@ -744,6 +769,13 @@ fn dumpNode(w: *std.Io.Writer, n: Node) std.Io.Writer.Error!void {
             try dumpNode(w, r.body.*);
             try w.writeAll(")");
         },
+        .fraction => |f| {
+            try w.writeAll(if (f.size == .display) "(dfrac " else "(frac ");
+            try dumpNode(w, f.num.*);
+            try w.writeAll(" ");
+            try dumpNode(w, f.den.*);
+            try w.writeAll(")");
+        },
     }
 }
 
@@ -838,7 +870,7 @@ test "errors are data, with the offset of the problem" {
     try expectError("{a", .missing_close, 0);
     try expectError("a}", .unmatched_close, 1);
     try expectError("\\foo", .unknown_command, 0);
-    try expectError("1/\\frac{x}{y}", .not_adopted, 2);
+    try expectError("1/\\sfrac{x}{y}", .not_adopted, 2);
     try expectError("\\u{D800}", .invalid_codepoint, 0);
     try expectError("\\text{x^2}", .script_in_text, 7);
     try expectError("a\tb", .control_character, 1);
@@ -880,6 +912,7 @@ test "a preview parse never fails and shows what is still to come" {
         .{ .src = "x^{2}", .tree = "(scripts (text \"x\") ^{(text \"2\")})", .problem = null },
         .{ .src = "\\sqrt{", .tree = "(sqrt {})", .problem = .missing_close },
         .{ .src = "\\sqrt", .tree = "(sqrt (slot))", .problem = .missing_argument },
+        .{ .src = "\\frac{1}", .tree = "(frac {(text \"1\")} (slot))", .problem = .missing_argument },
     };
     for (cases) |c| {
         var problems: std.ArrayList(Diagnostic) = .empty;
@@ -896,7 +929,7 @@ test "valid input parses the same strictly and in preview" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "CAPS LOCK", "x_i^2", "\\hat{x} + \\sin^{-1} y", "A\\\\B", "\\text{ab} \\ohm", "\\sqrt{x^2+1}", "\\sqrt2" }) |src| {
+    for ([_][]const u8{ "CAPS LOCK", "x_i^2", "\\hat{x} + \\sin^{-1} y", "A\\\\B", "\\text{ab} \\ohm", "\\sqrt{x^2+1}", "\\sqrt2", "\\frac{a}{b}", "\\dfrac12" }) |src| {
         var diag: Diagnostic = undefined;
         const strict = try parse(a, src, &diag);
         var s1: std.Io.Writer.Allocating = .init(a);

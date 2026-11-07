@@ -385,6 +385,7 @@ const Builder = struct {
             .accent => |acc| return b.accent(acc, cap, level, x, y),
             .placeholder => |ph| return b.placeholder(ph, cap, level, x, y),
             .radical => |r| return b.radical(r, cap, level, x, y),
+            .fraction => |f| return b.fraction(f, cap, level, x, y),
             .line_break => |br| {
                 // A soft break not taken is nothing. A hard break inside a
                 // group or script cannot start a line there.
@@ -440,6 +441,64 @@ const Builder = struct {
             .ink = outline.bounds(),
         });
         return right + 0.08 * cap + t / 2;
+    }
+
+    /// The ink box of `n` laid out at the origin, leaving nothing behind.
+    fn measureNode(b: *Builder, n: markup.Node, cap: f64, level: u8) Error!Box {
+        const items0 = b.items.items.len;
+        const elem0 = b.elements.items.len;
+        const diag0 = b.diagnostics.items.len;
+        defer {
+            b.items.shrinkRetainingCapacity(items0);
+            b.elements.shrinkRetainingCapacity(elem0);
+            b.profiles.shrinkRetainingCapacity(elem0);
+            b.diagnostics.shrinkRetainingCapacity(diag0);
+        }
+        _ = try b.node(n, cap, level, 0, 0);
+        var ink = Box.empty;
+        for (b.elements.items[elem0..]) |e| ink = ink.join(e.ink);
+        return ink;
+    }
+
+    /// \frac: numerator over denominator, each centred on a rule on the
+    /// math axis and clear of it by a gap. \frac and \tfrac set the parts
+    /// at script size, \dfrac at full size. The rule has the overbar's
+    /// weight and runs a little past the wider part.
+    fn fraction(b: *Builder, f: markup.Fraction, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+        const part_cap = if (f.size == .display) cap else cap * b.ctx.script_scale;
+        const part_level = if (f.size == .display) level else level + 1;
+        const t = b.ctx.rule_thickness * cap;
+        const gap = 0.12 * cap;
+        const pad = 0.08 * cap;
+        const axis = y + b.ctx.axis_height * cap;
+        var inks: [2]Box = undefined;
+        for ([_]*const markup.Node{ f.num, f.den }, &inks) |part, *ink| {
+            ink.* = try b.measureNode(part.*, part_cap, part_level);
+            // An empty part counts as a slot's size.
+            if (ink.isEmpty()) ink.* = .{ .x0 = 0, .y0 = 0, .x1 = 0.6 * part_cap, .y1 = part_cap };
+        }
+        const w = @max(inks[0].width(), inks[1].width()) + 2 * pad;
+        const num_y = axis + t / 2 + gap - inks[0].y0;
+        const den_y = axis - t / 2 - gap - inks[1].y1;
+        _ = try b.node(f.num.*, part_cap, part_level, x + (w - inks[0].width()) / 2 - inks[0].x0, num_y);
+        _ = try b.node(f.den.*, part_cap, part_level, x + (w - inks[1].width()) / 2 - inks[1].x0, den_y);
+
+        const outline = try rectangle(b.a, .{ .x0 = x, .y0 = axis - t / 2, .x1 = x + w, .y1 = axis + t / 2 });
+        const item0 = b.items.items.len;
+        try b.items.append(b.a, .{ .path = .{ .outline = outline, .element = @intCast(b.elements.items.len) } });
+        try b.addProfile(item0);
+        try b.elements.append(b.a, .{
+            .face = null,
+            .start = f.span.start,
+            .end = f.span.end,
+            .level = level,
+            .line = b.line,
+            .cap_height = cap,
+            .origin = .{ .x = x, .y = y },
+            .advance = 0,
+            .ink = outline.bounds(),
+        });
+        return x + w;
     }
 
     /// An empty slot in a preview: a frame the size of a capital, on the
@@ -726,7 +785,7 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
             }
         },
         .scripts => |s| try out.append(a, .{ .node = n, .class = nucleusClass(s.base.*) }),
-        .group, .accent, .placeholder, .radical => try out.append(a, .{ .node = n, .class = .ord }),
+        .group, .accent, .placeholder, .radical, .fraction => try out.append(a, .{ .node = n, .class = .ord }),
         .space => try out.append(a, .{ .node = n, .class = .space }),
         .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind == .soft }),
     }
@@ -1343,4 +1402,31 @@ test "a square root's vinculum clears its body by the gap and spans it" {
     const o = r.items[1].path.outline;
     try testing.expectEqual(1, o.contours.len);
     try testing.expect(o.signedArea() > 0);
+}
+
+test "a fraction centres its parts on a rule on the axis, clear by the gap" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderTest(&ctx, "\\frac{H}{HH}");
+    defer r.deinit();
+    // The numerator, the denominator, then the rule.
+    try testing.expectEqual(3, r.elements.len);
+    const num = r.elements[0].ink;
+    const den = r.elements[1].ink;
+    const rule = r.elements[2].ink;
+    const t = ctx.rule_thickness * 7;
+    const gap = 0.12 * 7;
+    const axis = ctx.axis_height * 7;
+    try testing.expectApproxEqAbs(axis, (rule.y0 + rule.y1) / 2, 1e-9);
+    try testing.expectApproxEqAbs(t, rule.y1 - rule.y0, 1e-9);
+    try testing.expectApproxEqAbs(rule.y1 + gap, num.y0, 1e-9);
+    try testing.expectApproxEqAbs(rule.y0 - gap, den.y1, 1e-9);
+    // Both parts centred on the rule, which spans the wider.
+    const mid = (rule.x0 + rule.x1) / 2;
+    try testing.expectApproxEqAbs(mid, (num.x0 + num.x1) / 2, 1e-9);
+    try testing.expectApproxEqAbs(mid, (den.x0 + den.x1) / 2, 1e-9);
+    try testing.expect(rule.x0 < den.x0 and rule.x1 > den.x1);
+    // Parts at script size: the H is a scaled capital.
+    try testing.expectApproxEqAbs(7 * ctx.script_scale, num.y1 - num.y0, 0.05);
 }

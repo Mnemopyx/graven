@@ -47,6 +47,10 @@ pub const Spec = struct {
     /// and 0.08 without one.
     accent_gap: ?f64 = null,
     rule_thickness: ?f64 = null,
+    /// Height of the math axis above the baseline, where fraction rules
+    /// sit, as a fraction of cap height; null for the upright face's MATH
+    /// table (AxisHeight), or 0.4 without one.
+    axis_height: ?f64 = null,
     /// How neighbours are placed: by their ink (contact profiles), or by the
     /// fonts' advances. Hand spacing (a literal or explicit space) always
     /// keeps advances.
@@ -86,6 +90,7 @@ pub const default_sup_raise = 0.55;
 pub const default_sub_drop = 0.25;
 pub const default_accent_gap = 0.1;
 pub const default_rule_thickness = 0.08;
+pub const default_axis_height = 0.4;
 
 pub const Context = struct {
     faces: []const *Face,
@@ -95,6 +100,7 @@ pub const Context = struct {
     sub_drop: f64,
     accent_gap: f64,
     rule_thickness: f64,
+    axis_height: f64,
 
     pub const Error = font.Error || error{ NoCapHeight, InvalidSize };
 
@@ -132,6 +138,10 @@ pub const Context = struct {
                 k.constant(main, hb.HB_OT_MATH_CONSTANT_OVERBAR_RULE_THICKNESS) / cap
             else
                 default_rule_thickness,
+            .axis_height = spec.axis_height orelse if (has_math)
+                k.constant(main, hb.HB_OT_MATH_CONSTANT_AXIS_HEIGHT) / cap
+            else
+                default_axis_height,
         };
     }
 
