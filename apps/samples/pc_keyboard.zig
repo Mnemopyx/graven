@@ -185,13 +185,16 @@ pub const Styles = struct {
 };
 
 /// The one tile prototype: keycap proportions for a cylindrical profile, an
-/// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back.
-const key_prototype: layout.model.TilePrototype = .{
-    .name = "key",
-    .body_inset = .all((pitch - 18.1) / 2.0),
-    .face_inset = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 },
-};
-const slot_inset: layout.model.Sides = .all(0.8);
+/// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back,
+/// with one slot, `top`, for the legend. Word legends override its style.
+fn keyPrototype(styles: Styles) layout.model.TilePrototype {
+    return .{
+        .name = "key",
+        .body_inset = .all((pitch - 18.1) / 2.0),
+        .face_inset = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 },
+        .slots = &.{.{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } }},
+    };
+}
 
 /// Adds the keyboard as a new panel; returns its index. Tiles are named K1,
 /// K2 … row by row, left to right.
@@ -208,7 +211,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
         .pitch = pitch,
     });
 
-    const key = try m.addPrototype(key_prototype);
+    const key = try m.addPrototype(keyPrototype(styles));
     var markup: std.Io.Writer.Allocating = .init(gpa);
     defer markup.deinit();
     var name_buf: [16]u8 = undefined;
@@ -223,7 +226,6 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
             const t = try m.addTile(.{ .designator = name, .w = e.w, .h = e.h, .prototype = key });
             markup.clearRetainingCapacity();
             const w = &markup.writer;
-            var style = styles.main;
             switch (e.legend) {
                 .one => |s| try escape(w, s),
                 .pair => |pr| {
@@ -233,10 +235,10 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
                 },
                 .words => |s| {
                     try escape(w, s);
-                    style = styles.small;
+                    try m.setSlotStyle(t, "top", styles.small);
                 },
             }
-            try m.addSlot(t, .{ .name = "top", .style = style, .content = markup.written(), .place = .{ .inset = slot_inset } });
+            try m.setContent(t, "top", markup.written());
             try m.place(p, r, ri, null, .{ .tile = t, .gap = e.gap });
             if (e.h > 1) {
                 // Spanning down: it also takes a place at the end of the next row.

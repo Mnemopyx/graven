@@ -289,7 +289,8 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
 
     var placed_labels: std.ArrayList(PlacedLabel) = .empty;
     for (tiles.items) |pt| {
-        for (m.tileConst(pt.id).slots.items, 0..) |slot, si| {
+        for (0..m.slotCount(pt.id)) |si| {
+            const slot = m.slot(pt.id, si);
             if (slot.content.len == 0) continue;
             const ctx = labels.context(slot.style) orelse {
                 try issues.append(a, .{ .kind = .style_error, .tile = pt.id, .slot = si });
@@ -444,10 +445,10 @@ test "labels render once per identical legend and sit in their slots" {
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     _ = try m.addRow(p, r, 0);
-    const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2) });
+    const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2), .slots = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
-        try m.addSlot(t, .{ .name = "top", .style = style, .content = "H", .place = .{ .inset = .all(1) } });
+        try m.setContent(t, "top", "H");
         try m.place(p, r, 0, null, .{ .tile = t });
     }
     var labels: Labels = .init(gpa, &faces);
@@ -534,8 +535,9 @@ test "a legend with characters no face covers is reported on its tile" {
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     _ = try m.addRow(p, r, 0);
-    const t = try m.addTile(.{ .designator = "K1" });
-    try m.addSlot(t, .{ .name = "top", .style = style, .content = "HQ" });
+    const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top", .style = style }} });
+    const t = try m.addTile(.{ .designator = "K1", .prototype = key });
+    try m.setContent(t, "top", "HQ");
     try m.place(p, r, 0, null, .{ .tile = t });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
@@ -575,4 +577,40 @@ test "changing a prototype changes every tile made from it" {
     for (after.tiles[0..2]) |t| try testing.expectApproxEqAbs(@as(f64, 3.5), t.face.x0 - t.pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), after.tiles[2].face.x0 - after.tiles[2].pitch_box.x0, 1e-9);
     try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, 9));
+}
+
+test "changing a prototype's slot moves every legend in it, but not a tile's own" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
+    const p = try m.addPanel("board", 100, 50);
+    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
+    _ = try m.addRow(p, r, 0);
+    const top: model.SlotPrototype = .{ .name = "top", .style = style, .place = .{ .inset = .all(1) } };
+    const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{top} });
+    for ([_][]const u8{ "K1", "K2", "K3" }) |d| {
+        const t = try m.addTile(.{ .designator = d, .prototype = key });
+        try m.setContent(t, "top", "H");
+        try m.place(p, r, 0, null, .{ .tile = t });
+    }
+    try m.setSlotPlace(m.findTile("K3").?, "top", .{ .inset = .all(1) });
+
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var before = try solve(gpa, &m, p, &labels);
+    defer before.deinit();
+    var moved = top;
+    moved.place.inset = .{ .left = 3, .right = 1, .top = 1, .bottom = 1 };
+    try m.setPrototype(key, .{ .name = "key", .face_inset = .all(2), .slots = &.{moved} });
+    var after = try solve(gpa, &m, p, &labels);
+    defer after.deinit();
+    try testing.expectEqual(3, after.labels.len);
+    for (before.labels, after.labels, 0..) |b, a, i| {
+        const dx = a.box.x0 - b.box.x0;
+        try testing.expectApproxEqAbs(@as(f64, if (i < 2) 2 else 0), dx, 1e-9);
+    }
 }

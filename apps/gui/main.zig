@@ -599,14 +599,14 @@ const ExprTarget = union(enum) {
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
             .panel_label => |l| state.model.panels.items[l.panel].labels.items[l.index].content,
-            .tile_slot => |ts| state.model.tileConst(ts.tile).slots.items[ts.slot].content,
+            .tile_slot => |ts| state.model.slot(ts.tile, ts.slot).content,
         };
     }
 
     fn store(t: ExprTarget, text: []const u8) !void {
         switch (t) {
             .panel_label => |l| try state.model.setLabelContent(l.panel, l.index, text),
-            .tile_slot => |ts| try state.model.setContent(ts.tile, state.model.tileConst(ts.tile).slots.items[ts.slot].name, text),
+            .tile_slot => |ts| try state.model.setContent(ts.tile, state.model.slot(ts.tile, ts.slot).name, text),
         }
     }
 
@@ -620,7 +620,7 @@ const ExprTarget = union(enum) {
 fn exprTarget() ?ExprTarget {
     return switch (state.context) {
         .label => |l| .{ .panel_label = .{ .panel = l.panel, .index = l.index } },
-        .tile => |id| if (state.model.tileConst(id).slots.items.len > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
+        .tile => |id| if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
         else => null,
     };
 }
@@ -1106,7 +1106,7 @@ fn treeContent() void {
                 if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, row.places.items.len > 0, false)) continue;
                 for (row.places.items) |p| {
                     const t = state.model.tileConst(p.tile);
-                    const legend = if (t.slots.items.len > 0) t.slots.items[0].content else "";
+                    const legend = if (state.model.slotCount(p.tile) > 0) state.model.slot(p.tile, 0).content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
                     _ = treeNode(.{ .tile = p.tile }, text, 5, false, false);
                 }
@@ -2479,7 +2479,10 @@ fn tileProperties(id: TileId) !void {
         propText("Row", "{d}", .{pt.row + 1}, 5);
     }
 
-    for (t.slots.items, 0..) |slot, si| {
+    propText("Prototype", "{s}", .{state.model.prototypeOf(id).name}, 6);
+
+    for (0..state.model.slotCount(id)) |si| {
+        const slot = state.model.slot(id, si);
         const n = 100 + si * 10;
         heading("Slot {s}", .{slot.name}, n);
         {
@@ -2496,7 +2499,9 @@ fn tileProperties(id: TileId) !void {
             te.deinit();
             if (changed and !std.mem.eql(u8, text, slot.content)) try state.model.setContent(id, slot.name, text);
         }
-        propText("Style", "{s}", .{state.model.styles.items[slot.style].name}, n + 2);
+        // A style the tile sets for itself, not its prototype's.
+        const own_style = if (state.model.fillConst(id, slot.name)) |f| f.style != null else false;
+        propText("Style", "{s}{s}", .{ state.model.styles.items[slot.style].name, if (own_style) " (this tile)" else "" }, n + 2);
         try propFont("Font", n + 3);
         if (found) |f| {
             for (state.placed.items[f.panel].issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
