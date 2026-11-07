@@ -89,6 +89,13 @@ pub const Slot = struct {
 /// A slot by tile and index into its prototype's slots.
 pub const SlotRef = struct { tile: TileId, slot: usize };
 
+/// Which ways tiles of a prototype may grow from 1u × 1u: wider along their
+/// track, taller across tracks (spanning them), both or neither.
+pub const Expand = struct {
+    horizontal: bool = true,
+    vertical: bool = true,
+};
+
 /// A kind of tile (a keyboard key, a calculator key): what every tile made
 /// from it shares. Tiles refer to their prototype, never copy it, so a
 /// change to it changes them all.
@@ -100,6 +107,26 @@ pub const TilePrototype = struct {
     face_inset: Sides = .{},
     /// The slots on the face, in order.
     slots: []const SlotPrototype = &.{},
+    /// Which ways its tiles may grow from 1u × 1u.
+    expand: Expand = .{},
+    /// The widths and heights its tiles may take where they may grow, u;
+    /// empty allows any.
+    widths: []const f64 = &.{},
+    heights: []const f64 = &.{},
+
+    /// Whether a tile `w` × `h` u keeps to the prototype's sizing rules. A
+    /// tile that does not is flagged, not refused.
+    pub fn allows(p: TilePrototype, w: f64, h: f64) bool {
+        return fits(w, p.expand.horizontal, p.widths) and fits(h, p.expand.vertical, p.heights);
+    }
+
+    fn fits(size: f64, grows: bool, sizes: []const f64) bool {
+        const tol = 1e-9;
+        if (!grows) return @abs(size - 1) <= tol;
+        if (sizes.len == 0) return true;
+        for (sizes) |s| if (@abs(size - s) <= tol) return true;
+        return false;
+    }
 };
 
 pub const Tile = struct {
@@ -665,7 +692,19 @@ pub const Model = struct {
             out.name = try m.a().dupe(u8, sp.name);
         }
         copy.slots = slots;
+        copy.widths = try m.a().dupe(f64, p.widths);
+        copy.heights = try m.a().dupe(f64, p.heights);
         return copy;
+    }
+
+    /// Resizes tile `id`, u. A size its prototype does not allow is kept and
+    /// flagged when placed.
+    pub fn setTileSize(m: *Model, id: TileId, w: f64, h: f64) Error!void {
+        if (!(w > 0 and h > 0)) return error.BadSize;
+        const t = m.tile(id);
+        t.w = w;
+        t.h = h;
+        m.revision += 1;
     }
 
     /// Makes tile `id` an instance of another prototype.
@@ -829,6 +868,22 @@ test "designators are unique and actions bump the revision" {
     try std.testing.expect(m.revision > before);
     try std.testing.expectEqualStrings("q", m.slot(q, 0).content);
     try std.testing.expectError(error.NoSuchSlot, m.setContent(q, "front", "x"));
+}
+
+test "a prototype's sizing rules: which ways a tile grows, and to what" {
+    const key: TilePrototype = .{ .name = "key", .widths = &.{ 1, 1.25, 2.25 }, .heights = &.{ 1, 2 } };
+    try std.testing.expect(key.allows(1, 1));
+    try std.testing.expect(key.allows(2.25, 2));
+    try std.testing.expect(!key.allows(1.3, 1));
+    try std.testing.expect(!key.allows(1, 3));
+    // Growing only wider: any width, but one track high.
+    const bar: TilePrototype = .{ .name = "bar", .expand = .{ .vertical = false } };
+    try std.testing.expect(bar.allows(6.25, 1));
+    try std.testing.expect(!bar.allows(1, 2));
+    // Not growing at all: 1u × 1u only.
+    const button: TilePrototype = .{ .name = "button", .expand = .{ .horizontal = false, .vertical = false } };
+    try std.testing.expect(button.allows(1, 1));
+    try std.testing.expect(!button.allows(1.25, 1));
 }
 
 test "a tile's slots are its prototype's, with its own labels and overrides" {

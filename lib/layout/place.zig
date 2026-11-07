@@ -62,6 +62,8 @@ pub const Issue = struct {
         markup_error,
         /// A style cannot be used (its face has no cap height, say).
         style_error,
+        /// A tile's size is not one its prototype allows.
+        tile_size,
     },
     tile: ?TileId = null,
     slot: ?usize = null,
@@ -281,6 +283,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     .body = body,
                     .face = proto.face_inset.inset(body),
                 });
+                if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = p.tile, .region = ri, .row = rowi });
                 bounds = bounds.join(pitch_box);
             }
             top -= region.pitch;

@@ -1445,6 +1445,8 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         body.stroke(.round(radius), .{ .thickness = px, .color = .{ .color = if (in_context) dvui.themeGet().focus else colors.edge } });
         face.fill(.round(radius), .{ .color = .{ .color = if (flagged.missing) colors.missing else colors.face } });
         if (flagged.overflow) face.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
+        // A size its prototype does not allow: the body outlined in warning.
+        if (flagged.size and !in_context) body.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = dvui.themeGet().focus } });
     }
     const o = panelOrigin(pi);
@@ -2081,7 +2083,7 @@ fn addPanelFromDrag(b: geom.Box) void {
     state.expanded.put(state.gpa, Context.key(.worksheet), true) catch {};
 }
 
-const Flags = struct { missing: bool = false, overflow: bool = false };
+const Flags = struct { missing: bool = false, overflow: bool = false, size: bool = false };
 
 fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
     var f: Flags = .{};
@@ -2090,6 +2092,7 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
         switch (i.kind) {
             .missing_glyph => f.missing = true,
             .label_overflow => f.overflow = true,
+            .tile_size => f.size = true,
             else => {},
         }
     }
@@ -2470,7 +2473,8 @@ fn labelProperties(pi: usize, index: usize) !void {
 fn tileProperties(id: TileId) !void {
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
-    propText("Size", "{d} × {d} u", .{ t.w, t.h }, 2);
+    try sizeProperty(id, .horizontal);
+    try sizeProperty(id, .vertical);
     const found = findTile(id);
     if (found) |f| {
         const pt = f.tile;
@@ -2511,6 +2515,45 @@ fn tileProperties(id: TileId) !void {
                 propText("Issue", "ink {d:.2} mm into the sheet margin", .{i.amount}, n + 9);
             };
         }
+    }
+}
+
+/// A tile's width or height: a choice of the sizes its prototype allows
+/// along that axis, a fixed 1 u where it may not grow, or the value alone
+/// where any size goes. A size outside the rules stays listed, marked.
+fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
+    const t = state.model.tileConst(id);
+    const proto = state.model.prototypeOf(id);
+    const horizontal = axis == .horizontal;
+    const name = if (horizontal) "Width" else "Height";
+    const size = if (horizontal) t.w else t.h;
+    const grows = if (horizontal) proto.expand.horizontal else proto.expand.vertical;
+    const sizes = if (horizontal) proto.widths else proto.heights;
+    const n: usize = if (horizontal) 2 else 7;
+    if (!grows or sizes.len == 0 or sizes.len > 15) {
+        const ok = proto.allows(if (horizontal) size else 1, if (horizontal) 1 else size);
+        propText(name, "{d} u{s}", .{ size, if (!grows and ok) " (fixed)" else if (!ok) " (not allowed)" else "" }, n);
+        return;
+    }
+    var bufs: [16][32]u8 = undefined;
+    var names: [16][]const u8 = undefined;
+    var choice: ?usize = null;
+    for (sizes, 0..) |s, i| {
+        names[i] = std.fmt.bufPrint(&bufs[i], "{d} u", .{s}) catch "?";
+        if (@abs(s - size) <= 1e-9) choice = i;
+    }
+    var listed = sizes.len;
+    if (choice == null) {
+        names[listed] = std.fmt.bufPrint(&bufs[listed], "{d} u (not allowed)", .{size}) catch "?";
+        choice = listed;
+        listed += 1;
+    }
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    var picked = choice.?;
+    if (dvui.dropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
+        if (horizontal) try state.model.setTileSize(id, sizes[picked], t.h) else try state.model.setTileSize(id, t.w, sizes[picked]);
     }
 }
 

@@ -187,12 +187,16 @@ pub const Styles = struct {
 /// The one tile prototype: keycap proportions for a cylindrical profile, an
 /// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back,
 /// with one slot, `top`, for the legend. Word legends override its style.
+/// Keys grow from 1u × 1u to the standard widths, and to 2u tall for the
+/// keypad + and Enter.
 fn keyPrototype(styles: Styles) layout.model.TilePrototype {
     return .{
         .name = "key",
         .body_inset = .all((pitch - 18.1) / 2.0),
         .face_inset = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 },
         .slots = &.{.{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } }},
+        .widths = &.{ 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25 },
+        .heights = &.{ 1, 2 },
     };
 }
 
@@ -269,4 +273,30 @@ test "the keyboard solves with no overflow and 104 tiles" {
     for (placed.issues) |i| try std.testing.expect(i.kind != .row_overflow);
     try std.testing.expectApproxEqAbs(22.5 * pitch, placed.bounds.width(), 1e-9);
     try std.testing.expectApproxEqAbs(6.5 * pitch, placed.bounds.height(), 1e-9);
+    // Every key's size is one the key prototype allows.
+    for (placed.issues) |i| try std.testing.expect(i.kind != .tile_size);
+}
+
+test "a key sized outside the key prototype's rules is flagged, not refused" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const s = try m.addStyle("main", .{ .upright = 0, .cap_height = 2.6 });
+    const p = try build(gpa, &m, .{ .main = s, .small = s });
+    var labels: layout.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    const tab = m.findTile("K38").?;
+    for ([_]struct { w: f64, flagged: bool }{ .{ .w = 1.3, .flagged = true }, .{ .w = 1.25, .flagged = false } }) |c| {
+        try m.setTileSize(tab, c.w, 1);
+        var placed = try layout.solve(gpa, &m, p, &labels);
+        defer placed.deinit();
+        var flagged = false;
+        for (placed.issues) |i| {
+            if (i.kind == .tile_size) {
+                try std.testing.expectEqual(tab, i.tile.?);
+                flagged = true;
+            }
+        }
+        try std.testing.expectEqual(c.flagged, flagged);
+    }
 }
