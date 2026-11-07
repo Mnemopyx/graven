@@ -365,7 +365,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, NoSuchRow, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -715,11 +715,74 @@ pub const Model = struct {
     pub fn addPrototypeSlot(m: *Model, id: PrototypeId, sp: SlotPrototype) Error!void {
         if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
         const p = &m.prototypes.items[id];
+        for (p.slots) |s| if (std.mem.eql(u8, s.name, sp.name)) return error.DuplicateSlot;
         const slots = try m.a().alloc(SlotPrototype, p.slots.len + 1);
         @memcpy(slots[0..p.slots.len], p.slots);
         slots[p.slots.len] = sp;
         slots[p.slots.len].name = try m.a().dupe(u8, sp.name);
         p.slots = slots;
+        m.revision += 1;
+    }
+
+    /// A copy of prototype `id` named `name`, art and all; returns its id.
+    pub fn duplicatePrototype(m: *Model, id: PrototypeId, name: []const u8) Error!PrototypeId {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        var copy = m.prototypes.items[id];
+        copy.name = name;
+        return m.addPrototype(copy);
+    }
+
+    /// Removes prototype `id`, which no tile may still be made from. Later
+    /// prototypes move down one, and tiles follow them.
+    pub fn removePrototype(m: *Model, id: PrototypeId) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.prototypeUses(id) > 0) return error.PrototypeInUse;
+        _ = m.prototypes.orderedRemove(id);
+        for (m.tiles.items) |*t| {
+            if (t.prototype > id) t.prototype -= 1;
+        }
+        m.revision += 1;
+    }
+
+    /// Renames slot `i` of a prototype; every tile made from it keeps its
+    /// label and overrides under the new name.
+    pub fn renamePrototypeSlot(m: *Model, id: PrototypeId, i: usize, name: []const u8) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const p = &m.prototypes.items[id];
+        if (i >= p.slots.len) return error.NoSuchSlot;
+        for (p.slots, 0..) |sp, k| {
+            if (k != i and std.mem.eql(u8, sp.name, name)) return error.DuplicateSlot;
+        }
+        const old = p.slots[i].name;
+        const new = try m.a().dupe(u8, name);
+        for (m.tiles.items) |*t| {
+            if (t.prototype != id) continue;
+            for (t.fills.items) |*f| {
+                if (std.mem.eql(u8, f.slot, old)) f.slot = new;
+            }
+        }
+        var sp = p.slots[i];
+        sp.name = new;
+        try m.setPrototypeSlot(id, i, sp);
+    }
+
+    /// Removes slot `i` from a prototype. Tiles keep what they had in it,
+    /// unshown, so adding a slot of that name back brings it back.
+    pub fn removePrototypeSlot(m: *Model, id: PrototypeId, i: usize) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const p = &m.prototypes.items[id];
+        if (i >= p.slots.len) return error.NoSuchSlot;
+        const slots = try m.a().alloc(SlotPrototype, p.slots.len - 1);
+        @memcpy(slots[0..i], p.slots[0..i]);
+        @memcpy(slots[i..], p.slots[i + 1 ..]);
+        p.slots = slots;
+        m.revision += 1;
+    }
+
+    /// Sets or clears a prototype's art; null draws it plain from its insets.
+    pub fn setPrototypeArt(m: *Model, id: PrototypeId, art: ?art_.Art) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        m.prototypes.items[id].art = if (art) |x| try art_.dupe(m.a(), x) else null;
         m.revision += 1;
     }
 
@@ -994,4 +1057,40 @@ test "a layer's paint changes; its outline does not" {
     try std.testing.expectError(error.NoSuchLayer, m.setLayerPaint(key, 5, .{}));
     const plain = try m.addPrototype(.{ .name = "plain" });
     try std.testing.expectError(error.NoSuchLayer, m.setLayerPaint(plain, 0, .{}));
+}
+
+test "prototypes are duplicated, have slots renamed and removed, and are removed when unused" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{ .{ .name = "top" }, .{ .name = "front" } } });
+    const k = try m.addTile(.{ .designator = "K1", .prototype = key });
+    try m.setContent(k, "top", "A");
+
+    // A copy is independent of its original.
+    const wide = try m.duplicatePrototype(key, "wide key");
+    try std.testing.expectEqualStrings("wide key", m.prototypes.items[wide].name);
+    try std.testing.expectEqual(2, m.prototypes.items[wide].slots.len);
+    try m.addPrototypeSlot(wide, .{ .name = "side" });
+    try std.testing.expectEqual(2, m.prototypes.items[key].slots.len);
+    try std.testing.expectError(error.DuplicateSlot, m.addPrototypeSlot(wide, .{ .name = "side" }));
+
+    // A renamed slot keeps each tile's label.
+    try m.renamePrototypeSlot(key, 0, "legend");
+    try std.testing.expectEqualStrings("A", m.slot(k, 0).content);
+    try std.testing.expectEqualStrings("legend", m.slot(k, 0).name);
+    try std.testing.expectError(error.DuplicateSlot, m.renamePrototypeSlot(key, 0, "front"));
+
+    // A removed slot hides its label; added back, it shows again.
+    try m.removePrototypeSlot(key, 0);
+    try std.testing.expectEqual(1, m.slotCount(k));
+    try m.addPrototypeSlot(key, .{ .name = "legend" });
+    try std.testing.expectEqualStrings("A", m.slot(k, 1).content);
+
+    // Only an unused prototype goes; tiles of later ones follow them down.
+    const spare = try m.addPrototype(.{ .name = "spare" });
+    try m.setTilePrototype(k, spare);
+    try std.testing.expectError(error.PrototypeInUse, m.removePrototype(spare));
+    try m.removePrototype(key);
+    try std.testing.expectEqual(spare - 1, m.tileConst(k).prototype);
+    try std.testing.expectEqualStrings("spare", m.prototypeOf(k).name);
 }

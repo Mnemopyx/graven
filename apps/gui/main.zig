@@ -2206,6 +2206,31 @@ fn toolPalette() void {
     if (dvui.buttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
 
+    switch (state.context) {
+        .prototypes => {
+            var pwd: dvui.WidgetData = undefined;
+            if (dvui.buttonIcon(@src(), "Add prototype", dvui.entypo.squared_plus, .{}, .{}, .{ .data_out = &pwd })) addPrototype() catch {
+                state.status = "The prototype was not added. ";
+            };
+            dvui.tooltip(@src(), .{ .active_rect = pwd.borderRectScale().r }, "Add a tile prototype", .{}, .{});
+        },
+        .prototype => |id| {
+            var dwd: dvui.WidgetData = undefined;
+            if (dvui.buttonIcon(@src(), "Duplicate prototype", dvui.entypo.copy, .{}, .{}, .{ .data_out = &dwd })) duplicatePrototype(id) catch {
+                state.status = "The prototype was not duplicated. ";
+            };
+            dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "Duplicate: a copy to make a variant of", .{}, .{});
+            var rwd: dvui.WidgetData = undefined;
+            if (dvui.buttonIcon(@src(), "Delete prototype", dvui.entypo.trash, .{}, .{}, .{ .data_out = &rwd })) {
+                if (state.model.removePrototype(id)) {
+                    state.context = .prototypes;
+                } else |err| state.status = if (err == error.PrototypeInUse) "Tiles are still made from this prototype: switch them first. " else "The prototype was not deleted. ";
+            }
+            dvui.tooltip(@src(), .{ .active_rect = rwd.borderRectScale().r }, "Delete: only while no tile is made from it", .{}, .{});
+        },
+        else => {},
+    }
+
     if (state.context == .panel) {
         // Add label: the next click on the panel places one.
         const on = state.tool == .add_label;
@@ -2567,7 +2592,19 @@ fn tileProperties(id: TileId) !void {
         propText("Row", "{d}", .{pt.row + 1}, 5);
     }
 
-    propText("Prototype", "{s}", .{state.model.prototypeOf(id).name}, 6);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 6 });
+        defer row.deinit();
+        propName("Prototype");
+        const lifo = dvui.currentWindow().lifo();
+        const names = try lifo.alloc([]const u8, state.model.prototypes.items.len);
+        defer lifo.free(names);
+        for (state.model.prototypes.items, names) |p, *nm| nm.* = p.name;
+        var choice: usize = t.prototype;
+        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != t.prototype) {
+            try state.model.setTilePrototype(id, @intCast(choice));
+        }
+    }
 
     for (0..state.model.slotCount(id)) |si| {
         const slot = state.model.slot(id, si);
@@ -2623,17 +2660,59 @@ fn tileProperties(id: TileId) !void {
 /// canvas.
 fn prototypeProperties(id: layout.model.PrototypeId) !void {
     const p = state.model.prototypes.items[id];
-    propText("Name", "{s}", .{p.name}, 1);
+    // Whole-prototype changes go through one copy, set once at the end.
+    var next_proto = p;
+    var proto_changed = false;
+    if (textProp("Name", p.name, 1)) |name| {
+        next_proto.name = name;
+        proto_changed = true;
+    }
     propText("Used by", "{d} tiles", .{state.model.prototypeUses(id)}, 2);
-    const grows: []const u8 = if (p.expand.horizontal and p.expand.vertical) "wider and taller" else if (p.expand.horizontal) "wider" else if (p.expand.vertical) "taller" else "no; 1 × 1 u only";
-    propText("Grows", "{s}", .{grows}, 3);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3 });
+        defer row.deinit();
+        propName("Grows");
+        if (dvui.checkbox(@src(), &next_proto.expand.horizontal, "Wider", .{ .id_extra = 3 })) proto_changed = true;
+        if (dvui.checkbox(@src(), &next_proto.expand.vertical, "Taller", .{ .id_extra = 4 })) proto_changed = true;
+    }
     var buf: [160]u8 = undefined;
-    if (p.expand.horizontal) propText("Widths", "{s}", .{sizeList(&buf, p.widths)}, 4);
-    if (p.expand.vertical) propText("Heights", "{s}", .{sizeList(&buf, p.heights)}, 5);
+    if (p.expand.horizontal) if (sizesProp("Widths, u", sizeList(&buf, p.widths), 4)) |list| {
+        next_proto.widths = list;
+        proto_changed = true;
+    };
+    if (p.expand.vertical) if (sizesProp("Heights, u", sizeList(&buf, p.heights), 5)) |list| {
+        next_proto.heights = list;
+        proto_changed = true;
+    };
+    var insets_changed = false;
+    if (sidesEditor("Body inset", p.body_inset, 10)) |s| {
+        next_proto.body_inset = s;
+        insets_changed = true;
+    }
+    if (sidesEditor("Face inset", p.face_inset, 20)) |s| {
+        next_proto.face_inset = s;
+        insets_changed = true;
+    }
+    if (insets_changed) {
+        // A keycap's shape follows its insets; other art keeps its outlines
+        // until redrawn.
+        if (isKeycap(p.art)) next_proto.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), next_proto, regionPitch());
+        proto_changed = true;
+    }
+    if (proto_changed) {
+        try state.model.setPrototype(id, next_proto);
+        return;
+    }
 
     for (p.slots, 0..) |sp, si| {
         const n = 100 + si * 20;
         heading("Slot {s}", .{sp.name}, n);
+        if (textProp("Name", sp.name, n * 8 + 7)) |name| {
+            state.model.renamePrototypeSlot(id, si, name) catch {
+                state.status = "Another slot has that name. ";
+            };
+            return;
+        }
         var next = sp;
         var changed = false;
         if (styleChoice(sp.style, null, n + 1)) |c| {
@@ -2645,11 +2724,31 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             changed = true;
         }
         if (changed) try state.model.setPrototypeSlot(id, si, next);
+        if (dvui.button(@src(), "Remove slot", .{}, .{ .id_extra = n, .gravity_x = 1 })) {
+            try state.model.removePrototypeSlot(id, si);
+            return;
+        }
+    }
+    if (dvui.button(@src(), "Add slot", .{}, .{ .id_extra = 590, .gravity_x = 1, .margin = .{ .y = 8 } })) {
+        var name_buf: [32]u8 = undefined;
+        var k: usize = p.slots.len + 1;
+        const name = while (true) : (k += 1) {
+            const candidate = std.fmt.bufPrint(&name_buf, "slot {d}", .{k}) catch "slot";
+            const taken = for (p.slots) |s| {
+                if (std.mem.eql(u8, s.name, candidate)) break true;
+            } else false;
+            if (!taken) break candidate;
+        };
+        try state.model.addPrototypeSlot(id, .{ .name = name, .style = if (p.slots.len > 0) p.slots[0].style else 0, .place = .{ .inset = .all(0.8) } });
+        return;
     }
 
     heading("Art", .{}, 600);
     const art = p.art orelse {
         propText("Look", "plain, from the insets", .{}, 601);
+        if (dvui.button(@src(), "Add keycap art", .{}, .{ .id_extra = 602, .gravity_x = 1 })) {
+            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch()));
+        }
         return;
     };
     for (art.layers, 0..) |layer, li| {
@@ -2657,6 +2756,101 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         heading("Layer {s}", .{layer.name}, n);
         if (paintEditor(layer.paint, n + 1)) |paint| try state.model.setLayerPaint(id, li, paint);
     }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_x = 1, .id_extra = 690, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (!isKeycap(p.art) and dvui.button(@src(), "Redraw from insets", .{}, .{ .id_extra = 691 })) {
+            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch()));
+        }
+        if (dvui.button(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try state.model.setPrototypeArt(id, null);
+    }
+}
+
+/// Whether `art` is a keycap's two layers, body and face, so it can be
+/// redrawn from the insets without losing anything.
+fn isKeycap(art: ?layout.art.Art) bool {
+    const a = art orelse return false;
+    return a.layers.len == 2 and std.mem.eql(u8, a.layers[0].name, "body") and std.mem.eql(u8, a.layers[1].name, "face");
+}
+
+/// The pitch new art is drawn for: the first region's, or 19.05 mm.
+fn regionPitch() f64 {
+    for (state.model.panels.items) |p| for (p.regions.items) |r| return r.pitch;
+    return 19.05;
+}
+
+/// A new plain prototype with one slot and keycap art, made the context.
+fn addPrototype() !void {
+    var name_buf: [32]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "Prototype {d}", .{state.model.prototypes.items.len + 1}) catch "Prototype";
+    var p: layout.model.TilePrototype = .{
+        .name = name,
+        .body_inset = .all(0.5),
+        .face_inset = .all(2),
+        .slots = &.{.{ .name = "top", .place = .{ .inset = .all(0.8) } }},
+    };
+    p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch());
+    const id = try state.model.addPrototype(p);
+    state.context = .{ .prototype = id };
+}
+
+fn duplicatePrototype(id: layout.model.PrototypeId) !void {
+    var name_buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s} copy", .{state.model.prototypes.items[id].name}) catch "copy";
+    state.context = .{ .prototype = try state.model.duplicatePrototype(id, name) };
+}
+
+/// An editable text property. Returns the new text when it changes; the
+/// model copies it.
+fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    var te = dvui.textEntry(@src(), .{ .text_initial = value }, .{ .expand = .horizontal, .id_extra = n });
+    defer te.deinit();
+    if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), value)) te.textSet(value, false);
+    if (!te.text_changed) return null;
+    const text = std.mem.trim(u8, te.textGet(), " ");
+    if (text.len == 0 or std.mem.eql(u8, text, value)) return null;
+    return dvui.currentWindow().arena().dupe(u8, text) catch null;
+}
+
+/// A list of sizes typed as "1, 1.25, 2"; empty allows any. Returns the new
+/// list once what is typed reads as one.
+fn sizesProp(name: []const u8, shown: []const u8, n: usize) ?[]const f64 {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    // Shown without the unit, as typed.
+    const value = if (std.mem.eql(u8, shown, "any")) "" else std.mem.trimEnd(u8, shown, " u");
+    var te = dvui.textEntry(@src(), .{ .text_initial = value }, .{ .expand = .horizontal, .id_extra = n });
+    defer te.deinit();
+    if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), value)) te.textSet(value, false);
+    if (!te.text_changed) return null;
+    var list: std.ArrayList(f64) = .empty;
+    var it = std.mem.tokenizeAny(u8, te.textGet(), ", ");
+    while (it.next()) |tok| {
+        const v = std.fmt.parseFloat(f64, tok) catch return null;
+        if (!(v > 0)) return null;
+        list.append(dvui.currentWindow().arena(), v) catch return null;
+    }
+    return list.items;
+}
+
+/// Four insets, left, right, top and bottom, mm. Returns them when one
+/// changes.
+fn sidesEditor(name: []const u8, sides: layout.model.Sides, n: usize) ?layout.model.Sides {
+    var s = sides;
+    var changed = false;
+    var label_buf: [4][48]u8 = undefined;
+    inline for (.{ "left", "right", "top", "bottom" }, 0..) |side, i| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
+        defer row.deinit();
+        propName(std.fmt.bufPrint(&label_buf[i], "{s} {s}, mm", .{ name, side }) catch name);
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(s, side), .min = 0, .max = 100 }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
+        changed = r.changed or changed;
+    }
+    return if (changed) s else null;
 }
 
 /// "1, 1.25, 2 u", or "any" for an empty list.

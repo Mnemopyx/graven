@@ -42,11 +42,12 @@ pub const Color = struct {
         return .{ .r = @truncate(v >> 16), .g = @truncate(v >> 8), .b = @truncate(v) };
     }
 
-    /// From "#rrggbb" typed at run time; null when it is not one.
+    /// From "#rrggbb" (or "rrggbb") typed at run time; null when it is not
+    /// one.
     pub fn parse(text: []const u8) ?Color {
-        const t = std.mem.trim(u8, text, " ");
-        if (t.len != 7 or t[0] != '#') return null;
-        const v = std.fmt.parseInt(u24, t[1..], 16) catch return null;
+        const t = std.mem.trimStart(u8, std.mem.trim(u8, text, " "), "#");
+        if (t.len != 6) return null;
+        const v = std.fmt.parseInt(u24, t, 16) catch return null;
         return .{ .r = @truncate(v >> 16), .g = @truncate(v >> 8), .b = @truncate(v) };
     }
 
@@ -303,6 +304,33 @@ pub fn plain(a: Allocator, proto: model.TilePrototype, pitch: f64) Allocator.Err
     });
 }
 
+/// Keycap art drawn afresh from a prototype's insets, for a cell of its
+/// art's pitch (or `pitch` without art), keeping the paint of its body and
+/// face layers when it has them. Outlines are never edited by hand: this is
+/// how a prototype's shape follows its insets.
+pub fn redrawKeycap(a: Allocator, proto: model.TilePrototype, pitch: f64) Allocator.Error!Art {
+    var body: Paint = .{ .fill = .{ .solid = .hex("#e4e2dc") }, .edge = .hex("#9a978f") };
+    var face: Paint = .{ .fill = .{ .solid = .hex("#f6f5f1") } };
+    if (proto.art) |old| for (old.layers) |l| {
+        if (std.mem.eql(u8, l.name, "body")) body = l.paint;
+        if (std.mem.eql(u8, l.name, "face")) face = l.paint;
+    };
+    var art = try keycap(a, .{
+        .pitch = if (proto.art) |old| old.pitch else pitch,
+        .body_inset = proto.body_inset,
+        .face_inset = proto.face_inset,
+        .body = body.fill,
+        .edge = body.edge,
+        .face = face.fill,
+    });
+    // keycap sets fills and the body's edge; carry the rest of each paint.
+    const layers = try a.dupe(Layer, art.layers);
+    layers[0].paint = body;
+    layers[1].paint = face;
+    art.layers = layers;
+    return art;
+}
+
 /// A deep copy, allocated from `a`.
 pub fn dupe(a: Allocator, art: Art) Allocator.Error!Art {
     const layers = try a.alloc(Layer, art.layers.len);
@@ -367,11 +395,30 @@ test "a curve across a cut cannot be stretched exactly and is refused" {
     try testing.expectError(error.CurveCrossesCut, stretch(a, art, 10, .{ .x0 = 0, .y0 = 0, .x1 = 20, .y1 = 10 }));
 }
 
+test "redrawn from new insets, a keycap keeps its paint" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var proto: model.TilePrototype = .{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2) };
+    proto.art = try redrawKeycap(a, proto, 19.05);
+    try testing.expectEqual(Color.hex("#e4e2dc"), proto.art.?.layers[0].paint.fill.solid);
+    var painted = proto.art.?;
+    const layers = try a.dupe(Layer, painted.layers);
+    layers[1].paint = .{ .fill = .{ .solid = .hex("#202020") } };
+    painted.layers = layers;
+    proto.art = painted;
+    proto.face_inset = .all(4);
+    const again = try redrawKeycap(a, proto, 19.05);
+    try testing.expectEqual(Color.hex("#202020"), again.layers[1].paint.fill.solid);
+    try testing.expectApproxEqAbs(@as(f64, 19.05 - 1 - 8), again.layers[1].outline.bounds().width(), 1e-9);
+}
+
 test "colours read and write as #rrggbb" {
     var buf: [7]u8 = undefined;
     const c = Color.parse(" #C8a24A ").?;
     try testing.expectEqual(Color.hex("#c8a24a"), c);
     try testing.expectEqualStrings("#c8a24a", c.format(&buf));
+    try testing.expectEqual(c, Color.parse("c8a24a").?);
     try testing.expectEqual(null, Color.parse("#c8a24"));
     try testing.expectEqual(null, Color.parse("c8a24a0"));
 }
