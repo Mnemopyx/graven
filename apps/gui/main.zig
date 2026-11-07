@@ -344,7 +344,8 @@ fn defaultFont(fonts: []const Font) usize {
 
 /// Installed outline fonts from fontconfig (system and user folders, such
 /// as ~/.local/share/fonts), sorted by name. Each face of a collection is
-/// listed; a variable font is listed once, at its default instance.
+/// listed; a variable font is listed once, at its default instance, under
+/// that instance's style (fontconfig also lists the font itself, unstyled).
 fn listFonts(gpa: std.mem.Allocator) ![]Font {
     const r = try std.process.run(gpa, dvui.io, .{ .argv = &.{ "fc-list", "--format", "%{family[0]}\t%{style[0]}\t%{index}\t%{file}\n" } });
     defer gpa.free(r.stderr);
@@ -363,8 +364,20 @@ fn listFonts(gpa: std.mem.Allocator) ![]Font {
         // Named instances of a variable font carry the instance above bit 16.
         if (!known or index >> 16 != 0) continue;
         const user = std.mem.indexOf(u8, path, "/.local/share/fonts/") != null or std.mem.indexOf(u8, path, "/.fonts/") != null;
-        const name = try std.fmt.allocPrint(gpa, "{s} {s}{s}", .{ family, style, if (user) " (user)" else "" });
-        try list.append(gpa, .{ .name = name, .path = path, .index = index, .family = family, .style = style });
+        const name = try std.fmt.allocPrint(gpa, "{s}{s}{s}{s}", .{ family, if (style.len > 0) " " else "", style, if (user) " (user)" else "" });
+        const font: Font = .{ .name = name, .path = path, .index = index, .family = family, .style = style };
+        // One entry per face of a file: a styled one replaces an unstyled.
+        const same = for (list.items) |*f| {
+            if (f.index == index and std.mem.eql(u8, f.path, path)) break f;
+        } else null;
+        if (same) |f| {
+            if (f.style.len == 0 and style.len > 0) {
+                gpa.free(f.name);
+                f.* = font;
+            } else gpa.free(name);
+            continue;
+        }
+        try list.append(gpa, font);
     }
     std.mem.sort(Font, list.items, {}, struct {
         fn less(_: void, x: Font, y: Font) bool {
