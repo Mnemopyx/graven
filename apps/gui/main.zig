@@ -185,15 +185,17 @@ const View = struct {
     }
 };
 
-/// Label outlines flattened to polylines in mm, per render, at a tolerance
-/// matched to the zoom. Rebuilt when the zoom changes a lot or the panel is
-/// re-solved (renders may be freed then).
-/// What a flattened contour came from: ink, faint preview text (source shown
+/// What a filled shape came from: ink, faint preview text (source shown
 /// literally while it is not valid), or a placeholder for what is to come.
 const PieceKind = enum { ink, faint, placeholder };
 
-const Piece = struct { points: []const geom.Point, kind: PieceKind };
+/// One item's outline, flattened and resolved: its overlaps removed, as
+/// simple loops and the triangles that fill them.
+const Piece = struct { region: geom.fill.Region, kind: PieceKind };
 
+/// Label outlines flattened to polylines in mm and triangulated, per
+/// render, at a tolerance matched to the zoom. Rebuilt when the zoom
+/// changes a lot or the panel is re-solved (renders may be freed then).
 const Flat = struct {
     arena: std.heap.ArenaAllocator,
     map: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
@@ -215,11 +217,16 @@ const Flat = struct {
                 .glyph => |g| if (g.faint) .faint else .ink,
                 .path => |p| if (p.role == .placeholder) .placeholder else .ink,
             };
-            for (o.contours) |c| {
+            // Overlaps resolved here, once: glyphs from variable fonts keep
+            // overlapping and self-crossing contours, which DVUI's
+            // triangulator fills wrongly. The triangles are drawn as they are.
+            const polys = try a.alloc([]const geom.Point, o.contours.len);
+            for (o.contours, polys) |c, *poly| {
                 var pts: std.ArrayList(geom.Point) = .empty;
                 for (c.segments) |s| try flatten(a, &pts, s, f.tol);
-                try contours.append(a, .{ .points = pts.items, .kind = kind });
+                poly.* = pts.items;
             }
+            try contours.append(a, .{ .region = try geom.fill.nonzero(a, polys, f.tol * 0.1), .kind = kind });
         }
         const out = contours.items;
         try f.map.put(a, r, out);
@@ -1434,31 +1441,24 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         const pieces = state.flat.get(l.render, &state.faces) catch continue;
         // Ink in the sheet's margins is drawn in the warning colour.
         const ink = if (inMargin(pi, l.tile, l.slot)) colors.overflow else colors.ink;
-        // Each kind fills as one shape, so overlapping contours stay nonzero.
-        for ([_]PieceKind{ .ink, .faint, .placeholder }) |kind| {
-            const paths = lifo.alloc(dvui.Path, pieces.len) catch continue;
-            defer lifo.free(paths);
-            var made: usize = 0;
-            defer for (paths[0..made]) |p| lifo.free(p.points);
-            for (pieces) |piece| {
-                if (piece.kind != kind) continue;
-                const pts = lifo.alloc(dvui.Point.Physical, piece.points.len) catch break;
-                for (piece.points, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + l.origin.x + o.x + d.x, .y = q.y + l.origin.y + o.y + d.y });
-                paths[made] = .{ .points = pts };
-                made += 1;
-            }
-            if (made == 0) continue;
-            const color: dvui.Color = switch (kind) {
+        const at: geom.Point = .{ .x = l.origin.x + o.x + d.x, .y = l.origin.y + o.y + d.y };
+        for (pieces) |piece| {
+            const color: dvui.Color = switch (piece.kind) {
                 .ink => ink,
                 .faint => ink.opacity(0.35),
                 .placeholder => dvui.themeGet().focus.opacity(0.7),
             };
-            if (show_construction and kind == .ink) {
+            if (show_construction and piece.kind == .ink) {
                 // Outlines over a translucent fill, so the lines show through.
-                dvui.Path.fill(paths[0..made], .{ .color = .{ .color = color.opacity(0.18) }, .fade = 1 });
-                for (paths[0..made]) |path| path.stroke(.{ .thickness = px, .color = .{ .color = color }, .closed = true });
+                fillRegion(area, piece.region, at, color.opacity(0.18));
+                for (piece.region.loops) |loop| {
+                    const pts = lifo.alloc(dvui.Point.Physical, loop.len) catch break;
+                    defer lifo.free(pts);
+                    for (loop, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+                    dvui.Path.stroke(.{ .points = pts }, .{ .thickness = px, .color = .{ .color = color }, .closed = true });
+                }
             } else {
-                dvui.Path.fill(paths[0..made], .{ .color = .{ .color = color }, .fade = 1 });
+                fillRegion(area, piece.region, at, color);
             }
         }
         if (show_construction) drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
@@ -1478,6 +1478,85 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         },
         else => {},
     }
+}
+
+/// Fills a resolved region placed at worksheet point `at`: its triangles as
+/// they are, then a band one pixel wide fading out past each loop, for
+/// antialiasing.
+fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point, color: dvui.Color) void {
+    const lifo = dvui.currentWindow().lifo();
+    const col: dvui.Color.PMA = .fromColor(color.opacity(dvui.currentWindow().alpha));
+    const Index = dvui.Vertex.Index;
+    // Vertex indices may be 16-bit: the triangles go in batches.
+    const batch = 20000;
+    var from: usize = 0;
+    while (from < region.triangles.len) : (from += batch) {
+        const tris = region.triangles[from..@min(from + batch, region.triangles.len)];
+        var b = dvui.Triangles.Builder.init(lifo, 3 * tris.len, 3 * tris.len) catch return;
+        defer b.deinit(lifo);
+        for (tris, 0..) |t, k| {
+            var v: [3]dvui.Point.Physical = undefined;
+            for (t, &v) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+            for (v) |pos| b.appendVertex(.{ .pos = pos, .col = col });
+            const i: Index = @intCast(3 * k);
+            b.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
+        }
+        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    }
+    for (region.loops) |loop| {
+        if (loop.len < 3 or loop.len > 30000) continue;
+        const n = loop.len;
+        var b = dvui.Triangles.Builder.init(lifo, 2 * n, 6 * n) catch return;
+        defer b.deinit(lifo);
+        const pts = lifo.alloc(dvui.Point.Physical, n) catch return;
+        defer lifo.free(pts);
+        for (loop, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+        for (pts, 0..) |p, i| {
+            // Loops keep the filled side on their left, so outward is to
+            // the right of each edge.
+            const out_in = outward(pts[(i + n - 1) % n], p);
+            const out_next = outward(p, pts[(i + 1) % n]);
+            var nx = (out_in.x + out_next.x) / 2;
+            var ny = (out_in.y + out_next.y) / 2;
+            // Mitred, within reason.
+            const d2 = nx * nx + ny * ny;
+            if (d2 > 1e-6) {
+                nx /= d2;
+                ny /= d2;
+            }
+            const len = @sqrt(nx * nx + ny * ny);
+            if (len > 2) {
+                nx *= 2 / len;
+                ny *= 2 / len;
+            }
+            b.appendVertex(.{ .pos = p, .col = col });
+            b.appendVertex(.{ .pos = .{ .x = p.x + nx, .y = p.y + ny }, .col = .transparent });
+        }
+        for (0..n) |i| {
+            const j = (i + 1) % n;
+            const ii: Index = @intCast(2 * i);
+            const jj: Index = @intCast(2 * j);
+            const v = b.vertexes.items;
+            b.appendTriangles(&ccw(v[ii].pos, v[ii + 1].pos, v[jj].pos, ii, ii + 1, jj));
+            b.appendTriangles(&ccw(v[ii + 1].pos, v[jj + 1].pos, v[jj].pos, ii + 1, jj + 1, jj));
+        }
+        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    }
+}
+
+/// The unit normal to the right of the edge from `p` to `q`, on screen.
+fn outward(p: dvui.Point.Physical, q: dvui.Point.Physical) dvui.Point.Physical {
+    const dx = q.x - p.x;
+    const dy = q.y - p.y;
+    const len = @sqrt(dx * dx + dy * dy);
+    if (len == 0) return .{ .x = 0, .y = 0 };
+    return .{ .x = -dy / len, .y = dx / len };
+}
+
+/// A triangle's indices in the order DVUI draws (counter-clockwise, y down).
+fn ccw(p0: dvui.Point.Physical, p1: dvui.Point.Physical, p2: dvui.Point.Physical, a: dvui.Vertex.Index, b: dvui.Vertex.Index, c: dvui.Vertex.Index) [3]dvui.Vertex.Index {
+    const cross = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
+    return if (cross <= 0) .{ a, b, c } else .{ a, c, b };
 }
 
 /// The expression line's cursor in placed label `l` of panel `pi`, if it

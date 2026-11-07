@@ -6,6 +6,8 @@
 const std = @import("std");
 
 pub const spring = @import("spring.zig");
+/// The nonzero region of overlapping polygons, as simple loops.
+pub const fill = @import("fill.zig");
 
 pub const Point = struct {
     x: f64,
@@ -313,4 +315,5 @@ test "affine composition applies left to right" {
 
 test {
     _ = spring;
+    _ = fill;
 }
