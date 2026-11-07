@@ -384,6 +384,7 @@ const Builder = struct {
             },
             .accent => |acc| return b.accent(acc, cap, level, x, y),
             .placeholder => |ph| return b.placeholder(ph, cap, level, x, y),
+            .radical => |r| return b.radical(r, cap, level, x, y),
             .line_break => |br| {
                 // A soft break not taken is nothing. A hard break inside a
                 // group or script cannot start a line there.
@@ -391,6 +392,54 @@ const Builder = struct {
                 return x;
             },
         }
+    }
+
+    /// \sqrt: the body, then a radical sign drawn as strokes (a short tick,
+    /// a downstroke below the baseline, a long upstroke) running into a
+    /// vinculum over the body. Stroke weight and the gap above the body are
+    /// the overbar's (the MATH table's when the face has one), so the sign
+    /// keeps one weight at any height and its geometry is exact for DRC.
+    fn radical(b: *Builder, r: markup.Radical, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+        const t = b.ctx.rule_thickness * cap;
+        const gap = b.ctx.accent_gap * cap;
+        // The body first, after room for the sign; its ink sets the height.
+        const sign_w = 0.55 * cap;
+        const body_x = x + sign_w + 0.12 * cap;
+        const first = b.elements.items.len;
+        const body_end = try b.node(r.body.*, cap, level, body_x, y);
+        var body = Box.empty;
+        for (b.elements.items[first..]) |e| body = body.join(e.ink);
+        // An empty body still gets a sign a capital high.
+        const top_ink = if (body.isEmpty()) y + cap else @max(body.y1, y + 0.7 * cap);
+        const low_ink = if (body.isEmpty()) y else @min(body.y0, y);
+        const right = if (body.isEmpty()) body_end else @max(body_end, body.x1);
+
+        // The centreline: tick, down, up, across.
+        const top = top_ink + gap + t / 2;
+        const bottom = low_ink - 0.08 * cap;
+        const pts = [_]geom.Point{
+            .{ .x = x, .y = y + 0.42 * cap },
+            .{ .x = x + 0.14 * sign_w, .y = y + 0.5 * cap },
+            .{ .x = x + 0.45 * sign_w, .y = bottom + t / 2 },
+            .{ .x = x + sign_w, .y = top },
+            .{ .x = right + 0.08 * cap, .y = top },
+        };
+        const outline = try strokePolyline(b.a, &pts, t);
+        const item0 = b.items.items.len;
+        try b.items.append(b.a, .{ .path = .{ .outline = outline, .element = @intCast(b.elements.items.len) } });
+        try b.addProfile(item0);
+        try b.elements.append(b.a, .{
+            .face = null,
+            .start = r.span.start,
+            .end = r.span.end,
+            .level = level,
+            .line = b.line,
+            .cap_height = cap,
+            .origin = .{ .x = x, .y = y },
+            .advance = 0,
+            .ink = outline.bounds(),
+        });
+        return right + 0.08 * cap + t / 2;
     }
 
     /// An empty slot in a preview: a frame the size of a capital, on the
@@ -677,7 +726,7 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
             }
         },
         .scripts => |s| try out.append(a, .{ .node = n, .class = nucleusClass(s.base.*) }),
-        .group, .accent, .placeholder => try out.append(a, .{ .node = n, .class = .ord }),
+        .group, .accent, .placeholder, .radical => try out.append(a, .{ .node = n, .class = .ord }),
         .space => try out.append(a, .{ .node = n, .class = .space }),
         .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind == .soft }),
     }
@@ -778,6 +827,51 @@ fn withMark(a: Allocator, t: markup.Text, m: u21, at: u32) !markup.Text {
 }
 
 /// A rectangle as a counter-clockwise outline, mm.
+/// An open polyline stroked `width` wide with mitred joins and square ends,
+/// as one closed contour: down one side and back up the other.
+fn strokePolyline(a: Allocator, pts: []const geom.Point, width: f64) !geom.Outline {
+    const h = width / 2;
+    const n = pts.len;
+    const left = try a.alloc(geom.Point, n);
+    const right = try a.alloc(geom.Point, n);
+    for (pts, 0..) |p, k| {
+        // The offset direction: the segment's normal at the ends, the
+        // mitre (the sum of the two normals, scaled) between.
+        const n0 = if (k > 0) normal(pts[k - 1], p) else normal(p, pts[k + 1]);
+        const n1 = if (k + 1 < n) normal(p, pts[k + 1]) else n0;
+        var m: geom.Point = .{ .x = n0.x + n1.x, .y = n0.y + n1.y };
+        const len = @sqrt(m.x * m.x + m.y * m.y);
+        m = .{ .x = m.x / len, .y = m.y / len };
+        const cos = m.x * n0.x + m.y * n0.y;
+        const s = h / @max(cos, 0.25); // a limited mitre
+        left[k] = .{ .x = p.x + m.x * s, .y = p.y + m.y * s };
+        right[k] = .{ .x = p.x - m.x * s, .y = p.y - m.y * s };
+    }
+    var ring = try a.alloc(geom.Point, 2 * n);
+    for (0..n) |k| ring[k] = right[k];
+    for (0..n) |k| ring[n + k] = left[n - 1 - k];
+    const segs = try a.alloc(geom.Segment, ring.len);
+    for (segs, 0..) |*seg, k| seg.* = .{ .line = .{ ring[k], ring[(k + 1) % ring.len] } };
+    const contours = try a.alloc(geom.Contour, 1);
+    contours[0] = .{ .segments = segs };
+    var o: geom.Outline = .{ .contours = contours };
+    // Counter-clockwise, as glyph ink is, so it fills with them nonzero.
+    if (o.signedArea() < 0) {
+        std.mem.reverse(geom.Point, ring);
+        for (segs, 0..) |*seg, k| seg.* = .{ .line = .{ ring[k], ring[(k + 1) % ring.len] } };
+        o = .{ .contours = contours };
+    }
+    return o;
+}
+
+/// The unit normal to the left of the direction from `p` to `q`.
+fn normal(p: geom.Point, q: geom.Point) geom.Point {
+    const dx = q.x - p.x;
+    const dy = q.y - p.y;
+    const len = @sqrt(dx * dx + dy * dy);
+    return .{ .x = -dy / len, .y = dx / len };
+}
+
 fn rectangle(a: Allocator, r: Box) !geom.Outline {
     const p = [4]geom.Point{
         .{ .x = r.x0, .y = r.y0 }, .{ .x = r.x1, .y = r.y0 },
@@ -1225,4 +1319,28 @@ test "the block shifts away from a hard-box edge before it overflows" {
     defer tall.deinit();
     try testing.expect(hasOverflow(tall));
     try testing.expectApproxEqAbs(@as(f64, 3), tall.anchor_at.?.y, eps); // ink top 7 + 3 = box top 10
+}
+
+test "a square root's vinculum clears its body by the gap and spans it" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderTest(&ctx, "\\sqrt{H}");
+    defer r.deinit();
+    // The H, then the radical as one stroked path.
+    try testing.expectEqual(2, r.elements.len);
+    try testing.expectEqual(2, r.items.len);
+    const body = r.elements[0].ink;
+    const sign = r.elements[1].ink;
+    const gap = ctx.accent_gap * 7;
+    const t = ctx.rule_thickness * 7;
+    // The vinculum's top: the body's top, the gap, the rule.
+    try testing.expectApproxEqAbs(body.y1 + gap + t, sign.y1, 1e-9);
+    // It covers the body, and the sign runs below the baseline.
+    try testing.expect(sign.x0 < body.x0 and sign.x1 > body.x1);
+    try testing.expect(sign.y0 < 0);
+    // One closed contour, filled counter-clockwise like glyph ink.
+    const o = r.items[1].path.outline;
+    try testing.expectEqual(1, o.contours.len);
+    try testing.expect(o.signedArea() > 0);
 }
