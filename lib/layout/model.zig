@@ -1,9 +1,10 @@
 //! The panel model: inputs only. Positions, boxes and rendered labels come
 //! from `place.solve`, so the model stays the single source of truth.
 //!
-//! This first slice covers what a PC keyboard needs: a panel holding tile
-//! regions, each a list of rows of tiles at a pitch. A tile spanning rows
-//! takes a place in each row it crosses; its first row places it. Each tile
+//! A panel holds regions, each a track: one flow of items (tiles, blanks,
+//! runs of text or equations, hard breaks) poured through a list of
+//! segments (rows or columns) at a pitch. A tile spanning segments is
+//! listed again where it crosses each later one; its first entry places it. Each tile
 //! is an instance of a tile prototype, which sets what tiles of its kind
 //! share: the body and the face (the labelling surface) as insets, and the
 //! named slots on the face where labels go. A tile holds only what is its
@@ -178,42 +179,63 @@ pub const Tile = struct {
     removed: bool = false,
 };
 
-/// One place in a track, in flow order: a tile, or a blank (a spacer
-/// `blank` u long), with any gap before it, u.
-pub const Place = struct {
-    tile: ?TileId = null,
-    gap: f64 = 0,
-    /// A blank's length along the track, u, when there is no tile.
-    blank: f64 = 0,
+/// A run of label markup in a track's flow: words, an equation, or both
+/// (equations are markup too). For now a run is one unbreakable item, set
+/// as a single line in its style; breaking between its words comes later.
+pub const Run = struct {
+    style: StyleId = 0,
+    content: []const u8,
 };
 
-/// A track: a row, or a column. Tracks are laid out one after another
-/// across their region, but each may be moved on its own, tiles and all.
-pub const Row = struct {
-    /// Space before the track across the region (above a row, left of a
-    /// column), u, while it follows the track before it.
+/// One item in a track's flow, with any gap before it, u. Text, tiles and
+/// equations share one stream: a tile of any prototype, a blank (a spacer
+/// `blank` u long), a run of markup, or a hard break, which ends its
+/// segment so the next item starts the next one.
+pub const Item = struct {
     gap: f64 = 0,
-    /// Where the track starts across the region, u from its start edge,
-    /// once it has been placed on its own; null follows the track before
-    /// (one track's thickness on, plus `gap`).
+    what: union(enum) {
+        tile: TileId,
+        blank: f64,
+        run: Run,
+        hard_break,
+    },
+
+    pub fn tileOf(item: Item) ?TileId {
+        return switch (item.what) {
+            .tile => |id| id,
+            else => null,
+        };
+    }
+};
+
+/// A segment: one row, or one column, of a track. The track's flow is
+/// poured through its segments in order. Segments are laid out one after
+/// another across their region, but each may be moved on its own.
+pub const Segment = struct {
+    /// Space before the segment across the region (above a row, left of a
+    /// column), u, while it follows the segment before it.
+    gap: f64 = 0,
+    /// Where the segment starts across the region, u from its start edge,
+    /// once it has been placed on its own; null follows the segment before
+    /// (one segment's thickness on, plus `gap`).
     across: ?f64 = null,
-    /// How far the track, tiles and all, is shifted along from the
+    /// How far the segment, content and all, is shifted along from the
     /// region's start, u; either way.
     offset: f64 = 0,
-    places: std.ArrayList(Place) = .empty,
 };
 
 /// Which way a region's tracks run: rows, filled left to right and stacked
 /// top to bottom, or columns, filled top to bottom and set left to right.
 pub const Major = enum { row, column };
 
-/// A region whose content is tracks of tiles (rows, or columns), placed in
-/// order from the region's top-left corner.
+/// A region holding a track: one flow of items (tiles, blanks, runs of
+/// text or equations, hard breaks) poured in order through its segments,
+/// rows or columns placed from the region's top-left corner.
 pub const TileRegion = struct {
     name: []const u8,
     /// The region's top-left corner in the panel frame, mm.
     origin: geom.Point,
-    /// Its size in u: tracks longer than the region overflow.
+    /// Its size in u: a segment's length along, and the room across.
     w: f64,
     h: f64,
     /// mm per u.
@@ -221,31 +243,35 @@ pub const TileRegion = struct {
     major: Major = .row,
     /// The kind of tile it was made for: what new tiles in it are.
     prototype: ?PrototypeId = null,
-    /// Its tracks, in order: rows top to bottom, or columns left to right.
-    /// A track's gap is the space before it.
-    rows: std.ArrayList(Row) = .empty,
+    /// Its segments, in order: rows top to bottom, or columns left to
+    /// right. A segment's gap is the space before it.
+    segments: std.ArrayList(Segment) = .empty,
+    /// The flow, in order. A tile spanning segments (a 2 u tall key) is
+    /// listed again where it crosses each later segment; its first entry
+    /// places it, and the later ones keep its room.
+    items: std.ArrayList(Item) = .empty,
 
-    /// A track's length, u.
-    pub fn trackLength(r: TileRegion) f64 {
+    /// A segment's length, u.
+    pub fn segmentLength(r: TileRegion) f64 {
         return if (r.major == .row) r.w else r.h;
     }
 
-    /// Where track `t` starts across the region, u from its start edge.
-    pub fn trackAcross(r: TileRegion, t: usize) f64 {
+    /// Where segment `t` starts across the region, u from its start edge.
+    pub fn segmentAcross(r: TileRegion, t: usize) f64 {
         var at: f64 = 0;
-        for (r.rows.items[0 .. t + 1], 0..) |row, i| {
+        for (r.segments.items[0 .. t + 1], 0..) |seg, i| {
             const follows = if (i == 0) 0 else at + 1;
-            at = row.across orelse follows + row.gap;
+            at = seg.across orelse follows + seg.gap;
         }
         return at;
     }
 
-    /// Track `t`'s band in the panel frame, mm: its length along, one
-    /// pitch across, moved as the track has been.
-    pub fn trackBox(r: TileRegion, t: usize) geom.Box {
-        const across = r.trackAcross(t) * r.pitch;
-        const shift = r.rows.items[t].offset * r.pitch;
-        const length = r.trackLength() * r.pitch;
+    /// Segment `t`'s band in the panel frame, mm: its length along, one
+    /// pitch across, moved as the segment has been.
+    pub fn segmentBox(r: TileRegion, t: usize) geom.Box {
+        const across = r.segmentAcross(t) * r.pitch;
+        const shift = r.segments.items[t].offset * r.pitch;
+        const length = r.segmentLength() * r.pitch;
         return if (r.major == .row)
             .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
         else
@@ -450,7 +476,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -686,16 +712,16 @@ pub const Model = struct {
     /// removed too. Later panels move down one index.
     pub fn removePanel(m: *Model, panel: usize) void {
         const p = m.panels.orderedRemove(panel);
-        for (p.regions.items) |region| for (region.rows.items) |row| for (row.places.items) |place_| {
-            const id = place_.tile orelse continue;
+        for (p.regions.items) |region| for (region.items.items) |item| {
+            const id = item.tileOf() orelse continue;
             if (!m.placedElsewhere(id)) m.tile(id).removed = true;
         };
         m.revision += 1;
     }
 
     fn placedElsewhere(m: *const Model, id: TileId) bool {
-        for (m.panels.items) |p| for (p.regions.items) |region| for (region.rows.items) |row| for (row.places.items) |pl| {
-            if (pl.tile != null and pl.tile.? == id) return true;
+        for (m.panels.items) |p| for (p.regions.items) |region| for (region.items.items) |item| {
+            if (item.tileOf() == id) return true;
         };
         return false;
     }
@@ -748,7 +774,8 @@ pub const Model = struct {
         if (!(region.pitch > 0 and region.w > 0 and region.h > 0)) return error.BadSize;
         var r = region;
         r.name = try m.a().dupe(u8, region.name);
-        r.rows = .empty;
+        r.segments = .empty;
+        r.items = .empty;
         const regions = &m.panels.items[panel].regions;
         try regions.append(m.a(), r);
         m.revision += 1;
@@ -786,7 +813,7 @@ pub const Model = struct {
             .major = t.major,
             .prototype = t.prototype,
         });
-        for (0..t.count) |_| _ = try m.addRow(panel, r, 0);
+        for (0..t.count) |_| _ = try m.addSegment(panel, r, 0);
         return r;
     }
 
@@ -799,19 +826,29 @@ pub const Model = struct {
         }
     }
 
-    fn trackRow(m: *Model, panel: usize, region: usize, track_: usize) Error!*Row {
-        const rows = m.panels.items[panel].regions.items[region].rows.items;
-        if (track_ >= rows.len) return error.NoSuchRow;
-        return &rows[track_];
+    fn flow(m: *Model, panel: usize, region: usize) *std.ArrayList(Item) {
+        return &m.panels.items[panel].regions.items[region].items;
+    }
+
+    /// Inserts item `item` at position `index` of a track's flow (0
+    /// before the first item; null for the end). Its tile, if any, must
+    /// already exist.
+    pub fn place(m: *Model, panel: usize, region: usize, index: ?usize, item: Item) Error!void {
+        const items = m.flow(panel, region);
+        const at = index orelse items.items.len;
+        if (at > items.items.len) return error.NoSuchItem;
+        var it = item;
+        if (it.what == .run) it.what.run.content = try m.a().dupe(u8, it.what.run.content);
+        try items.insert(m.a(), at, it);
+        m.revision += 1;
     }
 
     /// Inserts a new tile made from `prototype` at position `index` of a
-    /// track (0 before the first place): `along` u long in the track's
-    /// direction and the prototype's smallest size across. Returns it.
-    pub fn insertTile(m: *Model, panel: usize, region: usize, track_: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
+    /// track's flow: `along` u long in the track's direction and the
+    /// prototype's smallest size across. Returns it.
+    pub fn insertTile(m: *Model, panel: usize, region: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
         if (prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const row = try m.trackRow(panel, region, track_);
-        if (index > row.places.items.len) return error.NoSuchRow;
+        if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
         const major = m.panels.items[panel].regions.items[region].major;
         const across = m.prototypes.items[prototype].smallest(major, .across);
         var buf: [64]u8 = undefined;
@@ -821,90 +858,86 @@ pub const Model = struct {
             .w = if (major == .row) along else across,
             .h = if (major == .row) across else along,
         });
-        try row.places.insert(m.a(), index, .{ .tile = id });
-        m.revision += 1;
+        try m.place(panel, region, index, .{ .what = .{ .tile = id } });
         return id;
     }
 
     /// Inserts a blank `length` u long at position `index` of a track.
-    pub fn insertBlank(m: *Model, panel: usize, region: usize, track_: usize, index: usize, length: f64) Error!void {
+    pub fn insertBlank(m: *Model, panel: usize, region: usize, index: usize, length: f64) Error!void {
         if (!(length > 0)) return error.BadSize;
-        const row = try m.trackRow(panel, region, track_);
-        if (index > row.places.items.len) return error.NoSuchRow;
-        try row.places.insert(m.a(), index, .{ .blank = length });
+        try m.place(panel, region, index, .{ .what = .{ .blank = length } });
+    }
+
+    /// Inserts a hard break at position `index` of a track: what follows
+    /// starts the next segment.
+    pub fn insertBreak(m: *Model, panel: usize, region: usize, index: usize) Error!void {
+        try m.place(panel, region, index, .{ .what = .hard_break });
+    }
+
+    /// Inserts a run of markup (text, an equation, or both) at position
+    /// `index` of a track.
+    pub fn insertRun(m: *Model, panel: usize, region: usize, index: usize, run: Run) Error!void {
+        try m.place(panel, region, index, .{ .what = .{ .run = run } });
+    }
+
+    /// Sets the markup of the run at position `index` of a track.
+    pub fn setRunContent(m: *Model, panel: usize, region: usize, index: usize, content: []const u8) Error!void {
+        const items = m.flow(panel, region).items;
+        if (index >= items.len or items[index].what != .run) return error.NoSuchItem;
+        items[index].what.run.content = try m.a().dupe(u8, content);
         m.revision += 1;
     }
 
-    /// Removes place `index` of a track: a blank, or a tile, which leaves
-    /// every track it is in.
-    pub fn removeAt(m: *Model, panel: usize, region: usize, track_: usize, index: usize) Error!void {
-        const row = try m.trackRow(panel, region, track_);
-        if (index >= row.places.items.len) return error.NoSuchRow;
-        if (row.places.items[index].tile) |id| {
+    /// Removes item `index` of a track: a blank, run or break, or a tile,
+    /// which leaves every track it is in.
+    pub fn removeAt(m: *Model, panel: usize, region: usize, index: usize) Error!void {
+        const items = m.flow(panel, region);
+        if (index >= items.items.len) return error.NoSuchItem;
+        if (items.items[index].tileOf()) |id| {
             m.removeTile(id);
         } else {
-            _ = row.places.orderedRemove(index);
+            _ = items.orderedRemove(index);
             m.revision += 1;
         }
     }
 
-    /// How far a track's places reach along it, u: its offset, and every
-    /// gap and place.
-    pub fn trackExtent(m: *const Model, panel: usize, region: usize, track_: usize) f64 {
-        const r = m.panels.items[panel].regions.items[region];
-        const row = r.rows.items[track_];
-        var len = row.offset;
-        for (row.places.items) |p| {
-            len += p.gap;
-            if (p.tile) |id| {
-                const t = m.tileConst(id);
-                len += if (r.major == .row) t.w else t.h;
-            } else len += p.blank;
-        }
-        return len;
-    }
-
-    /// Fits a region's tracks to what has been put in them: their length
-    /// becomes the longest track's extent. A region with nothing in it is
-    /// left as it is. Returns whether it changed.
-    pub fn fitRegion(m: *Model, panel: usize, region: usize) bool {
+    /// Sets the length of a track's segments, u, as Fit to tiles does with
+    /// the length its longest paragraph needs (see `place.Placed`).
+    pub fn setSegmentLength(m: *Model, panel: usize, region: usize, length: f64) Error!void {
+        if (!(length > 0)) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
-        var longest: f64 = 0;
-        for (0..r.rows.items.len) |t| longest = @max(longest, m.trackExtent(panel, region, t));
-        if (!(longest > 0) or @abs(longest - r.trackLength()) < 1e-9) return false;
-        if (r.major == .row) r.w = longest else r.h = longest;
+        if (r.major == .row) r.w = length else r.h = length;
         m.revision += 1;
-        return true;
     }
 
-    /// Moves a track, tiles and all, `along` u along its length and
+    /// Moves a segment, content and all, `along` u along its length and
     /// `across` u across the region (down for a row, right for a column),
-    /// either way. Every other track keeps its place. It may move past its
-    /// region or its panel (flagged when placed), but not onto another
-    /// track's band anywhere on the panel: that is refused with `NoRoom`.
-    pub fn moveTrack(m: *Model, panel: usize, region: usize, track_: usize, along: f64, across: f64) Error!void {
+    /// either way. Every other segment keeps its place. It may move past
+    /// its region or its panel (flagged when placed), but not onto another
+    /// segment's band anywhere on the panel: that is refused with `NoRoom`.
+    pub fn moveSegment(m: *Model, panel: usize, region: usize, segment: usize, along: f64, across: f64) Error!void {
         const r = &m.panels.items[panel].regions.items[region];
-        const rows = r.rows.items;
-        if (track_ >= rows.len) return error.NoSuchRow;
+        const segs = r.segments.items;
+        if (segment >= segs.len) return error.NoSuchRow;
         // Where it would go, with the others where they are now.
-        var row = rows[track_];
-        row.across = r.trackAcross(track_) + across;
-        row.offset += along;
-        const saved = rows[track_];
-        rows[track_] = row;
-        const target = r.trackBox(track_);
-        rows[track_] = saved;
-        for (m.panels.items[panel].regions.items, 0..) |other, oi| for (0..other.rows.items.len) |ot| {
-            if (oi == region and ot == track_) continue;
-            if (overlaps(target, other.trackBox(ot))) return error.NoRoom;
+        var seg = segs[segment];
+        seg.across = r.segmentAcross(segment) + across;
+        seg.offset += along;
+        const saved = segs[segment];
+        segs[segment] = seg;
+        const target = r.segmentBox(segment);
+        segs[segment] = saved;
+        for (m.panels.items[panel].regions.items, 0..) |other, oi| for (0..other.segments.items.len) |ot| {
+            if (oi == region and ot == segment) continue;
+            if (overlaps(target, other.segmentBox(ot))) return error.NoRoom;
         };
-        // Every track of the region placed on its own from now on, so its
+        // Every segment of the region placed on its own from now on, so its
         // neighbours stay where they are.
         var places: [256]f64 = undefined;
-        if (rows.len > places.len) return error.NoRoom;
-        for (0..rows.len) |t| places[t] = r.trackAcross(t);
-        for (rows, 0..) |*t, i| t.across = places[i];
-        rows[track_] = row;
+        if (segs.len > places.len) return error.NoRoom;
+        for (0..segs.len) |t| places[t] = r.segmentAcross(t);
+        for (segs, 0..) |*t, i| t.across = places[i];
+        segs[segment] = seg;
         m.revision += 1;
     }
 
@@ -915,11 +948,11 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    pub fn addRow(m: *Model, panel: usize, region: usize, gap: f64) Error!usize {
-        const rows = &m.panels.items[panel].regions.items[region].rows;
-        try rows.append(m.a(), .{ .gap = gap });
+    pub fn addSegment(m: *Model, panel: usize, region: usize, gap: f64) Error!usize {
+        const segs = &m.panels.items[panel].regions.items[region].segments;
+        try segs.append(m.a(), .{ .gap = gap });
         m.revision += 1;
-        return rows.items.len - 1;
+        return segs.items.len - 1;
     }
 
     pub fn addPrototype(m: *Model, p: TilePrototype) Error!PrototypeId {
@@ -1127,22 +1160,13 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Puts `id` in a row at `index` (null for the end).
-    pub fn place(m: *Model, panel: usize, region: usize, row: usize, index: ?usize, p: Place) Error!void {
-        const rows = m.panels.items[panel].regions.items[region].rows.items;
-        if (row >= rows.len) return error.NoSuchRow;
-        const places = &rows[row].places;
-        try places.insert(m.a(), index orelse places.items.len, p);
-        m.revision += 1;
-    }
-
-    /// Takes `id` out of every row it is in, keeping the tile itself.
+    /// Takes `id` out of every track it is in, keeping the tile itself.
     pub fn unplace(m: *Model, id: TileId) void {
-        for (m.panels.items) |*panel| for (panel.regions.items) |*region| for (region.rows.items) |*row| {
+        for (m.panels.items) |*panel| for (panel.regions.items) |*region| {
             var i: usize = 0;
-            while (i < row.places.items.len) {
-                const here = row.places.items[i].tile;
-                if (here != null and here.? == id) _ = row.places.orderedRemove(i) else i += 1;
+            while (i < region.items.items.len) {
+                const here = region.items.items[i].tileOf();
+                if (here != null and here.? == id) _ = region.items.orderedRemove(i) else i += 1;
             }
         };
         m.revision += 1;
@@ -1188,8 +1212,8 @@ test "removing a panel removes its tiles and frees their designators" {
     _ = try m.placePanel(.{ .name = "A", .w = 50, .h = 50 });
     const b = try m.placePanel(.{ .name = "B", .origin = .{ .x = 100, .y = 0 }, .w = 50, .h = 50 });
     const r = try m.addRegion(b, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 2, .h = 1, .pitch = 19.05 });
-    _ = try m.addRow(b, r, 0);
-    try m.place(b, r, 0, null, .{ .tile = try m.addTile(.{ .designator = "K1" }) });
+    _ = try m.addSegment(b, r, 0);
+    try m.place(b, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "K1" }) } });
     m.removePanel(0);
     try std.testing.expectEqualStrings("B", m.panels.items[0].name);
     m.removePanel(0);
@@ -1224,12 +1248,12 @@ test "designators are unique and actions bump the revision" {
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "main", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 2, .pitch = 19.05 });
-    _ = try m.addRow(p, r, 0);
+    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top" }} });
     const q = try m.addTile(.{ .designator = "Q", .prototype = key });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = 7 }));
-    try m.place(p, r, 0, null, .{ .tile = q });
+    try m.place(p, r, null, .{ .what = .{ .tile = q } });
     const before = m.revision;
     try m.setContent(q, "top", "q");
     try std.testing.expect(m.revision > before);
@@ -1381,8 +1405,8 @@ test "tracks are added empty; a removed tile leaves them" {
     const region = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(4.5, region.w);
     try std.testing.expectEqual(2, region.h);
-    try std.testing.expectEqual(2, region.rows.items.len);
-    try std.testing.expectEqual(0, region.rows.items[0].places.items.len);
+    try std.testing.expectEqual(2, region.segments.items.len);
+    try std.testing.expectEqual(0, region.items.items.len);
     try std.testing.expectEqual(0, m.tiles.items.len);
 
     // Columns: as thick as the smallest width, as long as asked.
@@ -1392,39 +1416,50 @@ test "tracks are added empty; a removed tile leaves them" {
     try std.testing.expectEqual(2, side.h);
     try std.testing.expectError(error.BadSize, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .prototype = key, .count = 1, .length = 0.5, .pitch = 19.05 }));
 
-    for (0..4) |i| _ = try m.insertTile(p, r, 0, i, key, 1);
+    for (0..4) |i| _ = try m.insertTile(p, r, i, key, 1);
     const t1 = m.findTile("T1").?;
     m.removeTile(t1);
     try std.testing.expectEqual(null, m.findTile("T1"));
-    try std.testing.expectEqual(3, m.panels.items[p].regions.items[r].rows.items[0].places.items.len);
+    try std.testing.expectEqual(3, m.panels.items[p].regions.items[r].items.items.len);
 }
 
-test "tiles and blanks are inserted and removed in flow order" {
+test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
     const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.25, 1.5 } });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 1, .length = 2, .pitch = 19.05 });
-    _ = try m.insertTile(p, r, 0, 0, key, 1);
-    _ = try m.insertTile(p, r, 0, 1, key, 1);
+    _ = try m.insertTile(p, r, 0, key, 1);
+    _ = try m.insertTile(p, r, 1, key, 1);
     // T1 T2; insert a 1.5 u tile between them, and a blank before it.
-    const t = try m.insertTile(p, r, 0, 1, key, 1.5);
-    try m.insertBlank(p, r, 0, 1, 0.25);
-    const places = m.panels.items[p].regions.items[r].rows.items[0].places.items;
-    try std.testing.expectEqual(4, places.len);
-    try std.testing.expectEqual(null, places[1].tile);
-    try std.testing.expectEqual(0.25, places[1].blank);
-    try std.testing.expectEqual(t, places[2].tile.?);
+    const t = try m.insertTile(p, r, 1, key, 1.5);
+    try m.insertBlank(p, r, 1, 0.25);
+    const items = m.panels.items[p].regions.items[r].items.items;
+    try std.testing.expectEqual(4, items.len);
+    try std.testing.expectEqual(null, items[1].tileOf());
+    try std.testing.expectEqual(0.25, items[1].what.blank);
+    try std.testing.expectEqual(t, items[2].tileOf().?);
     try std.testing.expectEqualStrings("T3", m.tileConst(t).designator);
     try std.testing.expectEqual(1.5, m.tileConst(t).w);
     // Removing the blank, then the tile.
-    try m.removeAt(p, r, 0, 1);
-    try m.removeAt(p, r, 0, 1);
-    const left = m.panels.items[p].regions.items[r].rows.items[0].places.items;
+    try m.removeAt(p, r, 1);
+    try m.removeAt(p, r, 1);
+    const left = m.panels.items[p].regions.items[r].items.items;
     try std.testing.expectEqual(2, left.len);
     try std.testing.expectEqual(null, m.findTile("T3"));
-    try std.testing.expectError(error.NoSuchRow, m.removeAt(p, r, 0, 5));
+    try std.testing.expectError(error.NoSuchItem, m.removeAt(p, r, 5));
     // A new tile takes the lowest free designator.
-    _ = try m.insertTile(p, r, 0, 0, key, 1);
+    _ = try m.insertTile(p, r, 0, key, 1);
     try std.testing.expect(m.findTile("T3") != null);
+    // Text and equations share the flow with the tiles, and a hard break
+    // goes between any two items.
+    try m.insertRun(p, r, 1, .{ .content = "x = \\frac{1}{2}" });
+    try m.insertBreak(p, r, 2);
+    const mixed = m.panels.items[p].regions.items[r].items.items;
+    try std.testing.expectEqual(5, mixed.len);
+    try std.testing.expectEqualStrings("x = \\frac{1}{2}", mixed[1].what.run.content);
+    try std.testing.expect(mixed[2].what == .hard_break);
+    try m.setRunContent(p, r, 1, "word");
+    try std.testing.expectEqualStrings("word", m.panels.items[p].regions.items[r].items.items[1].what.run.content);
+    try std.testing.expectError(error.NoSuchItem, m.setRunContent(p, r, 0, "x"));
 }

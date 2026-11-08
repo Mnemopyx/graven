@@ -665,11 +665,14 @@ fn bottomContent() !void {
 const ExprTarget = union(enum) {
     panel_label: struct { panel: usize, index: usize },
     tile_slot: struct { tile: TileId, slot: usize },
+    /// A run of markup (text, an equation) in a track's flow.
+    run: struct { panel: usize, region: usize, item: usize },
 
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
             .panel_label => |l| state.model.panels.items[l.panel].labels.items[l.index].content,
             .tile_slot => |ts| state.model.slot(ts.tile, ts.slot).content,
+            .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.content,
         };
     }
 
@@ -677,6 +680,7 @@ const ExprTarget = union(enum) {
         switch (t) {
             .panel_label => |l| try state.model.setLabelContent(l.panel, l.index, text),
             .tile_slot => |ts| try state.model.setContent(ts.tile, state.model.slot(ts.tile, ts.slot).name, text),
+            .run => |r| try state.model.setRunContent(r.panel, r.region, r.item, text),
         }
     }
 
@@ -691,6 +695,7 @@ fn exprTarget() ?ExprTarget {
     return switch (state.context) {
         .label => |l| .{ .panel_label = .{ .panel = l.panel, .index = l.index } },
         .tile => |id| if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
+        .region => if (runAtCursor()) |r| .{ .run = .{ .panel = r.panel, .region = r.region, .item = r.item } } else null,
         else => null,
     };
 }
@@ -770,6 +775,18 @@ fn expressionLine() !void {
         e.handle(@src(), dvui.currentWindow().data());
     };
 
+    // In a run of a track's flow, Enter or Esc ends the run: the keyboard
+    // goes back to the canvas and its flow cursor, where Enter is a hard
+    // break.
+    if (was_focused and target == .run and comp.items.len == 0) for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down) continue;
+        if (k.code != .enter and k.code != .kp_enter and k.code != .escape) continue;
+        e.handle(@src(), dvui.currentWindow().data());
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    };
+
     // Otherwise Tab moves to the next argument slot, taken before the
     // entry sees it, as the entry would move focus.
     var next_slot = false;
@@ -787,6 +804,14 @@ fn expressionLine() !void {
         .font = .theme(.mono),
         .id_extra = @truncate(key),
     });
+    // A run just put in a track takes the keyboard at once.
+    if (focus_expression) {
+        focus_expression = false;
+        // Its window first: the palette over the canvas may hold the
+        // keyboard.
+        dvui.focusSubwindow(null, null);
+        dvui.focusWidget(te.data().id, null, null);
+    }
     const focused = te.data().id == dvui.focusedWidgetId();
     if (next_slot) nextSlot(te);
     // Kept in step with edits made elsewhere (the Text property).
@@ -878,6 +903,7 @@ fn firstSyntaxProblem(target: ExprTarget) ?engine.markup.Diagnostic {
         const hit = switch (target) {
             .panel_label => |l| l.panel == pi and i.label == l.index,
             .tile_slot => |ts| i.tile == ts.tile and i.slot == ts.slot,
+            .run => |r| r.panel == pi and i.region == r.region and i.item == r.item,
         };
         if (hit) return i.syntax;
     };
@@ -1180,13 +1206,19 @@ fn worksheetTree() void {
             _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, 3, false, label.default_content);
         }
         for (panel.regions.items, 0..) |region, ri| {
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, region.rows.items.len > 0, false)) continue;
-            for (region.rows.items, 0..) |row, rowi| {
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, region.segments.items.len > 0, false)) continue;
+            for (0..region.segments.items.len) |rowi| {
                 const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), rowi + 1 }) catch "Row";
-                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, row.places.items.len > 0, false)) continue;
-                for (row.places.items) |p| {
-                    // Blanks are spacers, not things to select.
-                    const id = p.tile orelse continue;
+                // What the flow put in this segment, from the last solve.
+                const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
+                const filled = for (placed_items) |it| {
+                    if (it.region == ri and it.segment == rowi and !isBreak(pi, it)) break true;
+                } else false;
+                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, filled, false)) continue;
+                for (placed_items) |it| {
+                    if (it.region != ri or it.segment != rowi) continue;
+                    // Blanks, runs and breaks are not things to select here.
+                    const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
                     const t = state.model.tileConst(id);
                     const legend = if (state.model.slotCount(id) > 0) state.model.slot(id, 0).content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
@@ -1474,8 +1506,8 @@ fn drawPanelMargins(area: dvui.Rect.Physical, pi: usize) void {
     if (ink.width() > 0 and ink.height() > 0) state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.margin.opacity(0.6) } });
 }
 
-fn inMargin(pi: usize, tile: ?TileId, slot: usize) bool {
-    for (state.intrusions) |i| if (i.panel == pi and i.tile == tile and i.slot == slot) return true;
+fn inMargin(pi: usize, tile: ?TileId, slot: usize, run_region: ?usize) bool {
+    for (state.intrusions) |i| if (i.panel == pi and i.tile == tile and i.slot == slot and i.run_region == run_region) return true;
     return false;
 }
 
@@ -1484,7 +1516,7 @@ fn inMargin(pi: usize, tile: ?TileId, slot: usize) bool {
 fn labelBox(pi: usize, index: usize) ?geom.Box {
     if (pi >= state.placed.items.len) return null;
     for (state.placed.items[pi].labels) |l| {
-        if (l.tile != null or l.slot != index) continue;
+        if (l.tile != null or l.run != null or l.slot != index) continue;
         const d = labelDelta(pi, index);
         const b = onSheet(pi, l.box);
         return .{ .x0 = b.x0 + d.x, .y0 = b.y0 + d.y, .x1 = b.x1 + d.x, .y1 = b.y1 + d.y };
@@ -1559,10 +1591,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
-        const d = if (l.tile == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
+        const d = if (l.tile == null and l.run == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
         const pieces = state.flat.get(l.render, &state.faces) catch continue;
         // Ink in the sheet's margins is drawn in the warning colour.
-        const ink = if (inMargin(pi, l.tile, l.slot)) colors.overflow else colors.ink;
+        const ink = if (inMargin(pi, l.tile, l.slot, if (l.run) |r| r.region else null)) colors.overflow else colors.ink;
         const at: geom.Point = .{ .x = l.origin.x + o.x + d.x, .y = l.origin.y + o.y + d.y };
         for (pieces) |piece| {
             const color: dvui.Color = switch (piece.kind) {
@@ -1592,6 +1624,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
         }
     }
+    drawFlowMarks(area, pi, placed);
     if (track_cursor) |c| if (c.panel == pi) drawCursor(area, pi, placed, c);
     // The selected panel label: its ink box, with a little room.
     switch (state.context) {
@@ -1702,8 +1735,9 @@ fn ccw(p0: dvui.Point.Physical, p1: dvui.Point.Physical, p2: dvui.Point.Physical
 fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
     const c = expr_caret orelse return null;
     const mine = switch (c.target) {
-        .panel_label => |t| t.panel == pi and l.tile == null and l.slot == t.index,
+        .panel_label => |t| t.panel == pi and l.tile == null and l.run == null and l.slot == t.index,
         .tile_slot => |t| l.tile != null and std.meta.eql(l.tile.?, t.tile) and l.slot == t.slot,
+        .run => |t| t.panel == pi and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
     };
     if (!mine) return null;
     return l.render.caret(@intCast(c.offset));
@@ -2217,6 +2251,15 @@ fn pick(at: geom.Point) void {
         }
         for (state.placed.items[pi].labels) |l| {
             if (l.tile != null) continue;
+            // A run of text or an equation in a track: the track becomes
+            // the context, with the cursor just after the run.
+            if (l.run) |run| {
+                if (contains(onSheet(pi, l.box), at)) {
+                    state.context = .{ .region = .{ .panel = pi, .region = run.region } };
+                    track_cursor = .{ .panel = pi, .region = run.region, .index = run.item + 1 };
+                }
+                continue;
+            }
             if (labelBox(pi, l.slot)) |lb| if (contains(.{ .x0 = lb.x0 - 1, .y0 = lb.y0 - 1, .x1 = lb.x1 + 1, .y1 = lb.y1 + 1 }, at)) {
                 state.context = .{ .label = .{ .panel = pi, .index = l.slot } };
             };
@@ -2434,7 +2477,7 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     };
     // Empty tracks, the user fills them: the cursor waits at the start.
     state.context = .{ .region = .{ .panel = plan.panel, .region = r } };
-    track_cursor = .{ .panel = plan.panel, .region = r, .track = 0, .index = 0 };
+    track_cursor = .{ .panel = plan.panel, .region = r, .index = 0 };
     state.expanded.put(state.gpa, Context.key(.{ .panel = plan.panel }), true) catch {};
 }
 
@@ -2513,9 +2556,9 @@ fn toolPalette() void {
         const r = state.context.region;
         var fwd: dvui.WidgetData = undefined;
         if (dvui.buttonIcon(@src(), "Fit to tiles", dvui.entypo.crop, .{}, .{}, .{ .data_out = &fwd })) {
-            state.status = if (state.model.fitRegion(r.panel, r.region)) "" else "The tracks already fit their tiles (or hold none). ";
+            state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
         }
-        dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: shorten the tracks to what is in them", .{}, .{});
+        dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
     }
     if (state.context == .worksheet) {
         // A mode tool: shown pressed while active; pressing again cancels.
@@ -2771,7 +2814,8 @@ fn properties() !void {
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ region.origin.x, region.origin.y }, 2);
             propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
             propText("Pitch", "{d} mm", .{region.pitch}, 4);
-            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{region.rows.items.len}, 5);
+            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{region.segments.items.len}, 5);
+            propText("Items", "{d}", .{region.items.items.len}, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
@@ -2779,11 +2823,14 @@ fn properties() !void {
         },
         .row => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
-            const row = region.rows.items[r.row];
-            propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, region.rows.items.len, region.name }, 1);
+            propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, region.segments.items.len, region.name }, 1);
             var where_buf: [96]u8 = undefined;
             propText("Placed", "{s}", .{trackWhere(&where_buf, region, r.row)}, 2);
-            propText("Tiles", "{d}", .{row.places.items.len}, 3);
+            var held: usize = 0;
+            if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].items) |it| {
+                if (it.region == r.region and it.segment == r.row and !isBreak(r.panel, it)) held += 1;
+            };
+            propText("Items", "{d}", .{held}, 3);
         },
         .tile => |id| try tileProperties(id),
         .label => |l| try labelProperties(l.panel, l.index),
@@ -3363,21 +3410,24 @@ fn statusContent() void {
 
 // Populating tracks --------------------------------------------------------
 //
-// With a region as the context, a click in its
-// tracks puts a flow cursor between places. Tiles and blanks go in at the
-// cursor from the insert palette, or by its keys: digits for tiles, the
-// row below them for blanks. Backspace removes the place before the
-// cursor, Delete the one after; arrows move it along and across tracks.
+// A track is one flow: tiles, blanks, runs of text or equations, and hard
+// breaks, poured in order through its rows or columns. With a region as
+// the context, a click in its tracks puts the flow cursor between items.
+// Things go in at the cursor from the insert palette, or by its keys:
+// digits for tiles, the row below them for blanks, A for text or an
+// equation (typed in the expression line), Enter for a hard break.
+// Backspace removes the item before the cursor, Delete the one after;
+// arrows move it along the flow, or to the next row or column.
 
-/// Where tiles and blanks go in: before place `index` of a track.
-const TrackCursor = struct { panel: usize, region: usize, track: usize, index: usize };
+/// Where things go in: before item `index` of a track's flow.
+const TrackCursor = struct { panel: usize, region: usize, index: usize };
 var track_cursor: ?TrackCursor = null;
 /// The canvas, and the palette's buttons, from the last frame: the
 /// cursor's keys work while one of them has the keyboard.
 var canvas_id: ?dvui.Id = null;
 var palette_ids: [24]dvui.Id = undefined;
 var palette_id_count: usize = 0;
-const palette_height = 168;
+const palette_height = 212;
 const move_palette_height = 124;
 /// How opaque the palette and its buttons are over the canvas.
 const palette_alpha = 0.6;
@@ -3429,9 +3479,37 @@ fn contextRegion() ?struct { panel: usize, region: usize } {
     };
 }
 
+/// The item of a region's flow that a click `along` mm into segment `seg`
+/// goes before: the first in that segment whose middle lies beyond it, else
+/// the segment's hard break (the end of its line), else past its last item.
+fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
+    const r = state.model.panels.items[pi].regions.items[region];
+    var after: ?usize = null;
+    for (state.placed.items[pi].items) |it| {
+        if (it.region != region or it.segment != seg) continue;
+        if (isBreak(pi, it)) return it.index;
+        if ((it.span[0] + it.span[1]) / 2 > along) return it.index;
+        after = it.index + 1;
+    }
+    return after orelse r.items.items.len;
+}
+
+/// The model's item for a placed one, while the model still has it: the
+/// placement is from the last solve, and an edit since may have removed it.
+fn modelItem(pi: usize, it: layout.place.PlacedItem) ?layout.model.Item {
+    if (pi >= state.model.panels.items.len) return null;
+    const regions = state.model.panels.items[pi].regions.items;
+    if (it.region >= regions.len or it.index >= regions[it.region].items.items.len) return null;
+    return regions[it.region].items.items[it.index];
+}
+
+fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
+    const item = modelItem(pi, it) orelse return false;
+    return item.what == .hard_break;
+}
+
 /// The cursor a click at worksheet point `at` puts in the context region's
-/// tracks: the track under it, before the first place whose middle lies
-/// beyond it.
+/// tracks: in the row or column under it, between the items either side.
 fn cursorAt(at: geom.Point) ?TrackCursor {
     const cr = contextRegion() orelse return null;
     if (cr.panel >= state.placed.items.len) return null;
@@ -3440,17 +3518,62 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
         const b = onSheet(cr.panel, t.box);
         if (!contains(b, at)) continue;
         const along = if (t.major == .row) at.x - b.x0 else b.y1 - at.y;
-        var index: usize = 0;
-        for (t.spans) |sp| {
-            if ((sp[0] + sp[1]) / 2 < along) index += 1;
-        }
-        return .{ .panel = cr.panel, .region = cr.region, .track = t.track, .index = index };
+        return .{ .panel = cr.panel, .region = cr.region, .index = indexAt(cr.panel, cr.region, t.track, along) };
     }
     return null;
 }
 
+/// Where the cursor shows: the segment and the distance along it, mm.
+fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
+    if (c.panel >= state.placed.items.len) return null;
+    const r = state.model.panels.items[c.panel].regions.items[c.region];
+    var prev: ?layout.place.PlacedItem = null;
+    var here: ?layout.place.PlacedItem = null;
+    for (state.placed.items[c.panel].items) |it| {
+        if (it.region != c.region) continue;
+        if (it.index + 1 == c.index) prev = it;
+        if (it.index == c.index) here = it;
+    }
+    // After a hard break: the start of the next segment.
+    if (prev) |p| if (isBreak(c.panel, p)) {
+        const seg = if (here) |h| h.segment else @min(p.segment + 1, r.segments.items.len - 1);
+        return .{ .segment = seg, .along = 0 };
+    };
+    if (here) |h| {
+        if (prev) |p| if (p.segment == h.segment) return .{ .segment = h.segment, .along = (p.span[1] + h.span[0]) / 2 };
+        return .{ .segment = h.segment, .along = h.span[0] };
+    }
+    if (prev) |p| return .{ .segment = p.segment, .along = p.span[1] };
+    return .{ .segment = 0, .along = 0 };
+}
+
+/// The run of text or an equation the expression line edits while the
+/// cursor is in a track: the one just before the cursor, else the one just
+/// after it.
+fn runAtCursor() ?struct { panel: usize, region: usize, item: usize } {
+    const c = track_cursor orelse return null;
+    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    if (c.index > 0 and c.index <= items.len and items[c.index - 1].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index - 1 };
+    if (c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
+    return null;
+}
+
+/// Fits a region's rows or columns to their content: as long as its
+/// longest paragraph needs, from the last solve. Whether it changed.
+fn fitRegion(pi: usize, region: usize) bool {
+    if (pi >= state.placed.items.len) return false;
+    for (state.placed.items[pi].flows) |f| {
+        if (f.region != region) continue;
+        const r = state.model.panels.items[pi].regions.items[region];
+        if (!(f.natural > 0) or @abs(f.natural - r.segmentLength()) < 1e-9) return false;
+        state.model.setSegmentLength(pi, region, f.natural) catch return false;
+        return true;
+    }
+    return false;
+}
+
 /// Drops the cursor when its region stops being the context, and keeps it
-/// inside its track as places come and go.
+/// within the flow as items come and go.
 fn validateCursor() void {
     const c = track_cursor orelse return;
     const cr = contextRegion() orelse {
@@ -3461,15 +3584,12 @@ fn validateCursor() void {
         track_cursor = null;
         return;
     }
-    const rows = state.model.panels.items[c.panel].regions.items[c.region].rows.items;
-    if (rows.len == 0) {
+    const r = state.model.panels.items[c.panel].regions.items[c.region];
+    if (r.segments.items.len == 0) {
         track_cursor = null;
         return;
     }
-    var fixed = c;
-    fixed.track = @min(c.track, rows.len - 1);
-    fixed.index = @min(c.index, rows[fixed.track].places.items.len);
-    track_cursor = fixed;
+    track_cursor.?.index = @min(c.index, r.items.items.len);
 }
 
 fn cursorKeysReach() bool {
@@ -3494,16 +3614,24 @@ fn cursorKey(code: dvui.enums.Key) bool {
         return true;
     };
     const region = state.model.panels.items[c.panel].regions.items[c.region];
-    const len = region.rows.items[c.track].places.items.len;
+    const len = region.items.items.len;
     const rows = region.major == .row;
     var next = c;
     switch (code) {
+        .a => {
+            insertAtCursor(.run, 0);
+            return true;
+        },
+        .enter, .kp_enter => {
+            insertAtCursor(.hard_break, 0);
+            return true;
+        },
         .backspace => {
             if (c.index == 0) return true;
-            state.model.removeAt(c.panel, c.region, c.track, c.index - 1) catch {};
+            state.model.removeAt(c.panel, c.region, c.index - 1) catch {};
             next.index -= 1;
         },
-        .delete => if (c.index < len) state.model.removeAt(c.panel, c.region, c.track, c.index) catch {},
+        .delete => if (c.index < len) state.model.removeAt(c.panel, c.region, c.index) catch {},
         .escape => {
             track_cursor = null;
             return true;
@@ -3514,9 +3642,11 @@ fn cursorKey(code: dvui.enums.Key) bool {
             if (along_key) {
                 if (forward and c.index < len) next.index += 1;
                 if (!forward and c.index > 0) next.index -= 1;
-            } else {
-                if (forward and c.track + 1 < region.rows.items.len) next.track += 1;
-                if (!forward and c.track > 0) next.track -= 1;
+            } else if (cursorPlace(c)) |at| {
+                // To the nearest place in the next or previous segment.
+                const segs = region.segments.items.len;
+                if (forward and at.segment + 1 < segs) next.index = indexAt(c.panel, c.region, at.segment + 1, at.along);
+                if (!forward and at.segment > 0) next.index = indexAt(c.panel, c.region, at.segment - 1, at.along);
             }
         },
         else => return false,
@@ -3526,33 +3656,84 @@ fn cursorKey(code: dvui.enums.Key) bool {
     return true;
 }
 
-/// Inserts a tile or a blank `size` u long at the cursor, which moves past it.
-fn insertAtCursor(kind: enum { tile, blank }, size: f64) void {
+/// Inserts at the cursor, which moves past it: a tile or a blank `size` u
+/// long, a hard break, or an empty run of markup, whose text the expression
+/// line then takes.
+fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
     const c = track_cursor orelse return;
     const pal = paletteFor(c.panel, c.region) orelse return;
     switch (kind) {
-        .tile => _ = state.model.insertTile(c.panel, c.region, c.track, c.index, pal.prototype, size) catch return,
-        .blank => state.model.insertBlank(c.panel, c.region, c.track, c.index, size) catch return,
+        .tile => _ = state.model.insertTile(c.panel, c.region, c.index, pal.prototype, size) catch return,
+        .blank => state.model.insertBlank(c.panel, c.region, c.index, size) catch return,
+        .hard_break => state.model.insertBreak(c.panel, c.region, c.index) catch return,
+        .run => {
+            state.model.insertRun(c.panel, c.region, c.index, .{ .style = labelStyle() catch return, .content = "" }) catch return;
+            focus_expression = true;
+        },
     }
     track_cursor.?.index += 1;
 }
 
-/// The cursor: a bar across its track between places.
+/// Set when a new run wants the expression line to take the keyboard.
+var focus_expression = false;
+
+/// The cursor: a bar across its row or column between items.
 fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
+    const at = cursorPlace(c) orelse return;
     for (placed.tracks) |t| {
-        if (t.region != c.region or t.track != c.track) continue;
-        const n = t.spans.len;
-        const pos: f64 = if (n == 0 or c.index == 0) (if (n > 0) t.spans[0][0] else 0) else if (c.index >= n) t.spans[n - 1][1] else (t.spans[c.index - 1][1] + t.spans[c.index][0]) / 2;
+        if (t.region != c.region or t.track != at.segment) continue;
+        const pos = at.along;
         const b = onSheet(pi, t.box);
         const px = dvui.windowNaturalScale();
         const focus = dvui.themeGet().focus;
-        // The track, faintly, then the bar a little past its edges.
+        // The segment, faintly, then the bar a little past its edges.
         state.view.rect(area, b).fill(.square, .{ .color = .{ .color = focus.opacity(0.06) } });
         const over = 1.0;
         const p0: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y0 - over } else .{ .x = b.x0 - over, .y = b.y1 - pos };
         const p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 3 * px, .color = .{ .color = focus } });
         return;
+    }
+}
+
+/// What the flow holds that output leaves out, drawn faintly while editing:
+/// each hard break as a down-and-left arrow (a carriage return) at the end
+/// of its segment's content, and each empty run as a dashed slot.
+fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
+    const px = dvui.windowNaturalScale();
+    const ghost = colors.edge.opacity(0.45);
+    for (placed.items) |it| {
+        const what = (modelItem(pi, it) orelse continue).what;
+        const r = state.model.panels.items[pi].regions.items[it.region];
+        if (what != .hard_break and !(what == .run and what.run.content.len == 0)) continue;
+        const band = for (placed.tracks) |t| {
+            if (t.region == it.region and t.track == it.segment) break onSheet(pi, t.box);
+        } else continue;
+        const rows = r.major == .row;
+        if (what == .run) {
+            const box: geom.Box = if (rows)
+                .{ .x0 = band.x0 + it.span[0], .x1 = band.x0 + it.span[1], .y0 = band.y0 + r.pitch * 0.2, .y1 = band.y1 - r.pitch * 0.2 }
+            else
+                .{ .x0 = band.x0 + r.pitch * 0.2, .x1 = band.x1 - r.pitch * 0.2, .y1 = band.y1 - it.span[0], .y0 = band.y1 - it.span[1] };
+            state.view.rect(area, box).stroke(.square, .{ .thickness = px, .color = .{ .color = ghost } });
+            continue;
+        }
+        // The arrow, about a third of a unit, just past the content: down
+        // from the top, then left, with a head.
+        const u = r.pitch * 0.32;
+        const x0 = if (rows) band.x0 + it.span[0] + u * 0.4 else (band.x0 + band.x1) / 2 - u / 2;
+        const ytop = if (rows) (band.y0 + band.y1) / 2 + u / 2 else band.y1 - it.span[0] - u * 0.4;
+        const right = x0 + u;
+        const low = ytop - u;
+        const pts = [_]geom.Point{ .{ .x = right, .y = ytop }, .{ .x = right, .y = low }, .{ .x = x0, .y = low } };
+        var phys: [3]dvui.Point.Physical = undefined;
+        for (pts, &phys) |q, *o| o.* = state.view.toPx(area, q);
+        dvui.Path.stroke(.{ .points = &phys }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+        const h = u * 0.3;
+        const head = [_]geom.Point{ .{ .x = x0 + h, .y = low + h }, .{ .x = x0, .y = low }, .{ .x = x0 + h, .y = low - h } };
+        var hp: [3]dvui.Point.Physical = undefined;
+        for (head, &hp) |q, *o| o.* = state.view.toPx(area, q);
+        dvui.Path.stroke(.{ .points = &hp }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
     }
 }
 
@@ -3564,7 +3745,7 @@ fn trackPalette() void {
     const c = track_cursor orelse return;
     const pal = paletteFor(c.panel, c.region) orelse return;
     const name = state.model.prototypes.items[pal.prototype].name;
-    dvui.label(@src(), "Insert {s} tiles and blanks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
+    dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
     inline for (.{ .tile, .blank }) |kind| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @backingInt(@as(enum { tile, blank }, kind)) });
         defer row.deinit();
@@ -3578,6 +3759,64 @@ fn trackPalette() void {
             }
         }
     }
+    // The flow's other items: a run of text or an equation, and a hard break.
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    if (flowButton(.run, 0)) insertAtCursor(.run, 0);
+    if (flowButton(.hard_break, 1)) {
+        insertAtCursor(.hard_break, 0);
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    }
+}
+
+/// A palette button for an item that is not a tile: its key, a picture and
+/// what it puts in.
+fn flowButton(kind: enum { run, hard_break }, i: usize) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{
+        .id_extra = i,
+        .margin = .all(2),
+        .padding = .{ .x = 8, .w = 8, .y = 3, .h = 3 },
+        .corners = .all(4),
+        .color_fill = .{ .color = dvui.themeGet().color(.control, .fill).opacity(palette_button_alpha) },
+    });
+    bw.processEvents();
+    bw.drawBackground();
+    const clicked = bw.clicked();
+    if (palette_id_count < palette_ids.len) {
+        palette_ids[palette_id_count] = bw.data().id;
+        palette_id_count += 1;
+    }
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer line.deinit();
+        dvui.labelNoFmt(@src(), if (kind == .run) "A" else "Enter", .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
+        var pic = dvui.box(@src(), .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 22, .h = 18 }, .max_size_content = .{ .w = 22, .h = 18 } });
+        const r = pic.data().contentRectScale().r;
+        pic.deinit();
+        const px = dvui.windowNaturalScale();
+        const ghost = colors.edge.opacity(0.55);
+        if (kind == .hard_break) {
+            // Down, then left, with a head: a carriage return, ghosted as
+            // it is on the canvas.
+            const right = r.x + r.w * 0.8;
+            const left = r.x + r.w * 0.15;
+            const top = r.y + r.h * 0.1;
+            const low = r.y + r.h * 0.75;
+            const h = r.h * 0.25;
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = right, .y = top }, .{ .x = right, .y = low }, .{ .x = left, .y = low } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = left + h, .y = low - h }, .{ .x = left, .y = low }, .{ .x = left + h, .y = low + h } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+        } else {
+            // A dashed-looking slot with a caret: text to be typed.
+            r.stroke(.square, .{ .thickness = px, .color = .{ .color = ghost } });
+            const x = r.x + r.w * 0.3;
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = x, .y = r.y + 3 * px }, .{ .x = x, .y = r.y + r.h - 3 * px } } }, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+        }
+        dvui.labelNoFmt(@src(), if (kind == .run) "Text or equation" else "Hard break", .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 8 } });
+    }
+    bw.drawFocus();
+    bw.deinit();
+    return clicked;
 }
 
 /// One palette button: the tile or blank drawn to scale, its key, its size.
@@ -3673,7 +3912,7 @@ fn moveTrackArrow(arrow: Arrow) void {
             along = s;
         },
     }
-    state.model.moveTrack(t.panel, t.region, t.row, along, across) catch |err| {
+    state.model.moveSegment(t.panel, t.region, t.row, along, across) catch |err| {
         state.status = if (err == error.NoRoom) "No room to move it that way. " else "It did not move. ";
         return;
     };
@@ -3733,8 +3972,8 @@ fn trackWhere(buf: []u8, region: layout.model.TileRegion, t: usize) []const u8 {
     // Where it would be had it never moved: after the tracks before it.
     var drawn: f64 = 0;
     for (0..t) |_| drawn += 1;
-    const across = region.trackAcross(t) - drawn;
-    const along = region.rows.items[t].offset;
+    const across = region.segmentAcross(t) - drawn;
+    const along = region.segments.items[t].offset;
     const rows = region.major == .row;
     const across_word = if (rows) (if (across < 0) "up" else "down") else (if (across < 0) "left" else "right");
     const along_word = if (rows) (if (along < 0) "left" else "right") else (if (along < 0) "up" else "down");

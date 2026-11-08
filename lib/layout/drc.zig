@@ -82,6 +82,9 @@ pub const MarginIntrusion = struct {
     /// directly on the panel, `slot` then being its index there.
     tile: ?model.TileId,
     slot: usize,
+    /// For a run of markup in a track's flow: its region, `slot` then
+    /// being its index in the flow.
+    run_region: ?usize = null,
     /// The label's ink box on the worksheet, mm.
     ink: Box,
     /// How far it reaches past the ink area, mm: the largest overhang on
@@ -108,7 +111,7 @@ pub fn marginIntrusions(gpa: std.mem.Allocator, m: *const model.Model, placed: [
             const y = o.y + l.origin.y;
             const b: Box = .{ .x0 = x + ink.x0, .y0 = y + ink.y0, .x1 = x + ink.x1, .y1 = y + ink.y1 };
             const amount = @max(@max(area.x0 - b.x0, b.x1 - area.x1), @max(area.y0 - b.y0, b.y1 - area.y1));
-            if (amount > 0) try out.append(gpa, .{ .panel = pi, .tile = l.tile, .slot = l.slot, .ink = b, .amount = amount });
+            if (amount > 0) try out.append(gpa, .{ .panel = pi, .tile = l.tile, .slot = l.slot, .run_region = if (l.run) |r| r.region else null, .ink = b, .amount = amount });
         }
     }
     return out.toOwnedSlice(gpa);
@@ -129,12 +132,12 @@ test "ink past a margin is found; a panel in the margin alone is not" {
     // No panel margins: this test is about the sheet's.
     try m.setPanelMargins(p, .{});
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 30 }, .w = 3, .h = 1, .pitch = 19.05 });
-    _ = try m.addRow(p, r, 0);
+    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{.{ .name = "top", .style = style }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
         try m.setContent(t, "top", "H");
-        try m.place(p, r, 0, null, .{ .tile = t });
+        try m.place(p, r, null, .{ .what = .{ .tile = t } });
     }
     var labels: place.Labels = .init(gpa, &faces);
     defer labels.deinit();

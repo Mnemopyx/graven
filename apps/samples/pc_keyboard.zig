@@ -1,7 +1,7 @@
 //! A PC keyboard (ANSI, 104 tiles) built through the layout library's
 //! actions: the first sample the GUI and CLI open.
 //!
-//! The library knows only tiles, rows and slots; everything keyboard-
+//! The library knows only tiles, tracks and slots; everything keyboard-
 //! specific (layout, legends, keycap proportions) lives here.
 
 const std = @import("std");
@@ -242,7 +242,9 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
     var spanning: ?layout.TileId = null;
     var spanning_row: usize = 0;
     for (rows, 0..) |row, ri| {
-        _ = try m.addRow(p, r, row.gap);
+        _ = try m.addSegment(p, r, row.gap);
+        // One flow for the whole keyboard: a hard break ends each row.
+        if (ri > 0) try m.place(p, r, null, .{ .what = .hard_break });
         for (row.entries) |e| {
             n += 1;
             const name = try std.fmt.bufPrint(&name_buf, "K{d}", .{n});
@@ -262,7 +264,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
                 },
             }
             try m.setContent(t, "top", markup.written());
-            try m.place(p, r, ri, null, .{ .tile = t, .gap = e.gap });
+            try m.place(p, r, null, .{ .gap = e.gap, .what = .{ .tile = t } });
             if (e.h > 1) {
                 // Spanning down: it also takes a place at the end of the next row.
                 spanning = t;
@@ -271,7 +273,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
         }
         // A tile spanning from the row above ends the row it crosses.
         if (spanning) |t| if (spanning_row == ri) {
-            try m.place(p, r, ri, null, .{ .tile = t });
+            try m.place(p, r, null, .{ .what = .{ .tile = t } });
             spanning = null;
         };
     }
