@@ -120,12 +120,20 @@ const State = struct {
 /// What a canvas drag does: pick things, or draw out a new panel.
 const Tool = enum { select, add_panel, add_label, add_tracks };
 
-/// The Add tracks tool's choices: the kind of tile, and which way the
-/// tracks run.
+/// The Add tracks tool's choices: what sizes the rows or columns (a tile
+/// prototype, or a text style), and which way the tracks run.
 var tracks_tool: struct {
-    prototype: layout.model.PrototypeId = 0,
+    size_to: SizeTo = .{ .prototype = 0 },
     major: layout.model.Major = .row,
 } = .{};
+
+/// What new tracks are sized to: a tile prototype's smallest tile, or a
+/// text style's line pitch. A null style is the default Label style, made
+/// when the tracks are.
+const SizeTo = union(enum) {
+    prototype: layout.model.PrototypeId,
+    style: ?layout.model.StyleId,
+};
 
 /// The current context: a node of the component tree.
 const Context = union(enum) {
@@ -2333,17 +2341,39 @@ fn propertiesContent() !void {
 fn tracksToolOptions() !void {
     heading("{s}", .{if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
     const protos = state.model.prototypes.items;
-    if (tracks_tool.prototype >= protos.len) tracks_tool.prototype = 0;
+    const styles = state.model.styles.items;
+    // Keep the choice valid as prototypes and styles come and go.
+    switch (tracks_tool.size_to) {
+        .prototype => |pid| if (pid >= protos.len) {
+            tracks_tool.size_to = if (protos.len > 0) .{ .prototype = 0 } else .{ .style = null };
+        },
+        .style => |sid| if (sid != null and sid.? >= styles.len) {
+            tracks_tool.size_to = .{ .style = null };
+        },
+    }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9001 });
         defer row.deinit();
-        propName("Prototype");
+        propName("Size to");
+        // Tile prototypes, then text styles (the default one offered while
+        // there is none).
         const lifo = dvui.currentWindow().lifo();
-        const names = try lifo.alloc([]const u8, protos.len);
+        const n_styles = @max(1, styles.len);
+        const names = try lifo.alloc([]const u8, protos.len + n_styles);
         defer lifo.free(names);
-        for (protos, names) |p, *nm| nm.* = p.name;
-        var choice: usize = tracks_tool.prototype;
-        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.prototype = @intCast(choice);
+        const arena = dvui.currentWindow().arena();
+        for (protos, 0..) |p, i| names[i] = try std.fmt.allocPrint(arena, "Tile: {s}", .{p.name});
+        if (styles.len == 0) names[protos.len] = "Text: Label";
+        for (styles, 0..) |st, i| names[protos.len + i] = try std.fmt.allocPrint(arena, "Text: {s}", .{st.name});
+        var choice: usize = switch (tracks_tool.size_to) {
+            .prototype => |pid| pid,
+            .style => |sid| protos.len + (sid orelse 0),
+        };
+        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+            tracks_tool.size_to = if (choice < protos.len)
+                .{ .prototype = @intCast(choice) }
+            else if (styles.len == 0) .{ .style = null } else .{ .style = @intCast(choice - protos.len) };
+        }
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9002 });
@@ -2353,15 +2383,36 @@ fn tracksToolOptions() !void {
         var choice: usize = @backingInt(tracks_tool.major);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
     }
-    if (protos.len > 0) {
-        const p = protos[tracks_tool.prototype];
-        var buf: [96]u8 = undefined;
-        const along = p.smallest(tracks_tool.major, .along);
-        const step_ = p.step(tracks_tool.major, .along);
-        const across = p.smallest(tracks_tool.major, .across);
-        propText("Snaps to", "{s}", .{std.fmt.bufPrint(&buf, "{d} u thick; {d} u long or more, in {d} u steps", .{ across, along, step_ }) catch ""}, 9003);
+    var buf: [96]u8 = undefined;
+    switch (tracks_tool.size_to) {
+        .prototype => |pid| if (pid < protos.len) {
+            const p = protos[pid];
+            const along = p.smallest(tracks_tool.major, .along);
+            const step_ = p.step(tracks_tool.major, .along);
+            const across = p.smallest(tracks_tool.major, .across);
+            propText("Snaps to", "{s}", .{std.fmt.bufPrint(&buf, "{d} u thick; {d} u long or more, in {d} u steps", .{ across, along, step_ }) catch ""}, 9003);
+        },
+        .style => |sid| if (styleLinePitch(sid)) |lp| {
+            propText("Snaps to", "{s}", .{std.fmt.bufPrint(&buf, "one line ({d:.2} mm) thick; {d} mm steps along", .{ lp, text_track_step }) catch ""}, 9003);
+        },
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = 6, .h = 6 } });
+}
+
+/// Text tracks snap along to this, mm.
+const text_track_step = 0.5;
+
+/// A text style's baseline-to-baseline distance, mm, in the current font;
+/// for no style, what the default Label style's would be (3 mm caps).
+fn styleLinePitch(style: ?layout.model.StyleId) ?f64 {
+    const labels = if (state.labels) |*l| l else return null;
+    if (style) |sid| {
+        const ctx = labels.context(sid) orelse return null;
+        return ctx.linePitch() catch null;
+    }
+    if (state.faces.len == 0) return null;
+    const ctx = engine.style.Context.init(&state.faces, .{ .upright = 0, .cap_height = 3 }) catch return null;
+    return ctx.linePitch() catch null;
 }
 
 /// "Row" or "Column".
@@ -2402,13 +2453,29 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
         .panel => |pi| pi,
         else => return null,
     };
-    if (tracks_tool.prototype >= state.model.prototypes.items.len) return null;
-    const p = state.model.prototypes.items[tracks_tool.prototype];
     const major = tracks_tool.major;
-    const pitch = if (p.art) |art| art.pitch else 19.05;
-    const along_min = p.smallest(major, .along);
-    const step_ = p.step(major, .along);
-    const across = p.smallest(major, .across);
+    // The unit (mm per u), and in it: the thickness of one track, the
+    // shortest length and the step along.
+    var pitch: f64 = undefined;
+    var along_min: f64 = undefined;
+    var step_: f64 = undefined;
+    var across: f64 = 1;
+    switch (tracks_tool.size_to) {
+        .prototype => |pid| {
+            if (pid >= state.model.prototypes.items.len) return null;
+            const p = state.model.prototypes.items[pid];
+            pitch = if (p.art) |art| art.pitch else 19.05;
+            along_min = p.smallest(major, .along);
+            step_ = p.step(major, .along);
+            across = p.smallest(major, .across);
+        },
+        .style => |sid| {
+            // One line thick: the unit is the style's line pitch.
+            pitch = styleLinePitch(sid) orelse return null;
+            step_ = text_track_step / pitch;
+            along_min = step_;
+        },
+    }
     const dx = at.x - from.x;
     const dy = at.y - from.y;
     const d_along = @abs(if (major == .row) dx else dy) / pitch;
@@ -2440,7 +2507,13 @@ fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, a_pt), state.view.toPx(area, b_pt) } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.6) } });
     }
     var buf: [64]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d} {s}{s} × {d} u", .{ n, if (plan.major == .row) "row" else "column", if (n == 1) "" else "s", plan.length }) catch "";
+    const word = if (plan.major == .row) "row" else "column";
+    const plural = if (n == 1) "" else "s";
+    // Text tracks in mm: a unit of one line pitch means little to anyone.
+    const text = if (tracks_tool.size_to == .style)
+        std.fmt.bufPrint(&buf, "{d} {s}{s} × {d:.1} mm", .{ n, word, plural, plan.length * plan.pitch }) catch ""
+    else
+        std.fmt.bufPrint(&buf, "{d} {s}{s} × {d} u", .{ n, word, plural, plan.length }) catch "";
     const corner = state.view.toPx(area, .{ .x = plan.box.x0, .y = plan.box.y1 });
     const ns = dvui.windowNaturalScale();
     dvui.labelNoFmt(@src(), text, .{}, .{
@@ -2467,7 +2540,14 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         .name = name,
         .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
         .major = plan.major,
-        .prototype = tracks_tool.prototype,
+        .prototype = switch (tracks_tool.size_to) {
+            .prototype => |pid| pid,
+            .style => null,
+        },
+        .style = switch (tracks_tool.size_to) {
+            .prototype => null,
+            .style => |sid| sid orelse (labelStyle() catch return),
+        },
         .count = plan.count,
         .length = plan.length,
         .pitch = plan.pitch,
@@ -2812,14 +2892,19 @@ fn properties() !void {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
             propText("Name", "{s}", .{region.name}, 1);
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ region.origin.x, region.origin.y }, 2);
-            propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
-            propText("Pitch", "{d} mm", .{region.pitch}, 4);
+            // Sized to a text style, the unit is one line pitch: shown in mm.
+            if (region.style != null)
+                propText("Size", "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 3)
+            else
+                propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
+            propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
             propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{region.segments.items.len}, 5);
             propText("Items", "{d}", .{region.items.items.len}, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
             if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
+            if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
         },
         .row => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
@@ -3667,7 +3752,8 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
         .blank => state.model.insertBlank(c.panel, c.region, c.index, size) catch return,
         .hard_break => state.model.insertBreak(c.panel, c.region, c.index) catch return,
         .run => {
-            state.model.insertRun(c.panel, c.region, c.index, .{ .style = labelStyle() catch return, .content = "" }) catch return;
+            const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
+            state.model.insertRun(c.panel, c.region, c.index, .{ .style = style, .content = "" }) catch return;
             focus_expression = true;
         },
     }

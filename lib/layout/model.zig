@@ -243,6 +243,10 @@ pub const TileRegion = struct {
     major: Major = .row,
     /// The kind of tile it was made for: what new tiles in it are.
     prototype: ?PrototypeId = null,
+    /// The text style it was sized to, if any: its segments are one line
+    /// pitch thick (the pitch is the style's baseline-to-baseline distance
+    /// when the region was made), and new runs in it take the style.
+    style: ?StyleId = null,
     /// Its segments, in order: rows top to bottom, or columns left to
     /// right. A segment's gap is the space before it.
     segments: std.ArrayList(Segment) = .empty,
@@ -476,7 +480,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -787,22 +791,32 @@ pub const Model = struct {
         /// The region's top-left corner in the panel frame, mm.
         origin: geom.Point,
         major: Major = .row,
-        prototype: PrototypeId,
-        /// How many tracks, and each one's length, u.
+        /// What sizes the segments: a tile prototype (as thick as its
+        /// smallest tile, as long as one at least), or a text style (one
+        /// line thick at `pitch`, its line pitch). One of the two.
+        prototype: ?PrototypeId = null,
+        style: ?StyleId = null,
+        /// How many segments, and each one's length, u.
         count: usize,
         length: f64,
         pitch: f64,
     };
 
-    /// Adds a region of `count` empty tracks for tiles made from
-    /// `prototype`, each as thick as its smallest tile; the user adds the
-    /// tiles. Returns the region's index.
+    /// Adds a region of `count` empty segments sized to a prototype or a
+    /// text style (see `Tracks`); the user adds the content. Returns the
+    /// region's index.
     pub fn addTracks(m: *Model, panel: usize, t: Tracks) Error!usize {
-        if (t.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const proto = m.prototypes.items[t.prototype];
-        const along = proto.smallest(t.major, .along);
-        const across = proto.smallest(t.major, .across);
-        if (t.count == 0 or !(t.length >= along - 1e-9)) return error.BadSize;
+        var along: f64 = 0;
+        var across: f64 = 1;
+        if (t.prototype) |pid| {
+            if (pid >= m.prototypes.items.len) return error.NoSuchPrototype;
+            const proto = m.prototypes.items[pid];
+            along = proto.smallest(t.major, .along);
+            across = proto.smallest(t.major, .across);
+        } else if (t.style) |sid| {
+            if (sid >= m.styles.items.len) return error.NoSuchStyle;
+        } else return error.NoSuchPrototype;
+        if (t.count == 0 or !(t.length > 0) or !(t.length >= along - 1e-9)) return error.BadSize;
         const thickness = @as(f64, @floatFromInt(t.count)) * across;
         const r = try m.addRegion(panel, .{
             .name = t.name,
@@ -812,6 +826,7 @@ pub const Model = struct {
             .pitch = t.pitch,
             .major = t.major,
             .prototype = t.prototype,
+            .style = t.style,
         });
         for (0..t.count) |_| _ = try m.addSegment(panel, r, 0);
         return r;
@@ -1462,4 +1477,21 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     try m.setRunContent(p, r, 1, "word");
     try std.testing.expectEqualStrings("word", m.panels.items[p].regions.items[r].items.items[1].what.run.content);
     try std.testing.expectError(error.NoSuchItem, m.setRunContent(p, r, 0, "x"));
+}
+
+test "tracks sized to a text style are one line pitch thick, and keep the style" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    // A 4.2 mm line pitch (the caller measures it from the style's font).
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 5, .y = 95 }, .style = body, .count = 3, .length = 20, .pitch = 4.2 });
+    const region = m.panels.items[p].regions.items[r];
+    try std.testing.expectEqual(body, region.style.?);
+    try std.testing.expectEqual(null, region.prototype);
+    try std.testing.expectEqual(20, region.w);
+    try std.testing.expectEqual(3, region.h);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.segmentBox(1).height(), 1e-9);
+    try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = 9, .count = 1, .length = 2, .pitch = 4 }));
+    try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
 }
