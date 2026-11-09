@@ -76,7 +76,11 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     );
     try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\">\n", .{ -x0, y1 });
     var gradients: usize = 0;
-    for (placed.tiles) |t| for (t.shapes) |s| {
+    // Tiles, then the panel's line art over them.
+    var shapes: std.ArrayList(art.Shape) = .empty;
+    for (placed.tiles) |t| try shapes.appendSlice(a, t.shapes);
+    for (placed.art) |pa| try shapes.appendSlice(a, pa.shapes);
+    for (shapes.items) |s| {
         if (s.outline.contours.len == 0) continue;
         var fill_buf: [32]u8 = undefined;
         const fill: []const u8 = switch (s.paint.fill) {
@@ -100,7 +104,7 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
         try w.writeAll(" d=\"");
         try pathData(w, s.outline);
         try w.writeAll("\"/>\n");
-    };
+    }
     try w.print("<g fill=\"{s}\" fill-rule=\"nonzero\">\n", .{opts.ink});
     for (placed.labels) |l| {
         const outlines = try l.render.outlines(a, faces);

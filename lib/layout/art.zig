@@ -332,6 +332,42 @@ pub fn redrawKeycap(a: Allocator, proto: model.TilePrototype, pitch: f64) Alloca
 }
 
 /// A deep copy, allocated from `a`.
+/// One shape `w` × `h` mm: an ellipse filling that box, its frame's
+/// origin at the box's bottom-left corner. Four cubics, as fonts draw
+/// circles.
+pub fn ellipse(a: Allocator, name: []const u8, w: f64, h: f64, paint: Paint) Allocator.Error![]const Shape {
+    const k = 0.5522847498;
+    const rx = w / 2;
+    const ry = h / 2;
+    const c: Point = .{ .x = rx, .y = ry };
+    const segs = try a.alloc(Segment, 4);
+    segs[0] = .{ .cubic = .{ .{ .x = c.x + rx, .y = c.y }, .{ .x = c.x + rx, .y = c.y + k * ry }, .{ .x = c.x + k * rx, .y = c.y + ry }, .{ .x = c.x, .y = c.y + ry } } };
+    segs[1] = .{ .cubic = .{ .{ .x = c.x, .y = c.y + ry }, .{ .x = c.x - k * rx, .y = c.y + ry }, .{ .x = c.x - rx, .y = c.y + k * ry }, .{ .x = c.x - rx, .y = c.y } } };
+    segs[2] = .{ .cubic = .{ .{ .x = c.x - rx, .y = c.y }, .{ .x = c.x - rx, .y = c.y - k * ry }, .{ .x = c.x - k * rx, .y = c.y - ry }, .{ .x = c.x, .y = c.y - ry } } };
+    segs[3] = .{ .cubic = .{ .{ .x = c.x, .y = c.y - ry }, .{ .x = c.x + k * rx, .y = c.y - ry }, .{ .x = c.x + rx, .y = c.y - k * ry }, .{ .x = c.x + rx, .y = c.y } } };
+    const contours = try a.alloc(geom.Contour, 1);
+    contours[0] = .{ .segments = segs };
+    const shapes = try a.alloc(Shape, 1);
+    shapes[0] = .{ .name = name, .outline = .{ .contours = contours }, .paint = paint };
+    return shapes;
+}
+
+/// A copy of `shapes` in `a`, moved by `d`.
+pub fn dupeShapes(a: Allocator, shapes: []const Shape, d: Point) Allocator.Error![]const Shape {
+    const out = try a.alloc(Shape, shapes.len);
+    const m = geom.Affine.translate(d.x, d.y);
+    for (shapes, out) |sh, *o| {
+        const contours = try a.alloc(geom.Contour, sh.outline.contours.len);
+        for (sh.outline.contours, contours) |c, *oc| {
+            const segs = try a.alloc(Segment, c.segments.len);
+            for (c.segments, segs) |sg, *os| os.* = sg.transformed(m);
+            oc.* = .{ .segments = segs };
+        }
+        o.* = .{ .name = try a.dupe(u8, sh.name), .outline = .{ .contours = contours }, .paint = sh.paint };
+    }
+    return out;
+}
+
 pub fn dupe(a: Allocator, art: Art) Allocator.Error!Art {
     const layers = try a.alloc(Layer, art.layers.len);
     for (art.layers, layers) |l, *out| {

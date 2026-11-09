@@ -366,6 +366,32 @@ pub const PanelLabel = struct {
     default_content: bool = false,
 };
 
+/// How an object on a panel makes the tracks under it flow: not at all,
+/// around its bounding box, or around its ink (the exact outline of its
+/// marks), either grown by its clearance.
+pub const Wrap = enum { none, bounds, ink };
+
+/// Line art placed on a panel: shapes in its own frame, set at `at`.
+pub const PanelArt = struct {
+    name: []const u8,
+    /// Where its frame's origin sits, mm in the panel frame.
+    at: geom.Point,
+    /// Its shapes, back to front, mm in its own frame (y up).
+    shapes: []const art_.Shape,
+    /// Whether the tracks it lies over flow around it, and how.
+    wrap: Wrap = .ink,
+    /// Space kept between it and the content flowing around it, mm.
+    clearance: f64 = 1,
+
+    /// Its shapes' bounds, mm in the panel frame.
+    pub fn box(p: PanelArt) geom.Box {
+        var b: geom.Box = .empty;
+        for (p.shapes) |s| b = b.join(s.outline.bounds());
+        if (b.isEmpty()) return b;
+        return .{ .x0 = b.x0 + p.at.x, .x1 = b.x1 + p.at.x, .y0 = b.y0 + p.at.y, .y1 = b.y1 + p.at.y };
+    }
+};
+
 pub const Panel = struct {
     name: []const u8,
     /// True while the name is one the app gave it (Panel 1), not the user.
@@ -378,6 +404,8 @@ pub const Panel = struct {
     h: f64,
     regions: std.ArrayList(TileRegion) = .empty,
     labels: std.ArrayList(PanelLabel) = .empty,
+    /// Line art placed on the panel, drawn over its tracks.
+    art: std.ArrayList(PanelArt) = .empty,
     /// Ink keep-out bands inside the panel's edges, mm: its ink area is the
     /// outline less these. 5 mm on each side until the user sets them.
     margins: Sides = .all(5),
@@ -757,6 +785,42 @@ pub const Model = struct {
     }
 
     /// Removes a label; later labels on the panel move down one index.
+    /// Places line art on a panel; returns its index there.
+    pub fn addArt(m: *Model, panel: usize, art: PanelArt) Error!usize {
+        if (!(art.clearance >= 0)) return error.BadSize;
+        var copy = art;
+        copy.name = try m.a().dupe(u8, art.name);
+        copy.shapes = try art_.dupeShapes(m.a(), art.shapes, .{ .x = 0, .y = 0 });
+        const list = &m.panels.items[panel].art;
+        try list.append(m.a(), copy);
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// Moves line art to `at` (panel frame, mm): what flows around it
+    /// reflows.
+    pub fn moveArt(m: *Model, panel: usize, index: usize, at: geom.Point) Error!void {
+        const list = m.panels.items[panel].art.items;
+        if (index >= list.len) return error.NoSuchItem;
+        list[index].at = at;
+        m.revision += 1;
+    }
+
+    /// Sets how the tracks under line art flow around it.
+    pub fn setArtWrap(m: *Model, panel: usize, index: usize, wrap: Wrap, clearance: f64) Error!void {
+        const list = m.panels.items[panel].art.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!(clearance >= 0)) return error.BadSize;
+        list[index].wrap = wrap;
+        list[index].clearance = clearance;
+        m.revision += 1;
+    }
+
+    pub fn removeArt(m: *Model, panel: usize, index: usize) void {
+        _ = m.panels.items[panel].art.orderedRemove(index);
+        m.revision += 1;
+    }
+
     pub fn removeLabel(m: *Model, panel: usize, label: usize) void {
         _ = m.panels.items[panel].labels.orderedRemove(label);
         m.revision += 1;

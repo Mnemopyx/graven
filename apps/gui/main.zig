@@ -118,7 +118,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_label, add_tracks };
+const Tool = enum { select, add_panel, add_label, add_tracks, add_art };
 
 /// The Add tracks tool's choices: what sizes the rows or columns (a tile
 /// prototype, or a text style), and which way the tracks run.
@@ -146,6 +146,8 @@ const Context = union(enum) {
     tile: TileId,
     /// A label placed directly on a panel.
     label: struct { panel: usize, index: usize },
+    /// Line art placed on a panel.
+    art: struct { panel: usize, index: usize },
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -169,6 +171,7 @@ const Context = union(enum) {
             .row => "Row",
             .tile => "Tile",
             .label => "Label",
+            .art => "Line art",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -1219,7 +1222,8 @@ fn worksheetTree() void {
     const sheet = state.model.sheet;
     if (!treeNode(.worksheet, sheet.name, 1, state.model.panels.items.len > 0, sheet.default_name)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!treeNode(.{ .panel = pi }, panel.name, 2, panel.regions.items.len > 0 or panel.labels.items.len > 0, panel.default_name)) continue;
+        if (!treeNode(.{ .panel = pi }, panel.name, 2, panel.regions.items.len > 0 or panel.labels.items.len > 0 or panel.art.items.len > 0, panel.default_name)) continue;
+        for (panel.art.items, 0..) |pa, ai| _ = treeNode(.{ .art = .{ .panel = pi, .index = ai } }, pa.name, 3, false, false);
         for (panel.labels.items, 0..) |label, li| {
             const text = std.fmt.bufPrint(&name_buf, "“{s}”", .{label.content}) catch label.content;
             _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, 3, false, label.default_content);
@@ -1325,7 +1329,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .label, .prototypes => false,
+        .file, .worksheet, .panel, .label, .art, .prototypes => false,
     };
 }
 
@@ -1335,6 +1339,7 @@ fn contextExtents() geom.Box {
         .file, .worksheet, .prototypes => return state.model.sheet.box(),
         .panel => |pi| return state.model.panels.items[pi].box(),
         .label => |l| if (labelBox(l.panel, l.index)) |b| return b,
+        .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
         else => {},
     }
     var b: geom.Box = .empty;
@@ -1563,6 +1568,73 @@ fn labelStyle() !layout.model.StyleId {
     return s;
 }
 
+/// Makes line art from a finished drag: an ellipse filling the box (on
+/// its panel), made the context. Tracks under it flow around its ink.
+fn addArtFromDrag(b: geom.Box) void {
+    defer state.tool = .select;
+    const pi = switch (state.context) {
+        .panel => |pi| pi,
+        else => return,
+    };
+    if (!(b.width() >= 1 and b.height() >= 1)) return;
+    const o = state.model.panels.items[pi].origin;
+    var name_buf: [32]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "Shape {d}", .{state.model.panels.items[pi].art.items.len + 1}) catch "Shape";
+    const shapes = layout.art.ellipse(dvui.currentWindow().arena(), name, b.width(), b.height(), .{
+        .fill = .{ .solid = .{ .r = 0xd9, .g = 0x8c, .b = 0x40, .a = 0xcc } },
+        .edge = .{ .r = 0x73, .g = 0x40, .b = 0x1a },
+    }) catch return;
+    const ai = state.model.addArt(pi, .{ .name = name, .at = .{ .x = b.x0 - o.x, .y = b.y0 - o.y }, .shapes = shapes }) catch return;
+    state.context = .{ .art = .{ .panel = pi, .index = ai } };
+}
+
+/// Moves the selected line art 1 mm the way an arrow points.
+fn moveArtKey(code: dvui.enums.Key) bool {
+    const l = switch (state.context) {
+        .art => |l| l,
+        else => return false,
+    };
+    const d: geom.Point = switch (code) {
+        .up => .{ .x = 0, .y = 1 },
+        .down => .{ .x = 0, .y = -1 },
+        .left => .{ .x = -1, .y = 0 },
+        .right => .{ .x = 1, .y = 0 },
+        else => return false,
+    };
+    const at = state.model.panels.items[l.panel].art.items[l.index].at;
+    state.model.moveArt(l.panel, l.index, .{ .x = at.x + d.x, .y = at.y + d.y }) catch return false;
+    return true;
+}
+
+/// Line art's properties: where it is, and how tracks under it flow.
+fn artProperties(pi: usize, index: usize) !void {
+    const pa = state.model.panels.items[pi].art.items[index];
+    propText("Name", "{s}", .{pa.name}, 1);
+    const b = pa.box();
+    propText("Box", "({d:.1}, {d:.1}) to ({d:.1}, {d:.1}) mm", .{ b.x0, b.y0, b.x1, b.y1 }, 2);
+    propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 3);
+    var wrap = pa.wrap;
+    var clearance = pa.clearance;
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4 });
+        defer row.deinit();
+        propName("Tracks under it");
+        const names = [_][]const u8{ "Run straight under", "Flow around its box", "Flow around its ink" };
+        var choice: usize = @intFromEnum(wrap);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
+            wrap = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    var buf: [32]u8 = undefined;
+    if (sizesProp("Clearance, mm", if (clearance > 0) std.fmt.bufPrint(&buf, "{d}", .{clearance}) catch "" else "any", 5)) |list| if (list.len <= 1) {
+        clearance = if (list.len == 1) list[0] else 0;
+        changed = true;
+    };
+    if (changed) try state.model.setArtWrap(pi, index, wrap, clearance);
+}
+
 /// Places a new label on panel `pi` at worksheet point `at` (on a 0.5 mm
 /// grid), with placeholder text; the context stays the panel.
 fn addLabelAt(pi: usize, at: geom.Point) void {
@@ -1631,6 +1703,21 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         // A size its prototype does not allow: the body outlined in warning.
         if (flagged.size and !in_context) body.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = dvui.themeGet().focus } });
+    }
+    // Line art, over the tracks; the selected piece outlined.
+    for (placed.art) |pa| {
+        const pieces = flatTile(&state.flat, pa.shapes) catch &.{};
+        for (pieces) |piece| {
+            if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
+            const edge = piece.shape.paint.edge orelse continue;
+            const width: f32 = @max(px, @as(f32, @floatCast(piece.shape.paint.edge_width * state.view.ppm)));
+            for (piece.lines) |line| strokeLoop(area, line, o, width, .{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a });
+        }
+        const sel = switch (state.context) {
+            .art => |l| l.panel == pi and l.index == pa.index,
+            else => false,
+        };
+        if (sel) state.view.rect(area, onSheet(pi, pa.box)).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
     }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
@@ -2035,6 +2122,16 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
+        // Selected line art: arrow keys move it 1 mm, and the tracks under
+        // it reflow.
+        if (e.evt == .key and state.context == .art and !e.handled and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and moveArtKey(k.code)) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         // The flow cursor's keys, while the canvas or the palette has the
         // keyboard: never from a text entry.
         if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
@@ -2080,6 +2177,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     .label => |l| if (state.moving_label == null) {
                         e.handle(@src(), box.data());
                         state.model.removeLabel(l.panel, l.index);
+                        state.context = .{ .panel = l.panel };
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
+                    .art => |l| {
+                        e.handle(@src(), box.data());
+                        state.model.removeArt(l.panel, l.index);
                         state.context = .{ .panel = l.panel };
                         dvui.refresh(null, @src(), box.data().id);
                     },
@@ -2143,6 +2246,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         // The release that follows is part of this click, not a pick.
                         state.press_consumed = true;
                     }
+                } else if (state.tool == .add_art and me.button.pointer()) {
+                    // Line art is drawn from a point on its panel.
+                    const at = state.view.toMm(area, me.p);
+                    if (state.context == .panel and contains(state.model.panels.items[state.context.panel].box(), at)) {
+                        const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
+                        state.drag = .{ .start = p, .at = p };
+                    }
                 } else if (state.tool == .add_tracks and me.button.pointer()) {
                     // Tracks are drawn from a point on the panel chosen for them.
                     const at = state.view.toMm(area, me.p);
@@ -2191,7 +2301,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 e.handle(@src(), box.data());
                 if (state.drag) |d| {
                     state.drag = null;
-                    if (state.tool == .add_tracks) addTracksFromDrag(d.start, d.at) else addPanelFromDrag(dragBox(d.start, d.at));
+                    switch (state.tool) {
+                        .add_tracks => addTracksFromDrag(d.start, d.at),
+                        .add_art => addArtFromDrag(dragBox(d.start, d.at)),
+                        else => addPanelFromDrag(dragBox(d.start, d.at)),
+                    }
                 } else if (state.moving) |mv| {
                     finishMove(mv.panel);
                 } else if (state.moving_label) |mv| {
@@ -2291,6 +2405,11 @@ fn pick(at: geom.Point) void {
         for (state.placed.items[pi].tiles) |t| {
             const body = onSheet(pi, t.body);
             if (at.x >= body.x0 and at.x <= body.x1 and at.y >= body.y0 and at.y <= body.y1) state.context = .{ .tile = t.id };
+        }
+        // Line art, by its box: drawn over the tracks, it is picked over
+        // what is under it.
+        for (state.placed.items[pi].art) |pa| {
+            if (contains(onSheet(pi, pa.box), at)) state.context = .{ .art = .{ .panel = pi, .index = pa.index } };
         }
         for (state.placed.items[pi].labels) |l| {
             if (l.tile != null) continue;
@@ -2645,6 +2764,17 @@ fn toolPalette() void {
         }
         dvui.tooltip(@src(), .{ .active_rect = lwd.borderRectScale().r }, "Add label: click on the panel to place it", .{}, .{});
 
+        const art_on = state.tool == .add_art;
+        var awd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Add shape", dvui.entypo.circle, .{}, .{}, .{
+            .data_out = &awd,
+            .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.drag = null;
+            state.tool = if (art_on) .select else .add_art;
+        }
+        dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add shape: drag out line art on the panel; tracks under it flow around its ink", .{}, .{});
+
         // Two track modes, one button each: rows (tiles flow left to right)
         // and columns (top to bottom).
         inline for (.{
@@ -2703,6 +2833,7 @@ fn lowerKind() []const u8 {
         .row => "row",
         .tile => "tile",
         .label => "label",
+        .art => "line art",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -2959,6 +3090,7 @@ fn properties() !void {
         },
         .tile => |id| try tileProperties(id),
         .label => |l| try labelProperties(l.panel, l.index),
+        .art => |l| try artProperties(l.panel, l.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),
     }
@@ -3595,6 +3727,7 @@ fn statusContent() void {
         .select => state.status,
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_label => "Add label: click on the panel to place it · Esc cancels",
+        .add_art => "Add shape: drag out its box on the panel · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));

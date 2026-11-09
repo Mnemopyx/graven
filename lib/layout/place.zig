@@ -127,6 +127,13 @@ pub const PlacedItem = struct {
     span: [2]f64,
 };
 
+/// Line art as placed: its shapes moved into the panel frame.
+pub const PlacedArt = struct {
+    index: usize,
+    box: Box,
+    shapes: []const art.Shape,
+};
+
 /// What a region's flow needs: the length, u, that would set its longest
 /// paragraph (the items between hard breaks) in one segment.
 pub const PlacedFlow = struct {
@@ -142,6 +149,8 @@ pub const Placed = struct {
     tiles: []const PlacedTile,
     tracks: []const PlacedTrack = &.{},
     items: []const PlacedItem = &.{},
+    /// The panel's line art, in the panel frame.
+    art: []const PlacedArt = &.{},
     flows: []const PlacedFlow = &.{},
     labels: []const PlacedLabel,
     issues: []const Issue,
@@ -333,6 +342,7 @@ const Flow = struct {
     spans: []const [2]f64,
     dropped: []const bool,
     dup: []const bool,
+    keepouts: []const KeepOut = &.{},
 
     /// Where a row's text baseline sits: its style's capitals centred
     /// across the band, or the band's middle for a track with no style.
@@ -420,8 +430,130 @@ const Flow = struct {
                 .{ band.y1 - @min(t.box.y1, band.y1), band.y1 - @max(t.box.y0, band.y0) };
             try closed.append(a, c);
         }
+        for (f.keepouts) |k| try k.closes(a, f.rows, band, closed);
     }
 };
+
+/// Line art the tracks flow around: its bounds, and for ink its outline
+/// flattened to polygons, mm in the panel frame.
+const KeepOut = struct {
+    box: Box,
+    /// Empty to wrap by the bounds.
+    polys: []const []const Point,
+    clearance: f64,
+
+    fn of(a: Allocator, pa: model.PanelArt) Allocator.Error!KeepOut {
+        const b = pa.box();
+        if (pa.wrap != .ink) return .{ .box = b, .polys = &.{}, .clearance = pa.clearance };
+        var polys: std.ArrayList([]const Point) = .empty;
+        for (pa.shapes) |sh| for (sh.outline.contours) |c| {
+            var pts: std.ArrayList(Point) = .empty;
+            for (c.segments) |sg| {
+                if (pts.items.len == 0) try pts.append(a, sg.start());
+                const n: usize = switch (sg) {
+                    .line => 1,
+                    else => 16,
+                };
+                for (1..n + 1) |i| try pts.append(a, pointOn(sg, @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n))));
+            }
+            for (pts.items) |*q| q.* = .{ .x = q.x + pa.at.x, .y = q.y + pa.at.y };
+            try polys.append(a, pts.items);
+        };
+        return .{ .box = b, .polys = polys.items, .clearance = pa.clearance };
+    }
+
+    /// The stretches it closes along a segment with band `band`, added to
+    /// `out`: where its ink (or its box), grown by the clearance, crosses
+    /// the band. Ink is measured on lines across the band, as contact
+    /// profiles measure glyphs, so a gap in the art leaves an open span.
+    fn closes(k: KeepOut, a: Allocator, rows: bool, band: Box, out: *std.ArrayList([2]f64)) Allocator.Error!void {
+        const c = k.clearance;
+        const grown: Box = .{ .x0 = k.box.x0 - c, .x1 = k.box.x1 + c, .y0 = k.box.y0 - c, .y1 = k.box.y1 + c };
+        if (k.box.isEmpty() or !model.overlaps(grown, band)) return;
+        // Spans along the band's length axis (x for rows, y for columns).
+        var spans: std.ArrayList([2]f64) = .empty;
+        if (k.polys.len == 0) {
+            try spans.append(a, if (rows) .{ grown.x0, grown.x1 } else .{ grown.y0, grown.y1 });
+        } else {
+            const lo = (if (rows) band.y0 else band.x0) - c;
+            const hi = (if (rows) band.y1 else band.x1) + c;
+            const lines = 12;
+            var cross: std.ArrayList(struct { at: f64, dir: i32 }) = .empty;
+            for (0..lines + 1) |i| {
+                const v = lo + (hi - lo) * @as(f64, @floatFromInt(i)) / lines;
+                cross.clearRetainingCapacity();
+                for (k.polys) |poly| for (poly, 0..) |p, j| {
+                    const q = poly[(j + 1) % poly.len];
+                    const pa = if (rows) p.y else p.x;
+                    const qa = if (rows) q.y else q.x;
+                    const pb = if (rows) p.x else p.y;
+                    const qb = if (rows) q.x else q.y;
+                    const up = pa <= v and v < qa;
+                    const down = qa <= v and v < pa;
+                    if (!up and !down) continue;
+                    const t = (v - pa) / (qa - pa);
+                    try cross.append(a, .{ .at = pb + (qb - pb) * t, .dir = if (up) 1 else -1 });
+                };
+                std.mem.sort(@TypeOf(cross.items[0]), cross.items, {}, struct {
+                    fn lt(_: void, x: @TypeOf(cross.items[0]), y: @TypeOf(cross.items[0])) bool {
+                        return x.at < y.at;
+                    }
+                }.lt);
+                // Nonzero: inside wherever the winding is not zero.
+                var wind: i32 = 0;
+                var from: f64 = 0;
+                for (cross.items) |x| {
+                    const was = wind;
+                    wind += x.dir;
+                    if (was == 0 and wind != 0) from = x.at;
+                    if (was != 0 and wind == 0) try spans.append(a, .{ from - c, x.at + c });
+                }
+            }
+        }
+        if (spans.items.len == 0) return;
+        std.mem.sort([2]f64, spans.items, {}, struct {
+            fn lt(_: void, x: [2]f64, y: [2]f64) bool {
+                return x[0] < y[0];
+            }
+        }.lt);
+        // Merged, clipped to the band, and measured along it from its start.
+        const b0 = if (rows) band.x0 else band.y0;
+        const b1 = if (rows) band.x1 else band.y1;
+        var cur = spans.items[0];
+        for (spans.items[1..]) |sp| {
+            if (sp[0] <= cur[1]) {
+                cur[1] = @max(cur[1], sp[1]);
+                continue;
+            }
+            try addSpan(a, out, rows, band, cur, b0, b1);
+            cur = sp;
+        }
+        try addSpan(a, out, rows, band, cur, b0, b1);
+    }
+
+    fn addSpan(a: Allocator, out: *std.ArrayList([2]f64), rows: bool, band: Box, sp: [2]f64, b0: f64, b1: f64) Allocator.Error!void {
+        const lo = @max(sp[0], b0);
+        const hi = @min(sp[1], b1);
+        if (hi <= lo) return;
+        try out.append(a, if (rows) .{ lo - band.x0, hi - band.x0 } else .{ band.y1 - hi, band.y1 - lo });
+    }
+};
+
+/// The point at `t` on segment `s`.
+fn pointOn(s: geom.Segment, t: f64) Point {
+    const u = 1 - t;
+    return switch (s) {
+        .line => |p| .{ .x = u * p[0].x + t * p[1].x, .y = u * p[0].y + t * p[1].y },
+        .quad => |p| .{
+            .x = u * u * p[0].x + 2 * u * t * p[1].x + t * t * p[2].x,
+            .y = u * u * p[0].y + 2 * u * t * p[1].y + t * t * p[2].y,
+        },
+        .cubic => |p| .{
+            .x = u * u * u * p[0].x + 3 * u * u * t * p[1].x + 3 * u * t * t * p[2].x + t * t * t * p[3].x,
+            .y = u * u * u * p[0].y + 3 * u * u * t * p[1].y + 3 * u * t * t * p[2].y + t * t * t * p[3].y,
+        },
+    };
+}
 
 /// The most segments one track's flow may reach.
 const max_segments = 4096;
@@ -480,6 +612,15 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     var flows: std.ArrayList(PlacedFlow) = .empty;
     var placed_labels: std.ArrayList(PlacedLabel) = .empty;
     const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
+    // Line art on the panel: drawn over the tracks, and what wraps is
+    // something their flow goes around.
+    var keepouts: std.ArrayList(KeepOut) = .empty;
+    var placed_art: std.ArrayList(PlacedArt) = .empty;
+    for (m.panels.items[panel].art.items, 0..) |pa, ai| {
+        try placed_art.append(a, .{ .index = ai, .box = pa.box(), .shapes = try art.dupeShapes(a, pa.shapes, pa.at) });
+        bounds = bounds.join(pa.box());
+        if (pa.wrap != .none) try keepouts.append(a, try KeepOut.of(a, pa));
+    }
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
         // Rows run right and stack down; columns run down and set to the
         // right. An item's size along is its width in a row and its height
@@ -547,7 +688,9 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var in_seg: usize = 0;
         var para: f64 = 0;
         var natural: f64 = 0;
-        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup };
+        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items };
+        // The first segment too: line art may close stretches of it.
+        try flow.enter(a, &path, 0, tall.items, &closed);
         for (items, 0..) |item, index| {
             if (item.what == .hard_break) {
                 segs_of[index] = seg;
@@ -789,6 +932,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         .tiles = try tiles.toOwnedSlice(a),
         .tracks = try tracks.toOwnedSlice(a),
         .items = try placed_items.toOwnedSlice(a),
+        .art = try placed_art.toOwnedSlice(a),
         .flows = try flows.toOwnedSlice(a),
         .labels = try placed_labels.toOwnedSlice(a),
         .issues = try issues.toOwnedSlice(a),
@@ -1585,4 +1729,70 @@ test "a drop cap sits on its word's baseline, binds to the word, and pushes the 
     };
     try testing.expectApproxEqAbs(@as(f64, 10), second.?, 1e-9);
     for (s.issues) |i| try testing.expect(i.kind != .tall_item);
+}
+
+test "line art over half a track: its tiles flow around the art's outline, and reflow when it moves" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 120);
+    const key = try m.addPrototype(.{ .name = "key" });
+    // Four 10 mm rows, 100 mm long, from y = 100 down to 60.
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 4, .length = 10, .pitch = 10 });
+    for (0..24) |_| _ = try appendKey(&m, p, r, key);
+    // A 40 mm circle centred at (50, 80), over the middle of all four rows.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const disc = try art.ellipse(arena.allocator(), "disc", 40, 40, .{ .fill = .{ .solid = .{ .r = 0, .g = 0, .b = 0 } } });
+    const ai = try m.addArt(p, .{ .name = "disc", .at = .{ .x = 30, .y = 60 }, .shapes = disc, .clearance = 1 });
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+
+    // No key's pitch box comes within the circle (plus most of the
+    // clearance; the outline is flattened and sampled).
+    const clearOf = struct {
+        fn f(s: *const Placed, cx: f64, cy: f64, rr: f64) !void {
+            for (s.tiles) |t| {
+                const b = t.pitch_box;
+                const nx = std.math.clamp(cx, b.x0, b.x1);
+                const ny = std.math.clamp(cy, b.y0, b.y1);
+                try testing.expect(@sqrt((nx - cx) * (nx - cx) + (ny - cy) * (ny - cy)) >= rr);
+            }
+        }
+    }.f;
+    var ink_start: f64 = 0;
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try clearOf(&s, 50, 80, 20.5);
+        try testing.expectEqual(1, s.art.len);
+        // Row 1: three keys, then the rest after the circle.
+        try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[2].pitch_box.x0, 1e-9);
+        ink_start = s.tiles[3].pitch_box.x0;
+        try testing.expect(ink_start > 60 and ink_start < 70);
+    }
+    // By its bounds instead: the whole box, grown, is closed, 29..71 mm,
+    // so even the third key (20..30) goes on past it.
+    try m.setArtWrap(p, ai, .bounds, 1);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 71), s.tiles[2].pitch_box.x0, 1e-9);
+        try testing.expect(s.tiles[3].pitch_box.x0 > ink_start);
+    }
+    // Not wrapping: the keys run straight under it.
+    try m.setArtWrap(p, ai, .none, 1);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 30), s.tiles[3].pitch_box.x0, 1e-9);
+    }
+    // Moved right by ink again: the flow follows it.
+    try m.setArtWrap(p, ai, .ink, 1);
+    try m.moveArt(p, ai, .{ .x = 50, .y = 60 });
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try clearOf(&s, 70, 80, 20.5);
+    try testing.expectApproxEqAbs(@as(f64, 40), s.tiles[4].pitch_box.x0, 1e-9);
+    try testing.expectError(error.BadSize, m.setArtWrap(p, ai, .ink, -1));
 }
