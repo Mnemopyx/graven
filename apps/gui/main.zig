@@ -149,7 +149,7 @@ const Context = union(enum) {
     /// Line art placed on a panel.
     art: struct { panel: usize, index: usize },
     /// A selection group of a space.
-    group: struct { space: usize, index: usize },
+    group: layout.model.ObjectId,
     /// Objects picked together with Select area (see `selection`).
     selection,
     /// The file's tile prototypes, and one of them.
@@ -384,7 +384,7 @@ const canvas_view: geom.Box = .{ .x0 = -15, .y0 = -15, .x1 = 185, .y1 = 120 };
 var shown_space: usize = 0;
 
 /// Objects picked together with Select area, all in the shown space.
-var selection: std.ArrayList(layout.model.Member) = .empty;
+var selection: std.ArrayList(layout.model.ObjectId) = .empty;
 
 /// The shown space's own panel (its loose objects), if the document is a
 /// canvas.
@@ -411,7 +411,7 @@ fn followContext() void {
         .row => |r| r.panel,
         .tile => |id| if (findTile(id)) |f| f.panel else null,
         .group => |g| {
-            shown_space = g.space;
+            if (state.model.spaceOfId(g)) |sp| shown_space = sp;
             return;
         },
         else => null,
@@ -1469,9 +1469,8 @@ fn worksheetTree() void {
         for (state.model.spaces.items, 0..) |sp, si| {
             const title = if (si == 0) std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas" else sp.name;
             if (!treeNode(.{ .panel = sp.root }, title, 1, true, sp.default_name)) continue;
-            for (sp.groups.items, 0..) |g, gi| {
-                const text = std.fmt.bufPrint(&tb, "Group “{s}” ({d})", .{ g.name, g.members.items.len }) catch g.name;
-                _ = treeNode(.{ .group = .{ .space = si, .index = gi } }, text, 2, false, false);
+            for (sp.groups.items) |g| {
+                if (state.model.parentGroup(g.id) == null) groupTree(g.id, 2);
             }
             panelChildren(sp.root, 2);
             for (state.model.panels.items, 0..) |panel, pi| {
@@ -1487,6 +1486,21 @@ fn worksheetTree() void {
     for (state.model.panels.items, 0..) |panel, pi| {
         if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
         panelChildren(pi, 3);
+    }
+}
+
+/// A group in the tree: its name and size, and the groups nested in it.
+fn groupTree(id: layout.model.ObjectId, d: usize) void {
+    const g = state.model.group(id) orelse return;
+    var tb: [96]u8 = undefined;
+    var nested = false;
+    for (g.members.items) |mb| {
+        if (state.model.group(mb) != null) nested = true;
+    }
+    const text = std.fmt.bufPrint(&tb, "Group “{s}” ({d})", .{ g.name, g.members.items.len }) catch g.name;
+    if (!treeNode(.{ .group = id }, text, d, nested, false)) return;
+    for (g.members.items) |mb| {
+        if (state.model.group(mb) != null) groupTree(mb, d + 1);
     }
 }
 
@@ -1919,22 +1933,27 @@ fn frameProperties(space: usize) !void {
 }
 
 /// A group's properties: what it holds, and how to move or dissolve it.
-fn groupProperties(space: usize, index: usize) !void {
-    const g = state.model.spaces.items[space].groups.items[index];
+fn groupProperties(id: layout.model.ObjectId) !void {
+    const g = state.model.group(id) orelse return;
     propText("Name", "{s}", .{g.name}, 1);
     propText("Members", "{d}", .{g.members.items.len}, 2);
-    propText("Moves", "{s}", .{"arrow keys, 1 mm, all together"}, 3);
+    if (state.model.parentGroup(id)) |p| if (state.model.group(p)) |pg| propText("In group", "{s}", .{pg.name}, 3);
+    propText("Moves", "{s}", .{"arrow keys, 1 mm, all together"}, 4);
     if (dvui.button(@src(), "Ungroup", .{}, .{ .margin = .{ .y = 8 } })) {
-        state.model.ungroup(space, index);
-        state.context = .{ .panel = state.model.spaces.items[space].root };
+        const parent = state.model.parentGroup(id);
+        const space = state.model.spaceOfId(id) orelse shown_space;
+        state.model.ungroup(id) catch return;
+        state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.spaces.items[space].root };
     }
 }
 
-/// Objects picked with Select area: how many, and where they can go.
+/// Objects picked with Select area: how many, and what can be done with
+/// them: group them in place, or move or copy them to another space.
 fn selectionProperties() !void {
     propText("Objects", "{d}", .{selection.items.len}, 1);
     if (selection.items.len == 0) return;
-    if (dvui.button(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) transferSelection(null, false);
+    if (dvui.button(@src(), "Group", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) groupSelection();
+    if (dvui.button(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, false);
     if (dvui.button(@src(), "Copy to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, true);
     for (state.model.spaces.items, 0..) |sp, si| {
         if (si == shown_space) continue;
@@ -1942,6 +1961,22 @@ fn selectionProperties() !void {
         const text = std.fmt.bufPrint(&buf, "Move to {s}", .{if (si == 0) "the canvas" else sp.name}) catch "Move";
         if (dvui.button(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = si })) transferSelection(si, false);
     }
+}
+
+/// Groups the selection where it is, and makes the group the context.
+fn groupSelection() void {
+    if (selection.items.len == 0) return;
+    var nb: [32]u8 = undefined;
+    var n: usize = 1;
+    for (state.model.spaces.items) |sp| n += sp.groups.items.len;
+    const name = std.fmt.bufPrint(&nb, "Group {d}", .{n}) catch "Group";
+    const g = state.model.makeGroup(selection.items, name) catch {
+        state.status = "They could not be grouped. ";
+        return;
+    };
+    selection.clearRetainingCapacity();
+    state.context = .{ .group = g };
+    if (canvas_id) |id| dvui.focusWidget(id, null, null);
 }
 
 /// Moves (or copies) the selection to space `dest` (a new frame, fitted
@@ -1967,7 +2002,7 @@ fn transferSelection(dest: ?usize, copy: bool) void {
     selection.clearRetainingCapacity();
     track_cursor = null;
     shown_space = target;
-    state.context = .{ .group = .{ .space = target, .index = g } };
+    state.context = .{ .group = g };
     // The keyboard goes to the canvas, for the arrow keys.
     if (canvas_id) |id| dvui.focusWidget(id, null, null);
     state.status = "Arrived as one group: arrow keys move it into place. ";
@@ -1976,8 +2011,19 @@ fn transferSelection(dest: ?usize, copy: bool) void {
 /// The selection's extents in its space, from the last solve.
 fn selectionExtents() geom.Box {
     var b: geom.Box = .empty;
-    for (selection.items) |mb| b = b.join(memberBox(mb));
+    for (selection.items) |id| b = b.join(idBox(id));
     return b;
+}
+
+/// An object's or a group's extents in its space, from the last solve.
+fn idBox(id: layout.model.ObjectId) geom.Box {
+    if (state.model.group(id)) |g| {
+        var b: geom.Box = .empty;
+        for (g.members.items) |mb| b = b.join(idBox(mb));
+        return b;
+    }
+    const loc = state.model.locate(id) orelse return .empty;
+    return memberBox(loc);
 }
 
 /// A member's extents in its space: a panel's outline, a label's ink, line
@@ -1997,51 +2043,53 @@ fn memberBox(mb: layout.model.Member) geom.Box {
     }
 }
 
-/// Select area: every object of the shown space wholly inside box `b`.
+/// Select area: what lies wholly inside box `b` in the shown space. A
+/// grouped object is picked only with its whole outermost group.
 fn selectArea(b: geom.Box) void {
     defer state.tool = .select;
     selection.clearRetainingCapacity();
+    var inside: std.ArrayList(layout.model.ObjectId) = .empty;
+    defer inside.deinit(state.gpa);
     for (state.model.panels.items, 0..) |p, pi| {
         if (!shownPanel(pi)) continue;
         if (!p.unbounded) {
-            if (layout.model.within(p.box(), b)) selection.append(state.gpa, .{ .panel = pi }) catch {};
+            if (layout.model.within(p.box(), b)) inside.append(state.gpa, p.id) catch {};
             continue;
         }
-        for (0..p.labels.items.len) |li| {
-            const m: layout.model.Member = .{ .label = .{ .panel = pi, .index = li } };
-            const mb = memberBox(m);
-            if (!mb.isEmpty() and layout.model.within(mb, b)) selection.append(state.gpa, m) catch {};
-        }
-        for (0..p.art.items.len) |ai| {
-            const m: layout.model.Member = .{ .art = .{ .panel = pi, .index = ai } };
-            const mb = memberBox(m);
-            if (!mb.isEmpty() and layout.model.within(mb, b)) selection.append(state.gpa, m) catch {};
-        }
-        for (0..p.regions.items.len) |ri| {
-            const m: layout.model.Member = .{ .region = .{ .panel = pi, .index = ri } };
-            const mb = memberBox(m);
-            if (!mb.isEmpty() and layout.model.within(mb, b)) selection.append(state.gpa, m) catch {};
-        }
+        const kinds = [_]struct { n: usize, k: u2 }{ .{ .n = p.labels.items.len, .k = 0 }, .{ .n = p.art.items.len, .k = 1 }, .{ .n = p.regions.items.len, .k = 2 } };
+        for (kinds) |kind| for (0..kind.n) |i| {
+            const loc: layout.model.Member = switch (kind.k) {
+                0 => .{ .label = .{ .panel = pi, .index = i } },
+                1 => .{ .art = .{ .panel = pi, .index = i } },
+                else => .{ .region = .{ .panel = pi, .index = i } },
+            };
+            const mb = memberBox(loc);
+            if (!mb.isEmpty() and layout.model.within(mb, b)) inside.append(state.gpa, state.model.idAt(loc)) catch {};
+        };
+    }
+    for (inside.items) |id| {
+        const top = state.model.topLevel(id);
+        if (std.mem.indexOfScalar(layout.model.ObjectId, selection.items, top) != null) continue;
+        if (top != id and !layout.model.within(idBox(top), b)) continue;
+        selection.append(state.gpa, top) catch {};
     }
     state.context = if (selection.items.len > 0) .selection else if (spaceRoot()) |r| .{ .panel = r } else .worksheet;
     track_cursor = null;
     if (selection.items.len == 0) state.status = "Nothing lies wholly inside that area. ";
 }
 
-/// The group of the shown space that holds what context `c` names, if any.
-fn groupOf(c: Context) ?usize {
-    if (shown_space >= state.model.spaces.items.len) return null;
-    const m: layout.model.Member = switch (c) {
+/// The outermost group holding what context `c` names, if it is grouped.
+fn groupOf(c: Context) ?layout.model.ObjectId {
+    const loc: layout.model.Member = switch (c) {
         .panel => |pi| if (state.model.panels.items[pi].unbounded) return null else .{ .panel = pi },
         .label => |l| .{ .label = .{ .panel = l.panel, .index = l.index } },
         .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
         .region => |r| .{ .region = .{ .panel = r.panel, .index = r.region } },
         else => return null,
     };
-    for (state.model.spaces.items[shown_space].groups.items, 0..) |g, gi| {
-        for (g.members.items) |mb| if (std.meta.eql(mb, m)) return gi;
-    }
-    return null;
+    const id = state.model.idAt(loc);
+    const top = state.model.topLevel(id);
+    return if (top == id) null else top;
 }
 
 /// Moves the selected group 1 mm the way an arrow points.
@@ -2057,7 +2105,7 @@ fn moveGroupKey(code: dvui.enums.Key) bool {
         .right => .{ .x = 1, .y = 0 },
         else => return false,
     };
-    state.model.moveGroup(g.space, g.index, d.x, d.y) catch return false;
+    state.model.moveGroup(g, d.x, d.y) catch return false;
     return true;
 }
 
@@ -2066,19 +2114,17 @@ fn drawPicked(area: dvui.Rect.Physical) void {
     const px = dvui.windowNaturalScale();
     const focus = dvui.themeGet().focus;
     switch (state.context) {
-        .selection => for (selection.items) |mb| {
-            const b = memberBox(mb);
+        .selection => for (selection.items) |id| {
+            const b = idBox(id);
             if (!b.isEmpty()) state.view.rect(area, b).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = focus } });
         },
         .group => |g| {
-            if (g.space >= state.model.spaces.items.len or g.index >= state.model.spaces.items[g.space].groups.items.len) return;
-            var all: geom.Box = .empty;
-            for (state.model.spaces.items[g.space].groups.items[g.index].members.items) |mb| {
-                const b = memberBox(mb);
-                if (b.isEmpty()) continue;
-                all = all.join(b);
-                state.view.rect(area, b).stroke(.square, .{ .thickness = px, .color = .{ .color = focus.opacity(0.6) } });
+            const grp = state.model.group(g) orelse return;
+            for (grp.members.items) |mb| {
+                const b = idBox(mb);
+                if (!b.isEmpty()) state.view.rect(area, b).stroke(.square, .{ .thickness = px, .color = .{ .color = focus.opacity(0.6) } });
             }
+            const all = idBox(g);
             if (!all.isEmpty()) dashedBox(area, .{ .x0 = all.x0 - 2, .y0 = all.y0 - 2, .x1 = all.x1 + 2, .y1 = all.y1 + 2 }, focus, 1.5 * px);
         },
         else => {},
@@ -3100,7 +3146,7 @@ fn pick(at: geom.Point) void {
         }
     }
     // A grouped object is picked as its group: one move places them all.
-    if (groupOf(state.context)) |g| state.context = .{ .group = .{ .space = shown_space, .index = g } };
+    if (groupOf(state.context)) |g| state.context = .{ .group = g };
     revealInTree(state.context);
 }
 
@@ -3795,7 +3841,7 @@ fn properties() !void {
         .tile => |id| try tileProperties(id),
         .label => |l| try labelProperties(l.panel, l.index),
         .art => |l| try artProperties(l.panel, l.index),
-        .group => |g| try groupProperties(g.space, g.index),
+        .group => |g| try groupProperties(g),
         .selection => try selectionProperties(),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),

@@ -24,6 +24,12 @@ const art_ = @import("art.zig");
 
 pub const TileId = enum(u32) { _ };
 
+/// An object's lasting identity: a panel, a label, a track, a piece of
+/// line art or a group keeps its ID for as long as it exists, wherever it
+/// moves, so references to it (groups, selections, later constraints) never
+/// go stale as other objects come and go. A copy gets a new one.
+pub const ObjectId = enum(u32) { none = 0, _ };
+
 pub const PrototypeId = u16;
 
 /// Whether boxes `a` and `b` share any area (touching edges do not).
@@ -278,6 +284,7 @@ pub const Major = enum { row, column };
 /// text or equations, hard breaks) poured in order through its segments,
 /// rows or columns placed from the region's top-left corner.
 pub const TileRegion = struct {
+    id: ObjectId = .none,
     name: []const u8,
     /// The region's top-left corner in the panel frame, mm.
     origin: geom.Point,
@@ -355,6 +362,7 @@ pub const Axis = enum { along, across };
 /// than in a tile's slot. It is set as one line from its anchor, without a
 /// hard box: it sits exactly where it was put.
 pub const PanelLabel = struct {
+    id: ObjectId = .none,
     /// The anchor on the label's baseline, mm in the panel frame.
     at: geom.Point,
     /// Which part of the line the anchor is: its start, centre or end.
@@ -373,6 +381,7 @@ pub const Wrap = enum { none, bounds, ink };
 
 /// Line art placed on a panel: shapes in its own frame, set at `at`.
 pub const PanelArt = struct {
+    id: ObjectId = .none,
     name: []const u8,
     /// Where its frame's origin sits, mm in the panel frame.
     at: geom.Point,
@@ -410,8 +419,9 @@ pub const Space = struct {
     groups: std.ArrayList(Group) = .empty,
 };
 
-/// An object in a space, as a selection names it: a panel, or one of a
-/// panel's labels, tracks (regions) or line art, by index.
+/// Where an object is: a panel, or one of a panel's labels, tracks
+/// (regions) or line art, by index. Indices change as objects come and go;
+/// hold an `ObjectId` and find it with `Model.locate`.
 pub const Member = union(enum) {
     panel: usize,
     label: struct { panel: usize, index: usize },
@@ -419,15 +429,16 @@ pub const Member = union(enum) {
     art: struct { panel: usize, index: usize },
 };
 
-/// A selection group: objects of one space treated as one. Members are
-/// held by index, so removing an object from the space dissolves the
-/// space's groups (a limit until objects have lasting IDs).
+/// A selection group: objects and groups of one space, treated as one.
+/// Groups nest: a member may be another group of the same space.
 pub const Group = struct {
+    id: ObjectId,
     name: []const u8,
-    members: std.ArrayList(Member) = .empty,
+    members: std.ArrayList(ObjectId) = .empty,
 };
 
 pub const Panel = struct {
+    id: ObjectId = .none,
     name: []const u8,
     /// True while the name is one the app gave it (Panel 1), not the user.
     default_name: bool = false,
@@ -618,6 +629,8 @@ pub const Model = struct {
     /// The document's units, chosen when its canvas was made: how lengths
     /// are shown and typed outside a sheet. Lengths are stored in mm.
     units: Units = .mm,
+    /// The next object ID to give out.
+    next_id: u32 = 1,
     /// The canvas (space 0) and the frames, once the document is a canvas.
     spaces: std.ArrayList(Space) = .empty,
     panels: std.ArrayList(Panel) = .empty,
@@ -730,8 +743,15 @@ pub const Model = struct {
         return root;
     }
 
+    /// A new object ID.
+    pub fn newId(m: *Model) ObjectId {
+        const id: ObjectId = @enumFromInt(m.next_id);
+        m.next_id += 1;
+        return id;
+    }
+
     fn addRoot(m: *Model, name: []const u8, space: usize) Error!usize {
-        try m.panels.append(m.a(), .{ .name = name, .unbounded = true, .space = space, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
+        try m.panels.append(m.a(), .{ .id = m.newId(), .name = name, .unbounded = true, .space = space, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
         m.revision += 1;
         return m.panels.items.len - 1;
     }
@@ -780,71 +800,252 @@ pub const Model = struct {
         }
     }
 
-    /// Moves `members` (all of one space) into space `dest`, keeping their
-    /// coordinates: panels change space, and loose labels, tracks and line
-    /// art move to `dest`'s own panel. They arrive as one selection group
-    /// named "from <source>". Returns the group's index in `dest`. (Once
-    /// constraints exist, the members' constraint group comes too, and
-    /// constraints reaching outside it are dropped and listed.)
-    pub fn moveToSpace(m: *Model, members: []const Member, dest: usize) Error!usize {
-        return m.transfer(members, dest, false);
+    /// Where object `id` is now, if it exists (groups are not objects in
+    /// panels: see `findGroup`).
+    pub fn locate(m: *const Model, id: ObjectId) ?Member {
+        if (id == .none) return null;
+        for (m.panels.items, 0..) |p, pi| {
+            if (p.id == id) return .{ .panel = pi };
+            for (p.labels.items, 0..) |l, i| if (l.id == id) return .{ .label = .{ .panel = pi, .index = i } };
+            for (p.regions.items, 0..) |r, i| if (r.id == id) return .{ .region = .{ .panel = pi, .index = i } };
+            for (p.art.items, 0..) |x, i| if (x.id == id) return .{ .art = .{ .panel = pi, .index = i } };
+        }
+        return null;
     }
 
-    /// As `moveToSpace`, with copies: the originals stay where they were.
-    pub fn copyToSpace(m: *Model, members: []const Member, dest: usize) Error!usize {
-        return m.transfer(members, dest, true);
+    /// The ID of the object at `loc`.
+    pub fn idAt(m: *const Model, loc: Member) ObjectId {
+        return switch (loc) {
+            .panel => |pi| m.panels.items[pi].id,
+            .label => |l| m.panels.items[l.panel].labels.items[l.index].id,
+            .region => |l| m.panels.items[l.panel].regions.items[l.index].id,
+            .art => |l| m.panels.items[l.panel].art.items[l.index].id,
+        };
     }
 
-    fn transfer(m: *Model, members: []const Member, dest: usize, copy: bool) Error!usize {
-        if (dest >= m.spaces.items.len or members.len == 0) return error.NoSuchItem;
-        const from = m.spaceOf(memberPanel(members[0]));
-        for (members) |mb| if (m.spaceOf(memberPanel(mb)) != from) return error.NoSuchItem;
+    /// The space and index of group `id`.
+    pub fn findGroup(m: *const Model, id: ObjectId) ?struct { space: usize, index: usize } {
+        for (m.spaces.items, 0..) |sp, si| {
+            for (sp.groups.items, 0..) |g, gi| if (g.id == id) return .{ .space = si, .index = gi };
+        }
+        return null;
+    }
+
+    pub fn group(m: *const Model, id: ObjectId) ?*Group {
+        const at = m.findGroup(id) orelse return null;
+        return &m.spaces.items[at.space].groups.items[at.index];
+    }
+
+    /// The space an object or a group is in.
+    pub fn spaceOfId(m: *const Model, id: ObjectId) ?usize {
+        if (m.findGroup(id)) |at| return at.space;
+        const loc = m.locate(id) orelse return null;
+        return m.spaceOf(memberPanel(loc));
+    }
+
+    /// The group directly holding `id` (an object or a group), if any.
+    pub fn parentGroup(m: *const Model, id: ObjectId) ?ObjectId {
+        for (m.spaces.items) |sp| for (sp.groups.items) |g| {
+            for (g.members.items) |mb| if (mb == id) return g.id;
+        };
+        return null;
+    }
+
+    /// The outermost group holding `id`, or `id` itself when it is in none.
+    pub fn topLevel(m: *const Model, id: ObjectId) ObjectId {
+        var at = id;
+        while (m.parentGroup(at)) |p| at = p;
+        return at;
+    }
+
+    /// The objects `id` stands for: itself, or every object in the group
+    /// and its nested groups, appended to `out`.
+    pub fn leaves(m: *Model, id: ObjectId, out: *std.ArrayList(ObjectId)) Allocator.Error!void {
+        if (m.group(id)) |g| {
+            for (g.members.items) |mb| try m.leaves(mb, out);
+        } else try out.append(m.a(), id);
+    }
+
+    /// Makes a group of `ids` (objects and groups of one space) where they
+    /// are. Where they were members of a group, the new group takes their
+    /// place in it. Returns the new group's ID.
+    pub fn makeGroup(m: *Model, ids: []const ObjectId, name: []const u8) Error!ObjectId {
+        if (ids.len == 0) return error.NoSuchItem;
+        const space = m.spaceOfId(ids[0]) orelse return error.NoSuchItem;
+        for (ids) |id| if (m.spaceOfId(id) != space) return error.NoSuchItem;
+        const gid = m.newId();
+        var g: Group = .{ .id = gid, .name = try m.a().dupe(u8, name) };
+        try g.members.appendSlice(m.a(), ids);
+        // Out of their old group, which holds the new one instead.
+        const parent = m.parentGroup(ids[0]);
+        for (ids) |id| m.dropMember(id);
+        try m.spaces.items[space].groups.append(m.a(), g);
+        if (parent) |p| if (m.group(p)) |pg| try pg.members.append(m.a(), gid);
+        m.revision += 1;
+        return gid;
+    }
+
+    /// Takes `id` out of whatever group holds it.
+    fn dropMember(m: *Model, id: ObjectId) void {
+        for (m.spaces.items) |*sp| for (sp.groups.items) |*g| {
+            var i: usize = 0;
+            while (i < g.members.items.len) {
+                if (g.members.items[i] == id) _ = g.members.orderedRemove(i) else i += 1;
+            }
+        };
+    }
+
+    /// Dissolves a group; its members stay where they are, and go to the
+    /// group that held it, if any.
+    pub fn ungroup(m: *Model, id: ObjectId) Error!void {
+        const at = m.findGroup(id) orelse return error.NoSuchItem;
+        const g = m.spaces.items[at.space].groups.orderedRemove(at.index);
+        if (m.parentGroup(id)) |p| {
+            m.dropMember(id);
+            if (m.group(p)) |pg| try pg.members.appendSlice(m.a(), g.members.items);
+        }
+        m.revision += 1;
+    }
+
+    /// An object is gone: out of every group, and groups left empty go too.
+    fn forget(m: *Model, id: ObjectId) void {
+        m.dropMember(id);
+        var again = true;
+        while (again) {
+            again = false;
+            for (m.spaces.items) |*sp| {
+                var i: usize = 0;
+                while (i < sp.groups.items.len) {
+                    if (sp.groups.items[i].members.items.len == 0) {
+                        const empty = sp.groups.orderedRemove(i);
+                        m.dropMember(empty.id);
+                        again = true;
+                    } else i += 1;
+                }
+            }
+        }
+    }
+
+    /// Moves every object of group `id` (nested groups included) by
+    /// (`dx`, `dy`) mm.
+    pub fn moveGroup(m: *Model, id: ObjectId, dx: f64, dy: f64) Error!void {
+        if (m.group(id) == null) return error.NoSuchItem;
+        var objs: std.ArrayList(ObjectId) = .empty;
+        try m.leaves(id, &objs);
+        for (objs.items) |oid| {
+            const loc = m.locate(oid) orelse continue;
+            switch (loc) {
+                .panel => |pi| {
+                    const o = &m.panels.items[pi].origin;
+                    o.* = .{ .x = o.x + dx, .y = o.y + dy };
+                },
+                .label => |l| {
+                    const at = &m.panels.items[l.panel].labels.items[l.index].at;
+                    at.* = .{ .x = at.x + dx, .y = at.y + dy };
+                },
+                .art => |l| {
+                    const at = &m.panels.items[l.panel].art.items[l.index].at;
+                    at.* = .{ .x = at.x + dx, .y = at.y + dy };
+                },
+                .region => |l| {
+                    const o = &m.panels.items[l.panel].regions.items[l.index].origin;
+                    o.* = .{ .x = o.x + dx, .y = o.y + dy };
+                },
+            }
+        }
+        m.revision += 1;
+    }
+
+    /// Moves `ids` (objects and groups, all of one space) into space
+    /// `dest`, keeping their coordinates: panels change space, loose
+    /// labels, tracks and line art move to `dest`'s own panel, and groups
+    /// go with their members. They arrive as one new group named
+    /// "from <source>", whose ID is returned. (Once constraints exist, the
+    /// constraint group comes too, and constraints reaching outside it are
+    /// dropped and listed.)
+    pub fn moveToSpace(m: *Model, ids: []const ObjectId, dest: usize) Error!ObjectId {
+        return m.transfer(ids, dest, false);
+    }
+
+    /// As `moveToSpace`, with copies (new IDs): the originals stay where
+    /// they were.
+    pub fn copyToSpace(m: *Model, ids: []const ObjectId, dest: usize) Error!ObjectId {
+        return m.transfer(ids, dest, true);
+    }
+
+    fn transfer(m: *Model, ids: []const ObjectId, dest: usize, copy: bool) Error!ObjectId {
+        if (dest >= m.spaces.items.len or ids.len == 0) return error.NoSuchItem;
+        const from = m.spaceOfId(ids[0]) orelse return error.NoSuchItem;
+        for (ids) |id| if (m.spaceOfId(id) != from) return error.NoSuchItem;
         if (from == dest and !copy) return error.NoSuchItem;
-        const droot = m.spaces.items[dest].root;
         var name_buf: [96]u8 = undefined;
         const gname = std.fmt.bufPrint(&name_buf, "from {s}", .{m.spaces.items[from].name}) catch "moved";
-        var group: Group = .{ .name = try m.a().dupe(u8, gname) };
-        // Loose objects first, taken from the back so earlier indices hold;
-        // then panels, which keep their indices.
-        var order: std.ArrayList(Member) = .empty;
-        try order.appendSlice(m.a(), members);
-        std.mem.sort(Member, order.items, {}, struct {
-            fn later(_: void, x: Member, y: Member) bool {
-                return looseIndex(x) > looseIndex(y);
+        var arrived: std.ArrayList(ObjectId) = .empty;
+        for (ids) |id| try arrived.append(m.a(), try m.carry(id, dest, copy));
+        // Moved out of the source: out of its groups too.
+        if (!copy) for (ids) |id| m.dropMember(id);
+        const gid = m.newId();
+        var g: Group = .{ .id = gid, .name = try m.a().dupe(u8, gname) };
+        try g.members.appendSlice(m.a(), arrived.items);
+        try m.spaces.items[dest].groups.append(m.a(), g);
+        m.revision += 1;
+        return gid;
+    }
+
+    /// Takes object or group `id` to space `dest` (a copy with new IDs when
+    /// `copy`). Returns its ID there.
+    fn carry(m: *Model, id: ObjectId, dest: usize, copy: bool) Error!ObjectId {
+        if (m.findGroup(id)) |at| {
+            const g = m.spaces.items[at.space].groups.items[at.index];
+            var members: std.ArrayList(ObjectId) = .empty;
+            for (g.members.items) |mb| try members.append(m.a(), try m.carry(mb, dest, copy));
+            if (copy) {
+                const nid = m.newId();
+                try m.spaces.items[dest].groups.append(m.a(), .{ .id = nid, .name = try m.a().dupe(u8, g.name), .members = members });
+                return nid;
             }
-        }.later);
-        for (order.items) |mb| switch (mb) {
+            // The group itself moves: out of the source's list, into dest's.
+            const at2 = m.findGroup(id).?;
+            var moved = m.spaces.items[at2.space].groups.orderedRemove(at2.index);
+            moved.members = members;
+            try m.spaces.items[dest].groups.append(m.a(), moved);
+            return id;
+        }
+        const loc = m.locate(id) orelse return error.NoSuchItem;
+        const droot = m.spaces.items[dest].root;
+        switch (loc) {
             .label => |l| {
                 const src = &m.panels.items[l.panel].labels;
                 var item = src.items[l.index];
-                if (!copy) _ = src.orderedRemove(l.index) else item.content = try m.a().dupe(u8, item.content);
+                if (copy) {
+                    item.content = try m.a().dupe(u8, item.content);
+                    item.id = m.newId();
+                } else _ = src.orderedRemove(l.index);
                 try m.panels.items[droot].labels.append(m.a(), item);
-                try group.members.append(m.a(), .{ .label = .{ .panel = droot, .index = m.panels.items[droot].labels.items.len - 1 } });
+                return item.id;
             },
             .art => |l| {
                 const src = &m.panels.items[l.panel].art;
                 var item = src.items[l.index];
-                if (!copy) _ = src.orderedRemove(l.index) else item.shapes = try art_.dupeShapes(m.a(), item.shapes, .{ .x = 0, .y = 0 });
+                if (copy) {
+                    item.shapes = try art_.dupeShapes(m.a(), item.shapes, .{ .x = 0, .y = 0 });
+                    item.id = m.newId();
+                } else _ = src.orderedRemove(l.index);
                 try m.panels.items[droot].art.append(m.a(), item);
-                try group.members.append(m.a(), .{ .art = .{ .panel = droot, .index = m.panels.items[droot].art.items.len - 1 } });
+                return item.id;
             },
             .region => |l| {
                 const src = &m.panels.items[l.panel].regions;
                 const item = if (copy) try m.copyRegion(src.items[l.index]) else src.orderedRemove(l.index);
                 try m.panels.items[droot].regions.append(m.a(), item);
-                try group.members.append(m.a(), .{ .region = .{ .panel = droot, .index = m.panels.items[droot].regions.items.len - 1 } });
+                return item.id;
             },
             .panel => |pi| {
                 const target = if (copy) try m.copyPanel(pi) else pi;
                 m.panels.items[target].space = dest;
-                try group.members.append(m.a(), .{ .panel = target });
+                return m.panels.items[target].id;
             },
-        };
-        // What was taken out of the source may have shifted its groups.
-        if (!copy) m.spaces.items[from].groups.clearRetainingCapacity();
-        try m.spaces.items[dest].groups.append(m.a(), group);
-        m.revision += 1;
-        return m.spaces.items[dest].groups.items.len - 1;
+        }
     }
 
     fn memberPanel(mb: Member) usize {
@@ -854,18 +1055,11 @@ pub const Model = struct {
         };
     }
 
-    /// Sorting key: loose objects by index (removed back to front), panels
-    /// last.
-    fn looseIndex(mb: Member) usize {
-        return switch (mb) {
-            .panel => 0,
-            inline else => |l| l.index + 1,
-        };
-    }
-
-    /// A copy of a track, with copies of its tiles (new designators).
+    /// A copy of a track, with copies of its tiles (new designators) and a
+    /// new ID.
     fn copyRegion(m: *Model, r: TileRegion) Error!TileRegion {
         var c = r;
+        c.id = m.newId();
         c.name = try m.a().dupe(u8, r.name);
         c.segments = .empty;
         try c.segments.appendSlice(m.a(), r.segments.items);
@@ -873,8 +1067,8 @@ pub const Model = struct {
         for (r.items.items) |item| {
             var it = item;
             switch (item.what) {
-                .tile => |id| {
-                    const t = m.tileConst(id);
+                .tile => |tid| {
+                    const t = m.tileConst(tid);
                     var buf: [64]u8 = undefined;
                     const prefix = if (m.prototypes.items[t.prototype].spacer) "B" else "T";
                     var copy_t = t.*;
@@ -889,10 +1083,12 @@ pub const Model = struct {
         return c;
     }
 
-    /// A copy of a panel, appended, with copies of its content. Returns it.
+    /// A copy of a panel, appended, with copies of its content, all with
+    /// new IDs. Returns it.
     fn copyPanel(m: *Model, pi: usize) Error!usize {
         const p = m.panels.items[pi];
         var c = p;
+        c.id = m.newId();
         c.name = try m.a().dupe(u8, p.name);
         c.regions = .empty;
         c.labels = .empty;
@@ -900,52 +1096,18 @@ pub const Model = struct {
         for (p.regions.items) |r| try c.regions.append(m.a(), try m.copyRegion(r));
         for (p.labels.items) |l| {
             var cl = l;
+            cl.id = m.newId();
             cl.content = try m.a().dupe(u8, l.content);
             try c.labels.append(m.a(), cl);
         }
         for (p.art.items) |pa| {
             var ca = pa;
+            ca.id = m.newId();
             ca.shapes = try art_.dupeShapes(m.a(), pa.shapes, .{ .x = 0, .y = 0 });
             try c.art.append(m.a(), ca);
         }
         try m.panels.append(m.a(), c);
         return m.panels.items.len - 1;
-    }
-
-    /// Moves every member of a space's group by (`dx`, `dy`) mm.
-    pub fn moveGroup(m: *Model, space: usize, group: usize, dx: f64, dy: f64) Error!void {
-        if (space >= m.spaces.items.len or group >= m.spaces.items[space].groups.items.len) return error.NoSuchItem;
-        for (m.spaces.items[space].groups.items[group].members.items) |mb| switch (mb) {
-            .panel => |pi| {
-                const o = &m.panels.items[pi].origin;
-                o.* = .{ .x = o.x + dx, .y = o.y + dy };
-            },
-            .label => |l| {
-                const at = &m.panels.items[l.panel].labels.items[l.index].at;
-                at.* = .{ .x = at.x + dx, .y = at.y + dy };
-            },
-            .art => |l| {
-                const at = &m.panels.items[l.panel].art.items[l.index].at;
-                at.* = .{ .x = at.x + dx, .y = at.y + dy };
-            },
-            .region => |l| {
-                const o = &m.panels.items[l.panel].regions.items[l.index].origin;
-                o.* = .{ .x = o.x + dx, .y = o.y + dy };
-            },
-        };
-        m.revision += 1;
-    }
-
-    /// Dissolves a group; its members stay where they are.
-    pub fn ungroup(m: *Model, space: usize, group: usize) void {
-        _ = m.spaces.items[space].groups.orderedRemove(group);
-        m.revision += 1;
-    }
-
-    /// Removing objects shifts indices: the groups of every space are
-    /// dissolved (their members stay).
-    fn dissolveGroups(m: *Model) void {
-        for (m.spaces.items) |*sp| sp.groups.clearRetainingCapacity();
     }
 
     /// Changes the canvas's units: a conversion, so nothing moves or
@@ -967,9 +1129,11 @@ pub const Model = struct {
         // off it.
         if (!m.gripsSheet(panel.box())) return error.OffSheet;
         var p = panel;
+        p.id = m.newId();
         p.name = try m.a().dupe(u8, panel.name);
         p.regions = .empty;
         p.labels = .empty;
+        p.art = .empty;
         try m.panels.append(m.a(), p);
         m.revision += 1;
         return m.panels.items.len - 1;
@@ -1052,6 +1216,7 @@ pub const Model = struct {
     /// Adds a label to a panel; returns its index on the panel.
     pub fn addLabel(m: *Model, panel: usize, label: PanelLabel) Error!usize {
         var l = label;
+        l.id = m.newId();
         l.content = try m.a().dupe(u8, label.content);
         const list = &m.panels.items[panel].labels;
         try list.append(m.a(), l);
@@ -1081,6 +1246,7 @@ pub const Model = struct {
     pub fn addArt(m: *Model, panel: usize, art: PanelArt) Error!usize {
         if (!(art.clearance >= 0)) return error.BadSize;
         var copy = art;
+        copy.id = m.newId();
         copy.name = try m.a().dupe(u8, art.name);
         copy.shapes = try art_.dupeShapes(m.a(), art.shapes, .{ .x = 0, .y = 0 });
         const list = &m.panels.items[panel].art;
@@ -1118,14 +1284,14 @@ pub const Model = struct {
     }
 
     pub fn removeArt(m: *Model, panel: usize, index: usize) void {
-        _ = m.panels.items[panel].art.orderedRemove(index);
-        m.dissolveGroups();
+        const gone = m.panels.items[panel].art.orderedRemove(index);
+        m.forget(gone.id);
         m.revision += 1;
     }
 
     pub fn removeLabel(m: *Model, panel: usize, label: usize) void {
-        _ = m.panels.items[panel].labels.orderedRemove(label);
-        m.dissolveGroups();
+        const gone = m.panels.items[panel].labels.orderedRemove(label);
+        m.forget(gone.id);
         m.revision += 1;
     }
 
@@ -1154,7 +1320,10 @@ pub const Model = struct {
         for (m.spaces.items) |*sp| if (sp.root > panel) {
             sp.root -= 1;
         };
-        m.dissolveGroups();
+        m.forget(p.id);
+        for (p.labels.items) |l| m.forget(l.id);
+        for (p.regions.items) |r| m.forget(r.id);
+        for (p.art.items) |pa| m.forget(pa.id);
         for (p.regions.items) |region| for (region.items.items) |item| {
             const id = item.tileOf() orelse continue;
             if (!m.placedElsewhere(id)) m.tile(id).removed = true;
@@ -1224,6 +1393,7 @@ pub const Model = struct {
     pub fn addRegion(m: *Model, panel: usize, region: TileRegion) Error!usize {
         if (!(region.pitch > 0 and region.w > 0 and region.h > 0)) return error.BadSize;
         var r = region;
+        r.id = m.newId();
         r.name = try m.a().dupe(u8, region.name);
         r.segments = .empty;
         r.items = .empty;
@@ -2058,7 +2228,7 @@ test "a canvas: units chosen up front, no sheet, loose objects on an unbounded p
     try std.testing.expectApproxEqAbs(@as(f64, 39.37007874), Units.mil.perMm(), 1e-6);
 }
 
-test "frames are spaces: moving keeps coordinates and arrives as one group; a group moves as one" {
+test "frames are spaces: moving keeps coordinates and IDs, and arrives as one group; a group moves as one" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
@@ -2069,43 +2239,82 @@ test "frames are spaces: moving keeps coordinates and arrives as one group; a gr
     _ = try m.insertTile(c, r, 0, key, 1);
     _ = try m.addLabel(c, .{ .at = .{ .x = 5, .y = 80 }, .content = "Stays" });
     _ = try m.addLabel(c, .{ .at = .{ .x = 120, .y = 70 }, .content = "Goes" });
+    const pid = m.panels.items[p].id;
+    const rid = m.panels.items[c].regions.items[r].id;
+    const lid = m.panels.items[c].labels.items[1].id;
     const f = try m.addFrame("Frame 1", null);
     try std.testing.expectEqual(1, f);
     const froot = m.spaces.items[f].root;
-    const g = try m.moveToSpace(&.{ .{ .panel = p }, .{ .region = .{ .panel = c, .index = r } }, .{ .label = .{ .panel = c, .index = 1 } } }, f);
+    const g = try m.moveToSpace(&.{ pid, rid, lid }, f);
     // Panels change space; loose objects move to the frame's own panel,
-    // coordinates kept.
+    // coordinates and IDs kept.
     try std.testing.expectEqual(f, m.spaceOf(p));
     try std.testing.expectEqual(10, m.panels.items[p].origin.x);
     try std.testing.expectEqual(0, m.panels.items[c].regions.items.len);
-    try std.testing.expectEqual(1, m.panels.items[c].labels.items.len);
     try std.testing.expectEqualStrings("Stays", m.panels.items[c].labels.items[0].content);
-    try std.testing.expectEqual(100, m.panels.items[froot].regions.items[0].origin.x);
-    try std.testing.expectEqualStrings("Goes", m.panels.items[froot].labels.items[0].content);
+    try std.testing.expectEqual(Member{ .region = .{ .panel = froot, .index = 0 } }, m.locate(rid).?);
+    try std.testing.expectEqual(Member{ .label = .{ .panel = froot, .index = 0 } }, m.locate(lid).?);
     // One group, named after where it came from; one move places all.
-    const group = m.spaces.items[f].groups.items[g];
+    const group = m.group(g).?;
     try std.testing.expectEqualStrings("from Canvas", group.name);
     try std.testing.expectEqual(3, group.members.items.len);
-    try m.moveGroup(f, g, -10, 5);
+    try m.moveGroup(g, -10, 5);
     try std.testing.expectEqual(0, m.panels.items[p].origin.x);
     try std.testing.expectEqual(90, m.panels.items[froot].regions.items[0].origin.x);
     try std.testing.expectEqual(75, m.panels.items[froot].labels.items[0].at.y);
-    // Copying leaves the original, and copies tiles with new designators.
+    // Copying leaves the original, and copies get new IDs (and tiles new
+    // designators).
     const tiles_before = m.tiles.items.len;
-    _ = try m.copyToSpace(&.{.{ .panel = p }}, 0);
+    const cg = try m.copyToSpace(&.{pid}, 0);
     try std.testing.expectEqual(f, m.spaceOf(p));
-    const copy = m.panels.items.len - 1;
-    try std.testing.expectEqual(0, m.spaceOf(copy));
+    const copy_id = m.group(cg).?.members.items[0];
+    try std.testing.expect(copy_id != pid);
+    try std.testing.expectEqual(0, m.spaceOfId(copy_id).?);
     try std.testing.expectEqual(tiles_before, m.tiles.items.len);
-    _ = try m.copyToSpace(&.{.{ .region = .{ .panel = froot, .index = 0 } }}, 0);
+    _ = try m.copyToSpace(&.{rid}, 0);
     try std.testing.expectEqual(tiles_before + 1, m.tiles.items.len);
     try std.testing.expectEqualStrings("T2", m.tiles.items[tiles_before].designator);
     // A frame's boundary, as Fit frame sets it.
     try m.setFrameBound(f, .{ .x0 = -5, .y0 = 0, .x1 = 150, .y1 = 100 });
     try std.testing.expectEqual(150, m.spaces.items[f].bound.?.x1);
     try std.testing.expectError(error.NoSuchItem, m.setFrameBound(0, .{ .x0 = 0, .y0 = 0, .x1 = 1, .y1 = 1 }));
-    // Members of two spaces cannot move together.
-    try std.testing.expectError(error.NoSuchItem, m.moveToSpace(&.{ .{ .panel = p }, .{ .panel = copy } }, 0));
-    m.ungroup(f, g);
-    try std.testing.expectEqual(0, m.spaces.items[f].groups.items.len);
+    // Objects of two spaces cannot move together.
+    try std.testing.expectError(error.NoSuchItem, m.moveToSpace(&.{ pid, copy_id }, 0));
+    try m.ungroup(g);
+    try std.testing.expectEqual(null, m.group(g));
+}
+
+test "groups made in place nest, survive other objects going, move as one, and ungroup into their parent" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var ids: [4]ObjectId = undefined;
+    for (&ids, 0..) |*id, i| {
+        const li = try m.addLabel(c, .{ .at = .{ .x = @floatFromInt(i * 10), .y = 0 }, .content = "L" });
+        id.* = m.panels.items[c].labels.items[li].id;
+    }
+    // A and B grouped; that group and C grouped: nested.
+    const inner = try m.makeGroup(&.{ ids[0], ids[1] }, "inner");
+    const outer = try m.makeGroup(&.{ inner, ids[2] }, "outer");
+    try std.testing.expectEqual(outer, m.topLevel(ids[0]));
+    try std.testing.expectEqual(inner, m.parentGroup(ids[0]).?);
+    var all: std.ArrayList(ObjectId) = .empty;
+    try m.leaves(outer, &all);
+    try std.testing.expectEqual(3, all.items.len);
+    // Removing D (in no group) and then C: the groups stay, minus C.
+    m.removeLabel(c, 3);
+    m.removeLabel(c, 2);
+    try std.testing.expectEqual(1, m.group(outer).?.members.items.len);
+    // One move moves everything left in it, by ID.
+    try m.moveGroup(outer, 5, 0);
+    try std.testing.expectEqual(5, m.panels.items[c].labels.items[0].at.x);
+    try std.testing.expectEqual(15, m.panels.items[c].labels.items[1].at.x);
+    // Ungrouping the inner group hands its members to the outer one.
+    try m.ungroup(inner);
+    try std.testing.expectEqual(2, m.group(outer).?.members.items.len);
+    try std.testing.expectEqual(outer, m.parentGroup(ids[0]).?);
+    // Removing the last members removes the emptied group.
+    m.removeLabel(c, 0);
+    m.removeLabel(c, 0);
+    try std.testing.expectEqual(null, m.group(outer));
 }
