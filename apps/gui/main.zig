@@ -1227,6 +1227,7 @@ fn worksheetTree() void {
                     if (it.region != ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
                     const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
+                    if (state.model.prototypes.items[state.model.tileConst(id).prototype].spacer) continue;
                     const t = state.model.tileConst(id);
                     const legend = if (state.model.slotCount(id) > 0) state.model.slot(id, 0).content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
@@ -1579,10 +1580,18 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
     for (placed.tiles) |t| {
+        const in_context = inContext(pi, t);
+        // A blank (a spacer tile): a faint outline while editing, nothing in
+        // output.
+        if (t.spacer) {
+            const box = state.view.rect(area, onSheet(pi, t.pitch_box));
+            const sel = in_context and state.context == .tile;
+            box.stroke(.square, .{ .thickness = (if (sel) @as(f32, 2) else 1) * px, .color = .{ .color = if (sel) dvui.themeGet().focus else colors.edge.opacity(0.3) } });
+            continue;
+        }
         const flagged = tileFlag(placed, t.id);
         const body = state.view.rect(area, onSheet(pi, t.body));
         const face = state.view.rect(area, onSheet(pi, t.face));
-        const in_context = inContext(pi, t);
         // The tile's art, as placement stretched it: fills, then edges.
         const pieces = flatTile(&state.flat, t.shapes) catch &.{};
         for (pieces) |piece| {
@@ -3088,6 +3097,20 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         if (dvui.checkbox(@src(), &next_proto.expand.horizontal, "Wider", .{ .id_extra = 3 })) proto_changed = true;
         if (dvui.checkbox(@src(), &next_proto.expand.vertical, "Taller", .{ .id_extra = 4 })) proto_changed = true;
     }
+    {
+        // How its tiles flow: a spacer (a blank, not in output), and
+        // whether one is dropped where a soft break leaves it at a row's
+        // start (a space between words) or kept (a keyboard's gap).
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7 });
+        defer row.deinit();
+        propName("In the flow");
+        if (dvui.checkbox(@src(), &next_proto.spacer, "Spacer", .{ .id_extra = 5 })) proto_changed = true;
+        var drop = next_proto.at_soft_break == .drop;
+        if (dvui.checkbox(@src(), &drop, "Dropped at a wrap", .{ .id_extra = 6 })) {
+            next_proto.at_soft_break = if (drop) .drop else .keep;
+            proto_changed = true;
+        }
+    }
     var buf: [160]u8 = undefined;
     {
         // Its u in mm; empty follows the pitch of the track a tile is in.
@@ -3531,6 +3554,24 @@ const palette_alpha = 0.6;
 const palette_button_alpha = 0.45;
 
 const tile_keys = "1234567890";
+
+/// The prototype the insert palette's tile row inserts, once switched with
+/// Tab; null for the track's own.
+var palette_prototype: ?layout.model.PrototypeId = null;
+
+/// Switches the palette's tile row to the next (or previous) prototype that
+/// is not a spacer.
+fn cyclePalettePrototype(back: bool) void {
+    const c = track_cursor orelse return;
+    const pal = paletteFor(c.panel, c.region) orelse return;
+    const protos = state.model.prototypes.items;
+    var id = pal.prototype;
+    for (0..protos.len) |_| {
+        id = if (back) (if (id == 0) @intCast(protos.len - 1) else id - 1) else @intCast((id + 1) % protos.len);
+        if (!protos[id].spacer) break;
+    }
+    palette_prototype = id;
+}
 const blank_keys = "QWERTYUIOP";
 
 /// The palette's choices for a region: tile lengths along its tracks (the
@@ -3546,7 +3587,10 @@ const InsertPalette = struct {
 fn paletteFor(panel: usize, region: usize) ?InsertPalette {
     if (state.model.prototypes.items.len == 0) return null;
     const r = state.model.panels.items[panel].regions.items[region];
-    const id = r.prototype orelse 0;
+    // The prototype the tile row inserts: the one chosen with Tab, else the
+    // track's own.
+    const own = r.prototype orelse 0;
+    const id = if (palette_prototype) |pp| (if (pp < state.model.prototypes.items.len and !state.model.prototypes.items[pp].spacer) pp else own) else own;
     const p = state.model.prototypes.items[id];
     var out: InsertPalette = .{ .prototype = id };
     const sizes = if (r.major == .row) p.widths else p.heights;
@@ -3672,7 +3716,11 @@ fn fitRegion(pi: usize, region: usize) bool {
 /// Drops the cursor when its region stops being the context, and keeps it
 /// within the flow as items come and go.
 fn validateCursor() void {
-    const c = track_cursor orelse return;
+    // Out of the flow, the palette goes back to each track's own prototype.
+    const c = track_cursor orelse {
+        palette_prototype = null;
+        return;
+    };
     const cr = contextRegion() orelse {
         track_cursor = null;
         return;
@@ -3717,6 +3765,10 @@ fn cursorKey(code: dvui.enums.Key) bool {
     switch (code) {
         .a => {
             insertAtCursor(.run, 0);
+            return true;
+        },
+        .tab => {
+            cyclePalettePrototype(false);
             return true;
         },
         .enter, .kp_enter => {
@@ -3766,7 +3818,7 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
             // are; a blank is stored in its track's unit.
             const r = state.model.panels.items[c.panel].regions.items[c.region];
             const unit = state.model.prototypes.items[pal.prototype].unitIn(r.pitch);
-            state.model.insertBlank(c.panel, c.region, c.index, size * unit / r.pitch) catch return;
+            _ = state.model.insertBlank(c.panel, c.region, c.index, size * unit / r.pitch) catch return;
         },
         .hard_break => state.model.insertBreak(c.panel, c.region, c.index) catch return,
         .run => {
@@ -3867,6 +3919,10 @@ fn trackPalette() void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
     if (flowButton(.run, 0)) insertAtCursor(.run, 0);
+    if (flowButton(.next_prototype, 2)) {
+        cyclePalettePrototype(false);
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    }
     if (flowButton(.hard_break, 1)) {
         insertAtCursor(.hard_break, 0);
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
@@ -3875,7 +3931,7 @@ fn trackPalette() void {
 
 /// A palette button for an item that is not a tile: its key, a picture and
 /// what it puts in.
-fn flowButton(kind: enum { run, hard_break }, i: usize) bool {
+fn flowButton(kind: enum { run, hard_break, next_prototype }, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .id_extra = i,
@@ -3894,7 +3950,11 @@ fn flowButton(kind: enum { run, hard_break }, i: usize) bool {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{});
         defer line.deinit();
-        dvui.labelNoFmt(@src(), if (kind == .run) "A" else "Enter", .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
+        dvui.labelNoFmt(@src(), switch (kind) {
+            .run => "A",
+            .hard_break => "Enter",
+            .next_prototype => "Tab",
+        }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
         var pic = dvui.box(@src(), .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 22, .h = 18 }, .max_size_content = .{ .w = 22, .h = 18 } });
         const r = pic.data().contentRectScale().r;
         pic.deinit();
@@ -3910,13 +3970,31 @@ fn flowButton(kind: enum { run, hard_break }, i: usize) bool {
             const h = r.h * 0.25;
             dvui.Path.stroke(.{ .points = &.{ .{ .x = right, .y = top }, .{ .x = right, .y = low }, .{ .x = left, .y = low } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
             dvui.Path.stroke(.{ .points = &.{ .{ .x = left + h, .y = low - h }, .{ .x = left, .y = low }, .{ .x = left + h, .y = low + h } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+        } else if (kind == .next_prototype) {
+            // Two tiles side by side: another kind of tile.
+            const w = r.w * 0.42;
+            const a_r: dvui.Rect.Physical = .{ .x = r.x, .y = r.y + r.h * 0.2, .w = w, .h = r.h * 0.6 };
+            const b_r: dvui.Rect.Physical = .{ .x = r.x + r.w - w, .y = r.y + r.h * 0.2, .w = w, .h = r.h * 0.6 };
+            a_r.stroke(.all(2 * px), .{ .thickness = px, .color = .{ .color = ghost } });
+            b_r.fill(.all(2 * px), .{ .color = .{ .color = colors.face } });
+            b_r.stroke(.all(2 * px), .{ .thickness = px, .color = .{ .color = colors.edge } });
         } else {
             // A dashed-looking slot with a caret: text to be typed.
             r.stroke(.square, .{ .thickness = px, .color = .{ .color = ghost } });
             const x = r.x + r.w * 0.3;
             dvui.Path.stroke(.{ .points = &.{ .{ .x = x, .y = r.y + 3 * px }, .{ .x = x, .y = r.y + r.h - 3 * px } } }, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
         }
-        dvui.labelNoFmt(@src(), if (kind == .run) "Text or equation" else "Hard break", .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 8 } });
+        const next_name = blk: {
+            if (kind != .next_prototype) break :blk "";
+            const c = track_cursor orelse break :blk "";
+            const pal = paletteFor(c.panel, c.region) orelse break :blk "";
+            break :blk std.fmt.allocPrint(dvui.currentWindow().arena(), "Tiles: {s} · next kind", .{state.model.prototypes.items[pal.prototype].name}) catch "";
+        };
+        dvui.labelNoFmt(@src(), switch (kind) {
+            .run => "Text or equation",
+            .hard_break => "Hard break",
+            .next_prototype => next_name,
+        }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 8 } });
     }
     bw.drawFocus();
     bw.deinit();

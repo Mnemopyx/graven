@@ -36,6 +36,8 @@ pub const PlacedTile = struct {
     /// How it looks: its prototype's art stretched onto it, back to front,
     /// mm in the panel frame.
     shapes: []const art.Shape,
+    /// A spacer (a blank): no shapes, left out of output and the bounds.
+    spacer: bool = false,
 };
 
 pub const PlacedLabel = struct {
@@ -356,7 +358,6 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
                     break :blk (if (rows) t.w else t.h) * unit;
                 },
-                .blank => |len| len * region.pitch,
                 .run => |run| blk: {
                     if (run.content.len == 0) break :blk 0.5 * region.pitch;
                     if (labels.context(run.style) == null) {
@@ -387,6 +388,13 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     pos = 0;
                     in_seg = 0;
                     start = gap;
+                    // Landing at the start after a soft break, a tile whose
+                    // prototype says so (a space between words) is dropped.
+                    if (item.tileOf()) |id| if (m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop) {
+                        para -= gap + size;
+                        try placed_items.append(a, .{ .region = ri, .index = index, .segment = seg, .span = .{ 0, 0 } });
+                        continue;
+                    };
                 }
             }
             const end = start + size;
@@ -409,6 +417,11 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     const pitch_box: Box = .{ .x0 = x0, .x1 = x0 + w, .y1 = y1, .y0 = y1 - h };
                     const proto = &m.prototypes.items[t.prototype];
                     const body = proto.body_inset.inset(pitch_box);
+                    // A spacer is drawn by nothing and bounds nothing.
+                    if (proto.spacer) {
+                        try tiles.append(a, .{ .id = pid, .region = ri, .row = seg, .pitch_box = pitch_box, .body = pitch_box, .face = pitch_box, .shapes = &.{}, .spacer = true });
+                        continue;
+                    }
                     const shapes = if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
                         error.CurveCrossesCut => blk: {
                             try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = seg });
@@ -909,7 +922,7 @@ test "blanks take their length in a track, and every item's span is reported" {
     const key = try m.addPrototype(.{ .name = "key" });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 1, .length = 4, .pitch = 10 });
     for (0..4) |i| _ = try m.insertTile(p, r, i, key, 1);
-    try m.insertBlank(p, r, 1, 0.5);
+    _ = try m.insertBlank(p, r, 1, 0.5);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
@@ -918,8 +931,10 @@ test "blanks take their length in a track, and every item's span is reported" {
     try testing.expectEqual(5, s.items.len);
     try testing.expectApproxEqAbs(@as(f64, 10), s.items[1].span[0], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 15), s.items[1].span[1], 1e-9);
-    // The second tile starts after the blank.
-    try testing.expectApproxEqAbs(@as(f64, 15), s.tiles[1].pitch_box.x0, 1e-9);
+    // The blank is a spacer tile; the second key starts after it.
+    try testing.expect(s.tiles[1].spacer);
+    try testing.expectEqual(0, s.tiles[1].shapes.len);
+    try testing.expectApproxEqAbs(@as(f64, 15), s.tiles[2].pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
 }
 
@@ -979,7 +994,7 @@ test "a region past its panel is flagged, and fitting it to its tiles can bring 
     _ = try m.insertTile(p, r, 1, key, 1);
     try m.insertBreak(p, r, 2);
     _ = try m.insertTile(p, r, 3, key, 1);
-    try m.insertBlank(p, r, 4, 0.5);
+    _ = try m.insertBlank(p, r, 4, 0.5);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     {
@@ -1097,7 +1112,8 @@ test "a tile keeps its prototype's unit in a track of another pitch" {
     // the next item starts after it, past a 0.25 u gap in the track's unit.
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 2, .length = 40, .pitch = 5 });
     const t = try m.insertTile(p, r, 0, key, 1.5);
-    try m.place(p, r, null, .{ .gap = 0.25, .what = .{ .blank = 1 } });
+    _ = try m.insertBlank(p, r, 1, 1);
+    m.panels.items[p].regions.items[r].items.items[1].gap = 0.25;
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
     var s = try solve(testing.allocator, &m, p, &labels);
@@ -1107,4 +1123,41 @@ test "a tile keeps its prototype's unit in a track of another pitch" {
     try testing.expectApproxEqAbs(@as(f64, 19.05), box.height(), 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 28.575 + 1.25), s.items[1].span[0], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 28.575 + 1.25 + 5), s.items[1].span[1], 1e-9);
+}
+
+test "one track holds keycaps, another prototype's keys and blanks, all as tiles; a dropped space" {
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key", .unit = 10, .expand = .{ .horizontal = true } });
+    const pad = try m.addPrototype(.{ .name = "pad", .unit = 10, .body_inset = .all(1) });
+    // A space between words: dropped when it lands at a row's start.
+    const space = try m.addPrototype(.{ .name = "space", .spacer = true, .at_soft_break = .drop, .expand = .{ .horizontal = true } });
+    const r = try m.addTracks(p, .{ .name = "mixed", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 4, .pitch = 10 });
+    _ = try m.insertTile(p, r, 0, key, 1.5);
+    _ = try m.insertBlank(p, r, 1, 0.5);
+    _ = try m.insertTile(p, r, 2, pad, 1);
+    // Fills the first row to 4 u: the space lands at the second's start.
+    _ = try m.insertTile(p, r, 3, key, 1);
+    _ = try m.insertTile(p, r, 4, space, 1);
+    _ = try m.insertTile(p, r, 5, pad, 1);
+    // A blank after a soft break is kept, unlike the space.
+    _ = try m.insertTile(p, r, 6, key, 2.5);
+    _ = try m.insertBlank(p, r, 7, 0.5);
+    var labels: Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    var s = try solve(testing.allocator, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectEqual(0, s.issues.len);
+    // Every item is a tile: keys, pads, a blank and a space.
+    for (m.panels.items[p].regions.items[r].items.items) |it| try testing.expect(it.tileOf() != null);
+    try testing.expectApproxEqAbs(@as(f64, 15), s.items[1].span[0], 1e-9);
+    try testing.expectEqual(1, s.items[4].segment);
+    try testing.expectApproxEqAbs(@as(f64, 0), s.items[4].span[1], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), s.items[5].span[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), s.items[6].span[0], 1e-9);
+    // Three keys, two pads and two blanks placed; the dropped space (T4)
+    // is not.
+    try testing.expectEqual(7, s.tiles.len);
+    try testing.expectEqual(null, s.findTile(m.findTile("T4").?));
 }

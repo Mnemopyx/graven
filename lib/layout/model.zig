@@ -128,6 +128,13 @@ pub const TilePrototype = struct {
     /// tile keeps its size in any track, a text track included. Null takes
     /// the pitch of the track it is in.
     unit: ?f64 = null,
+    /// Its tiles are spacers: no art and no labels, shown faintly while
+    /// editing and left out of output (the built-in Blank prototype).
+    spacer: bool = false,
+    /// What happens to one of its tiles that lands at the start of a
+    /// segment after a soft break: kept (blanks, like a keyboard's gaps), or
+    /// dropped (a space between words).
+    at_soft_break: enum { keep, drop } = .keep,
 
     /// mm per u for its tiles in a track of pitch `track_pitch`.
     pub fn unitIn(p: TilePrototype, track_pitch: f64) f64 {
@@ -197,14 +204,13 @@ pub const Run = struct {
 };
 
 /// One item in a track's flow, with any gap before it, u. Text, tiles and
-/// equations share one stream: a tile of any prototype, a blank (a spacer
-/// `blank` u long), a run of markup, or a hard break, which ends its
-/// segment so the next item starts the next one.
+/// equations share one stream: a tile of any prototype (a blank is a tile
+/// of the built-in Blank prototype), a run of markup, or a hard break,
+/// which ends its segment so the next item starts the next one.
 pub const Item = struct {
     gap: f64 = 0,
     what: union(enum) {
         tile: TileId,
-        blank: f64,
         run: Run,
         hard_break,
     },
@@ -485,6 +491,8 @@ pub const Model = struct {
     panels: std.ArrayList(Panel) = .empty,
     tiles: std.ArrayList(Tile) = .empty,
     prototypes: std.ArrayList(TilePrototype) = .empty,
+    /// The built-in Blank prototype, once a blank has been made.
+    blank_prototype: ?PrototypeId = null,
     styles: std.ArrayList(LabelStyle) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
@@ -886,10 +894,37 @@ pub const Model = struct {
         return id;
     }
 
-    /// Inserts a blank `length` u long at position `index` of a track.
-    pub fn insertBlank(m: *Model, panel: usize, region: usize, index: usize, length: f64) Error!void {
+    /// The built-in Blank prototype, made the first time it is asked for:
+    /// a spacer of any size, kept at soft breaks, in its track's unit.
+    pub fn blankPrototype(m: *Model) Error!PrototypeId {
+        if (m.blank_prototype) |id| return id;
+        // Tiles default to prototype 0: keep that a plain one, not Blank.
+        if (m.prototypes.items.len == 0) _ = try m.addPrototype(.{ .name = "Plain" });
+        const id = try m.addPrototype(.{
+            .name = "Blank",
+            .expand = .{ .horizontal = true, .vertical = true },
+            .spacer = true,
+        });
+        m.blank_prototype = id;
+        return id;
+    }
+
+    /// Inserts a blank, a tile of the built-in Blank prototype, `length` u
+    /// long (in the track's unit) at position `index` of a track. Returns it.
+    pub fn insertBlank(m: *Model, panel: usize, region: usize, index: usize, length: f64) Error!TileId {
         if (!(length > 0)) return error.BadSize;
-        try m.place(panel, region, index, .{ .what = .{ .blank = length } });
+        if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
+        const blank = try m.blankPrototype();
+        const major = m.panels.items[panel].regions.items[region].major;
+        var buf: [64]u8 = undefined;
+        const id = try m.addTile(.{
+            .designator = m.nextDesignator(&buf, "B"),
+            .prototype = blank,
+            .w = if (major == .row) length else 1,
+            .h = if (major == .row) 1 else length,
+        });
+        try m.place(panel, region, index, .{ .what = .{ .tile = id } });
+        return id;
     }
 
     /// Inserts a hard break at position `index` of a track: what follows
@@ -1058,6 +1093,11 @@ pub const Model = struct {
         for (m.tiles.items) |*t| {
             if (t.prototype > id) t.prototype -= 1;
         }
+        // Regions made for it, and the built-in Blank, follow the renumbering.
+        for (m.panels.items) |*panel| for (panel.regions.items) |*r| if (r.prototype) |rp| {
+            r.prototype = if (rp == id) null else if (rp > id) rp - 1 else rp;
+        };
+        if (m.blank_prototype) |b| m.blank_prototype = if (b == id) null else if (b > id) b - 1 else b;
         m.revision += 1;
     }
 
@@ -1457,11 +1497,15 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     _ = try m.insertTile(p, r, 1, key, 1);
     // T1 T2; insert a 1.5 u tile between them, and a blank before it.
     const t = try m.insertTile(p, r, 1, key, 1.5);
-    try m.insertBlank(p, r, 1, 0.25);
+    const b = try m.insertBlank(p, r, 1, 0.25);
     const items = m.panels.items[p].regions.items[r].items.items;
     try std.testing.expectEqual(4, items.len);
-    try std.testing.expectEqual(null, items[1].tileOf());
-    try std.testing.expectEqual(0.25, items[1].what.blank);
+    // A blank is a tile of the built-in Blank prototype.
+    try std.testing.expectEqual(b, items[1].tileOf().?);
+    try std.testing.expectEqual(0.25, m.tileConst(b).w);
+    try std.testing.expectEqualStrings("B1", m.tileConst(b).designator);
+    try std.testing.expect(m.prototypes.items[m.tileConst(b).prototype].spacer);
+    try std.testing.expectEqual(m.blank_prototype.?, try m.blankPrototype());
     try std.testing.expectEqual(t, items[2].tileOf().?);
     try std.testing.expectEqualStrings("T3", m.tileConst(t).designator);
     try std.testing.expectEqual(1.5, m.tileConst(t).w);
