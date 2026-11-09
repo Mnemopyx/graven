@@ -209,11 +209,20 @@ pub const Run = struct {
 /// which ends its segment so the next item starts the next one.
 pub const Item = struct {
     gap: f64 = 0,
+    /// No break between this item and the next: they belong to one group
+    /// (the arrow cluster, a modifier with its key), which breaks as one
+    /// while its items stay their own. A hard break is never bound.
+    bind: bool = false,
     what: union(enum) {
         tile: TileId,
         run: Run,
         hard_break,
     },
+
+    /// Whether this item and `next`, which follows it, are in one group.
+    pub fn binds(item: Item, next: Item) bool {
+        return item.bind and item.what != .hard_break and next.what != .hard_break;
+    }
 
     pub fn tileOf(item: Item) ?TileId {
         return switch (item.what) {
@@ -283,6 +292,14 @@ pub const TileRegion = struct {
     segments: std.ArrayList(Segment) = .empty,
     /// Space between segments the path continues to, u.
     gap: f64 = 0,
+    /// How each segment's content is set in it: from its start, about its
+    /// centre, or back from its end. (Its origin places the segment; this
+    /// only arranges what is in it.)
+    alignment: Align = .start,
+    /// The length of the blank put in after each hard break as it is
+    /// entered, so a new paragraph starts indented, u; 0 for none. The blank
+    /// is an ordinary item: it can be resized or removed.
+    indent: f64 = 0,
     /// The flow, in order. A tile spanning segments (a 2 u tall key) is
     /// listed again where it crosses each later segment; its first entry
     /// places it, and the later ones keep its room.
@@ -955,9 +972,35 @@ pub const Model = struct {
     }
 
     /// Inserts a hard break at position `index` of a track: what follows
-    /// starts the next segment.
-    pub fn insertBreak(m: *Model, panel: usize, region: usize, index: usize) Error!void {
+    /// starts the next segment. With the track's indent set, a blank that
+    /// long follows it. Returns how many items went in (1, or 2).
+    pub fn insertBreak(m: *Model, panel: usize, region: usize, index: usize) Error!usize {
         try m.place(panel, region, index, .{ .what = .hard_break });
+        const indent = m.panels.items[panel].regions.items[region].indent;
+        if (!(indent > 0)) return 1;
+        _ = try m.insertBlank(panel, region, index + 1, indent);
+        return 2;
+    }
+
+    /// Joins item `index` of a track to the next one, or parts them: with
+    /// `bind`, no break falls between them, so they move as one group.
+    pub fn setBind(m: *Model, panel: usize, region: usize, index: usize, bind: bool) Error!void {
+        const items = m.flow(panel, region).items;
+        if (index + 1 >= items.len) return error.NoSuchItem;
+        items[index].bind = bind;
+        m.revision += 1;
+    }
+
+    /// Sets how a track's segments hold their content: its alignment, the
+    /// indent after hard breaks (u), and the gap between segments the path
+    /// continues to (u).
+    pub fn setTrackFlow(m: *Model, panel: usize, region: usize, alignment: Align, indent: f64, gap: f64) Error!void {
+        if (!(indent >= 0) or !(gap >= 0)) return error.BadSize;
+        const r = &m.panels.items[panel].regions.items[region];
+        r.alignment = alignment;
+        r.indent = indent;
+        r.gap = gap;
+        m.revision += 1;
     }
 
     /// Inserts a run of markup (text, an equation, or both) at position
@@ -1560,7 +1603,7 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     // Text and equations share the flow with the tiles, and a hard break
     // goes between any two items.
     try m.insertRun(p, r, 1, .{ .content = "x = \\frac{1}{2}" });
-    try m.insertBreak(p, r, 2);
+    _ = try m.insertBreak(p, r, 2);
     const mixed = m.panels.items[p].regions.items[r].items.items;
     try std.testing.expectEqual(5, mixed.len);
     try std.testing.expectEqualStrings("x = \\frac{1}{2}", mixed[1].what.run.content);

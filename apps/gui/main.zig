@@ -2942,6 +2942,7 @@ fn properties() !void {
             };
             if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
             if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
+            try trackFlowProperties(r.panel, r.region);
         },
         .row => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
@@ -3248,6 +3249,38 @@ fn isKeycap(art: ?layout.art.Art) bool {
 /// keyboard's u) when it follows its tracks' pitch.
 fn protoUnit(p: layout.model.TilePrototype) f64 {
     return p.unit orelse 19.05;
+}
+
+/// How a track holds its content: alignment in each row or column, the
+/// indent after hard breaks, and the gap between rows the path makes.
+fn trackFlowProperties(pi: usize, ri: usize) !void {
+    const region = state.model.panels.items[pi].regions.items[ri];
+    var alignment = region.alignment;
+    var indent = region.indent;
+    var gap = region.gap;
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 20 });
+        defer row.deinit();
+        propName("Content");
+        const names = [_][]const u8{ "From the start", "Centred", "Back from the end" };
+        var choice: usize = @intFromEnum(alignment);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 20 })) {
+            alignment = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    var buf: [32]u8 = undefined;
+    // Empty is none; one length each.
+    if (sizesProp("Indent, u", if (indent > 0) std.fmt.bufPrint(&buf, "{d}", .{indent}) catch "" else "any", 21)) |list| if (list.len <= 1) {
+        indent = if (list.len == 1) list[0] else 0;
+        changed = true;
+    };
+    if (sizesProp(if (region.major == .row) "Row gap, u" else "Column gap, u", if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
+        gap = if (list.len == 1) list[0] else 0;
+        changed = true;
+    };
+    if (changed) try state.model.setTrackFlow(pi, ri, alignment, indent, gap);
 }
 
 /// A new plain prototype with one slot and keycap art, made the context.
@@ -3810,6 +3843,10 @@ fn cursorKey(code: dvui.enums.Key) bool {
             cyclePalettePrototype(false);
             return true;
         },
+        .g => {
+            toggleBindAtCursor();
+            return true;
+        },
         .enter, .kp_enter => {
             insertAtCursor(.hard_break, 0);
             return true;
@@ -3859,7 +3896,13 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
             const unit = state.model.prototypes.items[pal.prototype].unitIn(r.pitch);
             _ = state.model.insertBlank(c.panel, c.region, c.index, size * unit / r.pitch) catch return;
         },
-        .hard_break => state.model.insertBreak(c.panel, c.region, c.index) catch return,
+        .hard_break => {
+            // With the track's indent, a blank follows: the cursor goes past
+            // it, to where the new paragraph's content starts.
+            const n = state.model.insertBreak(c.panel, c.region, c.index) catch return;
+            track_cursor.?.index += n;
+            return;
+        },
         .run => {
             const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
             state.model.insertRun(c.panel, c.region, c.index, .{ .style = style, .content = "" }) catch return;
@@ -3867,6 +3910,24 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
         },
     }
     track_cursor.?.index += 1;
+}
+
+/// Joins the items either side of the cursor into one group, or parts them:
+/// a group breaks as one.
+fn toggleBindAtCursor() void {
+    const c = track_cursor orelse return;
+    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    if (c.index == 0 or c.index >= items.len) {
+        state.status = "Put the cursor between two items to join or part them. ";
+        return;
+    }
+    const before = items[c.index - 1];
+    if (before.what == .hard_break or items[c.index].what == .hard_break) {
+        state.status = "A hard break cannot be part of a group. ";
+        return;
+    }
+    state.model.setBind(c.panel, c.region, c.index - 1, !before.bind) catch return;
+    state.status = if (before.bind) "Parted: a break may fall here. " else "Joined: no break falls here. ";
 }
 
 /// Set when a new run wants the expression line to take the keyboard.
@@ -3916,6 +3977,26 @@ fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32)
 fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
     const ghost = colors.edge.opacity(0.45);
+    // Groups: a tie along the foot of the row (or the side of the column)
+    // from each item to the next one it is bound to.
+    for (placed.items, 0..) |it, k| {
+        const item = modelItem(pi, it) orelse continue;
+        if (k + 1 >= placed.items.len) break;
+        const nx = placed.items[k + 1];
+        if (nx.region != it.region or nx.segment != it.segment) continue;
+        const next = modelItem(pi, nx) orelse continue;
+        if (!item.binds(next)) continue;
+        const r = state.model.panels.items[pi].regions.items[it.region];
+        const band = for (placed.tracks) |t| {
+            if (t.region == it.region and t.track == it.segment) break onSheet(pi, t.box);
+        } else continue;
+        const a_mid = (it.span[0] + it.span[1]) / 2;
+        const b_mid = (nx.span[0] + nx.span[1]) / 2;
+        const inset = r.pitch * 0.08;
+        const p0: geom.Point = if (r.major == .row) .{ .x = band.x0 + a_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - a_mid };
+        const p1: geom.Point = if (r.major == .row) .{ .x = band.x0 + b_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - b_mid };
+        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 2 * px, .color = .{ .color = dvui.themeGet().focus.opacity(0.7) } });
+    }
     for (placed.items) |it| {
         const what = (modelItem(pi, it) orelse continue).what;
         const r = state.model.panels.items[pi].regions.items[it.region];
@@ -3977,6 +4058,10 @@ fn trackPalette() void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
     if (flowButton(.run, 0)) insertAtCursor(.run, 0);
+    if (flowButton(.join, 3)) {
+        toggleBindAtCursor();
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    }
     if (flowButton(.next_prototype, 2)) {
         cyclePalettePrototype(false);
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
@@ -3989,7 +4074,7 @@ fn trackPalette() void {
 
 /// A palette button for an item that is not a tile: its key, a picture and
 /// what it puts in.
-fn flowButton(kind: enum { run, hard_break, next_prototype }, i: usize) bool {
+fn flowButton(kind: enum { run, hard_break, next_prototype, join }, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .id_extra = i,
@@ -4012,6 +4097,7 @@ fn flowButton(kind: enum { run, hard_break, next_prototype }, i: usize) bool {
             .run => "A",
             .hard_break => "Enter",
             .next_prototype => "Tab",
+            .join => "G",
         }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
         var pic = dvui.box(@src(), .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 22, .h = 18 }, .max_size_content = .{ .w = 22, .h = 18 } });
         const r = pic.data().contentRectScale().r;
@@ -4028,6 +4114,15 @@ fn flowButton(kind: enum { run, hard_break, next_prototype }, i: usize) bool {
             const h = r.h * 0.25;
             dvui.Path.stroke(.{ .points = &.{ .{ .x = right, .y = top }, .{ .x = right, .y = low }, .{ .x = left, .y = low } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
             dvui.Path.stroke(.{ .points = &.{ .{ .x = left + h, .y = low - h }, .{ .x = left, .y = low }, .{ .x = left + h, .y = low + h } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+        } else if (kind == .join) {
+            // Two tiles with a tie under them: one group.
+            const w = r.w * 0.38;
+            const a_r: dvui.Rect.Physical = .{ .x = r.x + r.w * 0.06, .y = r.y + r.h * 0.1, .w = w, .h = r.h * 0.55 };
+            const b_r: dvui.Rect.Physical = .{ .x = r.x + r.w * 0.56, .y = r.y + r.h * 0.1, .w = w, .h = r.h * 0.55 };
+            a_r.stroke(.all(2 * px), .{ .thickness = px, .color = .{ .color = colors.edge } });
+            b_r.stroke(.all(2 * px), .{ .thickness = px, .color = .{ .color = colors.edge } });
+            const y = r.y + r.h * 0.85;
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = a_r.x + w / 2, .y = y }, .{ .x = b_r.x + w / 2, .y = y } } }, .{ .thickness = 2 * px, .color = .{ .color = dvui.themeGet().focus } });
         } else if (kind == .next_prototype) {
             // Two tiles side by side: another kind of tile.
             const w = r.w * 0.42;
@@ -4052,6 +4147,7 @@ fn flowButton(kind: enum { run, hard_break, next_prototype }, i: usize) bool {
             .run => "Text or equation",
             .hard_break => "Hard break",
             .next_prototype => next_name,
+            .join => "Join or part",
         }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 8 } });
     }
     bw.drawFocus();

@@ -379,8 +379,47 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         const rows = region.major == .row;
         const length = region.segmentLength() * region.pitch;
         const tol = 1e-9;
+        const items = region.items.items;
+
+        // First, every item's size along, and for a run its render.
+        const sizes = try a.alloc(f64, items.len);
+        const renders = try a.alloc(?*const engine.Render, items.len);
+        for (items, sizes, renders, 0..) |item, *size, *rr, index| {
+            rr.* = null;
+            size.* = switch (item.what) {
+                // In its prototype's unit, so a key keeps its size in a
+                // track of another pitch.
+                .tile => |id| blk: {
+                    const t = m.tileConst(id);
+                    const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
+                    break :blk (if (rows) t.w else t.h) * unit;
+                },
+                .run => |run| blk: {
+                    if (run.content.len == 0) break :blk 0.5 * region.pitch;
+                    if (labels.context(run.style) == null) {
+                        try issues.append(a, .{ .kind = .style_error, .region = ri, .item = index });
+                        break :blk 0.5 * region.pitch;
+                    }
+                    const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content })) orelse break :blk 0.5 * region.pitch;
+                    rr.* = render;
+                    const d = render.design;
+                    break :blk if (d.isEmpty()) 0 else if (rows) d.x1 - d.x0 else d.y1 - d.y0;
+                },
+                .hard_break => 0,
+            };
+        }
+
+        // Then the flow: each item's segment and span, before alignment.
+        // A group (items bound to the next, see `Item.bind`) breaks as one:
+        // when it does not fit, the whole of it moves on.
+        const segs_of = try a.alloc(usize, items.len);
+        const spans = try a.alloc([2]f64, items.len);
+        const dropped = try a.alloc(bool, items.len);
+        @memset(dropped, false);
         // Where each tile placed so far starts, along its segment.
         var placed_at: std.AutoHashMapUnmanaged(TileId, f64) = .empty;
+        const pinned = try a.alloc(bool, items.len);
+        @memset(pinned, false);
         // The segments, made as the flow reaches them: their origins along
         // the path, their bands, and how far each one's content reaches.
         var path: Path = .{ .region = &region, .avoid = tracks.items };
@@ -390,9 +429,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var in_seg: usize = 0;
         var para: f64 = 0;
         var natural: f64 = 0;
-        for (region.items.items, 0..) |item, index| {
+        for (items, 0..) |item, index| {
             if (item.what == .hard_break) {
-                try placed_items.append(a, .{ .region = ri, .index = index, .segment = seg, .span = .{ pos, pos } });
+                segs_of[index] = seg;
+                spans[index] = .{ pos, pos };
                 natural = @max(natural, para);
                 para = 0;
                 if (seg + 1 < max_segments) {
@@ -404,42 +444,29 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 continue;
             }
             const gap = item.gap * region.pitch;
-            // The item's size along, and for a run its render.
-            var run_render: ?*const engine.Render = null;
-            const size: f64 = switch (item.what) {
-                // In its prototype's unit, so a key keeps its size in a
-                // track of another pitch.
-                .tile => |id| blk: {
-                    const t = m.tileConst(id);
-                    const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
-                    break :blk (if (rows) t.w else t.h) * unit;
-                },
-                .run => |run| blk: {
-                    if (run.content.len == 0) break :blk 0.5 * region.pitch;
-                    if (labels.context(run.style) == null) {
-                        try issues.append(a, .{ .kind = .style_error, .region = ri, .row = seg, .item = index });
-                        break :blk 0.5 * region.pitch;
-                    }
-                    const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content })) orelse break :blk 0.5 * region.pitch;
-                    run_render = render;
-                    const d = render.design;
-                    break :blk if (d.isEmpty()) 0 else if (rows) d.x1 - d.x0 else d.y1 - d.y0;
-                },
-                .hard_break => unreachable,
-            };
+            const size = sizes[index];
             const pin = if (item.tileOf()) |id| placed_at.get(id) else null;
+            // Inside a group (bound to the item before), no break.
+            const in_group = index > 0 and items[index - 1].binds(items[index]);
             var start: f64 = undefined;
             if (pin) |at| {
                 // The later entries of a spanning tile keep its room.
                 if (pos > at + tol) try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = seg, .amount = pos - at });
                 start = at;
+                pinned[index] = true;
                 para = @max(para, at) + size;
             } else {
                 start = pos + gap;
                 para += gap + size;
+                // What must fit here: this item, or its whole group.
+                var need = size;
+                if (!in_group) {
+                    var k = index;
+                    while (k + 1 < items.len and items[k].binds(items[k + 1])) : (k += 1) need += items[k + 1].gap * region.pitch + sizes[k + 1];
+                }
                 // It does not fit: on to the next segment, made as needed,
                 // if this one holds something already.
-                if (start + size > length + tol and in_seg > 0 and seg + 1 < max_segments) {
+                if (!in_group and start + need > length + tol and in_seg > 0 and seg + 1 < max_segments) {
                     seg += 1;
                     try path.ensure(a, seg);
                     pos = 0;
@@ -449,7 +476,9 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     // prototype says so (a space between words) is dropped.
                     if (item.tileOf()) |id| if (m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop) {
                         para -= gap + size;
-                        try placed_items.append(a, .{ .region = ri, .index = index, .segment = seg, .span = .{ 0, 0 } });
+                        segs_of[index] = seg;
+                        spans[index] = .{ 0, 0 };
+                        dropped[index] = true;
                         continue;
                     };
                 }
@@ -458,13 +487,42 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             pos = @max(pos, end);
             in_seg += 1;
             path.reach.items[seg] = @max(path.reach.items[seg], end);
-            try placed_items.append(a, .{ .region = ri, .index = index, .segment = seg, .span = .{ start, end } });
+            segs_of[index] = seg;
+            spans[index] = .{ start, end };
+            if (pin == null) if (item.tileOf()) |id| try placed_at.put(a, id, start);
+        }
 
-            const band = path.boxes.items[seg];
+        // Each segment's content set by the track's alignment: from its
+        // start, about its centre, or back from its end. A segment holding
+        // a spanning tile's later entry keeps that tile's segment's shift.
+        const shifts = try a.alloc(f64, path.origins.items.len);
+        for (shifts, path.reach.items) |*sh, r_| {
+            const free = @max(0, length - r_);
+            sh.* = switch (region.alignment) {
+                .start => 0,
+                .centre => free / 2,
+                .end => free,
+            };
+        }
+        for (items, 0..) |_, index| if (pinned[index]) {
+            const id = items[index].tileOf().?;
+            for (0..index) |k| if (items[k].tileOf() == id and !pinned[k]) {
+                shifts[segs_of[index]] = shifts[segs_of[k]];
+                break;
+            };
+        };
+
+        // Last, each item where it landed.
+        for (items, 0..) |item, index| {
+            const sg = segs_of[index];
+            const sh = if (dropped[index]) 0 else shifts[sg];
+            const start = spans[index][0] + sh;
+            const end = spans[index][1] + sh;
+            try placed_items.append(a, .{ .region = ri, .index = index, .segment = sg, .span = .{ start, end } });
+            if (dropped[index] or pinned[index]) continue;
+            const band = path.boxes.items[sg];
             switch (item.what) {
                 .tile => |pid| {
-                    if (pin != null) continue;
-                    try placed_at.put(a, pid, start);
                     const t = m.tileConst(pid);
                     const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
                     const w = t.w * unit;
@@ -476,12 +534,12 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     const body = proto.body_inset.inset(pitch_box);
                     // A spacer is drawn by nothing and bounds nothing.
                     if (proto.spacer) {
-                        try tiles.append(a, .{ .id = pid, .region = ri, .row = seg, .pitch_box = pitch_box, .body = pitch_box, .face = pitch_box, .shapes = &.{}, .spacer = true });
+                        try tiles.append(a, .{ .id = pid, .region = ri, .row = sg, .pitch_box = pitch_box, .body = pitch_box, .face = pitch_box, .shapes = &.{}, .spacer = true });
                         continue;
                     }
                     const shapes = if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
                         error.CurveCrossesCut => blk: {
-                            try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = seg });
+                            try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = sg });
                             break :blk try art.plainShapes(a, proto.*, unit, pitch_box);
                         },
                         else => |e| return e,
@@ -489,18 +547,18 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     try tiles.append(a, .{
                         .id = pid,
                         .region = ri,
-                        .row = seg,
+                        .row = sg,
                         .pitch_box = pitch_box,
                         .body = body,
                         .face = proto.face_inset.inset(body),
                         .shapes = shapes,
                     });
-                    if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = seg });
+                    if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = sg });
                     bounds = bounds.join(pitch_box);
                 },
                 .run => |run| {
-                    const render = run_render orelse continue;
-                    if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = seg, .item = index, .syntax = render.syntax[0] });
+                    const render = renders[index] orelse continue;
+                    if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = index, .syntax = render.syntax[0] });
                     const d = render.design;
                     const cap = labels.context(run.style).?.spec.cap_height;
                     // On a baseline that centres its capitals across a
@@ -523,11 +581,11 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                         .render = render,
                     });
                     for (render.diagnostics) |dg| if (dg.kind == .missing_glyph) {
-                        try issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = seg, .item = index });
+                        try issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = index });
                         break;
                     };
                 },
-                else => {},
+                .hard_break => {},
             }
         }
         natural = @max(natural, para);
@@ -1032,7 +1090,7 @@ test "segments follow a path: moving one bends it, the next ones follow, and non
     // the flow reaches them, straight down.
     for (0..3) |t| {
         for (0..2) |_| _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-        if (t < 2) try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+        if (t < 2) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
     }
     try testing.expectEqual(1, m.panels.items[p].regions.items[r].segments.items.len);
     var labels: Labels = .init(gpa, &.{});
@@ -1057,7 +1115,7 @@ test "segments follow a path: moving one bends it, the next ones follow, and non
     // Row 3 0.5 u right: the path's last piece now leans right, so a
     // fourth row goes on that way, one row thickness along it.
     try moveIn(&m, &labels, p, r, 2, 0.5, 0);
-    try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+    _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
     _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
     {
         var s = try solve(gpa, &m, p, &labels);
@@ -1096,7 +1154,7 @@ test "segments past the soft area are flagged, and past the panel the region is"
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 25 }, .prototype = key, .count = 2, .length = 2, .pitch = 10 });
     for (0..3) |t| {
         _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-        if (t < 2) try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+        if (t < 2) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
     }
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
@@ -1125,7 +1183,7 @@ test "a region past its panel is flagged, and fitting it to its tiles can bring 
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 30 }, .prototype = key, .count = 2, .length = 8, .pitch = 10 });
     _ = try m.insertTile(p, r, 0, key, 1.5);
     _ = try m.insertTile(p, r, 1, key, 1);
-    try m.insertBreak(p, r, 2);
+    _ = try m.insertBreak(p, r, 2);
     _ = try m.insertTile(p, r, 3, key, 1);
     _ = try m.insertBlank(p, r, 4, 0.5);
     var labels: Labels = .init(gpa, &faces);
@@ -1166,7 +1224,7 @@ test "text, tiles and equations share one flow, set on one baseline" {
     try m.insertRun(p, r, 1, .{ .style = style, .content = "HOD" });
     try m.place(p, r, null, .{ .gap = 0.5, .what = .{ .run = .{ .style = style, .content = "A = \\frac{H}{D}" } } });
     _ = try m.insertTile(p, r, 3, key, 1);
-    try m.insertBreak(p, r, 4);
+    _ = try m.insertBreak(p, r, 4);
     try m.insertRun(p, r, 5, .{ .style = style, .content = "ADD" });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
@@ -1207,7 +1265,7 @@ test "an item that does not fit moves to the next segment, and the flow after it
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 3, .length = 3, .pitch = 10 });
     // Two rows of three, a hard break between them.
     for (0..3) |i| _ = try m.insertTile(p, r, i, key, 1);
-    try m.insertBreak(p, r, 3);
+    _ = try m.insertBreak(p, r, 3);
     for (4..7) |i| _ = try m.insertTile(p, r, i, key, 1);
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
@@ -1226,7 +1284,7 @@ test "an item that does not fit moves to the next segment, and the flow after it
     const segs = [_]usize{ 0, 0, 1, 1, 1, 2, 2, 2 };
     for (s.items, segs) |it, want| try testing.expectEqual(want, it.segment);
     // One more paragraph than the soft area holds: a fourth row, flagged.
-    try m.insertBreak(p, r, 8);
+    _ = try m.insertBreak(p, r, 8);
     _ = try m.insertTile(p, r, 9, key, 1);
     var t = try solve(testing.allocator, &m, p, &labels);
     defer t.deinit();
@@ -1293,4 +1351,95 @@ test "one track holds keycaps, another prototype's keys and blanks, all as tiles
     // is not.
     try testing.expectEqual(7, s.tiles.len);
     try testing.expectEqual(null, s.findTile(m.findTile("T4").?));
+}
+
+/// Appends a 1 u key made from `key` to region `r`'s flow.
+fn appendKey(m: *Model, p: usize, r: usize, key: model.PrototypeId) !TileId {
+    return m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
+}
+
+test "a group breaks as one: the arrow cluster stays together across a reflow" {
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 6, .pitch = 10 });
+    for (0..4) |_| _ = try appendKey(&m, p, r, key);
+    // Left, Down, Right: bound into one group.
+    for (0..3) |_| _ = try appendKey(&m, p, r, key);
+    try m.setBind(p, r, 4, true);
+    try m.setBind(p, r, 5, true);
+    try testing.expectError(error.NoSuchItem, m.setBind(p, r, 6, true));
+    var labels: Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    {
+        // 7 u in 6 u rows: unbound, only Right would wrap; bound, the three go.
+        var s = try solve(testing.allocator, &m, p, &labels);
+        defer s.deinit();
+        for (s.items[0..4]) |it| try testing.expectEqual(0, it.segment);
+        for (s.items[4..7]) |it| try testing.expectEqual(1, it.segment);
+        try testing.expectApproxEqAbs(@as(f64, 0), s.items[4].span[0], 1e-9);
+    }
+    // Two more keys at the start: the first row fills, and the cluster
+    // still moves as one.
+    _ = try m.insertTile(p, r, 0, key, 1);
+    _ = try m.insertTile(p, r, 0, key, 1);
+    var s = try solve(testing.allocator, &m, p, &labels);
+    defer s.deinit();
+    for (s.items[0..6]) |it| try testing.expectEqual(0, it.segment);
+    for (s.items[6..9]) |it| try testing.expectEqual(1, it.segment);
+    // Parted again, Left fits nowhere better: it wraps alone with the rest.
+    try m.setBind(p, r, 6, false);
+    var t = try solve(testing.allocator, &m, p, &labels);
+    defer t.deinit();
+    try testing.expectEqual(1, t.items[6].segment);
+    try testing.expectEqual(0, t.issues.len);
+}
+
+test "a centred track centres every segment; an end-aligned one sets it back from the end" {
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 6, .pitch = 10 });
+    for (0..2) |_| _ = try appendKey(&m, p, r, key);
+    _ = try m.insertBreak(p, r, 2);
+    for (0..4) |_| _ = try appendKey(&m, p, r, key);
+    try m.setTrackFlow(p, r, .centre, 0, 0);
+    var labels: Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    {
+        var s = try solve(testing.allocator, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[0].pitch_box.x0, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[2].pitch_box.x0, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 20), s.items[0].span[0], 1e-9);
+    }
+    try m.setTrackFlow(p, r, .end, 0, 0);
+    var s = try solve(testing.allocator, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[1].pitch_box.x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[5].pitch_box.x1, 1e-9);
+    try testing.expectError(error.BadSize, m.setTrackFlow(p, r, .start, -1, 0));
+}
+
+test "with an indent, each hard break brings a blank, so new paragraphs start indented" {
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 6, .pitch = 10 });
+    try m.setTrackFlow(p, r, .start, 0.5, 0);
+    _ = try appendKey(&m, p, r, key);
+    const items = &m.panels.items[p].regions.items[r].items;
+    try testing.expectEqual(2, try m.insertBreak(p, r, items.items.len));
+    _ = try appendKey(&m, p, r, key);
+    var labels: Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    var s = try solve(testing.allocator, &m, p, &labels);
+    defer s.deinit();
+    // The blank is an ordinary item, a spacer of the indent's length.
+    try testing.expect(m.prototypes.items[m.tileConst(items.items[2].tileOf().?).prototype].spacer);
+    try testing.expectApproxEqAbs(@as(f64, 5), s.items[3].span[0], 1e-9);
+    try testing.expectEqual(1, s.items[3].segment);
 }
