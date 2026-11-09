@@ -223,21 +223,34 @@ pub const Item = struct {
     }
 };
 
-/// A segment: one row, or one column, of a track. The track's flow is
-/// poured through its segments in order. Segments are laid out one after
-/// another across their region, but each may be moved on its own.
+/// A segment's origin: one row, or one column, of a track, by where its
+/// start corner sits, u from the region's origin: `along` the track's
+/// length, and `across` it (down for rows, right for columns).
+///
+/// A track's segments lie on a path through their origins, in order. The
+/// path is straight pieces between origins and carries on past the last
+/// one in the direction of its last piece (across, at first); each new
+/// segment goes one segment's thickness plus the track's gap along it.
 pub const Segment = struct {
-    /// Space before the segment across the region (above a row, left of a
-    /// column), u, while it follows the segment before it.
-    gap: f64 = 0,
-    /// Where the segment starts across the region, u from its start edge,
-    /// once it has been placed on its own; null follows the segment before
-    /// (one segment's thickness on, plus `gap`).
-    across: ?f64 = null,
-    /// How far the segment, content and all, is shifted along from the
-    /// region's start, u; either way.
-    offset: f64 = 0,
+    along: f64 = 0,
+    across: f64 = 0,
+
+    /// The point `d` u along the direction (`dir_along`, `dir_across`).
+    pub fn step(s: Segment, dir: [2]f64, d: f64) Segment {
+        return .{ .along = s.along + dir[0] * d, .across = s.across + dir[1] * d };
+    }
 };
+
+/// The path's direction from origin `prev` to `last`: a unit vector, or
+/// straight across when there is no piece yet (or it has no length).
+pub fn pathDirection(prev: ?Segment, last: Segment) [2]f64 {
+    const p = prev orelse return .{ 0, 1 };
+    const da = last.along - p.along;
+    const dc = last.across - p.across;
+    const len = @sqrt(da * da + dc * dc);
+    if (len < 1e-9) return .{ 0, 1 };
+    return .{ da / len, dc / len };
+}
 
 /// Which way a region's tracks run: rows, filled left to right and stacked
 /// top to bottom, or columns, filled top to bottom and set left to right.
@@ -262,9 +275,14 @@ pub const TileRegion = struct {
     /// pitch thick (the pitch is the style's baseline-to-baseline distance
     /// when the region was made), and new runs in it take the style.
     style: ?StyleId = null,
-    /// Its segments, in order: rows top to bottom, or columns left to
-    /// right. A segment's gap is the space before it.
+    /// Its segments' origins, in order, as far as they have been placed:
+    /// the first, and any moved by hand (with those before it). The rest
+    /// continue the path as the flow needs them (see `Segment`); the
+    /// region's `w` × `h` is the soft area they expand into, and segments
+    /// past it are flagged.
     segments: std.ArrayList(Segment) = .empty,
+    /// Space between segments the path continues to, u.
+    gap: f64 = 0,
     /// The flow, in order. A tile spanning segments (a 2 u tall key) is
     /// listed again where it crosses each later segment; its first entry
     /// places it, and the later ones keep its room.
@@ -275,26 +293,32 @@ pub const TileRegion = struct {
         return if (r.major == .row) r.w else r.h;
     }
 
-    /// Where segment `t` starts across the region, u from its start edge.
-    pub fn segmentAcross(r: TileRegion, t: usize) f64 {
-        var at: f64 = 0;
-        for (r.segments.items[0 .. t + 1], 0..) |seg, i| {
-            const follows = if (i == 0) 0 else at + 1;
-            at = seg.across orelse follows + seg.gap;
-        }
-        return at;
+    /// The origin after `last` (with `prev` before it) on the path, before
+    /// any skip past a blocked place.
+    pub fn nextOrigin(r: TileRegion, prev: ?Segment, last: Segment) Segment {
+        return last.step(pathDirection(prev, last), 1 + r.gap);
     }
 
-    /// Segment `t`'s band in the panel frame, mm: its length along, one
-    /// pitch across, moved as the segment has been.
-    pub fn segmentBox(r: TileRegion, t: usize) geom.Box {
-        const across = r.segmentAcross(t) * r.pitch;
-        const shift = r.segments.items[t].offset * r.pitch;
+    /// The band of a segment at origin `s`, mm in the panel frame: its
+    /// length along, one pitch across.
+    pub fn boxAt(r: TileRegion, s: Segment) geom.Box {
+        const across = s.across * r.pitch;
+        const shift = s.along * r.pitch;
         const length = r.segmentLength() * r.pitch;
         return if (r.major == .row)
             .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
         else
             .{ .x0 = r.origin.x + across, .x1 = r.origin.x + across + r.pitch, .y1 = r.origin.y - shift, .y0 = r.origin.y - shift - length };
+    }
+
+    /// Stored segment `t`'s band (see `boxAt`).
+    pub fn segmentBox(r: TileRegion, t: usize) geom.Box {
+        return r.boxAt(r.segments.items[t]);
+    }
+
+    /// The soft area its segments expand into, mm in the panel frame.
+    pub fn softArea(r: TileRegion) geom.Box {
+        return .{ .x0 = r.origin.x, .x1 = r.origin.x + r.w * r.pitch, .y1 = r.origin.y, .y0 = r.origin.y - r.h * r.pitch };
     }
 };
 
@@ -813,15 +837,16 @@ pub const Model = struct {
         /// line thick at `pitch`, its line pitch). One of the two.
         prototype: ?PrototypeId = null,
         style: ?StyleId = null,
-        /// How many segments, and each one's length, u.
+        /// How many segments the soft area holds, and each one's length, u.
         count: usize,
         length: f64,
         pitch: f64,
     };
 
-    /// Adds a region of `count` empty segments sized to a prototype or a
-    /// text style (see `Tracks`); the user adds the content. Returns the
-    /// region's index.
+    /// Adds a track sized to a prototype or a text style (see `Tracks`):
+    /// its first segment, and a soft area `count` segments thick for the
+    /// rest to expand into. The user adds the content. Returns the region's
+    /// index.
     pub fn addTracks(m: *Model, panel: usize, t: Tracks) Error!usize {
         var along: f64 = 0;
         var across: f64 = 1;
@@ -845,7 +870,9 @@ pub const Model = struct {
             .prototype = t.prototype,
             .style = t.style,
         });
-        for (0..t.count) |_| _ = try m.addSegment(panel, r, 0);
+        // The first segment; the rest come as the flow needs them, within
+        // the soft area `count` segments thick.
+        _ = try m.addSegment(panel, r, 0);
         return r;
     }
 
@@ -970,33 +997,33 @@ pub const Model = struct {
     }
 
     /// Moves a segment, content and all, `along` u along its length and
-    /// `across` u across the region (down for a row, right for a column),
-    /// either way. Every other segment keeps its place. It may move past
-    /// its region or its panel (flagged when placed), but not onto another
-    /// segment's band anywhere on the panel: that is refused with `NoRoom`.
-    pub fn moveSegment(m: *Model, panel: usize, region: usize, segment: usize, along: f64, across: f64) Error!void {
+    /// `across` u across (down for a row, right for a column), either way:
+    /// its origin moves, and the path bends through it, so the segments the
+    /// path continues to after it follow. `solved` is the region's segment
+    /// origins as last placed (see `place.PlacedTrack`): those up to this
+    /// one are kept from now on. It may move past its region or panel
+    /// (flagged when placed), but not onto any box in `avoid` (the other
+    /// segments on the panel): that is refused with `NoRoom`.
+    pub fn moveSegment(m: *Model, panel: usize, region: usize, segment: usize, solved: []const Segment, along: f64, across: f64, avoid: []const geom.Box) Error!void {
         const r = &m.panels.items[panel].regions.items[region];
-        const segs = r.segments.items;
-        if (segment >= segs.len) return error.NoSuchRow;
-        // Where it would go, with the others where they are now.
-        var seg = segs[segment];
-        seg.across = r.segmentAcross(segment) + across;
-        seg.offset += along;
-        const saved = segs[segment];
-        segs[segment] = seg;
-        const target = r.segmentBox(segment);
-        segs[segment] = saved;
-        for (m.panels.items[panel].regions.items, 0..) |other, oi| for (0..other.segments.items.len) |ot| {
-            if (oi == region and ot == segment) continue;
-            if (overlaps(target, other.segmentBox(ot))) return error.NoRoom;
-        };
-        // Every segment of the region placed on its own from now on, so its
-        // neighbours stay where they are.
-        var places: [256]f64 = undefined;
-        if (segs.len > places.len) return error.NoRoom;
-        for (0..segs.len) |t| places[t] = r.segmentAcross(t);
-        for (segs, 0..) |*t, i| t.across = places[i];
-        segs[segment] = seg;
+        if (segment >= solved.len and segment >= r.segments.items.len) return error.NoSuchRow;
+        const here = if (segment < r.segments.items.len) r.segments.items[segment] else solved[segment];
+        const target: Segment = .{ .along = here.along + along, .across = here.across + across };
+        const box = r.boxAt(target);
+        for (avoid) |b| if (overlaps(box, b)) return error.NoRoom;
+        // Keep the origins up to this one, as placed, so the path bends here.
+        while (r.segments.items.len <= segment) try r.segments.append(m.a(), solved[r.segments.items.len]);
+        r.segments.items[segment] = target;
+        m.revision += 1;
+    }
+
+    /// Drops kept origins past the first `count` segments, which the flow
+    /// no longer reaches: a segment left empty at the end goes. One stays.
+    pub fn trimSegments(m: *Model, panel: usize, region: usize, count: usize) void {
+        const segs = &m.panels.items[panel].regions.items[region].segments;
+        const keep = @max(1, count);
+        if (segs.items.len <= keep) return;
+        segs.shrinkRetainingCapacity(keep);
         m.revision += 1;
     }
 
@@ -1007,11 +1034,21 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Keeps one more segment origin, continuing the path with `gap` u of
+    /// extra space before it (the first sits at the region's origin), as a
+    /// sample laying out rows does. Returns its index.
     pub fn addSegment(m: *Model, panel: usize, region: usize, gap: f64) Error!usize {
-        const segs = &m.panels.items[panel].regions.items[region].segments;
-        try segs.append(m.a(), .{ .gap = gap });
+        const r = &m.panels.items[panel].regions.items[region];
+        const segs = &r.segments;
+        const n = segs.items.len;
+        const next: Segment = if (n == 0) .{} else blk: {
+            const last = segs.items[n - 1];
+            const prev = if (n >= 2) segs.items[n - 2] else null;
+            break :blk last.step(pathDirection(prev, last), 1 + gap);
+        };
+        try segs.append(m.a(), next);
         m.revision += 1;
-        return segs.items.len - 1;
+        return n;
     }
 
     pub fn addPrototype(m: *Model, p: TilePrototype) Error!PrototypeId {
@@ -1469,7 +1506,8 @@ test "tracks are added empty; a removed tile leaves them" {
     const region = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(4.5, region.w);
     try std.testing.expectEqual(2, region.h);
-    try std.testing.expectEqual(2, region.segments.items.len);
+    // One segment to start; the rest come as the flow needs them.
+    try std.testing.expectEqual(1, region.segments.items.len);
     try std.testing.expectEqual(0, region.items.items.len);
     try std.testing.expectEqual(0, m.tiles.items.len);
 
@@ -1544,7 +1582,7 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     try std.testing.expectEqual(null, region.prototype);
     try std.testing.expectEqual(20, region.w);
     try std.testing.expectEqual(3, region.h);
-    try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.segmentBox(1).height(), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.boxAt(.{ .across = 1 }).height(), 1e-9);
     try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = 9, .count = 1, .length = 2, .pitch = 4 }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
 }

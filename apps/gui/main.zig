@@ -478,6 +478,17 @@ fn update() !void {
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
+    // Segments the flow no longer reaches go, kept origins and all (the
+    // next solve shows it); a selected one gives way to its track.
+    for (state.placed.items, 0..) |*pl, pi| for (pl.flows) |f| {
+        state.model.trimSegments(pi, f.region, f.segments);
+        switch (state.context) {
+            .row => |r| if (r.panel == pi and r.region == f.region and r.row >= f.segments) {
+                state.context = .{ .region = .{ .panel = pi, .region = f.region } };
+            },
+            else => {},
+        }
+    };
 }
 
 fn clearPlaced() void {
@@ -1214,8 +1225,9 @@ fn worksheetTree() void {
             _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, 3, false, label.default_content);
         }
         for (panel.regions.items, 0..) |region, ri| {
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, region.segments.items.len > 0, false)) continue;
-            for (0..region.segments.items.len) |rowi| {
+            const seg_count = segmentCount(pi, ri);
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, seg_count > 0, false)) continue;
+            for (0..seg_count) |rowi| {
                 const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), rowi + 1 }) catch "Row";
                 // What the flow put in this segment, from the last solve.
                 const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
@@ -1576,9 +1588,23 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         const outside = for (placed.issues) |i| {
             if (i.kind == .region_outside and i.region == t.region) break true;
         } else false;
-        const colour = if (outside) colors.overflow else colors.edge.opacity(0.35);
+        // Past its track's soft area: in the warning colour, lighter.
+        const past_soft = for (placed.issues) |i| {
+            if (i.kind == .past_soft_area and i.region == t.region and i.row == t.track) break true;
+        } else false;
+        const colour = if (outside) colors.overflow else if (past_soft) colors.overflow.opacity(0.5) else colors.edge.opacity(0.35);
         state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
+    // The context track's soft area, which its rows or columns expand
+    // into, as a faint dashed outline.
+    const soft_region: ?usize = switch (state.context) {
+        .region => |r| if (r.panel == pi) r.region else null,
+        .row => |r| if (r.panel == pi) r.region else null,
+        else => null,
+    };
+    if (soft_region) |sr| if (sr < state.model.panels.items[pi].regions.items.len) {
+        dashedBox(area, onSheet(pi, state.model.panels.items[pi].regions.items[sr].softArea()), dvui.themeGet().focus.opacity(0.5), px);
+    };
     for (placed.tiles) |t| {
         const in_context = inContext(pi, t);
         // A blank (a spacer tile): a faint outline while editing, nothing in
@@ -2909,7 +2935,7 @@ fn properties() !void {
             else
                 propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
             propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
-            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{region.segments.items.len}, 5);
+            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{segmentCount(r.panel, r.region)}, 5);
             propText("Items", "{d}", .{region.items.items.len}, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
@@ -2919,9 +2945,9 @@ fn properties() !void {
         },
         .row => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
-            propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, region.segments.items.len, region.name }, 1);
+            propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, segmentCount(r.panel, r.region), region.name }, 1);
             var where_buf: [96]u8 = undefined;
-            propText("Placed", "{s}", .{trackWhere(&where_buf, region, r.row)}, 2);
+            propText("Placed", "{s}", .{trackWhere(&where_buf, r.panel, r.region, r.row)}, 2);
             var held: usize = 0;
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].items) |it| {
                 if (it.region == r.region and it.segment == r.row and !isBreak(r.panel, it)) held += 1;
@@ -3635,6 +3661,20 @@ fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
     return after orelse r.items.items.len;
 }
 
+/// How many rows or columns a track's flow reached in the last solve.
+fn segmentCount(pi: usize, region: usize) usize {
+    if (pi >= state.placed.items.len) return 0;
+    for (state.placed.items[pi].flows) |f| if (f.region == region) return f.segments;
+    return 0;
+}
+
+/// Where row or column `t` of a track's path lies, from the last solve.
+fn segmentOrigin(pi: usize, region: usize, t: usize) ?layout.model.Segment {
+    if (pi >= state.placed.items.len) return null;
+    for (state.placed.items[pi].tracks) |tr| if (tr.region == region and tr.track == t) return tr.origin;
+    return null;
+}
+
 /// The model's item for a placed one, while the model still has it: the
 /// placement is from the last solve, and an edit since may have removed it.
 fn modelItem(pi: usize, it: layout.place.PlacedItem) ?layout.model.Item {
@@ -3667,7 +3707,6 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
 /// Where the cursor shows: the segment and the distance along it, mm.
 fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
     if (c.panel >= state.placed.items.len) return null;
-    const r = state.model.panels.items[c.panel].regions.items[c.region];
     var prev: ?layout.place.PlacedItem = null;
     var here: ?layout.place.PlacedItem = null;
     for (state.placed.items[c.panel].items) |it| {
@@ -3677,7 +3716,7 @@ fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
     }
     // After a hard break: the start of the next segment.
     if (prev) |p| if (isBreak(c.panel, p)) {
-        const seg = if (here) |h| h.segment else @min(p.segment + 1, r.segments.items.len - 1);
+        const seg = if (here) |h| h.segment else @min(p.segment + 1, @max(1, segmentCount(c.panel, c.region)) - 1);
         return .{ .segment = seg, .along = 0 };
     };
     if (here) |h| {
@@ -3793,7 +3832,7 @@ fn cursorKey(code: dvui.enums.Key) bool {
                 if (!forward and c.index > 0) next.index -= 1;
             } else if (cursorPlace(c)) |at| {
                 // To the nearest place in the next or previous segment.
-                const segs = region.segments.items.len;
+                const segs = segmentCount(c.panel, c.region);
                 if (forward and at.segment + 1 < segs) next.index = indexAt(c.panel, c.region, at.segment + 1, at.along);
                 if (!forward and at.segment > 0) next.index = indexAt(c.panel, c.region, at.segment - 1, at.along);
             }
@@ -3849,6 +3888,25 @@ fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.P
         const p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 3 * px, .color = .{ .color = focus } });
         return;
+    }
+}
+
+/// A box outlined in dashes, about 2 mm long, on the worksheet.
+fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32) void {
+    const corners = [_]geom.Point{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 }, .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x0, .y = b.y0 } };
+    const dash = 2.0;
+    for (0..4) |i| {
+        const a = corners[i];
+        const z = corners[(i + 1) % 4];
+        const len = @sqrt((z.x - a.x) * (z.x - a.x) + (z.y - a.y) * (z.y - a.y));
+        if (len <= 0) continue;
+        var d: f64 = 0;
+        while (d < len) : (d += 2 * dash) {
+            const e = @min(len, d + dash);
+            const p0: geom.Point = .{ .x = a.x + (z.x - a.x) * d / len, .y = a.y + (z.y - a.y) * d / len };
+            const p1: geom.Point = .{ .x = a.x + (z.x - a.x) * e / len, .y = a.y + (z.y - a.y) * e / len };
+            dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = px, .color = .{ .color = colour } });
+        }
     }
 }
 
@@ -4048,7 +4106,8 @@ fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
 //
 // With a track (a row or a column) as the context, the arrow keys, or the
 // move palette's inverted-T buttons, move it in its prototype's smallest
-// step: along its length, or across the region, its neighbours staying put.
+// step: along its length, or across. Its origin moves and the path bends
+// through it, so rows that only continue the path follow; kept ones stay.
 
 /// The step a region's tracks move in: the finer of its prototype's size
 /// steps along and across (0.25 u for keyboard keys).
@@ -4094,7 +4153,13 @@ fn moveTrackArrow(arrow: Arrow) void {
             along = s;
         },
     }
-    state.model.moveSegment(t.panel, t.region, t.row, along, across) catch |err| {
+    if (t.panel >= state.placed.items.len) return;
+    const placed = &state.placed.items[t.panel];
+    var obuf: [512]layout.model.Segment = undefined;
+    var abuf: [1024]geom.Box = undefined;
+    const kept = state.model.panels.items[t.panel].regions.items[t.region].segments.items.len;
+    // The path bends through it; rows that only continue the path follow.
+    state.model.moveSegment(t.panel, t.region, t.row, placed.origins(t.region, &obuf), along, across, placed.obstacles(t.region, t.row, kept, &abuf)) catch |err| {
         state.status = if (err == error.NoRoom) "No room to move it that way. " else "It did not move. ";
         return;
     };
@@ -4143,20 +4208,20 @@ fn movePalette() void {
     var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5 });
     defer info.deinit();
     dvui.label(@src(), "Move {s} {d} of {s} in {d} u steps", .{ word, t.row + 1, region.name, s }, .{ .font = dvui.Font.theme(.heading) });
-    dvui.label(@src(), "Arrow keys or these buttons move it, tiles and all; other tracks stay where they are.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
+    dvui.label(@src(), "Arrow keys or these buttons move it, tiles and all. The path bends through it: rows that only continue the path follow; the rest stay.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
     var where_buf: [96]u8 = undefined;
-    dvui.labelNoFmt(@src(), trackWhere(&where_buf, region, t.row), .{}, .{ .font = dvui.Font.theme(.mono) });
+    dvui.labelNoFmt(@src(), trackWhere(&where_buf, t.panel, t.region, t.row), .{}, .{ .font = dvui.Font.theme(.mono) });
 }
 
-/// Where a track sits from where its region was drawn, in plain words:
-/// "0.25 u up · 1.5 u left" (a row) or "1 u right · 0.5 u down" (a column).
-fn trackWhere(buf: []u8, region: layout.model.TileRegion, t: usize) []const u8 {
-    // Where it would be had it never moved: after the tracks before it.
-    var drawn: f64 = 0;
-    for (0..t) |_| drawn += 1;
-    const across = region.segmentAcross(t) - drawn;
-    const along = region.segments.items[t].offset;
-    const rows = region.major == .row;
+/// Where a row or column sits from where a straight path would put it, in
+/// plain words: "0.25 u up · 1.5 u left" (a row) or "1 u right · 0.5 u
+/// down" (a column).
+fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
+    const o = segmentOrigin(pi, region, t) orelse return "";
+    // Straight on from the region's origin, one thickness each.
+    const across = o.across - @as(f64, @floatFromInt(t));
+    const along = o.along;
+    const rows = state.model.panels.items[pi].regions.items[region].major == .row;
     const across_word = if (rows) (if (across < 0) "up" else "down") else (if (across < 0) "left" else "right");
     const along_word = if (rows) (if (along < 0) "left" else "right") else (if (along < 0) "up" else "down");
     return std.fmt.bufPrint(buf, "{d} u {s} · {d} u {s}", .{ @abs(across), across_word, @abs(along), along_word }) catch "";

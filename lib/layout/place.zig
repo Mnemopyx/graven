@@ -80,6 +80,8 @@ pub const Issue = struct {
         /// A region's tracks reach past its panel's outline; `amount` says
         /// how far, mm.
         region_outside,
+        /// A segment lies past its track's soft area (`row` says which).
+        past_soft_area,
         /// A tile's art cannot be stretched exactly (a curve crosses a cut);
         /// it is drawn plain.
         tile_art,
@@ -107,6 +109,8 @@ pub const PlacedTrack = struct {
     /// The segment's band, mm in the panel frame: its length along, one
     /// pitch across.
     box: Box,
+    /// Its origin on the track's path, u from the region's origin.
+    origin: model.Segment = .{},
 };
 
 /// An item of a track's flow as placed: the segment it landed in, and
@@ -125,6 +129,9 @@ pub const PlacedItem = struct {
 pub const PlacedFlow = struct {
     region: usize,
     natural: f64,
+    /// How many segments the flow reached: kept origins past these are no
+    /// longer needed (see `Model.trimSegments`).
+    segments: usize = 0,
 };
 
 pub const Placed = struct {
@@ -141,6 +148,30 @@ pub const Placed = struct {
     pub fn deinit(p: *Placed) void {
         p.arena.deinit();
         p.* = undefined;
+    }
+
+    /// Region `region`'s segment origins as placed, in order, into `out`.
+    pub fn origins(p: *const Placed, region: usize, out: []model.Segment) []model.Segment {
+        var n: usize = 0;
+        for (p.tracks) |t| if (t.region == region and t.track < out.len) {
+            out[t.track] = t.origin;
+            n = @max(n, t.track + 1);
+        };
+        return out[0..n];
+    }
+
+    /// What moving segment `seg` of region `region` must not land on, into
+    /// `out`: every other segment on the panel, except the ones after it
+    /// that only continue the path (past the `kept` origins), which follow.
+    pub fn obstacles(p: *const Placed, region: usize, seg: usize, kept: usize, out: []Box) []Box {
+        var n: usize = 0;
+        for (p.tracks) |t| {
+            if (t.region == region and (t.track == seg or (t.track > seg and t.track >= kept))) continue;
+            if (n == out.len) break;
+            out[n] = t.box;
+            n += 1;
+        }
+        return out[0..n];
     }
 
     pub fn findTile(p: *const Placed, id: TileId) ?*const PlacedTile {
@@ -284,6 +315,47 @@ pub const Labels = struct {
 
 pub const Error = Allocator.Error || spring.Error;
 
+/// The most segments one track's flow may reach.
+const max_segments = 4096;
+
+/// A track's segments as its flow reaches them: kept origins first, then
+/// the path's continuation, each new origin skipping on along the path past
+/// places already taken (by earlier segments here, or `avoid`).
+const Path = struct {
+    region: *const model.TileRegion,
+    avoid: []const PlacedTrack,
+    origins: std.ArrayList(model.Segment) = .empty,
+    boxes: std.ArrayList(Box) = .empty,
+    reach: std.ArrayList(f64) = .empty,
+
+    fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
+        const kept = p.region.segments.items;
+        while (p.origins.items.len <= k) {
+            const n = p.origins.items.len;
+            var o: model.Segment = .{};
+            if (n < kept.len) {
+                o = kept[n];
+            } else if (n > 0) {
+                const last = p.origins.items[n - 1];
+                const prev = if (n >= 2) p.origins.items[n - 2] else null;
+                const dir = model.pathDirection(prev, last);
+                o = last.step(dir, 1 + p.region.gap);
+                var tries: usize = 0;
+                while (tries < 400 and p.blocked(p.region.boxAt(o))) : (tries += 1) o = o.step(dir, 0.25);
+            }
+            try p.origins.append(a, o);
+            try p.boxes.append(a, p.region.boxAt(o));
+            try p.reach.append(a, 0);
+        }
+    }
+
+    fn blocked(p: *const Path, b: Box) bool {
+        for (p.avoid) |t| if (model.overlaps(b, t.box)) return true;
+        for (p.boxes.items) |o| if (model.overlaps(b, o)) return true;
+        return false;
+    }
+};
+
 /// Places every tile and label of one panel.
 pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Error!Placed {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -301,23 +373,6 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     var placed_labels: std.ArrayList(PlacedLabel) = .empty;
     const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
-        const segs = region.segments.items;
-        // A region's segments may run or be moved past its panel's edge, to
-        // be fitted later: flagged, not refused.
-        {
-            var b: Box = if (segs.len == 0) .{
-                .x0 = region.origin.x,
-                .x1 = region.origin.x + region.w * region.pitch,
-                .y1 = region.origin.y,
-                .y0 = region.origin.y - region.h * region.pitch,
-            } else .empty;
-            for (0..segs.len) |t| b = b.join(region.segmentBox(t));
-            const past = @max(@max(outline.x0 - b.x0, b.x1 - outline.x1), @max(outline.y0 - b.y0, b.y1 - outline.y1));
-            if (past > 1e-9) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
-        }
-        for (0..segs.len) |t| try tracks.append(a, .{ .region = ri, .track = t, .major = region.major, .box = region.segmentBox(t) });
-        if (segs.len == 0) continue;
-
         // Rows run right and stack down; columns run down and set to the
         // right. An item's size along is its width in a row and its height
         // in a column.
@@ -326,9 +381,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         const tol = 1e-9;
         // Where each tile placed so far starts, along its segment.
         var placed_at: std.AutoHashMapUnmanaged(TileId, f64) = .empty;
-        // How far each segment's content reaches, mm.
-        const reach = try a.alloc(f64, segs.len);
-        @memset(reach, 0);
+        // The segments, made as the flow reaches them: their origins along
+        // the path, their bands, and how far each one's content reaches.
+        var path: Path = .{ .region = &region, .avoid = tracks.items };
+        try path.ensure(a, 0);
         var seg: usize = 0;
         var pos: f64 = 0;
         var in_seg: usize = 0;
@@ -339,9 +395,9 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 try placed_items.append(a, .{ .region = ri, .index = index, .segment = seg, .span = .{ pos, pos } });
                 natural = @max(natural, para);
                 para = 0;
-                // Past the last segment the flow runs on along it, flagged.
-                if (seg + 1 < segs.len) {
+                if (seg + 1 < max_segments) {
                     seg += 1;
+                    try path.ensure(a, seg);
                     pos = 0;
                     in_seg = 0;
                 }
@@ -381,10 +437,11 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             } else {
                 start = pos + gap;
                 para += gap + size;
-                // It does not fit: on to the next segment, if there is one
-                // and this one holds something already.
-                if (start + size > length + tol and in_seg > 0 and seg + 1 < segs.len) {
+                // It does not fit: on to the next segment, made as needed,
+                // if this one holds something already.
+                if (start + size > length + tol and in_seg > 0 and seg + 1 < max_segments) {
                     seg += 1;
+                    try path.ensure(a, seg);
                     pos = 0;
                     in_seg = 0;
                     start = gap;
@@ -400,10 +457,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             const end = start + size;
             pos = @max(pos, end);
             in_seg += 1;
-            reach[seg] = @max(reach[seg], end);
+            path.reach.items[seg] = @max(path.reach.items[seg], end);
             try placed_items.append(a, .{ .region = ri, .index = index, .segment = seg, .span = .{ start, end } });
 
-            const band = region.segmentBox(seg);
+            const band = path.boxes.items[seg];
             switch (item.what) {
                 .tile => |pid| {
                     if (pin != null) continue;
@@ -474,10 +531,21 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             }
         }
         natural = @max(natural, para);
-        try flows.append(a, .{ .region = ri, .natural = natural / region.pitch });
-        for (reach, 0..) |r_, t| if (r_ > length + tol) {
+        try flows.append(a, .{ .region = ri, .natural = natural / region.pitch, .segments = path.origins.items.len });
+        for (path.reach.items, 0..) |r_, t| if (r_ > length + tol) {
             try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - length });
         };
+        // Its segments: past the soft area each is flagged; past the panel,
+        // the region is (to be fitted, or the panel resized).
+        const soft = region.softArea();
+        var all: Box = .empty;
+        for (path.origins.items, path.boxes.items, 0..) |o, b, t| {
+            try tracks.append(a, .{ .region = ri, .track = t, .major = region.major, .box = b, .origin = o });
+            all = all.join(b);
+            if (!model.within(b, soft)) try issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
+        }
+        const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
+        if (past > 1e-9) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
     }
 
     for (tiles.items) |pt| {
@@ -613,7 +681,7 @@ test "segments pack by gaps, a hard break starts the next, and a spanning tile i
     try testing.expectEqual(0, s.issues.len);
 }
 
-test "a row too long for its region is reported" {
+test "a row too long wraps on into a new one, past the soft area, flagged" {
     var m: Model = .init(testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
@@ -625,8 +693,9 @@ test "a row too long for its region is reported" {
     var s = try solve(testing.allocator, &m, p, &labels);
     defer s.deinit();
     try testing.expectEqual(1, s.issues.len);
-    try testing.expectEqual(.row_overflow, s.issues[0].kind);
-    try testing.expectEqual(10, s.issues[0].amount);
+    try testing.expectEqual(.past_soft_area, s.issues[0].kind);
+    try testing.expectEqual(1, s.issues[0].row.?);
+    try testing.expectEqual(1, s.items[2].segment);
 }
 
 test "labels render once per identical legend and sit in their slots" {
@@ -906,9 +975,11 @@ test "columns run down from the region's top and set to the right" {
     try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[2].pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[2].pitch_box.y1, 1e-9);
     try testing.expectEqual(1, s.items[2].segment);
-    var overflow = false;
-    for (s.issues) |i| overflow = overflow or i.kind == .row_overflow;
-    try testing.expect(overflow);
+    // The sixth goes on to a third column, past the soft area.
+    try testing.expectEqual(2, s.items[5].segment);
+    var flagged = false;
+    for (s.issues) |i| flagged = flagged or i.kind == .past_soft_area;
+    try testing.expect(flagged);
 }
 
 test "blanks take their length in a track, and every item's span is reported" {
@@ -927,7 +998,8 @@ test "blanks take their length in a track, and every item's span is reported" {
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectEqual(1, s.tracks.len);
+    // 4.5 u in a 4 u row: the last key wraps on to a second row.
+    try testing.expectEqual(2, s.tracks.len);
     try testing.expectEqual(5, s.items.len);
     try testing.expectApproxEqAbs(@as(f64, 10), s.items[1].span[0], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 15), s.items[1].span[1], 1e-9);
@@ -938,44 +1010,105 @@ test "blanks take their length in a track, and every item's span is reported" {
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
 }
 
-test "a track moves as a whole, either way; others stay; it may not overlap one" {
+/// Moves segment `seg` of region `r` as the GUI does: with the origins
+/// and the other bands from a fresh solve.
+fn moveIn(m: *Model, labels: *Labels, p: usize, r: usize, seg: usize, along: f64, across: f64) !void {
+    var s = try solve(testing.allocator, m, p, labels);
+    defer s.deinit();
+    var obuf: [64]model.Segment = undefined;
+    var abuf: [64]Box = undefined;
+    const kept = m.panels.items[p].regions.items[r].segments.items.len;
+    try m.moveSegment(p, r, seg, s.origins(r, &obuf), along, across, s.obstacles(r, seg, kept, &abuf));
+}
+
+test "segments follow a path: moving one bends it, the next ones follow, and none may overlap" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 100 }, .prototype = key, .count = 3, .length = 4, .pitch = 10 });
-    // Two tiles a row, each row ended by a hard break.
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 100 }, .prototype = key, .count = 4, .length = 4, .pitch = 10 });
+    // Two tiles a row, each row ended by a hard break: three rows, made as
+    // the flow reaches them, straight down.
     for (0..3) |t| {
         for (0..2) |_| _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
         if (t < 2) try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
     }
-    // Row 3 down 0.5 u, then row 2 down 0.25 u and 0.5 u left: rows 1 and
-    // 3 stay where they were.
-    try m.moveSegment(p, r, 2, 0, 0.5);
-    try m.moveSegment(p, r, 1, -0.5, 0.25);
-    var labels: Labels = .init(gpa, &faces);
+    try testing.expectEqual(1, m.panels.items[p].regions.items[r].segments.items.len);
+    var labels: Labels = .init(gpa, &.{});
     defer labels.deinit();
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectEqual(3, s.tracks.len);
+        try testing.expectApproxEqAbs(@as(f64, 80), s.tracks[2].box.y1, 1e-9);
+        try testing.expectEqual(3, s.flows[0].segments);
+    }
+    // Row 2 down 0.5 u: the path bends there, and row 3 follows it.
+    try moveIn(&m, &labels, p, r, 1, 0, 0.5);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 85), s.tracks[1].box.y1, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 75), s.tracks[2].box.y1, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 75), s.tiles[4].pitch_box.y1, 1e-9);
+        try testing.expectEqual(0, s.issues.len);
+    }
+    // Row 3 0.5 u right: the path's last piece now leans right, so a
+    // fourth row goes on that way, one row thickness along it.
+    try moveIn(&m, &labels, p, r, 2, 0.5, 0);
+    try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+    _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectEqual(4, s.tracks.len);
+        // On the path's continuation: at least one thickness along it, and
+        // on past where it would overlap row 3 (a slant packs closer).
+        const d = model.pathDirection(s.tracks[1].origin, s.tracks[2].origin);
+        const o3 = s.tracks[2].origin;
+        const o4 = s.tracks[3].origin;
+        const t = (o4.along - o3.along) / d[0];
+        try testing.expect(t >= 1);
+        try testing.expectApproxEqAbs(o3.across + d[1] * t, o4.across, 1e-9);
+        try testing.expect(!model.overlaps(s.tracks[2].box, s.tracks[3].box));
+    }
+    // Onto row 1: refused.
+    try testing.expectError(error.NoRoom, moveIn(&m, &labels, p, r, 1, 0, -1));
+    // Content removed from the end: the segments it no longer reaches go,
+    // kept origins and all.
+    const items = &m.panels.items[p].regions.items[r].items;
+    while (items.items.len > 2) try m.removeAt(p, r, items.items.len - 1);
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    // Row 1 as drawn; row 2's band and tiles 5 mm left and 2.5 mm down.
-    try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[0].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 5), s.tiles[2].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 87.5), s.tiles[2].pitch_box.y1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 5), s.tracks[1].box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 75), s.tiles[4].pitch_box.y1, 1e-9);
-    // Up 0.25 u it touches row 1 again; any further would overlap it.
-    try m.moveSegment(p, r, 1, 0, -0.25);
-    try testing.expectError(error.NoRoom, m.moveSegment(p, r, 1, 0, -0.25));
-    // Past the panel's left edge: allowed, and flagged.
-    try m.moveSegment(p, r, 1, -1, 0);
-    var t = try solve(gpa, &m, p, &labels);
-    defer t.deinit();
+    try testing.expectEqual(1, s.tracks.len);
+    m.trimSegments(p, r, s.flows[0].segments);
+    try testing.expectEqual(1, m.panels.items[p].regions.items[r].segments.items.len);
+}
+
+test "segments past the soft area are flagged, and past the panel the region is" {
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 50, 25);
+    const key = try m.addPrototype(.{ .name = "key" });
+    // A soft area two rows thick; a third paragraph comes past it, and
+    // past the panel's bottom.
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 25 }, .prototype = key, .count = 2, .length = 2, .pitch = 10 });
+    for (0..3) |t| {
+        _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
+        if (t < 2) try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+    }
+    var labels: Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    var s = try solve(testing.allocator, &m, p, &labels);
+    defer s.deinit();
+    var soft: ?usize = null;
     var outside = false;
-    for (t.issues) |i| outside = outside or i.kind == .region_outside;
+    for (s.issues) |i| {
+        if (i.kind == .past_soft_area) soft = i.row;
+        if (i.kind == .region_outside) outside = true;
+    }
+    try testing.expectEqual(2, soft.?);
     try testing.expect(outside);
 }
 
@@ -1092,14 +1225,14 @@ test "an item that does not fit moves to the next segment, and the flow after it
     try testing.expectEqual(0, s.issues.len);
     const segs = [_]usize{ 0, 0, 1, 1, 1, 2, 2, 2 };
     for (s.items, segs) |it, want| try testing.expectEqual(want, it.segment);
-    // One more paragraph than segments: the last runs past the end, flagged.
+    // One more paragraph than the soft area holds: a fourth row, flagged.
     try m.insertBreak(p, r, 8);
     _ = try m.insertTile(p, r, 9, key, 1);
     var t = try solve(testing.allocator, &m, p, &labels);
     defer t.deinit();
     try testing.expectEqual(1, t.issues.len);
-    try testing.expectEqual(.row_overflow, t.issues[0].kind);
-    try testing.expectEqual(2, t.issues[0].row.?);
+    try testing.expectEqual(.past_soft_area, t.issues[0].kind);
+    try testing.expectEqual(3, t.issues[0].row.?);
 }
 
 test "a tile keeps its prototype's unit in a track of another pitch" {
