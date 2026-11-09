@@ -395,14 +395,49 @@ pub const PanelArt = struct {
     }
 };
 
+/// A space: the canvas, or a frame. Each has its own coordinates, an
+/// unbounded panel (`root`) holding its loose objects, its panels (those
+/// whose `space` is it), and its selection groups.
+pub const Space = struct {
+    name: []const u8,
+    /// True while the name is one the app gave it (Frame 1).
+    default_name: bool = false,
+    /// The panel holding the space's loose objects.
+    root: usize,
+    /// The frame's boundary in its own coordinates, mm; null for the canvas,
+    /// which has none. Content past it is flagged, not refused.
+    bound: ?geom.Box = null,
+    groups: std.ArrayList(Group) = .empty,
+};
+
+/// An object in a space, as a selection names it: a panel, or one of a
+/// panel's labels, tracks (regions) or line art, by index.
+pub const Member = union(enum) {
+    panel: usize,
+    label: struct { panel: usize, index: usize },
+    region: struct { panel: usize, index: usize },
+    art: struct { panel: usize, index: usize },
+};
+
+/// A selection group: objects of one space treated as one. Members are
+/// held by index, so removing an object from the space dissolves the
+/// space's groups (a limit until objects have lasting IDs).
+pub const Group = struct {
+    name: []const u8,
+    members: std.ArrayList(Member) = .empty,
+};
+
 pub const Panel = struct {
     name: []const u8,
     /// True while the name is one the app gave it (Panel 1), not the user.
     default_name: bool = false,
-    /// The canvas itself: the open drafting space holding loose objects,
-    /// with no outline, margins or sheet to keep to (see
-    /// `Model.startCanvas`).
+    /// A space's own panel: it holds the space's loose objects, with no
+    /// outline, margins or sheet to keep to (see `Model.startCanvas` and
+    /// `Model.addFrame`).
     unbounded: bool = false,
+    /// The space (the canvas, or a frame) the panel lives in; its origin
+    /// is in that space's coordinates.
+    space: usize = 0,
     /// Where the panel's frame origin (its bottom-left corner) sits on the
     /// worksheet, mm.
     origin: geom.Point = .{ .x = 0, .y = 0 },
@@ -583,6 +618,8 @@ pub const Model = struct {
     /// The document's units, chosen when its canvas was made: how lengths
     /// are shown and typed outside a sheet. Lengths are stored in mm.
     units: Units = .mm,
+    /// The canvas (space 0) and the frames, once the document is a canvas.
+    spaces: std.ArrayList(Space) = .empty,
     panels: std.ArrayList(Panel) = .empty,
     tiles: std.ArrayList(Tile) = .empty,
     prototypes: std.ArrayList(TilePrototype) = .empty,
@@ -688,16 +725,227 @@ pub const Model = struct {
         if (m.panels.items.len > 0) return error.NoRoom;
         m.units = units;
         m.has_sheet = false;
-        try m.panels.append(m.a(), .{ .name = "Canvas", .unbounded = true, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
+        const root = try m.addRoot("Canvas", 0);
+        try m.spaces.append(m.a(), .{ .name = "Canvas", .root = root });
+        return root;
+    }
+
+    fn addRoot(m: *Model, name: []const u8, space: usize) Error!usize {
+        try m.panels.append(m.a(), .{ .name = name, .unbounded = true, .space = space, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
         m.revision += 1;
         return m.panels.items.len - 1;
     }
 
-    /// The canvas's own panel, holding loose objects, if the document has
-    /// one.
+    /// The canvas's own panel, holding its loose objects, if the document
+    /// is a canvas.
     pub fn canvas(m: *const Model) ?usize {
-        for (m.panels.items, 0..) |p, i| if (p.unbounded) return i;
-        return null;
+        if (m.spaces.items.len == 0) return null;
+        return m.spaces.items[0].root;
+    }
+
+    /// Adds a frame: a space of its own, with `bound` (its own coordinates,
+    /// mm) or none yet. Returns its index among the spaces.
+    pub fn addFrame(m: *Model, name: []const u8, edge: ?geom.Box) Error!usize {
+        if (m.spaces.items.len == 0) return error.NoRoom;
+        if (edge) |b| if (!(b.width() > 0 and b.height() > 0)) return error.BadSize;
+        const sid = m.spaces.items.len;
+        const owned = try m.a().dupe(u8, name);
+        const root = try m.addRoot(owned, sid);
+        try m.spaces.append(m.a(), .{ .name = owned, .root = root, .bound = edge });
+        return sid;
+    }
+
+    /// Sets a frame's boundary, as Fit frame does with its contents'
+    /// extents plus a margin.
+    pub fn setFrameBound(m: *Model, space: usize, edge: geom.Box) Error!void {
+        if (space == 0 or space >= m.spaces.items.len) return error.NoSuchItem;
+        if (!(edge.width() > 0 and edge.height() > 0)) return error.BadSize;
+        m.spaces.items[space].bound = edge;
+        m.revision += 1;
+    }
+
+    /// The space a panel lives in.
+    pub fn spaceOf(m: *const Model, panel: usize) usize {
+        return m.panels.items[panel].space;
+    }
+
+    /// The first "<prefix> N" not yet used as a space name.
+    pub fn nextFrameName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
+        var n: usize = m.spaces.items.len;
+        while (true) : (n += 1) {
+            const name = std.fmt.bufPrint(buf, "{s} {d}", .{ prefix, n }) catch return prefix;
+            for (m.spaces.items) |sp| {
+                if (std.mem.eql(u8, sp.name, name)) break;
+            } else return name;
+        }
+    }
+
+    /// Moves `members` (all of one space) into space `dest`, keeping their
+    /// coordinates: panels change space, and loose labels, tracks and line
+    /// art move to `dest`'s own panel. They arrive as one selection group
+    /// named "from <source>". Returns the group's index in `dest`. (Once
+    /// constraints exist, the members' constraint group comes too, and
+    /// constraints reaching outside it are dropped and listed.)
+    pub fn moveToSpace(m: *Model, members: []const Member, dest: usize) Error!usize {
+        return m.transfer(members, dest, false);
+    }
+
+    /// As `moveToSpace`, with copies: the originals stay where they were.
+    pub fn copyToSpace(m: *Model, members: []const Member, dest: usize) Error!usize {
+        return m.transfer(members, dest, true);
+    }
+
+    fn transfer(m: *Model, members: []const Member, dest: usize, copy: bool) Error!usize {
+        if (dest >= m.spaces.items.len or members.len == 0) return error.NoSuchItem;
+        const from = m.spaceOf(memberPanel(members[0]));
+        for (members) |mb| if (m.spaceOf(memberPanel(mb)) != from) return error.NoSuchItem;
+        if (from == dest and !copy) return error.NoSuchItem;
+        const droot = m.spaces.items[dest].root;
+        var name_buf: [96]u8 = undefined;
+        const gname = std.fmt.bufPrint(&name_buf, "from {s}", .{m.spaces.items[from].name}) catch "moved";
+        var group: Group = .{ .name = try m.a().dupe(u8, gname) };
+        // Loose objects first, taken from the back so earlier indices hold;
+        // then panels, which keep their indices.
+        var order: std.ArrayList(Member) = .empty;
+        try order.appendSlice(m.a(), members);
+        std.mem.sort(Member, order.items, {}, struct {
+            fn later(_: void, x: Member, y: Member) bool {
+                return looseIndex(x) > looseIndex(y);
+            }
+        }.later);
+        for (order.items) |mb| switch (mb) {
+            .label => |l| {
+                const src = &m.panels.items[l.panel].labels;
+                var item = src.items[l.index];
+                if (!copy) _ = src.orderedRemove(l.index) else item.content = try m.a().dupe(u8, item.content);
+                try m.panels.items[droot].labels.append(m.a(), item);
+                try group.members.append(m.a(), .{ .label = .{ .panel = droot, .index = m.panels.items[droot].labels.items.len - 1 } });
+            },
+            .art => |l| {
+                const src = &m.panels.items[l.panel].art;
+                var item = src.items[l.index];
+                if (!copy) _ = src.orderedRemove(l.index) else item.shapes = try art_.dupeShapes(m.a(), item.shapes, .{ .x = 0, .y = 0 });
+                try m.panels.items[droot].art.append(m.a(), item);
+                try group.members.append(m.a(), .{ .art = .{ .panel = droot, .index = m.panels.items[droot].art.items.len - 1 } });
+            },
+            .region => |l| {
+                const src = &m.panels.items[l.panel].regions;
+                const item = if (copy) try m.copyRegion(src.items[l.index]) else src.orderedRemove(l.index);
+                try m.panels.items[droot].regions.append(m.a(), item);
+                try group.members.append(m.a(), .{ .region = .{ .panel = droot, .index = m.panels.items[droot].regions.items.len - 1 } });
+            },
+            .panel => |pi| {
+                const target = if (copy) try m.copyPanel(pi) else pi;
+                m.panels.items[target].space = dest;
+                try group.members.append(m.a(), .{ .panel = target });
+            },
+        };
+        // What was taken out of the source may have shifted its groups.
+        if (!copy) m.spaces.items[from].groups.clearRetainingCapacity();
+        try m.spaces.items[dest].groups.append(m.a(), group);
+        m.revision += 1;
+        return m.spaces.items[dest].groups.items.len - 1;
+    }
+
+    fn memberPanel(mb: Member) usize {
+        return switch (mb) {
+            .panel => |pi| pi,
+            inline else => |l| l.panel,
+        };
+    }
+
+    /// Sorting key: loose objects by index (removed back to front), panels
+    /// last.
+    fn looseIndex(mb: Member) usize {
+        return switch (mb) {
+            .panel => 0,
+            inline else => |l| l.index + 1,
+        };
+    }
+
+    /// A copy of a track, with copies of its tiles (new designators).
+    fn copyRegion(m: *Model, r: TileRegion) Error!TileRegion {
+        var c = r;
+        c.name = try m.a().dupe(u8, r.name);
+        c.segments = .empty;
+        try c.segments.appendSlice(m.a(), r.segments.items);
+        c.items = .empty;
+        for (r.items.items) |item| {
+            var it = item;
+            switch (item.what) {
+                .tile => |id| {
+                    const t = m.tileConst(id);
+                    var buf: [64]u8 = undefined;
+                    const prefix = if (m.prototypes.items[t.prototype].spacer) "B" else "T";
+                    var copy_t = t.*;
+                    copy_t.designator = m.nextDesignator(&buf, prefix);
+                    it.what = .{ .tile = try m.addTile(copy_t) };
+                },
+                .run => |run| it.what.run.content = try m.a().dupe(u8, run.content),
+                .hard_break => {},
+            }
+            try c.items.append(m.a(), it);
+        }
+        return c;
+    }
+
+    /// A copy of a panel, appended, with copies of its content. Returns it.
+    fn copyPanel(m: *Model, pi: usize) Error!usize {
+        const p = m.panels.items[pi];
+        var c = p;
+        c.name = try m.a().dupe(u8, p.name);
+        c.regions = .empty;
+        c.labels = .empty;
+        c.art = .empty;
+        for (p.regions.items) |r| try c.regions.append(m.a(), try m.copyRegion(r));
+        for (p.labels.items) |l| {
+            var cl = l;
+            cl.content = try m.a().dupe(u8, l.content);
+            try c.labels.append(m.a(), cl);
+        }
+        for (p.art.items) |pa| {
+            var ca = pa;
+            ca.shapes = try art_.dupeShapes(m.a(), pa.shapes, .{ .x = 0, .y = 0 });
+            try c.art.append(m.a(), ca);
+        }
+        try m.panels.append(m.a(), c);
+        return m.panels.items.len - 1;
+    }
+
+    /// Moves every member of a space's group by (`dx`, `dy`) mm.
+    pub fn moveGroup(m: *Model, space: usize, group: usize, dx: f64, dy: f64) Error!void {
+        if (space >= m.spaces.items.len or group >= m.spaces.items[space].groups.items.len) return error.NoSuchItem;
+        for (m.spaces.items[space].groups.items[group].members.items) |mb| switch (mb) {
+            .panel => |pi| {
+                const o = &m.panels.items[pi].origin;
+                o.* = .{ .x = o.x + dx, .y = o.y + dy };
+            },
+            .label => |l| {
+                const at = &m.panels.items[l.panel].labels.items[l.index].at;
+                at.* = .{ .x = at.x + dx, .y = at.y + dy };
+            },
+            .art => |l| {
+                const at = &m.panels.items[l.panel].art.items[l.index].at;
+                at.* = .{ .x = at.x + dx, .y = at.y + dy };
+            },
+            .region => |l| {
+                const o = &m.panels.items[l.panel].regions.items[l.index].origin;
+                o.* = .{ .x = o.x + dx, .y = o.y + dy };
+            },
+        };
+        m.revision += 1;
+    }
+
+    /// Dissolves a group; its members stay where they are.
+    pub fn ungroup(m: *Model, space: usize, group: usize) void {
+        _ = m.spaces.items[space].groups.orderedRemove(group);
+        m.revision += 1;
+    }
+
+    /// Removing objects shifts indices: the groups of every space are
+    /// dissolved (their members stay).
+    fn dissolveGroups(m: *Model) void {
+        for (m.spaces.items) |*sp| sp.groups.clearRetainingCapacity();
     }
 
     /// Changes the canvas's units: a conversion, so nothing moves or
@@ -871,11 +1119,13 @@ pub const Model = struct {
 
     pub fn removeArt(m: *Model, panel: usize, index: usize) void {
         _ = m.panels.items[panel].art.orderedRemove(index);
+        m.dissolveGroups();
         m.revision += 1;
     }
 
     pub fn removeLabel(m: *Model, panel: usize, label: usize) void {
         _ = m.panels.items[panel].labels.orderedRemove(label);
+        m.dissolveGroups();
         m.revision += 1;
     }
 
@@ -900,6 +1150,11 @@ pub const Model = struct {
     /// removed too. Later panels move down one index.
     pub fn removePanel(m: *Model, panel: usize) void {
         const p = m.panels.orderedRemove(panel);
+        // Spaces' own panels follow the renumbering.
+        for (m.spaces.items) |*sp| if (sp.root > panel) {
+            sp.root -= 1;
+        };
+        m.dissolveGroups();
         for (p.regions.items) |region| for (region.items.items) |item| {
             const id = item.tileOf() orelse continue;
             if (!m.placedElsewhere(id)) m.tile(id).removed = true;
@@ -953,7 +1208,11 @@ pub const Model = struct {
 
     /// The first "<prefix> N" not yet used as a panel name.
     pub fn nextPanelName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
-        var n: usize = m.panels.items.len + 1;
+        // Spaces' own panels are not counted.
+        var n: usize = 1;
+        for (m.panels.items) |p| {
+            if (!p.unbounded) n += 1;
+        }
         while (true) : (n += 1) {
             const name = std.fmt.bufPrint(buf, "{s} {d}", .{ prefix, n }) catch return prefix;
             for (m.panels.items) |p| {
@@ -1797,4 +2056,56 @@ test "a canvas: units chosen up front, no sheet, loose objects on an unbounded p
     m.setCanvasUnits(.mm);
     try std.testing.expectEqual(Units.mm, m.units);
     try std.testing.expectApproxEqAbs(@as(f64, 39.37007874), Units.mil.perMm(), 1e-6);
+}
+
+test "frames are spaces: moving keeps coordinates and arrives as one group; a group moves as one" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    // On the canvas: a panel, a loose track, a loose label and line art.
+    const p = try m.placePanel(.{ .name = "Front", .origin = .{ .x = 10, .y = 10 }, .w = 50, .h = 30 });
+    const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
+    const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 100, .y = 50 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    _ = try m.insertTile(c, r, 0, key, 1);
+    _ = try m.addLabel(c, .{ .at = .{ .x = 5, .y = 80 }, .content = "Stays" });
+    _ = try m.addLabel(c, .{ .at = .{ .x = 120, .y = 70 }, .content = "Goes" });
+    const f = try m.addFrame("Frame 1", null);
+    try std.testing.expectEqual(1, f);
+    const froot = m.spaces.items[f].root;
+    const g = try m.moveToSpace(&.{ .{ .panel = p }, .{ .region = .{ .panel = c, .index = r } }, .{ .label = .{ .panel = c, .index = 1 } } }, f);
+    // Panels change space; loose objects move to the frame's own panel,
+    // coordinates kept.
+    try std.testing.expectEqual(f, m.spaceOf(p));
+    try std.testing.expectEqual(10, m.panels.items[p].origin.x);
+    try std.testing.expectEqual(0, m.panels.items[c].regions.items.len);
+    try std.testing.expectEqual(1, m.panels.items[c].labels.items.len);
+    try std.testing.expectEqualStrings("Stays", m.panels.items[c].labels.items[0].content);
+    try std.testing.expectEqual(100, m.panels.items[froot].regions.items[0].origin.x);
+    try std.testing.expectEqualStrings("Goes", m.panels.items[froot].labels.items[0].content);
+    // One group, named after where it came from; one move places all.
+    const group = m.spaces.items[f].groups.items[g];
+    try std.testing.expectEqualStrings("from Canvas", group.name);
+    try std.testing.expectEqual(3, group.members.items.len);
+    try m.moveGroup(f, g, -10, 5);
+    try std.testing.expectEqual(0, m.panels.items[p].origin.x);
+    try std.testing.expectEqual(90, m.panels.items[froot].regions.items[0].origin.x);
+    try std.testing.expectEqual(75, m.panels.items[froot].labels.items[0].at.y);
+    // Copying leaves the original, and copies tiles with new designators.
+    const tiles_before = m.tiles.items.len;
+    _ = try m.copyToSpace(&.{.{ .panel = p }}, 0);
+    try std.testing.expectEqual(f, m.spaceOf(p));
+    const copy = m.panels.items.len - 1;
+    try std.testing.expectEqual(0, m.spaceOf(copy));
+    try std.testing.expectEqual(tiles_before, m.tiles.items.len);
+    _ = try m.copyToSpace(&.{.{ .region = .{ .panel = froot, .index = 0 } }}, 0);
+    try std.testing.expectEqual(tiles_before + 1, m.tiles.items.len);
+    try std.testing.expectEqualStrings("T2", m.tiles.items[tiles_before].designator);
+    // A frame's boundary, as Fit frame sets it.
+    try m.setFrameBound(f, .{ .x0 = -5, .y0 = 0, .x1 = 150, .y1 = 100 });
+    try std.testing.expectEqual(150, m.spaces.items[f].bound.?.x1);
+    try std.testing.expectError(error.NoSuchItem, m.setFrameBound(0, .{ .x0 = 0, .y0 = 0, .x1 = 1, .y1 = 1 }));
+    // Members of two spaces cannot move together.
+    try std.testing.expectError(error.NoSuchItem, m.moveToSpace(&.{ .{ .panel = p }, .{ .panel = copy } }, 0));
+    m.ungroup(f, g);
+    try std.testing.expectEqual(0, m.spaces.items[f].groups.items.len);
 }

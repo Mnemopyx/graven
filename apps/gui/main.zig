@@ -118,7 +118,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_label, add_tracks, add_art };
+const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area };
 
 /// The Add tracks tool's choices: what sizes the rows or columns (a tile
 /// prototype, or a text style), and which way the tracks run.
@@ -148,6 +148,10 @@ const Context = union(enum) {
     label: struct { panel: usize, index: usize },
     /// Line art placed on a panel.
     art: struct { panel: usize, index: usize },
+    /// A selection group of a space.
+    group: struct { space: usize, index: usize },
+    /// Objects picked together with Select area (see `selection`).
+    selection,
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -172,6 +176,8 @@ const Context = union(enum) {
             .tile => "Tile",
             .label => "Label",
             .art => "Line art",
+            .group => "Group",
+            .selection => "Selection",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -374,6 +380,48 @@ var click_at: ?geom.Point = null;
 /// bottom left.
 const canvas_view: geom.Box = .{ .x0 = -15, .y0 = -15, .x1 = 185, .y1 = 120 };
 
+/// The space the canvas shows: the canvas itself (0), or a frame.
+var shown_space: usize = 0;
+
+/// Objects picked together with Select area, all in the shown space.
+var selection: std.ArrayList(layout.model.Member) = .empty;
+
+/// The shown space's own panel (its loose objects), if the document is a
+/// canvas.
+fn spaceRoot() ?usize {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    return state.model.spaces.items[shown_space].root;
+}
+
+/// Whether panel `pi` is shown: it lives in the shown space (a worksheet
+/// document shows every panel).
+fn shownPanel(pi: usize) bool {
+    if (state.model.spaces.items.len == 0) return true;
+    return state.model.panels.items[pi].space == shown_space;
+}
+
+/// Shows the space the context belongs to.
+fn followContext() void {
+    if (state.model.spaces.items.len == 0) return;
+    const pi: ?usize = switch (state.context) {
+        .panel => |pi| pi,
+        .label => |l| l.panel,
+        .art => |l| l.panel,
+        .region => |r| r.panel,
+        .row => |r| r.panel,
+        .tile => |id| if (findTile(id)) |f| f.panel else null,
+        .group => |g| {
+            shown_space = g.space;
+            return;
+        },
+        else => null,
+    };
+    if (pi) |p| if (p < state.model.panels.items.len) {
+        shown_space = state.model.panels.items[p].space;
+    };
+    if (shown_space >= state.model.spaces.items.len) shown_space = 0;
+}
+
 /// Whether the document is an open canvas (no sheet).
 fn openCanvas() bool {
     return !state.model.has_sheet;
@@ -403,6 +451,8 @@ fn newCanvas() void {
     click_at = null;
     state.view.fit = canvas_view;
     canvas_prompt = true;
+    shown_space = 0;
+    selection.clearRetainingCapacity();
 }
 
 /// Makes the canvas in `units`, and makes it the context.
@@ -467,7 +517,7 @@ fn exportPanel() ?usize {
         .row => |r| return r.panel,
         else => {},
     }
-    if (state.model.canvas()) |ci| return ci;
+    if (spaceRoot()) |ri| return ri;
     return if (state.model.panels.items.len > 0) 0 else null;
 }
 
@@ -629,6 +679,7 @@ fn listFonts(gpa: std.mem.Allocator) ![]Font {
 /// Loads the chosen font if it changed, and re-solves when the model or the
 /// font changed.
 fn update() !void {
+    followContext();
     if (state.font_loaded != state.font_choice and state.fonts.len > 0) {
         const f = state.fonts[state.font_choice];
         const bytes = try std.Io.Dir.cwd().readFileAlloc(dvui.io, f.path, state.gpa, .limited(64 << 20));
@@ -1295,8 +1346,8 @@ fn titleBar() ?dvui.App.Result {
         dvui.labelNoFmt(@src(), state.file_name, .{}, .{ .font = styled(.theme(.body), !state.file_name_set), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         dvui.labelNoFmt(@src(), "  —  ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         if (openCanvas()) {
-            var tb: [32]u8 = undefined;
-            const t = if (canvas_prompt) "New canvas" else std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
+            var tb: [64]u8 = undefined;
+            const t = if (canvas_prompt) "New canvas" else if (shown_space > 0 and shown_space < state.model.spaces.items.len) std.fmt.bufPrint(&tb, "{s}, {s}", .{ state.model.spaces.items[shown_space].name, state.model.units.symbol() }) catch "Frame" else std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
             dvui.labelNoFmt(@src(), t, .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         } else dvui.labelNoFmt(@src(), state.model.sheet.name, .{}, .{ .font = styled(.theme(.body), state.model.sheet.default_name), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
     }
@@ -1344,7 +1395,7 @@ fn menu() ?dvui.App.Result {
             m.close();
             exportSvg();
         }
-        const others = state.model.panels.items.len - @as(usize, if (state.model.canvas() != null) 1 else 0);
+        const others = state.model.panels.items.len - state.model.spaces.items.len;
         if (others == 0 and !canvas_prompt) {
             if (dvui.menuItemLabel(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
                 loadSample() catch |err| {
@@ -1411,16 +1462,23 @@ fn treeContent() void {
 /// The worksheet's branch: its panels, their labels, regions, rows and
 /// tiles.
 fn worksheetTree() void {
-    // A canvas: its loose objects at the top, and its panels.
-    if (state.model.canvas()) |ci| {
-        var tb: [32]u8 = undefined;
-        const title = std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
-        if (!treeNode(.{ .panel = ci }, title, 1, true, false)) return;
-        panelChildren(ci, 2);
-        for (state.model.panels.items, 0..) |panel, pi| {
-            if (pi == ci) continue;
-            if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
-            panelChildren(pi, 3);
+    // A canvas: each space (the canvas, then its frames) with its groups,
+    // its loose objects and its panels.
+    if (state.model.spaces.items.len > 0) {
+        var tb: [64]u8 = undefined;
+        for (state.model.spaces.items, 0..) |sp, si| {
+            const title = if (si == 0) std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas" else sp.name;
+            if (!treeNode(.{ .panel = sp.root }, title, 1, true, sp.default_name)) continue;
+            for (sp.groups.items, 0..) |g, gi| {
+                const text = std.fmt.bufPrint(&tb, "Group “{s}” ({d})", .{ g.name, g.members.items.len }) catch g.name;
+                _ = treeNode(.{ .group = .{ .space = si, .index = gi } }, text, 2, false, false);
+            }
+            panelChildren(sp.root, 2);
+            for (state.model.panels.items, 0..) |panel, pi| {
+                if (pi == sp.root or panel.space != si) continue;
+                if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
+                panelChildren(pi, 3);
+            }
         }
         return;
     }
@@ -1548,7 +1606,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .label, .art, .prototypes => false,
+        .file, .worksheet, .panel, .label, .art, .group, .selection, .prototypes => false,
     };
 }
 
@@ -1571,11 +1629,10 @@ fn contextExtents() geom.Box {
 /// What the canvas holds, on the worksheet frame: every panel's solved
 /// content, or the canvas's first view when it holds nothing.
 fn contentExtents() geom.Box {
-    var b: geom.Box = .empty;
-    for (state.placed.items, 0..) |*p, pi| {
-        if (!p.bounds.isEmpty()) b = b.join(onSheet(pi, p.bounds));
-        if (!state.model.panels.items[pi].unbounded) b = b.join(state.model.panels.items[pi].box());
-    }
+    var b = spaceExtents();
+    if (state.model.spaces.items.len > shown_space) if (state.model.spaces.items[shown_space].bound) |fb| {
+        b = b.join(fb);
+    };
     return if (b.isEmpty()) canvas_view else b;
 }
 
@@ -1700,8 +1757,10 @@ fn canvas() void {
     const tol = 0.2 / state.view.ppm;
     if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
 
+    if (open) drawFrameBound(area);
     for (0..state.model.panels.items.len) |pi| {
-        // The canvas's own panel has no outline: only its content.
+        if (!shownPanel(pi)) continue;
+        // A space's own panel has no outline: only its content.
         if (state.model.panels.items[pi].unbounded) {
             if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
             continue;
@@ -1719,6 +1778,8 @@ fn canvas() void {
         outline.stroke(.square, .{ .thickness = if (is_context or off) 2 * px else px, .color = .{ .color = edge } });
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
+
+    drawPicked(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -1834,6 +1895,196 @@ fn typeLabel(pi: usize, txt: []const u8) void {
     focus_expression_end = true;
 }
 
+/// A frame's properties: its name, its boundary (fitted to what it holds),
+/// and what it holds.
+fn frameProperties(space: usize) !void {
+    const sp = state.model.spaces.items[space];
+    propText("Name", "{s}", .{sp.name}, 1);
+    if (sp.bound) |b| propText("Boundary", "{d:.1} × {d:.1} mm", .{ b.width(), b.height() }, 2) else propText("Boundary", "{s}", .{"none yet"}, 2);
+    propText("Groups", "{d}", .{sp.groups.items.len}, 3);
+    var panels: usize = 0;
+    for (state.model.panels.items) |p| {
+        if (p.space == space and !p.unbounded) panels += 1;
+    }
+    propText("Panels", "{d}", .{panels}, 4);
+    if (dvui.button(@src(), "Fit frame to its contents", .{}, .{ .margin = .{ .y = 8 } })) {
+        const e = spaceExtents();
+        if (e.isEmpty()) {
+            state.status = "The frame holds nothing to fit. ";
+        } else {
+            const margin = 5.0;
+            state.model.setFrameBound(space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin }) catch {};
+        }
+    }
+}
+
+/// A group's properties: what it holds, and how to move or dissolve it.
+fn groupProperties(space: usize, index: usize) !void {
+    const g = state.model.spaces.items[space].groups.items[index];
+    propText("Name", "{s}", .{g.name}, 1);
+    propText("Members", "{d}", .{g.members.items.len}, 2);
+    propText("Moves", "{s}", .{"arrow keys, 1 mm, all together"}, 3);
+    if (dvui.button(@src(), "Ungroup", .{}, .{ .margin = .{ .y = 8 } })) {
+        state.model.ungroup(space, index);
+        state.context = .{ .panel = state.model.spaces.items[space].root };
+    }
+}
+
+/// Objects picked with Select area: how many, and where they can go.
+fn selectionProperties() !void {
+    propText("Objects", "{d}", .{selection.items.len}, 1);
+    if (selection.items.len == 0) return;
+    if (dvui.button(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) transferSelection(null, false);
+    if (dvui.button(@src(), "Copy to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, true);
+    for (state.model.spaces.items, 0..) |sp, si| {
+        if (si == shown_space) continue;
+        var buf: [96]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "Move to {s}", .{if (si == 0) "the canvas" else sp.name}) catch "Move";
+        if (dvui.button(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = si })) transferSelection(si, false);
+    }
+}
+
+/// Moves (or copies) the selection to space `dest` (a new frame, fitted
+/// around it, when null), shows that space, and makes the group the
+/// objects arrived as the context, so the next move places them all.
+fn transferSelection(dest: ?usize, copy: bool) void {
+    const items = selection.items;
+    if (items.len == 0) return;
+    const target = dest orelse blk: {
+        var nb: [32]u8 = undefined;
+        const name = state.model.nextFrameName(&nb, "Frame");
+        const e = selectionExtents();
+        const margin = 10.0;
+        const edge: ?geom.Box = if (e.isEmpty()) null else .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin };
+        const f = state.model.addFrame(name, edge) catch return;
+        state.model.spaces.items[f].default_name = true;
+        break :blk f;
+    };
+    const g = (if (copy) state.model.copyToSpace(items, target) else state.model.moveToSpace(items, target)) catch {
+        state.status = "They could not be moved there. ";
+        return;
+    };
+    selection.clearRetainingCapacity();
+    track_cursor = null;
+    shown_space = target;
+    state.context = .{ .group = .{ .space = target, .index = g } };
+    // The keyboard goes to the canvas, for the arrow keys.
+    if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    state.status = "Arrived as one group: arrow keys move it into place. ";
+}
+
+/// The selection's extents in its space, from the last solve.
+fn selectionExtents() geom.Box {
+    var b: geom.Box = .empty;
+    for (selection.items) |mb| b = b.join(memberBox(mb));
+    return b;
+}
+
+/// A member's extents in its space: a panel's outline, a label's ink, line
+/// art's shapes, a track's segments.
+fn memberBox(mb: layout.model.Member) geom.Box {
+    switch (mb) {
+        .panel => |pi| return state.model.panels.items[pi].box(),
+        .label => |l| return labelBox(l.panel, l.index) orelse .empty,
+        .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
+        .region => |l| {
+            var b: geom.Box = .empty;
+            if (l.panel < state.placed.items.len) for (state.placed.items[l.panel].tracks) |t| {
+                if (t.region == l.index) b = b.join(onSheet(l.panel, t.box));
+            };
+            return b;
+        },
+    }
+}
+
+/// Select area: every object of the shown space wholly inside box `b`.
+fn selectArea(b: geom.Box) void {
+    defer state.tool = .select;
+    selection.clearRetainingCapacity();
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (!shownPanel(pi)) continue;
+        if (!p.unbounded) {
+            if (layout.model.within(p.box(), b)) selection.append(state.gpa, .{ .panel = pi }) catch {};
+            continue;
+        }
+        for (0..p.labels.items.len) |li| {
+            const m: layout.model.Member = .{ .label = .{ .panel = pi, .index = li } };
+            const mb = memberBox(m);
+            if (!mb.isEmpty() and layout.model.within(mb, b)) selection.append(state.gpa, m) catch {};
+        }
+        for (0..p.art.items.len) |ai| {
+            const m: layout.model.Member = .{ .art = .{ .panel = pi, .index = ai } };
+            const mb = memberBox(m);
+            if (!mb.isEmpty() and layout.model.within(mb, b)) selection.append(state.gpa, m) catch {};
+        }
+        for (0..p.regions.items.len) |ri| {
+            const m: layout.model.Member = .{ .region = .{ .panel = pi, .index = ri } };
+            const mb = memberBox(m);
+            if (!mb.isEmpty() and layout.model.within(mb, b)) selection.append(state.gpa, m) catch {};
+        }
+    }
+    state.context = if (selection.items.len > 0) .selection else if (spaceRoot()) |r| .{ .panel = r } else .worksheet;
+    track_cursor = null;
+    if (selection.items.len == 0) state.status = "Nothing lies wholly inside that area. ";
+}
+
+/// The group of the shown space that holds what context `c` names, if any.
+fn groupOf(c: Context) ?usize {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    const m: layout.model.Member = switch (c) {
+        .panel => |pi| if (state.model.panels.items[pi].unbounded) return null else .{ .panel = pi },
+        .label => |l| .{ .label = .{ .panel = l.panel, .index = l.index } },
+        .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
+        .region => |r| .{ .region = .{ .panel = r.panel, .index = r.region } },
+        else => return null,
+    };
+    for (state.model.spaces.items[shown_space].groups.items, 0..) |g, gi| {
+        for (g.members.items) |mb| if (std.meta.eql(mb, m)) return gi;
+    }
+    return null;
+}
+
+/// Moves the selected group 1 mm the way an arrow points.
+fn moveGroupKey(code: dvui.enums.Key) bool {
+    const g = switch (state.context) {
+        .group => |g| g,
+        else => return false,
+    };
+    const d: geom.Point = switch (code) {
+        .up => .{ .x = 0, .y = 1 },
+        .down => .{ .x = 0, .y = -1 },
+        .left => .{ .x = -1, .y = 0 },
+        .right => .{ .x = 1, .y = 0 },
+        else => return false,
+    };
+    state.model.moveGroup(g.space, g.index, d.x, d.y) catch return false;
+    return true;
+}
+
+/// Outlines what the selection or the selected group holds.
+fn drawPicked(area: dvui.Rect.Physical) void {
+    const px = dvui.windowNaturalScale();
+    const focus = dvui.themeGet().focus;
+    switch (state.context) {
+        .selection => for (selection.items) |mb| {
+            const b = memberBox(mb);
+            if (!b.isEmpty()) state.view.rect(area, b).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = focus } });
+        },
+        .group => |g| {
+            if (g.space >= state.model.spaces.items.len or g.index >= state.model.spaces.items[g.space].groups.items.len) return;
+            var all: geom.Box = .empty;
+            for (state.model.spaces.items[g.space].groups.items[g.index].members.items) |mb| {
+                const b = memberBox(mb);
+                if (b.isEmpty()) continue;
+                all = all.join(b);
+                state.view.rect(area, b).stroke(.square, .{ .thickness = px, .color = .{ .color = focus.opacity(0.6) } });
+            }
+            if (!all.isEmpty()) dashedBox(area, .{ .x0 = all.x0 - 2, .y0 = all.y0 - 2, .x1 = all.x1 + 2, .y1 = all.y1 + 2 }, focus, 1.5 * px);
+        },
+        else => {},
+    }
+}
+
 /// The canvas's properties: its units (a conversion: nothing moves), and
 /// what it holds.
 fn canvasProperties(pi: usize) !void {
@@ -1849,7 +2100,11 @@ fn canvasProperties(pi: usize) !void {
     propText("Labels", "{d}", .{panel.labels.items.len}, 2);
     propText("Tracks", "{d}", .{panel.regions.items.len}, 3);
     propText("Line art", "{d}", .{panel.art.items.len}, 4);
-    propText("Panels", "{d}", .{state.model.panels.items.len - 1}, 5);
+    var on_canvas: usize = 0;
+    for (state.model.panels.items) |p| {
+        if (p.space == 0 and !p.unbounded) on_canvas += 1;
+    }
+    propText("Panels", "{d}", .{on_canvas}, 5);
     propText("Typing", "{s}", .{"makes a label where you last clicked"}, 6);
     try propFont("Legend font", 7);
 }
@@ -2353,6 +2608,37 @@ fn drawRulers(area: dvui.Rect.Physical) void {
     }
 }
 
+/// The shown frame's boundary, with its name above it: in the warning colour
+/// when content reaches past it.
+fn drawFrameBound(area: dvui.Rect.Physical) void {
+    if (shown_space == 0 or shown_space >= state.model.spaces.items.len) return;
+    const sp = state.model.spaces.items[shown_space];
+    const b = sp.bound orelse return;
+    const px = dvui.windowNaturalScale();
+    const past = !layout.model.within(spaceExtents(), b);
+    const colour = if (past) colors.overflow else colors.panel_edge;
+    state.view.rect(area, b).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colour } });
+    const corner = state.view.toPx(area, .{ .x = b.x0, .y = b.y1 });
+    const ns = dvui.windowNaturalScale();
+    dvui.labelNoFmt(@src(), sp.name, .{}, .{
+        .rect = .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - 26, .w = 240, .h = 24 },
+        .color_text = .{ .color = colour },
+        .font = dvui.Font.theme(.body).larger(-1),
+    });
+}
+
+/// What the shown space holds, in its coordinates: its panels' outlines
+/// and every solved bound of its panels.
+fn spaceExtents() geom.Box {
+    var b: geom.Box = .empty;
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (!shownPanel(pi)) continue;
+        if (pi < state.placed.items.len and !state.placed.items[pi].bounds.isEmpty()) b = b.join(onSheet(pi, state.placed.items[pi].bounds));
+        if (!p.unbounded) b = b.join(p.box());
+    }
+    return b;
+}
+
 /// The canvas's axes through its origin, faint, with a mark at the origin.
 fn drawAxes(area: dvui.Rect.Physical) void {
     const px = dvui.windowNaturalScale();
@@ -2484,6 +2770,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
+        // A selected group: arrow keys move all of it 1 mm.
+        if (e.evt == .key and state.context == .group and !e.handled and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and moveGroupKey(k.code)) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         // Selected line art: arrow keys move it 1 mm, and the tracks under
         // it reflow.
         if (e.evt == .key and state.context == .art and !e.handled and cursorKeysReach()) {
@@ -2608,6 +2903,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         // The release that follows is part of this click, not a pick.
                         state.press_consumed = true;
                     }
+                } else if (state.tool == .select_area and me.button.pointer()) {
+                    const at = state.view.toMm(area, me.p);
+                    state.drag = .{ .start = at, .at = at };
                 } else if (state.tool == .add_art and me.button.pointer()) {
                     // Line art is drawn from a point on its panel.
                     const at = state.view.toMm(area, me.p);
@@ -2666,6 +2964,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     switch (state.tool) {
                         .add_tracks => addTracksFromDrag(d.start, d.at),
                         .add_art => addArtFromDrag(dragBox(d.start, d.at)),
+                        .select_area => selectArea(dragBox(d.start, d.at)),
                         else => addPanelFromDrag(dragBox(d.start, d.at)),
                     }
                 } else if (state.moving) |mv| {
@@ -2767,9 +3066,11 @@ fn pick(at: geom.Point) void {
     }
     track_cursor = null;
     click_at = at;
-    // Empty space is the worksheet, or on a canvas the canvas itself.
-    state.context = if (state.model.canvas()) |ci| .{ .panel = ci } else .worksheet;
+    // Empty space is the worksheet, or on a canvas the shown space itself.
+    state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
+    selection.clearRetainingCapacity();
     for (state.model.panels.items, 0..) |panel, pi| {
+        if (!shownPanel(pi)) continue;
         const b = panel.box();
         if (!panel.unbounded and at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
         if (pi >= state.placed.items.len) continue;
@@ -2798,6 +3099,8 @@ fn pick(at: geom.Point) void {
             };
         }
     }
+    // A grouped object is picked as its group: one move places them all.
+    if (groupOf(state.context)) |g| state.context = .{ .group = .{ .space = shown_space, .index = g } };
     revealInTree(state.context);
 }
 
@@ -2810,6 +3113,7 @@ fn addPanelFromDrag(b: geom.Box) void {
     const pi = state.model.placePanel(.{
         .name = name,
         .default_name = true,
+        .space = shown_space,
         .origin = .{ .x = b.x0, .y = b.y0 },
         .w = b.width(),
         .h = b.height(),
@@ -3185,6 +3489,18 @@ fn toolPalette() void {
         .panel => |pi| state.model.panels.items[pi].unbounded,
         else => false,
     };
+    if (on_canvas or state.context == .selection or state.context == .group) {
+        const sel_on = state.tool == .select_area;
+        var swd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Select area", dvui.entypo.select_arrows, .{}, .{}, .{
+            .data_out = &swd,
+            .color_fill = if (sel_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.drag = null;
+            state.tool = if (sel_on) .select else .select_area;
+        }
+        dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "Select area: drag around objects to pick them together, to move or copy into a frame", .{}, .{});
+    }
     if (state.context == .worksheet or on_canvas) {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
@@ -3210,6 +3526,8 @@ fn lowerKind() []const u8 {
         .tile => "tile",
         .label => "label",
         .art => "line art",
+        .group => "group",
+        .selection => "selection",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -3411,7 +3729,11 @@ fn properties() !void {
         .panel => |pi| state.model.panels.items[pi].unbounded,
         else => false,
     };
-    heading("{s}", .{if (on_canvas) "Canvas" else state.context.kindName()}, 0);
+    const frame_root = switch (state.context) {
+        .panel => |pi| state.model.panels.items[pi].unbounded and state.model.panels.items[pi].space != 0,
+        else => false,
+    };
+    heading("{s}", .{if (frame_root) "Frame" else if (on_canvas) "Canvas" else state.context.kindName()}, 0);
     switch (state.context) {
         .file => {
             // The file's name is its path, set by saving; it is not a property.
@@ -3425,7 +3747,7 @@ fn properties() !void {
             try propFont("Legend font", 5);
         },
         .panel => |pi| if (state.model.panels.items[pi].unbounded) {
-            try canvasProperties(pi);
+            if (state.model.panels.items[pi].space == 0) try canvasProperties(pi) else try frameProperties(state.model.panels.items[pi].space);
         } else {
             const panel = state.model.panels.items[pi];
             propValue("Name", panel.default_name, "{s}", .{panel.name}, 1);
@@ -3473,6 +3795,8 @@ fn properties() !void {
         .tile => |id| try tileProperties(id),
         .label => |l| try labelProperties(l.panel, l.index),
         .art => |l| try artProperties(l.panel, l.index),
+        .group => |g| try groupProperties(g.space, g.index),
+        .selection => try selectionProperties(),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),
     }
@@ -4102,7 +4426,7 @@ fn statusContent() void {
 
     var counts_buf: [160]u8 = undefined;
     const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs · {d} overflows · {d} in margins", .{
-        state.model.panels.items.len - @as(usize, if (state.model.canvas() != null) 1 else 0), state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len,
+        state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len,
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
 
@@ -4111,6 +4435,7 @@ fn statusContent() void {
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_label => "Add label: click on the panel to place it · Esc cancels",
         .add_art => "Add shape: drag out its box on the panel · Esc cancels",
+        .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
