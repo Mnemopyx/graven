@@ -352,6 +352,125 @@ pub fn ellipse(a: Allocator, name: []const u8, w: f64, h: f64, paint: Paint) All
     return shapes;
 }
 
+/// A closed-path primitive, as drawn: what line art was made as, kept so
+/// it can be redrawn when a parameter changes (a corner radius). Sizes in
+/// mm; its frame's origin is the bottom-left corner of its box.
+pub const Primitive = union(enum) {
+    /// Shapes with no primitive behind them (imported, or from a sample).
+    free,
+    rect: Size,
+    /// A rectangle with corners rounded to radius `r` (clamped to half the
+    /// shorter side).
+    rounded: struct { w: f64, h: f64, r: f64 },
+    circle: f64,
+    ellipse: Size,
+    /// A slot (a stadium): a rectangle with semicircular ends across its
+    /// shorter side.
+    slot: Size,
+    /// Corners in order, in its own frame.
+    polygon: []const Point,
+
+    pub const Size = struct { w: f64, h: f64 };
+
+    /// What a primitive is called, for its properties.
+    pub fn label(p: Primitive) []const u8 {
+        return switch (p) {
+            .free => "Drawing",
+            .rect => "Rectangle",
+            .rounded => "Rounded rectangle",
+            .circle => "Circle",
+            .ellipse => "Ellipse",
+            .slot => "Slot",
+            .polygon => "Polygon",
+        };
+    }
+};
+
+/// One shape drawn as primitive `p` (not `.free`), named `name`.
+pub fn primitive(a: Allocator, name: []const u8, p: Primitive, paint: Paint) Allocator.Error![]const Shape {
+    const outline: geom.Outline = switch (p) {
+        .free => return &.{},
+        .ellipse => |e| return ellipse(a, name, e.w, e.h, paint),
+        .circle => |d| return ellipse(a, name, d, d, paint),
+        .rect => |r| try polygonOutline(a, &.{ .{ .x = 0, .y = 0 }, .{ .x = r.w, .y = 0 }, .{ .x = r.w, .y = r.h }, .{ .x = 0, .y = r.h } }),
+        .rounded => |r| try roundedRect(a, .{ .x0 = 0, .y0 = 0, .x1 = r.w, .y1 = r.h }, r.r),
+        .slot => |r| try roundedRect(a, .{ .x0 = 0, .y0 = 0, .x1 = r.w, .y1 = r.h }, @min(r.w, r.h) / 2),
+        .polygon => |pts| try polygonOutline(a, pts),
+    };
+    const shapes = try a.alloc(Shape, 1);
+    shapes[0] = .{ .name = name, .outline = outline, .paint = paint };
+    return shapes;
+}
+
+/// A closed polygon through `pts`, counter-clockwise (y up) whichever way
+/// they were given.
+fn polygonOutline(a: Allocator, pts: []const Point) Allocator.Error!geom.Outline {
+    var area: f64 = 0;
+    for (pts, 0..) |p, i| {
+        const q = pts[(i + 1) % pts.len];
+        area += p.x * q.y - q.x * p.y;
+    }
+    const segs = try a.alloc(Segment, pts.len);
+    for (segs, 0..) |*sg, i| {
+        const k = if (area >= 0) i else pts.len - 1 - i;
+        const k2 = if (area >= 0) (i + 1) % pts.len else (2 * pts.len - 2 - i) % pts.len;
+        sg.* = .{ .line = .{ pts[k], pts[k2] } };
+    }
+    const contours = try a.alloc(geom.Contour, 1);
+    contours[0] = .{ .segments = segs };
+    return .{ .contours = contours };
+}
+
+/// A copy of primitive `p` in `a` (a polygon's corners copied).
+pub fn dupePrimitive(a: Allocator, p: Primitive) Allocator.Error!Primitive {
+    return switch (p) {
+        .polygon => |pts| .{ .polygon = try a.dupe(Point, pts) },
+        else => p,
+    };
+}
+
+/// Whether point `p` lies inside `o` (nonzero winding), curves taken
+/// within a small fraction of their size.
+pub fn contains(o: geom.Outline, p: Point) bool {
+    var winding: i32 = 0;
+    for (o.contours) |c| for (c.segments) |s| {
+        const steps: usize = switch (s) {
+            .line => 1,
+            .quad => 8,
+            .cubic => 16,
+        };
+        var prev = s.start();
+        for (1..steps + 1) |i| {
+            const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+            const q = pointAt(s, t);
+            if (prev.y <= p.y) {
+                if (q.y > p.y and cross(prev, q, p) > 0) winding += 1;
+            } else if (q.y <= p.y and cross(prev, q, p) < 0) winding -= 1;
+            prev = q;
+        }
+    };
+    return winding != 0;
+}
+
+fn cross(a: Point, b: Point, p: Point) f64 {
+    return (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y);
+}
+
+fn pointAt(s: Segment, t: f64) Point {
+    const u = 1 - t;
+    return switch (s) {
+        .line => |q| .{ .x = u * q[0].x + t * q[1].x, .y = u * q[0].y + t * q[1].y },
+        .quad => |q| .{
+            .x = u * u * q[0].x + 2 * u * t * q[1].x + t * t * q[2].x,
+            .y = u * u * q[0].y + 2 * u * t * q[1].y + t * t * q[2].y,
+        },
+        .cubic => |q| .{
+            .x = u * u * u * q[0].x + 3 * u * u * t * q[1].x + 3 * u * t * t * q[2].x + t * t * t * q[3].x,
+            .y = u * u * u * q[0].y + 3 * u * u * t * q[1].y + 3 * u * t * t * q[2].y + t * t * t * q[3].y,
+        },
+    };
+}
+
 /// A copy of `shapes` in `a`, moved by `d`.
 pub fn dupeShapes(a: Allocator, shapes: []const Shape, d: Point) Allocator.Error![]const Shape {
     const out = try a.alloc(Shape, shapes.len);
@@ -464,4 +583,29 @@ test "a gradient's colour runs from start to end" {
     try testing.expectEqual(Color.hex("#ffffff"), l.at(.{ .x = 3, .y = 10 }));
     try testing.expectEqual(@as(u8, 128), l.at(.{ .x = 3, .y = 5 }).r);
     try testing.expectEqual(Color.hex("#000000"), l.at(.{ .x = 3, .y = -2 }));
+}
+
+test "primitives are closed outlines that contain their middle and not their corners" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prims = [_]Primitive{
+        .{ .rect = .{ .w = 20, .h = 10 } },
+        .{ .rounded = .{ .w = 20, .h = 10, .r = 3 } },
+        .{ .circle = 10 },
+        .{ .ellipse = .{ .w = 20, .h = 10 } },
+        .{ .slot = .{ .w = 20, .h = 10 } },
+        .{ .polygon = &.{ .{ .x = 0, .y = 0 }, .{ .x = 0, .y = 10 }, .{ .x = 20, .y = 10 }, .{ .x = 20, .y = 0 } } },
+    };
+    for (prims) |p| {
+        const shapes = try primitive(a, "s", p, .{});
+        try testing.expectEqual(1, shapes.len);
+        const o = shapes[0].outline;
+        try testing.expectEqual(1, o.contours.len);
+        const b = o.bounds();
+        try testing.expect(contains(o, .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 }));
+        try testing.expect(!contains(o, .{ .x = b.x1 + 1, .y = b.y1 / 2 }));
+        if (p == .rounded or p == .slot or p == .circle or p == .ellipse)
+            try testing.expect(!contains(o, .{ .x = b.x0 + 0.3, .y = b.y0 + 0.3 }));
+    }
 }

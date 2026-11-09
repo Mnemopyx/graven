@@ -52,6 +52,11 @@ pub fn svg(gpa: std.mem.Allocator, outlines: []const geom.Outline, box: geom.Box
 pub const PanelSvgOptions = struct {
     margin: f64 = 2,
     ink: []const u8 = "#1d1d1b",
+    /// A panel with an outline of its own (see `Placed.edge`): its body,
+    /// holes cut through, and its edge.
+    body: []const u8 = "#f2efe8",
+    edge: []const u8 = "#333333",
+    edge_width: f64 = 0.2,
 };
 
 /// A placed panel for display: each tile drawn from its prototype's art as
@@ -76,10 +81,24 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     );
     try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\">\n", .{ -x0, y1 });
     var gradients: usize = 0;
+    // The panel's body: its outline with the cutouts as holes, even-odd so
+    // a hole is a hole whichever way it winds.
+    if (placed.edge) |e| {
+        try w.print("<path fill=\"{s}\" fill-rule=\"evenodd\" stroke=\"{s}\" stroke-width=\"{d}\" d=\"", .{ opts.body, opts.edge, opts.edge_width });
+        try pathData(w, e);
+        for (placed.art) |pa| if (pa.cutout) for (pa.shapes) |s| try pathData(w, s.outline);
+        try w.writeAll("\"/>\n");
+    }
+    // Cutouts with no panel around them (loose, on a canvas): outlined.
+    if (placed.edge == null) for (placed.art) |pa| if (pa.cutout) for (pa.shapes) |s| {
+        try w.print("<path fill=\"none\" stroke=\"{s}\" stroke-width=\"{d}\" d=\"", .{ opts.edge, opts.edge_width });
+        try pathData(w, s.outline);
+        try w.writeAll("\"/>\n");
+    };
     // Tiles, then the panel's line art over them.
     var shapes: std.ArrayList(art.Shape) = .empty;
     for (placed.tiles) |t| try shapes.appendSlice(a, t.shapes);
-    for (placed.art) |pa| try shapes.appendSlice(a, pa.shapes);
+    for (placed.art) |pa| if (!pa.cutout) try shapes.appendSlice(a, pa.shapes);
     for (shapes.items) |s| {
         if (s.outline.contours.len == 0) continue;
         var fill_buf: [32]u8 = undefined;

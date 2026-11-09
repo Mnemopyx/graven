@@ -120,6 +120,14 @@ const State = struct {
 /// What a canvas drag does: pick things, or draw out a new panel.
 const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area };
 
+/// What Add shape draws: a closed path, dragged out as a box (a polygon
+/// is clicked corner by corner).
+const ShapeKind = enum { rect, rounded, circle, ellipse, slot, polygon };
+var shape_kind: ShapeKind = .rounded;
+/// A polygon's corners so far, on panel `polygon_panel`, worksheet mm.
+var polygon_pts: std.ArrayList(geom.Point) = .empty;
+var polygon_panel: usize = 0;
+
 /// The Add tracks tool's choices: what sizes the rows or columns (a tile
 /// prototype, or a text style), and which way the tracks run.
 var tracks_tool: struct {
@@ -293,6 +301,18 @@ fn flatTile(f: *Flat, shapes: []const layout.art.Shape) ![]const TilePiece {
     }
     try f.tiles.put(a, shapes.ptr, out);
     return out;
+}
+
+/// Strokes an outline's contours placed at worksheet point `at`.
+fn strokeOutline(area: dvui.Rect.Physical, o: geom.Outline, at: geom.Point, width: f32, color: dvui.Color) void {
+    const arena = dvui.currentWindow().arena();
+    for (o.contours) |c| {
+        var pts: std.ArrayList(geom.Point) = .empty;
+        // Each segment adds the points after its start: the loop closes on
+        // the last one, so the first point is not repeated.
+        for (c.segments) |seg| flatten(arena, &pts, seg, state.flat.tol) catch return;
+        strokeLoop(area, pts.items, at, width, color);
+    }
 }
 
 /// Strokes a closed polyline placed at worksheet point `at`.
@@ -1786,14 +1806,23 @@ fn canvas() void {
         };
         // While dragged, compliance is shown live for the preview position.
         const off = if (state.moving != null and state.moving.?.panel == pi) !state.model.compliantAt(pi, panelOrigin(pi)) else panelIssue(pi) != null;
-        drawPanelMargins(area, pi);
         // A panel past the sheet's edge is outlined in the warning colour.
         const edge = if (is_context) dvui.themeGet().focus else if (off) colors.overflow else colors.panel_edge;
-        outline.stroke(.square, .{ .thickness = if (is_context or off) 2 * px else px, .color = .{ .color = edge } });
+        const thickness = if (is_context or off) 2 * px else px;
+        // A panel made from a closed path is drawn as that path; its
+        // margins (still a band inside its box) are not shown.
+        const shaped = pi < state.placed.items.len and state.model.panels.items[pi].edge != null and state.placed.items[pi].edge != null;
+        if (shaped) {
+            strokeOutline(area, state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
+        } else {
+            drawPanelMargins(area, pi);
+            outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
+        }
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
 
     drawPicked(area);
+    drawPolygonDraft(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -2155,8 +2184,8 @@ fn canvasProperties(pi: usize) !void {
     try propFont("Legend font", 7);
 }
 
-/// Makes line art from a finished drag: an ellipse filling the box (on
-/// its panel), made the context. Tracks under it flow around its ink.
+/// Makes line art from a finished drag: the chosen shape filling the box
+/// (a circle in its shorter side), on its panel, made the context.
 fn addArtFromDrag(b: geom.Box) void {
     defer state.tool = .select;
     const pi = switch (state.context) {
@@ -2164,15 +2193,79 @@ fn addArtFromDrag(b: geom.Box) void {
         else => return,
     };
     if (!(b.width() >= 1 and b.height() >= 1)) return;
+    const prim: layout.art.Primitive = switch (shape_kind) {
+        .rect => .{ .rect = .{ .w = b.width(), .h = b.height() } },
+        .rounded => .{ .rounded = .{ .w = b.width(), .h = b.height(), .r = @min(3.0, @min(b.width(), b.height()) / 4) } },
+        .circle => .{ .circle = @min(b.width(), b.height()) },
+        .ellipse => .{ .ellipse = .{ .w = b.width(), .h = b.height() } },
+        .slot => .{ .slot = .{ .w = b.width(), .h = b.height() } },
+        .polygon => return,
+    };
+    addPrimitive(pi, prim, .{ .x = b.x0, .y = b.y0 });
+}
+
+/// Adds primitive `prim` as line art on panel `pi`, its box's corner at
+/// worksheet point `at`, and makes it the context. Drawn as an outline:
+/// these are paths to cut or to make panels from.
+fn addPrimitive(pi: usize, prim: layout.art.Primitive, at: geom.Point) void {
     const o = state.model.panels.items[pi].origin;
-    var name_buf: [32]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "Shape {d}", .{state.model.panels.items[pi].art.items.len + 1}) catch "Shape";
-    const shapes = layout.art.ellipse(dvui.currentWindow().arena(), name, b.width(), b.height(), .{
-        .fill = .{ .solid = .{ .r = 0xd9, .g = 0x8c, .b = 0x40, .a = 0xcc } },
-        .edge = .{ .r = 0x73, .g = 0x40, .b = 0x1a },
+    var name_buf: [48]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ prim.label(), state.model.panels.items[pi].art.items.len + 1 }) catch "Shape";
+    const shapes = layout.art.primitive(dvui.currentWindow().arena(), name, prim, .{
+        .edge = .{ .r = 0x2b, .g = 0x2b, .b = 0x2b },
+        .edge_width = 0.25,
     }) catch return;
-    const ai = state.model.addArt(pi, .{ .name = name, .at = .{ .x = b.x0 - o.x, .y = b.y0 - o.y }, .shapes = shapes }) catch return;
+    // An outline lies over what is drawn inside it; a cutout keeps it away.
+    const ai = state.model.addArt(pi, .{ .name = name, .at = .{ .x = at.x - o.x, .y = at.y - o.y }, .shapes = shapes, .prim = prim, .wrap = .none }) catch return;
     state.context = .{ .art = .{ .panel = pi, .index = ai } };
+}
+
+/// A click while drawing a polygon: a new corner, or, on the first
+/// corner again, the polygon closed.
+fn polygonClick(pi: usize, at: geom.Point) void {
+    if (polygon_pts.items.len > 0 and polygon_panel != pi) polygon_pts.clearRetainingCapacity();
+    polygon_panel = pi;
+    if (polygon_pts.items.len >= 3) {
+        const first = polygon_pts.items[0];
+        const near = 6 / state.view.ppm;
+        if (@abs(at.x - first.x) <= near and @abs(at.y - first.y) <= near) {
+            finishPolygon();
+            return;
+        }
+    }
+    polygon_pts.append(state.gpa, at) catch {};
+}
+
+/// Closes the polygon being drawn (three corners at least) as line art.
+fn finishPolygon() void {
+    defer polygon_pts.clearRetainingCapacity();
+    if (polygon_pts.items.len < 3) {
+        state.status = "A polygon needs three corners at least. ";
+        return;
+    }
+    var box: geom.Box = .empty;
+    for (polygon_pts.items) |q| box = box.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+    const pts = dvui.currentWindow().arena().alloc(geom.Point, polygon_pts.items.len) catch return;
+    for (polygon_pts.items, pts) |q, *r| r.* = .{ .x = q.x - box.x0, .y = q.y - box.y0 };
+    state.tool = .select;
+    addPrimitive(polygon_panel, .{ .polygon = pts }, .{ .x = box.x0, .y = box.y0 });
+}
+
+/// The polygon being drawn: its corners joined, and on to the pointer.
+fn drawPolygonDraft(area: dvui.Rect.Physical) void {
+    if (state.tool != .add_art or shape_kind != .polygon or polygon_pts.items.len == 0) return;
+    const px = dvui.windowNaturalScale();
+    const focus = dvui.themeGet().focus;
+    const n = polygon_pts.items.len + @as(usize, if (state.mouse != null) 1 else 0);
+    const pts = dvui.currentWindow().arena().alloc(dvui.Point.Physical, n) catch return;
+    for (polygon_pts.items, 0..) |q, i| pts[i] = state.view.toPx(area, q);
+    if (state.mouse) |m| pts[n - 1] = state.view.toPx(area, m);
+    if (pts.len >= 2) dvui.Path.stroke(.{ .points = pts }, .{ .thickness = 1.5 * px, .color = .{ .color = focus } });
+    for (polygon_pts.items) |q| {
+        const c = state.view.toPx(area, q);
+        const r: dvui.Rect.Physical = .{ .x = c.x - 3 * px, .y = c.y - 3 * px, .w = 6 * px, .h = 6 * px };
+        r.fill(.square, .{ .color = .{ .color = focus } });
+    }
 }
 
 /// Moves the selected line art 1 mm the way an arrow points.
@@ -2230,6 +2323,49 @@ fn artProperties(pi: usize, index: usize) !void {
         propName("Tiles");
         var on = pa.wrap_tracks;
         if (dvui.checkbox(@src(), &on, "Move out from under it", .{ .id_extra = 6 })) try state.model.setArtWrapsTracks(pi, index, on);
+    }
+    try shapeProperties(pi, index);
+}
+
+/// Line art's shape: what it was drawn as, a rounded rectangle's corner
+/// radius, whether it is a cutout, and Make panel for a closed path lying
+/// loose in a space.
+fn shapeProperties(pi: usize, index: usize) !void {
+    const pa = state.model.panels.items[pi].art.items[index];
+    propText("Shape", "{s}", .{pa.prim.label()}, 10);
+    switch (pa.prim) {
+        .rounded => |r| {
+            var buf: [32]u8 = undefined;
+            if (sizesProp("Corner radius, mm", std.fmt.bufPrint(&buf, "{d}", .{r.r}) catch "", 11)) |list| if (list.len == 1) {
+                state.model.setArtCorner(pi, index, list[0]) catch {
+                    state.status = "That radius could not be used. ";
+                };
+            };
+        },
+        .circle => |d| propText("Diameter", "{d:.2} mm", .{d}, 11),
+        else => {},
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 12 });
+        defer row.deinit();
+        propName("Cutout");
+        var on = pa.cutout;
+        if (dvui.checkbox(@src(), &on, "Cut through the panel", .{ .id_extra = 12 })) try state.model.setArtCutout(pi, index, on);
+    }
+    if (!state.model.panels.items[pi].unbounded) return;
+    if (pa.closedPath() == null) {
+        propText("Panel", "{s}", .{"only a single closed path makes one"}, 13);
+        return;
+    }
+    if (dvui.button(@src(), "Make panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        const np = state.model.makePanel(pi, index) catch {
+            state.status = "A panel could not be made from it. ";
+            return;
+        };
+        state.context = .{ .panel = np };
+        state.expanded.put(state.gpa, Context.key(.{ .panel = np }), true) catch {};
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+        state.status = "Made a panel: what it encloses moves with it. ";
     }
 }
 
@@ -2305,7 +2441,11 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     // Line art, over the tracks; the selected piece outlined.
     for (placed.art) |pa| {
         const pieces = flatTile(&state.flat, pa.shapes) catch &.{};
-        for (pieces) |piece| {
+        if (pa.cutout) {
+            // A hole: its outline, in the panel's edge colour, a little
+            // heavier than line art.
+            for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, colors.panel_edge);
+        } else for (pieces) |piece| {
             if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
             const edge = piece.shape.paint.edge orelse continue;
             const width: f32 = @max(px, @as(f32, @floatCast(piece.shape.paint.edge_width * state.view.ppm)));
@@ -2861,6 +3001,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 e.handle(@src(), box.data());
                 state.tool = .select;
                 state.drag = null;
+                polygon_pts.clearRetainingCapacity();
+                dvui.refresh(null, @src(), box.data().id);
+            } else if ((k.code == .enter or k.code == .kp_enter) and k.action == .down and state.tool == .add_art and polygon_pts.items.len > 0) {
+                e.handle(@src(), box.data());
+                finishPolygon();
                 dvui.refresh(null, @src(), box.data().id);
             }
             continue;
@@ -2953,11 +3098,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     const at = state.view.toMm(area, me.p);
                     state.drag = .{ .start = at, .at = at };
                 } else if (state.tool == .add_art and me.button.pointer()) {
-                    // Line art is drawn from a point on its panel.
+                    // Line art is drawn from a point on its panel; a polygon
+                    // takes a click per corner.
                     const at = state.view.toMm(area, me.p);
                     if (state.context == .panel and panelHolds(state.context.panel, at)) {
                         const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
-                        state.drag = .{ .start = p, .at = p };
+                        if (shape_kind == .polygon) {
+                            polygonClick(state.context.panel, p);
+                            state.press_consumed = true;
+                        } else state.drag = .{ .start = p, .at = p };
                     }
                 } else if (state.tool == .add_tracks and me.button.pointer()) {
                     // Tracks are drawn from a point on the panel chosen for them.
@@ -3441,8 +3590,26 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     state.expanded.put(state.gpa, Context.key(.{ .panel = plan.panel }), true) catch {};
 }
 
-/// Tools for the current context, as icon buttons.
+/// Tools for the current context, as icon buttons; with Add shape on,
+/// which shape it draws.
 fn toolPalette() void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+    defer col.deinit();
+    toolBar();
+    if (state.tool != .add_art) return;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 8, .w = 8, .h = 4 } });
+    defer row.deinit();
+    propName("Shape");
+    const names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "Ellipse", "Slot", "Polygon" };
+    var choice: usize = @intFromEnum(shape_kind);
+    if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+        shape_kind = @enumFromInt(choice);
+        polygon_pts.clearRetainingCapacity();
+        state.drag = null;
+    }
+}
+
+fn toolBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4) });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
@@ -3801,12 +3968,30 @@ fn properties() !void {
             propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
             propText("Labels", "{d}", .{panel.labels.items.len}, 7);
+            propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
+            var cutouts: usize = 0;
+            for (panel.art.items) |pa| {
+                if (pa.cutout) cutouts += 1;
+            }
+            propText("Cutouts", "{d}", .{cutouts}, 9);
             try panelMargins(pi);
             if (panelIssue(pi)) |i| {
                 if (i.off_sheet > 0) propText("Issue", "{d:.2} mm off the sheet", .{i.off_sheet}, 20);
                 if (i.ink_outside > 0) propText("Issue", "ink area {d:.2} mm in margin", .{i.ink_outside}, 21);
             }
             try propFont("Legend font", 5);
+            if (state.model.has_sheet) return;
+            if (dvui.button(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+                const id = state.model.releasePanel(pi) catch {
+                    state.status = "The panel could not be released. ";
+                    return;
+                };
+                state.context = if (state.model.locate(id)) |loc| switch (loc) {
+                    .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
+                    else => .worksheet,
+                } else .worksheet;
+                state.status = "Released: its outline and contents are loose again. ";
+            }
         },
         .region => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
@@ -4480,7 +4665,7 @@ fn statusContent() void {
         .select => state.status,
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_label => "Add label: click on the panel to place it · Esc cancels",
-        .add_art => "Add shape: drag out its box on the panel · Esc cancels",
+        .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
     };

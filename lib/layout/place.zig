@@ -139,6 +139,8 @@ pub const PlacedArt = struct {
     index: usize,
     box: Box,
     shapes: []const art.Shape,
+    /// A hole cut through the panel: outlined, never filled.
+    cutout: bool = false,
 };
 
 /// What a region's flow needs: the length, u, that would set its longest
@@ -164,6 +166,10 @@ pub const Placed = struct {
     /// The union of the tiles' pitch boxes, line art, and the ink of
     /// labels outside tiles.
     bounds: Box,
+    /// The panel's outline, in the panel frame, when it is more than a
+    /// plain rectangle: its edge path (Make panel), or its rectangle when
+    /// it has cutouts. Null for a plain rectangle and for a space's panel.
+    edge: ?geom.Outline = null,
 
     pub fn deinit(p: *Placed) void {
         p.arena.deinit();
@@ -694,7 +700,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     var label_keepouts: std.ArrayList(KeepOut) = .empty;
     var placed_art: std.ArrayList(PlacedArt) = .empty;
     for (m.panels.items[panel].art.items, 0..) |pa, ai| {
-        try placed_art.append(a, .{ .index = ai, .box = pa.box(), .shapes = try art.dupeShapes(a, pa.shapes, pa.at) });
+        try placed_art.append(a, .{ .index = ai, .box = pa.box(), .shapes = try art.dupeShapes(a, pa.shapes, pa.at), .cutout = pa.cutout });
         bounds = bounds.join(pa.box());
         if (pa.wrap == .none) continue;
         const k = try KeepOut.of(a, pa);
@@ -1067,8 +1073,23 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         bounds = bounds.join(.{ .x0 = l.origin.x + ink.x0, .y0 = l.origin.y + ink.y0, .x1 = l.origin.x + ink.x1, .y1 = l.origin.y + ink.y1 });
     }
 
+    const this = m.panels.items[panel];
+    const has_cutout = for (this.art.items) |pa| {
+        if (pa.cutout) break true;
+    } else false;
+    var edge: ?geom.Outline = null;
+    if (this.edge) |e| {
+        const shapes = try art.dupeShapes(a, e.shapes, e.at);
+        if (shapes.len > 0) edge = shapes[0].outline;
+    } else if (has_cutout and !this.unbounded) {
+        const shapes = try art.primitive(a, "edge", .{ .rect = .{ .w = this.w, .h = this.h } }, .{});
+        edge = shapes[0].outline;
+    }
+    if (edge) |e| bounds = bounds.join(e.bounds());
+
     return .{
         .arena = arena,
+        .edge = edge,
         .tiles = try tiles.toOwnedSlice(a),
         .tracks = try tracks.toOwnedSlice(a),
         .items = try placed_items.toOwnedSlice(a),
@@ -2044,4 +2065,39 @@ test "a label on a canvas, with no sheet or panel, solves and exports" {
     const svg = try @import("output.zig").panelSvg(gpa, &s, &faces, .{});
     defer gpa.free(svg);
     try testing.expect(std.mem.indexOf(u8, svg, "<path") != null);
+}
+
+test "a panel made from a rounded rectangle exports its outline with the cutouts as holes" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prim: art.Primitive = .{ .rounded = .{ .w = 80, .h = 50, .r = 5 } };
+    const outline = try m.addArt(c, .{ .name = "Outline", .at = .{ .x = 0, .y = 0 }, .shapes = try art.primitive(a, "Outline", prim, .{ .edge = .{ .r = 0, .g = 0, .b = 0 } }), .prim = prim });
+    for ([_]f64{ 8, 66 }) |x| {
+        const hole: art.Primitive = .{ .circle = 6 };
+        const ai = try m.addArt(c, .{ .name = "Hole", .at = .{ .x = x, .y = 22 }, .shapes = try art.primitive(a, "Hole", hole, .{}), .prim = hole });
+        try m.setArtCutout(c, ai, true);
+    }
+    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    _ = try m.addLabel(c, .{ .at = .{ .x = 30, .y = 25 }, .style = style, .content = "HOD" });
+    const p = try m.makePanel(c, outline);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expect(s.edge != null);
+    try testing.expectEqual(1, s.labels.len);
+    const svg = try @import("output.zig").panelSvg(gpa, &s, &faces, .{});
+    defer gpa.free(svg);
+    // One even-odd body path: the outline and two holes (three contours).
+    const at = std.mem.indexOf(u8, svg, "fill-rule=\"evenodd\"") orelse return error.TestUnexpectedResult;
+    const end = std.mem.indexOfPos(u8, svg, at, "/>").?;
+    try testing.expectEqual(3, std.mem.count(u8, svg[at..end], "Z"));
 }

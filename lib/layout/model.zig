@@ -394,6 +394,19 @@ pub const PanelArt = struct {
     wrap_tracks: bool = true,
     /// Space kept between it and the content flowing around it, mm.
     clearance: f64 = 1,
+    /// The primitive it was drawn as, if any (so a corner radius can be
+    /// changed).
+    prim: art_.Primitive = .free,
+    /// A cutout: on a panel, a hole cut through it. Drawn as an outline,
+    /// never filled, and its SVG is a hole in the panel's outline.
+    cutout: bool = false,
+
+    /// Its outline, if it is one closed path (one shape, one contour):
+    /// what Make panel can take as a panel's edge.
+    pub fn closedPath(p: PanelArt) ?geom.Outline {
+        if (p.shapes.len != 1 or p.shapes[0].outline.contours.len != 1) return null;
+        return p.shapes[0].outline;
+    }
 
     /// Its shapes' bounds, mm in the panel frame.
     pub fn box(p: PanelArt) geom.Box {
@@ -463,6 +476,9 @@ pub const Panel = struct {
     /// outline less these. 5 mm on each side until the user sets them.
     margins: Sides = .all(5),
     default_margins: bool = true,
+    /// The closed path its outline was made from (Make panel), in the
+    /// panel frame, its box from (0, 0) to (w, h); none for a rectangle.
+    edge: ?PanelArt = null,
 
     /// The panel's outline on the worksheet.
     pub fn box(p: Panel) geom.Box {
@@ -1029,6 +1045,7 @@ pub const Model = struct {
                 var item = src.items[l.index];
                 if (copy) {
                     item.shapes = try art_.dupeShapes(m.a(), item.shapes, .{ .x = 0, .y = 0 });
+                    item.prim = try art_.dupePrimitive(m.a(), item.prim);
                     item.id = m.newId();
                 } else _ = src.orderedRemove(l.index);
                 try m.panels.items[droot].art.append(m.a(), item);
@@ -1104,7 +1121,14 @@ pub const Model = struct {
             var ca = pa;
             ca.id = m.newId();
             ca.shapes = try art_.dupeShapes(m.a(), pa.shapes, .{ .x = 0, .y = 0 });
+            ca.prim = try art_.dupePrimitive(m.a(), pa.prim);
             try c.art.append(m.a(), ca);
+        }
+        if (p.edge) |e| {
+            var ce = e;
+            ce.shapes = try art_.dupeShapes(m.a(), e.shapes, .{ .x = 0, .y = 0 });
+            ce.prim = try art_.dupePrimitive(m.a(), e.prim);
+            c.edge = ce;
         }
         try m.panels.append(m.a(), c);
         return m.panels.items.len - 1;
@@ -1249,6 +1273,7 @@ pub const Model = struct {
         copy.id = m.newId();
         copy.name = try m.a().dupe(u8, art.name);
         copy.shapes = try art_.dupeShapes(m.a(), art.shapes, .{ .x = 0, .y = 0 });
+        copy.prim = try art_.dupePrimitive(m.a(), art.prim);
         const list = &m.panels.items[panel].art;
         try list.append(m.a(), copy);
         m.revision += 1;
@@ -1281,6 +1306,180 @@ pub const Model = struct {
         if (index >= list.len) return error.NoSuchItem;
         list[index].wrap_tracks = on;
         m.revision += 1;
+    }
+
+    /// Makes line art a cutout (a hole, on a panel) or plain art again.
+    pub fn setArtCutout(m: *Model, panel: usize, index: usize, on: bool) Error!void {
+        const list = m.panels.items[panel].art.items;
+        if (index >= list.len) return error.NoSuchItem;
+        list[index].cutout = on;
+        // A hole keeps what flows away from it (by its ink, with the
+        // clearance), unless told otherwise.
+        if (on and list[index].wrap == .none) list[index].wrap = .ink;
+        m.revision += 1;
+    }
+
+    /// Sets a rounded rectangle's corner radius, mm: it is redrawn.
+    pub fn setArtCorner(m: *Model, panel: usize, index: usize, r: f64) Error!void {
+        const list = m.panels.items[panel].art.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!(r >= 0)) return error.BadSize;
+        const pa = &list[index];
+        const rr = switch (pa.prim) {
+            .rounded => |rr| rr,
+            else => return error.NoSuchItem,
+        };
+        const paint: art_.Paint = if (pa.shapes.len > 0) pa.shapes[0].paint else .{};
+        pa.prim = .{ .rounded = .{ .w = rr.w, .h = rr.h, .r = r } };
+        pa.shapes = try art_.primitive(m.a(), try m.a().dupe(u8, pa.name), pa.prim, paint);
+        m.revision += 1;
+    }
+
+    /// Make panel: loose line art `index` in space panel `root`, a closed
+    /// path, becomes the edge of a new panel there, and what it encloses
+    /// (labels by their anchor, tracks and other line art by their boxes'
+    /// corners) moves onto the panel, keeping where it is. The panel takes
+    /// the path's place in its group; what moves onto it leaves its groups.
+    /// Returns the panel's index.
+    pub fn makePanel(m: *Model, root: usize, index: usize) Error!usize {
+        const rp = m.panels.items[root];
+        if (!rp.unbounded or index >= rp.art.items.len) return error.NoSuchItem;
+        const edge_art = rp.art.items[index];
+        const path = edge_art.closedPath() orelse return error.NoSuchItem;
+        const b = edge_art.box();
+        if (!(b.width() > 0 and b.height() > 0)) return error.BadSize;
+        // The path in the space panel's frame, for the enclosure test.
+        const at = edge_art.at;
+        const inside = struct {
+            fn f(o: geom.Outline, off: geom.Point, q: geom.Point) bool {
+                return art_.contains(o, .{ .x = q.x - off.x, .y = q.y - off.y });
+            }
+            fn box(o: geom.Outline, off: geom.Point, bx: geom.Box) bool {
+                if (bx.isEmpty()) return false;
+                return f(o, off, .{ .x = bx.x0, .y = bx.y0 }) and f(o, off, .{ .x = bx.x1, .y = bx.y0 }) and
+                    f(o, off, .{ .x = bx.x0, .y = bx.y1 }) and f(o, off, .{ .x = bx.x1, .y = bx.y1 });
+            }
+        };
+        var name_buf: [64]u8 = undefined;
+        const name = m.nextPanelName(&name_buf, "Panel");
+        const origin: geom.Point = .{ .x = rp.origin.x + b.x0, .y = rp.origin.y + b.y0 };
+        // From the space panel's frame to the new panel's.
+        const d: geom.Point = .{ .x = rp.origin.x - origin.x, .y = rp.origin.y - origin.y };
+        var p: Panel = .{
+            .id = m.newId(),
+            .name = try m.a().dupe(u8, name),
+            .default_name = true,
+            .space = rp.space,
+            .origin = origin,
+            .w = b.width(),
+            .h = b.height(),
+        };
+        var e = edge_art;
+        e.at = .{ .x = at.x + d.x, .y = at.y + d.y };
+        e.cutout = false;
+        p.edge = e;
+        // What it encloses moves across, from the end so indices hold.
+        const src = &m.panels.items[root];
+        var i = src.labels.items.len;
+        while (i > 0) {
+            i -= 1;
+            const l = src.labels.items[i];
+            if (!inside.f(path, at, l.at)) continue;
+            var moved = src.labels.orderedRemove(i);
+            moved.at = .{ .x = moved.at.x + d.x, .y = moved.at.y + d.y };
+            try p.labels.insert(m.a(), 0, moved);
+        }
+        i = src.regions.items.len;
+        while (i > 0) {
+            i -= 1;
+            const r = src.regions.items[i];
+            if (!inside.box(path, at, r.softArea())) continue;
+            var moved = src.regions.orderedRemove(i);
+            moved.origin = .{ .x = moved.origin.x + d.x, .y = moved.origin.y + d.y };
+            try p.regions.insert(m.a(), 0, moved);
+        }
+        i = src.art.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (i == index) continue;
+            if (!inside.box(path, at, src.art.items[i].box())) continue;
+            var moved = src.art.orderedRemove(i);
+            moved.at = .{ .x = moved.at.x + d.x, .y = moved.at.y + d.y };
+            try p.art.insert(m.a(), 0, moved);
+        }
+        // The path itself, which is now the panel's edge (its index has
+        // moved down by the art taken before it).
+        for (src.art.items, 0..) |x, k| if (x.id == edge_art.id) {
+            _ = src.art.orderedRemove(k);
+            break;
+        };
+        for (p.labels.items) |x| m.forget(x.id);
+        for (p.regions.items) |x| m.forget(x.id);
+        for (p.art.items) |x| m.forget(x.id);
+        m.replaceMember(edge_art.id, p.id);
+        try m.panels.append(m.a(), p);
+        m.revision += 1;
+        return m.panels.items.len - 1;
+    }
+
+    /// Release panel: the panel goes, its edge (a rectangle, if it had
+    /// none) becomes loose line art in its space again, and its labels,
+    /// tracks and line art become loose objects there, all where they
+    /// were. The edge takes the panel's place in its group. Returns the
+    /// edge's ID.
+    pub fn releasePanel(m: *Model, panel: usize) Error!ObjectId {
+        const p = m.panels.items[panel];
+        if (p.unbounded) return error.NoSuchItem;
+        const root_before = m.spaces.items[p.space].root;
+        const rp = m.panels.items[root_before];
+        // From the panel's frame to its space panel's.
+        const d: geom.Point = .{ .x = p.origin.x - rp.origin.x, .y = p.origin.y - rp.origin.y };
+        var e: PanelArt = p.edge orelse blk: {
+            const prim: art_.Primitive = .{ .rect = .{ .w = p.w, .h = p.h } };
+            break :blk .{
+                .id = m.newId(),
+                .name = try m.a().dupe(u8, p.name),
+                .at = .{ .x = 0, .y = 0 },
+                .shapes = try art_.primitive(m.a(), try m.a().dupe(u8, p.name), prim, .{ .edge = .{ .r = 0x33, .g = 0x33, .b = 0x33 } }),
+                .prim = prim,
+                .wrap = .none,
+            };
+        };
+        if (e.id == .none) e.id = m.newId();
+        e.at = .{ .x = e.at.x + d.x, .y = e.at.y + d.y };
+        const dst = &m.panels.items[root_before];
+        try dst.art.append(m.a(), e);
+        for (p.labels.items) |l| {
+            var x = l;
+            x.at = .{ .x = x.at.x + d.x, .y = x.at.y + d.y };
+            try dst.labels.append(m.a(), x);
+        }
+        for (p.regions.items) |r| {
+            var x = r;
+            x.origin = .{ .x = x.origin.x + d.x, .y = x.origin.y + d.y };
+            try dst.regions.append(m.a(), x);
+        }
+        for (p.art.items) |pa| {
+            var x = pa;
+            x.at = .{ .x = x.at.x + d.x, .y = x.at.y + d.y };
+            try dst.art.append(m.a(), x);
+        }
+        m.replaceMember(p.id, e.id);
+        _ = m.panels.orderedRemove(panel);
+        for (m.spaces.items) |*sp| if (sp.root > panel) {
+            sp.root -= 1;
+        };
+        m.revision += 1;
+        return e.id;
+    }
+
+    /// Where `old` is a group's member, `new` takes its place.
+    fn replaceMember(m: *Model, old: ObjectId, new: ObjectId) void {
+        for (m.spaces.items) |*sp| for (sp.groups.items) |*g| {
+            for (g.members.items) |*mb| if (mb.* == old) {
+                mb.* = new;
+            };
+        };
     }
 
     pub fn removeArt(m: *Model, panel: usize, index: usize) void {
@@ -2317,4 +2516,65 @@ test "groups made in place nest, survive other objects going, move as one, and u
     m.removeLabel(c, 0);
     m.removeLabel(c, 0);
     try std.testing.expectEqual(null, m.group(outer));
+}
+
+test "a closed path becomes a panel with what it encloses, cutouts included, and releases back" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A rounded rectangle 100 x 60 at (10, 10), two circular cutouts in
+    // it, a label and a track inside, and a label outside.
+    const prim: art_.Primitive = .{ .rounded = .{ .w = 100, .h = 60, .r = 6 } };
+    const outline = try m.addArt(c, .{ .name = "Outline", .at = .{ .x = 10, .y = 10 }, .shapes = try art_.primitive(a, "Outline", prim, .{}), .prim = prim });
+    for ([_]f64{ 20, 90 }) |x| {
+        const hole: art_.Primitive = .{ .circle = 6 };
+        const ai = try m.addArt(c, .{ .name = "Hole", .at = .{ .x = x, .y = 15 }, .shapes = try art_.primitive(a, "Hole", hole, .{}), .prim = hole });
+        try m.setArtCutout(c, ai, true);
+    }
+    _ = try m.addLabel(c, .{ .at = .{ .x = 40, .y = 50 }, .content = "Inside" });
+    _ = try m.addLabel(c, .{ .at = .{ .x = 200, .y = 50 }, .content = "Outside" });
+    const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
+    _ = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 40, .y = 40 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const edge_id = m.panels.items[c].art.items[outline].id;
+    const g = try m.makeGroup(&.{ edge_id, m.panels.items[c].labels.items[1].id }, "g");
+
+    const p = try m.makePanel(c, outline);
+    const panel = m.panels.items[p];
+    try std.testing.expect(!panel.unbounded);
+    try std.testing.expectEqual(10, panel.origin.x);
+    try std.testing.expectEqual(100, panel.w);
+    try std.testing.expect(panel.edge != null);
+    try std.testing.expectEqual(1, panel.labels.items.len);
+    try std.testing.expectEqual(1, panel.regions.items.len);
+    try std.testing.expectEqual(2, panel.art.items.len);
+    try std.testing.expect(panel.art.items[0].cutout);
+    // In the panel's frame now: the label at (40, 50) on the canvas.
+    try std.testing.expectEqual(30, panel.labels.items[0].at.x);
+    try std.testing.expectEqual(40, panel.labels.items[0].at.y);
+    // Left on the canvas: only the outside label.
+    try std.testing.expectEqual(0, m.panels.items[c].art.items.len);
+    try std.testing.expectEqual(1, m.panels.items[c].labels.items.len);
+    // The panel took the outline's place in its group.
+    try std.testing.expectEqual(g, m.parentGroup(panel.id).?);
+
+    // It moves with all of it; released, everything is loose again where
+    // the move left it.
+    try m.movePanel(p, .{ .x = 15, .y = 10 });
+    const back = try m.releasePanel(p);
+    try std.testing.expectEqual(1, m.panels.items.len);
+    const root = m.panels.items[c];
+    try std.testing.expectEqual(3, root.art.items.len);
+    try std.testing.expectEqual(2, root.labels.items.len);
+    try std.testing.expectEqual(1, root.regions.items.len);
+    try std.testing.expectEqual(edge_id, back);
+    try std.testing.expectEqual(15, root.art.items[0].at.x);
+    try std.testing.expectEqual(45, root.labels.items[1].at.x);
+    try std.testing.expectEqual(45, root.regions.items[0].origin.x);
+    try std.testing.expectEqual(g, m.parentGroup(edge_id).?);
+    // A rounded rectangle's corner can be changed.
+    try m.setArtCorner(c, 0, 2);
+    try std.testing.expectEqual(2, root.art.items[0].prim.rounded.r);
 }
