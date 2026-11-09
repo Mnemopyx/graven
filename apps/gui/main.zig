@@ -2426,6 +2426,7 @@ fn ensurePrototype() !void {
     if (state.model.prototypes.items.len > 0) return;
     var p: layout.model.TilePrototype = .{
         .name = "Key",
+        .unit = 19.05,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
         .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
@@ -2464,7 +2465,8 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
         .prototype => |pid| {
             if (pid >= state.model.prototypes.items.len) return null;
             const p = state.model.prototypes.items[pid];
-            pitch = if (p.art) |art| art.pitch else 19.05;
+            // Its own unit: a 1 u key is 19.05 mm in any track.
+            pitch = p.unit orelse if (p.art) |art| art.pitch else 19.05;
             along_min = p.smallest(major, .along);
             step_ = p.step(major, .along);
             across = p.smallest(major, .across);
@@ -3087,6 +3089,15 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         if (dvui.checkbox(@src(), &next_proto.expand.vertical, "Taller", .{ .id_extra = 4 })) proto_changed = true;
     }
     var buf: [160]u8 = undefined;
+    {
+        // Its u in mm; empty follows the pitch of the track a tile is in.
+        var ubuf: [32]u8 = undefined;
+        const shown = if (p.unit) |u| std.fmt.bufPrint(&ubuf, "{d}", .{u}) catch "" else "any";
+        if (sizesProp("Unit, mm per u", shown, 6)) |list| if (list.len <= 1) {
+            next_proto.unit = if (list.len == 1) list[0] else null;
+            proto_changed = true;
+        };
+    }
     if (p.expand.horizontal) if (sizesProp("Widths, u", sizeList(&buf, p.widths), 4)) |list| {
         next_proto.widths = list;
         proto_changed = true;
@@ -3107,7 +3118,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     if (insets_changed) {
         // A keycap's shape follows its insets; other art keeps its outlines
         // until redrawn.
-        if (isKeycap(p.art)) next_proto.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), next_proto, regionPitch());
+        if (isKeycap(p.art)) next_proto.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), next_proto, protoUnit(next_proto));
         proto_changed = true;
     }
     if (proto_changed) {
@@ -3158,7 +3169,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     const art = p.art orelse {
         propText("Look", "plain, from the insets", .{}, 601);
         if (dvui.button(@src(), "Add keycap art", .{}, .{ .id_extra = 602, .gravity_x = 1 })) {
-            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch()));
+            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p)));
         }
         return;
     };
@@ -3171,7 +3182,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_x = 1, .id_extra = 690, .margin = .{ .y = 8 } });
         defer row.deinit();
         if (!isKeycap(p.art) and dvui.button(@src(), "Redraw from insets", .{}, .{ .id_extra = 691 })) {
-            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch()));
+            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p)));
         }
         if (dvui.button(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try state.model.setPrototypeArt(id, null);
     }
@@ -3184,10 +3195,10 @@ fn isKeycap(art: ?layout.art.Art) bool {
     return a.layers.len == 2 and std.mem.eql(u8, a.layers[0].name, "body") and std.mem.eql(u8, a.layers[1].name, "face");
 }
 
-/// The pitch new art is drawn for: the first region's, or 19.05 mm.
-fn regionPitch() f64 {
-    for (state.model.panels.items) |p| for (p.regions.items) |r| return r.pitch;
-    return 19.05;
+/// A prototype's unit, mm per u, which its art is drawn for: 19.05 mm (a
+/// keyboard's u) when it follows its tracks' pitch.
+fn protoUnit(p: layout.model.TilePrototype) f64 {
+    return p.unit orelse 19.05;
 }
 
 /// A new plain prototype with one slot and keycap art, made the context.
@@ -3196,11 +3207,12 @@ fn addPrototype() !void {
     const name = std.fmt.bufPrint(&name_buf, "Prototype {d}", .{state.model.prototypes.items.len + 1}) catch "Prototype";
     var p: layout.model.TilePrototype = .{
         .name = name,
+        .unit = 19.05,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
         .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
-    p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, regionPitch());
+    p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p));
     const id = try state.model.addPrototype(p);
     state.context = .{ .prototype = id };
 }
@@ -3749,7 +3761,13 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
     const pal = paletteFor(c.panel, c.region) orelse return;
     switch (kind) {
         .tile => _ = state.model.insertTile(c.panel, c.region, c.index, pal.prototype, size) catch return,
-        .blank => state.model.insertBlank(c.panel, c.region, c.index, size) catch return,
+        .blank => {
+            // The palette's blanks are in the prototype's u, as its tiles
+            // are; a blank is stored in its track's unit.
+            const r = state.model.panels.items[c.panel].regions.items[c.region];
+            const unit = state.model.prototypes.items[pal.prototype].unitIn(r.pitch);
+            state.model.insertBlank(c.panel, c.region, c.index, size * unit / r.pitch) catch return;
+        },
         .hard_break => state.model.insertBreak(c.panel, c.region, c.index) catch return,
         .run => {
             const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);

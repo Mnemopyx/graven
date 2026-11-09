@@ -349,9 +349,12 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             // The item's size along, and for a run its render.
             var run_render: ?*const engine.Render = null;
             const size: f64 = switch (item.what) {
+                // In its prototype's unit, so a key keeps its size in a
+                // track of another pitch.
                 .tile => |id| blk: {
                     const t = m.tileConst(id);
-                    break :blk (if (rows) t.w else t.h) * region.pitch;
+                    const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
+                    break :blk (if (rows) t.w else t.h) * unit;
                 },
                 .blank => |len| len * region.pitch,
                 .run => |run| blk: {
@@ -398,20 +401,21 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     if (pin != null) continue;
                     try placed_at.put(a, pid, start);
                     const t = m.tileConst(pid);
-                    const w = t.w * region.pitch;
-                    const h = t.h * region.pitch;
+                    const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
+                    const w = t.w * unit;
+                    const h = t.h * unit;
                     const x0 = if (rows) band.x0 + start else band.x0;
                     const y1 = if (rows) band.y1 else band.y1 - start;
                     const pitch_box: Box = .{ .x0 = x0, .x1 = x0 + w, .y1 = y1, .y0 = y1 - h };
                     const proto = &m.prototypes.items[t.prototype];
                     const body = proto.body_inset.inset(pitch_box);
-                    const shapes = if (proto.art) |pa| art.stretch(a, pa, region.pitch, pitch_box) catch |err| switch (err) {
+                    const shapes = if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
                         error.CurveCrossesCut => blk: {
                             try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = seg });
-                            break :blk try art.plainShapes(a, proto.*, region.pitch, pitch_box);
+                            break :blk try art.plainShapes(a, proto.*, unit, pitch_box);
                         },
                         else => |e| return e,
-                    } else try art.plainShapes(a, proto.*, region.pitch, pitch_box);
+                    } else try art.plainShapes(a, proto.*, unit, pitch_box);
                     try tiles.append(a, .{
                         .id = pid,
                         .region = ri,
@@ -1081,4 +1085,26 @@ test "an item that does not fit moves to the next segment, and the flow after it
     try testing.expectEqual(1, t.issues.len);
     try testing.expectEqual(.row_overflow, t.issues[0].kind);
     try testing.expectEqual(2, t.issues[0].row.?);
+}
+
+test "a tile keeps its prototype's unit in a track of another pitch" {
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const key = try m.addPrototype(.{ .name = "key", .unit = 19.05, .expand = .{ .horizontal = true } });
+    // Rows one 5 mm line thick: a 1.5 u key is still 28.575 mm wide, and
+    // the next item starts after it, past a 0.25 u gap in the track's unit.
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 2, .length = 40, .pitch = 5 });
+    const t = try m.insertTile(p, r, 0, key, 1.5);
+    try m.place(p, r, null, .{ .gap = 0.25, .what = .{ .blank = 1 } });
+    var labels: Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    var s = try solve(testing.allocator, &m, p, &labels);
+    defer s.deinit();
+    const box = s.findTile(t).?.pitch_box;
+    try testing.expectApproxEqAbs(@as(f64, 28.575), box.width(), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 19.05), box.height(), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 28.575 + 1.25), s.items[1].span[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 28.575 + 1.25 + 5), s.items[1].span[1], 1e-9);
 }

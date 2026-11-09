@@ -124,6 +124,15 @@ pub const TilePrototype = struct {
     /// How its tiles look, drawn for 1u × 1u and stretched; null for a flat
     /// body and face drawn from the insets.
     art: ?art_.Art = null,
+    /// Its unit, mm per u (19.05 for PC keys): tile sizes are in it, so a
+    /// tile keeps its size in any track, a text track included. Null takes
+    /// the pitch of the track it is in.
+    unit: ?f64 = null,
+
+    /// mm per u for its tiles in a track of pitch `track_pitch`.
+    pub fn unitIn(p: TilePrototype, track_pitch: f64) f64 {
+        return p.unit orelse track_pitch;
+    }
 
     /// The size of tiles along `major`'s tracks (`.along`) or across them:
     /// widths for rows, heights for columns, and the reverse across.

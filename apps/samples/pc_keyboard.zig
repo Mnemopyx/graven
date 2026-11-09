@@ -201,6 +201,8 @@ fn keyPrototype(a: std.mem.Allocator, styles: Styles) !layout.model.TilePrototyp
     }.f;
     return .{
         .name = "key",
+        // Keys are measured in u: 1 u = 19.05 mm, in any track.
+        .unit = pitch,
         .body_inset = body_inset,
         .face_inset = face_inset,
         .art = try art.keycap(a, .{
