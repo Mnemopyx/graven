@@ -1621,6 +1621,8 @@ fn artProperties(pi: usize, index: usize) !void {
         defer row.deinit();
         propName("Tracks under it");
         const names = [_][]const u8{ "Run straight under", "Flow around its box", "Flow around its ink" };
+        // (What flows: the tracks' tiles, unless they stay under it below,
+        // and the labels on them.)
         var choice: usize = @intFromEnum(wrap);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
             wrap = @enumFromInt(choice);
@@ -1633,6 +1635,15 @@ fn artProperties(pi: usize, index: usize) !void {
         changed = true;
     };
     if (changed) try state.model.setArtWrap(pi, index, wrap, clearance);
+    {
+        // Off, tracks lie under it (a mark printed over keys): their tiles
+        // stay, and only labels on them wrap around it.
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 6 });
+        defer row.deinit();
+        propName("Tiles");
+        var on = pa.wrap_tracks;
+        if (dvui.checkbox(@src(), &on, "Move out from under it", .{ .id_extra = 6 })) try state.model.setArtWrapsTracks(pi, index, on);
+    }
 }
 
 /// Places a new label on panel `pi` at worksheet point `at` (on a 0.5 mm
@@ -1870,6 +1881,13 @@ fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
         .run => |t| t.panel == pi and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
     };
     if (!mine) return null;
+    // A run of text set word by word: the word the caret is in (or just
+    // after) draws it, measured from the word's start.
+    if (l.run) |run| if (run.len > 0) {
+        const off: u32 = @intCast(c.offset);
+        if (off < run.from or off > run.from + run.len) return null;
+        return l.render.caret(off - run.from);
+    };
     return l.render.caret(@intCast(c.offset));
 }
 
@@ -3895,8 +3913,10 @@ fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
     var here: ?layout.place.PlacedItem = null;
     for (state.placed.items[c.panel].items) |it| {
         if (it.region != c.region) continue;
+        // A run set word by word has several pieces: the cursor goes after
+        // the last of the item before it, before the first of its own.
         if (it.index + 1 == c.index) prev = it;
-        if (it.index == c.index) here = it;
+        if (it.index == c.index and here == null) here = it;
     }
     // After a hard break: the start of the next segment.
     if (prev) |p| if (isBreak(c.panel, p)) {

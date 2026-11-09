@@ -43,7 +43,14 @@ pub const PlacedTile = struct {
 pub const PlacedLabel = struct {
     /// The run in a track's flow it sets, if it is one: then `tile` is
     /// null and `slot` is the item's index.
-    run: ?struct { region: usize, item: usize } = null,
+    run: ?struct {
+        region: usize,
+        item: usize,
+        /// The piece of the item's markup it sets (a word, when a run of
+        /// text breaks between words): its start and length there.
+        from: u32 = 0,
+        len: u32 = 0,
+    } = null,
     /// The tile whose slot holds it; null for a label placed directly on
     /// the panel, or a run.
     tile: ?TileId,
@@ -207,6 +214,9 @@ pub const Labels = struct {
         /// The hard box relative to the anchor point; null for none.
         box: ?[4]f64,
         markup: []const u8,
+        /// Each line's open span, where art over the label closes the rest
+        /// (see `engine.label.Options.line_spans`); empty for none.
+        spans: []const ?[2]f64 = &.{},
     };
 
     const Entry = struct {
@@ -221,10 +231,16 @@ pub const Labels = struct {
             h.update(std.mem.asBytes(&(k.box orelse [4]f64{ 0, 0, 0, 0 })));
             h.update(&.{@intFromBool(k.box != null)});
             h.update(k.markup);
+            for (k.spans) |sp| h.update(std.mem.asBytes(&(sp orelse [2]f64{ -1, -1 })));
             return h.final();
         }
         pub fn eql(_: KeyContext, x: Key, y: Key) bool {
             const boxes = if (x.box) |xb| (if (y.box) |yb| std.mem.eql(f64, &xb, &yb) else false) else y.box == null;
+            if (x.spans.len != y.spans.len) return false;
+            for (x.spans, y.spans) |p, q| {
+                if ((p == null) != (q == null)) return false;
+                if (p != null and !std.mem.eql(f64, &p.?, &q.?)) return false;
+            }
             return x.style == y.style and x.anchor == y.anchor and boxes and std.mem.eql(u8, x.markup, y.markup);
         }
     };
@@ -250,6 +266,7 @@ pub const Labels = struct {
 
     fn free(l: *Labels, k: Key, e: Entry) void {
         l.gpa.free(k.markup);
+        l.gpa.free(k.spans);
         if (e.render) |r| {
             r.deinit();
             l.gpa.destroy(r);
@@ -309,6 +326,7 @@ pub const Labels = struct {
             const r = engine.renderLabel(l.gpa, ctx, k.markup, .{
                 .anchor = anchor,
                 .hard_box = if (k.box) |b| .{ .x0 = b[0], .y0 = b[1], .x1 = b[2], .y1 = b[3] } else null,
+                .line_spans = k.spans,
                 .preview = true,
             }, &syntax) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -320,6 +338,7 @@ pub const Labels = struct {
         };
         var owned = k;
         owned.markup = try l.gpa.dupe(u8, k.markup);
+        owned.spans = try l.gpa.dupe(?[2]f64, k.spans);
         try l.cache.put(l.gpa, owned, .{ .render = render });
         return render;
     }
@@ -539,6 +558,62 @@ const KeepOut = struct {
     }
 };
 
+/// For a label set from anchor point `at` in hard box `box` (panel frame),
+/// each line's open span where line art closes stretches of it, in the
+/// label frame: the widest one left (a zero-width one if none is, so the
+/// line overflows and says so). Empty when no art reaches the box. Lines
+/// are taken one pitch apart down from the first baseline, before the
+/// block is fitted in its box.
+fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: f64, pitch: f64) Allocator.Error![]const ?[2]f64 {
+    var any = false;
+    for (keepouts) |k| {
+        const c = k.clearance;
+        if (model.overlaps(.{ .x0 = k.box.x0 - c, .x1 = k.box.x1 + c, .y0 = k.box.y0 - c, .y1 = k.box.y1 + c }, box)) any = true;
+    }
+    if (!any or !(pitch > 0)) return &.{};
+    var spans: std.ArrayList(?[2]f64) = .empty;
+    var closed: std.ArrayList([2]f64) = .empty;
+    const lead = (pitch - cap) / 2;
+    var i: usize = 0;
+    while (i < 64) : (i += 1) {
+        const base = at.y - @as(f64, @floatFromInt(i)) * pitch;
+        const band: Box = .{ .x0 = box.x0, .x1 = box.x1, .y0 = base - lead, .y1 = base + cap + lead };
+        if (band.y1 < box.y0) break;
+        closed.clearRetainingCapacity();
+        for (keepouts) |k| try k.closes(a, true, band, &closed);
+        if (closed.items.len == 0) {
+            try spans.append(a, null);
+            continue;
+        }
+        std.mem.sort([2]f64, closed.items, {}, struct {
+            fn lt(_: void, x: [2]f64, y: [2]f64) bool {
+                return x[0] < y[0];
+            }
+        }.lt);
+        // The widest open span between the closed stretches.
+        var best: [2]f64 = .{ 0, 0 };
+        var from: f64 = 0;
+        for (closed.items) |cl| {
+            if (cl[0] - from > best[1] - best[0]) best = .{ from, cl[0] };
+            from = @max(from, cl[1]);
+        }
+        if (box.width() - from > best[1] - best[0]) best = .{ from, box.width() };
+        try spans.append(a, .{ box.x0 + best[0] - at.x, box.x0 + best[1] - at.x });
+    }
+    return spans.items;
+}
+
+/// Whether a run's markup breaks between words at its spaces: plain text,
+/// with no commands (an equation keeps its spacing whole).
+fn splitsIntoWords(content: []const u8) bool {
+    return std.mem.indexOfScalar(u8, content, ' ') != null and std.mem.indexOfScalar(u8, content, '\\') == null;
+}
+
+/// Whether a flow piece is the space between two words of a run.
+fn isSpace(item: model.Item) bool {
+    return item.what == .run and std.mem.eql(u8, item.what.run.content, " ");
+}
+
 /// The point at `t` on segment `s`.
 fn pointOn(s: geom.Segment, t: f64) Point {
     const u = 1 - t;
@@ -615,11 +690,15 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
     // Line art on the panel: drawn over the tracks, and what wraps is
     // something their flow goes around.
     var keepouts: std.ArrayList(KeepOut) = .empty;
+    var label_keepouts: std.ArrayList(KeepOut) = .empty;
     var placed_art: std.ArrayList(PlacedArt) = .empty;
     for (m.panels.items[panel].art.items, 0..) |pa, ai| {
         try placed_art.append(a, .{ .index = ai, .box = pa.box(), .shapes = try art.dupeShapes(a, pa.shapes, pa.at) });
         bounds = bounds.join(pa.box());
-        if (pa.wrap != .none) try keepouts.append(a, try KeepOut.of(a, pa));
+        if (pa.wrap == .none) continue;
+        const k = try KeepOut.of(a, pa);
+        try label_keepouts.append(a, k);
+        if (pa.wrap_tracks) try keepouts.append(a, k);
     }
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
         // Rows run right and stack down; columns run down and set to the
@@ -628,7 +707,48 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         const rows = region.major == .row;
         const length = region.segmentLength() * region.pitch;
         const tol = 1e-9;
-        const items = region.items.items;
+        // The flow as the pass sees it: a run of plain text breaks between
+        // its words, so it becomes one piece a word with a space piece
+        // between (dropped where a wrap leaves it at a segment's start). A
+        // run with markup commands (an equation) stays whole. Each piece
+        // remembers its item, and where in the item's markup it starts.
+        var pieces: std.ArrayList(model.Item) = .empty;
+        var item_of: std.ArrayList(usize) = .empty;
+        var src_off: std.ArrayList(u32) = .empty;
+        for (region.items.items, 0..) |item, mi| {
+            const run = switch (item.what) {
+                .run => |run| run,
+                else => null,
+            };
+            if (run == null or !splitsIntoWords(run.?.content)) {
+                try pieces.append(a, item);
+                try item_of.append(a, mi);
+                try src_off.append(a, 0);
+                continue;
+            }
+            const content = run.?.content;
+            var first = true;
+            var i: usize = 0;
+            while (i < content.len) {
+                while (i < content.len and content[i] == ' ') i += 1;
+                if (i >= content.len) break;
+                var j = i;
+                while (j < content.len and content[j] != ' ') j += 1;
+                if (!first) {
+                    try pieces.append(a, .{ .what = .{ .run = .{ .style = run.?.style, .content = " " } } });
+                    try item_of.append(a, mi);
+                    try src_off.append(a, @intCast(i - 1));
+                }
+                try pieces.append(a, .{ .gap = if (first) item.gap else 0, .what = .{ .run = .{ .style = run.?.style, .content = content[i..j] } } });
+                try item_of.append(a, mi);
+                try src_off.append(a, @intCast(i));
+                first = false;
+                i = j;
+            }
+            // The item's own binding holds after its last word.
+            pieces.items[pieces.items.len - 1].bind = item.bind;
+        }
+        const items = pieces.items;
 
         // First, every item's size along, and for a run its render.
         const sizes = try a.alloc(f64, items.len);
@@ -645,10 +765,13 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 },
                 .run => |run| blk: {
                     if (run.content.len == 0) break :blk 0.5 * region.pitch;
-                    if (labels.context(run.style) == null) {
-                        try issues.append(a, .{ .kind = .style_error, .region = ri, .item = index });
+                    const sctx = labels.context(run.style) orelse {
+                        try issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
                         break :blk 0.5 * region.pitch;
-                    }
+                    };
+                    // The space between words: a third of an em, drawn as
+                    // nothing (TeX's interword space).
+                    if (isSpace(item)) break :blk (sctx.em(sctx.spec.cap_height) catch sctx.spec.cap_height * 1.4) / 3;
                     const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content })) orelse break :blk 0.5 * region.pitch;
                     rr.* = render;
                     const d = render.design;
@@ -739,14 +862,15 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 in_seg = 0;
                 start = Flow.clear(closed.items, gap, size);
                 // Landing at the start after a soft break, a tile whose
-                // prototype says so (a space between words) is dropped.
-                if (item.tileOf()) |id| if (m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop) {
+                // prototype says so, or a space between words, is dropped.
+                const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(item);
+                if (drops) {
                     para -= gap + size;
                     segs_of[index] = seg;
                     spans[index] = .{ 0, 0 };
                     dropped[index] = true;
                     continue;
-                };
+                }
             }
             const end = start + size;
             pos = @max(pos, end);
@@ -763,7 +887,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg];
             const start = spans[index][0] + sh;
             const end = spans[index][1] + sh;
-            try placed_items.append(a, .{ .region = ri, .index = index, .segment = sg, .span = .{ start, end } });
+            try placed_items.append(a, .{ .region = ri, .index = item_of.items[index], .segment = sg, .span = .{ start, end } });
             if (dropped[index] or dup[index]) continue;
             const band = path.boxes.items[sg];
             switch (item.what) {
@@ -799,7 +923,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 },
                 .run => |run| {
                     const render = renders[index] orelse continue;
-                    if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = index, .syntax = render.syntax[0] });
+                    if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
                     const d = render.design;
                     const cap = labels.context(run.style).?.spec.cap_height;
                     // On a baseline that centres its capitals across a
@@ -813,16 +937,16 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     else
                         .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                     try placed_labels.append(a, .{
-                        .run = .{ .region = ri, .item = index },
+                        .run = .{ .region = ri, .item = item_of.items[index], .from = src_off.items[index], .len = @intCast(run.content.len) },
                         .tile = null,
-                        .slot = index,
+                        .slot = item_of.items[index],
                         .box = box,
                         .origin = origin,
                         .style = run.style,
                         .render = render,
                     });
                     for (render.diagnostics) |dg| if (dg.kind == .missing_glyph) {
-                        try issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = index });
+                        try issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = item_of.items[index] });
                         break;
                     };
                 },
@@ -869,11 +993,15 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     .end => box.y0,
                 },
             };
+            // Art over the slot closes stretches of its lines: each line is
+            // given the widest span left open.
+            const spans = try lineSpans(a, label_keepouts.items, box, at, cap, ctx.linePitch() catch 0);
             const render = (try labels.get(.{
                 .style = slot.style,
                 .anchor = slot.place.h,
                 .box = .{ snap(box.x0 - at.x), snap(box.y0 - at.y), snap(box.x1 - at.x), snap(box.y1 - at.y) },
                 .markup = slot.content,
+                .spans = spans,
             })) orelse {
                 try issues.append(a, .{ .kind = .markup_error, .tile = pt.id, .slot = si });
                 continue;
@@ -1795,4 +1923,86 @@ test "line art over half a track: its tiles flow around the art's outline, and r
     try clearOf(&s, 70, 80, 20.5);
     try testing.expectApproxEqAbs(@as(f64, 40), s.tiles[4].pitch_box.x0, 1e-9);
     try testing.expectError(error.BadSize, m.setArtWrap(p, ai, .ink, -1));
+}
+
+test "a label wraps around art placed over its box" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 8 });
+    const p = try m.addPanel("board", 100, 100);
+    const key = try m.addPrototype(.{ .name = "key", .unit = 40, .slots = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 1, .pitch = 40 });
+    const t = try m.insertTile(p, r, 0, key, 1);
+    // "HH HH" is about 20 mm of ink: one line on the 38 mm face.
+    try m.setContent(t, "top", "HH HH");
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectEqual(@as(u16, 1), s.labels[0].render.lines);
+    }
+    // A disc over the face's right half, which the track lies under (so
+    // the key stays), leaves about 17 mm open on the left: the legend
+    // wraps there, each line in the open span.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const disc = try art.ellipse(arena.allocator(), "disc", 20, 40, .{});
+    _ = try m.addArt(p, .{ .name = "disc", .at = .{ .x = 30, .y = 50 }, .shapes = disc, .clearance = 1, .wrap_tracks = false });
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    const l = s.labels[0];
+    try testing.expectEqual(@as(u16, 2), l.render.lines);
+    // Its ink stays left of the disc.
+    try testing.expect(l.origin.x + l.render.ink.x1 <= 30 + 1e-6);
+}
+
+test "a run of text breaks between its words; a space a wrap leaves at a row's start is dropped" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
+    // Three words in one run; 30 mm rows hold two.
+    try m.insertRun(p, r, 0, .{ .style = body, .content = "HOD ADD HOD" });
+    // An equation stays whole, spaces and all.
+    try m.insertRun(p, r, 1, .{ .style = body, .content = "A = \\frac{H}{D}" });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    // Five pieces of item 0 (three words, two spaces), one of item 1.
+    var words: usize = 0;
+    for (s.labels) |l| if (l.run) |run| {
+        if (run.item == 0) words += 1;
+    };
+    try testing.expectEqual(3, words);
+    var pieces: [8]PlacedItem = undefined;
+    var n: usize = 0;
+    for (s.items) |it| if (it.index == 0) {
+        pieces[n] = it;
+        n += 1;
+    };
+    try testing.expectEqual(5, n);
+    // Words one space apart, the space a third of an em.
+    try testing.expect(pieces[1].span[1] - pieces[1].span[0] > 0);
+    try testing.expectApproxEqAbs(pieces[0].span[1], pieces[1].span[0], 1e-9);
+    try testing.expectApproxEqAbs(pieces[1].span[1], pieces[2].span[0], 1e-9);
+    // The third word wraps; the space before it, landing at the start of
+    // the second row, is dropped (no length), so the word starts the row.
+    try testing.expectEqual(0, pieces[2].segment);
+    try testing.expectEqual(1, pieces[4].segment);
+    try testing.expectApproxEqAbs(@as(f64, 0), pieces[4].span[0], 1e-9);
+    // The word labels know where in the run's markup they start.
+    for (s.labels) |l| if (l.run) |run| if (run.item == 0 and run.from == 8) {
+        try testing.expectEqual(3, run.len);
+    };
 }

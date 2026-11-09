@@ -37,6 +37,11 @@ pub const Options = struct {
     hard_box: ?Box = null,
     /// Where the anchor starts, in the hard box's coordinates.
     anchor_at: geom.Point = .{ .x = 0, .y = 0 },
+    /// For each line in turn, the open span of the line it may use, x0 to
+    /// x1 in the label frame (where art over the label closes the rest):
+    /// the line is filled to the span's width and set in it by the anchor.
+    /// Lines past the end, or null, use the hard box.
+    line_spans: []const ?[2]f64 = &.{},
     /// Parse leniently, for showing markup as it is typed: problems become
     /// placeholders and faint text, listed in the render's `syntax`, and
     /// the render never fails on syntax.
@@ -78,14 +83,22 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
         while (true) {
             const line = atoms.items[start..];
             var overflow = false;
-            const take = if (opts.hard_box) |hb| try b.fit(line, cap, hb.width(), &overflow) else line.len;
+            // The room this line has: the hard box's width, or the open
+            // span the caller gives for it (where art closes the rest).
+            const span: ?[2]f64 = if (b.line < opts.line_spans.len) opts.line_spans[b.line] else null;
+            const room: ?f64 = if (span) |sp| sp[1] - sp[0] else if (opts.hard_box) |hb| hb.width() else null;
+            const take = if (room) |w| try b.fit(line, cap, w, &overflow) else line.len;
             if (overflow) try b.diagnose(.overflow, atomOffset(line[0]));
             const item0 = b.items.items.len;
             const elem0 = b.elements.items.len;
             const y = -@as(f64, @floatFromInt(b.line)) * pitch;
-            const width = try b.atomsLine(line[0..take], cap, 0, 0, y);
-            // Each line sits on the anchor by its own width.
-            const dx = -(try opts.anchor.offset(width));
+            const width = try b.atomsLine(try b.lineAtoms(line, take), cap, 0, 0, y);
+            // Each line sits on the anchor by its own width; in an open
+            // span, the anchor's share of the span holds it.
+            const dx = if (span) |sp|
+                sp[0] + (sp[1] - sp[0] - width) * (try opts.anchor.offset(1))
+            else
+                -(try opts.anchor.offset(width));
             try b.shiftSince(item0, elem0, dx);
             design = design.join(.{ .x0 = dx, .y0 = y, .x1 = dx + width, .y1 = y });
             b.line += 1;
@@ -204,10 +217,25 @@ const Builder = struct {
     /// The line being laid out, from 0.
     line: u16 = 0,
 
+    /// The atoms of a line that ends before `atoms[take]`: when it breaks at
+    /// a soft hyphen, a hyphen ends it.
+    fn lineAtoms(b: *Builder, atoms: []const Atom, take: usize) Error![]const Atom {
+        if (take >= atoms.len) return atoms[0..take];
+        const at = atoms[take];
+        if (at.node != .line_break or at.node.line_break.kind != .hyphen) return atoms[0..take];
+        const out = try b.a.alloc(Atom, take + 1);
+        @memcpy(out[0..take], atoms[0..take]);
+        const src = try b.a.alloc(u32, 1);
+        src[0] = at.node.line_break.span.start;
+        out[take] = .{ .node = .{ .text = .{ .utf8 = "-", .source = src, .variant = .text, .span = at.node.line_break.span } }, .start = 0, .end = 1, .class = .ord };
+        return out;
+    }
+
     /// How many of `atoms` fit on one line `width` wide (by ink), breaking
-    /// at the last opportunity that fits. If none fits, the first
-    /// opportunity is taken (or none, when there is none) and `overflow` is
-    /// set: a word longer than its line is reported, never shrunk.
+    /// at the last opportunity that fits (a soft hyphen counts its hyphen).
+    /// If none fits, the first opportunity is taken (or none, when there is
+    /// none) and `overflow` is set: a word longer than its line is
+    /// reported, never shrunk.
     fn fit(b: *Builder, atoms: []const Atom, cap: f64, width: f64, overflow: *bool) Error!usize {
         if (try b.measure(atoms, cap) <= width) return atoms.len;
         var best: ?usize = null;
@@ -215,7 +243,7 @@ const Builder = struct {
         for (atoms, 0..) |atom, k| {
             if (!atom.breakable or k == 0) continue;
             if (first == null) first = k;
-            if (try b.measure(atoms[0..k], cap) <= width) best = k else break;
+            if (try b.measure(try b.lineAtoms(atoms, k), cap) <= width) best = k else break;
         }
         if (best) |k| return k;
         overflow.* = true;
@@ -788,7 +816,7 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
         .scripts => |s| try out.append(a, .{ .node = n, .class = nucleusClass(s.base.*) }),
         .group, .accent, .placeholder, .radical, .fraction => try out.append(a, .{ .node = n, .class = .ord }),
         .space => try out.append(a, .{ .node = n, .class = .space }),
-        .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind == .soft }),
+        .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind != .hard }),
     }
 }
 
@@ -1321,6 +1349,51 @@ test "lines wrap at a breaking space or \\allowbreak when the hard box is too na
     var free = try renderTest(&ctx, "HH HH");
     defer free.deinit();
     try testing.expectEqual(@as(u16, 1), free.lines);
+}
+
+test "a soft hyphen breaks a word that would overflow, with a hyphen; untaken it is nothing" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    const box: Box = .{ .x0 = 0, .y0 = -20, .x1 = 20, .y1 = 10 };
+
+    // "HHHH" overflows 20 mm; at the soft hyphen it breaks instead.
+    var plain = try renderBox(&ctx, "HHHH", .{ .hard_box = box });
+    defer plain.deinit();
+    try testing.expect(hasOverflow(plain));
+    var hy = try renderBox(&ctx, "HH\\-HH", .{ .hard_box = box });
+    defer hy.deinit();
+    try testing.expectEqual(@as(u16, 2), hy.lines);
+    try testing.expectEqualSlices(u32, &.{2}, hy.breaks);
+    try testing.expect(!hasOverflow(hy));
+    // The first line ends with the hyphen (from the \- in the source).
+    var hyphen = false;
+    for (hy.elements) |e| hyphen = hyphen or (e.origin.y == 0 and e.start == 2);
+    try testing.expect(hyphen);
+
+    // With room, it is nothing: the word is as wide as without it.
+    var wide = try renderTest(&ctx, "HH\\-HH");
+    defer wide.deinit();
+    var whole = try renderTest(&ctx, "HHHH");
+    defer whole.deinit();
+    try testing.expectEqual(@as(u16, 1), wide.lines);
+    try testing.expectApproxEqAbs(whole.ink.width(), wide.ink.width(), eps);
+}
+
+test "a line given an open span fills it and sits in it; later lines use the hard box" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    const box: Box = .{ .x0 = 0, .y0 = -20, .x1 = 40, .y1 = 10 };
+    // The first line may use only 10..23 mm (art closes the rest): "HH"
+    // fits there, so "HH HH" breaks; the second line has the whole box.
+    const spans = [_]?[2]f64{.{ 10, 23 }};
+    var r = try renderBox(&ctx, "HH HH", .{ .hard_box = box, .line_spans = &spans });
+    defer r.deinit();
+    try testing.expectEqual(@as(u16, 2), r.lines);
+    try testing.expectApproxEqAbs(@as(f64, 10), r.elements[0].origin.x, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0), r.elements[1].origin.x, eps);
+    try testing.expect(!hasOverflow(r));
 }
 
 test "a non-breaking space or a long word overflows instead of shrinking" {

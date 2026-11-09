@@ -378,8 +378,11 @@ pub const PanelArt = struct {
     at: geom.Point,
     /// Its shapes, back to front, mm in its own frame (y up).
     shapes: []const art_.Shape,
-    /// Whether the tracks it lies over flow around it, and how.
+    /// Whether what it lies over flows around it, and how.
     wrap: Wrap = .ink,
+    /// Whether the tracks under it flow around it. When not, their tiles
+    /// stay under it, and only labels (a key's legend) wrap around it.
+    wrap_tracks: bool = true,
     /// Space kept between it and the content flowing around it, mm.
     clearance: f64 = 1,
 
@@ -806,13 +809,22 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Sets how the tracks under line art flow around it.
+    /// Sets how what line art lies over flows around it.
     pub fn setArtWrap(m: *Model, panel: usize, index: usize, wrap: Wrap, clearance: f64) Error!void {
         const list = m.panels.items[panel].art.items;
         if (index >= list.len) return error.NoSuchItem;
         if (!(clearance >= 0)) return error.BadSize;
         list[index].wrap = wrap;
         list[index].clearance = clearance;
+        m.revision += 1;
+    }
+
+    /// Sets whether the tracks under line art flow around it (else only
+    /// labels do).
+    pub fn setArtWrapsTracks(m: *Model, panel: usize, index: usize, on: bool) Error!void {
+        const list = m.panels.items[panel].art.items;
+        if (index >= list.len) return error.NoSuchItem;
+        list[index].wrap_tracks = on;
         m.revision += 1;
     }
 

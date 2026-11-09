@@ -7,7 +7,7 @@
 //! Differences from KaTeX, by design:
 //! - Spaces are significant: "CAPS LOCK" keeps its space. A space is a
 //!   break opportunity; ~ is a non-breaking space.
-//! - \\ is a hard break and \allowbreak a soft one, not a backslash
+//! - \\ is a hard break, \allowbreak a soft one and \- a soft hyphen, not a backslash
 //!   (write \textbackslash).
 //! - A script attaches to the grapheme cluster before it ("CLEAR^2" puts
 //!   the 2 on the R), or to the group, command or accent before it.
@@ -111,7 +111,9 @@ pub const Space = struct {
 };
 
 pub const Break = struct {
-    kind: enum { hard, soft },
+    /// \\ ends the line; \allowbreak may; \- may inside a word, a hyphen
+    /// then ending the line (a soft hyphen).
+    kind: enum { hard, soft, hyphen },
     span: Span,
 };
 
@@ -457,6 +459,7 @@ const Parser = struct {
                 };
                 if (kind) |k| break :blk .{ .space = .{ .kind = k, .span = span } };
                 if (name[0] == '\\') break :blk .{ .line_break = .{ .kind = .hard, .span = span } };
+                if (name[0] == '-') break :blk .{ .line_break = .{ .kind = .hyphen, .span = span } };
                 try p.problem(.unknown_command, at);
                 break :blk try p.faint(at, span.end);
             }
@@ -858,6 +861,7 @@ test "accents, spaces and breaks" {
     try expectTree("\\hat{y},r", "(hat {(text \"y\")}) (text \",r\")");
     try expectTree("a\\,b", "(text \"a\") (space thin) (text \"b\")");
     try expectTree("CAPS\\allowbreak LOCK", "(text \"CAPS\") (break soft) (text \"LOCK\")");
+    try expectTree("Back\\-space", "(text \"Back\") (break hyphen) (text \"space\")");
     try expectTree("ON\\\\OFF", "(text \"ON\") (break hard) (text \"OFF\")");
     try expectTree("220~V", "(text \"220\u{00A0}V\")");
     try expectTree("AB% a note", "(text \"AB\")");
