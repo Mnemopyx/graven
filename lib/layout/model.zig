@@ -3,8 +3,8 @@
 //!
 //! A panel holds regions, each a track: one flow of items (tiles, blanks,
 //! runs of text or equations, hard breaks) poured through a list of
-//! segments (rows or columns) at a pitch. A tile spanning segments is
-//! listed again where it crosses each later one; its first entry places it. Each tile
+//! segments (rows or columns) at a pitch. A tile thicker than its segment
+//! reaches into the ones after it, and their content flows around it. Each tile
 //! is an instance of a tile prototype, which sets what tiles of its kind
 //! share: the body and the face (the labelling surface) as insets, and the
 //! named slots on the face where labels go. A tile holds only what is its
@@ -135,6 +135,15 @@ pub const TilePrototype = struct {
     /// segment after a soft break: kept (blanks, like a keyboard's gaps), or
     /// dropped (a space between words).
     at_soft_break: enum { keep, drop } = .keep,
+    /// Its tiles are letters (an illuminated initial, a symbol in a
+    /// legend): one binds to the item after it when that is not a break,
+    /// space or blank, so it stays with the rest of its word.
+    letter: bool = false,
+    /// Where its tiles' baseline lies, u above their bottom edge: in a row
+    /// a tile is then set on the row's text baseline, and what reaches
+    /// below the row (a drop cap) closes that stretch of the rows after.
+    /// Null sets tiles from the row's top.
+    baseline: ?f64 = null,
 
     /// mm per u for its tiles in a track of pitch `track_pitch`.
     pub fn unitIn(p: TilePrototype, track_pitch: f64) f64 {
@@ -300,9 +309,9 @@ pub const TileRegion = struct {
     /// entered, so a new paragraph starts indented, u; 0 for none. The blank
     /// is an ordinary item: it can be resized or removed.
     indent: f64 = 0,
-    /// The flow, in order. A tile spanning segments (a 2 u tall key) is
-    /// listed again where it crosses each later segment; its first entry
-    /// places it, and the later ones keep its room.
+    /// The flow, in order. A tile thicker than its segment (a 2 u tall
+    /// key) reaches into the segments after it, closing the stretch it
+    /// covers there; their content flows around it.
     items: std.ArrayList(Item) = .empty,
 
     /// A segment's length, u.
@@ -936,6 +945,26 @@ pub const Model = struct {
         });
         try m.place(panel, region, index, .{ .what = .{ .tile = id } });
         return id;
+    }
+
+    /// Whether flow item `k` and the one after it are in one group: bound
+    /// by hand (see `Item.bind`), or a letter tile followed by anything but
+    /// a break, a space or a blank (see `TilePrototype.letter`).
+    pub fn bound(m: *const Model, items: []const Item, k: usize) bool {
+        if (k + 1 >= items.len) return false;
+        const item = items[k];
+        const next = items[k + 1];
+        if (item.binds(next)) return true;
+        const id = item.tileOf() orelse return false;
+        if (!m.prototypes.items[m.tileConst(id).prototype].letter) return false;
+        return switch (next.what) {
+            .hard_break => false,
+            .run => true,
+            .tile => |nid| blk: {
+                const np = m.prototypes.items[m.tileConst(nid).prototype];
+                break :blk !np.spacer;
+            },
+        };
     }
 
     /// The built-in Blank prototype, made the first time it is asked for:

@@ -2344,7 +2344,9 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
         switch (i.kind) {
             .missing_glyph => f.missing = true,
             .label_overflow => f.overflow = true,
-            .tile_size => f.size = true,
+            // Reaching back into rows already filled: outlined as a size
+            // problem is, in the warning colour.
+            .tile_size, .tall_item => f.size = true,
             else => {},
         }
     }
@@ -3137,6 +3139,22 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             next_proto.at_soft_break = if (drop) .drop else .keep;
             proto_changed = true;
         }
+    }
+    {
+        // A letter binds to what follows it (an illuminated initial with
+        // its word); with a baseline, it sits on the row's text baseline.
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8 });
+        defer row.deinit();
+        propName("As a letter");
+        if (dvui.checkbox(@src(), &next_proto.letter, "Binds to its word", .{ .id_extra = 8 })) proto_changed = true;
+    }
+    {
+        var bbuf: [32]u8 = undefined;
+        const shown = if (p.baseline) |b| std.fmt.bufPrint(&bbuf, "{d}", .{b}) catch "" else "any";
+        if (sizesProp("Baseline, u up", shown, 9)) |list| if (list.len <= 1) {
+            next_proto.baseline = if (list.len == 1) list[0] else null;
+            proto_changed = true;
+        };
     }
     var buf: [160]u8 = undefined;
     {
@@ -3984,9 +4002,11 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         if (k + 1 >= placed.items.len) break;
         const nx = placed.items[k + 1];
         if (nx.region != it.region or nx.segment != it.segment) continue;
-        const next = modelItem(pi, nx) orelse continue;
-        if (!item.binds(next)) continue;
+        _ = modelItem(pi, nx) orelse continue;
+        _ = item;
         const r = state.model.panels.items[pi].regions.items[it.region];
+        // Bound by hand, or a letter tile to its word.
+        if (nx.index != it.index + 1 or !state.model.bound(r.items.items, it.index)) continue;
         const band = for (placed.tracks) |t| {
             if (t.region == it.region and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;

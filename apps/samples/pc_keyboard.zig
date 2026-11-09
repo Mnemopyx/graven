@@ -47,8 +47,8 @@ fn tall(e: Entry) Entry {
     return c;
 }
 
-/// Rows top to bottom with the space above each, in u. A tile spanning
-/// two rows is listed in its first row only; `spans` adds it to the next.
+/// Rows top to bottom with the space above each, in u. A 2 u tall key is
+/// listed in its first row; the flow closes its stretch of the next.
 const rows = [_]struct { gap: f64, entries: []const Entry }{
     .{ .gap = 0, .entries = &.{
         words("Esc", 1),
@@ -241,8 +241,6 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
     defer markup.deinit();
     var name_buf: [16]u8 = undefined;
     var n: usize = 0;
-    var spanning: ?layout.TileId = null;
-    var spanning_row: usize = 0;
     for (rows, 0..) |row, ri| {
         _ = try m.addSegment(p, r, row.gap);
         // One flow for the whole keyboard: a hard break ends each row.
@@ -267,17 +265,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
             }
             try m.setContent(t, "top", markup.written());
             try m.place(p, r, null, .{ .gap = e.gap, .what = .{ .tile = t } });
-            if (e.h > 1) {
-                // Spanning down: it also takes a place at the end of the next row.
-                spanning = t;
-                spanning_row = ri + 1;
-            }
         }
-        // A tile spanning from the row above ends the row it crosses.
-        if (spanning) |t| if (spanning_row == ri) {
-            try m.place(p, r, null, .{ .what = .{ .tile = t } });
-            spanning = null;
-        };
     }
     return p;
 }

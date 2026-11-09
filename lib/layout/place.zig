@@ -3,8 +3,8 @@
 //! A track's flow is poured through its segments (rows or columns) in
 //! order: each item packs against the one before it through the gap set
 //! before it; an item that does not fit moves to the next segment, and a
-//! hard break ends its segment. A tile spanning segments is pinned, in
-//! every segment after its first, where its first one put it. Text and
+//! hard break ends its segment. A tile thicker than its segment reaches
+//! into the segments after it and closes the stretch it covers there. Text and
 //! equations (runs of markup) flow with the tiles, set on a baseline.
 //! Labels are rendered by the engine through `Labels`, a cache keyed by
 //! style, markup, box and anchor, so identical legends share one render.
@@ -82,6 +82,9 @@ pub const Issue = struct {
         region_outside,
         /// A segment lies past its track's soft area (`row` says which).
         past_soft_area,
+        /// A tile reaches back past its row's top into a segment the flow
+        /// filled before: that content is not moved.
+        tall_item,
         /// A tile's art cannot be stretched exactly (a curve crosses a cut);
         /// it is drawn plain.
         tile_art,
@@ -315,6 +318,111 @@ pub const Labels = struct {
 
 pub const Error = Allocator.Error || spring.Error;
 
+/// A tile placed so far that reaches past its segment's band.
+const Tall = struct { box: Box, seg: usize };
+
+/// Pieces of the flow pass for one track.
+const Flow = struct {
+    m: *const Model,
+    region: *const model.TileRegion,
+    rows: bool,
+    length: f64,
+    ri: usize,
+    items: []const model.Item,
+    segs_of: []const usize,
+    spans: []const [2]f64,
+    dropped: []const bool,
+    dup: []const bool,
+
+    /// Where a row's text baseline sits: its style's capitals centred
+    /// across the band, or the band's middle for a track with no style.
+    fn baseline(f: Flow, band: Box) f64 {
+        var cap: f64 = 0;
+        if (f.region.style) |sid| if (sid < f.m.styles.items.len) {
+            cap = f.m.styles.items[sid].spec.cap_height;
+        };
+        return (band.y0 + band.y1 - cap) / 2;
+    }
+
+    /// Tile `id`'s pitch box at `start` mm along a segment with band
+    /// `band`: from the band's top (a row) or start edge (a column), or, in
+    /// a row, set on its baseline when its prototype has one.
+    fn tileBox(f: Flow, id: TileId, band: Box, start: f64) Box {
+        const t = f.m.tileConst(id);
+        const proto = f.m.prototypes.items[t.prototype];
+        const unit = proto.unitIn(f.region.pitch);
+        const w = t.w * unit;
+        const h = t.h * unit;
+        if (!f.rows) {
+            const y1 = band.y1 - start;
+            return .{ .x0 = band.x0, .x1 = band.x0 + w, .y1 = y1, .y0 = y1 - h };
+        }
+        const x0 = band.x0 + start;
+        if (proto.baseline) |b| {
+            const y0 = f.baseline(band) - b * unit;
+            return .{ .x0 = x0, .x1 = x0 + w, .y0 = y0, .y1 = y0 + h };
+        }
+        return .{ .x0 = x0, .x1 = x0 + w, .y1 = band.y1, .y0 = band.y1 - h };
+    }
+
+    /// The first start at or after `start` where `size` along misses every
+    /// closed stretch.
+    fn clear(closed: []const [2]f64, start: f64, size: f64) f64 {
+        var at = start;
+        var moved = true;
+        while (moved) {
+            moved = false;
+            for (closed) |c| if (at < c[1] - 1e-9 and at + size > c[0] + 1e-9) {
+                at = c[1];
+                moved = true;
+            };
+        }
+        return at;
+    }
+
+    /// Finishes segment `seg` (items `first` up to `stop`): sets its
+    /// alignment shift (none where tiles from before close stretches of
+    /// it, so its content stays clear of them), and records its tiles that
+    /// reach past its band. One reaching back into the segments before is
+    /// flagged: their content is not moved.
+    fn leave(f: Flow, a: Allocator, path: *Path, shifts: *std.ArrayList(f64), tall: *std.ArrayList(Tall), issues: *std.ArrayList(Issue), seg: usize, first: usize, stop: usize, has_closed: bool) Allocator.Error!void {
+        const free = @max(0, f.length - path.reach.items[seg]);
+        const sh: f64 = if (has_closed) 0 else switch (f.region.alignment) {
+            .start => 0,
+            .centre => free / 2,
+            .end => free,
+        };
+        try shifts.append(a, sh);
+        const band = path.boxes.items[seg];
+        const tol = 1e-9;
+        for (first..stop) |k| {
+            if (f.dropped[k] or f.dup[k] or f.segs_of[k] != seg) continue;
+            const id = f.items[k].tileOf() orelse continue;
+            const b = f.tileBox(id, band, f.spans[k][0] + sh);
+            const beyond = if (f.rows) b.y0 < band.y0 - tol else b.x1 > band.x1 + tol;
+            const behind = if (f.rows) b.y1 > band.y1 + tol else b.x0 < band.x0 - tol;
+            if (beyond) try tall.append(a, .{ .box = b, .seg = seg });
+            if (behind and seg > 0) try issues.append(a, .{ .kind = .tall_item, .tile = id, .region = f.ri, .row = seg });
+        }
+    }
+
+    /// Starts segment `seg`: makes it, and works out the stretches of it
+    /// that tiles from earlier segments close.
+    fn enter(f: Flow, a: Allocator, path: *Path, seg: usize, tall: []const Tall, closed: *std.ArrayList([2]f64)) Allocator.Error!void {
+        try path.ensure(a, seg);
+        const band = path.boxes.items[seg];
+        closed.clearRetainingCapacity();
+        for (tall) |t| {
+            if (t.seg >= seg or !model.overlaps(t.box, band)) continue;
+            const c: [2]f64 = if (f.rows)
+                .{ @max(t.box.x0, band.x0) - band.x0, @min(t.box.x1, band.x1) - band.x0 }
+            else
+                .{ band.y1 - @min(t.box.y1, band.y1), band.y1 - @max(t.box.y0, band.y0) };
+            try closed.append(a, c);
+        }
+    }
+};
+
 /// The most segments one track's flow may reach.
 const max_segments = 4096;
 
@@ -409,26 +517,37 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             };
         }
 
-        // Then the flow: each item's segment and span, before alignment.
-        // A group (items bound to the next, see `Item.bind`) breaks as one:
-        // when it does not fit, the whole of it moves on.
+        // Then the flow: each item's segment and span. A group (items
+        // bound to the next, see `Model.bound`) breaks as one: when it does
+        // not fit, the whole of it moves on. A tile thicker than its segment
+        // reaches into the segments that follow, closing the stretch it
+        // covers there, so their content flows around it.
         const segs_of = try a.alloc(usize, items.len);
         const spans = try a.alloc([2]f64, items.len);
         const dropped = try a.alloc(bool, items.len);
         @memset(dropped, false);
-        // Where each tile placed so far starts, along its segment.
-        var placed_at: std.AutoHashMapUnmanaged(TileId, f64) = .empty;
-        const pinned = try a.alloc(bool, items.len);
-        @memset(pinned, false);
+        // A tile listed again is placed once, at its first entry.
+        const dup = try a.alloc(bool, items.len);
+        @memset(dup, false);
+        var seen: std.AutoHashMapUnmanaged(TileId, void) = .empty;
         // The segments, made as the flow reaches them: their origins along
         // the path, their bands, and how far each one's content reaches.
         var path: Path = .{ .region = &region, .avoid = tracks.items };
         try path.ensure(a, 0);
+        // Each segment's alignment shift, set when the flow leaves it.
+        var shifts: std.ArrayList(f64) = .empty;
+        // Tiles placed so far that reach past their segment's band, with
+        // the segment that placed them; and the stretches they close in
+        // the segment being filled.
+        var tall: std.ArrayList(Tall) = .empty;
+        var closed: std.ArrayList([2]f64) = .empty;
+        var first_in_seg: usize = 0;
         var seg: usize = 0;
         var pos: f64 = 0;
         var in_seg: usize = 0;
         var para: f64 = 0;
         var natural: f64 = 0;
+        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup };
         for (items, 0..) |item, index| {
             if (item.what == .hard_break) {
                 segs_of[index] = seg;
@@ -436,52 +555,55 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 natural = @max(natural, para);
                 para = 0;
                 if (seg + 1 < max_segments) {
+                    try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0);
                     seg += 1;
-                    try path.ensure(a, seg);
+                    first_in_seg = index + 1;
+                    try flow.enter(a, &path, seg, tall.items, &closed);
                     pos = 0;
                     in_seg = 0;
                 }
                 continue;
             }
+            if (item.tileOf()) |id| {
+                if (seen.contains(id)) {
+                    dup[index] = true;
+                    segs_of[index] = seg;
+                    spans[index] = .{ pos, pos };
+                    continue;
+                }
+                try seen.put(a, id, {});
+            }
             const gap = item.gap * region.pitch;
             const size = sizes[index];
-            const pin = if (item.tileOf()) |id| placed_at.get(id) else null;
             // Inside a group (bound to the item before), no break.
-            const in_group = index > 0 and items[index - 1].binds(items[index]);
-            var start: f64 = undefined;
-            if (pin) |at| {
-                // The later entries of a spanning tile keep its room.
-                if (pos > at + tol) try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = seg, .amount = pos - at });
-                start = at;
-                pinned[index] = true;
-                para = @max(para, at) + size;
-            } else {
-                start = pos + gap;
-                para += gap + size;
-                // What must fit here: this item, or its whole group.
-                var need = size;
-                if (!in_group) {
-                    var k = index;
-                    while (k + 1 < items.len and items[k].binds(items[k + 1])) : (k += 1) need += items[k + 1].gap * region.pitch + sizes[k + 1];
-                }
-                // It does not fit: on to the next segment, made as needed,
-                // if this one holds something already.
-                if (!in_group and start + need > length + tol and in_seg > 0 and seg + 1 < max_segments) {
-                    seg += 1;
-                    try path.ensure(a, seg);
-                    pos = 0;
-                    in_seg = 0;
-                    start = gap;
-                    // Landing at the start after a soft break, a tile whose
-                    // prototype says so (a space between words) is dropped.
-                    if (item.tileOf()) |id| if (m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop) {
-                        para -= gap + size;
-                        segs_of[index] = seg;
-                        spans[index] = .{ 0, 0 };
-                        dropped[index] = true;
-                        continue;
-                    };
-                }
+            const in_group = index > 0 and m.bound(items, index - 1);
+            var start = Flow.clear(closed.items, pos + gap, size);
+            para += gap + size;
+            // What must fit here: this item, or its whole group.
+            var need = size;
+            if (!in_group) {
+                var k = index;
+                while (k + 1 < items.len and m.bound(items, k)) : (k += 1) need += items[k + 1].gap * region.pitch + sizes[k + 1];
+            }
+            // It does not fit: on to the next segment, made as needed, if
+            // this one holds something already.
+            if (!in_group and start + need > length + tol and in_seg > 0 and seg + 1 < max_segments) {
+                try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0);
+                seg += 1;
+                first_in_seg = index;
+                try flow.enter(a, &path, seg, tall.items, &closed);
+                pos = 0;
+                in_seg = 0;
+                start = Flow.clear(closed.items, gap, size);
+                // Landing at the start after a soft break, a tile whose
+                // prototype says so (a space between words) is dropped.
+                if (item.tileOf()) |id| if (m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop) {
+                    para -= gap + size;
+                    segs_of[index] = seg;
+                    spans[index] = .{ 0, 0 };
+                    dropped[index] = true;
+                    continue;
+                };
             }
             const end = start + size;
             pos = @max(pos, end);
@@ -489,47 +611,23 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             path.reach.items[seg] = @max(path.reach.items[seg], end);
             segs_of[index] = seg;
             spans[index] = .{ start, end };
-            if (pin == null) if (item.tileOf()) |id| try placed_at.put(a, id, start);
         }
-
-        // Each segment's content set by the track's alignment: from its
-        // start, about its centre, or back from its end. A segment holding
-        // a spanning tile's later entry keeps that tile's segment's shift.
-        const shifts = try a.alloc(f64, path.origins.items.len);
-        for (shifts, path.reach.items) |*sh, r_| {
-            const free = @max(0, length - r_);
-            sh.* = switch (region.alignment) {
-                .start => 0,
-                .centre => free / 2,
-                .end => free,
-            };
-        }
-        for (items, 0..) |_, index| if (pinned[index]) {
-            const id = items[index].tileOf().?;
-            for (0..index) |k| if (items[k].tileOf() == id and !pinned[k]) {
-                shifts[segs_of[index]] = shifts[segs_of[k]];
-                break;
-            };
-        };
+        try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0);
 
         // Last, each item where it landed.
         for (items, 0..) |item, index| {
             const sg = segs_of[index];
-            const sh = if (dropped[index]) 0 else shifts[sg];
+            const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg];
             const start = spans[index][0] + sh;
             const end = spans[index][1] + sh;
             try placed_items.append(a, .{ .region = ri, .index = index, .segment = sg, .span = .{ start, end } });
-            if (dropped[index] or pinned[index]) continue;
+            if (dropped[index] or dup[index]) continue;
             const band = path.boxes.items[sg];
             switch (item.what) {
                 .tile => |pid| {
                     const t = m.tileConst(pid);
                     const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
-                    const w = t.w * unit;
-                    const h = t.h * unit;
-                    const x0 = if (rows) band.x0 + start else band.x0;
-                    const y1 = if (rows) band.y1 else band.y1 - start;
-                    const pitch_box: Box = .{ .x0 = x0, .x1 = x0 + w, .y1 = y1, .y0 = y1 - h };
+                    const pitch_box = flow.tileBox(pid, band, start);
                     const proto = &m.prototypes.items[t.prototype];
                     const body = proto.body_inset.inset(pitch_box);
                     // A spacer is drawn by nothing and bounds nothing.
@@ -709,11 +807,11 @@ fn snap(v: f64) f64 {
 const testing = std.testing;
 const testdata = @import("graven_testdata");
 
-test "segments pack by gaps, a hard break starts the next, and a spanning tile is pinned in its later ones" {
+test "segments pack by gaps, a hard break starts the next, and a tall tile closes its stretch of the next" {
     var m: Model = .init(testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
-    const r = try m.addRegion(p, .{ .name = "pad", .origin = .{ .x = 10, .y = 90 }, .w = 4, .h = 2, .pitch = 10 });
+    const r = try m.addRegion(p, .{ .name = "pad", .origin = .{ .x = 10, .y = 90 }, .w = 5, .h = 2, .pitch = 10 });
     _ = try m.addSegment(p, r, 0);
     _ = try m.addSegment(p, r, 0);
     const one = try m.addTile(.{ .designator = "1" });
@@ -725,17 +823,22 @@ test "segments pack by gaps, a hard break starts the next, and a spanning tile i
     try m.place(p, r, null, .{ .what = .{ .tile = tall } });
     try m.place(p, r, null, .{ .what = .hard_break });
     try m.place(p, r, null, .{ .what = .{ .tile = wide } });
-    try m.place(p, r, null, .{ .what = .{ .tile = tall } });
+    // The tall key, listed once, closes 25..35 mm of the second row: this
+    // key, which would land at 20..30, goes on past it.
+    const three = try m.addTile(.{ .designator = "3" });
+    try m.place(p, r, null, .{ .what = .{ .tile = three } });
 
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
     var s = try solve(testing.allocator, &m, p, &labels);
     defer s.deinit();
-    try testing.expectEqual(4, s.tiles.len);
+    try testing.expectEqual(5, s.tiles.len);
     try testing.expectEqual(25, s.findTile(two).?.pitch_box.x0);
     try testing.expectEqual(35, s.findTile(tall).?.pitch_box.x0);
     try testing.expectEqual(70, s.findTile(tall).?.pitch_box.y0);
     try testing.expectEqual(80, s.findTile(wide).?.pitch_box.y1);
+    try testing.expectEqual(45, s.findTile(three).?.pitch_box.x0);
+    try testing.expectEqual(80, s.findTile(three).?.pitch_box.y1);
     try testing.expectEqual(0, s.issues.len);
 }
 
@@ -1442,4 +1545,44 @@ test "with an indent, each hard break brings a blank, so new paragraphs start in
     try testing.expect(m.prototypes.items[m.tileConst(items.items[2].tileOf().?).prototype].spacer);
     try testing.expectApproxEqAbs(@as(f64, 5), s.items[3].span[0], 1e-9);
     try testing.expectEqual(1, s.items[3].segment);
+}
+
+test "a drop cap sits on its word's baseline, binds to the word, and pushes the next row's content aside" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    // A letter tile 1 u wide and 2 u (rows) tall, its baseline 1.5 u up:
+    // set on the first row's baseline, its lower part reaches into the
+    // second row.
+    const cap = try m.addPrototype(.{ .name = "initial", .letter = true, .baseline = 1.5, .expand = .{ .vertical = true } });
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 4, .pitch = 10 });
+    // "H" + "ADD", then words that wrap into the next row.
+    const initial = try m.insertTile(p, r, 0, cap, 1);
+    try m.setTileSize(initial, 1, 2);
+    try m.insertRun(p, r, 1, .{ .style = body, .content = "ADD" });
+    for (0..3) |_| try m.insertRun(p, r, m.panels.items[p].regions.items[r].items.items.len, .{ .style = body, .content = "HOD" });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    // Bound to its word, it never stands alone at a row's end.
+    try testing.expect(m.bound(m.panels.items[p].regions.items[r].items.items, 0));
+    try testing.expect(!m.bound(m.panels.items[p].regions.items[r].items.items, 1));
+    const box = s.findTile(initial).?.pitch_box;
+    // The row's baseline: its 4 mm capitals centred in 90..100, at 93.
+    try testing.expectApproxEqAbs(@as(f64, 93 - 15), box.y0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 93 + 5), box.y1, 1e-9);
+    // In the second row, content starts after the cap's 10 mm.
+    var second: ?f64 = null;
+    for (s.items) |it| if (it.segment == 1) {
+        second = it.span[0];
+        break;
+    };
+    try testing.expectApproxEqAbs(@as(f64, 10), second.?, 1e-9);
+    for (s.issues) |i| try testing.expect(i.kind != .tall_item);
 }
