@@ -161,7 +161,8 @@ pub const Placed = struct {
     flows: []const PlacedFlow = &.{},
     labels: []const PlacedLabel,
     issues: []const Issue,
-    /// The union of the tiles' pitch boxes.
+    /// The union of the tiles' pitch boxes, line art, and the ink of
+    /// labels outside tiles.
     bounds: Box,
 
     pub fn deinit(p: *Placed) void {
@@ -967,8 +968,9 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             all = all.join(b);
             if (!model.within(b, soft)) try issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
         }
+        // The canvas has no outline to keep to.
         const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
-        if (past > 1e-9) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+        if (past > 1e-9 and !m.panels.items[panel].unbounded) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
     }
 
     for (tiles.items) |pt| {
@@ -1053,6 +1055,16 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             try issues.append(a, .{ .kind = .missing_glyph, .label = li });
             break;
         };
+    }
+
+    // Labels not inside a tile (on the panel, or runs in a track) reach
+    // past the tiles' boxes: the bounds hold their ink too, so a canvas
+    // with only a label still has extents.
+    for (placed_labels.items) |l| {
+        if (l.tile != null) continue;
+        const ink = l.render.ink;
+        if (ink.isEmpty()) continue;
+        bounds = bounds.join(.{ .x0 = l.origin.x + ink.x0, .y0 = l.origin.y + ink.y0, .x1 = l.origin.x + ink.x1, .y1 = l.origin.y + ink.y1 });
     }
 
     return .{
@@ -2005,4 +2017,31 @@ test "a run of text breaks between its words; a space a wrap leaves at a row's s
     for (s.labels) |l| if (l.run) |run| if (run.item == 0 and run.from == 8) {
         try testing.expectEqual(3, run.len);
     };
+}
+
+test "a label on a canvas, with no sheet or panel, solves and exports" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    // Far from the origin, below and left of it: the canvas has no edge.
+    _ = try m.addLabel(c, .{ .at = .{ .x = -40, .y = -25 }, .style = style, .content = "HOD" });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, c, &labels);
+    defer s.deinit();
+    try testing.expectEqual(0, s.issues.len);
+    try testing.expectEqual(1, s.labels.len);
+    try testing.expect(!s.bounds.isEmpty());
+    try testing.expect(s.bounds.x0 >= -40 - 1e-9 and s.bounds.y0 < -24);
+    const intrusions = try @import("drc.zig").marginIntrusions(gpa, &m, &.{s});
+    defer gpa.free(intrusions);
+    try testing.expectEqual(0, intrusions.len);
+    const svg = try @import("output.zig").panelSvg(gpa, &s, &faces, .{});
+    defer gpa.free(svg);
+    try testing.expect(std.mem.indexOf(u8, svg, "<path") != null);
 }

@@ -347,6 +347,8 @@ fn init(win: *dvui.Window) !void {
     applyDesktop(win, settings);
     desktop.watch(dvui.io, settings, wakeGui);
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
+    // Work starts on a canvas, not a worksheet: the user picks its units.
+    state.model.has_sheet = false;
     const installed: []Font = listFonts(gpa) catch &.{};
     if (std.Io.Dir.cwd().access(dvui.io, example_font, .{})) |_| {
         const fonts = try gpa.alloc(Font, installed.len + 1);
@@ -359,14 +361,186 @@ fn init(win: *dvui.Window) !void {
     state.font_choice = defaultFont(state.fonts);
 }
 
+/// Asking for a new canvas's units, before anything is drawn.
+var canvas_prompt = true;
+/// The units the last canvas was made in: the next one's default. (Kept
+/// for the session; shared preferences will keep it across sessions.)
+var last_units: layout.model.Units = .mm;
+/// Where the last click on the canvas landed, worksheet frame: typing makes
+/// a label there.
+var click_at: ?geom.Point = null;
+
+/// The part of the canvas a new one first shows, mm: its origin near the
+/// bottom left.
+const canvas_view: geom.Box = .{ .x0 = -15, .y0 = -15, .x1 = 185, .y1 = 120 };
+
+/// Whether the document is an open canvas (no sheet).
+fn openCanvas() bool {
+    return !state.model.has_sheet;
+}
+
+/// The units lengths are shown and typed in: the sheet's, or the canvas's.
+fn docUnits() layout.model.Units {
+    return if (state.model.has_sheet) state.model.sheet.units else state.model.units;
+}
+
+/// Starts over with an empty document and asks for the new canvas's units.
+fn newCanvas() void {
+    clearPlaced();
+    state.model.deinit();
+    state.model = .init(state.gpa);
+    state.model.has_sheet = false;
+    if (state.labels) |*l| l.clear();
+    state.label_style = null;
+    state.label_style_set = false;
+    state.context = .worksheet;
+    state.tool = .select;
+    state.drag = null;
+    state.moving = null;
+    state.moving_label = null;
+    state.placed_rev = std.math.maxInt(u64);
+    track_cursor = null;
+    click_at = null;
+    state.view.fit = canvas_view;
+    canvas_prompt = true;
+}
+
+/// Makes the canvas in `units`, and makes it the context.
+fn createCanvas(units: layout.model.Units) void {
+    const ci = state.model.startCanvas(units) catch return;
+    last_units = units;
+    canvas_prompt = false;
+    state.context = .{ .panel = ci };
+    state.view.fit = canvas_view;
+}
+
+/// The new-canvas prompt, centred on the canvas: its units, then Create
+/// (or Enter).
+fn newCanvasPrompt() void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 340;
+    const h: f32 = 175;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(9));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), "New canvas", .{}, .{ .font = dvui.Font.theme(.heading) });
+    dvui.labelNoFmt(@src(), "An open drafting space. Its units come first.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .y = 2, .h = 8 } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        propName("Units");
+        const names = [_][]const u8{ "Millimetres", "Inches", "Mils" };
+        var choice: usize = @intFromEnum(last_units);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) last_units = @enumFromInt(choice);
+    }
+    var enter = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action == .down and (k.code == .enter or k.code == .kp_enter)) {
+            e.handle(@src(), fw.data());
+            enter = true;
+        }
+    }
+    if (dvui.button(@src(), "Create", .{}, .{ .gravity_x = 1, .margin = .{ .y = 10 } }) or enter) createCanvas(last_units);
+}
+
+/// File › Export SVG is asking where to write.
+var export_prompt = false;
+
+fn exportSvg() void {
+    if (canvas_prompt) return;
+    export_prompt = true;
+}
+
+/// What Export SVG writes: the selected panel, else the canvas's loose
+/// objects (on a worksheet, the first panel).
+fn exportPanel() ?usize {
+    switch (state.context) {
+        .panel => |pi| return pi,
+        .label => |l| return l.panel,
+        .art => |l| return l.panel,
+        .region => |r| return r.panel,
+        .row => |r| return r.panel,
+        else => {},
+    }
+    if (state.model.canvas()) |ci| return ci;
+    return if (state.model.panels.items.len > 0) 0 else null;
+}
+
+/// The export prompt: the file to write, then Export (or Enter); Esc or
+/// Cancel closes it.
+fn exportPrompt() void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 460;
+    const h: f32 = 185;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(10));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    const pi = exportPanel();
+    const what = if (pi) |p| (if (state.model.panels.items[p].unbounded) "the canvas's loose objects" else state.model.panels.items[p].name) else "nothing yet";
+    dvui.label(@src(), "Export SVG: {s}", .{what}, .{ .font = dvui.Font.theme(.heading) });
+    var go = false;
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down) continue;
+        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        e.handle(@src(), fw.data());
+    }
+    var path: []const u8 = "graven.svg";
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        propName("File");
+        var te = dvui.textEntry(@src(), .{ .text_initial = "graven.svg" }, .{ .expand = .horizontal });
+        defer te.deinit();
+        path = dvui.currentWindow().arena().dupe(u8, std.mem.trim(u8, te.textGet(), " ")) catch "graven.svg";
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (dvui.button(@src(), "Export", .{}, .{})) go = true;
+    }
+    if (cancel) {
+        export_prompt = false;
+        return;
+    }
+    if (!go) return;
+    export_prompt = false;
+    const p = pi orelse {
+        state.status = "There is nothing to export yet. ";
+        return;
+    };
+    if (p >= state.placed.items.len or path.len == 0) return;
+    const svg = layout.output.panelSvg(state.gpa, &state.placed.items[p], &state.faces, .{}) catch {
+        state.status = "The SVG could not be made. ";
+        return;
+    };
+    defer state.gpa.free(svg);
+    std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = svg }) catch {
+        state.status = "The SVG could not be written there. ";
+        return;
+    };
+    state.status = "Exported. ";
+}
+
 /// Adds the sample PC keyboard as a new panel and makes it the context.
 fn loadSample() !void {
     const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
     const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
     const pi = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
-    // Top-left of the sheet, 20 mm in.
+    // Top-left of the sheet, 20 mm in; on a canvas, at its origin.
     const panel = state.model.panels.items[pi];
-    try state.model.movePanel(pi, .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
+    try state.model.movePanel(pi, if (openCanvas()) .{ .x = 0, .y = 0 } else .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
     state.context = .{ .panel = pi };
     state.view.fit = state.model.panels.items[pi].box();
 }
@@ -654,6 +828,8 @@ fn overlays() !void {
         defer fw.deinit();
         if (moving_track) movePalette() else trackPalette();
     }
+    if (canvas_prompt) newCanvasPrompt();
+    if (export_prompt) exportPrompt();
     if (panes.status == .overlay) {
         var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + c.h - status_height - g, .w = c.w - 2 * g, .h = status_height };
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(3));
@@ -833,6 +1009,8 @@ fn expressionLine() !void {
         // keyboard.
         dvui.focusSubwindow(null, null);
         dvui.focusWidget(te.data().id, null, null);
+        if (focus_expression_end) setCursor(te, te.textGet().len);
+        focus_expression_end = false;
     }
     const focused = te.data().id == dvui.focusedWidgetId();
     if (next_slot) nextSlot(te);
@@ -1116,7 +1294,11 @@ fn titleBar() ?dvui.App.Result {
         defer title.deinit();
         dvui.labelNoFmt(@src(), state.file_name, .{}, .{ .font = styled(.theme(.body), !state.file_name_set), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         dvui.labelNoFmt(@src(), "  —  ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
-        dvui.labelNoFmt(@src(), state.model.sheet.name, .{}, .{ .font = styled(.theme(.body), state.model.sheet.default_name), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        if (openCanvas()) {
+            var tb: [32]u8 = undefined;
+            const t = if (canvas_prompt) "New canvas" else std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
+            dvui.labelNoFmt(@src(), t, .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        } else dvui.labelNoFmt(@src(), state.model.sheet.name, .{}, .{ .font = styled(.theme(.body), state.model.sheet.default_name), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
     }
 
     if (!native_frame) if (windowButtons(desk.layout.rightSide())) |r| return r;
@@ -1154,7 +1336,16 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (state.model.panels.items.len == 0) {
+        if (dvui.menuItemLabel(@src(), "New canvas…", .{}, .{ .expand = .horizontal }) != null) {
+            newCanvas();
+            m.close();
+        }
+        if (dvui.menuItemLabel(@src(), "Export SVG…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            exportSvg();
+        }
+        const others = state.model.panels.items.len - @as(usize, if (state.model.canvas() != null) 1 else 0);
+        if (others == 0 and !canvas_prompt) {
             if (dvui.menuItemLabel(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
                 loadSample() catch |err| {
                     state.status = if (err == error.OffSheet) "The sample keyboard does not fit on this sheet. " else "The sample did not load. ";
@@ -1205,6 +1396,8 @@ fn treePane() void {
 fn treeContent() void {
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
+    // Nothing to show until the canvas is made.
+    if (canvas_prompt) return;
 
     // The file holds everything: its worksheet, and the tile prototypes its
     // tiles are made from.
@@ -1218,19 +1411,45 @@ fn treeContent() void {
 /// The worksheet's branch: its panels, their labels, regions, rows and
 /// tiles.
 fn worksheetTree() void {
-    var name_buf: [64]u8 = undefined;
+    // A canvas: its loose objects at the top, and its panels.
+    if (state.model.canvas()) |ci| {
+        var tb: [32]u8 = undefined;
+        const title = std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
+        if (!treeNode(.{ .panel = ci }, title, 1, true, false)) return;
+        panelChildren(ci, 2);
+        for (state.model.panels.items, 0..) |panel, pi| {
+            if (pi == ci) continue;
+            if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
+            panelChildren(pi, 3);
+        }
+        return;
+    }
     const sheet = state.model.sheet;
     if (!treeNode(.worksheet, sheet.name, 1, state.model.panels.items.len > 0, sheet.default_name)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!treeNode(.{ .panel = pi }, panel.name, 2, panel.regions.items.len > 0 or panel.labels.items.len > 0 or panel.art.items.len > 0, panel.default_name)) continue;
-        for (panel.art.items, 0..) |pa, ai| _ = treeNode(.{ .art = .{ .panel = pi, .index = ai } }, pa.name, 3, false, false);
+        if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
+        panelChildren(pi, 3);
+    }
+}
+
+fn hasChildren(panel: layout.model.Panel) bool {
+    return panel.regions.items.len > 0 or panel.labels.items.len > 0 or panel.art.items.len > 0;
+}
+
+/// A panel's art, labels and tracks (with their rows and tiles) in the
+/// tree, from depth `d`.
+fn panelChildren(pi: usize, d: usize) void {
+    var name_buf: [64]u8 = undefined;
+    const panel = state.model.panels.items[pi];
+    {
+        for (panel.art.items, 0..) |pa, ai| _ = treeNode(.{ .art = .{ .panel = pi, .index = ai } }, pa.name, d, false, false);
         for (panel.labels.items, 0..) |label, li| {
             const text = std.fmt.bufPrint(&name_buf, "“{s}”", .{label.content}) catch label.content;
-            _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, 3, false, label.default_content);
+            _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, d, false, label.default_content);
         }
         for (panel.regions.items, 0..) |region, ri| {
             const seg_count = segmentCount(pi, ri);
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, 3, seg_count > 0, false)) continue;
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, d, seg_count > 0, false)) continue;
             for (0..seg_count) |rowi| {
                 const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), rowi + 1 }) catch "Row";
                 // What the flow put in this segment, from the last solve.
@@ -1238,7 +1457,7 @@ fn worksheetTree() void {
                 const filled = for (placed_items) |it| {
                     if (it.region == ri and it.segment == rowi and !isBreak(pi, it)) break true;
                 } else false;
-                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, 4, filled, false)) continue;
+                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, d + 1, filled, false)) continue;
                 for (placed_items) |it| {
                     if (it.region != ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
@@ -1247,7 +1466,7 @@ fn worksheetTree() void {
                     const t = state.model.tileConst(id);
                     const legend = if (state.model.slotCount(id) > 0) state.model.slot(id, 0).content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
-                    _ = treeNode(.{ .tile = id }, text, 5, false, false);
+                    _ = treeNode(.{ .tile = id }, text, d + 2, false, false);
                 }
             }
         }
@@ -1336,8 +1555,8 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
 /// The context's extents on the worksheet, mm.
 fn contextExtents() geom.Box {
     switch (state.context) {
-        .file, .worksheet, .prototypes => return state.model.sheet.box(),
-        .panel => |pi| return state.model.panels.items[pi].box(),
+        .file, .worksheet, .prototypes => return if (openCanvas()) contentExtents() else state.model.sheet.box(),
+        .panel => |pi| return if (state.model.panels.items[pi].unbounded) contentExtents() else state.model.panels.items[pi].box(),
         .label => |l| if (labelBox(l.panel, l.index)) |b| return b,
         .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
         else => {},
@@ -1347,6 +1566,17 @@ fn contextExtents() geom.Box {
         if (inContext(pi, t)) b = b.join(onSheet(pi, t.pitch_box));
     };
     return if (b.isEmpty()) state.model.sheet.box() else b;
+}
+
+/// What the canvas holds, on the worksheet frame: every panel's solved
+/// content, or the canvas's first view when it holds nothing.
+fn contentExtents() geom.Box {
+    var b: geom.Box = .empty;
+    for (state.placed.items, 0..) |*p, pi| {
+        if (!p.bounds.isEmpty()) b = b.join(onSheet(pi, p.bounds));
+        if (!state.model.panels.items[pi].unbounded) b = b.join(state.model.panels.items[pi].box());
+    }
+    return if (b.isEmpty()) canvas_view else b;
 }
 
 /// Centres the context in the canvas and zooms it to fill the canvas.
@@ -1421,9 +1651,11 @@ fn canvas() void {
     const rw: f32 = ruler_size * dvui.windowNaturalScale();
     if (area.w <= 3 * rw or area.h <= 3 * rw) return;
     const sheet = state.model.sheet;
+    const open = openCanvas();
 
-    // The first frame fits the worksheet, leaving room for its rulers.
-    if (state.view.ppm == 0 and state.view.fit == null) state.view.fit = sheet.box();
+    // The first frame fits the worksheet, leaving room for its rulers; a
+    // canvas shows the space around its origin.
+    if (state.view.ppm == 0 and state.view.fit == null) state.view.fit = if (open) canvas_view else sheet.box();
     const ns = dvui.windowNaturalScale();
     canvas_rect = .{ .x = area.x / ns, .y = area.y / ns, .w = area.w / ns, .h = area.h / ns };
     if (state.view.fit) |b| {
@@ -1441,22 +1673,39 @@ fn canvas() void {
     const clip = dvui.clip(area);
     defer dvui.clipSet(clip);
 
+    // With a panel or the canvas as the context, typed text makes a
+    // label: ask for text input, which the backend sends only on request.
+    if (state.context == .panel and track_cursor == null and !canvas_prompt and cursorKeysReach()) {
+        const ns_ = dvui.windowNaturalScale();
+        dvui.wantTextInput(.{ .x = area.x / ns_, .y = area.y / ns_, .w = area.w / ns_, .h = area.h / ns_ });
+    }
     canvasEvents(box, area);
-    // Work happens on the worksheet: the view's centre stays on the sheet.
-    state.view.cx = std.math.clamp(state.view.cx, 0, sheet.w);
-    state.view.cy = std.math.clamp(state.view.cy, 0, sheet.h);
-
     const px = dvui.windowNaturalScale();
-    const sheet_rect = state.view.rect(area, sheet.box());
-    sheet_rect.fill(.square, .{ .color = .{ .color = colors.paper } });
-    drawMargins(area, sheet);
-    sheet_rect.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge } });
+    if (open) {
+        // An open canvas: drafting surface everywhere, and its axes
+        // through the origin.
+        area.fill(.square, .{ .color = .{ .color = colors.paper } });
+        drawAxes(area);
+    } else {
+        // Work happens on the worksheet: the view's centre stays on the sheet.
+        state.view.cx = std.math.clamp(state.view.cx, 0, sheet.w);
+        state.view.cy = std.math.clamp(state.view.cy, 0, sheet.h);
+        const sheet_rect = state.view.rect(area, sheet.box());
+        sheet_rect.fill(.square, .{ .color = .{ .color = colors.paper } });
+        drawMargins(area, sheet);
+        sheet_rect.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge } });
+    }
 
     // Re-flatten label outlines when the zoom has moved more than 2x.
     const tol = 0.2 / state.view.ppm;
     if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
 
     for (0..state.model.panels.items.len) |pi| {
+        // The canvas's own panel has no outline: only its content.
+        if (state.model.panels.items[pi].unbounded) {
+            if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
+            continue;
+        }
         const outline = state.view.rect(area, panelBox(pi));
         const is_context = switch (state.context) {
             .panel => |c| c == pi,
@@ -1566,6 +1815,43 @@ fn labelStyle() !layout.model.StyleId {
     const s = try state.model.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
     state.label_style = s;
     return s;
+}
+
+/// A label begun by typing `txt` on panel `pi`: at the last click on it,
+/// else at the view's centre, in the label style; it becomes the context
+/// and the expression line takes the keyboard, its cursor after `txt`.
+fn typeLabel(pi: usize, txt: []const u8) void {
+    const at = if (click_at) |c| (if (panelHolds(pi, c)) c else geom.Point{ .x = state.view.cx, .y = state.view.cy }) else geom.Point{ .x = state.view.cx, .y = state.view.cy };
+    const o = state.model.panels.items[pi].origin;
+    const style = labelStyle() catch return;
+    const li = state.model.addLabel(pi, .{
+        .at = .{ .x = @round((at.x - o.x) * 2) / 2, .y = @round((at.y - o.y) * 2) / 2 },
+        .style = style,
+        .content = txt,
+    }) catch return;
+    state.context = .{ .label = .{ .panel = pi, .index = li } };
+    focus_expression = true;
+    focus_expression_end = true;
+}
+
+/// The canvas's properties: its units (a conversion: nothing moves), and
+/// what it holds.
+fn canvasProperties(pi: usize) !void {
+    const panel = state.model.panels.items[pi];
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });
+        defer row.deinit();
+        propName("Units");
+        const names = [_][]const u8{ "Millimetres", "Inches", "Mils" };
+        var choice: usize = @intFromEnum(state.model.units);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) state.model.setCanvasUnits(@enumFromInt(choice));
+    }
+    propText("Labels", "{d}", .{panel.labels.items.len}, 2);
+    propText("Tracks", "{d}", .{panel.regions.items.len}, 3);
+    propText("Line art", "{d}", .{panel.art.items.len}, 4);
+    propText("Panels", "{d}", .{state.model.panels.items.len - 1}, 5);
+    propText("Typing", "{s}", .{"makes a label where you last clicked"}, 6);
+    try propFont("Legend font", 7);
 }
 
 /// Makes line art from a finished drag: an ellipse filling the box (on
@@ -1964,7 +2250,24 @@ fn ticks(buf: []Tick) []Tick {
     const min_tick = 4 * ns;
     const min_label = 44 * ns;
     var n: usize = 0;
-    switch (state.model.sheet.units) {
+    switch (docUnits()) {
+        .mil => {
+            // Labels at round numbers of mils, ticks at a half and a tenth.
+            const mil = 0.0254;
+            var label: f64 = 10;
+            for ([_]f64{ 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000 }) |st| {
+                label = st;
+                if (st * mil * ppm >= min_label) break;
+            }
+            buf[n] = .{ .step = label * mil, .len = 0.7, .label = true };
+            n += 1;
+            for ([_]Tick{ .{ .step = label * mil / 2, .len = 0.45, .label = false }, .{ .step = label * mil / 10, .len = 0.25, .label = false } }) |t| {
+                if (t.step * ppm >= min_tick and n < buf.len) {
+                    buf[n] = t;
+                    n += 1;
+                }
+            }
+        },
         .mm => {
             var label: f64 = 10;
             for ([_]f64{ 10, 20, 50, 100, 200, 500, 1000, 2000 }) |st| {
@@ -2015,9 +2318,11 @@ fn drawRulers(area: dvui.Rect.Physical) void {
     const prev = dvui.clip(area);
     defer dvui.clipSet(prev);
     const sheet = state.model.sheet;
-    const right = sheet.ruler_origin.fromRight();
-    const tl = state.view.toPx(area, .{ .x = 0, .y = sheet.h });
-    const br = state.view.toPx(area, .{ .x = sheet.w, .y = 0 });
+    const open = openCanvas();
+    const right = !open and sheet.ruler_origin.fromRight();
+    // A canvas has no edges: its rulers run along the canvas's own.
+    const tl = if (open) dvui.Point.Physical{ .x = area.x + rw, .y = area.y + rw } else state.view.toPx(area, .{ .x = 0, .y = sheet.h });
+    const br = if (open) dvui.Point.Physical{ .x = area.x + area.w, .y = area.y + area.h } else state.view.toPx(area, .{ .x = sheet.w, .y = 0 });
 
     const hy = std.math.clamp(tl.y - rw, area.y, area.y + area.h - rw);
     const hx0 = @max(tl.x, area.x);
@@ -2048,13 +2353,27 @@ fn drawRulers(area: dvui.Rect.Physical) void {
     }
 }
 
+/// The canvas's axes through its origin, faint, with a mark at the origin.
+fn drawAxes(area: dvui.Rect.Physical) void {
+    const px = dvui.windowNaturalScale();
+    const o = state.view.toPx(area, .{ .x = 0, .y = 0 });
+    const axis: dvui.ColorOrGradient = .{ .color = colors.edge.opacity(0.3) };
+    if (o.y >= area.y and o.y <= area.y + area.h) dvui.Path.stroke(.{ .points = &.{ .{ .x = area.x, .y = o.y }, .{ .x = area.x + area.w, .y = o.y } } }, .{ .thickness = px, .color = axis });
+    if (o.x >= area.x and o.x <= area.x + area.w) dvui.Path.stroke(.{ .points = &.{ .{ .x = o.x, .y = area.y }, .{ .x = o.x, .y = area.y + area.h } } }, .{ .thickness = px, .color = axis });
+    const r: f32 = 4 * px;
+    const mark: dvui.ColorOrGradient = .{ .color = colors.edge.opacity(0.6) };
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = o.x - r, .y = o.y }, .{ .x = o.x + r, .y = o.y } } }, .{ .thickness = 1.5 * px, .color = mark });
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = o.x, .y = o.y - r }, .{ .x = o.x, .y = o.y + r } } }, .{ .thickness = 1.5 * px, .color = mark });
+}
+
 /// One ruler's ticks and numbers, counted from the ruler origin. Ticks grow
 /// from the ruler's edge against the sheet.
 fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick, horizontal: bool) void {
     if (r.w <= 0 or r.h <= 0) return;
     const ns = dvui.windowNaturalScale();
     const sheet = state.model.sheet;
-    const from_far = if (horizontal) sheet.ruler_origin.fromRight() else sheet.ruler_origin.fromTop();
+    const open = openCanvas();
+    const from_far = !open and (if (horizontal) sheet.ruler_origin.fromRight() else sheet.ruler_origin.fromTop());
     const length = if (horizontal) sheet.w else sheet.h;
     // The ruler's ends in the worksheet frame, then as the ruler counts.
     const e0 = if (horizontal) state.view.toMm(area, .{ .x = r.x, .y = 0 }).x else state.view.toMm(area, .{ .x = 0, .y = r.y + r.h }).y;
@@ -2063,14 +2382,14 @@ fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick
     const c1 = if (from_far) length - e1 else e1;
     // A millimetre of slack each way, so pixel rounding at a sheet edge
     // does not drop the 0 or end tick; still clamped to the sheet.
-    const lo = @max(0, @min(c0, c1) - 1);
-    const hi = @min(length, @max(c0, c1) + 1);
+    const lo = if (open) @min(c0, c1) - 1 else @max(0, @min(c0, c1) - 1);
+    const hi = if (open) @max(c0, c1) + 1 else @min(length, @max(c0, c1) + 1);
     if (lo > hi) return;
 
     // Ticks grow from the edge against the sheet: the horizontal ruler's
     // bottom; the vertical ruler's right side on the left, left side on
     // the right.
-    const right_side = !horizontal and sheet.ruler_origin.fromRight();
+    const right_side = !horizontal and !open and sheet.ruler_origin.fromRight();
     const ink: dvui.ColorOrGradient = .{ .color = colors.ruler_ink };
     const font = dvui.Font.theme(.body).withSize(7);
     const depth = if (horizontal) r.h else r.w;
@@ -2092,7 +2411,7 @@ fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick
 
             var text_buf: [16]u8 = undefined;
             // @round(-0.0) prints as "-0".
-            const rounded = @round(v * sheet.units.perMm());
+            const rounded = @round(v * docUnits().perMm());
             const text = std.fmt.bufPrint(&text_buf, "{d}", .{if (rounded == 0) 0 else rounded}) catch continue;
             const size = font.textSize(text);
             const tw: f32 = size.w * ns;
@@ -2130,12 +2449,37 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     canvas_id = box.data().id;
     validateCursor();
     for (dvui.events()) |*e| {
+        // While a new canvas's units are asked for, the canvas takes no
+        // input but Enter, which makes it.
+        if (canvas_prompt) {
+            if (e.evt == .key and e.evt.key.action == .down and (e.evt.key.code == .enter or e.evt.key.code == .kp_enter)) {
+                e.handle(@src(), box.data());
+                createCanvas(last_units);
+                dvui.refresh(null, @src(), box.data().id);
+            }
+            continue;
+        }
         // A selected track's arrow keys move it, while the canvas or the
         // palette has the keyboard.
         if (e.evt == .key and track_cursor == null and state.context == .row and !e.handled and cursorKeysReach()) {
             const k = e.evt.key;
             if ((k.action == .down or k.action == .repeat) and moveTrackKey(k.code)) {
                 e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
+        // Typing with a panel or the canvas as the context makes a label
+        // where the last click landed, and the expression line takes the
+        // rest of the typing.
+        if (e.evt == .text and !e.handled and track_cursor == null and state.tool == .select and !canvas_prompt and cursorKeysReach()) {
+            const txt = switch (e.evt.text.action) {
+                .value => |v| v.txt,
+                else => "",
+            };
+            if (state.context == .panel and txt.len > 0 and txt[0] >= ' ') {
+                e.handle(@src(), box.data());
+                typeLabel(state.context.panel, txt);
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
@@ -2186,7 +2530,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             const k = e.evt.key;
             if (k.code == .delete and k.action == .down and state.moving == null) {
                 switch (state.context) {
-                    .panel => |pi| {
+                    .panel => |pi| if (!state.model.panels.items[pi].unbounded) {
                         e.handle(@src(), box.data());
                         state.model.removePanel(pi);
                         state.context = .worksheet;
@@ -2229,7 +2573,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .position => {
                 // The pointer's worksheet position, for the rulers and readout.
                 const at = state.view.toMm(area, me.p);
-                state.mouse = if (area.contains(me.p) and contains(state.model.sheet.box(), at)) at else null;
+                state.mouse = if (area.contains(me.p) and (openCanvas() or contains(state.model.sheet.box(), at))) at else null;
                 if (drawing) {
                     dvui.cursorSet(.crosshair);
                 } else if (state.moving != null or state.moving_label != null) {
@@ -2258,7 +2602,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 if (state.tool == .add_label and me.button.pointer()) {
                     // One click places a label on the panel it was chosen for.
                     const at = state.view.toMm(area, me.p);
-                    if (state.context == .panel and contains(state.model.panels.items[state.context.panel].box(), at)) {
+                    if (state.context == .panel and panelHolds(state.context.panel, at)) {
                         addLabelAt(state.context.panel, at);
                         state.tool = .select;
                         // The release that follows is part of this click, not a pick.
@@ -2267,21 +2611,21 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .add_art and me.button.pointer()) {
                     // Line art is drawn from a point on its panel.
                     const at = state.view.toMm(area, me.p);
-                    if (state.context == .panel and contains(state.model.panels.items[state.context.panel].box(), at)) {
+                    if (state.context == .panel and panelHolds(state.context.panel, at)) {
                         const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
                         state.drag = .{ .start = p, .at = p };
                     }
                 } else if (state.tool == .add_tracks and me.button.pointer()) {
                     // Tracks are drawn from a point on the panel chosen for them.
                     const at = state.view.toMm(area, me.p);
-                    if (state.context == .panel and contains(state.model.panels.items[state.context.panel].box(), at)) {
+                    if (state.context == .panel and panelHolds(state.context.panel, at)) {
                         const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
                         state.drag = .{ .start = p, .at = p };
                     }
                 } else if (drawing and me.button.pointer()) {
                     // A panel is drawn from a point on the sheet.
                     const at = snap(state.view.toMm(area, me.p));
-                    if (contains(state.model.sheet.box(), at)) state.drag = .{ .start = at, .at = at };
+                    if (openCanvas() or contains(state.model.sheet.box(), at)) state.drag = .{ .start = at, .at = at };
                 } else {
                     state.press_at = if (me.button.pointer()) state.view.toMm(area, me.p) else null;
                     dvui.dragPreStart(me.button, me.p, .{});
@@ -2373,17 +2717,24 @@ fn grabbedPanel() ?usize {
     return panelToMove(state.press_at orelse return null);
 }
 
+/// Whether worksheet point `at` lies on panel `pi`: always, for the canvas.
+fn panelHolds(pi: usize, at: geom.Point) bool {
+    const p = state.model.panels.items[pi];
+    return p.unbounded or contains(p.box(), at);
+}
+
 /// The panel a drag from worksheet point `at` would move: the selected
 /// panel when `at` is on it; from the worksheet context, the one panel
 /// under `at`, if exactly one is (where panels overlap, select one first).
 /// The context does not change.
 fn panelToMove(at: geom.Point) ?usize {
     switch (state.context) {
-        .panel => |pi| return if (contains(state.model.panels.items[pi].box(), at)) pi else null,
+        // The canvas itself never moves.
+        .panel => |pi| return if (!state.model.panels.items[pi].unbounded and contains(state.model.panels.items[pi].box(), at)) pi else null,
         .worksheet => {
             var found: ?usize = null;
             for (state.model.panels.items, 0..) |p, pi| {
-                if (!contains(p.box(), at)) continue;
+                if (p.unbounded or !contains(p.box(), at)) continue;
                 if (found != null) return null;
                 found = pi;
             }
@@ -2415,10 +2766,12 @@ fn pick(at: geom.Point) void {
         return;
     }
     track_cursor = null;
-    state.context = .worksheet;
+    click_at = at;
+    // Empty space is the worksheet, or on a canvas the canvas itself.
+    state.context = if (state.model.canvas()) |ci| .{ .panel = ci } else .worksheet;
     for (state.model.panels.items, 0..) |panel, pi| {
         const b = panel.box();
-        if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
+        if (!panel.unbounded and at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
         if (pi >= state.placed.items.len) continue;
         for (state.placed.items[pi].tiles) |t| {
             const body = onSheet(pi, t.body);
@@ -2500,6 +2853,7 @@ fn propertiesPane() !void {
 
 /// The tool palette and the properties, in whatever holds them.
 fn propertiesContent() !void {
+    if (canvas_prompt) return;
     toolPalette();
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
@@ -2827,7 +3181,11 @@ fn toolPalette() void {
         }
         dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
     }
-    if (state.context == .worksheet) {
+    const on_canvas = switch (state.context) {
+        .panel => |pi| state.model.panels.items[pi].unbounded,
+        else => false,
+    };
+    if (state.context == .worksheet or on_canvas) {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
         var awd: dvui.WidgetData = undefined;
@@ -3049,7 +3407,11 @@ fn propFont(name: []const u8, n: usize) !void {
 }
 
 fn properties() !void {
-    heading("{s}", .{state.context.kindName()}, 0);
+    const on_canvas = switch (state.context) {
+        .panel => |pi| state.model.panels.items[pi].unbounded,
+        else => false,
+    };
+    heading("{s}", .{if (on_canvas) "Canvas" else state.context.kindName()}, 0);
     switch (state.context) {
         .file => {
             // The file's name is its path, set by saving; it is not a property.
@@ -3062,7 +3424,9 @@ fn properties() !void {
             propText("Tiles", "{d}", .{state.model.tiles.items.len}, 4);
             try propFont("Legend font", 5);
         },
-        .panel => |pi| {
+        .panel => |pi| if (state.model.panels.items[pi].unbounded) {
+            try canvasProperties(pi);
+        } else {
             const panel = state.model.panels.items[pi];
             propValue("Name", panel.default_name, "{s}", .{panel.name}, 1);
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
@@ -3723,21 +4087,22 @@ fn statusContent() void {
     const muted: dvui.Options = .{ .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } };
 
     var pos_buf: [64]u8 = undefined;
-    const u = state.model.sheet.units;
+    const u = docUnits();
     const pos = if (state.mouse) |m_sheet| blk: {
-        // Shown as the rulers count: from the ruler origin.
-        const m = state.model.sheet.toRuler(m_sheet);
+        // Shown as the rulers count: from the ruler origin (a canvas's own).
+        const m = if (openCanvas()) m_sheet else state.model.sheet.toRuler(m_sheet);
         const k = u.perMm();
         break :blk switch (u) {
             .mm => std.fmt.bufPrint(&pos_buf, "x {d:.2}   y {d:.2} mm", .{ m.x * k, m.y * k }),
             .inch => std.fmt.bufPrint(&pos_buf, "x {d:.3}   y {d:.3} in", .{ m.x * k, m.y * k }),
+            .mil => std.fmt.bufPrint(&pos_buf, "x {d:.0}   y {d:.0} mil", .{ m.x * k, m.y * k }),
         } catch "";
     } else std.fmt.bufPrint(&pos_buf, "x –   y – {s}", .{u.symbol()}) catch "";
     dvui.labelNoFmt(@src(), pos, .{}, field.override(.{ .min_size_content = .{ .w = 190 }, .font = .theme(.mono) }));
 
     var counts_buf: [160]u8 = undefined;
     const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs · {d} overflows · {d} in margins", .{
-        state.model.panels.items.len, state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len,
+        state.model.panels.items.len - @as(usize, if (state.model.canvas() != null) 1 else 0), state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len,
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
 
@@ -4103,6 +4468,9 @@ fn toggleBindAtCursor() void {
 
 /// Set when a new run wants the expression line to take the keyboard.
 var focus_expression = false;
+/// With it, the cursor goes to the end of what is there (a label begun by
+/// typing).
+var focus_expression_end = false;
 
 /// The cursor: a bar across its row or column between items.
 fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {

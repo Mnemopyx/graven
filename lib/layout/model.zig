@@ -399,6 +399,10 @@ pub const Panel = struct {
     name: []const u8,
     /// True while the name is one the app gave it (Panel 1), not the user.
     default_name: bool = false,
+    /// The canvas itself: the open drafting space holding loose objects,
+    /// with no outline, margins or sheet to keep to (see
+    /// `Model.startCanvas`).
+    unbounded: bool = false,
     /// Where the panel's frame origin (its bottom-left corner) sits on the
     /// worksheet, mm.
     origin: geom.Point = .{ .x = 0, .y = 0 },
@@ -470,11 +474,14 @@ pub const RulerOrigin = enum {
 pub const Units = enum {
     mm,
     inch,
+    /// A thousandth of an inch, 25.4 µm.
+    mil,
 
     pub fn perMm(u: Units) f64 {
         return switch (u) {
             .mm => 1,
             .inch => 1.0 / 25.4,
+            .mil => 1000.0 / 25.4,
         };
     }
 
@@ -482,6 +489,7 @@ pub const Units = enum {
         return switch (u) {
             .mm => "mm",
             .inch => "in",
+            .mil => "mil",
         };
     }
 };
@@ -569,6 +577,12 @@ pub const Model = struct {
     /// Owns every string and list in the model.
     arena: std.heap.ArenaAllocator,
     sheet: Sheet = .{},
+    /// Whether the document has a sheet: false for a canvas started with
+    /// `startCanvas`, where work is drafted without one.
+    has_sheet: bool = true,
+    /// The document's units, chosen when its canvas was made: how lengths
+    /// are shown and typed outside a sheet. Lengths are stored in mm.
+    units: Units = .mm,
     panels: std.ArrayList(Panel) = .empty,
     tiles: std.ArrayList(Tile) = .empty,
     prototypes: std.ArrayList(TilePrototype) = .empty,
@@ -667,6 +681,32 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Starts an empty document as a canvas: an open drafting space in
+    /// `units`, with no sheet, its loose objects held by one unbounded
+    /// panel at the origin. Returns that panel's index.
+    pub fn startCanvas(m: *Model, units: Units) Error!usize {
+        if (m.panels.items.len > 0) return error.NoRoom;
+        m.units = units;
+        m.has_sheet = false;
+        try m.panels.append(m.a(), .{ .name = "Canvas", .unbounded = true, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
+        m.revision += 1;
+        return m.panels.items.len - 1;
+    }
+
+    /// The canvas's own panel, holding loose objects, if the document has
+    /// one.
+    pub fn canvas(m: *const Model) ?usize {
+        for (m.panels.items, 0..) |p, i| if (p.unbounded) return i;
+        return null;
+    }
+
+    /// Changes the canvas's units: a conversion, so nothing moves or
+    /// resizes; only how lengths are shown and typed changes.
+    pub fn setCanvasUnits(m: *Model, units: Units) void {
+        m.units = units;
+        m.revision += 1;
+    }
+
     pub fn addPanel(m: *Model, name: []const u8, w: f64, h: f64) Error!usize {
         return m.placePanel(.{ .name = name, .w = w, .h = h });
     }
@@ -755,6 +795,7 @@ pub const Model = struct {
     }
 
     pub fn compliantAt(m: *const Model, panel: usize, origin: geom.Point) bool {
+        if (!m.has_sheet or m.panels.items[panel].unbounded) return true;
         var p = m.panels.items[panel];
         p.origin = origin;
         return m.onSheet(p.box()) and within(p.inkArea(), m.sheet.inkArea());
@@ -880,6 +921,7 @@ pub const Model = struct {
     /// The origin nearest `origin` that keeps a grip of panel `panel` on
     /// the sheet; past that, it may hang off any edge.
     pub fn clampOnSheet(m: *const Model, panel: usize, origin: geom.Point) geom.Point {
+        if (!m.has_sheet) return origin;
         const p = m.panels.items[panel];
         const s = m.sheet;
         const gx = @min(panel_grip, p.w);
@@ -892,6 +934,8 @@ pub const Model = struct {
 
     /// Whether box `b` keeps a grip on the sheet (see `panel_grip`).
     pub fn gripsSheet(m: *const Model, b: geom.Box) bool {
+        // With no sheet, there is nothing to keep a grip on.
+        if (!m.has_sheet) return true;
         const s = m.sheet.box();
         const tol = 1e-9;
         const ox = @min(b.x1, s.x1) - @max(b.x0, s.x0);
@@ -903,6 +947,7 @@ pub const Model = struct {
     /// within it (they may overlap each other); a sheet change that leaves
     /// one hanging over the edge is reported by the checks instead.
     pub fn onSheet(m: *const Model, b: geom.Box) bool {
+        if (!m.has_sheet) return true;
         return within(b, m.sheet.box());
     }
 
@@ -1733,4 +1778,23 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.boxAt(.{ .across = 1 }).height(), 1e-9);
     try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = 9, .count = 1, .length = 2, .pitch = 4 }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
+}
+
+test "a canvas: units chosen up front, no sheet, loose objects on an unbounded panel" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const c = try m.startCanvas(.mil);
+    try std.testing.expectEqual(c, m.canvas().?);
+    try std.testing.expectEqual(Units.mil, m.units);
+    try std.testing.expect(!m.has_sheet);
+    try std.testing.expectError(error.NoRoom, m.startCanvas(.mm));
+    // A label anywhere, even far from the origin or at negative positions.
+    _ = try m.addLabel(c, .{ .at = .{ .x = -500, .y = 1200 }, .content = "Volume" });
+    try std.testing.expect(m.compliant(c));
+    // A panel too can go anywhere: there is no sheet to keep to.
+    const p = try m.placePanel(.{ .name = "Part", .origin = .{ .x = 5000, .y = -5000 }, .w = 50, .h = 20 });
+    try std.testing.expect(m.compliant(p));
+    m.setCanvasUnits(.mm);
+    try std.testing.expectEqual(Units.mm, m.units);
+    try std.testing.expectApproxEqAbs(@as(f64, 39.37007874), Units.mil.perMm(), 1e-6);
 }

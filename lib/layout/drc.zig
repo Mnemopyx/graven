@@ -29,6 +29,9 @@ pub fn panelIssues(gpa: std.mem.Allocator, m: *const model.Model) ![]PanelIssue 
     var out: std.ArrayList(PanelIssue) = .empty;
     errdefer out.deinit(gpa);
     for (m.panels.items, 0..) |p, pi| {
+        // Without a sheet, or for the canvas itself, there is nothing to
+        // comply with here.
+        if (!m.has_sheet or p.unbounded) continue;
         const off = overhang(p.box(), m.sheet.box());
         const ink = overhang(p.inkArea(), m.sheet.inkArea());
         if (off > 1e-9 or ink > 1e-9) try out.append(gpa, .{ .panel = pi, .off_sheet = @max(off, 0), .ink_outside = @max(ink, 0) });
@@ -98,11 +101,15 @@ pub const MarginIntrusion = struct {
 pub fn marginIntrusions(gpa: std.mem.Allocator, m: *const model.Model, placed: []const place.Placed) ![]MarginIntrusion {
     var out: std.ArrayList(MarginIntrusion) = .empty;
     errdefer out.deinit(gpa);
-    const sheet = m.sheet.inkArea();
+    // Without a sheet, or on the canvas's own unbounded panel, that limit
+    // falls away; with neither, there is nothing to intrude on.
+    const inf = std.math.inf(f64);
+    const open: Box = .{ .x0 = -inf, .y0 = -inf, .x1 = inf, .y1 = inf };
+    const sheet = if (m.has_sheet) m.sheet.inkArea() else open;
     for (placed, 0..) |p, pi| {
         const panel = m.panels.items[pi];
         const o = panel.origin;
-        const pa = panel.inkArea();
+        const pa = if (panel.unbounded) open else panel.inkArea();
         const area: Box = .{ .x0 = @max(sheet.x0, pa.x0), .y0 = @max(sheet.y0, pa.y0), .x1 = @min(sheet.x1, pa.x1), .y1 = @min(sheet.y1, pa.y1) };
         for (p.labels) |l| {
             const ink = l.render.ink;
