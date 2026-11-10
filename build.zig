@@ -119,6 +119,12 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Module{ geom, font, engine, layout, samples }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
+    // The GUI's window-free logic (hot edges' timing).
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/gui/dwell.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) })).step);
 
     // Optional OCCT bridge: zig build occt-test -Docct=<prefix>
     // <prefix> is an OCCT 8.0.1 install built static with scripts/build-occt.sh.

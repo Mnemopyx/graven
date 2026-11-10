@@ -15,6 +15,7 @@ const layout = @import("graven_layout");
 const engine = @import("graven_engine");
 const samples = @import("graven_samples");
 const desktop = @import("desktop.zig");
+const ghost_pane = @import("ghost.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -788,46 +789,82 @@ fn frame() !dvui.App.Result {
     if (titleBar()) |r| return r;
 
     {
-        // The body and the status bar are placed explicitly, so a tall pane
-        // can never push the status bar off the bottom of the window.
+        // The body, the docked bottom bar and the bottom edge's strip are
+        // placed explicitly, so a tall pane can never push them off the
+        // bottom of the window.
         var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
         defer rest.deinit();
         const size = rest.data().contentRect();
-        const status_h: f32 = if (panes.status == .docked) status_height else 0;
+        const t: f32 = tab_size;
+        const status_h: f32 = if (bottom_pane.mode == .docked) status_height else 0;
+        const body_h = @max(0, size.h - status_h - t);
+        // A side pane stops above a ghost bottom bar, so they never overlap.
+        const side_h = @max(0, body_h - if (bottom_pane.mode == .ghost) @as(f32, status_height) else 0);
         {
-            var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .rect = .{ .x = 0, .y = 0, .w = size.w, .h = @max(0, size.h - status_h) } });
+            var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .rect = .{ .x = 0, .y = 0, .w = size.w, .h = body_h } });
             defer body.deinit();
-            if (panes.tree == .docked) treePane();
+            sideStrip(&tree_pane, if (tree_pane.mode == .docked) body_h else side_h, 1);
+            if (tree_pane.mode == .docked) {
+                const prev = ghost_pane.themePush(&tree_pane);
+                defer ghost_pane.themePop(prev);
+                treePane();
+            }
             canvas();
-            if (panes.properties == .docked) try propertiesPane();
+            if (props_pane.mode == .docked) {
+                const prev = ghost_pane.themePush(&props_pane);
+                defer ghost_pane.themePop(prev);
+                try propertiesPane();
+            }
+            sideStrip(&props_pane, if (props_pane.mode == .docked) body_h else side_h, 2);
         }
-        if (panes.status == .docked) {
+        if (bottom_pane.mode == .docked) {
+            const prev = ghost_pane.themePush(&bottom_pane);
+            defer ghost_pane.themePop(prev);
             var bottom = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .rect = .{ .x = 0, .y = size.h - status_h, .w = size.w, .h = status_h },
+                .rect = .{ .x = t, .y = body_h, .w = @max(0, size.w - 2 * t), .h = status_h },
                 .background = true,
+                .color_fill = .{ .color = ghost_pane.fill(&bottom_pane) },
                 .border = .{ .y = 1 },
             });
             defer bottom.deinit();
             try bottomContent();
         }
+        {
+            // The bottom edge: the bottom bar's tab, as wide as the bar.
+            var strip = dvui.box(@src(), .{}, .{ .rect = .{ .x = 0, .y = size.h - t, .w = size.w, .h = t }, .background = true, .color_fill = .{ .color = colors.titlebar } });
+            defer strip.deinit();
+            applyTab(&bottom_pane, ghost_pane.tab(&bottom_pane, .{ .x = t, .y = 0, .w = @max(0, size.w - 2 * t), .h = t }, 3));
+        }
     }
     try overlays();
+    if (hot_edges) {
+        ghost_pane.hotEdges(&all_panes, root.data().id);
+    } else for (all_panes) |p| {
+        p.hot = .{};
+    }
     return .ok;
 }
 
-// Pane display -------------------------------------------------------------
+// Panes ---------------------------------------------------------------------
 //
-// The tree, the tool palette with properties, and the status bar each show
-// docked beside the canvas, over it as translucent overlays (the default),
-// or not at all.
+// The tree, the tools with the properties, and the bottom bar (the
+// expression and status lines) are ghost panes (see ghost.zig): attached to
+// an edge of the window, with a tab along that edge whose icons choose the
+// pane's mode (ghost over the canvas, docked beside it, or hidden), and
+// whose body makes a ghost pane active or ghost again.
 
-const PaneMode = enum { overlay, docked, hidden };
+var tree_pane: ghost_pane.Pane = .{ .name = "Tree", .edge = .left, .size = tree_width, .look = .{ .hue = 255 } };
+var props_pane: ghost_pane.Pane = .{ .name = "Tools and properties", .edge = .right, .size = properties_width, .look = .{ .hue = 165 } };
+/// Docked by default: the expression line is typed into often.
+var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
+const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &props_pane, &bottom_pane };
 
-var panes: struct {
-    tree: PaneMode = .overlay,
-    properties: PaneMode = .overlay,
-    status: PaneMode = .overlay,
-} = .{};
+/// Hot edges: holding the pointer on a ghost pane's tab activates it.
+var hot_edges = false;
+
+/// The strips along the window's edges that hold the panes' tabs, logical
+/// pixels.
+const tab_size = 18;
 
 const tree_width = 240;
 const properties_width = 320;
@@ -835,7 +872,7 @@ const properties_width = 320;
 const expression_height = 38;
 const status_line_height = 32;
 const status_height = expression_height + status_line_height;
-/// Space between an overlay and the canvas edge, logical pixels.
+/// Space between the key palette and the panes beside it.
 const overlay_gap = 6;
 /// How opaque an overlay's background is.
 const overlay_alpha = 0.84;
@@ -844,13 +881,37 @@ const overlay_alpha = 0.84;
 /// anchor to it.
 var canvas_rect: dvui.Rect = .{};
 
-/// How much of each canvas edge overlays cover, logical pixels, so fitting
-/// a view keeps its subject clear of them.
+/// A side edge's strip, holding its pane's tab as tall as the pane.
+fn sideStrip(p: *ghost_pane.Pane, h: f32, id: usize) void {
+    var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .id_extra = id,
+        .min_size_content = .{ .w = tab_size },
+        .max_size_content = .width(tab_size),
+        .expand = .vertical,
+        .background = true,
+        .color_fill = .{ .color = colors.titlebar },
+    });
+    defer strip.deinit();
+    applyTab(p, ghost_pane.tab(p, .{ .x = 0, .y = 0, .w = tab_size, .h = h }, id));
+}
+
+/// What a tab asked for, done; the canvas takes the keyboard back from a
+/// pane that stops taking events.
+fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
+    if (r == .none) return;
+    const had = p.interactive();
+    ghost_pane.apply(&all_panes, p, r);
+    if (had and !p.interactive()) if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    dvui.refresh(null, @src(), null);
+}
+
+/// How much of each canvas edge ghost panes cover, logical pixels, so
+/// fitting a view keeps its subject clear of them.
 fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
     return .{
-        .left = if (panes.tree == .overlay) tree_width + 2 * overlay_gap else 0,
-        .right = if (panes.properties == .overlay) properties_width + 2 * overlay_gap else 0,
-        .bottom = if (panes.status == .overlay) status_height + 2 * overlay_gap else 0,
+        .left = if (tree_pane.mode == .ghost) tree_width + overlay_gap else 0,
+        .right = if (props_pane.mode == .ghost) properties_width + overlay_gap else 0,
+        .bottom = if (bottom_pane.mode == .ghost) status_height + overlay_gap else 0,
     };
 }
 
@@ -866,31 +927,41 @@ fn overlayOptions(id: usize) dvui.Options {
     };
 }
 
-/// The panes shown as overlays, anchored to the canvas's edges.
+/// The ghost panes over the canvas, attached to its edges, then the key
+/// palette and any prompt.
 fn overlays() !void {
+    for (all_panes) |p| {
+        if (p.mode != .ghost) {
+            p.rect_px = .{};
+            p.sub_id = null;
+        }
+    }
     const c = canvas_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const g: f32 = overlay_gap;
-    const bottom: f32 = if (panes.status == .overlay) status_height + g else 0;
-    if (panes.tree == .overlay) {
-        var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + g, .w = tree_width, .h = @max(60, c.h - 2 * g - bottom) };
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(1));
-        defer fw.deinit();
+    const bottom: f32 = if (bottom_pane.mode == .ghost) status_height else 0;
+    if (tree_pane.mode == .ghost) {
+        var o = ghost_pane.begin(&tree_pane, .{ .x = c.x, .y = c.y, .w = tree_width, .h = @max(60, c.h - bottom) }, 1);
+        defer o.end();
         treeContent();
     }
-    if (panes.properties == .overlay) {
-        var r: dvui.Rect = .{ .x = c.x + c.w - properties_width - g, .y = c.y + g, .w = properties_width, .h = @max(60, c.h - 2 * g - bottom) };
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(2));
-        defer fw.deinit();
+    if (props_pane.mode == .ghost) {
+        var o = ghost_pane.begin(&props_pane, .{ .x = c.x + c.w - properties_width, .y = c.y, .w = properties_width, .h = @max(60, c.h - bottom) }, 2);
+        defer o.end();
         try propertiesContent();
+    }
+    if (bottom_pane.mode == .ghost) {
+        var o = ghost_pane.begin(&bottom_pane, .{ .x = c.x, .y = c.y + c.h - status_height, .w = c.w, .h = status_height }, 3);
+        defer o.end();
+        try bottomContent();
     }
     // A key palette across the top of the canvas, between the panes: the
     // insert palette while there is a flow cursor, the move palette for a
     // selected track.
     const moving_track = track_cursor == null and state.context == .row;
     if (track_cursor != null or moving_track) {
-        const left: f32 = if (panes.tree == .overlay) tree_width + 2 * g else g;
-        const right: f32 = if (panes.properties == .overlay) properties_width + 2 * g else g;
+        const left: f32 = if (tree_pane.mode == .ghost) tree_width + g else g;
+        const right: f32 = if (props_pane.mode == .ghost) properties_width + g else g;
         var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = if (moving_track) move_palette_height else palette_height };
         // Lighter than the panes: the tracks being filled show through.
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4).override(.{
@@ -901,12 +972,6 @@ fn overlays() !void {
     }
     if (canvas_prompt) newCanvasPrompt();
     if (export_prompt) exportPrompt();
-    if (panes.status == .overlay) {
-        var r: dvui.Rect = .{ .x = c.x + g, .y = c.y + c.h - status_height - g, .w = c.w - 2 * g, .h = status_height };
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(3));
-        defer fw.deinit();
-        try bottomContent();
-    }
 }
 
 /// The bottom area: the expression line, then the status line.
@@ -1438,18 +1503,23 @@ fn menu() ?dvui.App.Result {
             show_construction = !show_construction;
             m.close();
         }
-        // Pane display: overlay (the default), docked or hidden.
-        inline for (.{ .{ "Tree", "tree" }, .{ "Tools and properties", "properties" }, .{ "Status line", "status" } }, 0..) |pane, pi| {
+        // Pane modes, as the tabs' icons set them, and hot edges.
+        for (all_panes, 0..) |pane, pi| {
             _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = pi });
-            inline for (.{ PaneMode.overlay, PaneMode.docked, PaneMode.hidden }, 0..) |mode, mi| {
+            for ([_]ghost_pane.Mode{ .ghost, .docked, .hidden }, 0..) |mode, mi| {
                 var buf: [64]u8 = undefined;
-                const on = @field(panes, pane[1]) == mode;
-                const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane[0], @tagName(mode) }) catch pane[0];
+                const on = pane.mode == mode;
+                const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane.name, @tagName(mode) }) catch pane.name;
                 if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 3 + mi }) != null) {
-                    @field(panes, pane[1]) = mode;
+                    applyTab(pane, .{ .mode = mode });
                     m.close();
                 }
             }
+        }
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 9 });
+        if (dvui.menuItemLabel(@src(), if (hot_edges) "•  Hot edges: hold on a tab to open its pane" else "    Hot edges: hold on a tab to open its pane", .{}, .{ .expand = .horizontal }) != null) {
+            hot_edges = !hot_edges;
+            m.close();
         }
     }
     return null;
@@ -1458,7 +1528,7 @@ fn menu() ?dvui.App.Result {
 /// The component tree: file, panels, regions, rows, tiles. Clicking a node
 /// makes it the context; its arrow opens or closes it.
 fn treePane() void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_width }, .max_size_content = .width(tree_width), .expand = .vertical, .border = .{ .w = 1 } });
+    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_width }, .max_size_content = .width(tree_width), .expand = .vertical, .border = .{ .w = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tree_pane) } });
     defer pane.deinit();
     treeContent();
 }
@@ -3345,7 +3415,7 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
 /// The right side: a tool palette for the current context, then its
 /// properties.
 fn propertiesPane() !void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = properties_width }, .max_size_content = .width(properties_width), .expand = .vertical, .border = .{ .x = 1 } });
+    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = properties_width }, .max_size_content = .width(properties_width), .expand = .vertical, .border = .{ .x = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
     defer pane.deinit();
     try propertiesContent();
 }
