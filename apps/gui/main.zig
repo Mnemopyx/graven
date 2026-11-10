@@ -10,6 +10,7 @@
 //! around it, select tiles, edit their legends, and try other fonts.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const engine = @import("graven_engine");
@@ -17,6 +18,7 @@ const samples = @import("graven_samples");
 const desktop = @import("desktop.zig");
 const ghost_pane = @import("ghost.zig");
 const settings_file = @import("settings.zig");
+const history = layout.history;
 const locale = @import("locale.zig");
 
 const geom = engine.geom;
@@ -387,6 +389,7 @@ fn init(win: *dvui.Window) !void {
     applyDesktop(win, settings);
     desktop.watch(dvui.io, settings, wakeGui);
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
+    hist = .init(gpa);
     // Work starts on a canvas, not a worksheet: the user picks its units.
     state.model.has_sheet = false;
     const installed: []Font = listFonts(gpa) catch &.{};
@@ -505,6 +508,8 @@ fn newCanvas() void {
 /// Makes the canvas in `units`, and makes it the context.
 fn createCanvas(units: layout.model.Units) void {
     const ci = state.model.startCanvas(units) catch return;
+    // The new canvas is where its history starts: nothing to undo.
+    hist.reset(&state.model) catch {};
     last_units = units;
     canvas_prompt = false;
     state.context = .{ .panel = ci };
@@ -632,17 +637,20 @@ fn exportPrompt() void {
 
 /// Adds the sample PC keyboard as a new panel and makes it the context.
 fn loadSample() !void {
+    // Built by the sample's own calls, then logged as one step: a snapshot.
     const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
     const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
     const pi = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
     // Top-left of the sheet, 20 mm in; on a canvas, at its origin.
     const panel = state.model.panels.items[pi];
     try state.model.movePanel(pi, if (openCanvas()) .{ .x = 0, .y = 0 } else .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
+    try hist.snapshot(&state.model);
     state.context = .{ .panel = pi };
     state.view.fit = state.model.panels.items[pi].box();
 }
 
 fn deinit(_: *dvui.Window) void {
+    hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
     clearPlaced();
     state.placed.deinit(state.gpa);
@@ -758,7 +766,8 @@ fn update() !void {
     // Segments the flow no longer reaches go, kept origins and all (the
     // next solve shows it); a selected one gives way to its track.
     for (state.placed.items, 0..) |*pl, pi| for (pl.flows) |f| {
-        state.model.trimSegments(pi, f.region, f.segments);
+        if (state.model.panels.items[pi].regions.items[f.region].segments.items.len > @max(1, f.segments))
+            hist.join(&state.model, .trimSegments, .{ pi, f.region, f.segments }) catch {};
         switch (state.context) {
             .row => |r| if (r.panel == pi and r.region == f.region and r.row >= f.segments) {
                 state.context = .{ .region = .{ .panel = pi, .region = f.region } };
@@ -815,6 +824,8 @@ fn frame() !dvui.App.Result {
 
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .style = .window });
     defer root.deinit();
+    // Undo and redo take their keys before any widget does.
+    historyKeys(root.data());
 
     if (titleBar()) |r| return r;
 
@@ -895,6 +906,110 @@ const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
 var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
+
+// Undo -------------------------------------------------------------------------
+//
+// Every change to the model is an action, done through `act` (or `actV`
+// for those that cannot fail, `actM` for runs that undo as one step) and
+// logged by the history: undo restores its checkpoint and replays the
+// steps before the last; redo applies undone steps again.
+
+var hist: history.History = undefined;
+
+fn act(comptime tag: history.Tag, args: history.Args(@tagName(tag))) history.Error!history.Result(@tagName(tag)) {
+    return hist.do(&state.model, tag, args);
+}
+
+/// An action that cannot fail but for memory to log it.
+fn actV(comptime tag: history.Tag, args: history.Args(@tagName(tag))) void {
+    hist.do(&state.model, tag, args) catch {
+        state.status = "That change could not be recorded. ";
+    };
+}
+
+/// An action that joins the step before when that had the same `key`: a
+/// run of nudges, or typing, undone as one.
+fn actM(key: u64, comptime tag: history.Tag, args: history.Args(@tagName(tag))) history.Error!history.Result(@tagName(tag)) {
+    return hist.doMerged(&state.model, key, tag, args);
+}
+
+fn mergeKey(parts: anytype) u64 {
+    var h: std.hash.Wyhash = .init(0);
+    std.hash.autoHashStrat(&h, parts, .Deep);
+    return h.final();
+}
+
+/// Ctrl+Z undoes; Ctrl+Shift+Z (and Ctrl+Y off macOS) redoes. Cmd on
+/// macOS. Held, they repeat.
+fn historyKeys(wd: *dvui.WidgetData) void {
+    if (canvas_prompt) return;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down and k.action != .repeat) continue;
+        const primary = if (builtin.os.tag == .macos) k.mod.command() else k.mod.control();
+        if (!primary) continue;
+        if (k.code == .z and !k.mod.shift()) {
+            e.handle(@src(), wd);
+            undo();
+        } else if ((k.code == .z and k.mod.shift()) or (k.code == .y and builtin.os.tag != .macos)) {
+            e.handle(@src(), wd);
+            redo();
+        } else continue;
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn undo() void {
+    const done = hist.undo(&state.model) catch {
+        state.status = "Undo failed. ";
+        return;
+    };
+    state.status = if (done) "" else "Nothing to undo. ";
+    afterHistory();
+}
+
+fn redo() void {
+    const done = hist.redoStep(&state.model) catch {
+        state.status = "Redo failed. ";
+        return;
+    };
+    state.status = if (done) "" else "Nothing to redo. ";
+    afterHistory();
+}
+
+/// After undo or redo, what pointed into the model may point at nothing:
+/// the context, the selection and the flow cursor fall back to what still
+/// exists.
+fn afterHistory() void {
+    selection.clearRetainingCapacity();
+    track_cursor = null;
+    state.moving = null;
+    state.moving_label = null;
+    if (!contextValid(state.context)) {
+        state.context = if (state.model.spaces.items.len > shown_space) .{ .panel = state.model.spaces.items[shown_space].root } else .worksheet;
+    }
+    if (shown_space >= state.model.spaces.items.len) shown_space = 0;
+}
+
+fn contextValid(c: Context) bool {
+    const m = &state.model;
+    const np = m.panels.items.len;
+    return switch (c) {
+        .file, .worksheet, .prototypes, .selection => true,
+        .panel => |pi| pi < np,
+        .region => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len,
+        .row => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len and r.row < m.panels.items[r.panel].regions.items[r.region].segments.items.len,
+        .tile => |id| @intFromEnum(id) < m.tiles.items.len and !m.tileConst(id).removed,
+        .label => |l| l.panel < np and l.index < m.panels.items[l.panel].labels.items.len,
+        .art => |l| l.panel < np and l.index < m.panels.items[l.panel].art.items.len,
+        .group => |g| m.group(g) != null,
+        .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,
+        .layer => |l| l.space < m.spaces.items.len and l.index < m.spaces.items[l.space].layers.items.len,
+        .image => |im| im.space < m.spaces.items.len and im.index < m.spaces.items[im.space].images.items.len,
+        .prototype => |id| id < m.prototypes.items.len,
+    };
+}
 
 // Settings --------------------------------------------------------------------
 //
@@ -1298,9 +1413,10 @@ const ExprTarget = union(enum) {
 
     fn store(t: ExprTarget, text: []const u8) !void {
         switch (t) {
-            .panel_label => |l| try state.model.setLabelContent(l.panel, l.index, text),
-            .tile_slot => |ts| try state.model.setContent(ts.tile, state.model.slot(ts.tile, ts.slot).name, text),
-            .run => |r| try state.model.setRunContent(r.panel, r.region, r.item, text),
+            // Typing into one label is one undo step.
+            .panel_label => |l| try actM(mergeKey(.{ "label", l.panel, l.index }), .setLabelContent, .{ l.panel, l.index, text }),
+            .tile_slot => |ts| try actM(mergeKey(.{ "slot", ts.tile, ts.slot }), .setContent, .{ ts.tile, state.model.slot(ts.tile, ts.slot).name, text }),
+            .run => |r| try actM(mergeKey(.{ "run", r.panel, r.region, r.item }), .setRunContent, .{ r.panel, r.region, r.item, text }),
         }
     }
 
@@ -1783,6 +1899,21 @@ fn menu() ?dvui.App.Result {
             }
         }
         if (dvui.menuItemLabel(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) return .close;
+    }
+    if (dvui.menuItemLabel(@src(), "Edit", .{ .submenu = true }, .{})) |r| {
+        var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
+        defer fw.deinit();
+        const mod = if (builtin.os.tag == .macos) "Cmd" else "Ctrl";
+        var ub: [48]u8 = undefined;
+        var rb: [48]u8 = undefined;
+        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&ub, "Undo      {s}+Z", .{mod}) catch "Undo", .{}, .{ .expand = .horizontal, .color_text = if (hist.canUndo()) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.4) } }) != null) {
+            undo();
+            m.close();
+        }
+        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&rb, "Redo      {s}+Shift+Z", .{mod}) catch "Redo", .{}, .{ .expand = .horizontal, .color_text = if (hist.canRedo()) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.4) } }) != null) {
+            redo();
+            m.close();
+        }
     }
     if (dvui.menuItemLabel(@src(), "View", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -2272,8 +2403,14 @@ fn labelDelta(pi: usize, index: usize) geom.Point {
 /// The style for new panel labels: "Label", 3 mm cap height in the legend
 /// font, made the first time it is needed.
 fn labelStyle() !layout.model.StyleId {
+    return labelStyleIn(null);
+}
+
+/// As `labelStyle`, making the style (when it has to) as part of the step
+/// merged under `key`.
+fn labelStyleIn(key: ?u64) !layout.model.StyleId {
     if (state.label_style) |s| return s;
-    const s = try state.model.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    const s = if (key) |k| try actM(k, .addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } }) else try act(.addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } });
     state.label_style = s;
     return s;
 }
@@ -2284,12 +2421,15 @@ fn labelStyle() !layout.model.StyleId {
 fn typeLabel(pi: usize, txt: []const u8) void {
     const at = if (click_at) |c| (if (panelHolds(pi, c)) c else geom.Point{ .x = state.view.cx, .y = state.view.cy }) else geom.Point{ .x = state.view.cx, .y = state.view.cy };
     const o = state.model.panels.items[pi].origin;
-    const style = labelStyle() catch return;
-    const li = state.model.addLabel(pi, .{
+    // The style (if new), the label and the typing into it: one undo step.
+    const k = mergeKey(.{ "new label", pi, hist.next_step });
+    const style = labelStyleIn(k) catch return;
+    const li = actM(k, .addLabel, .{ pi, .{
         .at = .{ .x = @round((at.x - o.x) * 2) / 2, .y = @round((at.y - o.y) * 2) / 2 },
         .style = style,
         .content = txt,
-    }) catch return;
+    } }) catch return;
+    hist.mergeAs(mergeKey(.{ "label", pi, li }));
     state.context = .{ .label = .{ .panel = pi, .index = li } };
     focus_expression = true;
     focus_expression_end = true;
@@ -2313,7 +2453,7 @@ fn frameProperties(space: usize) !void {
             state.status = "The frame holds nothing to fit. ";
         } else {
             const margin = 5.0;
-            state.model.setFrameBound(space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin }) catch {};
+            act(.setFrameBound, .{space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin }}) catch {};
         }
     }
     layersList(space);
@@ -2330,7 +2470,7 @@ fn groupProperties(id: layout.model.ObjectId) !void {
     if (dvui.button(@src(), "Ungroup", .{}, .{ .margin = .{ .y = 8 } })) {
         const parent = state.model.parentGroup(id);
         const space = state.model.spaceOfId(id) orelse shown_space;
-        state.model.ungroup(id) catch return;
+        act(.ungroup, .{id}) catch return;
         state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.spaces.items[space].root };
     }
 }
@@ -2358,7 +2498,7 @@ fn groupSelection() void {
     var n: usize = 1;
     for (state.model.spaces.items) |sp| n += sp.groups.items.len;
     const name = std.fmt.bufPrint(&nb, "Group {d}", .{n}) catch "Group";
-    const g = state.model.makeGroup(selection.items, name) catch {
+    const g = act(.makeGroup, .{selection.items, name}) catch {
         state.status = "They could not be grouped. ";
         return;
     };
@@ -2379,11 +2519,11 @@ fn transferSelection(dest: ?usize, copy: bool) void {
         const e = selectionExtents();
         const margin = 10.0;
         const edge: ?geom.Box = if (e.isEmpty()) null else .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin };
-        const f = state.model.addFrame(name, edge) catch return;
+        const f = act(.addFrame, .{name, edge}) catch return;
         state.model.spaces.items[f].default_name = true;
         break :blk f;
     };
-    const g = (if (copy) state.model.copyToSpace(items, target) else state.model.moveToSpace(items, target)) catch {
+    const g = (if (copy) act(.copyToSpace, .{items, target}) else act(.moveToSpace, .{items, target})) catch {
         state.status = "They could not be moved there. ";
         return;
     };
@@ -2493,7 +2633,7 @@ fn moveGroupKey(code: dvui.enums.Key) bool {
         .right => .{ .x = 1, .y = 0 },
         else => return false,
     };
-    state.model.moveGroup(g, d.x, d.y) catch return false;
+    actM(mergeKey(.{ "moveGroupKey", state.context }), .moveGroup, .{g, d.x, d.y}) catch return false;
     return true;
 }
 
@@ -2529,7 +2669,7 @@ fn canvasProperties(pi: usize) !void {
         propName("Units");
         const names = [_][]const u8{ "Millimetres", "Inches", "Mils" };
         var choice: usize = @intFromEnum(state.model.units);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) state.model.setCanvasUnits(@enumFromInt(choice));
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) actV(.setCanvasUnits, .{@enumFromInt(choice)});
     }
     propText("Labels", "{d}", .{panel.labels.items.len}, 2);
     propText("Tracks", "{d}", .{panel.regions.items.len}, 3);
@@ -2590,7 +2730,7 @@ fn addPrimitive(pi: usize, prim: layout.art.Primitive, at: geom.Point) void {
         .edge_width = 0.25,
     }) catch return;
     // An outline lies over what is drawn inside it; a cutout keeps it away.
-    const ai = state.model.addArt(pi, .{ .name = name, .at = .{ .x = at.x - o.x, .y = at.y - o.y }, .shapes = shapes, .prim = prim, .wrap = .none }) catch return;
+    const ai = act(.addArt, .{pi, .{ .name = name, .at = .{ .x = at.x - o.x, .y = at.y - o.y }, .shapes = shapes, .prim = prim, .wrap = .none }}) catch return;
     state.context = .{ .art = .{ .panel = pi, .index = ai } };
 }
 
@@ -2656,7 +2796,7 @@ fn moveArtKey(code: dvui.enums.Key) bool {
         else => return false,
     };
     const at = state.model.panels.items[l.panel].art.items[l.index].at;
-    state.model.moveArt(l.panel, l.index, .{ .x = at.x + d.x, .y = at.y + d.y }) catch return false;
+    actM(mergeKey(.{ "moveArtKey", state.context }), .moveArt, .{l.panel, l.index, .{ .x = at.x + d.x, .y = at.y + d.y }}) catch return false;
     return true;
 }
 
@@ -2688,7 +2828,7 @@ fn artProperties(pi: usize, index: usize) !void {
         clearance = if (list.len == 1) list[0] else 0;
         changed = true;
     };
-    if (changed) try state.model.setArtWrap(pi, index, wrap, clearance);
+    if (changed) try act(.setArtWrap, .{pi, index, wrap, clearance});
     {
         // Off, tracks lie under it (a mark printed over keys): their tiles
         // stay, and only labels on them wrap around it.
@@ -2696,7 +2836,7 @@ fn artProperties(pi: usize, index: usize) !void {
         defer row.deinit();
         propName("Tiles");
         var on = pa.wrap_tracks;
-        if (dvui.checkbox(@src(), &on, "Move out from under it", .{ .id_extra = 6 })) try state.model.setArtWrapsTracks(pi, index, on);
+        if (dvui.checkbox(@src(), &on, "Move out from under it", .{ .id_extra = 6 })) try act(.setArtWrapsTracks, .{pi, index, on});
     }
     try shapeProperties(pi, index);
 }
@@ -2711,7 +2851,7 @@ fn shapeProperties(pi: usize, index: usize) !void {
         .rounded => |r| {
             var buf: [32]u8 = undefined;
             if (sizesProp("Corner radius, mm", std.fmt.bufPrint(&buf, "{d}", .{r.r}) catch "", 11)) |list| if (list.len == 1) {
-                state.model.setArtCorner(pi, index, list[0]) catch {
+                act(.setArtCorner, .{pi, index, list[0]}) catch {
                     state.status = "That radius could not be used. ";
                 };
             };
@@ -2724,7 +2864,7 @@ fn shapeProperties(pi: usize, index: usize) !void {
         defer row.deinit();
         propName("Cutout");
         var on = pa.cutout;
-        if (dvui.checkbox(@src(), &on, "Cut through the panel", .{ .id_extra = 12 })) try state.model.setArtCutout(pi, index, on);
+        if (dvui.checkbox(@src(), &on, "Cut through the panel", .{ .id_extra = 12 })) try act(.setArtCutout, .{pi, index, on});
     }
     if (!state.model.panels.items[pi].unbounded) return;
     if (pa.closedPath() == null) {
@@ -2732,11 +2872,11 @@ fn shapeProperties(pi: usize, index: usize) !void {
         return;
     }
     if (dvui.button(@src(), "Make panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        const np = state.model.makePanel(pi, index) catch {
+        const np = act(.makePanel, .{pi, index}) catch {
             state.status = "A panel could not be made from it. ";
             return;
         };
-        state.model.setPanelLayer(np, newObjectLayer()) catch {};
+        hist.join(&state.model, .setPanelLayer, .{ np, newObjectLayer() }) catch {};
         state.context = .{ .panel = np };
         state.expanded.put(state.gpa, Context.key(.{ .panel = np }), true) catch {};
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
@@ -2749,12 +2889,12 @@ fn shapeProperties(pi: usize, index: usize) !void {
 fn addLabelAt(pi: usize, at: geom.Point) void {
     const o = state.model.panels.items[pi].origin;
     const style = labelStyle() catch return;
-    _ = state.model.addLabel(pi, .{
+    _ = act(.addLabel, .{pi, .{
         .at = .{ .x = @round((at.x - o.x) * 2) / 2, .y = @round((at.y - o.y) * 2) / 2 },
         .style = style,
         .content = "LABEL",
         .default_content = true,
-    }) catch return;
+    }}) catch return;
     state.expanded.put(state.gpa, Context.key(.{ .panel = pi }), true) catch {};
 }
 
@@ -3354,7 +3494,7 @@ fn layersList(space: usize) void {
         if (dvui.checkbox(@src(), &vis, null, .{ .id_extra = li })) {
             var nl = l;
             nl.visible = vis;
-            state.model.setLayer(space, li, nl) catch {};
+            act(.setLayer, .{space, li, nl}) catch {};
         }
         var flagged = false;
         for (state.layer_issues) |iss| {
@@ -3370,7 +3510,7 @@ fn layersList(space: usize) void {
     }
     if (dvui.button(@src(), "Add layer", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) {
         var buf: [32]u8 = undefined;
-        const li = state.model.addLayer(space, state.model.nextLayerName(space, &buf)) catch return;
+        const li = act(.addLayer, .{space, state.model.nextLayerName(space, &buf)}) catch return;
         state.context = .{ .layer = .{ .space = space, .index = li } };
         active_layer = state.model.spaces.items[space].layers.items[li].id;
     }
@@ -3424,16 +3564,16 @@ fn layerProperties(space: usize, li: usize) !void {
             changed = true;
         }
     }
-    if (changed) try state.model.setLayer(space, li, l);
+    if (changed) try act(.setLayer, .{space, li, l});
     propText("New objects", "{s}", .{if (l.id == newObjectLayer()) "go on this layer" else "go elsewhere"}, 8);
     layerFlags(space, li, 9);
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Move up", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = state.model.moveLayer(space, li, true) catch li } };
-        if (dvui.button(@src(), "Move down", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = state.model.moveLayer(space, li, false) catch li } };
+        if (dvui.button(@src(), "Move up", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, true}) catch li } };
+        if (dvui.button(@src(), "Move down", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, false}) catch li } };
         if (dvui.button(@src(), "Remove", .{}, .{})) {
-            state.model.removeLayer(space, li) catch {
+            act(.removeLayer, .{space, li}) catch {
                 state.status = "Only an empty layer, other than the space's first, can be removed. ";
                 return;
             };
@@ -3462,11 +3602,11 @@ fn layerChoice(space: usize, current: layout.model.ObjectId, n: usize) ?layout.m
 fn imageProperties(space: usize, index: usize) !void {
     const im = imageAt(space, index) orelse return;
     propText("Name", "{s}", .{im.name}, 1);
-    if (layerChoice(space, im.layer, 2)) |l| try state.model.setImage(space, index, im.at, im.w, l);
+    if (layerChoice(space, im.layer, 2)) |l| try act(.setImage, .{space, index, im.at, im.w, l});
     propText("Place", "({d:.1}, {d:.1}) mm", .{ im.at.x, im.at.y }, 3);
     var buf: [32]u8 = undefined;
     if (sizesProp("Width, mm", std.fmt.bufPrint(&buf, "{d:.2}", .{im.w}) catch "", 4)) |list| if (list.len == 1) {
-        state.model.setImage(space, index, im.at, list[0], im.layer) catch {
+        act(.setImage, .{space, index, im.at, list[0], im.layer}) catch {
             state.status = "A width must be more than 0. ";
         };
     };
@@ -3476,7 +3616,7 @@ fn imageProperties(space: usize, index: usize) !void {
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 8);
     if (state.model.spaces.items[space].layerIndex(im.layer)) |li| layerFlags(space, li, 9);
     if (dvui.button(@src(), "Remove image", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        state.model.removeImage(space, index);
+        actV(.removeImage, .{space, index});
         state.context = .{ .panel = state.model.spaces.items[space].root };
     }
 }
@@ -3495,7 +3635,7 @@ fn moveImageKey(code: dvui.enums.Key) bool {
         .right => .{ .x = 1, .y = 0 },
         else => return false,
     };
-    state.model.setImage(c.space, c.index, .{ .x = im.at.x + d.x, .y = im.at.y + d.y }, im.w, im.layer) catch return false;
+    actM(mergeKey(.{ "moveImageKey", state.context }), .setImage, .{c.space, c.index, .{ .x = im.at.x + d.x, .y = im.at.y + d.y }, im.w, im.layer}) catch return false;
     return true;
 }
 
@@ -3573,7 +3713,7 @@ fn placeImage(path: []const u8) void {
     const w = @as(f64, @floatFromInt(pw)) / 150.0 * 25.4;
     const hgt = w * @as(f64, @floatFromInt(ph)) / @as(f64, @floatFromInt(pw));
     const at: geom.Point = .{ .x = state.view.cx - w / 2, .y = state.view.cy - hgt / 2 };
-    const ii = state.model.addImage(shown_space, std.fs.path.basename(path), bytes, @intCast(pw), @intCast(ph), at, w, newObjectLayer()) catch {
+    const ii = act(.addImage, .{shown_space, std.fs.path.basename(path), bytes, @intCast(pw), @intCast(ph), at, w, newObjectLayer()}) catch {
         state.status = "The image could not be placed. ";
         return;
     };
@@ -3731,7 +3871,7 @@ fn viewProperties(host: usize, index: usize) !void {
     propText("Size", "{d:.1} × {d:.1} mm", .{ hb.width(), hb.height() }, 4);
     var buf: [32]u8 = undefined;
     if (sizesProp("Scale", std.fmt.bufPrint(&buf, "{d}", .{sv.scale}) catch "", 5)) |list| if (list.len == 1) {
-        state.model.setViewScale(host, index, list[0]) catch {
+        act(.setViewScale, .{host, index, list[0]}) catch {
             state.status = "A scale must be more than 0. ";
         };
     };
@@ -3744,7 +3884,7 @@ fn viewProperties(host: usize, index: usize) !void {
         state.view.fit = contentExtents();
     }
     if (dvui.button(@src(), "Remove view", .{}, .{ .expand = .horizontal })) {
-        state.model.removeView(host, index);
+        actV(.removeView, .{host, index});
         state.context = .{ .panel = state.model.spaces.items[host].root };
     }
 }
@@ -3770,7 +3910,7 @@ fn placeViewButtons(space: usize) void {
 fn placeView(source: usize, host: usize) void {
     const e = extentsOf(host, 0);
     const at: geom.Point = if (e.isEmpty()) .{ .x = 0, .y = 0 } else .{ .x = e.x1 + 20, .y = e.y0 };
-    const vi = state.model.addView(host, source, at, 1) catch {
+    const vi = act(.addView, .{host, source, at, 1}) catch {
         state.status = "That view would show itself. ";
         return;
     };
@@ -3794,7 +3934,7 @@ fn moveViewKey(code: dvui.enums.Key) bool {
         .right => .{ .x = 1, .y = 0 },
         else => return false,
     };
-    state.model.moveView(v.space, v.index, .{ .x = sv.at.x + d.x, .y = sv.at.y + d.y }) catch return false;
+    actM(mergeKey(.{ "moveViewKey", state.context }), .moveView, .{v.space, v.index, .{ .x = sv.at.x + d.x, .y = sv.at.y + d.y }}) catch return false;
     return true;
 }
 
@@ -4035,31 +4175,31 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 switch (state.context) {
                     .panel => |pi| if (!state.model.panels.items[pi].unbounded) {
                         e.handle(@src(), box.data());
-                        state.model.removePanel(pi);
+                        actV(.removePanel, .{pi});
                         state.context = .worksheet;
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .label => |l| if (state.moving_label == null) {
                         e.handle(@src(), box.data());
-                        state.model.removeLabel(l.panel, l.index);
+                        actV(.removeLabel, .{l.panel, l.index});
                         state.context = .{ .panel = l.panel };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .art => |l| {
                         e.handle(@src(), box.data());
-                        state.model.removeArt(l.panel, l.index);
+                        actV(.removeArt, .{l.panel, l.index});
                         state.context = .{ .panel = l.panel };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .image => |im| {
                         e.handle(@src(), box.data());
-                        state.model.removeImage(im.space, im.index);
+                        actV(.removeImage, .{im.space, im.index});
                         state.context = .{ .panel = state.model.spaces.items[im.space].root };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .view => |v| {
                         e.handle(@src(), box.data());
-                        state.model.removeView(v.space, v.index);
+                        actV(.removeView, .{v.space, v.index});
                         state.context = .{ .panel = state.model.spaces.items[v.space].root };
                         dvui.refresh(null, @src(), box.data().id);
                     },
@@ -4067,7 +4207,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     .tile => |id| {
                         e.handle(@src(), box.data());
                         const found = findTile(id);
-                        state.model.removeTile(id);
+                        actV(.removeTile, .{id});
                         state.context = if (found) |f| .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } } else .worksheet;
                         dvui.refresh(null, @src(), box.data().id);
                     },
@@ -4197,7 +4337,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     const d = labelDelta(mv.panel, mv.index);
                     state.moving_label = null;
                     const at = state.model.panels.items[mv.panel].labels.items[mv.index].at;
-                    state.model.moveLabel(mv.panel, mv.index, .{ .x = at.x + d.x, .y = at.y + d.y });
+                    actV(.moveLabel, .{mv.panel, mv.index, .{ .x = at.x + d.x, .y = at.y + d.y }});
                 } else if (state.press_consumed) {
                     state.press_consumed = false;
                 } else if (dvui.dragging(me, null) == null) {
@@ -4276,7 +4416,7 @@ fn contains(b: geom.Box, p: geom.Point) bool {
 fn finishMove(pi: usize) void {
     const target = panelOrigin(pi);
     state.moving = null;
-    state.model.movePanel(pi, target) catch |err| dvui.log.err("moving a panel: {s}", .{@errorName(err)});
+    act(.movePanel, .{pi, target}) catch |err| dvui.log.err("moving a panel: {s}", .{@errorName(err)});
 }
 
 /// Makes what is under worksheet point `at` the context: a tile, else a
@@ -4338,19 +4478,19 @@ fn addPanelFromDrag(b: geom.Box) void {
     if (b.width() < 1 or b.height() < 1) return;
     var buf: [32]u8 = undefined;
     const name = state.model.nextPanelName(&buf, "Panel");
-    const pi = state.model.placePanel(.{
+    const pi = act(.placePanel, .{.{
         .name = name,
         .default_name = true,
         .space = shown_space,
         .origin = .{ .x = b.x0, .y = b.y0 },
         .w = b.width(),
         .h = b.height(),
-    }) catch |err| {
+    }}) catch |err| {
         state.status = if (err == error.OffSheet) "Too little of it is on the sheet: start further in. " else "The panel was not added. ";
         return;
     };
     // On the layer last chosen in its space.
-    if (state.model.spaces.items.len > 0) state.model.setPanelLayer(pi, newObjectLayer()) catch {};
+    if (state.model.spaces.items.len > 0) hist.join(&state.model, .setPanelLayer, .{ pi, newObjectLayer() }) catch {};
     // Tools are not modes: a use ends the tool, and the context it was
     // chosen in stays, so the next panel is one press away.
     state.tool = .select;
@@ -4494,7 +4634,7 @@ fn ensurePrototype() !void {
         .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, 19.05);
-    _ = try state.model.addPrototype(p);
+    _ = try act(.addPrototype, .{p});
 }
 
 /// Tracks a drag from `start` to `at` (worksheet, mm) would make on the
@@ -4602,7 +4742,7 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     // resized once their tiles show what is needed.
     var name_buf: [32]u8 = undefined;
     const name = std.fmt.bufPrint(&name_buf, "Tracks {d}", .{panel.regions.items.len + 1}) catch "Tracks";
-    const r = state.model.addTracks(plan.panel, .{
+    const r = act(.addTracks, .{plan.panel, .{
         .name = name,
         .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
         .major = plan.major,
@@ -4617,7 +4757,7 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         .count = plan.count,
         .length = plan.length,
         .pitch = plan.pitch,
-    }) catch {
+    }}) catch {
         state.status = "The tracks were not added. ";
         return;
     };
@@ -4669,7 +4809,7 @@ fn toolBar() void {
             dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "Duplicate: a copy to make a variant of", .{}, .{});
             var rwd: dvui.WidgetData = undefined;
             if (dvui.buttonIcon(@src(), "Delete prototype", dvui.entypo.trash, .{}, .{}, .{ .data_out = &rwd })) {
-                if (state.model.removePrototype(id)) {
+                if (act(.removePrototype, .{id})) {
                     state.context = .prototypes;
                 } else |err| state.status = if (err == error.PrototypeInUse) "Tiles are still made from this prototype: switch them first. " else "The prototype was not deleted. ";
             }
@@ -4830,7 +4970,7 @@ fn worksheetProperties() !void {
         te.deinit();
         // A text entry reports a change on its first frame; only a
         // different text is an edit.
-        if (changed and !std.mem.eql(u8, text, state.model.sheet.name)) try state.model.nameWorksheet(text);
+        if (changed and !std.mem.eql(u8, text, state.model.sheet.name)) try act(.nameWorksheet, .{text});
     }
 
     const sheet = state.model.sheet;
@@ -4844,7 +4984,7 @@ fn worksheetProperties() !void {
         names[papers.len] = "Custom";
         var choice: usize = sheet.paper orelse papers.len;
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
-            try state.model.setSheet(if (choice < papers.len) .standard(choice, sheet.orientation) else .custom(sheet.w, sheet.h));
+            try act(.setSheet, .{if (choice < papers.len) .standard(choice, sheet.orientation) else .custom(sheet.w, sheet.h)});
             zoomToContext();
         }
     }
@@ -4857,7 +4997,7 @@ fn worksheetProperties() !void {
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
             const o: layout.model.Orientation = @fromBackingInt(@intCast(choice));
             if (o != sheet.orientation) {
-                try state.model.setSheet(if (sheet.paper) |p| .standard(p, o) else .custom(sheet.h, sheet.w));
+                try act(.setSheet, .{if (sheet.paper) |p| .standard(p, o) else .custom(sheet.h, sheet.w)});
                 zoomToContext();
             }
         }
@@ -4869,7 +5009,7 @@ fn worksheetProperties() !void {
         const names = [_][]const u8{ "Millimetres", "Inches" };
         var choice: usize = @backingInt(sheet.units);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_units) })) {
-            state.model.setUnits(@fromBackingInt(@intCast(choice)));
+            actV(.setUnits, .{@fromBackingInt(@intCast(choice))});
         }
     }
     {
@@ -4879,7 +5019,7 @@ fn worksheetProperties() !void {
         const names = [_][]const u8{ "Bottom left", "Top left", "Bottom right", "Top right" };
         var choice: usize = @backingInt(sheet.ruler_origin);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_ruler_origin) })) {
-            state.model.setRulerOrigin(@fromBackingInt(@intCast(choice)));
+            actV(.setRulerOrigin, .{@fromBackingInt(@intCast(choice))});
         }
     }
     if (sheet.paper == null) {
@@ -4900,7 +5040,7 @@ fn worksheetProperties() !void {
             changed = dvui.textEntryNumber(@src(), f64, .{ .value = &h, .min = 1, .max = 10000 }, .{ .expand = .horizontal }).changed or changed;
         }
         if (changed) {
-            try state.model.setSheet(.custom(w, h));
+            try act(.setSheet, .{.custom(w, h)});
             zoomToContext();
         }
     } else {
@@ -4922,7 +5062,7 @@ fn worksheetProperties() !void {
         });
         changed = r.changed or changed;
     }
-    if (changed) state.model.setMargins(m) catch {};
+    if (changed) act(.setMargins, .{m}) catch {};
     if (state.intrusions.len > 0) {
         propValue("Ink in margins", false, "{d} labels", .{state.intrusions.len}, 70);
     }
@@ -4948,7 +5088,7 @@ fn panelMargins(pi: usize) !void {
         });
         changed = r.changed or changed;
     }
-    if (changed) state.model.setPanelMargins(pi, m) catch {};
+    if (changed) act(.setPanelMargins, .{pi, m}) catch {};
 }
 
 /// The font property: a list of installed fonts, with arrows to step
@@ -5009,7 +5149,7 @@ fn properties() !void {
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
             propText("Labels", "{d}", .{panel.labels.items.len}, 7);
             propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
-            if (state.model.spaces.items.len > 0) if (layerChoice(panel.space, panelLayer(pi), 10)) |l| try state.model.setPanelLayer(pi, l);
+            if (state.model.spaces.items.len > 0) if (layerChoice(panel.space, panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
             var cutouts: usize = 0;
             for (panel.art.items) |pa| {
                 if (pa.cutout) cutouts += 1;
@@ -5023,7 +5163,7 @@ fn properties() !void {
             try propFont("Legend font", 5);
             if (state.model.has_sheet) return;
             if (dvui.button(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-                const id = state.model.releasePanel(pi) catch {
+                const id = act(.releasePanel, .{pi}) catch {
                     state.status = "The panel could not be released. ";
                     return;
                 };
@@ -5095,7 +5235,7 @@ fn labelProperties(pi: usize, index: usize) !void {
         const changed = te.text_changed;
         const text = te.textGet();
         te.deinit();
-        if (changed and !std.mem.eql(u8, text, label.content)) try state.model.setLabelContent(pi, index, text);
+        if (changed and !std.mem.eql(u8, text, label.content)) try actM(mergeKey(.{ "label", pi, index }), .setLabelContent, .{ pi, index, text });
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -5104,7 +5244,7 @@ fn labelProperties(pi: usize, index: usize) !void {
         const names = [_][]const u8{ "Start", "Centre", "End" };
         var choice: usize = @backingInt(label.alignment);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
-            state.model.alignLabel(pi, index, @fromBackingInt(@intCast(choice)));
+            actV(.alignLabel, .{pi, index, @fromBackingInt(@intCast(choice))});
         }
     }
     {
@@ -5118,7 +5258,7 @@ fn labelProperties(pi: usize, index: usize) !void {
             const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(at, axis[1]), .min = -10000, .max = 10000 }, .{ .expand = .horizontal, .id_extra = pi * 1000 + index });
             changed = r.changed or changed;
         }
-        if (changed) state.model.moveLabel(pi, index, at);
+        if (changed) actV(.moveLabel, .{pi, index, at});
     }
     const style = state.model.styles.items[label.style];
     propText("Style", "{s}", .{style.name}, 20);
@@ -5130,7 +5270,7 @@ fn labelProperties(pi: usize, index: usize) !void {
         const default = state.label_style == label.style and !state.label_style_set;
         const r = dvui.textEntryNumber(@src(), f64, .{ .value = &cap, .min = 0.1, .max = 200 }, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
         if (r.changed) {
-            state.model.setCapHeight(label.style, cap) catch {};
+            act(.setCapHeight, .{label.style, cap}) catch {};
             if (state.label_style == label.style) state.label_style_set = true;
         }
     }
@@ -5166,7 +5306,7 @@ fn tileProperties(id: TileId) !void {
         for (state.model.prototypes.items, names) |p, *nm| nm.* = p.name;
         var choice: usize = t.prototype;
         if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != t.prototype) {
-            try state.model.setTilePrototype(id, @intCast(choice));
+            try act(.setTilePrototype, .{id, @intCast(choice)});
         }
     }
 
@@ -5186,12 +5326,12 @@ fn tileProperties(id: TileId) !void {
             const changed = te.text_changed;
             const text = te.textGet();
             te.deinit();
-            if (changed and !std.mem.eql(u8, text, slot.content)) try state.model.setContent(id, slot.name, text);
+            if (changed and !std.mem.eql(u8, text, slot.content)) try actM(mergeKey(.{ "slot", id, si }), .setContent, .{ id, slot.name, text });
         }
         // Style and placement: the prototype's, or the tile's own.
         const own = state.model.fillConst(id, slot.name);
         const proto_slot = state.model.prototypeOf(id).slots[si];
-        if (styleChoice(if (own) |f| f.style else null, proto_slot.style, n + 2)) |c| try state.model.setSlotStyle(id, slot.name, c);
+        if (styleChoice(if (own) |f| f.style else null, proto_slot.style, n + 2)) |c| try act(.setSlotStyle, .{id, slot.name, c});
         try propFont("Font", n + 3);
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 5 });
@@ -5201,11 +5341,11 @@ fn tileProperties(id: TileId) !void {
             const has_own = own != null and own.?.place != null;
             var choice: usize = if (has_own) 1 else 0;
             if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 5 })) {
-                try state.model.setSlotPlace(id, slot.name, if (choice == 1) slot.place else null);
+                try act(.setSlotPlace, .{id, slot.name, if (choice == 1) slot.place else null});
             }
         }
         if (own != null and own.?.place != null) {
-            if (slotPlaceEditor(slot.place, 1000 + n * 10)) |p| try state.model.setSlotPlace(id, slot.name, p);
+            if (slotPlaceEditor(slot.place, 1000 + n * 10)) |p| try act(.setSlotPlace, .{id, slot.name, p});
         }
         if (found) |f| {
             for (state.placed.items[f.panel].issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
@@ -5303,7 +5443,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         proto_changed = true;
     }
     if (proto_changed) {
-        try state.model.setPrototype(id, next_proto);
+        try act(.setPrototype, .{id, next_proto});
         return;
     }
 
@@ -5311,7 +5451,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         const n = 100 + si * 20;
         heading("Slot {s}", .{sp.name}, n);
         if (textProp("Name", sp.name, n * 8 + 7)) |name| {
-            state.model.renamePrototypeSlot(id, si, name) catch {
+            act(.renamePrototypeSlot, .{id, si, name}) catch {
                 state.status = "Another slot has that name. ";
             };
             return;
@@ -5326,9 +5466,9 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             next.place = pl;
             changed = true;
         }
-        if (changed) try state.model.setPrototypeSlot(id, si, next);
+        if (changed) try act(.setPrototypeSlot, .{id, si, next});
         if (dvui.button(@src(), "Remove slot", .{}, .{ .id_extra = n, .gravity_x = 1 })) {
-            try state.model.removePrototypeSlot(id, si);
+            try act(.removePrototypeSlot, .{id, si});
             return;
         }
     }
@@ -5342,7 +5482,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             } else false;
             if (!taken) break candidate;
         };
-        try state.model.addPrototypeSlot(id, .{ .name = name, .style = if (p.slots.len > 0) p.slots[0].style else 0, .place = .{ .inset = .all(0.8) } });
+        try act(.addPrototypeSlot, .{id, .{ .name = name, .style = if (p.slots.len > 0) p.slots[0].style else 0, .place = .{ .inset = .all(0.8) } }});
         return;
     }
 
@@ -5350,22 +5490,22 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     const art = p.art orelse {
         propText("Look", "plain, from the insets", .{}, 601);
         if (dvui.button(@src(), "Add keycap art", .{}, .{ .id_extra = 602, .gravity_x = 1 })) {
-            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p)));
+            try act(.setPrototypeArt, .{id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p))});
         }
         return;
     };
     for (art.layers, 0..) |layer, li| {
         const n = 700 + li * 20;
         heading("Layer {s}", .{layer.name}, n);
-        if (paintEditor(layer.paint, n + 1)) |paint| try state.model.setLayerPaint(id, li, paint);
+        if (paintEditor(layer.paint, n + 1)) |paint| try act(.setLayerPaint, .{id, li, paint});
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_x = 1, .id_extra = 690, .margin = .{ .y = 8 } });
         defer row.deinit();
         if (!isKeycap(p.art) and dvui.button(@src(), "Redraw from insets", .{}, .{ .id_extra = 691 })) {
-            try state.model.setPrototypeArt(id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p)));
+            try act(.setPrototypeArt, .{id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p))});
         }
-        if (dvui.button(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try state.model.setPrototypeArt(id, null);
+        if (dvui.button(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try act(.setPrototypeArt, .{id, null});
     }
 }
 
@@ -5411,7 +5551,7 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
         gap = if (list.len == 1) list[0] else 0;
         changed = true;
     };
-    if (changed) try state.model.setTrackFlow(pi, ri, alignment, indent, gap);
+    if (changed) try act(.setTrackFlow, .{pi, ri, alignment, indent, gap});
 }
 
 /// A new plain prototype with one slot and keycap art, made the context.
@@ -5426,14 +5566,14 @@ fn addPrototype() !void {
         .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p));
-    const id = try state.model.addPrototype(p);
+    const id = try act(.addPrototype, .{p});
     state.context = .{ .prototype = id };
 }
 
 fn duplicatePrototype(id: layout.model.PrototypeId) !void {
     var name_buf: [64]u8 = undefined;
     const name = std.fmt.bufPrint(&name_buf, "{s} copy", .{state.model.prototypes.items[id].name}) catch "copy";
-    state.context = .{ .prototype = try state.model.duplicatePrototype(id, name) };
+    state.context = .{ .prototype = try act(.duplicatePrototype, .{id, name}) };
 }
 
 /// An editable text property. Returns the new text when it changes; the
@@ -5634,7 +5774,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
         var v = size;
         const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = 0.25, .max = 100 }, .{ .expand = .horizontal, .id_extra = n });
         if (r.changed and v > 0) {
-            if (horizontal) try state.model.setTileSize(id, v, t.h) else try state.model.setTileSize(id, t.w, v);
+            if (horizontal) try act(.setTileSize, .{id, v, t.h}) else try act(.setTileSize, .{id, t.w, v});
         }
         return;
     }
@@ -5661,7 +5801,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
     propName(name);
     var picked = choice.?;
     if (dvui.dropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
-        if (horizontal) try state.model.setTileSize(id, sizes[picked], t.h) else try state.model.setTileSize(id, t.w, sizes[picked]);
+        if (horizontal) try act(.setTileSize, .{id, sizes[picked], t.h}) else try act(.setTileSize, .{id, t.w, sizes[picked]});
     }
 }
 
@@ -5917,7 +6057,7 @@ fn fitRegion(pi: usize, region: usize) bool {
         if (f.region != region) continue;
         const r = state.model.panels.items[pi].regions.items[region];
         if (!(f.natural > 0) or @abs(f.natural - r.segmentLength()) < 1e-9) return false;
-        state.model.setSegmentLength(pi, region, f.natural) catch return false;
+        act(.setSegmentLength, .{pi, region, f.natural}) catch return false;
         return true;
     }
     return false;
@@ -5991,10 +6131,10 @@ fn cursorKey(code: dvui.enums.Key) bool {
         },
         .backspace => {
             if (c.index == 0) return true;
-            state.model.removeAt(c.panel, c.region, c.index - 1) catch {};
+            act(.removeAt, .{c.panel, c.region, c.index - 1}) catch {};
             next.index -= 1;
         },
-        .delete => if (c.index < len) state.model.removeAt(c.panel, c.region, c.index) catch {},
+        .delete => if (c.index < len) act(.removeAt, .{c.panel, c.region, c.index}) catch {},
         .escape => {
             track_cursor = null;
             return true;
@@ -6026,24 +6166,24 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
     const c = track_cursor orelse return;
     const pal = paletteFor(c.panel, c.region) orelse return;
     switch (kind) {
-        .tile => _ = state.model.insertTile(c.panel, c.region, c.index, pal.prototype, size) catch return,
+        .tile => _ = act(.insertTile, .{c.panel, c.region, c.index, pal.prototype, size}) catch return,
         .blank => {
             // The palette's blanks are in the prototype's u, as its tiles
             // are; a blank is stored in its track's unit.
             const r = state.model.panels.items[c.panel].regions.items[c.region];
             const unit = state.model.prototypes.items[pal.prototype].unitIn(r.pitch);
-            _ = state.model.insertBlank(c.panel, c.region, c.index, size * unit / r.pitch) catch return;
+            _ = act(.insertBlank, .{c.panel, c.region, c.index, size * unit / r.pitch}) catch return;
         },
         .hard_break => {
             // With the track's indent, a blank follows: the cursor goes past
             // it, to where the new paragraph's content starts.
-            const n = state.model.insertBreak(c.panel, c.region, c.index) catch return;
+            const n = act(.insertBreak, .{c.panel, c.region, c.index}) catch return;
             track_cursor.?.index += n;
             return;
         },
         .run => {
             const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
-            state.model.insertRun(c.panel, c.region, c.index, .{ .style = style, .content = "" }) catch return;
+            act(.insertRun, .{c.panel, c.region, c.index, .{ .style = style, .content = "" }}) catch return;
             focus_expression = true;
         },
     }
@@ -6064,7 +6204,7 @@ fn toggleBindAtCursor() void {
         state.status = "A hard break cannot be part of a group. ";
         return;
     }
-    state.model.setBind(c.panel, c.region, c.index - 1, !before.bind) catch return;
+    act(.setBind, .{c.panel, c.region, c.index - 1, !before.bind}) catch return;
     state.status = if (before.bind) "Parted: a break may fall here. " else "Joined: no break falls here. ";
 }
 
@@ -6446,7 +6586,7 @@ fn moveTrackArrow(arrow: Arrow) void {
     var abuf: [1024]geom.Box = undefined;
     const kept = state.model.panels.items[t.panel].regions.items[t.region].segments.items.len;
     // The path bends through it; rows that only continue the path follow.
-    state.model.moveSegment(t.panel, t.region, t.row, placed.origins(t.region, &obuf), along, across, placed.obstacles(t.region, t.row, kept, &abuf)) catch |err| {
+    act(.moveSegment, .{t.panel, t.region, t.row, placed.origins(t.region, &obuf), along, across, placed.obstacles(t.region, t.row, kept, &abuf)}) catch |err| {
         state.status = if (err == error.NoRoom) "No room to move it that way. " else "It did not move. ";
         return;
     };

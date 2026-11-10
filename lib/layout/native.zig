@@ -173,6 +173,24 @@ pub fn encode(gpa: Allocator, m: *const model.Model) Allocator.Error![]u8 {
     return w.out.toOwnedSlice(gpa);
 }
 
+/// Any value the codec writes (a model, an op's arguments), as bytes in
+/// the same encoding, allocated from `gpa`.
+pub fn encodeValue(gpa: Allocator, comptime T: type, v: T) Allocator.Error![]u8 {
+    var w: Writer = .{ .gpa = gpa };
+    errdefer w.out.deinit(gpa);
+    try w.value(T, v);
+    return w.out.toOwnedSlice(gpa);
+}
+
+/// A value read from `encodeValue`'s bytes, its strings and lists
+/// allocated from `a` (an arena suits).
+pub fn decodeValue(a: Allocator, comptime T: type, bytes: []const u8) Error!T {
+    var r: Reader = .{ .in = bytes, .a = a };
+    const v = try r.value(T);
+    if (r.i != bytes.len) return error.BadFile;
+    return v;
+}
+
 // Reading --------------------------------------------------------------------
 
 const Reader = struct {

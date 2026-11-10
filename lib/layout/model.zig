@@ -916,6 +916,13 @@ pub const Model = struct {
         return sid;
     }
 
+    /// Marks a frame's name as the app's choice (Frame 2), not the user's.
+    pub fn markFrameNameDefault(m: *Model, space: usize) Error!void {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        m.spaces.items[space].default_name = true;
+        m.revision += 1;
+    }
+
     /// Sets a frame's boundary, as Fit frame does with its contents'
     /// extents plus a margin.
     pub fn setFrameBound(m: *Model, space: usize, edge: geom.Box) Error!void {
