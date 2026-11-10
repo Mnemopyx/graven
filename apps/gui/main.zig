@@ -860,8 +860,8 @@ fn frame() !dvui.App.Result {
 // pane's mode (ghost over the canvas, docked beside it, or hidden), and
 // whose body makes a ghost pane active or ghost again.
 
-var tree_pane: ghost_pane.Pane = .{ .name = "Tree", .edge = .left, .size = tree_width, .look = .{ .hue = 255 } };
-var props_pane: ghost_pane.Pane = .{ .name = "Tools and properties", .edge = .right, .size = properties_width, .look = .{ .hue = 165 } };
+var tree_pane: ghost_pane.Pane = .{ .name = "Tree", .edge = .left, .size = tree_width, .look = .{ .hue = 105 } };
+var props_pane: ghost_pane.Pane = .{ .name = "Tools and properties", .edge = .right, .size = properties_width, .look = .{ .hue = 78 } };
 /// Docked by default: the expression line is typed into often.
 var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &props_pane, &bottom_pane };
@@ -1776,6 +1776,13 @@ const Palette = struct {
     /// (OKLCH hue 38): no annotation or pane uses it. This is its light
     /// tint, behind a tile missing a glyph.
     missing: dvui.Color = .{ .r = 0xff, .g = 0xdd, .b = 0xd0 },
+    /// Annotations that are not content: guides (margins, boundaries, view
+    /// outlines, axes, track bands, break marks) and names, in one green
+    /// hue (OKLCH 145), told apart by lightness, weight and line style.
+    guide: dvui.Color = .{ .r = 0x2f, .g = 0x8a, .b = 0x4e },
+    /// The active selection, the flow cursor and shapes being drawn: their
+    /// own blue (OKLCH 255), and they move (marching dashes, a pulse).
+    select: dvui.Color = .{ .r = 0x1f, .g = 0x6f, .b = 0xe0 },
     /// What fails a check: overflow, past an edge, ink in a margin.
     overflow: dvui.Color = .{ .r = 0xf3, .g = 0x46, .b = 0x00 },
 };
@@ -1890,8 +1897,8 @@ fn canvas() void {
         if (planTracks(d.start, d.at)) |plan| drawTrackPlan(area, plan);
     } else {
         const r = state.view.rect(area, dragBox(d.start, d.at));
-        r.fill(.square, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.12) } });
-        r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+        r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.12) } });
+        r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
     };
     if (state.tool == .add_panel and state.model.panels.items.len == 0 and state.drag == null) {
         dvui.labelNoFmt(@src(), "Drag out the new panel on the sheet. Esc cancels.", .{}, .{
@@ -1908,7 +1915,7 @@ fn drawMargins(area: dvui.Rect.Physical, sheet: layout.model.Sheet) void {
     const px = dvui.windowNaturalScale();
     const s = sheet.box();
     const ink = sheet.inkArea();
-    const band: dvui.ColorOrGradient = .{ .color = colors.margin.opacity(0.35) };
+    const band: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.10) };
     for ([_]geom.Box{
         .{ .x0 = s.x0, .y0 = s.y0, .x1 = ink.x0, .y1 = s.y1 },
         .{ .x0 = ink.x1, .y0 = s.y0, .x1 = s.x1, .y1 = s.y1 },
@@ -1917,7 +1924,7 @@ fn drawMargins(area: dvui.Rect.Physical, sheet: layout.model.Sheet) void {
     }) |b| {
         if (b.width() > 0 and b.height() > 0) state.view.rect(area, b).fill(.square, .{ .color = band });
     }
-    state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.margin } });
+    state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.guide.opacity(0.7) } });
 }
 
 /// Panel `pi`'s compliance issue, if it has one.
@@ -1933,7 +1940,7 @@ fn drawPanelMargins(area: dvui.Rect.Physical, pi: usize) void {
     const p = state.model.panels.items[pi];
     const b = panelBox(pi);
     const ink = p.margins.inset(b);
-    const band: dvui.ColorOrGradient = .{ .color = colors.margin.opacity(0.18) };
+    const band: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.07) };
     for ([_]geom.Box{
         .{ .x0 = b.x0, .y0 = b.y0, .x1 = ink.x0, .y1 = b.y1 },
         .{ .x0 = ink.x1, .y0 = b.y0, .x1 = b.x1, .y1 = b.y1 },
@@ -1942,7 +1949,7 @@ fn drawPanelMargins(area: dvui.Rect.Physical, pi: usize) void {
     }) |r| {
         if (r.width() > 0 and r.height() > 0) state.view.rect(area, r).fill(.square, .{ .color = band });
     }
-    if (ink.width() > 0 and ink.height() > 0) state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.margin.opacity(0.6) } });
+    if (ink.width() > 0 and ink.height() > 0) state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.guide.opacity(0.45) } });
 }
 
 fn inMargin(pi: usize, tile: ?TileId, slot: usize, run_region: ?usize) bool {
@@ -2202,11 +2209,11 @@ fn moveGroupKey(code: dvui.enums.Key) bool {
 /// Outlines what the selection or the selected group holds.
 fn drawPicked(area: dvui.Rect.Physical) void {
     const px = dvui.windowNaturalScale();
-    const focus = dvui.themeGet().focus;
+    const focus = colors.select;
     switch (state.context) {
         .selection => for (selection.items) |id| {
             const b = idBox(id);
-            if (!b.isEmpty()) state.view.rect(area, b).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = focus } });
+            if (!b.isEmpty()) marchingBox(area, b, focus, 2 * px);
         },
         .group => |g| {
             const grp = state.model.group(g) orelse return;
@@ -2215,7 +2222,7 @@ fn drawPicked(area: dvui.Rect.Physical) void {
                 if (!b.isEmpty()) state.view.rect(area, b).stroke(.square, .{ .thickness = px, .color = .{ .color = focus.opacity(0.6) } });
             }
             const all = idBox(g);
-            if (!all.isEmpty()) dashedBox(area, .{ .x0 = all.x0 - 2, .y0 = all.y0 - 2, .x1 = all.x1 + 2, .y1 = all.y1 + 2 }, focus, 1.5 * px);
+            if (!all.isEmpty()) marchingBox(area, .{ .x0 = all.x0 - 2, .y0 = all.y0 - 2, .x1 = all.x1 + 2, .y1 = all.y1 + 2 }, focus, 1.5 * px);
         },
         else => {},
     }
@@ -2317,7 +2324,7 @@ fn finishPolygon() void {
 fn drawPolygonDraft(area: dvui.Rect.Physical) void {
     if (state.tool != .add_art or shape_kind != .polygon or polygon_pts.items.len == 0) return;
     const px = dvui.windowNaturalScale();
-    const focus = dvui.themeGet().focus;
+    const focus = colors.select;
     const n = polygon_pts.items.len + @as(usize, if (state.mouse != null) 1 else 0);
     const pts = dvui.currentWindow().arena().alloc(dvui.Point.Physical, n) catch return;
     for (polygon_pts.items, 0..) |q, i| pts[i] = state.view.toPx(area, q);
@@ -2460,7 +2467,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         const past_soft = for (placed.issues) |i| {
             if (i.kind == .past_soft_area and i.region == t.region and i.row == t.track) break true;
         } else false;
-        const colour = if (outside) colors.overflow else if (past_soft) colors.overflow.opacity(0.5) else colors.edge.opacity(0.35);
+        const colour = if (outside) colors.overflow else if (past_soft) colors.overflow.opacity(0.5) else colors.guide.opacity(0.35);
         state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
     // The context track's soft area, which its rows or columns expand
@@ -2471,7 +2478,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         else => null,
     };
     if (soft_region) |sr| if (sr < state.model.panels.items[pi].regions.items.len) {
-        dashedBox(area, onSheet(pi, state.model.panels.items[pi].regions.items[sr].softArea()), dvui.themeGet().focus.opacity(0.5), px);
+        dashedBox(area, onSheet(pi, state.model.panels.items[pi].regions.items[sr].softArea()), colors.guide.opacity(0.6), px);
     };
     for (placed.tiles) |t| {
         const in_context = inContext(pi, t);
@@ -2480,7 +2487,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         if (t.spacer) {
             const box = state.view.rect(area, onSheet(pi, t.pitch_box));
             const sel = in_context and state.context == .tile;
-            box.stroke(.square, .{ .thickness = (if (sel) @as(f32, 2) else 1) * px, .color = .{ .color = if (sel) dvui.themeGet().focus else colors.edge.opacity(0.3) } });
+            box.stroke(.square, .{ .thickness = (if (sel) @as(f32, 2) else 1) * px, .color = .{ .color = if (sel) colors.select else colors.guide.opacity(0.3) } });
             continue;
         }
         const flagged = tileFlag(placed, t.id);
@@ -2498,7 +2505,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         if (flagged.overflow) face.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         // A size its prototype does not allow: the body outlined in warning.
         if (flagged.size and !in_context) body.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
-        if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = dvui.themeGet().focus } });
+        if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = colors.select } });
     }
     // Line art, over the tracks; the selected piece outlined.
     for (placed.art) |pa| {
@@ -2517,7 +2524,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             .art => |l| l.panel == pi and l.index == pa.index,
             else => false,
         };
-        if (sel) state.view.rect(area, onSheet(pi, pa.box)).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+        if (sel) marchingBox(area, onSheet(pi, pa.box), colors.select, 1.5 * px);
     }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
@@ -2530,7 +2537,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             const color: dvui.Color = switch (piece.kind) {
                 .ink => ink,
                 .faint => ink.opacity(0.35),
-                .placeholder => dvui.themeGet().focus.opacity(0.7),
+                .placeholder => colors.select.opacity(0.7),
             };
             if (show_construction and piece.kind == .ink) {
                 // Outlines over a translucent fill, so the lines show through.
@@ -2551,7 +2558,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             const y = l.origin.y + o.y + d.y;
             const a = state.view.toPx(area, .{ .x = x, .y = y + c.y0 });
             const b = state.view.toPx(area, .{ .x = x, .y = y + c.y1 });
-            dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+            dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
         }
     }
     drawFlowMarks(area, pi, placed);
@@ -2560,7 +2567,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     switch (state.context) {
         .label => |sel| if (sel.panel == pi) if (labelBox(pi, sel.index)) |b| {
             const pad = 0.6;
-            state.view.rect(area, .{ .x0 = b.x0 - pad, .y0 = b.y0 - pad, .x1 = b.x1 + pad, .y1 = b.y1 + pad }).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = dvui.themeGet().focus } });
+            state.view.rect(area, .{ .x0 = b.x0 - pad, .y0 = b.y0 - pad, .x1 = b.x1 + pad, .y1 = b.y1 + pad }).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
         },
         else => {},
     }
@@ -2850,7 +2857,7 @@ fn drawRulers(area: dvui.Rect.Physical) void {
 
     if (state.mouse) |m| {
         const p = state.view.toPx(area, m);
-        const mark: dvui.ColorOrGradient = .{ .color = dvui.themeGet().focus };
+        const mark: dvui.ColorOrGradient = .{ .color = colors.select };
         dvui.Path.stroke(.{ .points = &.{ .{ .x = p.x, .y = top.y }, .{ .x = p.x, .y = top.y + top.h } } }, .{ .thickness = ns, .color = mark });
         dvui.Path.stroke(.{ .points = &.{ .{ .x = side.x, .y = p.y }, .{ .x = side.x + side.w, .y = p.y } } }, .{ .thickness = ns, .color = mark });
     }
@@ -2877,7 +2884,7 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize) void {
         // While dragged, compliance is shown live for the preview position.
         const off = if (state.moving != null and state.moving.?.panel == pi) !state.model.compliantAt(pi, panelOrigin(pi)) else panelIssue(pi) != null;
         // A panel past the sheet's edge is outlined in the warning colour.
-        const edge = if (is_context) dvui.themeGet().focus else if (off) colors.overflow else colors.panel_edge;
+        const edge = if (is_context) colors.select else if (off) colors.overflow else colors.panel_edge;
         const thickness = if (is_context or off) 2 * px else px;
         // A panel made from a closed path is drawn as that path; its
         // margins (still a band inside its box) are not shown.
@@ -2886,7 +2893,8 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize) void {
             strokeOutline(area, state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
         } else {
             drawPanelMargins(area, pi);
-            outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
+            // The selected panel's outline marches; others are content edges.
+            if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
         }
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
@@ -2978,9 +2986,9 @@ fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
             else => false,
         };
         if (sel) {
-            r.stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = dvui.themeGet().focus } });
+            marchingBox(area, hb, colors.select, 2 * px);
         } else {
-            dashedBox(area, hb, colors.panel_edge.opacity(0.7), px);
+            dashedBox(area, hb, colors.guide.opacity(0.8), px);
         }
         if (depth > 0) continue;
         // Its name above its corner, with the scale.
@@ -2992,7 +3000,7 @@ fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
             .id_extra = vi,
             .rect = annotationRect(area, corner, font, 320),
             .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad },
-            .color_text = .{ .color = if (sel) dvui.themeGet().focus else colors.panel_edge },
+            .color_text = .{ .color = if (sel) colors.select else colors.guide },
             .font = font,
         });
     }
@@ -3113,7 +3121,7 @@ fn drawFrameBound(area: dvui.Rect.Physical) void {
     const b = sp.bound orelse return;
     const px = dvui.windowNaturalScale();
     const past = !layout.model.within(spaceExtents(), b);
-    const colour = if (past) colors.overflow else colors.panel_edge;
+    const colour = if (past) colors.overflow else colors.guide;
     state.view.rect(area, b).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colour } });
     const corner = state.view.toPx(area, .{ .x = b.x0, .y = b.y1 });
     const font = dvui.Font.theme(.body).larger(-1);
@@ -3135,11 +3143,11 @@ fn spaceExtents() geom.Box {
 fn drawAxes(area: dvui.Rect.Physical) void {
     const px = dvui.windowNaturalScale();
     const o = state.view.toPx(area, .{ .x = 0, .y = 0 });
-    const axis: dvui.ColorOrGradient = .{ .color = colors.edge.opacity(0.3) };
+    const axis: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.3) };
     if (o.y >= area.y and o.y <= area.y + area.h) dvui.Path.stroke(.{ .points = &.{ .{ .x = area.x, .y = o.y }, .{ .x = area.x + area.w, .y = o.y } } }, .{ .thickness = px, .color = axis });
     if (o.x >= area.x and o.x <= area.x + area.w) dvui.Path.stroke(.{ .points = &.{ .{ .x = o.x, .y = area.y }, .{ .x = o.x, .y = area.y + area.h } } }, .{ .thickness = px, .color = axis });
     const r: f32 = 4 * px;
-    const mark: dvui.ColorOrGradient = .{ .color = colors.edge.opacity(0.6) };
+    const mark: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.7) };
     dvui.Path.stroke(.{ .points = &.{ .{ .x = o.x - r, .y = o.y }, .{ .x = o.x + r, .y = o.y } } }, .{ .thickness = 1.5 * px, .color = mark });
     dvui.Path.stroke(.{ .points = &.{ .{ .x = o.x, .y = o.y - r }, .{ .x = o.x, .y = o.y + r } } }, .{ .thickness = 1.5 * px, .color = mark });
 }
@@ -3845,7 +3853,7 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
 fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
     const px = dvui.windowNaturalScale();
     const fits = layout.model.within(plan.box, state.model.panels.items[plan.panel].box());
-    const colour = if (fits) dvui.themeGet().focus else colors.overflow;
+    const colour = if (fits) colors.select else colors.overflow;
     const r = state.view.rect(area, plan.box);
     r.fill(.square, .{ .color = .{ .color = colour.opacity(0.12) } });
     r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colour } });
@@ -5363,7 +5371,8 @@ fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.P
         const pos = at.along;
         const b = onSheet(pi, t.box);
         const px = dvui.windowNaturalScale();
-        const focus = dvui.themeGet().focus;
+        // The cursor pulses: it is where typing goes.
+        const focus = colors.select.opacity(pulse());
         // The segment, faintly, then the bar a little past its edges.
         state.view.rect(area, b).fill(.square, .{ .color = .{ .color = focus.opacity(0.06) } });
         const over = 1.0;
@@ -5375,6 +5384,53 @@ fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.P
 }
 
 /// A box outlined in dashes, about 2 mm long, on the worksheet.
+/// The active selection's outline: dashes that march round box `b`,
+/// fixed in screen size whatever the zoom. Keeps the canvas redrawing
+/// while it shows.
+fn marchingBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, width: f32) void {
+    const ns = dvui.windowNaturalScale();
+    const r = state.view.rect(area, b);
+    const pts = [_]dvui.Point.Physical{ .{ .x = r.x, .y = r.y }, .{ .x = r.x + r.w, .y = r.y }, .{ .x = r.x + r.w, .y = r.y + r.h }, .{ .x = r.x, .y = r.y + r.h } };
+    const dash: f32 = 6 * ns;
+    const phase: f32 = @floatCast(@mod(@as(f64, @floatFromInt(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms))) * 0.03 * ns, 2 * dash));
+    // Under the dashes, a faint solid line, so the box reads between them.
+    r.stroke(.square, .{ .thickness = width, .color = .{ .color = colour.opacity(0.25) } });
+    var walked: f32 = -phase;
+    for (0..4) |i| {
+        const a = pts[i];
+        const z = pts[(i + 1) % 4];
+        const len = @sqrt((z.x - a.x) * (z.x - a.x) + (z.y - a.y) * (z.y - a.y));
+        if (len <= 0) continue;
+        // Dashes start every 2·dash along the whole perimeter.
+        var d: f32 = @mod(-walked, 2 * dash);
+        if (d > dash) d -= 2 * dash;
+        while (d < len) : (d += 2 * dash) {
+            const s0 = @max(0, d);
+            const s1 = @min(len, d + dash);
+            if (s1 <= s0) continue;
+            const p0: dvui.Point.Physical = .{ .x = a.x + (z.x - a.x) * s0 / len, .y = a.y + (z.y - a.y) * s0 / len };
+            const p1: dvui.Point.Physical = .{ .x = a.x + (z.x - a.x) * s1 / len, .y = a.y + (z.y - a.y) * s1 / len };
+            dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = width, .color = .{ .color = colour } });
+        }
+        walked += len;
+    }
+    animate();
+}
+
+/// How strongly the flow cursor shows now, 0.55 to 1: a slow pulse.
+fn pulse() f32 {
+    animate();
+    const t: f64 = @as(f64, @floatFromInt(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms))) / 1000;
+    return @floatCast(0.775 + 0.225 * @sin(t * 2 * std.math.pi / 1.4));
+}
+
+/// Keeps the canvas redrawing about 25 times a second while something on
+/// it moves.
+fn animate() void {
+    const id = canvas_id orelse return;
+    if (dvui.timerDoneOrNone(id)) dvui.timer(id, 40_000);
+}
+
 fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32) void {
     const corners = [_]geom.Point{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 }, .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x0, .y = b.y0 } };
     const dash = 2.0;
@@ -5398,7 +5454,7 @@ fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32)
 /// of its segment's content, and each empty run as a dashed slot.
 fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
-    const ghost = colors.edge.opacity(0.45);
+    const ghost = colors.guide.opacity(0.55);
     // Groups: a tie along the foot of the row (or the side of the column)
     // from each item to the next one it is bound to.
     for (placed.items, 0..) |it, k| {
@@ -5419,7 +5475,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         const inset = r.pitch * 0.08;
         const p0: geom.Point = if (r.major == .row) .{ .x = band.x0 + a_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - a_mid };
         const p1: geom.Point = if (r.major == .row) .{ .x = band.x0 + b_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - b_mid };
-        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 2 * px, .color = .{ .color = dvui.themeGet().focus.opacity(0.7) } });
+        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 2 * px, .color = .{ .color = colors.select.opacity(0.7) } });
     }
     for (placed.items) |it| {
         const what = (modelItem(pi, it) orelse continue).what;
