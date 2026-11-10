@@ -88,9 +88,16 @@ pub fn nonzero(a: Allocator, polygons: []const []const Point, eps: f64) Allocato
         if (levels.items.len == 0 or y - levels.items[levels.items.len - 1] > eps) try levels.append(s, y);
     }
     const lv = levels.items;
+    // Every vertex onto its level. Levels closer than `eps` merged, so a
+    // vertex may lie a hair off its level; left there, the edge ending at it
+    // and the edge leaving it would give two x values a hair apart at the
+    // level, and the boundary would not join up there. Snapped, edges that
+    // share a vertex share it exactly.
     for (edges.items) |*e| {
         e.lo = nearest(lv, e.ymin());
         e.hi = nearest(lv, e.ymax());
+        e.a.y = lv[nearest(lv, e.a.y)];
+        e.b.y = lv[nearest(lv, e.b.y)];
     }
 
     // Per slab, the filled spans' sides at the slab's bottom and top.
@@ -255,16 +262,27 @@ fn chain(a: Allocator, s: Allocator, pieces: []const Piece, eps: f64) Allocator.
             const prev = pts.items[pts.items.len - 2];
             const in = Point{ .x = at.x - prev.x, .y = at.y - prev.y };
             const next = blk: {
-                const list = starts.getPtr(key(at)) orelse break :blk null;
                 var best: ?u32 = null;
                 var best_turn: f64 = -std.math.inf(f64);
-                for (list.items) |j| {
+                if (starts.getPtr(key(at))) |list| for (list.items) |j| {
                     if (used[j]) continue;
                     const out = Point{ .x = pieces[j].to.x - at.x, .y = pieces[j].to.y - at.y };
                     const turn = std.math.atan2(in.x * out.y - in.y * out.x, in.x * out.x + in.y * out.y);
                     if (turn > best_turn) {
                         best = j;
                         best_turn = turn;
+                    }
+                };
+                if (best != null) break :blk best;
+                // No piece starts exactly here: take the nearest unused one
+                // within `eps`, so a hair's gap never cuts a loop short.
+                var best_d: f64 = eps;
+                for (pieces, 0..) |pc, j| {
+                    if (used[j]) continue;
+                    const d = @max(@abs(pc.from.x - at.x), @abs(pc.from.y - at.y));
+                    if (d <= best_d) {
+                        best = @intCast(j);
+                        best_d = d;
                     }
                 }
                 break :blk best;

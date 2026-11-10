@@ -25,5 +25,6 @@ pub const renderLabel = label.renderLabel;
 pub const version = "0.0.0";
 
 test {
+    _ = @import("glyph_fill_test.zig");
     @import("std").testing.refAllDecls(@This());
 }
