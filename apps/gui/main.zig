@@ -817,12 +817,8 @@ fn frame() !dvui.App.Result {
                 treePane();
             }
             canvas();
-            if (props_pane.mode == .docked) {
-                const prev = ghost_pane.themePush(&props_pane);
-                defer ghost_pane.themePop(prev);
-                try propertiesPane();
-            }
-            sideStrip(&props_pane, if (props_pane.mode == .docked) body_h else side_h, 2);
+            if (rightDocked()) try rightColumn();
+            rightStrip(if (rightDocked()) body_h else side_h);
         }
         if (bottom_pane.mode == .docked) {
             const prev = ghost_pane.themePush(&bottom_pane);
@@ -861,10 +857,18 @@ fn frame() !dvui.App.Result {
 // whose body makes a ghost pane active or ghost again.
 
 var tree_pane: ghost_pane.Pane = .{ .name = "Tree", .edge = .left, .size = tree_width, .look = .{ .hue = 105 } };
-var props_pane: ghost_pane.Pane = .{ .name = "Tools and properties", .edge = .right, .size = properties_width, .look = .{ .hue = 78 } };
+/// The right edge holds two panes, one above the other: the tool palette
+/// and the properties. They meet at `tools_height` below the top, which
+/// the grip between their tabs moves.
+var tools_pane: ghost_pane.Pane = .{ .name = "Tools", .edge = .right, .size = properties_width, .look = .{ .hue = 55 } };
+var props_pane: ghost_pane.Pane = .{ .name = "Properties", .edge = .right, .size = properties_width, .look = .{ .hue = 78 } };
+/// The tool palette's height, logical pixels.
+var tools_height: f32 = 120;
+const split_grip = 8;
+const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
 var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
-const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &props_pane, &bottom_pane };
+const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
 
 /// Hot edges: holding the pointer on a ghost pane's tab activates it.
 var hot_edges = false;
@@ -902,6 +906,104 @@ fn sideStrip(p: *ghost_pane.Pane, h: f32, id: usize) void {
     applyTab(p, ghost_pane.tab(p, .{ .x = 0, .y = 0, .w = tab_size, .h = h }, id));
 }
 
+/// Whether the right edge's column is laid out beside the canvas: either of
+/// its panes is docked.
+fn rightDocked() bool {
+    return tools_pane.mode == .docked or props_pane.mode == .docked;
+}
+
+/// The tool palette's height for a right edge `h` tall, kept so both panes
+/// keep some room.
+fn toolsHeight(h: f32) f32 {
+    return std.math.clamp(tools_height, min_pane_height, @max(min_pane_height, h - split_grip - min_pane_height));
+}
+
+/// The right edge's strip: the tools pane's tab, the grip where the two
+/// panes meet (drag it up or down), then the properties pane's tab.
+fn rightStrip(h: f32) void {
+    var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .min_size_content = .{ .w = tab_size },
+        .max_size_content = .width(tab_size),
+        .expand = .vertical,
+        .background = true,
+        .color_fill = .{ .color = colors.titlebar },
+    });
+    defer strip.deinit();
+    const th = toolsHeight(h);
+    applyTab(&tools_pane, ghost_pane.tab(&tools_pane, .{ .x = 0, .y = 0, .w = tab_size, .h = th }, 2));
+    splitGrip(strip.data(), th);
+    applyTab(&props_pane, ghost_pane.tab(&props_pane, .{ .x = 0, .y = th + split_grip, .w = tab_size, .h = @max(0, h - th - split_grip) }, 4));
+}
+
+/// The grip between the right edge's tabs: dragged, it moves where the
+/// tool palette ends and the properties begin.
+fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
+    var grip = dvui.box(@src(), .{}, .{
+        .rect = .{ .x = 0, .y = at, .w = tab_size, .h = split_grip },
+        .background = true,
+        .color_fill = .{ .color = colors.titlebar },
+    });
+    defer grip.deinit();
+    const r = grip.data().contentRectScale().r;
+    const ns = dvui.windowNaturalScale();
+    // Three dots, to say it can be gripped.
+    const mid: dvui.Point.Physical = .{ .x = r.x + r.w / 2, .y = r.y + r.h / 2 };
+    for ([_]f32{ -4, 0, 4 }) |dx| {
+        const d: dvui.Rect.Physical = .{ .x = mid.x + dx * ns - ns, .y = mid.y - ns, .w = 2 * ns, .h = 2 * ns };
+        d.fill(.square, .{ .color = .{ .color = colors.panel_edge } });
+    }
+    const top = strip.contentRectScale().r.y;
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, grip.data())) continue;
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        switch (me.action) {
+            .press => if (me.button.pointer()) {
+                e.handle(@src(), grip.data());
+                dvui.captureMouse(grip.data(), e.num);
+                dvui.dragPreStart(me.button, me.p, .{ .cursor = .arrow_n_s });
+            },
+            .release => if (dvui.captured(grip.data().id)) {
+                e.handle(@src(), grip.data());
+                dvui.captureMouse(null, e.num);
+                dvui.dragEnd(me.button);
+            },
+            .motion => if (dvui.captured(grip.data().id)) {
+                e.handle(@src(), grip.data());
+                tools_height = (me.p.y - top) / ns - split_grip / 2;
+                dvui.refresh(null, @src(), grip.data().id);
+            },
+            .position => dvui.cursorSet(.arrow_n_s),
+            else => {},
+        }
+    }
+}
+
+/// The right edge's docked column: the tool palette above (or room for it,
+/// when it is not docked), the properties below.
+fn rightColumn() !void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = properties_width }, .max_size_content = .width(properties_width), .expand = .vertical, .border = .{ .x = 1 } });
+    defer col.deinit();
+    const th = toolsHeight(col.data().contentRect().h);
+    {
+        var top = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .h = th }, .max_size_content = .height(th), .expand = .horizontal, .background = tools_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&tools_pane) } });
+        defer top.deinit();
+        if (tools_pane.mode == .docked) {
+            const prev = ghost_pane.themePush(&tools_pane);
+            defer ghost_pane.themePop(prev);
+            toolsContent();
+        }
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = split_grip } });
+    var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = props_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
+    defer rest.deinit();
+    if (props_pane.mode == .docked) {
+        const prev = ghost_pane.themePush(&props_pane);
+        defer ghost_pane.themePop(prev);
+        try propertiesBody();
+    }
+}
+
 /// What a tab asked for, done; the canvas takes the keyboard back from a
 /// pane that stops taking events.
 fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
@@ -917,7 +1019,7 @@ fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
 fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
     return .{
         .left = if (tree_pane.mode == .ghost) tree_width + overlay_gap else 0,
-        .right = if (props_pane.mode == .ghost) properties_width + overlay_gap else 0,
+        .right = if (!rightDocked() and (props_pane.mode == .ghost or tools_pane.mode == .ghost)) properties_width + overlay_gap else 0,
         .bottom = if (bottom_pane.mode == .ghost) status_height + overlay_gap else 0,
     };
 }
@@ -952,10 +1054,22 @@ fn overlays() !void {
         defer o.end();
         treeContent();
     }
-    if (props_pane.mode == .ghost) {
-        var o = ghost_pane.begin(&props_pane, .{ .x = c.x + c.w - properties_width, .y = c.y, .w = properties_width, .h = @max(60, c.h - bottom) }, 2);
-        defer o.end();
-        try propertiesContent();
+    {
+        // The right edge: over the canvas's right side, or over the docked
+        // column's room when the other pane there is docked.
+        const x = if (rightDocked()) c.x + c.w + 1 else c.x + c.w - properties_width;
+        const h = @max(2 * min_pane_height + split_grip, c.h - if (rightDocked()) 0 else bottom);
+        const th = toolsHeight(h);
+        if (tools_pane.mode == .ghost) {
+            var o = ghost_pane.begin(&tools_pane, .{ .x = x, .y = c.y, .w = properties_width, .h = th }, 2);
+            defer o.end();
+            toolsContent();
+        }
+        if (props_pane.mode == .ghost) {
+            var o = ghost_pane.begin(&props_pane, .{ .x = x, .y = c.y + th + split_grip, .w = properties_width, .h = h - th - split_grip }, 4);
+            defer o.end();
+            try propertiesBody();
+        }
     }
     if (bottom_pane.mode == .ghost) {
         var o = ghost_pane.begin(&bottom_pane, .{ .x = c.x, .y = c.y + c.h - status_height, .w = c.w, .h = status_height }, 3);
@@ -968,7 +1082,7 @@ fn overlays() !void {
     const moving_track = track_cursor == null and state.context == .row;
     if (track_cursor != null or moving_track) {
         const left: f32 = if (tree_pane.mode == .ghost) tree_width + g else g;
-        const right: f32 = if (props_pane.mode == .ghost) properties_width + g else g;
+        const right: f32 = if (!rightDocked() and tools_pane.mode == .ghost) properties_width + g else g;
         var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = if (moving_track) move_palette_height else palette_height };
         // Lighter than the panes: the tracks being filled show through.
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4).override(.{
@@ -3675,17 +3789,18 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
 
 /// The right side: a tool palette for the current context, then its
 /// properties.
-fn propertiesPane() !void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = properties_width }, .max_size_content = .width(properties_width), .expand = .vertical, .border = .{ .x = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
-    defer pane.deinit();
-    try propertiesContent();
+/// The tool palette, in whatever holds it.
+fn toolsContent() void {
+    if (canvas_prompt) return;
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
+    defer scroll.deinit();
+    toolPalette();
 }
 
-/// The tool palette and the properties, in whatever holds them.
-fn propertiesContent() !void {
+/// The context's properties (and the active tool's choices), in whatever
+/// holds them.
+fn propertiesBody() !void {
     if (canvas_prompt) return;
-    toolPalette();
-    _ = dvui.separator(@src(), .{ .expand = .horizontal });
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
