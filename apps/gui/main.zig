@@ -1772,8 +1772,12 @@ const Palette = struct {
     edge: dvui.Color = .{ .r = 0x9a, .g = 0x97, .b = 0x8f },
     face: dvui.Color = .{ .r = 0xf6, .g = 0xf5, .b = 0xf1 },
     ink: dvui.Color = .{ .r = 0x1d, .g = 0x1d, .b = 0x1b },
-    missing: dvui.Color = .{ .r = 0xf6, .g = 0xd5, .b = 0xcf },
-    overflow: dvui.Color = .{ .r = 0xc2, .g = 0x41, .b = 0x2d },
+    /// Compliance flags take one hot hue, between red-hot and flame orange
+    /// (OKLCH hue 38): no annotation or pane uses it. This is its light
+    /// tint, behind a tile missing a glyph.
+    missing: dvui.Color = .{ .r = 0xff, .g = 0xdd, .b = 0xd0 },
+    /// What fails a check: overflow, past an edge, ink in a margin.
+    overflow: dvui.Color = .{ .r = 0xf3, .g = 0x46, .b = 0x00 },
 };
 
 const light_palette: Palette = .{
