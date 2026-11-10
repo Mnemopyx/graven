@@ -16,6 +16,7 @@ const engine = @import("graven_engine");
 const samples = @import("graven_samples");
 const desktop = @import("desktop.zig");
 const ghost_pane = @import("ghost.zig");
+const settings_file = @import("settings.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -389,6 +390,7 @@ fn init(win: *dvui.Window) !void {
         state.fonts = installed;
     }
     state.font_choice = defaultFont(state.fonts);
+    loadPrefs();
 }
 
 /// Asking for a new canvas's units, before anything is drawn.
@@ -624,6 +626,7 @@ fn loadSample() !void {
 }
 
 fn deinit(_: *dvui.Window) void {
+    if (prefs_store) |*ps| ps.deinit();
     clearPlaced();
     state.placed.deinit(state.gpa);
     if (state.labels) |*l| l.deinit();
@@ -840,6 +843,7 @@ fn frame() !dvui.App.Result {
         }
     }
     try overlays();
+    savePrefsIfChanged();
     if (hot_edges) {
         ghost_pane.hotEdges(&all_panes, root.data().id);
     } else for (all_panes) |p| {
@@ -865,10 +869,87 @@ var props_pane: ghost_pane.Pane = .{ .name = "Properties", .edge = .right, .size
 /// The tool palette's height, logical pixels.
 var tools_height: f32 = 120;
 const split_grip = 8;
+/// The grip between the right edge's panes is being dragged.
+var split_dragging = false;
 const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
 var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
+
+// Settings --------------------------------------------------------------------
+//
+// Preferences are read from the config files at start (see settings.zig:
+// shared.toml, then local.toml over it) and written back when they change.
+// Shared: the units a new canvas starts in, text construction, hot edges
+// and each pane's mode. Local: where the right edge's panes meet.
+
+var prefs_store: ?settings_file.Store = null;
+
+const Prefs = struct {
+    units: layout.model.Units,
+    show_construction: bool,
+    hot_edges: bool,
+    modes: [all_panes.len]ghost_pane.Mode,
+    tools_height: f32,
+
+    fn eql(a: Prefs, b: Prefs) bool {
+        return std.meta.eql(a, b);
+    }
+};
+
+/// The keys of each pane's mode, in `all_panes` order.
+const pane_keys = [all_panes.len][]const u8{ "panes.tree.mode", "panes.tools.mode", "panes.properties.mode", "panes.bottom.mode" };
+
+var saved_prefs: ?Prefs = null;
+
+fn currentPrefs() Prefs {
+    var modes: [all_panes.len]ghost_pane.Mode = undefined;
+    for (all_panes, &modes) |p, *m| m.* = p.mode;
+    return .{ .units = last_units, .show_construction = show_construction, .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
+}
+
+/// Reads the config files and applies what they set; what they leave out
+/// keeps its default.
+fn loadPrefs() void {
+    var ps = settings_file.load(state.gpa, dvui.io);
+    if (ps.get("canvas.units")) |v| if (v == .string) if (std.meta.stringToEnum(layout.model.Units, v.string)) |u| {
+        last_units = u;
+    };
+    if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
+        show_construction = v.boolean;
+    };
+    if (ps.get("panes.hot_edges")) |v| if (v == .boolean) {
+        hot_edges = v.boolean;
+    };
+    for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (std.meta.stringToEnum(ghost_pane.Mode, v.string)) |m| {
+        p.mode = m;
+    };
+    if (ps.get("panes.tools_height")) |v| switch (v) {
+        .float => |f| tools_height = @floatCast(f),
+        .integer => |i| tools_height = @floatFromInt(i),
+        else => {},
+    };
+    if (ps.problem()) |msg| state.status = msg;
+    prefs_store = ps;
+    saved_prefs = currentPrefs();
+}
+
+/// Writes the preferences back when one has changed since they were last
+/// read or written.
+fn savePrefsIfChanged() void {
+    const ps = &(prefs_store orelse return);
+    const now = currentPrefs();
+    if (saved_prefs) |old| if (old.eql(now)) return;
+    // A split being dragged is written once it rests.
+    if (split_dragging) return;
+    saved_prefs = now;
+    ps.put("canvas.units", .{ .string = @tagName(now.units) }, .shared);
+    ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
+    ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
+    for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .shared);
+    ps.put("panes.tools_height", .{ .integer = @intFromFloat(@round(now.tools_height)) }, .local);
+    if (ps.save(dvui.io)) |msg| state.status = msg;
+}
 
 /// Hot edges: holding the pointer on a ghost pane's tab activates it.
 var hot_edges = false;
@@ -953,6 +1034,7 @@ fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
         d.fill(.square, .{ .color = .{ .color = colors.panel_edge } });
     }
     const top = strip.contentRectScale().r.y;
+    split_dragging = dvui.captured(grip.data().id);
     for (dvui.events()) |*e| {
         if (!dvui.eventMatchSimple(e, grip.data())) continue;
         if (e.evt != .mouse) continue;
@@ -967,6 +1049,7 @@ fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
                 e.handle(@src(), grip.data());
                 dvui.captureMouse(null, e.num);
                 dvui.dragEnd(me.button);
+                split_dragging = false;
             },
             .motion => if (dvui.captured(grip.data().id)) {
                 e.handle(@src(), grip.data());

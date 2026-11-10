@@ -61,6 +61,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Configuration: TOML files, shared and local.
+    const config = b.addModule("graven_config", .{
+        .root_source_file = b.path("lib/config/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Applications. Samples build models through the libraries' actions.
     const samples = b.createModule(.{
         .root_source_file = b.path("apps/samples/root.zig"),
@@ -103,6 +110,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_layout", .module = layout },
                     .{ .name = "graven_engine", .module = engine },
                     .{ .name = "graven_samples", .module = samples },
+                    .{ .name = "graven_config", .module = config },
                 },
             }),
         });
@@ -116,7 +124,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).
