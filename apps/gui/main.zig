@@ -2953,7 +2953,6 @@ fn extentsOf(space: usize, depth: usize) geom.Box {
 fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
     if (depth >= view_depth or host >= state.model.spaces.items.len) return;
     const px = dvui.windowNaturalScale();
-    const ns = px;
     for (state.model.spaces.items[host].views.items, 0..) |sv, vi| {
         const hb = viewBox(sv);
         const r = state.view.rect(area, hb);
@@ -2984,14 +2983,27 @@ fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
         var buf: [128]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{s} · {s}", .{ sv.name, scaleText(sv.scale) }) catch sv.name;
         const corner = state.view.toPx(area, .{ .x = hb.x0, .y = hb.y1 });
+        const font = dvui.Font.theme(.body).larger(-2);
         dvui.labelNoFmt(@src(), text, .{}, .{
             .id_extra = vi,
-            .rect = .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - 22, .w = 320, .h = 20 },
+            .rect = annotationRect(area, corner, font, 320),
+            .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad },
             .color_text = .{ .color = if (sel) dvui.themeGet().focus else colors.panel_edge },
-            .font = dvui.Font.theme(.body).larger(-2),
+            .font = font,
         });
     }
 }
+
+/// A one-line annotation's rectangle just above canvas point `corner`
+/// (physical pixels), in the canvas's own logical coordinates: as tall as
+/// the font's line with its padding, so no part of the text is clipped.
+fn annotationRect(area: dvui.Rect.Physical, corner: dvui.Point.Physical, font: dvui.Font, w: f32) dvui.Rect {
+    const ns = dvui.windowNaturalScale();
+    const h = font.lineHeight() + 2 * annotation_pad;
+    return .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - h - 2, .w = w, .h = h };
+}
+
+const annotation_pad = 2;
 
 /// A scale as a ratio: 1:1, 1:2 (smaller), 2:1 (larger).
 fn scaleText(scale: f64) []const u8 {
@@ -3100,11 +3112,12 @@ fn drawFrameBound(area: dvui.Rect.Physical) void {
     const colour = if (past) colors.overflow else colors.panel_edge;
     state.view.rect(area, b).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colour } });
     const corner = state.view.toPx(area, .{ .x = b.x0, .y = b.y1 });
-    const ns = dvui.windowNaturalScale();
+    const font = dvui.Font.theme(.body).larger(-1);
     dvui.labelNoFmt(@src(), sp.name, .{}, .{
-        .rect = .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - 26, .w = 240, .h = 24 },
+        .rect = annotationRect(area, corner, font, 240),
+        .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad },
         .color_text = .{ .color = colour },
-        .font = dvui.Font.theme(.body).larger(-1),
+        .font = font,
     });
 }
 
@@ -3850,10 +3863,12 @@ fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
     else
         std.fmt.bufPrint(&buf, "{d} {s}{s} × {d} u", .{ n, word, plural, plan.length }) catch "";
     const corner = state.view.toPx(area, .{ .x = plan.box.x0, .y = plan.box.y1 });
-    const ns = dvui.windowNaturalScale();
+    const font = dvui.themeGet().font_body;
     dvui.labelNoFmt(@src(), text, .{}, .{
         // In the canvas's own coordinates, just above the region.
-        .rect = .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - 26, .w = 220, .h = 22 },
+        .rect = annotationRect(area, corner, font, 220),
+        .padding = .{ .x = 4, .w = 4, .y = annotation_pad, .h = annotation_pad },
+        .font = font,
         .color_text = .{ .color = colour },
         .background = true,
         .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.85) },
