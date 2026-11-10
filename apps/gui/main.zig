@@ -880,8 +880,9 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 //
 // Preferences are read from the config files at start (see settings.zig:
 // shared.toml, then local.toml over it) and written back when they change.
-// Shared: the units a new canvas starts in, text construction, hot edges
-// and each pane's mode. Local: where the right edge's panes meet.
+// Shared (how the user likes to work): the units a new canvas starts in,
+// text construction, hot edges. Local (this machine's layout): each pane's
+// mode, where the right edge's panes meet.
 
 var prefs_store: ?settings_file.Store = null;
 
@@ -946,7 +947,7 @@ fn savePrefsIfChanged() void {
     ps.put("canvas.units", .{ .string = @tagName(now.units) }, .shared);
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
     ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
-    for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .shared);
+    for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .local);
     ps.put("panes.tools_height", .{ .integer = @intFromFloat(@round(now.tools_height)) }, .local);
     if (ps.save(dvui.io)) |msg| state.status = msg;
 }
