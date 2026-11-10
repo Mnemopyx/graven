@@ -2736,6 +2736,7 @@ fn shapeProperties(pi: usize, index: usize) !void {
             state.status = "A panel could not be made from it. ";
             return;
         };
+        state.model.setPanelLayer(np, newObjectLayer()) catch {};
         state.context = .{ .panel = np };
         state.expanded.put(state.gpa, Context.key(.{ .panel = np }), true) catch {};
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
@@ -4348,9 +4349,10 @@ fn addPanelFromDrag(b: geom.Box) void {
         state.status = if (err == error.OffSheet) "Too little of it is on the sheet: start further in. " else "The panel was not added. ";
         return;
     };
+    // On the layer last chosen in its space.
+    if (state.model.spaces.items.len > 0) state.model.setPanelLayer(pi, newObjectLayer()) catch {};
     // Tools are not modes: a use ends the tool, and the context it was
     // chosen in stays, so the next panel is one press away.
-    _ = pi;
     state.tool = .select;
     state.expanded.put(state.gpa, Context.key(.file), true) catch {};
     state.expanded.put(state.gpa, Context.key(.worksheet), true) catch {};
