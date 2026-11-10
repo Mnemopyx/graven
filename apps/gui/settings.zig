@@ -12,6 +12,17 @@
 //!   `%LOCALAPPDATA%\Graven\local.toml`;
 //! * anywhere: `$GRAVEN_CONFIG_DIR/`, both files, when it is set.
 //!
+//! The local file may name another folder for the shared one, a synced or
+//! version-controlled folder, say:
+//!
+//!     [config]
+//!     shared_dir = "~/Sync/graven"
+//!
+//! `~` is the home folder; a relative path is taken from the local file's
+//! folder. When that folder is missing (a drive not mounted), shared
+//! settings are neither read nor written, and the user is told: Graven
+//! does not make the folder, which would split the settings in two.
+//!
 //! A file that cannot be read as TOML is reported and left untouched for
 //! the session: Graven never writes over what it could not read.
 
@@ -74,9 +85,38 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io) Store {
     const paths = filePaths(gpa) catch return s;
     s.shared_path = paths.shared;
     s.local_path = paths.local;
-    readInto(gpa, io, paths.shared, &s.files.shared, &s.shared_text, &s.shared_problem);
+    // The local file first: it may say where the shared one is.
     readInto(gpa, io, paths.local, &s.files.local, &s.local_text, &s.local_problem);
+    if (s.files.local.get("config.shared_dir")) |v| {
+        const dir = if (v == .string) resolveDir(gpa, v.string, std.fs.path.dirname(paths.local) orelse ".") catch null else null;
+        if (dir == null) {
+            s.shared_problem = gpa.dupe(u8, "config.shared_dir in local.toml is not a folder name; shared settings are not used.") catch null;
+            return s;
+        }
+        defer gpa.free(dir.?);
+        std.Io.Dir.cwd().access(io, dir.?, .{}) catch {
+            s.shared_problem = std.fmt.allocPrint(gpa, "Shared settings folder \"{s}\" (local.toml) is not there: shared settings unused.", .{v.string}) catch null;
+            return s;
+        };
+        const p = std.fs.path.join(gpa, &.{ dir.?, "shared.toml" }) catch return s;
+        gpa.free(paths.shared);
+        s.shared_path = p;
+    }
+    readInto(gpa, io, s.shared_path.?, &s.files.shared, &s.shared_text, &s.shared_problem);
     return s;
+}
+
+/// A folder named in a config file: `~` is the home folder, and a relative
+/// path is taken from `base`.
+pub fn resolveDir(gpa: std.mem.Allocator, name: []const u8, base: []const u8) ![]const u8 {
+    const t = std.mem.trim(u8, name, " \t");
+    if (t.len == 0) return error.Empty;
+    if (t[0] == '~' and (t.len == 1 or t[1] == '/' or t[1] == '\\')) {
+        const home = env(if (builtin.os.tag == .windows) "USERPROFILE" else "HOME") orelse return error.NoHome;
+        return std.fs.path.join(gpa, &.{ home, if (t.len > 2) t[2..] else "" });
+    }
+    if (std.fs.path.isAbsolute(t)) return gpa.dupe(u8, t);
+    return std.fs.path.join(gpa, &.{ base, t });
 }
 
 fn readInto(gpa: std.mem.Allocator, io: std.Io, path: []const u8, doc: *toml.Doc, text: *[]const u8, problem: *?[]const u8) void {
