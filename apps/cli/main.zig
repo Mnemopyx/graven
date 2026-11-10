@@ -2,6 +2,7 @@
 //! Applications own files and console output; the libraries never do.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const layout = @import("graven_layout");
 const engine = @import("graven_engine");
 const samples = @import("graven_samples");
@@ -17,6 +18,12 @@ const usage =
     \\         hard box that wide, so lines wrap; --centre centres each line on the anchor.
     \\       graven keyboard <font> <out.svg>
     \\         Lays out the sample PC keyboard in one font and writes it as SVG.
+    \\       graven dump [--log] <document>
+    \\         Prints a document's model as text (for reading, or as git's text converter);
+    \\         --log adds its history: the file's segments and every logged step.
+    \\       graven compact <document>
+    \\         Folds a document's history into its model and drops it: a smaller file, with
+    \\         no undo history, for example before a commit or before sharing it.
     \\
 ;
 
@@ -27,6 +34,13 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 4 and std.mem.eql(u8, args[1], "keyboard")) {
         return keyboard(init, args[2], args[3]);
+    }
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "dump")) {
+        if (args.len == 3) return dump(init, args[2], false);
+        if (args.len == 4 and std.mem.eql(u8, args[2], "--log")) return dump(init, args[3], true);
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "compact")) {
+        return compact(init, args[2]);
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
         return parse(init, args[2]);
@@ -192,4 +206,98 @@ fn parse(init: std.process.Init, src: []const u8) !void {
     var out: std.Io.Writer.Allocating = .init(arena.allocator());
     try engine.markup.dump(&out.writer, tree.items);
     std.debug.print("{s}\n", .{out.written()});
+}
+
+/// Opens document `path`, or says why it cannot and exits.
+fn openDocument(init: std.process.Init, path: []const u8) !struct { bytes: []u8, opened: layout.history.Opened } {
+    const gpa = init.gpa;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, gpa, .limited(1 << 30)) catch |err| {
+        std.debug.print("{s}: cannot be read ({s})\n", .{ path, @errorName(err) });
+        std.process.exit(1);
+    };
+    const opened = layout.history.openFile(gpa, bytes) catch |err| {
+        std.debug.print("{s}: {s}\n", .{ path, switch (err) {
+            error.BadFile, error.NoModel => "not a Graven document",
+            error.TooNew => "from a newer Graven",
+            error.BadChecksum, error.Truncated => "damaged where its model is stored",
+            else => @errorName(err),
+        } });
+        std.process.exit(1);
+    };
+    if (opened.damaged) std.debug.print("{s}: the end of the file is damaged; what it held is left out\n", .{path});
+    return .{ .bytes = bytes, .opened = opened };
+}
+
+fn printWriter(w: *std.Io.Writer, id: [16]u8) !void {
+    for (id[0..4]) |b| try w.print("{x:0>2}", .{b});
+}
+
+fn dump(init: std.process.Init, path: []const u8, with_log: bool) !void {
+    const gpa = init.gpa;
+    var doc = try openDocument(init, path);
+    defer gpa.free(doc.bytes);
+    defer doc.opened.model.deinit();
+    defer doc.opened.history.deinit();
+    var buf: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(init.io, &buf);
+    const w = &out.interface;
+    // The document as it opens, unsaved steps included.
+    try layout.native.dump(w, layout.Model, doc.opened.model);
+    if (with_log) {
+        const h = &doc.opened.history;
+        try w.print("\nhistory: {d} steps after the checkpoint, the save at entry {d} of {d}\n", .{ h.stepCount(), h.saved.?.len, h.log.items.len });
+        // The segments, as the file holds them.
+        var i: usize = layout.native.magic.len;
+        while (i < doc.bytes.len) {
+            const b = layout.native.readBlock(doc.bytes, i) catch break;
+            if (std.mem.eql(u8, &b.kind, &layout.history.segment_block) and b.version >= 2) {
+                var arena: std.heap.ArenaAllocator = .init(gpa);
+                defer arena.deinit();
+                if (layout.native.decodeValue(arena.allocator(), layout.history.Segment, b.payload)) |seg| {
+                    try w.writeAll("segment: writer ");
+                    try printWriter(w, seg.writer);
+                    try w.print(" on \"{s}\" at {d} ({s}): entries {d} to {d}\n", .{ seg.device, seg.time, seg.tool, seg.first, seg.first + seg.entries.len });
+                } else |_| try w.writeAll("segment: unreadable\n");
+            }
+            i = b.end;
+        }
+        for (h.log.items, 0..) |e, k| {
+            try w.print("entry {d}, step {d}:", .{ k, e.step });
+            try layout.native.dump(w, layout.history.Op, e.op);
+        }
+        if (doc.opened.unsaved) |u| try w.print("unsaved: {d} entries after the save, by a run on \"{s}\"\n", .{ u.entries, u.device });
+    }
+    try w.flush();
+}
+
+fn deviceName(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
+    if (builtin.os.tag == .windows) return "";
+    return std.posix.gethostname(buf) catch "";
+}
+
+fn compact(init: std.process.Init, path: []const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    var doc = try openDocument(init, path);
+    defer gpa.free(doc.bytes);
+    defer doc.opened.model.deinit();
+    defer doc.opened.history.deinit();
+    const h = &doc.opened.history;
+    if (doc.opened.unsaved) |u| std.debug.print("{s}: {d} unsaved entries (by a run on \"{s}\") are kept and folded in\n", .{ path, u.entries, u.device });
+    const steps = h.stepCount();
+    try h.compact();
+    var random: [16]u8 = undefined;
+    io.random(&random);
+    var host: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    const who: layout.history.Writer = .{ .id = layout.history.writerId(random), .device = deviceName(&host), .tool = layout.history.tool_version };
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const bytes = try layout.history.fileBytes(h, gpa, who, now);
+    defer gpa.free(bytes);
+    // Written beside it, then renamed over it: never half a file.
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp = try std.fmt.bufPrint(&tmp_buf, "{s}.compacting", .{path});
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = tmp, .data = bytes });
+    try cwd.rename(tmp, cwd, path, io);
+    std.debug.print("{s}: {d} steps of history folded in; {d} bytes, was {d}\n", .{ path, steps, bytes.len, doc.bytes.len });
 }

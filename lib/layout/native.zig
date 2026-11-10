@@ -400,6 +400,123 @@ pub fn decode(gpa: Allocator, bytes: []const u8) Error!model.Model {
     return error.NoModel;
 }
 
+// Text dump --------------------------------------------------------------------
+
+/// `v` as readable text, a field a line, nested by indentation: for reading
+/// a document, and for comparing two versions of one (graven dump, as
+/// git's text converter). Written by the same reflection as the format, so
+/// it keeps step with the model. Not read back.
+pub fn dump(w: *std.Io.Writer, comptime T: type, v: T) std.Io.Writer.Error!void {
+    // A struct's fields start at the first line, not after a label.
+    if (comptime @typeInfo(T) == .@"struct" and !isList(T) and !scalar(T)) {
+        var first = true;
+        inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |fname, ftype| {
+            if (comptime skipped(T, fname)) continue;
+            if (!first) try w.writeByte('\n');
+            first = false;
+            try w.writeAll(fname);
+            try w.writeByte(':');
+            if (comptime scalar(ftype)) try w.writeByte(' ');
+            try dumpValue(w, ftype, @field(v, fname), 2);
+        }
+    } else {
+        try dumpValue(w, T, v, 0);
+    }
+    try w.writeByte('\n');
+}
+
+/// Whether a value of `T` is written on its field's own line.
+fn scalar(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .void, .bool, .int, .float, .@"enum" => true,
+        .optional => |o| scalar(o.child),
+        .pointer => |p| p.child == u8,
+        .array => |arr| arr.child == u8,
+        .@"struct" => |st| !isList(T) and st.field_names.len == 0,
+        else => false,
+    };
+}
+
+fn newline(w: *std.Io.Writer, indent: usize) std.Io.Writer.Error!void {
+    try w.writeByte('\n');
+    try w.splatByteAll(' ', indent);
+}
+
+fn dumpBytes(w: *std.Io.Writer, b: []const u8) std.Io.Writer.Error!void {
+    if (std.unicode.utf8ValidateSlice(b) and std.mem.indexOfScalar(u8, b, 0) == null) {
+        try w.printStringEscaped(b);
+    } else {
+        try w.print("<{d} bytes>", .{b.len});
+    }
+}
+
+fn dumpList(w: *std.Io.Writer, comptime T: type, items: []const T, indent: usize) std.Io.Writer.Error!void {
+    if (items.len == 0) return w.writeAll(" []");
+    for (items) |x| {
+        try newline(w, indent);
+        try w.writeByte('-');
+        if (comptime scalar(T)) {
+            try w.writeByte(' ');
+            try dumpValue(w, T, x, indent + 2);
+        } else {
+            try dumpValue(w, T, x, indent + 2);
+        }
+    }
+}
+
+/// Writes `v`: a scalar after its label, anything else on the lines after
+/// it at `indent`.
+fn dumpValue(w: *std.Io.Writer, comptime T: type, v: T, indent: usize) std.Io.Writer.Error!void {
+    switch (@typeInfo(T)) {
+        .void => try w.writeAll("-"),
+        .bool => try w.writeAll(if (v) "true" else "false"),
+        .int => try w.print("{d}", .{v}),
+        .float => try w.print("{d}", .{v}),
+        .@"enum" => |e| if (e.mode == .exhaustive) try w.writeAll(@tagName(v)) else try w.print("{d}", .{@intFromEnum(v)}),
+        .optional => |o| if (v) |x| {
+            try dumpValue(w, o.child, x, indent);
+        } else try w.writeAll(if (comptime scalar(o.child)) "none" else " none"),
+        .array => |arr| if (arr.child == u8) {
+            for (v) |b| try w.print("{x:0>2}", .{b});
+        } else try dumpList(w, arr.child, &v, indent),
+        .pointer => |p| if (p.child == u8) try dumpBytes(w, v) else try dumpList(w, p.child, v, indent),
+        .@"union" => |u| {
+            _ = u;
+            switch (v) {
+                inline else => |payload| {
+                    const P = @TypeOf(payload);
+                    if (comptime scalar(P)) {
+                        try w.writeAll(" ");
+                        try w.writeAll(@tagName(v));
+                        if (P != void) {
+                            try w.writeByte(' ');
+                            try dumpValue(w, P, payload, indent);
+                        }
+                    } else {
+                        try newline(w, indent);
+                        try w.writeAll(@tagName(v));
+                        try w.writeByte(':');
+                        try dumpValue(w, P, payload, indent + 2);
+                    }
+                },
+            }
+        },
+        .@"struct" => |st| {
+            if (comptime isList(T)) return dumpList(w, @typeInfo(@TypeOf(v.items)).pointer.child, v.items, indent);
+            if (st.field_names.len == 0) return w.writeAll("{}");
+            inline for (st.field_names, st.field_types) |fname, ftype| {
+                if (comptime skipped(T, fname)) continue;
+                try newline(w, indent);
+                try w.writeAll(fname);
+                try w.writeByte(':');
+                if (comptime scalar(ftype)) try w.writeByte(' ');
+                try dumpValue(w, ftype, @field(v, fname), indent + 2);
+            }
+        },
+        else => @compileError("cannot dump " ++ @typeName(T)),
+    }
+}
+
 const testing = std.testing;
 
 test "a model writes and reads back to the same bytes, with its content" {
@@ -480,4 +597,19 @@ test "fields a reader does not know are skipped, and fields a file lacks take th
     try testing.expectEqual(2.5, n.b);
     try testing.expectEqual(7, n.added);
     try testing.expectEqual(null, n.maybe);
+}
+
+test "a model dumps as text, a field a line" {
+    const gpa = testing.allocator;
+    var m: model.Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    _ = try m.addLabel(c, .{ .at = .{ .x = 1.5, .y = 2 }, .content = "Hello \"you\"" });
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try dump(&out.writer, model.Model, m);
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "content: \"Hello \\\"you\\\"\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "units: mm") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "arena") == null);
 }

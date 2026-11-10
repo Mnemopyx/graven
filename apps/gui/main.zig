@@ -390,6 +390,7 @@ fn init(win: *dvui.Window) !void {
     desktop.watch(dvui.io, settings, wakeGui);
     state = .{ .gpa = gpa, .model = .init(gpa), .flat = .{ .arena = .init(gpa) } };
     hist = .init(gpa);
+    initWriter();
     // Work starts on a canvas, not a worksheet: the user picks its units.
     state.model.has_sheet = false;
     const installed: []Font = listFonts(gpa) catch &.{};
@@ -827,6 +828,7 @@ fn frame() !dvui.App.Result {
     defer root.deinit();
     // Undo and redo take their keys before any widget does.
     historyKeys(root.data());
+    autosaveTick(root.data().id);
 
     if (titleBar()) |r| return r;
 
@@ -936,8 +938,10 @@ var quit_now = false;
 const doc_ext = ".graven";
 
 fn setFilePath(path: ?[]const u8) void {
+    // Copied before the old one is freed: `path` may be it.
+    const next = if (path) |p| state.gpa.dupe(u8, p) catch null else null;
     if (file_path) |old| state.gpa.free(old);
-    file_path = if (path) |p| state.gpa.dupe(u8, p) catch null else null;
+    file_path = next;
     if (file_path) |p| {
         state.file_name = std.fs.path.basename(p);
         state.file_name_set = true;
@@ -992,43 +996,200 @@ fn saveAs() void {
     file_prompt_new = true;
 }
 
-/// Writes the document to `path`: beside it first, then renamed over it.
+// Files: writing, autosave, recovery and other writers -----------------------
+//
+// A save appends a segment to the document's file when the file is as this
+// run left it, and otherwise writes the whole file beside it and renames
+// it over it. Every few minutes (`files.autosave_minutes` in the config, 0
+// for never) the steps since the last write are appended as unsaved work,
+// which a later run can recover if this one ends without saving. Before
+// every write the file is read again: if another run (or anything else)
+// has written to it, nothing is written and the user decides.
+
+/// This run, as the writer of what it adds to files: a fresh random ID.
+var this_run: history.Writer = .{ .id = @splat(0) };
+var device_buf: [256]u8 = undefined;
+
+fn initWriter() void {
+    var random: [16]u8 = undefined;
+    dvui.io.random(&random);
+    const device: []const u8 = if (builtin.os.tag == .windows or builtin.os.tag == .wasi) "" else std.posix.gethostname(device_buf[0..std.posix.HOST_NAME_MAX]) catch "";
+    this_run = .{ .id = history.writerId(random), .device = device, .tool = history.tool_version };
+}
+
+fn nowSeconds() i64 {
+    return std.Io.Clock.real.now(dvui.io).toSeconds();
+}
+
+/// "2026-11-10 23:31" (UTC), for names and messages.
+fn stamp(buf: []u8, seconds: i64, sep: u8) []const u8 {
+    const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(0, seconds)) };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2} {d:0>2}{c}{d:0>2}", .{ yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), sep, ds.getMinutesIntoHour() }) catch "";
+}
+
+var autosave_minutes: u32 = 2;
+/// Set when a write was refused or put off; cleared by the next save.
+var autosave_paused = false;
+
+/// Another run has written to the file: the write of this kind waits for
+/// the user's choice.
+var contention: ?history.WriteKind = null;
+
+/// A file opened with unsaved steps in it, waiting for the user to keep or
+/// discard them.
+var recovery: ?struct { opened: history.Opened, path: []u8 } = null;
+
+/// Whether a prompt about files is up, over the new-canvas prompt.
+fn filePromptOpen() bool {
+    return file_prompt != null or leave_prompt != null or recovery != null or contention != null;
+}
+
+/// Writes the document to `path` as a save.
 fn writeDocument(path: []const u8) bool {
-    const bytes = history.fileBytes(&hist, state.gpa) catch {
-        state.status = "The document could not be made ready to save. ";
-        return false;
-    };
-    defer state.gpa.free(bytes);
+    return writeTo(path, .save, false);
+}
+
+/// `path` with " (<what> <time>)" before its extension: a backup or a copy.
+fn sideName(buf: []u8, path: []const u8, what: []const u8) []const u8 {
+    const ext = std.fs.path.extension(path);
+    var tb: [32]u8 = undefined;
+    const now = nowSeconds();
+    return std.fmt.bufPrint(buf, "{s} ({s} {s}.{d:0>2}){s}", .{ path[0 .. path.len - ext.len], what, stamp(&tb, now, '.'), @as(u64, @intCast(@mod(now, 60))), if (ext.len > 0) ext else doc_ext }) catch path;
+}
+
+/// Copies the file at `path` aside, as it is, before it is overwritten.
+fn backup(path: []const u8, buf: []u8) ?[]const u8 {
+    const name = sideName(buf, path, "backup");
+    const dir = std.Io.Dir.cwd();
+    dir.copyFile(path, dir, name, dvui.io, .{}) catch return null;
+    return name;
+}
+
+/// Writes `bytes` as the whole file at `path`: beside it first, then
+/// renamed over it, so there is never half a file.
+fn writeWhole(path: []const u8, bytes: []const u8) bool {
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
     const tmp = std.fmt.bufPrint(&tmp_buf, "{s}.saving", .{path}) catch return false;
     const dir = std.Io.Dir.cwd();
-    dir.writeFile(dvui.io, .{ .sub_path = tmp, .data = bytes }) catch {
-        state.status = "The document could not be written there. ";
-        return false;
-    };
-    dir.rename(tmp, dir, path, dvui.io) catch {
-        state.status = "The document could not be written there. ";
-        return false;
-    };
-    hist.markSaved();
-    setFilePath(path);
-    state.status = "Saved. ";
-    dvui.refresh(null, @src(), null);
-    if (after_save) |p| {
-        after_save = null;
-        proceed(p);
-    }
+    dir.writeFile(dvui.io, .{ .sub_path = tmp, .data = bytes }) catch return false;
+    dir.rename(tmp, dir, path, dvui.io) catch return false;
     return true;
 }
 
-/// Opens the document at `path`, replacing the one open.
+/// Writes `bytes` into the file at `path` at offset `at`, and syncs it.
+fn writeAt(path: []const u8, bytes: []const u8, at: u64) bool {
+    const io = dvui.io;
+    const f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch return false;
+    defer f.close(io);
+    f.writePositionalAll(io, bytes, at) catch return false;
+    f.sync(io) catch return false;
+    return true;
+}
+
+/// Writes one write from the history to `path`.
+fn put(path: []const u8, w: *const history.Write) bool {
+    return if (w.at) |at| writeAt(path, w.bytes, at) else writeWhole(path, w.bytes);
+}
+
+/// Whether the file at `path` is as this run last left it; true when it
+/// is gone (nothing to overwrite). Null when it cannot be read.
+fn fileUnchanged(path: []const u8) ?bool {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(1 << 30)) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => return null,
+    };
+    defer state.gpa.free(bytes);
+    return history.fileIsAsLeft(&hist, bytes);
+}
+
+/// Writes the document to `path`: a save, or an autosave of the steps
+/// since the last write. Appends when it can; `fresh` writes the whole
+/// file. Returns whether it was written.
+fn writeTo(path: []const u8, kind: history.WriteKind, fresh_asked: bool) bool {
+    var fresh = fresh_asked;
+    const same = if (file_path) |p| std.mem.eql(u8, p, path) else false;
+    if (!same) {
+        fresh = true;
+    } else if (!fresh) {
+        const unchanged = fileUnchanged(path) orelse {
+            state.status = "The document's file could not be read: nothing was written. ";
+            return false;
+        };
+        if (!unchanged) {
+            contention = kind;
+            dvui.refresh(null, @src(), null);
+            return false;
+        }
+        // Gone: written afresh.
+        if (std.Io.Dir.cwd().access(dvui.io, path, .{})) |_| {} else |_| fresh = true;
+    }
+    var w = history.prepareWrite(&hist, state.gpa, this_run, nowSeconds(), kind, fresh) catch |err| {
+        if (err == error.SavedStateLost) {
+            autosave_paused = true;
+            state.status = "Autosave is waiting for a save: the history no longer holds the saved document. ";
+        } else state.status = "The document could not be made ready to write. ";
+        return false;
+    };
+    defer w.deinit(state.gpa);
+    if (!put(path, &w)) {
+        state.status = "The document could not be written there. ";
+        return false;
+    }
+    history.wrote(&hist, &w);
+    if (kind == .save) {
+        setFilePath(path);
+        autosave_paused = false;
+        state.status = "Saved. ";
+    }
+    dvui.refresh(null, @src(), null);
+    if (kind == .save) if (after_save) |p| {
+        after_save = null;
+        proceed(p);
+    };
+    return true;
+}
+
+/// Every `autosave_minutes`, the steps since the last write go to the
+/// file as unsaved work.
+fn autosaveTick(id: dvui.Id) void {
+    if (autosave_minutes == 0) return;
+    if (dvui.timerDone(id)) autosave();
+    if (dvui.timerDoneOrNone(id)) dvui.timer(id, @intCast(@as(u64, autosave_minutes) * 60 * std.time.us_per_s));
+}
+
+fn autosave() void {
+    const path = file_path orelse return;
+    if (autosave_paused or canvas_prompt or contention != null or recovery != null) return;
+    if (!history.changedSinceWrite(&hist)) return;
+    if (writeTo(path, .autosave, false)) {
+        var tb: [32]u8 = undefined;
+        state.status = std.fmt.bufPrint(&status_buf, "Autosaved at {s} UTC (unsaved until you save). ", .{stamp(&tb, nowSeconds(), ':')[11..]}) catch "Autosaved. ";
+    }
+}
+
+var status_buf: [256]u8 = undefined;
+
+/// The user chose not to save: the steps autosaved since the last save
+/// are dropped from the file too, so they are not offered back later.
+fn discardAutosaved() void {
+    const path = file_path orelse return;
+    var d = (history.prepareDiscard(&hist, state.gpa, this_run, nowSeconds()) catch return) orelse return;
+    defer d.deinit(state.gpa);
+    if ((fileUnchanged(path) orelse false) and put(path, &d)) history.wroteDiscard(&hist, &d);
+}
+
+/// Opens the document at `path`, replacing the one open; when it holds
+/// unsaved steps, asks first whether to keep them.
 fn openDocument(path: []const u8) void {
     const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(1 << 30)) catch {
         state.status = "That file could not be read. ";
         return;
     };
     defer state.gpa.free(bytes);
-    const opened = history.openFile(state.gpa, bytes) catch |err| {
+    var opened = history.openFile(state.gpa, bytes) catch |err| {
         state.status = switch (err) {
             error.BadFile, error.NoModel => "That is not a Graven document. ",
             error.TooNew => "That document is from a newer Graven. ",
@@ -1037,6 +1198,22 @@ fn openDocument(path: []const u8) void {
         };
         return;
     };
+    if (opened.unsaved != null) {
+        const p = state.gpa.dupe(u8, path) catch {
+            opened.model.deinit();
+            opened.history.deinit();
+            return;
+        };
+        recovery = .{ .opened = opened, .path = p };
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    install(&opened, path);
+    state.status = if (opened.damaged) "Opened. The end of the file was damaged: the last changes in it are lost. " else "Opened. ";
+}
+
+/// Makes `opened` the document open, from `path`.
+fn install(opened: *history.Opened, path: []const u8) void {
     newCanvas();
     state.model.deinit();
     state.model = opened.model;
@@ -1050,8 +1227,122 @@ fn openDocument(path: []const u8) void {
     }
     state.view.fit = canvas_view;
     setFilePath(path);
-    state.status = if (opened.damaged) "Opened. The end of the file was damaged: the last changes in it are lost. " else "Opened. ";
+    autosave_paused = false;
     dvui.refresh(null, @src(), null);
+}
+
+/// A centred modal prompt over the canvas.
+fn promptWindow(src: std.builtin.SourceLocation, id: usize, w: f32, h: f32) ?*dvui.FloatingWindowWidget {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return null;
+    const S = struct {
+        var r: dvui.Rect = .{};
+    };
+    S.r = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    return dvui.floatingWindow(src, .{ .rect = &S.r, .resize = .none, .modal = true }, overlayOptions(id));
+}
+
+/// The file holds steps after its last save, by a run that ended (or is
+/// still open elsewhere) without saving them: keep them, or go back to
+/// the save.
+fn recoveryPrompt() void {
+    const rec = &(recovery orelse return);
+    const u = rec.opened.unsaved.?;
+    var fw = promptWindow(@src(), 14, 600, 175) orelse return;
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.label(@src(), "{s} has changes that were never saved", .{std.fs.path.basename(rec.path)}, .{ .font = dvui.Font.theme(.heading) });
+    var tb: [32]u8 = undefined;
+    const by = if (u.device.len > 0) u.device else "another computer";
+    dvui.label(@src(), "Made after its last save, on {s} at {s} UTC,", .{ by, stamp(&tb, u.time, ':') }, .{ .margin = .{ .y = 6 } });
+    dvui.labelNoFmt(@src(), "by a session that ended without saving them, or is still open there.", .{}, .{});
+    if (rec.opened.damaged) dvui.labelNoFmt(@src(), "The end of the file was damaged: the last of them are lost.", .{}, .{});
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
+    defer row.deinit();
+    if (dvui.button(@src(), "Cancel", .{}, .{})) {
+        rec.opened.model.deinit();
+        rec.opened.history.deinit();
+        state.gpa.free(rec.path);
+        recovery = null;
+        return;
+    }
+    if (dvui.button(@src(), "Discard them", .{}, .{})) {
+        var bb: [std.fs.max_path_bytes]u8 = undefined;
+        const copy = backup(rec.path, &bb);
+        rec.opened.discardUnsaved() catch {
+            state.status = "The saved document could not be rebuilt. ";
+            return;
+        };
+        finishRecovery(rec, .save);
+        state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Opened as last saved. The file as it was is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Opened as last saved. " else "Opened as last saved. A backup copy could not be made. ";
+        return;
+    }
+    if (dvui.button(@src(), "Keep them", .{}, .{})) {
+        finishRecovery(rec, .autosave);
+        state.status = "Opened with the changes kept; they are not saved yet. ";
+    }
+}
+
+/// Installs the recovered document and writes its file afresh under this
+/// run, so no file mixes two runs' unsaved work.
+fn finishRecovery(rec: anytype, kind: history.WriteKind) void {
+    install(&rec.opened, rec.path);
+    _ = writeTo(rec.path, kind, true);
+    state.gpa.free(rec.path);
+    recovery = null;
+}
+
+/// Another run (or program) wrote to the file since this one did.
+fn contentionPrompt(kind: history.WriteKind) void {
+    var fw = promptWindow(@src(), 15, 640, 175) orelse return;
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.label(@src(), "{s} was changed elsewhere", .{state.file_name}, .{ .font = dvui.Font.theme(.heading) });
+    dvui.labelNoFmt(@src(), "Another Graven session, or another program, has written to it", .{}, .{ .margin = .{ .y = 6 } });
+    dvui.labelNoFmt(@src(), "since this one did, so nothing was written. Your changes are still here.", .{}, .{});
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
+    defer row.deinit();
+    const path = file_path orelse {
+        contention = null;
+        return;
+    };
+    if (dvui.button(@src(), "Not now", .{}, .{})) {
+        contention = null;
+        after_save = null;
+        autosave_paused = true;
+        state.status = "Not written: the file was changed elsewhere. Autosave waits until you save. ";
+        return;
+    }
+    if (dvui.button(@src(), "Load theirs", .{}, .{})) {
+        contention = null;
+        after_save = null;
+        // Mine first, as a copy beside it.
+        var nb: [std.fs.max_path_bytes]u8 = undefined;
+        const mine = sideName(&nb, path, "mine");
+        const theirs = state.gpa.dupe(u8, path) catch return;
+        defer state.gpa.free(theirs);
+        if (!writeTo(mine, .save, true)) return;
+        var kept: [std.fs.max_path_bytes]u8 = undefined;
+        const kept_name = std.fmt.bufPrint(&kept, "{s}", .{std.fs.path.basename(mine)}) catch "";
+        openDocument(theirs);
+        if (recovery == null) state.status = std.fmt.bufPrint(&status_buf, "Opened theirs. Your version is saved as {s}. ", .{kept_name}) catch "Opened theirs. ";
+        return;
+    }
+    if (dvui.button(@src(), "Save mine as…", .{}, .{})) {
+        contention = null;
+        saveAs();
+        return;
+    }
+    if (dvui.button(@src(), "Overwrite with mine", .{}, .{})) {
+        contention = null;
+        var bb: [std.fs.max_path_bytes]u8 = undefined;
+        const copy = backup(path, &bb);
+        if (writeTo(path, if (kind == .save) .save else .autosave, true)) {
+            state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Written over it. Theirs is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Written over it. " else "Written over it. ";
+        }
+    }
 }
 
 /// The file prompt: a name to open or save as; Enter or the button does
@@ -1141,6 +1432,7 @@ fn leavePrompt(p: Pending) void {
     if (dvui.button(@src(), "Cancel", .{}, .{})) leave_prompt = null;
     if (dvui.button(@src(), "Don't save", .{}, .{})) {
         leave_prompt = null;
+        discardAutosaved();
         proceed(p);
     }
     if (dvui.button(@src(), "Save", .{}, .{})) {
@@ -1303,6 +1595,10 @@ fn currentPrefs() Prefs {
 fn loadPrefs() void {
     var ps = settings_file.load(state.gpa, dvui.io);
     loadLocale(&ps);
+    // How often unsaved work goes to the file, in minutes (0: never).
+    if (ps.get("files.autosave_minutes")) |v| if (v == .integer) {
+        autosave_minutes = @intCast(std.math.clamp(v.integer, 0, 30));
+    };
     if (ps.get("canvas.units")) |v| if (v == .string) if (std.meta.stringToEnum(layout.model.Units, v.string)) |u| {
         last_units = u;
     };
@@ -1626,11 +1922,13 @@ fn overlays() !void {
     }
     // The new-canvas prompt waits under an open or save prompt, so Enter
     // goes to the prompt on top.
-    if (canvas_prompt and file_prompt == null and leave_prompt == null) newCanvasPrompt();
+    if (canvas_prompt and !filePromptOpen()) newCanvasPrompt();
     if (export_prompt) exportPrompt();
     if (image_prompt) imagePrompt();
     if (file_prompt) |kind| filePrompt(kind);
     if (leave_prompt) |p| leavePrompt(p);
+    if (recovery != null) recoveryPrompt();
+    if (contention) |k| contentionPrompt(k);
 }
 
 /// The bottom area: the expression line, then the status line.
@@ -4346,7 +4644,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // input but Enter, which makes it (unless an open or save prompt
         // is on top, which takes the Enter).
         if (canvas_prompt) {
-            if (file_prompt == null and leave_prompt == null and e.evt == .key and e.evt.key.action == .down and (e.evt.key.code == .enter or e.evt.key.code == .kp_enter)) {
+            if (!filePromptOpen() and e.evt == .key and e.evt.key.action == .down and (e.evt.key.code == .enter or e.evt.key.code == .kp_enter)) {
                 e.handle(@src(), box.data());
                 createCanvas(last_units);
                 dvui.refresh(null, @src(), box.data().id);

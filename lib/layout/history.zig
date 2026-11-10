@@ -16,6 +16,10 @@
 //! one label); `join` adds an op to the step before it (a clean-up the app
 //! makes after an edit). What no single action expresses (loading a
 //! sample) is logged as a snapshot of the model after it.
+//!
+//! The history is bounded: past a number of steps or a memory budget, the
+//! oldest steps are folded into the checkpoint (`Limits`) and can no
+//! longer be undone.
 
 const std = @import("std");
 const model = @import("model.zig");
@@ -109,10 +113,31 @@ pub fn apply(m: *Model, op: Op) Error!void {
     }
 }
 
+/// `op` with its arguments copied into `a`.
+fn copyOp(a: Allocator, op: Op) Error!Op {
+    var buf: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer buf.deinit();
+    const bytes = try native.encodeValue(buf.allocator(), Op, op);
+    return native.decodeValue(a, Op, bytes);
+}
+
 pub const Entry = struct {
     op: Op,
     /// Ops of one step share it.
     step: u32,
+    /// The op's encoded size: what it costs to keep, for the limits.
+    size: u32 = 0,
+};
+
+/// How much history is kept. Past either limit the oldest steps are folded
+/// into the checkpoint, down to three quarters of it, so folding is
+/// occasional rather than on every step.
+pub const Limits = struct {
+    /// Steps that can be undone.
+    steps: usize = 2000,
+    /// Bytes the logged ops may take (the checkpoint aside, which folding
+    /// cannot shrink).
+    bytes: usize = 64 << 20,
 };
 
 pub const History = struct {
@@ -129,6 +154,16 @@ pub const History = struct {
     merge_key: ?u64 = null,
     /// Where the log stood when last saved; null when never saved.
     saved: ?Mark = null,
+    /// The saved state was folded into the checkpoint, or undone and
+    /// replaced: no undo or redo reaches it again.
+    saved_lost: bool = false,
+    limits: Limits = .{},
+    /// The file this history was last written to or opened from, as it
+    /// was then; null when there is none.
+    file: ?FileState = null,
+    /// The log's first `stable` entries are as they were when the file was
+    /// last written (undo lowers it).
+    stable: usize = 0,
 
     const Mark = struct { len: usize, last: u32 };
 
@@ -141,6 +176,7 @@ pub const History = struct {
     /// any changes at all). Undoing back to where a save left the log
     /// counts as saved.
     pub fn isDirty(h: *const History) bool {
+        if (h.saved_lost) return true;
         const now = h.mark();
         if (h.saved) |s| return !(s.len == now.len and s.last == now.last);
         return now.len != 0;
@@ -149,6 +185,17 @@ pub const History = struct {
     /// Records that the log as it stands has been saved.
     pub fn markSaved(h: *History) void {
         h.saved = h.mark();
+        h.saved_lost = false;
+    }
+
+    /// Whether the saved state is the log's first entries: the checkpoint
+    /// with them replayed is the document as saved.
+    fn savedInLog(h: *const History) ?usize {
+        if (h.saved_lost) return null;
+        const s = h.saved orelse return null;
+        if (s.len > h.log.items.len) return null;
+        const last: u32 = if (s.len > 0) h.log.items[s.len - 1].step else 0;
+        return if (last == s.last) s.len else null;
     }
 
     pub fn init(gpa: Allocator) History {
@@ -173,6 +220,9 @@ pub const History = struct {
         _ = h.arena.reset(.retain_capacity);
         h.merge_key = null;
         h.saved = null;
+        h.saved_lost = false;
+        h.file = null;
+        h.stable = 0;
     }
 
     pub fn canUndo(h: *const History) bool {
@@ -216,7 +266,7 @@ pub const History = struct {
         const bytes = try native.encodeValue(h.gpa, Args(@tagName(tag)), args);
         defer h.gpa.free(bytes);
         const copy = try native.decodeValue(h.arena.allocator(), Args(@tagName(tag)), bytes);
-        try h.record(@unionInit(Op, @tagName(tag), copy), mode);
+        try h.record(@unionInit(Op, @tagName(tag), copy), @intCast(bytes.len), mode);
         return result;
     }
 
@@ -224,15 +274,15 @@ pub const History = struct {
     /// action, as a new step.
     pub fn snapshot(h: *History, m: *const Model) Error!void {
         const bytes = try native.encode(h.arena.allocator(), m);
-        try h.record(.{ .snapshot = bytes }, .new);
+        try h.record(.{ .snapshot = bytes }, @intCast(bytes.len), .new);
     }
 
-    fn record(h: *History, op: Op, mode: Mode) Allocator.Error!void {
+    fn record(h: *History, op: Op, size: u32, mode: Mode) Error!void {
         if (mode == .join and h.log.items.len == 0) {
             // Nothing to join: it becomes part of the checkpoint, which the
             // caller's model already shows. (Rebuilt lazily by the caller's
             // next reset; replay applies it again from the log otherwise.)
-            try h.log.append(h.gpa, .{ .op = op, .step = 0 });
+            try h.log.append(h.gpa, .{ .op = op, .step = 0, .size = size });
             return;
         }
         const step = switch (mode) {
@@ -244,7 +294,93 @@ pub const History = struct {
             h.redo.clearRetainingCapacity();
             h.merge_key = if (mode == .merge) mode.merge else null;
         }
-        try h.log.append(h.gpa, .{ .op = op, .step = step });
+        try h.log.append(h.gpa, .{ .op = op, .step = step, .size = size });
+        if (mode != .join) try h.keepToLimits();
+    }
+
+    /// Steps in the log that can be undone (not those joined to the
+    /// checkpoint).
+    pub fn stepCount(h: *const History) usize {
+        var n: usize = 0;
+        var last: u32 = 0;
+        for (h.log.items) |e| {
+            if (e.step != 0 and e.step != last) n += 1;
+            last = e.step;
+        }
+        return n;
+    }
+
+    /// What the logged and undone ops take, in their encoded size.
+    pub fn logBytes(h: *const History) usize {
+        var n: usize = 0;
+        for (h.log.items) |e| n += e.size;
+        for (h.redo.items) |e| n += e.size;
+        return n;
+    }
+
+    /// Folds the oldest steps into the checkpoint while either limit is
+    /// passed, down to three quarters of it; the last step always stays.
+    fn keepToLimits(h: *History) Error!void {
+        var steps = h.stepCount();
+        var bytes = h.logBytes();
+        if (steps <= h.limits.steps and bytes <= h.limits.bytes) return;
+        const keep_steps = h.limits.steps * 3 / 4;
+        const keep_bytes = h.limits.bytes * 3 / 4;
+        const items = h.log.items;
+        var n: usize = 0;
+        while (n < items.len) {
+            const step = items[n].step;
+            var end = n;
+            var run: usize = 0;
+            while (end < items.len and items[end].step == step) : (end += 1) run += items[end].size;
+            if (end == items.len) break;
+            if (step != 0 and steps <= keep_steps and bytes <= keep_bytes) break;
+            n = end;
+            if (step != 0) steps -= 1;
+            bytes -= run;
+        }
+        if (n > 0) try h.fold(n);
+    }
+
+    /// Folds the log's first `n` entries into the checkpoint: they can no
+    /// longer be undone. The file must then be written whole.
+    pub fn fold(h: *History, n: usize) Error!void {
+        var m = try native.decode(h.gpa, h.checkpoint);
+        defer m.deinit();
+        for (h.log.items[0..n]) |e| try apply(&m, e.op);
+        const bytes = try native.encode(h.gpa, &m);
+        h.gpa.free(h.checkpoint);
+        h.checkpoint = bytes;
+        if (h.saved) |*s| {
+            if (s.len >= n) {
+                s.len -= n;
+                if (s.len == 0) s.last = 0;
+            } else {
+                h.saved = null;
+                h.saved_lost = true;
+            }
+        }
+        // What stays, copied into a fresh arena, so what was folded is
+        // freed.
+        var arena: std.heap.ArenaAllocator = .init(h.gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        for (h.log.items[n..]) |*e| e.op = try copyOp(a, e.op);
+        for (h.redo.items) |*e| e.op = try copyOp(a, e.op);
+        h.arena.deinit();
+        h.arena = arena;
+        std.mem.copyForwards(Entry, h.log.items, h.log.items[n..]);
+        h.log.shrinkRetainingCapacity(h.log.items.len - n);
+        h.stable = 0;
+        if (h.file) |*f| f.appendable = false;
+    }
+
+    /// Folds the whole log into the checkpoint and drops the redo: the
+    /// document as it is, with no history.
+    pub fn compact(h: *History) Error!void {
+        if (h.log.items.len > 0) try h.fold(h.log.items.len);
+        h.redo.clearRetainingCapacity();
+        h.merge_key = null;
     }
 
     fn newStep(h: *History) u32 {
@@ -264,6 +400,7 @@ pub const History = struct {
         while (first > 0 and items[first - 1].step == step) first -= 1;
         try h.redo.appendSlice(h.gpa, items[first..]);
         h.log.shrinkRetainingCapacity(first);
+        h.stable = @min(h.stable, first);
         h.merge_key = null;
         try h.rebuild(m);
         return true;
@@ -375,73 +512,314 @@ test "every op encodes and decodes, as the file's log will hold them" {
 // The document file ------------------------------------------------------------
 //
 // A document file is the checkpoint (a native file: magic and model block),
-// then the op log in segments. Each segment is a block of entries followed
-// by a trailer block: the segment's offset, length and checksum, the
-// checksum of the trailer before it (so the segments form a chain), and the
-// save point (how many entries a save had reached). A segment counts only
-// once its trailer is intact: a torn tail, from a crash or a partial sync,
-// is dropped and reported, and the rest opens. Saving writes the whole file
-// afresh; it never moves the checkpoint, so undo reaches back past a save,
-// after reopening too.
+// then the op log in segments. Each segment is a block saying who wrote it
+// (the app run's random ID, the device, the time, the tool's version) and
+// where in the log its entries go: they replace the log from that entry on,
+// so a segment written after an undo shortens the log as well as extending
+// it. A trailer block follows each segment: its offset, length and
+// checksum, the checksum of the trailer before it (so the segments form a
+// chain), the log's length after it, whether it marks a save, and the
+// writer's ID.
+//
+// A segment counts only once its trailer is intact: a torn tail, from a
+// crash or a partial sync, is dropped and reported, and the rest opens.
+// Segments after the last save are unsaved work (periodic appends, from a
+// run that ended before saving); the one opening the file chooses to keep
+// or discard them.
+//
+// Writing appends a segment while the file is as this history last left it
+// and the checkpoint has not moved; otherwise it writes the whole file
+// afresh. Neither moves the checkpoint (only the limits do), so undo
+// reaches back past a save, after reopening too.
 
 pub const segment_block = "OPSG".*;
 pub const trailer_block = "TRLR".*;
-const segment_version: u16 = 1;
+const segment_version: u16 = 2;
+
+/// Who writes: one run of an app. A new run is a new writer, so a crashed
+/// run's unsaved segments count as someone else's.
+pub const Writer = struct {
+    /// Random (version 4 UUID), fresh for each run.
+    id: [16]u8,
+    device: []const u8 = "",
+    tool: []const u8 = "",
+};
+
+/// The tool and version segments record.
+pub const tool_version = "Graven 0.0.0";
+
+/// A writer ID from 16 random bytes: a version 4 UUID.
+pub fn writerId(random: [16]u8) [16]u8 {
+    var id = random;
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    return id;
+}
+
+/// A segment's block.
+pub const Segment = struct {
+    writer: [16]u8 = @splat(0),
+    device: []const u8 = "",
+    /// When it was written, in seconds since 1970 (UTC).
+    time: i64 = 0,
+    tool: []const u8 = "",
+    /// The log entry its entries start at; those from there on are
+    /// replaced.
+    first: u64 = 0,
+    entries: []const Entry = &.{},
+};
 
 const Trailer = struct {
     segment_at: u64,
     segment_len: u64,
     segment_crc: u32,
     previous: u32,
-    save_point: u64,
+    /// The log's length after this segment.
+    log_len: u64,
+    /// The log as it stands after this segment is the document as saved.
+    saved: bool,
+    writer: [16]u8 = @splat(0),
 };
 
-fn trailerBytes(t: Trailer) [36]u8 {
-    var b: [36]u8 = undefined;
+const trailer_len = 52;
+
+fn trailerBytes(t: Trailer) [trailer_len]u8 {
+    var b: [trailer_len]u8 = undefined;
     std.mem.writeInt(u64, b[0..8], t.segment_at, .little);
     std.mem.writeInt(u64, b[8..16], t.segment_len, .little);
     std.mem.writeInt(u32, b[16..20], t.segment_crc, .little);
     std.mem.writeInt(u32, b[20..24], t.previous, .little);
-    std.mem.writeInt(u64, b[24..32], t.save_point, .little);
-    std.mem.writeInt(u32, b[32..36], 0, .little);
+    std.mem.writeInt(u64, b[24..32], t.log_len, .little);
+    std.mem.writeInt(u32, b[32..36], @intFromBool(t.saved), .little);
+    b[36..52].* = t.writer;
     return b;
 }
 
-fn readTrailer(p: []const u8) ?Trailer {
+fn readTrailer(version: u16, p: []const u8) ?Trailer {
     if (p.len < 32) return null;
-    return .{
+    var t: Trailer = .{
         .segment_at = std.mem.readInt(u64, p[0..8], .little),
         .segment_len = std.mem.readInt(u64, p[8..16], .little),
         .segment_crc = std.mem.readInt(u32, p[16..20], .little),
         .previous = std.mem.readInt(u32, p[20..24], .little),
-        .save_point = std.mem.readInt(u64, p[24..32], .little),
+        .log_len = std.mem.readInt(u64, p[24..32], .little),
+        // Version 1 wrote only saves.
+        .saved = true,
+    };
+    if (version >= 2) {
+        if (p.len < trailer_len) return null;
+        t.saved = std.mem.readInt(u32, p[32..36], .little) & 1 != 0;
+        t.writer = p[36..52].*;
+    }
+    return t;
+}
+
+/// A file as this history last wrote or opened it, to append to it and to
+/// notice when someone else has.
+pub const FileState = struct {
+    len: u64,
+    /// Where its last trailer block starts, and that trailer's checksum.
+    trailer_at: u64 = 0,
+    trailer_crc: u32 = 0,
+    /// The log's length it holds.
+    entries: usize = 0,
+    /// False after folding (the checkpoint moved) or a damaged tail: the
+    /// next write is the whole file.
+    appendable: bool = true,
+    /// It holds steps after its last save (autosaved, or from a run that
+    /// never saved them).
+    unsaved: bool = false,
+};
+
+/// Bytes to write, from `History.prepareWrite`.
+pub const Write = struct {
+    bytes: []u8,
+    /// Append at this offset of the file as it is; null: write the whole
+    /// file afresh.
+    at: ?u64,
+    next: FileState,
+    save: bool,
+
+    pub fn deinit(w: *Write, gpa: Allocator) void {
+        gpa.free(w.bytes);
+        w.* = undefined;
+    }
+};
+
+pub const WriteKind = enum {
+    /// The document as it is becomes the saved one.
+    save,
+    /// The steps since the last write are kept in the file as unsaved
+    /// work, recoverable after a crash.
+    autosave,
+};
+
+pub const WriteError = Error || error{
+    /// An autosave would have to write the whole file, and the saved state
+    /// is no longer in the history to write it: only a save can.
+    SavedStateLost,
+};
+
+fn appendSegment(gpa: Allocator, out: *std.ArrayList(u8), base: u64, previous: u32, who: Writer, now: i64, first: usize, entries: []const Entry, log_len: usize, saved: bool) Allocator.Error!struct { at: u64, crc: u32 } {
+    const at = out.items.len;
+    const seg: Segment = .{ .writer = who.id, .device = who.device, .time = now, .tool = who.tool, .first = first, .entries = entries };
+    const payload = try native.encodeValue(gpa, Segment, seg);
+    defer gpa.free(payload);
+    try native.appendBlock(gpa, out, segment_block, segment_version, payload);
+    const block = out.items[at..];
+    const t = trailerBytes(.{
+        .segment_at = base + at,
+        .segment_len = block.len,
+        .segment_crc = native.checksum(block),
+        .previous = previous,
+        .log_len = log_len,
+        .saved = saved,
+        .writer = who.id,
+    });
+    const t_at = out.items.len;
+    try native.appendBlock(gpa, out, trailer_block, segment_version, &t);
+    return .{ .at = base + t_at, .crc = native.checksum(&t) };
+}
+
+/// What to write to keep the file up to date: a segment to append when the
+/// file is as this history last left it, else the whole file. `fresh`
+/// asks for the whole file whatever the state (Save As, or a file someone
+/// else changed). Hand the result to `wrote` once it is written.
+pub fn prepareWrite(h: *const History, gpa: Allocator, who: Writer, now: i64, kind: WriteKind, fresh: bool) WriteError!Write {
+    const save = kind == .save;
+    const log = h.log.items;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    if (!fresh) if (h.file) |f| if (f.appendable) {
+        const first = @min(h.stable, f.entries);
+        const t = try appendSegment(gpa, &out, f.len, f.trailer_crc, who, now, first, log[first..], log.len, save);
+        const len = f.len + out.items.len;
+        return .{
+            .bytes = try out.toOwnedSlice(gpa),
+            .at = f.len,
+            .next = .{ .len = len, .trailer_at = t.at, .trailer_crc = t.crc, .entries = log.len, .unsaved = !save },
+            .save = save,
+        };
+    };
+    // The whole file: the checkpoint, then the saved log, then (for an
+    // autosave) the unsaved steps after it.
+    const saved_len: usize = if (save) log.len else h.savedInLog() orelse return error.SavedStateLost;
+    try out.appendSlice(gpa, h.checkpoint);
+    var t = try appendSegment(gpa, &out, 0, 0, who, now, 0, log[0..saved_len], saved_len, true);
+    if (saved_len < log.len) t = try appendSegment(gpa, &out, 0, t.crc, who, now, saved_len, log[saved_len..], log.len, false);
+    const len = out.items.len;
+    return .{
+        .bytes = try out.toOwnedSlice(gpa),
+        .at = null,
+        .next = .{ .len = len, .trailer_at = t.at, .trailer_crc = t.crc, .entries = log.len, .unsaved = saved_len < log.len },
+        .save = save,
     };
 }
 
-/// The document as a file's bytes: the checkpoint and the whole log, its
-/// save point at its end. Allocated from `gpa`.
-pub fn fileBytes(h: *const History, gpa: Allocator) Allocator.Error![]u8 {
+/// What to write to drop the unsaved steps a file holds (the user chose
+/// not to save them): a segment putting the log back as saved, marked as
+/// the save. Null when the file holds none. The history itself is left as
+/// it is; hand the result to `wroteDiscard` once it is written.
+pub fn prepareDiscard(h: *const History, gpa: Allocator, who: Writer, now: i64) WriteError!?Write {
+    const f = h.file orelse return null;
+    if (!f.unsaved) return null;
+    const saved_len = h.savedInLog() orelse return error.SavedStateLost;
+    const log = h.log.items;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    try out.appendSlice(gpa, h.checkpoint);
-    const at = out.items.len;
-    const entries = try native.encodeValue(gpa, []const Entry, h.log.items);
-    defer gpa.free(entries);
-    try native.appendBlock(gpa, &out, segment_block, segment_version, entries);
-    const seg = out.items[at..];
-    const t = trailerBytes(.{ .segment_at = at, .segment_len = seg.len, .segment_crc = native.checksum(seg), .previous = 0, .save_point = h.log.items.len });
-    try native.appendBlock(gpa, &out, trailer_block, segment_version, &t);
-    return out.toOwnedSlice(gpa);
+    var at: ?u64 = null;
+    var t: @TypeOf(try appendSegment(gpa, &out, 0, 0, who, now, 0, &.{}, 0, true)) = undefined;
+    if (f.appendable) {
+        const first = @min(h.stable, f.entries, saved_len);
+        t = try appendSegment(gpa, &out, f.len, f.trailer_crc, who, now, first, log[first..saved_len], saved_len, true);
+        at = f.len;
+    } else {
+        try out.appendSlice(gpa, h.checkpoint);
+        t = try appendSegment(gpa, &out, 0, 0, who, now, 0, log[0..saved_len], saved_len, true);
+    }
+    const len = (at orelse 0) + out.items.len;
+    return .{
+        .bytes = try out.toOwnedSlice(gpa),
+        .at = at,
+        .next = .{ .len = len, .trailer_at = t.at, .trailer_crc = t.crc, .entries = saved_len },
+        .save = false,
+    };
 }
 
+/// Records that `w`, from `prepareDiscard`, was written.
+pub fn wroteDiscard(h: *History, w: *const Write) void {
+    h.file = w.next;
+    h.stable = @min(h.stable, w.next.entries);
+}
+
+/// Whether the log has changed since the file was last written.
+pub fn changedSinceWrite(h: *const History) bool {
+    const f = h.file orelse return h.log.items.len > 0;
+    return h.stable != h.log.items.len or f.entries != h.log.items.len;
+}
+
+/// Records that `w` was written.
+pub fn wrote(h: *History, w: *const Write) void {
+    h.file = w.next;
+    h.stable = h.log.items.len;
+    if (w.save) h.markSaved();
+}
+
+/// Whether the file's bytes are as this history last wrote or opened them:
+/// false when another run (or anything else) has written to it since.
+pub fn fileIsAsLeft(h: *const History, bytes: []const u8) bool {
+    const f = h.file orelse return false;
+    if (bytes.len != f.len) return false;
+    if (f.trailer_at == 0) return true;
+    const b = native.readBlock(bytes, @intCast(f.trailer_at)) catch return false;
+    return std.mem.eql(u8, &b.kind, &trailer_block) and b.end == bytes.len and native.checksum(b.payload) == f.trailer_crc;
+}
+
+/// The document as a whole file, saved: the checkpoint and the whole log.
+/// Allocated from `gpa`.
+pub fn fileBytes(h: *const History, gpa: Allocator, who: Writer, now: i64) WriteError![]u8 {
+    const w = try prepareWrite(h, gpa, who, now, .save, true);
+    return w.bytes;
+}
+
+/// Unsaved work found on opening: the segments after the last save.
+pub const Unsaved = struct {
+    /// Entries they hold.
+    entries: usize,
+    /// Who wrote the first of them, and when.
+    writer: [16]u8,
+    device: []const u8,
+    time: i64,
+};
+
 /// A document file opened: its model (the checkpoint with the log
-/// replayed), its history, and what had to be dropped.
+/// replayed), its history, and what had to be dropped or decided.
 pub const Opened = struct {
     model: Model,
     history: History,
     /// The end of the file was damaged and dropped: what it held is lost,
     /// everything before it is here.
     damaged: bool = false,
+    /// Steps after the last save, which the model includes. `discardUnsaved`
+    /// goes back to the save.
+    unsaved: ?Unsaved = null,
+    /// The log as saved.
+    saved_log: []const Entry = &.{},
+
+    /// Back to the document as last saved: the unsaved steps are dropped.
+    /// The file still holds them, so the next write is the whole file.
+    pub fn discardUnsaved(o: *Opened) Error!void {
+        if (o.unsaved == null) return;
+        const h = &o.history;
+        h.log.clearRetainingCapacity();
+        try h.log.appendSlice(h.gpa, o.saved_log);
+        h.redo.clearRetainingCapacity();
+        try h.rebuild(&o.model);
+        h.markSaved();
+        h.stable = 0;
+        if (h.file) |*f| f.appendable = false;
+        o.unsaved = null;
+    }
 };
 
 /// Opens a document file. The checkpoint must be intact; a damaged tail
@@ -457,41 +835,69 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
     }
     var h: History = .init(gpa);
     errdefer h.deinit();
+    const a = h.arena.allocator();
     h.checkpoint = try gpa.dupe(u8, bytes[0..i]);
     var damaged = false;
-    var pending: ?[]Entry = null;
+    var pending: ?Segment = null;
     var pending_at: usize = 0;
     var previous: u32 = 0;
+    var file: FileState = .{ .len = i, .appendable = false };
+    var saved_log: []const Entry = &.{};
+    var unsaved: ?Unsaved = null;
     while (i < bytes.len) {
         const b = native.readBlock(bytes, i) catch {
             damaged = true;
             break;
         };
         if (std.mem.eql(u8, &b.kind, &segment_block)) {
-            pending = native.decodeValue(h.arena.allocator(), []Entry, b.payload) catch {
-                damaged = true;
-                break;
-            };
+            pending = if (b.version < 2)
+                .{ .entries = native.decodeValue(a, []const Entry, b.payload) catch {
+                    damaged = true;
+                    break;
+                } }
+            else
+                native.decodeValue(a, Segment, b.payload) catch {
+                    damaged = true;
+                    break;
+                };
             pending_at = i;
         } else if (std.mem.eql(u8, &b.kind, &trailer_block)) {
-            const t = readTrailer(b.payload) orelse {
+            const t = readTrailer(b.version, b.payload) orelse {
                 damaged = true;
                 break;
             };
-            const seg_ok = pending != null and t.segment_at == pending_at and t.previous == previous and
-                t.segment_at + t.segment_len <= bytes.len and native.checksum(bytes[@intCast(t.segment_at)..@intCast(t.segment_at + t.segment_len)]) == t.segment_crc;
-            if (!seg_ok) {
+            const seg = pending orelse {
+                damaged = true;
+                break;
+            };
+            const fits = t.segment_at == pending_at and t.previous == previous and seg.first <= h.log.items.len and
+                t.log_len == seg.first + seg.entries.len and t.segment_at + t.segment_len <= bytes.len and
+                native.checksum(bytes[@intCast(t.segment_at)..@intCast(t.segment_at + t.segment_len)]) == t.segment_crc;
+            if (!fits) {
                 damaged = true;
                 break;
             }
-            try h.log.appendSlice(gpa, pending.?);
+            h.log.shrinkRetainingCapacity(@intCast(seg.first));
+            try h.log.appendSlice(gpa, seg.entries);
             pending = null;
             previous = native.checksum(b.payload);
+            if (t.saved) {
+                saved_log = try a.dupe(Entry, h.log.items);
+                unsaved = null;
+            } else if (unsaved) |*u| {
+                u.entries += seg.entries.len;
+            } else {
+                unsaved = .{ .entries = seg.entries.len, .writer = seg.writer, .device = seg.device, .time = seg.time };
+            }
+            file = .{ .len = b.end, .trailer_at = i, .trailer_crc = previous, .appendable = true };
         }
         i = b.end;
     }
     // A segment with no trailer after it never finished being written.
     if (pending != null) damaged = true;
+    if (damaged) file.appendable = false;
+    file.entries = h.log.items.len;
+    file.unsaved = unsaved != null;
     var m = try native.decode(gpa, h.checkpoint);
     errdefer m.deinit();
     var max_step: u32 = 0;
@@ -501,8 +907,24 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
     }
     m.revision = 1;
     h.next_step = max_step + 1;
-    h.markSaved();
-    return .{ .model = m, .history = h, .damaged = damaged };
+    h.saved = .{ .len = saved_log.len, .last = if (saved_log.len > 0) saved_log[saved_log.len - 1].step else 0 };
+    h.file = file;
+    h.stable = h.log.items.len;
+    return .{ .model = m, .history = h, .damaged = damaged, .unsaved = unsaved, .saved_log = saved_log };
+}
+
+const test_writer: Writer = .{ .id = @splat(7), .device = "test", .tool = "test" };
+const other_writer: Writer = .{ .id = @splat(9), .device = "elsewhere", .tool = "test" };
+
+/// Writes `w` into `file` as an app would: appended, or the whole file.
+fn testWrite(gpa: Allocator, file: *std.ArrayList(u8), w: *const Write) !void {
+    if (w.at) |at| {
+        try testing.expectEqual(file.items.len, at);
+        try file.appendSlice(gpa, w.bytes);
+    } else {
+        file.clearRetainingCapacity();
+        try file.appendSlice(gpa, w.bytes);
+    }
 }
 
 test "a saved document reopens with its history: undo reaches back past the save" {
@@ -517,9 +939,10 @@ test "a saved document reopens with its history: undo reaches back past the save
     _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "first" } });
     try h.do(&m, .setLabelContent, .{ c, 0, "second" });
     try testing.expect(h.isDirty());
-    const bytes = try fileBytes(&h, gpa);
-    defer gpa.free(bytes);
-    h.markSaved();
+    var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
+    defer w.deinit(gpa);
+    try testing.expectEqual(null, w.at);
+    wrote(&h, &w);
     try testing.expect(!h.isDirty());
     // Undoing below the save point is unsaved; redoing back to it is not.
     _ = try h.undo(&m);
@@ -527,10 +950,11 @@ test "a saved document reopens with its history: undo reaches back past the save
     _ = try h.redoStep(&m);
     try testing.expect(!h.isDirty());
 
-    var o = try openFile(gpa, bytes);
+    var o = try openFile(gpa, w.bytes);
     defer o.model.deinit();
     defer o.history.deinit();
     try testing.expect(!o.damaged);
+    try testing.expectEqual(null, o.unsaved);
     try testing.expect(!o.history.isDirty());
     try testing.expectEqualStrings("second", o.model.panels.items[c].labels.items[0].content);
     // Undo after reopening reaches back past the save, to the checkpoint.
@@ -553,17 +977,175 @@ test "a torn end of the file is dropped, and the checkpoint still opens" {
     defer h.deinit();
     try h.reset(&m);
     _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "lost" } });
-    const bytes = try fileBytes(&h, gpa);
+    const bytes = try fileBytes(&h, gpa, test_writer, 1);
     defer gpa.free(bytes);
     // Cut in the trailer: the segment never counted.
     var o = try openFile(gpa, bytes[0 .. bytes.len - 10]);
     defer o.model.deinit();
     defer o.history.deinit();
     try testing.expect(o.damaged);
+    try testing.expect(!o.history.file.?.appendable);
     try testing.expectEqual(0, o.model.panels.items[c].labels.items.len);
     // A damaged checkpoint cannot open at all.
     const bad = try gpa.dupe(u8, bytes);
     defer gpa.free(bad);
     bad[native.magic.len + 20] ^= 1;
     try testing.expectError(error.BadChecksum, openFile(gpa, bad));
+}
+
+test "autosaves append unsaved steps; undo then edit appends a segment that replaces the log's tail" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    var file: std.ArrayList(u8) = .empty;
+    defer file.deinit(gpa);
+
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "a" } });
+    {
+        var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
+        defer w.deinit(gpa);
+        try testWrite(gpa, &file, &w);
+        wrote(&h, &w);
+    }
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 3, .y = 4 }, .content = "b" } });
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 5, .y = 6 }, .content = "c" } });
+    {
+        var w = try prepareWrite(&h, gpa, test_writer, 2, .autosave, false);
+        defer w.deinit(gpa);
+        try testing.expect(w.at != null);
+        try testWrite(gpa, &file, &w);
+        wrote(&h, &w);
+    }
+    try testing.expect(h.isDirty());
+    try testing.expect(fileIsAsLeft(&h, file.items));
+    // Undo "c" and add "d" instead: the next segment starts at "c".
+    _ = try h.undo(&m);
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 7, .y = 8 }, .content = "d" } });
+    {
+        var w = try prepareWrite(&h, gpa, test_writer, 3, .autosave, false);
+        defer w.deinit(gpa);
+        try testing.expect(w.at != null);
+        try testWrite(gpa, &file, &w);
+        wrote(&h, &w);
+    }
+
+    // Opened elsewhere (a crash, say): the unsaved steps come back, and can
+    // be discarded back to the save.
+    var o = try openFile(gpa, file.items);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    try testing.expect(!o.damaged);
+    const labels = o.model.panels.items[c].labels.items;
+    try testing.expectEqual(3, labels.len);
+    try testing.expectEqualStrings("d", labels[2].content);
+    try testing.expect(o.unsaved != null);
+    try testing.expectEqualStrings("test", o.unsaved.?.device);
+    try testing.expect(o.history.isDirty());
+    try o.discardUnsaved();
+    try testing.expectEqual(1, o.model.panels.items[c].labels.items.len);
+    try testing.expect(!o.history.isDirty());
+    // The file still holds the discarded steps: the next write is whole.
+    var w = try prepareWrite(&o.history, gpa, other_writer, 4, .autosave, false);
+    defer w.deinit(gpa);
+    try testing.expectEqual(null, w.at);
+}
+
+test "another writer's append is noticed before writing" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    var file: std.ArrayList(u8) = .empty;
+    defer file.deinit(gpa);
+    var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
+    try testWrite(gpa, &file, &w);
+    wrote(&h, &w);
+    w.deinit(gpa);
+    try testing.expect(fileIsAsLeft(&h, file.items));
+
+    // The other run opens it, edits and saves.
+    var o = try openFile(gpa, file.items);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    _ = try o.history.do(&o.model, .addLabel, .{ c, .{ .at = .{ .x = 0, .y = 0 }, .content = "theirs" } });
+    var w2 = try prepareWrite(&o.history, gpa, other_writer, 2, .save, false);
+    defer w2.deinit(gpa);
+    try testing.expect(w2.at != null);
+    try testWrite(gpa, &file, &w2);
+    try testing.expect(!fileIsAsLeft(&h, file.items));
+}
+
+test "past the limits the oldest steps fold into the checkpoint" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    h.limits = .{ .steps = 4 };
+    try h.reset(&m);
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 0, .y = 0 }, .content = "0" } });
+    h.markSaved();
+    var buf: [4]u8 = undefined;
+    for (1..10) |k| try h.do(&m, .setLabelContent, .{ c, 0, std.fmt.bufPrint(&buf, "{d}", .{k}) catch unreachable });
+    try testing.expect(h.stepCount() <= 4);
+    // The save was folded away: still unsaved, whatever is undone.
+    try testing.expect(h.saved_lost);
+    // Undo goes back as far as is kept, and no further.
+    var undone: usize = 0;
+    while (try h.undo(&m)) undone += 1;
+    try testing.expectEqual(h.redo.items.len, undone);
+    try testing.expect(h.isDirty());
+    const first = m.panels.items[c].labels.items[0].content;
+    try testing.expect(!std.mem.eql(u8, first, "0"));
+    // Redo all: the model is as it was.
+    while (try h.redoStep(&m)) {}
+    try testing.expectEqualStrings("9", m.panels.items[c].labels.items[0].content);
+    // Compacting folds the rest.
+    try h.compact();
+    try testing.expectEqual(0, h.log.items.len);
+    var back = try native.decode(gpa, h.checkpoint);
+    defer back.deinit();
+    try testing.expectEqualStrings("9", back.panels.items[c].labels.items[0].content);
+}
+
+test "not saving drops the autosaved steps from the file" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    var file: std.ArrayList(u8) = .empty;
+    defer file.deinit(gpa);
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "kept" } });
+    var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
+    try testWrite(gpa, &file, &w);
+    wrote(&h, &w);
+    w.deinit(gpa);
+    try testing.expectEqual(null, try prepareDiscard(&h, gpa, test_writer, 2));
+    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 3, .y = 4 }, .content = "dropped" } });
+    w = try prepareWrite(&h, gpa, test_writer, 2, .autosave, false);
+    try testWrite(gpa, &file, &w);
+    wrote(&h, &w);
+    w.deinit(gpa);
+    try testing.expect(!changedSinceWrite(&h));
+    var d = (try prepareDiscard(&h, gpa, test_writer, 3)).?;
+    defer d.deinit(gpa);
+    try testWrite(gpa, &file, &d);
+    wroteDiscard(&h, &d);
+    try testing.expect(fileIsAsLeft(&h, file.items));
+    var o = try openFile(gpa, file.items);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    try testing.expectEqual(null, o.unsaved);
+    try testing.expectEqual(1, o.model.panels.items[c].labels.items.len);
 }
