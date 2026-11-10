@@ -432,7 +432,98 @@ pub const Space = struct {
     groups: std.ArrayList(Group) = .empty,
     /// Views of other spaces placed in this one.
     views: std.ArrayList(SpaceView) = .empty,
+    /// Its layers, bottom first. There is always one at least.
+    layers: std.ArrayList(Layer) = .empty,
+    /// The layer an object with no layer of its own (`.none`) is on; the
+    /// space's loose objects are on it.
+    base_layer: ObjectId = .none,
+    /// Raster images placed in it.
+    images: std.ArrayList(Image) = .empty,
+
+    /// The index of layer `id` (`.none` meaning the base layer).
+    pub fn layerIndex(sp: Space, id: ObjectId) ?usize {
+        const want = if (id == .none) sp.base_layer else id;
+        for (sp.layers.items, 0..) |l, i| if (l.id == want) return i;
+        return null;
+    }
 };
+
+/// How a layer's content combines with what lies under it.
+pub const Blend = enum { normal, multiply, screen };
+
+/// What makes a layer's content: a process, or none (a guide or reference
+/// layer, shown but not made).
+pub const Output = enum {
+    none,
+    print,
+    engrave,
+    cut,
+    mill,
+
+    /// Whether opacity and blending mean anything to it: only to what is
+    /// seen (the screen) and printed.
+    pub fn blends(o: Output) bool {
+        return o == .none or o == .print;
+    }
+};
+
+/// A layer of a space: what it shows, whether it can be changed, how it
+/// is composited, and what makes it.
+pub const Layer = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    visible: bool = true,
+    locked: bool = false,
+    /// 0 (clear) to 1.
+    opacity: f64 = 1,
+    blend: Blend = .normal,
+    output: Output = .print,
+};
+
+/// A raster image placed in a space at a physical size. Its file (PNG or
+/// JPEG) is stored in the document.
+pub const Image = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    layer: ObjectId = .none,
+    /// Its bottom-left corner, mm in the space.
+    at: geom.Point,
+    /// Its size, mm.
+    w: f64,
+    h: f64,
+    /// Its pixels.
+    px_w: u32,
+    px_h: u32,
+    /// The image file's bytes.
+    data: []const u8,
+
+    pub fn box(i: Image) geom.Box {
+        return .{ .x0 = i.at.x, .y0 = i.at.y, .x1 = i.at.x + i.w, .y1 = i.at.y + i.h };
+    }
+
+    /// Its effective resolution, pixels per inch across.
+    pub fn dpi(i: Image) f64 {
+        return @as(f64, @floatFromInt(i.px_w)) / (i.w / 25.4);
+    }
+};
+
+/// A layer the checks flag, and why.
+pub const LayerIssue = struct {
+    space: usize,
+    layer: usize,
+    kind: enum {
+        /// Opacity or blending on a layer whose process ignores them
+        /// (engrave, cut, mill).
+        blend_ignored,
+        /// An image printed at under `min_print_dpi`.
+        low_resolution,
+    },
+    /// For `low_resolution`: the image, by index in the space.
+    image: ?usize = null,
+};
+
+/// The least resolution an image is printed at without a flag.
+pub const min_print_dpi = 150.0;
 
 /// A view: a live, read-only window onto another space (its source),
 /// placed in this one at a scale. What changes in the source shows in the
@@ -451,6 +542,8 @@ pub const SpaceView = struct {
     /// The part of the source it shows, in the source's coordinates; null
     /// shows the source's boundary, or all its content when it has none.
     window: ?geom.Box = null,
+    /// The layer of the host it is on (`.none`: the base layer).
+    layer: ObjectId = .none,
 
     /// Where source point `q` lands in the host, given the window's corner
     /// `corner`.
@@ -506,6 +599,9 @@ pub const Panel = struct {
     /// The closed path its outline was made from (Make panel), in the
     /// panel frame, its box from (0, 0) to (w, h); none for a rectangle.
     edge: ?PanelArt = null,
+    /// The layer of its space it is on (`.none`: the base layer). A
+    /// space's own panel is always on the base layer.
+    layer: ObjectId = .none,
 
     /// The panel's outline on the worksheet.
     pub fn box(p: Panel) geom.Box {
@@ -783,6 +879,7 @@ pub const Model = struct {
         m.has_sheet = false;
         const root = try m.addRoot("Canvas", 0);
         try m.spaces.append(m.a(), .{ .name = "Canvas", .root = root });
+        try m.addBaseLayer(0);
         return root;
     }
 
@@ -815,6 +912,7 @@ pub const Model = struct {
         const owned = try m.a().dupe(u8, name);
         const root = try m.addRoot(owned, sid);
         try m.spaces.append(m.a(), .{ .name = owned, .root = root, .bound = edge });
+        try m.addBaseLayer(sid);
         return sid;
     }
 
@@ -1087,6 +1185,8 @@ pub const Model = struct {
             .panel => |pi| {
                 const target = if (copy) try m.copyPanel(pi) else pi;
                 m.panels.items[target].space = dest;
+                // Layers belong to their space: it lands on dest's base layer.
+                m.panels.items[target].layer = .none;
                 return m.panels.items[target].id;
             },
         }
@@ -1333,6 +1433,156 @@ pub const Model = struct {
         if (index >= list.len) return error.NoSuchItem;
         list[index].wrap_tracks = on;
         m.revision += 1;
+    }
+
+    fn addBaseLayer(m: *Model, space: usize) Error!void {
+        const id = m.newId();
+        try m.spaces.items[space].layers.append(m.a(), .{ .id = id, .name = "Layer 1" });
+        m.spaces.items[space].base_layer = id;
+    }
+
+    /// Adds a layer at the top of space `space`'s stack; returns its index.
+    pub fn addLayer(m: *Model, space: usize, name: []const u8) Error!usize {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        const list = &m.spaces.items[space].layers;
+        try list.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name) });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// The first "Layer N" not yet used in space `space`.
+    pub fn nextLayerName(m: *const Model, space: usize, buf: []u8) []const u8 {
+        var n: usize = m.spaces.items[space].layers.items.len + 1;
+        while (true) : (n += 1) {
+            const name = std.fmt.bufPrint(buf, "Layer {d}", .{n}) catch return "Layer";
+            for (m.spaces.items[space].layers.items) |l| {
+                if (std.mem.eql(u8, l.name, name)) break;
+            } else return name;
+        }
+    }
+
+    /// Changes a layer's settings (not its ID).
+    pub fn setLayer(m: *Model, space: usize, index: usize, layer: Layer) Error!void {
+        const list = m.spaces.items[space].layers.items;
+        if (index >= list.len) return error.NoSuchLayer;
+        if (!(layer.opacity >= 0 and layer.opacity <= 1)) return error.BadSize;
+        var l = layer;
+        l.id = list[index].id;
+        if (!std.mem.eql(u8, l.name, list[index].name)) l.name = try m.a().dupe(u8, layer.name);
+        list[index] = l;
+        m.revision += 1;
+    }
+
+    /// Moves a layer one place up (toward the top) or down the stack;
+    /// returns its new index.
+    pub fn moveLayer(m: *Model, space: usize, index: usize, up: bool) Error!usize {
+        const list = m.spaces.items[space].layers.items;
+        if (index >= list.len) return error.NoSuchLayer;
+        const to = if (up) index + 1 else if (index == 0) return index else index - 1;
+        if (to >= list.len) return index;
+        std.mem.swap(Layer, &list[index], &list[to]);
+        m.revision += 1;
+        return to;
+    }
+
+    /// Whether anything is on layer `index` of space `space`.
+    pub fn layerUsed(m: *const Model, space: usize, index: usize) bool {
+        const sp = m.spaces.items[space];
+        const id = sp.layers.items[index].id;
+        const base = id == sp.base_layer;
+        for (m.panels.items, 0..) |p, pi| {
+            if (p.space != space) continue;
+            if (pi == sp.root) {
+                if (base and (p.labels.items.len > 0 or p.regions.items.len > 0 or p.art.items.len > 0)) return true;
+                continue;
+            }
+            if (p.layer == id or (p.layer == .none and base)) return true;
+        }
+        for (sp.views.items) |v| if (v.layer == id or (v.layer == .none and base)) return true;
+        for (sp.images.items) |im| if (im.layer == id or (im.layer == .none and base)) return true;
+        return false;
+    }
+
+    /// Removes an empty layer that is not the base layer.
+    pub fn removeLayer(m: *Model, space: usize, index: usize) Error!void {
+        const sp = &m.spaces.items[space];
+        if (index >= sp.layers.items.len) return error.NoSuchLayer;
+        if (sp.layers.items[index].id == sp.base_layer or m.layerUsed(space, index)) return error.NoRoom;
+        _ = sp.layers.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// Puts panel `panel` on layer `layer` of its space.
+    pub fn setPanelLayer(m: *Model, panel: usize, layer: ObjectId) Error!void {
+        const p = &m.panels.items[panel];
+        if (p.unbounded) return error.NoSuchItem;
+        if (m.spaces.items[p.space].layerIndex(layer) == null) return error.NoSuchLayer;
+        p.layer = layer;
+        m.revision += 1;
+    }
+
+    /// Places image file `data` (`px_w` × `px_h` pixels) in space `space`,
+    /// its corner at `at`, `w` mm wide (its height keeps its proportions),
+    /// on layer `layer`. The bytes are copied into the document. Returns
+    /// its index among the space's images.
+    pub fn addImage(m: *Model, space: usize, name: []const u8, data: []const u8, px_w: u32, px_h: u32, at: geom.Point, w: f64, layer: ObjectId) Error!usize {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        if (px_w == 0 or px_h == 0 or !(w > 0)) return error.BadSize;
+        if (m.spaces.items[space].layerIndex(layer) == null) return error.NoSuchLayer;
+        const h = w * @as(f64, @floatFromInt(px_h)) / @as(f64, @floatFromInt(px_w));
+        const list = &m.spaces.items[space].images;
+        try list.append(m.a(), .{
+            .id = m.newId(),
+            .name = try m.a().dupe(u8, name),
+            .layer = layer,
+            .at = at,
+            .w = w,
+            .h = h,
+            .px_w = px_w,
+            .px_h = px_h,
+            .data = try m.a().dupe(u8, data),
+        });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// Sets an image's place, width (its height follows) and layer.
+    pub fn setImage(m: *Model, space: usize, index: usize, at: geom.Point, w: f64, layer: ObjectId) Error!void {
+        const list = m.spaces.items[space].images.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!(w > 0)) return error.BadSize;
+        if (m.spaces.items[space].layerIndex(layer) == null) return error.NoSuchLayer;
+        const im = &list[index];
+        im.at = at;
+        im.h = w * @as(f64, @floatFromInt(im.px_h)) / @as(f64, @floatFromInt(im.px_w));
+        im.w = w;
+        im.layer = layer;
+        m.revision += 1;
+    }
+
+    pub fn removeImage(m: *Model, space: usize, index: usize) void {
+        _ = m.spaces.items[space].images.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// The layer checks: opacity or blending on a layer whose process
+    /// ignores them, where it holds something; images printed under
+    /// `min_print_dpi`. Allocated from `gpa`.
+    pub fn layerIssues(m: *const Model, gpa: Allocator) Allocator.Error![]LayerIssue {
+        var out: std.ArrayList(LayerIssue) = .empty;
+        errdefer out.deinit(gpa);
+        for (m.spaces.items, 0..) |sp, si| {
+            for (sp.layers.items, 0..) |l, li| {
+                if (!l.output.blends() and (l.opacity < 1 or l.blend != .normal) and m.layerUsed(si, li))
+                    try out.append(gpa, .{ .space = si, .layer = li, .kind = .blend_ignored });
+            }
+            for (sp.images.items, 0..) |im, ii| {
+                const li = sp.layerIndex(im.layer) orelse continue;
+                if (sp.layers.items[li].output == .print and im.dpi() < min_print_dpi)
+                    try out.append(gpa, .{ .space = si, .layer = li, .kind = .low_resolution, .image = ii });
+            }
+        }
+        return out.toOwnedSlice(gpa);
     }
 
     /// Places a view of space `source` in space `host`, at `at` and
@@ -2680,4 +2930,66 @@ test "a view shows another space live, at a scale, and views that would show the
     try std.testing.expectEqual(0.25, m.spaces.items[0].views.items[v].scale);
     m.removeView(0, v);
     try std.testing.expectEqual(1, m.spaces.items[0].views.items.len);
+}
+
+test "layers: a background image under a panel, and blending on an engrave layer flagged" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const sp = &m.spaces.items[0];
+    // Every space starts with one layer, its base.
+    try std.testing.expectEqual(1, sp.layers.items.len);
+    try std.testing.expectEqual(sp.base_layer, sp.layers.items[0].id);
+    // A background layer, moved under the base layer, half opaque.
+    var buf: [32]u8 = undefined;
+    const bg = try m.addLayer(0, m.nextLayerName(0, &buf));
+    try std.testing.expectEqualStrings("Layer 2", m.spaces.items[0].layers.items[bg].name);
+    const at = try m.moveLayer(0, bg, false);
+    try std.testing.expectEqual(0, at);
+    var l = m.spaces.items[0].layers.items[0];
+    l.name = "Background";
+    l.opacity = 0.5;
+    try m.setLayer(0, 0, l);
+    const bg_id = m.spaces.items[0].layers.items[0].id;
+    // An image 400 × 200 px placed 100 mm wide: 50 mm tall, 101.6 dpi.
+    const im = try m.addImage(0, "photo.png", "not decoded here", 400, 200, .{ .x = 0, .y = 0 }, 100, bg_id);
+    const image = m.spaces.items[0].images.items[im];
+    try std.testing.expectEqual(50, image.h);
+    try std.testing.expectApproxEqAbs(101.6, image.dpi(), 1e-9);
+    // A panel on the base layer, above it.
+    const p = try m.placePanel(.{ .name = "Front", .origin = .{ .x = 10, .y = 10 }, .w = 60, .h = 30 });
+    try std.testing.expectEqual(1, m.spaces.items[0].layerIndex(m.panels.items[p].layer).?);
+    // The image prints under 150 dpi: flagged. Blending on a print layer
+    // is not.
+    {
+        const issues = try m.layerIssues(std.testing.allocator);
+        defer std.testing.allocator.free(issues);
+        try std.testing.expectEqual(1, issues.len);
+        try std.testing.expectEqual(.low_resolution, issues[0].kind);
+    }
+    // Set to engrave, the half-opaque layer is flagged; resolution is not
+    // checked for engraving here.
+    l = m.spaces.items[0].layers.items[0];
+    l.output = .engrave;
+    l.blend = .multiply;
+    try m.setLayer(0, 0, l);
+    {
+        const issues = try m.layerIssues(std.testing.allocator);
+        defer std.testing.allocator.free(issues);
+        try std.testing.expectEqual(1, issues.len);
+        try std.testing.expectEqual(.blend_ignored, issues[0].kind);
+        try std.testing.expectEqual(0, issues[0].layer);
+    }
+    // A layer in use cannot be removed, nor the base layer; an empty one
+    // can.
+    try std.testing.expectError(error.NoRoom, m.removeLayer(0, 0));
+    try std.testing.expectError(error.NoRoom, m.removeLayer(0, 1));
+    m.removeImage(0, im);
+    try m.removeLayer(0, 0);
+    try std.testing.expectEqual(1, m.spaces.items[0].layers.items.len);
+    // A frame has its own base layer; a panel moved there lands on it.
+    const f = try m.addFrame("F", null);
+    try std.testing.expectEqual(1, m.spaces.items[f].layers.items.len);
+    _ = try m.moveToSpace(&.{m.panels.items[p].id}, f);
+    try std.testing.expectEqual(.none, m.panels.items[p].layer);
 }

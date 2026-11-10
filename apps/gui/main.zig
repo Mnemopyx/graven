@@ -85,6 +85,8 @@ const State = struct {
     intrusions: []layout.drc.MarginIntrusion = &.{},
     /// Panels out of compliance, as sheet and margin changes can leave them.
     panel_issues: []layout.drc.PanelIssue = &.{},
+    /// Layers the checks flag (see `Model.layerIssues`).
+    layer_issues: []layout.model.LayerIssue = &.{},
     /// The canvas tool, and a rectangle being dragged out with it.
     tool: Tool = .select,
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
@@ -165,6 +167,10 @@ const Context = union(enum) {
     selection,
     /// A view of another space, placed in space `space`.
     view: struct { space: usize, index: usize },
+    /// A layer of a space.
+    layer: struct { space: usize, index: usize },
+    /// A raster image placed in a space.
+    image: struct { space: usize, index: usize },
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -192,6 +198,8 @@ const Context = union(enum) {
             .group => "Group",
             .selection => "Selection",
             .view => "View",
+            .layer => "Layer",
+            .image => "Image",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -443,6 +451,14 @@ fn followContext() void {
         },
         .view => |v| {
             shown_space = v.space;
+            return;
+        },
+        .layer => |l| {
+            shown_space = l.space;
+            return;
+        },
+        .image => |im| {
+            shown_space = im.space;
             return;
         },
         else => null,
@@ -735,6 +751,7 @@ fn update() !void {
     }
     state.intrusions = try layout.drc.marginIntrusions(state.gpa, &state.model, state.placed.items);
     state.panel_issues = try layout.drc.panelIssues(state.gpa, &state.model);
+    state.layer_issues = try state.model.layerIssues(state.gpa);
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
@@ -756,6 +773,8 @@ fn clearPlaced() void {
     state.intrusions = &.{};
     state.gpa.free(state.panel_issues);
     state.panel_issues = &.{};
+    state.gpa.free(state.layer_issues);
+    state.layer_issues = &.{};
     for (state.placed.items) |*p| p.deinit();
     state.placed.clearRetainingCapacity();
     state.placed_rev = std.math.maxInt(u64);
@@ -1238,6 +1257,7 @@ fn overlays() !void {
     }
     if (canvas_prompt) newCanvasPrompt();
     if (export_prompt) exportPrompt();
+    if (image_prompt) imagePrompt();
 }
 
 /// The bottom area: the expression line, then the status line.
@@ -1742,6 +1762,13 @@ fn menu() ?dvui.App.Result {
             newCanvas();
             m.close();
         }
+        if (dvui.menuItemLabel(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            if (!canvas_prompt and openCanvas()) {
+                image_prompt = true;
+                image_prompt_new = true;
+            }
+        }
         if (dvui.menuItemLabel(@src(), "Export SVG…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             exportSvg();
@@ -1829,6 +1856,10 @@ fn worksheetTree() void {
                 if (state.model.parentGroup(g.id) == null) groupTree(g.id, 2);
             }
             for (sp.views.items, 0..) |sv, vi| _ = treeNode(.{ .view = .{ .space = si, .index = vi } }, sv.name, 2, false, false);
+            for (sp.images.items, 0..) |im, ii| {
+                var ib: [96]u8 = undefined;
+                _ = treeNode(.{ .image = .{ .space = si, .index = ii } }, std.fmt.bufPrint(&ib, "Image {s}", .{im.name}) catch im.name, 2, false, false);
+            }
             panelChildren(sp.root, 2);
             for (state.model.panels.items, 0..) |panel, pi| {
                 if (pi == sp.root or panel.space != si) continue;
@@ -1977,7 +2008,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .label, .art, .group, .selection, .view, .prototypes => false,
+        .file, .worksheet, .panel, .label, .art, .group, .selection, .view, .layer, .image, .prototypes => false,
     };
 }
 
@@ -1992,6 +2023,7 @@ fn contextExtents() geom.Box {
             const b = viewBox(sv);
             if (!b.isEmpty()) return withNameRoom(b);
         },
+        .image => |im| if (imageAt(im.space, im.index)) |image| return image.box(),
         else => {},
     }
     var b: geom.Box = .empty;
@@ -2144,8 +2176,7 @@ fn canvas() void {
     if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
 
     if (open) drawFrameBound(area);
-    if (open) drawViews(area, shown_space, 0);
-    drawSpacePanels(area, null);
+    if (open) drawSpace(area, shown_space, 0) else drawSpacePanels(area, null, null);
 
     drawPicked(area);
     drawPolygonDraft(area);
@@ -2285,6 +2316,7 @@ fn frameProperties(space: usize) !void {
             state.model.setFrameBound(space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin }) catch {};
         }
     }
+    layersList(space);
     placeViewButtons(space);
 }
 
@@ -2522,6 +2554,7 @@ fn canvasProperties(pi: usize) !void {
         propText("Measures", "{s}, from {s}", .{ @tagName(measurement), from }, 9);
     }
     try propFont("Legend font", 7);
+    layersList(0);
     placeViewButtons(0);
 }
 
@@ -3137,12 +3170,13 @@ fn drawRulers(area: dvui.Rect.Physical) void {
 
 /// The panels of `space` (or, when null, of the shown space), with their
 /// outlines and content, as the view maps them.
-fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize) void {
+fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model.ObjectId) void {
     const px = dvui.windowNaturalScale();
     for (0..state.model.panels.items.len) |pi| {
         if (space) |sp| {
             if (state.model.panels.items[pi].space != sp) continue;
         } else if (!shownPanel(pi)) continue;
+        if (layer) |l| if (panelLayer(pi) != l) continue;
         // A space's own panel has no outline: only its content.
         if (state.model.panels.items[pi].unbounded) {
             if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
@@ -3170,6 +3204,380 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize) void {
         }
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
+}
+
+// Layers and images ---------------------------------------------------------
+//
+// Each space draws its layers bottom first: a hidden layer is skipped; the
+// rest are drawn at their opacity, images with their blend mode (vector
+// content of a blended layer is drawn normally for now). Locked and hidden
+// layers' objects cannot be picked. New panels and images go on the active
+// layer: the last one chosen in the space, else its base layer.
+
+/// The layer last chosen; new objects in its space go on it.
+var active_layer: layout.model.ObjectId = .none;
+
+/// The layer a panel is on, resolved (a space's own panel is on its base
+/// layer).
+fn panelLayer(pi: usize) layout.model.ObjectId {
+    const p = state.model.panels.items[pi];
+    if (state.model.spaces.items.len == 0) return .none;
+    const sp = state.model.spaces.items[p.space];
+    return if (p.unbounded or p.layer == .none) sp.base_layer else p.layer;
+}
+
+/// Whether what is on layer `id` of space `space` can be picked: the layer
+/// is shown and not locked.
+fn layerOpen(space: usize, id: layout.model.ObjectId) bool {
+    if (space >= state.model.spaces.items.len) return true;
+    const sp = state.model.spaces.items[space];
+    const li = sp.layerIndex(id) orelse return true;
+    const l = sp.layers.items[li];
+    return l.visible and !l.locked;
+}
+
+/// The layer new objects in the shown space go on.
+fn newObjectLayer() layout.model.ObjectId {
+    if (shown_space >= state.model.spaces.items.len) return .none;
+    const sp = state.model.spaces.items[shown_space];
+    return if (sp.layerIndex(active_layer) != null and active_layer != .none) active_layer else sp.base_layer;
+}
+
+fn imageAt(space: usize, index: usize) ?layout.model.Image {
+    if (space >= state.model.spaces.items.len) return null;
+    const list = state.model.spaces.items[space].images.items;
+    return if (index < list.len) list[index] else null;
+}
+
+/// Space `space`'s layers, bottom first, each at its opacity: its images,
+/// views and panels on that layer.
+fn drawSpace(area: dvui.Rect.Physical, space: usize, depth: usize) void {
+    if (space >= state.model.spaces.items.len) return;
+    for (state.model.spaces.items[space].layers.items) |l| {
+        if (!l.visible) continue;
+        const prev = dvui.alpha(@floatCast(l.opacity));
+        defer dvui.alphaSet(prev);
+        drawImages(area, space, l.id, l.blend);
+        drawViews(area, space, depth, l.id);
+        drawSpacePanels(area, space, l.id);
+    }
+}
+
+/// The SDL blend mode for a layer's blend, on premultiplied colour.
+fn sdlBlend(b: layout.model.Blend) dvui.backend.c.SDL_BlendMode {
+    const c = dvui.backend.c;
+    return switch (b) {
+        .normal => c.SDL_ComposeCustomBlendMode(c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD, c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD),
+        // src·dst + dst·(1 − src alpha)
+        .multiply => c.SDL_ComposeCustomBlendMode(c.SDL_BLENDFACTOR_DST_COLOR, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD, c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD),
+        // src + dst·(1 − src)
+        .screen => c.SDL_ComposeCustomBlendMode(c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_COLOR, c.SDL_BLENDOPERATION_ADD, c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD),
+    };
+}
+
+/// The images of space `space` on layer `layer`, at their physical size,
+/// blended as the layer says.
+fn drawImages(area: dvui.Rect.Physical, space: usize, layer: layout.model.ObjectId, blend: layout.model.Blend) void {
+    const sp = state.model.spaces.items[space];
+    const px = dvui.windowNaturalScale();
+    for (sp.images.items, 0..) |im, ii| {
+        if ((if (im.layer == .none) sp.base_layer else im.layer) != layer) continue;
+        const r = state.view.rect(area, im.box());
+        const src: dvui.ImageSource = .{ .imageFile = .{ .bytes = im.data, .name = im.name } };
+        const tex = src.getTexture() catch {
+            r.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.overflow } });
+            continue;
+        };
+        _ = dvui.backend.c.SDL_SetTextureBlendMode(@ptrCast(@alignCast(tex.ptr)), sdlBlend(blend));
+        // The layer's opacity in the image's own colour: drawing may be
+        // replayed after the current alpha is back to 1.
+        const a = dvui.currentWindow().alpha;
+        dvui.alphaSet(1);
+        dvui.renderTexture(tex, .{ .r = r, .s = px }, .{ .colormod = (dvui.Color{ .r = 255, .g = 255, .b = 255 }).opacity(a) }) catch {};
+        dvui.alphaSet(a);
+        const sel = switch (state.context) {
+            .image => |c| c.space == space and c.index == ii,
+            else => false,
+        };
+        if (sel) marchingBox(area, im.box(), colors.select, 2 * px);
+    }
+}
+
+/// The top-most image of the shown space under `at` on an open layer.
+fn imageUnder(at: geom.Point) ?Context {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    const sp = state.model.spaces.items[shown_space];
+    var hit: ?Context = null;
+    var hit_layer: usize = 0;
+    for (sp.images.items, 0..) |im, ii| {
+        if (!contains(im.box(), at) or !layerOpen(shown_space, im.layer)) continue;
+        const li = sp.layerIndex(im.layer) orelse 0;
+        if (hit == null or li >= hit_layer) {
+            hit = .{ .image = .{ .space = shown_space, .index = ii } };
+            hit_layer = li;
+        }
+    }
+    return hit;
+}
+
+/// The layer flags of layer `li` of space `space`, as text lines.
+fn layerFlags(space: usize, li: usize, n: usize) void {
+    for (state.layer_issues) |iss| {
+        if (iss.space != space or iss.layer != li) continue;
+        const sp = state.model.spaces.items[space];
+        const l = sp.layers.items[li];
+        var buf: [160]u8 = undefined;
+        const text = switch (iss.kind) {
+            .blend_ignored => std.fmt.bufPrint(&buf, "Opacity and blending mean nothing to {s}: what is made ignores them.", .{@tagName(l.output)}) catch "",
+            .low_resolution => std.fmt.bufPrint(&buf, "{s} prints at {d:.0} dpi, under {d:.0}.", .{ sp.images.items[iss.image.?].name, sp.images.items[iss.image.?].dpi(), layout.model.min_print_dpi }) catch "",
+        };
+        // Wrapped: a flag is read in full.
+        var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n + 100 * @as(usize, @intFromEnum(iss.kind)) + (iss.image orelse 0), .expand = .horizontal, .background = false, .margin = .{ .y = 4 } });
+        tl.addText(text, .{ .color_text = .{ .color = colors.overflow } });
+        tl.deinit();
+    }
+}
+
+/// A space's layers, top first, for its properties: each one shown or
+/// hidden, locked or not, and opened by its name; then Add layer.
+fn layersList(space: usize) void {
+    heading("{s}", .{"Layers"}, 700);
+    const sp = state.model.spaces.items[space];
+    const n = sp.layers.items.len;
+    for (0..n) |k| {
+        const li = n - 1 - k;
+        const l = sp.layers.items[li];
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = li });
+        defer row.deinit();
+        var vis = l.visible;
+        if (dvui.checkbox(@src(), &vis, null, .{ .id_extra = li })) {
+            var nl = l;
+            nl.visible = vis;
+            state.model.setLayer(space, li, nl) catch {};
+        }
+        var flagged = false;
+        for (state.layer_issues) |iss| {
+            if (iss.space == space and iss.layer == li) flagged = true;
+        }
+        var buf: [96]u8 = undefined;
+        const active = l.id == newObjectLayer();
+        const text = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ l.name, if (l.locked) " (locked)" else "", if (active) " · new objects" else "", if (flagged) " · flagged" else "" }) catch l.name;
+        if (dvui.button(@src(), text, .{}, .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null })) {
+            state.context = .{ .layer = .{ .space = space, .index = li } };
+            active_layer = l.id;
+        }
+    }
+    if (dvui.button(@src(), "Add layer", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) {
+        var buf: [32]u8 = undefined;
+        const li = state.model.addLayer(space, state.model.nextLayerName(space, &buf)) catch return;
+        state.context = .{ .layer = .{ .space = space, .index = li } };
+        active_layer = state.model.spaces.items[space].layers.items[li].id;
+    }
+}
+
+/// A layer's properties: shown, locked, opacity, blend, output, its place
+/// in the stack, and its flags.
+fn layerProperties(space: usize, li: usize) !void {
+    const sp = state.model.spaces.items[space];
+    if (li >= sp.layers.items.len) return;
+    var l = sp.layers.items[li];
+    var changed = false;
+    propText("Name", "{s}", .{l.name}, 1);
+    propText("Place", "{d} of {d}, from the bottom", .{ li + 1, sp.layers.items.len }, 2);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3 });
+        defer row.deinit();
+        propName("Shown");
+        if (dvui.checkbox(@src(), &l.visible, "Visible", .{ .id_extra = 3 })) changed = true;
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4 });
+        defer row.deinit();
+        propName("Lock");
+        if (dvui.checkbox(@src(), &l.locked, "Locked: nothing on it can be picked", .{ .id_extra = 4 })) changed = true;
+    }
+    var buf: [32]u8 = undefined;
+    if (sizesProp("Opacity, %", std.fmt.bufPrint(&buf, "{d}", .{@round(l.opacity * 100)}) catch "", 5)) |list| if (list.len == 1) {
+        l.opacity = std.math.clamp(list[0] / 100, 0, 1);
+        changed = true;
+    };
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 6 });
+        defer row.deinit();
+        propName("Blend");
+        const names = [_][]const u8{ "Normal", "Multiply", "Screen" };
+        var choice: usize = @intFromEnum(l.blend);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
+            l.blend = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7 });
+        defer row.deinit();
+        propName("Output");
+        const names = [_][]const u8{ "None (guide)", "Print", "Engrave", "Cut", "Mill" };
+        var choice: usize = @intFromEnum(l.output);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7 })) {
+            l.output = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    if (changed) try state.model.setLayer(space, li, l);
+    propText("New objects", "{s}", .{if (l.id == newObjectLayer()) "go on this layer" else "go elsewhere"}, 8);
+    layerFlags(space, li, 9);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Move up", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = state.model.moveLayer(space, li, true) catch li } };
+        if (dvui.button(@src(), "Move down", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = state.model.moveLayer(space, li, false) catch li } };
+        if (dvui.button(@src(), "Remove", .{}, .{})) {
+            state.model.removeLayer(space, li) catch {
+                state.status = "Only an empty layer, other than the space's first, can be removed. ";
+                return;
+            };
+            state.context = .{ .panel = sp.root };
+        }
+    }
+}
+
+/// A dropdown of space `space`'s layers; returns the chosen layer when it
+/// changes.
+fn layerChoice(space: usize, current: layout.model.ObjectId, n: usize) ?layout.model.ObjectId {
+    const sp = state.model.spaces.items[space];
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName("Layer");
+    var names_buf: [16][]const u8 = undefined;
+    const n_layers = @min(sp.layers.items.len, names_buf.len);
+    for (0..n_layers) |i| names_buf[i] = sp.layers.items[i].name;
+    var choice: usize = sp.layerIndex(current) orelse 0;
+    if (dvui.dropdown(@src(), names_buf[0..n_layers], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) return sp.layers.items[choice].id;
+    return null;
+}
+
+/// An image's properties: its layer, place, physical size, pixels and
+/// effective resolution.
+fn imageProperties(space: usize, index: usize) !void {
+    const im = imageAt(space, index) orelse return;
+    propText("Name", "{s}", .{im.name}, 1);
+    if (layerChoice(space, im.layer, 2)) |l| try state.model.setImage(space, index, im.at, im.w, l);
+    propText("Place", "({d:.1}, {d:.1}) mm", .{ im.at.x, im.at.y }, 3);
+    var buf: [32]u8 = undefined;
+    if (sizesProp("Width, mm", std.fmt.bufPrint(&buf, "{d:.2}", .{im.w}) catch "", 4)) |list| if (list.len == 1) {
+        state.model.setImage(space, index, im.at, list[0], im.layer) catch {
+            state.status = "A width must be more than 0. ";
+        };
+    };
+    propText("Height", "{d:.2} mm (keeps its proportions)", .{im.h}, 5);
+    propText("Pixels", "{d} × {d}", .{ im.px_w, im.px_h }, 6);
+    propText("Resolution", "{d:.0} dpi at this size", .{im.dpi()}, 7);
+    propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 8);
+    if (state.model.spaces.items[space].layerIndex(im.layer)) |li| layerFlags(space, li, 9);
+    if (dvui.button(@src(), "Remove image", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        state.model.removeImage(space, index);
+        state.context = .{ .panel = state.model.spaces.items[space].root };
+    }
+}
+
+/// Moves the selected image 1 mm the way an arrow points.
+fn moveImageKey(code: dvui.enums.Key) bool {
+    const c = switch (state.context) {
+        .image => |c| c,
+        else => return false,
+    };
+    const im = imageAt(c.space, c.index) orelse return false;
+    const d: geom.Point = switch (code) {
+        .up => .{ .x = 0, .y = 1 },
+        .down => .{ .x = 0, .y = -1 },
+        .left => .{ .x = -1, .y = 0 },
+        .right => .{ .x = 1, .y = 0 },
+        else => return false,
+    };
+    state.model.setImage(c.space, c.index, .{ .x = im.at.x + d.x, .y = im.at.y + d.y }, im.w, im.layer) catch return false;
+    return true;
+}
+
+/// File › Place image is asking for the file.
+var image_prompt = false;
+/// The prompt has just opened: its file field takes the keyboard.
+var image_prompt_new = false;
+
+/// The Place image prompt: a PNG or JPEG file, placed in the shown space
+/// at 150 dpi on the active layer.
+fn imagePrompt() void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 460;
+    const h: f32 = 185;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(11));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), "Place image (PNG or JPEG)", .{}, .{ .font = dvui.Font.theme(.heading) });
+    var go = false;
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down) continue;
+        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        e.handle(@src(), fw.data());
+    }
+    var path: []const u8 = "";
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        propName("File");
+        var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal });
+        defer te.deinit();
+        if (image_prompt_new) {
+            dvui.focusWidget(te.data().id, null, null);
+            image_prompt_new = false;
+        }
+        if (te.enter_pressed) go = true;
+        path = dvui.currentWindow().arena().dupe(u8, std.mem.trim(u8, te.textGet(), " ")) catch "";
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (dvui.button(@src(), "Place", .{}, .{})) go = true;
+    }
+    if (cancel) {
+        image_prompt = false;
+        return;
+    }
+    if (!go or path.len == 0) return;
+    image_prompt = false;
+    placeImage(path);
+}
+
+/// Reads image file `path` and places it in the shown space.
+fn placeImage(path: []const u8) void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(256 << 20)) catch {
+        state.status = "That file could not be read. ";
+        return;
+    };
+    defer state.gpa.free(bytes);
+    var pw: c_int = 0;
+    var ph: c_int = 0;
+    var channels: c_int = 0;
+    if (dvui.c.stbi_info_from_memory(bytes.ptr, @intCast(bytes.len), &pw, &ph, &channels) == 0 or pw <= 0 or ph <= 0) {
+        state.status = "That is not a PNG or JPEG image. ";
+        return;
+    }
+    // At 150 dpi, centred in the view.
+    const w = @as(f64, @floatFromInt(pw)) / 150.0 * 25.4;
+    const hgt = w * @as(f64, @floatFromInt(ph)) / @as(f64, @floatFromInt(pw));
+    const at: geom.Point = .{ .x = state.view.cx - w / 2, .y = state.view.cy - hgt / 2 };
+    const ii = state.model.addImage(shown_space, std.fs.path.basename(path), bytes, @intCast(pw), @intCast(ph), at, w, newObjectLayer()) catch {
+        state.status = "The image could not be placed. ";
+        return;
+    };
+    state.context = .{ .image = .{ .space = shown_space, .index = ii } };
+    state.status = "Placed at 150 dpi: set its width in its properties. ";
 }
 
 // Views ---------------------------------------------------------------------
@@ -3223,6 +3631,9 @@ fn extentsOf(space: usize, depth: usize) geom.Box {
         if (pi < state.placed.items.len and !state.placed.items[pi].bounds.isEmpty()) b = b.join(onSheet(pi, state.placed.items[pi].bounds));
         if (!p.unbounded) b = b.join(p.box());
     }
+    if (space < state.model.spaces.items.len) for (state.model.spaces.items[space].images.items) |im| {
+        b = b.join(im.box());
+    };
     if (depth < view_depth and space < state.model.spaces.items.len) for (state.model.spaces.items[space].views.items) |sv| {
         if (sv.window == null and state.model.spaces.items[sv.source].bound == null and extentsOf(sv.source, depth + 1).isEmpty()) continue;
         b = b.join(withNameRoom(viewBox(sv)));
@@ -3234,10 +3645,12 @@ fn extentsOf(space: usize, depth: usize) geom.Box {
 /// view's scale, clipped to the view's box, on a faint ground; the selected
 /// one outlined. Views in the source are drawn inside, as deep as
 /// `view_depth`.
-fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
+fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize, layer: layout.model.ObjectId) void {
     if (depth >= view_depth or host >= state.model.spaces.items.len) return;
     const px = dvui.windowNaturalScale();
+    const base = state.model.spaces.items[host].base_layer;
     for (state.model.spaces.items[host].views.items, 0..) |sv, vi| {
+        if ((if (sv.layer == .none) base else sv.layer) != layer) continue;
         const hb = viewBox(sv);
         const r = state.view.rect(area, hb);
         r.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.7) } });
@@ -3248,8 +3661,7 @@ fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
             state.view.ppm = prev.ppm * sv.scale;
             state.view.cx = w.x0 + (prev.cx - sv.at.x) / sv.scale;
             state.view.cy = w.y0 + (prev.cy - sv.at.y) / sv.scale;
-            drawViews(area, sv.source, depth + 1);
-            drawSpacePanels(area, sv.source);
+            drawSpace(area, sv.source, depth + 1);
             state.view = prev;
             dvui.clipSet(prev_clip);
         }
@@ -3301,7 +3713,7 @@ fn viewUnder(at: geom.Point) ?Context {
     if (shown_space >= state.model.spaces.items.len) return null;
     var hit: ?Context = null;
     for (state.model.spaces.items[shown_space].views.items, 0..) |sv, vi| {
-        if (contains(viewBox(sv), at)) hit = .{ .view = .{ .space = shown_space, .index = vi } };
+        if (contains(viewBox(sv), at) and layerOpen(shown_space, sv.layer)) hit = .{ .view = .{ .space = shown_space, .index = vi } };
     }
     return hit;
 }
@@ -3551,6 +3963,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
+        // A selected image: arrow keys move it 1 mm.
+        if (e.evt == .key and state.context == .image and !e.handled and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and moveImageKey(k.code)) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         // A selected view: arrow keys move it 1 mm.
         if (e.evt == .key and state.context == .view and !e.handled and cursorKeysReach()) {
             const k = e.evt.key;
@@ -3627,6 +4048,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         e.handle(@src(), box.data());
                         state.model.removeArt(l.panel, l.index);
                         state.context = .{ .panel = l.panel };
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
+                    .image => |im| {
+                        e.handle(@src(), box.data());
+                        state.model.removeImage(im.space, im.index);
+                        state.context = .{ .panel = state.model.spaces.items[im.space].root };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .view => |v| {
@@ -3865,10 +4292,12 @@ fn pick(at: geom.Point) void {
     // Empty space is the worksheet, or on a canvas the shown space itself.
     state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
     selection.clearRetainingCapacity();
-    // A view, by its box; anything of the space's own over it wins.
+    // An image, then a view, by their boxes; anything over them wins.
+    if (imageUnder(at)) |im| state.context = im;
     if (viewUnder(at)) |v| state.context = v;
     for (state.model.panels.items, 0..) |panel, pi| {
         if (!shownPanel(pi)) continue;
+        if (state.model.spaces.items.len > 0 and !layerOpen(panel.space, panelLayer(pi))) continue;
         const b = panel.box();
         if (!panel.unbounded and at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
         if (pi >= state.placed.items.len) continue;
@@ -4348,6 +4777,8 @@ fn lowerKind() []const u8 {
         .group => "group",
         .selection => "selection",
         .view => "view",
+        .layer => "layer",
+        .image => "image",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -4576,6 +5007,7 @@ fn properties() !void {
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
             propText("Labels", "{d}", .{panel.labels.items.len}, 7);
             propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
+            if (state.model.spaces.items.len > 0) if (layerChoice(panel.space, panelLayer(pi), 10)) |l| try state.model.setPanelLayer(pi, l);
             var cutouts: usize = 0;
             for (panel.art.items) |pa| {
                 if (pa.cutout) cutouts += 1;
@@ -4636,6 +5068,8 @@ fn properties() !void {
         .group => |g| try groupProperties(g),
         .selection => try selectionProperties(),
         .view => |v| try viewProperties(v.space, v.index),
+        .layer => |l| try layerProperties(l.space, l.index),
+        .image => |im| try imageProperties(im.space, im.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),
     }
@@ -5263,9 +5697,11 @@ fn statusContent() void {
     } else std.fmt.bufPrint(&pos_buf, "x –   y – {s}", .{u.symbol()}) catch "";
     dvui.labelNoFmt(@src(), pos, .{}, field.override(.{ .min_size_content = .{ .w = 190 }, .font = .theme(.mono) }));
 
-    var counts_buf: [160]u8 = undefined;
-    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs · {d} overflows · {d} in margins", .{
-        state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len,
+    var counts_buf: [200]u8 = undefined;
+    var flags_buf: [40]u8 = undefined;
+    const layer_flags = if (state.layer_issues.len > 0) std.fmt.bufPrint(&flags_buf, " · {d} layer flag{s}", .{ state.layer_issues.len, if (state.layer_issues.len == 1) "" else "s" }) catch "" else "";
+    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs · {d} overflows · {d} in margins{s}", .{
+        state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len, layer_flags,
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
 
