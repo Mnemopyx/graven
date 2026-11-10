@@ -38,10 +38,10 @@ pub const Look = struct {
     /// OKLCH hue, degrees.
     hue: f32,
     /// The background's opacity while ghost, and the content's.
-    ghost_fill: f32 = 0.06,
-    ghost_content: f32 = 0.42,
+    ghost_fill: f32 = 0.12,
+    ghost_content: f32 = 0.55,
     /// The background's opacity while active or docked.
-    active_fill: f32 = 0.84,
+    active_fill: f32 = 0.72,
 };
 
 pub const Pane = struct {
