@@ -161,6 +161,8 @@ const Context = union(enum) {
     group: layout.model.ObjectId,
     /// Objects picked together with Select area (see `selection`).
     selection,
+    /// A view of another space, placed in space `space`.
+    view: struct { space: usize, index: usize },
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -187,6 +189,7 @@ const Context = union(enum) {
             .art => "Line art",
             .group => "Group",
             .selection => "Selection",
+            .view => "View",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -433,6 +436,10 @@ fn followContext() void {
         .tile => |id| if (findTile(id)) |f| f.panel else null,
         .group => |g| {
             if (state.model.spaceOfId(g)) |sp| shown_space = sp;
+            return;
+        },
+        .view => |v| {
+            shown_space = v.space;
             return;
         },
         else => null,
@@ -1562,6 +1569,7 @@ fn worksheetTree() void {
             for (sp.groups.items) |g| {
                 if (state.model.parentGroup(g.id) == null) groupTree(g.id, 2);
             }
+            for (sp.views.items, 0..) |sv, vi| _ = treeNode(.{ .view = .{ .space = si, .index = vi } }, sv.name, 2, false, false);
             panelChildren(sp.root, 2);
             for (state.model.panels.items, 0..) |panel, pi| {
                 if (pi == sp.root or panel.space != si) continue;
@@ -1710,7 +1718,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .label, .art, .group, .selection, .prototypes => false,
+        .file, .worksheet, .panel, .label, .art, .group, .selection, .view, .prototypes => false,
     };
 }
 
@@ -1721,6 +1729,10 @@ fn contextExtents() geom.Box {
         .panel => |pi| return if (state.model.panels.items[pi].unbounded) contentExtents() else state.model.panels.items[pi].box(),
         .label => |l| if (labelBox(l.panel, l.index)) |b| return b,
         .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
+        .view => |v| if (viewAt(v.space, v.index)) |sv| {
+            const b = viewBox(sv);
+            if (!b.isEmpty()) return withNameRoom(b);
+        },
         else => {},
     }
     var b: geom.Box = .empty;
@@ -1862,34 +1874,8 @@ fn canvas() void {
     if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
 
     if (open) drawFrameBound(area);
-    for (0..state.model.panels.items.len) |pi| {
-        if (!shownPanel(pi)) continue;
-        // A space's own panel has no outline: only its content.
-        if (state.model.panels.items[pi].unbounded) {
-            if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
-            continue;
-        }
-        const outline = state.view.rect(area, panelBox(pi));
-        const is_context = switch (state.context) {
-            .panel => |c| c == pi,
-            else => false,
-        };
-        // While dragged, compliance is shown live for the preview position.
-        const off = if (state.moving != null and state.moving.?.panel == pi) !state.model.compliantAt(pi, panelOrigin(pi)) else panelIssue(pi) != null;
-        // A panel past the sheet's edge is outlined in the warning colour.
-        const edge = if (is_context) dvui.themeGet().focus else if (off) colors.overflow else colors.panel_edge;
-        const thickness = if (is_context or off) 2 * px else px;
-        // A panel made from a closed path is drawn as that path; its
-        // margins (still a band inside its box) are not shown.
-        const shaped = pi < state.placed.items.len and state.model.panels.items[pi].edge != null and state.placed.items[pi].edge != null;
-        if (shaped) {
-            strokeOutline(area, state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
-        } else {
-            drawPanelMargins(area, pi);
-            outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
-        }
-        if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
-    }
+    if (open) drawViews(area, shown_space, 0);
+    drawSpacePanels(area, null);
 
     drawPicked(area);
     drawPolygonDraft(area);
@@ -2029,6 +2015,7 @@ fn frameProperties(space: usize) !void {
             state.model.setFrameBound(space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin }) catch {};
         }
     }
+    placeViewButtons(space);
 }
 
 /// A group's properties: what it holds, and how to move or dissolve it.
@@ -2252,6 +2239,7 @@ fn canvasProperties(pi: usize) !void {
     propText("Panels", "{d}", .{on_canvas}, 5);
     propText("Typing", "{s}", .{"makes a label where you last clicked"}, 6);
     try propFont("Legend font", 7);
+    placeViewButtons(0);
 }
 
 /// Makes line art from a finished drag: the chosen shape filling the box
@@ -2864,6 +2852,243 @@ fn drawRulers(area: dvui.Rect.Physical) void {
     }
 }
 
+/// The panels of `space` (or, when null, of the shown space), with their
+/// outlines and content, as the view maps them.
+fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize) void {
+    const px = dvui.windowNaturalScale();
+    for (0..state.model.panels.items.len) |pi| {
+        if (space) |sp| {
+            if (state.model.panels.items[pi].space != sp) continue;
+        } else if (!shownPanel(pi)) continue;
+        // A space's own panel has no outline: only its content.
+        if (state.model.panels.items[pi].unbounded) {
+            if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
+            continue;
+        }
+        const outline = state.view.rect(area, panelBox(pi));
+        const is_context = switch (state.context) {
+            .panel => |c| c == pi,
+            else => false,
+        };
+        // While dragged, compliance is shown live for the preview position.
+        const off = if (state.moving != null and state.moving.?.panel == pi) !state.model.compliantAt(pi, panelOrigin(pi)) else panelIssue(pi) != null;
+        // A panel past the sheet's edge is outlined in the warning colour.
+        const edge = if (is_context) dvui.themeGet().focus else if (off) colors.overflow else colors.panel_edge;
+        const thickness = if (is_context or off) 2 * px else px;
+        // A panel made from a closed path is drawn as that path; its
+        // margins (still a band inside its box) are not shown.
+        const shaped = pi < state.placed.items.len and state.model.panels.items[pi].edge != null and state.placed.items[pi].edge != null;
+        if (shaped) {
+            strokeOutline(area, state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
+        } else {
+            drawPanelMargins(area, pi);
+            outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
+        }
+        if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
+    }
+}
+
+// Views ---------------------------------------------------------------------
+//
+// A view is a live, read-only window onto another space, placed at a scale:
+// the source's panels are drawn through it from the same solve, so an edit
+// to the source shows in every view at once. Nothing in it is picked; the
+// view itself is, by its box.
+
+/// Views nest at most this deep (cycles are refused; this only bounds the
+/// drawing).
+const view_depth = 6;
+
+fn viewAt(space: usize, index: usize) ?layout.model.SpaceView {
+    if (space >= state.model.spaces.items.len) return null;
+    const list = state.model.spaces.items[space].views.items;
+    return if (index < list.len) list[index] else null;
+}
+
+/// What a view shows, in its source's coordinates: its window, else the
+/// source frame's boundary, else all the source holds.
+fn viewWindow(sv: layout.model.SpaceView) geom.Box {
+    if (sv.window) |w| return w;
+    if (sv.source < state.model.spaces.items.len) if (state.model.spaces.items[sv.source].bound) |b| return b;
+    return extentsOf(sv.source, 1);
+}
+
+/// Where a view lies in its host, mm.
+fn viewBox(sv: layout.model.SpaceView) geom.Box {
+    const w = viewWindow(sv);
+    if (w.isEmpty()) return .{ .x0 = sv.at.x, .y0 = sv.at.y, .x1 = sv.at.x + 20, .y1 = sv.at.y + 10 };
+    const c: geom.Point = .{ .x = w.x0, .y = w.y0 };
+    const lo = sv.toHost(c, c);
+    const hi = sv.toHost(c, .{ .x = w.x1, .y = w.y1 });
+    return .{ .x0 = lo.x, .y0 = lo.y, .x1 = hi.x, .y1 = hi.y };
+}
+
+/// A view's box with room above it for its name, for fitting.
+fn withNameRoom(b: geom.Box) geom.Box {
+    var r = b;
+    r.y1 += 0.08 * b.height();
+    return r;
+}
+
+/// What space `space` holds, in its coordinates: its panels' outlines and
+/// solved content, and its views.
+fn extentsOf(space: usize, depth: usize) geom.Box {
+    var b: geom.Box = .empty;
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (state.model.spaces.items.len > 0 and p.space != space) continue;
+        if (pi < state.placed.items.len and !state.placed.items[pi].bounds.isEmpty()) b = b.join(onSheet(pi, state.placed.items[pi].bounds));
+        if (!p.unbounded) b = b.join(p.box());
+    }
+    if (depth < view_depth and space < state.model.spaces.items.len) for (state.model.spaces.items[space].views.items) |sv| {
+        if (sv.window == null and state.model.spaces.items[sv.source].bound == null and extentsOf(sv.source, depth + 1).isEmpty()) continue;
+        b = b.join(withNameRoom(viewBox(sv)));
+    };
+    return b;
+}
+
+/// The views placed in space `host`: each its source drawn through the
+/// view's scale, clipped to the view's box, on a faint ground; the selected
+/// one outlined. Views in the source are drawn inside, as deep as
+/// `view_depth`.
+fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize) void {
+    if (depth >= view_depth or host >= state.model.spaces.items.len) return;
+    const px = dvui.windowNaturalScale();
+    const ns = px;
+    for (state.model.spaces.items[host].views.items, 0..) |sv, vi| {
+        const hb = viewBox(sv);
+        const r = state.view.rect(area, hb);
+        r.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.7) } });
+        const w = viewWindow(sv);
+        if (!w.isEmpty()) {
+            const prev = state.view;
+            const prev_clip = dvui.clip(r);
+            state.view.ppm = prev.ppm * sv.scale;
+            state.view.cx = w.x0 + (prev.cx - sv.at.x) / sv.scale;
+            state.view.cy = w.y0 + (prev.cy - sv.at.y) / sv.scale;
+            drawViews(area, sv.source, depth + 1);
+            drawSpacePanels(area, sv.source);
+            state.view = prev;
+            dvui.clipSet(prev_clip);
+        }
+        const sel = depth == 0 and switch (state.context) {
+            .view => |v| v.space == host and v.index == vi,
+            else => false,
+        };
+        if (sel) {
+            r.stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = dvui.themeGet().focus } });
+        } else {
+            dashedBox(area, hb, colors.panel_edge.opacity(0.7), px);
+        }
+        if (depth > 0) continue;
+        // Its name above its corner, with the scale.
+        var buf: [128]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{s} · {s}", .{ sv.name, scaleText(sv.scale) }) catch sv.name;
+        const corner = state.view.toPx(area, .{ .x = hb.x0, .y = hb.y1 });
+        dvui.labelNoFmt(@src(), text, .{}, .{
+            .id_extra = vi,
+            .rect = .{ .x = (corner.x - area.x) / ns, .y = (corner.y - area.y) / ns - 22, .w = 320, .h = 20 },
+            .color_text = .{ .color = if (sel) dvui.themeGet().focus else colors.panel_edge },
+            .font = dvui.Font.theme(.body).larger(-2),
+        });
+    }
+}
+
+/// A scale as a ratio: 1:1, 1:2 (smaller), 2:1 (larger).
+fn scaleText(scale: f64) []const u8 {
+    const buf = dvui.currentWindow().arena().alloc(u8, 32) catch return "";
+    if (scale >= 1) return std.fmt.bufPrint(buf, "{d}:1", .{@round(scale * 100) / 100}) catch "";
+    return std.fmt.bufPrint(buf, "1:{d}", .{@round(100 / scale) / 100}) catch "";
+}
+
+/// The top-most view of the shown space under `at`, if any.
+fn viewUnder(at: geom.Point) ?Context {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    var hit: ?Context = null;
+    for (state.model.spaces.items[shown_space].views.items, 0..) |sv, vi| {
+        if (contains(viewBox(sv), at)) hit = .{ .view = .{ .space = shown_space, .index = vi } };
+    }
+    return hit;
+}
+
+/// A view's properties: what it shows and at what scale, where it lies,
+/// and the way to its source.
+fn viewProperties(host: usize, index: usize) !void {
+    const sv = viewAt(host, index) orelse return;
+    propText("Name", "{s}", .{sv.name}, 1);
+    const src = state.model.spaces.items[sv.source];
+    propText("Shows", "{s}", .{if (sv.source == 0) "the canvas" else src.name}, 2);
+    const hb = viewBox(sv);
+    propText("Place", "({d:.1}, {d:.1}) mm", .{ hb.x0, hb.y0 }, 3);
+    propText("Size", "{d:.1} × {d:.1} mm", .{ hb.width(), hb.height() }, 4);
+    var buf: [32]u8 = undefined;
+    if (sizesProp("Scale", std.fmt.bufPrint(&buf, "{d}", .{sv.scale}) catch "", 5)) |list| if (list.len == 1) {
+        state.model.setViewScale(host, index, list[0]) catch {
+            state.status = "A scale must be more than 0. ";
+        };
+    };
+    propText("Reads as", "{s}", .{scaleText(sv.scale)}, 6);
+    propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 7);
+    propText("Edits", "{s}", .{"in its source: it shows them at once"}, 8);
+    if (dvui.button(@src(), "Show its source", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        shown_space = sv.source;
+        state.context = .{ .panel = src.root };
+        state.view.fit = contentExtents();
+    }
+    if (dvui.button(@src(), "Remove view", .{}, .{ .expand = .horizontal })) {
+        state.model.removeView(host, index);
+        state.context = .{ .panel = state.model.spaces.items[host].root };
+    }
+}
+
+/// Buttons placing a view of space `space` in each other space it may
+/// show in (one that would show itself is left out).
+fn placeViewButtons(space: usize) void {
+    var any = false;
+    for (state.model.spaces.items, 0..) |sp, host| {
+        if (state.model.viewWouldCycle(host, space)) continue;
+        if (!any) {
+            dvui.labelNoFmt(@src(), "Views of it", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .y = 8 } });
+            any = true;
+        }
+        var buf: [96]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "Place a view in {s}", .{if (host == 0) "the canvas" else sp.name}) catch "Place a view";
+        if (dvui.button(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = host })) placeView(space, host);
+    }
+}
+
+/// Places a view of `source` in `host` at 1:1, just right of what the host
+/// holds, and shows it there.
+fn placeView(source: usize, host: usize) void {
+    const e = extentsOf(host, 0);
+    const at: geom.Point = if (e.isEmpty()) .{ .x = 0, .y = 0 } else .{ .x = e.x1 + 20, .y = e.y0 };
+    const vi = state.model.addView(host, source, at, 1) catch {
+        state.status = "That view would show itself. ";
+        return;
+    };
+    shown_space = host;
+    state.context = .{ .view = .{ .space = host, .index = vi } };
+    state.view.fit = contentExtents();
+    state.status = "Placed a view: edits to its source show in it at once. ";
+}
+
+/// Moves the selected view 1 mm the way an arrow points.
+fn moveViewKey(code: dvui.enums.Key) bool {
+    const v = switch (state.context) {
+        .view => |v| v,
+        else => return false,
+    };
+    const sv = viewAt(v.space, v.index) orelse return false;
+    const d: geom.Point = switch (code) {
+        .up => .{ .x = 0, .y = 1 },
+        .down => .{ .x = 0, .y = -1 },
+        .left => .{ .x = -1, .y = 0 },
+        .right => .{ .x = 1, .y = 0 },
+        else => return false,
+    };
+    state.model.moveView(v.space, v.index, .{ .x = sv.at.x + d.x, .y = sv.at.y + d.y }) catch return false;
+    return true;
+}
+
 /// The shown frame's boundary, with its name above it: in the warning colour
 /// when content reaches past it.
 fn drawFrameBound(area: dvui.Rect.Physical) void {
@@ -2886,13 +3111,7 @@ fn drawFrameBound(area: dvui.Rect.Physical) void {
 /// What the shown space holds, in its coordinates: its panels' outlines
 /// and every solved bound of its panels.
 fn spaceExtents() geom.Box {
-    var b: geom.Box = .empty;
-    for (state.model.panels.items, 0..) |p, pi| {
-        if (!shownPanel(pi)) continue;
-        if (pi < state.placed.items.len and !state.placed.items[pi].bounds.isEmpty()) b = b.join(onSheet(pi, state.placed.items[pi].bounds));
-        if (!p.unbounded) b = b.join(p.box());
-    }
-    return b;
+    return extentsOf(shown_space, 0);
 }
 
 /// The canvas's axes through its origin, faint, with a mark at the origin.
@@ -3035,6 +3254,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
+        // A selected view: arrow keys move it 1 mm.
+        if (e.evt == .key and state.context == .view and !e.handled and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and moveViewKey(k.code)) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         // Selected line art: arrow keys move it 1 mm, and the tracks under
         // it reflow.
         if (e.evt == .key and state.context == .art and !e.handled and cursorKeysReach()) {
@@ -3102,6 +3330,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         e.handle(@src(), box.data());
                         state.model.removeArt(l.panel, l.index);
                         state.context = .{ .panel = l.panel };
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
+                    .view => |v| {
+                        e.handle(@src(), box.data());
+                        state.model.removeView(v.space, v.index);
+                        state.context = .{ .panel = state.model.spaces.items[v.space].root };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     // A tile leaves its track, which closes up behind it.
@@ -3334,6 +3568,8 @@ fn pick(at: geom.Point) void {
     // Empty space is the worksheet, or on a canvas the shown space itself.
     state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
     selection.clearRetainingCapacity();
+    // A view, by its box; anything of the space's own over it wins.
+    if (viewUnder(at)) |v| state.context = v;
     for (state.model.panels.items, 0..) |panel, pi| {
         if (!shownPanel(pi)) continue;
         const b = panel.box();
@@ -3811,6 +4047,7 @@ fn lowerKind() []const u8 {
         .art => "line art",
         .group => "group",
         .selection => "selection",
+        .view => "view",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -4098,6 +4335,7 @@ fn properties() !void {
         .art => |l| try artProperties(l.panel, l.index),
         .group => |g| try groupProperties(g),
         .selection => try selectionProperties(),
+        .view => |v| try viewProperties(v.space, v.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),
     }

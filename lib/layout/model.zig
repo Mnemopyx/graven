@@ -430,6 +430,33 @@ pub const Space = struct {
     /// which has none. Content past it is flagged, not refused.
     bound: ?geom.Box = null,
     groups: std.ArrayList(Group) = .empty,
+    /// Views of other spaces placed in this one.
+    views: std.ArrayList(SpaceView) = .empty,
+};
+
+/// A view: a live, read-only window onto another space (its source),
+/// placed in this one at a scale. What changes in the source shows in the
+/// view at once; nothing in it can be picked or edited through the view.
+/// A frame used this way many times is a symbol.
+pub const SpaceView = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    /// The space it shows.
+    source: usize,
+    /// Where the source point `look.x0, look.y0` (the window's corner)
+    /// lands in this space, mm.
+    at: geom.Point,
+    /// Host mm per source mm.
+    scale: f64 = 1,
+    /// The part of the source it shows, in the source's coordinates; null
+    /// shows the source's boundary, or all its content when it has none.
+    window: ?geom.Box = null,
+
+    /// Where source point `q` lands in the host, given the window's corner
+    /// `corner`.
+    pub fn toHost(v: SpaceView, corner: geom.Point, q: geom.Point) geom.Point {
+        return .{ .x = v.at.x + (q.x - corner.x) * v.scale, .y = v.at.y + (q.y - corner.y) * v.scale };
+    }
 };
 
 /// Where an object is: a panel, or one of a panel's labels, tracks
@@ -658,7 +685,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -1305,6 +1332,51 @@ pub const Model = struct {
         const list = m.panels.items[panel].art.items;
         if (index >= list.len) return error.NoSuchItem;
         list[index].wrap_tracks = on;
+        m.revision += 1;
+    }
+
+    /// Places a view of space `source` in space `host`, at `at` and
+    /// `scale`; returns its index among the host's views. Refused when the
+    /// source would show the host, directly or through its own views.
+    pub fn addView(m: *Model, host: usize, source: usize, at: geom.Point, scale: f64) Error!usize {
+        if (host >= m.spaces.items.len or source >= m.spaces.items.len) return error.NoSuchItem;
+        if (!(scale > 0)) return error.BadSize;
+        if (m.viewWouldCycle(host, source)) return error.ViewCycle;
+        var buf: [96]u8 = undefined;
+        const name = std.fmt.bufPrint(&buf, "View of {s}", .{m.spaces.items[source].name}) catch "View";
+        const list = &m.spaces.items[host].views;
+        try list.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .source = source, .at = at, .scale = scale });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// Whether a view of `source` placed in `host` would show `host`
+    /// inside itself: `source` is `host`, or reaches it through views.
+    pub fn viewWouldCycle(m: *const Model, host: usize, source: usize) bool {
+        if (host == source) return true;
+        for (m.spaces.items[source].views.items) |v| {
+            if (m.viewWouldCycle(host, v.source)) return true;
+        }
+        return false;
+    }
+
+    pub fn moveView(m: *Model, host: usize, index: usize, at: geom.Point) Error!void {
+        const list = m.spaces.items[host].views.items;
+        if (index >= list.len) return error.NoSuchItem;
+        list[index].at = at;
+        m.revision += 1;
+    }
+
+    pub fn setViewScale(m: *Model, host: usize, index: usize, scale: f64) Error!void {
+        const list = m.spaces.items[host].views.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!(scale > 0)) return error.BadSize;
+        list[index].scale = scale;
+        m.revision += 1;
+    }
+
+    pub fn removeView(m: *Model, host: usize, index: usize) void {
+        _ = m.spaces.items[host].views.orderedRemove(index);
         m.revision += 1;
     }
 
@@ -2577,4 +2649,35 @@ test "a closed path becomes a panel with what it encloses, cutouts included, and
     // A rounded rectangle's corner can be changed.
     try m.setArtCorner(c, 0, 2);
     try std.testing.expectEqual(2, root.art.items[0].prim.rounded.r);
+}
+
+test "a view shows another space live, at a scale, and views that would show themselves are refused" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const f = try m.addFrame("Front", .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 50 });
+    const g = try m.addFrame("Back", null);
+    // A view of the front frame on the canvas, at half size.
+    const v = try m.addView(0, f, .{ .x = 200, .y = 10 }, 0.5);
+    const view = m.spaces.items[0].views.items[v];
+    try std.testing.expectEqualStrings("View of Front", view.name);
+    try std.testing.expect(view.id != .none);
+    // The frame's corner lands at the view's place; its far corner at half.
+    const far = view.toHost(.{ .x = 0, .y = 0 }, .{ .x = 100, .y = 50 });
+    try std.testing.expectEqual(250, far.x);
+    try std.testing.expectEqual(35, far.y);
+    // A space in itself, or in a space it shows, is refused.
+    try std.testing.expectError(error.ViewCycle, m.addView(f, f, .{ .x = 0, .y = 0 }, 1));
+    try std.testing.expectError(error.ViewCycle, m.addView(f, 0, .{ .x = 0, .y = 0 }, 1));
+    // Front shows Back; Back may not then show Front, or the canvas.
+    _ = try m.addView(f, g, .{ .x = 0, .y = 0 }, 1);
+    try std.testing.expectError(error.ViewCycle, m.addView(g, f, .{ .x = 0, .y = 0 }, 1));
+    try std.testing.expectError(error.ViewCycle, m.addView(g, 0, .{ .x = 0, .y = 0 }, 1));
+    // The canvas may show Back too: no loop.
+    _ = try m.addView(0, g, .{ .x = 0, .y = 100 }, 2);
+    try m.setViewScale(0, v, 0.25);
+    try m.moveView(0, v, .{ .x = 5, .y = 5 });
+    try std.testing.expectEqual(0.25, m.spaces.items[0].views.items[v].scale);
+    m.removeView(0, v);
+    try std.testing.expectEqual(1, m.spaces.items[0].views.items.len);
 }
