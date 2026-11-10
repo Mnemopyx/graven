@@ -29,14 +29,19 @@ pub const Edge = enum { left, right, top, bottom };
 pub const Mode = enum { ghost, docked, hidden };
 
 /// How a pane looks: its dominant hue, and how opaque it is.
+///
+/// What takes events has the visual focus. An active (or docked) pane is
+/// clearly in front: the canvas still shows through, but takes effort to
+/// make out. A ghost reverses that: the canvas leads, and the pane's
+/// content is there to be read on purpose, not to catch the eye.
 pub const Look = struct {
     /// OKLCH hue, degrees.
     hue: f32,
     /// The background's opacity while ghost, and the content's.
-    ghost_fill: f32 = 0.28,
-    ghost_content: f32 = 0.78,
+    ghost_fill: f32 = 0.06,
+    ghost_content: f32 = 0.42,
     /// The background's opacity while active or docked.
-    active_fill: f32 = 0.93,
+    active_fill: f32 = 0.84,
 };
 
 pub const Pane = struct {
@@ -175,7 +180,7 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
         .background = true,
         .color_fill = .{ .color = fill(p) },
         .border = .all(1),
-        .color_border = .{ .color = t.border.opacity(if (p.active) 0.9 else 0.35) },
+        .color_border = .{ .color = t.border.opacity(if (p.active) 0.9 else 0.15) },
         .corners = .all(0),
         .box_shadow = null,
     });
