@@ -30,6 +30,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("graven_config");
 const toml = config.toml;
+pub const Value = toml.Value;
 
 pub const Store = struct {
     gpa: std.mem.Allocator,

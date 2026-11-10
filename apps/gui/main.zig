@@ -17,6 +17,7 @@ const samples = @import("graven_samples");
 const desktop = @import("desktop.zig");
 const ghost_pane = @import("ghost.zig");
 const settings_file = @import("settings.zig");
+const locale = @import("locale.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -913,6 +914,7 @@ fn currentPrefs() Prefs {
 /// keeps its default.
 fn loadPrefs() void {
     var ps = settings_file.load(state.gpa, dvui.io);
+    loadLocale(&ps);
     if (ps.get("canvas.units")) |v| if (v == .string) if (std.meta.stringToEnum(layout.model.Units, v.string)) |u| {
         last_units = u;
     };
@@ -933,6 +935,65 @@ fn loadPrefs() void {
     if (ps.problem()) |msg| state.status = msg;
     prefs_store = ps;
     saved_prefs = currentPrefs();
+}
+
+// Locale ----------------------------------------------------------------------
+//
+// The user's languages and measurement system: from `[locale]` in the
+// config files when set there, else from the system (see locale.zig). The
+// measurement system picks a new canvas's units (mm or inches) until the
+// user has chosen units (`canvas.units`). The languages are kept for the
+// interface text to come.
+
+/// Preferred languages, most preferred first.
+var languages: []const locale.Locale = &.{};
+var measurement: locale.Measurement = .metric;
+var measurement_source: locale.Source = .default;
+
+/// The system's preferred languages, as SDL reports them.
+fn systemLanguages(gpa: std.mem.Allocator) []const locale.Locale {
+    const c = dvui.backend.c;
+    var n_locales: c_int = 0;
+    const list = c.SDL_GetPreferredLocales(&n_locales) orelse return &.{};
+    defer c.SDL_free(@ptrCast(list));
+    const out = gpa.alloc(locale.Locale, @intCast(n_locales)) catch return &.{};
+    var n: usize = 0;
+    for (0..@intCast(n_locales)) |i| {
+        const l = list[i] orelse continue;
+        const lang = l.*.language orelse continue;
+        out[n] = .{
+            .language = gpa.dupe(u8, std.mem.span(lang)) catch continue,
+            .country = if (l.*.country) |ct| gpa.dupe(u8, std.mem.span(ct)) catch null else null,
+        };
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// Reads `[locale]` from the config files and the system's locale, and
+/// sets the languages, the measurement system and from it the default
+/// units of a new canvas.
+fn loadLocale(ps: *const settings_file.Store) void {
+    const gpa = state.gpa;
+    languages = systemLanguages(gpa);
+    // `languages = ["en-GB", "de"]` (or one tag) in the config wins.
+    if (ps.get("locale.languages")) |v| {
+        var list: std.ArrayList(locale.Locale) = .empty;
+        const tags: []const settings_file.Value = switch (v) {
+            .array => |xs| xs,
+            .string => &.{v},
+            else => &.{},
+        };
+        for (tags) |t| if (t == .string) if (locale.parseTag(t.string)) |l| {
+            list.append(gpa, .{ .language = gpa.dupe(u8, l.language) catch continue, .country = if (l.country) |ct| gpa.dupe(u8, ct) catch null else null }) catch {};
+        };
+        if (list.items.len > 0) languages = list.items;
+    }
+    const from_config: ?locale.Measurement = if (ps.get("locale.measurement")) |v| (if (v == .string) std.meta.stringToEnum(locale.Measurement, v.string) else null) else null;
+    const d = locale.decide(from_config, locale.systemMeasurement(), languages);
+    measurement = d.measurement;
+    measurement_source = d.source;
+    last_units = if (measurement == .imperial) .inch else .mm;
 }
 
 /// Writes the preferences back when one has changed since they were last
@@ -2447,6 +2508,19 @@ fn canvasProperties(pi: usize) !void {
     }
     propText("Panels", "{d}", .{on_canvas}, 5);
     propText("Typing", "{s}", .{"makes a label where you last clicked"}, 6);
+    {
+        var buf: [96]u8 = undefined;
+        var tb: [16]u8 = undefined;
+        const lang = if (languages.len > 0) languages[0].tag(&tb) else "not given";
+        propText("Language", "{s}", .{std.fmt.bufPrint(&buf, "{s}{s}", .{ lang, if (languages.len > 1) " and others" else "" }) catch lang}, 8);
+        const from = switch (measurement_source) {
+            .config => "your settings",
+            .system => "the system",
+            .country => "your language's country",
+            .default => "no locale given",
+        };
+        propText("Measures", "{s}, from {s}", .{ @tagName(measurement), from }, 9);
+    }
     try propFont("Legend font", 7);
     placeViewButtons(0);
 }
