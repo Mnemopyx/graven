@@ -337,32 +337,65 @@ fn defaultOf(comptime T: type) T {
 
 /// Reads a native file into a new model, its strings and lists in the
 /// model's own arena.
+/// One block of a native file, read and checked.
+pub const Block = struct {
+    kind: [4]u8,
+    version: u16,
+    payload: []const u8,
+    /// Where the next block starts.
+    end: usize,
+};
+
+pub const block_header = 4 + 2 + 2 + 8;
+
+/// The block starting at `i`, its checksum verified.
+pub fn readBlock(bytes: []const u8, i: usize) Error!Block {
+    if (bytes.len < i or bytes.len - i < block_header + 4) return error.Truncated;
+    const kind = bytes[i..][0..4].*;
+    const version = std.mem.readInt(u16, bytes[i + 4 ..][0..2], .little);
+    const len64 = std.mem.readInt(u64, bytes[i + 8 ..][0..8], .little);
+    if (len64 > bytes.len - i - block_header - 4) return error.Truncated;
+    const len: usize = @intCast(len64);
+    const stored = std.mem.readInt(u32, bytes[i + block_header + len ..][0..4], .little);
+    if (crc(bytes[i .. i + block_header + len]) != stored) return error.BadChecksum;
+    return .{ .kind = kind, .version = version, .payload = bytes[i + block_header ..][0..len], .end = i + block_header + len + 4 };
+}
+
+/// Appends a block of type `kind` holding `payload` to `out`.
+pub fn appendBlock(gpa: Allocator, out: *std.ArrayList(u8), kind: [4]u8, version: u16, payload: []const u8) Allocator.Error!void {
+    var w: Writer = .{ .gpa = gpa, .out = out.* };
+    defer out.* = w.out;
+    try block(&w, kind, version, payload);
+}
+
+/// The CRC-32C files use.
+pub fn checksum(bytes: []const u8) u32 {
+    return crc(bytes);
+}
+
+/// The model held in a model block's payload, in a new model's arena.
+pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
+    if (b.version > model_version) return error.TooNew;
+    var m: model.Model = .init(gpa);
+    errdefer m.deinit();
+    var r: Reader = .{ .in = b.payload, .a = m.arena.allocator() };
+    const read = try r.value(model.Model);
+    const arena = m.arena;
+    m = read;
+    m.arena = arena;
+    m.revision = 0;
+    return m;
+}
+
+/// Reads a native file into a new model, its strings and lists in the
+/// model's own arena. Every block up to the model must be intact.
 pub fn decode(gpa: Allocator, bytes: []const u8) Error!model.Model {
     if (bytes.len < magic.len or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadFile;
     var i: usize = magic.len;
     while (i < bytes.len) {
-        const header = 4 + 2 + 2 + 8;
-        if (bytes.len - i < header + 4) return error.Truncated;
-        const kind = bytes[i..][0..4].*;
-        const version = std.mem.readInt(u16, bytes[i + 4 ..][0..2], .little);
-        const len64 = std.mem.readInt(u64, bytes[i + 8 ..][0..8], .little);
-        if (len64 > bytes.len - i - header - 4) return error.Truncated;
-        const len: usize = @intCast(len64);
-        const payload = bytes[i + header ..][0..len];
-        const stored = std.mem.readInt(u32, bytes[i + header + len ..][0..4], .little);
-        if (crc(bytes[i .. i + header + len]) != stored) return error.BadChecksum;
-        i += header + len + 4;
-        if (!std.mem.eql(u8, &kind, &model_block)) continue;
-        if (version > model_version) return error.TooNew;
-        var m: model.Model = .init(gpa);
-        errdefer m.deinit();
-        var r: Reader = .{ .in = payload, .a = m.arena.allocator() };
-        const read = try r.value(model.Model);
-        const arena = m.arena;
-        m = read;
-        m.arena = arena;
-        m.revision = 0;
-        return m;
+        const b = try readBlock(bytes, i);
+        i = b.end;
+        if (std.mem.eql(u8, &b.kind, &model_block)) return decodeModelBlock(gpa, b);
     }
     return error.NoModel;
 }

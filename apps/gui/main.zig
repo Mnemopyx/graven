@@ -484,6 +484,7 @@ fn docUnits() layout.model.Units {
 
 /// Starts over with an empty document and asks for the new canvas's units.
 fn newCanvas() void {
+    setFilePath(null);
     clearPlaced();
     state.model.deinit();
     state.model = .init(state.gpa);
@@ -875,6 +876,8 @@ fn frame() !dvui.App.Result {
     }
     try overlays();
     savePrefsIfChanged();
+    updateWindowTitle();
+    if (quit_now) return .close;
     if (hot_edges) {
         ghost_pane.hotEdges(&all_panes, root.data().id);
     } else for (all_panes) |p| {
@@ -906,6 +909,246 @@ const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
 var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
+
+// Files ------------------------------------------------------------------------
+//
+// A document file holds the model as the history's checkpoint and the op
+// log since it (see layout.history): saved, it reopens with its undo
+// history. Save writes the whole file beside the old one and renames it
+// over it, so a failed save never leaves half a file. New, Open and Quit
+// with unsaved changes first ask whether to save them.
+
+/// The document's file, once saved or opened (owned).
+var file_path: ?[]u8 = null;
+
+const FilePromptKind = enum { open, save_as };
+/// A file name is being asked for.
+var file_prompt: ?FilePromptKind = null;
+var file_prompt_new = false;
+
+/// What waits on the unsaved-changes question, or on a save.
+const Pending = enum { new_canvas, open, quit };
+var leave_prompt: ?Pending = null;
+var after_save: ?Pending = null;
+var quit_now = false;
+
+/// The extension Graven's documents take.
+const doc_ext = ".graven";
+
+fn setFilePath(path: ?[]const u8) void {
+    if (file_path) |old| state.gpa.free(old);
+    file_path = if (path) |p| state.gpa.dupe(u8, p) catch null else null;
+    if (file_path) |p| {
+        state.file_name = std.fs.path.basename(p);
+        state.file_name_set = true;
+    } else {
+        state.file_name = "untitled";
+        state.file_name_set = false;
+    }
+}
+
+var shown_title: [256]u8 = undefined;
+var shown_title_len: usize = 0;
+
+/// The window's title for the desktop: the file, marked while unsaved.
+fn updateWindowTitle() void {
+    if (dvui.backend.kind != .sdl3) return;
+    var buf: [256]u8 = undefined;
+    const dirty = !canvas_prompt and hist.isDirty();
+    const t = std.fmt.bufPrintSentinel(&buf, "{s}{s} — Graven", .{ if (dirty) "• " else "", state.file_name }, 0) catch return;
+    if (std.mem.eql(u8, t, shown_title[0..shown_title_len])) return;
+    @memcpy(shown_title[0..t.len], t);
+    shown_title_len = t.len;
+    _ = dvui.backend.c.SDL_SetWindowTitle(dvui.currentWindow().backend.impl.window, t.ptr);
+}
+
+/// Does `p` now, or first asks about unsaved changes.
+fn leave(p: Pending) void {
+    if (!canvas_prompt and hist.isDirty()) {
+        leave_prompt = p;
+    } else proceed(p);
+}
+
+fn proceed(p: Pending) void {
+    switch (p) {
+        .new_canvas => newCanvas(),
+        .open => {
+            file_prompt = .open;
+            file_prompt_new = true;
+        },
+        .quit => quit_now = true,
+    }
+}
+
+/// Saves to the document's file, or asks for one.
+fn save() void {
+    if (file_path) |p| {
+        _ = writeDocument(p);
+    } else saveAs();
+}
+
+fn saveAs() void {
+    file_prompt = .save_as;
+    file_prompt_new = true;
+}
+
+/// Writes the document to `path`: beside it first, then renamed over it.
+fn writeDocument(path: []const u8) bool {
+    const bytes = history.fileBytes(&hist, state.gpa) catch {
+        state.status = "The document could not be made ready to save. ";
+        return false;
+    };
+    defer state.gpa.free(bytes);
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp = std.fmt.bufPrint(&tmp_buf, "{s}.saving", .{path}) catch return false;
+    const dir = std.Io.Dir.cwd();
+    dir.writeFile(dvui.io, .{ .sub_path = tmp, .data = bytes }) catch {
+        state.status = "The document could not be written there. ";
+        return false;
+    };
+    dir.rename(tmp, dir, path, dvui.io) catch {
+        state.status = "The document could not be written there. ";
+        return false;
+    };
+    hist.markSaved();
+    setFilePath(path);
+    state.status = "Saved. ";
+    dvui.refresh(null, @src(), null);
+    if (after_save) |p| {
+        after_save = null;
+        proceed(p);
+    }
+    return true;
+}
+
+/// Opens the document at `path`, replacing the one open.
+fn openDocument(path: []const u8) void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(1 << 30)) catch {
+        state.status = "That file could not be read. ";
+        return;
+    };
+    defer state.gpa.free(bytes);
+    const opened = history.openFile(state.gpa, bytes) catch |err| {
+        state.status = switch (err) {
+            error.BadFile, error.NoModel => "That is not a Graven document. ",
+            error.TooNew => "That document is from a newer Graven. ",
+            error.BadChecksum, error.Truncated => "That document is damaged where its model is stored: it cannot be opened. ",
+            else => "That document could not be opened. ",
+        };
+        return;
+    };
+    newCanvas();
+    state.model.deinit();
+    state.model = opened.model;
+    hist.deinit();
+    hist = opened.history;
+    canvas_prompt = false;
+    shown_space = 0;
+    state.context = if (state.model.spaces.items.len > 0) .{ .panel = state.model.spaces.items[0].root } else .worksheet;
+    for (state.model.styles.items, 0..) |st, si| {
+        if (std.mem.eql(u8, st.name, "Label")) state.label_style = @intCast(si);
+    }
+    state.view.fit = canvas_view;
+    setFilePath(path);
+    state.status = if (opened.damaged) "Opened. The end of the file was damaged: the last changes in it are lost. " else "Opened. ";
+    dvui.refresh(null, @src(), null);
+}
+
+/// The file prompt: a name to open or save as; Enter or the button does
+/// it, Esc or Cancel closes it.
+fn filePrompt(kind: FilePromptKind) void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 460;
+    const h: f32 = 185;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(12));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), if (kind == .open) "Open a document" else "Save the document as", .{}, .{ .font = dvui.Font.theme(.heading) });
+    var go = false;
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down) continue;
+        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        e.handle(@src(), fw.data());
+    }
+    var path: []const u8 = "";
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        propName("File");
+        const initial = if (kind == .save_as) (file_path orelse "untitled" ++ doc_ext) else "";
+        var te = dvui.textEntry(@src(), .{ .text_initial = initial }, .{ .expand = .horizontal, .id_extra = @intFromEnum(kind) });
+        defer te.deinit();
+        if (file_prompt_new) {
+            // The prompt's window takes the keys, so Enter and Esc reach it.
+            dvui.focusSubwindow(fw.data().id, null);
+            dvui.focusWidget(te.data().id, fw.data().id, null);
+            file_prompt_new = false;
+        }
+        if (te.enter_pressed) go = true;
+        path = dvui.currentWindow().arena().dupe(u8, std.mem.trim(u8, te.textGet(), " ")) catch "";
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (dvui.button(@src(), if (kind == .open) "Open" else "Save", .{}, .{})) go = true;
+    }
+    if (cancel) {
+        file_prompt = null;
+        after_save = null;
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    if (!go or path.len == 0) return;
+    file_prompt = null;
+    dvui.refresh(null, @src(), null);
+    switch (kind) {
+        .open => openDocument(path),
+        .save_as => {
+            // A name without an extension takes Graven's.
+            const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
+            if (!writeDocument(full)) after_save = null;
+        },
+    }
+}
+
+/// Unsaved changes: Save (then go on), Don't save, or Cancel.
+fn leavePrompt(p: Pending) void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 460;
+    const h: f32 = 150;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none, .modal = true }, overlayOptions(13));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.label(@src(), "{s} has unsaved changes", .{state.file_name}, .{ .font = dvui.Font.theme(.heading) });
+    const doing = switch (p) {
+        .new_canvas => "starting a new canvas",
+        .open => "opening another document",
+        .quit => "quitting",
+    };
+    dvui.label(@src(), "Save them before {s}?", .{doing}, .{ .margin = .{ .y = 6 } });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
+    defer row.deinit();
+    if (dvui.button(@src(), "Cancel", .{}, .{})) leave_prompt = null;
+    if (dvui.button(@src(), "Don't save", .{}, .{})) {
+        leave_prompt = null;
+        proceed(p);
+    }
+    if (dvui.button(@src(), "Save", .{}, .{})) {
+        leave_prompt = null;
+        after_save = p;
+        save();
+    }
+}
 
 // Undo -------------------------------------------------------------------------
 //
@@ -942,7 +1185,7 @@ fn mergeKey(parts: anytype) u64 {
 /// Ctrl+Z undoes; Ctrl+Shift+Z (and Ctrl+Y off macOS) redoes. Cmd on
 /// macOS. Held, they repeat.
 fn historyKeys(wd: *dvui.WidgetData) void {
-    if (canvas_prompt) return;
+    if (file_prompt != null or leave_prompt != null) return;
     for (dvui.events()) |*e| {
         if (e.evt != .key or e.handled) continue;
         const k = e.evt.key;
@@ -951,10 +1194,21 @@ fn historyKeys(wd: *dvui.WidgetData) void {
         if (!primary) continue;
         if (k.code == .z and !k.mod.shift()) {
             e.handle(@src(), wd);
-            undo();
+            if (!canvas_prompt) undo();
+        } else if (k.code == .s and k.action == .down) {
+            e.handle(@src(), wd);
+            if (!canvas_prompt) {
+                if (k.mod.shift()) saveAs() else save();
+            }
+        } else if (k.code == .o and k.action == .down) {
+            e.handle(@src(), wd);
+            leave(.open);
+        } else if (k.code == .n and k.action == .down) {
+            e.handle(@src(), wd);
+            leave(.new_canvas);
         } else if ((k.code == .z and k.mod.shift()) or (k.code == .y and builtin.os.tag != .macos)) {
             e.handle(@src(), wd);
-            redo();
+            if (!canvas_prompt) redo();
         } else continue;
         dvui.refresh(null, @src(), null);
     }
@@ -1370,9 +1624,13 @@ fn overlays() !void {
         defer fw.deinit();
         if (moving_track) movePalette() else trackPalette();
     }
-    if (canvas_prompt) newCanvasPrompt();
+    // The new-canvas prompt waits under an open or save prompt, so Enter
+    // goes to the prompt on top.
+    if (canvas_prompt and file_prompt == null and leave_prompt == null) newCanvasPrompt();
     if (export_prompt) exportPrompt();
     if (image_prompt) imagePrompt();
+    if (file_prompt) |kind| filePrompt(kind);
+    if (leave_prompt) |p| leavePrompt(p);
 }
 
 /// The bottom area: the expression line, then the status line.
@@ -1830,6 +2088,8 @@ fn titleBar() ?dvui.App.Result {
         defer middle.deinit();
         var title = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
         defer title.deinit();
+        // A bullet while there are unsaved changes.
+        if (!canvas_prompt and hist.isDirty()) dvui.labelNoFmt(@src(), "• ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         dvui.labelNoFmt(@src(), state.file_name, .{}, .{ .font = styled(.theme(.body), !state.file_name_set), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         dvui.labelNoFmt(@src(), "  —  ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         if (openCanvas()) {
@@ -1861,7 +2121,7 @@ fn windowButtons(buttons: []const desktop.Button) ?dvui.App.Result {
                 const maximized = (c.SDL_GetWindowFlags(window) & c.SDL_WINDOW_MAXIMIZED) != 0;
                 _ = if (maximized) c.SDL_RestoreWindow(window) else c.SDL_MaximizeWindow(window);
             },
-            .close => return .close,
+            .close => leave(.quit),
         }
     }
     return null;
@@ -1874,9 +2134,25 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (dvui.menuItemLabel(@src(), "New canvas…", .{}, .{ .expand = .horizontal }) != null) {
-            newCanvas();
+        const mod = if (builtin.os.tag == .macos) "Cmd" else "Ctrl";
+        var kb: [4][48]u8 = undefined;
+        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[0], "New canvas…      {s}+N", .{mod}) catch "New canvas…", .{}, .{ .expand = .horizontal }) != null) {
+            leave(.new_canvas);
             m.close();
+        }
+        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[1], "Open…      {s}+O", .{mod}) catch "Open…", .{}, .{ .expand = .horizontal }) != null) {
+            leave(.open);
+            m.close();
+        }
+        if (!canvas_prompt) {
+            if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[2], "Save      {s}+S", .{mod}) catch "Save", .{}, .{ .expand = .horizontal }) != null) {
+                save();
+                m.close();
+            }
+            if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[3], "Save As…      {s}+Shift+S", .{mod}) catch "Save As…", .{}, .{ .expand = .horizontal }) != null) {
+                saveAs();
+                m.close();
+            }
         }
         if (dvui.menuItemLabel(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
@@ -1898,7 +2174,10 @@ fn menu() ?dvui.App.Result {
                 m.close();
             }
         }
-        if (dvui.menuItemLabel(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) return .close;
+        if (dvui.menuItemLabel(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) {
+            leave(.quit);
+            m.close();
+        }
     }
     if (dvui.menuItemLabel(@src(), "Edit", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -3674,7 +3953,9 @@ fn imagePrompt() void {
         var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal });
         defer te.deinit();
         if (image_prompt_new) {
-            dvui.focusWidget(te.data().id, null, null);
+            // The prompt's window takes the keys, so Enter and Esc reach it.
+            dvui.focusSubwindow(fw.data().id, null);
+            dvui.focusWidget(te.data().id, fw.data().id, null);
             image_prompt_new = false;
         }
         if (te.enter_pressed) go = true;
@@ -3688,6 +3969,7 @@ fn imagePrompt() void {
     }
     if (cancel) {
         image_prompt = false;
+        dvui.refresh(null, @src(), null);
         return;
     }
     if (!go or path.len == 0) return;
@@ -4061,9 +4343,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     validateCursor();
     for (dvui.events()) |*e| {
         // While a new canvas's units are asked for, the canvas takes no
-        // input but Enter, which makes it.
+        // input but Enter, which makes it (unless an open or save prompt
+        // is on top, which takes the Enter).
         if (canvas_prompt) {
-            if (e.evt == .key and e.evt.key.action == .down and (e.evt.key.code == .enter or e.evt.key.code == .kp_enter)) {
+            if (file_prompt == null and leave_prompt == null and e.evt == .key and e.evt.key.action == .down and (e.evt.key.code == .enter or e.evt.key.code == .kp_enter)) {
                 e.handle(@src(), box.data());
                 createCanvas(last_units);
                 dvui.refresh(null, @src(), box.data().id);
