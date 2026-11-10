@@ -311,3 +311,33 @@ test "a key sized outside the key prototype's rules is flagged, not refused" {
         try std.testing.expectEqual(c.flagged, flagged);
     }
 }
+
+test "the keyboard saved and read back lays out and exports exactly the same" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const s = try m.addStyle("main", .{ .upright = 0, .cap_height = 2.6 });
+    const p = try build(gpa, &m, .{ .main = s, .small = s });
+    const bytes = try layout.native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try layout.native.decode(gpa, bytes);
+    defer back.deinit();
+    var labels: layout.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var a = try layout.solve(gpa, &m, p, &labels);
+    defer a.deinit();
+    var labels2: layout.Labels = .init(gpa, &.{});
+    defer labels2.deinit();
+    var b = try layout.solve(gpa, &back, p, &labels2);
+    defer b.deinit();
+    try std.testing.expectEqual(a.tiles.len, b.tiles.len);
+    for (a.tiles, b.tiles) |x, y| {
+        try std.testing.expectEqual(x.pitch_box, y.pitch_box);
+        try std.testing.expectEqual(x.body, y.body);
+    }
+    const svg_a = try layout.output.panelSvg(gpa, &a, &.{}, .{});
+    defer gpa.free(svg_a);
+    const svg_b = try layout.output.panelSvg(gpa, &b, &.{}, .{});
+    defer gpa.free(svg_b);
+    try std.testing.expectEqualStrings(svg_a, svg_b);
+}
