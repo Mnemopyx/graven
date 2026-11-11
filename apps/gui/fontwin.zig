@@ -154,6 +154,13 @@ fn codepoints(a: Allocator, s: []const u8) []u21 {
     return out.items;
 }
 
+/// Inside a scroll area whose bar overlays its content: the content, kept
+/// clear of where the bar appears, so nothing moves when it does.
+fn keepBarRoom(src: std.builtin.SourceLocation) *dvui.BoxWidget {
+    const bar = dvui.ScrollBarWidget.defaults.min_sizeGet().w;
+    return dvui.box(src, .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .{ .w = bar } });
+}
+
 fn heading(src: std.builtin.SourceLocation, s: []const u8) void {
     dvui.labelNoFmt(src, s, .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .y = 8, .h = 4 } });
 }
@@ -203,8 +210,10 @@ pub fn window(host: Host, allocator: Allocator) void {
 fn criteria() void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 250 }, .max_size_content = .width(250), .expand = .vertical, .padding = .all(8) });
     defer col.deinit();
-    var scroll = dvui.scrollArea(@src(), .{ .horizontal_bar = .hide }, .{ .expand = .both });
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay, .horizontal_bar = .hide }, .{ .expand = .both });
     defer scroll.deinit();
+    var bar_room = keepBarRoom(@src());
+    defer bar_room.deinit();
     heading(@src(), "Search");
     dvui.labelNoFmt(@src(), "Family or style has every word", .{}, .{});
     {
@@ -301,8 +310,10 @@ fn results(a: Allocator) []const fs.Hit {
         var buf: [64]u8 = undefined;
         heading(@src(), std.fmt.bufPrint(&buf, "Results ({d})", .{hits.len}) catch "Results");
     }
-    var scroll = dvui.scrollArea(@src(), .{ .horizontal_bar = .hide }, .{ .expand = .both });
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay, .horizontal_bar = .hide }, .{ .expand = .both });
     defer scroll.deinit();
+    var bar_room = keepBarRoom(@src());
+    defer bar_room.deinit();
     for (hits, 0..) |h, k| {
         const r = &records[h.index];
         const is_sel = selected != null and selected.? == h.index;
@@ -387,8 +398,10 @@ fn compare(a: Allocator, width: f32) void {
     defer col.deinit();
     // Scrolled, so long samples and details never widen the column past
     // what the window has.
-    var scroll = dvui.scrollArea(@src(), .{ .horizontal_bar = .hide }, .{ .expand = .both });
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay, .horizontal_bar = .hide }, .{ .expand = .both });
     defer scroll.deinit();
+    var bar_room = keepBarRoom(@src());
+    defer bar_room.deinit();
     heading(@src(), "Compare");
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -676,8 +689,10 @@ fn rangesOf(a: Allocator, s: []const u8) []engine.style.Range {
 fn compose(host: Host) void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 300 }, .max_size_content = .width(300), .expand = .vertical, .padding = .all(8) });
     defer col.deinit();
-    var scroll = dvui.scrollArea(@src(), .{ .horizontal_bar = .hide }, .{ .expand = .both });
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay, .horizontal_bar = .hide }, .{ .expand = .both });
     defer scroll.deinit();
+    var bar_room = keepBarRoom(@src());
+    defer bar_room.deinit();
     const m = host.model;
     heading(@src(), "Compose");
     // Which composed font: the document's, or a new one.
