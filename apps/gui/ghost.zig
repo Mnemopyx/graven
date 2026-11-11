@@ -41,7 +41,7 @@ pub const Look = struct {
     /// How far a ghost's background sits from the paper (OKLab distance),
     /// the same for every hue: a near-white wash at one opacity shows some
     /// hues and hides others.
-    ghost_presence: f32 = 0.018,
+    ghost_presence: f32 = 0.03,
     ghost_content: f32 = 0.55,
     /// The background's opacity while active or docked.
     active_fill: f32 = 0.72,
