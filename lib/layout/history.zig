@@ -44,6 +44,8 @@ pub const actions = [_][:0]const u8{
     "ungroup",           "moveGroup",          "moveToSpace",         "copyToSpace",        "addView",
     "moveView",          "setViewScale",       "removeView",          "addLayer",           "setLayer",
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
+    "addFont",           "renameFont",         "setFontMain",         "addFontMember",      "setFontMember",
+    "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -1148,4 +1150,37 @@ test "not saving drops the autosaved steps from the file" {
     defer o.history.deinit();
     try testing.expectEqual(null, o.unsaved);
     try testing.expectEqual(1, o.model.panels.items[c].labels.items.len);
+}
+
+test "composed-font edits undo and redo, and survive saving and reopening" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    _ = c;
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const style = try h.do(&m, .addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } });
+    const f = try h.do(&m, .addFont, .{ "Legend", .{ .family = "Inter" } });
+    _ = try h.do(&m, .addFontMember, .{ f, 0, .{ .font = .{ .family = "Symbols" }, .coverage = .{ .ranges = &.{.{ .first = 0x2190, .last = 0x21FF }} }, .scale = 1.1 } });
+    try h.do(&m, .setStyleFont, .{ style, f });
+    try testing.expectEqual(f, m.styles.items[style].font);
+    // Undo the style's font and the member; redo the member.
+    _ = try h.undo(&m);
+    _ = try h.undo(&m);
+    try testing.expectEqual(0, m.fonts.items[0].members.items.len);
+    try testing.expectEqual(.none, m.styles.items[style].font);
+    _ = try h.redoStep(&m);
+    try testing.expectEqual(1.1, m.fonts.items[0].members.items[0].scale);
+
+    const bytes = try fileBytes(&h, gpa, test_writer, 1);
+    defer gpa.free(bytes);
+    var o = try openFile(gpa, bytes);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    const back = o.model.fonts.items[0];
+    try testing.expectEqualStrings("Legend", back.name);
+    try testing.expectEqualStrings("Symbols", back.members.items[0].font.family);
+    try testing.expectEqual(0x21FF, back.members.items[0].coverage.ranges[0].last);
 }

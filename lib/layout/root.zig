@@ -13,6 +13,7 @@ pub const drc = @import("drc.zig");
 pub const output = @import("output.zig");
 pub const native = @import("native.zig");
 pub const history = @import("history.zig");
+pub const fonts = @import("fonts.zig");
 
 pub const Model = model.Model;
 pub const TileId = model.TileId;

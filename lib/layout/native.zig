@@ -57,7 +57,8 @@ const Writer = struct {
     }
 
     fn int(w: *Writer, comptime T: type, v: T) Allocator.Error!void {
-        var buf: [@sizeOf(T)]u8 = undefined;
+        // Its width in bytes, not its size in memory (a u24 takes four).
+        var buf: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
         std.mem.writeInt(T, &buf, v, .little);
         try w.bytes(&buf);
     }
@@ -205,7 +206,8 @@ const Reader = struct {
     }
 
     fn int(r: *Reader, comptime T: type) Error!T {
-        return std.mem.readInt(T, (try r.take(@sizeOf(T)))[0..@sizeOf(T)], .little);
+        const n = @divExact(@typeInfo(T).int.bits, 8);
+        return std.mem.readInt(T, (try r.take(n))[0..n], .little);
     }
 
     fn name(r: *Reader) Error![]const u8 {

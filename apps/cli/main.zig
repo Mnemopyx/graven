@@ -156,14 +156,14 @@ fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) 
         const bytes = try cwd.readFileAlloc(io, path, a, .limited(64 << 20));
         try faces.append(a, try engine.Face.init(gpa, bytes, 0));
     }
-    var fallbacks: std.ArrayList(engine.render.FaceId) = .empty;
+    var members: std.ArrayList(engine.style.Member) = .empty;
     const first_fallback: u32 = if (has_italic) 2 else 1;
-    for (first_fallback..faces.items.len) |k| try fallbacks.append(a, @intCast(k));
+    for (first_fallback..faces.items.len) |k| try members.append(a, .{ .upright = @intCast(k) });
 
     const ctx = try engine.style.Context.init(faces.items, .{
         .upright = 0,
         .italic = if (has_italic) 1 else null,
-        .fallbacks = fallbacks.items,
+        .members = members.items,
         .cap_height = cap,
         .letters = if (has_italic) .italic else .upright,
         .contact = flags.contact,

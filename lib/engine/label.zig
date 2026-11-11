@@ -586,7 +586,7 @@ const Builder = struct {
             if (singleCluster(acc.body.*)) |t| {
                 const combined = try withMark(b.a, t, m, acc.span.start);
                 const face = try b.chooseFace(combined, combined.utf8);
-                if (covers(b.ctx.faces[face], combined.utf8))
+                if (style.covers(b.ctx.faces[face], combined.utf8))
                     return b.text(combined, 0, combined.utf8.len, cap, level, x, y);
             }
         }
@@ -629,21 +629,14 @@ const Builder = struct {
     fn drawnGlyph(b: *Builder, cp: u21, span: markup.Span, body: Box, gap: f64, cap: f64, level: u8) Error!void {
         var buf: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
-        const spec = b.ctx.spec;
-        const face_id = blk: {
-            if (covers(b.ctx.faces[spec.upright], buf[0..n])) break :blk spec.upright;
-            for (spec.fallbacks) |f| {
-                if (covers(b.ctx.faces[f], buf[0..n])) break :blk f;
-            }
-            return b.diagnose(.missing_glyph, span.start);
-        };
+        const face_id = b.ctx.faceFor(buf[0..n], false, true) orelse return b.diagnose(.missing_glyph, span.start);
         const face = b.ctx.faces[face_id];
         const gid = face.glyph(cp).?;
         const s = try b.ctx.scaleFor(face_id, cap);
         const own = (try face.outline(gid)).bounds();
         if (own.isEmpty()) return;
         const dx = (body.x0 + body.x1) / 2 - (own.x0 + own.x1) / 2 * s;
-        const dy = body.y1 + gap - own.y0 * s;
+        const dy = body.y1 + gap - own.y0 * s + b.ctx.shiftFor(face_id, cap);
         const item: render.GlyphItem = .{
             .face = face_id,
             .gid = gid,
@@ -686,31 +679,25 @@ const Builder = struct {
         if (run_face) |f| pen = try b.element(t, run_start, end, f, cap, level, pen, y);
         return pen;
     }
-    /// The face for one cluster: the one its variant asks for if that face
-    /// has the whole cluster, else the first fallback that does, else the
-    /// asked-for face (whose .notdef is then drawn and reported).
+    /// The face for one cluster, as the composed font sets it (see
+    /// `style.Context.faceFor`): a member whose coverage takes it, else
+    /// the face its variant asks for, else the first fallback that has it,
+    /// else the asked-for face (whose .notdef is then drawn and reported).
     fn chooseFace(b: *Builder, t: markup.Text, cluster: []const u8) Error!FaceId {
-        const spec = b.ctx.spec;
         const first = firstCodepoint(cluster);
         const italic = isLetter(first) and !t.operator and switch (t.variant) {
             .italic => true,
-            .default => spec.letters == .italic,
+            .default => b.ctx.spec.letters == .italic,
             .upright, .text => false,
         };
-        var wanted = spec.upright;
-        if (italic) {
-            if (spec.italic) |f| wanted = f;
-        }
-        if (covers(b.ctx.faces[wanted], cluster)) return wanted;
-        for (spec.fallbacks) |f| {
-            if (covers(b.ctx.faces[f], cluster)) return f;
-        }
-        return wanted;
+        return b.ctx.faceFor(cluster, italic, false).?;
     }
 
     fn element(b: *Builder, t: markup.Text, start: usize, end: usize, face_id: FaceId, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
         const face = b.ctx.faces[face_id];
         const s = try b.ctx.scaleFor(face_id, cap);
+        // A member's baseline shift moves its whole element.
+        const y_shifted = y + b.ctx.shiftFor(face_id, cap);
         const glyphs = try shaping.shape(b.a, face, t.utf8[start..end]);
         const element_id: u32 = @intCast(b.elements.items.len);
 
@@ -723,7 +710,7 @@ const Builder = struct {
         for (glyphs) |g| {
             if (g.gid == 0) try b.diagnose(.missing_glyph, t.source[start + g.cluster]);
             const gx = x + (pen + @as(f64, @floatFromInt(g.x_offset))) * s;
-            const gy = y + @as(f64, @floatFromInt(g.y_offset)) * s;
+            const gy = y_shifted + @as(f64, @floatFromInt(g.y_offset)) * s;
             const item: render.GlyphItem = .{
                 .face = face_id,
                 .gid = g.gid,
@@ -755,15 +742,6 @@ const Builder = struct {
 
 /// True when `face` has a glyph for every codepoint of the cluster, ignoring
 /// joiners and variation selectors, which fonts need not map.
-fn covers(face: *font.Face, cluster: []const u8) bool {
-    var it = (std.unicode.Utf8View.initUnchecked(cluster)).iterator();
-    while (it.nextCodepoint()) |cp| {
-        if (cp == 0x200D or (cp >= 0xFE00 and cp <= 0xFE0F) or (cp >= 0xE0100 and cp <= 0xE01EF)) continue;
-        if (face.glyph(cp) == null) return false;
-    }
-    return true;
-}
-
 fn firstCodepoint(s: []const u8) u21 {
     var it = (std.unicode.Utf8View.initUnchecked(s)).iterator();
     return it.nextCodepoint() orelse 0;
@@ -1058,7 +1036,7 @@ test "a cluster the main face lacks comes from a fallback, matched by cap height
     var f = try Fonts.init();
     defer f.deinit();
     var spec = testSpec();
-    spec.fallbacks = &.{2};
+    spec.members = &.{.{ .upright = 2 }};
     const ctx = try style.Context.init(&f.faces, spec);
     var r = try renderTest(&ctx, "HxH");
     defer r.deinit();
@@ -1069,6 +1047,55 @@ test "a cluster the main face lacks comes from a fallback, matched by cap height
     // unit, so its 300-unit x is 4.2 mm tall.
     try testing.expectApproxEqAbs(@as(f64, 4.2), r.elements[1].ink.height(), eps);
     try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
+test "a member with explicit coverage takes its characters even where the main face has them" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    // H from the member, though the main face has an H.
+    spec.members = &.{.{ .upright = 2, .coverage = .{ .ranges = &.{.{ .first = 'H', .last = 'H' }} } }};
+    const ctx = try style.Context.init(&f.faces, spec);
+    var r = try renderTest(&ctx, "HxH");
+    defer r.deinit();
+    // H and H from the member; x from no face (it only falls back to
+    // fallback members, and this one covers H alone).
+    try testing.expectEqual(@as(?FaceId, 2), r.elements[0].face);
+    try testing.expect(r.diagnostics.len > 0);
+}
+
+test "a member is scaled and shifted against the main face" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var plain_spec = testSpec();
+    plain_spec.members = &.{.{ .upright = 2 }};
+    const plain = try style.Context.init(&f.faces, plain_spec);
+    var spec = testSpec();
+    spec.members = &.{.{ .upright = 2, .scale = 2, .shift = 0.5 }};
+    const ctx = try style.Context.init(&f.faces, spec);
+    var a = try renderTest(&plain, "HxH");
+    defer a.deinit();
+    var b = try renderTest(&ctx, "HxH");
+    defer b.deinit();
+    // Twice the size: the 4.2 mm x becomes 8.4 mm.
+    try testing.expectApproxEqAbs(@as(f64, 8.4), b.elements[1].ink.height(), eps);
+    // Raised by half the 7 mm cap height, less the doubling's own drop
+    // of its ink bottom (x sits on the baseline, so none).
+    try testing.expectApproxEqAbs(a.elements[1].ink.y0 + 3.5, b.elements[1].ink.y0, eps);
+    // The main face's letters are where they were.
+    try testing.expectApproxEqAbs(a.elements[0].ink.y0, b.elements[0].ink.y0, eps);
+}
+
+test "a member matched by em takes the main face's em size" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.members = &.{.{ .upright = 2, .match = .em }};
+    const ctx = try style.Context.init(&f.faces, spec);
+    const main = f.faces[0];
+    const main_em = try ctx.scaleFor(0, 7) * @as(f64, @floatFromInt(main.upem));
+    const member_em = try ctx.scaleFor(2, 7) * @as(f64, @floatFromInt(f.faces[2].upem));
+    try testing.expectApproxEqAbs(main_em, member_em, 1e-9);
 }
 
 test "letters follow the style's italic rule and explicit variants" {
@@ -1095,7 +1122,7 @@ test "missing glyphs and unrendered constructs are reported at their source" {
     var f = try Fonts.init();
     defer f.deinit();
     var spec = testSpec();
-    spec.fallbacks = &.{2};
+    spec.members = &.{.{ .upright = 2 }};
     const ctx = try style.Context.init(&f.faces, spec);
 
     var r = try renderTest(&ctx, "H\\u{5A}");
@@ -1141,7 +1168,7 @@ test "rendering a label is deterministic" {
     var f = try Fonts.init();
     defer f.deinit();
     var spec = testSpec();
-    spec.fallbacks = &.{2};
+    spec.members = &.{.{ .upright = 2 }};
     const ctx = try style.Context.init(&f.faces, spec);
     var r1 = try renderTest(&ctx, "Hx_{O}^{A H}D");
     defer r1.deinit();

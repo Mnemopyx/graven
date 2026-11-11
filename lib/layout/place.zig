@@ -9,6 +9,7 @@
 //! Labels are rendered by the engine through `Labels`, a cache keyed by
 //! style, markup, box and anchor, so identical legends share one render.
 
+const fonts = @import("fonts.zig");
 const std = @import("std");
 const engine = @import("graven_engine");
 const model = @import("model.zig");
@@ -206,10 +207,42 @@ pub const Placed = struct {
     }
 };
 
+/// Whether two specs set text alike: their fields, and their members'
+/// fields and coverage, compared by value (a spec's slices are rebuilt by
+/// each resolve).
+fn specEql(a: engine.style.Spec, b: engine.style.Spec) bool {
+    var x = a;
+    var y = b;
+    x.members = &.{};
+    y.members = &.{};
+    if (!std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&y))) return false;
+    if (a.members.len != b.members.len) return false;
+    for (a.members, b.members) |p, q| {
+        var pp = p;
+        var qq = q;
+        pp.coverage = .fallback;
+        qq.coverage = .fallback;
+        if (!std.mem.eql(u8, std.mem.asBytes(&pp), std.mem.asBytes(&qq))) return false;
+        switch (p.coverage) {
+            .fallback => if (q.coverage != .fallback) return false,
+            .ranges => |rs| {
+                if (q.coverage != .ranges) return false;
+                const ts = q.coverage.ranges;
+                if (rs.len != ts.len) return false;
+                for (rs, ts) |u, v| if (u.first != v.first or u.last != v.last) return false;
+            },
+        }
+    }
+    return true;
+}
+
 /// Renders labels for one face table, caching each render.
 pub const Labels = struct {
     gpa: Allocator,
     faces: []const *engine.Face,
+    /// The resolved fonts last given to `syncResolved`, which `sync` then
+    /// keeps to; the caller resolves again when the model changes.
+    resolved: ?*const fonts.Resolved = null,
     contexts: std.ArrayList(?Ctx) = .empty,
     cache: std.HashMapUnmanaged(Key, Entry, KeyContext, 80) = .empty,
 
@@ -281,19 +314,41 @@ pub const Labels = struct {
     }
 
     /// Brings the style contexts up to date with the model, dropping renders
-    /// of any style whose spec changed.
+    /// of any style whose spec changed. For a model whose styles name
+    /// faces directly (no composed fonts); see `syncResolved`.
     pub fn sync(l: *Labels, m: *const Model) Allocator.Error!void {
-        while (l.contexts.items.len < m.styles.items.len) try l.contexts.append(l.gpa, null);
-        for (m.styles.items, 0..) |s, i| {
+        if (l.resolved) |r| return l.syncSpecs(r.faces.items, r.specs.items);
+        const specs = try l.gpa.alloc(engine.style.Spec, m.styles.items.len);
+        defer l.gpa.free(specs);
+        for (m.styles.items, specs) |st, *sp| sp.* = st.spec;
+        try l.syncSpecs(l.faces, specs);
+    }
+
+    /// As `sync`, with the face table and specs that resolving the model's
+    /// composed fonts gave (see `fonts.resolve`). A changed face table
+    /// drops every render.
+    pub fn syncResolved(l: *Labels, r: *const fonts.Resolved) Allocator.Error!void {
+        l.resolved = r;
+        try l.syncSpecs(r.faces.items, r.specs.items);
+    }
+
+    fn syncSpecs(l: *Labels, faces: []const *engine.Face, specs: []const engine.style.Spec) Allocator.Error!void {
+        if (faces.ptr != l.faces.ptr or faces.len != l.faces.len) {
+            l.faces = faces;
+            for (l.contexts.items) |*c| c.* = null;
+            l.clear();
+        }
+        while (l.contexts.items.len < specs.len) try l.contexts.append(l.gpa, null);
+        for (specs, 0..) |spec, i| {
             const cur = &l.contexts.items[i];
-            if (cur.*) |c| if (std.mem.eql(u8, std.mem.asBytes(&c.spec), std.mem.asBytes(&s.spec))) continue;
-            const usable = s.spec.upright < l.faces.len and
-                (s.spec.italic orelse 0) < l.faces.len and
-                for (s.spec.fallbacks) |f| {
-                    if (f >= l.faces.len) break false;
+            if (cur.*) |c| if (specEql(c.spec, spec)) continue;
+            const usable = spec.upright < l.faces.len and
+                (spec.italic orelse 0) < l.faces.len and
+                for (spec.members) |mb| {
+                    if (mb.upright >= l.faces.len or (mb.italic orelse 0) >= l.faces.len) break false;
                 } else true;
-            const ctx = if (usable) engine.style.Context.init(l.faces, s.spec) catch null else null;
-            cur.* = .{ .spec = s.spec, .ctx = ctx };
+            const ctx = if (usable) engine.style.Context.init(l.faces, spec) catch null else null;
+            cur.* = .{ .spec = spec, .ctx = ctx };
             l.dropStyle(@intCast(i));
         }
     }

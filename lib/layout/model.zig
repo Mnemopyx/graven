@@ -752,9 +752,53 @@ pub const Sheet = struct {
     }
 };
 
+/// A font as a document names it: by family and style, never by file, so
+/// a document opens alike on any machine that has the font.
+pub const FontName = struct {
+    family: []const u8,
+    style: []const u8 = "Regular",
+
+    pub fn eql(a: FontName, b: FontName) bool {
+        return std.ascii.eqlIgnoreCase(a.family, b.family) and std.ascii.eqlIgnoreCase(a.style, b.style);
+    }
+};
+
+/// One face of a composed font besides its main one, and how it is set
+/// beside the main face (see `engine.style.Member`).
+pub const FontMember = struct {
+    font: FontName,
+    /// Its italic, for letters asked to be italic; else `font`.
+    italic: ?FontName = null,
+    /// The characters it sets: what the faces before it lack (a fallback),
+    /// or codepoint ranges, taken even where the main face has them.
+    coverage: engine.style.Coverage = .fallback,
+    /// How it is sized against the main face, then a further factor.
+    match: engine.style.Match = .cap_height,
+    scale: f64 = 1,
+    /// Baseline shift, a fraction of the cap height, up positive.
+    shift: f64 = 0,
+};
+
+/// A composed font: a named, virtual font that styles reference. A main
+/// font (and its italic) and an ordered list of members, each with its
+/// coverage and its size and baseline adjustments. Styles share it, so
+/// changing it restyles every label set in it.
+pub const ComposedFont = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    main: FontName,
+    italic: ?FontName = null,
+    members: std.ArrayList(FontMember) = .empty,
+};
+
 pub const LabelStyle = struct {
     name: []const u8,
-    /// Face ids index the face table the caller renders with.
+    /// The composed font the style is set in; none: the faces `spec`
+    /// names directly, in the caller's face table.
+    font: ObjectId = .none,
+    /// Face ids index the face table the caller renders with; a style set
+    /// in a composed font has them filled in when its font is resolved
+    /// (see `fonts.resolve`).
     spec: engine.style.Spec,
 };
 
@@ -778,10 +822,12 @@ pub const Model = struct {
     /// The built-in Blank prototype, once a blank has been made.
     blank_prototype: ?PrototypeId = null,
     styles: std.ArrayList(LabelStyle) = .empty,
+    /// The document's composed fonts, which styles reference.
+    fonts: std.ArrayList(ComposedFont) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -867,6 +913,130 @@ pub const Model = struct {
 
     pub fn setStyle(m: *Model, id: StyleId, spec: engine.style.Spec) void {
         m.styles.items[id].spec = spec;
+        m.revision += 1;
+    }
+
+    // Composed fonts ---------------------------------------------------------
+
+    fn dupeFontName(m: *Model, n: FontName) Allocator.Error!FontName {
+        return .{ .family = try m.a().dupe(u8, n.family), .style = try m.a().dupe(u8, n.style) };
+    }
+
+    fn dupeMember(m: *Model, mb: FontMember) Allocator.Error!FontMember {
+        var out = mb;
+        out.font = try m.dupeFontName(mb.font);
+        out.italic = if (mb.italic) |it| try m.dupeFontName(it) else null;
+        out.coverage = switch (mb.coverage) {
+            .fallback => .fallback,
+            .ranges => |rs| .{ .ranges = try m.a().dupe(engine.style.Range, rs) },
+        };
+        return out;
+    }
+
+    /// The index of composed font `id`.
+    pub fn fontIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.fonts.items, 0..) |f, i| if (f.id == id) return i;
+        return null;
+    }
+
+    fn font(m: *Model, id: ObjectId) Error!*ComposedFont {
+        return &m.fonts.items[m.fontIndex(id) orelse return error.NoSuchFont];
+    }
+
+    /// A new composed font named `name`, its main font `main`, with no
+    /// members yet. Returns its ID.
+    pub fn addFont(m: *Model, name: []const u8, main: FontName) Error!ObjectId {
+        const id = m.newId();
+        try m.fonts.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .main = try m.dupeFontName(main) });
+        m.revision += 1;
+        return id;
+    }
+
+    /// The first "Font N" no composed font uses yet.
+    pub fn nextFontName(m: *const Model, buf: []u8) []const u8 {
+        var n: usize = m.fonts.items.len + 1;
+        while (true) : (n += 1) {
+            const name = std.fmt.bufPrint(buf, "Font {d}", .{n}) catch return "Font";
+            for (m.fonts.items) |f| {
+                if (std.mem.eql(u8, f.name, name)) break;
+            } else return name;
+        }
+    }
+
+    pub fn renameFont(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        const f = try m.font(id);
+        f.name = try m.a().dupe(u8, name);
+        m.revision += 1;
+    }
+
+    /// Sets the main font of composed font `id`, and its italic (null for
+    /// none: letters asked to be italic are then upright, and reported).
+    pub fn setFontMain(m: *Model, id: ObjectId, main: FontName, italic: ?FontName) Error!void {
+        const f = try m.font(id);
+        f.main = try m.dupeFontName(main);
+        f.italic = if (italic) |it| try m.dupeFontName(it) else null;
+        m.revision += 1;
+    }
+
+    /// Inserts `member` into composed font `id` at `at` (past the end:
+    /// last). Returns where it went.
+    pub fn addFontMember(m: *Model, id: ObjectId, at: usize, member: FontMember) Error!usize {
+        const f = try m.font(id);
+        const i = @min(at, f.members.items.len);
+        try f.members.insert(m.a(), i, try m.dupeMember(member));
+        m.revision += 1;
+        return i;
+    }
+
+    pub fn setFontMember(m: *Model, id: ObjectId, index: usize, member: FontMember) Error!void {
+        const f = try m.font(id);
+        if (index >= f.members.items.len) return error.NoSuchItem;
+        f.members.items[index] = try m.dupeMember(member);
+        m.revision += 1;
+    }
+
+    /// Moves member `index` one place earlier (`up`) or later in the order
+    /// faces are tried. Returns its new index.
+    pub fn moveFontMember(m: *Model, id: ObjectId, index: usize, up: bool) Error!usize {
+        const list = (try m.font(id)).members.items;
+        if (index >= list.len) return error.NoSuchItem;
+        const to = if (up) (if (index == 0) return index else index - 1) else index + 1;
+        if (to >= list.len) return index;
+        std.mem.swap(FontMember, &list[index], &list[to]);
+        m.revision += 1;
+        return to;
+    }
+
+    pub fn removeFontMember(m: *Model, id: ObjectId, index: usize) Error!void {
+        const f = try m.font(id);
+        if (index >= f.members.items.len) return error.NoSuchItem;
+        _ = f.members.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// How many styles are set in composed font `id`.
+    pub fn fontUsers(m: *const Model, id: ObjectId) usize {
+        var n: usize = 0;
+        for (m.styles.items) |st| {
+            if (st.font == id) n += 1;
+        }
+        return n;
+    }
+
+    /// Removes composed font `id`; refused while a style is set in it.
+    pub fn removeFont(m: *Model, id: ObjectId) Error!void {
+        const i = m.fontIndex(id) orelse return error.NoSuchFont;
+        if (m.fontUsers(id) > 0) return error.FontInUse;
+        _ = m.fonts.orderedRemove(i);
+        m.revision += 1;
+    }
+
+    /// Sets style `style` in composed font `font` (none: back to the faces
+    /// its spec names).
+    pub fn setStyleFont(m: *Model, style: StyleId, font_id: ObjectId) Error!void {
+        if (style >= m.styles.items.len) return error.NoSuchStyle;
+        if (font_id != .none and m.fontIndex(font_id) == null) return error.NoSuchFont;
+        m.styles.items[style].font = font_id;
         m.revision += 1;
     }
 
@@ -2999,4 +3169,36 @@ test "layers: a background image under a panel, and blending on an engrave layer
     try std.testing.expectEqual(1, m.spaces.items[f].layers.items.len);
     _ = try m.moveToSpace(&.{m.panels.items[p].id}, f);
     try std.testing.expectEqual(.none, m.panels.items[p].layer);
+}
+
+test "composed fonts: members in order, styles set in them, and a font in use kept" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Font 1", m.nextFontName(&buf));
+    const f = try m.addFont("Legend", .{ .family = "Inter", .style = "Medium" });
+    try std.testing.expectEqualStrings("Font 2", m.nextFontName(&buf));
+    try m.setFontMain(f, .{ .family = "Inter", .style = "Medium" }, .{ .family = "Inter", .style = "Medium Italic" });
+    // A fallback, then Greek from another family taken before it.
+    var greek_ranges = [_]engine.style.Range{.{ .first = 0x0370, .last = 0x03FF }};
+    _ = try m.addFontMember(f, 99, .{ .font = .{ .family = "Noto Sans Symbols" } });
+    const g = try m.addFontMember(f, 0, .{ .font = .{ .family = "GFS Didot" }, .coverage = .{ .ranges = &greek_ranges }, .match = .x_height, .shift = -0.02 });
+    try std.testing.expectEqual(0, g);
+    // The model keeps its own copy of the ranges.
+    greek_ranges[0].last = 0;
+    const cf = m.fonts.items[m.fontIndex(f).?];
+    try std.testing.expectEqual(2, cf.members.items.len);
+    try std.testing.expectEqual(0x03FF, cf.members.items[0].coverage.ranges[0].last);
+    try std.testing.expectEqual(1, try m.moveFontMember(f, 0, false));
+    try std.testing.expectEqualStrings("Noto Sans Symbols", m.fonts.items[0].members.items[0].font.family);
+
+    try m.setStyleFont(body, f);
+    try std.testing.expectEqual(1, m.fontUsers(f));
+    try std.testing.expectError(error.FontInUse, m.removeFont(f));
+    try std.testing.expectError(error.NoSuchFont, m.setStyleFont(body, @enumFromInt(9999)));
+    try m.setStyleFont(body, .none);
+    try m.removeFontMember(f, 0);
+    try m.removeFont(f);
+    try std.testing.expectEqual(0, m.fonts.items.len);
 }
