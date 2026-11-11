@@ -15,6 +15,14 @@ const Outline = geom.Outline;
 
 pub const Error = error{ InvalidFont, OutOfMemory };
 
+/// How many faces a font file holds (more than one for a collection, such
+/// as .ttc); 0 when it is not a font.
+pub fn faceCount(bytes: []const u8) u32 {
+    const blob = hb.hb_blob_create(bytes.ptr, @intCast(bytes.len), hb.HB_MEMORY_MODE_READONLY, null, null) orelse return 0;
+    defer hb.hb_blob_destroy(blob);
+    return hb.hb_face_count(blob);
+}
+
 pub const Face = struct {
     gpa: Allocator,
     bytes: []u8,

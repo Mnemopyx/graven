@@ -8,6 +8,7 @@
 const face = @import("face.zig");
 
 pub const Face = face.Face;
+pub const faceCount = face.faceCount;
 const std = @import("std");
 pub const Error = face.Error;
 

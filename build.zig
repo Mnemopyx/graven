@@ -61,6 +61,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Font search: describing, searching and comparing fonts from any
+    // source. A separate tool's library; Graven may use it too.
+    const fontsearch = b.addModule("graven_fontsearch", .{
+        .root_source_file = b.path("lib/fontsearch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "hb", .module = hb },
+            .{ .name = "graven_geom", .module = geom },
+            .{ .name = "graven_font", .module = font },
+            .{ .name = "graven_testdata", .module = testdata },
+        },
+    });
+
     // Configuration: TOML files, shared and local.
     const config = b.addModule("graven_config", .{
         .root_source_file = b.path("lib/config/root.zig"),
@@ -96,6 +110,22 @@ pub fn build(b: *std.Build) void {
     run_cli.addPassthruArgs();
     b.step("run", "Run the graven CLI").dependOn(&run_cli.step);
 
+    // The font search tool: graven-fonts index | search | show.
+    const fonts_tool = b.addExecutable(.{
+        .name = "graven-fonts",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/fonts/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "graven_fontsearch", .module = fontsearch },
+                .{ .name = "graven_font", .module = font },
+            },
+        }),
+    });
+    b.installArtifact(fonts_tool);
+
     // GUI editor: zig build gui (fetches DVUI and SDL3 on first use).
     const gui_step = b.step("gui", "Build and run the GUI editor");
     if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui_dep| {
@@ -124,7 +154,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).
