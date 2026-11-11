@@ -7,9 +7,8 @@
 //! addons through the same `Source` interface.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const fs = @import("graven_fontsearch");
-const font = @import("graven_font");
+const local = @import("local.zig");
 
 const Record = fs.Record;
 
@@ -34,134 +33,21 @@ const usage =
     \\
 ;
 
-fn env(name: [*:0]const u8) ?[]const u8 {
-    const v = std.c.getenv(name) orelse return null;
-    const s = std.mem.span(v);
-    return if (s.len == 0) null else s;
-}
-
-/// The system's font folders, user folders included.
-fn fontDirs(a: std.mem.Allocator) ![]const []const u8 {
-    var dirs: std.ArrayList([]const u8) = .empty;
-    const home = env("HOME");
-    switch (builtin.os.tag) {
-        .windows => {
-            try dirs.append(a, try std.fs.path.join(a, &.{ env("WINDIR") orelse "C:\\Windows", "Fonts" }));
-            if (env("LOCALAPPDATA")) |l| try dirs.append(a, try std.fs.path.join(a, &.{ l, "Microsoft", "Windows", "Fonts" }));
-        },
-        .macos => {
-            try dirs.append(a, "/System/Library/Fonts");
-            try dirs.append(a, "/Library/Fonts");
-            if (home) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, "Library", "Fonts" }));
-        },
-        else => {
-            try dirs.append(a, "/usr/share/fonts");
-            try dirs.append(a, "/usr/local/share/fonts");
-            if (env("XDG_DATA_HOME")) |x| try dirs.append(a, try std.fs.path.join(a, &.{ x, "fonts" })) else if (home) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, ".local", "share", "fonts" }));
-            if (home) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, ".fonts" }));
-        },
-    }
-    return dirs.items;
-}
-
-/// Where the index is kept.
-fn indexPath(a: std.mem.Allocator) ![]const u8 {
-    if (env("GRAVEN_FONTS_INDEX")) |p| return p;
-    return switch (builtin.os.tag) {
-        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Graven", "fonts-index.json" }),
-        .macos => std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, "Library", "Caches", "Graven", "fonts-index.json" }),
-        else => if (env("XDG_CACHE_HOME")) |x|
-            std.fs.path.join(a, &.{ x, "graven", "fonts-index.json" })
-        else
-            std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, ".cache", "graven", "fonts-index.json" }),
-    };
-}
-
-fn isFontFile(name: []const u8) bool {
-    const ext = std.fs.path.extension(name);
-    for ([_][]const u8{ ".ttf", ".otf", ".ttc", ".otc" }) |e| {
-        if (std.ascii.eqlIgnoreCase(ext, e)) return true;
-    }
-    return false;
-}
-
-/// The index, as saved; empty when there is none yet.
-fn loadIndex(init: std.process.Init, a: std.mem.Allocator) ![]Record {
-    const path = try indexPath(a);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .limited(1 << 30)) catch return &.{};
-    return fs.loadIndex(a, bytes) orelse &.{};
-}
-
-/// Finds installed fonts, describes what is new or changed, saves the
-/// index, and returns its records.
+/// Scans and saves the index, saying what it did unless `quiet`.
 fn buildIndex(init: std.process.Init, a: std.mem.Allocator, quiet: bool) ![]Record {
-    const io = init.io;
-    const gpa = init.gpa;
-    const old = try loadIndex(init, a);
-    // Old records by location, to keep those whose file has not changed.
-    var by_path: std.StringHashMapUnmanaged(std.ArrayList(Record)) = .empty;
-    for (old) |r| {
-        const e = try by_path.getOrPut(a, r.location);
-        if (!e.found_existing) e.value_ptr.* = .empty;
-        try e.value_ptr.append(a, r);
-    }
-    var records: std.ArrayList(Record) = .empty;
-    var described: usize = 0;
-    var kept: usize = 0;
-    var failed: usize = 0;
-    const t0: std.Io.Timestamp = .now(io, .awake);
-    for (try fontDirs(a)) |root| {
-        var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch continue;
-        defer dir.close(io);
-        var walker = try dir.walk(gpa);
-        defer walker.deinit();
-        while (walker.next(io) catch null) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            if (!isFontFile(entry.basename)) continue;
-            const path = try std.fs.path.join(a, &.{ root, entry.path });
-            const st = entry.dir.statFile(io, entry.basename, .{}) catch continue;
-            const stamp: u64 = st.size ^ (@as(u64, @truncate(@as(u96, @bitCast(st.mtime.toNanoseconds())))) *% 0x9E3779B97F4A7C15);
-            if (by_path.get(path)) |list| if (list.items.len > 0 and list.items[0].stamp == stamp) {
-                try records.appendSlice(a, list.items);
-                kept += list.items.len;
-                continue;
-            };
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(256 << 20)) catch {
-                failed += 1;
-                continue;
-            };
-            defer gpa.free(bytes);
-            const n = font.faceCount(bytes);
-            for (0..n) |k| {
-                const face = font.Face.init(gpa, bytes, @intCast(k)) catch {
-                    failed += 1;
-                    continue;
-                };
-                defer face.deinit();
-                const r = fs.describe(a, face, "local", path, @intCast(k), stamp) catch {
-                    failed += 1;
-                    continue;
-                };
-                try records.append(a, r);
-                described += 1;
-            }
-        }
-    }
-    const index_path = try indexPath(a);
-    if (std.fs.path.dirname(index_path)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
-    const out = try fs.saveIndex(gpa, records.items);
-    defer gpa.free(out);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = index_path, .data = out });
+    const t0: std.Io.Timestamp = .now(init.io, .awake);
+    var rep: local.Report = .{};
+    const recs = try local.build(init.io, init.gpa, a, &rep);
     if (!quiet) {
-        const ms = @as(f64, @floatFromInt(t0.untilNow(io, .awake).toNanoseconds())) / 1e6;
-        std.debug.print("{d} faces: {d} described, {d} unchanged, {d} unreadable, in {d:.0} ms\nindex: {s}\n", .{ records.items.len, described, kept, failed, ms, index_path });
+        const ms = @as(f64, @floatFromInt(t0.untilNow(init.io, .awake).toNanoseconds())) / 1e6;
+        std.debug.print("{d} faces: {d} described, {d} unchanged, {d} unreadable, in {d:.0} ms\nindex: {s}\n", .{ recs.len, rep.described, rep.kept, rep.failed, ms, rep.path });
     }
-    return records.items;
+    return recs;
 }
 
 /// The index, built first if there is none.
 fn indexedRecords(init: std.process.Init, a: std.mem.Allocator) ![]Record {
-    const r = try loadIndex(init, a);
+    const r = local.load(init.io, a);
     if (r.len > 0) return r;
     std.debug.print("No font index yet: building it.\n", .{});
     return buildIndex(init, a, false);

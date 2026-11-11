@@ -110,6 +110,19 @@ pub fn build(b: *std.Build) void {
     run_cli.addPassthruArgs();
     b.step("run", "Run the graven CLI").dependOn(&run_cli.step);
 
+    // The local font source (installed fonts and the index cache), shared
+    // by graven-fonts and Graven.
+    const fonts_local = b.createModule(.{
+        .root_source_file = b.path("apps/fonts/local.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "graven_fontsearch", .module = fontsearch },
+            .{ .name = "graven_font", .module = font },
+        },
+    });
+
     // The font search tool: graven-fonts index | search | show.
     const fonts_tool = b.addExecutable(.{
         .name = "graven-fonts",
@@ -141,6 +154,8 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_engine", .module = engine },
                     .{ .name = "graven_samples", .module = samples },
                     .{ .name = "graven_config", .module = config },
+                    .{ .name = "graven_fontsearch", .module = fontsearch },
+                    .{ .name = "graven_fonts_local", .module = fonts_local },
                 },
             }),
         });

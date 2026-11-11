@@ -20,6 +20,7 @@ const ghost_pane = @import("ghost.zig");
 const settings_file = @import("settings.zig");
 const history = layout.history;
 const locale = @import("locale.zig");
+const fontwin = @import("fontwin.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -625,7 +626,7 @@ fn exportPrompt() void {
         return;
     };
     if (p >= state.placed.items.len or path.len == 0) return;
-    const svg = layout.output.panelSvg(state.gpa, &state.placed.items[p], &state.faces, .{}) catch {
+    const svg = layout.output.panelSvg(state.gpa, &state.placed.items[p], faceTable(), .{}) catch {
         state.status = "The SVG could not be made. ";
         return;
     };
@@ -751,9 +752,12 @@ fn update() !void {
         state.labels = .init(state.gpa, &state.faces);
         state.font_loaded = state.font_choice;
         state.placed_rev = std.math.maxInt(u64);
+        if (resolved) |*r| r.deinit();
+        resolved = null;
     }
     const labels = if (state.labels) |*l| l else return;
-    if (state.placed_rev == state.model.revision) return;
+    resolveFonts(labels);
+    if (state.placed_rev == state.model.revision and (resolved == null or resolved_rev == state.model.revision)) return;
     const t0: std.Io.Timestamp = .now(dvui.io, .awake);
     clearPlaced();
     for (0..state.model.panels.items.len) |pi| {
@@ -776,6 +780,86 @@ fn update() !void {
             },
             else => {},
         }
+    };
+}
+
+// Fonts ------------------------------------------------------------------------
+//
+// The fonts window (fontwin.zig) finds and composes fonts; the document's
+// composed fonts are resolved against the installed fonts it indexes, and
+// the canvas renders with the faces that gives.
+
+/// The document's composed fonts resolved, while it has any.
+var resolved: ?layout.fonts.Resolved = null;
+var resolved_rev: u64 = std.math.maxInt(u64);
+
+/// The face table labels render with: the resolved one, or the chosen
+/// font alone.
+fn faceTable() []const *engine.Face {
+    if (resolved) |*r| return r.faces.items;
+    return &state.faces;
+}
+
+/// Resolves the document's composed fonts again when the document changed.
+fn resolveFonts(labels: *layout.Labels) void {
+    const uses = for (state.model.styles.items) |st| {
+        if (st.font != .none) break true;
+    } else false;
+    if (!uses) {
+        if (resolved) |*r| {
+            labels.resolved = null;
+            r.deinit();
+            resolved = null;
+            labels.deinit();
+            state.labels = .init(state.gpa, &state.faces);
+        }
+        return;
+    }
+    if (resolved != null and resolved_rev == state.model.revision) return;
+    _ = fontwin.indexRecords(state.gpa, false);
+    var names_arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer names_arena.deinit();
+    const cat = fontwin.catalog(names_arena.allocator()) orelse return;
+    const next = layout.fonts.resolve(state.gpa, &state.model, cat, state.faces[0]) catch return;
+    if (resolved) |*old| old.deinit();
+    resolved = next;
+    resolved_rev = state.model.revision;
+    labels.syncResolved(&resolved.?) catch {};
+    if (resolved.?.substitutions.items.len > 0) {
+        const sub = resolved.?.substitutions.items[0];
+        state.status = std.fmt.bufPrint(&font_status_buf, "Font {s} {s} is not installed: {s}. ", .{ sub.wanted.family, sub.wanted.style, if (sub.got) |g| g.style else "left out" }) catch state.status;
+    }
+}
+var font_status_buf: [160]u8 = undefined;
+
+fn hostAddFont(name: []const u8, main_font: layout.model.FontName) ?layout.model.ObjectId {
+    return act(.addFont, .{ name, main_font }) catch null;
+}
+fn hostSetFontMain(id: layout.model.ObjectId, main_font: layout.model.FontName, italic: ?layout.model.FontName) void {
+    act(.setFontMain, .{ id, main_font, italic }) catch {};
+}
+fn hostAddFontMember(id: layout.model.ObjectId, member: layout.model.FontMember) void {
+    _ = act(.addFontMember, .{ id, std.math.maxInt(usize), member }) catch {};
+}
+fn hostMoveFontMember(id: layout.model.ObjectId, index: usize, up: bool) void {
+    _ = act(.moveFontMember, .{ id, index, up }) catch {};
+}
+fn hostRemoveFontMember(id: layout.model.ObjectId, index: usize) void {
+    act(.removeFontMember, .{ id, index }) catch {};
+}
+fn hostSetStyleFont(style: layout.model.StyleId, id: layout.model.ObjectId) void {
+    act(.setStyleFont, .{ style, id }) catch {};
+}
+
+fn fontHost() fontwin.Host {
+    return .{
+        .model = &state.model,
+        .addFont = hostAddFont,
+        .setFontMain = hostSetFontMain,
+        .addFontMember = hostAddFontMember,
+        .moveFontMember = hostMoveFontMember,
+        .removeFontMember = hostRemoveFontMember,
+        .setStyleFont = hostSetStyleFont,
     };
 }
 
@@ -829,6 +913,8 @@ fn frame() !dvui.App.Result {
     // Undo and redo take their keys before any widget does.
     historyKeys(root.data());
     autosaveTick(root.data().id);
+    // The fonts window, a window of its own, while open.
+    fontwin.window(fontHost(), state.gpa);
 
     if (titleBar()) |r| return r;
 
@@ -2492,6 +2578,14 @@ fn menu() ?dvui.App.Result {
             m.close();
         }
     }
+    if (dvui.menuItemLabel(@src(), "Text", .{ .submenu = true }, .{})) |r| {
+        var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
+        defer fw.deinit();
+        if (dvui.menuItemLabel(@src(), "Fonts…", .{}, .{ .expand = .horizontal }) != null) {
+            fontwin.open = true;
+            m.close();
+        }
+    }
     if (dvui.menuItemLabel(@src(), "View", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
@@ -3574,7 +3668,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
         const d = if (l.tile == null and l.run == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
-        const pieces = state.flat.get(l.render, &state.faces) catch continue;
+        const pieces = state.flat.get(l.render, faceTable()) catch continue;
         // Ink in the sheet's margins is drawn in the warning colour.
         const ink = if (inMargin(pi, l.tile, l.slot, if (l.run) |r| r.region else null)) colors.overflow else colors.ink;
         const at: geom.Point = .{ .x = l.origin.x + o.x + d.x, .y = l.origin.y + o.y + d.y };
@@ -3755,7 +3849,7 @@ fn drawConstruction(area: dvui.Rect.Physical, l: layout.place.PlacedLabel, at: g
     const ox = at.x + l.origin.x;
     const oy = at.y + l.origin.y;
     for (l.render.elements) |e| {
-        const face = state.faces[e.face orelse 0];
+        const face = faceTable()[e.face orelse 0];
         const cap_units = (face.capHeight() catch null) orelse continue;
         const k = e.cap_height / cap_units;
         const ext = face.extents();
