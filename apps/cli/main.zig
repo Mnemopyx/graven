@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const layout = @import("graven_layout");
 const engine = @import("graven_engine");
+const richtext = @import("graven_richtext");
 const samples = @import("graven_samples");
 
 const usage =
@@ -12,6 +13,9 @@ const usage =
     \\         Renders one run of text in one face and writes its outlines as SVG.
     \\       graven parse <markup>
     \\         Parses label markup and prints its tree, or where it went wrong.
+    \\       graven rtf <file.rtf>
+    \\         Reads an RTF file as an import would: each paragraph's settings and its
+    \\         text as Graven markup, then what was left out.
     \\       graven label [--advance] [--width mm] [--centre] [--bold font] [--bold-italic font] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
     \\         Renders label markup; with an italic font, letters default to italic.
     \\         Neighbours are placed by their ink unless --advance is given. --width gives a
@@ -42,6 +46,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "compact")) {
         return compact(init, args[2]);
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "rtf")) {
+        return rtfShow(init, args[2]);
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "parse")) {
         return parse(init, args[2]);
@@ -204,6 +211,43 @@ fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) 
     std.debug.print("{s}: {d} elements, script scale {d:.3}, raise {d:.3}, drop {d:.3}\n", .{
         out_path, r.elements.len, ctx.script_scale, ctx.sup_raise, ctx.sub_drop,
     });
+}
+
+fn rtfShow(init: std.process.Init, path: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .limited(64 << 20));
+    const doc = richtext.rtf.read(a, bytes) catch |err| {
+        std.debug.print("{s}: {s}\n", .{ path, if (err == error.NotRtf) "not an RTF file" else @errorName(err) });
+        std.process.exit(1);
+    };
+    var buf: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(init.io, &buf);
+    const w = &out.interface;
+    for (doc.fonts, 0..) |f, k| try w.print("font {d}: {s} ({s})\n", .{ k, f.name, @tagName(f.kind) });
+    for (doc.paragraphs, 0..) |p, k| {
+        const st = p.settings;
+        try w.print("\n¶{d} {s}, indents {d:.2}/{d:.2} first {d:.2}, space {d:.2}/{d:.2} mm\n", .{ k + 1, @tagName(st.alignment), st.indent_start, st.indent_end, st.first, st.space_before, st.space_after });
+        var i: usize = 0;
+        while (i < p.spans.len) {
+            if (p.spans[i].kind == .line_break) {
+                try w.writeAll("  (line break)\n");
+                i += 1;
+                continue;
+            }
+            const look = p.spans[i].look;
+            var e = i;
+            while (e < p.spans.len and p.spans[e].kind != .line_break and p.spans[e].look.font == look.font and p.spans[e].look.size == look.size) e += 1;
+            try w.print("  [{s} {d} pt] ", .{ if (look.font) |f| doc.fonts[f].name else "-", look.size orelse 0 });
+            try richtext.writeMarkup(w, p.spans[i..e]);
+            try w.writeAll("\n");
+            i = e;
+        }
+    }
+    const sk = doc.skipped;
+    try w.print("\nleft out: {d} pictures, {d} footnotes, {d} objects; {d} table rows as tabbed lines; {d} fields as their text\n", .{ sk.pictures, sk.footnotes, sk.objects, sk.table_rows, sk.fields });
+    try w.flush();
 }
 
 fn parse(init: std.process.Init, src: []const u8) !void {

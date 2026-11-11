@@ -689,6 +689,14 @@ comptime {
     std.debug.assert(alphabet_names.len == @typeInfo(engine.style.Alphabet).@"enum".field_names.len);
 }
 
+/// An installed family's regular face (or its first) and its italic and
+/// bolds, as names; null when no installed font is of that family.
+pub fn installedFamily(allocator: Allocator, family: []const u8) ?struct { main: model.FontName, variants: model.FontVariants } {
+    _ = indexRecords(allocator, false);
+    const k = fs.find(records, family, "Regular") orelse fs.find(records, family, "Book") orelse fs.find(records, family, null) orelse return null;
+    return .{ .main = nameOf(k), .variants = familyVariants(k) };
+}
+
 /// The italic, bold and bold italic of record `k`'s family, as names.
 fn familyVariants(k: usize) model.FontVariants {
     const v = fs.variantsOf(records, k);

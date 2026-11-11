@@ -51,12 +51,19 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_testdata", .module = testdata },
         },
     });
+    // Styled text as readers find it (RTF first), for importing.
+    const richtext = b.addModule("graven_richtext", .{
+        .root_source_file = b.path("lib/richtext/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const layout = b.addModule("graven_layout", .{
         .root_source_file = b.path("lib/layout/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "graven_engine", .module = engine },
+            .{ .name = "graven_richtext", .module = richtext },
             .{ .name = "graven_testdata", .module = testdata },
         },
     });
@@ -99,6 +106,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "graven_richtext", .module = richtext },
                 .{ .name = "graven_layout", .module = layout },
                 .{ .name = "graven_engine", .module = engine },
                 .{ .name = "graven_samples", .module = samples },
@@ -156,6 +164,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_config", .module = config },
                     .{ .name = "graven_fontsearch", .module = fontsearch },
                     .{ .name = "graven_fonts_local", .module = fonts_local },
+                    .{ .name = "graven_richtext", .module = richtext },
                 },
             }),
         });
@@ -169,7 +178,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).

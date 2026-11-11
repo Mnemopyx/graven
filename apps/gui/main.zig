@@ -21,6 +21,7 @@ const settings_file = @import("settings.zig");
 const history = layout.history;
 const locale = @import("locale.zig");
 const fontwin = @import("fontwin.zig");
+const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 
 const geom = engine.geom;
@@ -1041,7 +1042,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as };
+const FilePromptKind = enum { open, save_as, import_text };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -1299,6 +1300,68 @@ fn discardAutosaved() void {
     if ((fileUnchanged(path) orelse false) and put(path, &d)) history.wroteDiscard(&hist, &d);
 }
 
+var import_count: u64 = 0;
+var import_status_buf: [320]u8 = undefined;
+
+/// Reads the RTF file at `path` into the track at the flow cursor, as one
+/// undoable step, and says what came in and what did not.
+fn importText(path: []const u8) void {
+    const c = track_cursor orelse return;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(64 << 20)) catch {
+        state.status = "That file could not be read. ";
+        return;
+    };
+    defer state.gpa.free(bytes);
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const doc = richtext.rtf.read(arena.allocator(), bytes) catch |err| {
+        state.status = if (err == error.NotRtf) "That is not an RTF file. " else "That file could not be read. ";
+        return;
+    };
+    const region = state.model.panels.items[c.panel].regions.items[c.region];
+    const base = region.style orelse (labelStyle() catch return);
+    import_count += 1;
+    const key = mergeKey(.{ "import", import_count });
+    var rep = layout.import.rich(state.gpa, &hist, &state.model, key, c.panel, c.region, c.index, doc, base) catch {
+        state.status = "The text could not be imported. ";
+        return;
+    };
+    defer rep.deinit(state.gpa);
+    // Fonts made for the text's families: their installed faces, with
+    // their own italic and bolds.
+    var missing: usize = 0;
+    for (rep.fonts_made.items) |id| {
+        const i = state.model.fontIndex(id) orelse continue;
+        const fam = state.model.fonts.items[i].name;
+        const found = fontwin.installedFamily(state.gpa, fam) orelse {
+            missing += 1;
+            continue;
+        };
+        _ = hist.doMerged(&state.model, key, .setFontMain, .{ id, found.main, found.variants.italic }) catch {};
+        _ = hist.doMerged(&state.model, key, .setFontVariants, .{ id, found.variants }) catch {};
+    }
+    var notes: std.Io.Writer.Allocating = .init(arena.allocator());
+    const w = &notes.writer;
+    w.print("Imported {d} paragraph{s}", .{ rep.paragraphs, if (rep.paragraphs == 1) "" else "s" }) catch {};
+    if (rep.styles_made > 0) w.print(", {d} new style{s}", .{ rep.styles_made, if (rep.styles_made == 1) "" else "s" }) catch {};
+    if (rep.paragraph_styles_made > 0) w.print(", {d} new paragraph style{s}", .{ rep.paragraph_styles_made, if (rep.paragraph_styles_made == 1) "" else "s" }) catch {};
+    w.writeAll(".") catch {};
+    const sk = rep.skipped;
+    if (missing > 0) w.print(" {d} font famil{s} not installed.", .{ missing, if (missing == 1) "y" else "ies" }) catch {};
+    if (rep.tabs > 0) w.print(" {d} tab{s} set as spaces.", .{ rep.tabs, if (rep.tabs == 1) "" else "s" }) catch {};
+    if (rep.coloured > 0) w.print(" Colour not kept ({d} span{s}).", .{ rep.coloured, if (rep.coloured == 1) "" else "s" }) catch {};
+    if (sk.pictures > 0) w.print(" {d} picture{s} left out.", .{ sk.pictures, if (sk.pictures == 1) "" else "s" }) catch {};
+    if (sk.table_rows > 0) w.print(" Tables as tabbed lines ({d} row{s}).", .{ sk.table_rows, if (sk.table_rows == 1) "" else "s" }) catch {};
+    if (sk.footnotes > 0) w.print(" {d} footnote{s} left out.", .{ sk.footnotes, if (sk.footnotes == 1) "" else "s" }) catch {};
+    if (sk.objects > 0) w.print(" {d} object{s} left out.", .{ sk.objects, if (sk.objects == 1) "" else "s" }) catch {};
+    if (sk.fields > 0) w.print(" {d} field{s} kept as their text.", .{ sk.fields, if (sk.fields == 1) "" else "s" }) catch {};
+    const msg = notes.written();
+    const n = @min(msg.len, import_status_buf.len - 1);
+    @memcpy(import_status_buf[0..n], msg[0..n]);
+    import_status_buf[n] = ' ';
+    state.status = import_status_buf[0 .. n + 1];
+}
+
 /// Opens the document at `path`, replacing the one open; when it holds
 /// unsaved steps, asks first whether to keep them.
 fn openDocument(path: []const u8) void {
@@ -1475,7 +1538,11 @@ fn filePrompt(kind: FilePromptKind) void {
     defer fw.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
     defer body.deinit();
-    dvui.labelNoFmt(@src(), if (kind == .open) "Open a document" else "Save the document as", .{}, .{ .font = dvui.Font.theme(.heading) });
+    dvui.labelNoFmt(@src(), switch (kind) {
+        .open => "Open a document",
+        .save_as => "Save the document as",
+        .import_text => "Import text (RTF) at the flow cursor",
+    }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
     for (dvui.events()) |*e| {
@@ -1506,7 +1573,11 @@ fn filePrompt(kind: FilePromptKind) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
         if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), if (kind == .open) "Open" else "Save", .{}, .{})) go = true;
+        if (dvui.button(@src(), switch (kind) {
+            .open => "Open",
+            .save_as => "Save",
+            .import_text => "Import",
+        }, .{}, .{})) go = true;
     }
     if (cancel) {
         file_prompt = null;
@@ -1519,6 +1590,7 @@ fn filePrompt(kind: FilePromptKind) void {
     dvui.refresh(null, @src(), null);
     switch (kind) {
         .open => openDocument(path),
+        .import_text => importText(path),
         .save_as => {
             // A name without an extension takes Graven's.
             const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
@@ -2568,6 +2640,15 @@ fn menu() ?dvui.App.Result {
             if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[3], "Save As…      {s}+Shift+S", .{mod}) catch "Save As…", .{}, .{ .expand = .horizontal }) != null) {
                 saveAs();
                 m.close();
+            }
+        }
+        if (dvui.menuItemLabel(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            if (track_cursor == null) {
+                state.status = "Click in a track first: text comes in at its flow cursor. ";
+            } else {
+                file_prompt = .import_text;
+                file_prompt_new = true;
             }
         }
         if (dvui.menuItemLabel(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
