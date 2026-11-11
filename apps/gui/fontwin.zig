@@ -13,6 +13,7 @@ const layout = @import("graven_layout");
 const engine = @import("graven_engine");
 const fs = @import("graven_fontsearch");
 const local = @import("graven_fonts_local");
+const icons = @import("icons.zig");
 
 const geom = engine.geom;
 const model = layout.model;
@@ -183,8 +184,8 @@ pub fn window(host: Host, allocator: Allocator) void {
         var top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(6) });
         defer top.deinit();
         dvui.labelNoFmt(@src(), status, .{}, .{ .gravity_y = 0.5 });
-        if (dvui.button(@src(), "Close", .{}, .{ .gravity_x = 1 })) open = false;
-        if (dvui.button(@src(), "Scan installed fonts again", .{}, .{ .gravity_x = 1 })) {
+        if (icons.button(@src(), .x, "Close the fonts window", .{ .opts = .{ .gravity_x = 1 } })) open = false;
+        if (icons.button(@src(), .arrows_clockwise, "Scan installed fonts again", .{ .opts = .{ .gravity_x = 1 } })) {
             _ = indexRecords(allocator, true);
             selected = null;
             like = null;
@@ -236,12 +237,12 @@ fn criteria() void {
         if (like) |l| {
             var buf: [96]u8 = undefined;
             dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{s} {s}", .{ records[l].family, records[l].style }) catch "", .{}, .{ .gravity_y = 0.5 });
-            if (dvui.button(@src(), "Clear", .{}, .{ .gravity_x = 1 })) like = null;
+            if (icons.button(@src(), .x_circle, "Stop ranking by likeness", .{ .opts = .{ .gravity_x = 1 } })) like = null;
         } else dvui.labelNoFmt(@src(), "— (any)", .{}, .{ .gravity_y = 0.5 });
+        if (selected) |s| if (like == null or like.? != s) {
+            if (icons.button(@src(), .magnet, "Rank by likeness to the selected font", .{ .opts = .{ .gravity_x = 1 } })) like = s;
+        };
     }
-    if (selected) |s| if (like == null or like.? != s) {
-        if (dvui.button(@src(), "Rank by likeness to selected", .{}, .{ .expand = .horizontal })) like = s;
-    };
 
     heading(@src(), "Style");
     _ = dvui.dropdown(@src(), &.{ "Serif or sans", "Serif", "Sans" }, .{ .choice = &serif_choice }, .{}, .{ .expand = .horizontal });
@@ -327,7 +328,11 @@ fn results(a: Allocator) []const fs.Hit {
         });
         defer row.deinit();
         // First, so a long description never squeezes it out.
-        if (dvui.button(@src(), if (isPinned(h.index)) "Unpin" else "Pin", .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 40 } })) togglePin(h.index);
+        const pin = if (isPinned(h.index))
+            icons.button(@src(), .push_pin_slash, "Unpin: take out of the comparison", .{ .id_extra = k, .opts = .{ .gravity_y = 0.5 } })
+        else
+            icons.button(@src(), .push_pin, "Pin: keep in the comparison", .{ .id_extra = k, .opts = .{ .gravity_y = 0.5 } });
+        if (pin) togglePin(h.index);
         {
             var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
             defer info.deinit();
@@ -410,7 +415,11 @@ fn compare(a: Allocator, width: f32) void {
         var te = dvui.textEntry(@src(), .{ .text_initial = text(&sample, sample_len) }, .{ .expand = .horizontal });
         keep(&sample, &sample_len, te.textGet());
         te.deinit();
-        if (dvui.button(@src(), if (overlay) "Side by side" else "Overlay", .{}, .{})) overlay = !overlay;
+        const flip = if (overlay)
+            icons.button(@src(), .rows, "Show side by side", .{})
+        else
+            icons.button(@src(), .stack, "Overlay glyph by glyph", .{});
+        if (flip) overlay = !overlay;
     }
     // The selected font joins the comparison until pinned or replaced.
     var shown: std.ArrayList(usize) = .empty;
@@ -701,20 +710,26 @@ fn compose(host: Host) void {
     };
     if (target == null and m.fonts.items.len > 0) target = m.fonts.items[0].id;
     const a = dvui.currentWindow().arena();
-    if (m.fonts.items.len > 0) {
-        const names = a.alloc([]const u8, m.fonts.items.len) catch return;
-        var choice: usize = 0;
-        for (m.fonts.items, names, 0..) |f, *n, k| {
-            n.* = f.name;
-            if (target != null and f.id == target.?) choice = k;
-        }
-        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) target = m.fonts.items[choice].id;
-    } else dvui.labelNoFmt(@src(), "The document has no composed fonts yet.", .{}, .{});
     const sel = selected;
-    if (sel) |s| {
-        var nb: [128]u8 = undefined;
-        if (dvui.button(@src(), std.fmt.bufPrint(&nb, "New composed font from {s} {s}", .{ records[s].family, records[s].style }) catch "New composed font", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) {
-            if (host.addFont(records[s].family, nameOf(s))) |id| target = id;
+    var sel_name: [128]u8 = undefined;
+    const sel_label: []const u8 = if (sel) |s| std.fmt.bufPrint(&sel_name, "{s} {s}", .{ records[s].family, records[s].style }) catch "the selected font" else "";
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        if (m.fonts.items.len > 0) {
+            const names = a.alloc([]const u8, m.fonts.items.len) catch return;
+            var choice: usize = 0;
+            for (m.fonts.items, names, 0..) |f, *n, k| {
+                n.* = f.name;
+                if (target != null and f.id == target.?) choice = k;
+            }
+            if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .gravity_y = 0.5 })) target = m.fonts.items[choice].id;
+        } else dvui.labelNoFmt(@src(), "No composed fonts yet.", .{}, .{ .expand = .horizontal, .gravity_y = 0.5 });
+        if (sel) |s| {
+            var tb: [200]u8 = undefined;
+            if (icons.button(@src(), .plus_circle, std.fmt.bufPrint(&tb, "New composed font from {s}", .{sel_label}) catch "New composed font", .{ .opts = .{ .gravity_y = 0.5 } })) {
+                if (host.addFont(records[s].family, nameOf(s))) |id| target = id;
+            }
         }
     }
     const t = target orelse {
@@ -729,10 +744,22 @@ fn compose(host: Host) void {
         tl.addText(std.fmt.bufPrint(&buf, "Main: {s} {s}\nItalic: ", .{ cf.main.family, cf.main.style }) catch "", .{});
         if (cf.italic) |it| tl.addText(std.fmt.bufPrint(&buf, "{s} {s}", .{ it.family, it.style }) catch "", .{}) else tl.addText("none", .{});
     }
+    // What the selected font can become in it, as one row of icons.
     if (sel) |s| {
-        if (dvui.button(@src(), "Use selected as main", .{}, .{ .expand = .horizontal })) host.setFontMain(t, nameOf(s), cf.italic);
-        if (dvui.button(@src(), "Use selected as italic", .{}, .{ .expand = .horizontal })) host.setFontMain(t, cf.main, nameOf(s));
-    }
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        dvui.labelNoFmt(@src(), "Selected:", .{}, .{ .gravity_y = 0.5, .margin = .{ .w = 4 } });
+        var tb: [200]u8 = undefined;
+        if (icons.button(@src(), .text_aa, std.fmt.bufPrint(&tb, "Use {s} as the main font", .{sel_label}) catch "Use as the main font", .{})) host.setFontMain(t, nameOf(s), cf.italic);
+        if (icons.button(@src(), .text_italic, std.fmt.bufPrint(&tb, "Use {s} as the italic", .{sel_label}) catch "Use as the italic", .{})) host.setFontMain(t, cf.main, nameOf(s));
+        if (icons.button(@src(), .list_plus, std.fmt.bufPrint(&tb, "Add {s} as a fallback member", .{sel_label}) catch "Add as a fallback member", .{})) host.addFontMember(t, .{ .font = nameOf(s) });
+        const want = text(&covers, covers_len);
+        if (want.len > 0) {
+            if (icons.button(@src(), .selection_plus, std.fmt.bufPrint(&tb, "Add {s} as a member for {s}", .{ sel_label, want[0..@min(want.len, 40)] }) catch "Add as a member for the searched characters", .{})) {
+                host.addFontMember(t, .{ .font = nameOf(s), .coverage = .{ .ranges = rangesOf(a, want) } });
+            }
+        }
+    } else dvui.labelNoFmt(@src(), "Select a font to use it here.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
     heading(@src(), "Members, in order tried");
     if (cf.members.items.len == 0) dvui.labelNoFmt(@src(), "None yet.", .{}, .{});
     for (cf.members.items, 0..) |mb, k| {
@@ -743,21 +770,11 @@ fn compose(host: Host) void {
             .fallback => "fallback",
             .ranges => |rs| std.fmt.bufPrint(buf[100..], "{d} range{s}", .{ rs.len, if (rs.len == 1) "" else "s" }) catch "ranges",
         };
-        dvui.labelNoFmt(@src(), std.fmt.bufPrint(buf[0..100], "{s} {s} ({s})", .{ mb.font.family, mb.font.style, what }) catch "", .{}, .{ .expand = .horizontal, .gravity_y = 0.5 });
-        // Icons: the interface font has no arrows.
-        if (dvui.buttonIcon(@src(), "Earlier", dvui.entypo.chevron_up, .{}, .{}, .{})) host.moveFontMember(t, k, true);
-        if (dvui.buttonIcon(@src(), "Later", dvui.entypo.chevron_down, .{}, .{}, .{})) host.moveFontMember(t, k, false);
-        if (dvui.buttonIcon(@src(), "Remove", dvui.entypo.cross, .{}, .{}, .{})) host.removeFontMember(t, k);
-    }
-    if (sel) |s| {
-        if (dvui.button(@src(), "Add selected as a fallback", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) host.addFontMember(t, .{ .font = nameOf(s) });
-        const want = text(&covers, covers_len);
-        if (want.len > 0) {
-            var buf: [160]u8 = undefined;
-            if (dvui.button(@src(), std.fmt.bufPrint(&buf, "Add selected for {s}", .{want[0..@min(want.len, 40)]}) catch "Add selected for these characters", .{}, .{ .expand = .horizontal })) {
-                host.addFontMember(t, .{ .font = nameOf(s), .coverage = .{ .ranges = rangesOf(a, want) } });
-            }
-        } else dvui.labelNoFmt(@src(), "Type characters under Search to add the selected font just for them.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
+        // The icons first: a long name is clipped, never them.
+        if (icons.button(@src(), .caret_up, "Try earlier", .{ .id_extra = k, .size = 14 })) host.moveFontMember(t, k, true);
+        if (icons.button(@src(), .caret_down, "Try later", .{ .id_extra = k, .size = 14 })) host.moveFontMember(t, k, false);
+        if (icons.button(@src(), .trash, "Remove this member", .{ .id_extra = k, .size = 14 })) host.removeFontMember(t, k);
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(buf[0..100], "{s} {s} ({s})", .{ mb.font.family, mb.font.style, what }) catch "", .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
     }
     heading(@src(), "Set a style in it");
     if (m.styles.items.len == 0) {
@@ -767,11 +784,13 @@ fn compose(host: Host) void {
     const snames = a.alloc([]const u8, m.styles.items.len) catch return;
     for (m.styles.items, snames) |st, *n| n.* = st.name;
     style_choice = @min(style_choice, snames.len - 1);
-    _ = dvui.dropdown(@src(), snames, .{ .choice = &style_choice }, .{}, .{ .expand = .horizontal });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    _ = dvui.dropdown(@src(), snames, .{ .choice = &style_choice }, .{}, .{ .expand = .horizontal, .gravity_y = 0.5 });
     const st = m.styles.items[style_choice];
     if (st.font == t) {
-        dvui.labelNoFmt(@src(), "Set in this composed font.", .{}, .{});
-    } else if (dvui.button(@src(), "Set the style in this composed font", .{}, .{ .expand = .horizontal })) {
+        dvui.labelNoFmt(@src(), "set", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 6 } });
+    } else if (icons.button(@src(), .paint_brush, "Set this style in the composed font", .{ .opts = .{ .gravity_y = 0.5 } })) {
         host.setStyleFont(@intCast(style_choice), t);
     }
 }
