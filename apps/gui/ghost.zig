@@ -106,7 +106,7 @@ pub fn oklch(l: f32, c: f32, h: f32, alpha: f32) dvui.Color {
 /// Whether a pane's colours take a share of the most chroma their hue can
 /// show at each lightness (an experiment, chosen in View), rather than the
 /// fixed, muted chromas.
-pub var vivid = false;
+pub var vivid = true;
 
 /// Whether OKLCH `l`, `c`, `h` lies within sRGB.
 fn inGamut(l: f32, c: f32, h: f32) bool {
