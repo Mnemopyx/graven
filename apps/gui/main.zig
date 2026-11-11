@@ -769,10 +769,12 @@ fn update() !void {
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
-    // Segments the flow no longer reaches go, kept origins and all (the
-    // next solve shows it); a selected one gives way to its track.
+    // Segments the flow no longer reaches go (the next solve shows it),
+    // but those moved by hand keep their places; a selected one gives way
+    // to its track.
     for (state.placed.items, 0..) |*pl, pi| for (pl.flows) |f| {
-        if (state.model.panels.items[pi].regions.items[f.region].segments.items.len > @max(1, f.segments))
+        const reg = state.model.panels.items[pi].regions.items[f.region];
+        if (reg.segments.items.len > reg.keptSegments(f.segments))
             hist.join(&state.model, .trimSegments, .{ pi, f.region, f.segments }) catch {};
         switch (state.context) {
             .row => |r| if (r.panel == pi and r.region == f.region and r.row >= f.segments) {
@@ -3834,12 +3836,11 @@ fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
         .run => |t| t.panel == pi and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
     };
     if (!mine) return null;
-    // A run of text set word by word: the word the caret is in (or just
-    // after) draws it, measured from the word's start.
+    // A run set piece by piece: the piece the caret is in (or just after)
+    // draws it. Pieces keep the run's source offsets.
     if (l.run) |run| if (run.len > 0) {
         const off: u32 = @intCast(c.offset);
         if (off < run.from or off > run.from + run.len) return null;
-        return l.render.caret(off - run.from);
     };
     return l.render.caret(@intCast(c.offset));
 }

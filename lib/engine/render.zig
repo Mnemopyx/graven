@@ -112,6 +112,24 @@ pub const Element = struct {
     ink: Box,
 };
 
+/// Where a one-line render may break: a space between words, \allowbreak,
+/// or \- (whose break would need a hyphen drawn). What comes before it ends
+/// at `x0`; what comes after starts at `x1` (label frame, mm); items and
+/// elements before it number `item0` and `elem0`, and those after it start
+/// at `item1` and `elem1`.
+pub const Opportunity = struct {
+    /// Its source bytes.
+    start: u32,
+    end: u32,
+    x0: f64,
+    x1: f64,
+    item0: u32,
+    elem0: u32,
+    item1: u32,
+    elem1: u32,
+    hyphen: bool = false,
+};
+
 pub const Caret = struct {
     x: f64,
     y0: f64,
@@ -140,6 +158,9 @@ pub const Render = struct {
     /// Source offsets where lines broke, hard and soft, in order.
     breaks: []const u32 = &.{},
     lines: u16 = 1,
+    /// Of a render on one line (no hard box, no hard break): where it may
+    /// break, in order, so a flow can set it piece by piece (see `piece`).
+    opportunities: []const Opportunity = &.{},
 
     /// Where a text cursor at source byte `offset` goes in the drawing: a
     /// vertical bar at `x`, from `y0` to `y1` (label frame, mm), sized to the
@@ -185,6 +206,60 @@ pub const Render = struct {
 
     pub fn deinit(self: *Render) void {
         self.arena.deinit();
+    }
+
+    /// The part of a one-line render between two of its break
+    /// opportunities: after `after` (null: from its start) and before
+    /// `before` (null: to its end), moved so it starts at x 0. Allocated
+    /// from `a`, which owns it: it is never deinit'ed itself. Diagnostics
+    /// go with the piece their source is in; syntax with the first piece.
+    pub fn piece(self: *const Render, a: Allocator, after: ?u32, before: ?u32) Allocator.Error!Render {
+        const ops = self.opportunities;
+        const item0: u32 = if (after) |k| ops[k].item1 else 0;
+        const elem0: u32 = if (after) |k| ops[k].elem1 else 0;
+        const item1: u32 = if (before) |k| ops[k].item0 else @intCast(self.items.len);
+        const elem1: u32 = if (before) |k| ops[k].elem0 else @intCast(self.elements.len);
+        // The first piece keeps the render's frame and its design's start.
+        const x0: f64 = if (after) |k| ops[k].x1 else 0;
+        const x1: f64 = if (before) |k| ops[k].x0 else self.design.x1;
+        const src0: u32 = if (after) |k| ops[k].end else 0;
+        const src1: u32 = if (before) |k| ops[k].start else std.math.maxInt(u32);
+        const move = Affine.translate(-x0, 0);
+
+        const items = try a.alloc(Item, item1 - item0);
+        for (self.items[item0..item1], items) |from, *to| to.* = switch (from) {
+            .glyph => |g| blk: {
+                var c = g;
+                c.transform = g.transform.then(move);
+                c.element -= elem0;
+                break :blk .{ .glyph = c };
+            },
+            .path => |q| blk: {
+                var c = q;
+                c.outline = try q.outline.transformed(a, move);
+                c.element -= elem0;
+                break :blk .{ .path = c };
+            },
+        };
+        const elements = try a.alloc(Element, elem1 - elem0);
+        var ink = Box.empty;
+        for (self.elements[elem0..elem1], elements) |from, *to| {
+            to.* = from;
+            to.origin.x -= x0;
+            if (!from.ink.isEmpty()) to.ink = .{ .x0 = from.ink.x0 - x0, .y0 = from.ink.y0, .x1 = from.ink.x1 - x0, .y1 = from.ink.y1 };
+            ink = ink.join(to.ink);
+        }
+        var diagnostics: std.ArrayList(Diagnostic) = .empty;
+        for (self.diagnostics) |d| if (d.offset >= src0 and d.offset < src1) try diagnostics.append(a, d);
+        return .{
+            .arena = .init(a),
+            .items = items,
+            .design = .{ .x0 = if (after == null) self.design.x0 else 0, .y0 = self.design.y0, .x1 = x1 - x0, .y1 = self.design.y1 },
+            .ink = ink,
+            .diagnostics = diagnostics.items,
+            .elements = elements,
+            .syntax = if (after == null) self.syntax else &.{},
+        };
     }
 
     /// Each item's contours in the label frame (mm), allocated from `gpa`;

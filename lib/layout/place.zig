@@ -47,8 +47,9 @@ pub const PlacedLabel = struct {
     run: ?struct {
         region: usize,
         item: usize,
-        /// The piece of the item's markup it sets (a word, when a run of
-        /// text breaks between words): its start and length there.
+        /// The piece of the item's markup it sets (words between breaks,
+        /// when a run breaks across segments): its start and length
+        /// there. Its render keeps the run's source offsets.
         from: u32 = 0,
         len: u32 = 0,
     } = null,
@@ -682,15 +683,27 @@ fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: 
     return spans.items;
 }
 
-/// Whether a run's markup breaks between words at its spaces: plain text,
-/// with no commands (an equation keeps its spacing whole).
-fn splitsIntoWords(content: []const u8) bool {
-    return std.mem.indexOfScalar(u8, content, ' ') != null and std.mem.indexOfScalar(u8, content, '\\') == null;
-}
+/// A piece of a run cut from its one-line render: the words between two
+/// break opportunities, or (`space`) the space of one.
+const Cut = struct {
+    render: *const engine.Render,
+    after: ?u32,
+    before: ?u32,
+    space: bool = false,
 
-/// Whether a flow piece is the space between two words of a run.
-fn isSpace(item: model.Item) bool {
-    return item.what == .run and std.mem.eql(u8, item.what.run.content, " ");
+    /// Its length along the line.
+    fn size(c: Cut) f64 {
+        const ops = c.render.opportunities;
+        if (c.space) return ops[c.before.?].x1 - ops[c.before.?].x0;
+        const x0 = if (c.after) |k| ops[k].x1 else c.render.design.x0;
+        const x1 = if (c.before) |k| ops[k].x0 else c.render.design.x1;
+        return x1 - x0;
+    }
+};
+
+/// Whether flow piece `index` is the space between two words of a run.
+fn isSpace(cuts: []const ?Cut, index: usize) bool {
+    return if (cuts[index]) |c| c.space else false;
 }
 
 /// The point at `t` on segment `s`.
@@ -786,45 +799,68 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         const rows = region.major == .row;
         const length = region.segmentLength() * region.pitch;
         const tol = 1e-9;
-        // The flow as the pass sees it: a run of plain text breaks between
-        // its words, so it becomes one piece a word with a space piece
-        // between (dropped where a wrap leaves it at a segment's start). A
-        // run with markup commands (an equation) stays whole. Each piece
-        // remembers its item, and where in the item's markup it starts.
+        // The flow as the pass sees it. A run in a row is set once on one
+        // line, then cut where it may break (between words, see
+        // `engine.Render.opportunities`): a piece per word or stretch of
+        // words, with a space piece between (dropped where a wrap leaves it
+        // at a segment's start). A formula has no breaks and stays whole.
+        // Each piece remembers its item, and its source bytes there.
         var pieces: std.ArrayList(model.Item) = .empty;
+        var cuts: std.ArrayList(?Cut) = .empty;
         var item_of: std.ArrayList(usize) = .empty;
         var src_off: std.ArrayList(u32) = .empty;
+        var src_len: std.ArrayList(u32) = .empty;
         for (region.items.items, 0..) |item, mi| {
+            const whole = struct {
+                fn add(al: Allocator, ps: *std.ArrayList(model.Item), cs: *std.ArrayList(?Cut), io: *std.ArrayList(usize), so: *std.ArrayList(u32), sl: *std.ArrayList(u32), it: model.Item, index: usize) Allocator.Error!void {
+                    try ps.append(al, it);
+                    try cs.append(al, null);
+                    try io.append(al, index);
+                    try so.append(al, 0);
+                    try sl.append(al, if (it.what == .run) @intCast(it.what.run.content.len) else 0);
+                }
+            }.add;
             const run = switch (item.what) {
                 .run => |run| run,
                 else => null,
             };
-            if (run == null or !splitsIntoWords(run.?.content)) {
-                try pieces.append(a, item);
-                try item_of.append(a, mi);
-                try src_off.append(a, 0);
+            if (run == null or run.?.content.len == 0 or !rows or labels.context(run.?.style) == null) {
+                try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
             }
-            const content = run.?.content;
-            var first = true;
-            var i: usize = 0;
-            while (i < content.len) {
-                while (i < content.len and content[i] == ' ') i += 1;
-                if (i >= content.len) break;
-                var j = i;
-                while (j < content.len and content[j] != ' ') j += 1;
-                if (!first) {
-                    try pieces.append(a, .{ .what = .{ .run = .{ .style = run.?.style, .content = " " } } });
-                    try item_of.append(a, mi);
-                    try src_off.append(a, @intCast(i - 1));
-                }
-                try pieces.append(a, .{ .gap = if (first) item.gap else 0, .what = .{ .run = .{ .style = run.?.style, .content = content[i..j] } } });
-                try item_of.append(a, mi);
-                try src_off.append(a, @intCast(i));
-                first = false;
-                i = j;
+            const full = (try labels.get(.{ .style = run.?.style, .anchor = .start, .box = null, .markup = run.?.content })) orelse {
+                try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
+                continue;
+            };
+            // Breaks at \- would need a hyphen drawn: not taken yet.
+            var breaks: std.ArrayList(u32) = .empty;
+            for (full.opportunities, 0..) |o, k| if (!o.hyphen) try breaks.append(a, @intCast(k));
+            if (breaks.items.len == 0) {
+                try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
+                continue;
             }
-            // The item's own binding holds after its last word.
+            const content_len: u32 = @intCast(run.?.content.len);
+            var prev: ?u32 = null;
+            for (0..breaks.items.len + 1) |k| {
+                const next: ?u32 = if (k < breaks.items.len) breaks.items[k] else null;
+                const from: u32 = if (prev) |p_| full.opportunities[p_].end else 0;
+                const to: u32 = if (next) |n_| full.opportunities[n_].start else content_len;
+                try pieces.append(a, .{ .gap = if (k == 0) item.gap else 0, .what = .{ .run = run.? } });
+                try cuts.append(a, .{ .render = full, .after = prev, .before = next });
+                try item_of.append(a, mi);
+                try src_off.append(a, from);
+                try src_len.append(a, to - from);
+                if (next) |n_| {
+                    const o = full.opportunities[n_];
+                    try pieces.append(a, .{ .what = .{ .run = run.? } });
+                    try cuts.append(a, .{ .render = full, .after = n_, .before = n_, .space = true });
+                    try item_of.append(a, mi);
+                    try src_off.append(a, o.start);
+                    try src_len.append(a, o.end - o.start);
+                }
+                prev = next;
+            }
+            // The item's own binding holds after its last piece.
             pieces.items[pieces.items.len - 1].bind = item.bind;
         }
         const items = pieces.items;
@@ -843,14 +879,12 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     break :blk (if (rows) t.w else t.h) * unit;
                 },
                 .run => |run| blk: {
+                    if (cuts.items[index]) |c| break :blk c.size();
                     if (run.content.len == 0) break :blk 0.5 * region.pitch;
-                    const sctx = labels.context(run.style) orelse {
+                    _ = labels.context(run.style) orelse {
                         try issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
                         break :blk 0.5 * region.pitch;
                     };
-                    // The space between words: a third of an em, drawn as
-                    // nothing (TeX's interword space).
-                    if (isSpace(item)) break :blk (sctx.em(sctx.spec.cap_height) catch sctx.spec.cap_height * 1.4) / 3;
                     const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content })) orelse break :blk 0.5 * region.pitch;
                     rr.* = render;
                     const d = render.design;
@@ -942,7 +976,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 start = Flow.clear(closed.items, gap, size);
                 // Landing at the start after a soft break, a tile whose
                 // prototype says so, or a space between words, is dropped.
-                const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(item);
+                const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(cuts.items, index);
                 if (drops) {
                     para -= gap + size;
                     segs_of[index] = seg;
@@ -1001,7 +1035,12 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     bounds = bounds.join(pitch_box);
                 },
                 .run => |run| {
-                    const render = renders[index] orelse continue;
+                    const render = if (cuts.items[index]) |c| blk: {
+                        if (c.space) continue;
+                        const piece = try a.create(engine.Render);
+                        piece.* = try c.render.piece(a, c.after, c.before);
+                        break :blk piece;
+                    } else renders[index] orelse continue;
                     if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
                     const d = render.design;
                     const cap = labels.context(run.style).?.spec.cap_height;
@@ -1016,7 +1055,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     else
                         .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                     try placed_labels.append(a, .{
-                        .run = .{ .region = ri, .item = item_of.items[index], .from = src_off.items[index], .len = @intCast(run.content.len) },
+                        .run = .{ .region = ri, .item = item_of.items[index], .from = src_off.items[index], .len = src_len.items[index] },
                         .tile = null,
                         .slot = item_of.items[index],
                         .box = box,
@@ -1616,15 +1655,31 @@ test "segments follow a path: moving one bends it, the next ones follow, and non
     }
     // Onto row 1: refused.
     try testing.expectError(error.NoRoom, moveIn(&m, &labels, p, r, 1, 0, -1));
-    // Content removed from the end: the segments it no longer reaches go,
-    // kept origins and all.
+    // Content removed from the end: the segments it no longer reaches are
+    // not drawn, but those moved by hand keep their places.
     const items = &m.panels.items[p].regions.items[r].items;
+    const removed = try gpa.dupe(model.Item, items.items[2..]);
+    defer gpa.free(removed);
     while (items.items.len > 2) try m.removeAt(p, r, items.items.len - 1);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectEqual(1, s.tracks.len);
+        m.trimSegments(p, r, s.flows[0].segments);
+    }
+    // Rows 2 and 3 were moved: kept, with row 1 before them.
+    const kept = m.panels.items[p].regions.items[r].segments.items;
+    try testing.expectEqual(3, kept.len);
+    try testing.expect(kept[2].moved);
+    // Content back: row 3 is where it was moved to.
+    for (removed) |it| try m.place(p, r, null, it);
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectEqual(1, s.tracks.len);
-    m.trimSegments(p, r, s.flows[0].segments);
-    try testing.expectEqual(1, m.panels.items[p].regions.items[r].segments.items.len);
+    try testing.expectApproxEqAbs(kept[2].along, s.tracks[2].origin.along, 1e-9);
+    try testing.expectApproxEqAbs(kept[2].across, s.tracks[2].origin.across, 1e-9);
+    // Unmoved segments past the end go.
+    m.trimSegments(p, r, 1);
+    try testing.expectEqual(3, m.panels.items[p].regions.items[r].segments.items.len);
 }
 
 test "segments past the soft area are flagged, and past the panel the region is" {
@@ -2113,6 +2168,54 @@ test "a run of text breaks between its words; a space a wrap leaves at a row's s
     for (s.labels) |l| if (l.run) |run| if (run.item == 0 and run.from == 8) {
         try testing.expectEqual(3, run.len);
     };
+}
+
+test "a run with markup breaks between words, inside a bold group too, keeping its faces" {
+    const gpa = testing.allocator;
+    const regular = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer regular.deinit();
+    const bold = try engine.Face.init(gpa, testdata.cff, 0);
+    defer bold.deinit();
+    const faces = [_]*engine.Face{ regular, bold };
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .bold = 1, .cap_height = 4 });
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
+    const src = "HOD \\textbf{ADD HOD} HOD";
+    try m.insertRun(p, r, 0, .{ .style = body, .content = src });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    // Four word pieces: HOD, ADD (bold), HOD (bold), HOD.
+    var words: [4]PlacedLabel = undefined;
+    var n: usize = 0;
+    for (s.labels) |l| if (l.run != null) {
+        words[n] = l;
+        n += 1;
+    };
+    try testing.expectEqual(4, n);
+    try testing.expectEqual(@as(?engine.render.FaceId, 0), words[0].render.elements[0].face);
+    try testing.expectEqual(@as(?engine.render.FaceId, 1), words[1].render.elements[0].face);
+    try testing.expectEqual(@as(?engine.render.FaceId, 1), words[2].render.elements[0].face);
+    try testing.expectEqual(@as(?engine.render.FaceId, 0), words[3].render.elements[0].face);
+    // Each knows its source, up to the next break: the second bold word
+    // with the group's closing brace.
+    try testing.expectEqualStrings("HOD}", src[words[2].run.?.from..][0..words[2].run.?.len]);
+    // 30 mm rows hold two words: the group breaks across rows.
+    var segs: [4]usize = undefined;
+    var k: usize = 0;
+    for (s.labels) |l| if (l.run != null) {
+        // Which row: rows stack down from y 100, 10 mm each.
+        segs[k] = @intFromFloat(@floor((100 - l.box.y1 + 1e-6) / 10));
+        k += 1;
+    };
+    try testing.expectEqual(segs[0], segs[1]);
+    try testing.expect(segs[2] > segs[1]);
+    // A piece starts where the row starts after a wrap, its ink near x 0.
+    try testing.expect(words[2].box.x0 < 1e-6);
+    try testing.expect(words[2].render.ink.x0 >= -1e-9);
 }
 
 test "a label on a canvas, with no sheet or panel, solves and exports" {

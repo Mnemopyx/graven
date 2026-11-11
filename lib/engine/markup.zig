@@ -115,6 +115,10 @@ pub const Fraction = struct {
 pub const Group = struct {
     items: []const Node,
     span: Span,
+    /// Only a change of variant (\textbf{…}, \mathbb{…}): its contents
+    /// stand in the list around it, as their own atoms, and a line may
+    /// break inside it. Braces and \text make one atom.
+    flat: bool = false,
 };
 
 pub const Scripts = struct {
@@ -451,6 +455,13 @@ const Parser = struct {
         return p.argGroup(variant, text_mode);
     }
 
+    /// The braced argument of a variant command: a flat group.
+    fn styled(p: *Parser, variant: Variant, text_mode: bool) Error!Group {
+        var g = try p.braced(variant, text_mode);
+        g.flat = true;
+        return g;
+    }
+
     /// A braced argument. In a preview an empty one holds a slot, so where
     /// its content goes shows while it is typed.
     fn argGroup(p: *Parser, variant: Variant, text_mode: bool) Error!Group {
@@ -526,35 +537,35 @@ const Parser = struct {
                 break :blk .{ .group = g };
             }
             if (std.mem.eql(u8, name, "mathrm") or std.mem.eql(u8, name, "mathup"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .shape = .upright, .alphabet = .normal }), text_mode) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .shape = .upright, .alphabet = .normal }), text_mode) };
             if (std.mem.eql(u8, name, "mathit"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .shape = .italic, .alphabet = .normal }), text_mode) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .shape = .italic, .alphabet = .normal }), text_mode) };
             if (std.mem.eql(u8, name, "text"))
                 break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = .default, .alphabet = .normal }), true) };
             // Weight and slant, in text or math.
             if (std.mem.eql(u8, name, "textbf"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .bold = true }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .bold = true }), true) };
             if (std.mem.eql(u8, name, "mathbf"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .bold = true, .shape = .upright, .alphabet = .normal }), text_mode) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .bold = true, .shape = .upright, .alphabet = .normal }), text_mode) };
             if (std.mem.eql(u8, name, "boldsymbol") or std.mem.eql(u8, name, "bm"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .bold = true }), text_mode) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .bold = true }), text_mode) };
             if (std.mem.eql(u8, name, "textit"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = .italic }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .shape = .italic }), true) };
             if (std.mem.eql(u8, name, "emph"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = if (variant.shape == .italic) Shape.upright else Shape.italic }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .shape = if (variant.shape == .italic) Shape.upright else Shape.italic }), true) };
             if (std.mem.eql(u8, name, "textup") or std.mem.eql(u8, name, "textrm"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = .upright, .alphabet = .normal }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .shape = .upright, .alphabet = .normal }), true) };
             if (std.mem.eql(u8, name, "textmd"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .bold = false }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .bold = false }), true) };
             if (std.mem.eql(u8, name, "textnormal"))
-                break :blk .{ .group = try p.braced(.{ .text = true }, true) };
+                break :blk .{ .group = try p.styled(.{ .text = true }, true) };
             // Math alphabets, upright; bold carries over (bold fraktur).
             if (alphabets.get(name)) |alpha|
-                break :blk .{ .group = try p.braced(variant.with(.{ .alphabet = alpha, .shape = .upright }), text_mode) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .alphabet = alpha, .shape = .upright }), text_mode) };
             if (std.mem.eql(u8, name, "textsf"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .alphabet = .sans_serif }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .alphabet = .sans_serif }), true) };
             if (std.mem.eql(u8, name, "texttt"))
-                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .alphabet = .monospace }), true) };
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .alphabet = .monospace }), true) };
             const accent: ?@FieldType(Accent, "kind") = if (std.mem.eql(u8, name, "bar"))
                 .bar
             else if (std.mem.eql(u8, name, "overline"))

@@ -258,6 +258,9 @@ pub const Item = struct {
 pub const Segment = struct {
     along: f64 = 0,
     across: f64 = 0,
+    /// Moved by hand: kept, and where it is, even while the flow does not
+    /// reach it, so content that grows back finds it there.
+    moved: bool = false,
 
     /// The point `d` u along the direction (`dir_along`, `dir_across`).
     pub fn step(s: Segment, dir: [2]f64, d: f64) Segment {
@@ -320,6 +323,16 @@ pub const TileRegion = struct {
     /// key) reaches into the segments after it, closing the stretch it
     /// covers there; their content flows around it.
     items: std.ArrayList(Item) = .empty,
+
+    /// How many kept origins stay when the flow reaches `count` segments:
+    /// those, and any up to the last one moved by hand. At least one.
+    pub fn keptSegments(r: TileRegion, count: usize) usize {
+        var keep = @max(1, count);
+        for (r.segments.items, 0..) |sg, k| if (sg.moved) {
+            keep = @max(keep, k + 1);
+        };
+        return keep;
+    }
 
     /// A segment's length, u.
     pub fn segmentLength(r: TileRegion) f64 {
@@ -2372,14 +2385,16 @@ pub const Model = struct {
         // Keep the origins up to this one, as placed, so the path bends here.
         while (r.segments.items.len <= segment) try r.segments.append(m.a(), solved[r.segments.items.len]);
         r.segments.items[segment] = target;
+        r.segments.items[segment].moved = true;
         m.revision += 1;
     }
 
     /// Drops kept origins past the first `count` segments, which the flow
-    /// no longer reaches: a segment left empty at the end goes. One stays.
+    /// no longer reaches: a segment left empty at the end goes, unless it
+    /// (or one after it) was moved by hand. One stays.
     pub fn trimSegments(m: *Model, panel: usize, region: usize, count: usize) void {
         const segs = &m.panels.items[panel].regions.items[region].segments;
-        const keep = @max(1, count);
+        const keep = m.panels.items[panel].regions.items[region].keptSegments(count);
         if (segs.items.len <= keep) return;
         segs.shrinkRetainingCapacity(keep);
         m.revision += 1;

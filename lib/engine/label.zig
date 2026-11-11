@@ -79,6 +79,7 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
         var atoms: std.ArrayList(Atom) = .empty;
         for (rest[0..cut]) |n| try atomsOf(a, n, &atoms);
         applyTexRules(atoms.items);
+        limitBreaks(atoms.items);
 
         var start: usize = 0;
         while (true) {
@@ -93,7 +94,10 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
             const item0 = b.items.items.len;
             const elem0 = b.elements.items.len;
             const y = -@as(f64, @floatFromInt(b.line)) * pitch;
+            const opp0 = b.opportunities.items.len;
+            b.record = true;
             const width = try b.atomsLine(try b.lineAtoms(line, take), cap, 0, 0, y);
+            b.record = false;
             // Each line sits on the anchor by its own width; in an open
             // span, the anchor's share of the span holds it.
             const dx = if (span) |sp|
@@ -101,6 +105,10 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
             else
                 -(try opts.anchor.offset(width));
             try b.shiftSince(item0, elem0, dx);
+            for (b.opportunities.items[opp0..]) |*o| {
+                o.x0 += dx;
+                o.x1 += dx;
+            }
             design = design.join(.{ .x0 = dx, .y0 = y, .x1 = dx + width, .y1 = y });
             b.line += 1;
             if (take >= line.len) break;
@@ -173,7 +181,17 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
         .anchor_at = anchor_at,
         .breaks = try breaks.toOwnedSlice(a),
         .lines = b.line,
+        // Pieces of a render on one line only.
+        .opportunities = if (b.line == 1) try b.opportunities.toOwnedSlice(a) else &.{},
         .syntax = try problems.toOwnedSlice(a),
+    };
+}
+
+/// The source offset just past an atom.
+fn atomEnd(atom: Atom) u32 {
+    return switch (atom.node) {
+        .text => |t| t.source[atom.end - 1] + 1,
+        else => |n| n.span().end,
     };
 }
 
@@ -217,6 +235,11 @@ const Builder = struct {
     band: f64,
     /// The line being laid out, from 0.
     line: u16 = 0,
+    /// While a line is set for keeps: record its break opportunities.
+    record: bool = false,
+    /// How deep in nested lists `atomsLine` is (the line's own list is 1).
+    depth: u8 = 0,
+    opportunities: std.ArrayList(render.Opportunity) = .empty,
 
     /// The atoms of a line that ends before `atoms[take]`: when it breaks at
     /// a soft hyphen, a hyphen ends it.
@@ -342,9 +365,15 @@ const Builder = struct {
     fn atomsLine(b: *Builder, atoms: []const Atom, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
         const mu = (try b.ctx.em(cap)) / 18;
         const line0 = b.elements.items.len;
+        b.depth += 1;
+        defer b.depth -= 1;
+        const recording = b.record and b.depth == 1;
         var pen = x;
         var prev: ?Class = null;
         for (atoms) |atom| {
+            const before: f64 = pen;
+            const opp_items: u32 = @intCast(b.items.items.len);
+            const opp_elems: u32 = @intCast(b.elements.items.len);
             var space: f64 = 0;
             if (prev) |p| {
                 if (spacing(b.ctx.spec.spacing, p, atom.class, level)) |amount| space = amount * mu;
@@ -368,6 +397,17 @@ const Builder = struct {
             }
             pen = end;
             prev = atom.class;
+            if (recording and atom.breakable) try b.opportunities.append(b.a, .{
+                .start = atomOffset(atom),
+                .end = atomEnd(atom),
+                .x0 = before,
+                .x1 = pen,
+                .item0 = opp_items,
+                .elem0 = opp_elems,
+                .item1 = @intCast(b.items.items.len),
+                .elem1 = @intCast(b.elements.items.len),
+                .hyphen = atom.node == .line_break and atom.node.line_break.kind == .hyphen,
+            });
         }
         return pen;
     }
@@ -857,7 +897,22 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
     switch (n) {
         .text => |t| {
             if (t.operator) return out.append(a, .{ .node = n, .end = t.utf8.len, .class = .op });
-            if (t.variant.text) return out.append(a, .{ .node = n, .end = t.utf8.len, .class = .ord });
+            if (t.variant.text) {
+                // Text: its words, and the breaking spaces between them.
+                var i: usize = 0;
+                while (i < t.utf8.len) {
+                    var j = i;
+                    if (t.utf8[i] == ' ') {
+                        j += 1;
+                        try out.append(a, .{ .node = n, .start = i, .end = j, .class = .space, .breakable = true });
+                    } else {
+                        while (j < t.utf8.len and t.utf8[j] != ' ') j += 1;
+                        try out.append(a, .{ .node = n, .start = i, .end = j, .class = .ord });
+                    }
+                    i = j;
+                }
+                return;
+            }
             var i: usize = 0;
             while (i < t.utf8.len) {
                 const next = clusterEnd(t.utf8, i);
@@ -877,7 +932,11 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
             }
         },
         .scripts => |s| try out.append(a, .{ .node = n, .class = nucleusClass(s.base.*) }),
-        .group, .accent, .placeholder, .radical, .fraction => try out.append(a, .{ .node = n, .class = .ord }),
+        // A change of variant stands aside: its contents are atoms here.
+        .group => |g| if (g.flat) {
+            for (g.items) |item| try atomsOf(a, item, out);
+        } else try out.append(a, .{ .node = n, .class = .ord }),
+        .accent, .placeholder, .radical, .fraction => try out.append(a, .{ .node = n, .class = .ord }),
         .space => try out.append(a, .{ .node = n, .class = .space }),
         .line_break => |br| try out.append(a, .{ .node = n, .class = .space, .breakable = br.kind != .hard }),
     }
@@ -915,6 +974,32 @@ fn clusterClass(cp: u21) Class {
 
 /// TeX's rules: a binary operator with nothing to operate on, before or
 /// after, is ordinary ("+H", "a=-b", "Σ+"). Spaces do not count as atoms.
+/// A space breaks a line only between words: not beside an operator,
+/// relation or binary operator, so a formula's spaces hold it together.
+/// (Explicit breaks, \allowbreak and \-, always may.)
+fn limitBreaks(atoms: []Atom) void {
+    for (atoms, 0..) |*atom, k| {
+        if (!atom.breakable or atom.node != .text) continue;
+        var before: ?Class = null;
+        var i = k;
+        while (i > 0) {
+            i -= 1;
+            if (atoms[i].class != .space) {
+                before = atoms[i].class;
+                break;
+            }
+        }
+        var after: ?Class = null;
+        for (atoms[k + 1 ..]) |next| if (next.class != .space) {
+            after = next.class;
+            break;
+        };
+        const left_ok = if (before) |c| c == .ord or c == .close or c == .punct else true;
+        const right_ok = if (after) |c| c == .ord or c == .open else true;
+        atom.breakable = left_ok and right_ok;
+    }
+}
+
 fn applyTexRules(atoms: []Atom) void {
     var prev: ?usize = null;
     for (atoms, 0..) |*atom, k| {
@@ -1259,6 +1344,50 @@ test "math bold and alphabets become Unicode's math characters where a face has 
     try testing.expectEqual(@as(usize, 0), m.diagnostics.len);
     try testing.expectEqual(@as(?FaceId, 0), m.elements[0].face);
     try testing.expectEqual(@as(?FaceId, 1), m.elements[1].face);
+}
+
+test "a one-line render breaks between words, inside variant groups too, but not in a formula" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.bold = 1;
+    const ctx = try style.Context.init(&f.faces, spec);
+    const src = "HOD \\textbf{ADD HOD} A = H";
+    var r = try renderTest(&ctx, src);
+    defer r.deinit();
+    // After HOD, inside the bold group, and before A; not around =.
+    try testing.expectEqual(@as(usize, 3), r.opportunities.len);
+    try testing.expectEqual(@as(u32, 3), r.opportunities[0].start);
+    try testing.expectEqual(@as(u32, 15), r.opportunities[1].start);
+    try testing.expectEqual(@as(u32, 20), r.opportunities[2].start);
+
+    // The pieces between them hold every item once, each from x 0.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var total: usize = 0;
+    var k: usize = 0;
+    while (k <= r.opportunities.len) : (k += 1) {
+        const after: ?u32 = if (k == 0) null else @intCast(k - 1);
+        const before: ?u32 = if (k == r.opportunities.len) null else @intCast(k);
+        const p = try r.piece(arena.allocator(), after, before);
+        total += p.items.len;
+        if (k > 0) try testing.expect(p.ink.x0 >= -1e-9 and p.ink.x0 < 1);
+        for (p.items) |it| try testing.expect(it.glyph.element < p.elements.len);
+    }
+    // Spaces are drawn as nothing but are items: all but those.
+    var spaces: usize = 0;
+    for (r.opportunities) |o| spaces += o.item1 - o.item0;
+    try testing.expectEqual(r.items.len, total + spaces);
+    // The bold word is in the bold face.
+    const bold = try r.piece(arena.allocator(), 0, 1);
+    try testing.expectEqual(@as(?FaceId, 1), bold.elements[0].face);
+
+    // A label wrapped in a box has no pieces to give.
+    var diag: markup.Diagnostic = undefined;
+    var wrapped = try renderLabel(testing.allocator, &ctx, src, .{ .hard_box = .{ .x0 = 0, .y0 = -100, .x1 = 20, .y1 = 100 } }, &diag);
+    defer wrapped.deinit();
+    try testing.expect(wrapped.lines > 1);
+    try testing.expectEqual(@as(usize, 0), wrapped.opportunities.len);
 }
 
 test "missing glyphs and unrendered constructs are reported at their source" {
