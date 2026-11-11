@@ -3331,17 +3331,44 @@ fn transferSelection(dest: ?usize, copy: bool) void {
         state.model.spaces.items[f].default_name = true;
         break :blk f;
     };
+    const constraints_before = state.model.constraints.items.len;
+    var group_size: usize = 0;
+    for (items) |id| group_size += idLeafCount(id);
     const g = (if (copy) act(.copyToSpace, .{items, target}) else act(.moveToSpace, .{items, target})) catch {
         state.status = "They could not be moved there. ";
         return;
     };
+    var arrived_size: usize = 0;
+    if (state.model.findGroup(g)) |at| for (state.model.spaces.items[at.space].groups.items[at.index].members.items) |id| {
+        arrived_size += idLeafCount(id);
+    };
+    const dropped = if (copy) 0 else constraints_before -| state.model.constraints.items.len;
     selection.clearRetainingCapacity();
     track_cursor = null;
     shown_space = target;
     state.context = .{ .group = g };
     // The keyboard goes to the canvas, for the arrow keys.
     if (canvas_id) |id| dvui.focusWidget(id, null, null);
-    state.status = "Arrived as one group: arrow keys move it into place. ";
+    const brought = arrived_size -| group_size;
+    state.status = std.fmt.bufPrint(&transfer_status_buf, "Arrived as one group{s}{s}: arrow keys move it into place.{s} ", .{
+        if (brought > 0) ", with what is constrained to it" else "",
+        if (brought > 0) (std.fmt.bufPrint(&transfer_brought_buf, " ({d} more)", .{brought}) catch "") else "",
+        if (dropped > 0) (std.fmt.bufPrint(&transfer_dropped_buf, " {d} constraint{s} on what stayed behind dropped (undo brings them back).", .{ dropped, if (dropped == 1) "" else "s" }) catch "") else "",
+    }) catch "Arrived as one group. ";
+}
+
+var transfer_status_buf: [256]u8 = undefined;
+var transfer_brought_buf: [32]u8 = undefined;
+var transfer_dropped_buf: [96]u8 = undefined;
+
+/// How many objects `id` is: 1, or a group's, nested.
+fn idLeafCount(id: layout.model.ObjectId) usize {
+    if (state.model.findGroup(id)) |at| {
+        var n: usize = 0;
+        for (state.model.spaces.items[at.space].groups.items[at.index].members.items) |mb| n += idLeafCount(mb);
+        return n;
+    }
+    return 1;
 }
 
 /// The selection's extents in its space, from the last solve.
@@ -7779,7 +7806,7 @@ fn offsetBox(b: geom.Box, o: geom.Point) geom.Box {
     return .{ .x0 = b.x0 + o.x, .x1 = b.x1 + o.x, .y0 = b.y0 + o.y, .y1 = b.y1 + o.y };
 }
 
-const all_features = [_]Feature{ .left, .centre_x, .right, .origin_x, .bottom, .centre_y, .top, .origin_y };
+const all_features = [_]Feature{ .left, .centre_x, .right, .origin_x, .bottom, .centre_y, .top, .origin_y, .baseline };
 
 /// Feature `f`'s line on box `b` (space mm), at `pos` on its axis; a point
 /// object's line is a short one through it.
@@ -7825,6 +7852,7 @@ fn featureHit(at: geom.Point) ?FeatureHit {
             return switch (f) {
                 .left, .right, .bottom, .top => 0,
                 .origin_x, .origin_y => 1,
+                .baseline => 0.5,
                 .centre_x, .centre_y => 2,
             };
         }
@@ -7897,6 +7925,7 @@ fn featureName(f: Feature) []const u8 {
         .top => "top edge",
         .centre_y => "middle",
         .origin_y => "origin",
+        .baseline => "first baseline",
     };
 }
 
@@ -8123,6 +8152,7 @@ fn constraintProperties() void {
                 .mixed_axes => "a constraint mixes axes",
                 .conflict => "a constraint contradicts others: left out",
                 .inverted => "constraints turn it inside out",
+                .no_feature => "a constraint names a feature it lacks",
             }}, 9700);
             break;
         };

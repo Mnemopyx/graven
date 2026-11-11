@@ -48,6 +48,8 @@ pub const Issue = struct {
         conflict,
         /// Meeting it turns its object inside out (a negative size).
         inverted,
+        /// It names a feature its object lacks (a panel's baseline).
+        no_feature,
     },
 };
 
@@ -213,6 +215,7 @@ fn parentFeature(m: *const Model, parent: Parent, f: Feature) ?f64 {
         .top => b.y1,
         .centre_y => (b.y0 + b.y1) / 2,
         .origin_x, .origin_y => unreachable,
+        .baseline => null,
     };
 }
 
@@ -264,7 +267,8 @@ pub fn featureAt(m: *const Model, parent: Parent, end: model.ConstraintEnd) ?f64
     const loc = locate(m, end.object) orelse return null;
     const sh = shapeOf(m, loc, end.feature.vertical());
     const size = sh.hi - sh.lo;
-    return sh.lo + sh.f * size + sizeCoeff(end.feature, sh.f) * size;
+    const t = featureTerm(m, loc, end.feature, sh.f) orelse return null;
+    return sh.lo + sh.f * size + t.g * size + t.c;
 }
 
 /// What constraint `c` measures as things are now (the value it would
@@ -293,7 +297,32 @@ fn sizeCoeff(f: Feature, at: f64) f64 {
         .right, .top => 1 - at,
         .centre_x, .centre_y => 0.5 - at,
         .origin_x, .origin_y => 0,
+        .baseline => unreachable,
     };
+}
+
+/// Where feature `f` of object `loc` lies: its origin, plus `g` times its
+/// size, plus `c`. Null for a feature it lacks.
+const Term = struct { g: f64, c: f64 = 0 };
+
+fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
+    if (f != .baseline) return .{ .g = sizeCoeff(f, at) };
+    switch (loc.kind) {
+        // A label's anchor is on its baseline.
+        .label => return .{ .g = 0 },
+        // A track of text, in rows: its first row's capitals centred in
+        // the row (as the flow sets them), from its top.
+        .region => {
+            const r = m.panels.items[loc.holder].regions.items[loc.index];
+            if (r.major != .row) return null;
+            const sid = r.style orelse return null;
+            if (sid >= m.styles.items.len) return null;
+            const cap = m.styles.items[sid].spec.cap_height;
+            const across: f64 = if (r.segments.items.len > 0) r.segments.items[0].across else 0;
+            return .{ .g = 1 - at, .c = -(across * r.pitch + (r.pitch + cap) / 2) };
+        },
+        else => return null,
+    }
 }
 
 /// Solves every constraint, moving and resizing objects to meet them;
@@ -317,6 +346,15 @@ pub fn solve(m: *Model, gpa: Allocator, issues: ?*std.ArrayList(Issue)) Allocato
         if (c.a.feature.vertical() != c.b.feature.vertical()) {
             try note(gpa, issues, c.id, .mixed_axes);
             continue;
+        }
+        if (c.kind == .offset) {
+            const fa = shapeOf(m, la, c.a.feature.vertical()).f;
+            const lacks_a = featureTerm(m, la, c.a.feature, fa) == null;
+            const lacks_b = if (c.b.object == .none) c.b.feature == .baseline else if (locate(m, c.b.object)) |lb| featureTerm(m, lb, c.b.feature, shapeOf(m, lb, c.b.feature.vertical()).f) == null else false;
+            if (lacks_a or lacks_b) {
+                try note(gpa, issues, c.id, .no_feature);
+                continue;
+            }
         }
         if (c.b.object != .none) {
             const lb = locate(m, c.b.object) orelse {
@@ -438,11 +476,15 @@ fn solveAxis(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
             }
             const o = objs.items[objIndex(objs.items, end.object) orelse {
                 // A reference: its feature, or size, as it is.
-                const sh = shapeOf(m, locate(m, end.object).?, vertical);
+                const rloc = locate(m, end.object).?;
+                const sh = shapeOf(m, rloc, vertical);
                 const size = sh.hi - sh.lo;
                 const at = sh.lo + sh.f * size;
                 rhs -= sign * switch (c.kind) {
-                    .offset => at + sizeCoeff(end.feature, sh.f) * size,
+                    .offset => blk: {
+                        const t = featureTerm(m, rloc, end.feature, sh.f).?;
+                        break :blk at + t.g * size + t.c;
+                    },
                     .equal_size => size,
                 };
                 continue;
@@ -451,8 +493,9 @@ fn solveAxis(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
             switch (c.kind) {
                 .offset => {
                     coef[o.o_var] += sign;
-                    const g = sizeCoeff(end.feature, o.shape.f);
-                    if (o.s_var) |sv| coef[sv] += sign * g else rhs -= sign * g * s0;
+                    const t = featureTerm(m, o.loc, end.feature, o.shape.f).?;
+                    if (o.s_var) |sv| coef[sv] += sign * t.g else rhs -= sign * t.g * s0;
+                    rhs -= sign * t.c;
                 },
                 .equal_size => if (o.s_var) |sv| {
                     coef[sv] += sign;
@@ -692,4 +735,85 @@ test "peers: equal sizes, and the reference stays" {
     // A, the reference, is as it was.
     try testing.expectApproxEqAbs(@as(f64, 50), m.panels.items[p1].w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), m.panels.items[p1].origin.y, 1e-9);
+}
+
+test "side-by-side text columns share their first baseline" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 100 });
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const big = try m.addStyle("Big", .{ .upright = 0, .cap_height = 5 });
+    const left = try m.addTracks(p, .{ .name = "left", .origin = .{ .x = 10, .y = 90 }, .style = body, .count = 5, .length = 10, .pitch = 6 });
+    const right = try m.addTracks(p, .{ .name = "right", .origin = .{ .x = 110, .y = 83.7 }, .style = big, .count = 5, .length = 8, .pitch = 9 });
+    const style_id = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    _ = try m.addLabel(p, .{ .at = .{ .x = 100, .y = 10 }, .style = style_id, .content = "x" });
+    try h.reset(&m);
+    const pp = &m.panels.items[p];
+    const lid = pp.regions.items[left].id;
+    const rid = pp.regions.items[right].id;
+    const label_id = pp.labels.items[0].id;
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .baseline }, .b = .{ .object = lid, .feature = .baseline } }});
+    const parent: Parent = .{ .panel = p };
+    const bl = featureAt(&m, parent, .{ .object = lid, .feature = .baseline }).?;
+    const br = featureAt(&m, parent, .{ .object = rid, .feature = .baseline }).?;
+    try testing.expectApproxEqAbs(bl, br, 1e-9);
+    // The left column's first baseline: its top less half its pitch and cap.
+    try testing.expectApproxEqAbs(@as(f64, 85.5), bl, 1e-9);
+    // A label onto the same baseline.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = label_id, .feature = .baseline }, .b = .{ .object = lid, .feature = .baseline } }});
+    try testing.expectApproxEqAbs(bl, m.panels.items[p].labels.items[0].at.y, 1e-9);
+    // A panel has no baseline.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = lid, .feature = .baseline }, .b = .{ .feature = .baseline } }});
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(1, issues.len);
+    try testing.expect(issues[0].kind == .no_feature);
+}
+
+test "moving into a frame takes the constraint group; copying copies its constraints" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    const c = try m.startCanvas(.mm);
+    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    for ([_]geom.Point{ .{ .x = 10, .y = 10 }, .{ .x = 40, .y = 12 }, .{ .x = 80, .y = 30 } }) |at| _ = try m.addLabel(c, .{ .at = at, .style = style, .content = "x" });
+    const frame = try m.addFrame("Frame", null);
+    try h.reset(&m);
+    const ids = [3]ObjectId{ m.panels.items[c].labels.items[0].id, m.panels.items[c].labels.items[1].id, m.panels.items[c].labels.items[2].id };
+    // B is kept 30 mm right of A; A is kept level with C.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[1], .feature = .origin_x }, .b = .{ .object = ids[0], .feature = .origin_x }, .value = 30 }});
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[0], .feature = .origin_y }, .b = .{ .object = ids[2], .feature = .origin_y } }});
+
+    // A copy of A: B comes too (it keeps to A), with its constraint on the
+    // copy; A's tie to C stays with the original.
+    _ = try h.do(&m, .copyToSpace, .{ &[_]ObjectId{ids[0]}, frame });
+    try testing.expectEqual(3, m.constraints.items.len);
+    const copied = m.constraints.items[2];
+    try testing.expect(copied.a.object != ids[1] and copied.b.object != ids[0]);
+    try testing.expectEqual(@as(f64, 30), copied.value);
+    try testing.expectEqual(frame, m.spaceOfId(copied.a.object).?);
+
+    // Moving A: B goes with it; A's tie to C, left behind, is dropped.
+    _ = try h.do(&m, .moveToSpace, .{ &[_]ObjectId{ids[0]}, frame });
+    try testing.expectEqual(frame, m.spaceOfId(ids[0]).?);
+    try testing.expectEqual(frame, m.spaceOfId(ids[1]).?);
+    try testing.expectEqual(0, m.spaceOfId(ids[2]).?);
+    var kept_b = false;
+    for (m.constraints.items) |k| {
+        try testing.expect(!(k.a.object == ids[0] and k.b.object == ids[2]));
+        if (k.a.object == ids[1] and k.b.object == ids[0]) kept_b = true;
+    }
+    try testing.expect(kept_b);
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(0, issues.len);
+    // Undo brings the dropped constraint back.
+    _ = try h.undo(&m);
+    try testing.expectEqual(3, m.constraints.items.len);
 }

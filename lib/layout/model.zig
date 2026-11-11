@@ -74,6 +74,9 @@ pub const Feature = enum {
     centre_y,
     top,
     origin_y,
+    /// The first baseline: a label's (its anchor's), or a text track's
+    /// first row's. Other objects have none.
+    baseline,
 
     pub fn vertical(f: Feature) bool {
         return @intFromEnum(f) >= @intFromEnum(Feature.bottom);
@@ -1464,10 +1467,60 @@ pub const Model = struct {
         if (from == dest and !copy) return error.NoSuchItem;
         var name_buf: [96]u8 = undefined;
         const gname = std.fmt.bufPrint(&name_buf, "from {s}", .{m.spaces.items[from].name}) catch "moved";
+
+        // The constraint group: what is constrained to anything going comes
+        // too (and what is constrained to that), so the layout holds.
+        var going: std.ArrayList(ObjectId) = .empty;
+        for (ids) |id| try m.constrainedLeaves(id, &going);
+        var all: std.ArrayList(ObjectId) = .empty;
+        try all.appendSlice(m.a(), ids);
+        var grew = true;
+        while (grew) {
+            grew = false;
+            for (m.constraints.items) |c| {
+                if (c.b.object == .none or std.mem.indexOfScalar(ObjectId, going.items, c.b.object) == null) continue;
+                if (std.mem.indexOfScalar(ObjectId, going.items, c.a.object) != null) continue;
+                if (m.spaceOfId(c.a.object) != from) continue;
+                const top = m.topLevel(c.a.object);
+                try all.append(m.a(), top);
+                try m.constrainedLeaves(top, &going);
+                grew = true;
+            }
+        }
+
+        var pairs: std.ArrayList([2]ObjectId) = .empty;
         var arrived: std.ArrayList(ObjectId) = .empty;
-        for (ids) |id| try arrived.append(m.a(), try m.carry(id, dest, copy));
+        for (all.items) |id| try arrived.append(m.a(), try m.carry(id, dest, copy, &pairs));
         // Moved out of the source: out of its groups too.
-        if (!copy) for (ids) |id| m.dropMember(id);
+        if (!copy) for (all.items) |id| m.dropMember(id);
+
+        if (copy) {
+            // Copies keep the constraints among them (and on their parent);
+            // one on something not copied stays with the original only.
+            const n = m.constraints.items.len;
+            for (0..n) |ci| {
+                const c = m.constraints.items[ci];
+                const na = pairOf(pairs.items, c.a.object) orelse continue;
+                const nb: ObjectId = if (c.b.object == .none) .none else pairOf(pairs.items, c.b.object) orelse continue;
+                var cc = c;
+                cc.id = m.newId();
+                cc.a.object = na;
+                cc.b.object = nb;
+                try m.constraints.append(m.a(), cc);
+            }
+        } else {
+            // What moved keeps to nothing left behind: those constraints go
+            // (undo brings them back), and the objects keep their places.
+            var k: usize = 0;
+            while (k < m.constraints.items.len) {
+                const c = m.constraints.items[k];
+                const a_goes = std.mem.indexOfScalar(ObjectId, going.items, c.a.object) != null;
+                const b_goes = c.b.object == .none or std.mem.indexOfScalar(ObjectId, going.items, c.b.object) != null;
+                if (a_goes != b_goes and !(c.b.object == .none and !a_goes)) {
+                    _ = m.constraints.orderedRemove(k);
+                } else k += 1;
+            }
+        }
         const gid = m.newId();
         var g: Group = .{ .id = gid, .name = try m.a().dupe(u8, gname) };
         try g.members.appendSlice(m.a(), arrived.items);
@@ -1476,13 +1529,34 @@ pub const Model = struct {
         return gid;
     }
 
+    /// The objects `id` stands for: itself; a group's members, nested; a
+    /// panel and everything on it.
+    fn constrainedLeaves(m: *Model, id: ObjectId, out: *std.ArrayList(ObjectId)) Allocator.Error!void {
+        if (m.findGroup(id)) |at| {
+            for (m.spaces.items[at.space].groups.items[at.index].members.items) |mb| try m.constrainedLeaves(mb, out);
+            return;
+        }
+        try out.append(m.a(), id);
+        for (m.panels.items) |p| if (p.id == id) {
+            for (p.regions.items) |r| try out.append(m.a(), r.id);
+            for (p.labels.items) |l| try out.append(m.a(), l.id);
+            for (p.art.items) |x| try out.append(m.a(), x.id);
+        };
+    }
+
+    fn pairOf(pairs: []const [2]ObjectId, id: ObjectId) ?ObjectId {
+        for (pairs) |pr| if (pr[0] == id) return pr[1];
+        return null;
+    }
+
     /// Takes object or group `id` to space `dest` (a copy with new IDs when
-    /// `copy`). Returns its ID there.
-    fn carry(m: *Model, id: ObjectId, dest: usize, copy: bool) Error!ObjectId {
+    /// `copy`, each original and copy noted in `pairs`). Returns its ID
+    /// there.
+    fn carry(m: *Model, id: ObjectId, dest: usize, copy: bool, pairs: *std.ArrayList([2]ObjectId)) Error!ObjectId {
         if (m.findGroup(id)) |at| {
             const g = m.spaces.items[at.space].groups.items[at.index];
             var members: std.ArrayList(ObjectId) = .empty;
-            for (g.members.items) |mb| try members.append(m.a(), try m.carry(mb, dest, copy));
+            for (g.members.items) |mb| try members.append(m.a(), try m.carry(mb, dest, copy, pairs));
             if (copy) {
                 const nid = m.newId();
                 try m.spaces.items[dest].groups.append(m.a(), .{ .id = nid, .name = try m.a().dupe(u8, g.name), .members = members });
@@ -1506,6 +1580,7 @@ pub const Model = struct {
                     item.id = m.newId();
                 } else _ = src.orderedRemove(l.index);
                 try m.panels.items[droot].labels.append(m.a(), item);
+                try pairs.append(m.a(), .{ id, item.id });
                 return item.id;
             },
             .art => |l| {
@@ -1517,17 +1592,26 @@ pub const Model = struct {
                     item.id = m.newId();
                 } else _ = src.orderedRemove(l.index);
                 try m.panels.items[droot].art.append(m.a(), item);
+                try pairs.append(m.a(), .{ id, item.id });
                 return item.id;
             },
             .region => |l| {
                 const src = &m.panels.items[l.panel].regions;
                 const item = if (copy) try m.copyRegion(src.items[l.index]) else src.orderedRemove(l.index);
                 try m.panels.items[droot].regions.append(m.a(), item);
+                try pairs.append(m.a(), .{ id, item.id });
                 return item.id;
             },
             .panel => |pi| {
                 const target = if (copy) try m.copyPanel(pi) else pi;
                 m.panels.items[target].space = dest;
+                // A copy's contents are in the same order as the original's.
+                const orig = m.panels.items[pi];
+                const got = m.panels.items[target];
+                try pairs.append(m.a(), .{ orig.id, got.id });
+                for (orig.regions.items, got.regions.items) |o, n| try pairs.append(m.a(), .{ o.id, n.id });
+                for (orig.labels.items, got.labels.items) |o, n| try pairs.append(m.a(), .{ o.id, n.id });
+                for (orig.art.items, got.art.items) |o, n| try pairs.append(m.a(), .{ o.id, n.id });
                 // Layers belong to their space: it lands on dest's base layer.
                 m.panels.items[target].layer = .none;
                 return m.panels.items[target].id;
