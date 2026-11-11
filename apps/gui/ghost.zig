@@ -331,15 +331,29 @@ pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
 }
 
 /// The pane's background colour as drawn now.
+/// Whether a pane taking events (active or docked) gets a deep background
+/// in its hue with its content light on it, to stand apart from the light
+/// paper, rather than a near-white one made more opaque (an experiment,
+/// chosen in View).
+pub var deep_active = false;
+
+/// The theme a pane's colours derive from: a deep pane's is dark.
+fn paneBase(p: *const Pane, base: dvui.Theme) dvui.Theme {
+    if (!deep_active or !p.interactive()) return base;
+    var b = base;
+    b.dark = true;
+    return b;
+}
+
 pub fn fill(p: *const Pane) dvui.Color {
-    const t = theme(p.look, dvui.themeGet());
+    const t = theme(p.look, paneBase(p, dvui.themeGet()));
     return t.window.fill.?.opacity(if (p.interactive()) p.look.active_fill else p.look.ghost_fill);
 }
 
 /// Sets the pane's theme for content drawn until `themePop`.
 pub fn themePush(p: *const Pane) dvui.Theme {
     const prev = dvui.themeGet();
-    dvui.themeSet(theme(p.look, prev));
+    dvui.themeSet(theme(p.look, paneBase(p, prev)));
     return prev;
 }
 

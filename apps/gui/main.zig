@@ -2529,6 +2529,10 @@ fn menu() ?dvui.App.Result {
                 m.close();
             }
         }
+        if (dvui.menuItemLabel(@src(), if (ghost_pane.deep_active) "•  Active and docked panes: deep background" else "    Active and docked panes: deep background", .{}, .{ .expand = .horizontal }) != null) {
+            ghost_pane.deep_active = !ghost_pane.deep_active;
+            m.close();
+        }
         if (dvui.menuItemLabel(@src(), if (ghost_pane.vivid) "•  Pane colour: vivid" else "    Pane colour: vivid", .{}, .{ .expand = .horizontal }) != null) {
             ghost_pane.vivid = !ghost_pane.vivid;
             m.close();
