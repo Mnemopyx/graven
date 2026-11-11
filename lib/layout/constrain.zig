@@ -53,7 +53,9 @@ pub const Issue = struct {
 
 /// Where an object is, and what it is.
 const Kind = enum { panel, region, label, art, image };
-const Parent = union(enum) { space: usize, panel: usize };
+/// What an object sits in: a space (panels, images) or a panel (tracks,
+/// labels, line art), whose frame its position is in.
+pub const Parent = union(enum) { space: usize, panel: usize };
 
 const Loc = struct {
     kind: Kind,
@@ -214,6 +216,76 @@ fn parentFeature(m: *const Model, parent: Parent, f: Feature) ?f64 {
     };
 }
 
+/// The parent object `id` sits in; null for none (or not a positioning
+/// object).
+pub fn parentOf(m: *const Model, id: ObjectId) ?Parent {
+    return (locate(m, id) orelse return null).parent;
+}
+
+/// The space a parent is in.
+pub fn spaceOf(m: *const Model, parent: Parent) usize {
+    return switch (parent) {
+        .space => |si| si,
+        .panel => |pi| m.panels.items[pi].space,
+    };
+}
+
+/// Where a parent's frame sits in its space: a panel's origin corner (0
+/// for a space, and for a space's unbounded panel).
+pub fn frameOffset(m: *const Model, parent: Parent) geom.Point {
+    return switch (parent) {
+        .space => .{ .x = 0, .y = 0 },
+        .panel => |pi| m.panels.items[pi].origin,
+    };
+}
+
+/// Object `id`'s box in its parent's frame (a label's is its anchor
+/// point); null when it is not a positioning object.
+pub fn boxOf(m: *const Model, id: ObjectId) ?geom.Box {
+    const loc = locate(m, id) orelse return null;
+    const x = shapeOf(m, loc, false);
+    const y = shapeOf(m, loc, true);
+    return .{ .x0 = x.lo, .x1 = x.hi, .y0 = y.lo, .y1 = y.hi };
+}
+
+/// Where object `id`'s object origin is, in its parent's frame.
+pub fn originOf(m: *const Model, id: ObjectId) ?geom.Point {
+    const loc = locate(m, id) orelse return null;
+    const x = shapeOf(m, loc, false);
+    const y = shapeOf(m, loc, true);
+    return .{ .x = x.lo + x.f * (x.hi - x.lo), .y = y.lo + y.f * (y.hi - y.lo) };
+}
+
+/// Where a feature lies on its axis, in `parent`'s frame: of the object
+/// `end` names, or (no object) of `parent` itself. Null when it has none
+/// (an object that is gone, an unbounded space's edge).
+pub fn featureAt(m: *const Model, parent: Parent, end: model.ConstraintEnd) ?f64 {
+    if (end.object == .none) return parentFeature(m, parent, end.feature);
+    const loc = locate(m, end.object) orelse return null;
+    const sh = shapeOf(m, loc, end.feature.vertical());
+    const size = sh.hi - sh.lo;
+    return sh.lo + sh.f * size + sizeCoeff(end.feature, sh.f) * size;
+}
+
+/// What constraint `c` measures as things are now (the value it would
+/// keep): an offset between its features, or a difference of sizes.
+pub fn measure(m: *const Model, c: model.Constraint) ?f64 {
+    const parent = parentOf(m, c.a.object) orelse return null;
+    switch (c.kind) {
+        .offset => return (featureAt(m, parent, c.a) orelse return null) - (featureAt(m, parent, c.b) orelse return null),
+        .equal_size => {
+            const v = c.a.feature.vertical();
+            const sa = boxOf(m, c.a.object) orelse return null;
+            const sb: geom.Box = if (c.b.object == .none) blk: {
+                const lo = parentFeature(m, parent, if (v) .bottom else .left) orelse return null;
+                const hi = parentFeature(m, parent, if (v) .top else .right) orelse return null;
+                break :blk if (v) .{ .x0 = 0, .x1 = 0, .y0 = lo, .y1 = hi } else .{ .x0 = lo, .x1 = hi, .y0 = 0, .y1 = 0 };
+            } else boxOf(m, c.b.object) orelse return null;
+            return if (v) sa.height() - sb.height() else sa.width() - sb.width();
+        },
+    }
+}
+
 /// A feature as a multiple of an object's size away from its origin.
 fn sizeCoeff(f: Feature, at: f64) f64 {
     return switch (f) {
@@ -255,7 +327,7 @@ pub fn solve(m: *Model, gpa: Allocator, issues: ?*std.ArrayList(Issue)) Allocato
                 try note(gpa, issues, c.id, .cross_parent);
                 continue;
             }
-        } else if (c.kind == .offset and parentFeature(m, la.parent, c.b.feature) == null) {
+        } else if (parentFeature(m, la.parent, if (c.kind == .offset) c.b.feature else if (c.b.feature.vertical()) .top else .right) == null) {
             try note(gpa, issues, c.id, .no_parent_edge);
             continue;
         }
@@ -353,8 +425,15 @@ fn solveAxis(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
         var rhs = c.value;
         for ([_]model.ConstraintEnd{ c.a, c.b }, [_]f64{ 1, -1 }) |end, sign| {
             if (end.object == .none) {
-                // The parent: a constant (its size, 0, for equal_size).
-                if (c.kind == .offset) rhs -= sign * parentFeature(m, parent, end.feature).?;
+                // The parent: a constant, its feature or its size.
+                switch (c.kind) {
+                    .offset => rhs -= sign * parentFeature(m, parent, end.feature).?,
+                    .equal_size => {
+                        const lo = parentFeature(m, parent, if (vertical) .bottom else .left) orelse 0;
+                        const hi = parentFeature(m, parent, if (vertical) .top else .right) orelse 0;
+                        rhs -= sign * (hi - lo);
+                    },
+                }
                 continue;
             }
             const o = objs.items[objIndex(objs.items, end.object) orelse {

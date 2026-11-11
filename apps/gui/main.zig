@@ -128,7 +128,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area };
+const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area, constrain };
 
 /// What Add shape draws: a closed path, dragged out as a box (a polygon
 /// is clicked corner by corner).
@@ -2116,6 +2116,7 @@ fn overlays() !void {
     if (export_prompt) exportPrompt();
     if (image_prompt) imagePrompt();
     if (file_prompt) |kind| filePrompt(kind);
+    if (constrain_prompt != null) constrainPromptWindow();
     if (leave_prompt) |p| leavePrompt(p);
     if (recovery != null) recoveryPrompt();
     if (contention) |k| contentionPrompt(k);
@@ -3117,6 +3118,7 @@ fn canvas() void {
 
     drawPicked(area);
     drawPolygonDraft(area);
+    drawConstraintMarks(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -4967,6 +4969,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 e.handle(@src(), box.data());
                 state.tool = .select;
                 state.drag = null;
+                constrain_first = null;
+                constrain_hover = null;
                 polygon_pts.clearRetainingCapacity();
                 dvui.refresh(null, @src(), box.data().id);
             } else if ((k.code == .enter or k.code == .kp_enter) and k.action == .down and state.tool == .add_art and polygon_pts.items.len > 0) {
@@ -5038,6 +5042,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 // The pointer's worksheet position, for the rulers and readout.
                 const at = state.view.toMm(area, me.p);
                 state.mouse = if (area.contains(me.p) and (openCanvas() or contains(state.model.sheet.box(), at))) at else null;
+                if (state.tool == .constrain) {
+                    const was = constrain_hover;
+                    constrain_hover = if (area.contains(me.p)) featureHit(at) else null;
+                    if (!std.meta.eql(was, constrain_hover)) dvui.refresh(null, @src(), box.data().id);
+                }
                 if (drawing) {
                     dvui.cursorSet(.crosshair);
                 } else if (state.moving != null or state.moving_label != null) {
@@ -5093,6 +5102,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
                         state.drag = .{ .start = p, .at = p };
                     }
+                } else if (state.tool == .constrain and me.button.pointer()) {
+                    constrainClick();
+                    state.press_consumed = true;
                 } else if (drawing and me.button.pointer()) {
                     // A panel is drawn from a point on the sheet.
                     const at = snap(state.view.toMm(area, me.p));
@@ -5603,6 +5615,19 @@ fn toolBar() void {
     var wd: dvui.WidgetData = undefined;
     if (dvui.buttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
+    {
+        const on = state.tool == .constrain;
+        var cwd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "Constrain", dvui.entypo.ruler, .{}, .{}, .{
+            .data_out = &cwd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.drag = null;
+            constrain_first = null;
+            state.tool = if (on) .select else .constrain;
+        }
+        dvui.tooltip(@src(), .{ .active_rect = cwd.borderRectScale().r }, "Constrain: pick a feature of what is to move, then what it keeps to; set the distance or size", .{}, .{});
+    }
 
     switch (state.context) {
         .prototypes => {
@@ -5929,6 +5954,7 @@ fn propFont(name: []const u8, n: usize) !void {
 }
 
 fn properties() !void {
+    defer constraintProperties();
     const on_canvas = switch (state.context) {
         .panel => |pi| state.model.panels.items[pi].unbounded,
         else => false,
@@ -6768,6 +6794,7 @@ fn statusContent() void {
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
+        .constrain => if (constrain_first == null) "Constrain: click an edge, centre line or origin line of what is to move · Esc cancels" else "Constrain: click what it keeps to (its own, a peer's, or the parent's) · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
 
@@ -7665,4 +7692,475 @@ fn arrowButton(arrow: Arrow, i: usize) bool {
     bw.deinit();
     if (clicked) if (canvas_id) |id| dvui.focusWidget(id, null, null);
     return clicked;
+}
+
+// Constraints -------------------------------------------------------------------
+//
+// The Constrain tool picks a feature (an edge, centre line or origin line)
+// of an object, then a second on the same axis: of the same object, a peer
+// in the same parent, or the parent itself. A prompt then asks for the
+// relation and its value, offering the current measurement; applying it
+// moves the first object into place. Constraints show as dimension glyphs
+// in the annotation hue (flagged ones in the warning hue), and an object's
+// properties list its constraints, with their values to edit, and its
+// object origin to choose.
+
+const constrain = layout.constrain;
+const ConstraintEnd = layout.model.ConstraintEnd;
+const Feature = layout.model.Feature;
+
+/// A feature under the pointer: the end a constraint would take, the
+/// parent it is measured in, and its line, space mm.
+const FeatureHit = struct {
+    end: ConstraintEnd,
+    parent: constrain.Parent,
+    p0: geom.Point,
+    p1: geom.Point,
+};
+
+var constrain_hover: ?FeatureHit = null;
+var constrain_first: ?FeatureHit = null;
+var constrain_prompt: ?struct {
+    a: ConstraintEnd,
+    b: ConstraintEnd,
+    equal: bool = false,
+    /// In the document's units.
+    value: f64,
+    new: bool = true,
+} = null;
+
+var constraint_issues: []constrain.Issue = &.{};
+var constraint_issues_rev: u64 = std.math.maxInt(u64);
+
+/// The flagged constraints, checked again when the model has changed.
+fn constraintIssues() []const constrain.Issue {
+    if (constraint_issues_rev != state.model.revision) {
+        state.gpa.free(constraint_issues);
+        constraint_issues = constrain.check(&state.model, state.gpa) catch &.{};
+        constraint_issues_rev = state.model.revision;
+    }
+    return constraint_issues;
+}
+
+fn constraintIssue(id: layout.model.ObjectId) ?constrain.Issue {
+    for (constraintIssues()) |i| if (i.constraint == id) return i;
+    return null;
+}
+
+/// The positioning object the context is, if it is one.
+fn contextObject() ?layout.model.ObjectId {
+    const m = &state.model;
+    return switch (state.context) {
+        .panel => |pi| if (m.panels.items[pi].unbounded) null else m.panels.items[pi].id,
+        .region => |r| m.panels.items[r.panel].regions.items[r.region].id,
+        .label => |l| m.panels.items[l.panel].labels.items[l.index].id,
+        .art => |l| m.panels.items[l.panel].art.items[l.index].id,
+        .image => |im| if (imageAt(im.space, im.index)) |image| image.id else null,
+        else => null,
+    };
+}
+
+/// The objects constraints may be put on in the shown space.
+fn constrainables(a: std.mem.Allocator) []layout.model.ObjectId {
+    var list: std.ArrayList(layout.model.ObjectId) = .empty;
+    const m = &state.model;
+    for (m.panels.items) |p| {
+        if (p.space != shown_space) continue;
+        if (!p.unbounded) list.append(a, p.id) catch {};
+        for (p.regions.items) |r| list.append(a, r.id) catch {};
+        for (p.labels.items) |l| list.append(a, l.id) catch {};
+        for (p.art.items) |x| list.append(a, x.id) catch {};
+    }
+    if (shown_space < m.spaces.items.len) for (m.spaces.items[shown_space].images.items) |im| list.append(a, im.id) catch {};
+    return list.items;
+}
+
+fn offsetBox(b: geom.Box, o: geom.Point) geom.Box {
+    return .{ .x0 = b.x0 + o.x, .x1 = b.x1 + o.x, .y0 = b.y0 + o.y, .y1 = b.y1 + o.y };
+}
+
+const all_features = [_]Feature{ .left, .centre_x, .right, .origin_x, .bottom, .centre_y, .top, .origin_y };
+
+/// Feature `f`'s line on box `b` (space mm), at `pos` on its axis; a point
+/// object's line is a short one through it.
+fn featureLine(f: Feature, pos: f64, b: geom.Box) [2]geom.Point {
+    const reach = 10 / state.view.ppm;
+    if (f.vertical()) {
+        const x0 = if (b.width() > 0) b.x0 else b.x0 - reach;
+        const x1 = if (b.width() > 0) b.x1 else b.x1 + reach;
+        return .{ .{ .x = x0, .y = pos }, .{ .x = x1, .y = pos } };
+    }
+    const y0 = if (b.height() > 0) b.y0 else b.y0 - reach;
+    const y1 = if (b.height() > 0) b.y1 else b.y1 + reach;
+    return .{ .{ .x = pos, .y = y0 }, .{ .x = pos, .y = y1 } };
+}
+
+/// The feature nearest `at` (space mm) within a few pixels: any, or once a
+/// first is picked, one on its axis of the same object, a peer or the
+/// parent.
+fn featureHit(at: geom.Point) ?FeatureHit {
+    const m = &state.model;
+    const a = dvui.currentWindow().arena();
+    const tol = 7 / state.view.ppm;
+    var best: ?FeatureHit = null;
+    var best_d: f64 = std.math.inf(f64);
+    const consider = struct {
+        fn f(hit: FeatureHit, p: geom.Point, t: f64, rank: f64, bh: *?FeatureHit, bd: *f64) void {
+            const vertical = hit.end.feature.vertical();
+            const along_lo = if (vertical) @min(hit.p0.x, hit.p1.x) else @min(hit.p0.y, hit.p1.y);
+            const along_hi = if (vertical) @max(hit.p0.x, hit.p1.x) else @max(hit.p0.y, hit.p1.y);
+            const along = if (vertical) p.x else p.y;
+            if (along < along_lo - t or along > along_hi + t) return;
+            const d = @abs(if (vertical) p.y - hit.p0.y else p.x - hit.p0.x);
+            if (d > t) return;
+            const score = d + rank * t * 0.2;
+            if (score < bd.*) {
+                bd.* = score;
+                bh.* = hit;
+            }
+        }
+    }.f;
+    const rank = struct {
+        fn of(f: Feature) f64 {
+            return switch (f) {
+                .left, .right, .bottom, .top => 0,
+                .origin_x, .origin_y => 1,
+                .centre_x, .centre_y => 2,
+            };
+        }
+    }.of;
+    const first = constrain_first;
+    const first_parent: ?constrain.Parent = if (first) |f| f.parent else null;
+    // The parent panel, if the first pick's parent is one: its features
+    // are offered as the parent's, not as a peer's.
+    const parent_panel_id: ?layout.model.ObjectId = if (first_parent) |fp| switch (fp) {
+        .panel => |pi| if (m.panels.items[pi].unbounded) null else m.panels.items[pi].id,
+        .space => null,
+    } else null;
+    for (constrainables(a)) |id| {
+        if (parent_panel_id != null and id == parent_panel_id.?) continue;
+        const parent = constrain.parentOf(m, id) orelse continue;
+        if (first_parent) |fp| if (!std.meta.eql(fp, parent)) continue;
+        const off = constrain.frameOffset(m, parent);
+        const box = offsetBox(constrain.boxOf(m, id) orelse continue, off);
+        for (all_features) |f| {
+            if (first) |fh| if (f.vertical() != fh.end.feature.vertical()) continue;
+            const end: ConstraintEnd = .{ .object = id, .feature = f };
+            if (first) |fh| if (std.meta.eql(fh.end, end)) continue;
+            const pos = (constrain.featureAt(m, parent, end) orelse continue) + if (f.vertical()) off.y else off.x;
+            const line = featureLine(f, pos, box);
+            consider(.{ .end = end, .parent = parent, .p0 = line[0], .p1 = line[1] }, at, tol, rank(f), &best, &best_d);
+        }
+    }
+    // The parent's own features, once a first is picked.
+    if (first) |fh| {
+        const parent = fh.parent;
+        const off = constrain.frameOffset(m, parent);
+        const far = 1e5;
+        var pbox: geom.Box = .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
+        if (parent == .panel and !m.panels.items[parent.panel].unbounded) pbox = m.panels.items[parent.panel].box();
+        for (all_features) |f| {
+            if (f.vertical() != fh.end.feature.vertical()) continue;
+            const end: ConstraintEnd = .{ .feature = f };
+            const pos = (constrain.featureAt(m, parent, end) orelse continue) + if (f.vertical()) off.y else off.x;
+            const line = featureLine(f, pos, pbox);
+            consider(.{ .end = end, .parent = parent, .p0 = line[0], .p1 = line[1] }, at, tol, rank(f) + 0.5, &best, &best_d);
+        }
+    }
+    return best;
+}
+
+/// A click with the Constrain tool: the first feature, then the second,
+/// which opens the prompt.
+fn constrainClick() void {
+    const hit = constrain_hover orelse return;
+    if (constrain_first) |first| {
+        const value = constrain.measure(&state.model, .{ .a = first.end, .b = hit.end }) orelse 0;
+        const k = docUnits().perMm();
+        constrain_prompt = .{ .a = first.end, .b = hit.end, .value = @round(value * k * 10) / 10 };
+        constrain_first = null;
+        constrain_hover = null;
+        state.tool = .select;
+        return;
+    }
+    if (hit.end.object == .none) return;
+    constrain_first = hit;
+}
+
+fn featureName(f: Feature) []const u8 {
+    return switch (f) {
+        .left => "left edge",
+        .right => "right edge",
+        .centre_x => "centre",
+        .origin_x => "origin",
+        .bottom => "bottom edge",
+        .top => "top edge",
+        .centre_y => "middle",
+        .origin_y => "origin",
+    };
+}
+
+/// An object's name, as the tree shows it, or "the panel"/"the canvas"
+/// for a parent.
+fn objectName(id: layout.model.ObjectId) []const u8 {
+    const m = &state.model;
+    if (id == .none) return "the parent";
+    for (m.panels.items) |p| {
+        if (p.id == id) return p.name;
+        for (p.regions.items) |r| if (r.id == id) return r.name;
+        for (p.labels.items) |l| if (l.id == id) return if (l.content.len > 24) l.content[0..24] else l.content;
+        for (p.art.items) |x| if (x.id == id) return x.name;
+    }
+    for (m.spaces.items) |s| for (s.images.items) |im| if (im.id == id) return im.name;
+    return "(gone)";
+}
+
+/// "the right edge of Panel 1", or of "itself" when it is `self`.
+fn endText(buf: []u8, end: ConstraintEnd, self: ?layout.model.ObjectId) []const u8 {
+    if (end.object == .none) return std.fmt.bufPrint(buf, "the parent's {s}", .{featureName(end.feature)}) catch "";
+    if (self != null and end.object == self.?) return std.fmt.bufPrint(buf, "its {s}", .{featureName(end.feature)}) catch "";
+    return std.fmt.bufPrint(buf, "{s}'s {s}", .{ objectName(end.object), featureName(end.feature) }) catch "";
+}
+
+/// The prompt after the second pick: the relation, and its value.
+fn constrainPromptWindow() void {
+    const pr = &(constrain_prompt orelse return);
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 470;
+    const h: f32 = 215;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + 40, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(13));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), "Constrain", .{}, .{ .font = dvui.Font.theme(.heading) });
+    var b1: [120]u8 = undefined;
+    var b2: [120]u8 = undefined;
+    dvui.label(@src(), "{s}, against {s}", .{ endText(&b1, pr.a, null), endText(&b2, pr.b, pr.a.object) }, .{ .font = dvui.Font.theme(.body).larger(-1), .margin = .{ .y = 4 } });
+    var go = false;
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down) continue;
+        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        e.handle(@src(), fw.data());
+    }
+    const two_objects = pr.b.object != pr.a.object;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+        defer row.deinit();
+        propName("Relation");
+        const names = [_][]const u8{ "Distance between them", "Size difference" };
+        var choice: usize = if (pr.equal) 1 else 0;
+        if (dvui.dropdown(@src(), names[0..if (two_objects) 2 else 1], .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+            pr.equal = choice == 1;
+            const k = docUnits().perMm();
+            const measured = constrain.measure(&state.model, .{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b }) orelse 0;
+            pr.value = if (pr.equal) 0 else @round(measured * k * 10) / 10;
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        var nb: [32]u8 = undefined;
+        propName(std.fmt.bufPrint(&nb, "Value, {s}", .{docUnits().symbol()}) catch "Value");
+        var twd: dvui.WidgetData = undefined;
+        const te = dvui.textEntryNumber(@src(), f64, .{ .value = &pr.value, .min = -100000, .max = 100000 }, .{ .expand = .horizontal, .data_out = &twd });
+        if (pr.new) {
+            dvui.focusSubwindow(fw.data().id, null);
+            dvui.focusWidget(twd.id, fw.data().id, null);
+            pr.new = false;
+        }
+        if (te.enter_pressed) go = true;
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (dvui.button(@src(), "Apply", .{}, .{})) go = true;
+    }
+    if (cancel) {
+        constrain_prompt = null;
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    if (!go) return;
+    const value_mm = pr.value / docUnits().perMm();
+    _ = act(.addConstraint, .{.{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b, .value = value_mm }}) catch {
+        state.status = "That constraint could not be added. ";
+    };
+    constrain_prompt = null;
+    if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    dvui.refresh(null, @src(), null);
+}
+
+/// The constraints of the shown space as dimension glyphs, the features
+/// under the pointer and picked, and the context object's origin.
+fn drawConstraintMarks(area: dvui.Rect.Physical) void {
+    const m = &state.model;
+    const px = dvui.windowNaturalScale();
+    const font = dvui.Font.theme(.body).larger(-2);
+    for (m.constraints.items, 0..) |c, ci| {
+        const parent = constrain.parentOf(m, c.a.object) orelse continue;
+        if (constrain.spaceOf(m, parent) != shown_space) continue;
+        const off = constrain.frameOffset(m, parent);
+        const colour = if (constraintIssue(c.id) != null) colors.overflow else colors.guide;
+        const ink: dvui.ColorOrGradient = .{ .color = colour };
+        const v = c.a.feature.vertical();
+        const abox = offsetBox(constrain.boxOf(m, c.a.object) orelse continue, off);
+        switch (c.kind) {
+            .offset => {
+                const pa = (constrain.featureAt(m, parent, c.a) orelse continue) + if (v) off.y else off.x;
+                const pb = (constrain.featureAt(m, parent, c.b) orelse continue) + if (v) off.y else off.x;
+                // The dimension crosses the middle of the constrained
+                // object, from the reference to it.
+                const across = if (v) (abox.x0 + abox.x1) / 2 else (abox.y0 + abox.y1) / 2;
+                const p0: geom.Point = if (v) .{ .x = across, .y = pb } else .{ .x = pb, .y = across };
+                const p1: geom.Point = if (v) .{ .x = across, .y = pa } else .{ .x = pa, .y = across };
+                const q0 = state.view.toPx(area, p0);
+                const q1 = state.view.toPx(area, p1);
+                const t: f32 = 4 * px;
+                if (@abs(pa - pb) * state.view.ppm < 2) {
+                    // Aligned: a small double bar across the shared line.
+                    for ([_]f32{ -2, 2 }) |d| {
+                        const pts: [2]dvui.Point.Physical = if (v) .{ .{ .x = q0.x + d * px, .y = q0.y - t }, .{ .x = q0.x + d * px, .y = q0.y + t } } else .{ .{ .x = q0.x - t, .y = q0.y + d * px }, .{ .x = q0.x + t, .y = q0.y + d * px } };
+                        dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = px, .color = ink });
+                    }
+                    continue;
+                }
+                dvui.Path.stroke(.{ .points = &.{ q0, q1 } }, .{ .thickness = px, .color = ink });
+                for ([_]dvui.Point.Physical{ q0, q1 }) |q| {
+                    const pts: [2]dvui.Point.Physical = if (v) .{ .{ .x = q.x - t, .y = q.y }, .{ .x = q.x + t, .y = q.y } } else .{ .{ .x = q.x, .y = q.y - t }, .{ .x = q.x, .y = q.y + t } };
+                    dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = 1.5 * px, .color = ink });
+                }
+                var buf: [32]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "{d}", .{@round(@abs(c.value) * docUnits().perMm() * 100) / 100}) catch "";
+                const mid: dvui.Point.Physical = .{ .x = (q0.x + q1.x) / 2 + 3 * px, .y = (q0.y + q1.y) / 2 };
+                dvui.labelNoFmt(@src(), text, .{}, .{ .rect = annotationRect(area, mid, font, 80), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = ci });
+            },
+            .equal_size => {
+                // "=" on each object's extent.
+                for ([_]layout.model.ObjectId{ c.a.object, c.b.object }, 0..) |id, k| {
+                    if (id == .none) continue;
+                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, off);
+                    const at: geom.Point = if (v) .{ .x = b.x1, .y = (b.y0 + b.y1) / 2 } else .{ .x = (b.x0 + b.x1) / 2, .y = b.y1 };
+                    const q = state.view.toPx(area, at);
+                    dvui.labelNoFmt(@src(), "=", .{}, .{ .rect = annotationRect(area, .{ .x = q.x + 2 * px, .y = q.y }, font, 20), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = ci * 2 + k + 100000 });
+                }
+            },
+        }
+    }
+    // The context object's origin: a ring with a cross.
+    if (contextObject()) |id| if (constrain.parentOf(m, id)) |parent| if (constrain.originOf(m, id)) |o| {
+        const off = constrain.frameOffset(m, parent);
+        const q = state.view.toPx(area, .{ .x = o.x + off.x, .y = o.y + off.y });
+        const r: f32 = 5 * px;
+        var ring: [17]dvui.Point.Physical = undefined;
+        for (&ring, 0..) |*p, k| {
+            const t = @as(f32, @floatFromInt(k)) / 16.0 * 2 * std.math.pi;
+            p.* = .{ .x = q.x + r * @cos(t), .y = q.y + r * @sin(t) };
+        }
+        const ink: dvui.ColorOrGradient = .{ .color = colors.guide };
+        dvui.Path.stroke(.{ .points = &ring }, .{ .thickness = 1.5 * px, .color = ink });
+        dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x - 2 * r, .y = q.y }, .{ .x = q.x + 2 * r, .y = q.y } } }, .{ .thickness = px, .color = ink });
+        dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = q.y - 2 * r }, .{ .x = q.x, .y = q.y + 2 * r } } }, .{ .thickness = px, .color = ink });
+    };
+    // While constraining: the first pick, and what is under the pointer.
+    if (state.tool == .constrain) {
+        if (constrain_first) |f| strokeFeature(area, f, colors.guide, 3);
+        if (constrain_hover) |h| strokeFeature(area, h, colors.select, 2.5);
+    }
+}
+
+fn strokeFeature(area: dvui.Rect.Physical, h: FeatureHit, colour: dvui.Color, width: f32) void {
+    const px = dvui.windowNaturalScale();
+    dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, h.p0), state.view.toPx(area, h.p1) } }, .{ .thickness = width * px, .color = .{ .color = colour } });
+}
+
+/// The context object's origin and constraints, below its properties.
+fn constraintProperties() void {
+    const id = contextObject() orelse return;
+    const m = &state.model;
+    heading("Constraints", .{}, 9600);
+    const is_label = switch (state.context) {
+        .label => true,
+        else => false,
+    };
+    if (!is_label) originPicker(id);
+    var any = false;
+    const k = docUnits().perMm();
+    for (m.constraints.items, 0..) |c, ci| {
+        if (c.a.object != id and c.b.object != id) continue;
+        any = true;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = ci, .margin = .{ .y = 2 } });
+        defer row.deinit();
+        if (icons.button(@src(), .trash, "Remove this constraint", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+            act(.removeConstraint, .{c.id}) catch {};
+            return;
+        }
+        var b1: [120]u8 = undefined;
+        var b2: [120]u8 = undefined;
+        var b3: [260]u8 = undefined;
+        const what = if (c.kind == .equal_size)
+            std.fmt.bufPrint(&b3, "{s} size − {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch ""
+        else
+            std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
+        const flagged = constraintIssue(c.id);
+        dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged != null) .{ .color = colors.overflow } else null, .id_extra = ci });
+        var v = @round(c.value * k * 1000) / 1000;
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = -100000, .max = 100000 }, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci });
+        if (r.changed and r.value == .Valid) _ = actM(mergeKey(.{ "constraint value", c.id }), .setConstraintValue, .{ c.id, v / k }) catch {};
+    }
+    if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
+    for (constraintIssues()) |i| {
+        for (m.constraints.items) |c| if (c.id == i.constraint and (c.a.object == id or c.b.object == id)) {
+            propText("Issue", "{s}", .{switch (i.kind) {
+                .missing_object => "a constraint names something removed",
+                .cross_parent => "a constraint crosses parents",
+                .no_parent_edge => "the parent has no edges to keep to",
+                .mixed_axes => "a constraint mixes axes",
+                .conflict => "a constraint contradicts others: left out",
+                .inverted => "constraints turn it inside out",
+            }}, 9700);
+            break;
+        };
+    }
+}
+
+/// Nine buttons, the object's box's corners, edge midpoints and centre:
+/// the one lit is its object origin. Choosing moves nothing.
+fn originPicker(id: layout.model.ObjectId) void {
+    const m = &state.model;
+    const holds: layout.model.OriginPoint = blk: {
+        for (m.panels.items) |p| {
+            if (p.id == id) break :blk p.holds;
+            for (p.regions.items) |r| if (r.id == id) break :blk r.holds;
+            for (p.art.items) |x| if (x.id == id) break :blk x.holds;
+        }
+        for (m.spaces.items) |s| for (s.images.items) |im| if (im.id == id) break :blk im.holds;
+        return;
+    };
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    defer row.deinit();
+    propName("Origin");
+    var grid = dvui.box(@src(), .{ .dir = .vertical }, .{});
+    defer grid.deinit();
+    const ys = [_]layout.model.Third{ .high, .mid, .low };
+    const xs = [_]layout.model.Third{ .low, .mid, .high };
+    for (ys, 0..) |y, yi| {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = yi });
+        defer line.deinit();
+        for (xs, 0..) |x, xi| {
+            const on = holds.x == x and holds.y == y;
+            if (dvui.button(@src(), "", .{}, .{
+                .id_extra = yi * 3 + xi,
+                .min_size_content = .{ .w = 10, .h = 10 },
+                .margin = .all(1),
+                .padding = .all(3),
+                .color_fill = if (on) .{ .color = colors.guide } else null,
+            })) act(.setObjectOrigin, .{ id, layout.model.OriginPoint{ .x = x, .y = y } }) catch {};
+        }
+    }
 }
