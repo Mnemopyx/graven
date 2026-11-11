@@ -39,10 +39,7 @@ pub const Report = struct {
     }
 };
 
-/// Cap height as a share of point size, for styles made from a size in
-/// points (Graven sizes type by its capitals): typical of text faces.
-pub const cap_per_size = 0.7;
-const mm_per_pt = 25.4 / 72.0;
+const mm_per_pt = model.mm_per_pt;
 
 /// Imports `doc` into the flow of track (`panel`, `region`) at item
 /// `at`, with `base` the style of text that names no font or size. Returns
@@ -144,7 +141,12 @@ fn textStyle(gpa: Allocator, h: *history.History, m: *Model, key: u64, doc: rt.D
     for (m.styles.items, 0..) |st, i| if (std.mem.eql(u8, st.name, name)) return @intCast(i);
 
     var spec = base_style.spec;
-    if (look.size) |pt| spec.cap_height = pt * mm_per_pt * cap_per_size;
+    // A size in points is the em, as the source meant it: the cap height
+    // follows from the font once it is resolved.
+    if (look.size) |pt| {
+        spec.em_size = pt * mm_per_pt;
+        spec.cap_height = pt * mm_per_pt * model.cap_per_em;
+    }
     const style = try h.doMerged(m, key, .addStyle, .{ name, spec });
     rep.styles_made += 1;
     const font_id: model.ObjectId = if (family) |fam| blk: {
@@ -202,7 +204,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
     try testing.expectEqualStrings("\\textnormal{Second\\quad{}one.}", items[4].what.run.content);
     const carlito = m.styles.items[items[4].what.run.style];
     try testing.expectEqualStrings("Carlito 12 pt", carlito.name);
-    try testing.expectApproxEqAbs(12 * mm_per_pt * cap_per_size, carlito.spec.cap_height, 1e-9);
+    try testing.expectApproxEqAbs(12 * mm_per_pt, carlito.spec.em_size.?, 1e-9);
     try testing.expectEqual(m.paragraph_styles.items[0].alignment, .justify);
     try testing.expectEqual(m.paragraphStyleAt(p, r, 0), m.paragraphStyleAt(p, r, 4));
 

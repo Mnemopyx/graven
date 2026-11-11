@@ -6074,18 +6074,7 @@ fn labelProperties(pi: usize, index: usize) !void {
     }
     const style = state.model.styles.items[label.style];
     propText("Style", "{s}", .{style.name}, 20);
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer row.deinit();
-        propName("Cap height, mm");
-        var cap = style.spec.cap_height;
-        const default = state.label_style == label.style and !state.label_style_set;
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &cap, .min = 0.1, .max = 200 }, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
-        if (r.changed) {
-            act(.setCapHeight, .{label.style, cap}) catch {};
-            if (state.label_style == label.style) state.label_style_set = true;
-        }
-    }
+    try styleSizeProps(label.style, state.label_style == label.style and !state.label_style_set);
     try propFont("Font", 21);
     for (state.intrusions) |i| if (i.panel == pi and i.tile == null and i.slot == index) {
         propText("Issue", "ink {d:.2} mm in margin", .{i.amount}, 22);
@@ -6435,6 +6424,43 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         }
     }
     if (changed) _ = try actM(key, .setParagraphStyle, .{ id, ps });
+}
+
+/// A style's size, two ways: as a point size (its em, as other software
+/// gives it) and as cap height (Graven's own), each shown as its font
+/// resolves it. Typing either sets the style by that one; the one that
+/// sets it is shown plain, the other muted.
+fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
+    const style = state.model.styles.items[sid];
+    const ctx = if (state.labels) |*l| l.context(sid) else null;
+    const cap = if (ctx) |c| c.spec.cap_height else style.spec.cap_height;
+    const em_mm = style.spec.em_size orelse if (ctx) |c| (c.em(cap) catch cap / layout.model.cap_per_em) else cap / layout.model.cap_per_em;
+    const by_em = style.spec.em_size != null;
+    const muted: dvui.Options = .{ .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) } };
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });
+        defer row.deinit();
+        propName("Size, pt");
+        var pt = @round(em_mm / layout.model.mm_per_pt * 100) / 100;
+        const opts: dvui.Options = .{ .expand = .horizontal, .font = styled(.theme(.body), default), .id_extra = 1 };
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &pt, .min = 0.5, .max = 2000 }, if (by_em) opts else opts.override(muted));
+        if (r.changed and r.value == .Valid) {
+            act(.setEmSize, .{ sid, pt * layout.model.mm_per_pt }) catch {};
+            if (state.label_style == sid) state.label_style_set = true;
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 2 });
+        defer row.deinit();
+        propName("Cap height, mm");
+        var c = @round(cap * 1000) / 1000;
+        const opts: dvui.Options = .{ .expand = .horizontal, .font = styled(.theme(.body), default), .id_extra = 2 };
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &c, .min = 0.1, .max = 200 }, if (by_em) opts.override(muted) else opts);
+        if (r.changed and r.value == .Valid) {
+            act(.setCapHeight, .{ sid, c }) catch {};
+            if (state.label_style == sid) state.label_style_set = true;
+        }
+    }
 }
 
 /// A new plain prototype with one slot and keycap art, made the context.

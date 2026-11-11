@@ -131,8 +131,13 @@ pub const Spec = struct {
     /// coverage take their characters first; fallbacks are tried, in order,
     /// for clusters the chosen face lacks.
     members: []const Member = &.{},
-    /// Size as cap height, mm.
+    /// Size as cap height, mm. With `em_size` set, an estimate until the
+    /// context is made, which sets it from the main face.
     cap_height: f64,
+    /// Size as the em, mm, as point sizes are given elsewhere (12 pt is an
+    /// em of 12/72 in): the cap height then follows from the main face's
+    /// own cap height and units per em. Null to size by cap height.
+    em_size: ?f64 = null,
     letters: Letters = .upright,
     /// Scripts' size relative to their base; null for the upright face's
     /// MATH table (ScriptPercentScaleDown), or 0.7 without one.
@@ -213,10 +218,15 @@ pub const Context = struct {
     pub const Error = font.Error || error{ NoCapHeight, InvalidSize };
 
     /// Resolves `spec` against `faces`, which must outlive the context.
-    pub fn init(faces: []const *Face, spec: Spec) Error!Context {
-        if (!(spec.cap_height > 0)) return error.InvalidSize;
-        const main = faces[spec.upright];
+    pub fn init(faces: []const *Face, spec_in: Spec) Error!Context {
+        const main = faces[spec_in.upright];
         const cap = (try main.capHeight()) orelse return error.NoCapHeight;
+        var spec = spec_in;
+        if (spec_in.em_size) |em_mm| {
+            if (!(em_mm > 0)) return error.InvalidSize;
+            spec.cap_height = em_mm * cap / @as(f64, @floatFromInt(main.upem));
+        }
+        if (!(spec.cap_height > 0)) return error.InvalidSize;
         const has_math = hb.hb_ot_math_has_data(main.face) != 0;
         const k = struct {
             fn constant(f: *Face, c: hb.hb_ot_math_constant_t) f64 {

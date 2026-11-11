@@ -1471,6 +1471,20 @@ test "underline and strikethrough draw rules along their elements; text scripts 
     try testing.expectApproxEqAbs(base.cap_height * ctx.script_scale, raised.cap_height, 1e-9);
 }
 
+test "a style sized by its em gets its cap height from the face" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.em_size = 10;
+    spec.cap_height = 1; // an estimate, replaced
+    const ctx = try style.Context.init(&f.faces, spec);
+    const face = f.faces[0];
+    const want = 10 * (try face.capHeight()).? / @as(f64, @floatFromInt(face.upem));
+    try testing.expectApproxEqAbs(want, ctx.spec.cap_height, 1e-9);
+    // So the em is 10 mm: the face's units per em at that scale.
+    try testing.expectApproxEqAbs(@as(f64, 10), try ctx.em(ctx.spec.cap_height), 1e-9);
+}
+
 test "missing glyphs and unrendered constructs are reported at their source" {
     var f = try Fonts.init();
     defer f.deinit();

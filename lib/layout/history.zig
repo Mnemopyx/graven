@@ -47,6 +47,7 @@ pub const actions = [_][:0]const u8{
     "addFont",           "renameFont",         "setFontMain",         "addFontMember",      "setFontMember",
     "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
     "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
+    "setEmSize",
 };
 
 fn Fn(comptime name: []const u8) type {

@@ -447,15 +447,14 @@ const Flow = struct {
     /// Each piece's further shift along, where a justified line stretches
     /// its spaces; set when the flow leaves its segment.
     extra: []f64 = &.{},
+    /// The cap height of the track's style, as its font resolves it; 0
+    /// for a track with no style.
+    cap: f64 = 0,
 
     /// Where a row's text baseline sits: its style's capitals centred
     /// across the band, or the band's middle for a track with no style.
     fn baseline(f: Flow, band: Box) f64 {
-        var cap: f64 = 0;
-        if (f.region.style) |sid| if (sid < f.m.styles.items.len) {
-            cap = f.m.styles.items[sid].spec.cap_height;
-        };
-        return (band.y0 + band.y1 - cap) / 2;
+        return (band.y0 + band.y1 - f.cap) / 2;
     }
 
     /// Tile `id`'s pitch box at `start` mm along a segment with band
@@ -733,6 +732,14 @@ fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: 
     return spans.items;
 }
 
+/// The cap height of `region`'s style: as its context resolves it (a
+/// style sized by its em gets its font's), else as the model gives it.
+fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
+    const sid = region.style orelse return 0;
+    if (labels.context(sid)) |ctx| return ctx.spec.cap_height;
+    return if (sid < m.styles.items.len) m.styles.items[sid].spec.cap_height else 0;
+}
+
 /// The bounds and alignment of a segment of a paragraph in `style` (null:
 /// none, the whole segment as its track sets it); `first` for its first
 /// line. Indents larger than the segment leave it no room, not less.
@@ -994,7 +1001,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         for (stretch, 0..) |*st, k| st.* = isSpace(cuts.items, k);
         const extra = try a.alloc(f64, items.len);
         @memset(extra, 0);
-        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra };
+        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
         // The paragraph being set, and the bounds of the segment being
         // filled: its first line takes the first-line indent.
         var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;

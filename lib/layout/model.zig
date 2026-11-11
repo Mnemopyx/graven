@@ -44,6 +44,13 @@ pub fn within(a: geom.Box, b: geom.Box) bool {
     return a.x0 >= b.x0 - tol and a.y0 >= b.y0 - tol and a.x1 <= b.x1 + tol and a.y1 <= b.y1 + tol;
 }
 pub const StyleId = u16;
+/// The cap height, as a share of the em, that stands in for a style sized
+/// by its em until its font is known: typical of text faces.
+pub const cap_per_em = 0.7;
+
+/// mm per point (1/72 in, as PostScript, PDF, OpenType and CSS have it).
+pub const mm_per_pt = 25.4 / 72.0;
+
 /// A paragraph style's index in `Model.paragraph_styles`.
 pub const ParaId = u16;
 
@@ -2084,9 +2091,22 @@ pub const Model = struct {
     }
 
     /// Sets a style's size as cap height, mm; every label using it changes.
+    /// A style sized by its em is sized by cap height from then on.
     pub fn setCapHeight(m: *Model, style: StyleId, cap_height: f64) Error!void {
         if (!(cap_height > 0)) return error.BadSize;
         m.styles.items[style].spec.cap_height = cap_height;
+        m.styles.items[style].spec.em_size = null;
+        m.revision += 1;
+    }
+
+    /// Sets a style's size as its em, mm (a point size: 12 pt is 25.4 × 12
+    /// / 72 mm), as other software sizes type: its cap height then follows
+    /// from its font. Until the font is resolved, `cap_per_em` of the em
+    /// stands in for the cap height.
+    pub fn setEmSize(m: *Model, style: StyleId, em: f64) Error!void {
+        if (!(em > 0)) return error.BadSize;
+        m.styles.items[style].spec.em_size = em;
+        m.styles.items[style].spec.cap_height = em * cap_per_em;
         m.revision += 1;
     }
 
