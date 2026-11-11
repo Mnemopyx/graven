@@ -158,7 +158,23 @@ pub const Style = enum {
     tinted,
     /// As matched, with controls as outlines and no fill.
     outlined,
+    /// As tinted, with every mark (text, icon, border, fill) ringed by a
+    /// dark line and a light line beyond it: on light paper the dark line
+    /// carries it, on dark ink the light one, so it reads on either.
+    haloed,
 };
+
+/// The rings of a haloed ghost: widths in logical pixels, and opacity.
+pub const Halo = struct {
+    light_width: f32 = 2,
+    dark_width: f32 = 1,
+    light_alpha: f32 = 0.85,
+    dark_alpha: f32 = 0.45,
+    /// The light line next to the mark and the dark one outside it (a
+    /// keyline, as maps ring their labels), rather than the other way.
+    light_inside: bool = false,
+};
+pub var halo: Halo = .{};
 
 /// How a ghost's content is drawn (an experiment, chosen in View).
 pub var style: Style = .uniform;
@@ -249,7 +265,7 @@ pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
             return atPresence(if (tinted) deep else own, target, back);
         }
     }.of;
-    const tinted = st == .tinted;
+    const tinted = st == .tinted or st == .haloed;
     t.fill = f(t.fill, tinted, tint, pr.fill, b);
     if (t.text_select) |sel| t.text_select = f(sel, tinted, tint, pr.highlight, b);
     const border = atPresence(t.border, if (st == .outlined) pr.muted else pr.border, b);
@@ -294,8 +310,15 @@ pub const Open = struct {
     fw: *dvui.FloatingWindowWidget,
     prev_theme: dvui.Theme,
     prev_alpha: f32,
+    /// Haloed: where the content's drawing starts in the subwindow's
+    /// queues, the pane's hue, and rendering's state before.
+    halo: ?struct { start: usize, start_after: usize, hue: f32, prev_rendering: bool } = null,
 
     pub fn end(o: *Open) void {
+        if (o.halo) |h| {
+            _ = dvui.renderingSet(h.prev_rendering);
+            haloContent(o.fw, h.start, h.start_after, h.hue);
+        }
         o.fw.deinit();
         dvui.alphaSet(o.prev_alpha);
         dvui.themeSet(o.prev_theme);
@@ -326,7 +349,16 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     // at its own presence.
     if (!p.active and style != .uniform) dvui.themeSet(ghostTheme(p.look, prev_theme, style));
     const prev_alpha = if (p.active or style != .uniform) dvui.alpha(1) else dvui.alpha(p.look.ghost_content);
-    return .{ .fw = fw, .prev_theme = prev_theme, .prev_alpha = prev_alpha };
+    var o: Open = .{ .fw = fw, .prev_theme = prev_theme, .prev_alpha = prev_alpha };
+    if (!p.active and style == .haloed and dvui.backend.kind == .sdl3) {
+        const cw = dvui.currentWindow();
+        if (cw.subwindows.current()) |sw| {
+            // The content is queued, not drawn, so `end` can draw it into a
+            // texture and ring it.
+            o.halo = .{ .start = sw.render_cmds.items.len, .start_after = sw.render_cmds_after.items.len, .hue = p.look.hue, .prev_rendering = dvui.renderingSet(false) };
+        }
+    }
+    return o;
 }
 
 /// What a click on a tab asked for.
@@ -473,4 +505,124 @@ pub fn hotEdges(panes: []const *Pane, timer_id: dvui.Id) void {
 
 test {
     _ = dwell;
+}
+
+// Halos ------------------------------------------------------------------------
+
+/// SDL blend modes, on premultiplied colour: the usual one, and one that
+/// keeps the target's colour and takes the source's alpha, scaling the
+/// colour by it: drawn over an opaque fill, a silhouette in that fill.
+fn blendMode(as_silhouette: bool) dvui.backend.c.SDL_BlendMode {
+    const c = dvui.backend.c;
+    return if (as_silhouette)
+        c.SDL_ComposeCustomBlendMode(c.SDL_BLENDFACTOR_ZERO, c.SDL_BLENDFACTOR_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD, c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ZERO, c.SDL_BLENDOPERATION_ADD)
+    else
+        c.SDL_ComposeCustomBlendMode(c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD, c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD);
+}
+
+/// `content` (covering `r`) as one colour, keeping its shape and alpha.
+/// Must be called while rendering immediately.
+fn silhouette(content: dvui.Texture, r: dvui.Rect.Physical, color: dvui.Color) ?dvui.Texture {
+    const t = dvui.textureCreateTarget(.{ .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) }) catch return null;
+    const prev = dvui.renderTarget(.{ .texture = t, .offset = r.topLeft() });
+    r.fill(.{}, .{ .color = .{ .color = color.opacity(1) } });
+    const sdl_tex: *dvui.backend.c.SDL_Texture = @ptrCast(@alignCast(content.ptr));
+    _ = dvui.backend.c.SDL_SetTextureBlendMode(sdl_tex, blendMode(true));
+    dvui.renderTexture(content, .{ .r = r, .s = 1 }, .{}) catch {};
+    _ = dvui.backend.c.SDL_SetTextureBlendMode(sdl_tex, blendMode(false));
+    _ = dvui.renderTarget(prev);
+    return dvui.textureFromTarget(t) catch null;
+}
+
+/// Draws `tex` at `r` shifted to every whole-pixel offset within `radius`
+/// (a disc, centre left out), at `alpha`.
+fn ring(tex: dvui.Texture, r: dvui.Rect.Physical, radius: f32) void {
+    const n: i32 = @intFromFloat(@ceil(radius));
+    var dy: i32 = -n;
+    while (dy <= n) : (dy += 1) {
+        var dx: i32 = -n;
+        while (dx <= n) : (dx += 1) {
+            if (dx == 0 and dy == 0) continue;
+            const fx: f32 = @floatFromInt(dx);
+            const fy: f32 = @floatFromInt(dy);
+            if (fx * fx + fy * fy > radius * radius + 0.5) continue;
+            var shifted = r;
+            shifted.x += fx;
+            shifted.y += fy;
+            dvui.renderTexture(tex, .{ .r = shifted, .s = 1 }, .{}) catch {};
+        }
+    }
+}
+
+/// Replaces the content queued in the current subwindow since `start`
+/// (and `start_after`) with the same content drawn into a texture, ringed
+/// by a light then a dark line of the pane's hue.
+fn haloContent(fw: *dvui.FloatingWindowWidget, start: usize, start_after: usize, hue: f32) void {
+    const cw = dvui.currentWindow();
+    const sw = cw.subwindows.current() orelse return;
+    const cmds = sw.render_cmds.items[start..];
+    const after = sw.render_cmds_after.items[start_after..];
+    if (cmds.len + after.len == 0) return;
+    const rs = fw.data().borderRectScale();
+    var r = rs.r;
+    // Whole pixels, as textures are.
+    const x0 = @floor(r.x);
+    const y0 = @floor(r.y);
+    r.w = @round(@ceil(r.x + r.w) - x0);
+    r.h = @round(@ceil(r.y + r.h) - y0);
+    r.x = x0;
+    r.y = y0;
+    if (r.w < 1 or r.h < 1) return;
+
+    var content: dvui.Texture = undefined;
+    var outer: ?dvui.Texture = null;
+    var inner: ?dvui.Texture = null;
+    {
+        // Offscreen work happens now, not queued.
+        const prev_rendering = dvui.renderingSet(true);
+        defer _ = dvui.renderingSet(prev_rendering);
+        const t = dvui.textureCreateTarget(.{ .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) }) catch return;
+        const prev = dvui.renderTarget(.{ .texture = t, .offset = r.topLeft() });
+        cw.renderCommands(cmds) catch {};
+        cw.renderCommands(after) catch {};
+        _ = dvui.renderTarget(prev);
+        content = dvui.textureFromTarget(t) catch return;
+        outer = silhouette(content, r, oklch(0.985, 0.012, hue, 1));
+        inner = silhouette(content, r, oklch(0.26, 0.05, hue, 1));
+    }
+    // The replayed commands give way to the textures, queued in their
+    // place, so the pane's background (queued before them) stays under.
+    sw.render_cmds.shrinkRetainingCapacity(start);
+    sw.render_cmds_after.shrinkRetainingCapacity(start_after);
+    const prev_clip = dvui.clipGet();
+    defer dvui.clipSet(prev_clip);
+    dvui.clipSet(rs.r);
+    const a = cw.alpha;
+    defer dvui.alphaSet(a);
+    // The outer line first, as a disc the inner one then covers.
+    const both = (halo.light_width + halo.dark_width) * rs.s;
+    if (halo.light_inside) {
+        if (inner) |d| {
+            dvui.alphaSet(a * halo.dark_alpha);
+            ring(d, r, both);
+        }
+        if (outer) |l| {
+            dvui.alphaSet(a * halo.light_alpha);
+            ring(l, r, halo.light_width * rs.s);
+        }
+    } else {
+        if (outer) |l| {
+            dvui.alphaSet(a * halo.light_alpha);
+            ring(l, r, both);
+        }
+        if (inner) |d| {
+            dvui.alphaSet(a * halo.dark_alpha);
+            ring(d, r, halo.dark_width * rs.s);
+        }
+    }
+    if (outer) |l| dvui.textureDestroyLater(l);
+    if (inner) |d| dvui.textureDestroyLater(d);
+    dvui.alphaSet(a);
+    dvui.renderTexture(content, .{ .r = r, .s = 1 }, .{}) catch {};
+    dvui.textureDestroyLater(content);
 }

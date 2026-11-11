@@ -2519,13 +2519,17 @@ fn menu() ?dvui.App.Result {
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 9 });
         // An experiment: how a ghost pane's content is drawn.
-        for ([_]ghost_pane.Style{ .uniform, .matched, .tinted, .outlined }, [_][]const u8{ "one alpha", "matched contrast", "tinted", "outlined" }, 0..) |st, name, si| {
+        for ([_]ghost_pane.Style{ .uniform, .matched, .tinted, .outlined, .haloed }, [_][]const u8{ "one alpha", "matched contrast", "tinted", "outlined", "tinted, outlined and inlined" }, 0..) |st, name, si| {
             var buf: [64]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "{s}Ghost style: {s}", .{ if (ghost_pane.style == st) "•  " else "    ", name }) catch name;
             if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 20 + si }) != null) {
                 ghost_pane.style = st;
                 m.close();
             }
+        }
+        if (dvui.menuItemLabel(@src(), if (ghost_pane.halo.light_inside) "•  Halo: light line inside, dark keyline outside (try)" else "    Halo: light line inside, dark keyline outside (try)", .{}, .{ .expand = .horizontal }) != null) {
+            ghost_pane.halo.light_inside = !ghost_pane.halo.light_inside;
+            m.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 10 });
         if (dvui.menuItemLabel(@src(), if (hot_edges) "•  Hot edges: hold on a tab to open its pane" else "    Hot edges: hold on a tab to open its pane", .{}, .{ .expand = .horizontal }) != null) {
