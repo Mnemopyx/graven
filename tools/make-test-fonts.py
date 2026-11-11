@@ -140,7 +140,9 @@ def fallback(path):
             rect(rev, 50, 0, 350, 300)
         glyphs[g] = pen.glyph()
     fb.setupGlyphOrder(order)
-    fb.setupCharacterMap({0x20: "space", ord("H"): "H", ord("x"): "x"})
+    # Mathematical bold H and double-struck H share the H outline, so tests
+    # can see letters become Unicode's math alphanumerics.
+    fb.setupCharacterMap({0x20: "space", ord("H"): "H", ord("x"): "x", 0x1D407: "H", 0x210D: "H"})
     fb.setupHorizontalMetrics({g: (advance[g], 50 if g in ("H", "x") else 0) for g in order})
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupNameTable({"familyName": "Graven Test Fallback", "styleName": "Regular"})

@@ -12,10 +12,11 @@ const usage =
     \\         Renders one run of text in one face and writes its outlines as SVG.
     \\       graven parse <markup>
     \\         Parses label markup and prints its tree, or where it went wrong.
-    \\       graven label [--advance] [--width mm] [--centre] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
+    \\       graven label [--advance] [--width mm] [--centre] [--bold font] [--bold-italic font] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
     \\         Renders label markup; with an italic font, letters default to italic.
     \\         Neighbours are placed by their ink unless --advance is given. --width gives a
     \\         hard box that wide, so lines wrap; --centre centres each line on the anchor.
+    \\         --bold and --bold-italic give the family's bolds, for \\textbf and \\mathbf.
     \\       graven keyboard <font> <out.svg>
     \\         Lays out the sample PC keyboard in one font and writes it as SVG.
     \\       graven dump [--log] <document>
@@ -53,6 +54,12 @@ pub fn main(init: std.process.Init) !void {
                 flags.contact = .advance;
             } else if (std.mem.eql(u8, args[k], "--centre")) {
                 flags.centre = true;
+            } else if (std.mem.eql(u8, args[k], "--bold") and k + 1 < args.len) {
+                k += 1;
+                flags.bold = args[k];
+            } else if (std.mem.eql(u8, args[k], "--bold-italic") and k + 1 < args.len) {
+                k += 1;
+                flags.bold_italic = args[k];
             } else if (std.mem.eql(u8, args[k], "--width") and k + 1 < args.len) {
                 k += 1;
                 flags.width = std.fmt.parseFloat(f64, args[k]) catch null;
@@ -127,6 +134,8 @@ const LabelFlags = struct {
     contact: @FieldType(engine.style.Spec, "contact") = .ink,
     width: ?f64 = null,
     centre: bool = false,
+    bold: ?[]const u8 = null,
+    bold_italic: ?[]const u8 = null,
 };
 
 fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) !void {
@@ -144,25 +153,31 @@ fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) 
     const src = args[3];
     const out_path = args[4];
 
-    // Faces: upright, then italic if given, then fallbacks.
+    // Faces: upright, then italic if given, then the bolds, then fallbacks.
     var faces: std.ArrayList(*engine.Face) = .empty;
     defer for (faces.items) |f| f.deinit();
     var paths: std.ArrayList([]const u8) = .empty;
     try paths.append(a, args[0]);
     const has_italic = !std.mem.eql(u8, args[1], "-");
     if (has_italic) try paths.append(a, args[1]);
+    const bold_at: u32 = @intCast(paths.items.len);
+    if (flags.bold) |p| try paths.append(a, p);
+    const bold_italic_at: u32 = @intCast(paths.items.len);
+    if (flags.bold_italic) |p| try paths.append(a, p);
+    const first_fallback: u32 = @intCast(paths.items.len);
     for (args[5..]) |fb| try paths.append(a, fb);
     for (paths.items) |path| {
         const bytes = try cwd.readFileAlloc(io, path, a, .limited(64 << 20));
         try faces.append(a, try engine.Face.init(gpa, bytes, 0));
     }
     var members: std.ArrayList(engine.style.Member) = .empty;
-    const first_fallback: u32 = if (has_italic) 2 else 1;
     for (first_fallback..faces.items.len) |k| try members.append(a, .{ .upright = @intCast(k) });
 
     const ctx = try engine.style.Context.init(faces.items, .{
         .upright = 0,
         .italic = if (has_italic) 1 else null,
+        .bold = if (flags.bold != null) bold_at else null,
+        .bold_italic = if (flags.bold_italic != null) bold_italic_at else null,
         .members = members.items,
         .cap_height = cap,
         .letters = if (has_italic) .italic else .upright,

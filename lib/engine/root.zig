@@ -13,6 +13,7 @@ pub const style = @import("style.zig");
 pub const label = @import("label.zig");
 pub const shape = @import("shape.zig");
 pub const profile = @import("profile.zig");
+pub const alphanum = @import("alphanum.zig");
 
 pub const Face = font.Face;
 pub const Render = render.Render;

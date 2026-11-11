@@ -77,6 +77,9 @@ pub const Issue = struct {
         label_overflow,
         /// A label has characters no face covers.
         missing_glyph,
+        /// A label asks for a weight, slant or math alphabet its style's
+        /// font lacks: it is drawn in the regular face (or plain letters).
+        variant_missing,
         /// A label's markup does not parse. It is stored as typed and drawn
         /// from a lenient parse, with placeholders and faint text; `syntax`
         /// says what and where.
@@ -210,6 +213,15 @@ pub const Placed = struct {
 /// Whether two specs set text alike: their fields, and their members'
 /// fields and coverage, compared by value (a spec's slices are rebuilt by
 /// each resolve).
+/// Whether a render asked for a weight, slant or alphabet it did not get.
+fn lacksVariant(diagnostics: []const engine.render.Diagnostic) bool {
+    for (diagnostics) |d| switch (d.kind) {
+        .no_italic, .no_bold, .no_alphabet => return true,
+        else => {},
+    };
+    return false;
+}
+
 fn specEql(a: engine.style.Spec, b: engine.style.Spec) bool {
     var x = a;
     var y = b;
@@ -342,11 +354,16 @@ pub const Labels = struct {
         for (specs, 0..) |spec, i| {
             const cur = &l.contexts.items[i];
             if (cur.*) |c| if (specEql(c.spec, spec)) continue;
-            const usable = spec.upright < l.faces.len and
-                (spec.italic orelse 0) < l.faces.len and
-                for (spec.members) |mb| {
-                    if (mb.upright >= l.faces.len or (mb.italic orelse 0) >= l.faces.len) break false;
-                } else true;
+            const n = l.faces.len;
+            const inTable = struct {
+                fn f(v: engine.style.Variants, len: usize) bool {
+                    return v.upright < len and (v.italic orelse 0) < len and (v.bold orelse 0) < len and (v.bold_italic orelse 0) < len;
+                }
+            }.f;
+            const main: engine.style.Variants = .{ .upright = spec.upright, .italic = spec.italic, .bold = spec.bold, .bold_italic = spec.bold_italic };
+            const usable = inTable(main, n) and for (spec.members) |mb| {
+                if (!inTable(mb.variants(), n)) break false;
+            } else true;
             const ctx = if (usable) engine.style.Context.init(l.faces, spec) catch null else null;
             cur.* = .{ .spec = spec, .ctx = ctx };
             l.dropStyle(@intCast(i));
@@ -1011,6 +1028,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                         try issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = item_of.items[index] });
                         break;
                     };
+                    if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .region = ri, .row = sg, .item = item_of.items[index] });
                 },
                 .hard_break => {},
             }
@@ -1088,6 +1106,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             };
             if (overflow) try issues.append(a, .{ .kind = .label_overflow, .tile = pt.id, .slot = si });
             if (missing) try issues.append(a, .{ .kind = .missing_glyph, .tile = pt.id, .slot = si });
+            if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .tile = pt.id, .slot = si });
         }
     }
 
@@ -1116,6 +1135,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             try issues.append(a, .{ .kind = .missing_glyph, .label = li });
             break;
         };
+        if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .label = li });
     }
 
     // Labels not inside a tile (on the panel, or runs in a track) reach

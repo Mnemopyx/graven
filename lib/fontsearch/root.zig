@@ -478,6 +478,44 @@ pub fn find(records: []const Record, family: []const u8, style: ?[]const u8) ?us
     return null;
 }
 
+/// A face's family companions: its italic, bold and bold italic, as
+/// indexes into `records`.
+pub const Variants = struct {
+    italic: ?usize = null,
+    bold: ?usize = null,
+    bold_italic: ?usize = null,
+};
+
+/// The italic, bold and bold italic of the family of `records[k]`: faces
+/// of its family and width, the italic nearest its weight, the bolds
+/// nearest 300 heavier (at least 100 heavier, and at least semibold, 600).
+pub fn variantsOf(records: []const Record, k: usize) Variants {
+    const base = records[k];
+    const bold_target = base.weight + 300;
+    const bold_min = @max(600, base.weight + 100);
+    var out: Variants = .{};
+    var best: [3]f32 = @splat(std.math.inf(f32));
+    for (records, 0..) |r, i| {
+        if (i == k or !std.ascii.eqlIgnoreCase(r.family, base.family)) continue;
+        if (@abs(r.width - base.width) > 5) continue;
+        const slot: usize, const d: f32 = if (r.weight >= bold_min)
+            .{ if (r.italic) 2 else 1, @abs(r.weight - bold_target) }
+        else if (r.italic and !base.italic)
+            .{ 0, @abs(r.weight - base.weight) }
+        else
+            continue;
+        if (d < best[slot]) {
+            best[slot] = d;
+            switch (slot) {
+                0 => out.italic = i,
+                1 => out.bold = i,
+                else => out.bold_italic = i,
+            }
+        }
+    }
+    return out;
+}
+
 // Sources and the index ----------------------------------------------------------
 
 /// Where fonts come from: installed fonts (the local source, in the app),
@@ -607,4 +645,27 @@ test "search filters, covers characters, and ranks by likeness" {
     defer testing.allocator.free(ofl);
     try testing.expectEqual(1, ofl.len);
     try testing.expectEqual(2, find(&records, "alpha sans", "regular").?);
+}
+
+test "a face's italic and bolds are found in its family" {
+    const recs = [_]Record{
+        .{ .source = "", .location = "", .family = "Serif", .style = "Regular", .weight = 400 },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Italic", .weight = 400, .italic = true },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Semibold", .weight = 600 },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Bold", .weight = 700 },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Bold Italic", .weight = 700, .italic = true },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Medium Italic", .weight = 500, .italic = true },
+        .{ .source = "", .location = "", .family = "Serif Condensed", .style = "Bold", .weight = 700 },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Condensed Bold", .weight = 700, .width = 75 },
+    };
+    const v = variantsOf(&recs, 0);
+    try std.testing.expectEqual(1, v.italic);
+    try std.testing.expectEqual(3, v.bold);
+    try std.testing.expectEqual(4, v.bold_italic);
+    // From the semibold, bold is 300 heavier at best: the bold.
+    const w = variantsOf(&recs, 2);
+    try std.testing.expectEqual(3, w.bold);
+    // Nothing else in a family of one.
+    const c = variantsOf(&recs, 6);
+    try std.testing.expectEqual(Variants{}, c);
 }

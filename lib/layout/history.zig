@@ -46,6 +46,7 @@ pub const actions = [_][:0]const u8{
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
     "addFont",           "renameFont",         "setFontMain",         "addFontMember",      "setFontMember",
     "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
+    "setFontVariants",
 };
 
 fn Fn(comptime name: []const u8) type {

@@ -769,6 +769,12 @@ pub const FontMember = struct {
     font: FontName,
     /// Its italic, for letters asked to be italic; else `font`.
     italic: ?FontName = null,
+    /// Its bold and bold italic, for bold text; else the weights above.
+    bold: ?FontName = null,
+    bold_italic: ?FontName = null,
+    /// The math alphabet it sets from ordinary letters (a blackboard face
+    /// for \mathbb); normal for a member that sets characters as they are.
+    alphabet: engine.style.Alphabet = .normal,
     /// The characters it sets: what the faces before it lack (a fallback),
     /// or codepoint ranges, taken even where the main face has them.
     coverage: engine.style.Coverage = .fallback,
@@ -788,7 +794,23 @@ pub const ComposedFont = struct {
     name: []const u8,
     main: FontName,
     italic: ?FontName = null,
+    /// Its bold and bold italic: bold text falls back to the regular
+    /// weight (and is reported) without them, or in math to Unicode's
+    /// mathematical bold where a face has it.
+    bold: ?FontName = null,
+    bold_italic: ?FontName = null,
     members: std.ArrayList(FontMember) = .empty,
+
+    pub fn variants(f: ComposedFont) FontVariants {
+        return .{ .italic = f.italic, .bold = f.bold, .bold_italic = f.bold_italic };
+    }
+};
+
+/// A family's other weights and slants beside its regular face.
+pub const FontVariants = struct {
+    italic: ?FontName = null,
+    bold: ?FontName = null,
+    bold_italic: ?FontName = null,
 };
 
 pub const LabelStyle = struct {
@@ -922,10 +944,16 @@ pub const Model = struct {
         return .{ .family = try m.a().dupe(u8, n.family), .style = try m.a().dupe(u8, n.style) };
     }
 
+    fn dupeOptFontName(m: *Model, n: ?FontName) Allocator.Error!?FontName {
+        return if (n) |v| try m.dupeFontName(v) else null;
+    }
+
     fn dupeMember(m: *Model, mb: FontMember) Allocator.Error!FontMember {
         var out = mb;
         out.font = try m.dupeFontName(mb.font);
-        out.italic = if (mb.italic) |it| try m.dupeFontName(it) else null;
+        out.italic = try m.dupeOptFontName(mb.italic);
+        out.bold = try m.dupeOptFontName(mb.bold);
+        out.bold_italic = try m.dupeOptFontName(mb.bold_italic);
         out.coverage = switch (mb.coverage) {
             .fallback => .fallback,
             .ranges => |rs| .{ .ranges = try m.a().dupe(engine.style.Range, rs) },
@@ -975,6 +1003,16 @@ pub const Model = struct {
         const f = try m.font(id);
         f.main = try m.dupeFontName(main);
         f.italic = if (italic) |it| try m.dupeFontName(it) else null;
+        m.revision += 1;
+    }
+
+    /// Sets the italic, bold and bold italic of composed font `id`'s main
+    /// font (null for each it lacks).
+    pub fn setFontVariants(m: *Model, id: ObjectId, v: FontVariants) Error!void {
+        const f = try m.font(id);
+        f.italic = try m.dupeOptFontName(v.italic);
+        f.bold = try m.dupeOptFontName(v.bold);
+        f.bold_italic = try m.dupeOptFontName(v.bold_italic);
         m.revision += 1;
     }
 

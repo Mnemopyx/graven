@@ -24,6 +24,41 @@ pub fn covers(face: *Face, cluster: []const u8) bool {
 }
 
 const FaceId = render.FaceId;
+pub const Alphabet = @import("markup.zig").Alphabet;
+
+/// What a cluster asks of the composed font: its slant, its weight, its
+/// alphabet (\mathbb …).
+pub const Want = struct {
+    italic: bool = false,
+    bold: bool = false,
+    alphabet: Alphabet = .normal,
+};
+
+/// A family's faces by weight and slant. Missing ones fall back: bold
+/// italic to bold, then italic; bold and italic to upright.
+pub const Variants = struct {
+    upright: FaceId,
+    italic: ?FaceId = null,
+    bold: ?FaceId = null,
+    bold_italic: ?FaceId = null,
+
+    /// The face for `want`'s weight and slant, after fallbacks.
+    pub fn pick(v: Variants, want: Want) FaceId {
+        if (want.bold and want.italic) if (v.bold_italic) |f| return f;
+        if (want.bold) if (v.bold) |f| return f;
+        if (want.italic) if (v.italic) |f| return f;
+        return v.upright;
+    }
+
+    pub fn has(v: Variants, face: FaceId) bool {
+        return face == v.upright or v.italic == face or v.bold == face or v.bold_italic == face;
+    }
+
+    /// Whether `face` is one of the bold faces.
+    pub fn isBold(v: Variants, face: FaceId) bool {
+        return v.bold == face or v.bold_italic == face;
+    }
+};
 
 /// How letters without an explicit variant look.
 pub const Letters = enum { upright, italic };
@@ -66,12 +101,21 @@ pub const Member = struct {
     upright: FaceId,
     /// Its italic, for letters asked to be italic; else its upright.
     italic: ?FaceId = null,
+    bold: ?FaceId = null,
+    bold_italic: ?FaceId = null,
+    /// The alphabet it sets from ordinary letters (a blackboard face for
+    /// \mathbb). Such a member is only used for that alphabet.
+    alphabet: Alphabet = .normal,
     coverage: Coverage = .fallback,
     match: Match = .cap_height,
     /// A further size factor after matching.
     scale: f64 = 1,
     /// Baseline shift, a fraction of the cap height, up positive.
     shift: f64 = 0,
+
+    pub fn variants(m: Member) Variants {
+        return .{ .upright = m.upright, .italic = m.italic, .bold = m.bold, .bold_italic = m.bold_italic };
+    }
 };
 
 pub const Spec = struct {
@@ -79,6 +123,10 @@ pub const Spec = struct {
     /// The family's italic; letters asked to be italic fall back to upright
     /// (and are reported) when there is none.
     italic: ?FaceId = null,
+    /// Its bold and bold italic, for \textbf and \mathbf; bold falls back
+    /// to the upright weight (and is reported) when there is none.
+    bold: ?FaceId = null,
+    bold_italic: ?FaceId = null,
     /// The composed font's other faces, in order: members with explicit
     /// coverage take their characters first; fallbacks are tried, in order,
     /// for clusters the chosen face lacks.
@@ -207,13 +255,28 @@ pub const Context = struct {
 
     /// The member `face` belongs to, if it is a member's.
     pub fn memberOf(c: *const Context, face: FaceId) ?*const Member {
-        if (face == c.spec.upright) return null;
-        if (c.spec.italic) |it| if (face == it) return null;
-        for (c.spec.members) |*m| {
-            if (m.upright == face) return m;
-            if (m.italic) |it| if (it == face) return m;
-        }
+        if (c.mainVariants().has(face)) return null;
+        for (c.spec.members) |*m| if (m.variants().has(face)) return m;
         return null;
+    }
+
+    /// The main family's faces.
+    pub fn mainVariants(c: *const Context) Variants {
+        const s = c.spec;
+        return .{ .upright = s.upright, .italic = s.italic, .bold = s.bold, .bold_italic = s.bold_italic };
+    }
+
+    /// Whether `face` is a bold face of the main family or of a member.
+    pub fn isBold(c: *const Context, face: FaceId) bool {
+        if (c.mainVariants().isBold(face)) return true;
+        for (c.spec.members) |m| if (m.variants().isBold(face)) return true;
+        return false;
+    }
+
+    /// Whether a member sets `alphabet` from ordinary letters.
+    pub fn hasAlphabet(c: *const Context, alphabet: Alphabet) bool {
+        for (c.spec.members) |m| if (m.alphabet == alphabet) return true;
+        return false;
     }
 
     /// mm per font unit for `face` at cap height `cap_mm`. The main faces
@@ -245,32 +308,29 @@ pub const Context = struct {
         return m.shift * cap_mm;
     }
 
-    /// The face to set `cluster` in: a member whose coverage takes it,
-    /// else the main face (italic when `italic` and there is one), else
-    /// the first fallback member that has it, else the main face (whose
-    /// .notdef is then drawn). Null when no face has it and `strict`.
-    pub fn faceFor(c: *const Context, cluster: []const u8, italic: bool, strict: bool) ?FaceId {
+    /// The face to set `cluster` in: a member setting the alphabet asked
+    /// for, else a member whose coverage takes it, else the main family's
+    /// face for the weight and slant asked for, else the first fallback
+    /// member that has it, else that main face (whose .notdef is then
+    /// drawn). Null when no face has it and `strict`.
+    pub fn faceFor(c: *const Context, cluster: []const u8, want: Want, strict: bool) ?FaceId {
         var it = (std.unicode.Utf8View.initUnchecked(cluster)).iterator();
         const cp = it.nextCodepoint() orelse 0;
-        const pick = struct {
-            fn of(m: *const Member, want_italic: bool) FaceId {
-                if (want_italic) if (m.italic) |f| return f;
-                return m.upright;
-            }
-        }.of;
-        for (c.spec.members) |*m| {
-            if (!m.coverage.has(cp)) continue;
-            const f = pick(m, italic);
+        if (want.alphabet != .normal) for (c.spec.members) |m| {
+            if (m.alphabet != want.alphabet) continue;
+            const f = m.variants().pick(want);
+            if (covers(c.faces[f], cluster)) return f;
+        };
+        for (c.spec.members) |m| {
+            if (m.alphabet != .normal or !m.coverage.has(cp)) continue;
+            const f = m.variants().pick(want);
             if (covers(c.faces[f], cluster)) return f;
         }
-        var wanted = c.spec.upright;
-        if (italic) if (c.spec.italic) |f| {
-            wanted = f;
-        };
+        const wanted = c.mainVariants().pick(want);
         if (covers(c.faces[wanted], cluster)) return wanted;
-        for (c.spec.members) |*m| {
-            if (m.coverage != .fallback) continue;
-            const f = pick(m, italic);
+        for (c.spec.members) |m| {
+            if (m.alphabet != .normal or m.coverage != .fallback) continue;
+            const f = m.variants().pick(want);
             if (covers(c.faces[f], cluster)) return f;
         }
         return if (strict) null else wanted;

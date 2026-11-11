@@ -29,8 +29,34 @@ const entities = @import("entities.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// How letters were asked to look. `default` leaves it to the style.
-pub const Variant = enum { default, upright, italic, text };
+/// Letters' slant as asked for. `default` leaves it to the style.
+pub const Shape = enum { default, upright, italic };
+
+/// A math alphabet: letters (and some digits) of a particular design,
+/// as \mathbb, \mathfrak and the like ask for. `normal` is the font's own.
+pub const Alphabet = enum { normal, double_struck, fraktur, script, calligraphic, sans_serif, monospace };
+
+/// How letters were asked to look: their slant, weight and alphabet, and
+/// whether they are text rather than math. Commands change one part and
+/// keep the rest, so \textbf{\textit{x}} is bold italic.
+pub const Variant = struct {
+    shape: Shape = .default,
+    bold: bool = false,
+    alphabet: Alphabet = .normal,
+    /// Text, not math: letters upright unless asked otherwise, and no
+    /// math spacing.
+    text: bool = false,
+
+    pub fn eql(a: Variant, b: Variant) bool {
+        return a.shape == b.shape and a.bold == b.bold and a.alphabet == b.alphabet and a.text == b.text;
+    }
+
+    fn with(v: Variant, change: anytype) Variant {
+        var out = v;
+        inline for (@typeInfo(@TypeOf(change)).@"struct".field_names) |f| @field(out, f) = @field(change, f);
+        return out;
+    }
+};
 
 pub const Span = struct { start: u32, end: u32 };
 
@@ -179,7 +205,7 @@ pub fn parsePreview(arena: Allocator, src: []const u8, names: *const entities.Ta
     }
     var unused: Diagnostic = undefined;
     var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = &unused, .problems = problems };
-    const items = p.list(.default, false, false) catch |err| switch (err) {
+    const items = p.list(.{}, false, false) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // Every failure is recovered from in preview.
         error.Syntax => unreachable,
@@ -195,7 +221,7 @@ pub fn parseWith(arena: Allocator, src: []const u8, names: *const entities.Table
         return error.Syntax;
     }
     var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = diag };
-    const items = try p.list(.default, false, false);
+    const items = try p.list(.{}, false, false);
     return .{ .items = items, .span = .{ .start = 0, .end = @intCast(src.len) } };
 }
 
@@ -206,6 +232,11 @@ const operators = std.StaticStringMap(void).initComptime(.{
     .{"lim"},    .{"mod"},    .{"gcd"},    .{"Re"},   .{"Im"},   .{"arg"},
 });
 
+const alphabets = std.StaticStringMap(Alphabet).initComptime(.{
+    .{ "mathbb", .double_struck },  .{ "mathfrak", .fraktur },  .{ "mathscr", .script },
+    .{ "mathcal", .calligraphic },  .{ "mathsf", .sans_serif }, .{ "mathtt", .monospace },
+});
+
 /// Commands that take arguments or shape the label, with what follows their
 /// name when completed: "{}" for each braced argument.
 const structural = [_]struct { name: []const u8, args: []const u8, note: []const u8 }{
@@ -213,6 +244,22 @@ const structural = [_]struct { name: []const u8, args: []const u8, note: []const
     .{ .name = "mathrm", .args = "{}", .note = "upright" },
     .{ .name = "mathup", .args = "{}", .note = "upright" },
     .{ .name = "mathit", .args = "{}", .note = "italic" },
+    .{ .name = "mathbf", .args = "{}", .note = "bold, upright" },
+    .{ .name = "boldsymbol", .args = "{}", .note = "bold" },
+    .{ .name = "textbf", .args = "{}", .note = "bold text" },
+    .{ .name = "textit", .args = "{}", .note = "italic text" },
+    .{ .name = "emph", .args = "{}", .note = "emphasis (italic, or upright in italic)" },
+    .{ .name = "textup", .args = "{}", .note = "upright text" },
+    .{ .name = "textmd", .args = "{}", .note = "regular weight" },
+    .{ .name = "textnormal", .args = "{}", .note = "plain text" },
+    .{ .name = "mathbb", .args = "{}", .note = "double-struck" },
+    .{ .name = "mathfrak", .args = "{}", .note = "fraktur" },
+    .{ .name = "mathscr", .args = "{}", .note = "script" },
+    .{ .name = "mathcal", .args = "{}", .note = "calligraphic" },
+    .{ .name = "mathsf", .args = "{}", .note = "sans-serif" },
+    .{ .name = "mathtt", .args = "{}", .note = "monospace" },
+    .{ .name = "textsf", .args = "{}", .note = "sans-serif text" },
+    .{ .name = "texttt", .args = "{}", .note = "monospace text" },
     .{ .name = "operatorname", .args = "{}", .note = "operator name" },
     .{ .name = "hat", .args = "{}", .note = "circumflex accent" },
     .{ .name = "bar", .args = "{}", .note = "bar accent" },
@@ -303,7 +350,7 @@ const Parser = struct {
         return .{ .text = .{
             .utf8 = p.src[start..end],
             .source = source,
-            .variant = .upright,
+            .variant = .{ .shape = .upright },
             .faint = true,
             .span = .{ .start = start, .end = end },
         } };
@@ -469,7 +516,7 @@ const Parser = struct {
             if (operators.has(name)) break :blk try p.operatorText(name, at, span);
             if (std.mem.eql(u8, name, "operatorname")) {
                 // One run of text becomes an operator name, like \ln.
-                const g = try p.braced(.upright, true);
+                const g = try p.braced(.{ .shape = .upright }, true);
                 if (g.items.len == 1 and g.items[0] == .text) {
                     var t = g.items[0].text;
                     t.operator = true;
@@ -479,11 +526,35 @@ const Parser = struct {
                 break :blk .{ .group = g };
             }
             if (std.mem.eql(u8, name, "mathrm") or std.mem.eql(u8, name, "mathup"))
-                break :blk .{ .group = try p.braced(.upright, text_mode) };
+                break :blk .{ .group = try p.braced(variant.with(.{ .shape = .upright, .alphabet = .normal }), text_mode) };
             if (std.mem.eql(u8, name, "mathit"))
-                break :blk .{ .group = try p.braced(.italic, text_mode) };
+                break :blk .{ .group = try p.braced(variant.with(.{ .shape = .italic, .alphabet = .normal }), text_mode) };
             if (std.mem.eql(u8, name, "text"))
-                break :blk .{ .group = try p.braced(.text, true) };
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = .default, .alphabet = .normal }), true) };
+            // Weight and slant, in text or math.
+            if (std.mem.eql(u8, name, "textbf"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .bold = true }), true) };
+            if (std.mem.eql(u8, name, "mathbf"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .bold = true, .shape = .upright, .alphabet = .normal }), text_mode) };
+            if (std.mem.eql(u8, name, "boldsymbol") or std.mem.eql(u8, name, "bm"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .bold = true }), text_mode) };
+            if (std.mem.eql(u8, name, "textit"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = .italic }), true) };
+            if (std.mem.eql(u8, name, "emph"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = if (variant.shape == .italic) Shape.upright else Shape.italic }), true) };
+            if (std.mem.eql(u8, name, "textup") or std.mem.eql(u8, name, "textrm"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .shape = .upright, .alphabet = .normal }), true) };
+            if (std.mem.eql(u8, name, "textmd"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .bold = false }), true) };
+            if (std.mem.eql(u8, name, "textnormal"))
+                break :blk .{ .group = try p.braced(.{ .text = true }, true) };
+            // Math alphabets, upright; bold carries over (bold fraktur).
+            if (alphabets.get(name)) |alpha|
+                break :blk .{ .group = try p.braced(variant.with(.{ .alphabet = alpha, .shape = .upright }), text_mode) };
+            if (std.mem.eql(u8, name, "textsf"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .alphabet = .sans_serif }), true) };
+            if (std.mem.eql(u8, name, "texttt"))
+                break :blk .{ .group = try p.braced(variant.with(.{ .text = true, .alphabet = .monospace }), true) };
             const accent: ?@FieldType(Accent, "kind") = if (std.mem.eql(u8, name, "bar"))
                 .bar
             else if (std.mem.eql(u8, name, "overline"))
@@ -544,7 +615,7 @@ const Parser = struct {
     fn operatorText(p: *Parser, name: []const u8, at: u32, span: Span) Error!Node {
         const source = try p.a.alloc(u32, name.len);
         for (source, 0..) |*s, k| s.* = at + 1 + @as(u32, @intCast(k));
-        return .{ .text = .{ .utf8 = name, .source = source, .variant = .upright, .operator = true, .span = span } };
+        return .{ .text = .{ .utf8 = name, .source = source, .variant = .{ .shape = .upright }, .operator = true, .span = span } };
     }
 
     fn one(p: *Parser, n: Node) Error!*const Node {
@@ -750,7 +821,10 @@ fn dumpNode(w: *std.Io.Writer, n: Node) std.Io.Writer.Error!void {
     switch (n) {
         .text => |t| {
             try w.writeAll(if (t.operator) "(op " else if (t.faint) "(faint " else "(text ");
-            if (t.variant != .default) try w.print("{s} ", .{@tagName(t.variant)});
+            if (t.variant.text) try w.writeAll("text ");
+            if (t.variant.shape != .default) try w.print("{s} ", .{@tagName(t.variant.shape)});
+            if (t.variant.bold) try w.writeAll("bold ");
+            if (t.variant.alphabet != .normal) try w.print("{s} ", .{@tagName(t.variant.alphabet)});
             try w.print("\"{s}\")", .{t.utf8});
         },
         .group => |g| {
@@ -853,6 +927,16 @@ test "operators, variants and text" {
     try expectTree("\\mathit{x}y", "{(text italic \"x\")} (text \"y\")");
     try expectTree("\\text{R/S}", "{(text text \"R/S\")}");
     try expectTree("\\operatorname{sgn}", "(op upright \"sgn\")");
+}
+
+test "weights, slants and math alphabets nest" {
+    try expectTree("\\textbf{ab}", "{(text text bold \"ab\")}");
+    try expectTree("\\textbf{a\\textit{b}}", "{(text text bold \"a\") {(text text italic bold \"b\")}}");
+    try expectTree("\\mathbf{x}", "{(text upright bold \"x\")}");
+    try expectTree("\\boldsymbol{\\mathfrak{A}}", "{{(text upright bold fraktur \"A\")}}");
+    try expectTree("\\mathbb{R}^2", "(scripts {(text upright double_struck \"R\")} ^(text \"2\"))");
+    try expectTree("\\textit{a\\emph{b}}", "{(text text italic \"a\") {(text text upright \"b\")}}");
+    try expectTree("\\texttt{ls}", "{(text text monospace \"ls\")}");
 }
 
 test "accents, spaces and breaks" {

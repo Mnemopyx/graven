@@ -832,11 +832,27 @@ fn resolveFonts(labels: *layout.Labels) void {
 }
 var font_status_buf: [160]u8 = undefined;
 
-fn hostAddFont(name: []const u8, main_font: layout.model.FontName) ?layout.model.ObjectId {
-    return act(.addFont, .{ name, main_font }) catch null;
+/// Each font-window change that takes two actions is undone as one.
+var font_step: u64 = 0;
+
+fn hostAddFont(name: []const u8, main_font: layout.model.FontName, variants: layout.model.FontVariants) ?layout.model.ObjectId {
+    font_step += 1;
+    const key = mergeKey(.{ "font family", font_step });
+    const id = actM(key, .addFont, .{ name, main_font }) catch return null;
+    _ = actM(key, .setFontVariants, .{ id, variants }) catch {};
+    return id;
 }
-fn hostSetFontMain(id: layout.model.ObjectId, main_font: layout.model.FontName, italic: ?layout.model.FontName) void {
-    act(.setFontMain, .{ id, main_font, italic }) catch {};
+fn hostSetFontFamily(id: layout.model.ObjectId, main_font: layout.model.FontName, variants: layout.model.FontVariants) void {
+    font_step += 1;
+    const key = mergeKey(.{ "font family", font_step });
+    _ = actM(key, .setFontMain, .{ id, main_font, variants.italic }) catch return;
+    _ = actM(key, .setFontVariants, .{ id, variants }) catch {};
+}
+fn hostSetFontVariants(id: layout.model.ObjectId, variants: layout.model.FontVariants) void {
+    act(.setFontVariants, .{ id, variants }) catch {};
+}
+fn hostSetFontMember(id: layout.model.ObjectId, index: usize, member: layout.model.FontMember) void {
+    act(.setFontMember, .{ id, index, member }) catch {};
 }
 fn hostAddFontMember(id: layout.model.ObjectId, member: layout.model.FontMember) void {
     _ = act(.addFontMember, .{ id, std.math.maxInt(usize), member }) catch {};
@@ -855,7 +871,9 @@ fn fontHost() fontwin.Host {
     return .{
         .model = &state.model,
         .addFont = hostAddFont,
-        .setFontMain = hostSetFontMain,
+        .setFontFamily = hostSetFontFamily,
+        .setFontVariants = hostSetFontVariants,
+        .setFontMember = hostSetFontMember,
         .addFontMember = hostAddFontMember,
         .moveFontMember = hostMoveFontMember,
         .removeFontMember = hostRemoveFontMember,
@@ -5202,7 +5220,9 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
     for (placed.issues) |i| {
         if (i.tile != id) continue;
         switch (i.kind) {
-            .missing_glyph => f.missing = true,
+            // A face lacking a character, or a weight or slant: both
+            // the font's to fix.
+            .missing_glyph, .variant_missing => f.missing = true,
             .label_overflow => f.overflow = true,
             // Reaching back into rows already filled: outlined as a size
             // problem is, in the warning colour.
@@ -6509,12 +6529,14 @@ fn statusContent() void {
     var tiles: usize = 0;
     var labels: usize = 0;
     var missing: usize = 0;
+    var lacking: usize = 0;
     var overflow: usize = 0;
     for (state.placed.items) |*p| {
         tiles += p.tiles.len;
         labels += p.labels.len;
         for (p.issues) |i| switch (i.kind) {
             .missing_glyph => missing += 1,
+            .variant_missing => lacking += 1,
             .label_overflow, .row_overflow, .region_outside => overflow += 1,
             else => {},
         };
@@ -6536,11 +6558,14 @@ fn statusContent() void {
     } else std.fmt.bufPrint(&pos_buf, "x –   y – {s}", .{u.symbol()}) catch "";
     dvui.labelNoFmt(@src(), pos, .{}, field.override(.{ .min_size_content = .{ .w = 190 }, .font = .theme(.mono) }));
 
-    var counts_buf: [200]u8 = undefined;
+    var counts_buf: [260]u8 = undefined;
     var flags_buf: [40]u8 = undefined;
     const layer_flags = if (state.layer_issues.len > 0) std.fmt.bufPrint(&flags_buf, " · {d} layer flag{s}", .{ state.layer_issues.len, if (state.layer_issues.len == 1) "" else "s" }) catch "" else "";
-    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs · {d} overflows · {d} in margins{s}", .{
-        state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, overflow, state.intrusions.len, layer_flags,
+    // Only when there are any: bold or italic the font lacks.
+    var lack_buf: [48]u8 = undefined;
+    const lack = if (lacking > 0) std.fmt.bufPrint(&lack_buf, " · {d} lacking bold/italic", .{lacking}) catch "" else "";
+    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}", .{
+        state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, lack, overflow, state.intrusions.len, layer_flags,
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
 

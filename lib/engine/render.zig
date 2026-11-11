@@ -79,6 +79,12 @@ pub const Diagnostic = struct {
         not_rendered,
         /// Italic asked for, but the style has no italic face.
         no_italic,
+        /// Bold asked for, but the style has no bold face (nor, in math,
+        /// mathematical bold characters).
+        no_bold,
+        /// A math alphabet (\mathbb …) asked for, but no member sets it
+        /// and no face has its characters: ordinary letters are drawn.
+        no_alphabet,
         /// Content larger than its hard box: a word longer than its line,
         /// or a block wider or taller than the box. Nothing is shrunk.
         overflow,

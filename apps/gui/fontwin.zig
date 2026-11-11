@@ -27,9 +27,13 @@ pub var open = false;
 /// takes on it (each undoable there).
 pub const Host = struct {
     model: *const layout.Model,
-    addFont: *const fn (name: []const u8, main: model.FontName) ?ObjectId,
-    setFontMain: *const fn (id: ObjectId, main: model.FontName, italic: ?model.FontName) void,
+    /// A new composed font, its main font and that font's variants.
+    addFont: *const fn (name: []const u8, main: model.FontName, variants: model.FontVariants) ?ObjectId,
+    /// The main font and its variants, as one change.
+    setFontFamily: *const fn (id: ObjectId, main: model.FontName, variants: model.FontVariants) void,
+    setFontVariants: *const fn (id: ObjectId, variants: model.FontVariants) void,
     addFontMember: *const fn (id: ObjectId, member: model.FontMember) void,
+    setFontMember: *const fn (id: ObjectId, index: usize, member: model.FontMember) void,
     moveFontMember: *const fn (id: ObjectId, index: usize, up: bool) void,
     removeFontMember: *const fn (id: ObjectId, index: usize) void,
     setStyleFont: *const fn (style: model.StyleId, id: ObjectId) void,
@@ -678,6 +682,32 @@ fn details(i: usize) void {
 
 // Composition ------------------------------------------------------------------
 
+/// What a member's alphabet choice reads as, in `Alphabet`'s order.
+const alphabet_names = [_][]const u8{ "as is", "\\mathbb", "\\mathfrak", "\\mathscr", "\\mathcal", "\\mathsf", "\\mathtt" };
+
+comptime {
+    std.debug.assert(alphabet_names.len == @typeInfo(engine.style.Alphabet).@"enum".field_names.len);
+}
+
+/// The italic, bold and bold italic of record `k`'s family, as names.
+fn familyVariants(k: usize) model.FontVariants {
+    const v = fs.variantsOf(records, k);
+    return .{
+        .italic = if (v.italic) |i| nameOf(i) else null,
+        .bold = if (v.bold) |i| nameOf(i) else null,
+        .bold_italic = if (v.bold_italic) |i| nameOf(i) else null,
+    };
+}
+
+fn findRecord(n: model.FontName) ?usize {
+    return fs.find(records, n.family, n.style);
+}
+
+fn optEql(a: ?model.FontName, b: ?model.FontName) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return a.?.eql(b.?);
+}
+
 fn nameOf(i: usize) model.FontName {
     return .{ .family = records[i].family, .style = records[i].style };
 }
@@ -728,7 +758,7 @@ fn compose(host: Host) void {
         if (sel) |s| {
             var tb: [200]u8 = undefined;
             if (icons.button(@src(), .plus_circle, std.fmt.bufPrint(&tb, "New composed font from {s}", .{sel_label}) catch "New composed font", .{ .opts = .{ .gravity_y = 0.5 } })) {
-                if (host.addFont(records[s].family, nameOf(s))) |id| target = id;
+                if (host.addFont(records[s].family, nameOf(s), familyVariants(s))) |id| target = id;
             }
         }
     }
@@ -738,11 +768,48 @@ fn compose(host: Host) void {
     };
     const cf = m.fonts.items[m.fontIndex(t).?];
     {
-        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .margin = .{ .y = 6 } });
-        defer tl.deinit();
         var buf: [256]u8 = undefined;
-        tl.addText(std.fmt.bufPrint(&buf, "Main: {s} {s}\nItalic: ", .{ cf.main.family, cf.main.style }) catch "", .{});
-        if (cf.italic) |it| tl.addText(std.fmt.bufPrint(&buf, "{s} {s}", .{ it.family, it.style }) catch "", .{}) else tl.addText("none", .{});
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "Main: {s} {s}", .{ cf.main.family, cf.main.style }) catch "", .{}, .{ .margin = .{ .y = 6 } });
+        // Its weights and slants: each set from the selected font, or
+        // cleared (bold and italic then fall back, and are reported).
+        const kinds = [_]struct { name: []const u8, field: []const u8 }{
+            .{ .name = "Italic", .field = "italic" },
+            .{ .name = "Bold", .field = "bold" },
+            .{ .name = "Bold italic", .field = "bold_italic" },
+        };
+        inline for (kinds, 0..) |kind, k| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .expand = .horizontal });
+            defer row.deinit();
+            var v = cf.variants();
+            const cur = @field(v, kind.field);
+            var tb: [200]u8 = undefined;
+            if (sel) |s| {
+                if (icons.button(@src(), .arrow_square_in, std.fmt.bufPrint(&tb, "Use {s} as the {s}", .{ sel_label, kind.field }) catch "Use the selected font", .{ .id_extra = k, .size = 14 })) {
+                    @field(v, kind.field) = nameOf(s);
+                    host.setFontVariants(t, v);
+                }
+            }
+            if (cur == null) {
+                // The clear button's room, so the names line up.
+                _ = dvui.spacer(@src(), .{ .id_extra = k, .min_size_content = .{ .w = 22 } });
+            } else if (icons.button(@src(), .x, "None: fall back to the regular weight or upright", .{ .id_extra = k, .size = 14 })) {
+                @field(v, kind.field) = null;
+                host.setFontVariants(t, v);
+            }
+            const shown = if (cur) |n| std.fmt.bufPrint(&buf, "{s}: {s} {s}", .{ kind.name, n.family, n.style }) catch "" else std.fmt.bufPrint(&buf, "{s}: none", .{kind.name}) catch "";
+            dvui.labelNoFmt(@src(), shown, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
+        }
+        if (findRecord(cf.main)) |k| {
+            const auto = familyVariants(k);
+            const differs = !optEql(auto.italic, cf.italic) or !optEql(auto.bold, cf.bold) or !optEql(auto.bold_italic, cf.bold_italic);
+            if (differs and (auto.italic != null or auto.bold != null or auto.bold_italic != null)) {
+                var tb: [200]u8 = undefined;
+                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+                defer row.deinit();
+                if (icons.button(@src(), .magic_wand, std.fmt.bufPrint(&tb, "Use {s}'s own italic and bolds", .{cf.main.family}) catch "Use the family's italic and bolds", .{ .size = 14 })) host.setFontVariants(t, auto);
+                dvui.labelNoFmt(@src(), "The family has others", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 }, .font = dvui.Font.theme(.body).larger(-2) });
+            }
+        }
     }
     // What the selected font can become in it, as one row of icons.
     if (sel) |s| {
@@ -750,8 +817,7 @@ fn compose(host: Host) void {
         defer row.deinit();
         dvui.labelNoFmt(@src(), "Selected:", .{}, .{ .gravity_y = 0.5, .margin = .{ .w = 4 } });
         var tb: [200]u8 = undefined;
-        if (icons.button(@src(), .text_aa, std.fmt.bufPrint(&tb, "Use {s} as the main font", .{sel_label}) catch "Use as the main font", .{})) host.setFontMain(t, nameOf(s), cf.italic);
-        if (icons.button(@src(), .text_italic, std.fmt.bufPrint(&tb, "Use {s} as the italic", .{sel_label}) catch "Use as the italic", .{})) host.setFontMain(t, cf.main, nameOf(s));
+        if (icons.button(@src(), .text_aa, std.fmt.bufPrint(&tb, "Use {s} as the main font, with its family's italic and bolds", .{sel_label}) catch "Use as the main font", .{})) host.setFontFamily(t, nameOf(s), familyVariants(s));
         if (icons.button(@src(), .list_plus, std.fmt.bufPrint(&tb, "Add {s} as a fallback member", .{sel_label}) catch "Add as a fallback member", .{})) host.addFontMember(t, .{ .font = nameOf(s) });
         const want = text(&covers, covers_len);
         if (want.len > 0) {
@@ -774,6 +840,14 @@ fn compose(host: Host) void {
         if (icons.button(@src(), .caret_up, "Try earlier", .{ .id_extra = k, .size = 14 })) host.moveFontMember(t, k, true);
         if (icons.button(@src(), .caret_down, "Try later", .{ .id_extra = k, .size = 14 })) host.moveFontMember(t, k, false);
         if (icons.button(@src(), .trash, "Remove this member", .{ .id_extra = k, .size = 14 })) host.removeFontMember(t, k);
+        // The math alphabet it sets (\mathbb …), or none: it sets
+        // characters as they are.
+        var alpha: usize = @intFromEnum(mb.alphabet);
+        if (dvui.dropdown(@src(), &alphabet_names, .{ .choice = &alpha }, .{}, .{ .id_extra = k, .gravity_y = 0.5, .min_size_content = .{ .w = 90 } })) {
+            var changed = mb;
+            changed.alphabet = @enumFromInt(alpha);
+            host.setFontMember(t, k, changed);
+        }
         dvui.labelNoFmt(@src(), std.fmt.bufPrint(buf[0..100], "{s} {s} ({s})", .{ mb.font.family, mb.font.style, what }) catch "", .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
     }
     heading(@src(), "Set a style in it");

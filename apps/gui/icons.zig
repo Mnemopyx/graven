@@ -23,11 +23,12 @@ pub const Icon = enum {
     trash,
     plus_circle,
     text_aa,
-    text_italic,
     list_plus,
     selection_plus,
     paint_brush,
     magnet,
+    arrow_square_in,
+    magic_wand,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {

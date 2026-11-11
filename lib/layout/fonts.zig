@@ -106,6 +106,10 @@ const Resolver = struct {
         return id;
     }
 
+    fn optFace(s: *Resolver, font: ObjectId, want: ?FontName) Allocator.Error!?FaceId {
+        return if (want) |n| try s.face(font, n) else null;
+    }
+
     fn note(s: *Resolver, font: ObjectId, want: FontName, got: ?FontName) Allocator.Error!void {
         for (s.r.substitutions.items) |e| if (e.font == font and e.wanted.eql(want)) return;
         try s.r.substitutions.append(s.r.gpa, .{ .font = font, .wanted = want, .got = got });
@@ -135,8 +139,17 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
             // A member that cannot be found is left out: its characters
             // fall to the faces after it, and are reported if none has them.
             const up = (try s.face(cf.id, mb.font)) orelse continue;
-            const it = if (mb.italic) |n| try s.face(cf.id, n) else null;
-            try r.members.append(gpa, .{ .upright = up, .italic = it, .coverage = mb.coverage, .match = mb.match, .scale = mb.scale, .shift = mb.shift });
+            try r.members.append(gpa, .{
+                .upright = up,
+                .italic = try s.optFace(cf.id, mb.italic),
+                .bold = try s.optFace(cf.id, mb.bold),
+                .bold_italic = try s.optFace(cf.id, mb.bold_italic),
+                .alphabet = mb.alphabet,
+                .coverage = mb.coverage,
+                .match = mb.match,
+                .scale = mb.scale,
+                .shift = mb.shift,
+            });
             span.len += 1;
         }
     }
@@ -145,7 +158,14 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
         if (m.fontIndex(st.font)) |i| {
             const cf = m.fonts.items[i];
             spec.upright = (try s.face(cf.id, cf.main)) orelse 0;
-            spec.italic = if (cf.italic) |n| try s.face(cf.id, n) else null;
+            spec.italic = try s.optFace(cf.id, cf.italic);
+            spec.bold = try s.optFace(cf.id, cf.bold);
+            spec.bold_italic = try s.optFace(cf.id, cf.bold_italic);
+            // A variant found only as the regular face is no variant: the
+            // engine then reports what it lacks.
+            if (spec.italic == spec.upright) spec.italic = null;
+            if (spec.bold == spec.upright) spec.bold = null;
+            if (spec.bold_italic == spec.upright) spec.bold_italic = null;
             spec.members = r.members.items[span.start..][0..span.len];
         }
         try r.specs.append(gpa, spec);
@@ -222,6 +242,33 @@ test "a style set in a composed font gets its faces, members and all" {
     var render = try engine.renderLabel(testing.allocator, &ctx, "HxH", .{}, &diag);
     defer render.deinit();
     try testing.expectEqual(@as(?FaceId, spec.members[0].upright), render.elements[1].face);
+}
+
+test "a composed font's bold resolves to the family's bold face" {
+    var t = try TestFonts.init();
+    defer t.deinit();
+    var m: model.Model = .init(testing.allocator);
+    defer m.deinit();
+    const legend = try m.addStyle("Legend", .{ .upright = 0, .cap_height = 7 });
+    const f = try m.addFont("Legend", .{ .family = "Graven Test" });
+    // An italic the family lacks becomes its regular: no italic.
+    try m.setFontVariants(f, .{ .bold = .{ .family = "Graven Test", .style = "Bold" }, .italic = .{ .family = "Graven Test", .style = "Italic" } });
+    _ = try m.addFontMember(f, 0, .{ .font = .{ .family = "Graven Fallback" }, .alphabet = .double_struck });
+    try m.setStyleFont(legend, f);
+    var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
+    defer r.deinit();
+    const spec = r.specs.items[legend];
+    try testing.expectEqual(t.faces[1], r.faces.items[spec.bold.?]);
+    try testing.expectEqual(null, spec.italic);
+    try testing.expectEqual(null, spec.bold_italic);
+    try testing.expect(spec.members[0].alphabet == .double_struck);
+
+    const ctx = try engine.style.Context.init(r.faces.items, spec);
+    var diag: engine.markup.Diagnostic = undefined;
+    var render = try engine.renderLabel(testing.allocator, &ctx, "H\\textbf{H}\\mathbb{H}", .{}, &diag);
+    defer render.deinit();
+    try testing.expectEqual(spec.bold, render.elements[1].face);
+    try testing.expectEqual(@as(?FaceId, spec.members[0].upright), render.elements[2].face);
 }
 
 test "fonts not found as named are substituted and reported" {

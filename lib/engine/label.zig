@@ -19,6 +19,7 @@ const render = @import("render.zig");
 const style = @import("style.zig");
 const markup = @import("markup.zig");
 const entities = @import("entities.zig");
+const alphanum = @import("alphanum.zig");
 const shaping = @import("shape.zig");
 const Profile = @import("profile.zig").Profile;
 
@@ -227,7 +228,7 @@ const Builder = struct {
         @memcpy(out[0..take], atoms[0..take]);
         const src = try b.a.alloc(u32, 1);
         src[0] = at.node.line_break.span.start;
-        out[take] = .{ .node = .{ .text = .{ .utf8 = "-", .source = src, .variant = .text, .span = at.node.line_break.span } }, .start = 0, .end = 1, .class = .ord };
+        out[take] = .{ .node = .{ .text = .{ .utf8 = "-", .source = src, .variant = .{ .text = true }, .span = at.node.line_break.span } }, .start = 0, .end = 1, .class = .ord };
         return out;
     }
 
@@ -629,7 +630,7 @@ const Builder = struct {
     fn drawnGlyph(b: *Builder, cp: u21, span: markup.Span, body: Box, gap: f64, cap: f64, level: u8) Error!void {
         var buf: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
-        const face_id = b.ctx.faceFor(buf[0..n], false, true) orelse return b.diagnose(.missing_glyph, span.start);
+        const face_id = b.ctx.faceFor(buf[0..n], .{}, true) orelse return b.diagnose(.missing_glyph, span.start);
         const face = b.ctx.faces[face_id];
         const gid = face.glyph(cp).?;
         const s = try b.ctx.scaleFor(face_id, cap);
@@ -660,8 +661,18 @@ const Builder = struct {
     }
 
     /// Splits bytes `start..end` of a text node into elements by face,
-    /// cluster by cluster, then shapes and places each element.
-    fn text(b: *Builder, t: markup.Text, start: usize, end: usize, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+    /// cluster by cluster, then shapes and places each element. Letters
+    /// in a math alphabet no member sets, or (in math) bold or italic the
+    /// family lacks, become Unicode's mathematical characters first.
+    fn text(b: *Builder, t_in: markup.Text, start_in: usize, end_in: usize, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+        var t = t_in;
+        var start = start_in;
+        var end = end_in;
+        if (try b.remapped(t_in, start_in, end_in)) |r| {
+            t = r;
+            start = 0;
+            end = r.utf8.len;
+        }
         var pen = x;
         var i = start;
         var run_start = start;
@@ -679,18 +690,79 @@ const Builder = struct {
         if (run_face) |f| pen = try b.element(t, run_start, end, f, cap, level, pen, y);
         return pen;
     }
+
+    /// Whether letters of `t` are set italic.
+    fn italicLetters(b: *Builder, t: markup.Text) bool {
+        if (t.operator) return false;
+        return switch (t.variant.shape) {
+            .italic => true,
+            .upright => false,
+            .default => !t.variant.text and b.ctx.spec.letters == .italic,
+        };
+    }
+
+    /// Bytes `start..end` of `t` with letters and digits as Unicode's
+    /// mathematical alphanumerics, where that is how the variant asked for
+    /// is to be had: an alphabet no member sets, or in math a bold or
+    /// italic the main family lacks. Null when nothing changes. A letter
+    /// whose mathematical form no face has stays as it is (and an
+    /// alphabet asked for is reported).
+    fn remapped(b: *Builder, t: markup.Text, start: usize, end: usize) Error!?markup.Text {
+        const v = t.variant;
+        const italic = b.italicLetters(t);
+        const alphabet = v.alphabet != .normal and !b.ctx.hasAlphabet(v.alphabet);
+        const main = b.ctx.mainVariants();
+        const math = !v.text and !t.operator;
+        const weight = math and v.bold and main.bold == null;
+        const slant = math and italic and main.italic == null;
+        if (!alphabet and !weight and !slant) return null;
+
+        var utf8: std.ArrayList(u8) = .empty;
+        var source: std.ArrayList(u32) = .empty;
+        var changed = false;
+        var it = std.unicode.Utf8Iterator{ .bytes = t.utf8[start..end], .i = 0 };
+        while (true) {
+            const at = start + it.i;
+            const cp = it.nextCodepoint() orelse break;
+            const src = t.source[at];
+            const mapped: ?u21 = if (alphabet)
+                alphanum.remap(cp, v.alphabet, v.bold, italic) orelse alphanum.remap(cp, v.alphabet, false, false)
+            else
+                alphanum.remap(cp, .normal, v.bold and (weight or slant), italic and (slant or weight));
+            var out = cp;
+            if (mapped) |m| {
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(m, &buf) catch unreachable;
+                if (b.ctx.faceFor(buf[0..n], .{}, true) != null) {
+                    out = m;
+                } else if (alphabet) try b.diagnose(.no_alphabet, src);
+            }
+            if (out != cp) changed = true;
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(out, &buf) catch unreachable;
+            try utf8.appendSlice(b.a, buf[0..n]);
+            try source.appendNTimes(b.a, src, n);
+        }
+        if (!changed) return null;
+        var r = t;
+        r.utf8 = utf8.items;
+        r.source = source.items;
+        return r;
+    }
+
     /// The face for one cluster, as the composed font sets it (see
-    /// `style.Context.faceFor`): a member whose coverage takes it, else
-    /// the face its variant asks for, else the first fallback that has it,
-    /// else the asked-for face (whose .notdef is then drawn and reported).
+    /// `style.Context.faceFor`): a member setting its alphabet or whose
+    /// coverage takes it, else the main family's face for its weight and
+    /// slant, else the first fallback that has it, else that face (whose
+    /// .notdef is then drawn and reported).
     fn chooseFace(b: *Builder, t: markup.Text, cluster: []const u8) Error!FaceId {
         const first = firstCodepoint(cluster);
-        const italic = isLetter(first) and !t.operator and switch (t.variant) {
-            .italic => true,
-            .default => b.ctx.spec.letters == .italic,
-            .upright, .text => false,
-        };
-        return b.ctx.faceFor(cluster, italic, false).?;
+        const letter = isLetter(first);
+        return b.ctx.faceFor(cluster, .{
+            .italic = letter and b.italicLetters(t),
+            .bold = t.variant.bold,
+            .alphabet = if (letter or (first >= '0' and first <= '9')) t.variant.alphabet else .normal,
+        }, false).?;
     }
 
     fn element(b: *Builder, t: markup.Text, start: usize, end: usize, face_id: FaceId, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
@@ -701,8 +773,11 @@ const Builder = struct {
         const glyphs = try shaping.shape(b.a, face, t.utf8[start..end]);
         const element_id: u32 = @intCast(b.elements.items.len);
 
-        if (b.ctx.spec.italic == null and t.variant == .italic and isLetter(firstCodepoint(t.utf8[start..end])))
+        const first = firstCodepoint(t.utf8[start..end]);
+        if (b.ctx.spec.italic == null and t.variant.shape == .italic and isLetter(first))
             try b.diagnose(.no_italic, t.source[start]);
+        if (t.variant.bold and !b.ctx.isBold(face_id) and !isMathAlphanumeric(first) and !isSpace(first))
+            try b.diagnose(.no_bold, t.source[start]);
 
         var pen: f64 = 0;
         var ink = Box.empty;
@@ -759,6 +834,16 @@ fn clusterEnd(s: []const u8, i: usize) usize {
 }
 
 /// Latin and Greek letters: the ones a style may set italic.
+/// Unicode's mathematical alphanumerics, and the Letterlike Symbols that
+/// fill their holes: already bold, italic or of an alphabet.
+fn isMathAlphanumeric(cp: u21) bool {
+    return (cp >= 0x1D400 and cp <= 0x1D7FF) or (cp >= 0x2100 and cp <= 0x214F);
+}
+
+fn isSpace(cp: u21) bool {
+    return cp == ' ' or cp == 0xA0 or (cp >= 0x2000 and cp <= 0x200B) or cp == 0x202F;
+}
+
 fn isLetter(cp: u21) bool {
     return (cp >= 'A' and cp <= 'Z') or (cp >= 'a' and cp <= 'z') or
         (cp >= 0xC0 and cp <= 0x24F and cp != 0xD7 and cp != 0xF7) or
@@ -772,7 +857,7 @@ fn atomsOf(a: Allocator, n: markup.Node, out: *std.ArrayList(Atom)) !void {
     switch (n) {
         .text => |t| {
             if (t.operator) return out.append(a, .{ .node = n, .end = t.utf8.len, .class = .op });
-            if (t.variant == .text) return out.append(a, .{ .node = n, .end = t.utf8.len, .class = .ord });
+            if (t.variant.text) return out.append(a, .{ .node = n, .end = t.utf8.len, .class = .ord });
             var i: usize = 0;
             while (i < t.utf8.len) {
                 const next = clusterEnd(t.utf8, i);
@@ -803,7 +888,7 @@ fn nucleusClass(n: markup.Node) Class {
     return switch (n) {
         .text => |t| if (t.operator)
             .op
-        else if (t.variant != .text and clusterEnd(t.utf8, 0) == t.utf8.len)
+        else if (!t.variant.text and clusterEnd(t.utf8, 0) == t.utf8.len)
             clusterClass(firstCodepoint(t.utf8))
         else
             .ord,
@@ -1116,6 +1201,64 @@ test "letters follow the style's italic rule and explicit variants" {
     defer asked.deinit();
     try testing.expectEqual(@as(usize, 1), asked.diagnostics.len);
     try testing.expect(asked.diagnostics[0].kind == .no_italic);
+}
+
+test "bold picks the family's bold face, and is reported without one" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.bold = 1;
+    spec.italic = 2;
+    const ctx = try style.Context.init(&f.faces, spec);
+    var r = try renderTest(&ctx, "H\\textbf{H}\\textit{\\textbf{H}}");
+    defer r.deinit();
+    // No bold italic: bold italic falls back to bold.
+    try testing.expectEqual(@as(?FaceId, 0), r.elements[0].face);
+    try testing.expectEqual(@as(?FaceId, 1), r.elements[1].face);
+    try testing.expectEqual(@as(?FaceId, 1), r.elements[2].face);
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+    // Without a bold face, text stays regular and says so.
+    const plain = try style.Context.init(&f.faces, testSpec());
+    var asked = try renderTest(&plain, "\\textbf{H}");
+    defer asked.deinit();
+    try testing.expectEqual(@as(usize, 1), asked.diagnostics.len);
+    try testing.expect(asked.diagnostics[0].kind == .no_bold);
+}
+
+test "math bold and alphabets become Unicode's math characters where a face has them" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.members = &.{.{ .upright = 2 }};
+    const ctx = try style.Context.init(&f.faces, spec);
+
+    // No bold face: math bold H is U+1D407, which the fallback has.
+    var r = try renderTest(&ctx, "\\mathbf{H}\\mathbb{H}");
+    defer r.deinit();
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try testing.expectEqual(@as(?FaceId, 2), r.elements[0].face);
+    try testing.expectEqual(@as(?FaceId, 2), r.elements[1].face);
+    // Each still points at its own letter in the source.
+    try testing.expectEqual(@as(u32, 8), r.items[0].glyph.source);
+    try testing.expectEqual(@as(u32, 18), r.items[1].glyph.source);
+
+    // No face has double-struck D: it stays D, reported.
+    var d = try renderTest(&ctx, "\\mathbb{D}");
+    defer d.deinit();
+    try testing.expectEqual(@as(usize, 1), d.diagnostics.len);
+    try testing.expect(d.diagnostics[0].kind == .no_alphabet);
+    try testing.expectEqual(@as(?FaceId, 0), d.elements[0].face);
+
+    // A member that sets the alphabet takes its letters as they are.
+    var with_member = testSpec();
+    with_member.members = &.{.{ .upright = 1, .alphabet = .double_struck }};
+    const bb = try style.Context.init(&f.faces, with_member);
+    var m = try renderTest(&bb, "D\\mathbb{D}");
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 0), m.diagnostics.len);
+    try testing.expectEqual(@as(?FaceId, 0), m.elements[0].face);
+    try testing.expectEqual(@as(?FaceId, 1), m.elements[1].face);
 }
 
 test "missing glyphs and unrendered constructs are reported at their source" {
