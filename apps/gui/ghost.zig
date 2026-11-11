@@ -37,8 +37,11 @@ pub const Mode = enum { ghost, docked, hidden };
 pub const Look = struct {
     /// OKLCH hue, degrees.
     hue: f32,
-    /// The background's opacity while ghost, and the content's.
-    ghost_fill: f32 = 0.12,
+    /// The content's opacity while ghost.
+    /// How far a ghost's background sits from the paper (OKLab distance),
+    /// the same for every hue: a near-white wash at one opacity shows some
+    /// hues and hides others.
+    ghost_presence: f32 = 0.018,
     ghost_content: f32 = 0.55,
     /// The background's opacity while active or docked.
     active_fill: f32 = 0.72,
@@ -293,7 +296,8 @@ pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
     var t = theme(look, base);
     if (st == .uniform) return t;
     const h = look.hue;
-    const b = over(t.window.fill.?, look.ghost_fill, backdrop);
+    const gf = ghostFill(look);
+    const b = over(gf, @as(f32, @floatFromInt(gf.a)) / 255, backdrop);
     const pr = presence;
     // Text roles keep their colours.
     t.text = atPresence(t.text, pr.text, b);
@@ -345,9 +349,17 @@ fn paneBase(p: *const Pane, base: dvui.Theme) dvui.Theme {
     return b;
 }
 
+/// An inactive ghost's background: a tint of its hue at the opacity that
+/// sets it `ghost_presence` from the paper.
+pub fn ghostFill(look: Look) dvui.Color {
+    const l: f32 = 0.6;
+    return atPresence(oklch(l, 0.9 * maxChroma(l, look.hue), look.hue, 1), look.ghost_presence, backdrop);
+}
+
 pub fn fill(p: *const Pane) dvui.Color {
+    if (p.mode == .ghost and !p.active) return ghostFill(p.look);
     const t = theme(p.look, paneBase(p, dvui.themeGet()));
-    return t.window.fill.?.opacity(if (p.interactive()) p.look.active_fill else p.look.ghost_fill);
+    return t.window.fill.?.opacity(p.look.active_fill);
 }
 
 /// Sets the pane's theme for content drawn until `themePop`.
