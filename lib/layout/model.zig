@@ -51,6 +51,64 @@ pub const cap_per_em = 0.7;
 /// mm per point (1/72 in, as PostScript, PDF, OpenType and CSS have it).
 pub const mm_per_pt = 25.4 / 72.0;
 
+/// Where on an object's box its object origin is: low (left, bottom),
+/// middle or high (right, top), on each axis. Choosing it never moves the
+/// object; it says which point holds its position, and what a resize
+/// keeps in place.
+pub const Third = enum { low, mid, high };
+
+pub const OriginPoint = struct {
+    x: Third = .low,
+    y: Third = .low,
+};
+
+/// A feature of an object that constraints act on: an edge, a centre
+/// line, or the line through its object origin, on one axis. Points are
+/// pairs of these, one on each axis.
+pub const Feature = enum {
+    left,
+    centre_x,
+    right,
+    origin_x,
+    bottom,
+    centre_y,
+    top,
+    origin_y,
+
+    pub fn vertical(f: Feature) bool {
+        return @intFromEnum(f) >= @intFromEnum(Feature.bottom);
+    }
+};
+
+/// One end of a constraint: a feature of an object, or (object `.none`)
+/// of the parent the other end's object sits in: the space (its origin,
+/// and its boundary's edges when it has one) or the panel (its outline and
+/// its object origin, in its own frame).
+pub const ConstraintEnd = struct {
+    object: ObjectId = .none,
+    feature: Feature,
+};
+
+/// A parametric constraint: adding it, or changing its value, moves what
+/// it constrains (the object of end `a`; end `b` is the reference) to
+/// exactly where it says. Both ends' features are on one axis, and their
+/// objects share a parent (or `b` is that parent).
+pub const Constraint = struct {
+    id: ObjectId = .none,
+    kind: enum {
+        /// `a`'s feature lies `value` mm past `b`'s (right or up
+        /// positive); 0 aligns them. Two features of one object give it a
+        /// size (its right edge 40 mm past its left).
+        offset,
+        /// `a`'s size on the axis is `value` mm more than `b`'s; 0 makes
+        /// them equal.
+        equal_size,
+    } = .offset,
+    a: ConstraintEnd,
+    b: ConstraintEnd,
+    value: f64 = 0,
+};
+
 /// A paragraph style's index in `Model.paragraph_styles`.
 pub const ParaId = u16;
 
@@ -338,6 +396,9 @@ pub const TileRegion = struct {
     /// mm per u.
     pitch: f64,
     major: Major = .row,
+    /// Its object origin on its soft area; by default the top-left corner,
+    /// where `origin` is.
+    holds: OriginPoint = .{ .y = .high },
     /// The kind of tile it was made for: what new tiles in it are.
     prototype: ?PrototypeId = null,
     /// The text style it was sized to, if any: its segments are one line
@@ -451,6 +512,8 @@ pub const PanelArt = struct {
     wrap_tracks: bool = true,
     /// Space kept between it and the content flowing around it, mm.
     clearance: f64 = 1,
+    /// Its object origin on its shapes' bounds.
+    holds: OriginPoint = .{},
     /// The primitive it was drawn as, if any (so a corner radius can be
     /// changed).
     prim: art_.Primitive = .free,
@@ -548,6 +611,8 @@ pub const Image = struct {
     /// Its size, mm.
     w: f64,
     h: f64,
+    /// Its object origin on its box.
+    holds: OriginPoint = .{},
     /// Its pixels.
     px_w: u32,
     px_h: u32,
@@ -652,6 +717,8 @@ pub const Panel = struct {
     /// Ink keep-out bands inside the panel's edges, mm: its ink area is the
     /// outline less these. 5 mm on each side until the user sets them.
     margins: Sides = .all(5),
+    /// Its object origin on its outline.
+    holds: OriginPoint = .{},
     default_margins: bool = true,
     /// The closed path its outline was made from (Make panel), in the
     /// panel frame, its box from (0, 0) to (w, h); none for a rectangle.
@@ -905,10 +972,12 @@ pub const Model = struct {
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
     /// The document's composed fonts, which styles reference.
     fonts: std.ArrayList(ComposedFont) = .empty,
+    /// Parametric constraints on objects' features (see `constrain`).
+    constraints: std.ArrayList(Constraint) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -2367,6 +2436,68 @@ pub const Model = struct {
         if (!(indent > 0)) return 1;
         _ = try m.insertBlank(panel, region, index + 1, indent);
         return 2;
+    }
+
+    // Constraints -----------------------------------------------------------
+
+    /// Adds constraint `c` (its ends checked: one axis, objects that
+    /// exist). The history then solves, moving what it constrains into
+    /// place. Returns its ID.
+    pub fn addConstraint(m: *Model, c: Constraint) Error!ObjectId {
+        if (c.a.object == .none) return error.BadConstraint;
+        if (c.a.feature.vertical() != c.b.feature.vertical()) return error.BadConstraint;
+        if (!std.math.isFinite(c.value)) return error.BadConstraint;
+        var out = c;
+        out.id = m.newId();
+        try m.constraints.append(m.a(), out);
+        m.revision += 1;
+        return out.id;
+    }
+
+    fn constraintIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.constraints.items, 0..) |c, i| if (c.id == id) return i;
+        return null;
+    }
+
+    /// Sets constraint `id`'s value: what it constrains moves to match.
+    pub fn setConstraintValue(m: *Model, id: ObjectId, value: f64) Error!void {
+        if (!std.math.isFinite(value)) return error.BadConstraint;
+        const i = m.constraintIndex(id) orelse return error.NoSuchObject;
+        m.constraints.items[i].value = value;
+        m.revision += 1;
+    }
+
+    pub fn removeConstraint(m: *Model, id: ObjectId) Error!void {
+        const i = m.constraintIndex(id) orelse return error.NoSuchObject;
+        _ = m.constraints.orderedRemove(i);
+        m.revision += 1;
+    }
+
+    /// Designates object `id`'s object origin. Nothing moves.
+    pub fn setObjectOrigin(m: *Model, id: ObjectId, at: OriginPoint) Error!void {
+        for (m.panels.items) |*p| {
+            if (p.id == id) {
+                p.holds = at;
+                m.revision += 1;
+                return;
+            }
+            for (p.regions.items) |*r| if (r.id == id) {
+                r.holds = at;
+                m.revision += 1;
+                return;
+            };
+            for (p.art.items) |*x| if (x.id == id) {
+                x.holds = at;
+                m.revision += 1;
+                return;
+            };
+        }
+        for (m.spaces.items) |*s| for (s.images.items) |*im| if (im.id == id) {
+            im.holds = at;
+            m.revision += 1;
+            return;
+        };
+        return error.NoSuchObject;
     }
 
     // Paragraphs ------------------------------------------------------------

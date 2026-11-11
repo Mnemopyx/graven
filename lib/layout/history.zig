@@ -24,6 +24,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const native = @import("native.zig");
+const constrain = @import("constrain.zig");
 const Model = model.Model;
 const Allocator = std.mem.Allocator;
 
@@ -47,7 +48,7 @@ pub const actions = [_][:0]const u8{
     "addFont",           "renameFont",         "setFontMain",         "addFontMember",      "setFontMember",
     "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
     "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
-    "setEmSize",
+    "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -95,8 +96,14 @@ pub const Op = blk: {
 
 pub const Error = Model.Error || native.Error;
 
-/// Applies op `op` to `m`.
+/// Applies op `op` to `m`, then solves its constraints, so what they
+/// constrain follows (see `constrain`).
 pub fn apply(m: *Model, op: Op) Error!void {
+    try applyOnly(m, op);
+    try constrain.solve(m, m.arena.child_allocator, null);
+}
+
+fn applyOnly(m: *Model, op: Op) Error!void {
     switch (op) {
         .snapshot => |bytes| {
             const next = try native.decode(m.arena.child_allocator, bytes);
@@ -266,6 +273,8 @@ pub const History = struct {
         const f = @field(Model, @tagName(tag));
         const R = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
         const result = if (@typeInfo(R) == .error_union) try @call(.auto, f, .{m} ++ args) else @call(.auto, f, .{m} ++ args);
+        // What constraints hold follows, as replaying the op does.
+        try constrain.solve(m, h.gpa, null);
         // The arguments, copied: what the caller passed may not outlive it.
         const bytes = try native.encodeValue(h.gpa, Args(@tagName(tag)), args);
         defer h.gpa.free(bytes);

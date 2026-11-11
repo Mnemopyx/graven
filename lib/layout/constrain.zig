@@ -1,0 +1,616 @@
+//! Parametric constraints: solving them, and checking them.
+//!
+//! An object's features are linear in two numbers per axis: where its
+//! object origin is (`o`) and how big it is (`s`). With its origin a
+//! fraction `f` across it (0 at its low edge, ½ at its middle, 1 at its
+//! high edge), its low edge is at o − f·s, its high edge at o + (1 − f)·s,
+//! its centre at o + (½ − f)·s, and its origin at o. So every constraint
+//! (a feature at a distance from another, equal sizes) is one linear
+//! equation in one axis, and the axes solve apart.
+//!
+//! Constraints hold exactly. Within them, things move as little as they
+//! can, and what a constraint was applied to (its end `a`) moves before
+//! what it refers to (`b`, or the parent, which never moves for its
+//! children): each object's origin and size are weighted by how far they
+//! may give, sizes giving less than positions, so a constrained object
+//! moves rather than stretches unless two of its edges are held apart.
+//! A resize keeps the origin where it is.
+//!
+//! Solving runs after every action (see `history.apply`), so adding a
+//! constraint, changing its value, or moving something it relies on moves
+//! what it constrains into place. A constraint that contradicts those
+//! before it, or cannot be met (an end missing, a parent with no edges),
+//! is left out and flagged.
+
+const std = @import("std");
+const geom = @import("graven_engine").geom;
+const model = @import("model.zig");
+const native = @import("native.zig");
+
+const Allocator = std.mem.Allocator;
+const Model = model.Model;
+const ObjectId = model.ObjectId;
+const Feature = model.Feature;
+
+pub const Issue = struct {
+    constraint: ObjectId,
+    kind: enum {
+        /// An end names an object that is not there (removed, say).
+        missing_object,
+        /// Its ends' objects are in different parents.
+        cross_parent,
+        /// It refers to its parent's edges, and the parent has none (an
+        /// unbounded canvas or frame).
+        no_parent_edge,
+        /// Its ends are on different axes.
+        mixed_axes,
+        /// It contradicts constraints before it: left out.
+        conflict,
+        /// Meeting it turns its object inside out (a negative size).
+        inverted,
+    },
+};
+
+/// Where an object is, and what it is.
+const Kind = enum { panel, region, label, art, image };
+const Parent = union(enum) { space: usize, panel: usize };
+
+const Loc = struct {
+    kind: Kind,
+    parent: Parent,
+    /// Panel index (panels, and things in panels), or space index (images).
+    holder: usize,
+    index: usize = 0,
+};
+
+fn locate(m: *const Model, id: ObjectId) ?Loc {
+    if (id == .none) return null;
+    for (m.panels.items, 0..) |p, pi| {
+        if (p.id == id) return if (p.unbounded) null else .{ .kind = .panel, .parent = .{ .space = p.space }, .holder = pi };
+        for (p.regions.items, 0..) |r, k| if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
+        for (p.labels.items, 0..) |l, k| if (l.id == id) return .{ .kind = .label, .parent = .{ .panel = pi }, .holder = pi, .index = k };
+        for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = .{ .panel = pi }, .holder = pi, .index = k };
+    }
+    for (m.spaces.items, 0..) |s, si| for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
+    return null;
+}
+
+fn parentEql(a: Parent, b: Parent) bool {
+    return switch (a) {
+        .space => |s| b == .space and b.space == s,
+        .panel => |p| b == .panel and b.panel == p,
+    };
+}
+
+/// An object's extent on one axis, where its origin is across it, and
+/// whether it may be resized.
+const Shape = struct { lo: f64, hi: f64, f: f64, resizable: bool };
+
+fn frac(t: model.Third) f64 {
+    return switch (t) {
+        .low => 0,
+        .mid => 0.5,
+        .high => 1,
+    };
+}
+
+fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
+    const pick = struct {
+        fn f(b: geom.Box, holds: model.OriginPoint, v: bool, resizable: bool) Shape {
+            return if (v)
+                .{ .lo = b.y0, .hi = b.y1, .f = frac(holds.y), .resizable = resizable }
+            else
+                .{ .lo = b.x0, .hi = b.x1, .f = frac(holds.x), .resizable = resizable };
+        }
+    }.f;
+    const p = &m.panels.items[loc.holder];
+    return switch (loc.kind) {
+        .panel => pick(p.box(), p.holds, vertical, true),
+        .region => blk: {
+            const r = p.regions.items[loc.index];
+            break :blk pick(r.softArea(), r.holds, vertical, true);
+        },
+        .label => blk: {
+            const at = p.labels.items[loc.index].at;
+            const v = if (vertical) at.y else at.x;
+            break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
+        },
+        .art => blk: {
+            const x = p.art.items[loc.index];
+            var b = x.box();
+            if (b.isEmpty()) b = .{ .x0 = x.at.x, .y0 = x.at.y, .x1 = x.at.x, .y1 = x.at.y };
+            break :blk pick(b, x.holds, vertical, false);
+        },
+        .image => blk: {
+            const im = m.spaces.items[loc.holder].images.items[loc.index];
+            break :blk pick(im.box(), im.holds, vertical, true);
+        },
+    };
+}
+
+/// Moves object `loc` on one axis so its origin is at `o` and its size
+/// `s`.
+fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
+    const sh = shapeOf(m, loc, vertical);
+    const lo = o - sh.f * s;
+    const p = &m.panels.items[loc.holder];
+    switch (loc.kind) {
+        .panel => if (vertical) {
+            p.origin.y = lo;
+            p.h = s;
+        } else {
+            p.origin.x = lo;
+            p.w = s;
+        },
+        .region => {
+            const r = &p.regions.items[loc.index];
+            if (vertical) {
+                r.origin.y = lo + s;
+                r.h = s / r.pitch;
+            } else {
+                r.origin.x = lo;
+                r.w = s / r.pitch;
+            }
+        },
+        .label => {
+            const l = &p.labels.items[loc.index];
+            if (vertical) l.at.y = o else l.at.x = o;
+        },
+        .art => {
+            const x = &p.art.items[loc.index];
+            if (vertical) x.at.y += lo - sh.lo else x.at.x += lo - sh.lo;
+        },
+        .image => {
+            const im = &m.spaces.items[loc.holder].images.items[loc.index];
+            if (vertical) {
+                im.at.y = lo;
+                im.h = s;
+            } else {
+                im.at.x = lo;
+                im.w = s;
+            }
+        },
+    }
+}
+
+/// A feature of a parent, in the frame its children are placed in; null
+/// for an edge of an unbounded space.
+fn parentFeature(m: *const Model, parent: Parent, f: Feature) ?f64 {
+    const space_bound = struct {
+        fn of(mm: *const Model, si: usize) ?geom.Box {
+            return if (si < mm.spaces.items.len) mm.spaces.items[si].bound else null;
+        }
+    }.of;
+    var bound: ?geom.Box = null;
+    var holds: model.OriginPoint = .{};
+    switch (parent) {
+        .space => |si| bound = space_bound(m, si),
+        .panel => |pi| {
+            const p = m.panels.items[pi];
+            if (p.unbounded) {
+                bound = space_bound(m, p.space);
+            } else {
+                bound = .{ .x0 = 0, .y0 = 0, .x1 = p.w, .y1 = p.h };
+                holds = p.holds;
+            }
+        },
+    }
+    if (f == .origin_x or f == .origin_y) {
+        const b = bound orelse return 0;
+        // A space's origin is its coordinates' origin; a panel's is its
+        // object origin, in its own frame.
+        if (parent == .space or m.panels.items[parent.panel].unbounded) return 0;
+        return if (f == .origin_x) b.x0 + frac(holds.x) * b.width() else b.y0 + frac(holds.y) * b.height();
+    }
+    const b = bound orelse return null;
+    return switch (f) {
+        .left => b.x0,
+        .right => b.x1,
+        .centre_x => (b.x0 + b.x1) / 2,
+        .bottom => b.y0,
+        .top => b.y1,
+        .centre_y => (b.y0 + b.y1) / 2,
+        .origin_x, .origin_y => unreachable,
+    };
+}
+
+/// A feature as a multiple of an object's size away from its origin.
+fn sizeCoeff(f: Feature, at: f64) f64 {
+    return switch (f) {
+        .left, .bottom => -at,
+        .right, .top => 1 - at,
+        .centre_x, .centre_y => 0.5 - at,
+        .origin_x, .origin_y => 0,
+    };
+}
+
+/// Solves every constraint, moving and resizing objects to meet them;
+/// appends what cannot be met to `issues` when given. Spaces' panels are
+/// solved before what is in the panels, so children follow a resized
+/// panel.
+pub fn solve(m: *Model, gpa: Allocator, issues: ?*std.ArrayList(Issue)) Allocator.Error!void {
+    if (m.constraints.items.len == 0) return;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Each constraint's parent, or why it has none.
+    const parents = try a.alloc(?Parent, m.constraints.items.len);
+    for (m.constraints.items, parents) |c, *par| {
+        par.* = null;
+        const la = locate(m, c.a.object) orelse {
+            try note(gpa, issues, c.id, .missing_object);
+            continue;
+        };
+        if (c.a.feature.vertical() != c.b.feature.vertical()) {
+            try note(gpa, issues, c.id, .mixed_axes);
+            continue;
+        }
+        if (c.b.object != .none) {
+            const lb = locate(m, c.b.object) orelse {
+                try note(gpa, issues, c.id, .missing_object);
+                continue;
+            };
+            if (!parentEql(la.parent, lb.parent)) {
+                try note(gpa, issues, c.id, .cross_parent);
+                continue;
+            }
+        } else if (c.kind == .offset and parentFeature(m, la.parent, c.b.feature) == null) {
+            try note(gpa, issues, c.id, .no_parent_edge);
+            continue;
+        }
+        par.* = la.parent;
+    }
+
+    // Spaces first, then panels.
+    for ([_]bool{ true, false }) |spaces| {
+        var done: std.ArrayList(Parent) = .empty;
+        for (parents) |par| {
+            const p = par orelse continue;
+            if ((p == .space) != spaces) continue;
+            const seen = for (done.items) |d| {
+                if (parentEql(d, p)) break true;
+            } else false;
+            if (seen) continue;
+            try done.append(a, p);
+            for ([_]bool{ false, true }) |vertical| try solveAxis(m, gpa, a, issues, parents, p, vertical);
+        }
+    }
+}
+
+fn note(gpa: Allocator, issues: ?*std.ArrayList(Issue), id: ObjectId, kind: @FieldType(Issue, "kind")) Allocator.Error!void {
+    if (issues) |list| try list.append(gpa, .{ .constraint = id, .kind = kind });
+}
+
+/// The constraints of one parent on one axis.
+fn solveAxis(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Issue), parents: []const ?Parent, parent: Parent, vertical: bool) Allocator.Error!void {
+    // The objects involved, each with its origin and size as unknowns
+    // (a size only when the object may be resized).
+    const Obj = struct { id: ObjectId, loc: Loc, shape: Shape, o_var: usize, s_var: ?usize };
+    var objs: std.ArrayList(Obj) = .empty;
+    var nvars: usize = 0;
+    var rows_c: std.ArrayList(usize) = .empty;
+    // What constraints are applied to (their `a` ends) may move; what they
+    // only refer to stays, so it is no unknown at all.
+    var driven: std.ArrayList(ObjectId) = .empty;
+    for (m.constraints.items, parents, 0..) |c, par, ci| {
+        const p = par orelse continue;
+        if (!parentEql(p, parent) or c.a.feature.vertical() != vertical) continue;
+        try rows_c.append(a, ci);
+        try driven.append(a, c.a.object);
+    }
+    for (rows_c.items) |ci| {
+        const c = m.constraints.items[ci];
+        for ([_]model.ConstraintEnd{ c.a, c.b }) |end| {
+            if (end.object == .none) continue;
+            if (std.mem.indexOfScalar(ObjectId, driven.items, end.object) == null) continue;
+            const known = for (objs.items) |o| {
+                if (o.id == end.object) break true;
+            } else false;
+            if (!known) {
+                const loc = locate(m, end.object).?;
+                const sh = shapeOf(m, loc, vertical);
+                const o_var = nvars;
+                nvars += 1;
+                const s_var: ?usize = if (sh.resizable) v: {
+                    nvars += 1;
+                    break :v nvars - 1;
+                } else null;
+                try objs.append(a, .{ .id = end.object, .loc = loc, .shape = sh, .o_var = o_var, .s_var = s_var });
+            }
+        }
+    }
+    if (rows_c.items.len == 0) return;
+
+    // Where things are now, and how freely each unknown may give.
+    const v0 = try a.alloc(f64, nvars);
+    const weight = try a.alloc(f64, nvars);
+    for (objs.items) |o| {
+        const s0 = o.shape.hi - o.shape.lo;
+        v0[o.o_var] = o.shape.lo + o.shape.f * s0;
+        weight[o.o_var] = 1;
+        if (o.s_var) |sv| {
+            v0[sv] = s0;
+            // Resizing gives less than moving.
+            weight[sv] = 1e3;
+        }
+    }
+    const objIndex = struct {
+        fn f(list: []const Obj, id: ObjectId) ?usize {
+            for (list, 0..) |o, i| if (o.id == id) return i;
+            return null;
+        }
+    }.f;
+
+    // One row per constraint: coefficients over the unknowns, and what
+    // they must come to.
+    const Row = struct { coef: []f64, rhs: f64, ci: usize };
+    var rows: std.ArrayList(Row) = .empty;
+    for (rows_c.items) |ci| {
+        const c = m.constraints.items[ci];
+        const coef = try a.alloc(f64, nvars);
+        @memset(coef, 0);
+        var rhs = c.value;
+        for ([_]model.ConstraintEnd{ c.a, c.b }, [_]f64{ 1, -1 }) |end, sign| {
+            if (end.object == .none) {
+                // The parent: a constant (its size, 0, for equal_size).
+                if (c.kind == .offset) rhs -= sign * parentFeature(m, parent, end.feature).?;
+                continue;
+            }
+            const o = objs.items[objIndex(objs.items, end.object) orelse {
+                // A reference: its feature, or size, as it is.
+                const sh = shapeOf(m, locate(m, end.object).?, vertical);
+                const size = sh.hi - sh.lo;
+                const at = sh.lo + sh.f * size;
+                rhs -= sign * switch (c.kind) {
+                    .offset => at + sizeCoeff(end.feature, sh.f) * size,
+                    .equal_size => size,
+                };
+                continue;
+            }];
+            const s0 = o.shape.hi - o.shape.lo;
+            switch (c.kind) {
+                .offset => {
+                    coef[o.o_var] += sign;
+                    const g = sizeCoeff(end.feature, o.shape.f);
+                    if (o.s_var) |sv| coef[sv] += sign * g else rhs -= sign * g * s0;
+                },
+                .equal_size => if (o.s_var) |sv| {
+                    coef[sv] += sign;
+                } else {
+                    rhs -= sign * s0;
+                },
+            }
+        }
+        try rows.append(a, .{ .coef = coef, .rhs = rhs, .ci = ci });
+    }
+
+    // Keep the rows that add something; flag those that contradict the
+    // ones before them (and drop those that only repeat them).
+    var basis: std.ArrayList(struct { coef: []f64, rhs: f64, pivot: usize }) = .empty;
+    var kept: std.ArrayList(Row) = .empty;
+    for (rows.items) |row| {
+        const r = try a.dupe(f64, row.coef);
+        var rhs = row.rhs;
+        for (basis.items) |b| {
+            const k = r[b.pivot] / b.coef[b.pivot];
+            if (k == 0) continue;
+            for (r, b.coef) |*x, y| x.* -= k * y;
+            rhs -= k * b.rhs;
+        }
+        var pivot: usize = 0;
+        var best: f64 = 0;
+        for (r, 0..) |x, i| if (@abs(x) > best) {
+            best = @abs(x);
+            pivot = i;
+        };
+        if (best < 1e-9) {
+            if (@abs(rhs) > 1e-6) try note(gpa, issues, m.constraints.items[row.ci].id, .conflict);
+            continue;
+        }
+        try basis.append(a, .{ .coef = r, .rhs = rhs, .pivot = pivot });
+        try kept.append(a, row);
+    }
+    const n = kept.items.len;
+    if (n == 0) return;
+
+    // The least weighted change meeting them all: v = v0 + W⁻¹Aᵀλ, where
+    // (A W⁻¹ Aᵀ) λ = b − A v0.
+    const mat = try a.alloc(f64, n * n);
+    const lam = try a.alloc(f64, n);
+    for (kept.items, 0..) |ri, i| {
+        var av0: f64 = 0;
+        for (ri.coef, v0) |c, v| av0 += c * v;
+        lam[i] = ri.rhs - av0;
+        for (kept.items, 0..) |rj, j| {
+            var sum: f64 = 0;
+            for (ri.coef, rj.coef, weight) |x, y, w| sum += x * y / w;
+            mat[i * n + j] = sum;
+        }
+    }
+    if (!gaussSolve(mat, lam, n)) return;
+    const v = try a.dupe(f64, v0);
+    for (kept.items, lam) |row, l| for (row.coef, 0..) |c, k| {
+        v[k] += c * l / weight[k];
+    };
+
+    for (objs.items) |o| {
+        const s = if (o.s_var) |sv| v[sv] else o.shape.hi - o.shape.lo;
+        if (s < -1e-9) {
+            for (kept.items) |row| {
+                const c = m.constraints.items[row.ci];
+                if (c.a.object == o.id or c.b.object == o.id) try note(gpa, issues, c.id, .inverted);
+            }
+        }
+        place(m, o.loc, vertical, v[o.o_var], s);
+    }
+}
+
+/// Solves `mat` x = `rhs` in place (x in `rhs`), with partial pivoting.
+/// False when singular.
+fn gaussSolve(mat: []f64, rhs: []f64, n: usize) bool {
+    for (0..n) |col| {
+        var piv = col;
+        for (col + 1..n) |r| if (@abs(mat[r * n + col]) > @abs(mat[piv * n + col])) {
+            piv = r;
+        };
+        if (@abs(mat[piv * n + col]) < 1e-15) return false;
+        if (piv != col) {
+            for (0..n) |k| std.mem.swap(f64, &mat[col * n + k], &mat[piv * n + k]);
+            std.mem.swap(f64, &rhs[col], &rhs[piv]);
+        }
+        for (col + 1..n) |r| {
+            const f = mat[r * n + col] / mat[col * n + col];
+            if (f == 0) continue;
+            for (col..n) |k| mat[r * n + k] -= f * mat[col * n + k];
+            rhs[r] -= f * rhs[col];
+        }
+    }
+    var i = n;
+    while (i > 0) {
+        i -= 1;
+        var sum = rhs[i];
+        for (i + 1..n) |k| sum -= mat[i * n + k] * rhs[k];
+        rhs[i] = sum / mat[i * n + i];
+    }
+    return true;
+}
+
+/// What cannot be met, without moving anything: solves a copy.
+pub fn check(m: *const Model, gpa: Allocator) ![]Issue {
+    var issues: std.ArrayList(Issue) = .empty;
+    errdefer issues.deinit(gpa);
+    if (m.constraints.items.len == 0) return issues.toOwnedSlice(gpa);
+    const bytes = try native.encode(gpa, m);
+    defer gpa.free(bytes);
+    var copy = try native.decode(gpa, bytes);
+    defer copy.deinit();
+    try solve(&copy, gpa, &issues);
+    return issues.toOwnedSlice(gpa);
+}
+
+// Tests ---------------------------------------------------------------------------
+
+const testing = std.testing;
+const history = @import("history.zig");
+
+fn labelAt(m: *const Model, p: usize, i: usize) geom.Point {
+    return m.panels.items[p].labels.items[i].at;
+}
+
+test "a constraint moves what it constrains, exactly, and keeps it there" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    const c = try m.startCanvas(.mm);
+    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    // Two labels placed roughly.
+    _ = try m.addLabel(c, .{ .at = .{ .x = 10.3, .y = 20.7 }, .style = style, .content = "A" });
+    _ = try m.addLabel(c, .{ .at = .{ .x = 31.9, .y = 18.2 }, .style = style, .content = "B" });
+    try h.reset(&m);
+    const a_id = m.panels.items[c].labels.items[0].id;
+    const b_id = m.panels.items[c].labels.items[1].id;
+
+    // B exactly 25 mm right of A, and on its baseline: B moves, A stays.
+    const dx = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b_id, .feature = .origin_x }, .b = .{ .object = a_id, .feature = .origin_x }, .value = 25 }});
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b_id, .feature = .origin_y }, .b = .{ .object = a_id, .feature = .origin_y } }});
+    try testing.expectApproxEqAbs(@as(f64, 35.3), labelAt(&m, c, 1).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20.7), labelAt(&m, c, 1).y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10.3), labelAt(&m, c, 0).x, 1e-9);
+
+    // A changed value moves B; moving A takes B along.
+    try h.do(&m, .setConstraintValue, .{ dx, 40 });
+    try testing.expectApproxEqAbs(@as(f64, 50.3), labelAt(&m, c, 1).x, 1e-9);
+    try h.do(&m, .moveLabel, .{ c, 0, geom.Point{ .x = 0, .y = 5 } });
+    try testing.expectApproxEqAbs(@as(f64, 40), labelAt(&m, c, 1).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), labelAt(&m, c, 1).y, 1e-9);
+    // Moving B by hand: its constrained axes hold.
+    try h.do(&m, .moveLabel, .{ c, 1, geom.Point{ .x = 70, .y = 70 } });
+    try testing.expectApproxEqAbs(@as(f64, 40), labelAt(&m, c, 1).x, 1e-9);
+
+    // Undo takes the step back, as it was.
+    _ = try h.undo(&m);
+    try testing.expectApproxEqAbs(@as(f64, 40), labelAt(&m, c, 1).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), labelAt(&m, c, 1).y, 1e-9);
+}
+
+test "sizes change about the origin, follow a resized parent, and conflicts are flagged" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    const c = try m.startCanvas(.mm);
+    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 60 });
+    const style = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const r = try m.addTracks(p, .{ .name = "t", .origin = .{ .x = 9, .y = 52 }, .style = style, .count = 4, .length = 10, .pitch = 5 });
+    _ = c;
+    try h.reset(&m);
+    const pid = m.panels.items[p].id;
+    const rid = m.panels.items[p].regions.items[r].id;
+
+    // The panel's origin at its centre: a width of 120 grows both ways.
+    try h.do(&m, .setObjectOrigin, .{ pid, model.OriginPoint{ .x = .mid, .y = .mid } });
+    const w = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = pid, .feature = .right }, .b = .{ .object = pid, .feature = .left }, .value = 120 }});
+    const pb = m.panels.items[p].box();
+    try testing.expectApproxEqAbs(@as(f64, -10), pb.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 110), pb.x1, 1e-9);
+
+    // The track 10 mm in from the panel's left and right: placed and
+    // sized exactly, and following the panel when it is resized.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .left }, .b = .{ .feature = .left }, .value = 10 }});
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .right }, .b = .{ .feature = .right }, .value = -10 }});
+    var area = m.panels.items[p].regions.items[r].softArea();
+    try testing.expectApproxEqAbs(@as(f64, 10), area.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 110), area.x1, 1e-9);
+    try h.do(&m, .setConstraintValue, .{ w, 150 });
+    area = m.panels.items[p].regions.items[r].softArea();
+    try testing.expectApproxEqAbs(@as(f64, 140), area.x1, 1e-9);
+    // Its top did not move: nothing held it, and it was not in the way.
+    try testing.expectApproxEqAbs(@as(f64, 52), area.y1, 1e-9);
+
+    // A third rule on the same edge, disagreeing: flagged, left out.
+    const bad = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .left }, .b = .{ .feature = .left }, .value = 30 }});
+    try testing.expectApproxEqAbs(@as(f64, 10), m.panels.items[p].regions.items[r].softArea().x0, 1e-9);
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(1, issues.len);
+    try testing.expectEqual(bad, issues[0].constraint);
+    try testing.expect(issues[0].kind == .conflict);
+
+    // The canvas has no edges to refer to.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = pid, .feature = .top }, .b = .{ .feature = .top } }});
+    const more = try check(&m, gpa);
+    defer gpa.free(more);
+    try testing.expectEqual(2, more.len);
+    try testing.expect(more[0].kind == .no_parent_edge or more[1].kind == .no_parent_edge);
+}
+
+test "peers: equal sizes, and the reference stays" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const p1 = try m.placePanel(.{ .name = "A", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 });
+    const p2 = try m.placePanel(.{ .name = "B", .space = 0, .origin = .{ .x = 70, .y = 3 }, .w = 41, .h = 22 });
+    try h.reset(&m);
+    const a = m.panels.items[p1].id;
+    const b = m.panels.items[p2].id;
+    // B as wide and tall as A, its bottom on A's.
+    _ = try h.do(&m, .addConstraint, .{.{ .kind = .equal_size, .a = .{ .object = b, .feature = .left }, .b = .{ .object = a, .feature = .left } }});
+    _ = try h.do(&m, .addConstraint, .{.{ .kind = .equal_size, .a = .{ .object = b, .feature = .bottom }, .b = .{ .object = a, .feature = .bottom } }});
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b, .feature = .bottom }, .b = .{ .object = a, .feature = .bottom } }});
+    const pb = m.panels.items[p2];
+    try testing.expectApproxEqAbs(@as(f64, 50), pb.w, 1e-6);
+    try testing.expectApproxEqAbs(@as(f64, 30), pb.h, 1e-6);
+    try testing.expectApproxEqAbs(@as(f64, 0), pb.origin.y, 1e-6);
+    // Its origin (bottom-left) stayed: it grew up and right.
+    try testing.expectApproxEqAbs(@as(f64, 70), pb.origin.x, 1e-6);
+    // A, the reference, is as it was.
+    try testing.expectApproxEqAbs(@as(f64, 50), m.panels.items[p1].w, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), m.panels.items[p1].origin.y, 1e-9);
+}
