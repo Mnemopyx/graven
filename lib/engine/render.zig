@@ -215,15 +215,39 @@ pub const Render = struct {
     /// go with the piece their source is in; syntax with the first piece.
     pub fn piece(self: *const Render, a: Allocator, after: ?u32, before: ?u32) Allocator.Error!Render {
         const ops = self.opportunities;
-        const item0: u32 = if (after) |k| ops[k].item1 else 0;
-        const elem0: u32 = if (after) |k| ops[k].elem1 else 0;
-        const item1: u32 = if (before) |k| ops[k].item0 else @intCast(self.items.len);
-        const elem1: u32 = if (before) |k| ops[k].elem0 else @intCast(self.elements.len);
         // The first piece keeps the render's frame and its design's start.
-        const x0: f64 = if (after) |k| ops[k].x1 else 0;
-        const x1: f64 = if (before) |k| ops[k].x0 else self.design.x1;
-        const src0: u32 = if (after) |k| ops[k].end else 0;
-        const src1: u32 = if (before) |k| ops[k].start else std.math.maxInt(u32);
+        return self.slice(a, .{
+            .item0 = if (after) |k| ops[k].item1 else 0,
+            .elem0 = if (after) |k| ops[k].elem1 else 0,
+            .item1 = if (before) |k| ops[k].item0 else @intCast(self.items.len),
+            .elem1 = if (before) |k| ops[k].elem0 else @intCast(self.elements.len),
+            .x0 = if (after) |k| ops[k].x1 else 0,
+            .x1 = if (before) |k| ops[k].x0 else self.design.x1,
+            .src0 = if (after) |k| ops[k].end else 0,
+            .src1 = if (before) |k| ops[k].start else std.math.maxInt(u32),
+            .first = after == null,
+        });
+    }
+
+    /// The space of break opportunity `k` alone (drawn only where it is
+    /// decorated: an underline runs on under it), moved to start at x 0.
+    pub fn spacePiece(self: *const Render, a: Allocator, k: u32) Allocator.Error!Render {
+        const o = self.opportunities[k];
+        return self.slice(a, .{ .item0 = o.item0, .elem0 = o.elem0, .item1 = o.item1, .elem1 = o.elem1, .x0 = o.x0, .x1 = o.x1, .src0 = o.start, .src1 = o.end, .first = false });
+    }
+
+    const Slice = struct { item0: u32, elem0: u32, item1: u32, elem1: u32, x0: f64, x1: f64, src0: u32, src1: u32, first: bool };
+
+    fn slice(self: *const Render, a: Allocator, sl: Slice) Allocator.Error!Render {
+        const item0 = sl.item0;
+        const item1 = sl.item1;
+        const elem0 = sl.elem0;
+        const elem1 = sl.elem1;
+        const x0 = sl.x0;
+        const x1 = sl.x1;
+        const src0 = sl.src0;
+        const src1 = sl.src1;
+        const after: ?u32 = if (sl.first) null else 0;
         const move = Affine.translate(-x0, 0);
 
         const items = try a.alloc(Item, item1 - item0);

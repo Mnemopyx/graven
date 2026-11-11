@@ -1124,9 +1124,16 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 },
                 .run => |run| {
                     const render = if (cuts.items[index]) |c| blk: {
-                        if (c.space) continue;
                         const piece = try a.create(engine.Render);
-                        piece.* = try c.render.piece(a, c.after, c.before);
+                        if (c.space) {
+                            // A space is drawn only where a decoration
+                            // runs under it.
+                            piece.* = try c.render.spacePiece(a, c.before.?);
+                            const drawn = for (piece.items) |it| {
+                                if (it == .path) break true;
+                            } else false;
+                            if (!drawn) continue;
+                        } else piece.* = try c.render.piece(a, c.after, c.before);
                         break :blk piece;
                     } else renders[index] orelse continue;
                     if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });

@@ -15,6 +15,7 @@
 const std = @import("std");
 const geom = @import("graven_geom");
 const font = @import("graven_font");
+const harfbuzz = @import("hb");
 const render = @import("render.zig");
 const style = @import("style.zig");
 const markup = @import("markup.zig");
@@ -704,7 +705,22 @@ const Builder = struct {
     /// cluster by cluster, then shapes and places each element. Letters
     /// in a math alphabet no member sets, or (in math) bold or italic the
     /// family lacks, become Unicode's mathematical characters first.
-    fn text(b: *Builder, t_in: markup.Text, start_in: usize, end_in: usize, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+    fn text(b: *Builder, t_in: markup.Text, start_in: usize, end_in: usize, cap_in: f64, level: u8, x: f64, y_in: f64) Error!f64 {
+        // Text superscripts and subscripts: smaller, raised or lowered, as
+        // math scripts are, but in the line.
+        var cap = cap_in;
+        var y = y_in;
+        switch (t_in.variant.script) {
+            .none => {},
+            .sup => {
+                y += b.ctx.sup_raise * cap;
+                cap *= b.ctx.script_scale;
+            },
+            .sub => {
+                y -= b.ctx.sub_drop * cap;
+                cap *= b.ctx.script_scale;
+            },
+        }
         var t = t_in;
         var start = start_in;
         var end = end_in;
@@ -840,6 +856,18 @@ const Builder = struct {
         }
         const advance = pen * s;
         try b.addProfile(item0);
+        // Decorations: rules along the element, from the face's own
+        // underline and strikeout metrics (out of its contact profile).
+        if (t.variant.underline or t.variant.strike) {
+            const m = decorationMetrics(face);
+            for ([_]bool{ t.variant.underline, t.variant.strike }, [_][2]f64{ m.under, m.strike }) |on, d| {
+                if (!on or !(advance > 0)) continue;
+                const y0 = y_shifted + d[0] * s;
+                const rule: Box = .{ .x0 = x, .x1 = x + advance, .y0 = y0 - d[1] * s, .y1 = y0 };
+                try b.items.append(b.a, .{ .path = .{ .outline = try rectangle(b.a, rule), .element = element_id } });
+                ink = ink.join(rule);
+            }
+        }
         try b.elements.append(b.a, .{
             .face = face_id,
             .start = t.source[start],
@@ -854,6 +882,30 @@ const Builder = struct {
         return x + advance;
     }
 };
+
+/// A face's underline and strikeout, font units: each the top of its rule
+/// above the baseline (an underline's is negative) and its thickness. From
+/// the face's post and OS/2 tables, else from its cap height and x-height.
+fn decorationMetrics(face: *font.Face) struct { under: [2]f64, strike: [2]f64 } {
+    const get = struct {
+        fn f(fc: *font.Face, tag: c_int) ?f64 {
+            var v: harfbuzz.hb_position_t = 0;
+            if (harfbuzz.hb_ot_metrics_get_position(fc.font, @intCast(tag), &v) == 0) return null;
+            return @floatFromInt(v);
+        }
+    }.f;
+    const upem: f64 = @floatFromInt(face.upem);
+    const cap = (face.capHeight() catch null) orelse 0.7 * upem;
+    const xh = (face.xHeight() catch null) orelse 0.5 * upem;
+    const under_size = get(face, harfbuzz.HB_OT_METRICS_TAG_UNDERLINE_SIZE) orelse 0.06 * upem;
+    const strike_size = get(face, harfbuzz.HB_OT_METRICS_TAG_STRIKEOUT_SIZE) orelse under_size;
+    var under = get(face, harfbuzz.HB_OT_METRICS_TAG_UNDERLINE_OFFSET) orelse -0.12 * upem;
+    if (under > 0) under = -0.12 * upem;
+    var strike = get(face, harfbuzz.HB_OT_METRICS_TAG_STRIKEOUT_OFFSET) orelse 0;
+    // Missing or zero: through the middle of the lowercase letters.
+    if (!(strike > 0) or strike > cap) strike = xh / 2 + strike_size / 2;
+    return .{ .under = .{ under, @max(under_size, 1) }, .strike = .{ strike, @max(strike_size, 1) } };
+}
 
 /// True when `face` has a glyph for every codepoint of the cluster, ignoring
 /// joiners and variation selectors, which fonts need not map.
@@ -1388,6 +1440,35 @@ test "a one-line render breaks between words, inside variant groups too, but not
     defer wrapped.deinit();
     try testing.expect(wrapped.lines > 1);
     try testing.expectEqual(@as(usize, 0), wrapped.opportunities.len);
+}
+
+test "underline and strikethrough draw rules along their elements; text scripts sit raised and smaller" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderTest(&ctx, "H\\underline{H} \\sout{H}");
+    defer r.deinit();
+    var rules: [2]Box = undefined;
+    var n: usize = 0;
+    for (r.items) |it| if (it == .path) {
+        rules[n] = it.path.outline.bounds();
+        n += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), n);
+    // The underline below the baseline, the strike through the letters,
+    // each as wide as its element's advance.
+    try testing.expect(rules[0].y1 <= 1e-9);
+    try testing.expect(rules[1].y0 > 0 and rules[1].y1 < ctx.spec.cap_height);
+    const e1 = r.elements[1];
+    try testing.expectApproxEqAbs(e1.origin.x, rules[0].x0, 1e-9);
+    try testing.expectApproxEqAbs(e1.origin.x + e1.advance, rules[0].x1, 1e-9);
+
+    var sup = try renderTest(&ctx, "H\\textsuperscript{H}");
+    defer sup.deinit();
+    const base = sup.elements[0];
+    const raised = sup.elements[1];
+    try testing.expect(raised.origin.y > base.origin.y);
+    try testing.expectApproxEqAbs(base.cap_height * ctx.script_scale, raised.cap_height, 1e-9);
 }
 
 test "missing glyphs and unrendered constructs are reported at their source" {

@@ -30,6 +30,8 @@ const entities = @import("entities.zig");
 const Allocator = std.mem.Allocator;
 
 /// Letters' slant as asked for. `default` leaves it to the style.
+pub const Script = enum { none, sup, sub };
+
 pub const Shape = enum { default, upright, italic };
 
 /// A math alphabet: letters (and some digits) of a particular design,
@@ -46,9 +48,17 @@ pub const Variant = struct {
     /// Text, not math: letters upright unless asked otherwise, and no
     /// math spacing.
     text: bool = false,
+    /// Decorations, drawn under each element they cover.
+    underline: bool = false,
+    strike: bool = false,
+    /// Raised or lowered in its line, smaller: text superscript and
+    /// subscript (\textsuperscript), which break with the words around
+    /// them, unlike math scripts.
+    script: Script = .none,
 
     pub fn eql(a: Variant, b: Variant) bool {
-        return a.shape == b.shape and a.bold == b.bold and a.alphabet == b.alphabet and a.text == b.text;
+        return a.shape == b.shape and a.bold == b.bold and a.alphabet == b.alphabet and a.text == b.text and
+            a.underline == b.underline and a.strike == b.strike and a.script == b.script;
     }
 
     fn with(v: Variant, change: anytype) Variant {
@@ -264,6 +274,10 @@ const structural = [_]struct { name: []const u8, args: []const u8, note: []const
     .{ .name = "mathtt", .args = "{}", .note = "monospace" },
     .{ .name = "textsf", .args = "{}", .note = "sans-serif text" },
     .{ .name = "texttt", .args = "{}", .note = "monospace text" },
+    .{ .name = "underline", .args = "{}", .note = "underlined" },
+    .{ .name = "sout", .args = "{}", .note = "struck through" },
+    .{ .name = "textsuperscript", .args = "{}", .note = "raised text" },
+    .{ .name = "textsubscript", .args = "{}", .note = "lowered text" },
     .{ .name = "operatorname", .args = "{}", .note = "operator name" },
     .{ .name = "hat", .args = "{}", .note = "circumflex accent" },
     .{ .name = "bar", .args = "{}", .note = "bar accent" },
@@ -566,6 +580,15 @@ const Parser = struct {
                 break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .alphabet = .sans_serif }), true) };
             if (std.mem.eql(u8, name, "texttt"))
                 break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .alphabet = .monospace }), true) };
+            // Decorations, in text or math.
+            if (std.mem.eql(u8, name, "underline") or std.mem.eql(u8, name, "uline"))
+                break :blk .{ .group = try p.styled(variant.with(.{ .underline = true }), text_mode) };
+            if (std.mem.eql(u8, name, "sout") or std.mem.eql(u8, name, "st"))
+                break :blk .{ .group = try p.styled(variant.with(.{ .strike = true }), text_mode) };
+            if (std.mem.eql(u8, name, "textsuperscript"))
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .script = .sup }), true) };
+            if (std.mem.eql(u8, name, "textsubscript"))
+                break :blk .{ .group = try p.styled(variant.with(.{ .text = true, .script = .sub }), true) };
             const accent: ?@FieldType(Accent, "kind") = if (std.mem.eql(u8, name, "bar"))
                 .bar
             else if (std.mem.eql(u8, name, "overline"))
@@ -836,6 +859,9 @@ fn dumpNode(w: *std.Io.Writer, n: Node) std.Io.Writer.Error!void {
             if (t.variant.shape != .default) try w.print("{s} ", .{@tagName(t.variant.shape)});
             if (t.variant.bold) try w.writeAll("bold ");
             if (t.variant.alphabet != .normal) try w.print("{s} ", .{@tagName(t.variant.alphabet)});
+            if (t.variant.underline) try w.writeAll("underline ");
+            if (t.variant.strike) try w.writeAll("strike ");
+            if (t.variant.script != .none) try w.print("{s} ", .{@tagName(t.variant.script)});
             try w.print("\"{s}\")", .{t.utf8});
         },
         .group => |g| {
@@ -948,6 +974,13 @@ test "weights, slants and math alphabets nest" {
     try expectTree("\\mathbb{R}^2", "(scripts {(text upright double_struck \"R\")} ^(text \"2\"))");
     try expectTree("\\textit{a\\emph{b}}", "{(text text italic \"a\") {(text text upright \"b\")}}");
     try expectTree("\\texttt{ls}", "{(text text monospace \"ls\")}");
+}
+
+test "decorations and text scripts" {
+    try expectTree("\\underline{a \\textbf{b}}", "{(text underline \"a \") {(text text bold underline \"b\")}}");
+    try expectTree("\\sout{x}", "{(text strike \"x\")}");
+    try expectTree("1\\textsuperscript{st}", "(text \"1\") {(text text sup \"st\")}");
+    try expectTree("H\\textsubscript{2}O", "(text \"H\") {(text text sub \"2\")} (text \"O\")");
 }
 
 test "accents, spaces and breaks" {
