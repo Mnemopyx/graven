@@ -139,6 +139,139 @@ pub fn theme(look: Look, base: dvui.Theme) dvui.Theme {
     return t;
 }
 
+// Ghost content styles -----------------------------------------------------
+//
+// One alpha for all of a ghost's content keeps each colour's share of its
+// full contrast: what is dark and saturated stays strong, what is light
+// and pale (control fills, highlights, borders) fades to nearly nothing
+// against the paper. The other styles set each colour role's presence
+// instead: how far (OKLab distance) it ends up from what it is seen
+// against, the paper under the pane's own faint fill.
+
+pub const Style = enum {
+    /// Every colour at the pane's ghost alpha (`Look.ghost_content`).
+    uniform,
+    /// Each role its own alpha, to reach its presence.
+    matched,
+    /// As matched, with fills drawn as a deep, saturated tint of the hue
+    /// at low alpha, which hides less of the canvas under it.
+    tinted,
+    /// As matched, with controls as outlines and no fill.
+    outlined,
+};
+
+/// How a ghost's content is drawn (an experiment, chosen in View).
+pub var style: Style = .uniform;
+/// What a ghost is seen against: the canvas's paper.
+pub var backdrop: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
+
+/// Each role's presence in a ghost: OKLab distance from the backdrop. At
+/// full strength text is about 0.68 and a control fill 0.08; one alpha of
+/// 0.55 makes those 0.36 and 0.04.
+const Presence = struct {
+    text: f32 = 0.34,
+    muted: f32 = 0.26,
+    focus: f32 = 0.24,
+    border: f32 = 0.15,
+    highlight: f32 = 0.12,
+    press: f32 = 0.13,
+    hover: f32 = 0.11,
+    control: f32 = 0.09,
+    /// Content backgrounds: next to nothing, the pane's fill already
+    /// sets the pane apart.
+    fill: f32 = 0.02,
+};
+const presence: Presence = .{};
+
+fn toLab(c: dvui.Color) [3]f32 {
+    var lin: [3]f32 = undefined;
+    for ([3]u8{ c.r, c.g, c.b }, &lin) |x, *o| {
+        const v = @as(f32, @floatFromInt(x)) / 255;
+        o.* = if (v <= 0.04045) v / 12.92 else std.math.pow(f32, (v + 0.055) / 1.055, 2.4);
+    }
+    const l = std.math.cbrt(0.4122214708 * lin[0] + 0.5363325363 * lin[1] + 0.0514459929 * lin[2]);
+    const m = std.math.cbrt(0.2119034982 * lin[0] + 0.6806995451 * lin[1] + 0.1073969566 * lin[2]);
+    const s = std.math.cbrt(0.0883024619 * lin[0] + 0.2817188376 * lin[1] + 0.6299787005 * lin[2]);
+    return .{
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    };
+}
+
+/// `c` drawn at alpha `a` over opaque `b`, as the renderer blends.
+fn over(c: dvui.Color, a: f32, b: dvui.Color) dvui.Color {
+    const mix = struct {
+        fn f(x: u8, y: u8, t: f32) u8 {
+            return @intFromFloat(@round(t * @as(f32, @floatFromInt(x)) + (1 - t) * @as(f32, @floatFromInt(y))));
+        }
+    }.f;
+    return .{ .r = mix(c.r, b.r, a), .g = mix(c.g, b.g, a), .b = mix(c.b, b.b, a), .a = 255 };
+}
+
+fn distance(x: dvui.Color, y: dvui.Color) f32 {
+    const p = toLab(x);
+    const q = toLab(y);
+    return @sqrt((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2]));
+}
+
+/// `c` with the alpha that puts it `target` from `b` (opaque when even
+/// that falls short).
+fn atPresence(c: dvui.Color, target: f32, b: dvui.Color) dvui.Color {
+    if (distance(c, b) <= target) return c.opacity(1);
+    var lo: f32 = 0;
+    var hi: f32 = 1;
+    for (0..14) |_| {
+        const mid = (lo + hi) / 2;
+        if (distance(over(c, mid, b), b) < target) lo = mid else hi = mid;
+    }
+    var out = c;
+    out.a = @intFromFloat(@round(hi * 255));
+    return out;
+}
+
+/// The theme of a ghost's content in style `st`.
+pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
+    var t = theme(look, base);
+    if (st == .uniform) return t;
+    const h = look.hue;
+    const b = over(t.window.fill.?, look.ghost_fill, backdrop);
+    const pr = presence;
+    // Text roles keep their colours.
+    t.text = atPresence(t.text, pr.text, b);
+    t.text_hover = t.text;
+    t.text_press = t.text;
+    t.focus = atPresence(t.focus, pr.focus, b);
+    // Fills: their own colours, or a deep tint of the hue.
+    const tint = oklch(0.50, 0.14, h, 1);
+    const f = struct {
+        fn of(own: dvui.Color, tinted: bool, deep: dvui.Color, target: f32, back: dvui.Color) dvui.Color {
+            return atPresence(if (tinted) deep else own, target, back);
+        }
+    }.of;
+    const tinted = st == .tinted;
+    t.fill = f(t.fill, tinted, tint, pr.fill, b);
+    if (t.text_select) |sel| t.text_select = f(sel, tinted, tint, pr.highlight, b);
+    const border = atPresence(t.border, if (st == .outlined) pr.muted else pr.border, b);
+    t.border = border;
+    t.control = .{
+        .fill = if (st == .outlined) t.control.fill.?.opacity(0) else f(t.control.fill.?, tinted, tint, pr.control, b),
+        .fill_hover = f(t.control.fill_hover.?, tinted, tint, pr.hover, b),
+        .fill_press = f(t.control.fill_press.?, tinted, tint, pr.press, b),
+        .text = t.text,
+        .border = border,
+    };
+    t.window = .{ .fill = f(t.window.fill.?, tinted, tint, pr.fill, b), .text = t.text, .border = border };
+    t.highlight = .{
+        .fill = f(t.highlight.fill.?, tinted, tint, pr.highlight, b),
+        .fill_hover = f(t.highlight.fill_hover.?, tinted, tint, pr.hover, b),
+        .fill_press = f(t.highlight.fill_press.?, tinted, tint, pr.press, b),
+        .text = t.text,
+        .border = border,
+    };
+    return t;
+}
+
 /// The pane's background colour as drawn now.
 pub fn fill(p: *const Pane) dvui.Color {
     const t = theme(p.look, dvui.themeGet());
@@ -189,7 +322,10 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     p.rect_px = fw.data().borderRectScale().r;
     // A ghost lets the pointer through to what lies under it.
     if (dvui.currentWindow().subwindows.get(id)) |sw| sw.mouse_events = p.active;
-    const prev_alpha = if (p.active) dvui.alpha(1) else dvui.alpha(p.look.ghost_content);
+    // An inactive ghost's content: one alpha for all of it, or each colour
+    // at its own presence.
+    if (!p.active and style != .uniform) dvui.themeSet(ghostTheme(p.look, prev_theme, style));
+    const prev_alpha = if (p.active or style != .uniform) dvui.alpha(1) else dvui.alpha(p.look.ghost_content);
     return .{ .fw = fw, .prev_theme = prev_theme, .prev_alpha = prev_alpha };
 }
 
