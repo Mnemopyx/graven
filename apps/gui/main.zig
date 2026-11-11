@@ -896,6 +896,8 @@ fn frame() !dvui.App.Result {
 // pane's mode (ghost over the canvas, docked beside it, or hidden), and
 // whose body makes a ghost pane active or ghost again.
 
+/// An experiment: the side panes in hues away from the paper's warm cream.
+var cool_hues = false;
 var tree_pane: ghost_pane.Pane = .{ .name = "Tree", .edge = .left, .size = tree_width, .look = .{ .hue = 105 } };
 /// The right edge holds two panes, one above the other: the tool palette
 /// and the properties. They meet at `tools_height` below the top, which
@@ -2526,6 +2528,17 @@ fn menu() ?dvui.App.Result {
                 ghost_pane.style = st;
                 m.close();
             }
+        }
+        if (dvui.menuItemLabel(@src(), if (ghost_pane.vivid) "•  Pane colour: vivid" else "    Pane colour: vivid", .{}, .{ .expand = .horizontal }) != null) {
+            ghost_pane.vivid = !ghost_pane.vivid;
+            m.close();
+        }
+        if (dvui.menuItemLabel(@src(), if (cool_hues) "•  Pane hues: cool (teal, blue, magenta)" else "    Pane hues: cool (teal, blue, magenta)", .{}, .{ .expand = .horizontal }) != null) {
+            cool_hues = !cool_hues;
+            tree_pane.look.hue = if (cool_hues) 165 else 105;
+            props_pane.look.hue = if (cool_hues) 230 else 78;
+            tools_pane.look.hue = if (cool_hues) 330 else 55;
+            m.close();
         }
         if (dvui.menuItemLabel(@src(), if (ghost_pane.halo.light_inside) "•  Halo: light line inside, dark keyline outside (try)" else "    Halo: light line inside, dark keyline outside (try)", .{}, .{ .expand = .horizontal }) != null) {
             ghost_pane.halo.light_inside = !ghost_pane.halo.light_inside;

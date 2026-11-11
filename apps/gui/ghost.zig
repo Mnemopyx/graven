@@ -100,6 +100,48 @@ pub fn oklch(l: f32, c: f32, h: f32, alpha: f32) dvui.Color {
     return .{ .r = out[0], .g = out[1], .b = out[2], .a = @intFromFloat(@round(std.math.clamp(alpha, 0, 1) * 255)) };
 }
 
+/// Whether a pane's colours take a share of the most chroma their hue can
+/// show at each lightness (an experiment, chosen in View), rather than the
+/// fixed, muted chromas.
+pub var vivid = false;
+
+/// Whether OKLCH `l`, `c`, `h` lies within sRGB.
+fn inGamut(l: f32, c: f32, h: f32) bool {
+    const hr = h * std.math.pi / 180;
+    const a = c * @cos(hr);
+    const b = c * @sin(hr);
+    const l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    const m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    const s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+    const lc = l_ * l_ * l_;
+    const mc = m_ * m_ * m_;
+    const sc = s_ * s_ * s_;
+    const lin = [3]f32{
+        4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc,
+        -1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc,
+        -0.0041960863 * lc - 0.7034186147 * mc + 1.7076147010 * sc,
+    };
+    for (lin) |x| if (x < -0.0001 or x > 1.0001) return false;
+    return true;
+}
+
+/// The most chroma hue `h` can show at lightness `l` within sRGB.
+pub fn maxChroma(l: f32, h: f32) f32 {
+    var lo: f32 = 0;
+    var hi: f32 = 0.4;
+    for (0..20) |_| {
+        const mid = (lo + hi) / 2;
+        if (inGamut(l, mid, h)) lo = mid else hi = mid;
+    }
+    return lo;
+}
+
+/// A role's chroma: `fixed`, or when vivid, `share` of the most its hue
+/// can show at lightness `l`.
+fn chroma(l: f32, h: f32, fixed: f32, share: f32) f32 {
+    return if (vivid) share * maxChroma(l, h) else fixed;
+}
+
 /// Lightness levels for a pane's content, light and dark.
 const Levels = struct { text: f32, muted: f32, fill: f32, control: f32, hover: f32, press: f32, border: f32, focus: f32, highlight: f32 };
 const light: Levels = .{ .text = 0.30, .muted = 0.45, .fill = 0.97, .control = 0.91, .hover = 0.87, .press = 0.82, .border = 0.72, .focus = 0.55, .highlight = 0.86 };
@@ -110,29 +152,29 @@ pub fn theme(look: Look, base: dvui.Theme) dvui.Theme {
     const lv = if (base.dark) dark else light;
     const h = look.hue;
     var t = base;
-    const text = oklch(lv.text, 0.09, h, 1);
-    const border = oklch(lv.border, 0.06, h, 1);
+    const text = oklch(lv.text, chroma(lv.text, h, 0.09, 0.9), h, 1);
+    const border = oklch(lv.border, chroma(lv.border, h, 0.06, 0.8), h, 1);
     t.text = text;
     t.text_hover = text;
     t.text_press = text;
-    t.fill = oklch(lv.fill, 0.025, h, 1);
+    t.fill = oklch(lv.fill, chroma(lv.fill, h, 0.025, 0.6), h, 1);
     t.fill_hover = null;
     t.fill_press = null;
     t.border = border;
-    t.focus = oklch(lv.focus, 0.15, h, 1);
-    t.text_select = oklch(lv.highlight, 0.08, h, 1);
+    t.focus = oklch(lv.focus, chroma(lv.focus, h, 0.15, 0.95), h, 1);
+    t.text_select = oklch(lv.highlight, chroma(lv.highlight, h, 0.08, 0.85), h, 1);
     t.control = .{
-        .fill = oklch(lv.control, 0.04, h, 1),
-        .fill_hover = oklch(lv.hover, 0.05, h, 1),
-        .fill_press = oklch(lv.press, 0.06, h, 1),
+        .fill = oklch(lv.control, chroma(lv.control, h, 0.04, 0.85), h, 1),
+        .fill_hover = oklch(lv.hover, chroma(lv.hover, h, 0.05, 0.85), h, 1),
+        .fill_press = oklch(lv.press, chroma(lv.press, h, 0.06, 0.85), h, 1),
         .text = text,
         .border = border,
     };
-    t.window = .{ .fill = oklch(lv.fill, 0.03, h, 1), .text = text, .border = border };
+    t.window = .{ .fill = oklch(lv.fill, chroma(lv.fill, h, 0.03, 0.6), h, 1), .text = text, .border = border };
     t.highlight = .{
-        .fill = oklch(lv.highlight, 0.08, h, 1),
-        .fill_hover = oklch(lv.hover, 0.08, h, 1),
-        .fill_press = oklch(lv.press, 0.09, h, 1),
+        .fill = oklch(lv.highlight, chroma(lv.highlight, h, 0.08, 0.85), h, 1),
+        .fill_hover = oklch(lv.hover, chroma(lv.hover, h, 0.08, 0.85), h, 1),
+        .fill_press = oklch(lv.press, chroma(lv.press, h, 0.09, 0.85), h, 1),
         .text = text,
         .border = border,
     };
@@ -259,7 +301,7 @@ pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
     t.text_press = t.text;
     t.focus = atPresence(t.focus, pr.focus, b);
     // Fills: their own colours, or a deep tint of the hue.
-    const tint = oklch(0.50, 0.14, h, 1);
+    const tint = oklch(0.50, chroma(0.50, h, 0.14, 0.95), h, 1);
     const f = struct {
         fn of(own: dvui.Color, tinted: bool, deep: dvui.Color, target: f32, back: dvui.Color) dvui.Color {
             return atPresence(if (tinted) deep else own, target, back);
@@ -376,7 +418,7 @@ pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
         .rect = r,
         .id_extra = id_extra,
         .background = true,
-        .color_fill = .{ .color = oklch(body_l, 0.09, p.look.hue, 1) },
+        .color_fill = .{ .color = oklch(body_l, chroma(body_l, p.look.hue, 0.09, 0.9), p.look.hue, 1) },
         .padding = .all(1),
     });
     defer tb.deinit();
@@ -587,8 +629,8 @@ fn haloContent(fw: *dvui.FloatingWindowWidget, start: usize, start_after: usize,
         cw.renderCommands(after) catch {};
         _ = dvui.renderTarget(prev);
         content = dvui.textureFromTarget(t) catch return;
-        outer = silhouette(content, r, oklch(0.985, 0.012, hue, 1));
-        inner = silhouette(content, r, oklch(0.26, 0.05, hue, 1));
+        outer = silhouette(content, r, oklch(0.985, chroma(0.985, hue, 0.012, 0.9), hue, 1));
+        inner = silhouette(content, r, oklch(0.30, chroma(0.30, hue, 0.05, 0.9), hue, 1));
     }
     // The replayed commands give way to the textures, queued in their
     // place, so the pane's background (queued before them) stays under.
