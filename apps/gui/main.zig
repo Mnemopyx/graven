@@ -21,6 +21,7 @@ const settings_file = @import("settings.zig");
 const history = layout.history;
 const locale = @import("locale.zig");
 const fontwin = @import("fontwin.zig");
+const icons = @import("icons.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -924,8 +925,19 @@ fn onSheet(pi: usize, b: geom.Box) geom.Box {
     return .{ .x0 = b.x0 + o.x, .y0 = b.y0 + o.y, .x1 = b.x1 + o.x, .y1 = b.y1 + o.y };
 }
 
+/// Whether the document named on the command line has been opened.
+var opened_arg = false;
+
 fn frame() !dvui.App.Result {
     if (desktop.take()) |s| applyDesktop(dvui.currentWindow(), s);
+    // `graven-gui file.graven` opens that document.
+    if (!opened_arg) {
+        opened_arg = true;
+        if (dvui.App.main_init) |mi| {
+            const args = mi.minimal.args.toSlice(dvui.currentWindow().arena()) catch &.{};
+            if (args.len > 1) openDocument(args[1]);
+        }
+    }
     try update();
 
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .style = .window });
@@ -4852,7 +4864,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // keyboard: never from a text entry.
         if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
             const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and cursorKey(k.code)) {
+            if ((k.action == .down or k.action == .repeat) and cursorKey(k.code, k.mod.shift())) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -5910,6 +5922,7 @@ fn properties() !void {
             if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
             if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
             try trackFlowProperties(r.panel, r.region);
+            try paragraphProperties(r.panel, r.region);
         },
         .row => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
@@ -6270,6 +6283,77 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
         changed = true;
     };
     if (changed) try act(.setTrackFlow, .{pi, ri, alignment, indent, gap});
+}
+
+/// The paragraph at the flow cursor (else the track's first): which
+/// paragraph style it takes, and that style's settings, which every
+/// paragraph in it shares. Lengths in points, as type is measured.
+fn paragraphProperties(pi: usize, ri: usize) !void {
+    const m = &state.model;
+    const at: usize = if (track_cursor) |c| (if (c.panel == pi and c.region == ri) c.index else 0) else 0;
+    heading("Paragraph", .{}, 900);
+    const current = m.paragraphStyleAt(pi, ri, at);
+    const a = dvui.currentWindow().arena();
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 901 });
+        defer row.deinit();
+        propName("Style");
+        const names = try a.alloc([]const u8, m.paragraph_styles.items.len + 1);
+        names[0] = "None (the track's alignment)";
+        for (m.paragraph_styles.items, names[1..]) |ps, *n| n.* = ps.name;
+        var choice: usize = if (current) |id| id + 1 else 0;
+        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
+            try act(.setParagraphAt, .{ pi, ri, at, if (choice == 0) null else @as(layout.model.ParaId, @intCast(choice - 1)) });
+        }
+        if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_y = 0.5 } })) {
+            var buf: [32]u8 = undefined;
+            var base: layout.model.ParagraphStyle = if (current) |id| m.paragraph_styles.items[id] else .{ .name = "" };
+            base.name = m.nextParagraphStyleName(&buf);
+            const id = try act(.addParagraphStyle, .{base});
+            try act(.setParagraphAt, .{ pi, ri, at, id });
+        }
+    }
+    const id = current orelse return;
+    var ps = m.paragraph_styles.items[id];
+    const key = mergeKey(.{ "paragraph style", id });
+    if (textProp("Name", ps.name, 903)) |name| {
+        ps.name = name;
+        _ = try actM(key, .setParagraphStyle, .{ id, ps });
+        return;
+    }
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 904 });
+        defer row.deinit();
+        propName("Lines");
+        const names = [_][]const u8{ "From the start", "Centred", "Back from the end", "Justified" };
+        var choice: usize = @intFromEnum(ps.alignment);
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 904 })) {
+            ps.alignment = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    const pt_per_mm = 72.0 / 25.4;
+    const fields = [_]struct { name: []const u8, field: []const u8, min: f64 }{
+        .{ .name = "Indent at start, pt", .field = "indent_start", .min = 0 },
+        .{ .name = "Indent at end, pt", .field = "indent_end", .min = 0 },
+        .{ .name = "First line, pt", .field = "first", .min = -1000 },
+        .{ .name = "Space before, pt", .field = "space_before", .min = 0 },
+        .{ .name = "Space after, pt", .field = "space_after", .min = 0 },
+        .{ .name = "Between lines, pt", .field = "line_gap", .min = 0 },
+    };
+    inline for (fields, 0..) |f, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 910 + k });
+        defer row.deinit();
+        propName(f.name);
+        var v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = f.min, .max = 1000 }, .{ .expand = .horizontal, .id_extra = 910 + k });
+        if (r.changed and r.value == .Valid) {
+            @field(ps, f.field) = v / pt_per_mm;
+            changed = true;
+        }
+    }
+    if (changed) _ = try actM(key, .setParagraphStyle, .{ id, ps });
 }
 
 /// A new plain prototype with one slot and keycap art, made the context.
@@ -6718,7 +6802,7 @@ fn modelItem(pi: usize, it: layout.place.PlacedItem) ?layout.model.Item {
 
 fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
     const item = modelItem(pi, it) orelse return false;
-    return item.what == .hard_break;
+    return item.breaks();
 }
 
 /// The cursor a click at worksheet point `at` puts in the context region's
@@ -6818,19 +6902,22 @@ fn cursorKeysReach() bool {
 }
 
 /// Acts on a key for the flow cursor; whether it was one.
-fn cursorKey(code: dvui.enums.Key) bool {
+fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
     const c = track_cursor orelse return false;
     const tile_codes = [_]dvui.enums.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
     const blank_codes = [_]dvui.enums.Key{ .q, .w, .e, .r, .t, .y, .u, .i, .o, .p };
-    const pal = paletteFor(c.panel, c.region) orelse return false;
-    for (tile_codes, 0..) |k, i| if (code == k) {
-        if (i < pal.tile_count) insertAtCursor(.tile, pal.tiles[i]);
-        return true;
-    };
-    for (blank_codes, 0..) |k, i| if (code == k) {
-        insertAtCursor(.blank, pal.blanks[i]);
-        return true;
-    };
+    // Tiles and blanks while the document has a prototype; text and
+    // breaks always.
+    if (paletteFor(c.panel, c.region)) |pal| {
+        for (tile_codes, 0..) |k, i| if (code == k) {
+            if (i < pal.tile_count) insertAtCursor(.tile, pal.tiles[i]);
+            return true;
+        };
+        for (blank_codes, 0..) |k, i| if (code == k) {
+            insertAtCursor(.blank, pal.blanks[i]);
+            return true;
+        };
+    }
     const region = state.model.panels.items[c.panel].regions.items[c.region];
     const len = region.items.items.len;
     const rows = region.major == .row;
@@ -6848,8 +6935,10 @@ fn cursorKey(code: dvui.enums.Key) bool {
             toggleBindAtCursor();
             return true;
         },
+        // In text, Enter ends the paragraph and Shift+Enter the line; in a
+        // track of tiles, Enter ends the row.
         .enter, .kp_enter => {
-            insertAtCursor(.hard_break, 0);
+            insertAtCursor(if (shift or region.style == null) .hard_break else .paragraph, 0);
             return true;
         },
         .backspace => {
@@ -6885,12 +6974,15 @@ fn cursorKey(code: dvui.enums.Key) bool {
 /// Inserts at the cursor, which moves past it: a tile or a blank `size` u
 /// long, a hard break, or an empty run of markup, whose text the expression
 /// line then takes.
-fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
+fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: f64) void {
     const c = track_cursor orelse return;
-    const pal = paletteFor(c.panel, c.region) orelse return;
     switch (kind) {
-        .tile => _ = act(.insertTile, .{c.panel, c.region, c.index, pal.prototype, size}) catch return,
+        .tile => {
+            const pal = paletteFor(c.panel, c.region) orelse return;
+            _ = act(.insertTile, .{c.panel, c.region, c.index, pal.prototype, size}) catch return;
+        },
         .blank => {
+            const pal = paletteFor(c.panel, c.region) orelse return;
             // The palette's blanks are in the prototype's u, as its tiles
             // are; a blank is stored in its track's unit.
             const r = state.model.panels.items[c.panel].regions.items[c.region];
@@ -6903,6 +6995,11 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break }, size: f64) void {
             const n = act(.insertBreak, .{c.panel, c.region, c.index}) catch return;
             track_cursor.?.index += n;
             return;
+        },
+        .paragraph => {
+            // The new paragraph takes the style of the one it splits.
+            const style = state.model.paragraphStyleAt(c.panel, c.region, c.index);
+            act(.insertParagraph, .{c.panel, c.region, c.index, style}) catch return;
         },
         .run => {
             const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
@@ -6923,7 +7020,7 @@ fn toggleBindAtCursor() void {
         return;
     }
     const before = items[c.index - 1];
-    if (before.what == .hard_break or items[c.index].what == .hard_break) {
+    if (before.breaks() or items[c.index].breaks()) {
         state.status = "A hard break cannot be part of a group. ";
         return;
     }
@@ -7025,7 +7122,8 @@ fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32)
 
 /// What the flow holds that output leaves out, drawn faintly while editing:
 /// each hard break as a down-and-left arrow (a carriage return) at the end
-/// of its segment's content, and each empty run as a dashed slot.
+/// of its segment's content, each paragraph separator as a pilcrow, and
+/// each empty run as a dashed slot.
 fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
     const ghost = colors.guide.opacity(0.55);
@@ -7054,7 +7152,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
     for (placed.items) |it| {
         const what = (modelItem(pi, it) orelse continue).what;
         const r = state.model.panels.items[pi].regions.items[it.region];
-        if (what != .hard_break and !(what == .run and what.run.content.len == 0)) continue;
+        if (what != .hard_break and what != .paragraph and !(what == .run and what.run.content.len == 0)) continue;
         const band = for (placed.tracks) |t| {
             if (t.region == it.region and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
@@ -7067,9 +7165,31 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
             state.view.rect(area, box).stroke(.square, .{ .thickness = px, .color = .{ .color = ghost } });
             continue;
         }
+        const u = r.pitch * 0.32;
+        if (what == .paragraph) {
+            // A pilcrow just past the content: its bowl and two stems.
+            const x0 = if (rows) band.x0 + it.span[0] + u * 0.4 else (band.x0 + band.x1) / 2 - u / 2;
+            const top = if (rows) (band.y0 + band.y1) / 2 + u * 0.6 else band.y1 - it.span[0] - u * 0.4;
+            const bottom = top - u * 1.2;
+            const s1 = x0 + u * 0.55;
+            const s2 = x0 + u * 0.85;
+            const bowl_r = u * 0.28;
+            var bowl: [10]dvui.Point.Physical = undefined;
+            for (&bowl, 0..) |*o, k| {
+                const t = std.math.pi * (0.5 + @as(f64, @floatFromInt(k)) / 9.0);
+                o.* = state.view.toPx(area, .{ .x = s1 + bowl_r * @cos(t), .y = top - bowl_r + bowl_r * @sin(t) });
+            }
+            dvui.Path.stroke(.{ .points = &bowl }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+            const lines = [_][2]geom.Point{
+                .{ .{ .x = s1, .y = top }, .{ .x = s2, .y = top } },
+                .{ .{ .x = s1, .y = top }, .{ .x = s1, .y = bottom } },
+                .{ .{ .x = s2, .y = top }, .{ .x = s2, .y = bottom } },
+            };
+            for (lines) |ln| dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, ln[0]), state.view.toPx(area, ln[1]) } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+            continue;
+        }
         // The arrow, about a third of a unit, just past the content: down
         // from the top, then left, with a head.
-        const u = r.pitch * 0.32;
         const x0 = if (rows) band.x0 + it.span[0] + u * 0.4 else (band.x0 + band.x1) / 2 - u / 2;
         const ytop = if (rows) (band.y0 + band.y1) / 2 + u / 2 else band.y1 - it.span[0] - u * 0.4;
         const right = x0 + u;
@@ -7091,11 +7211,13 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
 /// cursor, as the key does.
 fn trackPalette() void {
     palette_id_count = 0;
-    const c = track_cursor orelse return;
-    const pal = paletteFor(c.panel, c.region) orelse return;
-    const name = state.model.prototypes.items[pal.prototype].name;
-    dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
-    inline for (.{ .tile, .blank }) |kind| {
+    if (track_cursor == null) return;
+    const palette = paletteFor(track_cursor.?.panel, track_cursor.?.region);
+    if (palette) |pal| {
+        const name = state.model.prototypes.items[pal.prototype].name;
+        dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
+    } else dvui.labelNoFmt(@src(), "Insert text or equations, and breaks, at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
+    if (palette) |pal| inline for (.{ .tile, .blank }) |kind| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @backingInt(@as(enum { tile, blank }, kind)) });
         defer row.deinit();
         const keys = if (kind == .tile) tile_keys else blank_keys;
@@ -7107,7 +7229,7 @@ fn trackPalette() void {
                 if (canvas_id) |id| dvui.focusWidget(id, null, null);
             }
         }
-    }
+    };
     // The flow's other items: a run of text or an equation, and a hard break.
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
@@ -7116,7 +7238,7 @@ fn trackPalette() void {
         toggleBindAtCursor();
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
     }
-    if (flowButton(.next_prototype, 2)) {
+    if (palette != null and flowButton(.next_prototype, 2)) {
         cyclePalettePrototype(false);
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
     }
@@ -7124,11 +7246,22 @@ fn trackPalette() void {
         insertAtCursor(.hard_break, 0);
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
     }
+    if (inTextTrack() and flowButton(.paragraph, 4)) {
+        insertAtCursor(.paragraph, 0);
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    }
+}
+
+/// Whether the flow cursor is in a track of text (sized to a style):
+/// there Enter ends the paragraph, and Shift+Enter the line.
+fn inTextTrack() bool {
+    const c = track_cursor orelse return false;
+    return state.model.panels.items[c.panel].regions.items[c.region].style != null;
 }
 
 /// A palette button for an item that is not a tile: its key, a picture and
 /// what it puts in.
-fn flowButton(kind: enum { run, hard_break, next_prototype, join }, i: usize) bool {
+fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .id_extra = i,
@@ -7149,7 +7282,8 @@ fn flowButton(kind: enum { run, hard_break, next_prototype, join }, i: usize) bo
         defer line.deinit();
         dvui.labelNoFmt(@src(), switch (kind) {
             .run => "A",
-            .hard_break => "Enter",
+            .hard_break => if (inTextTrack()) "Shift+Enter" else "Enter",
+            .paragraph => "Enter",
             .next_prototype => "Tab",
             .join => "G",
         }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
@@ -7158,7 +7292,23 @@ fn flowButton(kind: enum { run, hard_break, next_prototype, join }, i: usize) bo
         pic.deinit();
         const px = dvui.windowNaturalScale();
         const ghost = colors.edge.opacity(0.55);
-        if (kind == .hard_break) {
+        if (kind == .paragraph) {
+            // A pilcrow: a bowl and two stems.
+            const s1 = r.x + r.w * 0.5;
+            const s2 = r.x + r.w * 0.72;
+            const top = r.y + r.h * 0.1;
+            const bottom = r.y + r.h * 0.9;
+            const br = r.h * 0.22;
+            var bowl: [10]dvui.Point.Physical = undefined;
+            for (&bowl, 0..) |*o, k| {
+                const t = std.math.pi * (0.5 + @as(f32, @floatFromInt(k)) / 9.0);
+                o.* = .{ .x = s1 + br * @cos(t), .y = top + br - br * @sin(t) };
+            }
+            dvui.Path.stroke(.{ .points = &bowl }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = s1, .y = top }, .{ .x = s2, .y = top } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = s1, .y = top }, .{ .x = s1, .y = bottom } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = s2, .y = top }, .{ .x = s2, .y = bottom } } }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+        } else if (kind == .hard_break) {
             // Down, then left, with a head: a carriage return, ghosted as
             // it is on the canvas.
             const right = r.x + r.w * 0.8;
@@ -7199,7 +7349,8 @@ fn flowButton(kind: enum { run, hard_break, next_prototype, join }, i: usize) bo
         };
         dvui.labelNoFmt(@src(), switch (kind) {
             .run => "Text or equation",
-            .hard_break => "Hard break",
+            .hard_break => "Line break",
+            .paragraph => "New paragraph",
             .next_prototype => next_name,
             .join => "Join or part",
         }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 8 } });

@@ -44,6 +44,8 @@ pub fn within(a: geom.Box, b: geom.Box) bool {
     return a.x0 >= b.x0 - tol and a.y0 >= b.y0 - tol and a.x1 <= b.x1 + tol and a.y1 <= b.y1 + tol;
 }
 pub const StyleId = u16;
+/// A paragraph style's index in `Model.paragraph_styles`.
+pub const ParaId = u16;
 
 pub const Sides = struct {
     left: f64 = 0,
@@ -61,6 +63,27 @@ pub const Sides = struct {
 };
 
 pub const Align = enum { start, centre, end };
+
+/// How a paragraph's lines sit in their segments: as `Align`, or
+/// justified (spaces between words stretched to fill each line but its
+/// last).
+pub const ParagraphAlign = enum { start, centre, end, justify };
+
+/// Named paragraph settings, which a paragraph of a flow takes by its
+/// separator. Lengths in mm: indents from a segment's start and end, the
+/// first line's further indent (negative for a hanging one), space before
+/// and after the paragraph and between its lines, added to where its
+/// segments go along the track's path.
+pub const ParagraphStyle = struct {
+    name: []const u8,
+    alignment: ParagraphAlign = .start,
+    indent_start: f64 = 0,
+    indent_end: f64 = 0,
+    first: f64 = 0,
+    space_before: f64 = 0,
+    space_after: f64 = 0,
+    line_gap: f64 = 0,
+};
 
 /// Where a slot's label sits on the tile's face.
 pub const SlotPlace = struct {
@@ -231,12 +254,22 @@ pub const Item = struct {
     what: union(enum) {
         tile: TileId,
         run: Run,
+        /// A line break: what follows starts the next segment.
         hard_break,
+        /// A paragraph separator: ends a paragraph, and starts the next
+        /// in the paragraph style it names (null: the track's own).
+        paragraph: ?ParaId,
     },
 
     /// Whether this item and `next`, which follows it, are in one group.
     pub fn binds(item: Item, next: Item) bool {
-        return item.bind and item.what != .hard_break and next.what != .hard_break;
+        return item.bind and !item.breaks() and !next.breaks();
+    }
+
+    /// Whether it is a line break or a paragraph separator: either ends
+    /// its segment.
+    pub fn breaks(item: Item) bool {
+        return item.what == .hard_break or item.what == .paragraph;
     }
 
     pub fn tileOf(item: Item) ?TileId {
@@ -258,8 +291,9 @@ pub const Item = struct {
 pub const Segment = struct {
     along: f64 = 0,
     across: f64 = 0,
-    /// Moved by hand: kept, and where it is, even while the flow does not
-    /// reach it, so content that grows back finds it there.
+    /// Placed by hand (moved, or added with `addSegment`): kept, and where
+    /// it is, even while the flow does not reach it, so content that grows
+    /// back finds it there. Others follow the path.
     moved: bool = false,
 
     /// The point `d` u along the direction (`dir_along`, `dir_across`).
@@ -319,6 +353,9 @@ pub const TileRegion = struct {
     /// entered, so a new paragraph starts indented, u; 0 for none. The blank
     /// is an ordinary item: it can be resized or removed.
     indent: f64 = 0,
+    /// The paragraph style of the flow's first paragraph (each later one
+    /// takes its separator's); null for none: segments set by `alignment`.
+    paragraph: ?ParaId = null,
     /// The flow, in order. A tile thicker than its segment (a 2 u tall
     /// key) reaches into the segments after it, closing the stretch it
     /// covers there; their content flows around it.
@@ -857,6 +894,8 @@ pub const Model = struct {
     /// The built-in Blank prototype, once a blank has been made.
     blank_prototype: ?PrototypeId = null,
     styles: std.ArrayList(LabelStyle) = .empty,
+    /// Named paragraph settings, which paragraphs of flows take.
+    paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
     /// The document's composed fonts, which styles reference.
     fonts: std.ArrayList(ComposedFont) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
@@ -1448,7 +1487,7 @@ pub const Model = struct {
                     it.what = .{ .tile = try m.addTile(copy_t) };
                 },
                 .run => |run| it.what.run.content = try m.a().dupe(u8, run.content),
-                .hard_break => {},
+                .hard_break, .paragraph => {},
             }
             try c.items.append(m.a(), it);
         }
@@ -2257,7 +2296,7 @@ pub const Model = struct {
         const id = item.tileOf() orelse return false;
         if (!m.prototypes.items[m.tileConst(id).prototype].letter) return false;
         return switch (next.what) {
-            .hard_break => false,
+            .hard_break, .paragraph => false,
             .run => true,
             .tile => |nid| blk: {
                 const np = m.prototypes.items[m.tileConst(nid).prototype];
@@ -2308,6 +2347,83 @@ pub const Model = struct {
         if (!(indent > 0)) return 1;
         _ = try m.insertBlank(panel, region, index + 1, indent);
         return 2;
+    }
+
+    // Paragraphs ------------------------------------------------------------
+
+    fn checkParagraph(p: ParagraphStyle) Error!void {
+        for ([_]f64{ p.indent_start, p.indent_end, p.space_before, p.space_after, p.line_gap }) |v| if (!(v >= 0)) return error.BadSize;
+        if (!std.math.isFinite(p.first)) return error.BadSize;
+    }
+
+    /// A new paragraph style. Returns its ID.
+    pub fn addParagraphStyle(m: *Model, style: ParagraphStyle) Error!ParaId {
+        try checkParagraph(style);
+        var s = style;
+        s.name = try m.a().dupe(u8, style.name);
+        try m.paragraph_styles.append(m.a(), s);
+        m.revision += 1;
+        return @intCast(m.paragraph_styles.items.len - 1);
+    }
+
+    /// Changes paragraph style `id` (its name too): every paragraph in it
+    /// follows.
+    pub fn setParagraphStyle(m: *Model, id: ParaId, style: ParagraphStyle) Error!void {
+        if (id >= m.paragraph_styles.items.len) return error.NoSuchStyle;
+        try checkParagraph(style);
+        var s = style;
+        s.name = try m.a().dupe(u8, style.name);
+        m.paragraph_styles.items[id] = s;
+        m.revision += 1;
+    }
+
+    /// The first "Paragraph N" no paragraph style uses yet.
+    pub fn nextParagraphStyleName(m: *const Model, buf: []u8) []const u8 {
+        var n: usize = m.paragraph_styles.items.len + 1;
+        while (true) : (n += 1) {
+            const name = std.fmt.bufPrint(buf, "Paragraph {d}", .{n}) catch return "Paragraph";
+            for (m.paragraph_styles.items) |p| {
+                if (std.mem.eql(u8, p.name, name)) break;
+            } else return name;
+        }
+    }
+
+    /// Inserts a paragraph separator at position `index` of a track: the
+    /// paragraph before it ends, and the one after it is set in `style`
+    /// (null: the track's).
+    pub fn insertParagraph(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
+        if (style) |id| if (id >= m.paragraph_styles.items.len) return error.NoSuchStyle;
+        try m.place(panel, region, index, .{ .what = .{ .paragraph = style } });
+    }
+
+    /// Where the paragraph holding item `index` of a track takes its
+    /// style from: the separator before it, or (null) the track.
+    pub fn paragraphStart(m: *const Model, panel: usize, region: usize, index: usize) ?usize {
+        const items = m.panels.items[panel].regions.items[region].items.items;
+        var k = @min(index, items.len);
+        while (k > 0) {
+            k -= 1;
+            if (items[k].what == .paragraph) return k;
+        }
+        return null;
+    }
+
+    /// The paragraph style of the paragraph holding item `index`.
+    pub fn paragraphStyleAt(m: *const Model, panel: usize, region: usize, index: usize) ?ParaId {
+        const r = m.panels.items[panel].regions.items[region];
+        const k = m.paragraphStart(panel, region, index) orelse return r.paragraph;
+        return r.items.items[k].what.paragraph;
+    }
+
+    /// Sets the paragraph style of the paragraph holding item `index`
+    /// (null: none), at its separator or, for the first, on the track.
+    pub fn setParagraphAt(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
+        if (style) |id| if (id >= m.paragraph_styles.items.len) return error.NoSuchStyle;
+        const r = &m.panels.items[panel].regions.items[region];
+        if (m.paragraphStart(panel, region, index)) |k| {
+            r.items.items[k].what = .{ .paragraph = style };
+        } else r.paragraph = style;
+        m.revision += 1;
     }
 
     /// Joins item `index` of a track to the next one, or parts them: with
@@ -2414,10 +2530,13 @@ pub const Model = struct {
         const r = &m.panels.items[panel].regions.items[region];
         const segs = &r.segments;
         const n = segs.items.len;
+        // Placed on purpose, so kept where it is (see `Segment.moved`).
         const next: Segment = if (n == 0) .{} else blk: {
             const last = segs.items[n - 1];
             const prev = if (n >= 2) segs.items[n - 2] else null;
-            break :blk last.step(pathDirection(prev, last), 1 + gap);
+            var o = last.step(pathDirection(prev, last), 1 + gap);
+            o.moved = true;
+            break :blk o;
         };
         try segs.append(m.a(), next);
         m.revision += 1;

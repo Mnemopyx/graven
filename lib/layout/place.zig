@@ -442,6 +442,11 @@ const Flow = struct {
     dropped: []const bool,
     dup: []const bool,
     keepouts: []const KeepOut = &.{},
+    /// Which pieces are spaces between words (stretched when justified).
+    stretch: []const bool = &.{},
+    /// Each piece's further shift along, where a justified line stretches
+    /// its spaces; set when the flow leaves its segment.
+    extra: []f64 = &.{},
 
     /// Where a row's text baseline sits: its style's capitals centred
     /// across the band, or the band's middle for a track with no style.
@@ -494,20 +499,55 @@ const Flow = struct {
     /// it, so its content stays clear of them), and records its tiles that
     /// reach past its band. One reaching back into the segments before is
     /// flagged: their content is not moved.
-    fn leave(f: Flow, a: Allocator, path: *Path, shifts: *std.ArrayList(f64), tall: *std.ArrayList(Tall), issues: *std.ArrayList(Issue), seg: usize, first: usize, stop: usize, has_closed: bool) Allocator.Error!void {
-        const free = @max(0, f.length - path.reach.items[seg]);
-        const sh: f64 = if (has_closed) 0 else switch (f.region.alignment) {
-            .start => 0,
+    fn leave(f: Flow, a: Allocator, path: *Path, shifts: *std.ArrayList(f64), tall: *std.ArrayList(Tall), issues: *std.ArrayList(Issue), seg: usize, first: usize, stop: usize, has_closed: bool, line: Line) Allocator.Error!void {
+        // Where its content ends: its last piece but a space left at the
+        // end by a wrap.
+        var content_end: f64 = line.lo;
+        for (first..stop) |k| {
+            if (f.dropped[k] or f.dup[k] or f.segs_of[k] != seg) continue;
+            if (k < f.stretch.len and f.stretch[k]) continue;
+            content_end = @max(content_end, f.spans[k][1]);
+        }
+        const free = @max(0, line.hi - content_end);
+        const alignment: model.ParagraphAlign = line.alignment orelse switch (f.region.alignment) {
+            .start => .start,
+            .centre => .centre,
+            .end => .end,
+        };
+        const sh: f64 = if (has_closed) 0 else switch (alignment) {
+            .start, .justify => 0,
             .centre => free / 2,
             .end => free,
         };
         try shifts.append(a, sh);
+        // Justified, and ended by a wrap (not the paragraph's last line):
+        // the spaces between its words share what is left.
+        if (alignment == .justify and line.soft and !has_closed and free > 0 and f.extra.len > 0) {
+            var n: usize = 0;
+            for (first..stop) |k| {
+                if (f.dropped[k] or f.segs_of[k] != seg or !f.stretch[k]) continue;
+                if (f.spans[k][1] > content_end + 1e-9) continue;
+                n += 1;
+            }
+            if (n > 0) {
+                const each = free / @as(f64, @floatFromInt(n));
+                var acc: f64 = 0;
+                for (first..stop) |k| {
+                    if (f.dropped[k] or f.segs_of[k] != seg) continue;
+                    f.extra[k] = acc;
+                    if (f.stretch[k] and f.spans[k][1] <= content_end + 1e-9) {
+                        acc += each;
+                        f.extra[k] = acc - each;
+                    }
+                }
+            }
+        }
         const band = path.boxes.items[seg];
         const tol = 1e-9;
         for (first..stop) |k| {
             if (f.dropped[k] or f.dup[k] or f.segs_of[k] != seg) continue;
             const id = f.items[k].tileOf() orelse continue;
-            const b = f.tileBox(id, band, f.spans[k][0] + sh);
+            const b = f.tileBox(id, band, f.spans[k][0] + sh + (if (k < f.extra.len) f.extra[k] else 0));
             const beyond = if (f.rows) b.y0 < band.y0 - tol else b.x1 > band.x1 + tol;
             const behind = if (f.rows) b.y1 > band.y1 + tol else b.x0 < band.x0 - tol;
             if (beyond) try tall.append(a, .{ .box = b, .seg = seg });
@@ -531,6 +571,16 @@ const Flow = struct {
         }
         for (f.keepouts) |k| try k.closes(a, f.rows, band, closed);
     }
+};
+
+/// How one segment's content is set: between `lo` and `hi` along it (its
+/// paragraph's indents), aligned as its paragraph says (null: as its
+/// track says), and whether a wrap ended it (so a justified one fills).
+const Line = struct {
+    lo: f64,
+    hi: f64,
+    alignment: ?model.ParagraphAlign = null,
+    soft: bool = false,
 };
 
 /// Line art the tracks flow around: its bounds, and for ink its outline
@@ -683,6 +733,16 @@ fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: 
     return spans.items;
 }
 
+/// The bounds and alignment of a segment of a paragraph in `style` (null:
+/// none, the whole segment as its track sets it); `first` for its first
+/// line. Indents larger than the segment leave it no room, not less.
+fn lineIn(style: ?model.ParagraphStyle, first: bool, length: f64) Line {
+    const st = style orelse return .{ .lo = 0, .hi = length };
+    const lo = std.math.clamp(st.indent_start + (if (first) st.first else 0), 0, length);
+    const hi = std.math.clamp(length - st.indent_end, lo, length);
+    return .{ .lo = lo, .hi = hi, .alignment = st.alignment };
+}
+
 /// A piece of a run cut from its one-line render: the words between two
 /// break opportunities, or (`space`) the space of one.
 const Cut = struct {
@@ -734,19 +794,25 @@ const Path = struct {
     origins: std.ArrayList(model.Segment) = .empty,
     boxes: std.ArrayList(Box) = .empty,
     reach: std.ArrayList(f64) = .empty,
+    /// Further space, mm, before the next segment made (a paragraph's
+    /// space before and after, or its lines' gap).
+    lead: f64 = 0,
 
     fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
         const kept = p.region.segments.items;
         while (p.origins.items.len <= k) {
             const n = p.origins.items.len;
             var o: model.Segment = .{};
-            if (n < kept.len) {
+            // The first origin, and any moved by hand, are kept; those
+            // between follow the path, so paragraph spacing moves them.
+            if (n < kept.len and (n == 0 or kept[n].moved)) {
                 o = kept[n];
             } else if (n > 0) {
                 const last = p.origins.items[n - 1];
                 const prev = if (n >= 2) p.origins.items[n - 2] else null;
                 const dir = model.pathDirection(prev, last);
-                o = last.step(dir, 1 + p.region.gap);
+                o = last.step(dir, 1 + p.region.gap + p.lead / p.region.pitch);
+                o.moved = false;
                 var tries: usize = 0;
                 while (tries < 400 and p.blocked(p.region.boxAt(o))) : (tries += 1) o = o.step(dir, 0.25);
             }
@@ -754,6 +820,7 @@ const Path = struct {
             try p.boxes.append(a, p.region.boxAt(o));
             try p.reach.append(a, 0);
         }
+        p.lead = 0;
     }
 
     fn blocked(p: *const Path, b: Box) bool {
@@ -890,7 +957,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     const d = render.design;
                     break :blk if (d.isEmpty()) 0 else if (rows) d.x1 - d.x0 else d.y1 - d.y0;
                 },
-                .hard_break => 0,
+                .hard_break, .paragraph => 0,
             };
         }
 
@@ -920,25 +987,43 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var closed: std.ArrayList([2]f64) = .empty;
         var first_in_seg: usize = 0;
         var seg: usize = 0;
-        var pos: f64 = 0;
         var in_seg: usize = 0;
         var para: f64 = 0;
         var natural: f64 = 0;
-        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items };
+        const stretch = try a.alloc(bool, items.len);
+        for (stretch, 0..) |*st, k| st.* = isSpace(cuts.items, k);
+        const extra = try a.alloc(f64, items.len);
+        @memset(extra, 0);
+        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra };
+        // The paragraph being set, and the bounds of the segment being
+        // filled: its first line takes the first-line indent.
+        var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
+        var line: Line = lineIn(style, true, length);
+        var pos: f64 = line.lo;
         // The first segment too: line art may close stretches of it.
         try flow.enter(a, &path, 0, tall.items, &closed);
         for (items, 0..) |item, index| {
-            if (item.what == .hard_break) {
+            if (item.breaks()) {
                 segs_of[index] = seg;
                 spans[index] = .{ pos, pos };
                 natural = @max(natural, para);
                 para = 0;
                 if (seg + 1 < max_segments) {
-                    try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0);
+                    try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0, line);
                     seg += 1;
                     first_in_seg = index + 1;
+                    // A line break: the paragraph's next line. A separator:
+                    // the next paragraph, after both paragraphs' spacing.
+                    var first_line = false;
+                    if (item.what == .paragraph) {
+                        const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
+                        path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
+                        style = next;
+                        first_line = true;
+                    } else path.lead = if (style) |st| st.line_gap else 0;
+                    line = lineIn(style, first_line, length);
                     try flow.enter(a, &path, seg, tall.items, &closed);
-                    pos = 0;
+                    pos = line.lo;
                     in_seg = 0;
                 }
                 continue;
@@ -966,21 +1051,24 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             }
             // It does not fit: on to the next segment, made as needed, if
             // this one holds something already.
-            if (!in_group and start + need > length + tol and in_seg > 0 and seg + 1 < max_segments) {
-                try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0);
+            if (!in_group and start + need > line.hi + tol and in_seg > 0 and seg + 1 < max_segments) {
+                line.soft = true;
+                try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0, line);
                 seg += 1;
                 first_in_seg = index;
+                path.lead = if (style) |st| st.line_gap else 0;
+                line = lineIn(style, false, length);
                 try flow.enter(a, &path, seg, tall.items, &closed);
-                pos = 0;
+                pos = line.lo;
                 in_seg = 0;
-                start = Flow.clear(closed.items, gap, size);
+                start = Flow.clear(closed.items, pos + gap, size);
                 // Landing at the start after a soft break, a tile whose
                 // prototype says so, or a space between words, is dropped.
                 const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(cuts.items, index);
                 if (drops) {
                     para -= gap + size;
                     segs_of[index] = seg;
-                    spans[index] = .{ 0, 0 };
+                    spans[index] = .{ pos, pos };
                     dropped[index] = true;
                     continue;
                 }
@@ -992,12 +1080,12 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             segs_of[index] = seg;
             spans[index] = .{ start, end };
         }
-        try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0);
+        try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
 
         // Last, each item where it landed.
         for (items, 0..) |item, index| {
             const sg = segs_of[index];
-            const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg];
+            const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
             const start = spans[index][0] + sh;
             const end = spans[index][1] + sh;
             try placed_items.append(a, .{ .region = ri, .index = item_of.items[index], .segment = sg, .span = .{ start, end } });
@@ -1069,7 +1157,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     };
                     if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .region = ri, .row = sg, .item = item_of.items[index] });
                 },
-                .hard_break => {},
+                .hard_break, .paragraph => {},
             }
         }
         natural = @max(natural, para);
@@ -2216,6 +2304,70 @@ test "a run with markup breaks between words, inside a bold group too, keeping i
     // A piece starts where the row starts after a wrap, its ink near x 0.
     try testing.expect(words[2].box.x0 < 1e-6);
     try testing.expect(words[2].render.ink.x0 >= -1e-9);
+}
+
+test "paragraphs: indents, a justified paragraph, a centred one, and space between them" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 200);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 200 }, .style = body, .count = 12, .length = 6, .pitch = 10 });
+    const just = try m.addParagraphStyle(.{ .name = "Body", .alignment = .justify, .indent_start = 4, .first = 6, .indent_end = 2, .space_after = 5 });
+    const centred = try m.addParagraphStyle(.{ .name = "Centred", .alignment = .centre, .space_before = 3, .line_gap = 2 });
+    try m.setParagraphAt(p, r, 0, just);
+    try m.insertRun(p, r, 0, .{ .style = body, .content = "HOD ADD HOD ADD HOD ADD HOD" });
+    try m.insertParagraph(p, r, 1, centred);
+    try m.insertRun(p, r, 2, .{ .style = body, .content = "HOD ADD HOD ADD HOD ADD" });
+    try testing.expectEqual(just, m.paragraphStyleAt(p, r, 0));
+    try testing.expectEqual(centred, m.paragraphStyleAt(p, r, 2));
+
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectEqual(0, s.issues.len);
+    // Per segment: where its words start and end along it.
+    var lo: [8]f64 = @splat(std.math.inf(f64));
+    var hi: [8]f64 = @splat(-std.math.inf(f64));
+    var seg_item: [8]usize = undefined;
+    for (s.labels) |l| {
+        const run = l.run orelse continue;
+        const mid = (l.box.y0 + l.box.y1) / 2;
+        const t = for (s.tracks, 0..) |tr, k| {
+            if (mid > tr.box.y0 and mid < tr.box.y1) break k;
+        } else unreachable;
+        lo[t] = @min(lo[t], l.box.x0);
+        hi[t] = @max(hi[t], l.box.x1);
+        seg_item[t] = run.item;
+    }
+    var nsegs: usize = 0;
+    while (nsegs < 8 and lo[nsegs] < std.math.inf(f64)) nsegs += 1;
+    try testing.expect(nsegs >= 4);
+    // The first line: indented 4 + 6, justified out to 60 - 2.
+    try testing.expectApproxEqAbs(@as(f64, 10), lo[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 58), hi[0], 1e-6);
+    // The next lines of the paragraph: from 4.
+    try testing.expectApproxEqAbs(@as(f64, 4), lo[1], 1e-9);
+    // The paragraph's last line is not stretched; the centred paragraph's
+    // lines are centred in the whole segment.
+    var last: usize = 0;
+    while (seg_item[last + 1] == 0) last += 1;
+    try testing.expect(hi[last] < 58 - 1);
+    const c = last + 1;
+    try testing.expectApproxEqAbs(@as(f64, 30), (lo[c] + hi[c]) / 2, 1e-6);
+    // Between the paragraphs, 5 + 3 mm more than a line; within the
+    // centred one, its 2 mm line gap.
+    const step_in = s.tracks[1].origin.across - s.tracks[0].origin.across;
+    const step_between = s.tracks[c].origin.across - s.tracks[last].origin.across;
+    try testing.expectApproxEqAbs(step_in + 0.8, step_between, 1e-9);
+    if (c + 1 < s.tracks.len) {
+        const step_centred = s.tracks[c + 1].origin.across - s.tracks[c].origin.across;
+        try testing.expectApproxEqAbs(step_in + 0.2, step_centred, 1e-9);
+    }
 }
 
 test "a label on a canvas, with no sheet or panel, solves and exports" {
