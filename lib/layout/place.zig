@@ -92,7 +92,9 @@ pub const Issue = struct {
         /// A region's tracks reach past its panel's outline; `amount` says
         /// how far, mm.
         region_outside,
-        /// A segment lies past its track's soft area (`row` says which).
+        /// A segment lies past the segments its track's space was drawn
+        /// out for, across (`row` says which). Along, the path and the
+        /// segment length bound the track, so no segment is past it.
         past_soft_area,
         /// A tile reaches back past its row's top into a segment the flow
         /// filled before: that content is not moved.
@@ -1192,7 +1194,11 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         for (path.origins.items, path.boxes.items, 0..) |o, b, t| {
             try tracks.append(a, .{ .region = ri, .track = t, .major = region.major, .box = b, .origin = o });
             all = all.join(b);
-            if (!model.within(b, soft)) try issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
+            // Along, the path and the segment length are the boundary: a
+            // segment is always within it. Across, past the segments the
+            // space was drawn out for is flagged.
+            const past = if (rows) b.y0 < soft.y0 - tol or b.y1 > soft.y1 + tol else b.x0 < soft.x0 - tol or b.x1 > soft.x1 + tol;
+            if (past) try issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
         }
         // The canvas has no outline to keep to.
         const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
@@ -1732,12 +1738,12 @@ test "each segment is bound to the path by its centre; its paragraph's alignment
             try testing.expectApproxEqAbs(@as(f64, 60), t.box.width(), 1e-9);
             try testing.expectApproxEqAbs(@as(f64, 60), (t.box.x0 + t.box.x1) / 2, 1e-9);
         }
-        // Past the reserved space: flagged, not cut short.
-        var flagged = false;
-        for (s.issues) |is| if (is.kind == .past_soft_area) {
-            flagged = true;
-        };
-        try testing.expect(flagged);
+        // The path and the segment length are the track's boundary: it
+        // moves with the path, so nothing is out of bounds.
+        for (s.issues) |is| try testing.expect(is.kind != .past_soft_area);
+        const b = m.panels.items[p].regions.items[r].bounds();
+        try testing.expectApproxEqAbs(@as(f64, 30), b.x0, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 90), b.x1, 1e-9);
     }
 }
 

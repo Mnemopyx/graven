@@ -549,7 +549,50 @@ pub const TileRegion = struct {
             .{ .x0 = r.origin.x + across, .x1 = r.origin.x + across + r.pitch, .y1 = r.origin.y - shift, .y0 = r.origin.y - shift - length };
     }
 
-    /// The soft area its segments expand into, mm in the panel frame.
+    /// How far across its reserved space reaches, u: as many segments as
+    /// it was drawn out for.
+    pub fn crossLength(r: TileRegion) f64 {
+        return if (r.major == .row) r.h else r.w;
+    }
+
+    /// Where the track's boundary is along at `across`, u from its origin:
+    /// a whole segment's length centred on the path. The path and the
+    /// segment length bound the track, so a bent path takes its boundary
+    /// with it.
+    pub fn edgesAt(r: TileRegion, across: f64) [2]f64 {
+        const c = r.pathAt(across);
+        return .{ c - r.middle(), c + r.middle() };
+    }
+
+    /// The box around the track's boundary, mm in the panel frame: its
+    /// reserved space as the path shifts it along.
+    pub fn bounds(r: TileRegion) geom.Box {
+        var lo: f64 = 0;
+        var hi: f64 = r.segmentLength();
+        const n: usize = 64;
+        const reach = r.crossLength();
+        for (0..n + 1) |k| {
+            const e = r.edgesAt(reach * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n)));
+            if (k == 0) {
+                lo = e[0];
+                hi = e[1];
+            }
+            lo = @min(lo, e[0]);
+            hi = @max(hi, e[1]);
+        }
+        var b = r.softArea();
+        if (r.major == .row) {
+            b.x0 = r.origin.x + lo * r.pitch;
+            b.x1 = r.origin.x + hi * r.pitch;
+        } else {
+            b.y1 = r.origin.y - lo * r.pitch;
+            b.y0 = r.origin.y - hi * r.pitch;
+        }
+        return b;
+    }
+
+    /// The space reserved for its segments as drawn out, mm in the panel
+    /// frame: unshaped, the track's boundary; its frame for constraints.
     pub fn softArea(r: TileRegion) geom.Box {
         return .{ .x0 = r.origin.x, .x1 = r.origin.x + r.w * r.pitch, .y1 = r.origin.y, .y0 = r.origin.y - r.h * r.pitch };
     }
@@ -2223,7 +2266,7 @@ pub const Model = struct {
         while (i > 0) {
             i -= 1;
             const r = src.regions.items[i];
-            if (!inside.box(path, at, r.softArea())) continue;
+            if (!inside.box(path, at, r.bounds())) continue;
             var moved = src.regions.orderedRemove(i);
             moved.origin = .{ .x = moved.origin.x + d.x, .y = moved.origin.y + d.y };
             try p.regions.insert(m.a(), 0, moved);

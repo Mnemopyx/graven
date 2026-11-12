@@ -3747,15 +3747,16 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         const colour = if (outside) colors.overflow else if (past_soft) colors.overflow.opacity(0.5) else colors.guide.opacity(0.35);
         state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
-    // The context track's soft area, which its rows or columns expand
-    // into, as a faint dashed outline.
+    // The context track's boundary, which its rows or columns expand
+    // into, as a faint dashed outline: a segment's length centred on its
+    // path, as far across as the space it was drawn out for.
     const soft_region: ?usize = switch (state.context) {
         .region => |r| if (r.panel == pi) r.region else null,
         .row => |r| if (r.panel == pi) r.region else null,
         else => null,
     };
     if (soft_region) |sr| if (sr < state.model.panels.items[pi].regions.items.len) {
-        dashedBox(area, onSheet(pi, state.model.panels.items[pi].regions.items[sr].softArea()), colors.guide.opacity(0.6), px);
+        dashedOutline(area, trackOutline(pi, sr), colors.guide.opacity(0.6), px);
     };
     for (placed.tiles) |t| {
         const in_context = inContext(pi, t);
@@ -7274,19 +7275,50 @@ fn animate() void {
 
 fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32) void {
     const corners = [_]geom.Point{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 }, .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x0, .y = b.y0 } };
+    dashedOutline(area, &corners, colour, px);
+}
+
+/// Track `ri`'s boundary in panel `pi`, sheet mm: down one edge and back up
+/// the other, each a segment's half length from the path.
+fn trackOutline(pi: usize, ri: usize) []const geom.Point {
+    const r = state.model.panels.items[pi].regions.items[ri];
+    const a = dvui.currentWindow().arena();
+    const reach = r.crossLength();
+    const n: usize = @intFromFloat(@min(1000, @max(8, @ceil(reach * 8))));
+    var pts: std.ArrayList(geom.Point) = .empty;
+    for (0..2) |side| for (0..n + 1) |k0| {
+        const k = if (side == 0) k0 else n - k0;
+        const across = reach * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
+        const e = r.edgesAt(across);
+        // `pathToMm` puts a place across mid-row; the edges run the whole
+        // reach, from the first row's top to the last row's bottom.
+        const p = pathToMm(pi, ri, e[side], across - 0.5);
+        pts.append(a, p) catch return &.{};
+    };
+    return pts.items;
+}
+
+/// A closed outline through `pts` (sheet mm), dashed.
+fn dashedOutline(area: dvui.Rect.Physical, pts: []const geom.Point, colour: dvui.Color, px: f32) void {
     const dash = 2.0;
-    for (0..4) |i| {
-        const a = corners[i];
-        const z = corners[(i + 1) % 4];
+    // Where in the dash-gap pattern each piece starts, so short pieces of
+    // a curve dash evenly.
+    var phase: f64 = 0;
+    for (0..pts.len) |i| {
+        const a = pts[i];
+        const z = pts[(i + 1) % pts.len];
         const len = @sqrt((z.x - a.x) * (z.x - a.x) + (z.y - a.y) * (z.y - a.y));
         if (len <= 0) continue;
-        var d: f64 = 0;
+        var d: f64 = -phase;
         while (d < len) : (d += 2 * dash) {
+            const s0 = @max(0, d);
             const e = @min(len, d + dash);
-            const p0: geom.Point = .{ .x = a.x + (z.x - a.x) * d / len, .y = a.y + (z.y - a.y) * d / len };
+            if (e <= s0) continue;
+            const p0: geom.Point = .{ .x = a.x + (z.x - a.x) * s0 / len, .y = a.y + (z.y - a.y) * s0 / len };
             const p1: geom.Point = .{ .x = a.x + (z.x - a.x) * e / len, .y = a.y + (z.y - a.y) * e / len };
             dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = px, .color = .{ .color = colour } });
         }
+        phase = @mod(phase + len, 2 * dash);
     }
 }
 
