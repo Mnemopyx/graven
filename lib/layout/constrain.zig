@@ -629,6 +629,65 @@ fn gaussSolve(mat: []f64, rhs: []f64, n: usize) bool {
 }
 
 /// What cannot be met, without moving anything: solves a copy.
+/// Puts object `id` at `box` (in its parent's frame): moved there, and
+/// sized to it on the axes its kind can be resized on (a label or line art
+/// keeps its size, and moves by its lower edges). Whether it was found.
+pub fn setBox(m: *Model, id: ObjectId, box: geom.Box) bool {
+    const loc = locate(m, id) orelse return false;
+    for ([_]bool{ false, true }) |vertical| {
+        const sh = shapeOf(m, loc, vertical);
+        const lo = if (vertical) box.y0 else box.x0;
+        const s = if (sh.resizable) (if (vertical) box.height() else box.width()) else sh.hi - sh.lo;
+        place(m, loc, vertical, lo + sh.f * s, s);
+    }
+    return true;
+}
+
+/// Which ways object `id` may move and be resized without breaking a
+/// constraint: along each axis, and each of its edges (false on an axis
+/// its kind cannot be resized on). Tried on a copy of the model: the
+/// change is made and the constraints solved, and it is free where the
+/// object stays where it was put.
+pub const Freedom = struct {
+    x: bool = false,
+    y: bool = false,
+    left: bool = false,
+    right: bool = false,
+    bottom: bool = false,
+    top: bool = false,
+};
+
+pub fn freedom(gpa: Allocator, m: *const Model, id: ObjectId) !Freedom {
+    const loc = locate(m, id) orelse return .{};
+    const b = boxOf(m, id) orelse return .{};
+    const rx = shapeOf(m, loc, false).resizable;
+    const ry = shapeOf(m, loc, true).resizable;
+    const d = 1.0;
+    const tries = [_]struct { box: geom.Box, ok: bool }{
+        .{ .box = .{ .x0 = b.x0 + d, .x1 = b.x1 + d, .y0 = b.y0, .y1 = b.y1 }, .ok = true },
+        .{ .box = .{ .x0 = b.x0, .x1 = b.x1, .y0 = b.y0 + d, .y1 = b.y1 + d }, .ok = true },
+        .{ .box = .{ .x0 = b.x0 - d, .x1 = b.x1, .y0 = b.y0, .y1 = b.y1 }, .ok = rx },
+        .{ .box = .{ .x0 = b.x0, .x1 = b.x1 + d, .y0 = b.y0, .y1 = b.y1 }, .ok = rx },
+        .{ .box = .{ .x0 = b.x0, .x1 = b.x1, .y0 = b.y0 - d, .y1 = b.y1 }, .ok = ry },
+        .{ .box = .{ .x0 = b.x0, .x1 = b.x1, .y0 = b.y0, .y1 = b.y1 + d }, .ok = ry },
+    };
+    var free: [6]bool = undefined;
+    const bytes = if (m.constraints.items.len > 0) try native.encode(gpa, m) else &[_]u8{};
+    defer if (bytes.len > 0) gpa.free(bytes);
+    for (tries, &free) |t, *f| {
+        f.* = t.ok;
+        if (!t.ok or bytes.len == 0) continue;
+        var copy = try native.decode(gpa, bytes);
+        defer copy.deinit();
+        _ = setBox(&copy, id, t.box);
+        try solve(&copy, gpa, null);
+        const got = boxOf(&copy, id) orelse continue;
+        const tol = 1e-6;
+        f.* = @abs(got.x0 - t.box.x0) < tol and @abs(got.x1 - t.box.x1) < tol and @abs(got.y0 - t.box.y0) < tol and @abs(got.y1 - t.box.y1) < tol;
+    }
+    return .{ .x = free[0], .y = free[1], .left = free[2], .right = free[3], .bottom = free[4], .top = free[5] };
+}
+
 pub fn check(m: *const Model, gpa: Allocator) ![]Issue {
     var issues: std.ArrayList(Issue) = .empty;
     errdefer issues.deinit(gpa);
@@ -871,4 +930,37 @@ test "a track's control point can be constrained, and the rows follow it" {
     // Moving the track takes the point's place along: it keeps to it.
     try h.do(&m, .moveControlPoint, .{ cp, 9.0, 4.0 });
     try testing.expectApproxEqAbs(@as(f64, 5), m.panels.items[p].regions.items[r].path.items[0].along, 1e-9);
+}
+
+test "objects move and resize only where their constraints leave them free" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 80 });
+    const q = try m.placePanel(.{ .name = "Q", .space = 0, .origin = .{ .x = 150, .y = 0 }, .w = 40, .h = 40 });
+    const pid = m.panels.items[p].id;
+    const qid = m.panels.items[q].id;
+    try h.reset(&m);
+    // Unconstrained: free every way.
+    const f0 = try freedom(gpa, &m, qid);
+    try testing.expect(f0.x and f0.y and f0.left and f0.right and f0.bottom and f0.top);
+    // Q's left edge kept 50 mm right of P's right edge: Q cannot move
+    // across, nor its left edge; its right edge still resizes, and it
+    // moves freely up and down.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = qid, .feature = .left }, .b = .{ .object = pid, .feature = .right }, .value = 50 }});
+    const f1 = try freedom(gpa, &m, qid);
+    try testing.expect(!f1.x and f1.y and !f1.left and f1.right and f1.bottom and f1.top);
+    // Placing it across anyway: the constraint puts it back; up is kept.
+    _ = try h.do(&m, .placeObjects, .{ &[_]ObjectId{qid}, &[_]geom.Box{.{ .x0 = 170, .x1 = 210, .y0 = 10, .y1 = 50 }} });
+    const qb = boxOf(&m, qid).?;
+    try testing.expectApproxEqAbs(@as(f64, 150), qb.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), qb.y0, 1e-9);
+    // P is what Q keeps to: moving P is free, and Q follows.
+    const fp = try freedom(gpa, &m, pid);
+    try testing.expect(fp.x and fp.y);
+    _ = try h.do(&m, .placeObjects, .{ &[_]ObjectId{pid}, &[_]geom.Box{.{ .x0 = 20, .x1 = 120, .y0 = 0, .y1 = 80 }} });
+    try testing.expectApproxEqAbs(@as(f64, 170), boxOf(&m, qid).?.x0, 1e-9);
 }

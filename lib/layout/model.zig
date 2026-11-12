@@ -21,6 +21,7 @@ const engine = @import("graven_engine");
 const Allocator = std.mem.Allocator;
 const geom = engine.geom;
 const art_ = @import("art.zig");
+const constrain_ = @import("constrain.zig");
 
 pub const TileId = enum(u32) { _ };
 
@@ -1485,6 +1486,19 @@ pub const Model = struct {
     /// Makes a group of `ids` (objects and groups of one space) where they
     /// are. Where they were members of a group, the new group takes their
     /// place in it. Returns the new group's ID.
+    /// Puts each of objects `ids` at its box in `boxes` (each in its
+    /// parent's frame): moved, and resized where its kind can be. The
+    /// constraints are then solved, so what they bind goes back and what
+    /// keeps to these follows.
+    pub fn placeObjects(m: *Model, ids: []const ObjectId, boxes: []const geom.Box) Error!void {
+        if (ids.len != boxes.len) return error.NoSuchObject;
+        for (ids, boxes) |id, b| {
+            if (!(b.width() >= 0 and b.height() >= 0)) return error.BadSize;
+            if (!constrain_.setBox(m, id, b)) return error.NoSuchObject;
+        }
+        m.revision += 1;
+    }
+
     pub fn makeGroup(m: *Model, ids: []const ObjectId, name: []const u8) Error!ObjectId {
         if (ids.len == 0) return error.NoSuchItem;
         const space = m.spaceOfId(ids[0]) orelse return error.NoSuchItem;

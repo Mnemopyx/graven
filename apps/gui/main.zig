@@ -3215,6 +3215,7 @@ fn canvas() void {
     if (open) drawSpace(area, shown_space, 0) else drawSpacePanels(area, null, null);
 
     drawPicked(area);
+    drawSelection(area);
     drawPolygonDraft(area);
     drawTrackPath(area);
     drawConstraintMarks(area);
@@ -3387,6 +3388,14 @@ fn groupProperties(id: layout.model.ObjectId) !void {
 fn selectionProperties() !void {
     propText("Objects", "{d}", .{selection.items.len}, 1);
     if (selection.items.len == 0) return;
+    if (selection.items.len == 1) propText("Object", "{s}", .{objectName(selection.items[0])}, 2);
+    // Grouping and moving to a frame are for what is directly in a space.
+    const in_space = for (selection.items) |id| {
+        if (state.model.group(id) != null) continue;
+        const parent = constrain.parentOf(&state.model, id) orelse break false;
+        if (parent != .space) break false;
+    } else true;
+    if (!in_space) return;
     if (dvui.button(@src(), "Group", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) groupSelection();
     if (dvui.button(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, false);
     if (dvui.button(@src(), "Copy to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, true);
@@ -3576,10 +3585,8 @@ fn drawPicked(area: dvui.Rect.Physical) void {
     const px = dvui.windowNaturalScale();
     const focus = colors.select;
     switch (state.context) {
-        .selection => for (selection.items) |id| {
-            const b = idBox(id);
-            if (!b.isEmpty()) marchingBox(area, b, focus, 2 * px);
-        },
+        // Drawn whatever the context (see drawSelection).
+        .selection => {},
         .group => |g| {
             const grp = state.model.group(g) orelse return;
             for (grp.members.items) |mb| {
@@ -5072,6 +5079,17 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
+        // The selection's keys: Tab hunts on to the next-nearest container
+        // of the last Ctrl-click (Shift+Tab back), Esc empties it, and the
+        // arrows move it.
+        if (e.evt == .key and selection.items.len > 0 and !e.handled and track_cursor == null and cursorKeysReach()) {
+            const k = e.evt.key;
+            if ((k.action == .down or k.action == .repeat) and selectionKey(k.code, k.mod.shift())) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         // The flow cursor's keys, while the canvas or the palette has the
         // keyboard: never from a text entry.
         if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
@@ -5243,6 +5261,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .join and me.button.pointer()) {
                     joinClick(state.view.toMm(area, me.p));
                     state.press_consumed = true;
+                } else if (state.tool == .select and me.button.pointer() and primaryMod(me.mod)) {
+                    // Ctrl-click (Cmd on macOS) near a container's edge:
+                    // in or out of the selection.
+                    ctrlPick(state.view.toMm(area, me.p));
+                    state.press_consumed = true;
+                } else if (state.tool == .select and me.button.pointer() and selectionPress(state.view.toMm(area, me.p))) {
+                    hunt_clear();
                 } else if (state.tool == .select and me.button.pointer() and pathHit(state.view.toMm(area, me.p)) != null) {
                     const at = state.view.toMm(area, me.p);
                     const hit = pathHit(at).?;
@@ -5258,7 +5283,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (state.drag) |*d| {
+                if (resize_drag != null or sel_press != null) {
+                    e.handle(@src(), box.data());
+                    selectionDrag(state.view.toMm(area, me.p));
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (state.drag) |*d| {
                     e.handle(@src(), box.data());
                     d.at = if (state.tool == .add_tracks) state.view.toMm(area, me.p) else snap(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
@@ -5291,7 +5320,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
-                if (state.drag) |d| {
+                if (resize_drag != null or sel_press != null) {
+                    // A click on a selected box that did not drag keeps
+                    // its plain meaning.
+                    const clicked = sel_press != null and !sel_press.?.moved;
+                    selectionDragEnd();
+                    if (clicked) pick(state.view.toMm(area, me.p));
+                } else if (state.drag) |d| {
                     state.drag = null;
                     switch (state.tool) {
                         .add_tracks => addTracksFromDrag(d.start, d.at),
@@ -5392,8 +5427,10 @@ fn finishMove(pi: usize) void {
 /// Makes what is under worksheet point `at` the context: a tile, else a
 /// panel, else the worksheet.
 fn pick(at: geom.Point) void {
-    // In a region's context, a click in its tracks puts the flow cursor
-    // there; anywhere else picks as usual.
+    // A click in a text track makes it the context and puts the flow
+    // cursor there at once; in the context's tracks, the cursor too;
+    // anywhere else picks as usual.
+    if (textTrackAt(at)) |t| state.context = .{ .region = .{ .panel = t.panel, .region = t.region } };
     if (cursorAt(at)) |c| {
         track_cursor = c;
         return;
@@ -8201,6 +8238,310 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
 fn onSheetPoint(pi: usize, p: geom.Point) geom.Point {
     const o = panelOrigin(pi);
     return .{ .x = o.x + p.x, .y = o.y + p.y };
+}
+
+// Selecting, moving and resizing ------------------------------------------------
+//
+// Ctrl-click (Cmd on macOS) near a container's edge puts the nearest
+// container in the selection, or takes it out; Tab hunts on to the
+// next-nearest from the same click. A selection holds containers of one
+// parent. Each selected container shows a translucent box: a drag on it
+// moves the selection, and a lone selected container has handles on the
+// edges it may be resized by. Moves and resizes go only where constraints
+// leave freedom: the constraints are solved as the drag goes, so what
+// they bind stays and what keeps to the moved follows.
+
+/// The last Ctrl-click: where, the containers whose edges were near it
+/// (nearest first), and which of them it took.
+var hunt: ?struct { at: geom.Point, ids: []layout.model.ObjectId, k: usize } = null;
+
+/// A press on a selected container's box: once dragged, it moves the
+/// selection from where each was (boxes in their parents' frames).
+var sel_press: ?struct { start: geom.Point, moved: bool, key: u64, ids: []layout.model.ObjectId, boxes: []geom.Box } = null;
+
+/// A drag on a resize handle of the lone selected container.
+const Edges = struct { left: bool = false, right: bool = false, bottom: bool = false, top: bool = false };
+const Handle = struct { at: geom.Point, edges: Edges };
+var resize_drag: ?struct { id: layout.model.ObjectId, edges: Edges, start: geom.Point, box: geom.Box, key: u64 } = null;
+
+/// Which ways the lone selected container may move and resize, worked
+/// out once per document revision.
+var free_cache: ?struct { id: layout.model.ObjectId, rev: u64, f: constrain.Freedom } = null;
+var drag_count: u64 = 0;
+
+fn primaryMod(mod: dvui.enums.Mod) bool {
+    return if (builtin.os.tag == .macos) mod.command() else mod.control();
+}
+
+fn hunt_clear() void {
+    if (hunt) |h| state.gpa.free(h.ids);
+    hunt = null;
+}
+
+/// A container's box on the canvas (its space's frame), mm.
+fn containerBox(id: layout.model.ObjectId) ?geom.Box {
+    if (state.model.group(id) != null) {
+        const b = idBox(id);
+        return if (b.isEmpty()) null else b;
+    }
+    const parent = constrain.parentOf(&state.model, id) orelse return null;
+    const b = constrain.boxOf(&state.model, id) orelse return null;
+    return offsetBox(b, constrain.frameOffset(&state.model, parent));
+}
+
+/// How far `p` is from box `b`'s edges, mm.
+fn edgeDistance(b: geom.Box, p: geom.Point) f64 {
+    const inside = p.x >= b.x0 and p.x <= b.x1 and p.y >= b.y0 and p.y <= b.y1;
+    if (inside) return @min(@min(p.x - b.x0, b.x1 - p.x), @min(p.y - b.y0, b.y1 - p.y));
+    const dx = @max(@max(b.x0 - p.x, 0), p.x - b.x1);
+    const dy = @max(@max(b.y0 - p.y, 0), p.y - b.y1);
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// The containers in the shown space whose edges lie within a few pixels
+/// of `at`, nearest first.
+fn containersNear(at: geom.Point) []layout.model.ObjectId {
+    const a = dvui.currentWindow().arena();
+    const tol = 8 / state.view.ppm;
+    const Near = struct { id: layout.model.ObjectId, d: f64 };
+    var list: std.ArrayList(Near) = .empty;
+    for (constrainables(a)) |id| {
+        if (isControlPoint(id)) continue;
+        const b = containerBox(id) orelse continue;
+        const d = edgeDistance(b, at);
+        if (d <= tol) list.append(a, .{ .id = id, .d = d }) catch {};
+    }
+    std.mem.sort(Near, list.items, {}, struct {
+        fn lt(_: void, x: Near, y: Near) bool {
+            return x.d < y.d;
+        }
+    }.lt);
+    var ids = a.alloc(layout.model.ObjectId, list.items.len) catch return &.{};
+    for (list.items, 0..) |n, k| ids[k] = n.id;
+    return ids;
+}
+
+fn selectedAt(id: layout.model.ObjectId) ?usize {
+    return std.mem.indexOfScalar(layout.model.ObjectId, selection.items, id);
+}
+
+/// Puts `id` in the selection, or takes it out. A container of another
+/// parent starts a new selection.
+fn toggleSelected(id: layout.model.ObjectId) void {
+    if (selectedAt(id)) |k| {
+        _ = selection.orderedRemove(k);
+        return;
+    }
+    if (selection.items.len > 0) {
+        const a = constrain.parentOf(&state.model, selection.items[0]);
+        const b = constrain.parentOf(&state.model, id);
+        if (!std.meta.eql(a, b)) {
+            selection.clearRetainingCapacity();
+            state.status = "A selection holds containers of one parent: a new one starts. ";
+        }
+    }
+    selection.append(state.gpa, id) catch {};
+}
+
+fn ctrlPick(at: geom.Point) void {
+    hunt_clear();
+    const near = containersNear(at);
+    if (near.len == 0) {
+        state.status = "No container's edge there. ";
+        return;
+    }
+    hunt = .{ .at = at, .ids = state.gpa.dupe(layout.model.ObjectId, near) catch return, .k = 0 };
+    toggleSelected(near[0]);
+    state.context = .selection;
+    if (near.len > 1) state.status = "Tab takes the next-nearest container instead. ";
+}
+
+/// Swaps the container the last Ctrl-click took for the next-nearest (or,
+/// back, the one before).
+fn huntNext(back: bool) bool {
+    if (hunt == null) return false;
+    const h = &hunt.?;
+    if (h.ids.len < 2) return false;
+    if (selectedAt(h.ids[h.k])) |k| _ = selection.orderedRemove(k);
+    h.k = if (back) (h.k + h.ids.len - 1) % h.ids.len else (h.k + 1) % h.ids.len;
+    if (selectedAt(h.ids[h.k]) == null) toggleSelected(h.ids[h.k]);
+    state.context = .selection;
+    state.status = std.fmt.bufPrint(&status_hunt_buf, "Selected {s}. ", .{objectName(h.ids[h.k])}) catch "";
+    return true;
+}
+var status_hunt_buf: [128]u8 = undefined;
+
+fn selectionKey(code: dvui.enums.Key, shift: bool) bool {
+    switch (code) {
+        .tab => return huntNext(shift),
+        .escape => {
+            selection.clearRetainingCapacity();
+            hunt_clear();
+            if (state.context == .selection) state.context = .worksheet;
+            return true;
+        },
+        .left, .right, .up, .down => {
+            if (state.context != .selection) return false;
+            const step = 1.0;
+            const d: geom.Point = switch (code) {
+                .left => .{ .x = -step, .y = 0 },
+                .right => .{ .x = step, .y = 0 },
+                .up => .{ .x = 0, .y = step },
+                else => .{ .x = 0, .y = -step },
+            };
+            moveSelectionBy(d, mergeKey(.{ "nudge", selection.items.len, selection.items[0] }));
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// Moves the selection by `d` mm from where each is now.
+fn moveSelectionBy(d: geom.Point, key: u64) void {
+    const a = dvui.currentWindow().arena();
+    var ids: std.ArrayList(layout.model.ObjectId) = .empty;
+    var boxes: std.ArrayList(geom.Box) = .empty;
+    for (selection.items) |id| {
+        const b = constrain.boxOf(&state.model, id) orelse continue;
+        ids.append(a, id) catch return;
+        boxes.append(a, .{ .x0 = b.x0 + d.x, .x1 = b.x1 + d.x, .y0 = b.y0 + d.y, .y1 = b.y1 + d.y }) catch return;
+    }
+    if (ids.items.len == 0) return;
+    _ = actM(key, .placeObjects, .{ ids.items, boxes.items }) catch {
+        state.status = "It did not move. ";
+    };
+}
+
+fn freedomOf(id: layout.model.ObjectId) constrain.Freedom {
+    if (free_cache) |c| if (c.id == id and c.rev == state.model.revision) return c.f;
+    const f = constrain.freedom(state.gpa, &state.model, id) catch constrain.Freedom{};
+    free_cache = .{ .id = id, .rev = state.model.revision, .f = f };
+    return f;
+}
+
+/// The lone selected container's resize handles: where each is on the
+/// canvas, and which edges it moves. Only edges it may be resized by.
+fn resizeHandles(buf: []Handle) usize {
+    if (selection.items.len != 1) return 0;
+    const id = selection.items[0];
+    if (state.model.group(id) != null) return 0;
+    const b = containerBox(id) orelse return 0;
+    const f = freedomOf(id);
+    const mx = (b.x0 + b.x1) / 2;
+    const my = (b.y0 + b.y1) / 2;
+    var n: usize = 0;
+    const all = [_]struct { at: geom.Point, edges: Edges, ok: bool }{
+        .{ .at = .{ .x = b.x0, .y = my }, .edges = .{ .left = true }, .ok = f.left },
+        .{ .at = .{ .x = b.x1, .y = my }, .edges = .{ .right = true }, .ok = f.right },
+        .{ .at = .{ .x = mx, .y = b.y0 }, .edges = .{ .bottom = true }, .ok = f.bottom },
+        .{ .at = .{ .x = mx, .y = b.y1 }, .edges = .{ .top = true }, .ok = f.top },
+        .{ .at = .{ .x = b.x0, .y = b.y0 }, .edges = .{ .left = true, .bottom = true }, .ok = f.left and f.bottom },
+        .{ .at = .{ .x = b.x1, .y = b.y0 }, .edges = .{ .right = true, .bottom = true }, .ok = f.right and f.bottom },
+        .{ .at = .{ .x = b.x0, .y = b.y1 }, .edges = .{ .left = true, .top = true }, .ok = f.left and f.top },
+        .{ .at = .{ .x = b.x1, .y = b.y1 }, .edges = .{ .right = true, .top = true }, .ok = f.right and f.top },
+    };
+    for (all) |h| if (h.ok and n < buf.len) {
+        buf[n] = .{ .at = h.at, .edges = h.edges };
+        n += 1;
+    };
+    return n;
+}
+
+/// A press with the select tool: on a resize handle, or on a selected
+/// container's box. Whether it was.
+fn selectionPress(at: geom.Point) bool {
+    if (selection.items.len == 0) return false;
+    drag_count += 1;
+    var hb: [8]Handle = undefined;
+    const tol = 6 / state.view.ppm;
+    for (hb[0..resizeHandles(&hb)]) |h| {
+        if (@abs(h.at.x - at.x) > tol or @abs(h.at.y - at.y) > tol) continue;
+        const id = selection.items[0];
+        resize_drag = .{ .id = id, .edges = h.edges, .start = at, .box = constrain.boxOf(&state.model, id) orelse return false, .key = mergeKey(.{ "resize", drag_count }) };
+        return true;
+    }
+    const on = for (selection.items) |id| {
+        const b = containerBox(id) orelse continue;
+        if (contains(b, at)) break true;
+    } else false;
+    if (!on) return false;
+    const ids = state.gpa.dupe(layout.model.ObjectId, selection.items) catch return false;
+    const boxes = state.gpa.alloc(geom.Box, ids.len) catch {
+        state.gpa.free(ids);
+        return false;
+    };
+    for (ids, boxes) |id, *b| b.* = constrain.boxOf(&state.model, id) orelse .empty;
+    sel_press = .{ .start = at, .moved = false, .key = mergeKey(.{ "selmove", drag_count }), .ids = ids, .boxes = boxes };
+    return true;
+}
+
+fn selectionDrag(at: geom.Point) void {
+    if (resize_drag) |r| {
+        const dx = at.x - r.start.x;
+        const dy = at.y - r.start.y;
+        var b = r.box;
+        const min = 1.0;
+        if (r.edges.left) b.x0 = @min(b.x0 + dx, b.x1 - min);
+        if (r.edges.right) b.x1 = @max(b.x1 + dx, b.x0 + min);
+        if (r.edges.bottom) b.y0 = @min(b.y0 + dy, b.y1 - min);
+        if (r.edges.top) b.y1 = @max(b.y1 + dy, b.y0 + min);
+        _ = actM(r.key, .placeObjects, .{ &[_]layout.model.ObjectId{r.id}, &[_]geom.Box{b} }) catch {};
+        return;
+    }
+    if (sel_press == null) return;
+    const sp = &sel_press.?;
+    const dx = at.x - sp.start.x;
+    const dy = at.y - sp.start.y;
+    // A few pixels before it is a drag, not a click.
+    if (!sp.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 4) return;
+    sp.moved = true;
+    const a = dvui.currentWindow().arena();
+    const boxes = a.alloc(geom.Box, sp.boxes.len) catch return;
+    for (sp.boxes, boxes) |b, *o| o.* = .{ .x0 = b.x0 + dx, .x1 = b.x1 + dx, .y0 = b.y0 + dy, .y1 = b.y1 + dy };
+    _ = actM(sp.key, .placeObjects, .{ sp.ids, boxes }) catch {};
+}
+
+fn selectionDragEnd() void {
+    resize_drag = null;
+    if (sel_press) |sp| {
+        state.gpa.free(sp.ids);
+        state.gpa.free(sp.boxes);
+    }
+    sel_press = null;
+}
+
+/// The selection: a translucent box over each selected container, and
+/// the lone one's resize handles.
+fn drawSelection(area: dvui.Rect.Physical) void {
+    if (selection.items.len == 0) return;
+    const px = dvui.windowNaturalScale();
+    for (selection.items) |id| {
+        const b = containerBox(id) orelse continue;
+        const r = state.view.rect(area, b);
+        r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.14) } });
+        r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select.opacity(0.7) } });
+    }
+    var hb: [8]Handle = undefined;
+    for (hb[0..resizeHandles(&hb)]) |h| {
+        const q = state.view.toPx(area, h.at);
+        const s: f32 = 4.5 * px;
+        const grip: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };
+        grip.fill(.square, .{ .color = .{ .color = colors.paper } });
+        grip.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+    }
+}
+
+/// The text track (one sized to a text style) whose segment `at` lies in,
+/// in the shown space.
+fn textTrackAt(at: geom.Point) ?struct { panel: usize, region: usize } {
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (p.space != shown_space or pi >= state.placed.items.len) continue;
+        for (state.placed.items[pi].tracks) |t| {
+            if (t.member >= p.regions.items.len or p.regions.items[t.member].style == null) continue;
+            if (contains(onSheet(pi, t.box), at)) return .{ .panel = pi, .region = t.member };
+        }
+    }
+    return null;
 }
 
 /// A click with the Constrain tool: the first feature, then the second,

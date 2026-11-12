@@ -49,7 +49,7 @@ pub const actions = [_][:0]const u8{
     "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
     "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
-    "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks",
+    "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects",
 };
 
 fn Fn(comptime name: []const u8) type {
