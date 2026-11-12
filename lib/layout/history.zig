@@ -49,7 +49,7 @@ pub const actions = [_][:0]const u8{
     "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
     "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
-    "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint",
+    "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -1195,4 +1195,26 @@ test "composed-font edits undo and redo, and survive saving and reopening" {
     try testing.expectEqualStrings("Legend", back.name);
     try testing.expectEqualStrings("Symbols", back.members.items[0].font.family);
     try testing.expectEqual(0x21FF, back.members.items[0].coverage.ranges[0].last);
+}
+
+test "a thread of tracks is kept in the file, and its join is a step undo takes back" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 60, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    _ = try h.do(&m, .joinTracks, .{ p, a, b });
+    const bytes = try fileBytes(&h, gpa, test_writer, 1);
+    defer gpa.free(bytes);
+    var o = try openFile(gpa, bytes);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    try testing.expectEqual(o.model.panels.items[p].regions.items[b].id, o.model.panels.items[p].regions.items[a].next);
+    try testing.expect(try o.history.undo(&o.model));
+    try testing.expectEqual(model.ObjectId.none, o.model.panels.items[p].regions.items[a].next);
 }

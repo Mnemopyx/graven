@@ -467,6 +467,10 @@ pub const TileRegion = struct {
     /// The paragraph style of the flow's first paragraph (each later one
     /// takes its separator's); null for none: segments set by `alignment`.
     paragraph: ?ParaId = null,
+    /// The track its flow goes on into once this one is full (`.none`:
+    /// none). Tracks joined so make a thread: one flow, stored on the
+    /// thread's first track, runs through each in order.
+    next: ObjectId = .none,
     /// The flow, in order. A tile thicker than its segment (a 2 u tall
     /// key) reaches into the segments after it, closing the stretch it
     /// covers there; their content flows around it.
@@ -1102,7 +1106,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin };
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -1754,6 +1758,9 @@ pub const Model = struct {
         var c = r;
         c.id = m.newId();
         c.name = try m.a().dupe(u8, r.name);
+        // A copy starts a thread of its own (copies of a whole panel are
+        // rejoined by `copyPanel`).
+        c.next = .none;
         c.segments = .empty;
         try c.segments.appendSlice(m.a(), r.segments.items);
         c.path = .empty;
@@ -1789,6 +1796,10 @@ pub const Model = struct {
         c.labels = .empty;
         c.art = .empty;
         for (p.regions.items) |r| try c.regions.append(m.a(), try m.copyRegion(r));
+        // Its threads, among the copies.
+        for (p.regions.items, 0..) |r, k| if (m.regionIndex(pi, r.next)) |n| {
+            c.regions.items[k].next = c.regions.items[n].id;
+        };
         for (p.labels.items) |l| {
             var cl = l;
             cl.id = m.newId();
@@ -2791,6 +2802,94 @@ pub const Model = struct {
         const items = m.flow(panel, region).items;
         if (index + 1 >= items.len) return error.NoSuchItem;
         items[index].bind = bind;
+        m.revision += 1;
+    }
+
+    /// The index in `panel` of the track with ID `id`.
+    pub fn regionIndex(m: *const Model, panel: usize, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.panels.items[panel].regions.items, 0..) |r, k| if (r.id == id) return k;
+        return null;
+    }
+
+    /// The track whose flow goes on into track `region`, if any.
+    pub fn threadBefore(m: *const Model, panel: usize, region: usize) ?usize {
+        const id = m.panels.items[panel].regions.items[region].id;
+        if (id == .none) return null;
+        for (m.panels.items[panel].regions.items, 0..) |r, k| if (k != region and r.next == id) return k;
+        return null;
+    }
+
+    /// The first track of the thread `region` is in (itself when none goes
+    /// on into it): the one that holds the thread's flow.
+    pub fn threadHead(m: *const Model, panel: usize, region: usize) usize {
+        var at = region;
+        var steps: usize = 0;
+        while (m.threadBefore(panel, at)) |b| : (steps += 1) {
+            if (b == region or steps > m.panels.items[panel].regions.items.len) break;
+            at = b;
+        }
+        return at;
+    }
+
+    /// The tracks of the thread starting at `head`, in order, into `buf`
+    /// (stopping at a track already listed, or one not on this panel).
+    pub fn thread(m: *const Model, panel: usize, head: usize, buf: []usize) []usize {
+        var n: usize = 0;
+        var at: ?usize = head;
+        while (at) |k| {
+            if (n >= buf.len or std.mem.indexOfScalar(usize, buf[0..n], k) != null) break;
+            buf[n] = k;
+            n += 1;
+            at = m.regionIndex(panel, m.panels.items[panel].regions.items[k].next);
+        }
+        return buf[0..n];
+    }
+
+    /// Joins track `to` after track `from`: the flow of `from`'s thread
+    /// goes on into `to` (and the thread `to` starts, if it starts one)
+    /// before whatever followed `from`. What `to`'s thread held is added
+    /// to the end of the flow, as a new paragraph. Both must run the same
+    /// way, and `to` must start its thread and not be in `from`'s.
+    pub fn joinTracks(m: *Model, panel: usize, from: usize, to: usize) Error!void {
+        const regions = m.panels.items[panel].regions.items;
+        if (from >= regions.len or to >= regions.len) return error.NoSuchRow;
+        if (regions[from].major != regions[to].major) return error.BadJoin;
+        if (m.threadBefore(panel, to) != null) return error.BadJoin;
+        const head = m.threadHead(panel, from);
+        if (head == to) return error.BadJoin;
+        var buf: [256]usize = undefined;
+        const joining = m.thread(panel, to, &buf);
+        const tail = joining[joining.len - 1];
+        const r = &m.panels.items[panel].regions.items;
+        r.*[tail].next = r.*[from].next;
+        r.*[from].next = r.*[to].id;
+        // One flow: what `to` held goes on after the thread's.
+        if (head != to and r.*[to].items.items.len > 0) {
+            if (r.*[head].items.items.len > 0) try r.*[head].items.append(m.a(), .{ .what = .{ .paragraph = r.*[to].paragraph } });
+            try r.*[head].items.appendSlice(m.a(), r.*[to].items.items);
+            r.*[to].items.clearRetainingCapacity();
+        }
+        m.revision += 1;
+    }
+
+    /// Takes track `region` out of its thread: the tracks either side are
+    /// joined, and the flow stays whole on the thread (on the next track
+    /// when `region` held it); what no longer fits overflows the last.
+    pub fn unjoinTrack(m: *Model, panel: usize, region: usize) Error!void {
+        const r = &m.panels.items[panel].regions.items;
+        if (region >= r.len) return error.NoSuchRow;
+        const before = m.threadBefore(panel, region);
+        const after = m.regionIndex(panel, r.*[region].next);
+        if (before == null and after == null) return error.BadJoin;
+        if (before) |b| r.*[b].next = r.*[region].next;
+        if (before == null) if (after) |n| {
+            // It held the flow: the next track does now.
+            try r.*[n].items.appendSlice(m.a(), r.*[region].items.items);
+            r.*[region].items.clearRetainingCapacity();
+            r.*[n].paragraph = r.*[region].paragraph;
+        };
+        r.*[region].next = .none;
         m.revision += 1;
     }
 

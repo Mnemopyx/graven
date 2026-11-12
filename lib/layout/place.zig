@@ -119,9 +119,14 @@ pub const Issue = struct {
 
 /// A segment as placed: where its band lies.
 pub const PlacedTrack = struct {
+    /// The track whose flow it holds (the first of its thread), and its
+    /// index in that flow's segments.
     region: usize,
-    /// The segment's index in its region.
     track: usize,
+    /// The track it lies in, and its index there: the same as `region`
+    /// and `track` unless the track is threaded after another.
+    member: usize = 0,
+    local: usize = 0,
     major: model.Major,
     /// The segment's band, mm in the panel frame: its length along, one
     /// pitch across.
@@ -510,7 +515,7 @@ const Flow = struct {
             content_end = @max(content_end, f.spans[k][1]);
         }
         const free = @max(0, line.hi - content_end);
-        const alignment: model.ParagraphAlign = line.alignment orelse switch (f.region.alignment) {
+        const alignment: model.ParagraphAlign = line.alignment orelse switch (path.regionOf(seg).alignment) {
             .start => .start,
             .centre => .centre,
             .end => .end,
@@ -805,7 +810,12 @@ const max_segments = 4096;
 /// from the one before and where the track's path is along, skipping on
 /// past places already taken (by earlier segments here, or `avoid`).
 const Path = struct {
-    region: *const model.TileRegion,
+    /// The panel's tracks, and the thread's, in order: the flow goes on
+    /// into the next once one is full across.
+    regions: []const model.TileRegion,
+    thread: []const usize,
+    /// Each segment's place in the thread.
+    member: std.ArrayList(usize) = .empty,
     avoid: []const PlacedTrack,
     origins: std.ArrayList(model.Segment) = .empty,
     boxes: std.ArrayList(Box) = .empty,
@@ -815,15 +825,24 @@ const Path = struct {
     lead: f64 = 0,
 
     fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
-        const r = p.region;
         while (p.origins.items.len <= k) {
             const n = p.origins.items.len;
+            var at: usize = if (n == 0) 0 else p.member.items[n - 1];
+            var r = &p.regions[p.thread[at]];
             // One thickness (and the gap, and any paragraph spacing) on
             // across from the one before; along, wherever the path is
             // there. Past a place already taken, on across.
             var across: f64 = if (n == 0) 0 else p.origins.items[n - 1].across + 1 + r.gap + p.lead / r.pitch;
+            // Full across: on into the next track of the thread, at its
+            // start (a paragraph's spacing does not carry over).
+            if (n > 0 and across + 1 > r.crossLength() + 1e-9 and at + 1 < p.thread.len) {
+                at += 1;
+                r = &p.regions[p.thread[at]];
+                across = 0;
+            }
+            const first_here = n == 0 or at != p.member.items[n - 1];
             var o: model.Segment = .{ .along = r.pathAt(across), .across = across };
-            if (n > 0) {
+            if (!first_here) {
                 var tries: usize = 0;
                 while (tries < 400 and p.blocked(r.boxAt(o))) : (tries += 1) {
                     across += 0.25;
@@ -833,8 +852,14 @@ const Path = struct {
             try p.origins.append(a, o);
             try p.boxes.append(a, r.boxAt(o));
             try p.reach.append(a, 0);
+            try p.member.append(a, at);
         }
         p.lead = 0;
+    }
+
+    /// The track segment `seg` lies in.
+    fn regionOf(p: *const Path, seg: usize) *const model.TileRegion {
+        return &p.regions[p.thread[p.member.items[seg]]];
     }
 
     fn blocked(p: *const Path, b: Box) bool {
@@ -874,6 +899,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         if (pa.wrap_tracks) try keepouts.append(a, k);
     }
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
+        // A track threaded after another is filled by that one's flow.
+        if (m.threadBefore(panel, ri) != null) continue;
+        var thread_buf: [256]usize = undefined;
+        const thread = m.thread(panel, ri, &thread_buf);
         // Rows run right and stack down; columns run down and set to the
         // right. An item's size along is its width in a row and its height
         // in a column.
@@ -992,7 +1021,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         // the path, their bands, and how far each one's content reaches.
         // The paragraph being set.
         var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
-        var path: Path = .{ .region = &region, .avoid = tracks.items };
+        var path: Path = .{ .regions = m.panels.items[panel].regions.items, .thread = thread, .avoid = tracks.items };
         try path.ensure(a, 0);
         // Each segment's alignment shift, set when the flow leaves it.
         var shifts: std.ArrayList(f64) = .empty;
@@ -1189,10 +1218,14 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         }
         // Its segments: past the soft area each is flagged; past the panel,
         // the region is (to be fitted, or the panel resized).
-        const soft = region.softArea();
         var all: Box = .empty;
+        var local: usize = 0;
         for (path.origins.items, path.boxes.items, 0..) |o, b, t| {
-            try tracks.append(a, .{ .region = ri, .track = t, .major = region.major, .box = b, .origin = o });
+            if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
+            const member = thread[path.member.items[t]];
+            const soft = path.regionOf(t).softArea();
+            try tracks.append(a, .{ .region = ri, .track = t, .member = member, .local = local, .major = region.major, .box = b, .origin = o });
+            local += 1;
             all = all.join(b);
             // Along, the path and the segment length are the boundary: a
             // segment is always within it. Across, past the segments the
@@ -1745,6 +1778,100 @@ test "each segment is bound to the path by its centre; its paragraph's alignment
         try testing.expectApproxEqAbs(@as(f64, 30), b.x0, 1e-9);
         try testing.expectApproxEqAbs(@as(f64, 90), b.x1, 1e-9);
     }
+}
+
+test "joined tracks share one flow: what overflows one goes on into the next" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    // Two columns of text-like rows, side by side: each two rows of three.
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 100, .y = 90 }, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
+    for (0..9) |_| _ = try m.insertTile(p, a, m.panels.items[p].regions.items[a].items.items.len, key, 1);
+    // B holds one tile of its own.
+    _ = try m.insertTile(p, b, 0, key, 1);
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    {
+        // Unjoined: A's third row is past its space, flagged.
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        var past = false;
+        for (s.issues) |is| past = past or (is.kind == .past_soft_area and is.region == a);
+        try testing.expect(past);
+    }
+    // Joined: A's flow goes on into B, and B's tile is added at its end,
+    // as a new paragraph.
+    try m.joinTracks(p, a, b);
+    try testing.expectEqual(@as(usize, 0), m.panels.items[p].regions.items[b].items.items.len);
+    try testing.expectEqual(@as(usize, 11), m.panels.items[p].regions.items[a].items.items.len);
+    try testing.expectEqual(a, m.threadHead(p, b));
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        for (s.issues) |is| try testing.expect(is.kind != .past_soft_area);
+        // Six tiles in A's two rows, the rest in B's from its top-left.
+        try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[3].pitch_box.x0, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 100), s.tiles[6].pitch_box.x0, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[6].pitch_box.y1, 1e-9);
+        // B's tile starts the next row, after the separator.
+        try testing.expectApproxEqAbs(@as(f64, 80), s.tiles[9].pitch_box.y1, 1e-9);
+        // Every segment is the thread's: numbered through it, and each
+        // says which track it lies in.
+        try testing.expectEqual(4, s.tracks.len);
+        try testing.expectEqual(a, s.tracks[2].region);
+        try testing.expectEqual(b, s.tracks[2].member);
+        try testing.expectEqual(@as(usize, 0), s.tracks[2].local);
+        try testing.expectEqual(@as(usize, 1), s.flows.len);
+    }
+    // A thread cannot loop, or join tracks running different ways.
+    try testing.expectError(error.BadJoin, m.joinTracks(p, b, a));
+    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 150, .y = 90 }, .major = .column, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
+    try testing.expectError(error.BadJoin, m.joinTracks(p, b, c));
+    // Unjoined: the flow stays whole on A, and overflows it again.
+    try m.unjoinTrack(p, b);
+    try testing.expectEqual(@as(usize, 11), m.panels.items[p].regions.items[a].items.items.len);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        var past = false;
+        for (s.issues) |is| past = past or (is.kind == .past_soft_area and is.region == a);
+        try testing.expect(past);
+    }
+}
+
+test "a thread's first track taken out hands the flow to the next" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 60, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 110, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    for (0..7) |_| _ = try m.insertTile(p, a, m.panels.items[p].regions.items[a].items.items.len, key, 1);
+    try m.joinTracks(p, a, b);
+    try m.joinTracks(p, b, c);
+    var buf: [8]usize = undefined;
+    try testing.expectEqualSlices(usize, &.{ a, b, c }, m.thread(p, a, &buf));
+    // B out: A goes on into C.
+    try m.unjoinTrack(p, b);
+    try testing.expectEqualSlices(usize, &.{ a, c }, m.thread(p, a, &buf));
+    // Joined back in after A: A, B, C.
+    try m.joinTracks(p, a, b);
+    try testing.expectEqualSlices(usize, &.{ a, b, c }, m.thread(p, a, &buf));
+    // A out: B holds the flow, and the thread is B, C.
+    try m.unjoinTrack(p, a);
+    try testing.expectEqual(@as(usize, 7), m.panels.items[p].regions.items[b].items.items.len);
+    try testing.expectEqualSlices(usize, &.{ b, c }, m.thread(p, b, &buf));
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[0].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 110), s.tiles[3].pitch_box.x0, 1e-9);
 }
 
 test "segments step down at an even pitch; the path's control points set where each is centred" {

@@ -128,7 +128,10 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area, constrain };
+const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area, constrain, join };
+
+/// Join: the track a click on another track threads on into.
+var join_from: ?struct { panel: usize, region: usize } = null;
 
 /// What Add shape draws: a closed path, dragged out as a box (a polygon
 /// is clicked corner by corner).
@@ -2841,18 +2844,22 @@ fn panelChildren(pi: usize, d: usize) void {
             _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, d, false, label.default_content);
         }
         for (panel.regions.items, 0..) |region, ri| {
-            const seg_count = segmentCount(pi, ri);
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, d, seg_count > 0, false)) continue;
-            for (0..seg_count) |rowi| {
-                const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), rowi + 1 }) catch "Row";
+            // The rows lying in it; in a thread, numbered through the
+            // thread's flow, and named by their place in this track.
+            const here = tracksIn(pi, ri);
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, d, here.len > 0, false)) continue;
+            for (here) |pt| {
+                const rowi = pt.track;
+                const flow_ri = pt.region;
+                const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), pt.local + 1 }) catch "Row";
                 // What the flow put in this segment, from the last solve.
                 const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
                 const filled = for (placed_items) |it| {
-                    if (it.region == ri and it.segment == rowi and !isBreak(pi, it)) break true;
+                    if (it.region == flow_ri and it.segment == rowi and !isBreak(pi, it)) break true;
                 } else false;
-                if (!treeNode(.{ .row = .{ .panel = pi, .region = ri, .row = rowi } }, title, d + 1, filled, false)) continue;
+                if (!treeNode(.{ .row = .{ .panel = pi, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
                 for (placed_items) |it| {
-                    if (it.region != ri or it.segment != rowi) continue;
+                    if (it.region != flow_ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
                     const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
                     if (state.model.prototypes.items[state.model.tileConst(id).prototype].spacer) continue;
@@ -3752,12 +3759,13 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     // path, as far across as the space it was drawn out for.
     const soft_region: ?usize = switch (state.context) {
         .region => |r| if (r.panel == pi) r.region else null,
-        .row => |r| if (r.panel == pi) r.region else null,
+        .row => |r| if (r.panel == pi) (if (placedTrack(r.panel, r.region, r.row)) |pt| pt.member else r.region) else null,
         else => null,
     };
     if (soft_region) |sr| if (sr < state.model.panels.items[pi].regions.items.len) {
         dashedOutline(area, trackOutline(pi, sr), colors.guide.opacity(0.6), px);
     };
+    drawThreads(area, pi, placed);
     for (placed.tiles) |t| {
         const in_context = inContext(pi, t);
         // A blank (a spacer tile): a faint outline while editing, nothing in
@@ -5135,6 +5143,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .constrain and me.button.pointer()) {
                     constrainClick();
                     state.press_consumed = true;
+                } else if (state.tool == .join and me.button.pointer()) {
+                    joinClick(state.view.toMm(area, me.p));
+                    state.press_consumed = true;
                 } else if (state.tool == .select and me.button.pointer() and pathHit(state.view.toMm(area, me.p)) != null) {
                     const at = state.view.toMm(area, me.p);
                     const hit = pathHit(at).?;
@@ -6062,19 +6073,24 @@ fn properties() !void {
             else
                 propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
             propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
-            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{segmentCount(r.panel, r.region)}, 5);
-            propText("Items", "{d}", .{region.items.items.len}, 8);
+            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
+            const head = state.model.threadHead(r.panel, r.region);
+            propText("Items", "{d}{s}", .{ state.model.panels.items[r.panel].regions.items[head].items.items.len, if (head != r.region) " in its thread's flow" else "" }, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
             if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
             if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
             try trackFlowProperties(r.panel, r.region);
-            try paragraphProperties(r.panel, r.region);
+            // The flow's paragraphs are its thread's.
+            try paragraphProperties(r.panel, head);
+            threadProperties(r.panel, r.region);
         },
         .row => |r| {
-            const region = state.model.panels.items[r.panel].regions.items[r.region];
-            propText(trackWord(region.major), "{d} of {d} in {s}", .{ r.row + 1, segmentCount(r.panel, r.region), region.name }, 1);
+            const pt = placedTrack(r.panel, r.region, r.row);
+            const member = if (pt) |x| x.member else r.region;
+            const region = state.model.panels.items[r.panel].regions.items[member];
+            propText(trackWord(region.major), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(r.panel, member).len, region.name }, 1);
             var where_buf: [96]u8 = undefined;
             propText("Placed", "{s}", .{trackWhere(&where_buf, r.panel, r.region, r.row)}, 2);
             var held: usize = 0;
@@ -6835,6 +6851,7 @@ fn statusContent() void {
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
+        .join => "Join: click the track the flow goes on into · Esc cancels",
         .constrain => if (constrain_first == null) "Constrain: click an edge, centre line or origin line of what is to move · Esc cancels" else "Constrain: click what it keeps to (its own, a peer's, or the parent's) · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
@@ -6957,6 +6974,24 @@ fn segmentCount(pi: usize, region: usize) usize {
     if (pi >= state.placed.items.len) return 0;
     for (state.placed.items[pi].flows) |f| if (f.region == region) return f.segments;
     return 0;
+}
+
+/// Segment `t` of the flow of track `region` (the first of its thread), as
+/// the last solve placed it.
+fn placedTrack(pi: usize, region: usize, t: usize) ?layout.place.PlacedTrack {
+    if (pi >= state.placed.items.len) return null;
+    for (state.placed.items[pi].tracks) |tr| if (tr.region == region and tr.track == t) return tr;
+    return null;
+}
+
+/// The segments lying in track `ri`, as the last solve placed them (a
+/// threaded track's are its thread's flow's).
+fn tracksIn(pi: usize, ri: usize) []const layout.place.PlacedTrack {
+    if (pi >= state.placed.items.len) return &.{};
+    var list: std.ArrayList(layout.place.PlacedTrack) = .empty;
+    const a = dvui.currentWindow().arena();
+    for (state.placed.items[pi].tracks) |tr| if (tr.member == ri) list.append(a, tr) catch {};
+    return list.items;
 }
 
 /// Where row or column `t` of a track's path lies, from the last solve.
@@ -7663,8 +7698,9 @@ fn moveTrackArrow(arrow: Arrow) void {
         state.status = "Rows keep an even pitch: move a row along, or set paragraph spacing. ";
         return;
     }
-    const o = segmentOrigin(t.panel, t.region, t.row) orelse return;
-    _ = actM(mergeKey(.{ "bend", t.panel, t.region, t.row }), .bendPath, .{ t.panel, t.region, o.across, o.along + along, o.across }) catch {
+    const pt = placedTrack(t.panel, t.region, t.row) orelse return;
+    const o = pt.origin;
+    _ = actM(mergeKey(.{ "bend", t.panel, pt.member, t.row }), .bendPath, .{ t.panel, pt.member, o.across, o.along + along, o.across }) catch {
         state.status = "It did not move. ";
         return;
     };
@@ -7722,13 +7758,15 @@ fn movePalette() void {
 /// plain words: "0.25 u up · 1.5 u left" (a row) or "1 u right · 0.5 u
 /// down" (a column).
 fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
-    const o = segmentOrigin(pi, region, t) orelse return "";
-    // Straight on from the region's origin, one thickness each.
-    const across = o.across - @as(f64, @floatFromInt(t));
+    const pt = placedTrack(pi, region, t) orelse return "";
+    const o = pt.origin;
+    const member = state.model.panels.items[pi].regions.items[pt.member];
+    // Straight on from its track's origin, one thickness each.
+    const across = o.across - @as(f64, @floatFromInt(pt.local));
     // Along, from where an unshaped track's segment sits (its middle on
-    // the region's middle).
-    const along = o.along - state.model.panels.items[pi].regions.items[region].middle();
-    const rows = state.model.panels.items[pi].regions.items[region].major == .row;
+    // the track's middle).
+    const along = o.along - member.middle();
+    const rows = member.major == .row;
     const across_word = if (rows) (if (across < 0) "up" else "down") else (if (across < 0) "left" else "right");
     const along_word = if (rows) (if (along < 0) "left" else "right") else (if (along < 0) "up" else "down");
     return std.fmt.bufPrint(buf, "{d} u {s} · {d} u {s}", .{ @abs(across), across_word, @abs(along), along_word }) catch "";
@@ -7947,6 +7985,98 @@ fn featureHit(at: geom.Point) ?FeatureHit {
         }
     }
     return best;
+}
+
+/// A track's thread: what it continues and goes on into, and buttons to
+/// join a track after it or take it out of its thread.
+fn threadProperties(pi: usize, ri: usize) void {
+    const m = &state.model;
+    const regions = m.panels.items[pi].regions.items;
+    const before = m.threadBefore(pi, ri);
+    const after = m.regionIndex(pi, regions[ri].next);
+    if (before) |b| propText("Continues", "{s}", .{regions[b].name}, 30);
+    if (after) |n| propText("Goes on into", "{s}", .{regions[n].name}, 31);
+    if (dvui.button(@src(), "Join a track after this…", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
+        join_from = .{ .panel = pi, .region = ri };
+        state.tool = .join;
+    }
+    if (before != null or after != null) if (dvui.button(@src(), "Take out of its thread", .{}, .{ .expand = .horizontal })) {
+        act(.unjoinTrack, .{ pi, ri }) catch {};
+        state.status = "Taken out: the flow stays whole on the thread. ";
+    };
+}
+
+/// The track under `at` (sheet mm) in the shown space: the one a placed
+/// segment there lies in, or whose boundary holds it.
+fn trackUnder(at: geom.Point) ?struct { panel: usize, region: usize } {
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (p.space != shown_space or pi >= state.placed.items.len) continue;
+        for (state.placed.items[pi].tracks) |t| if (contains(onSheet(pi, t.box), at)) return .{ .panel = pi, .region = t.member };
+        for (p.regions.items, 0..) |r, k| if (contains(onSheet(pi, r.bounds()), at)) return .{ .panel = pi, .region = k };
+    }
+    return null;
+}
+
+/// A click with the Join tool: the track clicked goes on after the one
+/// joining.
+fn joinClick(at: geom.Point) void {
+    const from = join_from orelse return;
+    state.tool = .select;
+    join_from = null;
+    const to = trackUnder(at) orelse {
+        state.status = "No track there: nothing joined. ";
+        return;
+    };
+    if (to.panel != from.panel) {
+        state.status = "Threads across panels are not laid out yet: join tracks on the same panel. ";
+        return;
+    }
+    act(.joinTracks, .{ from.panel, from.region, to.region }) catch {
+        state.status = "Not joined: a thread joins tracks running the same way, onto one that starts its own thread, without looping. ";
+        return;
+    };
+    state.status = "Joined: the flow goes on into it. ";
+}
+
+/// Each thread's links, faintly: from where its flow leaves one track (its
+/// last segment there) to where it enters the next.
+fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
+    const m = &state.model;
+    const px = dvui.windowNaturalScale();
+    const ink: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.7) };
+    for (m.panels.items[pi].regions.items, 0..) |r, ri| {
+        const n = m.regionIndex(pi, r.next) orelse continue;
+        // Leaving: its last segment the flow reached, else its first.
+        var from_box: geom.Box = r.boxAt(.{ .along = r.pathAt(0), .across = 0 });
+        for (placed.tracks) |t| if (t.member == ri) {
+            from_box = t.box;
+        };
+        const nr = m.panels.items[pi].regions.items[n];
+        var to_box: geom.Box = nr.boxAt(.{ .along = nr.pathAt(0), .across = 0 });
+        for (placed.tracks) |t| if (t.member == n and t.local == 0) {
+            to_box = t.box;
+        };
+        const rows = r.major == .row;
+        const p0: geom.Point = if (rows) .{ .x = from_box.x1, .y = (from_box.y0 + from_box.y1) / 2 } else .{ .x = (from_box.x0 + from_box.x1) / 2, .y = from_box.y0 };
+        const p1: geom.Point = if (rows) .{ .x = to_box.x0, .y = (to_box.y0 + to_box.y1) / 2 } else .{ .x = (to_box.x0 + to_box.x1) / 2, .y = to_box.y1 };
+        const a = state.view.toPx(area, onSheetPoint(pi, p0));
+        const b = state.view.toPx(area, onSheetPoint(pi, p1));
+        dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.25 * px, .color = ink });
+        // An arrowhead where it enters.
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = @sqrt(dx * dx + dy * dy);
+        if (len < 1) continue;
+        const ux = dx / len;
+        const uy = dy / len;
+        const s: f32 = 6 * px;
+        dvui.Path.stroke(.{ .points = &.{ .{ .x = b.x - s * ux + s * 0.5 * uy, .y = b.y - s * uy - s * 0.5 * ux }, b, .{ .x = b.x - s * ux - s * 0.5 * uy, .y = b.y - s * uy + s * 0.5 * ux } } }, .{ .thickness = 1.25 * px, .color = ink });
+    }
+}
+
+fn onSheetPoint(pi: usize, p: geom.Point) geom.Point {
+    const o = panelOrigin(pi);
+    return .{ .x = o.x + p.x, .y = o.y + p.y };
 }
 
 /// A click with the Constrain tool: the first feature, then the second,
@@ -8277,7 +8407,8 @@ var path_selected: ?layout.model.ObjectId = null;
 fn pathRegion() ?struct { panel: usize, region: usize } {
     return switch (state.context) {
         .region => |r| .{ .panel = r.panel, .region = r.region },
-        .row => |r| .{ .panel = r.panel, .region = r.region },
+        // The track the row lies in (in a thread, not always the flow's).
+        .row => |r| .{ .panel = r.panel, .region = if (placedTrack(r.panel, r.region, r.row)) |pt| pt.member else r.region },
         else => null,
     };
 }
