@@ -5095,7 +5095,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // keyboard: never from a text entry.
         if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
             const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and cursorKey(k.code, k.mod.shift())) {
+            if ((k.action == .down or k.action == .repeat) and cursorKey(k)) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -7029,8 +7029,13 @@ fn statusContent() void {
 // arrows move it along the flow, or to the next row or column.
 
 /// Where things go in: before item `index` of a track's flow.
-const TrackCursor = struct { panel: usize, region: usize, index: usize };
+/// The flow cursor: in the flow of track `region` of `panel` (the first of
+/// its thread), before item `index`, or `offset` bytes into the run there.
+const TrackCursor = struct { panel: usize, region: usize, index: usize, offset: u32 = 0 };
 var track_cursor: ?TrackCursor = null;
+/// Where a selection in the flow started (Shift with a movement key): it
+/// runs from here to the cursor.
+var flow_anchor: ?struct { index: usize, offset: u32 } = null;
 /// The canvas, and the palette's buttons, from the last frame: the
 /// cursor's keys work while one of them has the keyboard.
 var canvas_id: ?dvui.Id = null;
@@ -7199,9 +7204,256 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
         const b = onSheet(cr.panel, t.box);
         if (!contains(b, at)) continue;
         const along = if (t.major == .row) at.x - b.x0 else b.y1 - at.y;
+        flow_anchor = null;
+        // The nearest place in that segment the cursor can stop.
+        var best: ?Stop = null;
+        for (flowStops(head.panel, head.region)) |st| {
+            if (st.panel != cr.panel or st.segment != t.track) continue;
+            if (best == null or @abs(st.along - along) < @abs(best.?.along - along)) best = st;
+        }
+        if (best) |st| return .{ .panel = head.panel, .region = head.region, .index = st.index, .offset = st.offset };
         return .{ .panel = head.panel, .region = head.region, .index = indexAt(head.panel, head.region, t.track, along) };
     }
     return null;
+}
+
+// The character cursor ------------------------------------------------------
+//
+// The flow cursor stops before each item and at each character of the text
+// set: before every glyph of a run, and at the end of each piece of it (so
+// at both sides of a space between words). Its keys are dvui's text-field
+// bindings: character, word, line (segment) start and end, text start and
+// end, and the line before or after; Shift selects.
+
+/// A place the flow cursor can stop: before item `index`, or `offset`
+/// bytes into the run there; where it shows: on panel `panel`, in flow
+/// segment `segment`, `along` mm into it.
+const Stop = struct { index: usize, offset: u32, panel: usize, segment: usize, along: f64 };
+
+fn stopBefore(x: Stop, y: Stop) bool {
+    return x.index < y.index or (x.index == y.index and x.offset < y.offset);
+}
+
+/// Every place the cursor can stop in the flow of track `fr` of panel `fp`
+/// (the first of its thread), in order, from the last solve.
+fn flowStops(fp: usize, fr: usize) []Stop {
+    const a = dvui.currentWindow().arena();
+    var list: std.ArrayList(Stop) = .empty;
+    if (fp >= state.model.panels.items.len or fr >= state.model.panels.items[fp].regions.items.len) return &.{};
+    const items = state.model.panels.items[fp].regions.items[fr].items.items;
+    var last: ?Stop = null;
+    for (state.placed.items, 0..) |pl, pi| {
+        for (pl.items) |it| {
+            if (it.flow_panel != fp or it.region != fr or it.index >= items.len) continue;
+            list.append(a, .{ .index = it.index, .offset = 0, .panel = pi, .segment = it.segment, .along = it.span[0] }) catch {};
+            const end: Stop = .{ .index = it.index + 1, .offset = 0, .panel = pi, .segment = it.segment, .along = it.span[1] };
+            if (last == null or !stopBefore(end, last.?)) last = end;
+        }
+        // The characters of the runs set here.
+        for (pl.labels) |l| {
+            const r = l.run orelse continue;
+            if (r.panel != fp or r.region != fr or r.item >= items.len or items[r.item].what != .run) continue;
+            const content = items[r.item].what.run.content;
+            const t = trackHolding(pi, fp, fr, l.origin) orelse continue;
+            const add = struct {
+                fn f(lst: *std.ArrayList(Stop), al: std.mem.Allocator, item: usize, off: u32, len: usize, panel: usize, seg: usize, along: f64) void {
+                    const s0: Stop = if (off >= len) .{ .index = item + 1, .offset = 0, .panel = panel, .segment = seg, .along = along } else .{ .index = item, .offset = off, .panel = panel, .segment = seg, .along = along };
+                    lst.append(al, s0) catch {};
+                }
+            }.f;
+            for (l.render.items) |ri| switch (ri) {
+                .glyph => |g| {
+                    if (g.source < r.from or g.source >= r.from + r.len) continue;
+                    add(&list, a, r.item, g.source, content.len, pi, t.track, l.origin.x + g.transform.e - t.box.x0);
+                },
+                else => {},
+            };
+            const piece_end = r.from + r.len;
+            if (l.render.caret(piece_end)) |cr| add(&list, a, r.item, piece_end, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
+        }
+    }
+    if (last) |e| list.append(a, e) catch {};
+    if (list.items.len == 0) {
+        // An empty flow: its first segment's start.
+        for (state.placed.items, 0..) |pl, pi| for (pl.tracks) |t| {
+            if (t.flow_panel == fp and t.region == fr and t.track == 0) return a.dupe(Stop, &.{.{ .index = 0, .offset = 0, .panel = pi, .segment = 0, .along = 0 }}) catch &.{};
+        };
+        return &.{};
+    }
+    std.mem.sort(Stop, list.items, {}, struct {
+        fn lt(_: void, x: Stop, y: Stop) bool {
+            return stopBefore(x, y);
+        }
+    }.lt);
+    // One stop per place: the first found (a run's start in its first piece).
+    var w: usize = 0;
+    for (list.items) |st| {
+        if (w > 0 and list.items[w - 1].index == st.index and list.items[w - 1].offset == st.offset) continue;
+        list.items[w] = st;
+        w += 1;
+    }
+    return list.items[0..w];
+}
+
+/// The placed segment of the flow of track `fr` of panel `fp` on panel
+/// `pi` that holds point `p` (panel frame): the one whose band it is in.
+fn trackHolding(pi: usize, fp: usize, fr: usize, p: geom.Point) ?layout.place.PlacedTrack {
+    var best: ?layout.place.PlacedTrack = null;
+    var best_d: f64 = std.math.inf(f64);
+    for (state.placed.items[pi].tracks) |t| {
+        if (t.flow_panel != fp or t.region != fr) continue;
+        const b = t.box;
+        const dy = if (p.y < b.y0) b.y0 - p.y else if (p.y > b.y1) p.y - b.y1 else 0;
+        const dx = if (p.x < b.x0) b.x0 - p.x else if (p.x > b.x1) p.x - b.x1 else 0;
+        const d = dx + dy;
+        if (d < best_d) {
+            best_d = d;
+            best = t;
+        }
+    }
+    return best;
+}
+
+/// The stop for flow position (`index`, `offset`): its own, else the last
+/// before it.
+fn stopAt(stops: []const Stop, index: usize, offset: u32) ?usize {
+    if (stops.len == 0) return null;
+    var k: usize = 0;
+    for (stops, 0..) |st, i| {
+        if (st.index < index or (st.index == index and st.offset <= offset)) k = i else break;
+    }
+    return k;
+}
+
+/// The character at a stop, for telling words apart: none (null) before an
+/// item that is not text.
+fn stopChar(fp: usize, fr: usize, st: Stop) ?u8 {
+    const items = state.model.panels.items[fp].regions.items[fr].items.items;
+    if (st.index >= items.len or items[st.index].what != .run) return null;
+    const content = items[st.index].what.run.content;
+    return if (st.offset < content.len) content[st.offset] else null;
+}
+
+fn isWordChar(ch: ?u8) bool {
+    const c = ch orelse return false;
+    return std.mem.indexOfScalar(u8, dvui.TextLayoutWidget.word_breaks, c) == null;
+}
+
+/// A movement key for the flow cursor (dvui's text-field bindings), with
+/// Shift selecting. Whether it was one.
+fn flowMoveKey(k: dvui.Event.Key) bool {
+    const c = track_cursor orelse return false;
+    const Move = enum { char_left, char_right, word_left, word_right, line_start, line_end, text_start, text_end, char_up, char_down };
+    const names = [_]struct { name: []const u8, move: Move, select: bool }{
+        .{ .name = "char_left", .move = .char_left, .select = false },
+        .{ .name = "char_left_select", .move = .char_left, .select = true },
+        .{ .name = "char_right", .move = .char_right, .select = false },
+        .{ .name = "char_right_select", .move = .char_right, .select = true },
+        .{ .name = "word_left", .move = .word_left, .select = false },
+        .{ .name = "word_left_select", .move = .word_left, .select = true },
+        .{ .name = "word_right", .move = .word_right, .select = false },
+        .{ .name = "word_right_select", .move = .word_right, .select = true },
+        .{ .name = "line_start", .move = .line_start, .select = false },
+        .{ .name = "line_start_select", .move = .line_start, .select = true },
+        .{ .name = "line_end", .move = .line_end, .select = false },
+        .{ .name = "line_end_select", .move = .line_end, .select = true },
+        .{ .name = "text_start", .move = .text_start, .select = false },
+        .{ .name = "text_start_select", .move = .text_start, .select = true },
+        .{ .name = "text_end", .move = .text_end, .select = false },
+        .{ .name = "text_end_select", .move = .text_end, .select = true },
+        .{ .name = "char_up", .move = .char_up, .select = false },
+        .{ .name = "char_up_select", .move = .char_up, .select = true },
+        .{ .name = "char_down", .move = .char_down, .select = false },
+        .{ .name = "char_down_select", .move = .char_down, .select = true },
+    };
+    var found: ?struct { move: Move, select: bool } = null;
+    for (names) |n| if (k.matchBind(n.name)) {
+        found = .{ .move = n.move, .select = n.select };
+        break;
+    };
+    const f = found orelse return false;
+    const stops = flowStops(c.panel, c.region);
+    const i = stopAt(stops, c.index, c.offset) orelse return true;
+    const here = stops[i];
+    var j = i;
+    switch (f.move) {
+        .char_left => j = i -| 1,
+        .char_right => j = @min(i + 1, stops.len - 1),
+        .word_left => {
+            j = i -| 1;
+            while (j > 0 and !(isWordChar(stopChar(c.panel, c.region, stops[j])) and !isWordChar(stopChar(c.panel, c.region, stops[j - 1])))) j -= 1;
+        },
+        .word_right => {
+            j = @min(i + 1, stops.len - 1);
+            while (j + 1 < stops.len and !(isWordChar(stopChar(c.panel, c.region, stops[j])) and !isWordChar(stopChar(c.panel, c.region, stops[j - 1])))) j += 1;
+        },
+        .line_start => while (j > 0 and stops[j - 1].panel == here.panel and stops[j - 1].segment == here.segment) {
+            j -= 1;
+        },
+        .line_end => while (j + 1 < stops.len and stops[j + 1].panel == here.panel and stops[j + 1].segment == here.segment) {
+            j += 1;
+        },
+        .text_start => j = 0,
+        .text_end => j = stops.len - 1,
+        .char_up, .char_down => {
+            // The nearest stop on the line before or after.
+            const down = f.move == .char_down;
+            var target: ?usize = null;
+            var best_seg: usize = 0;
+            for (stops) |st| {
+                const ok = if (down) st.segment > here.segment else st.segment < here.segment;
+                if (!ok) continue;
+                if (target == null or (if (down) st.segment < best_seg else st.segment > best_seg)) {
+                    best_seg = st.segment;
+                    target = 0;
+                }
+            }
+            if (target != null) {
+                var best: ?usize = null;
+                for (stops, 0..) |st, n| {
+                    if (st.segment != best_seg) continue;
+                    if (best == null or @abs(st.along - here.along) < @abs(stops[best.?].along - here.along)) best = n;
+                }
+                if (best) |b| j = b;
+            }
+        },
+    }
+    if (f.select) {
+        if (flow_anchor == null) flow_anchor = .{ .index = c.index, .offset = c.offset };
+    } else flow_anchor = null;
+    track_cursor.?.index = stops[j].index;
+    track_cursor.?.offset = stops[j].offset;
+    return true;
+}
+
+/// The selection in the flow, faintly: across each segment it covers.
+fn drawFlowSelection(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
+    const an = flow_anchor orelse return;
+    const stops = flowStops(c.panel, c.region);
+    const a0 = stopAt(stops, an.index, an.offset) orelse return;
+    const c0 = stopAt(stops, c.index, c.offset) orelse return;
+    if (a0 == c0) return;
+    const lo = @min(a0, c0);
+    const hi = @max(a0, c0);
+    var k = lo;
+    while (k < hi) {
+        // A run of stops on one segment.
+        const st = stops[k];
+        var e = k;
+        while (e + 1 <= hi and stops[e + 1].panel == st.panel and stops[e + 1].segment == st.segment) e += 1;
+        const to = if (e < hi) stops[e].along else stops[hi].along;
+        // Past its last stop the selection runs on to the segment's end
+        // when it goes on beyond it.
+        if (st.panel == pi) for (placed.tracks) |t| {
+            if (t.flow_panel != c.panel or t.region != c.region or t.track != st.segment) continue;
+            const b = onSheet(pi, t.box);
+            const x1 = if (e < hi) b.x1 else b.x0 + to;
+            const r: geom.Box = .{ .x0 = b.x0 + st.along, .x1 = @max(b.x0 + st.along, x1), .y0 = b.y0, .y1 = b.y1 };
+            state.view.rect(area, r).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.22) } });
+            break;
+        };
+        k = e + 1;
+    }
 }
 
 /// Where the cursor shows: the segment and the distance along it, mm.
@@ -7234,6 +7486,7 @@ fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
 fn runAtCursor() ?struct { panel: usize, region: usize, item: usize } {
     const c = track_cursor orelse return null;
     const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
     if (c.index > 0 and c.index <= items.len and items[c.index - 1].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index - 1 };
     if (c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
     return null;
@@ -7272,6 +7525,15 @@ fn validateCursor() void {
     }
     const r = state.model.panels.items[c.panel].regions.items[c.region];
     track_cursor.?.index = @min(c.index, r.items.items.len);
+    // Within a run, only while there is a run there and the offset is in it.
+    const tc = &track_cursor.?;
+    if (tc.offset > 0) {
+        const in_run = tc.index < r.items.items.len and r.items.items[tc.index].what == .run;
+        if (!in_run) tc.offset = 0 else if (tc.offset >= r.items.items[tc.index].what.run.content.len) {
+            tc.index += 1;
+            tc.offset = 0;
+        }
+    }
 }
 
 fn cursorKeysReach() bool {
@@ -7288,8 +7550,12 @@ fn cursorKeysReach() bool {
 /// character palettes.
 const tile_palette_shown = false;
 
-fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
+fn cursorKey(key: dvui.Event.Key) bool {
+    const code = key.code;
+    const shift = key.mod.shift();
     const c = track_cursor orelse return false;
+    // Movement as in a text field (dvui's bindings), Shift selecting.
+    if (flowMoveKey(key)) return true;
     const tile_codes = [_]dvui.enums.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
     const blank_codes = [_]dvui.enums.Key{ .q, .w, .e, .r, .t, .y, .u, .i, .o, .p };
     // Tiles and blanks while the document has a prototype; text and
@@ -7306,7 +7572,6 @@ fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
     };
     const region = state.model.panels.items[c.panel].regions.items[c.region];
     const len = region.items.items.len;
-    const rows = region.major == .row;
     var next = c;
     switch (code) {
         .a => {
@@ -7329,27 +7594,29 @@ fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
             return true;
         },
         .backspace => {
+            if (c.offset > 0) {
+                state.status = "Deleting within text comes next. ";
+                return true;
+            }
             if (c.index == 0) return true;
             act(.removeAt, .{c.panel, c.region, c.index - 1}) catch {};
             next.index -= 1;
         },
-        .delete => if (c.index < len) act(.removeAt, .{c.panel, c.region, c.index}) catch {},
+        .delete => {
+            if (c.offset > 0) {
+                state.status = "Deleting within text comes next. ";
+                return true;
+            }
+            if (c.index < len) act(.removeAt, .{c.panel, c.region, c.index}) catch {};
+        },
         .escape => {
+            // A selection first; then the cursor.
+            if (flow_anchor != null) {
+                flow_anchor = null;
+                return true;
+            }
             track_cursor = null;
             return true;
-        },
-        .left, .right, .up, .down => {
-            const forward = code == .right or code == .down;
-            const along_key = if (rows) code == .left or code == .right else code == .up or code == .down;
-            if (along_key) {
-                if (forward and c.index < len) next.index += 1;
-                if (!forward and c.index > 0) next.index -= 1;
-            } else if (cursorPlace(c)) |at| {
-                // To the nearest place in the next or previous segment.
-                const segs = segmentCount(c.panel, c.region);
-                if (forward and at.segment + 1 < segs) next.index = indexAt(c.panel, c.region, at.segment + 1, at.along);
-                if (!forward and at.segment > 0) next.index = indexAt(c.panel, c.region, at.segment - 1, at.along);
-            }
         },
         else => return false,
     }
@@ -7362,6 +7629,12 @@ fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
 /// long, a hard break, or an empty run of markup, whose text the expression
 /// line then takes.
 fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: f64) void {
+    // Within a run, for now, what is put in goes after it.
+    if (track_cursor) |*tc| if (tc.offset > 0) {
+        tc.index += 1;
+        tc.offset = 0;
+    };
+    flow_anchor = null;
     const c = track_cursor orelse return;
     switch (kind) {
         .tile => {
@@ -7423,7 +7696,15 @@ var focus_expression_end = false;
 
 /// The cursor: a bar across its row or column between items.
 fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
-    const at = cursorPlace(c) orelse return;
+    drawFlowSelection(area, pi, placed, c);
+    const stops = flowStops(c.panel, c.region);
+    const at: struct { segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k| blk: {
+        if (stops[k].panel != pi) return;
+        break :blk .{ .segment = stops[k].segment, .along = stops[k].along };
+    } else blk: {
+        const p = cursorPlace(c) orelse return;
+        break :blk .{ .segment = p.segment, .along = p.along };
+    };
     for (placed.tracks) |t| {
         if (t.flow_panel != c.panel or t.region != c.region or t.track != at.segment) continue;
         const pos = at.along;
