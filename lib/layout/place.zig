@@ -46,6 +46,8 @@ pub const PlacedLabel = struct {
     /// null and `slot` is the item's index.
     run: ?struct {
         region: usize,
+        /// The panel of the track holding the flow.
+        panel: usize = 0,
         item: usize,
         /// The piece of the item's markup it sets (words between breaks,
         /// when a run breaks across segments): its start and length
@@ -119,12 +121,15 @@ pub const Issue = struct {
 
 /// A segment as placed: where its band lies.
 pub const PlacedTrack = struct {
-    /// The track whose flow it holds (the first of its thread), and its
-    /// index in that flow's segments.
+    /// The track whose flow it holds (the first of its thread, on panel
+    /// `flow_panel`), and its index in that flow's segments.
     region: usize,
     track: usize,
-    /// The track it lies in, and its index there: the same as `region`
-    /// and `track` unless the track is threaded after another.
+    flow_panel: usize = 0,
+    /// The track it lies in (on `panel`, the panel placed), and its index
+    /// there: the same as `region` and `track` unless the track is
+    /// threaded after another.
+    panel: usize = 0,
     member: usize = 0,
     local: usize = 0,
     major: model.Major,
@@ -139,7 +144,9 @@ pub const PlacedTrack = struct {
 /// where it starts and ends along it, mm from the segment's start. A hard
 /// break has no length; it sits where its segment's content ends.
 pub const PlacedItem = struct {
+    /// The track holding the flow (on panel `flow_panel`).
     region: usize,
+    flow_panel: usize = 0,
     /// Its index in the region's flow.
     index: usize,
     segment: usize,
@@ -158,15 +165,38 @@ pub const PlacedArt = struct {
 /// What a region's flow needs: the length, u, that would set its longest
 /// paragraph (the items between hard breaks) in one segment.
 pub const PlacedFlow = struct {
+    /// The track holding the flow (on panel `flow_panel`): a thread's
+    /// flow has one of these on each panel it runs through.
     region: usize,
+    flow_panel: usize = 0,
+    /// Laid out on a panel downstream, before where the flow enters it is
+    /// known (see `Handoff`): nothing is placed in it yet.
+    waiting: bool = false,
     natural: f64,
     /// How many segments the flow reached: kept origins past these are no
     /// longer needed (see `Model.trimSegments`).
     segments: usize = 0,
 };
 
+/// Where a thread's flow goes on into a panel downstream: the track it
+/// enters (the first of its tracks there), the first piece of the flow
+/// still to place (pieces as the pass cuts the flow), the number its next
+/// segment takes, the paragraph style in force and whether the next line
+/// starts the paragraph, and whether a wrap (not a break) ended the line
+/// before. One panel's solve gives these for the next (`Placed.exits`).
+pub const Handoff = struct {
+    track: model.ObjectId,
+    piece: usize,
+    segment: usize,
+    paragraph: ?model.ParaId,
+    first_line: bool,
+    soft: bool,
+};
+
 pub const Placed = struct {
     arena: std.heap.ArenaAllocator,
+    /// Where the panel's threads go on into other panels.
+    exits: []const Handoff = &.{},
     tiles: []const PlacedTile,
     tracks: []const PlacedTrack = &.{},
     items: []const PlacedItem = &.{},
@@ -816,6 +846,8 @@ const Path = struct {
     thread: []const usize,
     /// Each segment's place in the thread.
     member: std.ArrayList(usize) = .empty,
+    /// Whether the thread goes on past these tracks, on another panel.
+    more: bool = false,
     avoid: []const PlacedTrack,
     origins: std.ArrayList(model.Segment) = .empty,
     boxes: std.ArrayList(Box) = .empty,
@@ -857,6 +889,17 @@ const Path = struct {
         p.lead = 0;
     }
 
+    /// Whether segment `n` (the next) would take the flow past the last of
+    /// these tracks, while the thread goes on elsewhere.
+    fn leaves(p: *const Path, n: usize) bool {
+        if (!p.more or n == 0 or n < p.origins.items.len) return false;
+        const at = p.member.items[n - 1];
+        if (at + 1 < p.thread.len) return false;
+        const r = &p.regions[p.thread[at]];
+        const across = p.origins.items[n - 1].across + 1 + r.gap + p.lead / r.pitch;
+        return across + 1 > r.crossLength() + 1e-9;
+    }
+
     /// The track segment `seg` lies in.
     fn regionOf(p: *const Path, seg: usize) *const model.TileRegion {
         return &p.regions[p.thread[p.member.items[seg]]];
@@ -871,6 +914,13 @@ const Path = struct {
 
 /// Places every tile and label of one panel.
 pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Error!Placed {
+    return solveWith(gpa, m, panel, labels, &.{});
+}
+
+/// Places every tile and label of one panel, given where threads from
+/// other panels enter it (`entries`; see `Handoff`). A thread entering
+/// with no entry given is left waiting (`PlacedFlow.waiting`).
+pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels, entries: []const Handoff) Error!Placed {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -883,6 +933,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
 
     var placed_items: std.ArrayList(PlacedItem) = .empty;
     var flows: std.ArrayList(PlacedFlow) = .empty;
+    var exits: std.ArrayList(Handoff) = .empty;
     var placed_labels: std.ArrayList(PlacedLabel) = .empty;
     const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
     // Line art on the panel: drawn over the tracks, and what wraps is
@@ -899,10 +950,36 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         if (pa.wrap_tracks) try keepouts.append(a, k);
     }
     for (m.panels.items[panel].regions.items, 0..) |region, ri| {
-        // A track threaded after another is filled by that one's flow.
-        if (m.threadBefore(panel, ri) != null) continue;
+        // A thread is laid out a leg at a time: the run of its tracks on
+        // one panel. A track threaded after another here is in its leg.
+        const before = m.threadBefore(panel, ri);
+        if (before) |b| if (b.panel == panel) continue;
+        const head = m.threadHead(panel, ri);
+        var all_buf: [256]model.TrackRef = undefined;
+        const thread_all = m.thread(head, &all_buf);
         var thread_buf: [256]usize = undefined;
-        const thread = m.thread(panel, ri, &thread_buf);
+        var leg_n: usize = 0;
+        var at_k: usize = 0;
+        while (at_k < thread_all.len and !(thread_all[at_k].panel == panel and thread_all[at_k].region == ri)) at_k += 1;
+        while (at_k < thread_all.len and thread_all[at_k].panel == panel and leg_n < thread_buf.len) : (at_k += 1) {
+            thread_buf[leg_n] = thread_all[at_k].region;
+            leg_n += 1;
+        }
+        if (leg_n == 0) {
+            thread_buf[0] = ri;
+            leg_n = 1;
+        }
+        const thread = thread_buf[0..leg_n];
+        // The thread's next track, on another panel, if it goes on.
+        const more: ?model.TrackRef = if (at_k < thread_all.len) thread_all[at_k] else null;
+        // The flow is the thread's first track's; where it enters this
+        // leg is the start, or what the panel before handed on.
+        const flow_r = &m.panels.items[head.panel].regions.items[head.region];
+        const fri = head.region;
+        const fpi = head.panel;
+        const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_r.paragraph, .first_line = true, .soft = false } else for (entries) |e| {
+            if (e.track == region.id) break e;
+        } else null;
         // Rows run right and stack down; columns run down and set to the
         // right. An item's size along is its width in a row and its height
         // in a column.
@@ -920,7 +997,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var item_of: std.ArrayList(usize) = .empty;
         var src_off: std.ArrayList(u32) = .empty;
         var src_len: std.ArrayList(u32) = .empty;
-        for (region.items.items, 0..) |item, mi| {
+        for (flow_r.items.items, 0..) |item, mi| {
             const whole = struct {
                 fn add(al: Allocator, ps: *std.ArrayList(model.Item), cs: *std.ArrayList(?Cut), io: *std.ArrayList(usize), so: *std.ArrayList(u32), sl: *std.ArrayList(u32), it: model.Item, index: usize) Allocator.Error!void {
                     try ps.append(al, it);
@@ -985,7 +1062,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 // track of another pitch.
                 .tile => |id| blk: {
                     const t = m.tileConst(id);
-                    const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
+                    const unit = m.prototypes.items[t.prototype].unitIn(flow_r.pitch);
                     break :blk (if (rows) t.w else t.h) * unit;
                 },
                 .run => |run| blk: {
@@ -1020,8 +1097,16 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         // The segments, made as the flow reaches them: their origins along
         // the path, their bands, and how far each one's content reaches.
         // The paragraph being set.
-        var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
-        var path: Path = .{ .regions = m.panels.items[panel].regions.items, .thread = thread, .avoid = tracks.items };
+        const seg0: usize = if (entry) |e| e.segment else 0;
+        var style_id: ?model.ParaId = if (entry) |e| e.paragraph else null;
+        var style: ?model.ParagraphStyle = if (style_id) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
+        var path: Path = .{ .regions = m.panels.items[panel].regions.items, .thread = thread, .avoid = tracks.items, .more = more != null };
+        // The pieces this leg places: from where the flow enters, to where
+        // it leaves for the next panel (or its end). Waiting, none.
+        const leg_lo: usize = if (entry) |e| @min(e.piece, items.len) else items.len;
+        var leg_hi: usize = items.len;
+        var exited = false;
+        var drop_first = if (entry) |e| e.soft else false;
         try path.ensure(a, 0);
         // Each segment's alignment shift, set when the flow leaves it.
         var shifts: std.ArrayList(f64) = .empty;
@@ -1030,7 +1115,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         // the segment being filled.
         var tall: std.ArrayList(Tall) = .empty;
         var closed: std.ArrayList([2]f64) = .empty;
-        var first_in_seg: usize = 0;
+        var first_in_seg: usize = leg_lo;
         var seg: usize = 0;
         var in_seg: usize = 0;
         var para: f64 = 0;
@@ -1039,13 +1124,25 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         for (stretch, 0..) |*st, k| st.* = isSpace(cuts.items, k);
         const extra = try a.alloc(f64, items.len);
         @memset(extra, 0);
-        const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
+        const flow: Flow = .{ .m = m, .region = flow_r, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
         // The bounds of the segment being filled: its first line takes the
         // first-line indent. The first segment too: line art may close stretches of it.
         try flow.enter(a, &path, 0, tall.items, &closed);
-        var line: Line = lineIn(style, true, segLength(&path, rows, 0));
+        var line: Line = lineIn(style, if (entry) |e| e.first_line else true, segLength(&path, rows, 0));
         var pos: f64 = line.lo;
-        for (items, 0..) |item, index| {
+        for (items[leg_lo..], leg_lo..) |item, index| {
+            // Entering after a wrap upstream: what a wrap drops at a
+            // line's start is dropped here too.
+            if (drop_first) {
+                drop_first = false;
+                const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(cuts.items, index);
+                if (drops) {
+                    segs_of[index] = seg;
+                    spans[index] = .{ pos, pos };
+                    dropped[index] = true;
+                    continue;
+                }
+            }
             if (item.breaks()) {
                 segs_of[index] = seg;
                 spans[index] = .{ pos, pos };
@@ -1062,8 +1159,17 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                         const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
                         path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
                         style = next;
+                        style_id = item.what.paragraph;
                         first_line = true;
                     } else path.lead = if (style) |st| st.line_gap else 0;
+                    // Past this leg's last track: the rest goes on into
+                    // the thread's next panel.
+                    if (path.leaves(seg)) {
+                        try exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
+                        leg_hi = index + 1;
+                        exited = true;
+                        break;
+                    }
                     try flow.enter(a, &path, seg, tall.items, &closed);
                     line = lineIn(style, first_line, segLength(&path, rows, seg));
                     pos = line.lo;
@@ -1100,6 +1206,12 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 seg += 1;
                 first_in_seg = index;
                 path.lead = if (style) |st| st.line_gap else 0;
+                if (path.leaves(seg)) {
+                    try exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
+                    leg_hi = index;
+                    exited = true;
+                    break;
+                }
                 try flow.enter(a, &path, seg, tall.items, &closed);
                 line = lineIn(style, false, segLength(&path, rows, seg));
                 pos = line.lo;
@@ -1123,15 +1235,15 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             segs_of[index] = seg;
             spans[index] = .{ start, end };
         }
-        try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
+        if (!exited) try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
 
         // Last, each item where it landed.
-        for (items, 0..) |item, index| {
+        for (items[leg_lo..leg_hi], leg_lo..) |item, index| {
             const sg = segs_of[index];
             const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
             const start = spans[index][0] + sh;
             const end = spans[index][1] + sh;
-            try placed_items.append(a, .{ .region = ri, .index = item_of.items[index], .segment = sg, .span = .{ start, end } });
+            try placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
             if (dropped[index] or dup[index]) continue;
             const band = path.boxes.items[sg];
             switch (item.what) {
@@ -1193,7 +1305,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                     else
                         .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                     try placed_labels.append(a, .{
-                        .run = .{ .region = ri, .item = item_of.items[index], .from = src_off.items[index], .len = src_len.items[index] },
+                        .run = .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[index], .len = src_len.items[index] },
                         .tile = null,
                         .slot = item_of.items[index],
                         .box = box,
@@ -1211,7 +1323,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             }
         }
         natural = @max(natural, para);
-        try flows.append(a, .{ .region = ri, .natural = natural / region.pitch, .segments = path.origins.items.len });
+        try flows.append(a, .{ .region = fri, .flow_panel = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
         for (path.reach.items, 0..) |r_, t| {
             const len_t = segLength(&path, rows, t);
             if (r_ > len_t + tol) try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
@@ -1224,7 +1336,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
             if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
             const member = thread[path.member.items[t]];
             const soft = path.regionOf(t).softArea();
-            try tracks.append(a, .{ .region = ri, .track = t, .member = member, .local = local, .major = region.major, .box = b, .origin = o });
+            try tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major, .box = b, .origin = o });
             local += 1;
             all = all.join(b);
             // Along, the path and the segment length are the boundary: a
@@ -1350,6 +1462,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
 
     return .{
         .arena = arena,
+        .exits = try exits.toOwnedSlice(a),
         .edge = edge,
         .tiles = try tiles.toOwnedSlice(a),
         .tracks = try tracks.toOwnedSlice(a),
@@ -1360,6 +1473,77 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         .issues = try issues.toOwnedSlice(a),
         .bounds = bounds,
     };
+}
+
+/// Whether two sets of handoffs are the same (in any order).
+pub fn sameHandoffs(x: []const Handoff, y: []const Handoff) bool {
+    if (x.len != y.len) return false;
+    for (x) |h| {
+        const found = for (y) |k| {
+            if (std.meta.eql(h, k)) break true;
+        } else false;
+        if (!found) return false;
+    }
+    return true;
+}
+
+/// The panels a thread crosses into or out of: the only ones whose
+/// solving changes where threads enter other panels.
+fn threadPanels(gpa: Allocator, m: *const Model) Allocator.Error![]usize {
+    var list: std.ArrayList(usize) = .empty;
+    errdefer list.deinit(gpa);
+    for (m.panels.items, 0..) |p, pi| for (p.regions.items) |r| {
+        const n = m.trackById(r.next) orelse continue;
+        if (n.panel == pi) continue;
+        for ([_]usize{ pi, n.panel }) |x| if (std.mem.indexOfScalar(usize, list.items, x) == null) try list.append(gpa, x);
+    };
+    std.mem.sort(usize, list.items, {}, std.sort.asc(usize));
+    return list.toOwnedSlice(gpa);
+}
+
+/// Where every thread enters each panel it runs on into, worked out by
+/// solving the panels threads cross, each with the handoffs the others
+/// gave last time, until those stop changing. `start` is a first guess
+/// (the last known handoffs, say); the result is the caller's.
+pub fn handoffs(gpa: Allocator, m: *const Model, labels: *Labels, start: []const Handoff) Error![]Handoff {
+    const panels = try threadPanels(gpa, m);
+    defer gpa.free(panels);
+    var entries: std.ArrayList(Handoff) = .empty;
+    errdefer entries.deinit(gpa);
+    try entries.appendSlice(gpa, start);
+    if (panels.len == 0) {
+        entries.clearRetainingCapacity();
+        return entries.toOwnedSlice(gpa);
+    }
+    // Each pass carries a thread at least one panel further.
+    var pass: usize = 0;
+    while (pass < m.panels.items.len + 2) : (pass += 1) {
+        var next: std.ArrayList(Handoff) = .empty;
+        defer next.deinit(gpa);
+        for (panels) |pi| {
+            var placed = try solveWith(gpa, m, pi, labels, entries.items);
+            defer placed.deinit();
+            try next.appendSlice(gpa, placed.exits);
+        }
+        if (sameHandoffs(next.items, entries.items)) break;
+        entries.clearRetainingCapacity();
+        try entries.appendSlice(gpa, next.items);
+    }
+    return entries.toOwnedSlice(gpa);
+}
+
+/// Every panel placed, threads followed across panels (see `handoffs`).
+/// The caller deinits each and frees the slice.
+pub fn solveAll(gpa: Allocator, m: *const Model, labels: *Labels) Error![]Placed {
+    const entries = try handoffs(gpa, m, labels, &.{});
+    defer gpa.free(entries);
+    var out: std.ArrayList(Placed) = .empty;
+    errdefer {
+        for (out.items) |*p| p.deinit();
+        out.deinit(gpa);
+    }
+    for (0..m.panels.items.len) |pi| try out.append(gpa, try solveWith(gpa, m, pi, labels, entries));
+    return out.toOwnedSlice(gpa);
 }
 
 /// Rounds a cache-key length to 1 nm, so the same box reached by different
@@ -1807,7 +1991,7 @@ test "joined tracks share one flow: what overflows one goes on into the next" {
     try m.joinTracks(p, a, b);
     try testing.expectEqual(@as(usize, 0), m.panels.items[p].regions.items[b].items.items.len);
     try testing.expectEqual(@as(usize, 11), m.panels.items[p].regions.items[a].items.items.len);
-    try testing.expectEqual(a, m.threadHead(p, b));
+    try testing.expectEqual(a, m.threadHead(p, b).region);
     {
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
@@ -1842,6 +2026,14 @@ test "joined tracks share one flow: what overflows one goes on into the next" {
     }
 }
 
+/// A thread's tracks on panel `p` from `head`, by index (tests).
+fn threadOn(m: *const Model, p: usize, head: usize, out: []usize) []usize {
+    var buf: [16]model.TrackRef = undefined;
+    const t = m.thread(.{ .panel = p, .region = head }, &buf);
+    for (t, 0..) |x, i| out[i] = x.region;
+    return out[0..t.len];
+}
+
 test "a thread's first track taken out hands the flow to the next" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
@@ -1855,23 +2047,108 @@ test "a thread's first track taken out hands the flow to the next" {
     try m.joinTracks(p, a, b);
     try m.joinTracks(p, b, c);
     var buf: [8]usize = undefined;
-    try testing.expectEqualSlices(usize, &.{ a, b, c }, m.thread(p, a, &buf));
+    try testing.expectEqualSlices(usize, &.{ a, b, c }, threadOn(&m, p, a, &buf));
     // B out: A goes on into C.
     try m.unjoinTrack(p, b);
-    try testing.expectEqualSlices(usize, &.{ a, c }, m.thread(p, a, &buf));
+    try testing.expectEqualSlices(usize, &.{ a, c }, threadOn(&m, p, a, &buf));
     // Joined back in after A: A, B, C.
     try m.joinTracks(p, a, b);
-    try testing.expectEqualSlices(usize, &.{ a, b, c }, m.thread(p, a, &buf));
+    try testing.expectEqualSlices(usize, &.{ a, b, c }, threadOn(&m, p, a, &buf));
     // A out: B holds the flow, and the thread is B, C.
     try m.unjoinTrack(p, a);
     try testing.expectEqual(@as(usize, 7), m.panels.items[p].regions.items[b].items.items.len);
-    try testing.expectEqualSlices(usize, &.{ b, c }, m.thread(p, b, &buf));
+    try testing.expectEqualSlices(usize, &.{ b, c }, threadOn(&m, p, b, &buf));
     var labels: Labels = .init(gpa, &.{});
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
     try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[0].pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 110), s.tiles[3].pitch_box.x0, 1e-9);
+}
+
+test "a thread runs on into a track on another panel" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p1 = try m.addPanel("page 1", 100, 100);
+    const p2 = try m.addPanel("page 2", 100, 100);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const a = try m.addTracks(p1, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
+    const b = try m.addTracks(p2, .{ .name = "B", .origin = .{ .x = 20, .y = 90 }, .prototype = key, .count = 4, .length = 3, .pitch = 10 });
+    for (0..10) |_| _ = try m.insertTile(p1, a, m.panels.items[p1].regions.items[a].items.items.len, key, 1);
+    try m.threadTracks(p1, a, p2, b);
+    try testing.expectEqual(model.TrackRef{ .panel = p1, .region = a }, m.threadHead(p2, b));
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    {
+        // Page 2 alone, before page 1 says where the flow enters: waiting.
+        var s2 = try solve(gpa, &m, p2, &labels);
+        defer s2.deinit();
+        try testing.expect(s2.flows[0].waiting);
+        try testing.expectEqual(@as(usize, 0), s2.items.len);
+        // Page 1 fills A and hands the rest on.
+        var s1 = try solve(gpa, &m, p1, &labels);
+        defer s1.deinit();
+        try testing.expectEqual(@as(usize, 1), s1.exits.len);
+        try testing.expectEqual(m.panels.items[p2].regions.items[b].id, s1.exits[0].track);
+        try testing.expectEqual(@as(usize, 6), s1.exits[0].piece);
+        try testing.expectEqual(@as(usize, 2), s1.exits[0].segment);
+        for (s1.issues) |is| try testing.expect(is.kind != .past_soft_area);
+        try testing.expectEqual(@as(usize, 6), s1.items.len);
+    }
+    // All together: the rest on page 2, numbered on through the thread.
+    const all = try solveAll(gpa, &m, &labels);
+    defer {
+        for (all) |*pl| pl.deinit();
+        gpa.free(all);
+    }
+    const s2 = all[p2];
+    try testing.expect(!s2.flows[0].waiting);
+    try testing.expectEqual(@as(usize, 4), s2.items.len);
+    try testing.expectEqual(p1, s2.items[0].flow_panel);
+    try testing.expectEqual(a, s2.items[0].region);
+    try testing.expectEqual(@as(usize, 6), s2.items[0].index);
+    try testing.expectEqual(@as(usize, 2), s2.tracks[0].track);
+    try testing.expectEqual(b, s2.tracks[0].member);
+    try testing.expectApproxEqAbs(@as(f64, 20), s2.tiles[0].pitch_box.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 80), s2.tiles[3].pitch_box.y1, 1e-9);
+    // Taken out: page 1 overflows again, page 2 is empty.
+    try m.unjoinTrack(p2, b);
+    const after = try handoffs(gpa, &m, &labels, &.{});
+    defer gpa.free(after);
+    try testing.expectEqual(@as(usize, 0), after.len);
+}
+
+test "a wrap across panels drops the space it leaves at the next panel's start" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p1 = try m.addPanel("page 1", 100, 100);
+    const p2 = try m.addPanel("page 2", 100, 100);
+    const key = try m.addPrototype(.{ .name = "key", .at_soft_break = .drop });
+    const plain = try m.addPrototype(.{ .name = "plain" });
+    const a = try m.addTracks(p1, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .prototype = plain, .count = 1, .length = 2, .pitch = 10 });
+    const b = try m.addTracks(p2, .{ .name = "B", .origin = .{ .x = 0, .y = 90 }, .prototype = plain, .count = 1, .length = 2, .pitch = 10 });
+    // Two tiles fill A; the dropping one would start B, so it is dropped.
+    const items = &m.panels.items[p1].regions.items[a].items;
+    _ = try m.insertTile(p1, a, items.items.len, plain, 1);
+    _ = try m.insertTile(p1, a, items.items.len, plain, 1);
+    _ = try m.insertTile(p1, a, items.items.len, key, 1);
+    _ = try m.insertTile(p1, a, items.items.len, plain, 1);
+    try m.threadTracks(p1, a, p2, b);
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    const all = try solveAll(gpa, &m, &labels);
+    defer {
+        for (all) |*pl| pl.deinit();
+        gpa.free(all);
+    }
+    try testing.expect(all[p2].exits.len == 0);
+    try testing.expectEqual(@as(usize, 1), all[p1].exits.len);
+    try testing.expect(all[p1].exits[0].soft);
+    // On page 2: the dropped tile, then the last at B's start.
+    try testing.expectEqual(@as(usize, 1), all[p2].tiles.len);
+    try testing.expectApproxEqAbs(@as(f64, 0), all[p2].tiles[0].pitch_box.x0, 1e-9);
 }
 
 test "segments step down at an even pitch; the path's control points set where each is centred" {

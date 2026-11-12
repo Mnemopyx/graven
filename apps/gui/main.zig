@@ -23,6 +23,7 @@ const locale = @import("locale.zig");
 const fontwin = @import("fontwin.zig");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
+const reflow = @import("reflow.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -493,6 +494,7 @@ fn docUnits() layout.model.Units {
 fn newCanvas() void {
     setFilePath(null);
     clearPlaced();
+    forgetThreads();
     state.model.deinit();
     state.model = .init(state.gpa);
     state.model.has_sheet = false;
@@ -631,7 +633,19 @@ fn exportPrompt() void {
         return;
     };
     if (p >= state.placed.items.len or path.len == 0) return;
-    const svg = layout.output.panelSvg(state.gpa, &state.placed.items[p], faceTable(), .{}) catch {
+    // Never a stale layout: threads followed to the end first.
+    const labels = if (state.labels) |*l| l else return;
+    const entries = layout.place.handoffs(state.gpa, &state.model, labels, thread_entries) catch {
+        state.status = "The SVG could not be made. ";
+        return;
+    };
+    defer state.gpa.free(entries);
+    var current = layout.place.solveWith(state.gpa, &state.model, p, labels, entries) catch {
+        state.status = "The SVG could not be made. ";
+        return;
+    };
+    defer current.deinit();
+    const svg = layout.output.panelSvg(state.gpa, &current, faceTable(), .{}) catch {
         state.status = "The SVG could not be made. ";
         return;
     };
@@ -666,6 +680,7 @@ fn deinit(_: *dvui.Window) void {
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
     state.expanded.deinit(state.gpa);
+    forgetThreads();
     state.model.deinit();
 }
 
@@ -740,6 +755,76 @@ fn listFonts(gpa: std.mem.Allocator) ![]Font {
     return list.toOwnedSlice(gpa);
 }
 
+/// Every panel laid out at once, threads entering where they did when last
+/// worked out (`thread_entries`).
+fn solvePanels(labels: *layout.Labels) !void {
+    clearPlaced();
+    for (0..state.model.panels.items.len) |pi| {
+        try state.placed.append(state.gpa, try layout.place.solveWith(state.gpa, &state.model, pi, labels, thread_entries));
+    }
+}
+
+/// The reflow worker (see reflow.zig), made when a thread first crosses
+/// panels, and where threads entered each panel when last worked out.
+var reflower: ?reflow.Worker = null;
+var thread_entries: []layout.place.Handoff = &.{};
+/// Panels downstream are behind an edit: a batch is pending or running.
+var catching_up = false;
+var submitted_rev: u64 = std.math.maxInt(u64);
+
+/// Another document: its threads start from nothing, and a batch still
+/// running for the last one is ignored when it completes.
+fn forgetThreads() void {
+    state.gpa.free(thread_entries);
+    thread_entries = &.{};
+    submitted_rev = std.math.maxInt(u64);
+    catching_up = false;
+    doc_generation += 1;
+}
+var doc_generation: u64 = 0;
+
+/// After the panels are laid out: where an edit moved where a thread goes
+/// on into another panel, those downstream are behind; a batch for the
+/// worker brings them up to date. With composed fonts (whose faces the
+/// app keeps, not to be shared with a thread) it is worked out here.
+fn followThreads(labels: *layout.Labels) !void {
+    const gpa = state.gpa;
+    var exits: std.ArrayList(layout.place.Handoff) = .empty;
+    defer exits.deinit(gpa);
+    for (state.placed.items) |pl| try exits.appendSlice(gpa, pl.exits);
+    if (layout.place.sameHandoffs(exits.items, thread_entries)) {
+        catching_up = reflower != null and reflower.?.busy();
+        return;
+    }
+    if (resolved != null) {
+        const e = try layout.place.handoffs(gpa, &state.model, labels, exits.items);
+        gpa.free(thread_entries);
+        thread_entries = e;
+        try solvePanels(labels);
+        catching_up = false;
+        return;
+    }
+    catching_up = true;
+    if (submitted_rev == state.model.revision) return;
+    submitted_rev = state.model.revision;
+    const doc = try layout.native.encode(gpa, &state.model);
+    errdefer gpa.free(doc);
+    const table = faceTable();
+    const faces = try gpa.alloc(*engine.Face, table.len);
+    var made: usize = 0;
+    errdefer {
+        for (faces[0..made]) |f| f.deinit();
+        gpa.free(faces);
+    }
+    for (table, 0..) |f, k| {
+        faces[k] = try f.clone(gpa);
+        made += 1;
+    }
+    const first_guess = try gpa.dupe(layout.place.Handoff, exits.items);
+    if (reflower == null) reflower = .{ .gpa = gpa, .io = dvui.io, .wake = wakeGui };
+    reflower.?.submit(.{ .rev = state.model.revision, .generation = doc_generation, .doc = doc, .faces = faces, .start = first_guess });
+}
+
 /// Loads the chosen font if it changed, and re-solves when the model or the
 /// font changed.
 fn update() !void {
@@ -762,12 +847,18 @@ fn update() !void {
     }
     const labels = if (state.labels) |*l| l else return;
     resolveFonts(labels);
+    // A reflow batch done: where threads now enter each panel.
+    if (reflower) |*w| if (w.take()) |res| {
+        if (res.generation == doc_generation) {
+            state.gpa.free(thread_entries);
+            thread_entries = res.entries;
+            state.placed_rev = std.math.maxInt(u64);
+        } else state.gpa.free(res.entries);
+    };
     if (state.placed_rev == state.model.revision and (resolved == null or resolved_rev == state.model.revision)) return;
     const t0: std.Io.Timestamp = .now(dvui.io, .awake);
-    clearPlaced();
-    for (0..state.model.panels.items.len) |pi| {
-        try state.placed.append(state.gpa, try layout.solve(state.gpa, &state.model, pi, labels));
-    }
+    try solvePanels(labels);
+    try followThreads(labels);
     state.intrusions = try layout.drc.marginIntrusions(state.gpa, &state.model, state.placed.items);
     state.panel_issues = try layout.drc.panelIssues(state.gpa, &state.model);
     state.layer_issues = try state.model.layerIssues(state.gpa);
@@ -775,14 +866,12 @@ fn update() !void {
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
     // A selected row the flow no longer reaches gives way to its track.
-    for (state.placed.items, 0..) |*pl, pi| for (pl.flows) |f| {
-        switch (state.context) {
-            .row => |r| if (r.panel == pi and r.region == f.region and r.row >= f.segments) {
-                state.context = .{ .region = .{ .panel = pi, .region = f.region } };
-            },
-            else => {},
-        }
-    };
+    switch (state.context) {
+        .row => |r| if (placedTrack(r.panel, r.region, r.row) == null and r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len) {
+            state.context = .{ .region = .{ .panel = r.panel, .region = r.region } };
+        },
+        else => {},
+    }
 }
 
 // Fonts ------------------------------------------------------------------------
@@ -1394,6 +1483,7 @@ fn openDocument(path: []const u8) void {
 /// Makes `opened` the document open, from `path`.
 fn install(opened: *history.Opened, path: []const u8) void {
     newCanvas();
+    forgetThreads();
     state.model.deinit();
     state.model = opened.model;
     hist.deinit();
@@ -2855,11 +2945,11 @@ fn panelChildren(pi: usize, d: usize) void {
                 // What the flow put in this segment, from the last solve.
                 const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
                 const filled = for (placed_items) |it| {
-                    if (it.region == flow_ri and it.segment == rowi and !isBreak(pi, it)) break true;
+                    if (it.flow_panel == pt.flow_panel and it.region == flow_ri and it.segment == rowi and !isBreak(pi, it)) break true;
                 } else false;
-                if (!treeNode(.{ .row = .{ .panel = pi, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
+                if (!treeNode(.{ .row = .{ .panel = pt.flow_panel, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
                 for (placed_items) |it| {
-                    if (it.region != flow_ri or it.segment != rowi) continue;
+                    if (it.flow_panel != pt.flow_panel or it.region != flow_ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
                     const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
                     if (state.model.prototypes.items[state.model.tileConst(id).prototype].spacer) continue;
@@ -3759,7 +3849,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     // path, as far across as the space it was drawn out for.
     const soft_region: ?usize = switch (state.context) {
         .region => |r| if (r.panel == pi) r.region else null,
-        .row => |r| if (r.panel == pi) (if (placedTrack(r.panel, r.region, r.row)) |pt| pt.member else r.region) else null,
+        .row => |r| if (placedTrack(r.panel, r.region, r.row)) |pt| (if (pt.panel == pi) pt.member else null) else (if (r.panel == pi) r.region else null),
         else => null,
     };
     if (soft_region) |sr| if (sr < state.model.panels.items[pi].regions.items.len) {
@@ -3848,7 +3938,8 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         }
     }
     drawFlowMarks(area, pi, placed);
-    if (track_cursor) |c| if (c.panel == pi) drawCursor(area, pi, placed, c);
+    // On whichever panel its segment lies: a thread runs across panels.
+    if (track_cursor) |c| drawCursor(area, pi, placed, c);
     // The selected panel label: its ink box, with a little room.
     switch (state.context) {
         .label => |sel| if (sel.panel == pi) if (labelBox(pi, sel.index)) |b| {
@@ -6075,7 +6166,8 @@ fn properties() !void {
             propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
             propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
-            propText("Items", "{d}{s}", .{ state.model.panels.items[r.panel].regions.items[head].items.items.len, if (head != r.region) " in its thread's flow" else "" }, 8);
+            const is_head = head.panel == r.panel and head.region == r.region;
+            propText("Items", "{d}{s}", .{ state.model.panels.items[head.panel].regions.items[head.region].items.items.len, if (!is_head) " in its thread's flow" else "" }, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
@@ -6083,20 +6175,21 @@ fn properties() !void {
             if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
-            try paragraphProperties(r.panel, head);
+            try paragraphProperties(head.panel, head.region);
             threadProperties(r.panel, r.region);
         },
         .row => |r| {
             const pt = placedTrack(r.panel, r.region, r.row);
             const member = if (pt) |x| x.member else r.region;
-            const region = state.model.panels.items[r.panel].regions.items[member];
-            propText(trackWord(region.major), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(r.panel, member).len, region.name }, 1);
+            const on = if (pt) |x| x.panel else r.panel;
+            const region = state.model.panels.items[on].regions.items[member];
+            propText(trackWord(region.major), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(on, member).len, region.name }, 1);
             var where_buf: [96]u8 = undefined;
             propText("Placed", "{s}", .{trackWhere(&where_buf, r.panel, r.region, r.row)}, 2);
             var held: usize = 0;
-            if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].items) |it| {
-                if (it.region == r.region and it.segment == r.row and !isBreak(r.panel, it)) held += 1;
-            };
+            for (flowItems(r.panel, r.region)) |it| {
+                if (it.segment == r.row and !isBreak(r.panel, it)) held += 1;
+            }
             propText("Items", "{d}", .{held}, 3);
         },
         .tile => |id| try tileProperties(id),
@@ -6839,8 +6932,9 @@ fn statusContent() void {
     // Only when there are any: bold or italic the font lacks.
     var lack_buf: [48]u8 = undefined;
     const lack = if (lacking > 0) std.fmt.bufPrint(&lack_buf, " · {d} lacking bold/italic", .{lacking}) catch "" else "";
-    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}", .{
+    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}{s}", .{
         state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, lack, overflow, state.intrusions.len, layer_flags,
+        if (catching_up) " · reflowing threads…" else "",
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
 
@@ -6960,8 +7054,8 @@ fn contextRegion() ?struct { panel: usize, region: usize } {
 fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
     const r = state.model.panels.items[pi].regions.items[region];
     var after: ?usize = null;
-    for (state.placed.items[pi].items) |it| {
-        if (it.region != region or it.segment != seg) continue;
+    for (flowItems(pi, region)) |it| {
+        if (it.segment != seg) continue;
         if (isBreak(pi, it)) return it.index;
         if ((it.span[0] + it.span[1]) / 2 > along) return it.index;
         after = it.index + 1;
@@ -6971,16 +7065,31 @@ fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
 
 /// How many rows or columns a track's flow reached in the last solve.
 fn segmentCount(pi: usize, region: usize) usize {
-    if (pi >= state.placed.items.len) return 0;
-    for (state.placed.items[pi].flows) |f| if (f.region == region) return f.segments;
-    return 0;
+    // A thread's flow has a part on each panel it runs through.
+    var n: usize = 0;
+    for (state.placed.items) |pl| for (pl.flows) |f| {
+        if (f.flow_panel == pi and f.region == region) n = @max(n, f.segments);
+    };
+    return n;
+}
+
+/// The placed items of the flow of track `region` of panel `pi` (the
+/// first of its thread), on every panel it runs through.
+fn flowItems(pi: usize, region: usize) []const layout.place.PlacedItem {
+    var list: std.ArrayList(layout.place.PlacedItem) = .empty;
+    const a = dvui.currentWindow().arena();
+    for (state.placed.items) |pl| for (pl.items) |it| {
+        if (it.flow_panel == pi and it.region == region) list.append(a, it) catch {};
+    };
+    return list.items;
 }
 
 /// Segment `t` of the flow of track `region` (the first of its thread), as
 /// the last solve placed it.
 fn placedTrack(pi: usize, region: usize, t: usize) ?layout.place.PlacedTrack {
-    if (pi >= state.placed.items.len) return null;
-    for (state.placed.items[pi].tracks) |tr| if (tr.region == region and tr.track == t) return tr;
+    for (state.placed.items) |pl| for (pl.tracks) |tr| {
+        if (tr.flow_panel == pi and tr.region == region and tr.track == t) return tr;
+    };
     return null;
 }
 
@@ -6996,16 +7105,16 @@ fn tracksIn(pi: usize, ri: usize) []const layout.place.PlacedTrack {
 
 /// Where row or column `t` of a track's path lies, from the last solve.
 fn segmentOrigin(pi: usize, region: usize, t: usize) ?layout.model.Segment {
-    if (pi >= state.placed.items.len) return null;
-    for (state.placed.items[pi].tracks) |tr| if (tr.region == region and tr.track == t) return tr.origin;
-    return null;
+    return if (placedTrack(pi, region, t)) |tr| tr.origin else null;
 }
 
 /// The model's item for a placed one, while the model still has it: the
 /// placement is from the last solve, and an edit since may have removed it.
 fn modelItem(pi: usize, it: layout.place.PlacedItem) ?layout.model.Item {
-    if (pi >= state.model.panels.items.len) return null;
-    const regions = state.model.panels.items[pi].regions.items;
+    _ = pi;
+    // The flow is its thread's first track's, on whichever panel.
+    if (it.flow_panel >= state.model.panels.items.len) return null;
+    const regions = state.model.panels.items[it.flow_panel].regions.items;
     if (it.region >= regions.len or it.index >= regions[it.region].items.items.len) return null;
     return regions[it.region].items.items[it.index];
 }
@@ -7020,12 +7129,15 @@ fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
 fn cursorAt(at: geom.Point) ?TrackCursor {
     const cr = contextRegion() orelse return null;
     if (cr.panel >= state.placed.items.len) return null;
+    // In any of the context's thread's segments on its panel: a cursor in
+    // the thread's flow.
+    const head = state.model.threadHead(cr.panel, cr.region);
     for (state.placed.items[cr.panel].tracks) |t| {
-        if (t.region != cr.region) continue;
+        if (t.flow_panel != head.panel or t.region != head.region) continue;
         const b = onSheet(cr.panel, t.box);
         if (!contains(b, at)) continue;
         const along = if (t.major == .row) at.x - b.x0 else b.y1 - at.y;
-        return .{ .panel = cr.panel, .region = cr.region, .index = indexAt(cr.panel, cr.region, t.track, along) };
+        return .{ .panel = head.panel, .region = head.region, .index = indexAt(head.panel, head.region, t.track, along) };
     }
     return null;
 }
@@ -7035,8 +7147,7 @@ fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
     if (c.panel >= state.placed.items.len) return null;
     var prev: ?layout.place.PlacedItem = null;
     var here: ?layout.place.PlacedItem = null;
-    for (state.placed.items[c.panel].items) |it| {
-        if (it.region != c.region) continue;
+    for (flowItems(c.panel, c.region)) |it| {
         // A run set word by word has several pieces: the cursor goes after
         // the last of the item before it, before the first of its own.
         if (it.index + 1 == c.index) prev = it;
@@ -7092,7 +7203,8 @@ fn validateCursor() void {
         track_cursor = null;
         return;
     };
-    if (cr.panel != c.panel or cr.region != c.region or c.panel >= state.model.panels.items.len) {
+    const head = state.model.threadHead(cr.panel, cr.region);
+    if (head.panel != c.panel or head.region != c.region or c.panel >= state.model.panels.items.len) {
         track_cursor = null;
         return;
     }
@@ -7244,7 +7356,7 @@ var focus_expression_end = false;
 fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
     const at = cursorPlace(c) orelse return;
     for (placed.tracks) |t| {
-        if (t.region != c.region or t.track != at.segment) continue;
+        if (t.flow_panel != c.panel or t.region != c.region or t.track != at.segment) continue;
         const pos = at.along;
         const b = onSheet(pi, t.box);
         const px = dvui.windowNaturalScale();
@@ -7370,14 +7482,14 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         const item = modelItem(pi, it) orelse continue;
         if (k + 1 >= placed.items.len) break;
         const nx = placed.items[k + 1];
-        if (nx.region != it.region or nx.segment != it.segment) continue;
+        if (nx.region != it.region or nx.flow_panel != it.flow_panel or nx.segment != it.segment) continue;
         _ = modelItem(pi, nx) orelse continue;
         _ = item;
-        const r = state.model.panels.items[pi].regions.items[it.region];
+        const r = state.model.panels.items[it.flow_panel].regions.items[it.region];
         // Bound by hand, or a letter tile to its word.
         if (nx.index != it.index + 1 or !state.model.bound(r.items.items, it.index)) continue;
         const band = for (placed.tracks) |t| {
-            if (t.region == it.region and t.track == it.segment) break onSheet(pi, t.box);
+            if (t.region == it.region and t.flow_panel == it.flow_panel and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
         const a_mid = (it.span[0] + it.span[1]) / 2;
         const b_mid = (nx.span[0] + nx.span[1]) / 2;
@@ -7388,10 +7500,10 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
     }
     for (placed.items) |it| {
         const what = (modelItem(pi, it) orelse continue).what;
-        const r = state.model.panels.items[pi].regions.items[it.region];
+        const r = state.model.panels.items[it.flow_panel].regions.items[it.region];
         if (what != .hard_break and what != .paragraph and !(what == .run and what.run.content.len == 0)) continue;
         const band = for (placed.tracks) |t| {
-            if (t.region == it.region and t.track == it.segment) break onSheet(pi, t.box);
+            if (t.region == it.region and t.flow_panel == it.flow_panel and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
         const rows = r.major == .row;
         if (what == .run) {
@@ -7700,7 +7812,7 @@ fn moveTrackArrow(arrow: Arrow) void {
     }
     const pt = placedTrack(t.panel, t.region, t.row) orelse return;
     const o = pt.origin;
-    _ = actM(mergeKey(.{ "bend", t.panel, pt.member, t.row }), .bendPath, .{ t.panel, pt.member, o.across, o.along + along, o.across }) catch {
+    _ = actM(mergeKey(.{ "bend", pt.panel, pt.member, t.row }), .bendPath, .{ pt.panel, pt.member, o.across, o.along + along, o.across }) catch {
         state.status = "It did not move. ";
         return;
     };
@@ -7760,7 +7872,7 @@ fn movePalette() void {
 fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
     const pt = placedTrack(pi, region, t) orelse return "";
     const o = pt.origin;
-    const member = state.model.panels.items[pi].regions.items[pt.member];
+    const member = state.model.panels.items[pt.panel].regions.items[pt.member];
     // Straight on from its track's origin, one thickness each.
     const across = o.across - @as(f64, @floatFromInt(pt.local));
     // Along, from where an unshaped track's segment sits (its middle on
@@ -7991,11 +8103,11 @@ fn featureHit(at: geom.Point) ?FeatureHit {
 /// join a track after it or take it out of its thread.
 fn threadProperties(pi: usize, ri: usize) void {
     const m = &state.model;
-    const regions = m.panels.items[pi].regions.items;
     const before = m.threadBefore(pi, ri);
-    const after = m.regionIndex(pi, regions[ri].next);
-    if (before) |b| propText("Continues", "{s}", .{regions[b].name}, 30);
-    if (after) |n| propText("Goes on into", "{s}", .{regions[n].name}, 31);
+    const after = m.trackById(m.panels.items[pi].regions.items[ri].next);
+    var buf: [160]u8 = undefined;
+    if (before) |b| propText("Continues", "{s}", .{trackLabel(&buf, b, pi)}, 30);
+    if (after) |n| propText("Goes on into", "{s}", .{trackLabel(&buf, n, pi)}, 31);
     if (dvui.button(@src(), "Join a track after this…", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
         join_from = .{ .panel = pi, .region = ri };
         state.tool = .join;
@@ -8004,6 +8116,14 @@ fn threadProperties(pi: usize, ri: usize) void {
         act(.unjoinTrack, .{ pi, ri }) catch {};
         state.status = "Taken out: the flow stays whole on the thread. ";
     };
+}
+
+/// A track's name, with its panel's when that is not panel `here`.
+fn trackLabel(buf: []u8, t: layout.model.TrackRef, here: usize) []const u8 {
+    const p = state.model.panels.items[t.panel];
+    const name = p.regions.items[t.region].name;
+    if (t.panel == here) return name;
+    return std.fmt.bufPrint(buf, "{s} (on {s})", .{ name, p.name }) catch name;
 }
 
 /// The track under `at` (sheet mm) in the shown space: the one a placed
@@ -8027,11 +8147,7 @@ fn joinClick(at: geom.Point) void {
         state.status = "No track there: nothing joined. ";
         return;
     };
-    if (to.panel != from.panel) {
-        state.status = "Threads across panels are not laid out yet: join tracks on the same panel. ";
-        return;
-    }
-    act(.joinTracks, .{ from.panel, from.region, to.region }) catch {
+    act(.threadTracks, .{ from.panel, from.region, to.panel, to.region }) catch {
         state.status = "Not joined: a thread joins tracks running the same way, onto one that starts its own thread, without looping. ";
         return;
     };
@@ -8045,22 +8161,24 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
     const px = dvui.windowNaturalScale();
     const ink: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.7) };
     for (m.panels.items[pi].regions.items, 0..) |r, ri| {
-        const n = m.regionIndex(pi, r.next) orelse continue;
+        const nt = m.trackById(r.next) orelse continue;
+        // On another panel: drawn when both are in the shown space.
+        if (m.panels.items[nt.panel].space != m.panels.items[pi].space) continue;
         // Leaving: its last segment the flow reached, else its first.
         var from_box: geom.Box = r.boxAt(.{ .along = r.pathAt(0), .across = 0 });
         for (placed.tracks) |t| if (t.member == ri) {
             from_box = t.box;
         };
-        const nr = m.panels.items[pi].regions.items[n];
+        const nr = m.panels.items[nt.panel].regions.items[nt.region];
         var to_box: geom.Box = nr.boxAt(.{ .along = nr.pathAt(0), .across = 0 });
-        for (placed.tracks) |t| if (t.member == n and t.local == 0) {
+        if (nt.panel < state.placed.items.len) for (state.placed.items[nt.panel].tracks) |t| if (t.member == nt.region and t.local == 0) {
             to_box = t.box;
         };
         const rows = r.major == .row;
         const p0: geom.Point = if (rows) .{ .x = from_box.x1, .y = (from_box.y0 + from_box.y1) / 2 } else .{ .x = (from_box.x0 + from_box.x1) / 2, .y = from_box.y0 };
         const p1: geom.Point = if (rows) .{ .x = to_box.x0, .y = (to_box.y0 + to_box.y1) / 2 } else .{ .x = (to_box.x0 + to_box.x1) / 2, .y = to_box.y1 };
         const a = state.view.toPx(area, onSheetPoint(pi, p0));
-        const b = state.view.toPx(area, onSheetPoint(pi, p1));
+        const b = state.view.toPx(area, onSheetPoint(nt.panel, p1));
         dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.25 * px, .color = ink });
         // An arrowhead where it enters.
         const dx = b.x - a.x;
@@ -8408,7 +8526,7 @@ fn pathRegion() ?struct { panel: usize, region: usize } {
     return switch (state.context) {
         .region => |r| .{ .panel = r.panel, .region = r.region },
         // The track the row lies in (in a thread, not always the flow's).
-        .row => |r| .{ .panel = r.panel, .region = if (placedTrack(r.panel, r.region, r.row)) |pt| pt.member else r.region },
+        .row => |r| if (placedTrack(r.panel, r.region, r.row)) |pt| .{ .panel = pt.panel, .region = pt.member } else .{ .panel = r.panel, .region = r.region },
         else => null,
     };
 }

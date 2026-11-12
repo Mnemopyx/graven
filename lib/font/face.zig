@@ -31,6 +31,8 @@ pub const Face = struct {
     font: *hb.hb_font_t,
     draw_funcs: *hb.hb_draw_funcs_t,
     upem: u32,
+    /// Its index in the font file.
+    index: u32 = 0,
     /// Outlines by glyph ID, in font units, owned by `arena`.
     outlines: std.AutoHashMapUnmanaged(u32, Outline) = .empty,
     arena: std.heap.ArenaAllocator,
@@ -71,9 +73,16 @@ pub const Face = struct {
             .font = font,
             .draw_funcs = funcs,
             .upem = upem,
+            .index = index,
             .arena = .init(gpa),
         };
         return self;
+    }
+
+    /// A face of its own on the same font (for another thread: a face's
+    /// outline cache is not shared safely).
+    pub fn clone(self: *const Face, gpa: Allocator) Error!*Face {
+        return init(gpa, self.bytes, self.index);
     }
 
     pub fn deinit(self: *Face) void {

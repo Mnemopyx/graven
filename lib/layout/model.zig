@@ -423,6 +423,9 @@ fn monotoneCubic(pts: []const ControlPoint, x: f64) f64 {
 /// top to bottom, or columns, filled top to bottom and set left to right.
 pub const Major = enum { row, column };
 
+/// A track by its panel and its index there.
+pub const TrackRef = struct { panel: usize, region: usize };
+
 /// A region holding a track: one flow of items (tiles, blanks, runs of
 /// text or equations, hard breaks) poured in order through its segments,
 /// rows or columns placed from the region's top-left corner.
@@ -2812,63 +2815,88 @@ pub const Model = struct {
         return null;
     }
 
-    /// The track whose flow goes on into track `region`, if any.
-    pub fn threadBefore(m: *const Model, panel: usize, region: usize) ?usize {
+    /// The track with ID `id`, on whichever panel.
+    pub fn trackById(m: *const Model, id: ObjectId) ?TrackRef {
+        if (id == .none) return null;
+        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, k| if (r.id == id) return .{ .panel = pi, .region = k };
+        return null;
+    }
+
+    /// The track whose flow goes on into track `region` of `panel`, on
+    /// whichever panel, if any.
+    pub fn threadBefore(m: *const Model, panel: usize, region: usize) ?TrackRef {
         const id = m.panels.items[panel].regions.items[region].id;
         if (id == .none) return null;
-        for (m.panels.items[panel].regions.items, 0..) |r, k| if (k != region and r.next == id) return k;
+        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, k| {
+            if (r.next == id and !(pi == panel and k == region)) return .{ .panel = pi, .region = k };
+        };
         return null;
     }
 
     /// The first track of the thread `region` is in (itself when none goes
     /// on into it): the one that holds the thread's flow.
-    pub fn threadHead(m: *const Model, panel: usize, region: usize) usize {
-        var at = region;
+    pub fn threadHead(m: *const Model, panel: usize, region: usize) TrackRef {
+        var at: TrackRef = .{ .panel = panel, .region = region };
         var steps: usize = 0;
-        while (m.threadBefore(panel, at)) |b| : (steps += 1) {
-            if (b == region or steps > m.panels.items[panel].regions.items.len) break;
+        while (m.threadBefore(at.panel, at.region)) |b| : (steps += 1) {
+            if ((b.panel == panel and b.region == region) or steps > 4096) break;
             at = b;
         }
         return at;
     }
 
     /// The tracks of the thread starting at `head`, in order, into `buf`
-    /// (stopping at a track already listed, or one not on this panel).
-    pub fn thread(m: *const Model, panel: usize, head: usize, buf: []usize) []usize {
+    /// (stopping at a track already listed).
+    pub fn thread(m: *const Model, head: TrackRef, buf: []TrackRef) []TrackRef {
         var n: usize = 0;
-        var at: ?usize = head;
+        var at: ?TrackRef = head;
         while (at) |k| {
-            if (n >= buf.len or std.mem.indexOfScalar(usize, buf[0..n], k) != null) break;
+            if (n >= buf.len) break;
+            for (buf[0..n]) |x| if (x.panel == k.panel and x.region == k.region) return buf[0..n];
             buf[n] = k;
             n += 1;
-            at = m.regionIndex(panel, m.panels.items[panel].regions.items[k].next);
+            at = m.trackById(m.panels.items[k.panel].regions.items[k.region].next);
         }
         return buf[0..n];
     }
 
-    /// Joins track `to` after track `from`: the flow of `from`'s thread
-    /// goes on into `to` (and the thread `to` starts, if it starts one)
-    /// before whatever followed `from`. What `to`'s thread held is added
+    fn trackPtr(m: *Model, t: TrackRef) *TileRegion {
+        return &m.panels.items[t.panel].regions.items[t.region];
+    }
+
+    /// Joins track `to` after track `from`, on one panel (see
+    /// `threadTracks`).
+    pub fn joinTracks(m: *Model, panel: usize, from: usize, to: usize) Error!void {
+        return m.threadTracks(panel, from, panel, to);
+    }
+
+    /// Joins track `to` (of `to_panel`) after track `from` (of
+    /// `from_panel`): the flow of `from`'s thread goes on into `to` (and
+    /// the thread `to` starts, if it starts one) before whatever followed
+    /// `from`, on this panel or another. What `to`'s thread held is added
     /// to the end of the flow, as a new paragraph. Both must run the same
     /// way, and `to` must start its thread and not be in `from`'s.
-    pub fn joinTracks(m: *Model, panel: usize, from: usize, to: usize) Error!void {
-        const regions = m.panels.items[panel].regions.items;
-        if (from >= regions.len or to >= regions.len) return error.NoSuchRow;
-        if (regions[from].major != regions[to].major) return error.BadJoin;
-        if (m.threadBefore(panel, to) != null) return error.BadJoin;
-        const head = m.threadHead(panel, from);
-        if (head == to) return error.BadJoin;
-        var buf: [256]usize = undefined;
-        const joining = m.thread(panel, to, &buf);
+    pub fn threadTracks(m: *Model, from_panel: usize, from: usize, to_panel: usize, to: usize) Error!void {
+        if (from_panel >= m.panels.items.len or to_panel >= m.panels.items.len) return error.NoSuchRow;
+        if (from >= m.panels.items[from_panel].regions.items.len or to >= m.panels.items[to_panel].regions.items.len) return error.NoSuchRow;
+        const f: TrackRef = .{ .panel = from_panel, .region = from };
+        const t: TrackRef = .{ .panel = to_panel, .region = to };
+        if (m.trackPtr(f).major != m.trackPtr(t).major) return error.BadJoin;
+        if (m.threadBefore(to_panel, to) != null) return error.BadJoin;
+        const head = m.threadHead(from_panel, from);
+        if (head.panel == to_panel and head.region == to) return error.BadJoin;
+        var buf: [256]TrackRef = undefined;
+        const joining = m.thread(t, &buf);
         const tail = joining[joining.len - 1];
-        const r = &m.panels.items[panel].regions.items;
-        r.*[tail].next = r.*[from].next;
-        r.*[from].next = r.*[to].id;
+        m.trackPtr(tail).next = m.trackPtr(f).next;
+        m.trackPtr(f).next = m.trackPtr(t).id;
         // One flow: what `to` held goes on after the thread's.
-        if (head != to and r.*[to].items.items.len > 0) {
-            if (r.*[head].items.items.len > 0) try r.*[head].items.append(m.a(), .{ .what = .{ .paragraph = r.*[to].paragraph } });
-            try r.*[head].items.appendSlice(m.a(), r.*[to].items.items);
-            r.*[to].items.clearRetainingCapacity();
+        const hr = m.trackPtr(head);
+        const tr = m.trackPtr(t);
+        if (tr.items.items.len > 0) {
+            if (hr.items.items.len > 0) try hr.items.append(m.a(), .{ .what = .{ .paragraph = tr.paragraph } });
+            try hr.items.appendSlice(m.a(), tr.items.items);
+            tr.items.clearRetainingCapacity();
         }
         m.revision += 1;
     }
@@ -2877,19 +2905,21 @@ pub const Model = struct {
     /// joined, and the flow stays whole on the thread (on the next track
     /// when `region` held it); what no longer fits overflows the last.
     pub fn unjoinTrack(m: *Model, panel: usize, region: usize) Error!void {
-        const r = &m.panels.items[panel].regions.items;
-        if (region >= r.len) return error.NoSuchRow;
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+        const self: TrackRef = .{ .panel = panel, .region = region };
         const before = m.threadBefore(panel, region);
-        const after = m.regionIndex(panel, r.*[region].next);
+        const after = m.trackById(m.trackPtr(self).next);
         if (before == null and after == null) return error.BadJoin;
-        if (before) |b| r.*[b].next = r.*[region].next;
+        if (before) |b| m.trackPtr(b).next = m.trackPtr(self).next;
         if (before == null) if (after) |n| {
             // It held the flow: the next track does now.
-            try r.*[n].items.appendSlice(m.a(), r.*[region].items.items);
-            r.*[region].items.clearRetainingCapacity();
-            r.*[n].paragraph = r.*[region].paragraph;
+            const r = m.trackPtr(self);
+            const nr = m.trackPtr(n);
+            try nr.items.appendSlice(m.a(), r.items.items);
+            r.items.clearRetainingCapacity();
+            nr.paragraph = r.paragraph;
         };
-        r.*[region].next = .none;
+        m.trackPtr(self).next = .none;
         m.revision += 1;
     }
 
