@@ -29,6 +29,9 @@ pub const Icon = enum {
     magnet,
     arrow_square_in,
     magic_wand,
+    hand,
+    hand_grabbing,
+    lock,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {
@@ -130,6 +133,15 @@ pub fn button(src: std.builtin.SourceLocation, comptime i: Icon, tip: []const u8
     const tip_id = (@as(usize, src.line) *% 1_000_003) +% (@as(usize, src.column) *% 7919) +% bo.id_extra;
     dvui.tooltip(@src(), .{ .active_rect = rect }, "{s}", .{tip}, .{ .id_extra = tip_id });
     return clicked;
+}
+
+/// Draws icon `i` into `r` (physical pixels), its lines in `line` and
+/// its tone in `tone`: for a mark drawn on the canvas, not a widget.
+pub fn drawAt(comptime i: Icon, r: dvui.Rect.Physical, line: dvui.Color, tone: dvui.Color) void {
+    const l = layers(i) orelse return;
+    const rs: dvui.RectScale = .{ .r = r, .s = r.h / 256 };
+    dvui.renderIcon(@tagName(i) ++ "-tone", l.tone, rs, .{}, .{ .fill_color = .{ .color = tone }, .stroke_color = .{ .color = tone } }) catch {};
+    dvui.renderIcon(@tagName(i) ++ "-line", l.line, rs, .{}, .{ .fill_color = .{ .color = line }, .stroke_color = .{ .color = line } }) catch {};
 }
 
 /// Frees the converted icons (at exit).

@@ -3219,6 +3219,7 @@ fn canvas() void {
     drawPolygonDraft(area);
     drawTrackPath(area);
     drawConstraintMarks(area);
+    drawPointerMark();
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -5200,7 +5201,24 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     constrain_hover = if (area.contains(me.p)) featureHit(at) else null;
                     if (!std.meta.eql(was, constrain_hover)) dvui.refresh(null, @src(), box.data().id);
                 }
-                if (drawing) {
+                pointer_mark = null;
+                if (state.tool == .select and area.contains(me.p)) if (selectionPointer(at)) |c| {
+                    // Over the selection: a hand to grab it, a lock where
+                    // it cannot move, arrows on a resize handle. The hand
+                    // and the lock are drawn here (no system cursor has
+                    // them).
+                    switch (c) {
+                        .cursor => |sys| dvui.cursorSet(sys),
+                        else => {
+                            dvui.cursorSet(.hidden);
+                            pointer_mark = .{ .mark = c, .p = me.p };
+                        },
+                    }
+                    dvui.refresh(null, @src(), box.data().id);
+                };
+                if (pointer_mark != null or resize_drag != null) {
+                    // Set above.
+                } else if (drawing) {
                     dvui.cursorSet(.crosshair);
                 } else if (state.moving != null or state.moving_label != null) {
                     dvui.cursorSet(.arrow_all);
@@ -8508,6 +8526,68 @@ fn selectionDragEnd() void {
         state.gpa.free(sp.boxes);
     }
     sel_press = null;
+}
+
+/// What the pointer shows over the selection: a system cursor (resize
+/// arrows), or a mark drawn at it: an open hand where a drag would move
+/// the selection, a closed one while it does, a lock where it cannot move.
+const PointerMark = union(enum) { cursor: dvui.enums.Cursor, grab, grabbing, locked };
+var pointer_mark: ?struct { mark: PointerMark, p: dvui.Point.Physical } = null;
+
+fn selectionPointer(at: geom.Point) ?PointerMark {
+    if (selection.items.len == 0) return null;
+    if (resize_drag) |r| return .{ .cursor = edgesCursor(r.edges) };
+    if (sel_press) |sp| if (sp.moved) return .grabbing;
+    var hb: [8]Handle = undefined;
+    const tol = 6 / state.view.ppm;
+    for (hb[0..resizeHandles(&hb)]) |h| {
+        if (@abs(h.at.x - at.x) <= tol and @abs(h.at.y - at.y) <= tol) return .{ .cursor = edgesCursor(h.edges) };
+    }
+    const over = for (selection.items) |id| {
+        const b = containerBox(id) orelse continue;
+        if (contains(b, at)) break true;
+    } else false;
+    if (!over) return null;
+    return if (selectionMovable()) .grab else .locked;
+}
+
+fn edgesCursor(e: Edges) dvui.enums.Cursor {
+    const h = e.left or e.right;
+    const v = e.bottom or e.top;
+    if (h and v) return if ((e.left and e.top) or (e.right and e.bottom)) .arrow_nw_se else .arrow_ne_sw;
+    return if (h) .arrow_w_e else .arrow_n_s;
+}
+
+/// Whether the selection can move at all: every container in it free
+/// along one axis at least. Worked out once per revision and selection.
+var movable_cache: ?struct { rev: u64, key: u64, movable: bool } = null;
+
+fn selectionMovable() bool {
+    const key = mergeKey(.{selection.items});
+    if (movable_cache) |c| if (c.rev == state.model.revision and c.key == key) return c.movable;
+    var movable = true;
+    for (selection.items) |id| {
+        if (state.model.group(id) != null) continue;
+        const f = if (selection.items.len == 1) freedomOf(id) else (constrain.freedom(state.gpa, &state.model, id) catch constrain.Freedom{});
+        if (!f.x and !f.y) movable = false;
+    }
+    movable_cache = .{ .rev = state.model.revision, .key = key, .movable = movable };
+    return movable;
+}
+
+/// The hand or lock at the pointer, over the selection.
+fn drawPointerMark() void {
+    const pm = pointer_mark orelse return;
+    const px = dvui.windowNaturalScale();
+    const size: f32 = 22 * px;
+    const r: dvui.Rect.Physical = .{ .x = pm.p.x - size / 2, .y = pm.p.y - size / 2, .w = size, .h = size };
+    const ink = dvui.themeGet().color(.control, .text);
+    switch (pm.mark) {
+        .grab => icons.drawAt(.hand, r, ink, colors.paper),
+        .grabbing => icons.drawAt(.hand_grabbing, r, ink, colors.paper),
+        .locked => icons.drawAt(.lock, r, ink, colors.overflow.opacity(0.5)),
+        .cursor => {},
+    }
 }
 
 /// The selection: a translucent box over each selected container, and
