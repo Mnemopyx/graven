@@ -309,6 +309,9 @@ pub const Tile = struct {
 pub const Run = struct {
     style: StyleId = 0,
     content: []const u8,
+    /// An equation, built in equation mode: its own item, which text typed
+    /// in the flow beside it does not join, and which no run is joined to.
+    equation: bool = false,
 };
 
 /// A place in a track's flow: before item `index`, or `offset` bytes into
@@ -2901,14 +2904,17 @@ pub const Model = struct {
             const esc = try edit_.escape(scratch.allocator(), line);
             const items = m.flow(panel, region).items;
             if (pos.index > items.len) return error.NoSuchItem;
-            if (m.runAt(panel, region, pos.index)) |r| {
-                // Into the run at the place.
+            const here = m.runAt(panel, region, pos.index);
+            const before = if (pos.index > 0) m.runAt(panel, region, pos.index - 1) else null;
+            if (here != null and !(here.?.equation and pos.offset == 0)) {
+                // Into the run at the place (inside an equation, into it).
+                const r = here.?;
                 const o = @min(pos.offset, r.content.len);
                 r.content = try std.mem.concat(m.a(), u8, &.{ r.content[0..o], esc, r.content[o..] });
                 pos = .{ .index = pos.index, .offset = @intCast(o + esc.len) };
-            } else if (pos.offset == 0 and pos.index > 0 and m.runAt(panel, region, pos.index - 1) != null) {
-                // Onto the end of the run before.
-                const r = m.runAt(panel, region, pos.index - 1).?;
+            } else if (pos.offset == 0 and before != null and !before.?.equation) {
+                // Onto the end of the run before, unless it is an equation.
+                const r = before.?;
                 r.content = try std.mem.concat(m.a(), u8, &.{ r.content, esc });
             } else {
                 try m.place(panel, region, pos.index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, esc) } } });
@@ -2966,7 +2972,7 @@ pub const Model = struct {
         var result: FlowPos = if (f.offset > 0) f else .{ .index = keep };
         // Runs left side by side, in one style: one run.
         if (keep > 0) if (m.runAt(panel, region, keep - 1)) |a_run| if (m.runAt(panel, region, keep)) |b_run| {
-            if (a_run.style == b_run.style) {
+            if (a_run.style == b_run.style and !a_run.equation and !b_run.equation) {
                 const joined_at: u32 = @intCast(a_run.content.len);
                 a_run.content = try std.mem.concat(m.a(), u8, &.{ a_run.content, b_run.content });
                 try m.removeAt(panel, region, keep);
@@ -2983,6 +2989,30 @@ pub const Model = struct {
         };
         m.revision += 1;
         return result;
+    }
+
+    /// Puts a new, empty equation at `at`, in `style`: inside a run of text
+    /// the run is split there (its markup kept whole); inside an
+    /// equation's structure, or in an equation, it goes after that run.
+    /// Returns the equation's index.
+    pub fn insertEquation(m: *Model, panel: usize, region: usize, at: FlowPos, style: StyleId) Error!usize {
+        var index = at.index;
+        if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
+        if (at.offset > 0) if (m.runAt(panel, region, at.index)) |r| {
+            index = at.index + 1;
+            if (at.offset < r.content.len and !r.equation) {
+                var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+                defer scratch.deinit();
+                if (try edit_.splitAt(scratch.allocator(), r.content, at.offset)) |parts| {
+                    const rs = r.style;
+                    r.content = try m.a().dupe(u8, parts[0]);
+                    try m.place(panel, region, index, .{ .what = .{ .run = .{ .style = rs, .content = try m.a().dupe(u8, parts[1]) } } });
+                }
+            }
+        };
+        try m.place(panel, region, index, .{ .what = .{ .run = .{ .style = style, .content = "", .equation = true } } });
+        m.revision += 1;
+        return index;
     }
 
     /// Breaks the flow at `at`: a new paragraph (in the style of the one
@@ -4019,4 +4049,40 @@ test "a flow is edited in place: typed into, deleted across items, broken and jo
     at = try m.insertText(p, r, .{ .index = 0 }, "one\ntwo", body);
     try std.testing.expectEqual(@as(usize, 3), items.items.len);
     try std.testing.expect(items.items[1].what == .paragraph);
+}
+
+test "an equation is its own item: put in a run of text, kept apart from it" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 100, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2.5 });
+    const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
+    const items = &m.panels.items[p].regions.items[r].items;
+    _ = try m.insertText(p, r, .{ .index = 0 }, "area is ", body);
+    // Inside the text: the run splits either side of the new equation.
+    const eq = try m.insertEquation(p, r, .{ .index = 0, .offset = 4 }, body);
+    try std.testing.expectEqual(@as(usize, 1), eq);
+    try std.testing.expectEqual(@as(usize, 3), items.items.len);
+    try std.testing.expect(items.items[1].what.run.equation);
+    try std.testing.expectEqualStrings("area", items.items[0].what.run.content);
+    try std.testing.expectEqualStrings(" is ", items.items[2].what.run.content);
+    items.items[1].what.run.content = "\\frac{a}{}";
+    // Typed into an empty slot, it goes into the equation.
+    var at = try m.insertText(p, r, .{ .index = 1, .offset = 9 }, "2", body);
+    try std.testing.expectEqualStrings("\\frac{a}{2}", items.items[1].what.run.content);
+    // Typed just before it or just after it, it goes into the text.
+    at = try m.insertText(p, r, .{ .index = 1 }, ":", body);
+    try std.testing.expectEqualStrings("area:", items.items[0].what.run.content);
+    try std.testing.expectEqual(FlowPos{ .index = 1 }, at);
+    at = try m.insertText(p, r, .{ .index = 2 }, "x", body);
+    try std.testing.expectEqual(@as(usize, 3), items.items.len);
+    try std.testing.expectEqualStrings("x is ", items.items[2].what.run.content);
+    // Deleting the end of the text before it leaves the two apart.
+    at = try m.deleteRange(p, r, .{ .index = 0, .offset = 2 }, .{ .index = 1 });
+    try std.testing.expectEqual(@as(usize, 3), items.items.len);
+    try std.testing.expectEqualStrings("ar", items.items[0].what.run.content);
+    try std.testing.expectEqualStrings("\\frac{a}{2}", items.items[1].what.run.content);
+    // At the end of an equation a new one goes after it.
+    try std.testing.expectEqual(@as(usize, 2), try m.insertEquation(p, r, .{ .index = 1, .offset = 3 }, body));
 }

@@ -2244,6 +2244,7 @@ const ExprTarget = union(enum) {
 };
 
 fn exprTarget() ?ExprTarget {
+    if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
     return switch (state.context) {
         .tile => |id| if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
         .region => if (runAtCursor()) |r| .{ .run = .{ .panel = r.panel, .region = r.region, .item = r.item } } else null,
@@ -2326,17 +2327,25 @@ fn expressionLine() !void {
         e.handle(@src(), dvui.currentWindow().data());
     };
 
-    // In a run of a track's flow, Enter or Esc ends the run: the keyboard
-    // goes back to the canvas and its flow cursor, where Enter is a hard
-    // break.
-    if (was_focused and target == .run and comp.items.len == 0) for (dvui.events()) |*e| {
+    // In a run of a track's flow, Enter or Esc ends the run, and Ctrl+\
+    // ends equation mode: the keyboard goes back to the canvas and its
+    // flow cursor (after the equation), where Enter is a hard break.
+    var back_to_flow = false;
+    if (was_focused and target == .run) for (dvui.events()) |*e| {
         if (e.evt != .key or e.handled) continue;
         const k = e.evt.key;
         if (k.action != .down) continue;
-        if (k.code != .enter and k.code != .kp_enter and k.code != .escape) continue;
+        const toggle = k.code == .backslash and primaryMod(k.mod);
+        if (!toggle and (comp.items.len > 0 or (k.code != .enter and k.code != .kp_enter and k.code != .escape))) continue;
         e.handle(@src(), dvui.currentWindow().data());
-        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+        back_to_flow = true;
     };
+    if (back_to_flow) {
+        leaveEquation(true);
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+        dvui.refresh(null, @src(), null);
+        return;
+    }
 
     // Otherwise Tab moves to the next argument slot, taken before the
     // entry sees it, as the entry would move focus.
@@ -2368,8 +2377,19 @@ fn expressionLine() !void {
         if (!std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
         expr_prev.clearRetainingCapacity();
         try expr_prev.appendSlice(state.gpa, content);
+        if (focus_expression_at) |at| setCursor(te, @min(at, te.textGet().len));
+        focus_expression_at = null;
     }
     const focused = te.data().id == dvui.focusedWidgetId();
+    // Equation mode ends when the keyboard goes elsewhere (a click on the
+    // canvas, another field).
+    if (equation_edit) |*eq| {
+        if (focused) eq.shown = true else if (eq.shown) {
+            te.deinit();
+            leaveEquation(false);
+            return;
+        }
+    }
     if (next_slot) nextSlot(te);
     // Kept in step with edits made elsewhere (the Text property).
     if (!focused and !std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
@@ -7042,6 +7062,12 @@ fn flowStops(fp: usize, fr: usize) []Stop {
             };
             const piece_end = r.from + r.len;
             if (l.render.caret(piece_end)) |cr| add(&list, a, r.item, piece_end, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
+            // An equation's anchor points, where Tab puts the cursor (an
+            // empty slot has no glyph to stop at).
+            if (items[r.item].what.run.equation) for (layout.edit.slots(a, content) catch &.{}) |at| {
+                if (at < r.from or at >= piece_end) continue;
+                if (l.render.caret(at)) |cr| add(&list, a, r.item, at, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
+            };
         }
     }
     if (last) |e| list.append(a, e) catch {};
@@ -7370,10 +7396,21 @@ fn cursorKey(key: dvui.Event.Key) bool {
             return true;
         };
     };
+    // Ctrl+\: equation mode, typing going to the expression line.
+    if (code == .backslash and key.action == .down and primaryMod(key.mod)) {
+        enterEquation();
+        return true;
+    }
     const region = state.model.panels.items[c.panel].regions.items[c.region];
     const len = region.items.items.len;
     switch (code) {
         .tab => {
+            // At or in an equation, Tab goes round its anchor points
+            // (Shift+Tab back).
+            if (equationAtCursor(c) != null) {
+                tabEquation(shift);
+                return true;
+            }
             if (!tile_palette_shown) return false;
             cyclePalettePrototype(false);
             return true;
@@ -7572,6 +7609,133 @@ fn toggleBindAtCursor() void {
 
 /// Set when a new run wants the expression line to take the keyboard.
 var focus_expression = false;
+/// Where the expression line's cursor goes when it takes the keyboard.
+var focus_expression_at: ?usize = null;
+
+// Equation mode ---------------------------------------------------------------
+//
+// Ctrl+\ at the flow cursor builds an equation there: an equation run of
+// its own, whose markup the expression line takes while typing goes to it.
+// At or in an equation already, it opens that one. Ctrl+\ again (or Enter,
+// or Esc) returns typing to the flow, after the equation; one left empty
+// goes. At or in an equation in the flow, Tab goes round its anchor
+// points, the argument slots, for editing it in place.
+
+/// The equation the expression line builds while equation mode is on;
+/// `shown` once the line has had the keyboard.
+var equation_edit: ?struct { panel: usize, region: usize, item: usize, shown: bool = false } = null;
+
+/// The equation being built, while it is still one.
+fn equationEdited() ?@TypeOf(equation_edit.?) {
+    const e = equation_edit orelse return null;
+    if (e.panel >= state.model.panels.items.len or e.region >= state.model.panels.items[e.panel].regions.items.len) return null;
+    const items = state.model.panels.items[e.panel].regions.items[e.region].items.items;
+    if (e.item >= items.len or items[e.item].what != .run or !items[e.item].what.run.equation) return null;
+    return e;
+}
+
+/// The equation at or around the cursor: the one it is in, else the one
+/// just before it, else the one just after it; with the cursor's offset in
+/// its markup.
+fn equationAtCursor(c: TrackCursor) ?struct { item: usize, offset: u32 } {
+    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const isEq = struct {
+        fn f(its: []const layout.model.Item, i: usize) bool {
+            return i < its.len and its[i].what == .run and its[i].what.run.equation;
+        }
+    }.f;
+    if (c.offset > 0 and isEq(items, c.index)) return .{ .item = c.index, .offset = c.offset };
+    if (c.offset == 0 and c.index > 0 and isEq(items, c.index - 1)) return .{ .item = c.index - 1, .offset = @intCast(items[c.index - 1].what.run.content.len) };
+    if (c.offset == 0 and isEq(items, c.index)) return .{ .item = c.index, .offset = 0 };
+    return null;
+}
+
+fn enterEquation() void {
+    const c = track_cursor orelse return;
+    var item: usize = 0;
+    var offset: u32 = 0;
+    if (equationAtCursor(c)) |eq| {
+        item = eq.item;
+        offset = eq.offset;
+    } else {
+        _ = deleteFlowSelection();
+        const cc = track_cursor orelse return;
+        const style = state.model.panels.items[cc.panel].regions.items[cc.region].style orelse (labelStyle() catch return);
+        item = act(.insertEquation, .{ cc.panel, cc.region, flowPos(cc), style }) catch return;
+    }
+    flow_anchor = null;
+    track_cursor.?.index = item + 1;
+    track_cursor.?.offset = 0;
+    equation_edit = .{ .panel = c.panel, .region = c.region, .item = item };
+    focus_expression = true;
+    focus_expression_at = offset;
+    typing_seq += 1;
+    state.status = "Equation mode: typing goes to the expression line. Ctrl+\\ returns to the flow. ";
+}
+
+/// Ends equation mode: an empty equation goes; with `to_flow`, the flow
+/// cursor goes after it.
+fn leaveEquation(to_flow: bool) void {
+    const e = equationEdited() orelse {
+        equation_edit = null;
+        return;
+    };
+    equation_edit = null;
+    typing_seq += 1;
+    state.status = "";
+    const content = state.model.panels.items[e.panel].regions.items[e.region].items.items[e.item].what.run.content;
+    // Empty: nothing typed (an equation of empty slots stays).
+    if (content.len == 0) {
+        const pos = act(.deleteRange, .{ e.panel, e.region, layout.model.FlowPos{ .index = e.item }, layout.model.FlowPos{ .index = e.item + 1 } }) catch return;
+        if (track_cursor) |*tc| if (tc.panel == e.panel and tc.region == e.region) {
+            tc.index = pos.index;
+            tc.offset = pos.offset;
+        };
+        return;
+    }
+    if (!to_flow) return;
+    if (track_cursor) |*tc| if (tc.panel == e.panel and tc.region == e.region) {
+        tc.index = e.item + 1;
+        tc.offset = 0;
+    };
+    flow_anchor = null;
+}
+
+/// Tab at or in an equation: the cursor goes to its next anchor point
+/// (with `back`, the one before), round from the last to the first.
+fn tabEquation(back: bool) void {
+    const c = track_cursor orelse return;
+    const eq = equationAtCursor(c) orelse return;
+    const content = state.model.panels.items[c.panel].regions.items[c.region].items.items[eq.item].what.run.content;
+    const anchors = layout.edit.slots(dvui.currentWindow().arena(), content) catch return;
+    if (anchors.len == 0) {
+        state.status = "This equation has no slots to go round. ";
+        return;
+    }
+    // From outside it (before or after), Tab starts at its first slot and
+    // Shift+Tab at its last.
+    const inside = c.index == eq.item and c.offset > 0;
+    var to = if (back) anchors[anchors.len - 1] else anchors[0];
+    if (inside) {
+        if (back) {
+            var k = anchors.len;
+            while (k > 0) {
+                k -= 1;
+                if (anchors[k] < c.offset) {
+                    to = anchors[k];
+                    break;
+                }
+            }
+        } else for (anchors) |x| if (x > c.offset) {
+            to = x;
+            break;
+        };
+    }
+    track_cursor.?.index = eq.item;
+    track_cursor.?.offset = to;
+    flow_anchor = null;
+    typing_seq += 1;
+}
 
 /// The cursor: a bar across its row or column between items.
 fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {

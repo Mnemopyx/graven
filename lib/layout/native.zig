@@ -530,7 +530,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
     const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 10, .y = 50 }, .prototype = key, .count = 2, .length = 4, .pitch = 19.05 });
     _ = try m.insertTile(c, r, 0, key, 1);
-    try m.insertRun(c, r, 1, .{ .style = style, .content = "V = \\frac{1}{2}" });
+    try m.insertRun(c, r, 1, .{ .style = style, .content = "V = \\frac{1}{2}", .equation = true });
     const f = try m.addFrame("Front", .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 50 });
     _ = try m.addView(0, f, .{ .x = 200, .y = 0 }, 0.5);
     _ = try m.addLayer(0, "Background");
@@ -548,6 +548,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     // And it is the same document.
     try testing.expectEqual(.inch, back.units);
     try testing.expectEqualStrings("V = \\frac{1}{2}", back.panels.items[c].regions.items[r].items.items[1].what.run.content);
+    try testing.expect(back.panels.items[c].regions.items[r].items.items[1].what.run.equation);
     try testing.expectEqual(0.7, back.styles.items[style].spec.script_scale.?);
     try testing.expectEqual(0.1 + 0.2, back.panels.items[p].h);
     try testing.expectEqual(2, back.spaces.items.len);

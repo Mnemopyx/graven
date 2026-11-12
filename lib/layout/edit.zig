@@ -180,6 +180,51 @@ pub fn splitAt(a: Allocator, src: []const u8, offset: u32) Allocator.Error!?[2][
     return .{ first.items, second.items };
 }
 
+/// The anchor points of an equation in markup `src`: where each argument
+/// slot's content starts (just inside its brace, or at an empty slot), for
+/// a fraction's parts, a root's body, an accent's body and a script, in
+/// source order. Allocated from `a`.
+pub fn slots(a: Allocator, src: []const u8) Allocator.Error![]u32 {
+    var problems: std.ArrayList(markup.Diagnostic) = .empty;
+    const root = try markup.parsePreview(a, src, &engine.entities.Table.builtin, &problems);
+    var out: std.ArrayList(u32) = .empty;
+    for (root.items) |n| try slotWalk(a, src, n, &out);
+    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+    var w: usize = 0;
+    for (out.items) |x| {
+        if (w > 0 and out.items[w - 1] == x) continue;
+        out.items[w] = x;
+        w += 1;
+    }
+    return out.items[0..w];
+}
+
+fn slotWalk(a: Allocator, src: []const u8, n: markup.Node, out: *std.ArrayList(u32)) Allocator.Error!void {
+    const arg = struct {
+        fn f(al: Allocator, s: []const u8, x: markup.Node, o: *std.ArrayList(u32)) Allocator.Error!void {
+            const sp = x.span();
+            const braced = x == .group and sp.start < s.len and s[sp.start] == '{';
+            try o.append(al, if (braced) sp.start + 1 else sp.start);
+            try slotWalk(al, s, x, o);
+        }
+    }.f;
+    switch (n) {
+        .group => |g| for (g.items) |it| try slotWalk(a, src, it, out),
+        .scripts => |s| {
+            try slotWalk(a, src, s.base.*, out);
+            if (s.sup) |x| try arg(a, src, x.*, out);
+            if (s.sub) |x| try arg(a, src, x.*, out);
+        },
+        .accent => |x| try arg(a, src, x.body.*, out),
+        .radical => |x| try arg(a, src, x.body.*, out),
+        .fraction => |x| {
+            try arg(a, src, x.num.*, out);
+            try arg(a, src, x.den.*, out);
+        },
+        else => {},
+    }
+}
+
 /// Plain `text` as markup that reads back as it (see `rt.escape`).
 pub fn escape(a: Allocator, text: []const u8) Allocator.Error![]u8 {
     var w: std.Io.Writer.Allocating = .init(a);
@@ -227,4 +272,16 @@ test "a run splits inside bold text into two that read as it did" {
     // Inside a fraction it does not split.
     try testing.expect(try splitAt(a, "\\frac{ab}{c}", 7) == null);
     try testing.expectEqualStrings("a\\{b\\}", try escape(a, "a{b}"));
+}
+
+test "an equation's anchor points are its argument slots" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // \frac{a}{} : inside each brace; x^2 : at the script.
+    const s = try slots(a, "\\frac{a}{}+x^2");
+    try testing.expectEqualSlices(u32, &.{ 6, 9, 13 }, s);
+    try testing.expectEqual(0, (try slots(a, "plain words")).len);
+    // Nested: the root inside the numerator has its own slot.
+    try testing.expectEqualSlices(u32, &.{ 6, 12, 15 }, try slots(a, "\\frac{\\sqrt{}}{b}"));
 }
