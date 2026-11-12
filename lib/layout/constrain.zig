@@ -54,7 +54,7 @@ pub const Issue = struct {
 };
 
 /// Where an object is, and what it is.
-const Kind = enum { panel, region, label, art, image };
+const Kind = enum { panel, region, label, art, image, control_point };
 /// What an object sits in: a space (panels, images) or a panel (tracks,
 /// labels, line art), whose frame its position is in.
 pub const Parent = union(enum) { space: usize, panel: usize };
@@ -65,13 +65,18 @@ const Loc = struct {
     /// Panel index (panels, and things in panels), or space index (images).
     holder: usize,
     index: usize = 0,
+    /// A control point's index in its track's path.
+    sub: usize = 0,
 };
 
 fn locate(m: *const Model, id: ObjectId) ?Loc {
     if (id == .none) return null;
     for (m.panels.items, 0..) |p, pi| {
         if (p.id == id) return if (p.unbounded) null else .{ .kind = .panel, .parent = .{ .space = p.space }, .holder = pi };
-        for (p.regions.items, 0..) |r, k| if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
+        for (p.regions.items, 0..) |r, k| {
+            if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
+            for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = .{ .panel = pi }, .holder = pi, .index = k, .sub = j };
+        }
         for (p.labels.items, 0..) |l, k| if (l.id == id) return .{ .kind = .label, .parent = .{ .panel = pi }, .holder = pi, .index = k };
         for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = .{ .panel = pi }, .holder = pi, .index = k };
     }
@@ -129,7 +134,22 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
             const im = m.spaces.items[loc.holder].images.items[loc.index];
             break :blk pick(im.box(), im.holds, vertical, true);
         },
+        .control_point => blk: {
+            const at = controlPointAt(p.regions.items[loc.index], loc.sub);
+            const v = if (vertical) at.y else at.x;
+            break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
+        },
     };
+}
+
+/// Where a track's control point is in its panel's frame: at the start of
+/// a row, half a row in (as the editor draws the path).
+pub fn controlPointAt(r: model.TileRegion, k: usize) geom.Point {
+    const cp = r.path.items[k];
+    return if (r.major == .row)
+        .{ .x = r.origin.x + cp.along * r.pitch, .y = r.origin.y - (cp.across + 0.5) * r.pitch }
+    else
+        .{ .x = r.origin.x + (cp.across + 0.5) * r.pitch, .y = r.origin.y - cp.along * r.pitch };
 }
 
 /// Moves object `loc` on one axis so its origin is at `o` and its size
@@ -163,6 +183,16 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
         .art => {
             const x = &p.art.items[loc.index];
             if (vertical) x.at.y += lo - sh.lo else x.at.x += lo - sh.lo;
+        },
+        .control_point => {
+            const r = &p.regions.items[loc.index];
+            const cp = &r.path.items[loc.sub];
+            // Back from the panel frame to u along and across.
+            if (r.major == .row) {
+                if (vertical) cp.across = @max(0, (r.origin.y - o) / r.pitch - 0.5) else cp.along = (o - r.origin.x) / r.pitch;
+            } else {
+                if (vertical) cp.along = (r.origin.y - o) / r.pitch else cp.across = @max(0, (o - r.origin.x) / r.pitch - 0.5);
+            }
         },
         .image => {
             const im = &m.spaces.items[loc.holder].images.items[loc.index];
@@ -816,4 +846,29 @@ test "moving into a frame takes the constraint group; copying copies its constra
     // Undo brings the dropped constraint back.
     _ = try h.undo(&m);
     try testing.expectEqual(3, m.constraints.items.len);
+}
+
+test "a track's control point can be constrained, and the rows follow it" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 120 });
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const r = try m.addTracks(p, .{ .name = "poem", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
+    try h.reset(&m);
+    const cp = try h.do(&m, .addControlPoint, .{ p, r, 2.0, 4.0 });
+    const rid = m.panels.items[p].regions.items[r].id;
+    // The point kept 30 mm right of the track's left edge: it moves there,
+    // and with it the path.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = cp, .feature = .origin_x }, .b = .{ .object = rid, .feature = .left }, .value = 30 }});
+    const region = m.panels.items[p].regions.items[r];
+    try testing.expectApproxEqAbs(@as(f64, 5), region.path.items[0].along, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4), region.path.items[0].across, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), region.pathAt(4), 1e-9);
+    // Moving the track takes the point's place along: it keeps to it.
+    try h.do(&m, .moveControlPoint, .{ cp, 9.0, 4.0 });
+    try testing.expectApproxEqAbs(@as(f64, 5), m.panels.items[p].regions.items[r].path.items[0].along, 1e-9);
 }

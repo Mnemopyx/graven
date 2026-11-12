@@ -7805,7 +7805,10 @@ fn constrainables(a: std.mem.Allocator) []layout.model.ObjectId {
     for (m.panels.items) |p| {
         if (p.space != shown_space) continue;
         if (!p.unbounded) list.append(a, p.id) catch {};
-        for (p.regions.items) |r| list.append(a, r.id) catch {};
+        for (p.regions.items) |r| {
+            list.append(a, r.id) catch {};
+            for (r.path.items) |cp| list.append(a, cp.id) catch {};
+        }
         for (p.labels.items) |l| list.append(a, l.id) catch {};
         for (p.art.items) |x| list.append(a, x.id) catch {};
     }
@@ -7882,8 +7885,11 @@ fn featureHit(at: geom.Point) ?FeatureHit {
         if (first_parent) |fp| if (!std.meta.eql(fp, parent)) continue;
         const off = constrain.frameOffset(m, parent);
         const box = offsetBox(constrain.boxOf(m, id) orelse continue, off);
+        const point = isControlPoint(id);
         for (all_features) |f| {
             if (first) |fh| if (f.vertical() != fh.end.feature.vertical()) continue;
+            // A path's point has only its place: its origin.
+            if (point and f != .origin_x and f != .origin_y) continue;
             const end: ConstraintEnd = .{ .object = id, .feature = f };
             if (first) |fh| if (std.meta.eql(fh.end, end)) continue;
             const pos = (constrain.featureAt(m, parent, end) orelse continue) + if (f.vertical()) off.y else off.x;
@@ -7940,6 +7946,11 @@ fn featureName(f: Feature) []const u8 {
     };
 }
 
+fn isControlPoint(id: layout.model.ObjectId) bool {
+    for (state.model.panels.items) |p| for (p.regions.items) |r| for (r.path.items) |cp| if (cp.id == id) return true;
+    return false;
+}
+
 /// An object's name, as the tree shows it, or "the panel"/"the canvas"
 /// for a parent.
 fn objectName(id: layout.model.ObjectId) []const u8 {
@@ -7947,7 +7958,11 @@ fn objectName(id: layout.model.ObjectId) []const u8 {
     if (id == .none) return "the parent";
     for (m.panels.items) |p| {
         if (p.id == id) return p.name;
-        for (p.regions.items) |r| if (r.id == id) return r.name;
+        for (p.regions.items) |r| {
+            if (r.id == id) return r.name;
+            for (r.path.items, 0..) |cp, k| if (cp.id == id)
+                return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} path point {d}", .{ r.name, k + 1 }) catch r.name;
+        }
         for (p.labels.items) |l| if (l.id == id) return if (l.content.len > 24) l.content[0..24] else l.content;
         for (p.art.items) |x| if (x.id == id) return x.name;
     }
