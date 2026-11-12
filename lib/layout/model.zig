@@ -472,9 +472,29 @@ pub const TileRegion = struct {
     /// covers there; their content flows around it.
     items: std.ArrayList(Item) = .empty,
 
+    /// Whether its path has been shaped: it has control points (or an
+    /// older document's moved origins). An unshaped track sets each line
+    /// in its whole segment, as its paragraph aligns it.
+    pub fn shaped(r: TileRegion) bool {
+        if (r.path.items.len > 0) return true;
+        for (r.segments.items, 0..) |sg, k| if (k > 0 and sg.moved) return true;
+        return false;
+    }
+
+    /// Where a line anchored `anchor` sits along on an unshaped track, u:
+    /// its start at the near edge, its centre in the middle, its end at the
+    /// far edge. The unshaped path is the track's own alignment's line.
+    pub fn anchorRef(r: TileRegion, anchor: Align) f64 {
+        return switch (anchor) {
+            .start => 0,
+            .centre => r.segmentLength() / 2,
+            .end => r.segmentLength(),
+        };
+    }
+
     /// The path's points, sorted across, into `buf`: its control points
-    /// (or an older document's moved origins), and the region's origin as
-    /// the start unless a point is there or before.
+    /// (or an older document's moved origins), and a start on the track's
+    /// alignment line (see `anchorRef`) unless a point is there or before.
     pub fn pathPoints(r: TileRegion, buf: []ControlPoint) []ControlPoint {
         var n: usize = 0;
         if (r.path.items.len > 0) {
@@ -491,7 +511,7 @@ pub const TileRegion = struct {
             has_start = true;
         };
         if (!has_start and n < buf.len) {
-            buf[n] = .{ .along = 0, .across = 0 };
+            buf[n] = .{ .along = r.anchorRef(r.alignment), .across = 0 };
             n += 1;
         }
         std.mem.sort(ControlPoint, buf[0..n], {}, struct {
@@ -533,9 +553,26 @@ pub const TileRegion = struct {
     /// reserved for the track; a segment the path starts further along is
     /// that much shorter), one pitch across.
     pub fn boxAt(r: TileRegion, s: Segment) geom.Box {
+        return r.bandAt(s, .start);
+    }
+
+    /// The band of a segment whose line is anchored `anchor` at `s`, mm in
+    /// the panel frame, within the soft area along: anchored at its start,
+    /// from there to the far edge; at its end, from the near edge to
+    /// there; at its centre, as far each way as the nearer edge allows.
+    pub fn bandAt(r: TileRegion, s: Segment, anchor: Align) geom.Box {
         const across = s.across * r.pitch;
-        const shift = s.along * r.pitch;
-        const length = @max(0, r.segmentLength() - s.along) * r.pitch;
+        const len = r.segmentLength();
+        const lo: f64, const hi: f64 = switch (anchor) {
+            .start => .{ s.along, @max(s.along, len) },
+            .end => .{ @min(0, s.along), s.along },
+            .centre => blk: {
+                const half = @max(0, @min(s.along, len - s.along));
+                break :blk .{ s.along - half, s.along + half };
+            },
+        };
+        const shift = lo * r.pitch;
+        const length = (hi - lo) * r.pitch;
         return if (r.major == .row)
             .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
         else

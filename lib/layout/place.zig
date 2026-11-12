@@ -747,6 +747,16 @@ fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f6
     return if (sid < m.styles.items.len) m.styles.items[sid].spec.cap_height else 0;
 }
 
+/// Which point of a line in `style` (null: none) sits on `region`'s path.
+fn anchorOf(style: ?model.ParagraphStyle, region: model.TileRegion) model.Align {
+    const st = style orelse return region.alignment;
+    return switch (st.alignment) {
+        .start, .justify => .start,
+        .centre => .centre,
+        .end => .end,
+    };
+}
+
 /// The bounds and alignment of a segment of a paragraph in `style` (null:
 /// none, the whole segment as its track sets it); `first` for its first
 /// line. Indents larger than the segment leave it no room, not less.
@@ -811,6 +821,9 @@ const Path = struct {
     /// Further space, mm, before the next segment made (a paragraph's
     /// space before and after, or its lines' gap).
     lead: f64 = 0,
+    /// Which point of the next segment's line sits on the path: its
+    /// paragraph's alignment (a justified one by its start).
+    anchor: model.Align = .start,
 
     fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
         const r = p.region;
@@ -820,19 +833,27 @@ const Path = struct {
             // across from the one before; along, wherever the path is
             // there. Past a place already taken, on across.
             var across: f64 = if (n == 0) 0 else p.origins.items[n - 1].across + 1 + r.gap + p.lead / r.pitch;
-            var o: model.Segment = .{ .along = r.pathAt(across), .across = across };
+            var o: model.Segment = .{ .along = p.alongAt(across), .across = across };
             if (n > 0) {
                 var tries: usize = 0;
-                while (tries < 400 and p.blocked(r.boxAt(o))) : (tries += 1) {
+                while (tries < 400 and p.blocked(r.bandAt(o, p.anchor))) : (tries += 1) {
                     across += 0.25;
-                    o = .{ .along = r.pathAt(across), .across = across };
+                    o = .{ .along = p.alongAt(across), .across = across };
                 }
             }
             try p.origins.append(a, o);
-            try p.boxes.append(a, r.boxAt(o));
+            try p.boxes.append(a, r.bandAt(o, p.anchor));
             try p.reach.append(a, 0);
         }
         p.lead = 0;
+    }
+
+    /// Where the next line's anchor is along at `across`, u: on the path,
+    /// once it is shaped; on an unshaped track, where the anchor sits in
+    /// a whole segment.
+    fn alongAt(p: *const Path, across: f64) f64 {
+        const r = p.region;
+        return if (r.shaped()) r.pathAt(across) else r.anchorRef(p.anchor);
     }
 
     fn blocked(p: *const Path, b: Box) bool {
@@ -988,7 +1009,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var seen: std.AutoHashMapUnmanaged(TileId, void) = .empty;
         // The segments, made as the flow reaches them: their origins along
         // the path, their bands, and how far each one's content reaches.
-        var path: Path = .{ .region = &region, .avoid = tracks.items };
+        // The paragraph being set: its alignment says which point of each
+        // line sits on the path.
+        var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
+        var path: Path = .{ .region = &region, .avoid = tracks.items, .anchor = anchorOf(style, region) };
         try path.ensure(a, 0);
         // Each segment's alignment shift, set when the flow leaves it.
         var shifts: std.ArrayList(f64) = .empty;
@@ -1007,10 +1031,8 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         const extra = try a.alloc(f64, items.len);
         @memset(extra, 0);
         const flow: Flow = .{ .m = m, .region = &region, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
-        // The paragraph being set, and the bounds of the segment being
-        // filled: its first line takes the first-line indent.
-        var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
-        // The first segment too: line art may close stretches of it.
+        // The bounds of the segment being filled: its first line takes the
+        // first-line indent. The first segment too: line art may close stretches of it.
         try flow.enter(a, &path, 0, tall.items, &closed);
         var line: Line = lineIn(style, true, segLength(&path, rows, 0));
         var pos: f64 = line.lo;
@@ -1031,6 +1053,7 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                         const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
                         path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
                         style = next;
+                        path.anchor = anchorOf(style, region);
                         first_line = true;
                     } else path.lead = if (style) |st| st.line_gap else 0;
                     try flow.enter(a, &path, seg, tall.items, &closed);
@@ -1688,6 +1711,63 @@ test "blanks take their length in a track, and every item's span is reported" {
     try testing.expectEqual(0, s.tiles[1].shapes.len);
     try testing.expectApproxEqAbs(@as(f64, 15), s.tiles[2].pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
+}
+
+test "each line sits on the path by its paragraph's alignment: start, centre or end" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 200);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 190 }, .prototype = key, .count = 12, .length = 6, .pitch = 10 });
+    const centred = try m.addParagraphStyle(.{ .name = "Centred", .alignment = .centre });
+    const ended = try m.addParagraphStyle(.{ .name = "Ended", .alignment = .end });
+    // Two rows of each: as the track sets them, centred, then ended.
+    const region = &m.panels.items[p].regions.items[r];
+    for (0..6) |t| {
+        if (t > 0) {
+            const at = region.items.items.len;
+            if (t == 2) try m.insertParagraph(p, r, at, centred) else if (t == 4) try m.insertParagraph(p, r, at, ended) else _ = try m.insertBreak(p, r, at);
+        }
+        _ = try m.insertTile(p, r, region.items.items.len, key, 1);
+    }
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    {
+        // Unshaped: each line in its whole segment, aligned in it.
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectEqual(6, s.tracks.len);
+        const want = [_]f64{ 10, 10, 35, 35, 60, 60 };
+        for (s.tiles, want) |t, x| try testing.expectApproxEqAbs(x, t.pitch_box.x0, 1e-9);
+    }
+    // A straight path 3 u in: starts, centres and ends on it.
+    _ = try m.addControlPoint(p, r, 3, 0);
+    _ = try m.addControlPoint(p, r, 3, 9);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        const want = [_]f64{ 40, 40, 35, 35, 30, 30 };
+        for (s.tiles, want) |t, x| try testing.expectApproxEqAbs(x, t.pitch_box.x0, 1e-9);
+        for (s.tracks) |t| try testing.expectApproxEqAbs(@as(f64, 3), t.origin.along, 1e-9);
+        // Each segment is the room its anchor leaves: on to the far edge,
+        // as far each way as the nearer edge allows, back to the near one.
+        const widths = [_]f64{ 30, 30, 60, 60, 30, 30 };
+        for (s.tracks, widths) |t, w| try testing.expectApproxEqAbs(w, t.box.width(), 1e-9);
+    }
+    // Near an edge, a centred line has little room: it is flagged, not
+    // pushed off the path.
+    _ = try m.addControlPoint(p, r, 0.25, 2);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 5), s.tracks[2].box.width(), 1e-9);
+        var flagged = false;
+        for (s.issues) |is| if (is.kind == .row_overflow and is.row == 2) {
+            flagged = true;
+        };
+        try testing.expect(flagged);
+    }
 }
 
 test "segments step down at an even pitch; the path's control points set where each starts" {
