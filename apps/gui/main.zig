@@ -2382,6 +2382,12 @@ fn expressionLine() !void {
         // keyboard.
         dvui.focusSubwindow(null, null);
         dvui.focusWidget(te.data().id, null, null);
+        // The new run takes the place in the flow of the item the cursor
+        // was before, so the line may still hold that item's text: it
+        // starts from the new run's own.
+        if (!std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
+        expr_prev.clearRetainingCapacity();
+        try expr_prev.appendSlice(state.gpa, content);
         if (focus_expression_end) setCursor(te, te.textGet().len);
         focus_expression_end = false;
     }
