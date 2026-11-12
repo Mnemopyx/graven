@@ -614,22 +614,6 @@ pub const TileRegion = struct {
 /// The length along a track, or across tracks.
 pub const Axis = enum { along, across };
 
-/// A label placed directly on a panel (a faceplate legend, say), rather
-/// than in a tile's slot. It is set as one line from its anchor, without a
-/// hard box: it sits exactly where it was put.
-pub const PanelLabel = struct {
-    id: ObjectId = .none,
-    /// The anchor on the label's baseline, mm in the panel frame.
-    at: geom.Point,
-    /// Which part of the line the anchor is: its start, centre or end.
-    alignment: Align = .start,
-    style: StyleId = 0,
-    /// Label markup.
-    content: []const u8,
-    /// True while the content is the app's placeholder.
-    default_content: bool = false,
-};
-
 /// How an object on a panel makes the tracks under it flow: not at all,
 /// around its bounding box, or around its ink (the exact outline of its
 /// marks), either grown by its clearance.
@@ -817,7 +801,6 @@ pub const SpaceView = struct {
 /// hold an `ObjectId` and find it with `Model.locate`.
 pub const Member = union(enum) {
     panel: usize,
-    label: struct { panel: usize, index: usize },
     region: struct { panel: usize, index: usize },
     art: struct { panel: usize, index: usize },
 };
@@ -849,7 +832,6 @@ pub const Panel = struct {
     w: f64,
     h: f64,
     regions: std.ArrayList(TileRegion) = .empty,
-    labels: std.ArrayList(PanelLabel) = .empty,
     /// Line art placed on the panel, drawn over its tracks.
     art: std.ArrayList(PanelArt) = .empty,
     /// Ink keep-out bands inside the panel's edges, mm: its ink area is the
@@ -1428,7 +1410,6 @@ pub const Model = struct {
         if (id == .none) return null;
         for (m.panels.items, 0..) |p, pi| {
             if (p.id == id) return .{ .panel = pi };
-            for (p.labels.items, 0..) |l, i| if (l.id == id) return .{ .label = .{ .panel = pi, .index = i } };
             for (p.regions.items, 0..) |r, i| if (r.id == id) return .{ .region = .{ .panel = pi, .index = i } };
             for (p.art.items, 0..) |x, i| if (x.id == id) return .{ .art = .{ .panel = pi, .index = i } };
         }
@@ -1439,7 +1420,6 @@ pub const Model = struct {
     pub fn idAt(m: *const Model, loc: Member) ObjectId {
         return switch (loc) {
             .panel => |pi| m.panels.items[pi].id,
-            .label => |l| m.panels.items[l.panel].labels.items[l.index].id,
             .region => |l| m.panels.items[l.panel].regions.items[l.index].id,
             .art => |l| m.panels.items[l.panel].art.items[l.index].id,
         };
@@ -1574,10 +1554,6 @@ pub const Model = struct {
                     const o = &m.panels.items[pi].origin;
                     o.* = .{ .x = o.x + dx, .y = o.y + dy };
                 },
-                .label => |l| {
-                    const at = &m.panels.items[l.panel].labels.items[l.index].at;
-                    at.* = .{ .x = at.x + dx, .y = at.y + dy };
-                },
                 .art => |l| {
                     const at = &m.panels.items[l.panel].art.items[l.index].at;
                     at.* = .{ .x = at.x + dx, .y = at.y + dy };
@@ -1687,7 +1663,6 @@ pub const Model = struct {
         try out.append(m.a(), id);
         for (m.panels.items) |p| if (p.id == id) {
             for (p.regions.items) |r| try out.append(m.a(), r.id);
-            for (p.labels.items) |l| try out.append(m.a(), l.id);
             for (p.art.items) |x| try out.append(m.a(), x.id);
         };
     }
@@ -1720,17 +1695,6 @@ pub const Model = struct {
         const loc = m.locate(id) orelse return error.NoSuchItem;
         const droot = m.spaces.items[dest].root;
         switch (loc) {
-            .label => |l| {
-                const src = &m.panels.items[l.panel].labels;
-                var item = src.items[l.index];
-                if (copy) {
-                    item.content = try m.a().dupe(u8, item.content);
-                    item.id = m.newId();
-                } else _ = src.orderedRemove(l.index);
-                try m.panels.items[droot].labels.append(m.a(), item);
-                try pairs.append(m.a(), .{ id, item.id });
-                return item.id;
-            },
             .art => |l| {
                 const src = &m.panels.items[l.panel].art;
                 var item = src.items[l.index];
@@ -1758,7 +1722,6 @@ pub const Model = struct {
                 const got = m.panels.items[target];
                 try pairs.append(m.a(), .{ orig.id, got.id });
                 for (orig.regions.items, got.regions.items) |o, n| try pairs.append(m.a(), .{ o.id, n.id });
-                for (orig.labels.items, got.labels.items) |o, n| try pairs.append(m.a(), .{ o.id, n.id });
                 for (orig.art.items, got.art.items) |o, n| try pairs.append(m.a(), .{ o.id, n.id });
                 // Layers belong to their space: it lands on dest's base layer.
                 m.panels.items[target].layer = .none;
@@ -1815,19 +1778,12 @@ pub const Model = struct {
         c.id = m.newId();
         c.name = try m.a().dupe(u8, p.name);
         c.regions = .empty;
-        c.labels = .empty;
         c.art = .empty;
         for (p.regions.items) |r| try c.regions.append(m.a(), try m.copyRegion(r));
         // Its threads, among the copies.
         for (p.regions.items, 0..) |r, k| if (m.regionIndex(pi, r.next)) |n| {
             c.regions.items[k].next = c.regions.items[n].id;
         };
-        for (p.labels.items) |l| {
-            var cl = l;
-            cl.id = m.newId();
-            cl.content = try m.a().dupe(u8, l.content);
-            try c.labels.append(m.a(), cl);
-        }
         for (p.art.items) |pa| {
             var ca = pa;
             ca.id = m.newId();
@@ -1867,7 +1823,6 @@ pub const Model = struct {
         p.id = m.newId();
         p.name = try m.a().dupe(u8, panel.name);
         p.regions = .empty;
-        p.labels = .empty;
         p.art = .empty;
         try m.panels.append(m.a(), p);
         m.revision += 1;
@@ -1948,35 +1903,6 @@ pub const Model = struct {
         return m.onSheet(p.box()) and within(p.inkArea(), m.sheet.inkArea());
     }
 
-    /// Adds a label to a panel; returns its index on the panel.
-    pub fn addLabel(m: *Model, panel: usize, label: PanelLabel) Error!usize {
-        var l = label;
-        l.id = m.newId();
-        l.content = try m.a().dupe(u8, label.content);
-        const list = &m.panels.items[panel].labels;
-        try list.append(m.a(), l);
-        m.revision += 1;
-        return list.items.len - 1;
-    }
-
-    pub fn setLabelContent(m: *Model, panel: usize, label: usize, content: []const u8) Error!void {
-        const l = &m.panels.items[panel].labels.items[label];
-        l.content = try m.a().dupe(u8, content);
-        l.default_content = false;
-        m.revision += 1;
-    }
-
-    pub fn moveLabel(m: *Model, panel: usize, label: usize, at: geom.Point) void {
-        m.panels.items[panel].labels.items[label].at = at;
-        m.revision += 1;
-    }
-
-    pub fn alignLabel(m: *Model, panel: usize, label: usize, alignment: Align) void {
-        m.panels.items[panel].labels.items[label].alignment = alignment;
-        m.revision += 1;
-    }
-
-    /// Removes a label; later labels on the panel move down one index.
     /// Places line art on a panel; returns its index there.
     pub fn addArt(m: *Model, panel: usize, art: PanelArt) Error!usize {
         if (!(art.clearance >= 0)) return error.BadSize;
@@ -2077,7 +2003,7 @@ pub const Model = struct {
         for (m.panels.items, 0..) |p, pi| {
             if (p.space != space) continue;
             if (pi == sp.root) {
-                if (base and (p.labels.items.len > 0 or p.regions.items.len > 0 or p.art.items.len > 0)) return true;
+                if (base and (p.regions.items.len > 0 or p.art.items.len > 0)) return true;
                 continue;
             }
             if (p.layer == id or (p.layer == .none and base)) return true;
@@ -2243,8 +2169,7 @@ pub const Model = struct {
 
     /// Make panel: loose line art `index` in space panel `root`, a closed
     /// path, becomes the edge of a new panel there, and what it encloses
-    /// (labels by their anchor, tracks and other line art by their boxes'
-    /// corners) moves onto the panel, keeping where it is. The panel takes
+    /// (tracks and other line art, by their boxes' corners) moves onto the panel, keeping where it is. The panel takes
     /// the path's place in its group; what moves onto it leaves its groups.
     /// Returns the panel's index.
     pub fn makePanel(m: *Model, root: usize, index: usize) Error!usize {
@@ -2286,16 +2211,7 @@ pub const Model = struct {
         p.edge = e;
         // What it encloses moves across, from the end so indices hold.
         const src = &m.panels.items[root];
-        var i = src.labels.items.len;
-        while (i > 0) {
-            i -= 1;
-            const l = src.labels.items[i];
-            if (!inside.f(path, at, l.at)) continue;
-            var moved = src.labels.orderedRemove(i);
-            moved.at = .{ .x = moved.at.x + d.x, .y = moved.at.y + d.y };
-            try p.labels.insert(m.a(), 0, moved);
-        }
-        i = src.regions.items.len;
+        var i = src.regions.items.len;
         while (i > 0) {
             i -= 1;
             const r = src.regions.items[i];
@@ -2319,7 +2235,6 @@ pub const Model = struct {
             _ = src.art.orderedRemove(k);
             break;
         };
-        for (p.labels.items) |x| m.forget(x.id);
         for (p.regions.items) |x| m.forget(x.id);
         for (p.art.items) |x| m.forget(x.id);
         m.replaceMember(edge_art.id, p.id);
@@ -2329,7 +2244,7 @@ pub const Model = struct {
     }
 
     /// Release panel: the panel goes, its edge (a rectangle, if it had
-    /// none) becomes loose line art in its space again, and its labels,
+    /// none) becomes loose line art in its space again, and its
     /// tracks and line art become loose objects there, all where they
     /// were. The edge takes the panel's place in its group. Returns the
     /// edge's ID.
@@ -2355,11 +2270,6 @@ pub const Model = struct {
         e.at = .{ .x = e.at.x + d.x, .y = e.at.y + d.y };
         const dst = &m.panels.items[root_before];
         try dst.art.append(m.a(), e);
-        for (p.labels.items) |l| {
-            var x = l;
-            x.at = .{ .x = x.at.x + d.x, .y = x.at.y + d.y };
-            try dst.labels.append(m.a(), x);
-        }
         for (p.regions.items) |r| {
             var x = r;
             x.origin = .{ .x = x.origin.x + d.x, .y = x.origin.y + d.y };
@@ -2390,12 +2300,6 @@ pub const Model = struct {
 
     pub fn removeArt(m: *Model, panel: usize, index: usize) void {
         const gone = m.panels.items[panel].art.orderedRemove(index);
-        m.forget(gone.id);
-        m.revision += 1;
-    }
-
-    pub fn removeLabel(m: *Model, panel: usize, label: usize) void {
-        const gone = m.panels.items[panel].labels.orderedRemove(label);
         m.forget(gone.id);
         m.revision += 1;
     }
@@ -2439,7 +2343,6 @@ pub const Model = struct {
             sp.root -= 1;
         };
         m.forget(p.id);
-        for (p.labels.items) |l| m.forget(l.id);
         for (p.regions.items) |r| m.forget(r.id);
         for (p.art.items) |pa| m.forget(pa.id);
         for (p.regions.items) |region| for (region.items.items) |item| {
@@ -3778,6 +3681,15 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
 }
 
+/// A small dot of line art at `at` on panel `panel`, named `name` (tests:
+/// an object to place, move and group). Returns its index there.
+fn testDot(m: *Model, panel: usize, name: []const u8, at: geom.Point) !usize {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const prim: art_.Primitive = .{ .circle = 1 };
+    return m.addArt(panel, .{ .name = name, .at = at, .shapes = try art_.primitive(arena.allocator(), name, prim, .{}), .prim = prim });
+}
+
 test "a canvas: units chosen up front, no sheet, loose objects on an unbounded panel" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
@@ -3786,8 +3698,8 @@ test "a canvas: units chosen up front, no sheet, loose objects on an unbounded p
     try std.testing.expectEqual(Units.mil, m.units);
     try std.testing.expect(!m.has_sheet);
     try std.testing.expectError(error.NoRoom, m.startCanvas(.mm));
-    // A label anywhere, even far from the origin or at negative positions.
-    _ = try m.addLabel(c, .{ .at = .{ .x = -500, .y = 1200 }, .content = "Volume" });
+    // Line art anywhere, even far from the origin or at negative positions.
+    _ = try testDot(&m, c, "Volume", .{ .x = -500, .y = 1200 });
     try std.testing.expect(m.compliant(c));
     // A panel too can go anywhere: there is no sheet to keep to.
     const p = try m.placePanel(.{ .name = "Part", .origin = .{ .x = 5000, .y = -5000 }, .w = 50, .h = 20 });
@@ -3801,16 +3713,16 @@ test "frames are spaces: moving keeps coordinates and IDs, and arrives as one gr
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
-    // On the canvas: a panel, a loose track, a loose label and line art.
+    // On the canvas: a panel, a loose track and line art.
     const p = try m.placePanel(.{ .name = "Front", .origin = .{ .x = 10, .y = 10 }, .w = 50, .h = 30 });
     const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
     const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 100, .y = 50 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
     _ = try m.insertTile(c, r, 0, key, 1);
-    _ = try m.addLabel(c, .{ .at = .{ .x = 5, .y = 80 }, .content = "Stays" });
-    _ = try m.addLabel(c, .{ .at = .{ .x = 120, .y = 70 }, .content = "Goes" });
+    _ = try testDot(&m, c, "Stays", .{ .x = 5, .y = 80 });
+    _ = try testDot(&m, c, "Goes", .{ .x = 120, .y = 70 });
     const pid = m.panels.items[p].id;
     const rid = m.panels.items[c].regions.items[r].id;
-    const lid = m.panels.items[c].labels.items[1].id;
+    const lid = m.panels.items[c].art.items[1].id;
     const f = try m.addFrame("Frame 1", null);
     try std.testing.expectEqual(1, f);
     const froot = m.spaces.items[f].root;
@@ -3820,9 +3732,9 @@ test "frames are spaces: moving keeps coordinates and IDs, and arrives as one gr
     try std.testing.expectEqual(f, m.spaceOf(p));
     try std.testing.expectEqual(10, m.panels.items[p].origin.x);
     try std.testing.expectEqual(0, m.panels.items[c].regions.items.len);
-    try std.testing.expectEqualStrings("Stays", m.panels.items[c].labels.items[0].content);
+    try std.testing.expectEqualStrings("Stays", m.panels.items[c].art.items[0].name);
     try std.testing.expectEqual(Member{ .region = .{ .panel = froot, .index = 0 } }, m.locate(rid).?);
-    try std.testing.expectEqual(Member{ .label = .{ .panel = froot, .index = 0 } }, m.locate(lid).?);
+    try std.testing.expectEqual(Member{ .art = .{ .panel = froot, .index = 0 } }, m.locate(lid).?);
     // One group, named after where it came from; one move places all.
     const group = m.group(g).?;
     try std.testing.expectEqualStrings("from Canvas", group.name);
@@ -3830,7 +3742,7 @@ test "frames are spaces: moving keeps coordinates and IDs, and arrives as one gr
     try m.moveGroup(g, -10, 5);
     try std.testing.expectEqual(0, m.panels.items[p].origin.x);
     try std.testing.expectEqual(90, m.panels.items[froot].regions.items[0].origin.x);
-    try std.testing.expectEqual(75, m.panels.items[froot].labels.items[0].at.y);
+    try std.testing.expectEqual(75, m.panels.items[froot].art.items[0].at.y);
     // Copying leaves the original, and copies get new IDs (and tiles new
     // designators).
     const tiles_before = m.tiles.items.len;
@@ -3859,8 +3771,8 @@ test "groups made in place nest, survive other objects going, move as one, and u
     const c = try m.startCanvas(.mm);
     var ids: [4]ObjectId = undefined;
     for (&ids, 0..) |*id, i| {
-        const li = try m.addLabel(c, .{ .at = .{ .x = @floatFromInt(i * 10), .y = 0 }, .content = "L" });
-        id.* = m.panels.items[c].labels.items[li].id;
+        const li = try testDot(&m, c, "L", .{ .x = @floatFromInt(i * 10), .y = 0 });
+        id.* = m.panels.items[c].art.items[li].id;
     }
     // A and B grouped; that group and C grouped: nested.
     const inner = try m.makeGroup(&.{ ids[0], ids[1] }, "inner");
@@ -3871,20 +3783,20 @@ test "groups made in place nest, survive other objects going, move as one, and u
     try m.leaves(outer, &all);
     try std.testing.expectEqual(3, all.items.len);
     // Removing D (in no group) and then C: the groups stay, minus C.
-    m.removeLabel(c, 3);
-    m.removeLabel(c, 2);
+    m.removeArt(c, 3);
+    m.removeArt(c, 2);
     try std.testing.expectEqual(1, m.group(outer).?.members.items.len);
     // One move moves everything left in it, by ID.
     try m.moveGroup(outer, 5, 0);
-    try std.testing.expectEqual(5, m.panels.items[c].labels.items[0].at.x);
-    try std.testing.expectEqual(15, m.panels.items[c].labels.items[1].at.x);
+    try std.testing.expectEqual(5, m.panels.items[c].art.items[0].at.x);
+    try std.testing.expectEqual(15, m.panels.items[c].art.items[1].at.x);
     // Ungrouping the inner group hands its members to the outer one.
     try m.ungroup(inner);
     try std.testing.expectEqual(2, m.group(outer).?.members.items.len);
     try std.testing.expectEqual(outer, m.parentGroup(ids[0]).?);
     // Removing the last members removes the emptied group.
-    m.removeLabel(c, 0);
-    m.removeLabel(c, 0);
+    m.removeArt(c, 0);
+    m.removeArt(c, 0);
     try std.testing.expectEqual(null, m.group(outer));
 }
 
@@ -3896,7 +3808,7 @@ test "a closed path becomes a panel with what it encloses, cutouts included, and
     defer arena.deinit();
     const a = arena.allocator();
     // A rounded rectangle 100 x 60 at (10, 10), two circular cutouts in
-    // it, a label and a track inside, and a label outside.
+    // it, a dot and a track inside, and a dot outside.
     const prim: art_.Primitive = .{ .rounded = .{ .w = 100, .h = 60, .r = 6 } };
     const outline = try m.addArt(c, .{ .name = "Outline", .at = .{ .x = 10, .y = 10 }, .shapes = try art_.primitive(a, "Outline", prim, .{}), .prim = prim });
     for ([_]f64{ 20, 90 }) |x| {
@@ -3904,12 +3816,12 @@ test "a closed path becomes a panel with what it encloses, cutouts included, and
         const ai = try m.addArt(c, .{ .name = "Hole", .at = .{ .x = x, .y = 15 }, .shapes = try art_.primitive(a, "Hole", hole, .{}), .prim = hole });
         try m.setArtCutout(c, ai, true);
     }
-    _ = try m.addLabel(c, .{ .at = .{ .x = 40, .y = 50 }, .content = "Inside" });
-    _ = try m.addLabel(c, .{ .at = .{ .x = 200, .y = 50 }, .content = "Outside" });
+    _ = try testDot(&m, c, "Inside", .{ .x = 40, .y = 50 });
+    const outside = try testDot(&m, c, "Outside", .{ .x = 200, .y = 50 });
     const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
     _ = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 40, .y = 40 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
     const edge_id = m.panels.items[c].art.items[outline].id;
-    const g = try m.makeGroup(&.{ edge_id, m.panels.items[c].labels.items[1].id }, "g");
+    const g = try m.makeGroup(&.{ edge_id, m.panels.items[c].art.items[outside].id }, "g");
 
     const p = try m.makePanel(c, outline);
     const panel = m.panels.items[p];
@@ -3917,16 +3829,14 @@ test "a closed path becomes a panel with what it encloses, cutouts included, and
     try std.testing.expectEqual(10, panel.origin.x);
     try std.testing.expectEqual(100, panel.w);
     try std.testing.expect(panel.edge != null);
-    try std.testing.expectEqual(1, panel.labels.items.len);
     try std.testing.expectEqual(1, panel.regions.items.len);
-    try std.testing.expectEqual(2, panel.art.items.len);
+    try std.testing.expectEqual(3, panel.art.items.len);
     try std.testing.expect(panel.art.items[0].cutout);
-    // In the panel's frame now: the label at (40, 50) on the canvas.
-    try std.testing.expectEqual(30, panel.labels.items[0].at.x);
-    try std.testing.expectEqual(40, panel.labels.items[0].at.y);
-    // Left on the canvas: only the outside label.
-    try std.testing.expectEqual(0, m.panels.items[c].art.items.len);
-    try std.testing.expectEqual(1, m.panels.items[c].labels.items.len);
+    // In the panel's frame now: the dot at (40, 50) on the canvas.
+    try std.testing.expectEqual(30, panel.art.items[2].at.x);
+    try std.testing.expectEqual(40, panel.art.items[2].at.y);
+    // Left on the canvas: only the outside dot.
+    try std.testing.expectEqual(1, m.panels.items[c].art.items.len);
     // The panel took the outline's place in its group.
     try std.testing.expectEqual(g, m.parentGroup(panel.id).?);
 
@@ -3936,17 +3846,16 @@ test "a closed path becomes a panel with what it encloses, cutouts included, and
     const back = try m.releasePanel(p);
     try std.testing.expectEqual(1, m.panels.items.len);
     const root = m.panels.items[c];
-    try std.testing.expectEqual(3, root.art.items.len);
-    try std.testing.expectEqual(2, root.labels.items.len);
+    try std.testing.expectEqual(5, root.art.items.len);
     try std.testing.expectEqual(1, root.regions.items.len);
     try std.testing.expectEqual(edge_id, back);
-    try std.testing.expectEqual(15, root.art.items[0].at.x);
-    try std.testing.expectEqual(45, root.labels.items[1].at.x);
+    try std.testing.expectEqual(15, root.art.items[1].at.x);
+    try std.testing.expectEqual(45, root.art.items[4].at.x);
     try std.testing.expectEqual(45, root.regions.items[0].origin.x);
     try std.testing.expectEqual(g, m.parentGroup(edge_id).?);
     // A rounded rectangle's corner can be changed.
-    try m.setArtCorner(c, 0, 2);
-    try std.testing.expectEqual(2, root.art.items[0].prim.rounded.r);
+    try m.setArtCorner(c, 1, 2);
+    try std.testing.expectEqual(2, root.art.items[1].prim.rounded.r);
 }
 
 test "a view shows another space live, at a scale, and views that would show themselves are refused" {

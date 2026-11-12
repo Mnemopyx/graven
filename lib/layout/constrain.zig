@@ -54,9 +54,9 @@ pub const Issue = struct {
 };
 
 /// Where an object is, and what it is.
-const Kind = enum { panel, region, label, art, image, control_point };
+const Kind = enum { panel, region, art, image, control_point };
 /// What an object sits in: a space (panels, images) or a panel (tracks,
-/// labels, line art), whose frame its position is in.
+/// line art), whose frame its position is in.
 pub const Parent = union(enum) { space: usize, panel: usize };
 
 const Loc = struct {
@@ -77,7 +77,6 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
             if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
             for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = .{ .panel = pi }, .holder = pi, .index = k, .sub = j };
         }
-        for (p.labels.items, 0..) |l, k| if (l.id == id) return .{ .kind = .label, .parent = .{ .panel = pi }, .holder = pi, .index = k };
         for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = .{ .panel = pi }, .holder = pi, .index = k };
     }
     for (m.spaces.items, 0..) |s, si| for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
@@ -118,11 +117,6 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
         .region => blk: {
             const r = p.regions.items[loc.index];
             break :blk pick(r.softArea(), r.holds, vertical, true);
-        },
-        .label => blk: {
-            const at = p.labels.items[loc.index].at;
-            const v = if (vertical) at.y else at.x;
-            break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
         },
         .art => blk: {
             const x = p.art.items[loc.index];
@@ -175,10 +169,6 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
                 r.origin.x = lo;
                 r.w = s / r.pitch;
             }
-        },
-        .label => {
-            const l = &p.labels.items[loc.index];
-            if (vertical) l.at.y = o else l.at.x = o;
         },
         .art => {
             const x = &p.art.items[loc.index];
@@ -272,8 +262,8 @@ pub fn frameOffset(m: *const Model, parent: Parent) geom.Point {
     };
 }
 
-/// Object `id`'s box in its parent's frame (a label's is its anchor
-/// point); null when it is not a positioning object.
+/// Object `id`'s box in its parent's frame (a point's is that point);
+/// null when it is not a positioning object.
 pub fn boxOf(m: *const Model, id: ObjectId) ?geom.Box {
     const loc = locate(m, id) orelse return null;
     const x = shapeOf(m, loc, false);
@@ -338,8 +328,6 @@ const Term = struct { g: f64, c: f64 = 0 };
 fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
     if (f != .baseline) return .{ .g = sizeCoeff(f, at) };
     switch (loc.kind) {
-        // A label's anchor is on its baseline.
-        .label => return .{ .g = 0 },
         // A track of text, in rows: its first row's capitals centred in
         // the row (as the flow sets them), from its top.
         .region => {
@@ -630,7 +618,7 @@ fn gaussSolve(mat: []f64, rhs: []f64, n: usize) bool {
 
 /// What cannot be met, without moving anything: solves a copy.
 /// Puts object `id` at `box` (in its parent's frame): moved there, and
-/// sized to it on the axes its kind can be resized on (a label or line art
+/// sized to it on the axes its kind can be resized on (line art
 /// keeps its size, and moves by its lower edges). Whether it was found.
 pub fn setBox(m: *Model, id: ObjectId, box: geom.Box) bool {
     const loc = locate(m, id) orelse return false;
@@ -705,8 +693,8 @@ pub fn check(m: *const Model, gpa: Allocator) ![]Issue {
 const testing = std.testing;
 const history = @import("history.zig");
 
-fn labelAt(m: *const Model, p: usize, i: usize) geom.Point {
-    return m.panels.items[p].labels.items[i].at;
+fn artAt(m: *const Model, p: usize, i: usize) geom.Point {
+    return m.panels.items[p].art.items[i].at;
 }
 
 test "a constraint moves what it constrains, exactly, and keeps it there" {
@@ -716,35 +704,34 @@ test "a constraint moves what it constrains, exactly, and keeps it there" {
     var h: history.History = .init(gpa);
     defer h.deinit();
     const c = try m.startCanvas(.mm);
-    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
-    // Two labels placed roughly.
-    _ = try m.addLabel(c, .{ .at = .{ .x = 10.3, .y = 20.7 }, .style = style, .content = "A" });
-    _ = try m.addLabel(c, .{ .at = .{ .x = 31.9, .y = 18.2 }, .style = style, .content = "B" });
+    // Two points of line art (no shapes: each is its place) placed roughly.
+    _ = try m.addArt(c, .{ .name = "A", .at = .{ .x = 10.3, .y = 20.7 }, .shapes = &.{} });
+    _ = try m.addArt(c, .{ .name = "B", .at = .{ .x = 31.9, .y = 18.2 }, .shapes = &.{} });
     try h.reset(&m);
-    const a_id = m.panels.items[c].labels.items[0].id;
-    const b_id = m.panels.items[c].labels.items[1].id;
+    const a_id = m.panels.items[c].art.items[0].id;
+    const b_id = m.panels.items[c].art.items[1].id;
 
-    // B exactly 25 mm right of A, and on its baseline: B moves, A stays.
+    // B exactly 25 mm right of A, and level with it: B moves, A stays.
     const dx = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b_id, .feature = .origin_x }, .b = .{ .object = a_id, .feature = .origin_x }, .value = 25 }});
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b_id, .feature = .origin_y }, .b = .{ .object = a_id, .feature = .origin_y } }});
-    try testing.expectApproxEqAbs(@as(f64, 35.3), labelAt(&m, c, 1).x, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 20.7), labelAt(&m, c, 1).y, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 10.3), labelAt(&m, c, 0).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 35.3), artAt(&m, c, 1).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20.7), artAt(&m, c, 1).y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10.3), artAt(&m, c, 0).x, 1e-9);
 
     // A changed value moves B; moving A takes B along.
     try h.do(&m, .setConstraintValue, .{ dx, 40 });
-    try testing.expectApproxEqAbs(@as(f64, 50.3), labelAt(&m, c, 1).x, 1e-9);
-    try h.do(&m, .moveLabel, .{ c, 0, geom.Point{ .x = 0, .y = 5 } });
-    try testing.expectApproxEqAbs(@as(f64, 40), labelAt(&m, c, 1).x, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 5), labelAt(&m, c, 1).y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 50.3), artAt(&m, c, 1).x, 1e-9);
+    try h.do(&m, .moveArt, .{ c, 0, geom.Point{ .x = 0, .y = 5 } });
+    try testing.expectApproxEqAbs(@as(f64, 40), artAt(&m, c, 1).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), artAt(&m, c, 1).y, 1e-9);
     // Moving B by hand: its constrained axes hold.
-    try h.do(&m, .moveLabel, .{ c, 1, geom.Point{ .x = 70, .y = 70 } });
-    try testing.expectApproxEqAbs(@as(f64, 40), labelAt(&m, c, 1).x, 1e-9);
+    try h.do(&m, .moveArt, .{ c, 1, geom.Point{ .x = 70, .y = 70 } });
+    try testing.expectApproxEqAbs(@as(f64, 40), artAt(&m, c, 1).x, 1e-9);
 
     // Undo takes the step back, as it was.
     _ = try h.undo(&m);
-    try testing.expectApproxEqAbs(@as(f64, 40), labelAt(&m, c, 1).x, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 5), labelAt(&m, c, 1).y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 40), artAt(&m, c, 1).x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), artAt(&m, c, 1).y, 1e-9);
 }
 
 test "sizes change about the origin, follow a resized parent, and conflicts are flagged" {
@@ -838,13 +825,10 @@ test "side-by-side text columns share their first baseline" {
     const big = try m.addStyle("Big", .{ .upright = 0, .cap_height = 5 });
     const left = try m.addTracks(p, .{ .name = "left", .origin = .{ .x = 10, .y = 90 }, .style = body, .count = 5, .length = 10, .pitch = 6 });
     const right = try m.addTracks(p, .{ .name = "right", .origin = .{ .x = 110, .y = 83.7 }, .style = big, .count = 5, .length = 8, .pitch = 9 });
-    const style_id = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
-    _ = try m.addLabel(p, .{ .at = .{ .x = 100, .y = 10 }, .style = style_id, .content = "x" });
     try h.reset(&m);
     const pp = &m.panels.items[p];
     const lid = pp.regions.items[left].id;
     const rid = pp.regions.items[right].id;
-    const label_id = pp.labels.items[0].id;
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .baseline }, .b = .{ .object = lid, .feature = .baseline } }});
     const parent: Parent = .{ .panel = p };
     const bl = featureAt(&m, parent, .{ .object = lid, .feature = .baseline }).?;
@@ -852,9 +836,6 @@ test "side-by-side text columns share their first baseline" {
     try testing.expectApproxEqAbs(bl, br, 1e-9);
     // The left column's first baseline: its top less half its pitch and cap.
     try testing.expectApproxEqAbs(@as(f64, 85.5), bl, 1e-9);
-    // A label onto the same baseline.
-    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = label_id, .feature = .baseline }, .b = .{ .object = lid, .feature = .baseline } }});
-    try testing.expectApproxEqAbs(bl, m.panels.items[p].labels.items[0].at.y, 1e-9);
     // A panel has no baseline.
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = lid, .feature = .baseline }, .b = .{ .feature = .baseline } }});
     const issues = try check(&m, gpa);
@@ -870,11 +851,10 @@ test "moving into a frame takes the constraint group; copying copies its constra
     var h: history.History = .init(gpa);
     defer h.deinit();
     const c = try m.startCanvas(.mm);
-    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
-    for ([_]geom.Point{ .{ .x = 10, .y = 10 }, .{ .x = 40, .y = 12 }, .{ .x = 80, .y = 30 } }) |at| _ = try m.addLabel(c, .{ .at = at, .style = style, .content = "x" });
+    for ([_]geom.Point{ .{ .x = 10, .y = 10 }, .{ .x = 40, .y = 12 }, .{ .x = 80, .y = 30 } }) |at| _ = try m.addArt(c, .{ .name = "x", .at = at, .shapes = &.{} });
     const frame = try m.addFrame("Frame", null);
     try h.reset(&m);
-    const ids = [3]ObjectId{ m.panels.items[c].labels.items[0].id, m.panels.items[c].labels.items[1].id, m.panels.items[c].labels.items[2].id };
+    const ids = [3]ObjectId{ m.panels.items[c].art.items[0].id, m.panels.items[c].art.items[1].id, m.panels.items[c].art.items[2].id };
     // B is kept 30 mm right of A; A is kept level with C.
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[1], .feature = .origin_x }, .b = .{ .object = ids[0], .feature = .origin_x }, .value = 30 }});
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[0], .feature = .origin_y }, .b = .{ .object = ids[2], .feature = .origin_y } }});

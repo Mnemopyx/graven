@@ -55,13 +55,11 @@ pub const PlacedLabel = struct {
         from: u32 = 0,
         len: u32 = 0,
     } = null,
-    /// The tile whose slot holds it; null for a label placed directly on
-    /// the panel, or a run.
+    /// The tile whose slot holds it; null for a run.
     tile: ?TileId,
-    /// The slot's index on the tile, or the label's index on the panel.
+    /// The slot's index on the tile.
     slot: usize,
-    /// The slot's box, mm in the panel frame; for a panel label, its ink
-    /// box there.
+    /// The slot's box, mm in the panel frame.
     box: Box,
     /// Where the label frame's origin sits in the panel frame; the render's
     /// geometry is relative to it.
@@ -107,8 +105,6 @@ pub const Issue = struct {
     },
     tile: ?TileId = null,
     slot: ?usize = null,
-    /// A label placed directly on the panel, by index.
-    label: ?usize = null,
     region: ?usize = null,
     row: ?usize = null,
     /// The item in a region's flow, for a run of markup.
@@ -1408,37 +1404,8 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         }
     }
 
-    // Labels placed directly on the panel: one line from their anchor.
-    for (m.panels.items[panel].labels.items, 0..) |pl, li| {
-        if (pl.content.len == 0) continue;
-        if (labels.context(pl.style) == null) {
-            try issues.append(a, .{ .kind = .style_error, .label = li });
-            continue;
-        }
-        const render = (try labels.get(.{ .style = pl.style, .anchor = pl.alignment, .box = null, .markup = pl.content })) orelse {
-            try issues.append(a, .{ .kind = .markup_error, .label = li });
-            continue;
-        };
-        if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .label = li, .syntax = render.syntax[0] });
-        const ink = render.ink;
-        try placed_labels.append(a, .{
-            .tile = null,
-            .slot = li,
-            .box = if (ink.isEmpty()) .{ .x0 = pl.at.x, .y0 = pl.at.y, .x1 = pl.at.x, .y1 = pl.at.y } else .{ .x0 = pl.at.x + ink.x0, .y0 = pl.at.y + ink.y0, .x1 = pl.at.x + ink.x1, .y1 = pl.at.y + ink.y1 },
-            .origin = pl.at,
-            .style = pl.style,
-            .render = render,
-        });
-        for (render.diagnostics) |d| if (d.kind == .missing_glyph) {
-            try issues.append(a, .{ .kind = .missing_glyph, .label = li });
-            break;
-        };
-        if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .label = li });
-    }
-
-    // Labels not inside a tile (on the panel, or runs in a track) reach
-    // past the tiles' boxes: the bounds hold their ink too, so a canvas
-    // with only a label still has extents.
+    // Runs of text in tracks reach past the tiles' boxes: the bounds hold
+    // their ink too, so a canvas with only text still has extents.
     for (placed_labels.items) |l| {
         if (l.tile != null) continue;
         const ink = l.render.ink;
@@ -1643,7 +1610,7 @@ test "labels render once per identical legend and sit in their slots" {
     try testing.expectApproxEqAbs(s2.labels[0].box.y1 - 2.5, s2.labels[0].origin.y, 1e-12);
 }
 
-test "a panel label sits on its anchor, aligned as asked" {
+test "a run being typed is stored as typed, flagged, and still drawn" {
     const gpa = testing.allocator;
     const face = try engine.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
@@ -1652,35 +1619,13 @@ test "a panel label sits on its anchor, aligned as asked" {
     defer m.deinit();
     const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
-    _ = try m.addLabel(p, .{ .at = .{ .x = 50, .y = 20 }, .alignment = .centre, .style = style, .content = "HH" });
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 10, .y = 40 }, .style = style, .count = 1, .length = 10, .pitch = 5 });
+    try m.insertRun(p, r, 0, .{ .style = style, .content = "H^" });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectEqual(1, s.labels.len);
-    const l = s.labels[0];
-    try testing.expect(l.tile == null);
-    // Centred: the ink straddles the anchor; on the baseline: it rises from it.
-    try testing.expectApproxEqAbs(50, (l.box.x0 + l.box.x1) / 2, 0.5);
-    try testing.expectApproxEqAbs(20, l.box.y0, 1e-9);
-    try testing.expectApproxEqAbs(23, l.box.y1, 1e-9);
-}
-
-test "a label being typed is stored as typed, flagged, and still drawn" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
-    const p = try m.addPanel("board", 100, 50);
-    _ = try m.addLabel(p, .{ .at = .{ .x = 10, .y = 10 }, .style = style, .content = "H^" });
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    try testing.expectEqualStrings("H^", m.panels.items[p].labels.items[0].content);
+    try testing.expectEqualStrings("H^", m.panels.items[p].regions.items[r].items.items[0].what.run.content);
     try testing.expectEqual(1, s.labels.len);
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.markup_error, s.issues[0].kind);
@@ -2849,7 +2794,7 @@ test "paragraphs: indents, a justified paragraph, a centred one, and space betwe
     }
 }
 
-test "a label on a canvas, with no sheet or panel, solves and exports" {
+test "text on a canvas, with no sheet or panel, solves and exports" {
     const gpa = testing.allocator;
     const face = try engine.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
@@ -2858,8 +2803,10 @@ test "a label on a canvas, with no sheet or panel, solves and exports" {
     defer m.deinit();
     const c = try m.startCanvas(.mm);
     const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
-    // Far from the origin, below and left of it: the canvas has no edge.
-    _ = try m.addLabel(c, .{ .at = .{ .x = -40, .y = -25 }, .style = style, .content = "HOD" });
+    // A track far from the origin, below and left of it: the canvas has
+    // no edge.
+    const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = -40, .y = -20 }, .style = style, .count = 1, .length = 20, .pitch = 5 });
+    try m.insertRun(c, r, 0, .{ .style = style, .content = "HOD" });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var s = try solve(gpa, &m, c, &labels);
@@ -2867,7 +2814,7 @@ test "a label on a canvas, with no sheet or panel, solves and exports" {
     try testing.expectEqual(0, s.issues.len);
     try testing.expectEqual(1, s.labels.len);
     try testing.expect(!s.bounds.isEmpty());
-    try testing.expect(s.bounds.x0 >= -40 - 1e-9 and s.bounds.y0 < -24);
+    try testing.expect(s.bounds.x0 >= -40 - 1e-9 and s.bounds.y0 < -21);
     const intrusions = try @import("drc.zig").marginIntrusions(gpa, &m, &.{s});
     defer gpa.free(intrusions);
     try testing.expectEqual(0, intrusions.len);
@@ -2895,7 +2842,8 @@ test "a panel made from a rounded rectangle exports its outline with the cutouts
         try m.setArtCutout(c, ai, true);
     }
     const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
-    _ = try m.addLabel(c, .{ .at = .{ .x = 30, .y = 25 }, .style = style, .content = "HOD" });
+    const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = 30, .y = 30 }, .style = style, .count = 1, .length = 6, .pitch = 5 });
+    try m.insertRun(c, r, 0, .{ .style = style, .content = "HOD" });
     const p = try m.makePanel(c, outline);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();

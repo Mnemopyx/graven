@@ -98,18 +98,15 @@ const State = struct {
     drag: ?struct { start: geom.Point, at: geom.Point } = null,
     /// The pointer's position on the worksheet, mm; null off the canvas.
     mouse: ?geom.Point = null,
-    /// The press was used by a tool (placing a label), so its release does
-    /// not pick.
+    /// The press was used by a tool, so its release does not pick.
     press_consumed: bool = false,
     /// Where the pointer went down on the canvas, mm.
     press_at: ?geom.Point = null,
     /// A selected panel being dragged to a new place: shown at its preview
     /// position, committed on release.
     moving: ?struct { panel: usize, start: geom.Point, at: geom.Point } = null,
-    /// A selected panel label being dragged, likewise.
-    moving_label: ?struct { panel: usize, index: usize, start: geom.Point, at: geom.Point } = null,
-    /// The style new panel labels get, made with the first one; its size
-    /// is the app's choice until the user sets it.
+    /// The style new runs get, made with the first one; its size is the
+    /// app's choice until the user sets it.
     label_style: ?layout.model.StyleId = null,
     label_style_set: bool = false,
     solve_ms: f64 = 0,
@@ -129,7 +126,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_label, add_tracks, add_art, select_area, constrain, join };
+const Tool = enum { select, add_panel, add_tracks, add_art, select_area, constrain, join };
 
 /// Join: the track a click on another track threads on into.
 var join_from: ?struct { panel: usize, region: usize } = null;
@@ -166,8 +163,6 @@ const Context = union(enum) {
     region: struct { panel: usize, region: usize },
     row: struct { panel: usize, region: usize, row: usize },
     tile: TileId,
-    /// A label placed directly on a panel.
-    label: struct { panel: usize, index: usize },
     /// Line art placed on a panel.
     art: struct { panel: usize, index: usize },
     /// A selection group of a space.
@@ -202,7 +197,6 @@ const Context = union(enum) {
             .region => "Region",
             .row => "Row",
             .tile => "Tile",
-            .label => "Label",
             .art => "Line art",
             .group => "Group",
             .selection => "Selection",
@@ -418,9 +412,6 @@ var canvas_prompt = true;
 /// The units the last canvas was made in: the next one's default. (Kept
 /// for the session; shared preferences will keep it across sessions.)
 var last_units: layout.model.Units = .mm;
-/// Where the last click on the canvas landed, worksheet frame: typing makes
-/// a label there.
-var click_at: ?geom.Point = null;
 
 /// The part of the canvas a new one first shows, mm: its origin near the
 /// bottom left.
@@ -451,7 +442,6 @@ fn followContext() void {
     if (state.model.spaces.items.len == 0) return;
     const pi: ?usize = switch (state.context) {
         .panel => |pi| pi,
-        .label => |l| l.panel,
         .art => |l| l.panel,
         .region => |r| r.panel,
         .row => |r| r.panel,
@@ -505,10 +495,8 @@ fn newCanvas() void {
     state.tool = .select;
     state.drag = null;
     state.moving = null;
-    state.moving_label = null;
     state.placed_rev = std.math.maxInt(u64);
     track_cursor = null;
-    click_at = null;
     state.view.fit = canvas_view;
     canvas_prompt = true;
     shown_space = 0;
@@ -573,7 +561,6 @@ fn exportSvg() void {
 fn exportPanel() ?usize {
     switch (state.context) {
         .panel => |pi| return pi,
-        .label => |l| return l.panel,
         .art => |l| return l.panel,
         .region => |r| return r.panel,
         .row => |r| return r.panel,
@@ -1809,7 +1796,6 @@ fn afterHistory() void {
     selection.clearRetainingCapacity();
     track_cursor = null;
     state.moving = null;
-    state.moving_label = null;
     if (!contextValid(state.context)) {
         state.context = if (state.model.spaces.items.len > shown_space) .{ .panel = state.model.spaces.items[shown_space].root } else .worksheet;
     }
@@ -1825,7 +1811,6 @@ fn contextValid(c: Context) bool {
         .region => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len,
         .row => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len and r.row < segmentCount(r.panel, r.region),
         .tile => |id| @intFromEnum(id) < m.tiles.items.len and !m.tileConst(id).removed,
-        .label => |l| l.panel < np and l.index < m.panels.items[l.panel].labels.items.len,
         .art => |l| l.panel < np and l.index < m.panels.items[l.panel].art.items.len,
         .group => |g| m.group(g) != null,
         .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,
@@ -2233,14 +2218,12 @@ fn bottomContent() !void {
 
 /// What the expression line edits.
 const ExprTarget = union(enum) {
-    panel_label: struct { panel: usize, index: usize },
     tile_slot: struct { tile: TileId, slot: usize },
     /// A run of markup (text, an equation) in a track's flow.
     run: struct { panel: usize, region: usize, item: usize },
 
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
-            .panel_label => |l| state.model.panels.items[l.panel].labels.items[l.index].content,
             .tile_slot => |ts| state.model.slot(ts.tile, ts.slot).content,
             .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.content,
         };
@@ -2248,8 +2231,6 @@ const ExprTarget = union(enum) {
 
     fn store(t: ExprTarget, text: []const u8) !void {
         switch (t) {
-            // Typing into one label is one undo step.
-            .panel_label => |l| try actM(mergeKey(.{ "label", l.panel, l.index }), .setLabelContent, .{ l.panel, l.index, text }),
             .tile_slot => |ts| try actM(mergeKey(.{ "slot", ts.tile, ts.slot }), .setContent, .{ ts.tile, state.model.slot(ts.tile, ts.slot).name, text }),
             .run => |r| try actM(mergeKey(.{ "run", r.panel, r.region, r.item }), .setRunContent, .{ r.panel, r.region, r.item, text }),
         }
@@ -2264,7 +2245,6 @@ const ExprTarget = union(enum) {
 
 fn exprTarget() ?ExprTarget {
     return switch (state.context) {
-        .label => |l| .{ .panel_label = .{ .panel = l.panel, .index = l.index } },
         .tile => |id| if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
         .region => if (runAtCursor()) |r| .{ .run = .{ .panel = r.panel, .region = r.region, .item = r.item } } else null,
         else => null,
@@ -2318,7 +2298,7 @@ fn expressionLine() !void {
     const muted: dvui.Options = .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 6 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } };
     dvui.labelNoFmt(@src(), "Expression", .{}, muted);
     const target = exprTarget() orelse {
-        dvui.labelNoFmt(@src(), "Select a label or tile to edit its expression.", .{}, muted.override(.{ .expand = .horizontal, .font = dvui.Font.theme(.body).withStyle(.italic) }));
+        dvui.labelNoFmt(@src(), "Select a tile or put the cursor in a flow to edit its expression.", .{}, muted.override(.{ .expand = .horizontal, .font = dvui.Font.theme(.body).withStyle(.italic) }));
         return;
     };
     const key = target.key();
@@ -2388,8 +2368,6 @@ fn expressionLine() !void {
         if (!std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
         expr_prev.clearRetainingCapacity();
         try expr_prev.appendSlice(state.gpa, content);
-        if (focus_expression_end) setCursor(te, te.textGet().len);
-        focus_expression_end = false;
     }
     const focused = te.data().id == dvui.focusedWidgetId();
     if (next_slot) nextSlot(te);
@@ -2480,7 +2458,6 @@ fn firstSyntaxProblem(target: ExprTarget) ?engine.markup.Diagnostic {
     for (state.placed.items, 0..) |*p, pi| for (p.issues) |i| {
         if (i.kind != .markup_error) continue;
         const hit = switch (target) {
-            .panel_label => |l| l.panel == pi and i.label == l.index,
             .tile_slot => |ts| i.tile == ts.tile and i.slot == ts.slot,
             .run => |r| r.panel == pi and i.region == r.region and i.item == r.item,
         };
@@ -2925,20 +2902,16 @@ fn groupTree(id: layout.model.ObjectId, d: usize) void {
 }
 
 fn hasChildren(panel: layout.model.Panel) bool {
-    return panel.regions.items.len > 0 or panel.labels.items.len > 0 or panel.art.items.len > 0;
+    return panel.regions.items.len > 0 or panel.art.items.len > 0;
 }
 
-/// A panel's art, labels and tracks (with their rows and tiles) in the
+/// A panel's art and tracks (with their rows and tiles) in the
 /// tree, from depth `d`.
 fn panelChildren(pi: usize, d: usize) void {
     var name_buf: [64]u8 = undefined;
     const panel = state.model.panels.items[pi];
     {
         for (panel.art.items, 0..) |pa, ai| _ = treeNode(.{ .art = .{ .panel = pi, .index = ai } }, pa.name, d, false, false);
-        for (panel.labels.items, 0..) |label, li| {
-            const text = std.fmt.bufPrint(&name_buf, "“{s}”", .{label.content}) catch label.content;
-            _ = treeNode(.{ .label = .{ .panel = pi, .index = li } }, text, d, false, label.default_content);
-        }
         for (panel.regions.items, 0..) |region, ri| {
             // The rows lying in it; in a thread, numbered through the
             // thread's flow, and named by their place in this track.
@@ -3019,10 +2992,6 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
 fn revealInTree(ctx: Context) void {
     const id = switch (ctx) {
         .tile => |t| t,
-        .label => |l| {
-            for ([_]Context{ .file, .worksheet, .{ .panel = l.panel } }) |c| state.expanded.put(state.gpa, c.key(), true) catch {};
-            return;
-        },
         else => return,
     };
     const f = findTile(id) orelse return;
@@ -3044,7 +3013,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .label, .art, .group, .selection, .view, .layer, .image, .prototypes => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .prototypes => false,
     };
 }
 
@@ -3053,7 +3022,6 @@ fn contextExtents() geom.Box {
     switch (state.context) {
         .file, .worksheet, .prototypes => return if (openCanvas()) contentExtents() else state.model.sheet.box(),
         .panel => |pi| return if (state.model.panels.items[pi].unbounded) contentExtents() else state.model.panels.items[pi].box(),
-        .label => |l| if (labelBox(l.panel, l.index)) |b| return b,
         .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
         .view => |v| if (viewAt(v.space, v.index)) |sv| {
             const b = viewBox(sv);
@@ -3288,30 +3256,8 @@ fn inMargin(pi: usize, tile: ?TileId, slot: usize, run_region: ?usize) bool {
     return false;
 }
 
-/// A panel label's ink box on the worksheet, from the last solve, moved to
-/// its preview place while dragged.
-fn labelBox(pi: usize, index: usize) ?geom.Box {
-    if (pi >= state.placed.items.len) return null;
-    for (state.placed.items[pi].labels) |l| {
-        if (l.tile != null or l.run != null or l.slot != index) continue;
-        const d = labelDelta(pi, index);
-        const b = onSheet(pi, l.box);
-        return .{ .x0 = b.x0 + d.x, .y0 = b.y0 + d.y, .x1 = b.x1 + d.x, .y1 = b.y1 + d.y };
-    }
-    return null;
-}
-
-/// How far a dragged panel label has travelled, in 0.5 mm steps.
-fn labelDelta(pi: usize, index: usize) geom.Point {
-    if (state.moving_label) |mv| if (mv.panel == pi and mv.index == index) return .{
-        .x = @round((mv.at.x - mv.start.x) * 2) / 2,
-        .y = @round((mv.at.y - mv.start.y) * 2) / 2,
-    };
-    return .{ .x = 0, .y = 0 };
-}
-
-/// The style for new panel labels: "Label", 3 mm cap height in the legend
-/// font, made the first time it is needed.
+/// The style for text put in a track that has none: "Label", 3 mm cap
+/// height in the legend font, made the first time it is needed.
 fn labelStyle() !layout.model.StyleId {
     return labelStyleIn(null);
 }
@@ -3323,26 +3269,6 @@ fn labelStyleIn(key: ?u64) !layout.model.StyleId {
     const s = if (key) |k| try actM(k, .addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } }) else try act(.addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } });
     state.label_style = s;
     return s;
-}
-
-/// A label begun by typing `txt` on panel `pi`: at the last click on it,
-/// else at the view's centre, in the label style; it becomes the context
-/// and the expression line takes the keyboard, its cursor after `txt`.
-fn typeLabel(pi: usize, txt: []const u8) void {
-    const at = if (click_at) |c| (if (panelHolds(pi, c)) c else geom.Point{ .x = state.view.cx, .y = state.view.cy }) else geom.Point{ .x = state.view.cx, .y = state.view.cy };
-    const o = state.model.panels.items[pi].origin;
-    // The style (if new), the label and the typing into it: one undo step.
-    const k = mergeKey(.{ "new label", pi, hist.next_step });
-    const style = labelStyleIn(k) catch return;
-    const li = actM(k, .addLabel, .{ pi, .{
-        .at = .{ .x = @round((at.x - o.x) * 2) / 2, .y = @round((at.y - o.y) * 2) / 2 },
-        .style = style,
-        .content = txt,
-    } }) catch return;
-    hist.mergeAs(mergeKey(.{ "label", pi, li }));
-    state.context = .{ .label = .{ .panel = pi, .index = li } };
-    focus_expression = true;
-    focus_expression_end = true;
 }
 
 /// A frame's properties: its name, its boundary (fitted to what it holds),
@@ -3499,12 +3425,11 @@ fn idBox(id: layout.model.ObjectId) geom.Box {
     return memberBox(loc);
 }
 
-/// A member's extents in its space: a panel's outline, a label's ink, line
-/// art's shapes, a track's segments.
+/// A member's extents in its space: a panel's outline, line art's shapes,
+/// a track's segments.
 fn memberBox(mb: layout.model.Member) geom.Box {
     switch (mb) {
         .panel => |pi| return state.model.panels.items[pi].box(),
-        .label => |l| return labelBox(l.panel, l.index) orelse .empty,
         .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
         .region => |l| {
             var b: geom.Box = .empty;
@@ -3529,10 +3454,9 @@ fn selectArea(b: geom.Box) void {
             if (layout.model.within(p.box(), b)) inside.append(state.gpa, p.id) catch {};
             continue;
         }
-        const kinds = [_]struct { n: usize, k: u2 }{ .{ .n = p.labels.items.len, .k = 0 }, .{ .n = p.art.items.len, .k = 1 }, .{ .n = p.regions.items.len, .k = 2 } };
+        const kinds = [_]struct { n: usize, k: u2 }{ .{ .n = p.art.items.len, .k = 1 }, .{ .n = p.regions.items.len, .k = 2 } };
         for (kinds) |kind| for (0..kind.n) |i| {
             const loc: layout.model.Member = switch (kind.k) {
-                0 => .{ .label = .{ .panel = pi, .index = i } },
                 1 => .{ .art = .{ .panel = pi, .index = i } },
                 else => .{ .region = .{ .panel = pi, .index = i } },
             };
@@ -3555,7 +3479,6 @@ fn selectArea(b: geom.Box) void {
 fn groupOf(c: Context) ?layout.model.ObjectId {
     const loc: layout.model.Member = switch (c) {
         .panel => |pi| if (state.model.panels.items[pi].unbounded) return null else .{ .panel = pi },
-        .label => |l| .{ .label = .{ .panel = l.panel, .index = l.index } },
         .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
         .region => |r| .{ .region = .{ .panel = r.panel, .index = r.region } },
         else => return null,
@@ -3614,7 +3537,6 @@ fn canvasProperties(pi: usize) !void {
         var choice: usize = @intFromEnum(state.model.units);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) actV(.setCanvasUnits, .{@enumFromInt(choice)});
     }
-    propText("Labels", "{d}", .{panel.labels.items.len}, 2);
     propText("Tracks", "{d}", .{panel.regions.items.len}, 3);
     propText("Line art", "{d}", .{panel.art.items.len}, 4);
     var on_canvas: usize = 0;
@@ -3622,7 +3544,6 @@ fn canvasProperties(pi: usize) !void {
         if (p.space == 0 and !p.unbounded) on_canvas += 1;
     }
     propText("Panels", "{d}", .{on_canvas}, 5);
-    propText("Typing", "{s}", .{"makes a label where you last clicked"}, 6);
     {
         var buf: [96]u8 = undefined;
         var tb: [16]u8 = undefined;
@@ -3758,8 +3679,8 @@ fn artProperties(pi: usize, index: usize) !void {
         defer row.deinit();
         propName("Tracks under it");
         const names = [_][]const u8{ "Run straight under", "Flow around its box", "Flow around its ink" };
-        // (What flows: the tracks' tiles, unless they stay under it below,
-        // and the labels on them.)
+        // (What flows: the tracks' tiles and runs, unless tiles stay under
+        // it below.)
         var choice: usize = @intFromEnum(wrap);
         if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
             wrap = @enumFromInt(choice);
@@ -3774,7 +3695,7 @@ fn artProperties(pi: usize, index: usize) !void {
     if (changed) try act(.setArtWrap, .{pi, index, wrap, clearance});
     {
         // Off, tracks lie under it (a mark printed over keys): their tiles
-        // stay, and only labels on them wrap around it.
+        // stay, and only runs on them wrap around it.
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 6 });
         defer row.deinit();
         propName("Tiles");
@@ -3825,20 +3746,6 @@ fn shapeProperties(pi: usize, index: usize) !void {
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
         state.status = "Made a panel: what it encloses moves with it. ";
     }
-}
-
-/// Places a new label on panel `pi` at worksheet point `at` (on a 0.5 mm
-/// grid), with placeholder text; the context stays the panel.
-fn addLabelAt(pi: usize, at: geom.Point) void {
-    const o = state.model.panels.items[pi].origin;
-    const style = labelStyle() catch return;
-    _ = act(.addLabel, .{pi, .{
-        .at = .{ .x = @round((at.x - o.x) * 2) / 2, .y = @round((at.y - o.y) * 2) / 2 },
-        .style = style,
-        .content = "LABEL",
-        .default_content = true,
-    }}) catch return;
-    state.expanded.put(state.gpa, Context.key(.{ .panel = pi }), true) catch {};
 }
 
 /// Tiles and legends of panel `pi`, moved onto the worksheet.
@@ -3919,11 +3826,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
-        const d = if (l.tile == null and l.run == null) labelDelta(pi, l.slot) else geom.Point{ .x = 0, .y = 0 };
         const pieces = state.flat.get(l.render, faceTable()) catch continue;
         // Ink in the sheet's margins is drawn in the warning colour.
         const ink = if (inMargin(pi, l.tile, l.slot, if (l.run) |r| r.region else null)) colors.overflow else colors.ink;
-        const at: geom.Point = .{ .x = l.origin.x + o.x + d.x, .y = l.origin.y + o.y + d.y };
+        const at: geom.Point = .{ .x = l.origin.x + o.x, .y = l.origin.y + o.y };
         for (pieces) |piece| {
             const color: dvui.Color = switch (piece.kind) {
                 .ink => ink,
@@ -3943,10 +3849,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
                 fillRegion(area, piece.region, at, .{ .flat = color });
             }
         }
-        if (show_construction) drawConstruction(area, l, .{ .x = o.x + d.x, .y = o.y + d.y });
+        if (show_construction) drawConstruction(area, l, o);
         if (caretIn(pi, l)) |c| {
-            const x = l.origin.x + o.x + d.x + c.x;
-            const y = l.origin.y + o.y + d.y;
+            const x = l.origin.x + o.x + c.x;
+            const y = l.origin.y + o.y;
             const a = state.view.toPx(area, .{ .x = x, .y = y + c.y0 });
             const b = state.view.toPx(area, .{ .x = x, .y = y + c.y1 });
             dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
@@ -3955,14 +3861,6 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     drawFlowMarks(area, pi, placed);
     // On whichever panel its segment lies: a thread runs across panels.
     if (track_cursor) |c| drawCursor(area, pi, placed, c);
-    // The selected panel label: its ink box, with a little room.
-    switch (state.context) {
-        .label => |sel| if (sel.panel == pi) if (labelBox(pi, sel.index)) |b| {
-            const pad = 0.6;
-            state.view.rect(area, .{ .x0 = b.x0 - pad, .y0 = b.y0 - pad, .x1 = b.x1 + pad, .y1 = b.y1 + pad }).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
-        },
-        else => {},
-    }
 }
 
 /// Fills a resolved region placed at worksheet point `at`: its triangles as
@@ -4064,7 +3962,6 @@ fn ccw(p0: dvui.Point.Physical, p1: dvui.Point.Physical, p2: dvui.Point.Physical
 fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
     const c = expr_caret orelse return null;
     const mine = switch (c.target) {
-        .panel_label => |t| t.panel == pi and l.tile == null and l.run == null and l.slot == t.index,
         .tile_slot => |t| l.tile != null and std.meta.eql(l.tile.?, t.tile) and l.slot == t.slot,
         .run => |t| t.panel == pi and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
     };
@@ -5029,9 +4926,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
-        // Typing with a panel or the canvas as the context makes a label
-        // where the last click landed, and the expression line takes the
-        // rest of the typing.
         // Typing at the flow cursor goes into the flow.
         if (e.evt == .text and !e.handled and track_cursor != null and !canvas_prompt and cursorKeysReach()) {
             const txt = switch (e.evt.text.action) {
@@ -5041,18 +4935,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             if (txt.len > 0 and txt[0] >= ' ') {
                 e.handle(@src(), box.data());
                 typeIntoFlow(txt);
-                dvui.refresh(null, @src(), box.data().id);
-                continue;
-            }
-        }
-        if (e.evt == .text and !e.handled and track_cursor == null and state.tool == .select and !canvas_prompt and cursorKeysReach()) {
-            const txt = switch (e.evt.text.action) {
-                .value => |v| v.txt,
-                else => "",
-            };
-            if (state.context == .panel and txt.len > 0 and txt[0] >= ' ') {
-                e.handle(@src(), box.data());
-                typeLabel(state.context.panel, txt);
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
@@ -5115,12 +4997,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         }
-        if (e.evt == .key and (state.moving != null or state.moving_label != null)) {
+        if (e.evt == .key and state.moving != null) {
             const k = e.evt.key;
             if (k.code == .escape and k.action == .down) {
                 e.handle(@src(), box.data());
                 state.moving = null;
-                state.moving_label = null;
                 dvui.refresh(null, @src(), box.data().id);
             }
             continue;
@@ -5158,12 +5039,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         e.handle(@src(), box.data());
                         actV(.removePanel, .{pi});
                         state.context = .worksheet;
-                        dvui.refresh(null, @src(), box.data().id);
-                    },
-                    .label => |l| if (state.moving_label == null) {
-                        e.handle(@src(), box.data());
-                        actV(.removeLabel, .{l.panel, l.index});
-                        state.context = .{ .panel = l.panel };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .art => |l| {
@@ -5234,9 +5109,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Set above.
                 } else if (drawing) {
                     dvui.cursorSet(.crosshair);
-                } else if (state.moving != null or state.moving_label != null) {
-                    dvui.cursorSet(.arrow_all);
-                } else if (labelUnder(state.view.toMm(area, me.p))) {
+                } else if (state.moving != null) {
                     dvui.cursorSet(.arrow_all);
                 } else if (panelToMove(state.view.toMm(area, me.p)) != null) {
                     // Over a panel a drag would move, show that it can be.
@@ -5257,16 +5130,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
-                if (state.tool == .add_label and me.button.pointer()) {
-                    // One click places a label on the panel it was chosen for.
-                    const at = state.view.toMm(area, me.p);
-                    if (state.context == .panel and panelHolds(state.context.panel, at)) {
-                        addLabelAt(state.context.panel, at);
-                        state.tool = .select;
-                        // The release that follows is part of this click, not a pick.
-                        state.press_consumed = true;
-                    }
-                } else if (state.tool == .select_area and me.button.pointer()) {
+                if (state.tool == .select_area and me.button.pointer()) {
                     const at = state.view.toMm(area, me.p);
                     state.drag = .{ .start = at, .at = at };
                 } else if (state.tool == .add_art and me.button.pointer()) {
@@ -5327,10 +5191,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     e.handle(@src(), box.data());
                     mv.at = state.view.toMm(area, me.p);
                     dvui.refresh(null, @src(), box.data().id);
-                } else if (state.moving_label) |*mv| {
-                    e.handle(@src(), box.data());
-                    mv.at = state.view.toMm(area, me.p);
-                    dvui.refresh(null, @src(), box.data().id);
                 } else if (path_drag) |*pd| {
                     e.handle(@src(), box.data());
                     pd.at = state.view.toMm(area, me.p);
@@ -5338,9 +5198,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (dvui.dragging(me, null)) |d| {
                     e.handle(@src(), box.data());
                     // Dragging the selected panel moves it; anything else pans.
-                    if (grabbedLabel()) |l| {
-                        state.moving_label = .{ .panel = l.panel, .index = l.index, .start = state.press_at.?, .at = state.view.toMm(area, me.p) };
-                    } else if (grabbedPanel()) |pi| {
+                    if (grabbedPanel()) |pi| {
                         state.moving = .{ .panel = pi, .start = state.press_at.?, .at = state.view.toMm(area, me.p) };
                     } else {
                         state.view.fit = null;
@@ -5368,11 +5226,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     }
                 } else if (state.moving) |mv| {
                     finishMove(mv.panel);
-                } else if (state.moving_label) |mv| {
-                    const d = labelDelta(mv.panel, mv.index);
-                    state.moving_label = null;
-                    const at = state.model.panels.items[mv.panel].labels.items[mv.index].at;
-                    actV(.moveLabel, .{mv.panel, mv.index, .{ .x = at.x + d.x, .y = at.y + d.y }});
                 } else if (path_drag != null) {
                     finishPathDrag();
                 } else if (state.press_consumed) {
@@ -5391,28 +5244,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
 }
 
 /// The selected panel, when the pointer went down on it: a drag then moves it.
-/// Whether `at` is on the selected panel label, which a drag would move.
-fn labelUnder(at: geom.Point) bool {
-    const l = switch (state.context) {
-        .label => |l| l,
-        else => return false,
-    };
-    const b = labelBox(l.panel, l.index) orelse return false;
-    return contains(.{ .x0 = b.x0 - 1, .y0 = b.y0 - 1, .x1 = b.x1 + 1, .y1 = b.y1 + 1 }, at);
-}
-
-/// The selected panel label, when the pointer went down on it.
-fn grabbedLabel() ?struct { panel: usize, index: usize } {
-    const at = state.press_at orelse return null;
-    const l = switch (state.context) {
-        .label => |l| l,
-        else => return null,
-    };
-    const b = labelBox(l.panel, l.index) orelse return null;
-    if (!contains(.{ .x0 = b.x0 - 1, .y0 = b.y0 - 1, .x1 = b.x1 + 1, .y1 = b.y1 + 1 }, at)) return null;
-    return .{ .panel = l.panel, .index = l.index };
-}
-
 fn grabbedPanel() ?usize {
     return panelToMove(state.press_at orelse return null);
 }
@@ -5468,7 +5299,6 @@ fn pick(at: geom.Point) void {
         return;
     }
     track_cursor = null;
-    click_at = at;
     // Empty space is the worksheet, or on a canvas the shown space itself.
     state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
     selection.clearRetainingCapacity();
@@ -5501,9 +5331,6 @@ fn pick(at: geom.Point) void {
                 }
                 continue;
             }
-            if (labelBox(pi, l.slot)) |lb| if (contains(.{ .x0 = lb.x0 - 1, .y0 = lb.y0 - 1, .x1 = lb.x1 + 1, .y1 = lb.y1 + 1 }, at)) {
-                state.context = .{ .label = .{ .panel = pi, .index = l.slot } };
-            };
         }
     }
     // A grouped object is picked as its group: one move places them all.
@@ -5873,17 +5700,6 @@ fn toolBar() void {
     }
 
     if (state.context == .panel) {
-        // Add label: the next click on the panel places one.
-        const on = state.tool == .add_label;
-        var lwd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Add label", dvui.entypo.text, .{}, .{}, .{
-            .data_out = &lwd,
-            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.tool = if (on) .select else .add_label;
-        }
-        dvui.tooltip(@src(), .{ .active_rect = lwd.borderRectScale().r }, "Add label: click on the panel to place it", .{}, .{});
-
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
         if (dvui.buttonIcon(@src(), "Add shape", dvui.entypo.circle, .{}, .{}, .{
@@ -5968,7 +5784,6 @@ fn lowerKind() []const u8 {
         .region => "region",
         .row => "row",
         .tile => "tile",
-        .label => "label",
         .art => "line art",
         .group => "group",
         .selection => "selection",
@@ -6118,7 +5933,7 @@ fn worksheetProperties() !void {
     }
     if (changed) act(.setMargins, .{m}) catch {};
     if (state.intrusions.len > 0) {
-        propValue("Ink in margins", false, "{d} labels", .{state.intrusions.len}, 70);
+        propValue("Ink in margins", false, "{d} text pieces", .{state.intrusions.len}, 70);
     }
     if (state.panel_issues.len > 0) {
         propValue("Out of compliance", false, "{d} panels", .{state.panel_issues.len}, 71);
@@ -6202,7 +6017,6 @@ fn properties() !void {
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
             propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
-            propText("Labels", "{d}", .{panel.labels.items.len}, 7);
             propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
             if (state.model.spaces.items.len > 0) if (layerChoice(panel.space, panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
             var cutouts: usize = 0;
@@ -6268,7 +6082,6 @@ fn properties() !void {
             propText("Items", "{d}", .{held}, 3);
         },
         .tile => |id| try tileProperties(id),
-        .label => |l| try labelProperties(l.panel, l.index),
         .art => |l| try artProperties(l.panel, l.index),
         .group => |g| try groupProperties(g),
         .selection => try selectionProperties(),
@@ -6278,61 +6091,6 @@ fn properties() !void {
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),
     }
-}
-
-/// A panel label's properties: its text, how it aligns on its anchor, the
-/// anchor's position, and its style's size.
-fn labelProperties(pi: usize, index: usize) !void {
-    const label = state.model.panels.items[pi].labels.items[index];
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer row.deinit();
-        propName("Text");
-        var te = dvui.textEntry(@src(), .{ .text_initial = label.content }, .{
-            .expand = .horizontal,
-            .font = styled(.theme(.body), label.default_content),
-            .id_extra = pi * 1000 + index,
-        });
-        // Kept in step with the expression line while not being edited here.
-        if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), label.content)) te.textSet(label.content, false);
-        const changed = te.text_changed;
-        const text = te.textGet();
-        te.deinit();
-        if (changed and !std.mem.eql(u8, text, label.content)) try actM(mergeKey(.{ "label", pi, index }), .setLabelContent, .{ pi, index, text });
-    }
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer row.deinit();
-        propName("Alignment");
-        const names = [_][]const u8{ "Start", "Centre", "End" };
-        var choice: usize = @backingInt(label.alignment);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
-            actV(.alignLabel, .{pi, index, @fromBackingInt(@intCast(choice))});
-        }
-    }
-    {
-        // The anchor, on the baseline, in the panel's frame.
-        var at = label.at;
-        var changed = false;
-        inline for (.{ .{ "Anchor x, mm", "x" }, .{ "Anchor y, mm", "y" } }, 0..) |axis, i| {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
-            defer row.deinit();
-            propName(axis[0]);
-            const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(at, axis[1]), .min = -10000, .max = 10000 }, .{ .expand = .horizontal, .id_extra = pi * 1000 + index });
-            changed = r.changed or changed;
-        }
-        if (changed) actV(.moveLabel, .{pi, index, at});
-    }
-    const style = state.model.styles.items[label.style];
-    propText("Style", "{s}", .{style.name}, 20);
-    try styleSizeProps(label.style, state.label_style == label.style and !state.label_style_set);
-    try propFont("Font", 21);
-    for (state.intrusions) |i| if (i.panel == pi and i.tile == null and i.slot == index) {
-        propText("Issue", "ink {d:.2} mm in margin", .{i.amount}, 22);
-    };
-    if (pi < state.placed.items.len) for (state.placed.items[pi].issues, 0..) |i, k| if (i.label == index) {
-        propText("Issue", "{s}", .{@tagName(i.kind)}, 23 + k);
-    };
 }
 
 fn tileProperties(id: TileId) !void {
@@ -7007,7 +6765,7 @@ fn statusContent() void {
     // Only when there are any: bold or italic the font lacks.
     var lack_buf: [48]u8 = undefined;
     const lack = if (lacking > 0) std.fmt.bufPrint(&lack_buf, " · {d} lacking bold/italic", .{lacking}) catch "" else "";
-    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} labels · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}{s}", .{
+    const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} text pieces · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}{s}", .{
         state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, lack, overflow, state.intrusions.len, layer_flags,
         if (catching_up) " · reflowing threads…" else "",
     }) catch "";
@@ -7016,7 +6774,6 @@ fn statusContent() void {
     const hint = switch (state.tool) {
         .select => state.status,
         .add_panel => "Add panel: drag out its outline · Esc cancels",
-        .add_label => "Add label: click on the panel to place it · Esc cancels",
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
@@ -7815,9 +7572,6 @@ fn toggleBindAtCursor() void {
 
 /// Set when a new run wants the expression line to take the keyboard.
 var focus_expression = false;
-/// With it, the cursor goes to the end of what is there (a label begun by
-/// typing).
-var focus_expression_end = false;
 
 /// The cursor: a bar across its row or column between items.
 fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
@@ -8451,7 +8205,6 @@ fn contextObject() ?layout.model.ObjectId {
     return switch (state.context) {
         .panel => |pi| if (m.panels.items[pi].unbounded) null else m.panels.items[pi].id,
         .region => |r| m.panels.items[r.panel].regions.items[r.region].id,
-        .label => |l| m.panels.items[l.panel].labels.items[l.index].id,
         .art => |l| m.panels.items[l.panel].art.items[l.index].id,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else null,
         else => null,
@@ -8469,7 +8222,6 @@ fn constrainables(a: std.mem.Allocator) []layout.model.ObjectId {
             list.append(a, r.id) catch {};
             for (r.path.items) |cp| list.append(a, cp.id) catch {};
         }
-        for (p.labels.items) |l| list.append(a, l.id) catch {};
         for (p.art.items) |x| list.append(a, x.id) catch {};
     }
     if (shown_space < m.spaces.items.len) for (m.spaces.items[shown_space].images.items) |im| list.append(a, im.id) catch {};
@@ -9095,7 +8847,6 @@ fn objectName(id: layout.model.ObjectId) []const u8 {
             for (r.path.items, 0..) |cp, k| if (cp.id == id)
                 return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} path point {d}", .{ r.name, k + 1 }) catch r.name;
         }
-        for (p.labels.items) |l| if (l.id == id) return if (l.content.len > 24) l.content[0..24] else l.content;
         for (p.art.items) |x| if (x.id == id) return x.name;
     }
     for (m.spaces.items) |s| for (s.images.items) |im| if (im.id == id) return im.name;
@@ -9271,11 +9022,7 @@ fn constraintProperties() void {
     const id = contextObject() orelse return;
     const m = &state.model;
     heading("Constraints", .{}, 9600);
-    const is_label = switch (state.context) {
-        .label => true,
-        else => false,
-    };
-    if (!is_label) originPicker(id);
+    originPicker(id);
     var any = false;
     const k = docUnits().perMm();
     for (m.constraints.items, 0..) |c, ci| {

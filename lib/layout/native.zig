@@ -527,10 +527,10 @@ test "a model writes and reads back to the same bytes, with its content" {
     defer m.deinit();
     const c = try m.startCanvas(.inch);
     const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3, .script_scale = 0.7 });
-    _ = try m.addLabel(c, .{ .at = .{ .x = 1.25, .y = -3.5 }, .style = style, .content = "V = \\frac{1}{2}" });
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
     const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 10, .y = 50 }, .prototype = key, .count = 2, .length = 4, .pitch = 19.05 });
     _ = try m.insertTile(c, r, 0, key, 1);
+    try m.insertRun(c, r, 1, .{ .style = style, .content = "V = \\frac{1}{2}" });
     const f = try m.addFrame("Front", .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 50 });
     _ = try m.addView(0, f, .{ .x = 200, .y = 0 }, 0.5);
     _ = try m.addLayer(0, "Background");
@@ -547,7 +547,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqualSlices(u8, bytes, again);
     // And it is the same document.
     try testing.expectEqual(.inch, back.units);
-    try testing.expectEqualStrings("V = \\frac{1}{2}", back.panels.items[c].labels.items[0].content);
+    try testing.expectEqualStrings("V = \\frac{1}{2}", back.panels.items[c].regions.items[r].items.items[1].what.run.content);
     try testing.expectEqual(0.7, back.styles.items[style].spec.script_scale.?);
     try testing.expectEqual(0.1 + 0.2, back.panels.items[p].h);
     try testing.expectEqual(2, back.spaces.items.len);
@@ -555,7 +555,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqualStrings("\x89PNG...", back.spaces.items[0].images.items[0].data);
     try testing.expectEqual(m.next_id, back.next_id);
     // It goes on being edited like any model.
-    _ = try back.addLabel(c, .{ .at = .{ .x = 0, .y = 0 }, .content = "more" });
+    try back.insertRun(c, r, 0, .{ .style = style, .content = "more" });
 }
 
 test "a damaged file is refused, and unknown blocks are skipped" {
@@ -606,7 +606,9 @@ test "a model dumps as text, a field a line" {
     var m: model.Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
-    _ = try m.addLabel(c, .{ .at = .{ .x = 1.5, .y = 2 }, .content = "Hello \"you\"" });
+    const style = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = 1.5, .y = 2 }, .style = style, .count = 1, .length = 40, .pitch = 5 });
+    try m.insertRun(c, r, 0, .{ .style = style, .content = "Hello \"you\"" });
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try dump(&out.writer, model.Model, m);

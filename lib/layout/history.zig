@@ -33,8 +33,7 @@ pub const actions = [_][:0]const u8{
     "startCanvas",       "setCanvasUnits",     "addFrame",            "setFrameBound",      "markFrameNameDefault",
     "setSheet",          "setMargins",         "setRulerOrigin",      "setUnits",           "nameWorksheet",
     "placePanel",        "movePanel",          "removePanel",         "setPanelMargins",    "setPanelLayer",
-    "makePanel",         "releasePanel",       "addLabel",            "setLabelContent",    "moveLabel",
-    "alignLabel",        "removeLabel",        "addArt",              "moveArt",            "removeArt",
+    "makePanel",         "releasePanel",       "addArt",              "moveArt",            "removeArt",
     "setArtWrap",        "setArtWrapsTracks",  "setArtCutout",        "setArtCorner",       "addTracks",
     "insertTile",        "insertBlank",        "insertRun",           "insertBreak",        "removeAt",
     "removeTile",        "setTileSize",        "setTilePrototype",    "setContent",         "setRunContent",
@@ -457,24 +456,24 @@ test "undo restores, redo reapplies, and a new step drops the redo" {
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
-    const li = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "A" } });
-    try h.do(&m, .setLabelContent, .{ c, li, "AB" });
-    try testing.expectEqualStrings("AB", m.panels.items[c].labels.items[0].content);
-    // Undo the content, then the label.
+    const li = try h.do(&m, .addArt, .{ c, .{ .name = "A", .at = .{ .x = 1, .y = 2 }, .shapes = &.{} } });
+    try h.do(&m, .moveArt, .{ c, li, .{ .x = 3, .y = 3 } });
+    try testing.expectEqual(3, m.panels.items[c].art.items[0].at.x);
+    // Undo the move, then the art.
     try testing.expect(try h.undo(&m));
-    try testing.expectEqualStrings("A", m.panels.items[c].labels.items[0].content);
+    try testing.expectEqual(1, m.panels.items[c].art.items[0].at.x);
     try testing.expect(try h.undo(&m));
-    try testing.expectEqual(0, m.panels.items[c].labels.items.len);
+    try testing.expectEqual(0, m.panels.items[c].art.items.len);
     try testing.expect(!try h.undo(&m));
     // Redo both, IDs and all.
     try testing.expect(try h.redoStep(&m));
     try testing.expect(try h.redoStep(&m));
-    try testing.expectEqualStrings("AB", m.panels.items[c].labels.items[0].content);
+    try testing.expectEqual(3, m.panels.items[c].art.items[0].at.x);
     // Undo once, then a new edit: the redo is gone.
     _ = try h.undo(&m);
-    try h.do(&m, .moveLabel, .{ c, 0, .{ .x = 5, .y = 5 } });
+    try h.do(&m, .moveArt, .{ c, 0, .{ .x = 5, .y = 5 } });
     try testing.expect(!h.canRedo());
-    try testing.expectEqual(5, m.panels.items[c].labels.items[0].at.x);
+    try testing.expectEqual(5, m.panels.items[c].art.items[0].at.x);
 }
 
 test "ops with one merge key make one step; joined ops undo with their step; snapshots replay" {
@@ -485,18 +484,18 @@ test "ops with one merge key make one step; joined ops undo with their step; sna
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 0, .y = 0 }, .content = "N" } });
-    // Five nudges of one label: one step.
-    for (1..6) |i| try h.doMerged(&m, 42, .moveLabel, .{ c, 0, .{ .x = @floatFromInt(i), .y = 0 } });
-    try testing.expectEqual(5, m.panels.items[c].labels.items[0].at.x);
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "N", .at = .{ .x = 0, .y = 0 }, .shapes = &.{} } });
+    // Five nudges of one piece of art: one step.
+    for (1..6) |i| try h.doMerged(&m, 42, .moveArt, .{ c, 0, .{ .x = @floatFromInt(i), .y = 0 } });
+    try testing.expectEqual(5, m.panels.items[c].art.items[0].at.x);
     _ = try h.undo(&m);
-    try testing.expectEqual(0, m.panels.items[c].labels.items[0].at.x);
+    try testing.expectEqual(0, m.panels.items[c].art.items[0].at.x);
     // A joined op goes with the step before.
-    try h.do(&m, .setLabelContent, .{ c, 0, "X" });
-    try h.join(&m, .alignLabel, .{ c, 0, .centre });
+    try h.do(&m, .moveArt, .{ c, 0, .{ .x = 9, .y = 0 } });
+    try h.join(&m, .setArtWrap, .{ c, 0, .none, 0 });
     _ = try h.undo(&m);
-    try testing.expectEqualStrings("N", m.panels.items[c].labels.items[0].content);
-    try testing.expectEqual(.start, m.panels.items[c].labels.items[0].alignment);
+    try testing.expectEqual(0, m.panels.items[c].art.items[0].at.x);
+    try testing.expectEqual(model.Wrap.ink, m.panels.items[c].art.items[0].wrap);
     // A change made directly, logged as a snapshot: undone and redone.
     _ = try m.addFrame("Direct", null);
     try h.snapshot(&m);
@@ -515,12 +514,12 @@ test "every op encodes and decodes, as the file's log will hold them" {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const op: Op = .{ .moveLabel = .{ 3, 1, .{ .x = 0.1, .y = -2.5 } } };
+    const op: Op = .{ .moveArt = .{ 3, 1, .{ .x = 0.1, .y = -2.5 } } };
     const bytes = try native.encodeValue(gpa, Op, op);
     defer gpa.free(bytes);
     const back = try native.decodeValue(arena.allocator(), Op, bytes);
-    try testing.expectEqual(3, back.moveLabel[0]);
-    try testing.expectEqual(-2.5, back.moveLabel[2].y);
+    try testing.expectEqual(3, back.moveArt[0]);
+    try testing.expectEqual(-2.5, back.moveArt[2].y);
 }
 
 // The document file ------------------------------------------------------------
@@ -950,8 +949,8 @@ test "a saved document reopens with its history: undo reaches back past the save
     defer h.deinit();
     try h.reset(&m);
     try testing.expect(!h.isDirty());
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "first" } });
-    try h.do(&m, .setLabelContent, .{ c, 0, "second" });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "first", .at = .{ .x = 1, .y = 2 }, .shapes = &.{} } });
+    try h.do(&m, .moveArt, .{ c, 0, .{ .x = 2, .y = 2 } });
     try testing.expect(h.isDirty());
     var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
     defer w.deinit(gpa);
@@ -970,15 +969,15 @@ test "a saved document reopens with its history: undo reaches back past the save
     try testing.expect(!o.damaged);
     try testing.expectEqual(null, o.unsaved);
     try testing.expect(!o.history.isDirty());
-    try testing.expectEqualStrings("second", o.model.panels.items[c].labels.items[0].content);
+    try testing.expectEqual(2, o.model.panels.items[c].art.items[0].at.x);
     // Undo after reopening reaches back past the save, to the checkpoint.
     try testing.expect(try o.history.undo(&o.model));
-    try testing.expectEqualStrings("first", o.model.panels.items[c].labels.items[0].content);
+    try testing.expectEqual(1, o.model.panels.items[c].art.items[0].at.x);
     try testing.expect(try o.history.undo(&o.model));
-    try testing.expectEqual(0, o.model.panels.items[c].labels.items.len);
+    try testing.expectEqual(0, o.model.panels.items[c].art.items.len);
     // New steps after reopening carry on numbering.
     _ = try o.history.redoStep(&o.model);
-    _ = try o.history.do(&o.model, .addLabel, .{ c, .{ .at = .{ .x = 0, .y = 0 }, .content = "third" } });
+    _ = try o.history.do(&o.model, .addArt, .{ c, .{ .name = "third", .at = .{ .x = 0, .y = 0 }, .shapes = &.{} } });
     try testing.expect(o.history.log.items[o.history.log.items.len - 1].step > o.history.log.items[0].step);
 }
 
@@ -990,7 +989,7 @@ test "a torn end of the file is dropped, and the checkpoint still opens" {
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "lost" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "lost", .at = .{ .x = 1, .y = 2 }, .shapes = &.{} } });
     const bytes = try fileBytes(&h, gpa, test_writer, 1);
     defer gpa.free(bytes);
     // Cut in the trailer: the segment never counted.
@@ -999,7 +998,7 @@ test "a torn end of the file is dropped, and the checkpoint still opens" {
     defer o.history.deinit();
     try testing.expect(o.damaged);
     try testing.expect(!o.history.file.?.appendable);
-    try testing.expectEqual(0, o.model.panels.items[c].labels.items.len);
+    try testing.expectEqual(0, o.model.panels.items[c].art.items.len);
     // A damaged checkpoint cannot open at all.
     const bad = try gpa.dupe(u8, bytes);
     defer gpa.free(bad);
@@ -1018,15 +1017,15 @@ test "autosaves append unsaved steps; undo then edit appends a segment that repl
     var file: std.ArrayList(u8) = .empty;
     defer file.deinit(gpa);
 
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "a" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "a", .at = .{ .x = 1, .y = 2 }, .shapes = &.{} } });
     {
         var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
         defer w.deinit(gpa);
         try testWrite(gpa, &file, &w);
         wrote(&h, &w);
     }
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 3, .y = 4 }, .content = "b" } });
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 5, .y = 6 }, .content = "c" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "b", .at = .{ .x = 3, .y = 4 }, .shapes = &.{} } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "c", .at = .{ .x = 5, .y = 6 }, .shapes = &.{} } });
     {
         var w = try prepareWrite(&h, gpa, test_writer, 2, .autosave, false);
         defer w.deinit(gpa);
@@ -1038,7 +1037,7 @@ test "autosaves append unsaved steps; undo then edit appends a segment that repl
     try testing.expect(fileIsAsLeft(&h, file.items));
     // Undo "c" and add "d" instead: the next segment starts at "c".
     _ = try h.undo(&m);
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 7, .y = 8 }, .content = "d" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "d", .at = .{ .x = 7, .y = 8 }, .shapes = &.{} } });
     {
         var w = try prepareWrite(&h, gpa, test_writer, 3, .autosave, false);
         defer w.deinit(gpa);
@@ -1053,14 +1052,14 @@ test "autosaves append unsaved steps; undo then edit appends a segment that repl
     defer o.model.deinit();
     defer o.history.deinit();
     try testing.expect(!o.damaged);
-    const labels = o.model.panels.items[c].labels.items;
-    try testing.expectEqual(3, labels.len);
-    try testing.expectEqualStrings("d", labels[2].content);
+    const art = o.model.panels.items[c].art.items;
+    try testing.expectEqual(3, art.len);
+    try testing.expectEqualStrings("d", art[2].name);
     try testing.expect(o.unsaved != null);
     try testing.expectEqualStrings("test", o.unsaved.?.device);
     try testing.expect(o.history.isDirty());
     try o.discardUnsaved();
-    try testing.expectEqual(1, o.model.panels.items[c].labels.items.len);
+    try testing.expectEqual(1, o.model.panels.items[c].art.items.len);
     try testing.expect(!o.history.isDirty());
     // The file still holds the discarded steps: the next write is whole.
     var w = try prepareWrite(&o.history, gpa, other_writer, 4, .autosave, false);
@@ -1088,7 +1087,7 @@ test "another writer's append is noticed before writing" {
     var o = try openFile(gpa, file.items);
     defer o.model.deinit();
     defer o.history.deinit();
-    _ = try o.history.do(&o.model, .addLabel, .{ c, .{ .at = .{ .x = 0, .y = 0 }, .content = "theirs" } });
+    _ = try o.history.do(&o.model, .addArt, .{ c, .{ .name = "theirs", .at = .{ .x = 0, .y = 0 }, .shapes = &.{} } });
     var w2 = try prepareWrite(&o.history, gpa, other_writer, 2, .save, false);
     defer w2.deinit(gpa);
     try testing.expect(w2.at != null);
@@ -1105,10 +1104,11 @@ test "past the limits the oldest steps fold into the checkpoint" {
     defer h.deinit();
     h.limits = .{ .steps = 4 };
     try h.reset(&m);
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 0, .y = 0 }, .content = "0" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "0", .at = .{ .x = 0, .y = 0 }, .shapes = &.{} } });
     h.markSaved();
     var buf: [4]u8 = undefined;
-    for (1..10) |k| try h.do(&m, .setLabelContent, .{ c, 0, std.fmt.bufPrint(&buf, "{d}", .{k}) catch unreachable });
+    _ = &buf;
+    for (1..10) |k| try h.do(&m, .moveArt, .{ c, 0, .{ .x = @floatFromInt(k), .y = 0 } });
     try testing.expect(h.stepCount() <= 4);
     // The save was folded away: still unsaved, whatever is undone.
     try testing.expect(h.saved_lost);
@@ -1117,17 +1117,17 @@ test "past the limits the oldest steps fold into the checkpoint" {
     while (try h.undo(&m)) undone += 1;
     try testing.expectEqual(h.redo.items.len, undone);
     try testing.expect(h.isDirty());
-    const first = m.panels.items[c].labels.items[0].content;
-    try testing.expect(!std.mem.eql(u8, first, "0"));
+    const first = m.panels.items[c].art.items[0].at.x;
+    try testing.expect(first != 0);
     // Redo all: the model is as it was.
     while (try h.redoStep(&m)) {}
-    try testing.expectEqualStrings("9", m.panels.items[c].labels.items[0].content);
+    try testing.expectEqual(9, m.panels.items[c].art.items[0].at.x);
     // Compacting folds the rest.
     try h.compact();
     try testing.expectEqual(0, h.log.items.len);
     var back = try native.decode(gpa, h.checkpoint);
     defer back.deinit();
-    try testing.expectEqualStrings("9", back.panels.items[c].labels.items[0].content);
+    try testing.expectEqual(9, back.panels.items[c].art.items[0].at.x);
 }
 
 test "not saving drops the autosaved steps from the file" {
@@ -1140,13 +1140,13 @@ test "not saving drops the autosaved steps from the file" {
     try h.reset(&m);
     var file: std.ArrayList(u8) = .empty;
     defer file.deinit(gpa);
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 1, .y = 2 }, .content = "kept" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "kept", .at = .{ .x = 1, .y = 2 }, .shapes = &.{} } });
     var w = try prepareWrite(&h, gpa, test_writer, 1, .save, false);
     try testWrite(gpa, &file, &w);
     wrote(&h, &w);
     w.deinit(gpa);
     try testing.expectEqual(null, try prepareDiscard(&h, gpa, test_writer, 2));
-    _ = try h.do(&m, .addLabel, .{ c, .{ .at = .{ .x = 3, .y = 4 }, .content = "dropped" } });
+    _ = try h.do(&m, .addArt, .{ c, .{ .name = "dropped", .at = .{ .x = 3, .y = 4 }, .shapes = &.{} } });
     w = try prepareWrite(&h, gpa, test_writer, 2, .autosave, false);
     try testWrite(gpa, &file, &w);
     wrote(&h, &w);
@@ -1161,7 +1161,7 @@ test "not saving drops the autosaved steps from the file" {
     defer o.model.deinit();
     defer o.history.deinit();
     try testing.expectEqual(null, o.unsaved);
-    try testing.expectEqual(1, o.model.panels.items[c].labels.items.len);
+    try testing.expectEqual(1, o.model.panels.items[c].art.items.len);
 }
 
 test "composed-font edits undo and redo, and survive saving and reopening" {
