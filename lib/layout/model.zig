@@ -528,12 +528,14 @@ pub const TileRegion = struct {
 
 
 
-    /// The band of a segment at origin `s`, mm in the panel frame: its
-    /// length along, one pitch across.
+    /// The band of a segment at origin `s`, mm in the panel frame: from
+    /// its origin to the far edge of the soft area along (the space
+    /// reserved for the track; a segment the path starts further along is
+    /// that much shorter), one pitch across.
     pub fn boxAt(r: TileRegion, s: Segment) geom.Box {
         const across = s.across * r.pitch;
         const shift = s.along * r.pitch;
-        const length = r.segmentLength() * r.pitch;
+        const length = @max(0, r.segmentLength() - s.along) * r.pitch;
         return if (r.major == .row)
             .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
         else

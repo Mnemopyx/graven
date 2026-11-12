@@ -3113,6 +3113,7 @@ fn canvas() void {
 
     drawPicked(area);
     drawPolygonDraft(area);
+    drawTrackPath(area);
     drawConstraintMarks(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
@@ -5006,6 +5007,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (e.evt == .key) {
             // Keys reach the canvas only while it has focus.
             const k = e.evt.key;
+            if (k.code == .delete and k.action == .down and path_selected != null and pathRegion() != null) {
+                act(.removeControlPoint, .{path_selected.?}) catch {};
+                path_selected = null;
+                e.handle(@src(), box.data());
+                continue;
+            }
             if (k.code == .delete and k.action == .down and state.moving == null) {
                 switch (state.context) {
                     .panel => |pi| if (!state.model.panels.items[pi].unbounded) {
@@ -5127,6 +5134,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .constrain and me.button.pointer()) {
                     constrainClick();
                     state.press_consumed = true;
+                } else if (state.tool == .select and me.button.pointer() and pathHit(state.view.toMm(area, me.p)) != null) {
+                    const at = state.view.toMm(area, me.p);
+                    const hit = pathHit(at).?;
+                    const t = pathRegion().?;
+                    path_drag = .{ .panel = t.panel, .region = t.region, .id = hit.id, .from_across = hit.across, .start = at, .at = at };
                 } else if (drawing and me.button.pointer()) {
                     // A panel is drawn from a point on the sheet.
                     const at = snap(state.view.toMm(area, me.p));
@@ -5148,6 +5160,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.moving_label) |*mv| {
                     e.handle(@src(), box.data());
                     mv.at = state.view.toMm(area, me.p);
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (path_drag) |*pd| {
+                    e.handle(@src(), box.data());
+                    pd.at = state.view.toMm(area, me.p);
                     dvui.refresh(null, @src(), box.data().id);
                 } else if (dvui.dragging(me, null)) |d| {
                     e.handle(@src(), box.data());
@@ -5181,6 +5197,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     state.moving_label = null;
                     const at = state.model.panels.items[mv.panel].labels.items[mv.index].at;
                     actV(.moveLabel, .{mv.panel, mv.index, .{ .x = at.x + d.x, .y = at.y + d.y }});
+                } else if (path_drag != null) {
+                    finishPathDrag();
                 } else if (state.press_consumed) {
                     state.press_consumed = false;
                 } else if (dvui.dragging(me, null) == null) {
@@ -8186,4 +8204,143 @@ fn originPicker(id: layout.model.ObjectId) void {
             })) act(.setObjectOrigin, .{ id, layout.model.OriginPoint{ .x = x, .y = y } }) catch {};
         }
     }
+}
+
+// Track paths -------------------------------------------------------------------
+//
+// While a track (or one of its rows) is the context, its path shows through
+// its rows' starts with its control points. Dragging a point moves it;
+// dragging anywhere else on the path makes a point there and moves it; a
+// click on the path adds a point, and a click on a point selects it, for
+// Delete. Rows keep their pitch: the path only sets where each starts.
+
+var path_drag: ?struct {
+    panel: usize,
+    region: usize,
+    id: ?layout.model.ObjectId,
+    from_across: f64,
+    start: geom.Point,
+    at: geom.Point,
+} = null;
+var path_selected: ?layout.model.ObjectId = null;
+
+/// The track whose path is shown: the context's, or its row's.
+fn pathRegion() ?struct { panel: usize, region: usize } {
+    return switch (state.context) {
+        .region => |r| .{ .panel = r.panel, .region = r.region },
+        .row => |r| .{ .panel = r.panel, .region = r.region },
+        else => null,
+    };
+}
+
+/// A path point (u from the region's origin) on the canvas, mm: at the
+/// start of a row, half a row in (the middle of its thickness).
+fn pathToMm(pi: usize, ri: usize, along: f64, across: f64) geom.Point {
+    const o = panelOrigin(pi);
+    const r = state.model.panels.items[pi].regions.items[ri];
+    return if (r.major == .row)
+        .{ .x = o.x + r.origin.x + along * r.pitch, .y = o.y + r.origin.y - (across + 0.5) * r.pitch }
+    else
+        .{ .x = o.x + r.origin.x + (across + 0.5) * r.pitch, .y = o.y + r.origin.y - along * r.pitch };
+}
+
+fn pathFromMm(pi: usize, ri: usize, p: geom.Point) struct { along: f64, across: f64 } {
+    const o = panelOrigin(pi);
+    const r = state.model.panels.items[pi].regions.items[ri];
+    return if (r.major == .row)
+        .{ .along = (p.x - o.x - r.origin.x) / r.pitch, .across = (o.y + r.origin.y - p.y) / r.pitch - 0.5 }
+    else
+        .{ .along = (o.y + r.origin.y - p.y) / r.pitch, .across = (p.x - o.x - r.origin.x) / r.pitch - 0.5 };
+}
+
+/// How far across the path is drawn: its soft area, its last point, or
+/// its last row, whichever is furthest.
+fn pathReach(pi: usize, ri: usize) f64 {
+    const r = state.model.panels.items[pi].regions.items[ri];
+    var reach = r.h;
+    if (r.major == .column) reach = r.w;
+    for (r.path.items) |cp| reach = @max(reach, cp.across + 1);
+    if (segmentOrigin(pi, ri, segmentCount(pi, ri) -| 1)) |o| reach = @max(reach, o.across + 1);
+    return reach;
+}
+
+/// The path point at `at` (canvas mm): a control point (its ID), or a
+/// place on the path (no ID), with where it is across.
+fn pathHit(at: geom.Point) ?struct { id: ?layout.model.ObjectId, across: f64 } {
+    const t = pathRegion() orelse return null;
+    const r = state.model.panels.items[t.panel].regions.items[t.region];
+    const tol = 7 / state.view.ppm;
+    for (r.path.items) |cp| {
+        const q = pathToMm(t.panel, t.region, cp.along, cp.across);
+        if (@abs(q.x - at.x) <= tol and @abs(q.y - at.y) <= tol) return .{ .id = cp.id, .across = cp.across };
+    }
+    const u = pathFromMm(t.panel, t.region, at);
+    if (u.across < -0.5 or u.across > pathReach(t.panel, t.region)) return null;
+    const across = @max(0, u.across);
+    if (@abs(u.along - r.pathAt(across)) * r.pitch > tol) return null;
+    return .{ .id = null, .across = across };
+}
+
+fn finishPathDrag() void {
+    const pd = path_drag orelse return;
+    path_drag = null;
+    const moved = @abs(pd.at.x - pd.start.x) + @abs(pd.at.y - pd.start.y);
+    if (moved * state.view.ppm < 3) {
+        // A click: select the point, or add one where the path is.
+        if (pd.id) |id| {
+            path_selected = id;
+            state.status = "Control point: drag it to bend the path; Delete removes it. ";
+            return;
+        }
+        const r = state.model.panels.items[pd.panel].regions.items[pd.region];
+        path_selected = act(.addControlPoint, .{ pd.panel, pd.region, r.pathAt(pd.from_across), pd.from_across }) catch null;
+        state.status = "A control point: drag it to bend the path. ";
+        return;
+    }
+    const u = pathFromMm(pd.panel, pd.region, pd.at);
+    const across = @max(0, u.across);
+    if (pd.id) |id| {
+        act(.moveControlPoint, .{ id, u.along, across }) catch {};
+        path_selected = id;
+    } else {
+        path_selected = act(.bendPath, .{ pd.panel, pd.region, pd.from_across, u.along, across }) catch null;
+    }
+    state.status = "";
+}
+
+/// The context track's path, its control points (the selected one lit)
+/// and, while one is dragged, where it goes.
+fn drawTrackPath(area: dvui.Rect.Physical) void {
+    const t = pathRegion() orelse {
+        path_selected = null;
+        return;
+    };
+    if (t.panel >= state.model.panels.items.len or t.region >= state.model.panels.items[t.panel].regions.items.len) return;
+    const r = state.model.panels.items[t.panel].regions.items[t.region];
+    const px = dvui.windowNaturalScale();
+    const reach = pathReach(t.panel, t.region);
+    var pts: std.ArrayList(dvui.Point.Physical) = .empty;
+    const a = dvui.currentWindow().arena();
+    const steps: usize = @intFromFloat(@min(2000, @ceil(reach * 8)));
+    for (0..steps + 1) |k| {
+        const across = reach * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(@max(1, steps)));
+        pts.append(a, state.view.toPx(area, pathToMm(t.panel, t.region, r.pathAt(across), across))) catch return;
+    }
+    const ink: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.85) };
+    if (pts.items.len >= 2) dvui.Path.stroke(.{ .points = pts.items }, .{ .thickness = 1.5 * px, .color = ink });
+    for (r.path.items) |cp| {
+        const dragged = if (path_drag) |pd| pd.id != null and pd.id.? == cp.id else false;
+        const at = if (dragged) path_drag.?.at else pathToMm(t.panel, t.region, cp.along, cp.across);
+        const q = state.view.toPx(area, at);
+        const s: f32 = 4 * px;
+        const box: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };
+        const lit = path_selected != null and path_selected.? == cp.id;
+        box.fill(.square, .{ .color = .{ .color = if (lit) colors.select else colors.guide } });
+    }
+    if (path_drag) |pd| if (pd.id == null) {
+        const q = state.view.toPx(area, pd.at);
+        const s: f32 = 4 * px;
+        const box: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };
+        box.fill(.square, .{ .color = .{ .color = colors.select } });
+    };
 }

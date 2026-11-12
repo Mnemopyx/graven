@@ -732,6 +732,13 @@ fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: 
     return spans.items;
 }
 
+/// Segment `seg`'s length along, mm: from where the path starts it to the
+/// far edge of its region's soft area.
+fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
+    const b = path.boxes.items[seg];
+    return if (rows) b.width() else b.height();
+}
+
 /// The cap height of `region`'s style: as its context resolves it (a
 /// style sized by its em gets its font's), else as the model gives it.
 fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
@@ -1003,10 +1010,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         // The paragraph being set, and the bounds of the segment being
         // filled: its first line takes the first-line indent.
         var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
-        var line: Line = lineIn(style, true, length);
-        var pos: f64 = line.lo;
         // The first segment too: line art may close stretches of it.
         try flow.enter(a, &path, 0, tall.items, &closed);
+        var line: Line = lineIn(style, true, segLength(&path, rows, 0));
+        var pos: f64 = line.lo;
         for (items, 0..) |item, index| {
             if (item.breaks()) {
                 segs_of[index] = seg;
@@ -1026,8 +1033,8 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                         style = next;
                         first_line = true;
                     } else path.lead = if (style) |st| st.line_gap else 0;
-                    line = lineIn(style, first_line, length);
                     try flow.enter(a, &path, seg, tall.items, &closed);
+                    line = lineIn(style, first_line, segLength(&path, rows, seg));
                     pos = line.lo;
                     in_seg = 0;
                 }
@@ -1062,8 +1069,8 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                 seg += 1;
                 first_in_seg = index;
                 path.lead = if (style) |st| st.line_gap else 0;
-                line = lineIn(style, false, length);
                 try flow.enter(a, &path, seg, tall.items, &closed);
+                line = lineIn(style, false, segLength(&path, rows, seg));
                 pos = line.lo;
                 in_seg = 0;
                 start = Flow.clear(closed.items, pos + gap, size);
@@ -1174,9 +1181,10 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         }
         natural = @max(natural, para);
         try flows.append(a, .{ .region = ri, .natural = natural / region.pitch, .segments = path.origins.items.len });
-        for (path.reach.items, 0..) |r_, t| if (r_ > length + tol) {
-            try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - length });
-        };
+        for (path.reach.items, 0..) |r_, t| {
+            const len_t = segLength(&path, rows, t);
+            if (r_ > len_t + tol) try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
+        }
         // Its segments: past the soft area each is flagged; past the panel,
         // the region is (to be fitted, or the panel resized).
         const soft = region.softArea();
