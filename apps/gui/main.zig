@@ -771,13 +771,8 @@ fn update() !void {
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
-    // Segments the flow no longer reaches go (the next solve shows it),
-    // but those moved by hand keep their places; a selected one gives way
-    // to its track.
+    // A selected row the flow no longer reaches gives way to its track.
     for (state.placed.items, 0..) |*pl, pi| for (pl.flows) |f| {
-        const reg = state.model.panels.items[pi].regions.items[f.region];
-        if (reg.segments.items.len > reg.keptSegments(f.segments))
-            hist.join(&state.model, .trimSegments, .{ pi, f.region, f.segments }) catch {};
         switch (state.context) {
             .row => |r| if (r.panel == pi and r.region == f.region and r.row >= f.segments) {
                 state.context = .{ .region = .{ .panel = pi, .region = f.region } };
@@ -1735,7 +1730,7 @@ fn contextValid(c: Context) bool {
         .file, .worksheet, .prototypes, .selection => true,
         .panel => |pi| pi < np,
         .region => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len,
-        .row => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len and r.row < m.panels.items[r.panel].regions.items[r.region].segments.items.len,
+        .row => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len and r.row < segmentCount(r.panel, r.region),
         .tile => |id| @intFromEnum(id) < m.tiles.items.len and !m.tileConst(id).removed,
         .label => |l| l.panel < np and l.index < m.panels.items[l.panel].labels.items.len,
         .art => |l| l.panel < np and l.index < m.panels.items[l.panel].art.items.len,
@@ -7048,10 +7043,6 @@ fn validateCursor() void {
         return;
     }
     const r = state.model.panels.items[c.panel].regions.items[c.region];
-    if (r.segments.items.len == 0) {
-        track_cursor = null;
-        return;
-    }
     track_cursor.?.index = @min(c.index, r.items.items.len);
 }
 
@@ -7615,14 +7606,16 @@ fn moveTrackArrow(arrow: Arrow) void {
             along = s;
         },
     }
-    if (t.panel >= state.placed.items.len) return;
-    const placed = &state.placed.items[t.panel];
-    var obuf: [512]layout.model.Segment = undefined;
-    var abuf: [1024]geom.Box = undefined;
-    const kept = state.model.panels.items[t.panel].regions.items[t.region].segments.items.len;
-    // The path bends through it; rows that only continue the path follow.
-    act(.moveSegment, .{t.panel, t.region, t.row, placed.origins(t.region, &obuf), along, across, placed.obstacles(t.region, t.row, kept, &abuf)}) catch |err| {
-        state.status = if (err == error.NoRoom) "No room to move it that way. " else "It did not move. ";
+    // Rows keep their pitch: a row moves along, bending the track's path
+    // where it attaches (a control point there); the rows around it follow
+    // the curve.
+    if (across != 0) {
+        state.status = "Rows keep an even pitch: move a row along, or set paragraph spacing. ";
+        return;
+    }
+    const o = segmentOrigin(t.panel, t.region, t.row) orelse return;
+    _ = actM(mergeKey(.{ "bend", t.panel, t.region, t.row }), .bendPath, .{ t.panel, t.region, o.across, o.along + along, o.across }) catch {
+        state.status = "It did not move. ";
         return;
     };
     state.status = "";

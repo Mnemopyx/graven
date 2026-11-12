@@ -352,33 +352,71 @@ pub const Item = struct {
 /// start corner sits, u from the region's origin: `along` the track's
 /// length, and `across` it (down for rows, right for columns).
 ///
-/// A track's segments lie on a path through their origins, in order. The
-/// path is straight pieces between origins and carries on past the last
-/// one in the direction of its last piece (across, at first); each new
-/// segment goes one segment's thickness plus the track's gap along it.
+/// Segments are made as content flows, never placed by hand: each goes one
+/// segment's thickness (plus the track's gap and any paragraph spacing)
+/// further across than the one before, and its `along` is where the
+/// track's path is at that point across (see `TileRegion.pathAt`). So
+/// rows keep an even pitch however the path bends.
 pub const Segment = struct {
     along: f64 = 0,
     across: f64 = 0,
-    /// Placed by hand (moved, or added with `addSegment`): kept, and where
-    /// it is, even while the flow does not reach it, so content that grows
-    /// back finds it there. Others follow the path.
+    /// Older documents only: an origin moved by hand, read now as a
+    /// control point of the path.
     moved: bool = false,
-
-    /// The point `d` u along the direction (`dir_along`, `dir_across`).
-    pub fn step(s: Segment, dir: [2]f64, d: f64) Segment {
-        return .{ .along = s.along + dir[0] * d, .across = s.across + dir[1] * d };
-    }
 };
 
-/// The path's direction from origin `prev` to `last`: a unit vector, or
-/// straight across when there is no piece yet (or it has no length).
-pub fn pathDirection(prev: ?Segment, last: Segment) [2]f64 {
-    const p = prev orelse return .{ 0, 1 };
-    const da = last.along - p.along;
-    const dc = last.across - p.across;
-    const len = @sqrt(da * da + dc * dc);
-    if (len < 1e-9) return .{ 0, 1 };
-    return .{ da / len, dc / len };
+/// A control point of a track's path: where the path passes, u from the
+/// region's origin (`along` its length, `across` it). The path is a
+/// smooth curve through its control points, giving an offset along for
+/// every point across; it starts at the region's origin unless a control
+/// point is there, and runs straight on past the last one.
+pub const ControlPoint = struct {
+    id: ObjectId = .none,
+    along: f64,
+    across: f64,
+};
+
+/// The value at `x` of the monotone cubic (Fritsch–Carlson) through
+/// `pts` (sorted across, distinct): `along` as a function of `across`,
+/// level outside them.
+fn monotoneCubic(pts: []const ControlPoint, x: f64) f64 {
+    const n = pts.len;
+    if (n == 0) return 0;
+    if (n == 1 or x <= pts[0].across) return pts[0].along;
+    if (x >= pts[n - 1].across) return pts[n - 1].along;
+    var i: usize = 0;
+    while (i + 2 < n and x > pts[i + 1].across) i += 1;
+    // The secant slopes, and tangents at each point limited so the curve
+    // stays between its neighbours (flat at a peak or a trough).
+    const slope = struct {
+        fn of(p: []const ControlPoint, k: usize) f64 {
+            return (p[k + 1].along - p[k].along) / (p[k + 1].across - p[k].across);
+        }
+    }.of;
+    const tangent = struct {
+        fn at(p: []const ControlPoint, k: usize) f64 {
+            const last = p.len - 1;
+            if (k == 0) return slope(p, 0);
+            if (k == last) return slope(p, last - 1);
+            const d0 = slope(p, k - 1);
+            const d1 = slope(p, k);
+            if (d0 * d1 <= 0) return 0;
+            // A weighted harmonic mean keeps it monotone.
+            const h0 = p[k].across - p[k - 1].across;
+            const h1 = p[k + 1].across - p[k].across;
+            const w1 = 2 * h1 + h0;
+            const w2 = h1 + 2 * h0;
+            return (w1 + w2) / (w1 / d0 + w2 / d1);
+        }
+    }.at;
+    const x0 = pts[i].across;
+    const h = pts[i + 1].across - x0;
+    const t = (x - x0) / h;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const m0 = tangent(pts, i) * h;
+    const m1 = tangent(pts, i + 1) * h;
+    return (2 * t3 - 3 * t2 + 1) * pts[i].along + (t3 - 2 * t2 + t) * m0 + (-2 * t3 + 3 * t2) * pts[i + 1].along + (t3 - t2) * m1;
 }
 
 /// Which way a region's tracks run: rows, filled left to right and stacked
@@ -408,11 +446,13 @@ pub const TileRegion = struct {
     /// pitch thick (the pitch is the style's baseline-to-baseline distance
     /// when the region was made), and new runs in it take the style.
     style: ?StyleId = null,
-    /// Its segments' origins, in order, as far as they have been placed:
-    /// the first, and any moved by hand (with those before it). The rest
-    /// continue the path as the flow needs them (see `Segment`); the
-    /// region's `w` × `h` is the soft area they expand into, and segments
-    /// past it are flagged.
+    /// Its path's control points, in any order (see `ControlPoint`). The
+    /// region's `w` × `h` is the soft area segments are made in; segments
+    /// past it are flagged. Control points stay when content no longer
+    /// reaches them, so the path keeps its shape.
+    path: std.ArrayList(ControlPoint) = .empty,
+    /// Older documents only: segment origins as they were stored, those
+    /// marked `moved` read as control points.
     segments: std.ArrayList(Segment) = .empty,
     /// Space between segments the path continues to, u.
     gap: f64 = 0,
@@ -432,14 +472,53 @@ pub const TileRegion = struct {
     /// covers there; their content flows around it.
     items: std.ArrayList(Item) = .empty,
 
-    /// How many kept origins stay when the flow reaches `count` segments:
-    /// those, and any up to the last one moved by hand. At least one.
-    pub fn keptSegments(r: TileRegion, count: usize) usize {
-        var keep = @max(1, count);
-        for (r.segments.items, 0..) |sg, k| if (sg.moved) {
-            keep = @max(keep, k + 1);
+    /// The path's points, sorted across, into `buf`: its control points
+    /// (or an older document's moved origins), and the region's origin as
+    /// the start unless a point is there or before.
+    pub fn pathPoints(r: TileRegion, buf: []ControlPoint) []ControlPoint {
+        var n: usize = 0;
+        if (r.path.items.len > 0) {
+            for (r.path.items) |cp| if (n < buf.len) {
+                buf[n] = cp;
+                n += 1;
+            };
+        } else for (r.segments.items, 0..) |sg, k| if (k > 0 and sg.moved and n < buf.len) {
+            buf[n] = .{ .along = sg.along, .across = sg.across };
+            n += 1;
         };
-        return keep;
+        var has_start = false;
+        for (buf[0..n]) |cp| if (cp.across <= 1e-9) {
+            has_start = true;
+        };
+        if (!has_start and n < buf.len) {
+            buf[n] = .{ .along = 0, .across = 0 };
+            n += 1;
+        }
+        std.mem.sort(ControlPoint, buf[0..n], {}, struct {
+            fn lt(_: void, x: ControlPoint, y: ControlPoint) bool {
+                return x.across < y.across;
+            }
+        }.lt);
+        // Two at one place across: the later one stands.
+        var w: usize = 0;
+        for (buf[0..n]) |cp| {
+            if (w > 0 and @abs(buf[w - 1].across - cp.across) < 1e-9) {
+                buf[w - 1] = cp;
+            } else {
+                buf[w] = cp;
+                w += 1;
+            }
+        }
+        return buf[0..w];
+    }
+
+    /// Where the path is along at `across`, u: a monotone cubic through
+    /// its points (it passes through each, never overshooting them, so a
+    /// bend peaks at its point), level before the first and after the last.
+    pub fn pathAt(r: TileRegion, across: f64) f64 {
+        var buf: [64]ControlPoint = undefined;
+        const pts = r.pathPoints(&buf);
+        return monotoneCubic(pts, across);
     }
 
     /// A segment's length, u.
@@ -447,11 +526,7 @@ pub const TileRegion = struct {
         return if (r.major == .row) r.w else r.h;
     }
 
-    /// The origin after `last` (with `prev` before it) on the path, before
-    /// any skip past a blocked place.
-    pub fn nextOrigin(r: TileRegion, prev: ?Segment, last: Segment) Segment {
-        return last.step(pathDirection(prev, last), 1 + r.gap);
-    }
+
 
     /// The band of a segment at origin `s`, mm in the panel frame: its
     /// length along, one pitch across.
@@ -463,11 +538,6 @@ pub const TileRegion = struct {
             .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
         else
             .{ .x0 = r.origin.x + across, .x1 = r.origin.x + across + r.pitch, .y1 = r.origin.y - shift, .y0 = r.origin.y - shift - length };
-    }
-
-    /// Stored segment `t`'s band (see `boxAt`).
-    pub fn segmentBox(r: TileRegion, t: usize) geom.Box {
-        return r.boxAt(r.segments.items[t]);
     }
 
     /// The soft area its segments expand into, mm in the panel frame.
@@ -1634,6 +1704,8 @@ pub const Model = struct {
         c.name = try m.a().dupe(u8, r.name);
         c.segments = .empty;
         try c.segments.appendSlice(m.a(), r.segments.items);
+        c.path = .empty;
+        for (r.path.items) |cp| try c.path.append(m.a(), .{ .id = m.newId(), .along = cp.along, .across = cp.across });
         c.items = .empty;
         for (r.items.items) |item| {
             var it = item;
@@ -2357,6 +2429,7 @@ pub const Model = struct {
         r.id = m.newId();
         r.name = try m.a().dupe(u8, region.name);
         r.segments = .empty;
+        r.path = .empty;
         r.items = .empty;
         const regions = &m.panels.items[panel].regions;
         try regions.append(m.a(), r);
@@ -2407,9 +2480,8 @@ pub const Model = struct {
             .prototype = t.prototype,
             .style = t.style,
         });
-        // The first segment; the rest come as the flow needs them, within
-        // the soft area `count` segments thick.
-        _ = try m.addSegment(panel, r, 0);
+        // Segments come as the flow needs them, along its path, within the
+        // soft area `count` segments thick.
         return r;
     }
 
@@ -2718,37 +2790,81 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Moves a segment, content and all, `along` u along its length and
-    /// `across` u across (down for a row, right for a column), either way:
-    /// its origin moves, and the path bends through it, so the segments the
-    /// path continues to after it follow. `solved` is the region's segment
-    /// origins as last placed (see `place.PlacedTrack`): those up to this
-    /// one are kept from now on. It may move past its region or panel
-    /// (flagged when placed), but not onto any box in `avoid` (the other
-    /// segments on the panel): that is refused with `NoRoom`.
+    /// Older documents' history only: a segment moved by hand, now a
+    /// control point where that segment was placed (see `bendPath`).
     pub fn moveSegment(m: *Model, panel: usize, region: usize, segment: usize, solved: []const Segment, along: f64, across: f64, avoid: []const geom.Box) Error!void {
+        _ = avoid;
+        if (segment >= solved.len) return error.NoSuchRow;
+        const here = solved[segment];
+        _ = try m.bendPath(panel, region, here.across, here.along + along, here.across + across);
+    }
+
+    /// Older documents' history only: the path now keeps its control points.
+    pub fn trimSegments(m: *Model, panel: usize, region: usize, count: usize) void {
+        _ = m;
+        _ = panel;
+        _ = region;
+        _ = count;
+    }
+
+    /// Adds a control point to a track's path at (`along`, `across`) u
+    /// from its region's origin. Returns its ID.
+    pub fn addControlPoint(m: *Model, panel: usize, region: usize, along: f64, across: f64) Error!ObjectId {
+        if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
-        if (segment >= solved.len and segment >= r.segments.items.len) return error.NoSuchRow;
-        const here = if (segment < r.segments.items.len) r.segments.items[segment] else solved[segment];
-        const target: Segment = .{ .along = here.along + along, .across = here.across + across };
-        const box = r.boxAt(target);
-        for (avoid) |b| if (overlaps(box, b)) return error.NoRoom;
-        // Keep the origins up to this one, as placed, so the path bends here.
-        while (r.segments.items.len <= segment) try r.segments.append(m.a(), solved[r.segments.items.len]);
-        r.segments.items[segment] = target;
-        r.segments.items[segment].moved = true;
+        try m.adoptLegacyPath(r);
+        const id = m.newId();
+        try r.path.append(m.a(), .{ .id = id, .along = along, .across = across });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Bends a track's path where a segment attaches to it (`at_across`):
+    /// the control point there moves to (`along`, `across`), or one is
+    /// made there and moved. The segments after it follow the new shape.
+    pub fn bendPath(m: *Model, panel: usize, region: usize, at_across: f64, along: f64, across: f64) Error!ObjectId {
+        if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
+        const r = &m.panels.items[panel].regions.items[region];
+        try m.adoptLegacyPath(r);
+        for (r.path.items) |*cp| if (@abs(cp.across - at_across) < 1e-6) {
+            cp.along = along;
+            cp.across = across;
+            m.revision += 1;
+            return cp.id;
+        };
+        return m.addControlPoint(panel, region, along, across);
+    }
+
+    fn controlPoint(m: *Model, id: ObjectId) ?*ControlPoint {
+        for (m.panels.items) |*p| for (p.regions.items) |*r| for (r.path.items) |*cp| if (cp.id == id) return cp;
+        return null;
+    }
+
+    pub fn moveControlPoint(m: *Model, id: ObjectId, along: f64, across: f64) Error!void {
+        if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
+        const cp = m.controlPoint(id) orelse return error.NoSuchObject;
+        cp.along = along;
+        cp.across = across;
         m.revision += 1;
     }
 
-    /// Drops kept origins past the first `count` segments, which the flow
-    /// no longer reaches: a segment left empty at the end goes, unless it
-    /// (or one after it) was moved by hand. One stays.
-    pub fn trimSegments(m: *Model, panel: usize, region: usize, count: usize) void {
-        const segs = &m.panels.items[panel].regions.items[region].segments;
-        const keep = m.panels.items[panel].regions.items[region].keptSegments(count);
-        if (segs.items.len <= keep) return;
-        segs.shrinkRetainingCapacity(keep);
-        m.revision += 1;
+    pub fn removeControlPoint(m: *Model, id: ObjectId) Error!void {
+        for (m.panels.items) |*p| for (p.regions.items) |*r| for (r.path.items, 0..) |cp, k| if (cp.id == id) {
+            _ = r.path.orderedRemove(k);
+            m.revision += 1;
+            return;
+        };
+        return error.NoSuchObject;
+    }
+
+    /// An older document's moved origins, made control points (once), so
+    /// a change to the path keeps them.
+    fn adoptLegacyPath(m: *Model, r: *TileRegion) Error!void {
+        if (r.path.items.len > 0) return;
+        for (r.segments.items, 0..) |sg, k| if (k > 0 and sg.moved) {
+            try r.path.append(m.a(), .{ .id = m.newId(), .along = sg.along, .across = sg.across });
+        };
+        r.segments.clearRetainingCapacity();
     }
 
     /// Removes tile `id`: it leaves every track it is in, which reflows.
@@ -2758,25 +2874,6 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Keeps one more segment origin, continuing the path with `gap` u of
-    /// extra space before it (the first sits at the region's origin), as a
-    /// sample laying out rows does. Returns its index.
-    pub fn addSegment(m: *Model, panel: usize, region: usize, gap: f64) Error!usize {
-        const r = &m.panels.items[panel].regions.items[region];
-        const segs = &r.segments;
-        const n = segs.items.len;
-        // Placed on purpose, so kept where it is (see `Segment.moved`).
-        const next: Segment = if (n == 0) .{} else blk: {
-            const last = segs.items[n - 1];
-            const prev = if (n >= 2) segs.items[n - 2] else null;
-            var o = last.step(pathDirection(prev, last), 1 + gap);
-            o.moved = true;
-            break :blk o;
-        };
-        try segs.append(m.a(), next);
-        m.revision += 1;
-        return n;
-    }
 
     pub fn addPrototype(m: *Model, p: TilePrototype) Error!PrototypeId {
         try m.prototypes.append(m.a(), try m.dupePrototype(p));
@@ -3040,7 +3137,6 @@ test "removing a panel removes its tiles and frees their designators" {
     _ = try m.placePanel(.{ .name = "A", .w = 50, .h = 50 });
     const b = try m.placePanel(.{ .name = "B", .origin = .{ .x = 100, .y = 0 }, .w = 50, .h = 50 });
     const r = try m.addRegion(b, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 2, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(b, r, 0);
     try m.place(b, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "K1" }) } });
     m.removePanel(0);
     try std.testing.expectEqualStrings("B", m.panels.items[0].name);
@@ -3076,7 +3172,6 @@ test "designators are unique and actions bump the revision" {
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "main", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 2, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top" }} });
     const q = try m.addTile(.{ .designator = "Q", .prototype = key });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
@@ -3233,8 +3328,10 @@ test "tracks are added empty; a removed tile leaves them" {
     const region = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(4.5, region.w);
     try std.testing.expectEqual(2, region.h);
-    // One segment to start; the rest come as the flow needs them.
-    try std.testing.expectEqual(1, region.segments.items.len);
+    // No segments stored: they come as the flow needs them, along a path
+    // that is straight until it is given control points.
+    try std.testing.expectEqual(0, region.segments.items.len);
+    try std.testing.expectEqual(0, region.path.items.len);
     try std.testing.expectEqual(0, region.items.items.len);
     try std.testing.expectEqual(0, m.tiles.items.len);
 

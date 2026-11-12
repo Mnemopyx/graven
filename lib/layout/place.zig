@@ -792,9 +792,9 @@ fn pointOn(s: geom.Segment, t: f64) Point {
 /// The most segments one track's flow may reach.
 const max_segments = 4096;
 
-/// A track's segments as its flow reaches them: kept origins first, then
-/// the path's continuation, each new origin skipping on along the path past
-/// places already taken (by earlier segments here, or `avoid`).
+/// A track's segments as its flow reaches them, each one step on across
+/// from the one before and where the track's path is along, skipping on
+/// past places already taken (by earlier segments here, or `avoid`).
 const Path = struct {
     region: *const model.TileRegion,
     avoid: []const PlacedTrack,
@@ -806,25 +806,23 @@ const Path = struct {
     lead: f64 = 0,
 
     fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
-        const kept = p.region.segments.items;
+        const r = p.region;
         while (p.origins.items.len <= k) {
             const n = p.origins.items.len;
-            var o: model.Segment = .{};
-            // The first origin, and any moved by hand, are kept; those
-            // between follow the path, so paragraph spacing moves them.
-            if (n < kept.len and (n == 0 or kept[n].moved)) {
-                o = kept[n];
-            } else if (n > 0) {
-                const last = p.origins.items[n - 1];
-                const prev = if (n >= 2) p.origins.items[n - 2] else null;
-                const dir = model.pathDirection(prev, last);
-                o = last.step(dir, 1 + p.region.gap + p.lead / p.region.pitch);
-                o.moved = false;
+            // One thickness (and the gap, and any paragraph spacing) on
+            // across from the one before; along, wherever the path is
+            // there. Past a place already taken, on across.
+            var across: f64 = if (n == 0) 0 else p.origins.items[n - 1].across + 1 + r.gap + p.lead / r.pitch;
+            var o: model.Segment = .{ .along = r.pathAt(across), .across = across };
+            if (n > 0) {
                 var tries: usize = 0;
-                while (tries < 400 and p.blocked(p.region.boxAt(o))) : (tries += 1) o = o.step(dir, 0.25);
+                while (tries < 400 and p.blocked(r.boxAt(o))) : (tries += 1) {
+                    across += 0.25;
+                    o = .{ .along = r.pathAt(across), .across = across };
+                }
             }
             try p.origins.append(a, o);
-            try p.boxes.append(a, p.region.boxAt(o));
+            try p.boxes.append(a, r.boxAt(o));
             try p.reach.append(a, 0);
         }
         p.lead = 0;
@@ -1333,8 +1331,6 @@ test "segments pack by gaps, a hard break starts the next, and a tall tile close
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
     const r = try m.addRegion(p, .{ .name = "pad", .origin = .{ .x = 10, .y = 90 }, .w = 5, .h = 2, .pitch = 10 });
-    _ = try m.addSegment(p, r, 0);
-    _ = try m.addSegment(p, r, 0);
     const one = try m.addTile(.{ .designator = "1" });
     const two = try m.addTile(.{ .designator = "2" });
     const tall = try m.addTile(.{ .designator = "T", .h = 2 });
@@ -1368,7 +1364,6 @@ test "a row too long wraps on into a new one, past the soft area, flagged" {
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 100 }, .w = 2, .h = 1, .pitch = 10 });
-    _ = try m.addSegment(p, r, 0);
     for ([_][]const u8{ "A", "B", "C" }) |d| try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = d }) } });
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
@@ -1391,7 +1386,6 @@ test "labels render once per identical legend and sit in their slots" {
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2), .slots = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
@@ -1481,7 +1475,6 @@ test "a legend with characters no face covers is reported on its tile" {
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top", .style = style }} });
     const t = try m.addTile(.{ .designator = "K1", .prototype = key });
     try m.setContent(t, "top", "HQ");
@@ -1504,7 +1497,6 @@ test "changing a prototype changes every tile made from it" {
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2) });
     const flat = try m.addPrototype(.{ .name = "flat" });
     for ([_][]const u8{ "K1", "K2", "K3" }) |d| try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = d, .prototype = key }) } });
@@ -1536,7 +1528,6 @@ test "changing a prototype's slot moves every legend in it, but not a tile's own
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
     const top: model.SlotPrototype = .{ .name = "top", .style = style, .place = .{ .inset = .all(1) } };
     const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{top} });
     for ([_][]const u8{ "K1", "K2", "K3" }) |d| {
@@ -1574,7 +1565,6 @@ test "tiles are drawn from their prototype's art, stretched; bad art is drawn pl
     defer m.deinit();
     const p = try m.addPanel("board", 120, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
 
     // A calculator key: a dark body, a lighter top, and a gold band across
     // its front, from the same drawing code as any other art.
@@ -1692,96 +1682,98 @@ test "blanks take their length in a track, and every item's span is reported" {
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
 }
 
-/// Moves segment `seg` of region `r` as the GUI does: with the origins
-/// and the other bands from a fresh solve.
-fn moveIn(m: *Model, labels: *Labels, p: usize, r: usize, seg: usize, along: f64, across: f64) !void {
-    var s = try solve(testing.allocator, m, p, labels);
-    defer s.deinit();
-    var obuf: [64]model.Segment = undefined;
-    var abuf: [64]Box = undefined;
-    const kept = m.panels.items[p].regions.items[r].segments.items.len;
-    try m.moveSegment(p, r, seg, s.origins(r, &obuf), along, across, s.obstacles(r, seg, kept, &abuf));
+test "segments step down at an even pitch; the path's control points set where each starts" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("board", 200, 200);
+    const key = try m.addPrototype(.{ .name = "key" });
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 190 }, .prototype = key, .count = 12, .length = 6, .pitch = 10 });
+    // One tile a row, ten rows, made as the flow reaches them.
+    for (0..10) |t| {
+        _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
+        if (t < 9) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+    }
+    var labels: Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    {
+        // The default path: straight down from the region's corner.
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectEqual(10, s.tracks.len);
+        for (s.tracks, 0..) |t, k| {
+            try testing.expectApproxEqAbs(@as(f64, 0), t.origin.along, 1e-9);
+            try testing.expectApproxEqAbs(@as(f64, @floatFromInt(k)), t.origin.across, 1e-9);
+        }
+    }
+    // An S: out to 3 u at row 3, back to 0 at row 6, out to 2 at row 9.
+    _ = try m.addControlPoint(p, r, 3, 3);
+    const back = try m.addControlPoint(p, r, 0, 6);
+    _ = try m.addControlPoint(p, r, 2, 9);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        const o = s.tracks;
+        // Rows still step down one pitch each, whatever the path does.
+        for (o, 0..) |t, k| try testing.expectApproxEqAbs(@as(f64, @floatFromInt(k)), t.origin.across, 1e-9);
+        // The path passes through its points, peaking there, and between
+        // them stays between their values.
+        try testing.expectApproxEqAbs(@as(f64, 3), o[3].origin.along, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 0), o[6].origin.along, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 2), o[9].origin.along, 1e-9);
+        try testing.expect(o[1].origin.along > 0 and o[1].origin.along < o[2].origin.along and o[2].origin.along < 3);
+        try testing.expect(o[4].origin.along < 3 and o[4].origin.along > o[5].origin.along and o[5].origin.along > 0);
+        try testing.expect(o[2].origin.along <= 3 and o[4].origin.along <= 3);
+        // The tile is where its row is.
+        try testing.expectApproxEqAbs(@as(f64, 10 + 30), s.tiles[3].pitch_box.x0, 1e-9);
+    }
+    // Moving a control point moves the rows around it; removing one lets
+    // the path straighten.
+    try m.moveControlPoint(back, 1, 6);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 1), s.tracks[6].origin.along, 1e-9);
+    }
+    // Bending where a row is: the point there moves, or one is made.
+    _ = try m.bendPath(p, r, 6, 0.5, 6);
+    try testing.expectEqual(3, m.panels.items[p].regions.items[r].path.items.len);
+    _ = try m.bendPath(p, r, 8, 1.5, 8);
+    try testing.expectEqual(4, m.panels.items[p].regions.items[r].path.items.len);
+    try m.removeControlPoint(back);
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        try testing.expectApproxEqAbs(@as(f64, 1.5), s.tracks[8].origin.along, 1e-9);
+    }
+    // Content removed: the path keeps its points.
+    const items = &m.panels.items[p].regions.items[r].items;
+    while (items.items.len > 3) try m.removeAt(p, r, items.items.len - 1);
+    try testing.expectEqual(3, m.panels.items[p].regions.items[r].path.items.len);
 }
 
-test "segments follow a path: moving one bends it, the next ones follow, and none may overlap" {
+test "an older document's moved origins are read as control points" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 100 }, .prototype = key, .count = 4, .length = 4, .pitch = 10 });
-    // Two tiles a row, each row ended by a hard break: three rows, made as
-    // the flow reaches them, straight down.
-    for (0..3) |t| {
-        for (0..2) |_| _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-        if (t < 2) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 6, .length = 4, .pitch = 10 });
+    for (0..4) |t| {
+        _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
+        if (t < 3) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
     }
-    try testing.expectEqual(1, m.panels.items[p].regions.items[r].segments.items.len);
+    const segs = &m.panels.items[p].regions.items[r].segments;
+    try segs.append(m.arena.allocator(), .{});
+    try segs.append(m.arena.allocator(), .{ .along = 2, .across = 2, .moved = true });
     var labels: Labels = .init(gpa, &.{});
     defer labels.deinit();
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectEqual(3, s.tracks.len);
-        try testing.expectApproxEqAbs(@as(f64, 80), s.tracks[2].box.y1, 1e-9);
-        try testing.expectEqual(3, s.flows[0].segments);
-    }
-    // Row 2 down 0.5 u: the path bends there, and row 3 follows it.
-    try moveIn(&m, &labels, p, r, 1, 0, 0.5);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 85), s.tracks[1].box.y1, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 75), s.tracks[2].box.y1, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 75), s.tiles[4].pitch_box.y1, 1e-9);
-        try testing.expectEqual(0, s.issues.len);
-    }
-    // Row 3 0.5 u right: the path's last piece now leans right, so a
-    // fourth row goes on that way, one row thickness along it.
-    try moveIn(&m, &labels, p, r, 2, 0.5, 0);
-    _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
-    _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectEqual(4, s.tracks.len);
-        // On the path's continuation: at least one thickness along it, and
-        // on past where it would overlap row 3 (a slant packs closer).
-        const d = model.pathDirection(s.tracks[1].origin, s.tracks[2].origin);
-        const o3 = s.tracks[2].origin;
-        const o4 = s.tracks[3].origin;
-        const t = (o4.along - o3.along) / d[0];
-        try testing.expect(t >= 1);
-        try testing.expectApproxEqAbs(o3.across + d[1] * t, o4.across, 1e-9);
-        try testing.expect(!model.overlaps(s.tracks[2].box, s.tracks[3].box));
-    }
-    // Onto row 1: refused.
-    try testing.expectError(error.NoRoom, moveIn(&m, &labels, p, r, 1, 0, -1));
-    // Content removed from the end: the segments it no longer reaches are
-    // not drawn, but those moved by hand keep their places.
-    const items = &m.panels.items[p].regions.items[r].items;
-    const removed = try gpa.dupe(model.Item, items.items[2..]);
-    defer gpa.free(removed);
-    while (items.items.len > 2) try m.removeAt(p, r, items.items.len - 1);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectEqual(1, s.tracks.len);
-        m.trimSegments(p, r, s.flows[0].segments);
-    }
-    // Rows 2 and 3 were moved: kept, with row 1 before them.
-    const kept = m.panels.items[p].regions.items[r].segments.items;
-    try testing.expectEqual(3, kept.len);
-    try testing.expect(kept[2].moved);
-    // Content back: row 3 is where it was moved to.
-    for (removed) |it| try m.place(p, r, null, it);
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectApproxEqAbs(kept[2].along, s.tracks[2].origin.along, 1e-9);
-    try testing.expectApproxEqAbs(kept[2].across, s.tracks[2].origin.across, 1e-9);
-    // Unmoved segments past the end go.
-    m.trimSegments(p, r, 1);
-    try testing.expectEqual(3, m.panels.items[p].regions.items[r].segments.items.len);
+    try testing.expectApproxEqAbs(@as(f64, 2), s.tracks[2].origin.along, 1e-9);
+    // Changing the path adopts them as control points.
+    _ = try m.addControlPoint(p, r, 0, 3);
+    try testing.expectEqual(2, m.panels.items[p].regions.items[r].path.items.len);
 }
 
 test "segments past the soft area are flagged, and past the panel the region is" {

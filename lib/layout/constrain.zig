@@ -318,8 +318,8 @@ fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
             const sid = r.style orelse return null;
             if (sid >= m.styles.items.len) return null;
             const cap = m.styles.items[sid].spec.cap_height;
-            const across: f64 = if (r.segments.items.len > 0) r.segments.items[0].across else 0;
-            return .{ .g = 1 - at, .c = -(across * r.pitch + (r.pitch + cap) / 2) };
+            // The first row is at the region's top.
+            return .{ .g = 1 - at, .c = -(r.pitch + cap) / 2 };
         },
         else => return null,
     }

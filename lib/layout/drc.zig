@@ -139,7 +139,6 @@ test "ink past a margin is found; a panel in the margin alone is not" {
     // No panel margins: this test is about the sheet's.
     try m.setPanelMargins(p, .{});
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 30 }, .w = 3, .h = 1, .pitch = 19.05 });
-    _ = try m.addSegment(p, r, 0);
     const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{.{ .name = "top", .style = style }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });

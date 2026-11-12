@@ -242,9 +242,17 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
     var name_buf: [16]u8 = undefined;
     var n: usize = 0;
     for (rows, 0..) |row, ri| {
-        _ = try m.addSegment(p, r, row.gap);
-        // One flow for the whole keyboard: a hard break ends each row.
-        if (ri > 0) try m.place(p, r, null, .{ .what = .hard_break });
+        // One flow for the whole keyboard: a hard break ends each row. A
+        // row with space before it (the function row's gap) starts a
+        // paragraph whose style puts it there.
+        if (ri > 0) {
+            if (row.gap > 0) {
+                var nb: [48]u8 = undefined;
+                const name = try std.fmt.bufPrint(&nb, "Row gap {d} u", .{row.gap});
+                const ps = try m.addParagraphStyle(.{ .name = name, .space_before = row.gap * pitch });
+                try m.insertParagraph(p, r, m.panels.items[p].regions.items[r].items.items.len, ps);
+            } else try m.place(p, r, null, .{ .what = .hard_break });
+        }
         for (row.entries) |e| {
             n += 1;
             const name = try std.fmt.bufPrint(&name_buf, "K{d}", .{n});
