@@ -16,6 +16,7 @@ pub const history = @import("history.zig");
 pub const fonts = @import("fonts.zig");
 pub const import = @import("import.zig");
 pub const constrain = @import("constrain.zig");
+pub const edit = @import("edit.zig");
 
 pub const Model = model.Model;
 pub const TileId = model.TileId;

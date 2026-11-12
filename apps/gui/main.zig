@@ -3185,8 +3185,9 @@ fn canvas() void {
     defer dvui.clipSet(clip);
 
     // With a panel or the canvas as the context, typed text makes a
-    // label: ask for text input, which the backend sends only on request.
-    if (state.context == .panel and track_cursor == null and !canvas_prompt and cursorKeysReach()) {
+    // label, and at the flow cursor it goes into the flow: ask for text
+    // input, which the backend sends only on request.
+    if (((state.context == .panel and track_cursor == null) or track_cursor != null) and !canvas_prompt and cursorKeysReach()) {
         const ns_ = dvui.windowNaturalScale();
         dvui.wantTextInput(.{ .x = area.x / ns_, .y = area.y / ns_, .w = area.w / ns_, .h = area.h / ns_ });
     }
@@ -5031,6 +5032,19 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // Typing with a panel or the canvas as the context makes a label
         // where the last click landed, and the expression line takes the
         // rest of the typing.
+        // Typing at the flow cursor goes into the flow.
+        if (e.evt == .text and !e.handled and track_cursor != null and !canvas_prompt and cursorKeysReach()) {
+            const txt = switch (e.evt.text.action) {
+                .value => |v| v.txt,
+                else => "",
+            };
+            if (txt.len > 0 and txt[0] >= ' ') {
+                e.handle(@src(), box.data());
+                typeIntoFlow(txt);
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         if (e.evt == .text and !e.handled and track_cursor == null and state.tool == .select and !canvas_prompt and cursorKeysReach()) {
             const txt = switch (e.evt.text.action) {
                 .value => |v| v.txt,
@@ -7205,6 +7219,7 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
         if (!contains(b, at)) continue;
         const along = if (t.major == .row) at.x - b.x0 else b.y1 - at.y;
         flow_anchor = null;
+        typing_seq += 1;
         // The nearest place in that segment the cursor can stop.
         var best: ?Stop = null;
         for (flowStops(head.panel, head.region)) |st| {
@@ -7555,7 +7570,35 @@ fn cursorKey(key: dvui.Event.Key) bool {
     const shift = key.mod.shift();
     const c = track_cursor orelse return false;
     // Movement as in a text field (dvui's bindings), Shift selecting.
-    if (flowMoveKey(key)) return true;
+    if (flowMoveKey(key)) {
+        typing_seq += 1;
+        return true;
+    }
+    if (key.action == .down) {
+        if (key.matchBind("copy")) {
+            copyFlowSelection(false);
+            return true;
+        }
+        if (key.matchBind("cut")) {
+            copyFlowSelection(true);
+            return true;
+        }
+        if (key.matchBind("paste")) {
+            const text = dvui.clipboardText();
+            if (text.len > 0) typeIntoFlow(text);
+            typing_seq += 1;
+            return true;
+        }
+        if (key.matchBind("select_all")) {
+            const stops = flowStops(c.panel, c.region);
+            if (stops.len > 0) {
+                flow_anchor = .{ .index = stops[0].index, .offset = stops[0].offset };
+                track_cursor.?.index = stops[stops.len - 1].index;
+                track_cursor.?.offset = stops[stops.len - 1].offset;
+            }
+            return true;
+        }
+    }
     const tile_codes = [_]dvui.enums.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
     const blank_codes = [_]dvui.enums.Key{ .q, .w, .e, .r, .t, .y, .u, .i, .o, .p };
     // Tiles and blanks while the document has a prototype; text and
@@ -7572,42 +7615,36 @@ fn cursorKey(key: dvui.Event.Key) bool {
     };
     const region = state.model.panels.items[c.panel].regions.items[c.region];
     const len = region.items.items.len;
-    var next = c;
     switch (code) {
-        .a => {
-            insertAtCursor(.run, 0);
-            return true;
-        },
         .tab => {
             if (!tile_palette_shown) return false;
             cyclePalettePrototype(false);
             return true;
         },
-        .g => {
-            toggleBindAtCursor();
-            return true;
-        },
-        // In text, Enter ends the paragraph and Shift+Enter the line; in a
-        // track of tiles, Enter ends the row.
+        // In text, Enter ends the paragraph and Shift+Enter the line (a
+        // run is split where the cursor is); in a track of tiles, Enter
+        // ends the row.
         .enter, .kp_enter => {
-            insertAtCursor(if (shift or region.style == null) .hard_break else .paragraph, 0);
+            _ = deleteFlowSelection();
+            const cc = track_cursor.?;
+            const pos = act(.breakAt, .{ cc.panel, cc.region, flowPos(cc), !(shift or region.style == null) }) catch return true;
+            setFlowPos(pos);
+            typing_seq += 1;
             return true;
         },
         .backspace => {
-            if (c.offset > 0) {
-                state.status = "Deleting within text comes next. ";
-                return true;
-            }
-            if (c.index == 0) return true;
-            act(.removeAt, .{c.panel, c.region, c.index - 1}) catch {};
-            next.index -= 1;
+            if (deleteFlowSelection()) return true;
+            const from = charBeforeCursor(c) orelse return true;
+            const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, from, flowPos(c) }) catch return true;
+            setFlowPos(pos);
+            return true;
         },
         .delete => {
-            if (c.offset > 0) {
-                state.status = "Deleting within text comes next. ";
-                return true;
-            }
-            if (c.index < len) act(.removeAt, .{c.panel, c.region, c.index}) catch {};
+            if (deleteFlowSelection()) return true;
+            const to = charAfterCursor(c, len) orelse return true;
+            const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, flowPos(c), to }) catch return true;
+            setFlowPos(pos);
+            return true;
         },
         .escape => {
             // A selection first; then the cursor.
@@ -7620,9 +7657,97 @@ fn cursorKey(key: dvui.Event.Key) bool {
         },
         else => return false,
     }
-    track_cursor = next;
-    validateCursor();
+}
+
+// Editing the flow in place -----------------------------------------------------
+
+/// Typing since the cursor last moved is one undo step.
+var typing_seq: u64 = 0;
+
+fn typingKey() u64 {
+    const c = track_cursor orelse return 0;
+    return mergeKey(.{ "type", c.panel, c.region, typing_seq });
+}
+
+fn flowPos(c: TrackCursor) layout.model.FlowPos {
+    return .{ .index = c.index, .offset = c.offset };
+}
+
+fn setFlowPos(p: layout.model.FlowPos) void {
+    if (track_cursor) |*c| {
+        c.index = p.index;
+        c.offset = p.offset;
+    }
+    flow_anchor = null;
+}
+
+/// The selection in the flow, when there is one: its two ends.
+fn flowSelection() ?[2]layout.model.FlowPos {
+    const c = track_cursor orelse return null;
+    const an = flow_anchor orelse return null;
+    if (an.index == c.index and an.offset == c.offset) return null;
+    return .{ .{ .index = an.index, .offset = an.offset }, flowPos(c) };
+}
+
+/// Deletes the selection, if there is one; whether there was.
+fn deleteFlowSelection() bool {
+    const c = track_cursor orelse return false;
+    const sel = flowSelection() orelse return false;
+    const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, sel[0], sel[1] }) catch return true;
+    setFlowPos(pos);
     return true;
+}
+
+/// Types `text` in at the cursor, over the selection if there is one.
+fn typeIntoFlow(text: []const u8) void {
+    _ = deleteFlowSelection();
+    const c = track_cursor orelse return;
+    const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
+    const pos = actM(typingKey(), .insertText, .{ c.panel, c.region, flowPos(c), text, style }) catch return;
+    setFlowPos(pos);
+}
+
+/// Copies the selection as plain text (and with `cut`, deletes it).
+fn copyFlowSelection(cut: bool) void {
+    const c = track_cursor orelse return;
+    const sel = flowSelection() orelse return;
+    const text = state.model.flowText(state.gpa, c.panel, c.region, sel[0], sel[1]) catch return;
+    defer state.gpa.free(text);
+    dvui.clipboardTextSet(text);
+    if (cut) {
+        _ = deleteFlowSelection();
+        typing_seq += 1;
+    }
+}
+
+/// Where the character before the cursor starts: in the run it is in,
+/// else at the end of the run before, else the item before.
+fn charBeforeCursor(c: TrackCursor) ?layout.model.FlowPos {
+    const a = dvui.currentWindow().arena();
+    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) {
+        const at = layout.edit.charBefore(a, items[c.index].what.run.content, c.offset) catch null;
+        return .{ .index = c.index, .offset = at orelse 0 };
+    }
+    if (c.index == 0) return null;
+    const k = c.index - 1;
+    if (items[k].what == .run) {
+        const content = items[k].what.run.content;
+        if (layout.edit.charBefore(a, content, @intCast(content.len)) catch null) |at| return .{ .index = k, .offset = at };
+    }
+    return .{ .index = k };
+}
+
+/// Where the character at the cursor ends.
+fn charAfterCursor(c: TrackCursor, len: usize) ?layout.model.FlowPos {
+    if (c.index >= len) return null;
+    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    if (items[c.index].what == .run) {
+        const content = items[c.index].what.run.content;
+        const end = (layout.edit.charAfter(dvui.currentWindow().arena(), content, c.offset) catch null) orelse @as(u32, @intCast(content.len));
+        return if (end >= content.len) .{ .index = c.index + 1 } else .{ .index = c.index, .offset = end };
+    }
+    return .{ .index = c.index + 1 };
 }
 
 /// Inserts at the cursor, which moves past it: a tile or a blank `size` u
@@ -7980,11 +8105,12 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{});
         defer line.deinit();
         dvui.labelNoFmt(@src(), switch (kind) {
-            .run => "A",
+            // Letters type text now: these two have no key.
+            .run => "",
             .hard_break => if (inTextTrack()) "Shift+Enter" else "Enter",
             .paragraph => "Enter",
             .next_prototype => "Tab",
-            .join => "G",
+            .join => "",
         }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
         var pic = dvui.box(@src(), .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 22, .h = 18 }, .max_size_content = .{ .w = 22, .h = 18 } });
         const r = pic.data().contentRectScale().r;

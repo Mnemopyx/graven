@@ -22,6 +22,7 @@ const Allocator = std.mem.Allocator;
 const geom = engine.geom;
 const art_ = @import("art.zig");
 const constrain_ = @import("constrain.zig");
+const edit_ = @import("edit.zig");
 
 pub const TileId = enum(u32) { _ };
 
@@ -309,6 +310,10 @@ pub const Run = struct {
     style: StyleId = 0,
     content: []const u8,
 };
+
+/// A place in a track's flow: before item `index`, or `offset` bytes into
+/// the markup of the run there.
+pub const FlowPos = struct { index: usize, offset: u32 = 0 };
 
 /// One item in a track's flow, with any gap before it, u. Text, tiles and
 /// equations share one stream: a tile of any prototype (a blank is a tile
@@ -2963,6 +2968,173 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    // Editing a flow in place ------------------------------------------------
+    //
+    // As a word processor does: text typed in at a place, a range deleted,
+    // a line or paragraph broken. Within a run the markup stays whole (see
+    // `edit`): only characters are removed, and a run split in two keeps
+    // what each part reads as.
+
+    fn runAt(m: *Model, panel: usize, region: usize, index: usize) ?*Run {
+        const items = m.flow(panel, region).items;
+        if (index >= items.len or items[index].what != .run) return null;
+        return &items[index].what.run;
+    }
+
+    /// Types plain `text` in at `at` (newlines break paragraphs): into the
+    /// run there, else onto the end of the run before, else as a new run in
+    /// `style`. Returns the place after it.
+    pub fn insertText(m: *Model, panel: usize, region: usize, at: FlowPos, text: []const u8, style: StyleId) Error!FlowPos {
+        var pos = at;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        var first = true;
+        while (lines.next()) |line_raw| {
+            if (!first) pos = try m.breakAt(panel, region, pos, true);
+            first = false;
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            if (line.len == 0) continue;
+            var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+            defer scratch.deinit();
+            const esc = try edit_.escape(scratch.allocator(), line);
+            const items = m.flow(panel, region).items;
+            if (pos.index > items.len) return error.NoSuchItem;
+            if (m.runAt(panel, region, pos.index)) |r| {
+                // Into the run at the place.
+                const o = @min(pos.offset, r.content.len);
+                r.content = try std.mem.concat(m.a(), u8, &.{ r.content[0..o], esc, r.content[o..] });
+                pos = .{ .index = pos.index, .offset = @intCast(o + esc.len) };
+            } else if (pos.offset == 0 and pos.index > 0 and m.runAt(panel, region, pos.index - 1) != null) {
+                // Onto the end of the run before.
+                const r = m.runAt(panel, region, pos.index - 1).?;
+                r.content = try std.mem.concat(m.a(), u8, &.{ r.content, esc });
+            } else {
+                try m.place(panel, region, pos.index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, esc) } } });
+                pos = .{ .index = pos.index + 1 };
+            }
+            // At the end of a run: the place before what follows it.
+            if (m.runAt(panel, region, pos.index)) |r| if (pos.offset >= r.content.len) {
+                pos = .{ .index = pos.index + 1 };
+            };
+        }
+        m.revision += 1;
+        return pos;
+    }
+
+    /// Deletes what lies between `from` and `to` (either way round): the
+    /// characters of the runs at either end, and every item between; runs
+    /// left side by side in one style are joined. Returns where it was.
+    pub fn deleteRange(m: *Model, panel: usize, region: usize, from: FlowPos, to: FlowPos) Error!FlowPos {
+        var f = from;
+        var t = to;
+        if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
+        var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const len = m.flow(panel, region).items.len;
+        if (f.index > len or t.index > len) return error.NoSuchItem;
+        if (f.index == t.index) {
+            if (m.runAt(panel, region, f.index)) |r| if (t.offset > f.offset) {
+                r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, t.offset));
+                // Nothing left of it: it goes.
+                if (!try edit_.hasChars(sa, r.content)) {
+                    try m.removeAt(panel, region, f.index);
+                    f.offset = 0;
+                }
+            };
+            m.revision += 1;
+            return f;
+        }
+        // The start of the run the range ends in.
+        if (t.offset > 0) if (m.runAt(panel, region, t.index)) |r| {
+            r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, 0, t.offset));
+        };
+        // The end of the run it starts in.
+        var keep = f.index;
+        if (f.offset > 0) if (m.runAt(panel, region, f.index)) |r| {
+            r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, @intCast(r.content.len)));
+            keep = f.index + 1;
+        };
+        // Every item between.
+        var k = t.index;
+        while (k > keep) {
+            k -= 1;
+            try m.removeAt(panel, region, k);
+        }
+        var result: FlowPos = if (f.offset > 0) f else .{ .index = keep };
+        // Runs left side by side, in one style: one run.
+        if (keep > 0) if (m.runAt(panel, region, keep - 1)) |a_run| if (m.runAt(panel, region, keep)) |b_run| {
+            if (a_run.style == b_run.style) {
+                const joined_at: u32 = @intCast(a_run.content.len);
+                a_run.content = try std.mem.concat(m.a(), u8, &.{ a_run.content, b_run.content });
+                try m.removeAt(panel, region, keep);
+                if (f.offset == 0) result = .{ .index = keep - 1, .offset = joined_at };
+            }
+        };
+        // A run left with nothing in it goes.
+        if (m.runAt(panel, region, result.index)) |r| if (!try edit_.hasChars(sa, r.content)) {
+            try m.removeAt(panel, region, result.index);
+            result.offset = 0;
+        };
+        if (m.runAt(panel, region, result.index)) |r| if (result.offset >= r.content.len and result.offset > 0) {
+            result = .{ .index = result.index + 1 };
+        };
+        m.revision += 1;
+        return result;
+    }
+
+    /// Breaks the flow at `at`: a new paragraph (in the style of the one
+    /// it splits) or a line break. Inside a run the run is split, its
+    /// markup kept whole; inside an equation's structure the break goes
+    /// after the run. Returns the place after the break.
+    pub fn breakAt(m: *Model, panel: usize, region: usize, at: FlowPos, paragraph: bool) Error!FlowPos {
+        var index = at.index;
+        if (at.offset > 0) if (m.runAt(panel, region, at.index)) |r| {
+            index = at.index + 1;
+            if (at.offset < r.content.len) {
+                var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+                defer scratch.deinit();
+                if (try edit_.splitAt(scratch.allocator(), r.content, at.offset)) |parts| {
+                    const style = r.style;
+                    r.content = try m.a().dupe(u8, parts[0]);
+                    try m.place(panel, region, index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, parts[1]) } } });
+                }
+            }
+        };
+        if (paragraph) {
+            const style = m.paragraphStyleAt(panel, region, index);
+            try m.insertParagraph(panel, region, index, style);
+            return .{ .index = index + 1 };
+        }
+        const n = try m.insertBreak(panel, region, index);
+        return .{ .index = index + n };
+    }
+
+    /// The plain text between `from` and `to` (either way round): the
+    /// characters of runs, a newline for each break or paragraph.
+    pub fn flowText(m: *Model, gpa: Allocator, panel: usize, region: usize, from: FlowPos, to: FlowPos) Error![]u8 {
+        var f = from;
+        var t = to;
+        if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        var out: std.ArrayList(u8) = .empty;
+        const items = m.flow(panel, region).items;
+        var k = f.index;
+        while (k <= t.index and k < items.len) : (k += 1) {
+            const lo: u32 = if (k == f.index) f.offset else 0;
+            switch (items[k].what) {
+                .run => |r| {
+                    const hi: u32 = if (k == t.index) t.offset else @intCast(r.content.len);
+                    if (hi > lo) try edit_.plainText(sa, r.content, lo, hi, &out);
+                },
+                .hard_break, .paragraph => if (k < t.index) try out.append(sa, '\n'),
+                else => {},
+            }
+        }
+        return gpa.dupe(u8, out.items);
+    }
+
     /// Removes item `index` of a track: a blank, run or break, or a tile,
     /// which leaves every track it is in.
     pub fn removeAt(m: *Model, panel: usize, region: usize, index: usize) Error!void {
@@ -3900,4 +4072,42 @@ test "composed fonts: members in order, styles set in them, and a font in use ke
     try m.removeFontMember(f, 0);
     try m.removeFont(f);
     try std.testing.expectEqual(0, m.fonts.items.len);
+}
+
+test "a flow is edited in place: typed into, deleted across items, broken and joined" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 100, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2.5 });
+    const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
+    const items = &m.panels.items[p].regions.items[r].items;
+    // Typing into an empty flow makes a run; more goes on its end.
+    var at = try m.insertText(p, r, .{ .index = 0 }, "Hello", body);
+    try std.testing.expectEqual(FlowPos{ .index = 1 }, at);
+    at = try m.insertText(p, r, at, " world {1}", body);
+    try std.testing.expectEqualStrings("Hello world \\{1\\}", items.items[0].what.run.content);
+    // A paragraph broken inside it: two runs either side of a separator.
+    at = try m.breakAt(p, r, .{ .index = 0, .offset = 5 }, true);
+    try std.testing.expectEqual(@as(usize, 3), items.items.len);
+    try std.testing.expectEqualStrings("Hello", items.items[0].what.run.content);
+    try std.testing.expectEqualStrings(" world \\{1\\}", items.items[2].what.run.content);
+    try std.testing.expectEqual(FlowPos{ .index = 2 }, at);
+    // Deleting across the separator joins the runs again, less what lay
+    // between: "Hel" + "orld {1}".
+    at = try m.deleteRange(p, r, .{ .index = 0, .offset = 3 }, .{ .index = 2, .offset = 2 });
+    try std.testing.expectEqual(@as(usize, 1), items.items.len);
+    try std.testing.expectEqualStrings("Helorld \\{1\\}", items.items[0].what.run.content);
+    try std.testing.expectEqual(FlowPos{ .index = 0, .offset = 3 }, at);
+    // Copied as plain text.
+    const text = try m.flowText(gpa, p, r, .{ .index = 0, .offset = 0 }, .{ .index = 1 });
+    defer gpa.free(text);
+    try std.testing.expectEqualStrings("Helorld {1}", text);
+    // Deleting a whole run takes it away.
+    _ = try m.deleteRange(p, r, .{ .index = 0 }, .{ .index = 1 });
+    try std.testing.expectEqual(@as(usize, 0), items.items.len);
+    // Pasted lines become paragraphs.
+    at = try m.insertText(p, r, .{ .index = 0 }, "one\ntwo", body);
+    try std.testing.expectEqual(@as(usize, 3), items.items.len);
+    try std.testing.expect(items.items[1].what == .paragraph);
 }
