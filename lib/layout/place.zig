@@ -732,8 +732,8 @@ fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: 
     return spans.items;
 }
 
-/// Segment `seg`'s length along, mm: from where the path starts it to the
-/// far edge of its region's soft area.
+/// Segment `seg`'s length along, mm: a whole segment's, wherever the path
+/// puts it.
 fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
     const b = path.boxes.items[seg];
     return if (rows) b.width() else b.height();
@@ -745,16 +745,6 @@ fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f6
     const sid = region.style orelse return 0;
     if (labels.context(sid)) |ctx| return ctx.spec.cap_height;
     return if (sid < m.styles.items.len) m.styles.items[sid].spec.cap_height else 0;
-}
-
-/// Which point of a line in `style` (null: none) sits on `region`'s path.
-fn anchorOf(style: ?model.ParagraphStyle, region: model.TileRegion) model.Align {
-    const st = style orelse return region.alignment;
-    return switch (st.alignment) {
-        .start, .justify => .start,
-        .centre => .centre,
-        .end => .end,
-    };
 }
 
 /// The bounds and alignment of a segment of a paragraph in `style` (null:
@@ -821,9 +811,6 @@ const Path = struct {
     /// Further space, mm, before the next segment made (a paragraph's
     /// space before and after, or its lines' gap).
     lead: f64 = 0,
-    /// Which point of the next segment's line sits on the path: its
-    /// paragraph's alignment (a justified one by its start).
-    anchor: model.Align = .start,
 
     fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
         const r = p.region;
@@ -833,27 +820,19 @@ const Path = struct {
             // across from the one before; along, wherever the path is
             // there. Past a place already taken, on across.
             var across: f64 = if (n == 0) 0 else p.origins.items[n - 1].across + 1 + r.gap + p.lead / r.pitch;
-            var o: model.Segment = .{ .along = p.alongAt(across), .across = across };
+            var o: model.Segment = .{ .along = r.pathAt(across), .across = across };
             if (n > 0) {
                 var tries: usize = 0;
-                while (tries < 400 and p.blocked(r.bandAt(o, p.anchor))) : (tries += 1) {
+                while (tries < 400 and p.blocked(r.boxAt(o))) : (tries += 1) {
                     across += 0.25;
-                    o = .{ .along = p.alongAt(across), .across = across };
+                    o = .{ .along = r.pathAt(across), .across = across };
                 }
             }
             try p.origins.append(a, o);
-            try p.boxes.append(a, r.bandAt(o, p.anchor));
+            try p.boxes.append(a, r.boxAt(o));
             try p.reach.append(a, 0);
         }
         p.lead = 0;
-    }
-
-    /// Where the next line's anchor is along at `across`, u: on the path,
-    /// once it is shaped; on an unshaped track, where the anchor sits in
-    /// a whole segment.
-    fn alongAt(p: *const Path, across: f64) f64 {
-        const r = p.region;
-        return if (r.shaped()) r.pathAt(across) else r.anchorRef(p.anchor);
     }
 
     fn blocked(p: *const Path, b: Box) bool {
@@ -1009,10 +988,9 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
         var seen: std.AutoHashMapUnmanaged(TileId, void) = .empty;
         // The segments, made as the flow reaches them: their origins along
         // the path, their bands, and how far each one's content reaches.
-        // The paragraph being set: its alignment says which point of each
-        // line sits on the path.
+        // The paragraph being set.
         var style: ?model.ParagraphStyle = if (region.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
-        var path: Path = .{ .region = &region, .avoid = tracks.items, .anchor = anchorOf(style, region) };
+        var path: Path = .{ .region = &region, .avoid = tracks.items };
         try path.ensure(a, 0);
         // Each segment's alignment shift, set when the flow leaves it.
         var shifts: std.ArrayList(f64) = .empty;
@@ -1053,7 +1031,6 @@ pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Err
                         const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
                         path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
                         style = next;
-                        path.anchor = anchorOf(style, region);
                         first_line = true;
                     } else path.lead = if (style) |st| st.line_gap else 0;
                     try flow.enter(a, &path, seg, tall.items, &closed);
@@ -1713,7 +1690,7 @@ test "blanks take their length in a track, and every item's span is reported" {
     try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
 }
 
-test "each line sits on the path by its paragraph's alignment: start, centre or end" {
+test "each segment is bound to the path by its centre; its paragraph's alignment arranges what is in it" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
@@ -1741,36 +1718,30 @@ test "each line sits on the path by its paragraph's alignment: start, centre or 
         const want = [_]f64{ 10, 10, 35, 35, 60, 60 };
         for (s.tiles, want) |t, x| try testing.expectApproxEqAbs(x, t.pitch_box.x0, 1e-9);
     }
-    // A straight path 3 u in: starts, centres and ends on it.
-    _ = try m.addControlPoint(p, r, 3, 0);
-    _ = try m.addControlPoint(p, r, 3, 9);
+    // A straight path 2 u right of the middle: every segment moves with
+    // it, whole, bound by its centre; alignment arranges what is in it.
+    _ = try m.addControlPoint(p, r, 5, 0);
+    _ = try m.addControlPoint(p, r, 5, 9);
     {
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
-        const want = [_]f64{ 40, 40, 35, 35, 30, 30 };
+        const want = [_]f64{ 30, 30, 55, 55, 80, 80 };
         for (s.tiles, want) |t, x| try testing.expectApproxEqAbs(x, t.pitch_box.x0, 1e-9);
-        for (s.tracks) |t| try testing.expectApproxEqAbs(@as(f64, 3), t.origin.along, 1e-9);
-        // Each segment is the room its anchor leaves: on to the far edge,
-        // as far each way as the nearer edge allows, back to the near one.
-        const widths = [_]f64{ 30, 30, 60, 60, 30, 30 };
-        for (s.tracks, widths) |t, w| try testing.expectApproxEqAbs(w, t.box.width(), 1e-9);
-    }
-    // Near an edge, a centred line has little room: it is flagged, not
-    // pushed off the path.
-    _ = try m.addControlPoint(p, r, 0.25, 2);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 5), s.tracks[2].box.width(), 1e-9);
+        for (s.tracks) |t| {
+            try testing.expectApproxEqAbs(@as(f64, 5), t.origin.along, 1e-9);
+            try testing.expectApproxEqAbs(@as(f64, 60), t.box.width(), 1e-9);
+            try testing.expectApproxEqAbs(@as(f64, 60), (t.box.x0 + t.box.x1) / 2, 1e-9);
+        }
+        // Past the reserved space: flagged, not cut short.
         var flagged = false;
-        for (s.issues) |is| if (is.kind == .row_overflow and is.row == 2) {
+        for (s.issues) |is| if (is.kind == .past_soft_area) {
             flagged = true;
         };
         try testing.expect(flagged);
     }
 }
 
-test "segments step down at an even pitch; the path's control points set where each starts" {
+test "segments step down at an even pitch; the path's control points set where each is centred" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
@@ -1785,19 +1756,19 @@ test "segments step down at an even pitch; the path's control points set where e
     var labels: Labels = .init(gpa, &.{});
     defer labels.deinit();
     {
-        // The default path: straight down from the region's corner.
+        // The default path: straight down the middle (3 u in).
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
         try testing.expectEqual(10, s.tracks.len);
         for (s.tracks, 0..) |t, k| {
-            try testing.expectApproxEqAbs(@as(f64, 0), t.origin.along, 1e-9);
+            try testing.expectApproxEqAbs(@as(f64, 3), t.origin.along, 1e-9);
             try testing.expectApproxEqAbs(@as(f64, @floatFromInt(k)), t.origin.across, 1e-9);
         }
     }
-    // An S: out to 3 u at row 3, back to 0 at row 6, out to 2 at row 9.
-    _ = try m.addControlPoint(p, r, 3, 3);
-    const back = try m.addControlPoint(p, r, 0, 6);
-    _ = try m.addControlPoint(p, r, 2, 9);
+    // An S: out to 6 u at row 3, back to 3 at row 6, out to 5 at row 9.
+    _ = try m.addControlPoint(p, r, 6, 3);
+    const back = try m.addControlPoint(p, r, 3, 6);
+    _ = try m.addControlPoint(p, r, 5, 9);
     {
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
@@ -1806,33 +1777,34 @@ test "segments step down at an even pitch; the path's control points set where e
         for (o, 0..) |t, k| try testing.expectApproxEqAbs(@as(f64, @floatFromInt(k)), t.origin.across, 1e-9);
         // The path passes through its points, peaking there, and between
         // them stays between their values.
-        try testing.expectApproxEqAbs(@as(f64, 3), o[3].origin.along, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 0), o[6].origin.along, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 2), o[9].origin.along, 1e-9);
-        try testing.expect(o[1].origin.along > 0 and o[1].origin.along < o[2].origin.along and o[2].origin.along < 3);
-        try testing.expect(o[4].origin.along < 3 and o[4].origin.along > o[5].origin.along and o[5].origin.along > 0);
-        try testing.expect(o[2].origin.along <= 3 and o[4].origin.along <= 3);
-        // The tile is where its row is.
+        try testing.expectApproxEqAbs(@as(f64, 6), o[3].origin.along, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 3), o[6].origin.along, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 5), o[9].origin.along, 1e-9);
+        try testing.expect(o[1].origin.along > 3 and o[1].origin.along < o[2].origin.along and o[2].origin.along < 6);
+        try testing.expect(o[4].origin.along < 6 and o[4].origin.along > o[5].origin.along and o[5].origin.along > 3);
+        try testing.expect(o[2].origin.along <= 6 and o[4].origin.along <= 6);
+        // The tile is where its row is: the row centred 3 u right of the
+        // middle.
         try testing.expectApproxEqAbs(@as(f64, 10 + 30), s.tiles[3].pitch_box.x0, 1e-9);
     }
     // Moving a control point moves the rows around it; removing one lets
     // the path straighten.
-    try m.moveControlPoint(back, 1, 6);
+    try m.moveControlPoint(back, 4, 6);
     {
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 1), s.tracks[6].origin.along, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 4), s.tracks[6].origin.along, 1e-9);
     }
     // Bending where a row is: the point there moves, or one is made.
-    _ = try m.bendPath(p, r, 6, 0.5, 6);
+    _ = try m.bendPath(p, r, 6, 3.5, 6);
     try testing.expectEqual(3, m.panels.items[p].regions.items[r].path.items.len);
-    _ = try m.bendPath(p, r, 8, 1.5, 8);
+    _ = try m.bendPath(p, r, 8, 4.5, 8);
     try testing.expectEqual(4, m.panels.items[p].regions.items[r].path.items.len);
     try m.removeControlPoint(back);
     {
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 1.5), s.tracks[8].origin.along, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 4.5), s.tracks[8].origin.along, 1e-9);
     }
     // Content removed: the path keeps its points.
     const items = &m.panels.items[p].regions.items[r].items;
@@ -1858,7 +1830,10 @@ test "an older document's moved origins are read as control points" {
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectApproxEqAbs(@as(f64, 2), s.tracks[2].origin.along, 1e-9);
+    // The moved origin was the segment's start, 2 u in: its centre is
+    // 2 u right of the middle, and its tile where it was.
+    try testing.expectApproxEqAbs(@as(f64, 4), s.tracks[2].origin.along, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10 + 20), s.tiles[2].pitch_box.x0, 1e-9);
     // Changing the path adopts them as control points.
     _ = try m.addControlPoint(p, r, 0, 3);
     try testing.expectEqual(2, m.panels.items[p].regions.items[r].path.items.len);

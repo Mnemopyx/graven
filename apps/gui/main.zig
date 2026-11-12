@@ -7693,7 +7693,9 @@ fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
     const o = segmentOrigin(pi, region, t) orelse return "";
     // Straight on from the region's origin, one thickness each.
     const across = o.across - @as(f64, @floatFromInt(t));
-    const along = o.along;
+    // Along, from where an unshaped track's segment sits (its middle on
+    // the region's middle).
+    const along = o.along - state.model.panels.items[pi].regions.items[region].middle();
     const rows = state.model.panels.items[pi].regions.items[region].major == .row;
     const across_word = if (rows) (if (across < 0) "up" else "down") else (if (across < 0) "left" else "right");
     const along_word = if (rows) (if (along < 0) "left" else "right") else (if (along < 0) "up" else "down");
