@@ -7036,7 +7036,8 @@ var track_cursor: ?TrackCursor = null;
 var canvas_id: ?dvui.Id = null;
 var palette_ids: [24]dvui.Id = undefined;
 var palette_id_count: usize = 0;
-const palette_height = 212;
+/// Taller with the tile and blank rows (see `tile_palette_shown`).
+const palette_height: f32 = if (tile_palette_shown) 212 else 64;
 const move_palette_height = 124;
 /// How opaque the palette and its buttons are over the canvas.
 const palette_alpha = 0.6;
@@ -7281,13 +7282,19 @@ fn cursorKeysReach() bool {
 }
 
 /// Acts on a key for the flow cursor; whether it was one.
+/// The keyboard tile palette and its keys (digits for tiles, Q to P for
+/// blanks, Tab for the next prototype): hidden for now, while flow editing
+/// is worked on for text and equations; they come back with the Unicode
+/// character palettes.
+const tile_palette_shown = false;
+
 fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
     const c = track_cursor orelse return false;
     const tile_codes = [_]dvui.enums.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
     const blank_codes = [_]dvui.enums.Key{ .q, .w, .e, .r, .t, .y, .u, .i, .o, .p };
     // Tiles and blanks while the document has a prototype; text and
     // breaks always.
-    if (paletteFor(c.panel, c.region)) |pal| {
+    if (tile_palette_shown) if (paletteFor(c.panel, c.region)) |pal| {
         for (tile_codes, 0..) |k, i| if (code == k) {
             if (i < pal.tile_count) insertAtCursor(.tile, pal.tiles[i]);
             return true;
@@ -7296,7 +7303,7 @@ fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
             insertAtCursor(.blank, pal.blanks[i]);
             return true;
         };
-    }
+    };
     const region = state.model.panels.items[c.panel].regions.items[c.region];
     const len = region.items.items.len;
     const rows = region.major == .row;
@@ -7307,6 +7314,7 @@ fn cursorKey(code: dvui.enums.Key, shift: bool) bool {
             return true;
         },
         .tab => {
+            if (!tile_palette_shown) return false;
             cyclePalettePrototype(false);
             return true;
         },
@@ -7622,7 +7630,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
 fn trackPalette() void {
     palette_id_count = 0;
     if (track_cursor == null) return;
-    const palette = paletteFor(track_cursor.?.panel, track_cursor.?.region);
+    const palette = if (tile_palette_shown) paletteFor(track_cursor.?.panel, track_cursor.?.region) else null;
     if (palette) |pal| {
         const name = state.model.prototypes.items[pal.prototype].name;
         dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
