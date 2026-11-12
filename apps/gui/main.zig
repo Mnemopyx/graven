@@ -5280,7 +5280,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     joinClick(state.view.toMm(area, me.p));
                     state.press_consumed = true;
                 } else if (state.tool == .select and me.button.pointer() and primaryMod(me.mod)) {
-                    // Ctrl-click (Cmd on macOS) near a container's edge:
+                    // Ctrl-click (or Cmd-click) near a container's edge:
                     // in or out of the selection.
                     ctrlPick(state.view.toMm(area, me.p));
                     state.press_consumed = true;
@@ -8287,8 +8287,16 @@ var resize_drag: ?struct { id: layout.model.ObjectId, edges: Edges, start: geom.
 var free_cache: ?struct { id: layout.model.ObjectId, rev: u64, f: constrain.Freedom } = null;
 var drag_count: u64 = 0;
 
+/// Whether Ctrl (or Cmd) is held for a click: as the event says, or as
+/// the keyboard is now. The event's modifiers are those of the last key
+/// event the window had, which a Ctrl pressed before the window had the
+/// keyboard (or reported only as a modifier change, as Wayland may) never
+/// was; SDL keeps the live state.
 fn primaryMod(mod: dvui.enums.Mod) bool {
-    return if (builtin.os.tag == .macos) mod.command() else mod.control();
+    if (mod.control() or mod.command()) return true;
+    const c = dvui.backend.c;
+    const live = c.SDL_GetModState();
+    return (live & (c.SDL_KMOD_CTRL | c.SDL_KMOD_GUI)) != 0;
 }
 
 fn hunt_clear() void {
