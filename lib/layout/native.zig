@@ -549,7 +549,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqual(.inch, back.units);
     try testing.expectEqualStrings("V = \\frac{1}{2}", back.panels.items[c].regions.items[r].items.items[1].what.run.content);
     try testing.expect(back.panels.items[c].regions.items[r].items.items[1].what.run.equation);
-    try testing.expectEqual(0.7, back.styles.items[style].spec.script_scale.?);
+    try testing.expectEqual(0.7, back.textStyle(style).spec.script_scale.?);
     try testing.expectEqual(0.1 + 0.2, back.panels.items[p].h);
     try testing.expectEqual(2, back.spaces.items.len);
     try testing.expectEqual(1, back.spaces.items[0].views.items.len);

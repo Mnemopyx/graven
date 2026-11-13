@@ -1339,12 +1339,12 @@ test "composed-font edits undo and redo, and survive saving and reopening" {
     const f = try h.do(&m, .addFont, .{ "Legend", .{ .family = "Inter" } });
     _ = try h.do(&m, .addFontMember, .{ f, 0, .{ .font = .{ .family = "Symbols" }, .coverage = .{ .ranges = &.{.{ .first = 0x2190, .last = 0x21FF }} }, .scale = 1.1 } });
     try h.do(&m, .setStyleFont, .{ style, f });
-    try testing.expectEqual(f, m.styles.items[style].font);
+    try testing.expectEqual(f, m.textStyle(style).font);
     // Undo the style's font and the member; redo the member.
     _ = try h.undo(&m);
     _ = try h.undo(&m);
     try testing.expectEqual(0, m.fonts.items[0].members.items.len);
-    try testing.expectEqual(.none, m.styles.items[style].font);
+    try testing.expectEqual(.none, m.textStyle(style).font);
     _ = try h.redoStep(&m);
     try testing.expectEqual(1.1, m.fonts.items[0].members.items[0].scale);
 

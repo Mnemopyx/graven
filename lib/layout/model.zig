@@ -47,7 +47,9 @@ pub fn within(a: geom.Box, b: geom.Box) bool {
     const tol = 1e-9;
     return a.x0 >= b.x0 - tol and a.y0 >= b.y0 - tol and a.x1 <= b.x1 + tol and a.y1 <= b.y1 + tol;
 }
-pub const StyleId = u16;
+/// A text style's ID: its own object ID. `.none` means the document's
+/// first style.
+pub const StyleId = ObjectId;
 /// The cap height, as a share of the em, that stands in for a style sized
 /// by its em until its font is known: typical of text faces.
 pub const cap_per_em = 0.7;
@@ -117,7 +119,8 @@ pub const Constraint = struct {
 };
 
 /// A paragraph style's index in `Model.paragraph_styles`.
-pub const ParaId = u16;
+/// A paragraph style's ID: its own object ID.
+pub const ParaId = ObjectId;
 
 pub const Sides = struct {
     left: f64 = 0,
@@ -147,6 +150,7 @@ pub const ParagraphAlign = enum { start, centre, end, justify };
 /// and after the paragraph and between its lines, added to where its
 /// segments go along the track's path.
 pub const ParagraphStyle = struct {
+    id: ObjectId = .none,
     name: []const u8,
     alignment: ParagraphAlign = .start,
     indent_start: f64 = 0,
@@ -172,7 +176,7 @@ pub const SlotPlace = struct {
 pub const SlotPrototype = struct {
     name: []const u8,
     place: SlotPlace = .{},
-    style: StyleId = 0,
+    style: StyleId = .none,
 };
 
 /// A tile's own part of one of its prototype's slots, matched by name: its
@@ -334,7 +338,7 @@ pub const PrototypeSketch = struct {
 /// (equations are markup too). For now a run is one unbreakable item, set
 /// as a single line in its style; breaking between its words comes later.
 pub const Run = struct {
-    style: StyleId = 0,
+    style: StyleId = .none,
     content: []const u8,
     /// An equation, built in equation mode: its own item, which text typed
     /// in the flow beside it does not join, and which no run is joined to.
@@ -1231,6 +1235,7 @@ pub const FontVariants = struct {
 };
 
 pub const LabelStyle = struct {
+    id: ObjectId = .none,
     name: []const u8,
     /// The composed font the style is set in; none: the faces `spec`
     /// names directly, in the caller's face table.
@@ -1363,14 +1368,39 @@ pub const Model = struct {
     // Actions -----------------------------------------------------------
 
     pub fn addStyle(m: *Model, name: []const u8, spec: engine.style.Spec) Error!StyleId {
-        try m.styles.append(m.a(), .{ .name = try m.a().dupe(u8, name), .spec = spec });
+        const id = m.newId();
+        try m.styles.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .spec = spec });
         m.revision += 1;
-        return @intCast(m.styles.items.len - 1);
+        return id;
     }
 
     pub fn setStyle(m: *Model, id: StyleId, spec: engine.style.Spec) void {
-        m.styles.items[id].spec = spec;
+        m.textStyle(id).spec = spec;
         m.revision += 1;
+    }
+
+    /// The index of text style `id` in the list (`.none`: the first one).
+    pub fn styleIndex(m: *const Model, id: StyleId) ?usize {
+        if (id == .none) return if (m.styles.items.len > 0) 0 else null;
+        for (m.styles.items, 0..) |st, i| if (st.id == id) return i;
+        return null;
+    }
+
+    /// Text style `id`, which must be one of the document's.
+    pub fn textStyle(m: *const Model, id: StyleId) *LabelStyle {
+        return &m.styles.items[m.styleIndex(id).?];
+    }
+
+    /// The index of paragraph style `id` in the list.
+    pub fn paraIndex(m: *const Model, id: ParaId) ?usize {
+        if (id == .none) return null;
+        for (m.paragraph_styles.items, 0..) |ps, i| if (ps.id == id) return i;
+        return null;
+    }
+
+    /// Paragraph style `id`, if it is one of the document's.
+    pub fn paraStyle(m: *const Model, id: ParaId) ?*ParagraphStyle {
+        return &m.paragraph_styles.items[m.paraIndex(id) orelse return null];
     }
 
     // Composed fonts ---------------------------------------------------------
@@ -1507,9 +1537,9 @@ pub const Model = struct {
     /// Sets style `style` in composed font `font` (none: back to the faces
     /// its spec names).
     pub fn setStyleFont(m: *Model, style: StyleId, font_id: ObjectId) Error!void {
-        if (style >= m.styles.items.len) return error.NoSuchStyle;
+        if (m.styleIndex(style) == null) return error.NoSuchStyle;
         if (font_id != .none and m.fontIndex(font_id) == null) return error.NoSuchFont;
-        m.styles.items[style].font = font_id;
+        m.textStyle(style).font = font_id;
         m.revision += 1;
     }
 
@@ -3124,8 +3154,9 @@ pub const Model = struct {
     /// A style sized by its em is sized by cap height from then on.
     pub fn setCapHeight(m: *Model, style: StyleId, cap_height: f64) Error!void {
         if (!(cap_height > 0)) return error.BadSize;
-        m.styles.items[style].spec.cap_height = cap_height;
-        m.styles.items[style].spec.em_size = null;
+        if (m.styleIndex(style) == null) return error.NoSuchStyle;
+        m.textStyle(style).spec.cap_height = cap_height;
+        m.textStyle(style).spec.em_size = null;
         m.revision += 1;
     }
 
@@ -3135,8 +3166,9 @@ pub const Model = struct {
     /// stands in for the cap height.
     pub fn setEmSize(m: *Model, style: StyleId, em: f64) Error!void {
         if (!(em > 0)) return error.BadSize;
-        m.styles.items[style].spec.em_size = em;
-        m.styles.items[style].spec.cap_height = em * cap_per_em;
+        if (m.styleIndex(style) == null) return error.NoSuchStyle;
+        m.textStyle(style).spec.em_size = em;
+        m.textStyle(style).spec.cap_height = em * cap_per_em;
         m.revision += 1;
     }
 
@@ -3278,7 +3310,7 @@ pub const Model = struct {
             along = pr.smallest(t.major, .along);
             across = pr.smallest(t.major, .across);
         } else if (t.style) |sid| {
-            if (sid >= m.styles.items.len) return error.NoSuchStyle;
+            if (m.styleIndex(sid) == null) return error.NoSuchStyle;
         } else return error.NoSuchPrototype;
         if (t.count == 0 or !(t.length > 0) or !(t.length >= along - 1e-9)) return error.BadSize;
         const thickness = @as(f64, @floatFromInt(t.count)) * across;
@@ -3481,19 +3513,21 @@ pub const Model = struct {
         try checkParagraph(style);
         var s = style;
         s.name = try m.a().dupe(u8, style.name);
+        s.id = m.newId();
         try m.paragraph_styles.append(m.a(), s);
         m.revision += 1;
-        return @intCast(m.paragraph_styles.items.len - 1);
+        return s.id;
     }
 
     /// Changes paragraph style `id` (its name too): every paragraph in it
     /// follows.
     pub fn setParagraphStyle(m: *Model, id: ParaId, style: ParagraphStyle) Error!void {
-        if (id >= m.paragraph_styles.items.len) return error.NoSuchStyle;
+        const i = m.paraIndex(id) orelse return error.NoSuchStyle;
         try checkParagraph(style);
         var s = style;
         s.name = try m.a().dupe(u8, style.name);
-        m.paragraph_styles.items[id] = s;
+        s.id = id;
+        m.paragraph_styles.items[i] = s;
         m.revision += 1;
     }
 
@@ -3512,7 +3546,7 @@ pub const Model = struct {
     /// paragraph before it ends, and the one after it is set in `style`
     /// (null: the track's).
     pub fn insertParagraph(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
-        if (style) |id| if (id >= m.paragraph_styles.items.len) return error.NoSuchStyle;
+        if (style) |id| if (m.paraIndex(id) == null) return error.NoSuchStyle;
         try m.place(panel, region, index, .{ .what = .{ .paragraph = style } });
     }
 
@@ -3538,7 +3572,7 @@ pub const Model = struct {
     /// Sets the paragraph style of the paragraph holding item `index`
     /// (null: none), at its separator or, for the first, on the track.
     pub fn setParagraphAt(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
-        if (style) |id| if (id >= m.paragraph_styles.items.len) return error.NoSuchStyle;
+        if (style) |id| if (m.paraIndex(id) == null) return error.NoSuchStyle;
         const r = &m.panels.items[panel].regions.items[region];
         if (m.paragraphStart(panel, region, index)) |k| {
             r.items.items[k].what = .{ .paragraph = style };
@@ -4407,9 +4441,11 @@ test "a prototype's sizing rules: which ways a tile grows, and to what" {
 test "a tile's slots are its prototype's, with its own labels and overrides" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
+    const s1: StyleId = @enumFromInt(1001);
+    const s2: StyleId = @enumFromInt(1002);
     const key = try m.addPrototype(.{ .name = "key", .slots = &.{
-        .{ .name = "top", .style = 1, .place = .{ .inset = .all(1) } },
-        .{ .name = "front", .style = 1 },
+        .{ .name = "top", .style = s1, .place = .{ .inset = .all(1) } },
+        .{ .name = "front", .style = s1 },
     } });
     const plain = try m.addPrototype(.{ .name = "plain" });
     const k = try m.addTile(.{ .designator = "K23", .prototype = key });
@@ -4421,12 +4457,12 @@ test "a tile's slots are its prototype's, with its own labels and overrides" {
     try std.testing.expectError(error.NoSuchTile, m.setContentAt("K99.top", "x"));
 
     // The prototype's style and place until the tile overrides one.
-    try std.testing.expectEqual(1, m.slot(k, 0).style);
-    try m.setSlotStyle(k, "top", 2);
-    try std.testing.expectEqual(2, m.slot(k, 0).style);
-    try std.testing.expectEqual(1, m.slot(k, 1).style);
+    try std.testing.expectEqual(s1, m.slot(k, 0).style);
+    try m.setSlotStyle(k, "top", s2);
+    try std.testing.expectEqual(s2, m.slot(k, 0).style);
+    try std.testing.expectEqual(s1, m.slot(k, 1).style);
     try m.setSlotStyle(k, "top", null);
-    try std.testing.expectEqual(1, m.slot(k, 0).style);
+    try std.testing.expectEqual(s1, m.slot(k, 0).style);
     try std.testing.expectEqual(1, m.slot(k, 0).place.inset.left);
 
     // Changing the prototype's slot changes the tile's, where it has no own.
@@ -4611,7 +4647,7 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     try std.testing.expectEqual(20, region.w);
     try std.testing.expectEqual(3, region.h);
     try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.boxAt(.{ .across = 1 }).height(), 1e-9);
-    try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = 9, .count = 1, .length = 2, .pitch = 4 }));
+    try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = @enumFromInt(9999), .count = 1, .length = 2, .pitch = 4 }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
 }
 

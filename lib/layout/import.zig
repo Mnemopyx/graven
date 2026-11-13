@@ -114,10 +114,11 @@ fn paragraphStyle(h: *history.History, m: *Model, key: u64, s: rt.Settings, trac
         // The track's pitch is its lines' spacing; more is a gap.
         .line_gap = if (s.line_pitch) |lp| @max(0, lp - track_pitch) else 0,
     };
-    for (m.paragraph_styles.items, 0..) |p, i| {
+    for (m.paragraph_styles.items) |p| {
         var q = p;
         q.name = "";
-        if (std.meta.eql(q, want)) return @intCast(i);
+        q.id = .none;
+        if (std.meta.eql(q, want)) return p.id;
     }
     var buf: [32]u8 = undefined;
     var named = want;
@@ -132,13 +133,13 @@ fn paragraphStyle(h: *history.History, m: *Model, key: u64, s: rt.Settings, trac
 fn textStyle(gpa: Allocator, h: *history.History, m: *Model, key: u64, doc: rt.Doc, look: rt.Look, base: StyleId, rep: *Report) !StyleId {
     const family: ?[]const u8 = if (look.font) |f| (if (f < doc.fonts.len and doc.fonts[f].name.len > 0) doc.fonts[f].name else null) else null;
     if (family == null and look.size == null) return base;
-    const base_style = m.styles.items[base];
+    const base_style = m.textStyle(base).*;
     var name_buf: [160]u8 = undefined;
     const name = if (look.size) |pt|
         std.fmt.bufPrint(&name_buf, "{s} {d} pt", .{ family orelse base_style.name, pt }) catch "Imported"
     else
         std.fmt.bufPrint(&name_buf, "{s}", .{family.?}) catch "Imported";
-    for (m.styles.items, 0..) |st, i| if (std.mem.eql(u8, st.name, name)) return @intCast(i);
+    for (m.styles.items) |st| if (std.mem.eql(u8, st.name, name)) return st.id;
 
     var spec = base_style.spec;
     // A size in points is the em, as the source meant it: the cap height
@@ -202,7 +203,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
     try testing.expect(items[1].what == .hard_break);
     try testing.expect(items[3].what == .paragraph);
     try testing.expectEqualStrings("\\textnormal{Second\\quad{}one.}", items[4].what.run.content);
-    const carlito = m.styles.items[items[4].what.run.style];
+    const carlito = m.textStyle(items[4].what.run.style).*;
     try testing.expectEqualStrings("Carlito 12 pt", carlito.name);
     try testing.expectApproxEqAbs(12 * mm_per_pt, carlito.spec.em_size.?, 1e-9);
     try testing.expectEqual(m.paragraph_styles.items[0].alignment, .justify);

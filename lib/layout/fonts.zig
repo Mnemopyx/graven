@@ -58,9 +58,11 @@ pub const Resolved = struct {
     /// The face table: 0 is the default face, the rest as composed fonts
     /// need them.
     faces: std.ArrayList(*engine.Face) = .empty,
-    /// Per style (by `StyleId`), its spec with its faces in `faces`. A
-    /// spec's coverage ranges point into the model.
+    /// Per style, in the model's order, its spec with its faces in
+    /// `faces`, and the style's ID. A spec's coverage ranges point into the
+    /// model.
     specs: std.ArrayList(engine.style.Spec) = .empty,
+    ids: std.ArrayList(model.StyleId) = .empty,
     /// The members of each spec, in one list the specs' slices point into.
     members: std.ArrayList(engine.style.Member) = .empty,
     substitutions: std.ArrayList(Substitution) = .empty,
@@ -68,6 +70,7 @@ pub const Resolved = struct {
     pub fn deinit(r: *Resolved) void {
         r.faces.deinit(r.gpa);
         r.specs.deinit(r.gpa);
+        r.ids.deinit(r.gpa);
         r.members.deinit(r.gpa);
         r.substitutions.deinit(r.gpa);
         r.* = undefined;
@@ -169,6 +172,7 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
             spec.members = r.members.items[span.start..][0..span.len];
         }
         try r.specs.append(gpa, spec);
+        try r.ids.append(gpa, st.id);
     }
     return r;
 }
@@ -227,8 +231,8 @@ test "a style set in a composed font gets its faces, members and all" {
     // The main font is the default face itself: one face for both, and the
     // fallback beside it.
     try testing.expectEqual(2, r.faces.items.len);
-    try testing.expectEqual(0, r.specs.items[plain].upright);
-    const spec = r.specs.items[legend];
+    try testing.expectEqual(0, r.specs.items[m.styleIndex(plain).?].upright);
+    const spec = r.specs.items[m.styleIndex(legend).?];
     try testing.expectEqual(0, spec.upright);
     try testing.expectEqual(7, spec.cap_height);
     try testing.expectEqual(1, spec.members.len);
@@ -257,7 +261,7 @@ test "a composed font's bold resolves to the family's bold face" {
     try m.setStyleFont(legend, f);
     var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
     defer r.deinit();
-    const spec = r.specs.items[legend];
+    const spec = r.specs.items[m.styleIndex(legend).?];
     try testing.expectEqual(t.faces[1], r.faces.items[spec.bold.?]);
     try testing.expectEqual(null, spec.italic);
     try testing.expectEqual(null, spec.bold_italic);
@@ -288,7 +292,7 @@ test "fonts not found as named are substituted and reported" {
 
     var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[1]);
     defer r.deinit();
-    const spec = r.specs.items[legend];
+    const spec = r.specs.items[m.styleIndex(legend).?];
     // Light → Regular of the same family, the plain style first.
     try testing.expectEqual(t.faces[0], r.faces.items[spec.upright]);
     try testing.expectEqual(null, spec.italic);

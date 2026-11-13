@@ -1518,8 +1518,8 @@ fn install(opened: *history.Opened, path: []const u8) void {
     canvas_prompt = false;
     shown_space = 0;
     state.context = if (state.model.spaces.items.len > 0) .{ .panel = state.model.spaces.items[0].root } else .worksheet;
-    for (state.model.styles.items, 0..) |st, si| {
-        if (std.mem.eql(u8, st.name, "Label")) state.label_style = @intCast(si);
+    for (state.model.styles.items) |st| {
+        if (std.mem.eql(u8, st.name, "Label")) state.label_style = st.id;
     }
     state.view.fit = canvas_view;
     setFilePath(path);
@@ -6092,7 +6092,7 @@ fn tracksToolOptions() !void {
         .prototype => |pid| if (state.model.protoIndex(pid) == null) {
             tracks_tool.size_to = if (protos.len > 0) .{ .prototype = protos[0].id } else .{ .style = null };
         },
-        .style => |sid| if (sid != null and sid.? >= styles.len) {
+        .style => |sid| if (sid != null and state.model.styleIndex(sid.?) == null) {
             tracks_tool.size_to = .{ .style = null };
         },
     }
@@ -6112,12 +6112,12 @@ fn tracksToolOptions() !void {
         for (styles, 0..) |st, i| names[protos.len + i] = try std.fmt.allocPrint(arena, "Text: {s}", .{st.name});
         var choice: usize = switch (tracks_tool.size_to) {
             .prototype => |pid| protoPos(pid),
-            .style => |sid| protos.len + (sid orelse 0),
+            .style => |sid| protos.len + (if (sid) |x| state.model.styleIndex(x) orelse 0 else 0),
         };
         if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
             tracks_tool.size_to = if (choice < protos.len)
                 .{ .prototype = protos[choice].id }
-            else if (styles.len == 0) .{ .style = null } else .{ .style = @intCast(choice - protos.len) };
+            else if (styles.len == 0) .{ .style = null } else .{ .style = styles[choice - protos.len].id };
         }
     }
     {
@@ -6762,7 +6762,7 @@ fn properties() !void {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
             if (region.prototype) |pid| if (state.model.protoIndex(pid) != null) propText("Prototype", "{s}", .{state.model.proto(pid).name}, 6);
-            if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
+            if (region.style) |sid| if (state.model.styleIndex(sid) != null) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.textStyle(sid).name, region.pitch }, 9);
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
@@ -7007,7 +7007,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             } else false;
             if (!taken) break candidate;
         };
-        try act(.addPrototypeSlot, .{id, .{ .name = name, .style = if (p.slots.len > 0) p.slots[0].style else 0, .place = .{ .inset = .all(0.8) } }});
+        try act(.addPrototypeSlot, .{id, .{ .name = name, .style = if (p.slots.len > 0) p.slots[0].style else .none, .place = .{ .inset = .all(0.8) } }});
         return;
     }
 
@@ -7095,20 +7095,20 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         const names = try a.alloc([]const u8, m.paragraph_styles.items.len + 1);
         names[0] = "None (the track's alignment)";
         for (m.paragraph_styles.items, names[1..]) |ps, *n| n.* = ps.name;
-        var choice: usize = if (current) |id| id + 1 else 0;
+        var choice: usize = if (current) |id| (if (m.paraIndex(id)) |x| x + 1 else 0) else 0;
         if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
-            try act(.setParagraphAt, .{ pi, ri, at, if (choice == 0) null else @as(layout.model.ParaId, @intCast(choice - 1)) });
+            try act(.setParagraphAt, .{ pi, ri, at, if (choice == 0) null else m.paragraph_styles.items[choice - 1].id });
         }
         if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_y = 0.5 } })) {
             var buf: [32]u8 = undefined;
-            var base: layout.model.ParagraphStyle = if (current) |id| m.paragraph_styles.items[id] else .{ .name = "" };
+            var base: layout.model.ParagraphStyle = if (current) |id| (if (m.paraStyle(id)) |ps| ps.* else .{ .name = "" }) else .{ .name = "" };
             base.name = m.nextParagraphStyleName(&buf);
             const id = try act(.addParagraphStyle, .{base});
             try act(.setParagraphAt, .{ pi, ri, at, id });
         }
     }
     const id = current orelse return;
-    var ps = m.paragraph_styles.items[id];
+    var ps = (m.paraStyle(id) orelse return).*;
     const key = mergeKey(.{ "paragraph style", id });
     if (textProp("Name", ps.name, 903)) |name| {
         ps.name = name;
@@ -7155,7 +7155,7 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
 /// resolves it. Typing either sets the style by that one; the one that
 /// sets it is shown plain, the other muted.
 fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
-    const style = state.model.styles.items[sid];
+    const style = state.model.textStyle(sid).*;
     const ctx = if (state.labels) |*l| l.context(sid) else null;
     const cap = if (ctx) |c| c.spec.cap_height else style.spec.cap_height;
     const em_mm = style.spec.em_size orelse if (ctx) |c| (c.em(cap) catch cap / layout.model.cap_per_em) else cap / layout.model.cap_per_em;
@@ -7287,13 +7287,13 @@ fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: 
     var bufs: [32][64]u8 = undefined;
     var names: [32][]const u8 = undefined;
     const first: usize = if (inherited != null) 1 else 0;
-    if (inherited) |s| names[0] = std.fmt.bufPrint(&bufs[0], "Prototype's: {s}", .{styles[s].name}) catch "Prototype's";
+    if (inherited) |s| names[0] = std.fmt.bufPrint(&bufs[0], "Prototype's: {s}", .{if (state.model.styleIndex(s)) |x| styles[x].name else "?"}) catch "Prototype's";
     for (styles, 0..) |s, i| names[first + i] = std.fmt.bufPrint(&bufs[first + i], "{s}", .{s.name}) catch "?";
-    var choice: usize = if (own) |s| first + s else 0;
+    var choice: usize = if (own) |s| first + (state.model.styleIndex(s) orelse 0) else 0;
     const before = choice;
     if (!dvui.dropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
     if (choice < first) return @as(?layout.model.StyleId, null);
-    return @as(?layout.model.StyleId, @intCast(choice - first));
+    return @as(?layout.model.StyleId, styles[choice - first].id);
 }
 
 /// Edits a slot's place: its inset from the face on each side, and how the

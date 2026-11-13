@@ -876,6 +876,6 @@ fn compose(host: Host) void {
     if (st.font == t) {
         dvui.labelNoFmt(@src(), "set", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 6 } });
     } else if (icons.button(@src(), .paint_brush, "Set this style in the composed font", .{ .opts = .{ .gravity_y = 0.5 } })) {
-        host.setStyleFont(@intCast(style_choice), t);
+        host.setStyleFont(st.id, t);
     }
 }

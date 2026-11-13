@@ -310,6 +310,8 @@ pub const Labels = struct {
     /// keeps to; the caller resolves again when the model changes.
     resolved: ?*const fonts.Resolved = null,
     contexts: std.ArrayList(?Ctx) = .empty,
+    /// The style each of `contexts` is for, in the model's order.
+    ids: std.ArrayList(StyleId) = .empty,
     cache: std.HashMapUnmanaged(Key, Entry, KeyContext, 80) = .empty,
     /// Prototype sketches solved for a tile's size and parameters: their
     /// closed profiles in the sketch's frame (null: it did not solve), by
@@ -432,6 +434,7 @@ pub const Labels = struct {
         l.clear();
         l.cache.deinit(l.gpa);
         l.contexts.deinit(l.gpa);
+        l.ids.deinit(l.gpa);
         l.* = undefined;
     }
 
@@ -455,11 +458,16 @@ pub const Labels = struct {
     /// of any style whose spec changed. For a model whose styles name
     /// faces directly (no composed fonts); see `syncResolved`.
     pub fn sync(l: *Labels, m: *const Model) Allocator.Error!void {
-        if (l.resolved) |r| return l.syncSpecs(r.faces.items, r.specs.items);
+        if (l.resolved) |r| return l.syncSpecs(r.faces.items, r.specs.items, r.ids.items);
         const specs = try l.gpa.alloc(engine.style.Spec, m.styles.items.len);
         defer l.gpa.free(specs);
-        for (m.styles.items, specs) |st, *sp| sp.* = st.spec;
-        try l.syncSpecs(l.faces, specs);
+        const ids = try l.gpa.alloc(StyleId, m.styles.items.len);
+        defer l.gpa.free(ids);
+        for (m.styles.items, specs, ids) |st, *sp, *id| {
+            sp.* = st.spec;
+            id.* = st.id;
+        }
+        try l.syncSpecs(l.faces, specs, ids);
     }
 
     /// As `sync`, with the face table and specs that resolving the model's
@@ -467,18 +475,25 @@ pub const Labels = struct {
     /// drops every render.
     pub fn syncResolved(l: *Labels, r: *const fonts.Resolved) Allocator.Error!void {
         l.resolved = r;
-        try l.syncSpecs(r.faces.items, r.specs.items);
+        try l.syncSpecs(r.faces.items, r.specs.items, r.ids.items);
     }
 
-    fn syncSpecs(l: *Labels, faces: []const *engine.Face, specs: []const engine.style.Spec) Allocator.Error!void {
+    fn syncSpecs(l: *Labels, faces: []const *engine.Face, specs: []const engine.style.Spec, ids: []const StyleId) Allocator.Error!void {
         if (faces.ptr != l.faces.ptr or faces.len != l.faces.len) {
             l.faces = faces;
             for (l.contexts.items) |*c| c.* = null;
             l.clear();
         }
         while (l.contexts.items.len < specs.len) try l.contexts.append(l.gpa, null);
-        for (specs, 0..) |spec, i| {
+        while (l.ids.items.len < specs.len) try l.ids.append(l.gpa, .none);
+        for (specs, ids, 0..) |spec, id, i| {
             const cur = &l.contexts.items[i];
+            // A style now in another style's place: its context is new.
+            if (l.ids.items[i] != id) {
+                if (l.ids.items[i] != .none) l.dropStyle(l.ids.items[i]);
+                l.ids.items[i] = id;
+                cur.* = null;
+            }
             if (cur.*) |c| if (specEql(c.spec, spec)) continue;
             const n = l.faces.len;
             const inTable = struct {
@@ -492,7 +507,9 @@ pub const Labels = struct {
             } else true;
             const ctx = if (usable) engine.style.Context.init(l.faces, spec) catch null else null;
             cur.* = .{ .spec = spec, .ctx = ctx };
-            l.dropStyle(@intCast(i));
+            l.dropStyle(id);
+            // Renders cached under `.none` (the first style) too.
+            if (i == 0) l.dropStyle(.none);
         }
     }
 
@@ -508,9 +525,13 @@ pub const Labels = struct {
         }
     }
 
+    /// The context of text style `style` (`.none`: the first style).
     pub fn context(l: *const Labels, style: StyleId) ?*const engine.style.Context {
-        if (style >= l.contexts.items.len) return null;
-        if (l.contexts.items[style]) |*c| if (c.ctx) |*ctx| return ctx;
+        const i: usize = if (style == .none) 0 else for (l.ids.items, 0..) |id, k| {
+            if (id == style) break k;
+        } else return null;
+        if (i >= l.contexts.items.len) return null;
+        if (l.contexts.items[i]) |*c| if (c.ctx) |*ctx| return ctx;
         return null;
     }
 
@@ -869,7 +890,7 @@ fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
 fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
     const sid = region.style orelse return 0;
     if (labels.context(sid)) |ctx| return ctx.spec.cap_height;
-    return if (sid < m.styles.items.len) m.styles.items[sid].spec.cap_height else 0;
+    return if (m.styleIndex(sid) != null) m.textStyle(sid).spec.cap_height else 0;
 }
 
 /// The bounds and alignment of a segment of a paragraph in `style` (null:
@@ -1212,7 +1233,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         // The paragraph being set.
         const seg0: usize = if (entry) |e| e.segment else 0;
         var style_id: ?model.ParaId = if (entry) |e| e.paragraph else null;
-        var style: ?model.ParagraphStyle = if (style_id) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
+        var style: ?model.ParagraphStyle = if (style_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
         var path: Path = .{ .regions = m.panels.items[panel].regions.items, .thread = thread, .avoid = tracks.items, .more = more != null };
         // The pieces this leg places: from where the flow enters, to where
         // it leaves for the next panel (or its end). Waiting, none.
@@ -1272,7 +1293,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     // the next paragraph, after both paragraphs' spacing.
                     var first_line = false;
                     if (item.what == .paragraph) {
-                        const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (id < m.paragraph_styles.items.len) m.paragraph_styles.items[id] else null) else null;
+                        const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
                         path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
                         style = next;
                         style_id = item.what.paragraph;
