@@ -10192,7 +10192,63 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at);
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, line, ray };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray };
+
+/// The geometry buttons, in order, and each one's sub-options (its tools),
+/// the first its default. A button remembers the sub-option last used.
+const SkGeo = enum { point, line, polyline, arc, circle };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt } };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle };
+
+/// The geometry button tool `t` belongs to.
+fn skGeoOf(t: SkTool) ?SkGeo {
+    for (sk_geo_tools, 0..) |tools, g| for (tools) |x| {
+        if (x == t) return @enumFromInt(g);
+    };
+    return null;
+}
+
+/// Whether tool `t` can be chosen now: rays and lines are construction
+/// geometry only.
+fn skToolAllowed(t: SkTool) bool {
+    return (t != .ray and t != .line) or sk_construction;
+}
+
+/// Chooses tool `t` (remembered for its button), starting it afresh.
+fn skChooseTool(t: SkTool) void {
+    if (!skToolAllowed(t)) return;
+    sk_tool = t;
+    sk_nclicks = 0;
+    if (skGeoOf(t)) |g| sk_geo_last[@intFromEnum(g)] = t;
+}
+
+/// M: the active button's next sub-option it allows.
+fn skCycleTool() void {
+    const g = skGeoOf(sk_tool) orelse return;
+    const tools = sk_geo_tools[@intFromEnum(g)];
+    var k: usize = for (tools, 0..) |x, i| {
+        if (x == sk_tool) break i;
+    } else 0;
+    for (0..tools.len) |_| {
+        k = (k + 1) % tools.len;
+        if (skToolAllowed(tools[k])) return skChooseTool(tools[k]);
+    }
+}
+
+/// Sets construction geometry on or off for new geometry and the
+/// selection; off, a ray or line tool falls back to the segment.
+fn skSetConstruction(on: bool) void {
+    sk_construction = on;
+    for (sk_sel.items) |p| switch (p) {
+        .curve => |g| _ = skEdit(.{ .construction = .{ .g = g, .on = on } }),
+        .point => |r| if (r.role == .point) {
+            _ = skEdit(.{ .construction = .{ .g = r.geom, .on = on } });
+        },
+        .constraint => {},
+    };
+    if (!on and (sk_tool == .ray or sk_tool == .line)) skChooseTool(.segment);
+    if (!on) sk_geo_last[@intFromEnum(SkGeo.line)] = .segment;
+}
 var sk_tool: SkTool = .none;
 /// New geometry is construction geometry.
 var sk_construction = false;
@@ -10510,7 +10566,7 @@ fn skToolClicks(t: SkTool) usize {
         .none => 0,
         .point => 1,
         .segment, .polyline, .circle, .line, .ray => 2,
-        .arc_centre, .arc_3pt => 3,
+        .arc_centre, .arc_3pt, .circle_3pt => 3,
     };
 }
 
@@ -10538,6 +10594,11 @@ fn skToolClick(p: geom.Point) void {
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
             _ = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+        },
+        .circle_3pt => if (circleThrough(c[0], c[1], c[2])) |centre| {
+            _ = skEdit(.{ .circle = .{ .c = centre, .r = skDist(centre, c[0]), .construction = cons } });
+        } else {
+            state.status = "The three points are in line: no circle passes through them. ";
         },
         .arc_3pt => if (circleThrough(c[0], c[2], c[1])) |centre| {
             // From the first click to the second, through the third: the
@@ -10913,6 +10974,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             .d => skConstrain(.distance, area),
             .r => skConstrain(.radius, area),
             .a => skConstrain(.angle, area),
+            .m => skCycleTool(),
             else => used = false,
         }
         if (used) {
@@ -11488,40 +11550,168 @@ fn skSummary(area: dvui.Rect.Physical) void {
 fn sketchPalette() void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(4) });
     defer col.deinit();
-    const tools = [_]struct { t: SkTool, name: []const u8 }{
-        .{ .t = .none, .name = "Select" },
-        .{ .t = .point, .name = "Point" },
-        .{ .t = .segment, .name = "Segment" },
-        .{ .t = .polyline, .name = "Polyline" },
-        .{ .t = .arc_centre, .name = "Arc: centre" },
-        .{ .t = .arc_3pt, .name = "Arc: 3 points" },
-        .{ .t = .circle, .name = "Circle" },
-        .{ .t = .line, .name = "Line" },
-        .{ .t = .ray, .name = "Ray" },
-    };
+    const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
+    const on_fill = dvui.themeGet().focus.opacity(0.35);
+    var below: dvui.Rect.Physical = undefined;
     {
         var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
         defer flex.deinit();
-        for (tools, 0..) |t, i| {
-            const on = sk_tool == t.t;
-            if (dvui.button(@src(), t.name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = .{ .x = 6, .w = 6, .y = 3, .h = 3 }, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) {
-                sk_tool = t.t;
-                sk_nclicks = 0;
+        below = flex.data().borderRectScale().r;
+        if (dvui.button(@src(), "Select", .{}, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null })) {
+            sk_tool = .none;
+            sk_nclicks = 0;
+        }
+        if (dvui.button(@src(), "Construction", .{}, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null })) skSetConstruction(!sk_construction);
+        const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle" };
+        for (names, 0..) |name, g| {
+            const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == g else false;
+            if (dvui.button(@src(), name, .{}, .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null })) {
+                const want = sk_geo_last[g];
+                skChooseTool(if (skToolAllowed(want)) want else sk_geo_tools[g][0]);
             }
         }
     }
-    var cons = sk_construction;
-    if (dvui.checkbox(@src(), &cons, "Construction", .{})) {
-        sk_construction = cons;
-        // The selected geometry follows.
-        for (sk_sel.items) |p| switch (p) {
-            .curve => |g| _ = skEdit(.{ .construction = .{ .g = g, .on = cons } }),
-            .point => |r| if (r.role == .point) {
-                _ = skEdit(.{ .construction = .{ .g = r.geom, .on = cons } });
-            },
-            .constraint => {},
-        };
+    const g = skGeoOf(sk_tool) orelse return;
+    skToolOverlay(g, below);
+}
+
+/// The overlay below the geometry buttons for the active one: its
+/// sub-options first (M goes to the next), then the step being placed,
+/// with typed values for it.
+fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
+    const ns = dvui.windowNaturalScale();
+    const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
+    const tools = sk_geo_tools[@intFromEnum(g)];
+    // Floating over what is below the buttons, as tall as its rows.
+    const fields: f32 = @floatFromInt(skStepFieldCount());
+    const hint_rows: f32 = if (tools.len > 1) (if (g == .line and !sk_construction) 2 else 1) else 0;
+    const h: f32 = 20 + (if (tools.len > 1) @as(f32, 32) else 0) + hint_rows * 24 + 28 + fields * 40;
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{}, .{
+        .rect = .{ .x = buttons.x / ns, .y = (buttons.y + buttons.h) / ns + 4, .w = buttons.w / ns, .h = h },
+        .background = true,
+        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
+        .border = .all(1),
+        .corners = .all(6),
+        .padding = .all(6),
+    });
+    defer fw.deinit();
+    // Clicked, it takes the keyboard (a floating widget's own fields get
+    // keys only while its subwindow has focus), as floating windows do.
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatch(e, .{ .id = fw.data().id, .r = fw.data().rectScale().r })) continue;
+        if (e.evt == .mouse and e.evt.mouse.action == .focus) dvui.focusSubwindow(fw.data().id, e.num);
     }
+    if (tools.len > 1) {
+        var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+        defer flex.deinit();
+        for (tools, 0..) |t, i| {
+            const name = skToolName(t);
+            if (!skToolAllowed(t)) {
+                dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.35) } });
+                continue;
+            }
+            const on = sk_tool == t;
+            if (dvui.button(@src(), name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) skChooseTool(t);
+        }
+    }
+    const faint = dvui.themeGet().color(.control, .text).opacity(0.65);
+    if (tools.len > 1) dvui.labelNoFmt(@src(), "M: next option", .{}, .{ .color_text = .{ .color = faint } });
+    if (g == .line and !sk_construction) dvui.labelNoFmt(@src(), "Ray and line: construction only", .{}, .{ .color_text = .{ .color = faint } });
+    dvui.label(@src(), "{s}: point {d} of {d}", .{ skToolName(sk_tool), sk_nclicks + 1, skToolClicks(sk_tool) }, .{ .color_text = .{ .color = faint } });
+    skStepFields();
+}
+
+fn skToolName(t: SkTool) []const u8 {
+    return switch (t) {
+        .none => "Select",
+        .point => "Point",
+        .segment => "Segment",
+        .ray => "Ray",
+        .line => "Line",
+        .polyline => "Polyline",
+        .arc_centre => "Centre",
+        .arc_3pt => "3 points",
+        .circle => "Centre",
+        .circle_3pt => "3 points",
+    };
+}
+
+/// How many typed values the step being placed has (see `skStepFields`).
+fn skStepFieldCount() usize {
+    const n = sk_nclicks;
+    const arc_end = sk_tool == .arc_centre and n == 2;
+    const from_prev = n > 0 and switch (sk_tool) {
+        .segment, .ray, .line, .polyline, .circle => true,
+        .arc_centre => n == 1,
+        else => false,
+    };
+    return 2 + @as(usize, if (from_prev) 2 else if (arc_end) 1 else 0);
+}
+
+/// The typed values of the step being placed: where it goes (x, y), and,
+/// from the point before, how far and at what angle (a circle's or an
+/// arc's radius); an arc's end, at what angle from its centre. Shown live
+/// from the pointer; Enter in one places the step there.
+var sk_step_text: [4][24]u8 = undefined;
+/// Values typed for the step being placed: kept, not followed live, until
+/// it is placed (or the tool changes).
+var sk_step_typed = [4]?f64{ null, null, null, null };
+var sk_step_of: struct { tool: SkTool, n: usize } = .{ .tool = .none, .n = 0 };
+
+fn skStepFields() void {
+    const p = skClickPoint() orelse geom.Point{ .x = 0, .y = 0 };
+    const n = sk_nclicks;
+    const prev: ?geom.Point = if (n > 0) sk_clicks[n - 1] else null;
+    const arc_end = sk_tool == .arc_centre and n == 2;
+    const from_prev = prev != null and switch (sk_tool) {
+        .segment, .ray, .line, .polyline, .circle => true,
+        .arc_centre => n == 1,
+        else => false,
+    };
+    const base: geom.Point = if (arc_end) sk_clicks[0] else prev orelse p;
+    const live_len = skDist(base, p);
+    const live_ang = std.math.atan2(p.y - base.y, p.x - base.x) * 180 / std.math.pi;
+    const radius_word = sk_tool == .circle or sk_tool == .arc_centre;
+    // A new step (or tool) forgets what was typed for the last.
+    if (sk_step_of.tool != sk_tool or sk_step_of.n != n) {
+        sk_step_typed = .{ null, null, null, null };
+        sk_step_of = .{ .tool = sk_tool, .n = n };
+    }
+    var vals = [4]f64{ p.x, p.y, live_len, live_ang };
+    for (&vals, sk_step_typed) |*v, t| if (t) |x| {
+        v.* = x;
+    };
+    var entered: ?usize = null;
+    const labels = [4][]const u8{ "x, mm", "y, mm", if (radius_word) "Radius, mm" else "Length, mm", if (arc_end) "End angle, °" else "Angle, °" };
+    for (0..4) |k| {
+        if (k == 2 and !from_prev) continue;
+        if (k == 3 and !from_prev and !arc_end) continue;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = k });
+        defer row.deinit();
+        propName(labels[k]);
+        const live = std.fmt.bufPrint(&sk_step_text[k], "{d:.2}", .{vals[k]}) catch "";
+        // Typed values are drawn bold: they hold until the step is placed.
+        var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal, .id_extra = 7700 + k, .font = if (sk_step_typed[k] != null) dvui.Font.theme(.body).withWeight(.bold) else null });
+        const focused = te.data().id == dvui.focusedWidgetId();
+        if (!focused and sk_step_typed[k] == null and !std.mem.eql(u8, te.textGet(), live)) te.textSet(live, false);
+        if (te.text_changed and focused) {
+            sk_step_typed[k] = std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " ")) catch null;
+        }
+        if (std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " "))) |v| vals[k] = v else |_| {}
+        if (focused and te.enter_pressed) entered = k;
+        te.deinit();
+    }
+    const k = entered orelse return;
+    const target: geom.Point = switch (k) {
+        0, 1 => .{ .x = vals[0], .y = vals[1] },
+        else => blk: {
+            const r = if (arc_end) skDist(sk_clicks[0], sk_clicks[1]) else vals[2];
+            const a = vals[3] * std.math.pi / 180;
+            break :blk .{ .x = base.x + r * @cos(a), .y = base.y + r * @sin(a) };
+        },
+    };
+    skToolClick(target);
 }
 
 /// The constrain buttons: those that fit the selection, live.
