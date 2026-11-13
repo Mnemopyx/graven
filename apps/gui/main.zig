@@ -2268,7 +2268,6 @@ fn bottomContent() !void {
 
 /// What the expression line edits.
 const ExprTarget = union(enum) {
-    tile_slot: struct { tile: TileId, slot: usize },
     /// A tile's content in one of its prototype's tracks, as text (a
     /// newline for each hard break).
     tile_track: struct { tile: TileId, track: layout.model.ObjectId },
@@ -2277,7 +2276,6 @@ const ExprTarget = union(enum) {
 
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
-            .tile_slot => |ts| state.model.slot(ts.tile, ts.slot).content,
             .tile_track => |tt| state.model.tileTrackText(dvui.currentWindow().arena(), tt.tile, tt.track) catch "",
             .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.content,
         };
@@ -2285,7 +2283,6 @@ const ExprTarget = union(enum) {
 
     fn store(t: ExprTarget, text: []const u8) !void {
         switch (t) {
-            .tile_slot => |ts| try actM(mergeKey(.{ "slot", ts.tile, ts.slot }), .setContent, .{ ts.tile, state.model.slot(ts.tile, ts.slot).name, text }),
             .tile_track => |tt| try actM(mergeKey(.{ "tile track", tt.tile, tt.track }), .setTileTrackText, .{ tt.tile, tt.track, text }),
             .run => |r| try actM(mergeKey(.{ "run", r.panel, r.region, r.item }), .setRunContent, .{ r.panel, r.region, r.item, text }),
         }
@@ -2301,7 +2298,7 @@ const ExprTarget = union(enum) {
 fn exprTarget() ?ExprTarget {
     if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
     return switch (state.context) {
-        .tile => |id| if (exprTrackOf(id)) |tr| .{ .tile_track = .{ .tile = id, .track = tr } } else if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
+        .tile => |id| if (exprTrackOf(id)) |tr| .{ .tile_track = .{ .tile = id, .track = tr } } else null,
         .region => if (runAtCursor()) |r| .{ .run = .{ .panel = r.panel, .region = r.region, .item = r.item } } else null,
         else => null,
     };
@@ -2544,8 +2541,7 @@ fn firstSyntaxProblem(target: ExprTarget) ?engine.markup.Diagnostic {
     for (state.placed.items, 0..) |*p, pi| for (p.issues) |i| {
         if (i.kind != .markup_error) continue;
         const hit = switch (target) {
-            .tile_slot => |ts| i.tile == ts.tile and i.slot == ts.slot,
-            .tile_track => |tt| i.tile == tt.tile and i.slot != null and i.slot.? >= layout.place.tile_track_slot,
+            .tile_track => |tt| i.tile == tt.tile and i.slot != null and if (state.model.tileTrackIndex(tt.tile, tt.track)) |k| i.slot.? == k else false,
             .run => |r| r.panel == pi and i.region == r.region and i.item == r.item,
         };
         if (hit) return i.syntax;
@@ -3030,7 +3026,13 @@ fn panelChildren(pi: usize, d: usize) void {
                     const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
                     if (state.model.proto(state.model.tileConst(id).prototype).spacer) continue;
                     const t = state.model.tileConst(id);
-                    const legend = if (state.model.slotCount(id) > 0) state.model.slot(id, 0).content else "";
+                    const tracks = state.model.prototypeOf(id).tracks;
+                    const empty: []u8 = &.{};
+                    const legend: []u8 = if (tracks.len > 0) (state.model.tileTrackText(dvui.currentWindow().arena(), id, tracks[0].id) catch empty) else empty;
+                    // One line in the tree.
+                    for (legend) |*ch| if (ch.* == '\n') {
+                        ch.* = ' ';
+                    };
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
                     _ = treeNode(.{ .tile = id }, text, d + 2, false, false);
                 }
@@ -4086,7 +4088,6 @@ fn ccw(p0: dvui.Point.Physical, p1: dvui.Point.Physical, p2: dvui.Point.Physical
 fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
     const c = expr_caret orelse return null;
     const mine = switch (c.target) {
-        .tile_slot => |t| l.tile != null and std.meta.eql(l.tile.?, t.tile) and l.slot == t.slot,
         // A tile track's text is set piece by piece with no offsets kept:
         // no caret in it yet.
         .tile_track => false,
@@ -4535,7 +4536,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
         defer row.deinit();
         inline for (.{ .{ "Parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "Holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "Legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
             if (dvui.button(@src(), kind[0], .{}, .{ .id_extra = 92 + k })) {
-                const proto_id = if (state.model.prototypes.items.len == 0) try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }}) else state.model.prototypes.items[0].id;
+                const proto_id = if (state.model.prototypes.items.len == 0) try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) else state.model.prototypes.items[0].id;
                 const step_x = sh.stepX();
                 const step_y = sh.stepY();
                 _ = act(.addStamp, .{ pi, gi, layout.model.Stamp{ .name = kind[0], .prototype = proto_id, .role = kind[1], .w = step_x * kind[2], .h = step_y * kind[3], .offset = .{ .x = 0, .y = step_y * kind[4] } } }) catch {
@@ -6203,7 +6204,7 @@ fn ensurePrototype() !void {
         .unit = 19.05,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
-        .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
+        .tracks = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, 19.05);
     _ = try act(.addPrototype, .{p});
@@ -6882,50 +6883,12 @@ fn tileProperties(id: TileId) !void {
         if (focused) expr_track = tt.id;
         if (changed and !std.mem.eql(u8, now, text)) try actM(mergeKey(.{ "tile track", id, tt.id }), .setTileTrackText, .{ id, tt.id, now });
         propText("Runs", "{s}, {s}", .{ if (tt.major == .row) "in rows" else "down columns, a character at a time", @tagName(tt.alignment) }, n + 1);
-    }
-    for (0..state.model.slotCount(id)) |si| {
-        const slot = state.model.slot(id, si);
-        const n = 100 + si * 10;
-        heading("Slot {s}", .{slot.name}, n);
-        {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 1 });
-            defer row.deinit();
-            dvui.labelNoFmt(@src(), "Legend", .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
-            var te = dvui.textEntry(@src(), .{ .text_initial = slot.content }, .{
-                .expand = .horizontal,
-                .id_extra = @backingInt(id) * 16 + si,
-            });
-            if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), slot.content)) te.textSet(slot.content, false);
-            const changed = te.text_changed;
-            const text = te.textGet();
-            te.deinit();
-            if (changed and !std.mem.eql(u8, text, slot.content)) try actM(mergeKey(.{ "slot", id, si }), .setContent, .{ id, slot.name, text });
-        }
-        // Style and placement: the prototype's, or the tile's own.
-        const own = state.model.fillConst(id, slot.name);
-        const proto_slot = state.model.prototypeOf(id).slots[si];
-        if (styleChoice(if (own) |f| f.style else null, proto_slot.style, n + 2)) |c| try act(.setSlotStyle, .{id, slot.name, c});
-        try propFont("Font", n + 3);
-        {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 5 });
-            defer row.deinit();
-            propName("Placement");
-            const names = [_][]const u8{ "Prototype's", "This tile's" };
-            const has_own = own != null and own.?.place != null;
-            var choice: usize = if (has_own) 1 else 0;
-            if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 5 })) {
-                try act(.setSlotPlace, .{id, slot.name, if (choice == 1) slot.place else null});
-            }
-        }
-        if (own != null and own.?.place != null) {
-            if (slotPlaceEditor(slot.place, 1000 + n * 10)) |p| try act(.setSlotPlace, .{id, slot.name, p});
-        }
         if (found) |f| {
-            for (state.placed.items[f.panel].issues, 0..) |i, k| if (i.tile == id and i.slot == si) {
-                propText("Issue", "{s}", .{@tagName(i.kind)}, n + 4 + k);
+            for (state.placed.items[f.panel].issues, 0..) |i, q| if (i.tile == id and i.slot == k) {
+                propText("Issue", "{s}", .{@tagName(i.kind)}, n + 2 + @min(q, 5));
             };
-            for (state.intrusions) |i| if (i.tile == id and i.slot == si) {
-                propText("Issue", "ink {d:.2} mm into the sheet margin", .{i.amount}, n + 9);
+            for (state.intrusions) |i| if (i.tile == id and i.slot == k) {
+                propText("Issue", "ink {d:.2} mm into the sheet margin", .{i.amount}, n + 8);
             };
         }
     }
@@ -7079,47 +7042,8 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             } else false;
             if (!taken) break candidate;
         };
-        const style: layout.model.StyleId = if (p.tracks.len > 0) p.tracks[0].style else if (p.slots.len > 0) p.slots[0].style else .none;
+        const style: layout.model.StyleId = if (p.tracks.len > 0) p.tracks[0].style else .none;
         _ = try act(.addPrototypeTrack, .{ id, layout.model.TileTrack{ .name = name, .style = style, .alignment = .centre, .place = .{ .inset = .all(0.8) } } });
-        return;
-    }
-
-    for (p.slots, 0..) |sp, si| {
-        const n = 100 + si * 20;
-        heading("Slot {s}", .{sp.name}, n);
-        if (textProp("Name", sp.name, n * 8 + 7)) |name| {
-            act(.renamePrototypeSlot, .{id, si, name}) catch {
-                state.status = "Another slot has that name. ";
-            };
-            return;
-        }
-        var next = sp;
-        var changed = false;
-        if (styleChoice(sp.style, null, n + 1)) |c| {
-            next.style = c.?;
-            changed = true;
-        }
-        if (slotPlaceEditor(sp.place, n + 2)) |pl| {
-            next.place = pl;
-            changed = true;
-        }
-        if (changed) try act(.setPrototypeSlot, .{id, si, next});
-        if (dvui.button(@src(), "Remove slot", .{}, .{ .id_extra = n, .gravity_x = 1 })) {
-            try act(.removePrototypeSlot, .{id, si});
-            return;
-        }
-    }
-    if (dvui.button(@src(), "Add slot", .{}, .{ .id_extra = 590, .gravity_x = 1, .margin = .{ .y = 8 } })) {
-        var name_buf: [32]u8 = undefined;
-        var k: usize = p.slots.len + 1;
-        const name = while (true) : (k += 1) {
-            const candidate = std.fmt.bufPrint(&name_buf, "slot {d}", .{k}) catch "slot";
-            const taken = for (p.slots) |s| {
-                if (std.mem.eql(u8, s.name, candidate)) break true;
-            } else false;
-            if (!taken) break candidate;
-        };
-        try act(.addPrototypeSlot, .{id, .{ .name = name, .style = if (p.slots.len > 0) p.slots[0].style else .none, .place = .{ .inset = .all(0.8) } }});
         return;
     }
 
@@ -7299,7 +7223,7 @@ fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
     }
 }
 
-/// A new plain prototype with one slot and keycap art, made the context.
+/// A new plain prototype with one track and keycap art, made the context.
 fn addPrototype() !void {
     var name_buf: [32]u8 = undefined;
     const name = std.fmt.bufPrint(&name_buf, "Prototype {d}", .{state.model.prototypes.items.len + 1}) catch "Prototype";
@@ -7308,7 +7232,7 @@ fn addPrototype() !void {
         .unit = 19.05,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
-        .slots = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
+        .tracks = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p));
     const id = try act(.addPrototype, .{p});
@@ -7406,32 +7330,6 @@ fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: 
     if (!dvui.dropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
     if (choice < first) return @as(?layout.model.StyleId, null);
     return @as(?layout.model.StyleId, styles[choice - first].id);
-}
-
-/// Edits a slot's place: its inset from the face on each side, and how the
-/// label aligns across and down. Returns the new place when it changes.
-fn slotPlaceEditor(place: layout.model.SlotPlace, n: usize) ?layout.model.SlotPlace {
-    var p = place;
-    var changed = false;
-    inline for (.{ .{ "Inset left, mm", "left" }, .{ "Inset right, mm", "right" }, .{ "Inset top, mm", "top" }, .{ "Inset bottom, mm", "bottom" } }, 0..) |side, i| {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
-        defer row.deinit();
-        propName(side[0]);
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(p.inset, side[1]), .min = 0, .max = 100 }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
-        changed = r.changed or changed;
-    }
-    inline for (.{ .{ "Across", "h", [_][]const u8{ "Start", "Centre", "End" } }, .{ "Down", "v", [_][]const u8{ "Top", "Centre", "Bottom" } } }, 0..) |axis, i| {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n * 8 + 4 + i });
-        defer row.deinit();
-        propName(axis[0]);
-        var choice: usize = @backingInt(@field(p, axis[1]));
-        const names = axis[2];
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n * 8 + 4 + i })) {
-            @field(p, axis[1]) = @fromBackingInt(@intCast(choice));
-            changed = true;
-        }
-    }
-    return if (changed) p else null;
 }
 
 /// Edits how an art layer is painted: its fill's colours (one, or a

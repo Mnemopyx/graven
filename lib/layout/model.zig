@@ -7,8 +7,8 @@
 //! reaches into the ones after it, and their content flows around it. Each tile
 //! is an instance of a tile prototype, which sets what tiles of its kind
 //! share: the body and the face (the labelling surface) as insets, and the
-//! named slots on the face where labels go. A tile holds only what is its
-//! own: its size, and per slot its label and any overrides.
+//! tracks on the face its text is set in. A tile holds only what is its
+//! own: its size, and what is in each of those tracks.
 //!
 //! Lengths are mm; tile sizes and gaps in a tile region are in pitch units
 //! (u), so a 1.25u tile at 19.05 mm pitch is 23.8125 mm. Frames are y up.
@@ -162,14 +162,10 @@ pub const ParagraphStyle = struct {
     line_gap: f64 = 0,
 };
 
-/// Where a slot's label sits on the tile's face.
-pub const SlotPlace = struct {
-    /// The slot's box: the face less this inset, mm.
+/// Where a track lies on a tile's face.
+pub const FacePlace = struct {
+    /// The track's box: the face less this inset, mm.
     inset: Sides = .{},
-    /// Horizontal: start edge, centre, end edge. Vertical: top, centre,
-    /// bottom (start is top).
-    h: Align = .start,
-    v: Align = .start,
 };
 
 /// A track every tile of a prototype has: where it lies on the face, which
@@ -181,9 +177,8 @@ pub const SlotPlace = struct {
 pub const TileTrack = struct {
     id: ObjectId = .none,
     name: []const u8,
-    /// Its box: the face less this inset. (`place.h` and `place.v` are
-    /// unused; `alignment` sets each line.)
-    place: SlotPlace = .{},
+    /// Its box on the face.
+    place: FacePlace = .{},
     major: Major = .row,
     style: StyleId = .none,
     /// How each line (row) or column is set along: from its start, about
@@ -200,37 +195,6 @@ pub const TileFlow = struct {
     track: ObjectId,
     items: std.ArrayList(Item) = .empty,
 };
-
-/// A slot every tile of a prototype has: where its label goes on the face,
-/// and the style it is set in unless a tile says otherwise.
-pub const SlotPrototype = struct {
-    name: []const u8,
-    place: SlotPlace = .{},
-    style: StyleId = .none,
-};
-
-/// A tile's own part of one of its prototype's slots, matched by name: its
-/// label, and overrides of the prototype's style and place. Kept by name, so
-/// a tile switched to another prototype and back keeps its labels.
-pub const SlotFill = struct {
-    slot: []const u8,
-    /// Label markup; empty for an empty slot.
-    content: []const u8 = "",
-    style: ?StyleId = null,
-    place: ?SlotPlace = null,
-};
-
-/// A slot as a tile has it: its prototype's slot with the tile's label and
-/// overrides applied.
-pub const Slot = struct {
-    name: []const u8,
-    place: SlotPlace,
-    style: StyleId,
-    content: []const u8,
-};
-
-/// A slot by tile and index into its prototype's slots.
-pub const SlotRef = struct { tile: TileId, slot: usize };
 
 /// Which ways tiles of a prototype may grow from 1u × 1u: wider along their
 /// track, taller across tracks (spanning them), both or neither.
@@ -249,8 +213,6 @@ pub const TilePrototype = struct {
     body_inset: Sides = .{},
     /// Its labelling face: the body less this inset, mm.
     face_inset: Sides = .{},
-    /// The slots on the face, in order.
-    slots: []const SlotPrototype = &.{},
     /// The tracks on the face, in order (see `TileTrack`).
     tracks: []const TileTrack = &.{},
     /// Which ways its tiles may grow from 1u × 1u.
@@ -342,7 +304,6 @@ pub const Tile = struct {
     /// The kind of tile it is.
     /// `.none` takes the document's first prototype (see `addTile`).
     prototype: PrototypeId = .none,
-    fills: std.ArrayList(SlotFill) = .empty,
     removed: bool = false,
     /// Its own values for its prototype's sketch parameters (a homing bump
     /// switched on); the sketch's own expressions give the rest.
@@ -940,7 +901,7 @@ pub const Group = struct {
 /// What a grid's instances are, as made: a part (a key, drawn as its
 /// prototype draws it), a hole (its prototype's outline cut through the
 /// panel: the prototype with inside and outside swapped), or a legend (only
-/// its prototype's slots and their labels).
+/// its prototype's tracks and their text).
 pub const GridRole = enum { part, hole, legend };
 
 /// One kind of thing a grid stamps at its points: a prototype, as what,
@@ -1314,7 +1275,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -1360,54 +1321,6 @@ pub const Model = struct {
     /// The prototype tile `id` is an instance of.
     pub fn prototypeOf(m: *const Model, id: TileId) *const TilePrototype {
         return m.proto(m.tileConst(id).prototype);
-    }
-
-    /// How many slots tile `id` has: its prototype's.
-    pub fn slotCount(m: *const Model, id: TileId) usize {
-        return m.prototypeOf(id).slots.len;
-    }
-
-    /// Slot `i` of tile `id`, its prototype's with the tile's label and
-    /// overrides applied.
-    pub fn slot(m: *const Model, id: TileId, i: usize) Slot {
-        const sp = m.prototypeOf(id).slots[i];
-        const own = m.fillConst(id, sp.name);
-        return .{
-            .name = sp.name,
-            .place = if (own) |f| f.place orelse sp.place else sp.place,
-            .style = if (own) |f| f.style orelse sp.style else sp.style,
-            .content = if (own) |f| f.content else "",
-        };
-    }
-
-    /// The index of tile `id`'s slot called `name`.
-    pub fn slotIndex(m: *const Model, id: TileId, name: []const u8) ?usize {
-        for (m.prototypeOf(id).slots, 0..) |sp, i| if (std.mem.eql(u8, sp.name, name)) return i;
-        return null;
-    }
-
-    /// A slot named as the label content format writes it: a designator,
-    /// a dot and a slot name, as in `K23.top`.
-    pub fn findSlotPath(m: *const Model, path: []const u8) ?SlotRef {
-        const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return null;
-        const id = m.findTile(path[0..dot]) orelse return null;
-        return .{ .tile = id, .slot = m.slotIndex(id, path[dot + 1 ..]) orelse return null };
-    }
-
-    /// Tile `id`'s own part of slot `name`, if it has one.
-    pub fn fillConst(m: *const Model, id: TileId, name: []const u8) ?*const SlotFill {
-        for (m.tileConst(id).fills.items) |*f| if (std.mem.eql(u8, f.slot, name)) return f;
-        return null;
-    }
-
-    /// Tile `id`'s fill for its slot `name`, made if it has none; the slot
-    /// must be one of its prototype's.
-    fn fill(m: *Model, id: TileId, name: []const u8) Error!*SlotFill {
-        if (m.slotIndex(id, name) == null) return error.NoSuchSlot;
-        const fills = &m.tile(id).fills;
-        for (fills.items) |*f| if (std.mem.eql(u8, f.slot, name)) return f;
-        try fills.append(m.a(), .{ .slot = try m.a().dupe(u8, name) });
-        return &fills.items[fills.items.len - 1];
     }
 
     // Actions -----------------------------------------------------------
@@ -2885,7 +2798,7 @@ pub const Model = struct {
     pub fn addPrototypeTrack(m: *Model, id: PrototypeId, track: TileTrack) Error!ObjectId {
         if (m.protoIndex(id) == null) return error.NoSuchPrototype;
         const p = m.proto(id);
-        for (p.tracks) |tt| if (std.mem.eql(u8, tt.name, track.name)) return error.DuplicateSlot;
+        for (p.tracks) |tt| if (std.mem.eql(u8, tt.name, track.name)) return error.DuplicateTrack;
         const list = try m.a().alloc(TileTrack, p.tracks.len + 1);
         @memcpy(list[0..p.tracks.len], p.tracks);
         var t = track;
@@ -2911,7 +2824,7 @@ pub const Model = struct {
             m.revision += 1;
             return;
         };
-        return error.NoSuchSlot;
+        return error.NoSuchTrack;
     }
 
     /// Removes track `track` from prototype `id`. Tiles keep what they had
@@ -2924,7 +2837,7 @@ pub const Model = struct {
         for (p.tracks) |tt| {
             if (tt.id == track) found = true else try list.append(m.a(), tt);
         }
-        if (!found) return error.NoSuchSlot;
+        if (!found) return error.NoSuchTrack;
         p.tracks = list.items;
         m.revision += 1;
     }
@@ -2935,11 +2848,24 @@ pub const Model = struct {
         return null;
     }
 
+    /// Where track `track` is among tile `tile_id`'s prototype's tracks.
+    pub fn tileTrackIndex(m: *const Model, tile_id: TileId, track: ObjectId) ?usize {
+        for (m.prototypeOf(tile_id).tracks, 0..) |tt, k| if (tt.id == track) return k;
+        return null;
+    }
+
     /// Tile `tile_id`'s content in track `track`, if it has any.
     pub fn tileFlow(m: *const Model, tile_id: TileId, track: ObjectId) ?*TileFlow {
         const t = &m.tiles.items[m.tileIndex(tile_id) orelse return null];
         for (t.flows.items) |*f| if (f.track == track) return f;
         return null;
+    }
+
+    /// Sets the content of tile `tile_id`'s track called `name` (see
+    /// `setTileTrackText`).
+    pub fn setTrackText(m: *Model, tile_id: TileId, name: []const u8, text: []const u8) Error!void {
+        if (m.tileIndex(tile_id) == null) return error.NoSuchTile;
+        return m.setTileTrackText(tile_id, m.tileTrackNamed(tile_id, name) orelse return error.NoSuchTrack, text);
     }
 
     /// Tile `tile_id`'s content in track `track` as text, as
@@ -2962,7 +2888,7 @@ pub const Model = struct {
         if (m.tileIndex(tile_id) == null) return error.NoSuchTile;
         const tt = for (m.prototypeOf(tile_id).tracks) |tt| {
             if (tt.id == track) break tt;
-        } else return error.NoSuchSlot;
+        } else return error.NoSuchTrack;
         const f = m.tileFlow(tile_id, track) orelse blk: {
             const t = m.tile(tile_id);
             try t.flows.append(m.a(), .{ .id = m.newId(), .track = track });
@@ -4226,20 +4152,6 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Changes slot `i` of a prototype (its place, default style or name),
-    /// and so that slot on every tile made from it, except where a tile has
-    /// its own.
-    pub fn setPrototypeSlot(m: *Model, id: PrototypeId, i: usize, sp: SlotPrototype) Error!void {
-        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
-        const p = m.proto(id);
-        if (i >= p.slots.len) return error.NoSuchSlot;
-        const slots = try m.a().dupe(SlotPrototype, p.slots);
-        slots[i] = sp;
-        slots[i].name = try m.a().dupe(u8, sp.name);
-        p.slots = slots;
-        m.revision += 1;
-    }
-
     /// Changes how layer `i` of a prototype's art is painted. Its outline is
     /// left as drawn.
     pub fn setLayerPaint(m: *Model, id: PrototypeId, i: usize, paint: art_.Paint) Error!void {
@@ -4266,24 +4178,15 @@ pub const Model = struct {
         return n;
     }
 
-    /// Adds a slot to a prototype, and so to every tile made from it.
-    pub fn addPrototypeSlot(m: *Model, id: PrototypeId, sp: SlotPrototype) Error!void {
-        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
-        const p = m.proto(id);
-        for (p.slots) |s| if (std.mem.eql(u8, s.name, sp.name)) return error.DuplicateSlot;
-        const slots = try m.a().alloc(SlotPrototype, p.slots.len + 1);
-        @memcpy(slots[0..p.slots.len], p.slots);
-        slots[p.slots.len] = sp;
-        slots[p.slots.len].name = try m.a().dupe(u8, sp.name);
-        p.slots = slots;
-        m.revision += 1;
-    }
-
     /// A copy of prototype `id` named `name`, art and all; returns its id.
     pub fn duplicatePrototype(m: *Model, id: PrototypeId, name: []const u8) Error!PrototypeId {
         if (m.protoIndex(id) == null) return error.NoSuchPrototype;
         var copy = m.proto(id).*;
         copy.name = name;
+        // Its tracks are its own: new IDs.
+        const tracks = try m.a().dupe(TileTrack, copy.tracks);
+        for (tracks) |*tt| tt.id = .none;
+        copy.tracks = tracks;
         return m.addPrototype(copy);
     }
 
@@ -4299,41 +4202,6 @@ pub const Model = struct {
         if (m.blank_prototype) |b| if (b == id) {
             m.blank_prototype = null;
         };
-        m.revision += 1;
-    }
-
-    /// Renames slot `i` of a prototype; every tile made from it keeps its
-    /// label and overrides under the new name.
-    pub fn renamePrototypeSlot(m: *Model, id: PrototypeId, i: usize, name: []const u8) Error!void {
-        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
-        const p = m.proto(id);
-        if (i >= p.slots.len) return error.NoSuchSlot;
-        for (p.slots, 0..) |sp, k| {
-            if (k != i and std.mem.eql(u8, sp.name, name)) return error.DuplicateSlot;
-        }
-        const old = p.slots[i].name;
-        const new = try m.a().dupe(u8, name);
-        for (m.tiles.items) |*t| {
-            if (t.prototype != id) continue;
-            for (t.fills.items) |*f| {
-                if (std.mem.eql(u8, f.slot, old)) f.slot = new;
-            }
-        }
-        var sp = p.slots[i];
-        sp.name = new;
-        try m.setPrototypeSlot(id, i, sp);
-    }
-
-    /// Removes slot `i` from a prototype. Tiles keep what they had in it,
-    /// unshown, so adding a slot of that name back brings it back.
-    pub fn removePrototypeSlot(m: *Model, id: PrototypeId, i: usize) Error!void {
-        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
-        const p = m.proto(id);
-        if (i >= p.slots.len) return error.NoSuchSlot;
-        const slots = try m.a().alloc(SlotPrototype, p.slots.len - 1);
-        @memcpy(slots[0..i], p.slots[0..i]);
-        @memcpy(slots[i..], p.slots[i + 1 ..]);
-        p.slots = slots;
         m.revision += 1;
     }
 
@@ -4416,12 +4284,6 @@ pub const Model = struct {
             .height_param = try m.a().dupe(u8, ps.height_param),
             .offset = ps.offset,
         };
-        const slots = try m.a().alloc(SlotPrototype, p.slots.len);
-        for (p.slots, slots) |sp, *out| {
-            out.* = sp;
-            out.name = try m.a().dupe(u8, sp.name);
-        }
-        copy.slots = slots;
         const tracks = try m.a().alloc(TileTrack, p.tracks.len);
         for (p.tracks, tracks) |tt, *out| {
             out.* = tt;
@@ -4462,45 +4324,21 @@ pub const Model = struct {
         if (copy.prototype == .none) copy.prototype = m.prototypes.items[0].id;
         if (m.protoIndex(copy.prototype) == null) return error.NoSuchPrototype;
         copy.designator = try m.a().dupe(u8, t.designator);
-        copy.fills = .empty;
-        for (t.fills.items) |f| {
-            var c = f;
-            c.slot = try m.a().dupe(u8, f.slot);
-            c.content = try m.a().dupe(u8, f.content);
-            try copy.fills.append(m.a(), c);
+        // Its own copy of what is in its tracks, each with an ID of its own.
+        copy.flows = .empty;
+        for (t.flows.items) |f| {
+            var c: TileFlow = .{ .id = m.newId(), .track = f.track };
+            for (f.items.items) |it| {
+                var ci = it;
+                if (ci.what == .run) ci.what.run.content = try m.a().dupe(u8, it.what.run.content);
+                try c.items.append(m.a(), ci);
+            }
+            try copy.flows.append(m.a(), c);
         }
         copy.id = m.newId();
         try m.tiles.append(m.a(), copy);
         m.revision += 1;
         return copy.id;
-    }
-
-    /// Sets the label markup in tile `id`'s slot `name`.
-    pub fn setContent(m: *Model, id: TileId, name: []const u8, content: []const u8) Error!void {
-        const f = try m.fill(id, name);
-        f.content = try m.a().dupe(u8, content);
-        m.revision += 1;
-    }
-
-    /// Sets the label markup in the slot `path` names (`K23.top`).
-    pub fn setContentAt(m: *Model, path: []const u8, content: []const u8) Error!void {
-        const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return error.NoSuchSlot;
-        const id = m.findTile(path[0..dot]) orelse return error.NoSuchTile;
-        return m.setContent(id, path[dot + 1 ..], content);
-    }
-
-    /// Sets tile `id`'s own style for slot `name`; null takes the
-    /// prototype's again.
-    pub fn setSlotStyle(m: *Model, id: TileId, name: []const u8, style: ?StyleId) Error!void {
-        (try m.fill(id, name)).style = style;
-        m.revision += 1;
-    }
-
-    /// Sets tile `id`'s own place for slot `name`; null takes the
-    /// prototype's again.
-    pub fn setSlotPlace(m: *Model, id: TileId, name: []const u8, place_: ?SlotPlace) Error!void {
-        (try m.fill(id, name)).place = place_;
-        m.revision += 1;
     }
 
     /// Takes `id` out of every track it is in, keeping the tile itself.
@@ -4590,16 +4428,16 @@ test "designators are unique and actions bump the revision" {
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "main", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 2, .pitch = 19.05 });
-    const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top" }} });
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
     const q = try m.addTile(.{ .designator = "Q", .prototype = key });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = @enumFromInt(9999) }));
     try m.place(p, r, null, .{ .what = .{ .tile = q } });
     const before = m.revision;
-    try m.setContent(q, "top", "q");
+    try m.setTrackText(q, "top", "q");
     try std.testing.expect(m.revision > before);
-    try std.testing.expectEqualStrings("q", m.slot(q, 0).content);
-    try std.testing.expectError(error.NoSuchSlot, m.setContent(q, "front", "x"));
+    try std.testing.expectEqualStrings("q", m.tileFlow(q, m.tileTrackNamed(q, "top").?).?.items.items[0].what.run.content);
+    try std.testing.expectError(error.NoSuchTrack, m.setTrackText(q, "front", "x"));
 }
 
 test "a prototype's sizing rules: which ways a tile grows, and to what" {
@@ -4616,53 +4454,6 @@ test "a prototype's sizing rules: which ways a tile grows, and to what" {
     const button: TilePrototype = .{ .name = "button", .expand = .{ .horizontal = false, .vertical = false } };
     try std.testing.expect(button.allows(1, 1));
     try std.testing.expect(!button.allows(1.25, 1));
-}
-
-test "a tile's slots are its prototype's, with its own labels and overrides" {
-    var m: Model = .init(std.testing.allocator);
-    defer m.deinit();
-    const s1: StyleId = @enumFromInt(1001);
-    const s2: StyleId = @enumFromInt(1002);
-    const key = try m.addPrototype(.{ .name = "key", .slots = &.{
-        .{ .name = "top", .style = s1, .place = .{ .inset = .all(1) } },
-        .{ .name = "front", .style = s1 },
-    } });
-    const plain = try m.addPrototype(.{ .name = "plain" });
-    const k = try m.addTile(.{ .designator = "K23", .prototype = key });
-
-    // Addressed as the label content format writes it.
-    try m.setContentAt("K23.top", "Q");
-    try std.testing.expectEqual(SlotRef{ .tile = k, .slot = 0 }, m.findSlotPath("K23.top").?);
-    try std.testing.expectEqual(null, m.findSlotPath("K23.side"));
-    try std.testing.expectError(error.NoSuchTile, m.setContentAt("K99.top", "x"));
-
-    // The prototype's style and place until the tile overrides one.
-    try std.testing.expectEqual(s1, m.slot(k, 0).style);
-    try m.setSlotStyle(k, "top", s2);
-    try std.testing.expectEqual(s2, m.slot(k, 0).style);
-    try std.testing.expectEqual(s1, m.slot(k, 1).style);
-    try m.setSlotStyle(k, "top", null);
-    try std.testing.expectEqual(s1, m.slot(k, 0).style);
-    try std.testing.expectEqual(1, m.slot(k, 0).place.inset.left);
-
-    // Changing the prototype's slot changes the tile's, where it has no own.
-    var top = m.proto(key).slots[0];
-    top.place.h = .centre;
-    try m.setPrototypeSlot(key, 0, top);
-    try std.testing.expectEqual(Align.centre, m.slot(k, 0).place.h);
-    try std.testing.expectEqual(1, m.prototypeUses(key));
-
-    // A slot added to the prototype appears on its tiles, empty.
-    try m.addPrototypeSlot(key, .{ .name = "side" });
-    try std.testing.expectEqual(3, m.slotCount(k));
-    try std.testing.expectEqualStrings("", m.slot(k, 2).content);
-
-    // Switched to a prototype without the slot and back, the label is kept.
-    try m.setTilePrototype(k, plain);
-    try std.testing.expectEqual(0, m.slotCount(k));
-    try std.testing.expectError(error.NoSuchSlot, m.setContent(k, "top", "x"));
-    try m.setTilePrototype(k, key);
-    try std.testing.expectEqualStrings("Q", m.slot(k, 0).content);
 }
 
 test "a layer's paint changes; its outline does not" {
@@ -4689,32 +4480,34 @@ test "a layer's paint changes; its outline does not" {
     try std.testing.expectError(error.NoSuchLayer, m.setLayerPaint(plain, 0, .{}));
 }
 
-test "prototypes are duplicated, have slots renamed and removed, and are removed when unused" {
+test "prototypes are duplicated with tracks of their own; a renamed track keeps each tile's text; prototypes are removed when unused" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{ .{ .name = "top" }, .{ .name = "front" } } });
+    const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .tracks = &.{ .{ .name = "top" }, .{ .name = "front" } } });
     const k = try m.addTile(.{ .designator = "K1", .prototype = key });
-    try m.setContent(k, "top", "A");
+    try m.setTrackText(k, "top", "A");
+    const top = m.tileTrackNamed(k, "top").?;
 
-    // A copy is independent of its original.
+    // A copy is independent of its original, its tracks its own.
     const wide = try m.duplicatePrototype(key, "wide key");
     try std.testing.expectEqualStrings("wide key", m.proto(wide).name);
-    try std.testing.expectEqual(2, m.proto(wide).slots.len);
-    try m.addPrototypeSlot(wide, .{ .name = "side" });
-    try std.testing.expectEqual(2, m.proto(key).slots.len);
-    try std.testing.expectError(error.DuplicateSlot, m.addPrototypeSlot(wide, .{ .name = "side" }));
+    try std.testing.expectEqual(2, m.proto(wide).tracks.len);
+    try std.testing.expect(m.proto(wide).tracks[0].id != top);
+    _ = try m.addPrototypeTrack(wide, .{ .name = "side" });
+    try std.testing.expectEqual(2, m.proto(key).tracks.len);
+    try std.testing.expectError(error.DuplicateTrack, m.addPrototypeTrack(wide, .{ .name = "side" }));
 
-    // A renamed slot keeps each tile's label.
-    try m.renamePrototypeSlot(key, 0, "legend");
-    try std.testing.expectEqualStrings("A", m.slot(k, 0).content);
-    try std.testing.expectEqualStrings("legend", m.slot(k, 0).name);
-    try std.testing.expectError(error.DuplicateSlot, m.renamePrototypeSlot(key, 0, "front"));
+    // A renamed track keeps each tile's text: it is matched by ID.
+    var renamed = m.proto(key).tracks[0];
+    renamed.name = "legend";
+    try m.setPrototypeTrack(key, top, renamed);
+    try std.testing.expectEqual(top, m.tileTrackNamed(k, "legend").?);
+    try std.testing.expectEqualStrings("A", m.tileFlow(k, top).?.items.items[0].what.run.content);
 
-    // A removed slot hides its label; added back, it shows again.
-    try m.removePrototypeSlot(key, 0);
-    try std.testing.expectEqual(1, m.slotCount(k));
-    try m.addPrototypeSlot(key, .{ .name = "legend" });
-    try std.testing.expectEqualStrings("A", m.slot(k, 1).content);
+    // A removed track hides the tile's text, which stays.
+    try m.removePrototypeTrack(key, top);
+    try std.testing.expectEqual(1, m.proto(key).tracks.len);
+    try std.testing.expect(m.tileFlow(k, top) != null);
 
     // Only an unused prototype goes; tiles of others keep theirs.
     const spare = try m.addPrototype(.{ .name = "spare" });
@@ -4743,7 +4536,7 @@ test "tracks are added empty; a removed tile leaves them" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.5 }, .slots = &.{.{ .name = "top" }} });
+    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.5 }, .tracks = &.{.{ .name = "top" }} });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 2, .length = 4.5, .pitch = 19.05 });
     const region = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(4.5, region.w);

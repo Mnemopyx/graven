@@ -31,7 +31,7 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 - **Spaces and frames:** frames are spaces of their own. Views place one space inside another.
 - **Structure:** layers, images, groups, and object IDs that last.
 - **Panels:** margins and compliance checks. Panels can be made from closed paths and can have cutouts.
-- **Tiles:** tile prototypes with slots, sizing rules, art drawn at 1u and stretched, and their own unit.
+- **Tiles:** tile prototypes with tracks on their faces (rows, or columns set a character at a time), sizing rules, art drawn at 1u and stretched, and their own unit.
 - **Tracks:**
   - rows or columns along a path with control points, where segments step by pitch and are bound to the path at their centre;
   - the path and segment length define the track's boundary;

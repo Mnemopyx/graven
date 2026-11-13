@@ -36,11 +36,11 @@ pub const actions = [_][:0]const u8{
     "makePanel",         "releasePanel",       "addArt",              "moveArt",            "removeArt",
     "setArtWrap",        "setArtWrapsTracks",  "setArtCutout",        "setArtCorner",       "addTracks",
     "insertTile",        "insertBlank",        "insertRun",           "insertBreak",        "removeAt",
-    "removeTile",        "setTileSize",        "setTilePrototype",    "setContent",         "setRunContent",
-    "setSlotPlace",      "setSlotStyle",       "setBind",             "setTrackFlow",       "setSegmentLength",
+    "removeTile",        "setTileSize",        "setTilePrototype",    "setRunContent",
+    "setBind",             "setTrackFlow",       "setSegmentLength",
     "moveSegment",       "trimSegments",       "addStyle",            "setCapHeight",       "addPrototype",
     "duplicatePrototype", "removePrototype",   "setPrototype",        "setPrototypeArt",    "setLayerPaint",
-    "addPrototypeSlot",  "setPrototypeSlot",   "renamePrototypeSlot", "removePrototypeSlot", "makeGroup",
+    "makeGroup",
     "ungroup",           "moveGroup",          "moveToSpace",         "copyToSpace",        "addView",
     "moveView",          "setViewScale",       "removeView",          "addLayer",           "setLayer",
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
@@ -51,7 +51,7 @@ pub const actions = [_][:0]const u8{
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
-    "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText",
+    "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -570,8 +570,8 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     try h.reset(&m);
     const plate = try h.do(&m, .placePanel, .{model.Panel{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 140, .h = 60 }});
     const keys = try h.do(&m, .placePanel, .{model.Panel{ .name = "Keys", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 100 }, .w = 140, .h = 60 }});
-    const key_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }});
-    const legend_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Legend", .slots = &.{.{ .name = "f", .place = .{ .h = .centre, .v = .centre } }} }});
+    const key_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }});
+    const legend_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Legend", .tracks = &.{.{ .name = "f", .alignment = .centre }} }});
     // 10 columns by 4 rows, 13 mm apart across and 12 down.
     const g = try h.do(&m, .addGrid, .{ plate, .{ .x = 10, .y = 50 }, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12 } });
     const holes = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Holes", .prototype = key_proto, .role = .hole, .w = 10, .h = 8 } });
@@ -608,7 +608,7 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     // Dragged over points: one instance spanning them, keeping the labels
     // of the first that lay there.
     const k00 = m.panels.items[keys].grids.items[kg].instances.items[0].tile;
-    try m.setContent(k00, "top", "ON");
+    try m.setTrackText(k00, "top", "ON");
     const before = m.panels.items[keys].grids.items[kg].instances.items.len;
     const wide = try h.do(&m, .placeInstance, .{ keys, kg, caps, 0, 0, 2, 1 });
     try testing.expectEqual(k00, wide);
@@ -648,7 +648,7 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     // Placed: the holes are cut through the plate's outline; legends have
     // no shapes; key labels sit on the keys.
     const key0 = m.panels.items[keys].grids.items[kg].instances.items[0].tile;
-    try m.setContent(key0, "top", "x");
+    try m.setTrackText(key0, "top", "x");
     const place = @import("place.zig");
     var labels: place.Labels = .init(gpa, &.{});
     defer labels.deinit();

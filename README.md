@@ -64,7 +64,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 | `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic), contours, exact areas and bounds; `spring`, the 1-D tension solver |
 | `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
-| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes, tiles, slots, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
+| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
 | `docs` | Project notes: [status.md](docs/status.md), what exists today and what is still to come |
 | `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |

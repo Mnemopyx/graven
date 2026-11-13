@@ -186,7 +186,8 @@ pub const Styles = struct {
 
 /// The one tile prototype: keycap proportions for a cylindrical profile, an
 /// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back,
-/// with one slot, `top`, for the legend. Word legends override its style.
+/// with two tracks over the same part of its face: `top` for symbols and
+/// shifted pairs, `words`, smaller, for words.
 /// Keys grow from 1u × 1u to the standard widths, and to 2u tall for the
 /// keypad + and Enter. Its art is one 1u keycap, shaded darker toward the
 /// front where a cylindrical cap slopes away, stretched to every key.
@@ -213,7 +214,12 @@ fn keyPrototype(a: std.mem.Allocator, styles: Styles) !layout.model.TilePrototyp
             .edge = .hex("#9a978f"),
             .face = back_to_front(.hex("#faf9f6"), .hex("#efede8")),
         }),
-        .slots = &.{.{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } }},
+        // Symbols and shifted pairs in `top`; words, smaller, in `words`,
+        // over the same part of the face.
+        .tracks = &.{
+            .{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } },
+            .{ .name = "words", .style = styles.small, .place = .{ .inset = .all(0.8) } },
+        },
         .widths = &.{ 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25 },
         .heights = &.{ 1, 2 },
     };
@@ -259,19 +265,16 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
             const t = try m.addTile(.{ .designator = name, .w = e.w, .h = e.h, .prototype = key });
             markup.clearRetainingCapacity();
             const w = &markup.writer;
+            // A shifted pair: two lines, the shifted symbol on top.
             switch (e.legend) {
-                .one => |s| try escape(w, s),
+                .one, .words => |s| try escape(w, s),
                 .pair => |pr| {
                     try escape(w, pr[0]);
-                    try w.writeAll("\\\\");
+                    try w.writeByte('\n');
                     try escape(w, pr[1]);
                 },
-                .words => |s| {
-                    try escape(w, s);
-                    try m.setSlotStyle(t, "top", styles.small);
-                },
             }
-            try m.setContent(t, "top", markup.written());
+            try m.setTrackText(t, if (e.legend == .words) "words" else "top", markup.written());
             try m.place(p, r, null, .{ .gap = e.gap, .what = .{ .tile = t } });
         }
     }

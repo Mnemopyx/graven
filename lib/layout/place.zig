@@ -59,11 +59,12 @@ pub const PlacedLabel = struct {
         from: u32 = 0,
         len: u32 = 0,
     } = null,
-    /// The tile whose slot holds it; null for a run.
+    /// The tile whose track holds it; null for a run in a panel's track.
     tile: ?TileId,
-    /// The slot's index on the tile.
+    /// For a tile's text, the index of its track among its prototype's;
+    /// for a run, the item's index.
     slot: usize,
-    /// The slot's box, mm in the panel frame.
+    /// Its box, mm in the panel frame.
     box: Box,
     /// Where the label frame's origin sits in the panel frame; the render's
     /// geometry is relative to it.
@@ -78,7 +79,7 @@ pub const Issue = struct {
         /// A segment's content runs past its end (past the last segment's,
         /// when the flow overflows), or meets a spanning tile.
         row_overflow,
-        /// A label does not fit its slot.
+        /// A tile's text does not fit its track.
         label_overflow,
         /// A label has characters no face covers.
         missing_glyph,
@@ -833,51 +834,6 @@ const KeepOut = struct {
     }
 };
 
-/// For a label set from anchor point `at` in hard box `box` (panel frame),
-/// each line's open span where line art closes stretches of it, in the
-/// label frame: the widest one left (a zero-width one if none is, so the
-/// line overflows and says so). Empty when no art reaches the box. Lines
-/// are taken one pitch apart down from the first baseline, before the
-/// block is fitted in its box.
-fn lineSpans(a: Allocator, keepouts: []const KeepOut, box: Box, at: Point, cap: f64, pitch: f64) Allocator.Error![]const ?[2]f64 {
-    var any = false;
-    for (keepouts) |k| {
-        const c = k.clearance;
-        if (model.overlaps(.{ .x0 = k.box.x0 - c, .x1 = k.box.x1 + c, .y0 = k.box.y0 - c, .y1 = k.box.y1 + c }, box)) any = true;
-    }
-    if (!any or !(pitch > 0)) return &.{};
-    var spans: std.ArrayList(?[2]f64) = .empty;
-    var closed: std.ArrayList([2]f64) = .empty;
-    const lead = (pitch - cap) / 2;
-    var i: usize = 0;
-    while (i < 64) : (i += 1) {
-        const base = at.y - @as(f64, @floatFromInt(i)) * pitch;
-        const band: Box = .{ .x0 = box.x0, .x1 = box.x1, .y0 = base - lead, .y1 = base + cap + lead };
-        if (band.y1 < box.y0) break;
-        closed.clearRetainingCapacity();
-        for (keepouts) |k| try k.closes(a, true, band, &closed);
-        if (closed.items.len == 0) {
-            try spans.append(a, null);
-            continue;
-        }
-        std.mem.sort([2]f64, closed.items, {}, struct {
-            fn lt(_: void, x: [2]f64, y: [2]f64) bool {
-                return x[0] < y[0];
-            }
-        }.lt);
-        // The widest open span between the closed stretches.
-        var best: [2]f64 = .{ 0, 0 };
-        var from: f64 = 0;
-        for (closed.items) |cl| {
-            if (cl[0] - from > best[1] - best[0]) best = .{ from, cl[0] };
-            from = @max(from, cl[1]);
-        }
-        if (box.width() - from > best[1] - best[0]) best = .{ from, box.width() };
-        try spans.append(a, .{ box.x0 + best[0] - at.x, box.x0 + best[1] - at.x });
-    }
-    return spans.items;
-}
-
 /// Segment `seg`'s length along, mm: a whole segment's, wherever the path
 /// puts it.
 fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
@@ -956,10 +912,6 @@ fn endsIn(cuts: []const ?Cut, index: usize, end: @TypeOf(@as(Cut, undefined).end
 fn pointOn(s: geom.Segment, t: f64) Point {
     return s.at(t);
 }
-
-/// A tile track's labels name it by this plus its index in the
-/// prototype's tracks, as `PlacedLabel.slot`, so they are told from slots.
-pub const tile_track_slot: usize = 1 << 20;
 
 /// How far down a column one piece of text reaches: a character, a cap
 /// height and a half; a space between words, half a cap.
@@ -1383,7 +1335,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         for (stretch, 0..) |*st, k| st.* = isSpace(cuts.items, k);
         const extra = try a.alloc(f64, items.len);
         @memset(extra, 0);
-        const flow: Flow = .{ .m = m, .region = flow_r, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
+        const flow: Flow = .{ .m = m, .region = flow_r, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = if (own) keepouts.items else label_keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
         // The bounds of the segment being filled: its first line takes the
         // first-line indent. The first segment too: line art may close stretches of it.
         try flow.enter(a, &path, 0, tall.items, &closed);
@@ -1539,7 +1491,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 const hd = hr.design;
                 try placed_labels.append(a, .{
                     .tile = if (own) null else synth_owner.items[ri],
-                    .slot = if (own) item_of.items[index] else tile_track_slot + synth_which.items[ri],
+                    .slot = if (own) item_of.items[index] else synth_which.items[ri],
                     .box = .{ .x0 = band.x0 + end, .x1 = band.x0 + end + (hd.x1 - hd.x0), .y0 = band.y0, .y1 = band.y1 },
                     .origin = .{ .x = band.x0 + end - hd.x0, .y = (band.y0 + band.y1 - cap) / 2 },
                     .style = item.what.run.style,
@@ -1616,7 +1568,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     try placed_labels.append(a, .{
                         .run = if (own) .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
                         .tile = if (own) null else synth_owner.items[ri],
-                        .slot = if (own) item_of.items[index] else tile_track_slot + synth_which.items[ri],
+                        .slot = if (own) item_of.items[index] else synth_which.items[ri],
                         .box = box,
                         .origin = origin,
                         .style = run.style,
@@ -1668,67 +1620,10 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             .missing_glyph, .markup_error, .style_error, .variant_missing => i.kind,
             else => continue,
         };
-        try issues.append(a, .{ .kind = kind, .tile = synth_owner.items[r], .slot = tile_track_slot + synth_which.items[r], .syntax = i.syntax });
+        try issues.append(a, .{ .kind = kind, .tile = synth_owner.items[r], .slot = synth_which.items[r], .syntax = i.syntax });
     }
 
 
-    for (tiles.items) |pt| {
-        for (0..m.slotCount(pt.id)) |si| {
-            const slot = m.slot(pt.id, si);
-            if (slot.content.len == 0) continue;
-            const ctx = labels.context(slot.style) orelse {
-                try issues.append(a, .{ .kind = .style_error, .tile = pt.id, .slot = si });
-                continue;
-            };
-            const box = slot.place.inset.inset(pt.face);
-            const cap = ctx.spec.cap_height;
-            const at: Point = .{
-                .x = switch (slot.place.h) {
-                    .start => box.x0,
-                    .centre => (box.x0 + box.x1) / 2,
-                    .end => box.x1,
-                },
-                .y = switch (slot.place.v) {
-                    .start => box.y1 - cap,
-                    .centre => (box.y0 + box.y1 - cap) / 2,
-                    .end => box.y0,
-                },
-            };
-            // Art over the slot closes stretches of its lines: each line is
-            // given the widest span left open.
-            const spans = try lineSpans(a, label_keepouts.items, box, at, cap, ctx.linePitch() catch 0);
-            const render = (try labels.get(.{
-                .style = slot.style,
-                .anchor = slot.place.h,
-                .box = .{ snap(box.x0 - at.x), snap(box.y0 - at.y), snap(box.x1 - at.x), snap(box.y1 - at.y) },
-                .markup = slot.content,
-                .spans = spans,
-            })) orelse {
-                try issues.append(a, .{ .kind = .markup_error, .tile = pt.id, .slot = si });
-                continue;
-            };
-            if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .tile = pt.id, .slot = si, .syntax = render.syntax[0] });
-            const shift = render.anchor_at orelse Point{ .x = 0, .y = 0 };
-            try placed_labels.append(a, .{
-                .tile = pt.id,
-                .slot = si,
-                .box = box,
-                .origin = .{ .x = at.x + shift.x, .y = at.y + shift.y },
-                .style = slot.style,
-                .render = render,
-            });
-            var overflow = false;
-            var missing = false;
-            for (render.diagnostics) |d| switch (d.kind) {
-                .overflow => overflow = true,
-                .missing_glyph => missing = true,
-                else => {},
-            };
-            if (overflow) try issues.append(a, .{ .kind = .label_overflow, .tile = pt.id, .slot = si });
-            if (missing) try issues.append(a, .{ .kind = .missing_glyph, .tile = pt.id, .slot = si });
-            if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .tile = pt.id, .slot = si });
-        }
-    }
 
     // Runs of text in tracks reach past the tiles' boxes: the bounds hold
     // their ink too, so a canvas with only text still has extents.
@@ -1902,7 +1797,7 @@ test "a row too long wraps on into a new one, past the soft area, flagged" {
     try testing.expectEqual(1, s.items[2].segment);
 }
 
-test "labels render once per identical legend and sit in their slots" {
+test "legends render once per identical text and sit on their track's line" {
     const gpa = testing.allocator;
     const face = try engine.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
@@ -1913,10 +1808,10 @@ test "labels render once per identical legend and sit in their slots" {
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
-    const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2), .slots = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
+    const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
-        try m.setContent(t, "top", "H");
+        try m.setTrackText(t, "top", "H");
         try m.place(p, r, null, .{ .what = .{ .tile = t } });
     }
     var labels: Labels = .init(gpa, &faces);
@@ -1926,17 +1821,18 @@ test "labels render once per identical legend and sit in their slots" {
     try testing.expectEqual(2, s.labels.len);
     try testing.expectEqual(s.labels[0].render, s.labels[1].render);
     try testing.expectEqual(1, labels.cache.count());
-    // Top-left: baseline one cap height below the slot's top.
+    // On the track's first line, from its start: capitals centred across
+    // the line.
     const l = s.labels[0];
-    try testing.expectApproxEqAbs(l.box.y1 - 3, l.origin.y, 1e-12);
-    try testing.expect(l.origin.x + l.render.ink.x0 >= l.box.x0 - 1e-12);
+    try testing.expectApproxEqAbs((l.box.y0 + l.box.y1 - 3) / 2, l.origin.y, 1e-9);
+    try testing.expect(l.origin.x + l.render.ink.x0 >= l.box.x0 - 1e-9);
 
     // A style change drops its renders.
     m.setStyle(style, .{ .upright = 0, .cap_height = 2.5 });
     var s2 = try solve(gpa, &m, p, &labels);
     defer s2.deinit();
     try testing.expectEqual(1, labels.cache.count());
-    try testing.expectApproxEqAbs(s2.labels[0].box.y1 - 2.5, s2.labels[0].origin.y, 1e-12);
+    try testing.expectApproxEqAbs((s2.labels[0].box.y0 + s2.labels[0].box.y1 - 2.5) / 2, s2.labels[0].origin.y, 1e-9);
 }
 
 test "a run being typed is stored as typed, flagged, and still drawn" {
@@ -1980,9 +1876,9 @@ test "a legend with characters no face covers is reported on its tile" {
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
-    const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top", .style = style }} });
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top", .style = style }} });
     const t = try m.addTile(.{ .designator = "K1", .prototype = key });
-    try m.setContent(t, "top", "HQ");
+    try m.setTrackText(t, "top", "HQ");
     try m.place(p, r, null, .{ .what = .{ .tile = t } });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
@@ -2023,7 +1919,7 @@ test "changing a prototype changes every tile made from it" {
     try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, @enumFromInt(9999)));
 }
 
-test "changing a prototype's slot moves every legend in it, but not a tile's own" {
+test "changing a prototype's track moves every tile's text in it" {
     const gpa = testing.allocator;
     const face = try engine.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
@@ -2033,903 +1929,26 @@ test "changing a prototype's slot moves every legend in it, but not a tile's own
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
-    const top: model.SlotPrototype = .{ .name = "top", .style = style, .place = .{ .inset = .all(1) } };
-    const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .slots = &.{top} });
+    const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     for ([_][]const u8{ "K1", "K2", "K3" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
-        try m.setContent(t, "top", "H");
+        try m.setTrackText(t, "top", "H");
         try m.place(p, r, null, .{ .what = .{ .tile = t } });
     }
-    try m.setSlotPlace(m.findTile("K3").?, "top", .{ .inset = .all(1) });
-
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var before = try solve(gpa, &m, p, &labels);
     defer before.deinit();
-    var moved = top;
+    var moved = m.proto(key).tracks[0];
     moved.place.inset = .{ .left = 3, .right = 1, .top = 1, .bottom = 1 };
-    try m.setPrototype(key, .{ .name = "key", .face_inset = .all(2), .slots = &.{moved} });
+    try m.setPrototypeTrack(key, moved.id, moved);
     var after = try solve(gpa, &m, p, &labels);
     defer after.deinit();
     try testing.expectEqual(3, after.labels.len);
-    for (before.labels, after.labels, 0..) |b, a, i| {
-        const dx = a.box.x0 - b.box.x0;
-        try testing.expectApproxEqAbs(@as(f64, if (i < 2) 2 else 0), dx, 1e-9);
-    }
+    for (before.labels, after.labels) |b, a| try testing.expectApproxEqAbs(@as(f64, 2), a.box.x0 - b.box.x0, 1e-9);
 }
 
-test "tiles are drawn from their prototype's art, stretched; bad art is drawn plain and flagged" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var scratch: std.heap.ArenaAllocator = .init(gpa);
-    defer scratch.deinit();
-    const sa = scratch.allocator();
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 120, 50);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 1, .pitch = 19.05 });
-
-    // A calculator key: a dark body, a lighter top, and a gold band across
-    // its front, from the same drawing code as any other art.
-    var calc_art = try art.keycap(sa, .{
-        .pitch = 19.05,
-        .body_inset = .all(1),
-        .face_inset = .{ .left = 1.5, .right = 1.5, .top = 1.5, .bottom = 5 },
-        .body = .{ .solid = .hex("#2b2b2b") },
-        .edge = null,
-        .face = .{ .solid = .hex("#3c3c3c") },
-    });
-    const band = try art.roundedRect(sa, .{ .x0 = 1, .y0 = 1, .x1 = 18.05, .y1 = 5 }, 0.5);
-    const layers = try sa.alloc(art.Layer, 3);
-    @memcpy(layers[0..2], calc_art.layers);
-    layers[2] = .{ .name = "gold", .outline = band, .paint = .{ .fill = .{ .solid = .hex("#c8a24a") } } };
-    calc_art.layers = layers;
-
-    const calc = try m.addPrototype(.{ .name = "calculator key", .art = calc_art });
-    const plain = try m.addPrototype(.{ .name = "plain", .body_inset = .all(0.5), .face_inset = .all(2) });
-    // Art whose corner arcs reach across a cut placed off centre cannot
-    // stretch exactly.
-    const blob = try m.addPrototype(.{ .name = "blob", .art = .{ .pitch = 19.05, .cut = .{ .x = 6, .y = 6 }, .layers = &.{.{
-        .name = "dot",
-        .outline = try art.roundedRect(sa, .{ .x0 = 0, .y0 = 0, .x1 = 19.05, .y1 = 19.05 }, 9.525),
-        .paint = .{ .fill = .{ .solid = .hex("#ff0000") } },
-    }} } });
-    try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "C", .prototype = calc, .w = 2 }) } });
-    try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "P", .prototype = plain }) } });
-    try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "B", .prototype = blob }) } });
-
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-
-    // The calculator key: three layers, the gold band stretched across its
-    // 2u width with its rounded ends kept.
-    const c = s.tiles[0];
-    try testing.expectEqual(3, c.shapes.len);
-    try testing.expectEqualStrings("gold", c.shapes[2].name);
-    try testing.expectEqual(art.Color.hex("#c8a24a"), c.shapes[2].paint.fill.solid);
-    const gold = c.shapes[2].outline.bounds();
-    try testing.expectApproxEqAbs(c.pitch_box.width() - 2, gold.width(), 1e-9);
-    // The plain key: its body and face, flat, from its insets.
-    const pl = s.tiles[1];
-    try testing.expectEqual(2, pl.shapes.len);
-    try testing.expectApproxEqAbs(pl.body.width(), pl.shapes[0].outline.bounds().width(), 1e-9);
-    // The blob: drawn plain, and flagged.
-    try testing.expectEqualStrings("body", s.tiles[2].shapes[0].name);
-    var flagged = false;
-    for (s.issues) |i| flagged = flagged or i.kind == .tile_art;
-    try testing.expect(flagged);
-}
-
-test "columns run down from the region's top and set to the right" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 100, 100);
-    const key = try m.addPrototype(.{ .name = "key", .heights = &.{ 1, 2 } });
-    const r = try m.addTracks(p, .{ .name = "col", .origin = .{ .x = 10, .y = 90 }, .major = .column, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
-    for (0..6) |i| _ = try m.insertTile(p, r, i, key, 1);
-    // The first tile twice as tall: the rest move down, the third into the
-    // second column, which then overflows.
-    const first = m.panels.items[p].regions.items[r].items.items[0].tileOf().?;
-    try m.setTileSize(first, 1, 2);
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    // Column 1: tiles at 90..70 and 70..60.
-    try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[0].pitch_box.y1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 70), s.tiles[0].pitch_box.y0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 70), s.tiles[1].pitch_box.y1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[1].pitch_box.x0, 1e-9);
-    // Column 2 sits to the right, from the top, starting with the third.
-    try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[2].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[2].pitch_box.y1, 1e-9);
-    try testing.expectEqual(1, s.items[2].segment);
-    // The sixth goes on to a third column, past the soft area.
-    try testing.expectEqual(2, s.items[5].segment);
-    var flagged = false;
-    for (s.issues) |i| flagged = flagged or i.kind == .past_soft_area;
-    try testing.expect(flagged);
-}
-
-test "blanks take their length in a track, and every item's span is reported" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 100, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 1, .length = 4, .pitch = 10 });
-    for (0..4) |i| _ = try m.insertTile(p, r, i, key, 1);
-    _ = try m.insertBlank(p, r, 1, 0.5);
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    // 4.5 u in a 4 u row: the last key wraps on to a second row.
-    try testing.expectEqual(2, s.tracks.len);
-    try testing.expectEqual(5, s.items.len);
-    try testing.expectApproxEqAbs(@as(f64, 10), s.items[1].span[0], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 15), s.items[1].span[1], 1e-9);
-    // The blank is a spacer tile; the second key starts after it.
-    try testing.expect(s.tiles[1].spacer);
-    try testing.expectEqual(0, s.tiles[1].shapes.len);
-    try testing.expectApproxEqAbs(@as(f64, 15), s.tiles[2].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 90), s.tracks[0].box.y0, 1e-9);
-}
-
-test "each segment is bound to the path by its centre; its paragraph's alignment arranges what is in it" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 200);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 190 }, .prototype = key, .count = 12, .length = 6, .pitch = 10 });
-    const centred = try m.addParagraphStyle(.{ .name = "Centred", .alignment = .centre });
-    const ended = try m.addParagraphStyle(.{ .name = "Ended", .alignment = .end });
-    // Two rows of each: as the track sets them, centred, then ended.
-    const region = &m.panels.items[p].regions.items[r];
-    for (0..6) |t| {
-        if (t > 0) {
-            const at = region.items.items.len;
-            if (t == 2) try m.insertParagraph(p, r, at, centred) else if (t == 4) try m.insertParagraph(p, r, at, ended) else _ = try m.insertBreak(p, r, at);
-        }
-        _ = try m.insertTile(p, r, region.items.items.len, key, 1);
-    }
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    {
-        // Unshaped: each line in its whole segment, aligned in it.
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectEqual(6, s.tracks.len);
-        const want = [_]f64{ 10, 10, 35, 35, 60, 60 };
-        for (s.tiles, want) |t, x| try testing.expectApproxEqAbs(x, t.pitch_box.x0, 1e-9);
-    }
-    // A straight path 2 u right of the middle: every segment moves with
-    // it, whole, bound by its centre; alignment arranges what is in it.
-    _ = try m.addControlPoint(p, r, 5, 0);
-    _ = try m.addControlPoint(p, r, 5, 9);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        const want = [_]f64{ 30, 30, 55, 55, 80, 80 };
-        for (s.tiles, want) |t, x| try testing.expectApproxEqAbs(x, t.pitch_box.x0, 1e-9);
-        for (s.tracks) |t| {
-            try testing.expectApproxEqAbs(@as(f64, 5), t.origin.along, 1e-9);
-            try testing.expectApproxEqAbs(@as(f64, 60), t.box.width(), 1e-9);
-            try testing.expectApproxEqAbs(@as(f64, 60), (t.box.x0 + t.box.x1) / 2, 1e-9);
-        }
-        // The path and the segment length are the track's boundary: it
-        // moves with the path, so nothing is out of bounds.
-        for (s.issues) |is| try testing.expect(is.kind != .past_soft_area);
-        const b = m.panels.items[p].regions.items[r].bounds();
-        try testing.expectApproxEqAbs(@as(f64, 30), b.x0, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 90), b.x1, 1e-9);
-    }
-}
-
-test "joined tracks share one flow: what overflows one goes on into the next" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("page", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    // Two columns of text-like rows, side by side: each two rows of three.
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 100, .y = 90 }, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
-    for (0..9) |_| _ = try m.insertTile(p, a, m.panels.items[p].regions.items[a].items.items.len, key, 1);
-    // B holds one tile of its own.
-    _ = try m.insertTile(p, b, 0, key, 1);
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    {
-        // Unjoined: A's third row is past its space, flagged.
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        var past = false;
-        for (s.issues) |is| past = past or (is.kind == .past_soft_area and is.region == a);
-        try testing.expect(past);
-    }
-    // Joined: A's flow goes on into B, and B's tile is added at its end,
-    // as a new paragraph.
-    try m.joinTracks(p, a, b);
-    try testing.expectEqual(@as(usize, 0), m.panels.items[p].regions.items[b].items.items.len);
-    try testing.expectEqual(@as(usize, 11), m.panels.items[p].regions.items[a].items.items.len);
-    try testing.expectEqual(a, m.threadHead(p, b).region);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        for (s.issues) |is| try testing.expect(is.kind != .past_soft_area);
-        // Six tiles in A's two rows, the rest in B's from its top-left.
-        try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[3].pitch_box.x0, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 100), s.tiles[6].pitch_box.x0, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 90), s.tiles[6].pitch_box.y1, 1e-9);
-        // B's tile starts the next row, after the separator.
-        try testing.expectApproxEqAbs(@as(f64, 80), s.tiles[9].pitch_box.y1, 1e-9);
-        // Every segment is the thread's: numbered through it, and each
-        // says which track it lies in.
-        try testing.expectEqual(4, s.tracks.len);
-        try testing.expectEqual(a, s.tracks[2].region);
-        try testing.expectEqual(b, s.tracks[2].member);
-        try testing.expectEqual(@as(usize, 0), s.tracks[2].local);
-        try testing.expectEqual(@as(usize, 1), s.flows.len);
-    }
-    // A thread cannot loop, or join tracks running different ways.
-    try testing.expectError(error.BadJoin, m.joinTracks(p, b, a));
-    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 150, .y = 90 }, .major = .column, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
-    try testing.expectError(error.BadJoin, m.joinTracks(p, b, c));
-    // Unjoined: the flow stays whole on A, and overflows it again.
-    try m.unjoinTrack(p, b);
-    try testing.expectEqual(@as(usize, 11), m.panels.items[p].regions.items[a].items.items.len);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        var past = false;
-        for (s.issues) |is| past = past or (is.kind == .past_soft_area and is.region == a);
-        try testing.expect(past);
-    }
-}
-
-/// A thread's tracks on panel `p` from `head`, by index (tests).
-fn threadOn(m: *const Model, p: usize, head: usize, out: []usize) []usize {
-    var buf: [16]model.TrackRef = undefined;
-    const t = m.thread(.{ .panel = p, .region = head }, &buf);
-    for (t, 0..) |x, i| out[i] = x.region;
-    return out[0..t.len];
-}
-
-test "a thread's first track taken out hands the flow to the next" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("page", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 60, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
-    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 110, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
-    for (0..7) |_| _ = try m.insertTile(p, a, m.panels.items[p].regions.items[a].items.items.len, key, 1);
-    try m.joinTracks(p, a, b);
-    try m.joinTracks(p, b, c);
-    var buf: [8]usize = undefined;
-    try testing.expectEqualSlices(usize, &.{ a, b, c }, threadOn(&m, p, a, &buf));
-    // B out: A goes on into C.
-    try m.unjoinTrack(p, b);
-    try testing.expectEqualSlices(usize, &.{ a, c }, threadOn(&m, p, a, &buf));
-    // Joined back in after A: A, B, C.
-    try m.joinTracks(p, a, b);
-    try testing.expectEqualSlices(usize, &.{ a, b, c }, threadOn(&m, p, a, &buf));
-    // A out: B holds the flow, and the thread is B, C.
-    try m.unjoinTrack(p, a);
-    try testing.expectEqual(@as(usize, 7), m.panels.items[p].regions.items[b].items.items.len);
-    try testing.expectEqualSlices(usize, &.{ b, c }, threadOn(&m, p, b, &buf));
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[0].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 110), s.tiles[3].pitch_box.x0, 1e-9);
-}
-
-test "a thread runs on into a track on another panel" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p1 = try m.addPanel("page 1", 100, 100);
-    const p2 = try m.addPanel("page 2", 100, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const a = try m.addTracks(p1, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 2, .length = 3, .pitch = 10 });
-    const b = try m.addTracks(p2, .{ .name = "B", .origin = .{ .x = 20, .y = 90 }, .prototype = key, .count = 4, .length = 3, .pitch = 10 });
-    for (0..10) |_| _ = try m.insertTile(p1, a, m.panels.items[p1].regions.items[a].items.items.len, key, 1);
-    try m.threadTracks(p1, a, p2, b);
-    try testing.expectEqual(model.TrackRef{ .panel = p1, .region = a }, m.threadHead(p2, b));
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    {
-        // Page 2 alone, before page 1 says where the flow enters: waiting.
-        var s2 = try solve(gpa, &m, p2, &labels);
-        defer s2.deinit();
-        try testing.expect(s2.flows[0].waiting);
-        try testing.expectEqual(@as(usize, 0), s2.items.len);
-        // Page 1 fills A and hands the rest on.
-        var s1 = try solve(gpa, &m, p1, &labels);
-        defer s1.deinit();
-        try testing.expectEqual(@as(usize, 1), s1.exits.len);
-        try testing.expectEqual(m.panels.items[p2].regions.items[b].id, s1.exits[0].track);
-        try testing.expectEqual(@as(usize, 6), s1.exits[0].piece);
-        try testing.expectEqual(@as(usize, 2), s1.exits[0].segment);
-        for (s1.issues) |is| try testing.expect(is.kind != .past_soft_area);
-        try testing.expectEqual(@as(usize, 6), s1.items.len);
-    }
-    // All together: the rest on page 2, numbered on through the thread.
-    const all = try solveAll(gpa, &m, &labels);
-    defer {
-        for (all) |*pl| pl.deinit();
-        gpa.free(all);
-    }
-    const s2 = all[p2];
-    try testing.expect(!s2.flows[0].waiting);
-    try testing.expectEqual(@as(usize, 4), s2.items.len);
-    try testing.expectEqual(p1, s2.items[0].flow_panel);
-    try testing.expectEqual(a, s2.items[0].region);
-    try testing.expectEqual(@as(usize, 6), s2.items[0].index);
-    try testing.expectEqual(@as(usize, 2), s2.tracks[0].track);
-    try testing.expectEqual(b, s2.tracks[0].member);
-    try testing.expectApproxEqAbs(@as(f64, 20), s2.tiles[0].pitch_box.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 80), s2.tiles[3].pitch_box.y1, 1e-9);
-    // Taken out: page 1 overflows again, page 2 is empty.
-    try m.unjoinTrack(p2, b);
-    const after = try handoffs(gpa, &m, &labels, &.{});
-    defer gpa.free(after);
-    try testing.expectEqual(@as(usize, 0), after.len);
-}
-
-test "a wrap across panels drops the space it leaves at the next panel's start" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p1 = try m.addPanel("page 1", 100, 100);
-    const p2 = try m.addPanel("page 2", 100, 100);
-    const key = try m.addPrototype(.{ .name = "key", .at_soft_break = .drop });
-    const plain = try m.addPrototype(.{ .name = "plain" });
-    const a = try m.addTracks(p1, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .prototype = plain, .count = 1, .length = 2, .pitch = 10 });
-    const b = try m.addTracks(p2, .{ .name = "B", .origin = .{ .x = 0, .y = 90 }, .prototype = plain, .count = 1, .length = 2, .pitch = 10 });
-    // Two tiles fill A; the dropping one would start B, so it is dropped.
-    const items = &m.panels.items[p1].regions.items[a].items;
-    _ = try m.insertTile(p1, a, items.items.len, plain, 1);
-    _ = try m.insertTile(p1, a, items.items.len, plain, 1);
-    _ = try m.insertTile(p1, a, items.items.len, key, 1);
-    _ = try m.insertTile(p1, a, items.items.len, plain, 1);
-    try m.threadTracks(p1, a, p2, b);
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    const all = try solveAll(gpa, &m, &labels);
-    defer {
-        for (all) |*pl| pl.deinit();
-        gpa.free(all);
-    }
-    try testing.expect(all[p2].exits.len == 0);
-    try testing.expectEqual(@as(usize, 1), all[p1].exits.len);
-    try testing.expect(all[p1].exits[0].soft);
-    // On page 2: the dropped tile, then the last at B's start.
-    try testing.expectEqual(@as(usize, 1), all[p2].tiles.len);
-    try testing.expectApproxEqAbs(@as(f64, 0), all[p2].tiles[0].pitch_box.x0, 1e-9);
-}
-
-test "segments step down at an even pitch; the path's control points set where each is centred" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 200);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 190 }, .prototype = key, .count = 12, .length = 6, .pitch = 10 });
-    // One tile a row, ten rows, made as the flow reaches them.
-    for (0..10) |t| {
-        _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-        if (t < 9) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
-    }
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    {
-        // The default path: straight down the middle (3 u in).
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectEqual(10, s.tracks.len);
-        for (s.tracks, 0..) |t, k| {
-            try testing.expectApproxEqAbs(@as(f64, 3), t.origin.along, 1e-9);
-            try testing.expectApproxEqAbs(@as(f64, @floatFromInt(k)), t.origin.across, 1e-9);
-        }
-    }
-    // An S: out to 6 u at row 3, back to 3 at row 6, out to 5 at row 9.
-    _ = try m.addControlPoint(p, r, 6, 3);
-    const back = try m.addControlPoint(p, r, 3, 6);
-    _ = try m.addControlPoint(p, r, 5, 9);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        const o = s.tracks;
-        // Rows still step down one pitch each, whatever the path does.
-        for (o, 0..) |t, k| try testing.expectApproxEqAbs(@as(f64, @floatFromInt(k)), t.origin.across, 1e-9);
-        // The path passes through its points, peaking there, and between
-        // them stays between their values.
-        try testing.expectApproxEqAbs(@as(f64, 6), o[3].origin.along, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 3), o[6].origin.along, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 5), o[9].origin.along, 1e-9);
-        try testing.expect(o[1].origin.along > 3 and o[1].origin.along < o[2].origin.along and o[2].origin.along < 6);
-        try testing.expect(o[4].origin.along < 6 and o[4].origin.along > o[5].origin.along and o[5].origin.along > 3);
-        try testing.expect(o[2].origin.along <= 6 and o[4].origin.along <= 6);
-        // The tile is where its row is: the row centred 3 u right of the
-        // middle.
-        try testing.expectApproxEqAbs(@as(f64, 10 + 30), s.tiles[3].pitch_box.x0, 1e-9);
-    }
-    // Moving a control point moves the rows around it; removing one lets
-    // the path straighten.
-    try m.moveControlPoint(back, 4, 6);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 4), s.tracks[6].origin.along, 1e-9);
-    }
-    // Bending where a row is: the point there moves, or one is made.
-    _ = try m.bendPath(p, r, 6, 3.5, 6);
-    try testing.expectEqual(3, m.panels.items[p].regions.items[r].path.items.len);
-    _ = try m.bendPath(p, r, 8, 4.5, 8);
-    try testing.expectEqual(4, m.panels.items[p].regions.items[r].path.items.len);
-    try m.removeControlPoint(back);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 4.5), s.tracks[8].origin.along, 1e-9);
-    }
-    // Content removed: the path keeps its points.
-    const items = &m.panels.items[p].regions.items[r].items;
-    while (items.items.len > 3) try m.removeAt(p, r, items.items.len - 1);
-    try testing.expectEqual(3, m.panels.items[p].regions.items[r].path.items.len);
-}
-
-test "an older document's moved origins are read as control points" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 100, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 6, .length = 4, .pitch = 10 });
-    for (0..4) |t| {
-        _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-        if (t < 3) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
-    }
-    const segs = &m.panels.items[p].regions.items[r].segments;
-    try segs.append(m.arena.allocator(), .{});
-    try segs.append(m.arena.allocator(), .{ .along = 2, .across = 2, .moved = true });
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    // The moved origin was the segment's start, 2 u in: its centre is
-    // 2 u right of the middle, and its tile where it was.
-    try testing.expectApproxEqAbs(@as(f64, 4), s.tracks[2].origin.along, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 10 + 20), s.tiles[2].pitch_box.x0, 1e-9);
-    // Changing the path adopts them as control points.
-    _ = try m.addControlPoint(p, r, 0, 3);
-    try testing.expectEqual(2, m.panels.items[p].regions.items[r].path.items.len);
-}
-
-test "segments past the soft area are flagged, and past the panel the region is" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 50, 25);
-    const key = try m.addPrototype(.{ .name = "key" });
-    // A soft area two rows thick; a third paragraph comes past it, and
-    // past the panel's bottom.
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 25 }, .prototype = key, .count = 2, .length = 2, .pitch = 10 });
-    for (0..3) |t| {
-        _ = try m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-        if (t < 2) _ = try m.insertBreak(p, r, m.panels.items[p].regions.items[r].items.items.len);
-    }
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    var soft: ?usize = null;
-    var outside = false;
-    for (s.issues) |i| {
-        if (i.kind == .past_soft_area) soft = i.row;
-        if (i.kind == .region_outside) outside = true;
-    }
-    try testing.expectEqual(2, soft.?);
-    try testing.expect(outside);
-}
-
-test "a region past its panel is flagged, and fitting it to its tiles can bring it back" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 60, 30);
-    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.5 } });
-    // 8 u at 10 mm runs 20 mm past the 60 mm panel.
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 30 }, .prototype = key, .count = 2, .length = 8, .pitch = 10 });
-    _ = try m.insertTile(p, r, 0, key, 1.5);
-    _ = try m.insertTile(p, r, 1, key, 1);
-    _ = try m.insertBreak(p, r, 2);
-    _ = try m.insertTile(p, r, 3, key, 1);
-    _ = try m.insertBlank(p, r, 4, 0.5);
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        var past: f64 = 0;
-        for (s.issues) |i| if (i.kind == .region_outside) {
-            past = i.amount;
-        };
-        try testing.expectApproxEqAbs(@as(f64, 20), past, 1e-9);
-        // The longest paragraph needs 2.5 u: the region shrinks to that.
-        try testing.expectEqual(1, s.flows.len);
-        try testing.expectApproxEqAbs(@as(f64, 2.5), s.flows[0].natural, 1e-9);
-        try m.setSegmentLength(p, r, s.flows[0].natural);
-    }
-    try testing.expectApproxEqAbs(@as(f64, 2.5), m.panels.items[p].regions.items[r].w, 1e-9);
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    for (s.issues) |i| try testing.expect(i.kind != .region_outside);
-}
-
-test "text, tiles and equations share one flow, set on one baseline" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const style = try m.addStyle("text", .{ .upright = 0, .cap_height = 3 });
-    const p = try m.addPanel("board", 200, 50);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "mixed", .origin = .{ .x = 0, .y = 50 }, .prototype = key, .count = 2, .length = 15, .pitch = 10 });
-    // A tile, a word, an equation, a tile; a hard break; a word. (The
-    // test font has only a few letters.)
-    _ = try m.insertTile(p, r, 0, key, 1);
-    try m.insertRun(p, r, 1, .{ .style = style, .content = "HOD" });
-    try m.place(p, r, null, .{ .gap = 0.5, .what = .{ .run = .{ .style = style, .content = "A = \\frac{H}{D}" } } });
-    _ = try m.insertTile(p, r, 3, key, 1);
-    _ = try m.insertBreak(p, r, 4);
-    try m.insertRun(p, r, 5, .{ .style = style, .content = "ADD" });
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    try testing.expectEqual(0, s.issues.len);
-    try testing.expectEqual(6, s.items.len);
-    // Each item starts where the one before ends, after its gap.
-    try testing.expectApproxEqAbs(@as(f64, 10), s.items[1].span[0], 1e-9);
-    try testing.expect(s.items[1].span[1] > s.items[1].span[0]);
-    try testing.expectApproxEqAbs(s.items[1].span[1] + 5, s.items[2].span[0], 1e-9);
-    try testing.expectApproxEqAbs(s.items[2].span[1], s.items[3].span[0], 1e-9);
-    try testing.expectApproxEqAbs(s.items[3].span[0], s.findTile(m.findTile("T2").?).?.pitch_box.x0, 1e-9);
-    // The break ends the first row; the last word starts the second.
-    try testing.expectEqual(0, s.items[4].segment);
-    try testing.expectEqual(1, s.items[5].segment);
-    try testing.expectApproxEqAbs(@as(f64, 0), s.items[5].span[0], 1e-9);
-    // The runs are labels of their own, on the same baseline in a row.
-    var runs: usize = 0;
-    var baseline: ?f64 = null;
-    for (s.labels) |l| if (l.run) |run| {
-        runs += 1;
-        try testing.expectEqual(r, run.region);
-        if (s.items[run.item].segment == 0) {
-            if (baseline) |b| try testing.expectApproxEqAbs(b, l.origin.y, 1e-9) else baseline = l.origin.y;
-        }
-    };
-    try testing.expectEqual(3, runs);
-    // Centred: the capitals sit midway across the 10 mm row.
-    try testing.expectApproxEqAbs(@as(f64, 50 - 5 - 1.5), baseline.?, 1e-9);
-}
-
-test "an item that does not fit moves to the next segment, and the flow after it follows" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 2 } });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 3, .length = 3, .pitch = 10 });
-    // Two rows of three, a hard break between them.
-    for (0..3) |i| _ = try m.insertTile(p, r, i, key, 1);
-    _ = try m.insertBreak(p, r, 3);
-    for (4..7) |i| _ = try m.insertTile(p, r, i, key, 1);
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    {
-        var s = try solve(testing.allocator, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectEqual(0, s.issues.len);
-        try testing.expectEqual(1, s.items[4].segment);
-    }
-    // A 2 u key early in the first row: its third key goes on to the
-    // second row, whose break then sends the second paragraph to the third.
-    _ = try m.insertTile(p, r, 1, key, 2);
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    try testing.expectEqual(0, s.issues.len);
-    const segs = [_]usize{ 0, 0, 1, 1, 1, 2, 2, 2 };
-    for (s.items, segs) |it, want| try testing.expectEqual(want, it.segment);
-    // One more paragraph than the soft area holds: a fourth row, flagged.
-    _ = try m.insertBreak(p, r, 8);
-    _ = try m.insertTile(p, r, 9, key, 1);
-    var t = try solve(testing.allocator, &m, p, &labels);
-    defer t.deinit();
-    try testing.expectEqual(1, t.issues.len);
-    try testing.expectEqual(.past_soft_area, t.issues[0].kind);
-    try testing.expectEqual(3, t.issues[0].row.?);
-}
-
-test "a tile keeps its prototype's unit in a track of another pitch" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
-    const key = try m.addPrototype(.{ .name = "key", .unit = 19.05, .expand = .{ .horizontal = true } });
-    // Rows one 5 mm line thick: a 1.5 u key is still 28.575 mm wide, and
-    // the next item starts after it, past a 0.25 u gap in the track's unit.
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 2, .length = 40, .pitch = 5 });
-    const t = try m.insertTile(p, r, 0, key, 1.5);
-    _ = try m.insertBlank(p, r, 1, 1);
-    m.panels.items[p].regions.items[r].items.items[1].gap = 0.25;
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    const box = s.findTile(t).?.pitch_box;
-    try testing.expectApproxEqAbs(@as(f64, 28.575), box.width(), 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 19.05), box.height(), 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 28.575 + 1.25), s.items[1].span[0], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 28.575 + 1.25 + 5), s.items[1].span[1], 1e-9);
-}
-
-test "one track holds keycaps, another prototype's keys and blanks, all as tiles; a dropped space" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key", .unit = 10, .expand = .{ .horizontal = true } });
-    const pad = try m.addPrototype(.{ .name = "pad", .unit = 10, .body_inset = .all(1) });
-    // A space between words: dropped when it lands at a row's start.
-    const space = try m.addPrototype(.{ .name = "space", .spacer = true, .at_soft_break = .drop, .expand = .{ .horizontal = true } });
-    const r = try m.addTracks(p, .{ .name = "mixed", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 4, .pitch = 10 });
-    _ = try m.insertTile(p, r, 0, key, 1.5);
-    _ = try m.insertBlank(p, r, 1, 0.5);
-    _ = try m.insertTile(p, r, 2, pad, 1);
-    // Fills the first row to 4 u: the space lands at the second's start.
-    _ = try m.insertTile(p, r, 3, key, 1);
-    _ = try m.insertTile(p, r, 4, space, 1);
-    _ = try m.insertTile(p, r, 5, pad, 1);
-    // A blank after a soft break is kept, unlike the space.
-    _ = try m.insertTile(p, r, 6, key, 2.5);
-    _ = try m.insertBlank(p, r, 7, 0.5);
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    try testing.expectEqual(0, s.issues.len);
-    // Every item is a tile: keys, pads, a blank and a space.
-    for (m.panels.items[p].regions.items[r].items.items) |it| try testing.expect(it.tileOf() != null);
-    try testing.expectApproxEqAbs(@as(f64, 15), s.items[1].span[0], 1e-9);
-    try testing.expectEqual(1, s.items[4].segment);
-    try testing.expectApproxEqAbs(@as(f64, 0), s.items[4].span[1], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 0), s.items[5].span[0], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 10), s.items[6].span[0], 1e-9);
-    // Three keys, two pads and two blanks placed; the dropped space (T4)
-    // is not.
-    try testing.expectEqual(7, s.tiles.len);
-    try testing.expectEqual(null, s.findTile(m.findTile("T4").?));
-}
-
-/// Appends a 1 u key made from `key` to region `r`'s flow.
-fn appendKey(m: *Model, p: usize, r: usize, key: model.PrototypeId) !TileId {
-    return m.insertTile(p, r, m.panels.items[p].regions.items[r].items.items.len, key, 1);
-}
-
-test "a group breaks as one: the arrow cluster stays together across a reflow" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 6, .pitch = 10 });
-    for (0..4) |_| _ = try appendKey(&m, p, r, key);
-    // Left, Down, Right: bound into one group.
-    for (0..3) |_| _ = try appendKey(&m, p, r, key);
-    try m.setBind(p, r, 4, true);
-    try m.setBind(p, r, 5, true);
-    try testing.expectError(error.NoSuchItem, m.setBind(p, r, 6, true));
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    {
-        // 7 u in 6 u rows: unbound, only Right would wrap; bound, the three go.
-        var s = try solve(testing.allocator, &m, p, &labels);
-        defer s.deinit();
-        for (s.items[0..4]) |it| try testing.expectEqual(0, it.segment);
-        for (s.items[4..7]) |it| try testing.expectEqual(1, it.segment);
-        try testing.expectApproxEqAbs(@as(f64, 0), s.items[4].span[0], 1e-9);
-    }
-    // Two more keys at the start: the first row fills, and the cluster
-    // still moves as one.
-    _ = try m.insertTile(p, r, 0, key, 1);
-    _ = try m.insertTile(p, r, 0, key, 1);
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    for (s.items[0..6]) |it| try testing.expectEqual(0, it.segment);
-    for (s.items[6..9]) |it| try testing.expectEqual(1, it.segment);
-    // Parted again, Left fits nowhere better: it wraps alone with the rest.
-    try m.setBind(p, r, 6, false);
-    var t = try solve(testing.allocator, &m, p, &labels);
-    defer t.deinit();
-    try testing.expectEqual(1, t.items[6].segment);
-    try testing.expectEqual(0, t.issues.len);
-}
-
-test "a centred track centres every segment; an end-aligned one sets it back from the end" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 6, .pitch = 10 });
-    for (0..2) |_| _ = try appendKey(&m, p, r, key);
-    _ = try m.insertBreak(p, r, 2);
-    for (0..4) |_| _ = try appendKey(&m, p, r, key);
-    try m.setTrackFlow(p, r, .centre, 0, 0);
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    {
-        var s = try solve(testing.allocator, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[0].pitch_box.x0, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 10), s.tiles[2].pitch_box.x0, 1e-9);
-        try testing.expectApproxEqAbs(@as(f64, 20), s.items[0].span[0], 1e-9);
-    }
-    try m.setTrackFlow(p, r, .end, 0, 0);
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[1].pitch_box.x1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 60), s.tiles[5].pitch_box.x1, 1e-9);
-    try testing.expectError(error.BadSize, m.setTrackFlow(p, r, .start, -1, 0));
-}
-
-test "with an indent, each hard break brings a blank, so new paragraphs start indented" {
-    var m: Model = .init(testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 100);
-    const key = try m.addPrototype(.{ .name = "key" });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 2, .length = 6, .pitch = 10 });
-    try m.setTrackFlow(p, r, .start, 0.5, 0);
-    _ = try appendKey(&m, p, r, key);
-    const items = &m.panels.items[p].regions.items[r].items;
-    try testing.expectEqual(2, try m.insertBreak(p, r, items.items.len));
-    _ = try appendKey(&m, p, r, key);
-    var labels: Labels = .init(testing.allocator, &.{});
-    defer labels.deinit();
-    var s = try solve(testing.allocator, &m, p, &labels);
-    defer s.deinit();
-    // The blank is an ordinary item, a spacer of the indent's length.
-    try testing.expect(m.proto(m.tileConst(items.items[2].tileOf().?).prototype).spacer);
-    try testing.expectApproxEqAbs(@as(f64, 5), s.items[3].span[0], 1e-9);
-    try testing.expectEqual(1, s.items[3].segment);
-}
-
-test "a drop cap sits on its word's baseline, binds to the word, and pushes the next row's content aside" {
-    const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("page", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
-    // A letter tile 1 u wide and 2 u (rows) tall, its baseline 1.5 u up:
-    // set on the first row's baseline, its lower part reaches into the
-    // second row.
-    const cap = try m.addPrototype(.{ .name = "initial", .letter = true, .baseline = 1.5, .expand = .{ .vertical = true } });
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 4, .pitch = 10 });
-    // "H" + "ADD", then words that wrap into the next row.
-    const initial = try m.insertTile(p, r, 0, cap, 1);
-    try m.setTileSize(initial, 1, 2);
-    try m.insertRun(p, r, 1, .{ .style = body, .content = "ADD" });
-    for (0..3) |_| try m.insertRun(p, r, m.panels.items[p].regions.items[r].items.items.len, .{ .style = body, .content = "HOD" });
-    var labels: Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    // Bound to its word, it never stands alone at a row's end.
-    try testing.expect(m.bound(m.panels.items[p].regions.items[r].items.items, 0));
-    try testing.expect(!m.bound(m.panels.items[p].regions.items[r].items.items, 1));
-    const box = s.findTile(initial).?.pitch_box;
-    // The row's baseline: its 4 mm capitals centred in 90..100, at 93.
-    try testing.expectApproxEqAbs(@as(f64, 93 - 15), box.y0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 93 + 5), box.y1, 1e-9);
-    // In the second row, content starts after the cap's 10 mm.
-    var second: ?f64 = null;
-    for (s.items) |it| if (it.segment == 1) {
-        second = it.span[0];
-        break;
-    };
-    try testing.expectApproxEqAbs(@as(f64, 10), second.?, 1e-9);
-    for (s.issues) |i| try testing.expect(i.kind != .tall_item);
-}
-
-test "line art over half a track: its tiles flow around the art's outline, and reflow when it moves" {
-    const gpa = testing.allocator;
-    var m: Model = .init(gpa);
-    defer m.deinit();
-    const p = try m.addPanel("board", 200, 120);
-    const key = try m.addPrototype(.{ .name = "key" });
-    // Four 10 mm rows, 100 mm long, from y = 100 down to 60.
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 4, .length = 10, .pitch = 10 });
-    for (0..24) |_| _ = try appendKey(&m, p, r, key);
-    // A 40 mm circle centred at (50, 80), over the middle of all four rows.
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const disc = try art.ellipse(arena.allocator(), "disc", 40, 40, .{ .fill = .{ .solid = .{ .r = 0, .g = 0, .b = 0 } } });
-    const ai = try m.addArt(p, .{ .name = "disc", .at = .{ .x = 30, .y = 60 }, .shapes = disc, .clearance = 1 });
-    var labels: Labels = .init(gpa, &.{});
-    defer labels.deinit();
-
-    // No key's pitch box comes within the circle (plus most of the
-    // clearance; the outline is flattened and sampled).
-    const clearOf = struct {
-        fn f(s: *const Placed, cx: f64, cy: f64, rr: f64) !void {
-            for (s.tiles) |t| {
-                const b = t.pitch_box;
-                const nx = std.math.clamp(cx, b.x0, b.x1);
-                const ny = std.math.clamp(cy, b.y0, b.y1);
-                try testing.expect(@sqrt((nx - cx) * (nx - cx) + (ny - cy) * (ny - cy)) >= rr);
-            }
-        }
-    }.f;
-    var ink_start: f64 = 0;
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try clearOf(&s, 50, 80, 20.5);
-        try testing.expectEqual(1, s.art.len);
-        // Row 1: three keys, then the rest after the circle.
-        try testing.expectApproxEqAbs(@as(f64, 20), s.tiles[2].pitch_box.x0, 1e-9);
-        ink_start = s.tiles[3].pitch_box.x0;
-        try testing.expect(ink_start > 60 and ink_start < 70);
-    }
-    // By its bounds instead: the whole box, grown, is closed, 29..71 mm,
-    // so even the third key (20..30) goes on past it.
-    try m.setArtWrap(p, ai, .bounds, 1);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 71), s.tiles[2].pitch_box.x0, 1e-9);
-        try testing.expect(s.tiles[3].pitch_box.x0 > ink_start);
-    }
-    // Not wrapping: the keys run straight under it.
-    try m.setArtWrap(p, ai, .none, 1);
-    {
-        var s = try solve(gpa, &m, p, &labels);
-        defer s.deinit();
-        try testing.expectApproxEqAbs(@as(f64, 30), s.tiles[3].pitch_box.x0, 1e-9);
-    }
-    // Moved right by ink again: the flow follows it.
-    try m.setArtWrap(p, ai, .ink, 1);
-    try m.moveArt(p, ai, .{ .x = 50, .y = 60 });
-    var s = try solve(gpa, &m, p, &labels);
-    defer s.deinit();
-    try clearOf(&s, 70, 80, 20.5);
-    try testing.expectApproxEqAbs(@as(f64, 40), s.tiles[4].pitch_box.x0, 1e-9);
-    try testing.expectError(error.BadSize, m.setArtWrap(p, ai, .ink, -1));
-}
-
-test "a label wraps around art placed over its box" {
+test "a tile's text wraps around art placed over its track" {
     const gpa = testing.allocator;
     const face = try engine.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
@@ -2938,17 +1957,18 @@ test "a label wraps around art placed over its box" {
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 8 });
     const p = try m.addPanel("board", 100, 100);
-    const key = try m.addPrototype(.{ .name = "key", .unit = 40, .slots = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
+    const key = try m.addPrototype(.{ .name = "key", .unit = 40, .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 1, .pitch = 40 });
     const t = try m.insertTile(p, r, 0, key, 1);
     // "HH HH" is about 20 mm of ink: one line on the 38 mm face.
-    try m.setContent(t, "top", "HH HH");
+    try m.setTrackText(t, "top", "HH HH");
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     {
+        // One line: both words on it.
         var s = try solve(gpa, &m, p, &labels);
         defer s.deinit();
-        try testing.expectEqual(@as(u16, 1), s.labels[0].render.lines);
+        try testing.expectApproxEqAbs(s.labels[0].origin.y, s.labels[s.labels.len - 1].origin.y, 1e-9);
     }
     // A disc over the face's right half, which the track lies under (so
     // the key stays), leaves about 17 mm open on the left: the legend
@@ -2959,10 +1979,14 @@ test "a label wraps around art placed over its box" {
     _ = try m.addArt(p, .{ .name = "disc", .at = .{ .x = 30, .y = 50 }, .shapes = disc, .clearance = 1, .wrap_tracks = false });
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    const l = s.labels[0];
-    try testing.expectEqual(@as(u16, 2), l.render.lines);
-    // Its ink stays left of the disc.
-    try testing.expect(l.origin.x + l.render.ink.x1 <= 30 + 1e-6);
+    // Two lines now, every word's ink left of the disc.
+    var lowest: f64 = s.labels[0].origin.y;
+    for (s.labels) |l| {
+        if (l.render.ink.isEmpty()) continue;
+        try testing.expect(l.origin.x + l.render.ink.x1 <= 30 + 1e-6);
+        lowest = @min(lowest, l.origin.y);
+    }
+    try testing.expect(lowest < s.labels[0].origin.y - 1);
 }
 
 test "a run of text breaks between its words; a space a wrap leaves at a row's start is dropped" {
@@ -3375,10 +2399,9 @@ test "a tile's tracks: a row wraps between words in the face; a column sets lett
     defer letters.deinit(gpa);
     for (s.labels) |l| {
         if (l.tile == null or l.tile.? != t) continue;
-        try testing.expect(l.slot >= tile_track_slot);
-        // Every piece is set inside the tile's face.
+        // Every piece is set inside the tile's face; `slot` names the track.
         try testing.expect(l.origin.x >= tb.x0 - 1e-6 and l.origin.x <= tb.x1);
-        if (l.slot == tile_track_slot) words += 1 else try letters.append(gpa, l);
+        if (l.slot == 0) words += 1 else try letters.append(gpa, l);
     }
     // The words wrapped onto more than one line: several pieces.
     try testing.expect(words > 1);
