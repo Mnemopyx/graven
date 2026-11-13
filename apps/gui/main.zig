@@ -678,6 +678,20 @@ fn loadSample() !void {
     state.view.fit = state.model.panels.items[pi].box();
 }
 
+/// Adds the rough HP-15C keypad (a plate and its keys) to the shown space,
+/// right of what it holds, and opens the plate's grid.
+fn loadHp15c() !void {
+    const key = try state.model.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
+    const g = try state.model.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
+    const f = try state.model.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
+    const held = spaceExtents();
+    const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 0 } else .{ .x = held.x1 + 20, .y = held.y0 };
+    const b = try samples.hp15c.build(&state.model, .{ .key = key, .g = g, .f = f }, shown_space, at);
+    try hist.snapshot(&state.model);
+    state.context = .{ .grid = .{ .panel = b.plate, .index = 0 } };
+    state.view.fit = state.model.panels.items[b.plate].box().join(state.model.panels.items[b.keys].box());
+}
+
 fn deinit(_: *dvui.Window) void {
     hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
@@ -2786,6 +2800,12 @@ fn menu() ?dvui.App.Result {
                 };
                 m.close();
             }
+        }
+        if (openCanvas() and !canvas_prompt and dvui.menuItemLabel(@src(), "Add sample: HP-15C keypad", .{}, .{ .expand = .horizontal }) != null) {
+            loadHp15c() catch {
+                state.status = "The sample did not load. ";
+            };
+            m.close();
         }
         if (dvui.menuItemLabel(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) {
             leave(.quit);

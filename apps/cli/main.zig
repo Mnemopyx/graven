@@ -23,6 +23,9 @@ const usage =
     \\         --bold and --bold-italic give the family's bolds, for \\textbf and \\mathbf.
     \\       graven keyboard <font> <out.svg>
     \\         Lays out the sample PC keyboard in one font and writes it as SVG.
+    \\       graven hp15c <font> <plate.svg> <keys.svg>
+    \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
+    \\         and the keys, each written as SVG.
     \\       graven dump [--log] <document>
     \\         Prints a document's model as text (for reading, or as git's text converter);
     \\         --log adds its history: the file's segments and every logged step.
@@ -39,6 +42,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 4 and std.mem.eql(u8, args[1], "keyboard")) {
         return keyboard(init, args[2], args[3]);
+    }
+    if (args.len == 5 and std.mem.eql(u8, args[1], "hp15c")) {
+        return hp15c(init, args[2], args[3], args[4]);
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "dump")) {
         if (args.len == 3) return dump(init, args[2], false);
@@ -135,6 +141,40 @@ fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8)
     defer gpa.free(doc);
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} tiles, {d} labels ({d} renders) in {d:.1} ms\n", .{ out_path, placed.tiles.len, placed.labels.len, labels.cache.count(), ms });
+}
+
+fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
+    defer gpa.free(bytes);
+    const face = try engine.Face.init(gpa, bytes, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+
+    var m: layout.Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const key = try m.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
+    const g = try m.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
+    const f = try m.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
+    const b = try samples.hp15c.build(&m, .{ .key = key, .g = g, .f = f }, 0, .{ .x = 0, .y = 0 });
+
+    var labels: layout.Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
+        var placed = try layout.solve(gpa, &m, part.p, &labels);
+        defer placed.deinit();
+        for (placed.issues) |i| {
+            const name = if (i.tile) |t| m.tileConst(t).designator else "-";
+            std.debug.print("{s}: {s}\n", .{ name, @tagName(i.kind) });
+        }
+        const doc = try layout.output.panelSvg(gpa, &placed, &faces, .{});
+        defer gpa.free(doc);
+        try cwd.writeFile(io, .{ .sub_path = part.path, .data = doc });
+        std.debug.print("{s}: {d} tiles, {d} labels\n", .{ part.path, placed.tiles.len, placed.labels.len });
+    }
 }
 
 const LabelFlags = struct {
