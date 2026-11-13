@@ -72,7 +72,7 @@ const Loc = struct {
 fn locate(m: *const Model, id: ObjectId) ?Loc {
     if (id == .none) return null;
     for (m.panels.items, 0..) |p, pi| {
-        if (p.id == id) return if (p.unbounded) null else .{ .kind = .panel, .parent = .{ .space = p.space }, .holder = pi };
+        if (p.id == id) return if (p.unbounded) null else .{ .kind = .panel, .parent = .{ .space = m.spaceOf(pi) }, .holder = pi };
         for (p.regions.items, 0..) |r, k| {
             if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
             for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = .{ .panel = pi }, .holder = pi, .index = k, .sub = j };
@@ -212,7 +212,7 @@ fn parentFeature(m: *const Model, parent: Parent, f: Feature) ?f64 {
         .panel => |pi| {
             const p = m.panels.items[pi];
             if (p.unbounded) {
-                bound = space_bound(m, p.space);
+                bound = space_bound(m, m.spaceOf(pi));
             } else {
                 bound = .{ .x0 = 0, .y0 = 0, .x1 = p.w, .y1 = p.h };
                 holds = p.holds;
@@ -249,7 +249,7 @@ pub fn parentOf(m: *const Model, id: ObjectId) ?Parent {
 pub fn spaceOf(m: *const Model, parent: Parent) usize {
     return switch (parent) {
         .space => |si| si,
-        .panel => |pi| m.panels.items[pi].space,
+        .panel => |pi| m.spaceOf(pi),
     };
 }
 
@@ -741,7 +741,7 @@ test "sizes change about the origin, follow a resized parent, and conflicts are 
     var h: history.History = .init(gpa);
     defer h.deinit();
     const c = try m.startCanvas(.mm);
-    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 60 });
+    const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 60 });
     const style = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
     const r = try m.addTracks(p, .{ .name = "t", .origin = .{ .x = 9, .y = 52 }, .style = style, .count = 4, .length = 10, .pitch = 5 });
     _ = c;
@@ -793,8 +793,8 @@ test "peers: equal sizes, and the reference stays" {
     var h: history.History = .init(gpa);
     defer h.deinit();
     _ = try m.startCanvas(.mm);
-    const p1 = try m.placePanel(.{ .name = "A", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 });
-    const p2 = try m.placePanel(.{ .name = "B", .space = 0, .origin = .{ .x = 70, .y = 3 }, .w = 41, .h = 22 });
+    const p1 = try m.placePanel(.{ .name = "A", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 });
+    const p2 = try m.placePanel(.{ .name = "B", .space = m.spaces.items[0].id, .origin = .{ .x = 70, .y = 3 }, .w = 41, .h = 22 });
     try h.reset(&m);
     const a = m.panels.items[p1].id;
     const b = m.panels.items[p2].id;
@@ -820,7 +820,7 @@ test "side-by-side text columns share their first baseline" {
     var h: history.History = .init(gpa);
     defer h.deinit();
     _ = try m.startCanvas(.mm);
-    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 100 });
+    const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 100 });
     const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
     const big = try m.addStyle("Big", .{ .upright = 0, .cap_height = 5 });
     const left = try m.addTracks(p, .{ .name = "left", .origin = .{ .x = 10, .y = 90 }, .style = body, .count = 5, .length = 10, .pitch = 6 });
@@ -894,7 +894,7 @@ test "a track's control point can be constrained, and the rows follow it" {
     var h: history.History = .init(gpa);
     defer h.deinit();
     _ = try m.startCanvas(.mm);
-    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 120 });
+    const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 120 });
     const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
     const r = try m.addTracks(p, .{ .name = "poem", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
     try h.reset(&m);
@@ -919,8 +919,8 @@ test "objects move and resize only where their constraints leave them free" {
     var h: history.History = .init(gpa);
     defer h.deinit();
     _ = try m.startCanvas(.mm);
-    const p = try m.placePanel(.{ .name = "P", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 80 });
-    const q = try m.placePanel(.{ .name = "Q", .space = 0, .origin = .{ .x = 150, .y = 0 }, .w = 40, .h = 40 });
+    const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 80 });
+    const q = try m.placePanel(.{ .name = "Q", .space = m.spaces.items[0].id, .origin = .{ .x = 150, .y = 0 }, .w = 40, .h = 40 });
     const pid = m.panels.items[p].id;
     const qid = m.panels.items[q].id;
     try h.reset(&m);

@@ -447,14 +447,14 @@ var selection: std.ArrayList(layout.model.ObjectId) = .empty;
 /// canvas.
 fn spaceRoot() ?usize {
     if (shown_space >= state.model.spaces.items.len) return null;
-    return state.model.spaces.items[shown_space].root;
+    return state.model.rootOf(shown_space);
 }
 
 /// Whether panel `pi` is shown: it lives in the shown space (a worksheet
 /// document shows every panel).
 fn shownPanel(pi: usize) bool {
     if (state.model.spaces.items.len == 0) return true;
-    return state.model.panels.items[pi].space == shown_space;
+    return state.model.spaceOf(pi) == shown_space;
 }
 
 /// Shows the space the context belongs to.
@@ -485,7 +485,7 @@ fn followContext() void {
         else => null,
     };
     if (pi) |p| if (p < state.model.panels.items.len) {
-        shown_space = state.model.panels.items[p].space;
+        shown_space = state.model.spaceOf(p);
     };
     if (shown_space >= state.model.spaces.items.len) shown_space = 0;
 }
@@ -694,6 +694,12 @@ fn loadHp15c() !void {
 
 /// Where prototype `id` is in the document's list, for dropdowns; 0 when
 /// it is none of them.
+/// The ID of space `si` (by position); `.none` without spaces (a
+/// worksheet), as its panels have.
+fn spaceId(si: usize) layout.model.ObjectId {
+    return if (si < state.model.spaces.items.len) state.model.spaces.items[si].id else .none;
+}
+
 fn protoPos(id: layout.model.PrototypeId) usize {
     return state.model.protoIndex(id) orelse 0;
 }
@@ -1517,7 +1523,7 @@ fn install(opened: *history.Opened, path: []const u8) void {
     hist = opened.history;
     canvas_prompt = false;
     shown_space = 0;
-    state.context = if (state.model.spaces.items.len > 0) .{ .panel = state.model.spaces.items[0].root } else .worksheet;
+    state.context = if (state.model.spaces.items.len > 0) .{ .panel = state.model.rootOf(0) } else .worksheet;
     for (state.model.styles.items) |st| {
         if (std.mem.eql(u8, st.name, "Label")) state.label_style = st.id;
     }
@@ -1837,7 +1843,7 @@ fn afterHistory() void {
     track_cursor = null;
     state.moving = null;
     if (!contextValid(state.context)) {
-        state.context = if (state.model.spaces.items.len > shown_space) .{ .panel = state.model.spaces.items[shown_space].root } else .worksheet;
+        state.context = if (state.model.spaces.items.len > shown_space) .{ .panel = state.model.rootOf(shown_space) } else .worksheet;
     }
     if (shown_space >= state.model.spaces.items.len) shown_space = 0;
 }
@@ -2933,7 +2939,7 @@ fn worksheetTree() void {
         var tb: [64]u8 = undefined;
         for (state.model.spaces.items, 0..) |sp, si| {
             const title = if (si == 0) std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas" else sp.name;
-            if (!treeNode(.{ .panel = sp.root }, title, 1, true, sp.default_name)) continue;
+            if (!treeNode(.{ .panel = state.model.rootOf(si) }, title, 1, true, sp.default_name)) continue;
             for (sp.groups.items) |g| {
                 if (state.model.parentGroup(g.id) == null) groupTree(g.id, 2);
             }
@@ -2942,9 +2948,9 @@ fn worksheetTree() void {
                 var ib: [96]u8 = undefined;
                 _ = treeNode(.{ .image = .{ .space = si, .index = ii } }, std.fmt.bufPrint(&ib, "Image {s}", .{im.name}) catch im.name, 2, false, false);
             }
-            panelChildren(sp.root, 2);
+            panelChildren(state.model.rootOf(si), 2);
             for (state.model.panels.items, 0..) |panel, pi| {
-                if (pi == sp.root or panel.space != si) continue;
+                if (panel.id == sp.root or panel.space != sp.id) continue;
                 if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
                 panelChildren(pi, 3);
             }
@@ -3365,7 +3371,7 @@ fn frameProperties(space: usize) !void {
     propText("Groups", "{d}", .{sp.groups.items.len}, 3);
     var panels: usize = 0;
     for (state.model.panels.items) |p| {
-        if (p.space == space and !p.unbounded) panels += 1;
+        if (p.space == spaceId(space) and !p.unbounded) panels += 1;
     }
     propText("Panels", "{d}", .{panels}, 4);
     if (dvui.button(@src(), "Fit frame to its contents", .{}, .{ .margin = .{ .y = 8 } })) {
@@ -3392,7 +3398,7 @@ fn groupProperties(id: layout.model.ObjectId) !void {
         const parent = state.model.parentGroup(id);
         const space = state.model.spaceOfId(id) orelse shown_space;
         act(.ungroup, .{id}) catch return;
-        state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.spaces.items[space].root };
+        state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.rootOf(space) };
     }
 }
 
@@ -3626,7 +3632,7 @@ fn canvasProperties(pi: usize) !void {
     propText("Line art", "{d}", .{panel.art.items.len}, 4);
     var on_canvas: usize = 0;
     for (state.model.panels.items) |p| {
-        if (p.space == 0 and !p.unbounded) on_canvas += 1;
+        if (p.space == spaceId(0) and !p.unbounded) on_canvas += 1;
     }
     propText("Panels", "{d}", .{on_canvas}, 5);
     {
@@ -4257,7 +4263,7 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
     const px = dvui.windowNaturalScale();
     for (0..state.model.panels.items.len) |pi| {
         if (space) |sp| {
-            if (state.model.panels.items[pi].space != sp) continue;
+            if (state.model.spaceOf(pi) != sp) continue;
         } else if (!shownPanel(pi)) continue;
         if (layer) |l| if (panelLayer(pi) != l) continue;
         // A space's own panel has no outline: only its content.
@@ -4607,7 +4613,7 @@ fn enterPanelEdit(pi: usize) void {
     panel_edit = .{ .panel = pi };
     pe_hover = null;
     pe_press = null;
-    shown_space = state.model.panels.items[pi].space;
+    shown_space = state.model.spaceOf(pi);
     state.tool = .select;
     selection.clearRetainingCapacity();
     track_cursor = null;
@@ -4856,7 +4862,7 @@ var active_layer: layout.model.ObjectId = .none;
 fn panelLayer(pi: usize) layout.model.ObjectId {
     const p = state.model.panels.items[pi];
     if (state.model.spaces.items.len == 0) return .none;
-    const sp = state.model.spaces.items[p.space];
+    const sp = state.model.spaces.items[state.model.spaceOf(pi)];
     return if (p.unbounded or p.layer == .none) sp.base_layer else p.layer;
 }
 
@@ -5070,7 +5076,7 @@ fn layerProperties(space: usize, li: usize) !void {
                 state.status = "Only an empty layer, other than the space's first, can be removed. ";
                 return;
             };
-            state.context = .{ .panel = sp.root };
+            state.context = .{ .panel = state.model.rootOf(space) };
         }
     }
 }
@@ -5110,7 +5116,7 @@ fn imageProperties(space: usize, index: usize) !void {
     if (state.model.spaces.items[space].layerIndex(im.layer)) |li| layerFlags(space, li, 9);
     if (dvui.button(@src(), "Remove image", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         actV(.removeImage, .{space, index});
-        state.context = .{ .panel = state.model.spaces.items[space].root };
+        state.context = .{ .panel = state.model.rootOf(space) };
     }
 }
 
@@ -5238,8 +5244,8 @@ fn viewAt(space: usize, index: usize) ?layout.model.SpaceView {
 /// source frame's boundary, else all the source holds.
 fn viewWindow(sv: layout.model.SpaceView) geom.Box {
     if (sv.window) |w| return w;
-    if (sv.source < state.model.spaces.items.len) if (state.model.spaces.items[sv.source].bound) |b| return b;
-    return extentsOf(sv.source, 1);
+    if (state.model.spaceIndex(sv.source)) |src| if (state.model.spaces.items[src].bound) |b| return b;
+    return extentsOf(state.model.spaceIndex(sv.source) orelse return .empty, 1);
 }
 
 /// Where a view lies in its host, mm.
@@ -5264,7 +5270,7 @@ fn withNameRoom(b: geom.Box) geom.Box {
 fn extentsOf(space: usize, depth: usize) geom.Box {
     var b: geom.Box = .empty;
     for (state.model.panels.items, 0..) |p, pi| {
-        if (state.model.spaces.items.len > 0 and p.space != space) continue;
+        if (state.model.spaces.items.len > 0 and p.space != spaceId(space)) continue;
         if (pi < state.placed.items.len and !state.placed.items[pi].bounds.isEmpty()) b = b.join(onSheet(pi, state.placed.items[pi].bounds));
         if (!p.unbounded) b = b.join(p.box());
     }
@@ -5272,7 +5278,8 @@ fn extentsOf(space: usize, depth: usize) geom.Box {
         b = b.join(im.box());
     };
     if (depth < view_depth and space < state.model.spaces.items.len) for (state.model.spaces.items[space].views.items) |sv| {
-        if (sv.window == null and state.model.spaces.items[sv.source].bound == null and extentsOf(sv.source, depth + 1).isEmpty()) continue;
+        const src = state.model.spaceIndex(sv.source) orelse continue;
+        if (sv.window == null and state.model.spaces.items[src].bound == null and extentsOf(src, depth + 1).isEmpty()) continue;
         b = b.join(withNameRoom(viewBox(sv)));
     };
     return b;
@@ -5298,7 +5305,7 @@ fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize, layer: layout.
             state.view.ppm = prev.ppm * sv.scale;
             state.view.cx = w.x0 + (prev.cx - sv.at.x) / sv.scale;
             state.view.cy = w.y0 + (prev.cy - sv.at.y) / sv.scale;
-            drawSpace(area, sv.source, depth + 1);
+            if (state.model.spaceIndex(sv.source)) |src| drawSpace(area, src, depth + 1);
             state.view = prev;
             dvui.clipSet(prev_clip);
         }
@@ -5360,8 +5367,9 @@ fn viewUnder(at: geom.Point) ?Context {
 fn viewProperties(host: usize, index: usize) !void {
     const sv = viewAt(host, index) orelse return;
     propText("Name", "{s}", .{sv.name}, 1);
-    const src = state.model.spaces.items[sv.source];
-    propText("Shows", "{s}", .{if (sv.source == 0) "the canvas" else src.name}, 2);
+    const src_i = state.model.spaceIndex(sv.source) orelse return;
+    const src = state.model.spaces.items[src_i];
+    propText("Shows", "{s}", .{if (src_i == 0) "the canvas" else src.name}, 2);
     const hb = viewBox(sv);
     propText("Place", "({d:.1}, {d:.1}) mm", .{ hb.x0, hb.y0 }, 3);
     propText("Size", "{d:.1} × {d:.1} mm", .{ hb.width(), hb.height() }, 4);
@@ -5375,13 +5383,13 @@ fn viewProperties(host: usize, index: usize) !void {
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 7);
     propText("Edits", "{s}", .{"in its source: it shows them at once"}, 8);
     if (dvui.button(@src(), "Show its source", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        shown_space = sv.source;
-        state.context = .{ .panel = src.root };
+        shown_space = src_i;
+        state.context = .{ .panel = state.model.rootOf(src_i) };
         state.view.fit = contentExtents();
     }
     if (dvui.button(@src(), "Remove view", .{}, .{ .expand = .horizontal })) {
         actV(.removeView, .{host, index});
-        state.context = .{ .panel = state.model.spaces.items[host].root };
+        state.context = .{ .panel = state.model.rootOf(host) };
     }
 }
 
@@ -5710,19 +5718,19 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     .sketch => |sc| {
                         e.handle(@src(), box.data());
                         actV(.removeSketchView, .{ sc.space, sc.index });
-                        state.context = .{ .panel = state.model.spaces.items[sc.space].root };
+                        state.context = .{ .panel = state.model.rootOf(sc.space) };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .image => |im| {
                         e.handle(@src(), box.data());
                         actV(.removeImage, .{im.space, im.index});
-                        state.context = .{ .panel = state.model.spaces.items[im.space].root };
+                        state.context = .{ .panel = state.model.rootOf(im.space) };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .view => |v| {
                         e.handle(@src(), box.data());
                         actV(.removeView, .{v.space, v.index});
-                        state.context = .{ .panel = state.model.spaces.items[v.space].root };
+                        state.context = .{ .panel = state.model.rootOf(v.space) };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     // A tile leaves its track, which closes up behind it.
@@ -5982,7 +5990,7 @@ fn pick(at: geom.Point) void {
     }
     for (state.model.panels.items, 0..) |panel, pi| {
         if (!shownPanel(pi)) continue;
-        if (state.model.spaces.items.len > 0 and !layerOpen(panel.space, panelLayer(pi))) continue;
+        if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(pi), panelLayer(pi))) continue;
         const b = panel.box();
         if (!panel.unbounded and at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
         if (pi >= state.placed.items.len) continue;
@@ -6022,7 +6030,7 @@ fn addPanelFromDrag(b: geom.Box) void {
     const pi = act(.placePanel, .{.{
         .name = name,
         .default_name = true,
-        .space = shown_space,
+        .space = spaceId(shown_space),
         .origin = .{ .x = b.x0, .y = b.y0 },
         .w = b.width(),
         .h = b.height(),
@@ -6692,7 +6700,7 @@ fn properties() !void {
         else => false,
     };
     const frame_root = switch (state.context) {
-        .panel => |pi| state.model.panels.items[pi].unbounded and state.model.panels.items[pi].space != 0,
+        .panel => |pi| state.model.panels.items[pi].unbounded and state.model.spaceOf(pi) != 0,
         else => false,
     };
     heading("{s}", .{if (frame_root) "Frame" else if (on_canvas) "Canvas" else state.context.kindName()}, 0);
@@ -6709,7 +6717,7 @@ fn properties() !void {
             try propFont("Legend font", 5);
         },
         .panel => |pi| if (state.model.panels.items[pi].unbounded) {
-            if (state.model.panels.items[pi].space == 0) try canvasProperties(pi) else try frameProperties(state.model.panels.items[pi].space);
+            if (state.model.spaceOf(pi) == 0) try canvasProperties(pi) else try frameProperties(state.model.spaceOf(pi));
         } else {
             const panel = state.model.panels.items[pi];
             propValue("Name", panel.default_name, "{s}", .{panel.name}, 1);
@@ -6717,7 +6725,7 @@ fn properties() !void {
             propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
             if (panel.sketch != .none) sketchPanelProperties(pi) else propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
-            if (state.model.spaces.items.len > 0) if (layerChoice(panel.space, panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
+            if (state.model.spaces.items.len > 0) if (layerChoice(state.model.spaceOf(pi), panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
             var cutouts: usize = 0;
             for (panel.art.items) |pa| {
                 if (pa.cutout) cutouts += 1;
@@ -9098,7 +9106,7 @@ fn constrainables(a: std.mem.Allocator) []layout.model.ObjectId {
     var list: std.ArrayList(layout.model.ObjectId) = .empty;
     const m = &state.model;
     for (m.panels.items) |p| {
-        if (p.space != shown_space) continue;
+        if (p.space != spaceId(shown_space)) continue;
         if (!p.unbounded) list.append(a, p.id) catch {};
         for (p.regions.items) |r| {
             list.append(a, r.id) catch {};
@@ -9240,7 +9248,7 @@ fn trackLabel(buf: []u8, t: layout.model.TrackRef, here: usize) []const u8 {
 /// segment there lies in, or whose boundary holds it.
 fn trackUnder(at: geom.Point) ?struct { panel: usize, region: usize } {
     for (state.model.panels.items, 0..) |p, pi| {
-        if (p.space != shown_space or pi >= state.placed.items.len) continue;
+        if (p.space != spaceId(shown_space) or pi >= state.placed.items.len) continue;
         for (state.placed.items[pi].tracks) |t| if (contains(onSheet(pi, t.box), at)) return .{ .panel = pi, .region = t.member };
         for (p.regions.items, 0..) |r, k| if (contains(onSheet(pi, r.bounds()), at)) return .{ .panel = pi, .region = k };
     }
@@ -9672,7 +9680,7 @@ fn drawSelection(area: dvui.Rect.Physical) void {
 /// in the shown space.
 fn textTrackAt(at: geom.Point) ?struct { panel: usize, region: usize } {
     for (state.model.panels.items, 0..) |p, pi| {
-        if (p.space != shown_space or pi >= state.placed.items.len) continue;
+        if (p.space != spaceId(shown_space) or pi >= state.placed.items.len) continue;
         for (state.placed.items[pi].tracks) |t| {
             if (t.member >= p.regions.items.len or p.regions.items[t.member].style == null) continue;
             if (contains(onSheet(pi, t.box), at)) return .{ .panel = pi, .region = t.member };
@@ -11752,7 +11760,7 @@ fn sketchPanelProperties(pi: usize) void {
     var islands = pn.islands;
     if (dvui.checkbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
     if (dvui.button(@src(), "Edit its sketch", .{}, .{ .expand = .horizontal, .id_extra = 72 })) {
-        enterSketchAt(si, pn.space, pn.sketch_at);
+        enterSketchAt(si, state.model.spaceOf(pi), pn.sketch_at);
         state.context = .{ .panel = pi };
     }
 }

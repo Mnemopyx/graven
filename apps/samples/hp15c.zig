@@ -107,8 +107,8 @@ pub const Built = struct { plate: usize, keys: usize };
 /// Adds the plate and the keys as two panels in space `space`, the plate's
 /// bottom-left corner at `at` and the keys beside it; returns them.
 pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
-    const plate = try m.placePanel(.{ .name = "HP-15C plate", .space = space, .origin = at, .w = plate_w, .h = plate_h, .margins = .all(3), .default_margins = false });
-    const keys = try m.placePanel(.{ .name = "HP-15C keys", .space = space, .origin = .{ .x = at.x + plate_w + 15, .y = at.y }, .w = plate_w, .h = plate_h, .margins = .all(3), .default_margins = false });
+    const plate = try m.placePanel(.{ .name = "HP-15C plate", .space = m.spaces.items[space].id, .origin = at, .w = plate_w, .h = plate_h, .margins = .all(3), .default_margins = false });
+    const keys = try m.placePanel(.{ .name = "HP-15C keys", .space = m.spaces.items[space].id, .origin = .{ .x = at.x + plate_w + 15, .y = at.y }, .w = plate_w, .h = plate_h, .margins = .all(3), .default_margins = false });
 
     // A key: its top, the white legend in its upper part and the blue g on
     // its front, a band along the bottom.

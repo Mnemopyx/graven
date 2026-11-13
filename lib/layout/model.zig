@@ -697,11 +697,12 @@ pub const PanelArt = struct {
 /// unbounded panel (`root`) holding its loose objects, its panels (those
 /// whose `space` is it), and its selection groups.
 pub const Space = struct {
+    id: ObjectId = .none,
     name: []const u8,
     /// True while the name is one the app gave it (Frame 1).
     default_name: bool = false,
-    /// The panel holding the space's loose objects.
-    root: usize,
+    /// The panel holding the space's loose objects (see `Model.rootOf`).
+    root: ObjectId,
     /// The frame's boundary in its own coordinates, mm; null for the canvas,
     /// which has none. Content past it is flagged, not refused.
     bound: ?geom.Box = null,
@@ -864,8 +865,8 @@ pub const min_print_dpi = 150.0;
 pub const SpaceView = struct {
     id: ObjectId = .none,
     name: []const u8,
-    /// The space it shows.
-    source: usize,
+    /// The space it shows (see `Model.spaceIndex`).
+    source: ObjectId,
     /// Where the source point `look.x0, look.y0` (the window's corner)
     /// lands in this space, mm.
     at: geom.Point,
@@ -987,9 +988,10 @@ pub const Panel = struct {
     /// outline, margins or sheet to keep to (see `Model.startCanvas` and
     /// `Model.addFrame`).
     unbounded: bool = false,
-    /// The space (the canvas, or a frame) the panel lives in; its origin
-    /// is in that space's coordinates.
-    space: usize = 0,
+    /// The space (the canvas, or a frame) the panel lives in (see
+    /// `Model.spaceOf`); its origin is in that space's coordinates.
+    /// `.none` for a panel of a worksheet, which has no spaces.
+    space: ObjectId = .none,
     /// Where the panel's frame origin (its bottom-left corner) sits on the
     /// worksheet, mm.
     origin: geom.Point = .{ .x = 0, .y = 0 },
@@ -1550,8 +1552,9 @@ pub const Model = struct {
         if (m.panels.items.len > 0) return error.NoRoom;
         m.units = units;
         m.has_sheet = false;
-        const root = try m.addRoot("Canvas", 0);
-        try m.spaces.append(m.a(), .{ .name = "Canvas", .root = root });
+        const sid = m.newId();
+        const root = try m.addRoot("Canvas", sid);
+        try m.spaces.append(m.a(), .{ .id = sid, .name = "Canvas", .root = m.panels.items[root].id });
         try m.addBaseLayer(0);
         return root;
     }
@@ -1563,7 +1566,7 @@ pub const Model = struct {
         return id;
     }
 
-    fn addRoot(m: *Model, name: []const u8, space: usize) Error!usize {
+    fn addRoot(m: *Model, name: []const u8, space: ObjectId) Error!usize {
         try m.panels.append(m.a(), .{ .id = m.newId(), .name = name, .unbounded = true, .space = space, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
         m.revision += 1;
         return m.panels.items.len - 1;
@@ -1573,7 +1576,7 @@ pub const Model = struct {
     /// is a canvas.
     pub fn canvas(m: *const Model) ?usize {
         if (m.spaces.items.len == 0) return null;
-        return m.spaces.items[0].root;
+        return m.rootOf(0);
     }
 
     /// Adds a frame: a space of its own, with `bound` (its own coordinates,
@@ -1582,9 +1585,10 @@ pub const Model = struct {
         if (m.spaces.items.len == 0) return error.NoRoom;
         if (edge) |b| if (!(b.width() > 0 and b.height() > 0)) return error.BadSize;
         const sid = m.spaces.items.len;
+        const id = m.newId();
         const owned = try m.a().dupe(u8, name);
-        const root = try m.addRoot(owned, sid);
-        try m.spaces.append(m.a(), .{ .name = owned, .root = root, .bound = edge });
+        const root = try m.addRoot(owned, id);
+        try m.spaces.append(m.a(), .{ .id = id, .name = owned, .root = m.panels.items[root].id, .bound = edge });
         try m.addBaseLayer(sid);
         return sid;
     }
@@ -1605,9 +1609,34 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// The space a panel lives in.
+    /// The index of the space a panel lives in (0 for a worksheet's
+    /// panel, which has none).
     pub fn spaceOf(m: *const Model, panel: usize) usize {
-        return m.panels.items[panel].space;
+        return m.spaceIndex(m.panels.items[panel].space) orelse 0;
+    }
+
+    /// The index of space `id`.
+    pub fn spaceIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.spaces.items, 0..) |sp, i| if (sp.id == id) return i;
+        return null;
+    }
+
+    /// The index of panel `id`.
+    pub fn panelIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.panels.items, 0..) |p, i| if (p.id == id) return i;
+        return null;
+    }
+
+    /// The index of space `space`'s own panel.
+    pub fn rootOf(m: *const Model, space: usize) usize {
+        return m.panelIndex(m.spaces.items[space].root).?;
+    }
+
+    /// Whether panel `panel` lives in space `space` (by index).
+    pub fn inSpace(m: *const Model, panel: usize, space: usize) bool {
+        return space < m.spaces.items.len and m.panels.items[panel].space == m.spaces.items[space].id;
     }
 
     /// The first "<prefix> N" not yet used as a space name.
@@ -1910,7 +1939,7 @@ pub const Model = struct {
             return id;
         }
         const loc = m.locate(id) orelse return error.NoSuchItem;
-        const droot = m.spaces.items[dest].root;
+        const droot = m.rootOf(dest);
         switch (loc) {
             .art => |l| {
                 const src = &m.panels.items[l.panel].art;
@@ -1933,7 +1962,7 @@ pub const Model = struct {
             },
             .panel => |pi| {
                 const target = if (copy) try m.copyPanel(pi) else pi;
-                m.panels.items[target].space = dest;
+                m.panels.items[target].space = m.spaces.items[dest].id;
                 // A copy's contents are in the same order as the original's.
                 const orig = m.panels.items[pi];
                 const got = m.panels.items[target];
@@ -2217,9 +2246,9 @@ pub const Model = struct {
         const sp = m.spaces.items[space];
         const id = sp.layers.items[index].id;
         const base = id == sp.base_layer;
-        for (m.panels.items, 0..) |p, pi| {
-            if (p.space != space) continue;
-            if (pi == sp.root) {
+        for (m.panels.items) |p| {
+            if (p.space != sp.id) continue;
+            if (p.id == sp.root) {
                 if (base and (p.regions.items.len > 0 or p.art.items.len > 0)) return true;
                 continue;
             }
@@ -2243,7 +2272,7 @@ pub const Model = struct {
     pub fn setPanelLayer(m: *Model, panel: usize, layer: ObjectId) Error!void {
         const p = &m.panels.items[panel];
         if (p.unbounded) return error.NoSuchItem;
-        if (m.spaces.items[p.space].layerIndex(layer) == null) return error.NoSuchLayer;
+        if (m.spaces.items[m.spaceOf(panel)].layerIndex(layer) == null) return error.NoSuchLayer;
         p.layer = layer;
         m.revision += 1;
     }
@@ -2383,7 +2412,7 @@ pub const Model = struct {
             .id = m.newId(),
             .name = try m.a().dupe(u8, name),
             .default_name = true,
-            .space = space,
+            .space = m.spaces.items[space].id,
             .w = 1,
             .h = 1,
             .sketch = v.sketch,
@@ -2396,7 +2425,7 @@ pub const Model = struct {
         p.h = edge.h;
         p.edge = edge.art;
         // What the outermost outline encloses moves onto the panel.
-        const root = m.spaces.items[space].root;
+        const root = m.rootOf(space);
         const rp = m.panels.items[root];
         const outer: geom.Outline = .{ .contours = edge.art.shapes[0].outline.contours[0..1] };
         const off: geom.Point = .{ .x = p.origin.x - rp.origin.x, .y = p.origin.y - rp.origin.y };
@@ -2948,7 +2977,7 @@ pub const Model = struct {
         var buf: [96]u8 = undefined;
         const name = std.fmt.bufPrint(&buf, "View of {s}", .{m.spaces.items[source].name}) catch "View";
         const list = &m.spaces.items[host].views;
-        try list.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .source = source, .at = at, .scale = scale });
+        try list.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .source = m.spaces.items[source].id, .at = at, .scale = scale });
         m.revision += 1;
         return list.items.len - 1;
     }
@@ -2958,7 +2987,7 @@ pub const Model = struct {
     pub fn viewWouldCycle(m: *const Model, host: usize, source: usize) bool {
         if (host == source) return true;
         for (m.spaces.items[source].views.items) |v| {
-            if (m.viewWouldCycle(host, v.source)) return true;
+            if (m.viewWouldCycle(host, m.spaceIndex(v.source) orelse continue)) return true;
         }
         return false;
     }
@@ -3094,7 +3123,7 @@ pub const Model = struct {
     pub fn releasePanel(m: *Model, panel: usize) Error!ObjectId {
         const p = m.panels.items[panel];
         if (p.unbounded) return error.NoSuchItem;
-        const root_before = m.spaces.items[p.space].root;
+        const root_before = m.rootOf(m.spaceOf(panel));
         const rp = m.panels.items[root_before];
         // From the panel's frame to its space panel's.
         const d: geom.Point = .{ .x = p.origin.x - rp.origin.x, .y = p.origin.y - rp.origin.y };
@@ -3114,7 +3143,7 @@ pub const Model = struct {
         const dst = &m.panels.items[root_before];
         // A sketch panel goes back to being a view of its sketch.
         if (p.sketch != .none) {
-            try m.spaces.items[p.space].sketch_views.append(m.a(), .{ .id = e.id, .sketch = p.sketch, .at = p.sketch_at, .layer = p.layer });
+            try m.spaces.items[m.spaceOf(panel)].sketch_views.append(m.a(), .{ .id = e.id, .sketch = p.sketch, .at = p.sketch_at, .layer = p.layer });
         } else try dst.art.append(m.a(), e);
         for (p.regions.items) |r| {
             var x = r;
@@ -3128,9 +3157,6 @@ pub const Model = struct {
         }
         m.replaceMember(p.id, e.id);
         _ = m.panels.orderedRemove(panel);
-        for (m.spaces.items) |*sp| if (sp.root > panel) {
-            sp.root -= 1;
-        };
         m.revision += 1;
         return e.id;
     }
@@ -3187,9 +3213,6 @@ pub const Model = struct {
     pub fn removePanel(m: *Model, panel: usize) void {
         const p = m.panels.orderedRemove(panel);
         // Spaces' own panels follow the renumbering.
-        for (m.spaces.items) |*sp| if (sp.root > panel) {
-            sp.root -= 1;
-        };
         m.forget(p.id);
         for (p.regions.items) |r| m.forget(r.id);
         for (p.art.items) |pa| m.forget(pa.id);
@@ -4695,7 +4718,7 @@ test "frames are spaces: moving keeps coordinates and IDs, and arrives as one gr
     const lid = m.panels.items[c].art.items[1].id;
     const f = try m.addFrame("Frame 1", null);
     try std.testing.expectEqual(1, f);
-    const froot = m.spaces.items[f].root;
+    const froot = m.rootOf(f);
     const g = try m.moveToSpace(&.{ pid, rid, lid }, f);
     // Panels change space; loose objects move to the frame's own panel,
     // coordinates and IDs kept.

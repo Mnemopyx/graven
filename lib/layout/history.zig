@@ -567,8 +567,8 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
-    const plate = try h.do(&m, .placePanel, .{model.Panel{ .name = "Plate", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 140, .h = 60 }});
-    const keys = try h.do(&m, .placePanel, .{model.Panel{ .name = "Keys", .space = 0, .origin = .{ .x = 0, .y = 100 }, .w = 140, .h = 60 }});
+    const plate = try h.do(&m, .placePanel, .{model.Panel{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 140, .h = 60 }});
+    const keys = try h.do(&m, .placePanel, .{model.Panel{ .name = "Keys", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 100 }, .w = 140, .h = 60 }});
     const key_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }});
     const legend_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Legend", .slots = &.{.{ .name = "f", .place = .{ .h = .centre, .v = .centre } }} }});
     // 10 columns by 4 rows, 13 mm apart across and 12 down.
