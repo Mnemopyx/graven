@@ -7864,11 +7864,33 @@ fn dashedOutline(area: dvui.Rect.Physical, pts: []const geom.Point, colour: dvui
 
 /// What the flow holds that output leaves out, drawn faintly while editing:
 /// each hard break as a down-and-left arrow (a carriage return) at the end
-/// of its segment's content, each paragraph separator as a pilcrow, and
-/// each empty run as a dashed slot.
+/// of its segment's content, each paragraph separator as a pilcrow, each
+/// empty run as a dashed slot, and each forced wrap (a word cut to fit its
+/// line) as a hooked arrow, right then down, at the end of its line.
 fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
     const ghost = colors.guide.opacity(0.55);
+    for (placed.wraps) |w| {
+        const r = state.model.panels.items[w.flow_panel].regions.items[w.region];
+        if (r.major != .row) continue;
+        const band = for (placed.tracks) |t| {
+            if (t.region == w.region and t.flow_panel == w.flow_panel and t.track == w.segment) break onSheet(pi, t.box);
+        } else continue;
+        const u = r.pitch * 0.32;
+        const x0 = band.x0 + w.along + u * 0.25;
+        const mid = (band.y0 + band.y1) / 2 + u * 0.35;
+        const right = x0 + u * 0.8;
+        const low = mid - u;
+        const pts = [_]geom.Point{ .{ .x = x0, .y = mid }, .{ .x = right, .y = mid }, .{ .x = right, .y = low } };
+        var phys: [3]dvui.Point.Physical = undefined;
+        for (pts, &phys) |q, *o| o.* = state.view.toPx(area, q);
+        dvui.Path.stroke(.{ .points = &phys }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+        const h = u * 0.3;
+        const head = [_]geom.Point{ .{ .x = right - h, .y = low + h }, .{ .x = right, .y = low }, .{ .x = right + h, .y = low + h } };
+        var hp: [3]dvui.Point.Physical = undefined;
+        for (head, &hp) |q, *o| o.* = state.view.toPx(area, q);
+        dvui.Path.stroke(.{ .points = &hp }, .{ .thickness = 1.5 * px, .color = .{ .color = ghost } });
+    }
     // Groups: a tie along the foot of the row (or the side of the column)
     // from each item to the next one it is bound to.
     for (placed.items, 0..) |it, k| {

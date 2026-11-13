@@ -189,8 +189,21 @@ pub const Handoff = struct {
     soft: bool,
 };
 
+/// Where a word too long for its line was cut to wrap (no break
+/// opportunity fitted): the end of that line, `along` mm into segment
+/// `segment` of the flow of track `region` on panel `flow_panel`. Shown
+/// while editing; not an issue.
+pub const PlacedWrap = struct {
+    region: usize,
+    flow_panel: usize = 0,
+    segment: usize,
+    along: f64,
+};
+
 pub const Placed = struct {
     arena: std.heap.ArenaAllocator,
+    /// Forced wraps in the panel's flows.
+    wraps: []const PlacedWrap = &.{},
     /// Where the panel's threads go on into other panels.
     exits: []const Handoff = &.{},
     tiles: []const PlacedTile,
@@ -792,25 +805,49 @@ fn lineIn(style: ?model.ParagraphStyle, first: bool, length: f64) Line {
 
 /// A piece of a run cut from its one-line render: the words between two
 /// break opportunities, or (`space`) the space of one.
+/// A piece of a run that breaks: the words (or part of a word) between two
+/// cuts of its render, or the space at a break opportunity.
 const Cut = struct {
     render: *const engine.Render,
-    after: ?u32,
-    before: ?u32,
-    space: bool = false,
+    from: ?engine.Render.Cut = null,
+    to: ?engine.Render.Cut = null,
+    /// The space of break opportunity `space`, alone.
+    space: ?u32 = null,
+    /// What ends it: a break between words, a soft hyphen (where a line
+    /// break draws a hyphen), or a cut inside a word (taken only when the
+    /// word does not fit a line, a forced wrap).
+    end: enum { none, space, hyphen, forced } = .none,
 
     /// Its length along the line.
     fn size(c: Cut) f64 {
-        const ops = c.render.opportunities;
-        if (c.space) return ops[c.before.?].x1 - ops[c.before.?].x0;
-        const x0 = if (c.after) |k| ops[k].x1 else c.render.design.x0;
-        const x1 = if (c.before) |k| ops[k].x0 else c.render.design.x1;
+        if (c.space) |k| {
+            const o = c.render.opportunities[k];
+            return o.x1 - o.x0;
+        }
+        const x0 = if (c.from) |f| f.x1 else c.render.design.x0;
+        const x1 = if (c.to) |t| t.x0 else c.render.design.x1;
         return x1 - x0;
     }
 };
 
 /// Whether flow piece `index` is the space between two words of a run.
 fn isSpace(cuts: []const ?Cut, index: usize) bool {
-    return if (cuts[index]) |c| c.space else false;
+    return if (cuts[index]) |c| c.space != null else false;
+}
+
+/// What a line broken at a soft hyphen ends with.
+const hyphen_markup = "-";
+
+/// The length of the hyphen a line broken at a soft hyphen ends with, in
+/// style `style`.
+fn hyphenSize(labels: anytype, style: model.StyleId) f64 {
+    const r = (labels.get(.{ .style = style, .anchor = .start, .box = null, .markup = hyphen_markup }) catch return 0) orelse return 0;
+    return r.design.x1 - r.design.x0;
+}
+
+/// Whether flow piece `index` ends in a cut of kind `end`.
+fn endsIn(cuts: []const ?Cut, index: usize, end: @TypeOf(@as(Cut, undefined).end)) bool {
+    return if (cuts[index]) |c| c.end == end else false;
 }
 
 /// The point at `t` on segment `s`.
@@ -931,6 +968,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     var flows: std.ArrayList(PlacedFlow) = .empty;
     var exits: std.ArrayList(Handoff) = .empty;
     var placed_labels: std.ArrayList(PlacedLabel) = .empty;
+    var wraps: std.ArrayList(PlacedWrap) = .empty;
     const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
     // Line art on the panel: drawn over the tracks, and what wraps is
     // something their flow goes around.
@@ -1015,33 +1053,44 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
             };
-            // Breaks at \- would need a hyphen drawn: not taken yet.
-            var breaks: std.ArrayList(u32) = .empty;
-            for (full.opportunities, 0..) |o, k| if (!o.hyphen) try breaks.append(a, @intCast(k));
-            if (breaks.items.len == 0) {
+            // Its cuts: each break opportunity (a space, \allowbreak, or a
+            // soft hyphen) and, inside words, between glyphs (taken only
+            // for a word longer than its line). The pieces between them
+            // inside a word are bound, so the word breaks as one.
+            const Bound = struct { cut: engine.Render.Cut, end: @TypeOf(@as(Cut, undefined).end), opp: ?u32 };
+            var cut_at: std.ArrayList(Bound) = .empty;
+            for (full.opportunities, 0..) |o, k| try cut_at.append(a, .{ .cut = .at(full, @intCast(k)), .end = if (o.hyphen) .hyphen else .space, .opp = @intCast(k) });
+            for (try full.forcedCuts(a)) |c| try cut_at.append(a, .{ .cut = c, .end = .forced, .opp = null });
+            if (cut_at.items.len == 0) {
                 try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
             }
+            std.mem.sort(Bound, cut_at.items, {}, struct {
+                fn lt(_: void, x: Bound, y: Bound) bool {
+                    return x.cut.src0 < y.cut.src0;
+                }
+            }.lt);
             const content_len: u32 = @intCast(run.?.content.len);
-            var prev: ?u32 = null;
-            for (0..breaks.items.len + 1) |k| {
-                const next: ?u32 = if (k < breaks.items.len) breaks.items[k] else null;
-                const from: u32 = if (prev) |p_| full.opportunities[p_].end else 0;
-                const to: u32 = if (next) |n_| full.opportunities[n_].start else content_len;
-                try pieces.append(a, .{ .gap = if (k == 0) item.gap else 0, .what = .{ .run = run.? } });
-                try cuts.append(a, .{ .render = full, .after = prev, .before = next });
+            var prev: ?engine.Render.Cut = null;
+            for (0..cut_at.items.len + 1) |k| {
+                const next: ?Bound = if (k < cut_at.items.len) cut_at.items[k] else null;
+                const from: u32 = if (prev) |p_| p_.src1 else 0;
+                const to: u32 = if (next) |n_| n_.cut.src0 else content_len;
+                const bound_on = if (next) |n_| n_.end == .forced else false;
+                try pieces.append(a, .{ .gap = if (k == 0) item.gap else 0, .bind = bound_on, .what = .{ .run = run.? } });
+                try cuts.append(a, .{ .render = full, .from = prev, .to = if (next) |n_| n_.cut else null, .end = if (next) |n_| n_.end else .none });
                 try item_of.append(a, mi);
                 try src_off.append(a, from);
-                try src_len.append(a, to - from);
-                if (next) |n_| {
-                    const o = full.opportunities[n_];
+                try src_len.append(a, @max(to, from) - from);
+                if (next) |n_| if (n_.end == .space) {
+                    const o = full.opportunities[n_.opp.?];
                     try pieces.append(a, .{ .what = .{ .run = run.? } });
-                    try cuts.append(a, .{ .render = full, .after = n_, .before = n_, .space = true });
+                    try cuts.append(a, .{ .render = full, .space = n_.opp.?, .end = .space });
                     try item_of.append(a, mi);
                     try src_off.append(a, o.start);
                     try src_len.append(a, o.end - o.start);
-                }
-                prev = next;
+                };
+                prev = if (next) |n_| n_.cut else null;
             }
             // The item's own binding holds after its last piece.
             pieces.items[pieces.items.len - 1].bind = item.bind;
@@ -1103,6 +1152,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         var leg_hi: usize = items.len;
         var exited = false;
         var drop_first = if (entry) |e| e.soft else false;
+        // Set while a word longer than its line is cut to fit (a forced
+        // wrap): up to its last piece.
+        var forcing: ?usize = null;
         try path.ensure(a, 0);
         // Each segment's alignment shift, set when the flow leaves it.
         var shifts: std.ArrayList(f64) = .empty;
@@ -1190,13 +1242,27 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             para += gap + size;
             // What must fit here: this item, or its whole group.
             var need = size;
+            var group_end = index;
             if (!in_group) {
-                var k = index;
-                while (k + 1 < items.len and m.bound(items, k)) : (k += 1) need += items[k + 1].gap * region.pitch + sizes[k + 1];
+                while (group_end + 1 < items.len and m.bound(items, group_end)) : (group_end += 1) need += items[group_end + 1].gap * region.pitch + sizes[group_end + 1];
+                // Ending at a soft hyphen: unless the rest of the word fits
+                // too, the line would end here, with a hyphen.
+                if (endsIn(cuts.items, group_end, .hyphen)) {
+                    var rest = need;
+                    var k = group_end;
+                    while (k + 1 < items.len and item_of.items[k + 1] == item_of.items[k] and (endsIn(cuts.items, k, .hyphen) or endsIn(cuts.items, k, .forced))) : (k += 1) rest += sizes[k + 1];
+                    if (start + rest > line.hi + tol) need += hyphenSize(labels, items[index].what.run.style);
+                }
             }
+            if (forcing) |f| if (index > f) {
+                forcing = null;
+            };
+            // Cutting a word to fit: a piece of it that does not fit goes
+            // on to the next line.
+            const forced_break = forcing != null and in_group and start + size > line.hi + tol and in_seg > 0;
             // It does not fit: on to the next segment, made as needed, if
             // this one holds something already.
-            if (!in_group and start + need > line.hi + tol and in_seg > 0 and seg + 1 < max_segments) {
+            if (((!in_group and start + need > line.hi + tol and in_seg > 0) or forced_break) and seg + 1 < max_segments) {
                 line.soft = true;
                 try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0, line);
                 seg += 1;
@@ -1224,6 +1290,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     continue;
                 }
             }
+            // A word that does not fit even a line of its own is cut
+            // between its glyphs, where it must.
+            if (!in_group and forcing == null and in_seg == 0 and start + need > line.hi + tol and endsIn(cuts.items, index, .forced)) forcing = group_end;
             const end = start + size;
             pos = @max(pos, end);
             in_seg += 1;
@@ -1233,15 +1302,39 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         }
         if (!exited) try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
 
-        // Last, each item where it landed.
+        // Last, each item where it landed. The pieces of a word that were
+        // not wrapped between are set as one.
+        var chain: ?usize = null;
         for (items[leg_lo..leg_hi], leg_lo..) |item, index| {
             const sg = segs_of[index];
+            if (endsIn(cuts.items, index, .forced) and !dropped[index] and index + 1 < leg_hi and segs_of[index + 1] == sg and !dropped[index + 1]) {
+                if (chain == null) chain = index;
+                continue;
+            }
+            const first = chain orelse index;
+            chain = null;
             const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
-            const start = spans[index][0] + sh;
+            const start = spans[first][0] + (if (first == index) sh else shifts.items[sg] + extra[first]);
             const end = spans[index][1] + sh;
             try placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
             if (dropped[index] or dup[index]) continue;
             const band = path.boxes.items[sg];
+            // A line ending inside a word: at a soft hyphen, a hyphen is
+            // drawn; at a cut, the wrap is recorded.
+            const line_ends = (index + 1 < leg_hi and segs_of[index + 1] != sg) or (index + 1 == leg_hi and exited);
+            if (line_ends and endsIn(cuts.items, index, .forced)) try wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
+            if (line_ends and endsIn(cuts.items, index, .hyphen)) if (try labels.get(.{ .style = item.what.run.style, .anchor = .start, .box = null, .markup = hyphen_markup })) |hr| {
+                const cap = labels.context(item.what.run.style).?.spec.cap_height;
+                const hd = hr.design;
+                try placed_labels.append(a, .{
+                    .tile = null,
+                    .slot = item_of.items[index],
+                    .box = .{ .x0 = band.x0 + end, .x1 = band.x0 + end + (hd.x1 - hd.x0), .y0 = band.y0, .y1 = band.y1 },
+                    .origin = .{ .x = band.x0 + end - hd.x0, .y = (band.y0 + band.y1 - cap) / 2 },
+                    .style = item.what.run.style,
+                    .render = hr,
+                });
+            };
             switch (item.what) {
                 .tile => |pid| {
                     const t = m.tileConst(pid);
@@ -1276,15 +1369,15 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 .run => |run| {
                     const render = if (cuts.items[index]) |c| blk: {
                         const piece = try a.create(engine.Render);
-                        if (c.space) {
+                        if (c.space) |k| {
                             // A space is drawn only where a decoration
                             // runs under it.
-                            piece.* = try c.render.spacePiece(a, c.before.?);
+                            piece.* = try c.render.spacePiece(a, k);
                             const drawn = for (piece.items) |it| {
                                 if (it == .path) break true;
                             } else false;
                             if (!drawn) continue;
-                        } else piece.* = try c.render.piece(a, c.after, c.before);
+                        } else piece.* = try c.render.between(a, cuts.items[first].?.from, c.to);
                         break :blk piece;
                     } else renders[index] orelse continue;
                     if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
@@ -1301,7 +1394,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     else
                         .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                     try placed_labels.append(a, .{
-                        .run = .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[index], .len = src_len.items[index] },
+                        .run = .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] },
                         .tile = null,
                         .slot = item_of.items[index],
                         .box = box,
@@ -1430,6 +1523,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     return .{
         .arena = arena,
         .exits = try exits.toOwnedSlice(a),
+        .wraps = try wraps.toOwnedSlice(a),
         .edge = edge,
         .tiles = try tiles.toOwnedSlice(a),
         .tracks = try tracks.toOwnedSlice(a),
@@ -2857,4 +2951,86 @@ test "a panel made from a rounded rectangle exports its outline with the cutouts
     const at = std.mem.indexOf(u8, svg, "fill-rule=\"evenodd\"") orelse return error.TestUnexpectedResult;
     const end = std.mem.indexOfPos(u8, svg, at, "/>").?;
     try testing.expectEqual(3, std.mem.count(u8, svg[at..end], "Z"));
+}
+
+test "a word longer than its line is cut to wrap, and the wrap recorded, not flagged" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    try labels.sync(&m);
+    const word = "HODDAHODDAHODDA";
+    const w = blk: {
+        const rr = (try labels.get(.{ .style = body, .anchor = .start, .box = null, .markup = word })).?;
+        break :blk rr.design.x1 - rr.design.x0;
+    };
+    // Rows a little over a third of the word long: it takes three, after
+    // a short word that fits the first.
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 6, .length = w * 0.4 / 10, .pitch = 10 });
+    try m.insertRun(p, r, 0, .{ .style = body, .content = "H " ++ word });
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    for (s.issues) |i| try testing.expect(i.kind != .row_overflow);
+    // The short word stays alone on the first row; the long one goes on to
+    // the second, and is cut there and on the third.
+    try testing.expectEqual(2, s.wraps.len);
+    try testing.expectEqual(1, s.wraps[0].segment);
+    try testing.expectEqual(2, s.wraps[1].segment);
+    // Its pieces cover it once, each within its row.
+    var covered: u32 = 0;
+    for (s.labels) |l| if (l.run) |run| if (run.from >= 2) {
+        covered += run.len;
+        try testing.expect(l.render.design.x1 - l.render.design.x0 <= w * 0.4 + 1e-6);
+    };
+    try testing.expectEqual(@as(u32, word.len), covered);
+}
+
+test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word does not fit" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    try labels.sync(&m);
+    const half = (try labels.get(.{ .style = body, .anchor = .start, .box = null, .markup = "HODDA" })).?.design;
+    const w = half.x1 - half.x0;
+    // Rows that hold "HODDA-" but not the whole word.
+    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = w * 1.5 / 10, .pitch = 10 });
+    try m.insertRun(p, r, 0, .{ .style = body, .content = "HODDA\\-HODDA" });
+    {
+        var s = try solve(gpa, &m, p, &labels);
+        defer s.deinit();
+        var runs: usize = 0;
+        var hyphens: usize = 0;
+        for (s.labels) |l| {
+            if (l.run != null) runs += 1 else hyphens += 1;
+        }
+        try testing.expectEqual(2, runs);
+        try testing.expectEqual(1, hyphens);
+        try testing.expectEqual(0, s.wraps.len);
+        for (s.issues) |i| try testing.expect(i.kind != .row_overflow);
+    }
+    // Rows long enough for the whole word: no break, no hyphen.
+    m.panels.items[p].regions.items[r].w = w * 3 / 10;
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    for (s.labels) |l| try testing.expect(l.run != null);
+    var segs: [2]usize = .{ 9, 9 };
+    var n: usize = 0;
+    for (s.items) |it| {
+        if (n < 2) segs[n] = it.segment;
+        n += 1;
+    }
+    try testing.expectEqual(segs[0], segs[1]);
 }

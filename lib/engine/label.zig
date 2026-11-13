@@ -1442,6 +1442,38 @@ test "a one-line render breaks between words, inside variant groups too, but not
     try testing.expectEqual(@as(usize, 0), wrapped.opportunities.len);
 }
 
+test "a word longer than its line may be cut between its glyphs, never in a formula" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    const ctx = try style.Context.init(&f.faces, testSpec());
+    var r = try renderTest(&ctx, "HODDA \\frac{H}{D}");
+    defer r.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cuts = try r.forcedCuts(a);
+    // Inside HODDA only: before O, D, D and A; not in the fraction.
+    try testing.expectEqual(@as(usize, 4), cuts.len);
+    try testing.expectEqual(@as(u32, 1), cuts[0].src1);
+    // Cut at each, the pieces hold every glyph once, and their elements
+    // are trimmed to them: they sum to the word's advance.
+    const word_end: Render.Cut = .at(&r, 0);
+    var total: usize = 0;
+    var advance: f64 = 0;
+    var prev: ?Render.Cut = null;
+    for (0..cuts.len + 1) |k| {
+        const to: Render.Cut = if (k < cuts.len) cuts[k] else word_end;
+        const p = try r.between(a, prev, to);
+        total += p.items.len;
+        try testing.expectEqual(@as(usize, 1), p.elements.len);
+        try testing.expectEqual(p.elements[0].end - p.elements[0].start, 1);
+        advance += p.elements[0].advance;
+        prev = to;
+    }
+    try testing.expectEqual(@as(usize, 5), total);
+    try testing.expectApproxEqAbs(r.elements[0].advance, advance, 1e-9);
+}
+
 test "underline and strikethrough draw rules along their elements; text scripts sit raised and smaller" {
     var f = try Fonts.init();
     defer f.deinit();

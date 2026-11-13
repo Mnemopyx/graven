@@ -236,6 +236,86 @@ pub const Render = struct {
         return self.slice(a, .{ .item0 = o.item0, .elem0 = o.elem0, .item1 = o.item1, .elem1 = o.elem1, .x0 = o.x0, .x1 = o.x1, .src0 = o.start, .src1 = o.end, .first = false });
     }
 
+    /// A place a one-line render may be cut: at a break opportunity, or
+    /// (for a forced wrap) between two glyphs of a word, where one element
+    /// is shared by the pieces either side. What comes before it ends at
+    /// item `item0` and element `elem0`, at `x0` and source `src0`; what
+    /// comes after starts at `item1`, `elem1`, `x1` and `src1`.
+    pub const Cut = struct {
+        item0: u32,
+        elem0: u32,
+        x0: f64,
+        src0: u32,
+        item1: u32,
+        elem1: u32,
+        x1: f64,
+        src1: u32,
+
+        /// At break opportunity `k`, its source and space left out.
+        pub fn at(self: *const Render, k: u32) Cut {
+            const o = self.opportunities[k];
+            return .{ .item0 = o.item0, .elem0 = o.elem0, .x0 = o.x0, .src0 = o.start, .item1 = o.item1, .elem1 = o.elem1, .x1 = o.x1, .src1 = o.end };
+        }
+    };
+
+    /// Where a word may be cut when it is longer than its line: before
+    /// each glyph of a word that follows another glyph on the same
+    /// baseline, from later source, further along (so never inside an
+    /// equation's structure), with no break opportunity between. In order.
+    pub fn forcedCuts(self: *const Render, a: Allocator) Allocator.Error![]Cut {
+        var out: std.ArrayList(Cut) = .empty;
+        var k: usize = 1;
+        var o: usize = 0;
+        while (k < self.items.len) : (k += 1) {
+            const p = switch (self.items[k - 1]) {
+                .glyph => |g| g,
+                else => continue,
+            };
+            const g = switch (self.items[k]) {
+                .glyph => |g| g,
+                else => continue,
+            };
+            while (o < self.opportunities.len and self.opportunities[o].item1 <= k) o += 1;
+            // An opportunity right here: a break, not a forced cut.
+            if (o > 0 and self.opportunities[o - 1].item1 == k) continue;
+            if (o < self.opportunities.len and self.opportunities[o].item0 == k) continue;
+            const pe = self.elements[p.element];
+            const ge = self.elements[g.element];
+            if (pe.level != 0 or ge.level != 0 or pe.face == null or ge.face == null) continue;
+            if (pe.origin.y != ge.origin.y or g.source <= p.source or !(g.transform.e > p.transform.e)) continue;
+            const shared = p.element == g.element;
+            try out.append(a, .{
+                .item0 = @intCast(k),
+                .elem0 = if (shared) g.element + 1 else g.element,
+                .x0 = g.transform.e,
+                .src0 = g.source,
+                .item1 = @intCast(k),
+                .elem1 = g.element,
+                .x1 = g.transform.e,
+                .src1 = g.source,
+            });
+        }
+        return out.items;
+    }
+
+    /// The part of a one-line render between two cuts: after `from` (null:
+    /// from its start) and before `to` (null: to its end), moved so it
+    /// starts at x 0 (see `piece`). An element shared with the piece either
+    /// side is trimmed to this one's glyphs.
+    pub fn between(self: *const Render, a: Allocator, from: ?Cut, to: ?Cut) Allocator.Error!Render {
+        return self.slice(a, .{
+            .item0 = if (from) |c| c.item1 else 0,
+            .elem0 = if (from) |c| c.elem1 else 0,
+            .item1 = if (to) |c| c.item0 else @intCast(self.items.len),
+            .elem1 = if (to) |c| c.elem0 else @intCast(self.elements.len),
+            .x0 = if (from) |c| c.x1 else 0,
+            .x1 = if (to) |c| c.x0 else self.design.x1,
+            .src0 = if (from) |c| c.src1 else 0,
+            .src1 = if (to) |c| c.src0 else std.math.maxInt(u32),
+            .first = from == null,
+        });
+    }
+
     const Slice = struct { item0: u32, elem0: u32, item1: u32, elem1: u32, x0: f64, x1: f64, src0: u32, src1: u32, first: bool };
 
     fn slice(self: *const Render, a: Allocator, sl: Slice) Allocator.Error!Render {
@@ -269,8 +349,22 @@ pub const Render = struct {
         var ink = Box.empty;
         for (self.elements[elem0..elem1], elements) |from, *to| {
             to.* = from;
+            // Shared with the piece before (a forced cut): from the cut on.
+            if (from.start < src0 and from.end > src0) {
+                const end_x = from.origin.x + from.advance;
+                to.start = src0;
+                to.origin.x = x0;
+                to.advance = end_x - x0;
+                if (!from.ink.isEmpty()) to.ink.x0 = @max(from.ink.x0, x0);
+            }
+            // Shared with the piece after: up to the cut.
+            if (from.start < src1 and from.end > src1) {
+                to.end = src1;
+                to.advance = x1 - to.origin.x;
+                if (!from.ink.isEmpty()) to.ink.x1 = @min(to.ink.x1, x1);
+            }
             to.origin.x -= x0;
-            if (!from.ink.isEmpty()) to.ink = .{ .x0 = from.ink.x0 - x0, .y0 = from.ink.y0, .x1 = from.ink.x1 - x0, .y1 = from.ink.y1 };
+            if (!to.ink.isEmpty()) to.ink = .{ .x0 = to.ink.x0 - x0, .y0 = to.ink.y0, .x1 = to.ink.x1 - x0, .y1 = to.ink.y1 };
             ink = ink.join(to.ink);
         }
         var diagnostics: std.ArrayList(Diagnostic) = .empty;
