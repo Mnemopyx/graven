@@ -3116,7 +3116,7 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
     // homing bump, construction until a tile asks for it; and a slot that
     // needs a tile wider than 25 mm.
     const si = try m.addSketch(0, "Key", .{ .x = 0, .y = 0 });
-    const sk = &m.spaces.items[0].sketches.items[si].sketch;
+    const sk = &m.sketches.items[si].sketch;
     const al = m.arena.allocator();
     const P = struct { fn f(x: f64, y: f64) geom.Point { return .{ .x = x, .y = y }; } }.f;
     try sk.setParam(al, "w", "19.05");
@@ -3144,8 +3144,8 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
     _ = try sk.solve(gpa);
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
     // Not the parameters it has: refused.
-    try testing.expectError(error.NoSuchParameter, m.applySketch(key, 0, si, "width", "h", .{ .x = 0, .y = 0 }));
-    try m.applySketch(key, 0, si, "w", "h", .{ .x = 0, .y = 0 });
+    try testing.expectError(error.NoSuchParameter, m.applySketch(key, si, "width", "h", .{ .x = 0, .y = 0 }));
+    try m.applySketch(key, si, "w", "h", .{ .x = 0, .y = 0 });
     const r = try m.addTracks(c, .{ .name = "row", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 1, .length = 6, .pitch = 19.05 });
     _ = try m.insertTile(c, r, 0, key, 1);
     _ = try m.insertTile(c, r, 1, key, 2);

@@ -175,8 +175,11 @@ const Context = union(enum) {
     layer: struct { space: usize, index: usize },
     /// A raster image placed in a space.
     image: struct { space: usize, index: usize },
-    /// A sketch drawn in a space.
+    /// A view of a sketch, placed in a space.
     sketch: struct { space: usize, index: usize },
+    /// The document's sketches, and one of them.
+    sketches,
+    sketch_def: usize,
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -205,7 +208,9 @@ const Context = union(enum) {
             .view => "View",
             .layer => "Layer",
             .image => "Image",
-            .sketch => "Sketch",
+            .sketch => "Sketch view",
+            .sketches => "Sketches",
+            .sketch_def => "Sketch",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -1828,7 +1833,9 @@ fn contextValid(c: Context) bool {
         .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,
         .layer => |l| l.space < m.spaces.items.len and l.index < m.spaces.items[l.space].layers.items.len,
         .image => |im| im.space < m.spaces.items.len and im.index < m.spaces.items[im.space].images.items.len,
-        .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketches.items.len,
+        .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len,
+        .sketches => true,
+        .sketch_def => |i| i < m.sketches.items.len,
         .prototype => |id| id < m.prototypes.items.len,
     };
 }
@@ -2882,6 +2889,9 @@ fn treeContent() void {
     if (treeNode(.prototypes, "Tile prototypes", 1, state.model.prototypes.items.len > 0, false)) {
         for (state.model.prototypes.items, 0..) |p, i| _ = treeNode(.{ .prototype = @intCast(i) }, p.name, 2, false, false);
     }
+    if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
+        for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
+    };
 }
 
 /// The worksheet's branch: its panels, their labels, regions, rows and
@@ -3046,7 +3056,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .prototypes => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes => false,
     };
 }
 
@@ -5092,7 +5102,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     },
                     .sketch => |sc| {
                         e.handle(@src(), box.data());
-                        actV(.removeSketch, .{ sc.space, sc.index });
+                        actV(.removeSketchView, .{ sc.space, sc.index });
                         state.context = .{ .panel = state.model.spaces.items[sc.space].root };
                         dvui.refresh(null, @src(), box.data().id);
                     },
@@ -5863,7 +5873,9 @@ fn lowerKind() []const u8 {
         .view => "view",
         .layer => "layer",
         .image => "image",
-        .sketch => "sketch",
+        .sketch => "sketch view",
+        .sketches => "sketches",
+        .sketch_def => "sketch",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -6092,7 +6104,7 @@ fn properties() !void {
             propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
             propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
-            propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
+            if (panel.sketch != .none) sketchPanelProperties(pi) else propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
             if (state.model.spaces.items.len > 0) if (layerChoice(panel.space, panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
             var cutouts: usize = 0;
             for (panel.art.items) |pa| {
@@ -6167,6 +6179,8 @@ fn properties() !void {
         .layer => |l| try layerProperties(l.space, l.index),
         .image => |im| try imageProperties(im.space, im.index),
         .sketch => |sc| sketchProperties(sc.space, sc.index),
+        .sketches => propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1),
+        .sketch_def => |i| sketchDefProperties(i),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| {
             try prototypeProperties(id);
@@ -9508,10 +9522,33 @@ fn drawTrackPath(area: dvui.Rect.Physical) void {
 
 const skl = layout.model.sketch_;
 
+/// A view of a sketch in a space.
 const SketchRef = struct { space: usize, index: usize };
 
-/// The sketch being edited, while sketch mode is on.
-var sketch_edit: ?SketchRef = null;
+/// The sketch being edited, while sketch mode is on, and where its origin
+/// sits in the space shown (its view's place, or its panel's).
+const SkEdit = struct { sketch: usize, space: usize, at: geom.Point };
+var sketch_edit: ?SkEdit = null;
+
+/// A sketch with the place its origin sits, as drawn.
+const SkPlace = struct {
+    item: *layout.model.SketchItem,
+    sketch: *skl.Sketch,
+    name: []const u8,
+    at: geom.Point,
+
+    fn of(index: usize, at: geom.Point) ?SkPlace {
+        if (index >= state.model.sketches.items.len) return null;
+        const it = &state.model.sketches.items[index];
+        return .{ .item = it, .sketch = &it.sketch, .name = it.name, .at = at };
+    }
+};
+
+/// A sketch view's sketch, placed.
+fn viewPlace(space: usize, view: usize) ?SkPlace {
+    const v = state.model.sketchView(space, view) catch return null;
+    return SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at);
+}
 
 const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, line, ray };
 var sk_tool: SkTool = .none;
@@ -9561,16 +9598,16 @@ var sk_an_rev: u64 = std.math.maxInt(u64);
 /// Double-click: the last pick, when and on which sketch.
 var sk_last_pick: ?struct { ref: SketchRef, ns: i128 } = null;
 
-fn skItem() ?*layout.model.SketchItem {
+fn skItem() ?SkPlace {
     const r = sketch_edit orelse return null;
-    return state.model.sketchAt(r.space, r.index) catch null;
+    return SkPlace.of(r.sketch, r.at);
 }
 
-fn skLocal(it: *const layout.model.SketchItem, p: geom.Point) geom.Point {
+fn skLocal(it: SkPlace, p: geom.Point) geom.Point {
     return .{ .x = p.x - it.at.x, .y = p.y - it.at.y };
 }
 
-fn skPx(area: dvui.Rect.Physical, it: *const layout.model.SketchItem, p: geom.Point) dvui.Point.Physical {
+fn skPx(area: dvui.Rect.Physical, it: SkPlace, p: geom.Point) dvui.Point.Physical {
     return state.view.toPx(area, .{ .x = p.x + it.at.x, .y = p.y + it.at.y });
 }
 
@@ -9585,8 +9622,15 @@ fn skAnalysis() ?skl.solver.Analysis {
 }
 
 fn enterSketch(ref: SketchRef) void {
-    sketch_edit = ref;
+    const v = state.model.sketchView(ref.space, ref.index) catch return;
+    enterSketchAt(state.model.sketchIndex(v.sketch) orelse return, ref.space, v.at);
     state.context = .{ .sketch = .{ .space = ref.space, .index = ref.index } };
+}
+
+/// Edits sketch `index` with its origin at `at` in space `space`.
+fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
+    sketch_edit = .{ .sketch = index, .space = space, .at = at };
+    shown_space = space;
     state.tool = .select;
     sk_tool = .none;
     sk_nclicks = 0;
@@ -9614,8 +9658,7 @@ fn leaveSketch() void {
 
 /// A new sketch in the shown space, its origin at `at`, then edited.
 fn newSketchAt(at: geom.Point) void {
-    var n: usize = 1;
-    for (state.model.spaces.items) |sp| n += sp.sketches.items.len;
+    const n: usize = state.model.sketches.items.len + 1;
     var buf: [32]u8 = undefined;
     const name = std.fmt.bufPrint(&buf, "Sketch {d}", .{n}) catch "Sketch";
     const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
@@ -9623,13 +9666,13 @@ fn newSketchAt(at: geom.Point) void {
         state.status = "The sketch was not started. ";
         return;
     };
-    state.model.spaces.items[shown_space].sketches.items[idx].default_name = true;
-    enterSketch(.{ .space = shown_space, .index = idx });
+    state.model.sketches.items[idx].default_name = true;
+    enterSketch(.{ .space = shown_space, .index = state.model.spaces.items[shown_space].sketch_views.items.len - 1 });
 }
 
 fn skEdit(edit: layout.model.SketchEdit) ?u32 {
     const r = sketch_edit orelse return null;
-    return act(.editSketch, .{ r.space, r.index, edit }) catch |err| {
+    return act(.editSketch, .{ r.sketch, edit }) catch |err| {
         state.status = switch (err) {
             error.NotConstruction => "Infinite lines and rays are construction only. ",
             error.WrongKind, error.NoSuchPoint => "That constraint does not fit what is selected. ",
@@ -9640,7 +9683,7 @@ fn skEdit(edit: layout.model.SketchEdit) ?u32 {
 }
 
 /// The sketch's box in the space (its own box moved by its origin).
-fn sketchBox(it: *const layout.model.SketchItem) ?geom.Box {
+fn sketchBox(it: SkPlace) ?geom.Box {
     const b = (it.sketch.box(dvui.currentWindow().arena()) catch return null) orelse return null;
     return .{ .x0 = b.x0 + it.at.x, .y0 = b.y0 + it.at.y, .x1 = b.x1 + it.at.x, .y1 = b.y1 + it.at.y };
 }
@@ -9649,8 +9692,8 @@ fn sketchBox(it: *const layout.model.SketchItem) ?geom.Box {
 fn sketchUnder(at: geom.Point) ?SketchRef {
     if (shown_space >= state.model.spaces.items.len) return null;
     var found: ?SketchRef = null;
-    for (state.model.spaces.items[shown_space].sketches.items, 0..) |*it, i| {
-        const b = sketchBox(it) orelse continue;
+    for (state.model.spaces.items[shown_space].sketch_views.items, 0..) |_, i| {
+        const b = sketchBox(viewPlace(shown_space, i) orelse continue) orelse continue;
         const m = 1.0;
         if (at.x >= b.x0 - m and at.x <= b.x1 + m and at.y >= b.y0 - m and at.y <= b.y1 + m) found = .{ .space = shown_space, .index = i };
     }
@@ -9933,7 +9976,7 @@ fn skIsRound(s: *const skl.Sketch, g: skl.GeomId) bool {
 /// does not fit), into `out`.
 fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
     const it = skItem() orelse return 0;
-    const s = &it.sketch;
+    const s = it.sketch;
     const p = skParts();
     var n: usize = 0;
     switch (kind) {
@@ -10125,7 +10168,7 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
 /// Where a constraint's glyph or value is drawn, on the screen.
 fn skDimAnchor(area: dvui.Rect.Physical, id: skl.ConstraintId) ?dvui.Point.Physical {
     const it = skItem() orelse return null;
-    const p = skAnchor(&it.sketch, it.sketch.constraints.items[id]) orelse return null;
+    const p = skAnchor(it.sketch, it.sketch.constraints.items[id]) orelse return null;
     return skPx(area, it, p);
 }
 
@@ -10251,7 +10294,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             state.mouse = at_space;
             sk_pointer = q;
             const radius = 10 * dvui.windowNaturalScale() / state.view.ppm;
-            skFindHits(&it.sketch, q, radius);
+            skFindHits(it.sketch, q, radius);
             // A lock lets go when the pointer goes well away.
             if (sk_lock != null) {
                 const dx = me.p.x - sk_lock_px.x;
@@ -10297,7 +10340,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 if (d.moved or moved_px > 3) {
                     d.moved = true;
                     const r = sketch_edit.?;
-                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketch, .{ r.space, r.index, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
+                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketch, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
                 }
             } else if (sk_box) |*b| {
                 b.at = q;
@@ -10317,7 +10360,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 sk_box = null;
                 if (skDist(b.start, b.at) * state.view.ppm < 4) {
                     if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
-                } else skBoxSelect(&it.sketch, b.start, b.at, sk_press_ctrl);
+                } else skBoxSelect(it.sketch, b.start, b.at, sk_press_ctrl);
             }
             sk_lock = null;
             dvui.captureMouse(null, e.num);
@@ -10417,9 +10460,11 @@ fn skSelected(p: SkPick) bool {
 fn drawSketches(area: dvui.Rect.Physical) void {
     if (shown_space >= state.model.spaces.items.len) return;
     const px = dvui.windowNaturalScale();
-    for (state.model.spaces.items[shown_space].sketches.items, 0..) |*it, i| {
+    for (state.model.spaces.items[shown_space].sketch_views.items, 0..) |v, i| {
         const ref: SketchRef = .{ .space = shown_space, .index = i };
-        if (sketch_edit != null and std.meta.eql(sketch_edit.?, ref)) continue;
+        const it = viewPlace(shown_space, i) orelse continue;
+        // The one being edited draws in sketch mode.
+        if (sketch_edit) |e| if (e.space == shown_space and state.model.sketchIndex(v.sketch) == e.sketch and e.at.x == v.at.x and e.at.y == v.at.y) continue;
         const b = sketchBox(it) orelse continue;
         // Construction, clipped to the box (display only).
         {
@@ -10444,8 +10489,8 @@ fn drawSketches(area: dvui.Rect.Physical) void {
 }
 
 /// One geometry, stroked: infinite lines and rays across the view.
-fn skDrawGeometry(area: dvui.Rect.Physical, it: *const layout.model.SketchItem, g: skl.Geometry, colour: dvui.Color, thick: f32, dashed: bool) void {
-    const s = &it.sketch;
+fn skDrawGeometry(area: dvui.Rect.Physical, it: SkPlace, g: skl.Geometry, colour: dvui.Color, thick: f32, dashed: bool) void {
+    const s = it.sketch;
     const a = dvui.currentWindow().arena();
     switch (g.kind) {
         .point => |p| skDot(skPx(area, it, skVal(s, p)), 2.5 * dvui.windowNaturalScale(), colour),
@@ -10521,7 +10566,7 @@ fn skRing(c: dvui.Point.Physical, r: f32, colour: dvui.Color, thick: f32) void {
 /// The sketch being edited, over the dimmed canvas.
 fn drawSketchMode(area: dvui.Rect.Physical) void {
     const it = skItem() orelse return;
-    const s = &it.sketch;
+    const s = it.sketch;
     const px = dvui.windowNaturalScale();
     area.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.72) } });
     const an = skAnalysis();
@@ -10669,7 +10714,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
     if (sk_summary) skSummary(area);
 }
 
-fn skPreview(area: dvui.Rect.Physical, it: *const layout.model.SketchItem, segs: []const geom.Segment) void {
+fn skPreview(area: dvui.Rect.Physical, it: SkPlace, segs: []const geom.Segment) void {
     const a = dvui.currentWindow().arena();
     var pts: std.ArrayList(geom.Point) = .empty;
     pts.append(a, segs[0].start()) catch return;
@@ -10937,7 +10982,7 @@ var sk_pw_for: ?skl.GeomId = null;
 
 /// For one selected construction geometry: the parameter that makes it
 /// output while not 0 (a tile switches it on).
-fn sketchPhysicalWhen(it: *layout.model.SketchItem) void {
+fn sketchPhysicalWhen(it: SkPlace) void {
     if (sk_sel.items.len != 1) return;
     const g: skl.GeomId = switch (sk_sel.items[0]) {
         .curve => |c| c,
@@ -10972,7 +11017,7 @@ var sk_param_text: [128]u8 = @splat(0);
 
 /// The sketch's parameters: each with its expression and value; a line to
 /// add or change one ("name = expression"), Enter or Set to apply.
-fn sketchParameters(it: *layout.model.SketchItem) void {
+fn sketchParameters(it: SkPlace) void {
     heading("{s}", .{"Parameters"}, 8300);
     for (it.sketch.params.items, 0..) |p, pi| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = pi });
@@ -11024,8 +11069,8 @@ var sk_param_reset = false;
 
 /// A sketch's properties, outside sketch mode.
 fn sketchProperties(space: usize, index: usize) void {
-    const it = state.model.sketchAt(space, index) catch return;
-    propText("Name", "{s}", .{it.name}, 1);
+    const it = viewPlace(space, index) orelse return;
+    propText("Sketch", "{s}", .{it.name}, 1);
     propText("Origin", "({d:.2}, {d:.2}) {s}", .{ it.at.x * docUnits().perMm(), it.at.y * docUnits().perMm(), docUnits().symbol() }, 2);
     if (sketchBox(it)) |b| propText("Box", "{d:.2} × {d:.2} {s}", .{ b.width() * docUnits().perMm(), b.height() * docUnits().perMm(), docUnits().symbol() }, 3);
     var arena: std.heap.ArenaAllocator = .init(state.gpa);
@@ -11034,6 +11079,63 @@ fn sketchProperties(space: usize, index: usize) void {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
     if (dvui.button(@src(), "Edit sketch", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) enterSketch(.{ .space = space, .index = index });
+    // An enclosed sketch may be made a panel (or part) here.
+    if (dvui.button(@src(), "Make panel", .{}, .{ .expand = .horizontal })) {
+        if (act(.makeSketchPanel, .{ space, index })) |pi| {
+            state.context = .{ .panel = pi };
+            state.status = "A panel, made from the sketch's outlines: it follows the sketch. ";
+        } else |err| state.status = switch (err) {
+            error.NotEnclosed => "Only an enclosed sketch makes a panel: one outermost closed outline. ",
+            else => "The panel was not made. ",
+        };
+    }
+}
+
+/// A sketch of the document (from the tree): its views, and where to place
+/// one.
+fn sketchDefProperties(index: usize) void {
+    const sk = state.model.sketchAt(index) catch return;
+    propText("Name", "{s}", .{sk.name}, 1);
+    var views: usize = 0;
+    for (state.model.spaces.items) |sp| for (sp.sketch_views.items) |v| {
+        if (v.sketch == sk.id) views += 1;
+    };
+    var panels: usize = 0;
+    for (state.model.panels.items) |pn| {
+        if (pn.sketch == sk.id) panels += 1;
+    }
+    propText("Views", "{d}", .{views}, 2);
+    propText("Panels", "{d}", .{panels}, 3);
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    if (sk.sketch.analyse(state.gpa, arena.allocator())) |x| {
+        propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
+    } else |_| {}
+    // A view of it at the middle of what is shown.
+    if (dvui.button(@src(), "Place a view here", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        const at: geom.Point = .{ .x = @round(state.view.cx), .y = @round(state.view.cy) };
+        if (act(.addSketchView, .{ shown_space, index, at })) |vi| {
+            state.context = .{ .sketch = .{ .space = shown_space, .index = vi } };
+        } else |_| state.status = "The view was not placed. ";
+    }
+    if (dvui.button(@src(), "Delete sketch", .{}, .{ .expand = .horizontal })) {
+        if (act(.removeSketch, .{index})) {
+            state.context = .sketches;
+        } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+    }
+}
+
+/// A sketch panel's own properties: its sketch, and how it cuts.
+fn sketchPanelProperties(pi: usize) void {
+    const pn = state.model.panels.items[pi];
+    const si = state.model.sketchIndex(pn.sketch) orelse return;
+    propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
+    var islands = pn.islands;
+    if (dvui.checkbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
+    if (dvui.button(@src(), "Edit its sketch", .{}, .{ .expand = .horizontal, .id_extra = 72 })) {
+        enterSketchAt(si, pn.space, pn.sketch_at);
+        state.context = .{ .panel = pi };
+    }
 }
 
 // Tiles from sketches -------------------------------------------------------------
@@ -11052,28 +11154,15 @@ var proto_sk_h: usize = 1;
 var proto_sk_off: [2]f64 = .{ 0, 0 };
 var proto_preview: [2]f64 = .{ 1, 1 };
 
-/// Every sketch in the document, as (space, index).
-fn allSketches(buf: []SketchRef) []SketchRef {
-    var n: usize = 0;
-    for (state.model.spaces.items, 0..) |sp, si| for (sp.sketches.items, 0..) |_, i| {
-        if (n >= buf.len) break;
-        buf[n] = .{ .space = si, .index = i };
-        n += 1;
-    };
-    return buf[0..n];
-}
+
 
 fn prototypeSketch(id: layout.model.PrototypeId) void {
     const proto = state.model.prototypes.items[id];
     heading("{s}", .{"Drawn from a sketch"}, 8400);
     if (proto.sketch) |ps| {
         // Its copy: where it came from, and how it sits on its tiles.
-        var from_name: []const u8 = "a sketch since removed";
-        var from_ref: ?SketchRef = null;
-        for (state.model.spaces.items, 0..) |sp, si| for (sp.sketches.items, 0..) |sk, i| if (sk.id == ps.from) {
-            from_name = sk.name;
-            from_ref = .{ .space = si, .index = i };
-        };
+        const from_ref: ?usize = state.model.sketchIndex(ps.from);
+        const from_name: []const u8 = if (from_ref) |fi| state.model.sketches.items[fi].name else "a sketch since removed";
         propText("Copy of", "{s}", .{from_name}, 8401);
         propText("Width from", "{s}", .{ps.width_param}, 8402);
         propText("Height from", "{s}", .{ps.height_param}, 8403);
@@ -11090,7 +11179,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8406 });
             defer row.deinit();
             if (from_ref) |fr| if (dvui.button(@src(), "Apply again", .{}, .{})) {
-                act(.applySketch, .{ id, fr.space, fr.index, ps.width_param, ps.height_param, ps.offset }) catch |err| {
+                act(.applySketch, .{ id, fr, ps.width_param, ps.height_param, ps.offset }) catch |err| {
                     state.status = applyError(err);
                 };
             };
@@ -11098,24 +11187,23 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         }
     }
     // Apply a sketch: which one, its size parameters, the offset.
-    var refs_buf: [64]SketchRef = undefined;
-    const refs = allSketches(&refs_buf);
-    if (refs.len == 0) {
+    const nsk = state.model.sketches.items.len;
+    if (nsk == 0) {
         propText("Sketches", "{s}", .{"none in the document yet"}, 8410);
         return;
     }
     const arena = dvui.currentWindow().arena();
-    const names = arena.alloc([]const u8, refs.len) catch return;
-    for (refs, names) |rf, *n| n.* = state.model.spaces.items[rf.space].sketches.items[rf.index].name;
-    if (proto_sk_choice >= refs.len) proto_sk_choice = 0;
+    const names = arena.alloc([]const u8, nsk) catch return;
+    for (state.model.sketches.items, names) |sk_, *n| n.* = sk_.name;
+    if (proto_sk_choice >= nsk) proto_sk_choice = 0;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8411 });
         defer row.deinit();
         propName("Sketch");
         _ = dvui.dropdown(@src(), names, .{ .choice = &proto_sk_choice }, .{}, .{ .expand = .horizontal });
     }
-    const chosen = refs[proto_sk_choice];
-    const sk = &state.model.spaces.items[chosen.space].sketches.items[chosen.index].sketch;
+    const chosen = proto_sk_choice;
+    const sk = &state.model.sketches.items[chosen].sketch;
     if (sk.params.items.len == 0) {
         propText("Parameters", "{s}", .{"none: give the sketch two, for width and height"}, 8412);
         return;
@@ -11138,7 +11226,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
     }
     if (dvui.button(@src(), "Apply sketch to this prototype", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
         const off: geom.Point = .{ .x = proto_sk_off[0], .y = proto_sk_off[1] };
-        if (act(.applySketch, .{ id, chosen.space, chosen.index, pnames[proto_sk_w], pnames[proto_sk_h], off })) {
+        if (act(.applySketch, .{ id, chosen, pnames[proto_sk_w], pnames[proto_sk_h], off })) {
             state.status = "Applied: the prototype has its own copy of the sketch. ";
         } else |err| state.status = applyError(err);
     }

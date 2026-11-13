@@ -708,8 +708,9 @@ pub const Space = struct {
     base_layer: ObjectId = .none,
     /// Raster images placed in it.
     images: std.ArrayList(Image) = .empty,
-    /// Sketches drawn in it.
-    sketches: std.ArrayList(SketchItem) = .empty,
+    /// Views of the document's sketches placed in it: what is drawn in it
+    /// with a sketch.
+    sketch_views: std.ArrayList(SketchView) = .empty,
 
     /// The index of layer `id` (`.none` meaning the base layer).
     pub fn layerIndex(sp: Space, id: ObjectId) ?usize {
@@ -760,10 +761,19 @@ pub const SketchItem = struct {
     name: []const u8,
     /// True while the name is one the app gave it (Sketch 1).
     default_name: bool = false,
-    layer: ObjectId = .none,
-    /// Where its origin sits, mm in the space.
-    at: geom.Point,
     sketch: sketch_.Sketch,
+};
+
+/// A view of a sketch placed in a space: what shows there of the sketch,
+/// its origin at `at`. A sketch is the document's; drawing one on a canvas
+/// or in a frame places a view of it there.
+pub const SketchView = struct {
+    id: ObjectId = .none,
+    /// The sketch (its `SketchItem.id`).
+    sketch: ObjectId,
+    /// Where the sketch's origin sits, mm in the space.
+    at: geom.Point,
+    layer: ObjectId = .none,
 };
 
 /// One change to a sketch, as `editSketch` makes it (in the sketch's own
@@ -917,6 +927,16 @@ pub const Panel = struct {
     /// The layer of its space it is on (`.none`: the base layer). A
     /// space's own panel is always on the base layer.
     layer: ObjectId = .none,
+    /// The sketch whose outlines it is made from (see
+    /// `Model.makeSketchPanel`), and where that sketch's origin sits in the
+    /// space; `.none` for a panel of another kind. Its edge follows the
+    /// sketch.
+    sketch: ObjectId = .none,
+    sketch_at: geom.Point = .{ .x = 0, .y = 0 },
+    /// Cuts by nesting, counting the outlines inward: between an odd and
+    /// the even one inside it is cut, so inside a hole is an island, and so
+    /// on. Without islands only the holes in the outermost outline are cut.
+    islands: bool = true,
 
     /// The panel's outline on the worksheet.
     pub fn box(p: Panel) geom.Box {
@@ -1156,6 +1176,8 @@ pub const Model = struct {
     panels: std.ArrayList(Panel) = .empty,
     tiles: std.ArrayList(Tile) = .empty,
     prototypes: std.ArrayList(TilePrototype) = .empty,
+    /// The document's sketches; spaces hold views of them.
+    sketches: std.ArrayList(SketchItem) = .empty,
     /// The built-in Blank prototype, once a blank has been made.
     blank_prototype: ?PrototypeId = null,
     styles: std.ArrayList(LabelStyle) = .empty,
@@ -1168,7 +1190,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -2146,50 +2168,234 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Starts a new sketch in space `space`, its origin at `at`, on the
-    /// space's base layer. Returns its index among the space's sketches.
+    /// Starts a new sketch, with a view of it in space `space`, its origin
+    /// at `at`. Returns the sketch's index; the view is the space's last.
     pub fn addSketch(m: *Model, space: usize, name: []const u8, at: geom.Point) Error!usize {
         if (space >= m.spaces.items.len) return error.NoSuchItem;
-        const list = &m.spaces.items[space].sketches;
-        try list.append(m.a(), .{
-            .id = m.newId(),
+        const id = m.newId();
+        try m.sketches.append(m.a(), .{
+            .id = id,
             .name = try m.a().dupe(u8, name),
-            .at = at,
             .sketch = try sketch_.Sketch.init(m.a()),
         });
+        try m.spaces.items[space].sketch_views.append(m.a(), .{ .id = m.newId(), .sketch = id, .at = at });
+        m.revision += 1;
+        return m.sketches.items.len - 1;
+    }
+
+    /// Places another view of sketch `index` in space `space`. Returns the
+    /// view's index.
+    pub fn addSketchView(m: *Model, space: usize, index: usize, at: geom.Point) Error!usize {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        const sk = try m.sketchAt(index);
+        const list = &m.spaces.items[space].sketch_views;
+        try list.append(m.a(), .{ .id = m.newId(), .sketch = sk.id, .at = at });
         m.revision += 1;
         return list.items.len - 1;
     }
 
-    pub fn removeSketch(m: *Model, space: usize, index: usize) Error!void {
-        if (space >= m.spaces.items.len or index >= m.spaces.items[space].sketches.items.len) return error.NoSuchItem;
-        _ = m.spaces.items[space].sketches.orderedRemove(index);
+    pub fn moveSketchView(m: *Model, space: usize, view: usize, at: geom.Point) Error!void {
+        (try m.sketchView(space, view)).at = at;
         m.revision += 1;
     }
 
-    /// Moves a sketch: its origin to `at`.
-    pub fn moveSketch(m: *Model, space: usize, index: usize, at: geom.Point) Error!void {
-        const sk = try m.sketchAt(space, index);
-        sk.at = at;
+    pub fn removeSketchView(m: *Model, space: usize, view: usize) Error!void {
+        _ = try m.sketchView(space, view);
+        _ = m.spaces.items[space].sketch_views.orderedRemove(view);
         m.revision += 1;
     }
 
-    pub fn renameSketch(m: *Model, space: usize, index: usize, name: []const u8) Error!void {
-        const sk = try m.sketchAt(space, index);
+    /// Removes sketch `index` and its views. Refused while a panel is made
+    /// from it.
+    pub fn removeSketch(m: *Model, index: usize) Error!void {
+        const id = (try m.sketchAt(index)).id;
+        for (m.panels.items) |pn| if (pn.sketch == id) return error.SketchInUse;
+        for (m.spaces.items) |*sp| {
+            var k = sp.sketch_views.items.len;
+            while (k > 0) {
+                k -= 1;
+                if (sp.sketch_views.items[k].sketch == id) _ = sp.sketch_views.orderedRemove(k);
+            }
+        }
+        _ = m.sketches.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    pub fn renameSketch(m: *Model, index: usize, name: []const u8) Error!void {
+        const sk = try m.sketchAt(index);
         sk.name = try m.a().dupe(u8, name);
         sk.default_name = false;
         m.revision += 1;
     }
 
-    pub fn sketchAt(m: *Model, space: usize, index: usize) Error!*SketchItem {
-        if (space >= m.spaces.items.len or index >= m.spaces.items[space].sketches.items.len) return error.NoSuchItem;
-        return &m.spaces.items[space].sketches.items[index];
+    pub fn sketchAt(m: *Model, index: usize) Error!*SketchItem {
+        if (index >= m.sketches.items.len) return error.NoSuchItem;
+        return &m.sketches.items[index];
+    }
+
+    /// The index of the sketch with ID `id`.
+    pub fn sketchIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.sketches.items, 0..) |sk, i| if (sk.id == id) return i;
+        return null;
+    }
+
+    pub fn sketchView(m: *Model, space: usize, view: usize) Error!*SketchView {
+        if (space >= m.spaces.items.len or view >= m.spaces.items[space].sketch_views.items.len) return error.NoSuchItem;
+        return &m.spaces.items[space].sketch_views.items[view];
+    }
+
+    /// Makes a panel of the view `view` of an enclosed sketch, in space
+    /// `space`: the view becomes the panel, its edge the sketch's outlines
+    /// (cut by nesting), and it follows the sketch. What the outermost
+    /// outline encloses (tracks, line art) moves onto the panel, keeping
+    /// where it is. Refused unless the sketch's output has exactly one
+    /// outermost closed outline. Returns the panel's index.
+    pub fn makeSketchPanel(m: *Model, space: usize, view: usize) Error!usize {
+        const v = (try m.sketchView(space, view)).*;
+        const si = m.sketchIndex(v.sketch) orelse return error.NoSuchItem;
+        var name_buf: [64]u8 = undefined;
+        const name = m.nextPanelName(&name_buf, "Panel");
+        var p: Panel = .{
+            .id = m.newId(),
+            .name = try m.a().dupe(u8, name),
+            .default_name = true,
+            .space = space,
+            .w = 1,
+            .h = 1,
+            .sketch = v.sketch,
+            .sketch_at = v.at,
+            .layer = v.layer,
+        };
+        const edge = (try m.sketchEdge(&m.sketches.items[si].sketch, true)) orelse return error.NotEnclosed;
+        p.origin = .{ .x = v.at.x + edge.min.x, .y = v.at.y + edge.min.y };
+        p.w = edge.w;
+        p.h = edge.h;
+        p.edge = edge.art;
+        // What the outermost outline encloses moves onto the panel.
+        const root = m.spaces.items[space].root;
+        const rp = m.panels.items[root];
+        const outer: geom.Outline = .{ .contours = edge.art.shapes[0].outline.contours[0..1] };
+        const off: geom.Point = .{ .x = p.origin.x - rp.origin.x, .y = p.origin.y - rp.origin.y };
+        const inside = struct {
+            fn f(o: geom.Outline, d: geom.Point, q: geom.Point) bool {
+                return art_.contains(o, .{ .x = q.x - d.x, .y = q.y - d.y });
+            }
+            fn box(o: geom.Outline, d: geom.Point, bx: geom.Box) bool {
+                if (bx.isEmpty()) return false;
+                return f(o, d, .{ .x = bx.x0, .y = bx.y0 }) and f(o, d, .{ .x = bx.x1, .y = bx.y0 }) and
+                    f(o, d, .{ .x = bx.x0, .y = bx.y1 }) and f(o, d, .{ .x = bx.x1, .y = bx.y1 });
+            }
+        };
+        const src = &m.panels.items[root];
+        const d: geom.Point = .{ .x = -off.x, .y = -off.y };
+        var i = src.regions.items.len;
+        while (i > 0) {
+            i -= 1;
+            const rg = src.regions.items[i];
+            if (!inside.box(outer, off, rg.bounds())) continue;
+            var moved = src.regions.orderedRemove(i);
+            moved.origin = .{ .x = moved.origin.x + d.x, .y = moved.origin.y + d.y };
+            try p.regions.insert(m.a(), 0, moved);
+        }
+        i = src.art.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (!inside.box(outer, off, src.art.items[i].box())) continue;
+            var moved = src.art.orderedRemove(i);
+            moved.at = .{ .x = moved.at.x + d.x, .y = moved.at.y + d.y };
+            try p.art.insert(m.a(), 0, moved);
+        }
+        for (p.regions.items) |x| m.forget(x.id);
+        for (p.art.items) |x| m.forget(x.id);
+        _ = m.spaces.items[space].sketch_views.orderedRemove(view);
+        try m.panels.append(m.a(), p);
+        m.revision += 1;
+        return m.panels.items.len - 1;
+    }
+
+    /// Whether a sketch panel cuts islands (see `Panel.islands`).
+    pub fn setPanelIslands(m: *Model, panel: usize, on: bool) Error!void {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        m.panels.items[panel].islands = on;
+        try m.syncSketchPanel(panel);
+        m.revision += 1;
+    }
+
+    const SketchEdge = struct { art: PanelArt, min: geom.Point, w: f64, h: f64 };
+
+    /// A sketch's outlines as a panel's edge: its closed profiles, the
+    /// outermost first, as one outline whose even-odd fill is the cut by
+    /// nesting (without `islands`, only the outermost and the holes in it),
+    /// moved so the outermost's box starts at (0, 0). Null unless there is
+    /// exactly one outermost outline.
+    fn sketchEdge(m: *Model, sk: *const sketch_.Sketch, islands: bool) Error!?SketchEdge {
+        var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const prof = try sk.profiles(sa);
+        if (prof.contours.len == 0) return null;
+        // Each outline's depth: how many others contain it.
+        const depth = try sa.alloc(usize, prof.contours.len);
+        for (prof.contours, depth, 0..) |c, *dp, i| {
+            dp.* = 0;
+            const q = c.segments[0].at(0.5);
+            for (prof.contours, 0..) |o, k| {
+                if (k == i) continue;
+                if (art_.contains(.{ .contours = &.{o} }, q)) dp.* += 1;
+            }
+        }
+        var outer: ?usize = null;
+        for (depth, 0..) |dp, i| if (dp == 0) {
+            if (outer != null) return null;
+            outer = i;
+        };
+        const oi = outer orelse return null;
+        const b = prof.contours[oi].bounds();
+        const move = geom.Affine.translate(-b.x0, -b.y0);
+        var kept: std.ArrayList(geom.Contour) = .empty;
+        for (prof.contours, depth, 0..) |c, dp, i| {
+            if (i != oi and dp != 0 and !(islands or dp == 1)) continue;
+            const segs = try m.a().alloc(geom.Segment, c.segments.len);
+            for (c.segments, segs) |sg, *o| o.* = sg.transformed(move);
+            const item: geom.Contour = .{ .segments = segs };
+            if (i == oi) try kept.insert(m.a(), 0, item) else try kept.append(m.a(), item);
+        }
+        const shapes = try m.a().alloc(art_.Shape, 1);
+        shapes[0] = .{ .name = "edge", .outline = .{ .contours = kept.items }, .paint = .{} };
+        return .{
+            .art = .{ .id = m.newId(), .name = "edge", .at = .{ .x = 0, .y = 0 }, .shapes = shapes },
+            .min = .{ .x = b.x0, .y = b.y0 },
+            .w = b.width(),
+            .h = b.height(),
+        };
+    }
+
+    /// Brings a sketch panel's edge up to date with its sketch; what is on
+    /// the panel keeps where it is in the space.
+    fn syncSketchPanel(m: *Model, panel: usize) Error!void {
+        const p = &m.panels.items[panel];
+        if (p.sketch == .none) return;
+        const si = m.sketchIndex(p.sketch) orelse return;
+        // A sketch that no longer encloses leaves the edge as it was.
+        const edge = (try m.sketchEdge(&m.sketches.items[si].sketch, p.islands)) orelse return;
+        const origin: geom.Point = .{ .x = p.sketch_at.x + edge.min.x, .y = p.sketch_at.y + edge.min.y };
+        const d: geom.Point = .{ .x = p.origin.x - origin.x, .y = p.origin.y - origin.y };
+        for (p.regions.items) |*rg| rg.origin = .{ .x = rg.origin.x + d.x, .y = rg.origin.y + d.y };
+        for (p.art.items) |*pa| pa.at = .{ .x = pa.at.x + d.x, .y = pa.at.y + d.y };
+        p.origin = origin;
+        p.w = edge.w;
+        p.h = edge.h;
+        p.edge = edge.art;
     }
 
     /// Changes a sketch (see `SketchEdit`) and solves it again. Returns the
     /// new geometry's or constraint's ID, where the edit makes one (else 0).
-    pub fn editSketch(m: *Model, space: usize, index: usize, edit: SketchEdit) Error!u32 {
-        const sk = &(try m.sketchAt(space, index)).sketch;
+    pub fn editSketch(m: *Model, index: usize, edit: SketchEdit) Error!u32 {
+        const sk = &(try m.sketchAt(index)).sketch;
+        const sid = m.sketches.items[index].id;
+        defer for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) {
+            m.syncSketchPanel(pi) catch {};
+        };
         const al = m.a();
         const gpa = m.arena.child_allocator;
         var out: u32 = 0;
@@ -2419,7 +2625,10 @@ pub const Model = struct {
         if (e.id == .none) e.id = m.newId();
         e.at = .{ .x = e.at.x + d.x, .y = e.at.y + d.y };
         const dst = &m.panels.items[root_before];
-        try dst.art.append(m.a(), e);
+        // A sketch panel goes back to being a view of its sketch.
+        if (p.sketch != .none) {
+            try m.spaces.items[p.space].sketch_views.append(m.a(), .{ .id = e.id, .sketch = p.sketch, .at = p.sketch_at, .layer = p.layer });
+        } else try dst.art.append(m.a(), e);
         for (p.regions.items) |r| {
             var x = r;
             x.origin = .{ .x = x.origin.x + d.x, .y = x.origin.y + d.y };
@@ -3451,9 +3660,9 @@ pub const Model = struct {
     /// tile's width and `height_param` to its height (mm), the sketch's
     /// origin `offset` from the tile's origin. Refused for a sketch that is
     /// not fully constrained or lacks the parameters.
-    pub fn applySketch(m: *Model, id: PrototypeId, space: usize, index: usize, width_param: []const u8, height_param: []const u8, offset: geom.Point) Error!void {
+    pub fn applySketch(m: *Model, id: PrototypeId, index: usize, width_param: []const u8, height_param: []const u8, offset: geom.Point) Error!void {
         if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const src = try m.sketchAt(space, index);
+        const src = try m.sketchAt(index);
         var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
         defer scratch.deinit();
         var copy = try src.sketch.clone(m.a());
@@ -4301,4 +4510,66 @@ test "an equation is its own item: put in a run of text, kept apart from it" {
     try std.testing.expectEqualStrings("\\frac{a}{2}", items.items[1].what.run.content);
     // At the end of an equation a new one goes after it.
     try std.testing.expectEqual(@as(usize, 2), try m.insertEquation(p, r, .{ .index = 1, .offset = 3 }, body));
+}
+
+test "a panel made from an enclosed sketch: cut by nesting, following its sketch" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    const si = try m.addSketch(0, "Plate", .{ .x = 10, .y = 20 });
+    const al = m.a();
+    const P = struct {
+        fn f(x: f64, y: f64) geom.Point {
+            return .{ .x = x, .y = y };
+        }
+    }.f;
+    const sk = &m.sketches.items[si].sketch;
+    // A 40 × 30 outline, a hole in it, and an island in the hole.
+    const bottom = try sk.addSegment(al, P(0, 0), P(40, 0), false);
+    const right = try sk.addSegment(al, P(40, 0), P(40, 30), false);
+    const top = try sk.addSegment(al, P(40, 30), P(0, 30), false);
+    const left = try sk.addSegment(al, P(0, 30), P(0, 0), false);
+    const sides = [_]sketch_.GeomId{ bottom, right, top, left };
+    for (0..4) |k| _ = try sk.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = sides[k], .role = .end }, .{ .geom = sides[(k + 1) % 4], .role = .start } } } });
+    _ = try sk.addCircle(al, P(28, 15), 8, false);
+    _ = try sk.addCircle(al, P(28, 15), 3, false);
+    // A track on the canvas inside the outline, and one outside it.
+    const st = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2 });
+    _ = try m.addTracks(c, .{ .name = "in", .origin = .{ .x = 12, .y = 40 }, .style = st, .count = 1, .length = 1, .pitch = 5 });
+    _ = try m.addTracks(c, .{ .name = "out", .origin = .{ .x = 100, .y = 100 }, .style = st, .count = 1, .length = 1, .pitch = 5 });
+    const pi = try m.makeSketchPanel(0, 0);
+    const p = m.panels.items[pi];
+    try std.testing.expectEqual(@as(usize, 0), m.spaces.items[0].sketch_views.items.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), p.origin.x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 40), p.w, 1e-9);
+    // Outline, hole, island: even-odd, the outline first.
+    const edge = p.edge.?.shapes[0].outline;
+    try std.testing.expectEqual(@as(usize, 3), edge.contours.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 40), edge.contours[0].bounds().width(), 1e-9);
+    // The track inside came onto the panel, where it was.
+    try std.testing.expectEqual(@as(usize, 1), p.regions.items.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), p.origin.x + p.regions.items[0].origin.x, 1e-9);
+    // Without islands: the outline and the hole only.
+    try m.setPanelIslands(pi, false);
+    try std.testing.expectEqual(@as(usize, 2), m.panels.items[pi].edge.?.shapes[0].outline.contours.len);
+    // The sketch grows to the left: the panel follows, its track stays put.
+    try m.setPanelIslands(pi, true);
+    _ = try m.editSketch(si, .{ .drag = .{ .p = .{ .geom = bottom, .role = .start }, .to = P(-5, 0) } });
+    const q = m.panels.items[pi];
+    try std.testing.expectApproxEqAbs(@as(f64, 5), q.origin.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), q.origin.x + q.regions.items[0].origin.x, 1e-6);
+    // A sketch with two separate outlines does not make one panel.
+    const two = try m.addSketch(0, "Two", .{ .x = 200, .y = 0 });
+    const sk2 = &m.sketches.items[two].sketch;
+    _ = try sk2.addCircle(al, P(0, 0), 2, false);
+    _ = try sk2.addCircle(al, P(10, 0), 2, false);
+    try std.testing.expectError(error.NotEnclosed, m.makeSketchPanel(0, 0));
+    // While a panel is made from it, a sketch stays.
+    try std.testing.expectError(error.SketchInUse, m.removeSketch(si));
+    // Released, the panel is a view of its sketch again, its track loose.
+    _ = try m.releasePanel(pi);
+    try std.testing.expectEqual(@as(usize, 2), m.spaces.items[0].sketch_views.items.len);
+    try std.testing.expectEqual(m.sketches.items[si].id, m.spaces.items[0].sketch_views.items[1].sketch);
+    try m.removeSketch(si);
 }
