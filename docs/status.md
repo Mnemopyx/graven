@@ -76,7 +76,7 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 ## Agreed but not built
 
 1. Paragraph styles for headings (size, weight, rules above and below). This is the likely next item.
-2. Grids, next steps: a panel editing mode, placing and spanning instances by clicking on the grid, a polar grid, and a rough HP-15C to try sizes on. Built: Cartesian grids on panels with stamps (prototype instances as parts, holes or legends) bound to their points, grids that follow another part's grid, and panels from sketches: sketches have their own tree category, a sketch on a canvas or frame is a view of it, and an enclosed sketch view can be made a panel, cut by nesting.
+2. Grids, next steps: a polar grid, and a rough HP-15C to try sizes on. Built: a panel editing mode that places and spans instances by clicking and dragging on a grid, Cartesian grids on panels with stamps (prototype instances as parts, holes or legends) bound to their points, grids that follow another part's grid, and panels from sketches: sketches have their own tree category, a sketch on a canvas or frame is a view of it, and an enclosed sketch view can be made a panel, cut by nesting.
 3. Moves into frames that drop constraints to the original frame and to objects left behind.
 4. The discussion of text and tile entry principles.
 5. Compose-key and digraph Unicode entry.

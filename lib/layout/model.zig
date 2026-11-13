@@ -2688,6 +2688,50 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Puts an instance of stamp `si` on the `cols` × `rows` points from
+    /// (`col`, `row`). What of the stamp already lies there makes way: the
+    /// first such instance (its labels with it) is moved and stretched to
+    /// the block, the rest removed; with none, a new one is made. Returns
+    /// its tile.
+    pub fn placeInstance(m: *Model, panel: usize, gi: usize, si: usize, col: u32, row: u32, cols: u32, rows: u32) Error!TileId {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const sh = m.gridShape(panel, gi);
+        if (cols == 0 or rows == 0 or col + cols > sh.cols or row + rows > sh.rows) return error.BadSize;
+        const g = &m.panels.items[panel].grids.items[gi];
+        if (si >= g.stamps.items.len) return error.NoSuchItem;
+        const sid = g.stamps.items[si].id;
+        var kept: ?TileId = null;
+        var k: usize = 0;
+        while (k < g.instances.items.len) {
+            const o = g.instances.items[k];
+            const meets = o.stamp == sid and o.loose == null and o.col < col + cols and col < o.col + o.cols and o.row < row + rows and row < o.row + o.rows;
+            if (!meets) {
+                k += 1;
+                continue;
+            }
+            if (kept == null) {
+                kept = o.tile;
+                g.instances.items[k].col = col;
+                g.instances.items[k].row = row;
+                g.instances.items[k].cols = cols;
+                g.instances.items[k].rows = rows;
+                k += 1;
+            } else {
+                m.tile(o.tile).removed = true;
+                _ = g.instances.orderedRemove(k);
+            }
+        }
+        if (kept) |t| {
+            m.revision += 1;
+            return t;
+        }
+        const id = try m.addInstance(panel, gi, si, col, row);
+        const gg = &m.panels.items[panel].grids.items[gi];
+        gg.instances.items[gg.instances.items.len - 1].cols = cols;
+        gg.instances.items[gg.instances.items.len - 1].rows = rows;
+        return id;
+    }
+
     /// Binds instance `ii` to point (`col`, `row`) (an unbound one too).
     pub fn bindInstance(m: *Model, panel: usize, gi: usize, ii: usize, col: u32, row: u32) Error!void {
         if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;

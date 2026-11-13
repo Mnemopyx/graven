@@ -3237,6 +3237,10 @@ fn canvas() void {
         drawSketchMode(area);
         return;
     }
+    if (panel_edit != null) {
+        drawPanelEdit(area);
+        return;
+    }
 
     drawPicked(area);
     drawSelection(area);
@@ -4552,6 +4556,264 @@ fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
     }
 }
 
+// Panel editing ---------------------------------------------------------------
+//
+// A mode focused on one panel: the canvas shows it filling the view, and
+// clicks go to its grids. A click on a point puts an instance of the
+// chosen stamp there (or picks the one there); a drag across points puts
+// one instance spanning them. Esc lets go of a drag or the picked
+// instance, Delete removes the picked instance; the mode is left with its
+// button, not a key.
+
+const PanelEdit = struct {
+    panel: usize,
+    grid: usize = 0,
+    stamp: usize = 0,
+};
+
+var panel_edit: ?PanelEdit = null;
+/// The grid point under the pointer, and where a press began.
+const GridAt = struct { col: u32, row: u32 };
+var pe_hover: ?GridAt = null;
+var pe_press: ?GridAt = null;
+
+fn enterPanelEdit(pi: usize) void {
+    panel_edit = .{ .panel = pi };
+    pe_hover = null;
+    pe_press = null;
+    shown_space = state.model.panels.items[pi].space;
+    state.tool = .select;
+    selection.clearRetainingCapacity();
+    track_cursor = null;
+    state.view.fit = panelBox(pi);
+    if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    state.status = "Panel editing: click a grid point to place the stamp there, drag across points to span them. ";
+}
+
+fn leavePanelEdit() void {
+    if (panel_edit) |pe| state.context = .{ .panel = pe.panel };
+    panel_edit = null;
+    pe_hover = null;
+    pe_press = null;
+    state.status = "";
+}
+
+/// The panel editing mode's grid and stamp, when both exist.
+fn peTarget() ?struct { panel: usize, grid: usize, stamp: usize } {
+    const pe = panel_edit orelse return null;
+    if (pe.panel >= state.model.panels.items.len) return null;
+    const grids = state.model.panels.items[pe.panel].grids.items;
+    if (pe.grid >= grids.len) return null;
+    if (pe.stamp >= grids[pe.grid].stamps.items.len) return null;
+    return .{ .panel = pe.panel, .grid = pe.grid, .stamp = pe.stamp };
+}
+
+/// The point of the mode's grid nearest `at` (space mm), when `at` lies
+/// within half a step of the grid's points.
+fn peGridAt(at: geom.Point) ?GridAt {
+    const pe = panel_edit orelse return null;
+    if (pe.panel >= state.model.panels.items.len or pe.grid >= state.model.panels.items[pe.panel].grids.items.len) return null;
+    const o = onSheetPoint(pe.panel, state.model.gridPoint(pe.panel, pe.grid, 0, 0));
+    const sh = state.model.gridShape(pe.panel, pe.grid);
+    const c = @round((at.x - o.x) / sh.stepX());
+    const r = @round((o.y - at.y) / sh.stepY());
+    if (c < 0 or r < 0 or c >= @as(f64, @floatFromInt(sh.cols)) or r >= @as(f64, @floatFromInt(sh.rows))) return null;
+    return .{ .col = @intFromFloat(c), .row = @intFromFloat(r) };
+}
+
+/// The panel being edited, outlined, and the stamp's box at the pointer,
+/// or over the points a drag spans.
+fn drawPanelEdit(area: dvui.Rect.Physical) void {
+    const px = dvui.windowNaturalScale();
+    const pe = panel_edit orelse return;
+    if (pe.panel >= state.model.panels.items.len) return;
+    marchingBox(area, panelBox(pe.panel), colors.select, 1.5 * px);
+    const t = peTarget() orelse return;
+    const hover = pe_hover orelse return;
+    const from = pe_press orelse hover;
+    const c0 = @min(from.col, hover.col);
+    const r0 = @min(from.row, hover.row);
+    const cols = @max(from.col, hover.col) - c0 + 1;
+    const rows = @max(from.row, hover.row) - r0 + 1;
+    const st = state.model.panels.items[t.panel].grids.items[t.grid].stamps.items[t.stamp];
+    const sh = state.model.gridShape(t.panel, t.grid);
+    const w = st.w + @as(f64, @floatFromInt(cols - 1)) * sh.stepX();
+    const h = st.h + @as(f64, @floatFromInt(rows - 1)) * sh.stepY();
+    const p = state.model.gridPoint(t.panel, t.grid, @as(f64, @floatFromInt(c0)) + @as(f64, @floatFromInt(cols - 1)) / 2, @as(f64, @floatFromInt(r0)) + @as(f64, @floatFromInt(rows - 1)) / 2);
+    const cx = p.x + st.offset.x;
+    const cy = p.y + st.offset.y;
+    dashedBox(area, onSheet(t.panel, .{ .x0 = cx - w / 2, .x1 = cx + w / 2, .y0 = cy - h / 2, .y1 = cy + h / 2 }), colors.select, 1.5 * px);
+}
+
+fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
+    const pe = panel_edit orelse return;
+    if (pe.panel >= state.model.panels.items.len) {
+        leavePanelEdit();
+        return;
+    }
+    if (e.handled) return;
+    if (e.evt == .key) {
+        if (!cursorKeysReach()) return;
+        const k = e.evt.key;
+        if (k.action != .down) return;
+        if (primaryMod(k.mod)) return;
+        switch (k.code) {
+            .escape => {
+                if (pe_press != null) {
+                    pe_press = null;
+                } else state.context = .{ .panel = pe.panel };
+            },
+            .delete, .backspace => {
+                const id = switch (state.context) {
+                    .tile => |id| id,
+                    else => return,
+                };
+                const at = state.model.gridInstanceOf(id) orelse return;
+                act(.removeInstance, .{ at.panel, at.grid, at.index }) catch {};
+                state.context = .{ .panel = pe.panel };
+            },
+            else => return,
+        }
+        e.handle(@src(), box.data());
+        dvui.refresh(null, @src(), box.data().id);
+        return;
+    }
+    if (e.evt != .mouse) return;
+    if (!dvui.eventMatchSimple(e, box.data())) return;
+    const me = e.evt.mouse;
+    const at = state.view.toMm(area, me.p);
+    switch (me.action) {
+        .focus => {
+            e.handle(@src(), box.data());
+            dvui.focusWidget(box.data().id, null, e.num);
+        },
+        .position => {
+            state.mouse = at;
+            pe_hover = peGridAt(at);
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        .wheel_y => |dy| {
+            e.handle(@src(), box.data());
+            const z = @exp(@log(1.003) * @as(f64, dy));
+            state.view.ppm *= z;
+            state.view.fit = null;
+            state.view.cx = at.x - (at.x - state.view.cx) / z;
+            state.view.cy = at.y - (at.y - state.view.cy) / z;
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        .press => if (area.contains(me.p)) {
+            e.handle(@src(), box.data());
+            dvui.captureMouse(box.data(), e.num);
+            if (me.button == .middle) {
+                dvui.dragPreStart(me.button, me.p, .{});
+                return;
+            }
+            if (!me.button.pointer()) return;
+            pe_press = peGridAt(at);
+            if (pe_press == null) pickInPanel(pe.panel, at);
+        },
+        .motion => if (dvui.captured(box.data().id)) {
+            e.handle(@src(), box.data());
+            pe_hover = peGridAt(at);
+            if (pe_press == null) if (dvui.dragging(me, null)) |d| {
+                state.view.fit = null;
+                state.view.cx -= d.x / state.view.ppm;
+                state.view.cy += d.y / state.view.ppm;
+            };
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        .release => if (dvui.captured(box.data().id)) {
+            e.handle(@src(), box.data());
+            if (pe_press) |from| if (peGridAt(at)) |to| peRelease(from, to);
+            pe_press = null;
+            dvui.captureMouse(null, e.num);
+            dvui.dragEnd(me.button);
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        else => {},
+    }
+}
+
+/// A click off the grid: picks what of the panel is there (an instance of
+/// another grid or stamp, the panel itself).
+fn pickInPanel(pi: usize, at: geom.Point) void {
+    state.context = .{ .panel = pi };
+    if (pi >= state.placed.items.len) return;
+    for (state.placed.items[pi].tiles) |t| {
+        if (contains(onSheet(pi, t.pitch_box), at)) state.context = .{ .tile = t.id };
+    }
+}
+
+/// A press on `from` let go on `to`: on one point, picks what of the stamp
+/// is there or places one; across points, one instance spans them.
+fn peRelease(from: GridAt, to: GridAt) void {
+    const t = peTarget() orelse {
+        state.status = "Choose a grid and a stamp to place. ";
+        return;
+    };
+    const sid = state.model.panels.items[t.panel].grids.items[t.grid].stamps.items[t.stamp].id;
+    if (from.col == to.col and from.row == to.row) {
+        if (state.model.instanceAt(t.panel, t.grid, sid, from.col, from.row)) |ii| {
+            state.context = .{ .tile = state.model.panels.items[t.panel].grids.items[t.grid].instances.items[ii].tile };
+            return;
+        }
+    }
+    const c0 = @min(from.col, to.col);
+    const r0 = @min(from.row, to.row);
+    const id = act(.placeInstance, .{ t.panel, t.grid, t.stamp, c0, r0, @max(from.col, to.col) - c0 + 1, @max(from.row, to.row) - r0 + 1 }) catch {
+        state.status = "It could not be placed there. ";
+        return;
+    };
+    state.context = .{ .tile = id };
+}
+
+/// The mode's own properties, above the context's: the grid and stamp to
+/// place, and leaving the mode.
+fn panelEditHeader() void {
+    if (panel_edit == null) return;
+    const p = &panel_edit.?;
+    if (p.panel >= state.model.panels.items.len) {
+        leavePanelEdit();
+        return;
+    }
+    const panel = state.model.panels.items[p.panel];
+    heading("Editing {s}", .{panel.name}, 7000);
+    const arena = dvui.currentWindow().arena();
+    if (panel.grids.items.len == 0) {
+        propText("Grids", "none yet: add one below", .{}, 7001);
+    } else {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (panel.grids.items) |g| names.append(arena, g.name) catch {};
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7002 });
+        defer row.deinit();
+        propName("Grid");
+        var choice: usize = @min(p.grid, names.items.len - 1);
+        if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7002 })) {
+            p.grid = choice;
+            p.stamp = 0;
+        }
+    }
+    if (p.grid < panel.grids.items.len) {
+        const stamps = panel.grids.items[p.grid].stamps.items;
+        if (stamps.len == 0) {
+            propText("Stamps", "none yet: add one in the grid's properties", .{}, 7003);
+        } else {
+            var names: std.ArrayList([]const u8) = .empty;
+            for (stamps) |st| names.append(arena, st.name) catch {};
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7004 });
+            defer row.deinit();
+            propName("Places");
+            var choice: usize = @min(p.stamp, names.items.len - 1);
+            if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7004 })) p.stamp = choice;
+        }
+        if (dvui.button(@src(), "Grid settings", .{}, .{ .expand = .horizontal, .id_extra = 7005 })) state.context = .{ .grid = .{ .panel = p.panel, .index = p.grid } };
+    }
+    inline for (.{ "Click a point: place or pick.", "Drag across points: span them.", "Delete removes the picked one." }, 0..) |line, k| {
+        dvui.labelNoFmt(@src(), line, .{}, .{ .id_extra = 7010 + k, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
+    }
+    if (dvui.button(@src(), "Leave panel editing", .{}, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } })) leavePanelEdit();
+}
+
 // Layers and images ---------------------------------------------------------
 //
 // Each space draws its layers bottom first: a hidden layer is skipped; the
@@ -5282,6 +5544,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // Sketch mode takes the canvas's events.
         if (sketch_edit != null) {
             sketchEvent(e, box, area);
+            continue;
+        }
+        if (panel_edit != null) {
+            panelEditEvent(e, box, area);
             continue;
         }
         // A selected track's arrow keys move it, while the canvas or the
@@ -6390,6 +6656,10 @@ fn propFont(name: []const u8, n: usize) !void {
 
 fn properties() !void {
     if (sketch_edit != null) return sketchModeProperties();
+    if (panel_edit != null) {
+        panelEditHeader();
+        if (panel_edit == null) return;
+    }
     defer constraintProperties();
     const on_canvas = switch (state.context) {
         .panel => |pi| state.model.panels.items[pi].unbounded,
@@ -6433,6 +6703,7 @@ fn properties() !void {
                 if (i.ink_outside > 0) propText("Issue", "ink area {d:.2} mm in margin", .{i.ink_outside}, 21);
             }
             try propFont("Legend font", 5);
+            if (panel_edit == null and dvui.button(@src(), "Edit panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) enterPanelEdit(pi);
             try panelGrids(pi);
             if (state.model.has_sheet) return;
             if (dvui.button(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {

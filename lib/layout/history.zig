@@ -50,7 +50,7 @@ pub const actions = [_][:0]const u8{
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
-    "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "setInstanceSpan", "bindInstance", "removeInstance",
+    "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -593,6 +593,17 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     // Its centre is between rows 2 and 3.
     try testing.expectApproxEqAbs(@as(f64, 50 - 2.5 * 12), (eb.y0 + eb.y1) / 2, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 10 + 5 * 13), (eb.x0 + eb.x1) / 2, 1e-9);
+
+    // Dragged over points: one instance spanning them, keeping the labels
+    // of the first that lay there.
+    const k00 = m.panels.items[keys].grids.items[kg].instances.items[0].tile;
+    try m.setContent(k00, "top", "ON");
+    const before = m.panels.items[keys].grids.items[kg].instances.items.len;
+    const wide = try h.do(&m, .placeInstance, .{ keys, kg, caps, 0, 0, 2, 1 });
+    try testing.expectEqual(k00, wide);
+    try testing.expectEqual(before - 1, m.panels.items[keys].grids.items[kg].instances.items.len);
+    try testing.expect(try h.undo(&m));
+    try testing.expectEqual(before, m.panels.items[keys].grids.items[kg].instances.items.len);
 
     // Stretching the plate's grid moves the holes, the legends and the
     // keys on the other part together.
