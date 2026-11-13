@@ -126,7 +126,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_tracks, add_art, select_area, constrain, join };
+const Tool = enum { select, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
 
 /// Join: the track a click on another track threads on into.
 var join_from: ?struct { panel: usize, region: usize } = null;
@@ -175,6 +175,8 @@ const Context = union(enum) {
     layer: struct { space: usize, index: usize },
     /// A raster image placed in a space.
     image: struct { space: usize, index: usize },
+    /// A sketch drawn in a space.
+    sketch: struct { space: usize, index: usize },
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -203,6 +205,7 @@ const Context = union(enum) {
             .view => "View",
             .layer => "Layer",
             .image => "Image",
+            .sketch => "Sketch",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -1825,6 +1828,7 @@ fn contextValid(c: Context) bool {
         .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,
         .layer => |l| l.space < m.spaces.items.len and l.index < m.spaces.items[l.space].layers.items.len,
         .image => |im| im.space < m.spaces.items.len and im.index < m.spaces.items[im.space].images.items.len,
+        .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketches.items.len,
         .prototype => |id| id < m.prototypes.items.len,
     };
 }
@@ -3042,7 +3046,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .prototypes => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .prototypes => false,
     };
 }
 
@@ -3211,6 +3215,11 @@ fn canvas() void {
 
     if (open) drawFrameBound(area);
     if (open) drawSpace(area, shown_space, 0) else drawSpacePanels(area, null, null);
+    if (open) drawSketches(area);
+    if (sketch_edit != null) {
+        drawSketchMode(area);
+        return;
+    }
 
     drawPicked(area);
     drawSelection(area);
@@ -4945,6 +4954,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
             continue;
         }
+        // Sketch mode takes the canvas's events.
+        if (sketch_edit != null) {
+            sketchEvent(e, box, area);
+            continue;
+        }
         // A selected track's arrow keys move it, while the canvas or the
         // palette has the keyboard.
         if (e.evt == .key and track_cursor == null and state.context == .row and !e.handled and cursorKeysReach()) {
@@ -5076,6 +5090,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         state.context = .{ .panel = l.panel };
                         dvui.refresh(null, @src(), box.data().id);
                     },
+                    .sketch => |sc| {
+                        e.handle(@src(), box.data());
+                        actV(.removeSketch, .{ sc.space, sc.index });
+                        state.context = .{ .panel = state.model.spaces.items[sc.space].root };
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
                     .image => |im| {
                         e.handle(@src(), box.data());
                         actV(.removeImage, .{im.space, im.index});
@@ -5180,6 +5200,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
                         state.drag = .{ .start = p, .at = p };
                     }
+                } else if (state.tool == .new_sketch and me.button.pointer()) {
+                    state.tool = .select;
+                    state.press_consumed = true;
+                    newSketchAt(state.view.toMm(area, me.p));
                 } else if (state.tool == .constrain and me.button.pointer()) {
                     constrainClick();
                     state.press_consumed = true;
@@ -5334,6 +5358,11 @@ fn pick(at: geom.Point) void {
     // An image, then a view, by their boxes; anything over them wins.
     if (imageUnder(at)) |im| state.context = im;
     if (viewUnder(at)) |v| state.context = v;
+    // A sketch, by its box; a second click on it soon after enters it.
+    if (sketchUnder(at)) |sr| {
+        pickSketch(sr);
+        if (sketch_edit != null) return;
+    }
     for (state.model.panels.items, 0..) |panel, pi| {
         if (!shownPanel(pi)) continue;
         if (state.model.spaces.items.len > 0 and !layerOpen(panel.space, panelLayer(pi))) continue;
@@ -5667,6 +5696,7 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
 /// Tools for the current context, as icon buttons; with Add shape on,
 /// which shape it draws.
 fn toolPalette() void {
+    if (sketch_edit != null) return sketchPalette();
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
     defer col.deinit();
     toolBar();
@@ -5726,6 +5756,20 @@ fn toolBar() void {
             dvui.tooltip(@src(), .{ .active_rect = rwd.borderRectScale().r }, "Delete: only while no tile is made from it", .{}, .{});
         },
         else => {},
+    }
+
+    // On a canvas or in a frame: start a sketch where the next click lands.
+    if (state.context == .panel and state.model.panels.items[state.context.panel].unbounded) {
+        const on = state.tool == .new_sketch;
+        var swd: dvui.WidgetData = undefined;
+        if (dvui.buttonIcon(@src(), "New sketch", dvui.entypo.pencil, .{}, .{}, .{
+            .data_out = &swd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        })) {
+            state.drag = null;
+            state.tool = if (on) .select else .new_sketch;
+        }
+        dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "New sketch: click where its origin goes, then draw and constrain it", .{}, .{});
     }
 
     if (state.context == .panel) {
@@ -5819,6 +5863,7 @@ fn lowerKind() []const u8 {
         .view => "view",
         .layer => "layer",
         .image => "image",
+        .sketch => "sketch",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -6016,6 +6061,7 @@ fn propFont(name: []const u8, n: usize) !void {
 }
 
 fn properties() !void {
+    if (sketch_edit != null) return sketchModeProperties();
     defer constraintProperties();
     const on_canvas = switch (state.context) {
         .panel => |pi| state.model.panels.items[pi].unbounded,
@@ -6117,6 +6163,7 @@ fn properties() !void {
         .view => |v| try viewProperties(v.space, v.index),
         .layer => |l| try layerProperties(l.space, l.index),
         .image => |im| try imageProperties(im.space, im.index),
+        .sketch => |sc| sketchProperties(sc.space, sc.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| try prototypeProperties(id),
     }
@@ -6807,6 +6854,7 @@ fn statusContent() void {
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
+        .new_sketch => "New sketch: click where its origin goes · Esc cancels",
         .constrain => if (constrain_first == null) "Constrain: click an edge, centre line or origin line of what is to move · Esc cancels" else "Constrain: click what it keeps to (its own, a peer's, or the parent's) · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
@@ -9433,4 +9481,1371 @@ fn drawTrackPath(area: dvui.Rect.Physical) void {
         const box: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };
         box.fill(.square, .{ .color = .{ .color = colors.select } });
     };
+}
+
+// Sketch mode ------------------------------------------------------------------
+//
+// A sketch is entered to be drawn and constrained (New sketch, a
+// double-click on one, or Edit sketch in its properties); everything else
+// is dimmed and cannot be picked meanwhile. The pointer highlights the
+// nearest point of interest (a geometry's points first, then the nearest
+// place on a curve); Tab locks the pointer onto it, and further Tabs onto
+// the next-closest, so a click cannot slip off it (Esc releases the lock,
+// which adds no constraint). A held click on a point drags it as far as
+// its constraints let it. Drawing tools take clicks and add only the
+// geometry drawn: every constraint is added on purpose, from the
+// selection, by a palette button or a single key (C coincident, H
+// horizontal, V vertical, O on object, D distance, R radius, A angle). Esc
+// ends, in turn, the pointer lock, a dimension being entered, a drawing
+// tool, the selection; it never leaves sketch mode. Enter shows the
+// sketch's summary; there, Enter accepts and leaves, and Esc goes back.
+
+const skl = layout.model.sketch_;
+
+const SketchRef = struct { space: usize, index: usize };
+
+/// The sketch being edited, while sketch mode is on.
+var sketch_edit: ?SketchRef = null;
+
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, line, ray };
+var sk_tool: SkTool = .none;
+/// New geometry is construction geometry.
+var sk_construction = false;
+/// The clicks of the drawing tool so far, in the sketch's frame.
+var sk_clicks: [3]geom.Point = undefined;
+var sk_nclicks: usize = 0;
+
+/// Something picked in a sketch: a point of a geometry, a curve, or a
+/// constraint (from the list).
+const SkPick = union(enum) {
+    point: skl.PointRef,
+    curve: skl.GeomId,
+    constraint: skl.ConstraintId,
+};
+var sk_sel: std.ArrayList(SkPick) = .empty;
+
+/// Points of interest near the pointer, nearest first (points before
+/// curves), with where each is (the sketch's frame).
+const SkHit = struct { pick: SkPick, at: geom.Point };
+var sk_hits: [24]SkHit = undefined;
+var sk_nhits: usize = 0;
+/// The hit Tab locked the pointer onto, and where on the screen.
+var sk_lock: ?SkHit = null;
+var sk_lock_px: dvui.Point.Physical = .{};
+var sk_lock_index: usize = 0;
+/// The pointer, in the sketch's frame.
+var sk_pointer: ?geom.Point = null;
+/// A point being dragged (`moved` once it has), each drag one undo step.
+var sk_drag: ?struct { p: skl.PointRef, moved: bool, start: geom.Point } = null;
+var sk_drag_seq: u64 = 0;
+/// A selection box being dragged out on empty space.
+var sk_box: ?struct { start: geom.Point, at: geom.Point } = null;
+var sk_press_ctrl = false;
+var sk_summary = false;
+/// A dimension's value being entered.
+var sk_dim: ?struct { c: skl.ConstraintId, at: dvui.Point.Physical, fresh: bool = true, focus_tries: u8 = 6 } = null;
+var sk_status_buf: [160]u8 = undefined;
+var sk_dim_id: ?dvui.Id = null;
+
+/// The analysis of the sketch being edited, kept until the model changes.
+var sk_an: ?skl.solver.Analysis = null;
+var sk_an_arena: ?std.heap.ArenaAllocator = null;
+var sk_an_rev: u64 = std.math.maxInt(u64);
+
+/// Double-click: the last pick, when and on which sketch.
+var sk_last_pick: ?struct { ref: SketchRef, ns: i128 } = null;
+
+fn skItem() ?*layout.model.SketchItem {
+    const r = sketch_edit orelse return null;
+    return state.model.sketchAt(r.space, r.index) catch null;
+}
+
+fn skLocal(it: *const layout.model.SketchItem, p: geom.Point) geom.Point {
+    return .{ .x = p.x - it.at.x, .y = p.y - it.at.y };
+}
+
+fn skPx(area: dvui.Rect.Physical, it: *const layout.model.SketchItem, p: geom.Point) dvui.Point.Physical {
+    return state.view.toPx(area, .{ .x = p.x + it.at.x, .y = p.y + it.at.y });
+}
+
+fn skAnalysis() ?skl.solver.Analysis {
+    const it = skItem() orelse return null;
+    if (sk_an != null and sk_an_rev == state.model.revision) return sk_an;
+    if (sk_an_arena) |*ar| ar.deinit();
+    sk_an_arena = .init(state.gpa);
+    sk_an = it.sketch.analyse(state.gpa, sk_an_arena.?.allocator()) catch null;
+    sk_an_rev = state.model.revision;
+    return sk_an;
+}
+
+fn enterSketch(ref: SketchRef) void {
+    sketch_edit = ref;
+    state.context = .{ .sketch = .{ .space = ref.space, .index = ref.index } };
+    state.tool = .select;
+    sk_tool = .none;
+    sk_nclicks = 0;
+    sk_sel.clearRetainingCapacity();
+    sk_lock = null;
+    sk_summary = false;
+    sk_dim = null;
+    sk_an_rev = std.math.maxInt(u64);
+    selection.clearRetainingCapacity();
+    track_cursor = null;
+    if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    state.status = "Sketch mode: draw from the palette; Tab locks the pointer; Enter shows the summary. ";
+}
+
+fn leaveSketch() void {
+    sketch_edit = null;
+    sk_summary = false;
+    sk_dim = null;
+    sk_lock = null;
+    sk_drag = null;
+    sk_box = null;
+    sk_sel.clearRetainingCapacity();
+    state.status = "";
+}
+
+/// A new sketch in the shown space, its origin at `at`, then edited.
+fn newSketchAt(at: geom.Point) void {
+    var n: usize = 1;
+    for (state.model.spaces.items) |sp| n += sp.sketches.items.len;
+    var buf: [32]u8 = undefined;
+    const name = std.fmt.bufPrint(&buf, "Sketch {d}", .{n}) catch "Sketch";
+    const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
+    const idx = act(.addSketch, .{ shown_space, name, p }) catch {
+        state.status = "The sketch was not started. ";
+        return;
+    };
+    state.model.spaces.items[shown_space].sketches.items[idx].default_name = true;
+    enterSketch(.{ .space = shown_space, .index = idx });
+}
+
+fn skEdit(edit: layout.model.SketchEdit) ?u32 {
+    const r = sketch_edit orelse return null;
+    return act(.editSketch, .{ r.space, r.index, edit }) catch |err| {
+        state.status = switch (err) {
+            error.NotConstruction => "Infinite lines and rays are construction only. ",
+            error.WrongKind, error.NoSuchPoint => "That constraint does not fit what is selected. ",
+            else => "That change could not be made. ",
+        };
+        return null;
+    };
+}
+
+/// The sketch's box in the space (its own box moved by its origin).
+fn sketchBox(it: *const layout.model.SketchItem) ?geom.Box {
+    const b = (it.sketch.box(dvui.currentWindow().arena()) catch return null) orelse return null;
+    return .{ .x0 = b.x0 + it.at.x, .y0 = b.y0 + it.at.y, .x1 = b.x1 + it.at.x, .y1 = b.y1 + it.at.y };
+}
+
+/// The sketch under space point `at` in the shown space, by its box.
+fn sketchUnder(at: geom.Point) ?SketchRef {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    var found: ?SketchRef = null;
+    for (state.model.spaces.items[shown_space].sketches.items, 0..) |*it, i| {
+        const b = sketchBox(it) orelse continue;
+        const m = 1.0;
+        if (at.x >= b.x0 - m and at.x <= b.x1 + m and at.y >= b.y0 - m and at.y <= b.y1 + m) found = .{ .space = shown_space, .index = i };
+    }
+    return found;
+}
+
+/// Picks a sketch for its properties; a second pick on it soon after
+/// enters it.
+fn pickSketch(ref: SketchRef) void {
+    state.context = .{ .sketch = .{ .space = ref.space, .index = ref.index } };
+    const now = dvui.frameTimeNS();
+    if (sk_last_pick) |lp| if (std.meta.eql(lp.ref, ref) and now - lp.ns < 500 * std.time.ns_per_ms) {
+        sk_last_pick = null;
+        enterSketch(ref);
+        return;
+    };
+    sk_last_pick = .{ .ref = ref, .ns = now };
+}
+
+// Geometry questions, in the sketch's frame -------------------------------------
+
+fn skVal(s: *const skl.Sketch, p: skl.Pt) geom.Point {
+    return .{ .x = s.vars.items[p.x], .y = s.vars.items[p.y] };
+}
+
+fn skDist(a: geom.Point, b: geom.Point) f64 {
+    return @sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+}
+
+fn normAngle(t: f64) f64 {
+    var x = @mod(t, 2 * std.math.pi);
+    if (x < 0) x += 2 * std.math.pi;
+    return x;
+}
+
+/// A straight geometry's point and unit direction.
+fn skLineOf(s: *const skl.Sketch, g: skl.Geometry) ?struct { p: geom.Point, d: geom.Point } {
+    switch (g.kind) {
+        .segment => |sg| {
+            const a = skVal(s, sg.a);
+            const b = skVal(s, sg.b);
+            const l = skDist(a, b);
+            if (l == 0) return null;
+            return .{ .p = a, .d = .{ .x = (b.x - a.x) / l, .y = (b.y - a.y) / l } };
+        },
+        .line => |ln| {
+            const th = s.vars.items[ln.theta];
+            const rho = s.vars.items[ln.rho];
+            return .{ .p = .{ .x = rho * @cos(th), .y = rho * @sin(th) }, .d = .{ .x = -@sin(th), .y = @cos(th) } };
+        },
+        .ray => |ry| {
+            const an = s.vars.items[ry.angle];
+            return .{ .p = skVal(s, ry.o), .d = .{ .x = @cos(an), .y = @sin(an) } };
+        },
+        else => return null,
+    }
+}
+
+/// The nearest place on geometry `g` to `q`, if it has one there.
+fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point {
+    switch (g.kind) {
+        .point => return null,
+        .segment, .line, .ray => {
+            const l = skLineOf(s, g) orelse return null;
+            var t = (q.x - l.p.x) * l.d.x + (q.y - l.p.y) * l.d.y;
+            switch (g.kind) {
+                .segment => |sg| t = std.math.clamp(t, 0, skDist(skVal(s, sg.a), skVal(s, sg.b))),
+                .ray => t = @max(t, 0),
+                else => {},
+            }
+            return .{ .x = l.p.x + t * l.d.x, .y = l.p.y + t * l.d.y };
+        },
+        .circle => |ci| {
+            const c = skVal(s, ci.c);
+            const r = s.vars.items[ci.r];
+            const d = skDist(q, c);
+            if (d == 0) return null;
+            return .{ .x = c.x + (q.x - c.x) * r / d, .y = c.y + (q.y - c.y) * r / d };
+        },
+        .arc => |ar| {
+            const c = skVal(s, ar.c);
+            const a = skVal(s, ar.a);
+            const b = skVal(s, ar.b);
+            const r = skDist(a, c);
+            const d = skDist(q, c);
+            if (d == 0) return null;
+            const a0 = std.math.atan2(a.y - c.y, a.x - c.x);
+            const sweep = normAngle(std.math.atan2(b.y - c.y, b.x - c.x) - a0);
+            if (normAngle(std.math.atan2(q.y - c.y, q.x - c.x) - a0) > sweep) return null;
+            return .{ .x = c.x + (q.x - c.x) * r / d, .y = c.y + (q.y - c.y) * r / d };
+        },
+    }
+}
+
+/// The points of a geometry, with their roles.
+fn skPointsOf(g: skl.Geometry, buf: *[3]skl.PointRef, id: skl.GeomId) []skl.PointRef {
+    const roles: []const @FieldType(skl.PointRef, "role") = switch (g.kind) {
+        .point => &.{.point},
+        .segment => &.{ .start, .end },
+        .circle => &.{.centre},
+        .arc => &.{ .centre, .start, .end },
+        .ray => &.{.origin},
+        .line => &.{},
+    };
+    for (roles, 0..) |r, i| buf[i] = .{ .geom = id, .role = r };
+    return buf[0..roles.len];
+}
+
+/// The points of interest within `radius` of `q`: points first, nearest
+/// first, then curves.
+fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
+    sk_nhits = 0;
+    var curves: [24]SkHit = undefined;
+    var ncurves: usize = 0;
+    var pdist: [24]f64 = undefined;
+    var cdist: [24]f64 = undefined;
+    for (s.geometry.items, 0..) |g, gi| {
+        if (g.removed) continue;
+        var buf: [3]skl.PointRef = undefined;
+        for (skPointsOf(g, &buf, @intCast(gi))) |r| {
+            const p = s.point(r) catch continue;
+            const d = skDist(p, q);
+            if (d > radius or sk_nhits >= sk_hits.len) continue;
+            // Insertion by distance.
+            var k = sk_nhits;
+            while (k > 0 and pdist[k - 1] > d) : (k -= 1) {
+                sk_hits[k] = sk_hits[k - 1];
+                pdist[k] = pdist[k - 1];
+            }
+            sk_hits[k] = .{ .pick = .{ .point = r }, .at = p };
+            pdist[k] = d;
+            sk_nhits += 1;
+        }
+        if (skNearestOn(s, g, q)) |p| {
+            const d = skDist(p, q);
+            if (d > radius or ncurves >= curves.len) continue;
+            var k = ncurves;
+            while (k > 0 and cdist[k - 1] > d) : (k -= 1) {
+                curves[k] = curves[k - 1];
+                cdist[k] = cdist[k - 1];
+            }
+            curves[k] = .{ .pick = .{ .curve = @intCast(gi) }, .at = p };
+            cdist[k] = d;
+            ncurves += 1;
+        }
+    }
+    for (curves[0..ncurves]) |c| {
+        if (sk_nhits >= sk_hits.len) break;
+        sk_hits[sk_nhits] = c;
+        sk_nhits += 1;
+    }
+}
+
+/// What the pointer is on: the locked hit, else the nearest.
+fn skTarget() ?SkHit {
+    if (sk_lock) |l| return l;
+    if (sk_nhits > 0) return sk_hits[0];
+    return null;
+}
+
+/// Where a click lands: on the locked point of interest, else at the
+/// pointer.
+fn skClickPoint() ?geom.Point {
+    if (sk_lock) |l| return l.at;
+    return sk_pointer;
+}
+
+// Drawing tools -----------------------------------------------------------------
+
+fn skToolClicks(t: SkTool) usize {
+    return switch (t) {
+        .none => 0,
+        .point => 1,
+        .segment, .polyline, .circle, .line, .ray => 2,
+        .arc_centre, .arc_3pt => 3,
+    };
+}
+
+/// A click of the drawing tool at `p`: geometry once it has its clicks.
+fn skToolClick(p: geom.Point) void {
+    sk_clicks[sk_nclicks] = p;
+    sk_nclicks += 1;
+    if (sk_nclicks < skToolClicks(sk_tool)) return;
+    const c = sk_clicks;
+    const cons = sk_construction;
+    switch (sk_tool) {
+        .none => {},
+        .point => _ = skEdit(.{ .point = .{ .at = c[0], .construction = cons } }),
+        .segment, .polyline => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .segment = .{ .a = c[0], .b = c[1], .construction = cons } });
+        },
+        .circle => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .circle = .{ .c = c[0], .r = skDist(c[0], c[1]), .construction = cons } });
+        },
+        .line => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .line = .{ .through = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+        },
+        .ray => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .ray = .{ .o = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+        },
+        .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+        },
+        .arc_3pt => if (circleThrough(c[0], c[2], c[1])) |centre| {
+            // From the first click to the second, through the third: the
+            // way round that passes it, counter-clockwise.
+            const a0 = std.math.atan2(c[0].y - centre.y, c[0].x - centre.x);
+            const sweep = normAngle(std.math.atan2(c[1].y - centre.y, c[1].x - centre.x) - a0);
+            const through = normAngle(std.math.atan2(c[2].y - centre.y, c[2].x - centre.x) - a0);
+            if (through < sweep) {
+                _ = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons } });
+            } else _ = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons } });
+        } else {
+            state.status = "The three points are in line: no arc passes through them. ";
+        },
+    }
+    // A polyline goes on from its last point; other tools start again.
+    if (sk_tool == .polyline) {
+        sk_clicks[0] = c[1];
+        sk_nclicks = 1;
+    } else sk_nclicks = 0;
+}
+
+/// The centre of the circle through three points; null when they are in
+/// line.
+fn circleThrough(a: geom.Point, b: geom.Point, c: geom.Point) ?geom.Point {
+    const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if (@abs(d) < 1e-12) return null;
+    const a2 = a.x * a.x + a.y * a.y;
+    const b2 = b.x * b.x + b.y * b.y;
+    const c2 = c.x * c.x + c.y * c.y;
+    return .{
+        .x = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d,
+        .y = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d,
+    };
+}
+
+// Constraints from the selection --------------------------------------------------
+
+const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, angle, fixed };
+
+const SkSelParts = struct {
+    points: [8]skl.PointRef = undefined,
+    np: usize = 0,
+    curves: [8]skl.GeomId = undefined,
+    nc: usize = 0,
+};
+
+fn skParts() SkSelParts {
+    var out: SkSelParts = .{};
+    for (sk_sel.items) |p| switch (p) {
+        .point => |r| if (out.np < 8) {
+            out.points[out.np] = r;
+            out.np += 1;
+        },
+        .curve => |g| if (out.nc < 8) {
+            out.curves[out.nc] = g;
+            out.nc += 1;
+        },
+        .constraint => {},
+    };
+    return out;
+}
+
+fn skIsStraight(s: *const skl.Sketch, g: skl.GeomId) bool {
+    return switch (s.geometry.items[g].kind) {
+        .segment, .line, .ray => true,
+        else => false,
+    };
+}
+
+fn skIsRound(s: *const skl.Sketch, g: skl.GeomId) bool {
+    return switch (s.geometry.items[g].kind) {
+        .circle, .arc => true,
+        else => false,
+    };
+}
+
+/// The constraints `kind` makes from the selection: how many (0 when it
+/// does not fit), into `out`.
+fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
+    const it = skItem() orelse return 0;
+    const s = &it.sketch;
+    const p = skParts();
+    var n: usize = 0;
+    switch (kind) {
+        .coincident => if (p.np == 2 and p.nc == 0) {
+            out[0] = .{ .kind = .{ .coincident = .{ p.points[0], p.points[1] } } };
+            n = 1;
+        },
+        .horizontal, .vertical => {
+            if (p.np == 2 and p.nc == 0) {
+                const lin: skl.Linear = .{ .points = .{ p.points[0], p.points[1] } };
+                out[0] = if (kind == .horizontal) .{ .kind = .{ .horizontal = lin } } else .{ .kind = .{ .vertical = lin } };
+                n = 1;
+            } else if (p.np == 0 and p.nc > 0) {
+                for (p.curves[0..p.nc]) |g| {
+                    if (!skIsStraight(s, g)) return 0;
+                    out[n] = if (kind == .horizontal) .{ .kind = .{ .horizontal = .{ .geom = g } } } else .{ .kind = .{ .vertical = .{ .geom = g } } };
+                    n += 1;
+                }
+            }
+        },
+        .point_on => if (p.np == 1 and p.nc == 1 and s.geometry.items[p.curves[0]].kind != .point) {
+            out[0] = .{ .kind = .{ .point_on = .{ .p = p.points[0], .on = p.curves[0] } } };
+            n = 1;
+        },
+        .distance, .distance_x, .distance_y => {
+            var a: skl.PointRef = undefined;
+            var b: skl.PointRef = undefined;
+            if (p.np == 2 and p.nc == 0) {
+                a = p.points[0];
+                b = p.points[1];
+            } else if (p.np == 0 and p.nc == 1 and s.geometry.items[p.curves[0]].kind == .segment) {
+                a = .{ .geom = p.curves[0], .role = .start };
+                b = .{ .geom = p.curves[0], .role = .end };
+            } else if (kind == .distance and p.np == 1 and p.nc == 1 and skIsStraight(s, p.curves[0])) {
+                const q = s.point(p.points[0]) catch return 0;
+                const l = skLineOf(s, s.geometry.items[p.curves[0]]) orelse return 0;
+                const d = @abs((q.x - l.p.x) * l.d.y - (q.y - l.p.y) * l.d.x);
+                out[0] = .{ .kind = .{ .line_distance = .{ .p = p.points[0], .line = p.curves[0], .value = d } } };
+                return 1;
+            } else return 0;
+            const pa = s.point(a) catch return 0;
+            const pb = s.point(b) catch return 0;
+            out[0] = switch (kind) {
+                .distance => .{ .kind = .{ .distance = .{ .a = a, .b = b, .value = skDist(pa, pb) } } },
+                .distance_x => .{ .kind = .{ .distance_x = .{ .a = a, .b = b, .value = pb.x - pa.x } } },
+                else => .{ .kind = .{ .distance_y = .{ .a = a, .b = b, .value = pb.y - pa.y } } },
+            };
+            n = 1;
+        },
+        .radius => if (p.np == 0 and p.nc > 0) {
+            for (p.curves[0..p.nc]) |g| {
+                if (!skIsRound(s, g)) return 0;
+                const r = switch (s.geometry.items[g].kind) {
+                    .circle => |ci| s.vars.items[ci.r],
+                    .arc => |ar| skDist(skVal(s, ar.a), skVal(s, ar.c)),
+                    else => unreachable,
+                };
+                out[n] = .{ .kind = .{ .radius = .{ .g = g, .value = r } } };
+                n += 1;
+            }
+        },
+        .angle => if (p.np == 0 and (p.nc == 1 or p.nc == 2)) {
+            const ga = if (p.nc == 2) p.curves[0] else skl.h_axis;
+            const gb = p.curves[p.nc - 1];
+            if (!skIsStraight(s, ga) or !skIsStraight(s, gb)) return 0;
+            const la = skLineOf(s, s.geometry.items[ga]) orelse return 0;
+            const lb = skLineOf(s, s.geometry.items[gb]) orelse return 0;
+            const v = std.math.atan2(la.d.x * lb.d.y - la.d.y * lb.d.x, la.d.x * lb.d.x + la.d.y * lb.d.y);
+            out[0] = .{ .kind = .{ .angle = .{ .a = ga, .b = gb, .value = v } } };
+            n = 1;
+        },
+        .fixed => if (p.np > 0 and p.nc == 0) {
+            for (p.points[0..p.np]) |r| {
+                out[n] = .{ .kind = .{ .fixed = .{ .p = r, .at = s.point(r) catch return 0 } } };
+                n += 1;
+            }
+        },
+    }
+    return n;
+}
+
+/// Adds the constraints `kind` makes from the selection; a dimension then
+/// opens for its value.
+fn skConstrain(kind: SkKind, area: dvui.Rect.Physical) void {
+    var buf: [8]skl.Constraint = undefined;
+    const n = skConstraintsFor(kind, &buf);
+    if (n == 0) {
+        state.status = "That constraint does not fit what is selected. ";
+        return;
+    }
+    var last: ?u32 = null;
+    for (buf[0..n]) |c| last = skEdit(.{ .constrain = c });
+    sk_sel.clearRetainingCapacity();
+    if (last) |id| switch (kind) {
+        .distance, .distance_x, .distance_y, .radius, .angle => {
+            const at = skDimAnchor(area, id) orelse dvui.Point.Physical{ .x = area.x + area.w / 2, .y = area.y + area.h / 2 };
+            sk_dim = .{ .c = id, .at = at };
+        },
+        else => {},
+    };
+}
+
+/// A constraint's value as shown: lengths in the document's units, angles
+/// in degrees.
+fn skShownValue(c: skl.Constraint) ?f64 {
+    return switch (c.kind) {
+        inline .distance, .distance_x, .distance_y => |d| d.value * docUnits().perMm(),
+        .line_distance => |d| d.value * docUnits().perMm(),
+        .radius => |r| r.value * docUnits().perMm(),
+        .angle => |a| a.value * 180 / std.math.pi,
+        else => null,
+    };
+}
+
+fn skFromShown(c: skl.Constraint, v: f64) f64 {
+    return switch (c.kind) {
+        .angle => v * std.math.pi / 180,
+        else => v / docUnits().perMm(),
+    };
+}
+
+fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
+    const unit = docUnits().symbol();
+    const name: []const u8 = switch (c.kind) {
+        .coincident => "Coincident",
+        .horizontal => "Horizontal",
+        .vertical => "Vertical",
+        .point_on => "On object",
+        .fixed => "Locked",
+        .distance => "Distance",
+        .distance_x => "Horizontal distance",
+        .distance_y => "Vertical distance",
+        .line_distance => "Distance to line",
+        .radius => "Radius",
+        .angle => "Angle",
+    };
+    if (skShownValue(c)) |v| {
+        const u = if (c.kind == .angle) "°" else unit;
+        if (c.name.len > 0) return std.fmt.bufPrint(buf, "{s} {s} = {d:.3}{s}", .{ name, c.name, v, u }) catch name;
+        return std.fmt.bufPrint(buf, "{s} {d:.3}{s}", .{ name, v, u }) catch name;
+    }
+    return name;
+}
+
+/// Where a constraint's glyph or value is drawn, on the screen.
+fn skDimAnchor(area: dvui.Rect.Physical, id: skl.ConstraintId) ?dvui.Point.Physical {
+    const it = skItem() orelse return null;
+    const p = skAnchor(&it.sketch, it.sketch.constraints.items[id]) orelse return null;
+    return skPx(area, it, p);
+}
+
+fn skMid(a: geom.Point, b: geom.Point) geom.Point {
+    return .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
+}
+
+/// A constraint's anchor in the sketch's frame.
+fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
+    const curveMid = struct {
+        fn f(sk_: *const skl.Sketch, g: skl.GeomId) ?geom.Point {
+            if (g >= sk_.geometry.items.len) return null;
+            const geo = sk_.geometry.items[g];
+            return switch (geo.kind) {
+                .segment => |sg| skMid(skVal(sk_, sg.a), skVal(sk_, sg.b)),
+                .circle => |ci| blk: {
+                    const cc = skVal(sk_, ci.c);
+                    break :blk .{ .x = cc.x + sk_.vars.items[ci.r] * 0.7071, .y = cc.y + sk_.vars.items[ci.r] * 0.7071 };
+                },
+                .arc => |ar| skVal(sk_, ar.a),
+                .ray => |ry| skVal(sk_, ry.o),
+                .line => |ln| blk: {
+                    const th = sk_.vars.items[ln.theta];
+                    const rho = sk_.vars.items[ln.rho];
+                    break :blk .{ .x = rho * @cos(th), .y = rho * @sin(th) };
+                },
+                .point => |pp| skVal(sk_, pp),
+            };
+        }
+    }.f;
+    return switch (c.kind) {
+        .coincident => |ps| s.point(ps[0]) catch null,
+        .horizontal, .vertical => |l| switch (l) {
+            .geom => |g| curveMid(s, g),
+            .points => |ps| skMid(s.point(ps[0]) catch return null, s.point(ps[1]) catch return null),
+        },
+        .point_on => |po| s.point(po.p) catch null,
+        .fixed => |f| s.point(f.p) catch null,
+        inline .distance, .distance_x, .distance_y => |d| skMid(s.point(d.a) catch return null, s.point(d.b) catch return null),
+        .line_distance => |d| s.point(d.p) catch null,
+        .radius => |r| curveMid(s, r.g),
+        .angle => |a| curveMid(s, a.b),
+    };
+}
+
+// Events ----------------------------------------------------------------------------
+
+/// Takes every canvas event while sketch mode is on.
+fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
+    const it = skItem() orelse {
+        leaveSketch();
+        return;
+    };
+    if (e.handled) return;
+    if (e.evt == .key) {
+        // Keys reach the sketch only while the canvas has the keyboard (a
+        // dimension's entry takes its own).
+        if (!cursorKeysReach()) return;
+        const k = e.evt.key;
+        if (k.action != .down and k.action != .repeat) return;
+        if (sk_summary) {
+            switch (k.code) {
+                .enter, .kp_enter => leaveSketch(),
+                .escape => sk_summary = false,
+                else => return,
+            }
+            e.handle(@src(), box.data());
+            dvui.refresh(null, @src(), box.data().id);
+            return;
+        }
+        // Ctrl or Cmd with a letter is the app's (undo, copy), not a
+        // constraint.
+        if (primaryMod(k.mod) and k.code != .tab) return;
+        var used = true;
+        switch (k.code) {
+            .tab => skTab(area, k.mod.shift()),
+            .escape => {
+                if (sk_lock != null) {
+                    sk_lock = null;
+                } else if (sk_nclicks > 0) {
+                    sk_nclicks = 0;
+                } else if (sk_tool != .none) {
+                    sk_tool = .none;
+                } else sk_sel.clearRetainingCapacity();
+            },
+            .enter, .kp_enter => {
+                sk_nclicks = 0;
+                sk_summary = true;
+            },
+            .delete, .backspace => skDeleteSelection(),
+            .c => skConstrain(.coincident, area),
+            .h => skConstrain(.horizontal, area),
+            .v => skConstrain(.vertical, area),
+            .o => skConstrain(.point_on, area),
+            .d => skConstrain(.distance, area),
+            .r => skConstrain(.radius, area),
+            .a => skConstrain(.angle, area),
+            else => used = false,
+        }
+        if (used) {
+            e.handle(@src(), box.data());
+            dvui.refresh(null, @src(), box.data().id);
+        }
+        return;
+    }
+    if (e.evt != .mouse) return;
+    const me = e.evt.mouse;
+    const at_space = state.view.toMm(area, me.p);
+    const q = skLocal(it, at_space);
+    switch (me.action) {
+        .focus => {
+            e.handle(@src(), box.data());
+            dvui.focusWidget(box.data().id, null, e.num);
+        },
+        .position => {
+            state.mouse = at_space;
+            sk_pointer = q;
+            const radius = 10 * dvui.windowNaturalScale() / state.view.ppm;
+            skFindHits(&it.sketch, q, radius);
+            // A lock lets go when the pointer goes well away.
+            if (sk_lock != null) {
+                const dx = me.p.x - sk_lock_px.x;
+                const dy = me.p.y - sk_lock_px.y;
+                if (dx * dx + dy * dy > 60 * 60 * dvui.windowNaturalScale() * dvui.windowNaturalScale()) sk_lock = null;
+            }
+            dvui.cursorSet(if (sk_tool != .none) .crosshair else .arrow);
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        .wheel_y => |dy| {
+            e.handle(@src(), box.data());
+            const z = @exp(@log(1.003) * @as(f64, dy));
+            state.view.ppm *= z;
+            state.view.fit = null;
+            state.view.cx = at_space.x - (at_space.x - state.view.cx) / z;
+            state.view.cy = at_space.y - (at_space.y - state.view.cy) / z;
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        .press => if (area.contains(me.p)) {
+            e.handle(@src(), box.data());
+            dvui.captureMouse(box.data(), e.num);
+            if (me.button == .middle) {
+                dvui.dragPreStart(me.button, me.p, .{});
+                return;
+            }
+            if (!me.button.pointer() or sk_summary) return;
+            if (sk_tool != .none) {
+                if (skClickPoint()) |p| skToolClick(p);
+                sk_lock = null;
+                return;
+            }
+            sk_press_ctrl = primaryMod(me.mod);
+            const target = skTarget();
+            if (target != null and target.?.pick == .point and !sk_press_ctrl) {
+                sk_drag = .{ .p = target.?.pick.point, .moved = false, .start = q };
+                sk_drag_seq += 1;
+            } else sk_box = .{ .start = q, .at = q };
+        },
+        .motion => if (dvui.captured(box.data().id)) {
+            e.handle(@src(), box.data());
+            if (sk_drag) |*d| {
+                const moved_px = skDist(d.start, q) * state.view.ppm;
+                if (d.moved or moved_px > 3) {
+                    d.moved = true;
+                    const r = sketch_edit.?;
+                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketch, .{ r.space, r.index, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
+                }
+            } else if (sk_box) |*b| {
+                b.at = q;
+            } else if (dvui.dragging(me, null)) |d| {
+                state.view.fit = null;
+                state.view.cx -= d.x / state.view.ppm;
+                state.view.cy += d.y / state.view.ppm;
+            }
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        .release => if (dvui.captured(box.data().id)) {
+            e.handle(@src(), box.data());
+            if (sk_drag) |d| {
+                if (!d.moved) skClickSelect(.{ .point = d.p }, false);
+                sk_drag = null;
+            } else if (sk_box) |b| {
+                sk_box = null;
+                if (skDist(b.start, b.at) * state.view.ppm < 4) {
+                    if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
+                } else skBoxSelect(&it.sketch, b.start, b.at, sk_press_ctrl);
+            }
+            sk_lock = null;
+            dvui.captureMouse(null, e.num);
+            dvui.dragEnd(me.button);
+            dvui.refresh(null, @src(), box.data().id);
+        },
+        else => {},
+    }
+}
+
+/// Tab: locks the pointer onto the nearest point of interest, then the
+/// next-closest (Shift+Tab back), round.
+fn skTab(area: dvui.Rect.Physical, back: bool) void {
+    const it = skItem() orelse return;
+    if (sk_nhits == 0) return;
+    if (sk_lock == null) {
+        sk_lock_index = 0;
+    } else if (back) {
+        sk_lock_index = if (sk_lock_index == 0) sk_nhits - 1 else sk_lock_index - 1;
+    } else sk_lock_index = (sk_lock_index + 1) % sk_nhits;
+    sk_lock = sk_hits[sk_lock_index];
+    sk_lock_px = skPx(area, it, sk_lock.?.at);
+}
+
+/// A click on `p`: it alone is selected, or with Ctrl it goes in or out.
+fn skClickSelect(p: SkPick, toggle: bool) void {
+    for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, p)) {
+        if (toggle) _ = sk_sel.orderedRemove(i);
+        return;
+    };
+    if (!toggle) sk_sel.clearRetainingCapacity();
+    sk_sel.append(state.gpa, p) catch {};
+}
+
+/// Selects every point and whole curve inside the box.
+fn skBoxSelect(s: *const skl.Sketch, a: geom.Point, b: geom.Point, add: bool) void {
+    if (!add) sk_sel.clearRetainingCapacity();
+    const x0 = @min(a.x, b.x);
+    const x1 = @max(a.x, b.x);
+    const y0 = @min(a.y, b.y);
+    const y1 = @max(a.y, b.y);
+    const inside = struct {
+        fn f(p: geom.Point, bx: [4]f64) bool {
+            return p.x >= bx[0] and p.x <= bx[1] and p.y >= bx[2] and p.y <= bx[3];
+        }
+    }.f;
+    const bx = [4]f64{ x0, x1, y0, y1 };
+    for (s.geometry.items, 0..) |g, gi| {
+        if (g.removed or g.reference) continue;
+        var buf: [3]skl.PointRef = undefined;
+        const pts = skPointsOf(g, &buf, @intCast(gi));
+        var all = pts.len > 0 and g.kind != .ray;
+        for (pts) |r| {
+            const p = s.point(r) catch continue;
+            if (inside(p, bx)) sk_sel.append(state.gpa, .{ .point = r }) catch {} else all = false;
+        }
+        if (g.kind == .circle) {
+            const c = skVal(s, g.kind.circle.c);
+            const r = s.vars.items[g.kind.circle.r];
+            all = inside(.{ .x = c.x - r, .y = c.y - r }, bx) and inside(.{ .x = c.x + r, .y = c.y + r }, bx);
+        }
+        if (all and g.kind != .point) sk_sel.append(state.gpa, .{ .curve = @intCast(gi) }) catch {};
+    }
+}
+
+/// Removes the selected constraints, then the selected geometry (with
+/// its constraints).
+fn skDeleteSelection() void {
+    const it = skItem() orelse return;
+    var cons: std.ArrayList(skl.ConstraintId) = .empty;
+    defer cons.deinit(state.gpa);
+    var geos: std.ArrayList(skl.GeomId) = .empty;
+    defer geos.deinit(state.gpa);
+    for (sk_sel.items) |p| switch (p) {
+        .constraint => |c| cons.append(state.gpa, c) catch {},
+        .curve => |g| geos.append(state.gpa, g) catch {},
+        .point => |r| if (r.role == .point) geos.append(state.gpa, r.geom) catch {},
+    };
+    // Constraints last first, so the indices hold.
+    std.mem.sort(skl.ConstraintId, cons.items, {}, std.sort.desc(skl.ConstraintId));
+    for (cons.items) |c| _ = skEdit(.{ .unconstrain = c });
+    for (geos.items) |g| {
+        if (g < it.sketch.geometry.items.len and !it.sketch.geometry.items[g].reference and !it.sketch.geometry.items[g].removed) _ = skEdit(.{ .remove = g });
+    }
+    sk_sel.clearRetainingCapacity();
+}
+
+fn skSelected(p: SkPick) bool {
+    for (sk_sel.items) |x| if (std.meta.eql(x, p)) return true;
+    return false;
+}
+
+// Drawing ------------------------------------------------------------------------------
+
+/// The shown space's sketches, other than the one being edited: what is
+/// output, and their construction faintly within their boxes.
+fn drawSketches(area: dvui.Rect.Physical) void {
+    if (shown_space >= state.model.spaces.items.len) return;
+    const px = dvui.windowNaturalScale();
+    for (state.model.spaces.items[shown_space].sketches.items, 0..) |*it, i| {
+        const ref: SketchRef = .{ .space = shown_space, .index = i };
+        if (sketch_edit != null and std.meta.eql(sketch_edit.?, ref)) continue;
+        const b = sketchBox(it) orelse continue;
+        // Construction, clipped to the box (display only).
+        {
+            const r = state.view.rect(area, b);
+            const clip = dvui.clip(r);
+            defer dvui.clipSet(clip);
+            for (it.sketch.geometry.items) |g| {
+                if (g.removed or g.reference or !g.construction) continue;
+                skDrawGeometry(area, it, g, colors.guide.opacity(0.35), px, true);
+            }
+        }
+        for (it.sketch.geometry.items) |g| {
+            if (g.removed or g.reference or g.construction) continue;
+            skDrawGeometry(area, it, g, colors.ink, 1.5 * px, false);
+        }
+        const picked = switch (state.context) {
+            .sketch => |sc| sc.space == ref.space and sc.index == ref.index,
+            else => false,
+        };
+        if (picked) dashedBox(area, b, colors.select, px);
+    }
+}
+
+/// One geometry, stroked: infinite lines and rays across the view.
+fn skDrawGeometry(area: dvui.Rect.Physical, it: *const layout.model.SketchItem, g: skl.Geometry, colour: dvui.Color, thick: f32, dashed: bool) void {
+    const s = &it.sketch;
+    const a = dvui.currentWindow().arena();
+    switch (g.kind) {
+        .point => |p| skDot(skPx(area, it, skVal(s, p)), 2.5 * dvui.windowNaturalScale(), colour),
+        .segment, .circle, .arc => {
+            var segs: std.ArrayList(geom.Segment) = .empty;
+            s.appendSegments(a, g, &segs) catch return;
+            var pts: std.ArrayList(geom.Point) = .empty;
+            if (segs.items.len == 0) return;
+            pts.append(a, segs.items[0].start()) catch return;
+            for (segs.items) |seg| flatten(a, &pts, seg, 0.5 / state.view.ppm) catch return;
+            const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+            for (pts.items, phys) |p, *o| o.* = skPx(area, it, p);
+            if (dashed) {
+                skDashed(phys, colour, thick);
+            } else dvui.Path.stroke(.{ .points = phys }, .{ .thickness = thick, .color = .{ .color = colour } });
+        },
+        .line, .ray => {
+            const l = skLineOf(s, g) orelse return;
+            // Far enough to cross the whole view.
+            const far = (area.w + area.h) / state.view.ppm * 2 + skDist(.{ .x = state.view.cx - it.at.x, .y = state.view.cy - it.at.y }, l.p);
+            const t0: f64 = if (g.kind == .ray) 0 else -far;
+            const p0: geom.Point = .{ .x = l.p.x + t0 * l.d.x, .y = l.p.y + t0 * l.d.y };
+            const p1: geom.Point = .{ .x = l.p.x + far * l.d.x, .y = l.p.y + far * l.d.y };
+            if (dashed) {
+                skDashed(&.{ skPx(area, it, p0), skPx(area, it, p1) }, colour, thick);
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, p0), skPx(area, it, p1) } }, .{ .thickness = thick, .color = .{ .color = colour } });
+        },
+    }
+}
+
+/// An open polyline, dashed on the screen.
+fn skDashed(pts: []const dvui.Point.Physical, colour: dvui.Color, thick: f32) void {
+    const dash: f32 = 5 * dvui.windowNaturalScale();
+    var phase: f32 = 0;
+    for (1..pts.len) |i| {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const len = @sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+        if (len == 0) continue;
+        var t: f32 = 0;
+        while (t < len) {
+            const in_dash = @mod(phase + t, 2 * dash) < dash;
+            const step = @min(len - t, dash - @mod(phase + t, dash));
+            if (in_dash) {
+                const p0: dvui.Point.Physical = .{ .x = a.x + (b.x - a.x) * t / len, .y = a.y + (b.y - a.y) * t / len };
+                const p1: dvui.Point.Physical = .{ .x = a.x + (b.x - a.x) * (t + step) / len, .y = a.y + (b.y - a.y) * (t + step) / len };
+                dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = thick, .color = .{ .color = colour } });
+            }
+            t += @max(step, 0.01);
+        }
+        phase += len;
+    }
+}
+
+fn skDot(c: dvui.Point.Physical, r: f32, colour: dvui.Color) void {
+    var pts: [12]dvui.Point.Physical = undefined;
+    for (&pts, 0..) |*p, k| {
+        const t: f32 = @as(f32, @floatFromInt(k)) / 12 * 2 * std.math.pi;
+        p.* = .{ .x = c.x + r * @cos(t), .y = c.y + r * @sin(t) };
+    }
+    dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
+}
+
+fn skRing(c: dvui.Point.Physical, r: f32, colour: dvui.Color, thick: f32) void {
+    var pts: [16]dvui.Point.Physical = undefined;
+    for (&pts, 0..) |*p, k| {
+        const t: f32 = @as(f32, @floatFromInt(k)) / 16 * 2 * std.math.pi;
+        p.* = .{ .x = c.x + r * @cos(t), .y = c.y + r * @sin(t) };
+    }
+    dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = thick, .color = .{ .color = colour }, .closed = true });
+}
+
+/// The sketch being edited, over the dimmed canvas.
+fn drawSketchMode(area: dvui.Rect.Physical) void {
+    const it = skItem() orelse return;
+    const s = &it.sketch;
+    const px = dvui.windowNaturalScale();
+    area.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.72) } });
+    const an = skAnalysis();
+    // Geometry the conflicting constraints touch.
+    const conflicted = struct {
+        fn f(anl: ?skl.solver.Analysis, sk_: *const skl.Sketch, g: skl.GeomId) bool {
+            const x = anl orelse return false;
+            for (x.conflicting) |ci| if (ci < sk_.constraints.items.len and skl.refersTo(sk_.constraints.items[ci], g)) return true;
+            return false;
+        }
+    }.f;
+    const isFree = struct {
+        fn f(anl: ?skl.solver.Analysis, g: skl.GeomId) bool {
+            const x = anl orelse return true;
+            for (x.free) |fg| if (fg == g) return true;
+            return false;
+        }
+    }.f;
+    // The origin and axes, faintly.
+    for (s.geometry.items[0..3]) |g| skDrawGeometry(area, it, g, colors.guide.opacity(0.4), px, true);
+    // The box.
+    if (sketchBox(it)) |b| dashedBox(area, b, colors.guide.opacity(0.6), px);
+    for (s.geometry.items, 0..) |g, gi| {
+        if (g.removed or g.reference) continue;
+        const id: skl.GeomId = @intCast(gi);
+        var colour = if (isFree(an, id)) colors.ink else colors.guide;
+        if (conflicted(an, s, id)) colour = colors.overflow;
+        if (skSelected(.{ .curve = id })) colour = colors.select;
+        skDrawGeometry(area, it, g, if (g.construction) colour.opacity(0.75) else colour, if (g.construction) px else 2 * px, g.construction);
+        var buf: [3]skl.PointRef = undefined;
+        for (skPointsOf(g, &buf, id)) |r| {
+            const p = s.point(r) catch continue;
+            const sel = skSelected(.{ .point = r });
+            const rad: f32 = if (sel) 4 else 2.5;
+            skDot(skPx(area, it, p), rad * px, if (sel) colors.select else colour);
+        }
+    }
+    // Constraint glyphs and values.
+    const font = dvui.Font.theme(.body).larger(-2);
+    for (s.constraints.items, 0..) |c, ci| {
+        const anchor = skAnchor(s, c) orelse continue;
+        const q = skPx(area, it, anchor);
+        var colour = colors.guide;
+        if (an) |x| {
+            for (x.conflicting) |k| if (k == ci) {
+                colour = colors.overflow;
+            };
+            for (x.redundant) |k| if (k == ci) {
+                colour = colors.overflow.opacity(0.6);
+            };
+        }
+        if (skSelected(.{ .constraint = @intCast(ci) })) colour = colors.select;
+        var tb: [64]u8 = undefined;
+        const text: []const u8 = switch (c.kind) {
+            .coincident => {
+                skRing(q, 5 * px, colour, 1.5 * px);
+                continue;
+            },
+            .horizontal => "H",
+            .vertical => "V",
+            .point_on => "on",
+            .fixed => "lock",
+            .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
+                const v = skShownValue(c).?;
+                const u: []const u8 = if (c.kind == .angle) "°" else "";
+                const pre: []const u8 = switch (c.kind) {
+                    .radius => "R",
+                    .distance_x => "↔",
+                    .distance_y => "↕",
+                    else => "",
+                };
+                break :blk std.fmt.bufPrint(&tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
+            },
+        };
+        // A distance draws its line.
+        switch (c.kind) {
+            inline .distance, .distance_x, .distance_y => |d| {
+                const pa = s.point(d.a) catch continue;
+                const pb = s.point(d.b) catch continue;
+                const end: geom.Point = switch (c.kind) {
+                    .distance_x => .{ .x = pb.x, .y = pa.y },
+                    .distance_y => .{ .x = pa.x, .y = pb.y },
+                    else => pb,
+                };
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, pa), skPx(area, it, end) } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
+            },
+            else => {},
+        }
+        const corner: dvui.Point.Physical = .{ .x = q.x + 6 * px, .y = q.y - 2 * px };
+        dvui.labelNoFmt(@src(), text, .{}, .{ .rect = annotationRect(area, corner, font, 90), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = 70000 + ci });
+    }
+    // The pointer's point of interest: a ring; locked, a ring and a cross.
+    if (skTarget()) |t| {
+        const q = skPx(area, it, t.at);
+        const locked = sk_lock != null;
+        const ring: f32 = if (locked) 7 else 6;
+        const ring_t: f32 = if (locked) 2 else 1.5;
+        skRing(q, ring * px, colors.select, ring_t * px);
+        if (locked) {
+            const l: f32 = 11 * px;
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x - l, .y = q.y }, .{ .x = q.x + l, .y = q.y } } }, .{ .thickness = px, .color = .{ .color = colors.select } });
+            dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = q.y - l }, .{ .x = q.x, .y = q.y + l } } }, .{ .thickness = px, .color = .{ .color = colors.select } });
+        }
+    }
+    // The drawing tool's clicks so far, to the pointer.
+    if (sk_tool != .none and sk_nclicks > 0) if (skClickPoint()) |p| {
+        const last = sk_clicks[sk_nclicks - 1];
+        switch (sk_tool) {
+            .circle => {
+                const r = skDist(sk_clicks[0], p);
+                var buf4: [4]geom.Segment = undefined;
+                const segs = geom.arc(sk_clicks[0], r, 0, 2 * std.math.pi, &buf4);
+                skPreview(area, it, segs);
+            },
+            else => dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
+        }
+        for (sk_clicks[0..sk_nclicks]) |c| skDot(skPx(area, it, c), 3 * px, colors.select);
+    };
+    if (sk_box) |b| {
+        const r = state.view.rect(area, .{ .x0 = @min(b.start.x, b.at.x) + it.at.x, .y0 = @min(b.start.y, b.at.y) + it.at.y, .x1 = @max(b.start.x, b.at.x) + it.at.x, .y1 = @max(b.start.y, b.at.y) + it.at.y });
+        r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.1) } });
+        r.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.select } });
+    }
+    // The readout.
+    if (an) |x| {
+        state.status = if (!x.solved)
+            std.fmt.bufPrint(&sk_status_buf, "{s}: {d} conflicting constraint{s} · Enter for the summary ", .{ it.name, x.conflicting.len, if (x.conflicting.len == 1) "" else "s" }) catch ""
+        else if (x.fully_constrained)
+            std.fmt.bufPrint(&sk_status_buf, "{s}: fully constrained · Enter for the summary ", .{it.name}) catch ""
+        else
+            std.fmt.bufPrint(&sk_status_buf, "{s}: {d} degree{s} of freedom left · Enter for the summary ", .{ it.name, x.dof, if (x.dof == 1) "" else "s" }) catch "";
+    }
+    skDimEntry(area);
+    if (sk_summary) skSummary(area);
+}
+
+fn skPreview(area: dvui.Rect.Physical, it: *const layout.model.SketchItem, segs: []const geom.Segment) void {
+    const a = dvui.currentWindow().arena();
+    var pts: std.ArrayList(geom.Point) = .empty;
+    pts.append(a, segs[0].start()) catch return;
+    for (segs) |seg| flatten(a, &pts, seg, 0.5 / state.view.ppm) catch return;
+    const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+    for (pts.items, phys) |p, *o| o.* = skPx(area, it, p);
+    dvui.Path.stroke(.{ .points = phys }, .{ .thickness = 1.5 * dvui.windowNaturalScale(), .color = .{ .color = colors.select } });
+}
+
+/// A dimension's value being entered, by the dimension: Enter sets it,
+/// Esc leaves it as it is.
+fn skDimEntry(area: dvui.Rect.Physical) void {
+    const d = &(sk_dim orelse return);
+    const it = skItem() orelse return;
+    if (d.c >= it.sketch.constraints.items.len) {
+        sk_dim = null;
+        return;
+    }
+    const c = it.sketch.constraints.items[d.c];
+    const ns = dvui.windowNaturalScale();
+    // A plain widget in the canvas, by the dimension: in the main window,
+    // so it takes the keyboard as the expression line does.
+    var holder = dvui.box(@src(), .{}, .{ .rect = .{ .x = (d.at.x - area.x) / ns + 8, .y = (d.at.y - area.y) / ns - 42, .w = 150, .h = 40 }, .background = true, .border = .all(1), .corners = .all(4), .padding = .all(2), .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } });
+    defer holder.deinit();
+    // Enter and Esc, taken before the entry sees them (it would keep
+    // Enter for itself).
+    var enter = false;
+    var close = false;
+    if (sk_dim_id) |id| if (id == dvui.focusedWidgetId()) for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled or e.evt.key.action != .down) continue;
+        switch (e.evt.key.code) {
+            .enter, .kp_enter => enter = true,
+            .escape => close = true,
+            else => continue,
+        }
+        e.handle(@src(), holder.data());
+    };
+    var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal, .font = .theme(.mono) });
+    sk_dim_id = te.data().id;
+    if (d.fresh) {
+        var buf: [32]u8 = undefined;
+        const v = skShownValue(c) orelse 0;
+        te.textSet(std.fmt.bufPrint(&buf, "{d:.3}", .{if (c.kind == .angle) v else @abs(v)}) catch "", true);
+        d.fresh = false;
+    }
+    // Asked for over a few frames: a new entry takes focus once it exists.
+    if (d.focus_tries > 0) {
+        if (te.data().id == dvui.focusedWidgetId()) {
+            d.focus_tries = 0;
+        } else {
+            d.focus_tries -= 1;
+            dvui.focusSubwindow(null, null);
+            dvui.focusWidget(te.data().id, null, null);
+            dvui.refresh(null, @src(), null);
+        }
+    }
+    if (enter) {
+        if (std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " "))) |v| {
+            // Lengths keep their sign as made (a horizontal distance runs
+            // one way).
+            var val = skFromShown(c, v);
+            switch (c.kind) {
+                inline .distance_x, .distance_y => |dd| if (dd.value < 0) {
+                    val = -@abs(val);
+                },
+                else => {},
+            }
+            _ = skEdit(.{ .value = .{ .c = d.c, .value = val } });
+        } else |_| state.status = "Not a number. ";
+        close = true;
+    }
+    te.deinit();
+    if (close) {
+        sk_dim = null;
+        if (canvas_id) |id| dvui.focusWidget(id, null, null);
+    }
+}
+
+/// The summary: what holds the sketch, before leaving it.
+fn skSummary(area: dvui.Rect.Physical) void {
+    const it = skItem() orelse return;
+    const an = skAnalysis();
+    const ns = dvui.windowNaturalScale();
+    const w: f32 = 380;
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{}, .{ .rect = .{ .x = (area.x + area.w / 2) / ns - w / 2, .y = (area.y + area.h / 3) / ns, .w = w, .h = 0 }, .background = true, .border = .all(1), .corners = .all(8), .padding = .all(12), .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } });
+    defer fw.deinit();
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+    defer col.deinit();
+    dvui.label(@src(), "{s}", .{it.name}, .{ .font = dvui.Font.theme(.heading) });
+    var n_geo: usize = 0;
+    for (it.sketch.geometry.items) |g| {
+        if (!g.removed and !g.reference) n_geo += 1;
+    }
+    if (an) |x| {
+        if (x.fully_constrained)
+            dvui.labelNoFmt(@src(), "Fully constrained.", .{}, .{})
+        else
+            dvui.label(@src(), "Not fully constrained: {d} degree{s} of freedom left.", .{ x.dof, if (x.dof == 1) "" else "s" }, .{ .color_text = .{ .color = colors.overflow } });
+        if (x.conflicting.len > 0) dvui.label(@src(), "Conflicting: {d} constraint{s}, marked in the list.", .{ x.conflicting.len, if (x.conflicting.len == 1) "" else "s" }, .{ .color_text = .{ .color = colors.overflow } });
+        if (x.redundant.len > 0) dvui.label(@src(), "Redundant: {d} constraint{s}, marked in the list.", .{ x.redundant.len, if (x.redundant.len == 1) "" else "s" }, .{ .color_text = .{ .color = colors.overflow } });
+    }
+    dvui.label(@src(), "{d} geometr{s}, {d} constraint{s}.", .{ n_geo, if (n_geo == 1) "y" else "ies", it.sketch.constraints.items.len, if (it.sketch.constraints.items.len == 1) "" else "s" }, .{});
+    if (sketchBox(it)) |b| dvui.label(@src(), "Box {d:.2} × {d:.2} {s}.", .{ b.width() * docUnits().perMm(), b.height() * docUnits().perMm(), docUnits().symbol() }, .{});
+    dvui.labelNoFmt(@src(), "Enter accepts and leaves · Esc goes back to sketching", .{}, .{ .margin = .{ .y = 8 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    if (dvui.button(@src(), "Accept and leave", .{}, .{})) leaveSketch();
+    if (dvui.button(@src(), "Back to sketching", .{}, .{})) sk_summary = false;
+}
+
+// Palette and properties ----------------------------------------------------------
+
+fn sketchPalette() void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(4) });
+    defer col.deinit();
+    const tools = [_]struct { t: SkTool, name: []const u8 }{
+        .{ .t = .none, .name = "Select" },
+        .{ .t = .point, .name = "Point" },
+        .{ .t = .segment, .name = "Segment" },
+        .{ .t = .polyline, .name = "Polyline" },
+        .{ .t = .arc_centre, .name = "Arc: centre" },
+        .{ .t = .arc_3pt, .name = "Arc: 3 points" },
+        .{ .t = .circle, .name = "Circle" },
+        .{ .t = .line, .name = "Line" },
+        .{ .t = .ray, .name = "Ray" },
+    };
+    {
+        var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+        defer flex.deinit();
+        for (tools, 0..) |t, i| {
+            const on = sk_tool == t.t;
+            if (dvui.button(@src(), t.name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = .{ .x = 6, .w = 6, .y = 3, .h = 3 }, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) {
+                sk_tool = t.t;
+                sk_nclicks = 0;
+            }
+        }
+    }
+    var cons = sk_construction;
+    if (dvui.checkbox(@src(), &cons, "Construction", .{})) {
+        sk_construction = cons;
+        // The selected geometry follows.
+        for (sk_sel.items) |p| switch (p) {
+            .curve => |g| _ = skEdit(.{ .construction = .{ .g = g, .on = cons } }),
+            .point => |r| if (r.role == .point) {
+                _ = skEdit(.{ .construction = .{ .g = r.geom, .on = cons } });
+            },
+            .constraint => {},
+        };
+    }
+}
+
+/// The constrain buttons: those that fit the selection, live.
+fn sketchConstrainButtons() void {
+    const kinds = [_]struct { k: SkKind, name: []const u8 }{
+        .{ .k = .coincident, .name = "Coincident C" },
+        .{ .k = .horizontal, .name = "Horizontal H" },
+        .{ .k = .vertical, .name = "Vertical V" },
+        .{ .k = .point_on, .name = "On object O" },
+        .{ .k = .distance, .name = "Distance D" },
+        .{ .k = .distance_x, .name = "Horizontal distance" },
+        .{ .k = .distance_y, .name = "Vertical distance" },
+        .{ .k = .radius, .name = "Radius R" },
+        .{ .k = .angle, .name = "Angle A" },
+        .{ .k = .fixed, .name = "Lock" },
+    };
+    var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+    defer flex.deinit();
+    for (kinds, 0..) |k, i| {
+        var buf: [8]skl.Constraint = undefined;
+        const fits = skConstraintsFor(k.k, &buf) > 0;
+        const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
+        if (fits) {
+            if (dvui.button(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad })) skConstrain(k.k, canvasArea());
+        } else {
+            dvui.labelNoFmt(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.35) } });
+        }
+    }
+}
+
+/// The canvas area in physical pixels, from the last frame.
+fn canvasArea() dvui.Rect.Physical {
+    const ns = dvui.windowNaturalScale();
+    return .{ .x = canvas_rect.x * ns, .y = canvas_rect.y * ns, .w = canvas_rect.w * ns, .h = canvas_rect.h * ns };
+}
+
+/// The sketch being edited: its readout and its constraints.
+fn sketchModeProperties() void {
+    const it = skItem() orelse return;
+    propText("Sketch", "{s}", .{it.name}, 1);
+    if (skAnalysis()) |x| {
+        if (x.fully_constrained) propText("State", "{s}", .{"fully constrained"}, 2) else propText("Freedom", "{d} left", .{x.dof}, 2);
+        if (x.conflicting.len > 0) propText("Conflicts", "{d}", .{x.conflicting.len}, 3);
+        if (x.redundant.len > 0) propText("Redundant", "{d}", .{x.redundant.len}, 4);
+    }
+    heading("{s}", .{"Constrain the selection"}, 8199);
+    sketchConstrainButtons();
+    if (dvui.button(@src(), "Finish sketch…  Enter", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
+        sk_nclicks = 0;
+        sk_summary = true;
+    }
+    heading("{s}", .{"Constraints"}, 8200);
+    const an = skAnalysis();
+    for (it.sketch.constraints.items, 0..) |c, ci| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = ci });
+        defer row.deinit();
+        var colour = dvui.themeGet().color(.window, .text);
+        if (an) |x| {
+            for (x.conflicting) |k| if (k == ci) {
+                colour = colors.overflow;
+            };
+            for (x.redundant) |k| if (k == ci) {
+                colour = colors.overflow.opacity(0.7);
+            };
+        }
+        const sel = skSelected(.{ .constraint = @intCast(ci) });
+        var tb: [96]u8 = undefined;
+        const text = skConstraintText(&tb, c);
+        if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{ .expand = .horizontal, .color_text = .{ .color = colour }, .background = sel, .color_fill = if (sel) .{ .color = dvui.themeGet().focus.opacity(0.3) } else null })) {
+            skClickSelect(.{ .constraint = @intCast(ci) }, false);
+            // A dimension opens for its value.
+            if (skShownValue(c) != null) {
+                const at = skDimAnchor(canvasArea(), @intCast(ci)) orelse dvui.Point.Physical{ .x = 0, .y = 0 };
+                sk_dim = .{ .c = @intCast(ci), .at = at };
+            }
+        }
+        if (dvui.buttonIcon(@src(), "Remove constraint", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
+            _ = skEdit(.{ .unconstrain = @intCast(ci) });
+            sk_sel.clearRetainingCapacity();
+            break;
+        }
+    }
+}
+
+/// A sketch's properties, outside sketch mode.
+fn sketchProperties(space: usize, index: usize) void {
+    const it = state.model.sketchAt(space, index) catch return;
+    propText("Name", "{s}", .{it.name}, 1);
+    propText("Origin", "({d:.2}, {d:.2}) {s}", .{ it.at.x * docUnits().perMm(), it.at.y * docUnits().perMm(), docUnits().symbol() }, 2);
+    if (sketchBox(it)) |b| propText("Box", "{d:.2} × {d:.2} {s}", .{ b.width() * docUnits().perMm(), b.height() * docUnits().perMm(), docUnits().symbol() }, 3);
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    if (it.sketch.analyse(state.gpa, arena.allocator())) |x| {
+        propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
+    } else |_| {}
+    if (dvui.button(@src(), "Edit sketch", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) enterSketch(.{ .space = space, .index = index });
 }

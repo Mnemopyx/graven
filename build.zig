@@ -57,6 +57,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Parametric sketches: geometry held by constraints, solved together.
+    const sketch = b.addModule("graven_sketch", .{
+        .root_source_file = b.path("lib/sketch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "graven_geom", .module = geom }},
+    });
+
     const layout = b.addModule("graven_layout", .{
         .root_source_file = b.path("lib/layout/root.zig"),
         .target = target,
@@ -65,6 +73,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_engine", .module = engine },
             .{ .name = "graven_richtext", .module = richtext },
             .{ .name = "graven_testdata", .module = testdata },
+            .{ .name = "graven_sketch", .module = sketch },
         },
     });
 
@@ -80,14 +89,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_font", .module = font },
             .{ .name = "graven_testdata", .module = testdata },
         },
-    });
-
-    // Parametric sketches: geometry held by constraints, solved together.
-    const sketch = b.addModule("graven_sketch", .{
-        .root_source_file = b.path("lib/sketch/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "graven_geom", .module = geom }},
     });
 
     // Configuration: TOML files, shared and local.

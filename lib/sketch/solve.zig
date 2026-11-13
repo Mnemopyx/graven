@@ -94,7 +94,7 @@ fn build(s: *Sketch, a: Allocator) root.Error!System {
             };
         }
     }.f;
-    for (s.geometry.items, 0..) |g, gi| switch (g.kind) {
+    for (s.geometry.items, 0..) |g, gi| if (!g.removed) switch (g.kind) {
         .arc => |ar| {
             var l: root.Local = .{ .s = s };
             const d = l.arcResidual(ar);
@@ -156,14 +156,14 @@ fn cholesky(a: []f64, b: []f64, k: usize) bool {
 /// constraints cannot all hold. Solved, points held together by coincident
 /// constraints are given exactly the same coordinates (a fixed one's, if
 /// any), so what they join closes exactly.
-pub fn solve(s: *Sketch) root.Error!Result {
-    const res = try iterate(s);
-    if (res.solved) try joinCoincident(s);
+pub fn solve(s: *Sketch, gpa: Allocator) root.Error!Result {
+    const res = try iterate(s, gpa);
+    if (res.solved) try joinCoincident(s, gpa);
     return res;
 }
 
-fn joinCoincident(s: *Sketch) root.Error!void {
-    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+fn joinCoincident(s: *Sketch, gpa: Allocator) root.Error!void {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     // Union-find over points, by their x var.
@@ -207,8 +207,8 @@ fn joinCoincident(s: *Sketch) root.Error!void {
     };
 }
 
-fn iterate(s: *Sketch) root.Error!Result {
-    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+fn iterate(s: *Sketch, gpa: Allocator) root.Error!Result {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var lambda: f64 = 1e-10;
     var iterations: usize = 0;
@@ -249,7 +249,7 @@ fn iterate(s: *Sketch) root.Error!Result {
                     for (0..m) |i| d += sys.j[i * n + c] * y[i];
                     s.vars.items[v] = saved[v] - d;
                 }
-                var trial_arena: std.heap.ArenaAllocator = .init(s.gpa);
+                var trial_arena: std.heap.ArenaAllocator = .init(gpa);
                 defer trial_arena.deinit();
                 const trial = try build(s, trial_arena.allocator());
                 if (sumSq(trial.r) < norm) {
@@ -263,7 +263,7 @@ fn iterate(s: *Sketch) root.Error!Result {
         }
         if (!improved) return .{ .solved = worst < tol, .residual = worst, .iterations = iterations };
     }
-    var arena2: std.heap.ArenaAllocator = .init(s.gpa);
+    var arena2: std.heap.ArenaAllocator = .init(gpa);
     defer arena2.deinit();
     const final = try build(s, arena2.allocator());
     const worst = maxAbs(final.r);
@@ -279,8 +279,8 @@ fn dot(a: []const f64, b: []const f64) f64 {
 /// What holds the sketch as it stands (solve it first): degrees of
 /// freedom, redundant and conflicting constraints, free geometry.
 /// Allocated from `out`.
-pub fn analyse(s: *Sketch, out: Allocator) root.Error!Analysis {
-    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) root.Error!Analysis {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const sys = try build(s, a);
@@ -364,7 +364,7 @@ pub fn analyse(s: *Sketch, out: Allocator) root.Error!Analysis {
     }
     var free: std.ArrayList(GeomId) = .empty;
     for (s.geometry.items, 0..) |g, gi| {
-        if (g.reference) continue;
+        if (g.reference or g.removed) continue;
         const any = switch (g.kind) {
             .point => |p| free_var[p.x] or free_var[p.y],
             .segment => |sg| free_var[sg.a.x] or free_var[sg.a.y] or free_var[sg.b.x] or free_var[sg.b.y],

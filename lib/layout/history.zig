@@ -49,6 +49,7 @@ pub const actions = [_][:0]const u8{
     "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
+    "addSketch", "removeSketch", "moveSketch", "renameSketch", "editSketch",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -474,6 +475,40 @@ test "undo restores, redo reapplies, and a new step drops the redo" {
     try h.do(&m, .moveArt, .{ c, 0, .{ .x = 5, .y = 5 } });
     try testing.expect(!h.canRedo());
     try testing.expectEqual(5, m.panels.items[c].art.items[0].at.x);
+}
+
+test "a sketch is drawn and constrained through the history, and saves and reopens" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    _ = c;
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const si = try h.do(&m, .addSketch, .{ 0, "Sketch 1", .{ .x = 10, .y = 20 } });
+    const seg = try h.do(&m, .editSketch, .{ 0, si, .{ .segment = .{ .a = .{ .x = 0.2, .y = 0.1 }, .b = .{ .x = 9, .y = 1 } } } });
+    _ = try h.do(&m, .editSketch, .{ 0, si, .{ .constrain = .{ .kind = .{ .coincident = .{ .{ .geom = seg, .role = .start }, .{ .geom = model.sketch_.origin } } } } } });
+    _ = try h.do(&m, .editSketch, .{ 0, si, .{ .constrain = .{ .kind = .{ .horizontal = .{ .geom = seg } } } } });
+    _ = try h.do(&m, .editSketch, .{ 0, si, .{ .constrain = .{ .kind = .{ .distance = .{ .a = .{ .geom = seg, .role = .start }, .b = .{ .geom = seg, .role = .end }, .value = 12 } }, .name = "len" } } });
+    const sk = &m.spaces.items[0].sketches.items[0].sketch;
+    try testing.expectApproxEqAbs(@as(f64, 12), (try sk.point(.{ .geom = seg, .role = .end })).x, 1e-9);
+    // Undo the length: the segment keeps its solved place, and redo sets it.
+    try testing.expect(try h.undo(&m));
+    try testing.expectEqual(@as(usize, 2), m.spaces.items[0].sketches.items[0].sketch.constraints.items.len);
+    try testing.expect(try h.redoStep(&m));
+    try testing.expectEqual(@as(usize, 3), m.spaces.items[0].sketches.items[0].sketch.constraints.items.len);
+    // Saved and read back: the same sketch, which solves the same.
+    const bytes = try native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try native.decode(gpa, bytes);
+    defer back.deinit();
+    const bk = &back.spaces.items[0].sketches.items[0];
+    try testing.expectEqualStrings("Sketch 1", bk.name);
+    try testing.expectEqual(@as(f64, 10), bk.at.x);
+    try testing.expectEqualStrings("len", bk.sketch.constraints.items[2].name);
+    _ = try back.editSketch(0, 0, .{ .value = .{ .c = 2, .value = 15 } });
+    try testing.expectApproxEqAbs(@as(f64, 15), (try bk.sketch.point(.{ .geom = seg, .role = .end })).x, 1e-9);
 }
 
 test "ops with one merge key make one step; joined ops undo with their step; snapshots replay" {

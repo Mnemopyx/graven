@@ -21,6 +21,7 @@ const engine = @import("graven_engine");
 const Allocator = std.mem.Allocator;
 const geom = engine.geom;
 const art_ = @import("art.zig");
+pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
 const edit_ = @import("edit.zig");
 
@@ -684,6 +685,8 @@ pub const Space = struct {
     base_layer: ObjectId = .none,
     /// Raster images placed in it.
     images: std.ArrayList(Image) = .empty,
+    /// Sketches drawn in it.
+    sketches: std.ArrayList(SketchItem) = .empty,
 
     /// The index of layer `id` (`.none` meaning the base layer).
     pub fn layerIndex(sp: Space, id: ObjectId) ?usize {
@@ -727,6 +730,38 @@ pub const Layer = struct {
 
 /// A raster image placed in a space at a physical size. Its file (PNG or
 /// JPEG) is stored in the document.
+/// A sketch drawn in a space: its geometry and constraints (see
+/// `graven_sketch`), in its own frame, whose origin sits at `at`.
+pub const SketchItem = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    /// True while the name is one the app gave it (Sketch 1).
+    default_name: bool = false,
+    layer: ObjectId = .none,
+    /// Where its origin sits, mm in the space.
+    at: geom.Point,
+    sketch: sketch_.Sketch,
+};
+
+/// One change to a sketch, as `editSketch` makes it (in the sketch's own
+/// frame, mm and radians).
+pub const SketchEdit = union(enum) {
+    point: struct { at: geom.Point, construction: bool = false },
+    segment: struct { a: geom.Point, b: geom.Point, construction: bool = false },
+    circle: struct { c: geom.Point, r: f64, construction: bool = false },
+    /// About `c`, counter-clockwise from `a` to `b`'s angle.
+    arc: struct { c: geom.Point, a: geom.Point, b: geom.Point, construction: bool = false },
+    line: struct { through: geom.Point, angle: f64 },
+    ray: struct { o: geom.Point, angle: f64 },
+    construction: struct { g: sketch_.GeomId, on: bool },
+    remove: sketch_.GeomId,
+    constrain: sketch_.Constraint,
+    unconstrain: sketch_.ConstraintId,
+    value: struct { c: sketch_.ConstraintId, value: f64 },
+    /// A point moved towards `to` as far as its constraints let it.
+    drag: struct { p: sketch_.PointRef, to: geom.Point },
+};
+
 pub const Image = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -1100,7 +1135,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin };
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -2076,6 +2111,80 @@ pub const Model = struct {
     pub fn removeImage(m: *Model, space: usize, index: usize) void {
         _ = m.spaces.items[space].images.orderedRemove(index);
         m.revision += 1;
+    }
+
+    /// Starts a new sketch in space `space`, its origin at `at`, on the
+    /// space's base layer. Returns its index among the space's sketches.
+    pub fn addSketch(m: *Model, space: usize, name: []const u8, at: geom.Point) Error!usize {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        const list = &m.spaces.items[space].sketches;
+        try list.append(m.a(), .{
+            .id = m.newId(),
+            .name = try m.a().dupe(u8, name),
+            .at = at,
+            .sketch = try sketch_.Sketch.init(m.a()),
+        });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    pub fn removeSketch(m: *Model, space: usize, index: usize) Error!void {
+        if (space >= m.spaces.items.len or index >= m.spaces.items[space].sketches.items.len) return error.NoSuchItem;
+        _ = m.spaces.items[space].sketches.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// Moves a sketch: its origin to `at`.
+    pub fn moveSketch(m: *Model, space: usize, index: usize, at: geom.Point) Error!void {
+        const sk = try m.sketchAt(space, index);
+        sk.at = at;
+        m.revision += 1;
+    }
+
+    pub fn renameSketch(m: *Model, space: usize, index: usize, name: []const u8) Error!void {
+        const sk = try m.sketchAt(space, index);
+        sk.name = try m.a().dupe(u8, name);
+        sk.default_name = false;
+        m.revision += 1;
+    }
+
+    pub fn sketchAt(m: *Model, space: usize, index: usize) Error!*SketchItem {
+        if (space >= m.spaces.items.len or index >= m.spaces.items[space].sketches.items.len) return error.NoSuchItem;
+        return &m.spaces.items[space].sketches.items[index];
+    }
+
+    /// Changes a sketch (see `SketchEdit`) and solves it again. Returns the
+    /// new geometry's or constraint's ID, where the edit makes one (else 0).
+    pub fn editSketch(m: *Model, space: usize, index: usize, edit: SketchEdit) Error!u32 {
+        const sk = &(try m.sketchAt(space, index)).sketch;
+        const al = m.a();
+        const gpa = m.arena.child_allocator;
+        var out: u32 = 0;
+        switch (edit) {
+            .point => |e| out = try sk.addPoint(al, e.at, e.construction),
+            .segment => |e| out = try sk.addSegment(al, e.a, e.b, e.construction),
+            .circle => |e| out = try sk.addCircle(al, e.c, e.r, e.construction),
+            .arc => |e| out = try sk.addArc(al, e.c, e.a, e.b, e.construction),
+            .line => |e| out = try sk.addLine(al, e.through, e.angle),
+            .ray => |e| out = try sk.addRay(al, e.o, e.angle),
+            .construction => |e| try sk.setConstruction(e.g, e.on),
+            .remove => |g| try sk.removeGeometry(g),
+            .constrain => |c| {
+                var k = c;
+                k.name = try al.dupe(u8, c.name);
+                out = try sk.addConstraint(al, k);
+            },
+            .unconstrain => |c| try sk.removeConstraint(c),
+            .value => |e| try sk.setValue(e.c, e.value),
+            .drag => |e| {
+                _ = try sk.drag(al, gpa, e.p, e.to);
+                m.revision += 1;
+                return 0;
+            },
+        }
+        _ = try sk.solve(gpa);
+        m.revision += 1;
+        return out;
     }
 
     /// The layer checks: opacity or blending on a layer whose process

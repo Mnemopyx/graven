@@ -53,6 +53,8 @@ pub const Geometry = struct {
     construction: bool = false,
     /// The sketch's origin and axes: fixed, never output or removed.
     reference: bool = false,
+    /// Removed: kept in place so IDs hold, its unknowns fixed, ignored.
+    removed: bool = false,
 };
 
 /// A point of a geometry: a point itself, a segment's or arc's start or
@@ -91,84 +93,137 @@ pub const Constraint = struct {
     name: []const u8 = "",
 };
 
-pub const Error = Allocator.Error || error{ NoSuchGeometry, NoSuchPoint, WrongKind, NotConstruction };
+pub const Error = Allocator.Error || error{ NoSuchGeometry, NoSuchPoint, WrongKind, NotConstruction, NoSuchConstraint };
 
 pub const origin: GeomId = 0;
 pub const h_axis: GeomId = 1;
 pub const v_axis: GeomId = 2;
 
+/// A sketch's data, unmanaged: whoever holds it passes the allocator its
+/// lists live in (`a`), and scratch space for solving (`gpa`).
 pub const Sketch = struct {
-    gpa: Allocator,
     vars: std.ArrayList(f64) = .empty,
     /// Per var: fixed (the reference geometry's), not an unknown.
     fixed: std.ArrayList(bool) = .empty,
     geometry: std.ArrayList(Geometry) = .empty,
     constraints: std.ArrayList(Constraint) = .empty,
 
-    pub fn init(gpa: Allocator) Error!Sketch {
-        var s: Sketch = .{ .gpa = gpa };
-        errdefer s.deinit();
-        const o = try s.pt(.{ .x = 0, .y = 0 }, true);
-        try s.geometry.append(gpa, .{ .kind = .{ .point = o }, .construction = true, .reference = true });
-        try s.geometry.append(gpa, .{ .kind = .{ .line = .{ .theta = try s.newVar(std.math.pi / 2.0, true), .rho = try s.newVar(0, true) } }, .construction = true, .reference = true });
-        try s.geometry.append(gpa, .{ .kind = .{ .line = .{ .theta = try s.newVar(0, true), .rho = try s.newVar(0, true) } }, .construction = true, .reference = true });
+    pub fn init(a: Allocator) Error!Sketch {
+        var s: Sketch = .{};
+        errdefer s.deinit(a);
+        const o = try s.pt(a, .{ .x = 0, .y = 0 }, true);
+        try s.geometry.append(a, .{ .kind = .{ .point = o }, .construction = true, .reference = true });
+        try s.geometry.append(a, .{ .kind = .{ .line = .{ .theta = try s.newVar(a, std.math.pi / 2.0, true), .rho = try s.newVar(a, 0, true) } }, .construction = true, .reference = true });
+        try s.geometry.append(a, .{ .kind = .{ .line = .{ .theta = try s.newVar(a, 0, true), .rho = try s.newVar(a, 0, true) } }, .construction = true, .reference = true });
         return s;
     }
 
-    pub fn deinit(s: *Sketch) void {
-        s.vars.deinit(s.gpa);
-        s.fixed.deinit(s.gpa);
-        s.geometry.deinit(s.gpa);
-        s.constraints.deinit(s.gpa);
+    pub fn deinit(s: *Sketch, a: Allocator) void {
+        s.vars.deinit(a);
+        s.fixed.deinit(a);
+        s.geometry.deinit(a);
+        s.constraints.deinit(a);
     }
 
-    fn newVar(s: *Sketch, v: f64, fixed: bool) Allocator.Error!VarId {
-        try s.vars.append(s.gpa, v);
-        try s.fixed.append(s.gpa, fixed);
+    /// A copy in `a`, sharing nothing with this one (constraint names
+    /// included).
+    pub fn clone(s: *const Sketch, a: Allocator) Allocator.Error!Sketch {
+        var c: Sketch = .{};
+        try c.vars.appendSlice(a, s.vars.items);
+        try c.fixed.appendSlice(a, s.fixed.items);
+        try c.geometry.appendSlice(a, s.geometry.items);
+        try c.constraints.appendSlice(a, s.constraints.items);
+        for (c.constraints.items) |*k| k.name = try a.dupe(u8, k.name);
+        return c;
+    }
+
+    fn newVar(s: *Sketch, a: Allocator, v: f64, fixed: bool) Allocator.Error!VarId {
+        try s.vars.append(a, v);
+        try s.fixed.append(a, fixed);
         return @intCast(s.vars.items.len - 1);
     }
 
-    fn pt(s: *Sketch, p: Point, fixed: bool) Allocator.Error!Pt {
-        return .{ .x = try s.newVar(p.x, fixed), .y = try s.newVar(p.y, fixed) };
+    fn pt(s: *Sketch, a: Allocator, p: Point, fixed: bool) Allocator.Error!Pt {
+        return .{ .x = try s.newVar(a, p.x, fixed), .y = try s.newVar(a, p.y, fixed) };
     }
 
-    fn add(s: *Sketch, g: Geometry) Allocator.Error!GeomId {
-        try s.geometry.append(s.gpa, g);
+    fn add(s: *Sketch, a: Allocator, g: Geometry) Allocator.Error!GeomId {
+        try s.geometry.append(a, g);
         return @intCast(s.geometry.items.len - 1);
     }
 
-    pub fn addPoint(s: *Sketch, at: Point, construction: bool) Error!GeomId {
-        return s.add(.{ .kind = .{ .point = try s.pt(at, false) }, .construction = construction });
+    pub fn addPoint(s: *Sketch, a: Allocator, at: Point, construction: bool) Error!GeomId {
+        return s.add(a, .{ .kind = .{ .point = try s.pt(a, at, false) }, .construction = construction });
     }
 
-    pub fn addSegment(s: *Sketch, a: Point, b: Point, construction: bool) Error!GeomId {
-        return s.add(.{ .kind = .{ .segment = .{ .a = try s.pt(a, false), .b = try s.pt(b, false) } }, .construction = construction });
+    pub fn addSegment(s: *Sketch, a: Allocator, p0: Point, p1: Point, construction: bool) Error!GeomId {
+        return s.add(a, .{ .kind = .{ .segment = .{ .a = try s.pt(a, p0, false), .b = try s.pt(a, p1, false) } }, .construction = construction });
     }
 
-    pub fn addCircle(s: *Sketch, c: Point, r: f64, construction: bool) Error!GeomId {
-        return s.add(.{ .kind = .{ .circle = .{ .c = try s.pt(c, false), .r = try s.newVar(r, false) } }, .construction = construction });
+    pub fn addCircle(s: *Sketch, a: Allocator, c: Point, r: f64, construction: bool) Error!GeomId {
+        return s.add(a, .{ .kind = .{ .circle = .{ .c = try s.pt(a, c, false), .r = try s.newVar(a, r, false) } }, .construction = construction });
     }
 
-    /// An arc about `c`, counter-clockwise from `a` to the point at `b`'s
-    /// angle on the circle through `a`.
-    pub fn addArc(s: *Sketch, c: Point, a: Point, b: Point, construction: bool) Error!GeomId {
-        const r = @sqrt((a.x - c.x) * (a.x - c.x) + (a.y - c.y) * (a.y - c.y));
-        const t = std.math.atan2(b.y - c.y, b.x - c.x);
+    /// An arc about `c`, counter-clockwise from `p0` to the point at `p1`'s
+    /// angle on the circle through `p0`.
+    pub fn addArc(s: *Sketch, a: Allocator, c: Point, p0: Point, p1: Point, construction: bool) Error!GeomId {
+        const r = @sqrt((p0.x - c.x) * (p0.x - c.x) + (p0.y - c.y) * (p0.y - c.y));
+        const t = std.math.atan2(p1.y - c.y, p1.x - c.x);
         const end: Point = .{ .x = c.x + r * @cos(t), .y = c.y + r * @sin(t) };
-        return s.add(.{ .kind = .{ .arc = .{ .c = try s.pt(c, false), .a = try s.pt(a, false), .b = try s.pt(end, false) } }, .construction = construction });
+        return s.add(a, .{ .kind = .{ .arc = .{ .c = try s.pt(a, c, false), .a = try s.pt(a, p0, false), .b = try s.pt(a, end, false) } }, .construction = construction });
     }
 
     /// An infinite line through `through` at `angle` to the horizontal:
     /// construction, always.
-    pub fn addLine(s: *Sketch, through: Point, angle: f64) Error!GeomId {
+    pub fn addLine(s: *Sketch, a: Allocator, through: Point, angle: f64) Error!GeomId {
         const theta = angle + std.math.pi / 2.0;
         const rho = @cos(theta) * through.x + @sin(theta) * through.y;
-        return s.add(.{ .kind = .{ .line = .{ .theta = try s.newVar(theta, false), .rho = try s.newVar(rho, false) } }, .construction = true });
+        return s.add(a, .{ .kind = .{ .line = .{ .theta = try s.newVar(a, theta, false), .rho = try s.newVar(a, rho, false) } }, .construction = true });
     }
 
     /// A ray from `o` at `angle`: construction, always.
-    pub fn addRay(s: *Sketch, o: Point, angle: f64) Error!GeomId {
-        return s.add(.{ .kind = .{ .ray = .{ .o = try s.pt(o, false), .angle = try s.newVar(angle, false) } }, .construction = true });
+    pub fn addRay(s: *Sketch, a: Allocator, o: Point, angle: f64) Error!GeomId {
+        return s.add(a, .{ .kind = .{ .ray = .{ .o = try s.pt(a, o, false), .angle = try s.newVar(a, angle, false) } }, .construction = true });
+    }
+
+    /// Removes geometry `g` and every constraint on it. Its ID stays
+    /// taken; its unknowns are fixed, so they count for nothing.
+    pub fn removeGeometry(s: *Sketch, g: GeomId) Error!void {
+        const geo = try s.get(g);
+        if (geo.reference) return error.WrongKind;
+        geo.removed = true;
+        var buf: [6]VarId = undefined;
+        for (s.varsOf(geo.*, &buf)) |v| s.fixed.items[v] = true;
+        var i: usize = s.constraints.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (refersTo(s.constraints.items[i], g)) _ = s.constraints.orderedRemove(i);
+        }
+    }
+
+    /// The unknowns of a geometry, in `buf`.
+    pub fn varsOf(_: *const Sketch, g: Geometry, buf: *[6]VarId) []VarId {
+        const list: []const VarId = switch (g.kind) {
+            .point => |p| &.{ p.x, p.y },
+            .segment => |sg| &.{ sg.a.x, sg.a.y, sg.b.x, sg.b.y },
+            .circle => |c| &.{ c.c.x, c.c.y, c.r },
+            .arc => |ar| &.{ ar.c.x, ar.c.y, ar.a.x, ar.a.y, ar.b.x, ar.b.y },
+            .line => |ln| &.{ ln.theta, ln.rho },
+            .ray => |ry| &.{ ry.o.x, ry.o.y, ry.angle },
+        };
+        @memcpy(buf[0..list.len], list);
+        return buf[0..list.len];
+    }
+
+    /// Moves point `r` towards `to` as far as its constraints let it: the
+    /// sketch is solved with the point held at `to`, then without, so it
+    /// settles back onto what its constraints allow, the least way.
+    pub fn drag(s: *Sketch, a: Allocator, gpa: Allocator, r: PointRef, to: Point) Error!solver.Result {
+        _ = try s.pointOf(r);
+        try s.constraints.append(a, .{ .kind = .{ .fixed = .{ .p = r, .at = to } } });
+        _ = try solver.solve(s, gpa);
+        _ = s.constraints.pop();
+        return solver.solve(s, gpa);
     }
 
     /// Sets geometry `g` to construction or not (infinite lines and rays
@@ -181,13 +236,13 @@ pub const Sketch = struct {
     }
 
     fn get(s: *Sketch, g: GeomId) Error!*Geometry {
-        if (g >= s.geometry.items.len) return error.NoSuchGeometry;
+        if (g >= s.geometry.items.len or s.geometry.items[g].removed) return error.NoSuchGeometry;
         return &s.geometry.items[g];
     }
 
     /// The unknowns of point `r`.
     pub fn pointOf(s: *const Sketch, r: PointRef) Error!Pt {
-        if (r.geom >= s.geometry.items.len) return error.NoSuchGeometry;
+        if (r.geom >= s.geometry.items.len or s.geometry.items[r.geom].removed) return error.NoSuchGeometry;
         return switch (s.geometry.items[r.geom].kind) {
             .point => |p| if (r.role == .point) p else error.NoSuchPoint,
             .segment => |sg| switch (r.role) {
@@ -215,7 +270,7 @@ pub const Sketch = struct {
 
     /// Adds a constraint, checking what it refers to. A distance to a line
     /// keeps to the side the point is on now.
-    pub fn addConstraint(s: *Sketch, c_in: Constraint) Error!ConstraintId {
+    pub fn addConstraint(s: *Sketch, a: Allocator, c_in: Constraint) Error!ConstraintId {
         var c = c_in;
         try s.check(c);
         switch (c.kind) {
@@ -226,12 +281,22 @@ pub const Sketch = struct {
             },
             else => {},
         }
-        try s.constraints.append(s.gpa, c);
+        try s.constraints.append(a, c);
         return @intCast(s.constraints.items.len - 1);
     }
 
-    pub fn removeConstraint(s: *Sketch, id: ConstraintId) void {
+    pub fn removeConstraint(s: *Sketch, id: ConstraintId) Error!void {
+        if (id >= s.constraints.items.len) return error.NoSuchConstraint;
         _ = s.constraints.orderedRemove(id);
+    }
+
+    /// Sets a dimension's value (distance, radius, angle).
+    pub fn setValue(s: *Sketch, id: ConstraintId, value: f64) Error!void {
+        if (id >= s.constraints.items.len) return error.NoSuchConstraint;
+        switch (s.constraints.items[id].kind) {
+            inline .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => |*d| d.value = value,
+            else => return error.WrongKind,
+        }
     }
 
     fn check(s: *Sketch, c: Constraint) Error!void {
@@ -241,15 +306,16 @@ pub const Sketch = struct {
         _ = try local.residuals(c, &out);
     }
 
-    /// Solves the sketch in place (see `solver.solve`).
-    pub fn solve(s: *Sketch) Error!solver.Result {
-        return solver.solve(s);
+    /// Solves the sketch in place (see `solver.solve`), with scratch
+    /// space from `gpa`.
+    pub fn solve(s: *Sketch, gpa: Allocator) Error!solver.Result {
+        return solver.solve(s, gpa);
     }
 
     /// What is left free, and what is redundant or conflicts (see
-    /// `solver.analyse`), allocated from `a`.
-    pub fn analyse(s: *Sketch, a: Allocator) Error!solver.Analysis {
-        return solver.analyse(s, a);
+    /// `solver.analyse`), allocated from `out`.
+    pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) Error!solver.Analysis {
+        return solver.analyse(s, gpa, out);
     }
 
     /// The geometry that is output: every geometry that is neither
@@ -258,7 +324,7 @@ pub const Sketch = struct {
     pub fn physical(s: *const Sketch, a: Allocator) Allocator.Error![]geom.Segment {
         var out: std.ArrayList(geom.Segment) = .empty;
         for (s.geometry.items) |g| {
-            if (g.construction or g.reference) continue;
+            if (g.construction or g.reference or g.removed) continue;
             try s.appendSegments(a, g, &out);
         }
         return out.items;
@@ -268,7 +334,7 @@ pub const Sketch = struct {
         return .{ .x = s.vars.items[p.x], .y = s.vars.items[p.y] };
     }
 
-    fn appendSegments(s: *const Sketch, a: Allocator, g: Geometry, out: *std.ArrayList(geom.Segment)) Allocator.Error!void {
+    pub fn appendSegments(s: *const Sketch, a: Allocator, g: Geometry, out: *std.ArrayList(geom.Segment)) Allocator.Error!void {
         var buf: [4]geom.Segment = undefined;
         switch (g.kind) {
             .segment => |sg| try out.append(a, .{ .line = .{ s.val(sg.a), s.val(sg.b) } }),
@@ -301,7 +367,7 @@ pub const Sketch = struct {
         var b = Box.empty;
         var any = false;
         for (s.geometry.items) |g| {
-            if (g.reference) continue;
+            if (g.reference or g.removed) continue;
             any = true;
             switch (g.kind) {
                 .point => |p| b = b.addPoint(s.val(p)),
@@ -318,7 +384,7 @@ pub const Sketch = struct {
         if (b.isEmpty()) {
             const tol = 1e-12;
             for (s.geometry.items) |g| {
-                if (g.reference) continue;
+                if (g.reference or g.removed) continue;
                 switch (g.kind) {
                     .ray => |r| b = b.addPoint(s.val(r.o)),
                     .line => |h| {
@@ -326,7 +392,7 @@ pub const Sketch = struct {
                         if (@abs(@cos(th)) > tol) continue; // not horizontal
                         const y = s.vars.items[h.rho] / @sin(th);
                         for (s.geometry.items) |g2| {
-                            if (g2.reference or g2.kind != .line) continue;
+                            if (g2.reference or g2.removed or g2.kind != .line) continue;
                             const t2 = s.vars.items[g2.kind.line.theta];
                             if (@abs(@sin(t2)) > tol) continue; // not vertical
                             b = b.addPoint(.{ .x = s.vars.items[g2.kind.line.rho] / @cos(t2), .y = y });
@@ -350,6 +416,28 @@ pub const Sketch = struct {
         return b;
     }
 };
+
+/// Whether constraint `c` refers to geometry `g`.
+pub fn refersTo(c: Constraint, g: GeomId) bool {
+    const lin = struct {
+        fn f(l: Linear, gg: GeomId) bool {
+            return switch (l) {
+                .geom => |x| x == gg,
+                .points => |ps| ps[0].geom == gg or ps[1].geom == gg,
+            };
+        }
+    }.f;
+    return switch (c.kind) {
+        .coincident => |ps| ps[0].geom == g or ps[1].geom == g,
+        .horizontal, .vertical => |l| lin(l, g),
+        .point_on => |po| po.p.geom == g or po.on == g,
+        .fixed => |f| f.p.geom == g,
+        inline .distance, .distance_x, .distance_y => |d| d.a.geom == g or d.b.geom == g,
+        .line_distance => |d| d.p.geom == g or d.line == g,
+        .radius => |r| r.g == g,
+        .angle => |an| an.a == g or an.b == g,
+    };
+}
 
 /// One constraint's residuals as duals over its own unknowns (at most
 /// `dual.n` of them), for its exact Jacobian row.
@@ -378,7 +466,7 @@ pub const Local = struct {
     }
 
     fn geo(l: *Local, g: GeomId) Error!Geometry {
-        if (g >= l.s.geometry.items.len) return error.NoSuchGeometry;
+        if (g >= l.s.geometry.items.len or l.s.geometry.items[g].removed) return error.NoSuchGeometry;
         return l.s.geometry.items[g];
     }
 
