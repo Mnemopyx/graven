@@ -172,6 +172,35 @@ pub const SlotPlace = struct {
     v: Align = .start,
 };
 
+/// A track every tile of a prototype has: where it lies on the face, which
+/// way it runs, and the style of its text. Its shape is the prototype's;
+/// what is in it is each tile's own (see `TileFlow`), matched by the
+/// track's ID. A row track sets its text in lines across the face; a
+/// column track sets it a character at a time down the face, upright,
+/// going on into the next column (neither turns text).
+pub const TileTrack = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    /// Its box: the face less this inset. (`place.h` and `place.v` are
+    /// unused; `alignment` sets each line.)
+    place: SlotPlace = .{},
+    major: Major = .row,
+    style: StyleId = .none,
+    /// How each line (row) or column is set along: from its start, about
+    /// its centre, or back from its end.
+    alignment: Align = .start,
+};
+
+/// A tile's content in one of its prototype's tracks: runs of text and
+/// equations, and hard breaks (no tiles). It has an ID of its own, so the
+/// tile's track can be connected to by ID.
+pub const TileFlow = struct {
+    id: ObjectId = .none,
+    /// The prototype track it fills.
+    track: ObjectId,
+    items: std.ArrayList(Item) = .empty,
+};
+
 /// A slot every tile of a prototype has: where its label goes on the face,
 /// and the style it is set in unless a tile says otherwise.
 pub const SlotPrototype = struct {
@@ -222,6 +251,8 @@ pub const TilePrototype = struct {
     face_inset: Sides = .{},
     /// The slots on the face, in order.
     slots: []const SlotPrototype = &.{},
+    /// The tracks on the face, in order (see `TileTrack`).
+    tracks: []const TileTrack = &.{},
     /// Which ways its tiles may grow from 1u × 1u.
     expand: Expand = .{},
     /// The widths and heights its tiles may take where they may grow, u;
@@ -316,6 +347,8 @@ pub const Tile = struct {
     /// Its own values for its prototype's sketch parameters (a homing bump
     /// switched on); the sketch's own expressions give the rest.
     params: std.ArrayList(TileParam) = .empty,
+    /// Its content in its prototype's tracks.
+    flows: std.ArrayList(TileFlow) = .empty,
 };
 
 pub const TileParam = struct { name: []const u8, value: f64 };
@@ -2843,6 +2876,93 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    // Tile tracks.
+
+    /// Adds a track to prototype `id`, and so to every tile made from it;
+    /// returns the track's ID. Names are unique within a prototype.
+    pub fn addPrototypeTrack(m: *Model, id: PrototypeId, track: TileTrack) Error!ObjectId {
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
+        for (p.tracks) |tt| if (std.mem.eql(u8, tt.name, track.name)) return error.DuplicateSlot;
+        const list = try m.a().alloc(TileTrack, p.tracks.len + 1);
+        @memcpy(list[0..p.tracks.len], p.tracks);
+        var t = track;
+        t.id = m.newId();
+        t.name = try m.a().dupe(u8, track.name);
+        list[p.tracks.len] = t;
+        p.tracks = list;
+        m.revision += 1;
+        return t.id;
+    }
+
+    /// Changes track `track` of prototype `id` (its name, place, direction,
+    /// style or alignment); every tile's content in it stays.
+    pub fn setPrototypeTrack(m: *Model, id: PrototypeId, track: ObjectId, to: TileTrack) Error!void {
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
+        const list = try m.a().dupe(TileTrack, p.tracks);
+        for (list) |*tt| if (tt.id == track) {
+            tt.* = to;
+            tt.id = track;
+            tt.name = try m.a().dupe(u8, to.name);
+            p.tracks = list;
+            m.revision += 1;
+            return;
+        };
+        return error.NoSuchSlot;
+    }
+
+    /// Removes track `track` from prototype `id`. Tiles keep what they had
+    /// in it, unshown.
+    pub fn removePrototypeTrack(m: *Model, id: PrototypeId, track: ObjectId) Error!void {
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
+        var list: std.ArrayList(TileTrack) = .empty;
+        var found = false;
+        for (p.tracks) |tt| {
+            if (tt.id == track) found = true else try list.append(m.a(), tt);
+        }
+        if (!found) return error.NoSuchSlot;
+        p.tracks = list.items;
+        m.revision += 1;
+    }
+
+    /// The track of tile `tile`'s prototype called `name`.
+    pub fn tileTrackNamed(m: *const Model, tile_id: TileId, name: []const u8) ?ObjectId {
+        for (m.prototypeOf(tile_id).tracks) |tt| if (std.mem.eql(u8, tt.name, name)) return tt.id;
+        return null;
+    }
+
+    /// Tile `tile_id`'s content in track `track`, if it has any.
+    pub fn tileFlow(m: *const Model, tile_id: TileId, track: ObjectId) ?*TileFlow {
+        const t = &m.tiles.items[m.tileIndex(tile_id) orelse return null];
+        for (t.flows.items) |*f| if (f.track == track) return f;
+        return null;
+    }
+
+    /// Sets tile `tile_id`'s content in its prototype's track `track` to
+    /// `text`: runs in the track's style, a hard break at each newline.
+    pub fn setTileTrackText(m: *Model, tile_id: TileId, track: ObjectId, text: []const u8) Error!void {
+        if (m.tileIndex(tile_id) == null) return error.NoSuchTile;
+        const tt = for (m.prototypeOf(tile_id).tracks) |tt| {
+            if (tt.id == track) break tt;
+        } else return error.NoSuchSlot;
+        const f = m.tileFlow(tile_id, track) orelse blk: {
+            const t = m.tile(tile_id);
+            try t.flows.append(m.a(), .{ .id = m.newId(), .track = track });
+            break :blk &t.flows.items[t.flows.items.len - 1];
+        };
+        f.items = .empty;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        var first = true;
+        while (lines.next()) |line| {
+            if (!first) try f.items.append(m.a(), .{ .what = .hard_break });
+            first = false;
+            if (line.len > 0) try f.items.append(m.a(), .{ .what = .{ .run = .{ .style = tt.style, .content = try m.a().dupe(u8, line) } } });
+        }
+        m.revision += 1;
+    }
+
     pub fn setPanelIslands(m: *Model, panel: usize, on: bool) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         m.panels.items[panel].islands = on;
@@ -4286,6 +4406,13 @@ pub const Model = struct {
             out.name = try m.a().dupe(u8, sp.name);
         }
         copy.slots = slots;
+        const tracks = try m.a().alloc(TileTrack, p.tracks.len);
+        for (p.tracks, tracks) |tt, *out| {
+            out.* = tt;
+            out.name = try m.a().dupe(u8, tt.name);
+            if (out.id == .none) out.id = m.newId();
+        }
+        copy.tracks = tracks;
         if (p.art) |art| copy.art = try art_.dupe(m.a(), art);
         copy.widths = try m.a().dupe(f64, p.widths);
         copy.heights = try m.a().dupe(f64, p.heights);

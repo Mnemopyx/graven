@@ -916,7 +916,9 @@ const Cut = struct {
     /// What ends it: a break between words, a soft hyphen (where a line
     /// break draws a hyphen), or a cut inside a word (taken only when the
     /// word does not fit a line, a forced wrap).
-    end: enum { none, space, hyphen, forced } = .none,
+    /// `glyph`: between two characters of a column track's text, each
+    /// set on its own down the column.
+    end: enum { none, space, hyphen, forced, glyph } = .none,
 
     /// Its length along the line.
     fn size(c: Cut) f64 {
@@ -953,6 +955,55 @@ fn endsIn(cuts: []const ?Cut, index: usize, end: @TypeOf(@as(Cut, undefined).end
 /// The point at `t` on segment `s`.
 fn pointOn(s: geom.Segment, t: f64) Point {
     return s.at(t);
+}
+
+/// A tile track's labels name it by this plus its index in the
+/// prototype's tracks, as `PlacedLabel.slot`, so they are told from slots.
+pub const tile_track_slot: usize = 1 << 20;
+
+/// How far down a column one piece of text reaches: a character, a cap
+/// height and a half; a space between words, half a cap.
+fn columnStep(labels: *Labels, style: StyleId, c: Cut) f64 {
+    const cap = if (labels.context(style)) |ctx| ctx.spec.cap_height else 2;
+    return if (c.space != null) 0.5 * cap else 1.5 * cap;
+}
+
+/// The tracks of the placed tiles `tiles` with content in them, as
+/// tracks in the panel frame: each its prototype track's box in the
+/// tile's face, one line (a row) or one character (a column) thick, with
+/// the tile's content. With them, the tile each is for and its index
+/// among its prototype's tracks.
+fn tileRegions(a: Allocator, m: *const Model, labels: *Labels, tiles: []const PlacedTile, out: *std.ArrayList(model.TileRegion), owner: *std.ArrayList(TileId), which: *std.ArrayList(usize)) Allocator.Error!void {
+    for (tiles) |pt| {
+        // A hole shows nothing of its prototype's text.
+        if (pt.spacer or pt.grid == .hole) continue;
+        const proto = m.prototypeOf(pt.id);
+        for (proto.tracks, 0..) |tt, k| {
+            const f = m.tileFlow(pt.id, tt.id) orelse continue;
+            if (f.items.items.len == 0) continue;
+            const box = tt.place.inset.inset(pt.face);
+            if (!(box.width() > 0 and box.height() > 0)) continue;
+            const ctx = labels.context(tt.style);
+            const cap = if (ctx) |c| c.spec.cap_height else 2;
+            const pitch: f64 = if (tt.major == .row) (if (ctx) |c| (c.linePitch() catch 1.4 * cap) else 1.4 * cap) else 1.5 * cap;
+            const along = (if (tt.major == .row) box.width() else box.height()) / pitch;
+            const across = (if (tt.major == .row) box.height() else box.width()) / pitch;
+            try out.append(a, .{
+                .id = f.id,
+                .name = tt.name,
+                .origin = .{ .x = box.x0, .y = box.y1 },
+                .w = if (tt.major == .row) along else across,
+                .h = if (tt.major == .row) across else along,
+                .pitch = pitch,
+                .major = tt.major,
+                .style = tt.style,
+                .alignment = tt.alignment,
+                .items = f.items,
+            });
+            try owner.append(a, pt.id);
+            try which.append(a, k);
+        }
+    }
 }
 
 /// The most segments one track's flow may reach.
@@ -1072,14 +1123,83 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         try label_keepouts.append(a, k);
         if (pa.wrap_tracks) try keepouts.append(a, k);
     }
-    for (m.panels.items[panel].regions.items, 0..) |region, ri| {
+    // Grids' instances: tiles at their points.
+    for (m.panels.items[panel].grids.items, 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
+        const box = m.instanceBox(panel, gi, ii) orelse continue;
+        const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp).?];
+        const t = m.tileConst(inst.tile);
+        const proto = m.proto(t.prototype);
+        const body = proto.body_inset.inset(box);
+        const unit = proto.unitIn(box.height());
+        const shapes: []const art.Shape = switch (st.role) {
+            .legend => &.{},
+            else => blk: {
+                const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| s: {
+                    const got = try labels.sketchShapes(a, ps, t.params.items, box);
+                    if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = inst.tile });
+                    break :s got;
+                } else null;
+                const all = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, box) catch |err| switch (err) {
+                    error.CurveCrossesCut => s: {
+                        try issues.append(a, .{ .kind = .tile_art, .tile = inst.tile });
+                        break :s try art.plainShapes(a, proto.*, unit, box);
+                    },
+                    else => |e| return e,
+                } else try art.plainShapes(a, proto.*, unit, box);
+                if (st.role == .part) break :blk all;
+                // A hole is cut by its prototype's outline: the largest of
+                // its shapes.
+                var best: ?art.Shape = null;
+                var best_area: f64 = -1;
+                for (all) |sh| {
+                    const b = sh.outline.bounds();
+                    const area = b.width() * b.height();
+                    if (area > best_area) {
+                        best_area = area;
+                        best = sh;
+                    }
+                }
+                const one = try a.alloc(art.Shape, if (best != null) 1 else 0);
+                if (best) |b| one[0] = b;
+                break :blk one;
+            },
+        };
+        try tiles.append(a, .{ .id = inst.tile, .region = 0, .row = 0, .pitch_box = box, .body = body, .face = proto.face_inset.inset(body), .shapes = shapes, .grid = st.role });
+        if (st.role != .legend) bounds = bounds.join(box);
+    };
+
+    // Tracks: the panel's own, then (once the tiles are placed) the
+    // tracks of each tile on it, laid out by the same pass. A tile's track
+    // is its own, in its face; what its pass gives other than labels (its
+    // segments, items, flows) is not the panel's, and its issues are the
+    // tile's.
+    var synth: std.ArrayList(model.TileRegion) = .empty;
+    var synth_owner: std.ArrayList(TileId) = .empty;
+    var synth_which: std.ArrayList(usize) = .empty;
+    var junk_tracks: std.ArrayList(PlacedTrack) = .empty;
+    var junk_items: std.ArrayList(PlacedItem) = .empty;
+    var junk_flows: std.ArrayList(PlacedFlow) = .empty;
+    var junk_exits: std.ArrayList(Handoff) = .empty;
+    var junk_wraps: std.ArrayList(PlacedWrap) = .empty;
+    var junk_issues: std.ArrayList(Issue) = .empty;
+    for (0..2) |pass| {
+    const own = pass == 0;
+    if (!own) try tileRegions(a, m, labels, tiles.items, &synth, &synth_owner, &synth_which);
+    const regs: []const model.TileRegion = if (own) m.panels.items[panel].regions.items else synth.items;
+    for (regs, 0..) |region, ri| {
+        const out_tracks = if (own) &tracks else &junk_tracks;
+        const out_placed_items = if (own) &placed_items else &junk_items;
+        const out_flows = if (own) &flows else &junk_flows;
+        const out_exits = if (own) &exits else &junk_exits;
+        const out_wraps = if (own) &wraps else &junk_wraps;
+        const out_issues = if (own) &issues else &junk_issues;
         // A thread is laid out a leg at a time: the run of its tracks on
         // one panel. A track threaded after another here is in its leg.
-        const before = m.threadBefore(panel, ri);
+        const before = if (own) m.threadBefore(panel, ri) else null;
         if (before) |b| if (b.panel == panel) continue;
-        const head = m.threadHead(panel, ri);
+        const head: model.TrackRef = if (own) m.threadHead(panel, ri) else .{ .panel = panel, .region = ri };
         var all_buf: [256]model.TrackRef = undefined;
-        const thread_all = m.thread(head, &all_buf);
+        const thread_all = if (own) m.thread(head, &all_buf) else all_buf[0..0];
         var thread_buf: [256]usize = undefined;
         var leg_n: usize = 0;
         var at_k: usize = 0;
@@ -1097,7 +1217,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         const more: ?model.TrackRef = if (at_k < thread_all.len) thread_all[at_k] else null;
         // The flow is the thread's first track's; where it enters this
         // leg is the start, or what the panel before handed on.
-        const flow_r = &m.panels.items[head.panel].regions.items[head.region];
+        const flow_r = if (own) &m.panels.items[head.panel].regions.items[head.region] else &regs[ri];
         const fri = head.region;
         const fpi = head.panel;
         const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_r.paragraph, .first_line = true, .soft = false } else for (entries) |e| {
@@ -1134,7 +1254,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 .run => |run| run,
                 else => null,
             };
-            if (run == null or run.?.content.len == 0 or !rows or labels.context(run.?.style) == null) {
+            if (run == null or run.?.content.len == 0 or labels.context(run.?.style) == null) {
                 try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
             }
@@ -1149,7 +1269,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             const Bound = struct { cut: engine.Render.Cut, end: @TypeOf(@as(Cut, undefined).end), opp: ?u32 };
             var cut_at: std.ArrayList(Bound) = .empty;
             for (full.opportunities, 0..) |o, k| try cut_at.append(a, .{ .cut = .at(full, @intCast(k)), .end = if (o.hyphen) .hyphen else .space, .opp = @intCast(k) });
-            for (try full.forcedCuts(a)) |c| try cut_at.append(a, .{ .cut = c, .end = .forced, .opp = null });
+            // In a column, text is set a character at a time, upright:
+            // a cut between each two, any of them a place to go on.
+            for (try full.forcedCuts(a)) |c| try cut_at.append(a, .{ .cut = c, .end = if (rows) .forced else .glyph, .opp = null });
             if (cut_at.items.len == 0) {
                 try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
@@ -1200,10 +1322,10 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     break :blk (if (rows) t.w else t.h) * unit;
                 },
                 .run => |run| blk: {
-                    if (cuts.items[index]) |c| break :blk c.size();
+                    if (cuts.items[index]) |c| break :blk if (rows) c.size() else columnStep(labels, run.style, c);
                     if (run.content.len == 0) break :blk 0.5 * region.pitch;
                     _ = labels.context(run.style) orelse {
-                        try issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
+                        try out_issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
                         break :blk 0.5 * region.pitch;
                     };
                     const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content })) orelse break :blk 0.5 * region.pitch;
@@ -1234,7 +1356,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         const seg0: usize = if (entry) |e| e.segment else 0;
         var style_id: ?model.ParaId = if (entry) |e| e.paragraph else null;
         var style: ?model.ParagraphStyle = if (style_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
-        var path: Path = .{ .regions = m.panels.items[panel].regions.items, .thread = thread, .avoid = tracks.items, .more = more != null };
+        var path: Path = .{ .regions = regs, .thread = thread, .avoid = if (own) tracks.items else &.{}, .more = more != null };
         // The pieces this leg places: from where the flow enters, to where
         // it leaves for the next panel (or its end). Waiting, none.
         const leg_lo: usize = if (entry) |e| @min(e.piece, items.len) else items.len;
@@ -1286,7 +1408,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 natural = @max(natural, para);
                 para = 0;
                 if (seg + 1 < max_segments) {
-                    try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0, line);
+                    try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
                     seg += 1;
                     first_in_seg = index + 1;
                     // A line break: the paragraph's next line. A separator:
@@ -1302,7 +1424,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     // Past this leg's last track: the rest goes on into
                     // the thread's next panel.
                     if (path.leaves(seg)) {
-                        try exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
+                        try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
                         leg_hi = index + 1;
                         exited = true;
                         break;
@@ -1353,12 +1475,12 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             // this one holds something already.
             if (((!in_group and start + need > line.hi + tol and in_seg > 0) or forced_break) and seg + 1 < max_segments) {
                 line.soft = true;
-                try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, index, closed.items.len > 0, line);
+                try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
                 seg += 1;
                 first_in_seg = index;
                 path.lead = if (style) |st| st.line_gap else 0;
                 if (path.leaves(seg)) {
-                    try exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
+                    try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
                     leg_hi = index;
                     exited = true;
                     break;
@@ -1389,7 +1511,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             segs_of[index] = seg;
             spans[index] = .{ start, end };
         }
-        if (!exited) try flow.leave(a, &path, &shifts, &tall, &issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
+        if (!exited) try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
 
         // Last, each item where it landed. The pieces of a word that were
         // not wrapped between are set as one.
@@ -1405,19 +1527,19 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
             const start = spans[first][0] + (if (first == index) sh else shifts.items[sg] + extra[first]);
             const end = spans[index][1] + sh;
-            try placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
+            try out_placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
             if (dropped[index] or dup[index]) continue;
             const band = path.boxes.items[sg];
             // A line ending inside a word: at a soft hyphen, a hyphen is
             // drawn; at a cut, the wrap is recorded.
             const line_ends = (index + 1 < leg_hi and segs_of[index + 1] != sg) or (index + 1 == leg_hi and exited);
-            if (line_ends and endsIn(cuts.items, index, .forced)) try wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
+            if (line_ends and endsIn(cuts.items, index, .forced)) try out_wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
             if (line_ends and endsIn(cuts.items, index, .hyphen)) if (try labels.get(.{ .style = item.what.run.style, .anchor = .start, .box = null, .markup = hyphen_markup })) |hr| {
                 const cap = labels.context(item.what.run.style).?.spec.cap_height;
                 const hd = hr.design;
                 try placed_labels.append(a, .{
-                    .tile = null,
-                    .slot = item_of.items[index],
+                    .tile = if (own) null else synth_owner.items[ri],
+                    .slot = if (own) item_of.items[index] else tile_track_slot + synth_which.items[ri],
                     .box = .{ .x0 = band.x0 + end, .x1 = band.x0 + end + (hd.x1 - hd.x0), .y0 = band.y0, .y1 = band.y1 },
                     .origin = .{ .x = band.x0 + end - hd.x0, .y = (band.y0 + band.y1 - cap) / 2 },
                     .style = item.what.run.style,
@@ -1438,12 +1560,12 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     }
                     const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| blk: {
                         const got = try labels.sketchShapes(a, ps, m.tileConst(pid).params.items, pitch_box);
-                        if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg });
+                        if (got == null) try out_issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg });
                         break :blk got;
                     } else null;
                     const shapes = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
                         error.CurveCrossesCut => blk: {
-                            try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = sg });
+                            try out_issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = sg });
                             break :blk try art.plainShapes(a, proto.*, unit, pitch_box);
                         },
                         else => |e| return e,
@@ -1457,7 +1579,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         .face = proto.face_inset.inset(body),
                         .shapes = shapes,
                     });
-                    if (!proto.allows(t.w, t.h)) try issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = sg });
+                    if (!proto.allows(t.w, t.h)) try out_issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = sg });
                     bounds = bounds.join(pitch_box);
                 },
                 .run => |run| {
@@ -1474,13 +1596,17 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         } else piece.* = try c.render.between(a, cuts.items[first].?.from, c.to);
                         break :blk piece;
                     } else renders[index] orelse continue;
-                    if (render.syntax.len > 0) try issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
+                    if (render.syntax.len > 0) try out_issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
                     const d = render.design;
                     const cap = labels.context(run.style).?.spec.cap_height;
                     // On a baseline that centres its capitals across a
                     // row; centred across a column, one line below another.
+                    // In a column, a character's capitals sit a quarter cap
+                    // below where its step starts.
                     const origin: Point = if (rows)
                         .{ .x = band.x0 + start - d.x0, .y = (band.y0 + band.y1 - cap) / 2 }
+                    else if (cuts.items[index] != null)
+                        .{ .x = (band.x0 + band.x1 - (d.x1 - d.x0)) / 2 - d.x0, .y = band.y1 - start - 1.25 * cap }
                     else
                         .{ .x = (band.x0 + band.x1 - (d.x1 - d.x0)) / 2 - d.x0, .y = band.y1 - start - d.y1 };
                     const box: Box = if (rows)
@@ -1488,28 +1614,28 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     else
                         .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                     try placed_labels.append(a, .{
-                        .run = .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] },
-                        .tile = null,
-                        .slot = item_of.items[index],
+                        .run = if (own) .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
+                        .tile = if (own) null else synth_owner.items[ri],
+                        .slot = if (own) item_of.items[index] else tile_track_slot + synth_which.items[ri],
                         .box = box,
                         .origin = origin,
                         .style = run.style,
                         .render = render,
                     });
                     for (render.diagnostics) |dg| if (dg.kind == .missing_glyph) {
-                        try issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = item_of.items[index] });
+                        try out_issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = item_of.items[index] });
                         break;
                     };
-                    if (lacksVariant(render.diagnostics)) try issues.append(a, .{ .kind = .variant_missing, .region = ri, .row = sg, .item = item_of.items[index] });
+                    if (lacksVariant(render.diagnostics)) try out_issues.append(a, .{ .kind = .variant_missing, .region = ri, .row = sg, .item = item_of.items[index] });
                 },
                 .hard_break, .paragraph => {},
             }
         }
         natural = @max(natural, para);
-        try flows.append(a, .{ .region = fri, .flow_panel = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
+        try out_flows.append(a, .{ .region = fri, .flow_panel = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
         for (path.reach.items, 0..) |r_, t| {
             const len_t = segLength(&path, rows, t);
-            if (r_ > len_t + tol) try issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
+            if (r_ > len_t + tol) try out_issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
         }
         // Its segments: past the soft area each is flagged; past the panel,
         // the region is (to be fitted, or the panel resized).
@@ -1519,64 +1645,32 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
             const member = thread[path.member.items[t]];
             const soft = path.regionOf(t).softArea();
-            try tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major, .box = b, .origin = o });
+            try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major, .box = b, .origin = o });
             local += 1;
             all = all.join(b);
             // Along, the path and the segment length are the boundary: a
             // segment is always within it. Across, past the segments the
             // space was drawn out for is flagged.
             const past = if (rows) b.y0 < soft.y0 - tol or b.y1 > soft.y1 + tol else b.x0 < soft.x0 - tol or b.x1 > soft.x1 + tol;
-            if (past) try issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
+            if (past) try out_issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
         }
         // The canvas has no outline to keep to.
         const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
-        if (past > 1e-9 and !m.panels.items[panel].unbounded) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+        if (past > 1e-9 and !m.panels.items[panel].unbounded) try out_issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+    }
+    }
+    // A tile track's problems are its tile's.
+    for (junk_issues.items) |i| {
+        const r = i.region orelse continue;
+        if (r >= synth_owner.items.len) continue;
+        const kind: @TypeOf(i.kind) = switch (i.kind) {
+            .row_overflow, .past_soft_area, .region_outside => .label_overflow,
+            .missing_glyph, .markup_error, .style_error, .variant_missing => i.kind,
+            else => continue,
+        };
+        try issues.append(a, .{ .kind = kind, .tile = synth_owner.items[r], .slot = tile_track_slot + synth_which.items[r], .syntax = i.syntax });
     }
 
-    // Grids' instances: tiles at their points.
-    for (m.panels.items[panel].grids.items, 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
-        const box = m.instanceBox(panel, gi, ii) orelse continue;
-        const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp).?];
-        const t = m.tileConst(inst.tile);
-        const proto = m.proto(t.prototype);
-        const body = proto.body_inset.inset(box);
-        const unit = proto.unitIn(box.height());
-        const shapes: []const art.Shape = switch (st.role) {
-            .legend => &.{},
-            else => blk: {
-                const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| s: {
-                    const got = try labels.sketchShapes(a, ps, t.params.items, box);
-                    if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = inst.tile });
-                    break :s got;
-                } else null;
-                const all = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, box) catch |err| switch (err) {
-                    error.CurveCrossesCut => s: {
-                        try issues.append(a, .{ .kind = .tile_art, .tile = inst.tile });
-                        break :s try art.plainShapes(a, proto.*, unit, box);
-                    },
-                    else => |e| return e,
-                } else try art.plainShapes(a, proto.*, unit, box);
-                if (st.role == .part) break :blk all;
-                // A hole is cut by its prototype's outline: the largest of
-                // its shapes.
-                var best: ?art.Shape = null;
-                var best_area: f64 = -1;
-                for (all) |sh| {
-                    const b = sh.outline.bounds();
-                    const area = b.width() * b.height();
-                    if (area > best_area) {
-                        best_area = area;
-                        best = sh;
-                    }
-                }
-                const one = try a.alloc(art.Shape, if (best != null) 1 else 0);
-                if (best) |b| one[0] = b;
-                break :blk one;
-            },
-        };
-        try tiles.append(a, .{ .id = inst.tile, .region = 0, .row = 0, .pitch_box = box, .body = body, .face = proto.face_inset.inset(body), .shapes = shapes, .grid = st.role });
-        if (st.role != .legend) bounds = bounds.join(box);
-    };
 
     for (tiles.items) |pt| {
         for (0..m.slotCount(pt.id)) |si| {
@@ -3248,4 +3342,50 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
         flagged += 1;
     };
     try testing.expectEqual(2, flagged);
+}
+
+test "a tile's tracks: a row wraps between words in the face; a column sets letters upright, one below another" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 2 });
+    const p = try m.addPanel("board", 100, 60);
+    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 60 }, .w = 3, .h = 2, .pitch = 19.05 });
+    // A tall key: a row track across its top, a column track below it.
+    const key = try m.addPrototype(.{ .name = "key", .unit = 19.05, .face_inset = .all(1), .tracks = &.{
+        .{ .name = "words", .style = style, .place = .{ .inset = .{ .bottom = 30 } } },
+        .{ .name = "down", .style = style, .major = .column, .alignment = .start, .place = .{ .inset = .{ .top = 8 } } },
+    } });
+    const t = try m.addTile(.{ .designator = "K1", .prototype = key, .h = 2 });
+    try m.place(p, r, null, .{ .what = .{ .tile = t } });
+    try m.setTileTrackText(t, m.tileTrackNamed(t, "words").?, "one two three four five");
+    try m.setTileTrackText(t, m.tileTrackNamed(t, "down").?, "ENTER");
+    try testing.expect(m.tileTrackNamed(t, "side") == null);
+
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, p, &labels);
+    defer s.deinit();
+    const tb = s.findTile(t).?.face;
+    var words: usize = 0;
+    var letters: std.ArrayList(PlacedLabel) = .empty;
+    defer letters.deinit(gpa);
+    for (s.labels) |l| {
+        if (l.tile == null or l.tile.? != t) continue;
+        try testing.expect(l.slot >= tile_track_slot);
+        // Every piece is set inside the tile's face.
+        try testing.expect(l.origin.x >= tb.x0 - 1e-6 and l.origin.x <= tb.x1);
+        if (l.slot == tile_track_slot) words += 1 else try letters.append(gpa, l);
+    }
+    // The words wrapped onto more than one line: several pieces.
+    try testing.expect(words > 1);
+    // Five letters, one below another, each about centred across.
+    try testing.expectEqual(@as(usize, 5), letters.items.len);
+    for (letters.items[1..], 0..) |l, k| try testing.expect(l.origin.y < letters.items[k].origin.y);
+    // The panel's own tracks know nothing of the tile's.
+    for (s.tracks) |tr| try testing.expectEqual(@as(usize, 0), tr.region);
+    for (s.issues) |i| try testing.expect(i.kind != .row_overflow);
 }

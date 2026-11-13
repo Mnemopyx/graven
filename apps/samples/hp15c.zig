@@ -1,7 +1,8 @@
 //! A rough HP-15C keypad, to try spacing and sizes on: a plate with a
 //! grid of holes and, above each hole, the gold f legend; and the keys, a
 //! part whose grid follows the plate's, each with its white legend on top
-//! and its blue g legend on the front. ENTER spans two rows.
+//! and its blue g legend on the front, in the keys' tracks. ENTER spans
+//! two rows, its legend down a column track.
 //!
 //! Only the spacing across (11.43 mm on centre) is given. Everything else
 //! (the spacing down, key, hole and legend sizes, the plate) is a first
@@ -110,20 +111,33 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
     const plate = try m.placePanel(.{ .name = "HP-15C plate", .space = m.spaces.items[space].id, .origin = at, .w = plate_w, .h = plate_h, .margins = .all(3), .default_margins = false });
     const keys = try m.placePanel(.{ .name = "HP-15C keys", .space = m.spaces.items[space].id, .origin = .{ .x = at.x + plate_w + 15, .y = at.y }, .w = plate_w, .h = plate_h, .margins = .all(3), .default_margins = false });
 
-    // A key: its top, the white legend in its upper part and the blue g on
-    // its front, a band along the bottom.
+    // A key: its top, a row track for the white legend in its upper part
+    // and one for the blue g on its front, a band along the bottom. Its
+    // face is 8.2 x 7.2 mm.
     const key = try m.addPrototype(.{
         .name = "15C key",
         .face_inset = .all(0.4),
-        .slots = &.{
-            .{ .name = "top", .style = styles.key, .place = .{ .inset = .{ .bottom = 2.2 }, .h = .centre, .v = .centre } },
-            .{ .name = "g", .style = styles.g, .place = .{ .inset = .{ .top = 5.0 }, .h = .centre, .v = .centre } },
+        .tracks = &.{
+            .{ .name = "top", .style = styles.key, .alignment = .centre, .place = .{ .inset = .{ .top = 0.8, .bottom = 3.0 } } },
+            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = 4.8 } } },
         },
     });
-    // The gold legend above a hole: only its slot.
+    // ENTER: its legend in a column track down the key, a character at a
+    // time; the g legend on the front as on the others. Its face is
+    // 8.2 x (key_h + spacing_down - 0.8) mm.
+    const enter_face_h = key_h + spacing_down - 0.8;
+    const enter_proto = try m.addPrototype(.{
+        .name = "15C ENTER key",
+        .face_inset = .all(0.4),
+        .tracks = &.{
+            .{ .name = "top", .style = styles.key, .major = .column, .alignment = .centre, .place = .{ .inset = .{ .top = 1.0, .bottom = 3.0, .left = 2.0, .right = 2.0 } } },
+            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = enter_face_h - 2.4 } } },
+        },
+    });
+    // The gold legend above a hole: only its track.
     const gold = try m.addPrototype(.{
         .name = "15C gold legend",
-        .slots = &.{.{ .name = "f", .style = styles.f, .place = .{ .h = .centre, .v = .centre } }},
+        .tracks = &.{.{ .name = "f", .style = styles.f, .alignment = .centre }},
     });
 
     const shape: model.GridShape = .{ .cols = 10, .rows = 4, .pitch_x = spacing_across, .pitch_y = spacing_down };
@@ -141,11 +155,12 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
         const span: u32 = if (c == enter_col and r == enter_row) 2 else 1;
         _ = try m.placeInstance(plate, pg, holes, col, ro, 1, span);
         const t = try m.placeInstance(keys, kg, caps, col, ro, 1, span);
-        if (k.top.len > 0) try m.setContent(t, "top", k.top);
-        if (k.g.len > 0) try m.setContent(t, "g", k.g);
+        if (span > 1) try m.setTilePrototype(t, enter_proto);
+        if (k.top.len > 0) try m.setTileTrackText(t, m.tileTrackNamed(t, "top").?, k.top);
+        if (k.g.len > 0) try m.setTileTrackText(t, m.tileTrackNamed(t, "g").?, k.g);
         if (k.f.len > 0) {
             const l = try m.placeInstance(plate, pg, golds, col, ro, 1, 1);
-            try m.setContent(l, "f", k.f);
+            try m.setTileTrackText(l, m.tileTrackNamed(l, "f").?, k.f);
         }
     };
     return .{ .plate = plate, .keys = keys };
