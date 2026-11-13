@@ -437,7 +437,7 @@ pub fn contains(o: geom.Outline, p: Point) bool {
         const steps: usize = switch (s) {
             .line => 1,
             .quad => 8,
-            .cubic => 16,
+            .cubic, .conic => 16,
         };
         var prev = s.start();
         for (1..steps + 1) |i| {
@@ -457,18 +457,7 @@ fn cross(a: Point, b: Point, p: Point) f64 {
 }
 
 fn pointAt(s: Segment, t: f64) Point {
-    const u = 1 - t;
-    return switch (s) {
-        .line => |q| .{ .x = u * q[0].x + t * q[1].x, .y = u * q[0].y + t * q[1].y },
-        .quad => |q| .{
-            .x = u * u * q[0].x + 2 * u * t * q[1].x + t * t * q[2].x,
-            .y = u * u * q[0].y + 2 * u * t * q[1].y + t * t * q[2].y,
-        },
-        .cubic => |q| .{
-            .x = u * u * u * q[0].x + 3 * u * u * t * q[1].x + 3 * u * t * t * q[2].x + t * t * t * q[3].x,
-            .y = u * u * u * q[0].y + 3 * u * u * t * q[1].y + 3 * u * t * t * q[2].y + t * t * t * q[3].y,
-        },
-    };
+    return s.at(t);
 }
 
 /// A copy of `shapes` in `a`, moved by `d`.

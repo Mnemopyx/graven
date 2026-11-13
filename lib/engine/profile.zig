@@ -57,6 +57,15 @@ pub const Profile = struct {
                         prev = pt;
                     }
                 },
+                .conic => |q| {
+                    const steps = pieces(&q.p, tol) * 2;
+                    var prev = q.p[0];
+                    for (1..steps + 1) |k| {
+                        const pt = q.at(@as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(steps)));
+                        p.addLine(prev, pt, band);
+                        prev = pt;
+                    }
+                },
             };
         }
         return p;

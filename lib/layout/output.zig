@@ -40,6 +40,7 @@ pub fn svg(gpa: std.mem.Allocator, outlines: []const geom.Outline, box: geom.Box
                 .line => |p| try w.print("L{d} {d}", .{ p[1].x, p[1].y }),
                 .quad => |p| try w.print("Q{d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y }),
                 .cubic => |p| try w.print("C{d} {d} {d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y, p[3].x, p[3].y }),
+                .conic => |k| try conicData(w, k),
             };
             try w.writeAll("Z");
         }
@@ -142,6 +143,38 @@ fn colour(buf: []u8, c: art.Color) ![]const u8 {
     return std.fmt.bufPrint(buf, "rgba({d},{d},{d},{d:.3})", .{ c.r, c.g, c.b, @as(f64, @floatFromInt(c.a)) / 255 });
 }
 
+/// A conic as SVG path data, exactly: an elliptical arc (A) for one of
+/// weight below 1, a quadratic (Q) for weight 1. The arc's radii and
+/// rotation come from its conjugate semi-diameters (the singular values of
+/// the map from the unit circle); it is never more than half a turn, and
+/// its sweep follows the way it turns in the path's own (y-up) frame.
+fn conicData(w: *std.Io.Writer, k: geom.Conic) !void {
+    const p = k.p;
+    if (@abs(k.w - 1) < 1e-12 or k.w >= 1 or k.w <= 0) {
+        // Not an ellipse: a parabola is a quadratic; others (never made by
+        // Graven) are written as their parabola, flagged by nothing.
+        return w.print("Q{d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y });
+    }
+    const e = k.ellipse();
+    // M = [a b] (columns); M = U S V^T, with U a rotation by phi.
+    const m00 = e.a.x;
+    const m01 = e.b.x;
+    const m10 = e.a.y;
+    const m11 = e.b.y;
+    const E = (m00 + m11) / 2;
+    const F = (m00 - m11) / 2;
+    const G = (m10 + m01) / 2;
+    const H = (m10 - m01) / 2;
+    const Q = @sqrt(E * E + H * H);
+    const R = @sqrt(F * F + G * G);
+    const rx = Q + R;
+    const ry = @abs(Q - R);
+    const phi = (std.math.atan2(H, E) + std.math.atan2(G, F)) / 2;
+    const turn = (p[1].x - p[0].x) * (p[2].y - p[1].y) - (p[1].y - p[0].y) * (p[2].x - p[1].x);
+    const sweep: u8 = if (turn > 0) 1 else 0;
+    try w.print("A{d} {d} {d} 0 {d} {d} {d}", .{ rx, ry, phi * 180 / std.math.pi, sweep, p[2].x, p[2].y });
+}
+
 fn path(w: *std.Io.Writer, o: geom.Outline) !void {
     if (o.contours.len == 0) return;
     try w.writeAll("<path d=\"");
@@ -157,6 +190,7 @@ fn pathData(w: *std.Io.Writer, o: geom.Outline) !void {
             .line => |p| try w.print("L{d} {d}", .{ p[1].x, p[1].y }),
             .quad => |p| try w.print("Q{d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y }),
             .cubic => |p| try w.print("C{d} {d} {d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y, p[3].x, p[3].y }),
+            .conic => |k| try conicData(w, k),
         };
         try w.writeAll("Z");
     }
@@ -172,4 +206,35 @@ test "svg writes native quadratics and closes every contour" {
     const text = try svg(std.testing.allocator, &outlines, (geom.Outline{ .contours = &contours }).bounds(), .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "M0 0L6 0Q3 6 0 0Z") != null);
+}
+
+test "svg writes arcs exactly, as elliptical arcs" {
+    const testing = std.testing;
+    var buf: [4]geom.Segment = undefined;
+    const circle = geom.arc(.{ .x = 0, .y = 0 }, 2, 0, 2 * std.math.pi, &buf);
+    const o: geom.Outline = .{ .contours = &.{.{ .segments = circle }} };
+    const text = try svg(testing.allocator, &.{o}, o.bounds(), .{});
+    defer testing.allocator.free(text);
+    // Four quarter arcs of radius 2, turning counter-clockwise.
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "A"));
+    var arcs = std.mem.splitScalar(u8, text, 'A');
+    _ = arcs.next();
+    while (arcs.next()) |rest| {
+        var f = std.mem.tokenizeAny(u8, rest, " ");
+        try testing.expectApproxEqAbs(@as(f64, 2), try std.fmt.parseFloat(f64, f.next().?), 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 2), try std.fmt.parseFloat(f64, f.next().?), 1e-9);
+        _ = f.next();
+        try testing.expectEqualStrings("0", f.next().?);
+        try testing.expectEqualStrings("1", f.next().?);
+    }
+    // Stretched to an ellipse 4 by 1 and turned: the radii follow.
+    const m: geom.Affine = .{ .a = 2 * @cos(0.3), .b = 2 * @sin(0.3), .c = -0.5 * @sin(0.3), .d = 0.5 * @cos(0.3) };
+    var data: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer data.deinit();
+    try conicData(&data.writer, circle[0].transformed(m).conic);
+    var it = std.mem.tokenizeAny(u8, data.written()[1..], " ");
+    const rx = try std.fmt.parseFloat(f64, it.next().?);
+    const ry = try std.fmt.parseFloat(f64, it.next().?);
+    try testing.expectApproxEqAbs(@as(f64, 4), rx, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1), ry, 1e-9);
 }

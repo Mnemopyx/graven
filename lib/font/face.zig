@@ -157,11 +157,10 @@ const Builder = struct {
     failed: bool = false,
 
     fn push(b: *Builder, s: Segment) void {
-        const degenerate = switch (s) {
-            inline else => |p| for (p[1..]) |q| {
-                if (!q.eql(p[0])) break false;
-            } else true,
-        };
+        const pts = s.points();
+        const degenerate = for (pts[1..]) |q| {
+            if (!q.eql(pts[0])) break false;
+        } else true;
         if (degenerate) return;
         b.segments.append(b.gpa, s) catch {
             b.failed = true;

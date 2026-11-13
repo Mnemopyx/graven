@@ -478,6 +478,9 @@ fn sampleLines(a: Allocator, i: usize, tol: f64) ?struct { glyphs: []const []con
 fn flatten(a: Allocator, pts: *std.ArrayList(geom.Point), s: geom.Segment, tol: f64) !void {
     switch (s) {
         .line => |p| try pts.append(a, p[1]),
+        .conic => |c| {
+            for (1..33) |k| try pts.append(a, c.at(@as(f64, @floatFromInt(k)) / 32));
+        },
         inline .quad, .cubic => |p| {
             var len: f64 = 0;
             for (1..p.len) |k| len += @sqrt((p[k].x - p[k - 1].x) * (p[k].x - p[k - 1].x) + (p[k].y - p[k - 1].y) * (p[k].y - p[k - 1].y));

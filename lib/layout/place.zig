@@ -852,18 +852,7 @@ fn endsIn(cuts: []const ?Cut, index: usize, end: @TypeOf(@as(Cut, undefined).end
 
 /// The point at `t` on segment `s`.
 fn pointOn(s: geom.Segment, t: f64) Point {
-    const u = 1 - t;
-    return switch (s) {
-        .line => |p| .{ .x = u * p[0].x + t * p[1].x, .y = u * p[0].y + t * p[1].y },
-        .quad => |p| .{
-            .x = u * u * p[0].x + 2 * u * t * p[1].x + t * t * p[2].x,
-            .y = u * u * p[0].y + 2 * u * t * p[1].y + t * t * p[2].y,
-        },
-        .cubic => |p| .{
-            .x = u * u * u * p[0].x + 3 * u * u * t * p[1].x + 3 * u * t * t * p[2].x + t * t * t * p[3].x,
-            .y = u * u * u * p[0].y + 3 * u * u * t * p[1].y + 3 * u * t * t * p[2].y + t * t * t * p[3].y,
-        },
-    };
+    return s.at(t);
 }
 
 /// The most segments one track's flow may reach.

@@ -82,6 +82,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Parametric sketches: geometry held by constraints, solved together.
+    const sketch = b.addModule("graven_sketch", .{
+        .root_source_file = b.path("lib/sketch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "graven_geom", .module = geom }},
+    });
+
     // Configuration: TOML files, shared and local.
     const config = b.addModule("graven_config", .{
         .root_source_file = b.path("lib/config/root.zig"),
@@ -178,7 +186,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext, sketch }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).

@@ -269,18 +269,7 @@ fn crossings(buf: []f64, o: geom.Outline, at: f64, vertical: bool) []f64 {
 }
 
 fn pointAt(s: geom.Segment, t: f64) geom.Point {
-    const u = 1 - t;
-    return switch (s) {
-        .line => |p| .{ .x = u * p[0].x + t * p[1].x, .y = u * p[0].y + t * p[1].y },
-        .quad => |p| .{
-            .x = u * u * p[0].x + 2 * u * t * p[1].x + t * t * p[2].x,
-            .y = u * u * p[0].y + 2 * u * t * p[1].y + t * t * p[2].y,
-        },
-        .cubic => |p| .{
-            .x = u * u * u * p[0].x + 3 * u * u * t * p[1].x + 3 * u * t * t * p[2].x + t * t * t * p[3].x,
-            .y = u * u * u * p[0].y + 3 * u * u * t * p[1].y + 3 * u * t * t * p[2].y + t * t * t * p[3].y,
-        },
-    };
+    return s.at(t);
 }
 
 /// The first ink span along a line: its length.

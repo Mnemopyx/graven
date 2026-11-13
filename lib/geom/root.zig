@@ -96,25 +96,129 @@ pub const Box = struct {
 
 /// One segment of a contour. Quadratics stay native; nothing is raised to a
 /// cubic or flattened.
+/// A rational quadratic Bézier: control points `p` with the middle one
+/// weighted `w` (the ends weigh 1). With 0 < w < 1 it is an arc of an
+/// ellipse, exactly; when its control polygon is isosceles it is an arc of
+/// a circle, with w the cosine of half the angle it turns through (see
+/// `arc`). An affine transform maps it to another conic of the same weight,
+/// so arcs stay exact through any placement.
+pub const Conic = struct {
+    p: [3]Point,
+    w: f64,
+
+    pub fn at(c: Conic, t: f64) Point {
+        const u = 1 - t;
+        const b0 = u * u;
+        const b1 = 2 * c.w * u * t;
+        const b2 = t * t;
+        const d = b0 + b1 + b2;
+        return .{
+            .x = (b0 * c.p[0].x + b1 * c.p[1].x + b2 * c.p[2].x) / d,
+            .y = (b0 * c.p[0].y + b1 * c.p[1].y + b2 * c.p[2].y) / d,
+        };
+    }
+
+    /// The area between the curve and its chord, as a share of the
+    /// triangle of its control points: 2/3 for a parabola (w = 1). Exact,
+    /// from the circular arc of the same weight (areas keep their ratios
+    /// under affine maps).
+    pub fn segmentRatio(w: f64) f64 {
+        if (@abs(1 - w) < 1e-12) return 2.0 / 3.0;
+        if (w < 1) {
+            const s = @sqrt(1 - w * w);
+            if (s < 1e-3) return w * (2.0 / 3.0 + s * s / 5);
+            return w * (std.math.acos(w) - w * s) / (s * s * s);
+        }
+        const s = @sqrt(w * w - 1);
+        if (s < 1e-3) return w * (2.0 / 3.0 - s * s / 5);
+        return w * (w * s - std.math.acosh(w)) / (s * s * s);
+    }
+
+    /// Its ellipse (0 < w < 1): the centre and two conjugate semi-diameters,
+    /// `a` to the curve's midpoint and `b` parallel to its chord, so the
+    /// curve is centre + a cos φ + b sin φ for φ from -θ to θ, where
+    /// cos θ = w (θ is `half`).
+    pub fn ellipse(c: Conic) struct { centre: Point, a: Point, b: Point, half: f64 } {
+        const m: Point = .{ .x = (c.p[0].x + c.p[2].x) / 2, .y = (c.p[0].y + c.p[2].y) / 2 };
+        const k = c.w * c.w / (1 - c.w * c.w);
+        const centre: Point = .{ .x = m.x + (m.x - c.p[1].x) * k, .y = m.y + (m.y - c.p[1].y) * k };
+        const mid = c.at(0.5);
+        const s = @sqrt(1 - c.w * c.w);
+        return .{
+            .centre = centre,
+            .a = .{ .x = mid.x - centre.x, .y = mid.y - centre.y },
+            .b = .{ .x = (c.p[2].x - c.p[0].x) / (2 * s), .y = (c.p[2].y - c.p[0].y) / (2 * s) },
+            .half = std.math.acos(c.w),
+        };
+    }
+};
+
+/// An arc of the circle about `centre` of radius `r`, from angle `from`
+/// turning through `sweep` (radians, counter-clockwise when positive), as
+/// exact conics, each turning through at most a quarter turn: up to four,
+/// written to `out`. A full turn is four.
+pub fn arc(centre: Point, r: f64, from: f64, sweep: f64, out: *[4]Segment) []Segment {
+    const turn = @min(@abs(sweep), 2 * std.math.pi);
+    const n: usize = @max(1, @min(4, @as(usize, @intFromFloat(@ceil(turn / (std.math.pi / 2.0) - 1e-9)))));
+    const step = std.math.sign(sweep) * turn / @as(f64, @floatFromInt(n));
+    const half = step / 2;
+    const w = @cos(half);
+    for (0..n) |k| {
+        const a0 = from + step * @as(f64, @floatFromInt(k));
+        const a1 = a0 + step;
+        const am = a0 + half;
+        const p0: Point = .{ .x = centre.x + r * @cos(a0), .y = centre.y + r * @sin(a0) };
+        const p2: Point = .{ .x = centre.x + r * @cos(a1), .y = centre.y + r * @sin(a1) };
+        // The tangents' meeting point, out along the middle direction.
+        const d = r / w;
+        const p1: Point = .{ .x = centre.x + d * @cos(am), .y = centre.y + d * @sin(am) };
+        out[k] = .{ .conic = .{ .p = .{ p0, p1, p2 }, .w = w } };
+    }
+    return out[0..n];
+}
+
 pub const Segment = union(enum) {
     line: [2]Point,
     quad: [3]Point,
     cubic: [4]Point,
+    conic: Conic,
 
     pub fn start(s: Segment) Point {
         return switch (s) {
+            .conic => |c| c.p[0],
             inline else => |p| p[0],
         };
     }
 
     pub fn end(s: Segment) Point {
         return switch (s) {
+            .conic => |c| c.p[2],
             inline else => |p| p[p.len - 1],
+        };
+    }
+
+    /// The point at parameter `t` (0 at its start, 1 at its end).
+    pub fn at(s: Segment, t: f64) Point {
+        const u = 1 - t;
+        return switch (s) {
+            .line => |p| .{ .x = u * p[0].x + t * p[1].x, .y = u * p[0].y + t * p[1].y },
+            .quad => |p| quadAt(p, t),
+            .cubic => |p| cubicAt(p, t),
+            .conic => |c| c.at(t),
+        };
+    }
+
+    /// Its control points (for a conic, without the weight).
+    pub fn points(s: *const Segment) []const Point {
+        return switch (s.*) {
+            .conic => |*c| &c.p,
+            inline else => |*p| p,
         };
     }
 
     pub fn transformed(s: Segment, m: Affine) Segment {
         return switch (s) {
+            .conic => |c| .{ .conic = .{ .p = .{ m.apply(c.p[0]), m.apply(c.p[1]), m.apply(c.p[2]) }, .w = c.w } },
             inline else => |p, tag| blk: {
                 var q = p;
                 for (&q) |*v| v.* = m.apply(v.*);
@@ -131,6 +235,13 @@ pub const Segment = union(enum) {
             .quad => |p| (p[0].cross(p[1]) + p[1].cross(p[2])) / 3 + p[0].cross(p[2]) / 6,
             .cubic => |p| (6 * p[0].cross(p[1]) + 3 * p[0].cross(p[2]) + p[0].cross(p[3]) +
                 3 * p[1].cross(p[2]) + 3 * p[1].cross(p[3]) + 6 * p[2].cross(p[3])) / 20,
+            // The chord's share, and the area between curve and chord: a
+            // fixed share of the control triangle's (signed).
+            .conic => |c| blk: {
+                const p = c.p;
+                const tri = (p[0].cross(p[1]) + p[1].cross(p[2]) + p[2].cross(p[0])) / 2;
+                break :blk p[0].cross(p[2]) / 2 + Conic.segmentRatio(c.w) * tri;
+            },
         };
     }
 
@@ -179,6 +290,43 @@ pub const Segment = union(enum) {
                     }
                     for (roots[0..n]) |t| {
                         if (t > 0 and t < 1) b = b.addPoint(cubicAt(p, t));
+                    }
+                }
+            },
+            .conic => |c| {
+                inline for (.{ "x", "y" }) |axis| {
+                    // x(t) = N(t) / D(t); its extremes are where
+                    // N'D - ND' = 0, a quadratic (the cubic terms cancel).
+                    const a = @field(c.p[0], axis);
+                    const m = @field(c.p[1], axis);
+                    const e = @field(c.p[2], axis);
+                    const n0 = a;
+                    const n1 = -2 * a + 2 * c.w * m;
+                    const n2 = a - 2 * c.w * m + e;
+                    const d0: f64 = 1;
+                    const d1 = -2 + 2 * c.w;
+                    const d2 = 2 - 2 * c.w;
+                    const qa = n2 * d1 - n1 * d2;
+                    const qb = 2 * (n2 * d0 - n0 * d2);
+                    const qc = n1 * d0 - n0 * d1;
+                    var roots: [2]f64 = undefined;
+                    var n: usize = 0;
+                    if (@abs(qa) < 1e-15 * (@abs(qb) + @abs(qc) + 1e-300)) {
+                        if (qb != 0) {
+                            roots[0] = -qc / qb;
+                            n = 1;
+                        }
+                    } else {
+                        const disc = qb * qb - 4 * qa * qc;
+                        if (disc >= 0) {
+                            const rt = @sqrt(disc);
+                            roots[0] = (-qb + rt) / (2 * qa);
+                            roots[1] = (-qb - rt) / (2 * qa);
+                            n = 2;
+                        }
+                    }
+                    for (roots[0..n]) |t| {
+                        if (t > 0 and t < 1) b = b.addPoint(c.at(t));
                     }
                 }
             },
@@ -302,6 +450,43 @@ test "curve bounds use the curve's extremes, not its control points" {
 
     const c: Segment = .{ .cubic = .{ pt(650, 0), pt(450, 400), pt(250, 400), pt(50, 0) } };
     try testing.expectApproxEqAbs(@as(f64, 300), c.bounds().y1, 1e-9);
+}
+
+test "arcs are exact conics: a circle's area and bounds, kept through a transform" {
+    var buf: [4]Segment = undefined;
+    const circle = arc(pt(3, -2), 5, 0, 2 * std.math.pi, &buf);
+    try testing.expectEqual(@as(usize, 4), circle.len);
+    const c: Contour = .{ .segments = circle };
+    try testing.expect(c.isClosed() or @abs(circle[3].end().x - circle[0].start().x) < 1e-12);
+    try testing.expectApproxEqAbs(std.math.pi * 25, c.signedArea(), 1e-9);
+    const b = c.bounds();
+    try testing.expectApproxEqAbs(@as(f64, -2), b.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 8), b.x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3), b.y1, 1e-9);
+    // Every point on it is on the circle, not near it.
+    for (circle) |s| for (0..11) |k| {
+        const q = s.at(@as(f64, @floatFromInt(k)) / 10);
+        try testing.expectApproxEqAbs(@as(f64, 5), @sqrt((q.x - 3) * (q.x - 3) + (q.y + 2) * (q.y + 2)), 1e-12);
+    };
+    // Stretched to an ellipse, its area scales with the map.
+    const m: Affine = .{ .a = 2, .d = 0.5, .b = 0, .c = 0 };
+    var area: f64 = 0;
+    for (circle) |s| area += s.transformed(m).areaTerm();
+    try testing.expectApproxEqAbs(std.math.pi * 25, area, 1e-9);
+    // A half circle turned clockwise: two pieces, negative area.
+    var half_buf: [4]Segment = undefined;
+    const half = arc(pt(0, 0), 1, std.math.pi, -std.math.pi, &half_buf);
+    try testing.expectEqual(@as(usize, 2), half.len);
+    var ha: f64 = 0;
+    for (half) |s| ha += s.areaTerm();
+    ha += (Segment{ .line = .{ half[1].end(), half[0].start() } }).areaTerm();
+    try testing.expectApproxEqAbs(-std.math.pi / 2.0, ha, 1e-12);
+    // The ellipse of a quarter: its centre and radii.
+    const e = circle[0].conic.ellipse();
+    try testing.expectApproxEqAbs(@as(f64, 3), e.centre.x, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -2), e.centre.y, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 5), @sqrt(e.a.x * e.a.x + e.a.y * e.a.y), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 5), @sqrt(e.b.x * e.b.x + e.b.y * e.b.y), 1e-12);
 }
 
 test "affine composition applies left to right" {

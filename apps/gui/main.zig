@@ -346,6 +346,15 @@ fn strokeLoop(area: dvui.Rect.Physical, line: []const geom.Point, at: geom.Point
 fn flatten(a: std.mem.Allocator, pts: *std.ArrayList(geom.Point), s: geom.Segment, tol: f64) !void {
     switch (s) {
         .line => |p| try pts.append(a, p[1]),
+        .conic => |c| {
+            // Sampled by angle: enough pieces that each chord stays within
+            // `tol` of the curve.
+            const e = c.ellipse();
+            const r = @max(@sqrt(e.a.x * e.a.x + e.a.y * e.a.y), @sqrt(e.b.x * e.b.x + e.b.y * e.b.y));
+            const step = 2 * std.math.acos(@max(0, 1 - tol / @max(r, 1e-12)));
+            const n: usize = @max(2, @min(256, @as(usize, @intFromFloat(@ceil(2 * e.half / @max(step, 1e-6))))));
+            for (1..n + 1) |i| try pts.append(a, c.at(@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n))));
+        },
         .quad => |p| {
             const dev = 0.25 * @sqrt(sq(p[0].x - 2 * p[1].x + p[2].x) + sq(p[0].y - 2 * p[1].y + p[2].y));
             const n: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(dev / tol)))));
