@@ -130,7 +130,9 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
         .name = "15C ENTER key",
         .face_inset = .all(0.4),
         .tracks = &.{
-            .{ .name = "top", .style = styles.key, .major = .column, .alignment = .centre, .place = .{ .inset = .{ .top = 1.0, .bottom = 3.0, .left = 2.0, .right = 2.0 } } },
+            // One column wide (a cap height and a half at the 1.9 mm caps
+            // the app gives it), so the letters centre on the key.
+            .{ .name = "top", .style = styles.key, .major = .column, .alignment = .centre, .place = .{ .inset = .{ .top = 1.0, .bottom = 3.0, .left = 2.675, .right = 2.675 } } },
             .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = enter_face_h - 2.4 } } },
         },
     });

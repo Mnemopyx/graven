@@ -2269,12 +2269,16 @@ fn bottomContent() !void {
 /// What the expression line edits.
 const ExprTarget = union(enum) {
     tile_slot: struct { tile: TileId, slot: usize },
+    /// A tile's content in one of its prototype's tracks, as text (a
+    /// newline for each hard break).
+    tile_track: struct { tile: TileId, track: layout.model.ObjectId },
     /// A run of markup (text, an equation) in a track's flow.
     run: struct { panel: usize, region: usize, item: usize },
 
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
             .tile_slot => |ts| state.model.slot(ts.tile, ts.slot).content,
+            .tile_track => |tt| state.model.tileTrackText(dvui.currentWindow().arena(), tt.tile, tt.track) catch "",
             .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.content,
         };
     }
@@ -2282,6 +2286,7 @@ const ExprTarget = union(enum) {
     fn store(t: ExprTarget, text: []const u8) !void {
         switch (t) {
             .tile_slot => |ts| try actM(mergeKey(.{ "slot", ts.tile, ts.slot }), .setContent, .{ ts.tile, state.model.slot(ts.tile, ts.slot).name, text }),
+            .tile_track => |tt| try actM(mergeKey(.{ "tile track", tt.tile, tt.track }), .setTileTrackText, .{ tt.tile, tt.track, text }),
             .run => |r| try actM(mergeKey(.{ "run", r.panel, r.region, r.item }), .setRunContent, .{ r.panel, r.region, r.item, text }),
         }
     }
@@ -2296,10 +2301,21 @@ const ExprTarget = union(enum) {
 fn exprTarget() ?ExprTarget {
     if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
     return switch (state.context) {
-        .tile => |id| if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
+        .tile => |id| if (exprTrackOf(id)) |tr| .{ .tile_track = .{ .tile = id, .track = tr } } else if (state.model.slotCount(id) > 0) .{ .tile_slot = .{ .tile = id, .slot = 0 } } else null,
         .region => if (runAtCursor()) |r| .{ .run = .{ .panel = r.panel, .region = r.region, .item = r.item } } else null,
         else => null,
     };
+}
+
+/// The tile track the expression line edits, when the context is a tile
+/// whose prototype has it; else its first track.
+var expr_track: layout.model.ObjectId = .none;
+
+fn exprTrackOf(id: TileId) ?layout.model.ObjectId {
+    const tracks = state.model.prototypeOf(id).tracks;
+    if (tracks.len == 0) return null;
+    for (tracks) |tt| if (tt.id == expr_track) return tt.id;
+    return tracks[0].id;
 }
 
 /// The line's text before this frame's edits, for the pairing rules.
@@ -2529,6 +2545,7 @@ fn firstSyntaxProblem(target: ExprTarget) ?engine.markup.Diagnostic {
         if (i.kind != .markup_error) continue;
         const hit = switch (target) {
             .tile_slot => |ts| i.tile == ts.tile and i.slot == ts.slot,
+            .tile_track => |tt| i.tile == tt.tile and i.slot != null and i.slot.? >= layout.place.tile_track_slot,
             .run => |r| r.panel == pi and i.region == r.region and i.item == r.item,
         };
         if (hit) return i.syntax;
@@ -3910,6 +3927,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         // A size its prototype does not allow: the body outlined in warning.
         if (flagged.size and !in_context) body.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = colors.select } });
+        if (in_context and state.context == .tile) drawTileTracks(area, pi, t);
     }
     // Line art, over the tracks; the selected piece outlined.
     for (placed.art) |pa| {
@@ -4069,6 +4087,9 @@ fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
     const c = expr_caret orelse return null;
     const mine = switch (c.target) {
         .tile_slot => |t| l.tile != null and std.meta.eql(l.tile.?, t.tile) and l.slot == t.slot,
+        // A tile track's text is set piece by piece with no offsets kept:
+        // no caret in it yet.
+        .tile_track => false,
         .run => |t| t.panel == pi and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
     };
     if (!mine) return null;
@@ -6843,6 +6864,25 @@ fn tileProperties(id: TileId) !void {
         }
     }
 
+    for (state.model.prototypeOf(id).tracks, 0..) |tt, k| {
+        const n = 3000 + k * 10;
+        heading("Track {s}", .{tt.name}, n);
+        const arena = dvui.currentWindow().arena();
+        const text = state.model.tileTrackText(arena, id, tt.id) catch "";
+        var te = dvui.textEntry(@src(), .{ .text_initial = text, .multiline = true }, .{
+            .expand = .horizontal,
+            .min_size_content = .{ .h = 40 },
+            .id_extra = @as(usize, @backingInt(id)) * 64 + k,
+        });
+        if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), text)) te.textSet(text, false);
+        const changed = te.text_changed;
+        const now = te.textGet();
+        const focused = te.data().id == dvui.focusedWidgetId();
+        te.deinit();
+        if (focused) expr_track = tt.id;
+        if (changed and !std.mem.eql(u8, now, text)) try actM(mergeKey(.{ "tile track", id, tt.id }), .setTileTrackText, .{ id, tt.id, now });
+        propText("Runs", "{s}, {s}", .{ if (tt.major == .row) "in rows" else "down columns, a character at a time", @tagName(tt.alignment) }, n + 1);
+    }
     for (0..state.model.slotCount(id)) |si| {
         const slot = state.model.slot(id, si);
         const n = 100 + si * 10;
@@ -6977,6 +7017,70 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     }
     if (proto_changed) {
         try act(.setPrototype, .{id, next_proto});
+        return;
+    }
+
+    for (p.tracks, 0..) |tt, k| {
+        const n = 800 + k * 20;
+        heading("Track {s}", .{tt.name}, n);
+        var next = tt;
+        var changed = false;
+        if (textProp("Name", tt.name, n * 8 + 7)) |name| {
+            next.name = name;
+            changed = true;
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 1 });
+            defer row.deinit();
+            propName("Runs");
+            const names = [_][]const u8{ "in rows", "down columns" };
+            var choice: usize = if (tt.major == .row) 0 else 1;
+            if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 1 })) {
+                next.major = if (choice == 0) .row else .column;
+                changed = true;
+            }
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 2 });
+            defer row.deinit();
+            propName("Set from");
+            const names = [_][]const u8{ "start", "centre", "end" };
+            var choice: usize = @intFromEnum(tt.alignment);
+            if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 2 })) {
+                next.alignment = @enumFromInt(choice);
+                changed = true;
+            }
+        }
+        if (styleChoice(tt.style, null, n + 3)) |c| {
+            next.style = c.?;
+            changed = true;
+        }
+        inline for (.{ .{ "Inset left, mm", "left" }, .{ "Inset right, mm", "right" }, .{ "Inset top, mm", "top" }, .{ "Inset bottom, mm", "bottom" } }, 0..) |side, i| {
+            if (numberProp(side[0], @field(tt.place.inset, side[1]), 0, 1000, n + 4 + i)) |v| {
+                @field(next.place.inset, side[1]) = v;
+                changed = true;
+            }
+        }
+        if (changed) actM(mergeKey(.{ "proto track", id, tt.id }), .setPrototypeTrack, .{ id, tt.id, next }) catch {
+            state.status = "That track cannot be set so. ";
+        };
+        if (dvui.button(@src(), "Remove track", .{}, .{ .id_extra = n + 9, .gravity_x = 1 })) {
+            try act(.removePrototypeTrack, .{ id, tt.id });
+            return;
+        }
+    }
+    if (dvui.button(@src(), "Add track", .{}, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } })) {
+        var name_buf: [32]u8 = undefined;
+        var k: usize = p.tracks.len + 1;
+        const name = while (true) : (k += 1) {
+            const candidate = std.fmt.bufPrint(&name_buf, "track {d}", .{k}) catch "track";
+            const taken = for (p.tracks) |tt| {
+                if (std.mem.eql(u8, tt.name, candidate)) break true;
+            } else false;
+            if (!taken) break candidate;
+        };
+        const style: layout.model.StyleId = if (p.tracks.len > 0) p.tracks[0].style else if (p.slots.len > 0) p.slots[0].style else .none;
+        _ = try act(.addPrototypeTrack, .{ id, layout.model.TileTrack{ .name = name, .style = style, .alignment = .centre, .place = .{ .inset = .all(0.8) } } });
         return;
     }
 
@@ -8540,6 +8644,19 @@ fn trackOutline(pi: usize, ri: usize) []const geom.Point {
         pts.append(a, p) catch return &.{};
     };
     return pts.items;
+}
+
+/// The selected tile's tracks: their boxes on its face, dashed; the one
+/// the expression line edits stronger.
+fn drawTileTracks(area: dvui.Rect.Physical, pi: usize, t: layout.place.PlacedTile) void {
+    const px = dvui.windowNaturalScale();
+    const edited = exprTrackOf(t.id);
+    for (state.model.prototypeOf(t.id).tracks) |tt| {
+        const b = tt.place.inset.inset(t.face);
+        if (!(b.width() > 0 and b.height() > 0)) continue;
+        const strong = edited != null and edited.? == tt.id;
+        dashedBox(area, onSheet(pi, b), if (strong) colors.select.opacity(0.8) else colors.guide.opacity(0.6), px);
+    }
 }
 
 /// A closed outline through `pts` (sheet mm), dashed.

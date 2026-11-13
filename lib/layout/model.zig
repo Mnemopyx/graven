@@ -2695,9 +2695,11 @@ pub const Model = struct {
         var st = stamp;
         st.id = g.stamps.items[si].id;
         st.name = try m.a().dupe(u8, stamp.name);
+        // The tiles take the stamp's new prototype, but for those given
+        // one of their own (an ENTER key among the keys).
+        const was = g.stamps.items[si].prototype;
         g.stamps.items[si] = st;
-        // The tiles take the stamp's prototype.
-        for (g.instances.items) |inst| if (inst.stamp == st.id) {
+        for (g.instances.items) |inst| if (inst.stamp == st.id and m.tileConst(inst.tile).prototype == was) {
             m.tile(inst.tile).prototype = st.prototype;
         };
         m.revision += 1;
@@ -2938,6 +2940,20 @@ pub const Model = struct {
         const t = &m.tiles.items[m.tileIndex(tile_id) orelse return null];
         for (t.flows.items) |*f| if (f.track == track) return f;
         return null;
+    }
+
+    /// Tile `tile_id`'s content in track `track` as text, as
+    /// `setTileTrackText` takes it: its runs, a newline for each hard
+    /// break. Allocated with `al`.
+    pub fn tileTrackText(m: *const Model, al: Allocator, tile_id: TileId, track: ObjectId) Allocator.Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        const f = m.tileFlow(tile_id, track) orelse return out.toOwnedSlice(al);
+        for (f.items.items) |it| switch (it.what) {
+            .run => |r| try out.appendSlice(al, r.content),
+            .hard_break, .paragraph => try out.append(al, '\n'),
+            .tile => {},
+        };
+        return out.toOwnedSlice(al);
     }
 
     /// Sets tile `tile_id`'s content in its prototype's track `track` to
@@ -5274,4 +5290,30 @@ test "spaces, prototypes, styles and tiles are connected by ID; a panel given no
     try std.testing.expect(@intFromEnum(t) >= m.tiles.items.len);
     try std.testing.expectEqualStrings("A", m.tileConst(t).designator);
     try std.testing.expectEqual(t, m.findTile("A").?);
+}
+
+test "a tile's track text reads back as set; a stamp's new prototype leaves a tile given its own" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.addPanel("P", 50, 30);
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
+    const tall = try m.addPrototype(.{ .name = "tall", .tracks = &.{.{ .name = "top", .major = .column }} });
+    const other = try m.addPrototype(.{ .name = "other" });
+    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 10, .pitch_y = 10 });
+    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    const a = try m.addInstance(p, g, st, 0, 0);
+    const b = try m.addInstance(p, g, st, 1, 0);
+    const top = m.tileTrackNamed(a, "top").?;
+    try m.setTileTrackText(a, top, "ON\nOFF");
+    const text = try m.tileTrackText(std.testing.allocator, a, top);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ON\nOFF", text);
+    try std.testing.expectEqual(@as(usize, 3), m.tileFlow(a, top).?.items.items.len);
+    try m.setTilePrototype(b, tall);
+    var next = m.panels.items[p].grids.items[g].stamps.items[st];
+    next.prototype = other;
+    try m.setStamp(p, g, st, next);
+    try std.testing.expectEqual(other, m.tileConst(a).prototype);
+    try std.testing.expectEqual(tall, m.tileConst(b).prototype);
 }
