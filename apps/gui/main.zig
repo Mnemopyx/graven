@@ -1856,7 +1856,7 @@ fn contextValid(c: Context) bool {
         .panel => |pi| pi < np,
         .region => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len,
         .row => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len and r.row < segmentCount(r.panel, r.region),
-        .tile => |id| @intFromEnum(id) < m.tiles.items.len and !m.tileConst(id).removed,
+        .tile => |id| m.tileIndex(id) != null and !m.tileConst(id).removed,
         .art => |l| l.panel < np and l.index < m.panels.items[l.panel].art.items.len,
         .group => |g| m.group(g) != null,
         .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,

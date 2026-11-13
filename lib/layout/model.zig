@@ -25,7 +25,8 @@ pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
 const edit_ = @import("edit.zig");
 
-pub const TileId = enum(u32) { _ };
+/// A tile's ID: its own object ID.
+pub const TileId = ObjectId;
 
 /// An object's lasting identity: a panel, a label, a track, a piece of
 /// line art or a group keeps its ID for as long as it exists, wherever it
@@ -301,6 +302,7 @@ pub const TilePrototype = struct {
 };
 
 pub const Tile = struct {
+    id: ObjectId = .none,
     /// The visible name, unique within its panel (K23, ENTER).
     designator: []const u8,
     /// Width and height in pitch units of its region.
@@ -1294,12 +1296,20 @@ pub const Model = struct {
         return m.arena.allocator();
     }
 
+    /// The index of tile `id` in the list, if it is one.
+    pub fn tileIndex(m: *const Model, id: TileId) ?usize {
+        if (id == .none) return null;
+        for (m.tiles.items, 0..) |t, i| if (t.id == id) return i;
+        return null;
+    }
+
+    /// Tile `id`, which must be one of the document's.
     pub fn tile(m: *Model, id: TileId) *Tile {
-        return &m.tiles.items[@backingInt(id)];
+        return &m.tiles.items[m.tileIndex(id).?];
     }
 
     pub fn tileConst(m: *const Model, id: TileId) *const Tile {
-        return &m.tiles.items[@backingInt(id)];
+        return &m.tiles.items[m.tileIndex(id).?];
     }
 
     /// The index of prototype `id` in the list, if it is one.
@@ -2070,6 +2080,9 @@ pub const Model = struct {
         p.name = try m.a().dupe(u8, panel.name);
         p.regions = .empty;
         p.art = .empty;
+        // On a canvas, a panel given no space goes on the canvas.
+        if (p.space == .none and m.spaces.items.len > 0) p.space = m.spaces.items[0].id;
+        if (p.space != .none and m.spaceIndex(p.space) == null) return error.NoSuchItem;
         try m.panels.append(m.a(), p);
         m.revision += 1;
         return m.panels.items.len - 1;
@@ -4313,9 +4326,10 @@ pub const Model = struct {
             c.content = try m.a().dupe(u8, f.content);
             try copy.fills.append(m.a(), c);
         }
+        copy.id = m.newId();
         try m.tiles.append(m.a(), copy);
         m.revision += 1;
-        return @fromBackingInt(@intCast(m.tiles.items.len - 1));
+        return copy.id;
     }
 
     /// Sets the label markup in tile `id`'s slot `name`.
@@ -4359,8 +4373,8 @@ pub const Model = struct {
     }
 
     pub fn findTile(m: *const Model, designator: []const u8) ?TileId {
-        for (m.tiles.items, 0..) |t, i| {
-            if (!t.removed and std.mem.eql(u8, t.designator, designator)) return @fromBackingInt(@intCast(i));
+        for (m.tiles.items) |t| {
+            if (!t.removed and std.mem.eql(u8, t.designator, designator)) return t.id;
         }
         return null;
     }
@@ -5110,4 +5124,27 @@ test "a panel made from an enclosed sketch: cut by nesting, following its sketch
     try std.testing.expectEqual(@as(usize, 2), m.spaces.items[0].sketch_views.items.len);
     try std.testing.expectEqual(m.sketches.items[si].id, m.spaces.items[0].sketch_views.items[1].sketch);
     try m.removeSketch(si);
+}
+
+test "spaces, prototypes, styles and tiles are connected by ID; a panel given no space goes on the canvas" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.addPanel("P", 50, 30);
+    const f = try m.addFrame("Frame 1", null);
+    try std.testing.expectEqual(m.spaces.items[0].id, m.panels.items[p].space);
+    try std.testing.expect(m.inSpace(p, 0));
+    try std.testing.expect(!m.inSpace(p, f));
+    // Removing a panel before a space's own panel leaves the space's own
+    // panel found.
+    const froot = m.rootOf(f);
+    m.removePanel(p);
+    try std.testing.expectEqual(froot - 1, m.rootOf(f));
+    try std.testing.expect(m.panels.items[m.rootOf(f)].unbounded);
+    try std.testing.expect(m.inSpace(m.rootOf(f), f));
+    // Tiles are found by their IDs, which are not positions.
+    const t = try m.addTile(.{ .designator = "A" });
+    try std.testing.expect(@intFromEnum(t) >= m.tiles.items.len);
+    try std.testing.expectEqualStrings("A", m.tileConst(t).designator);
+    try std.testing.expectEqual(t, m.findTile("A").?);
 }
