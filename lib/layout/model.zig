@@ -760,6 +760,13 @@ pub const SketchEdit = union(enum) {
     value: struct { c: sketch_.ConstraintId, value: f64 },
     /// A point moved towards `to` as far as its constraints let it.
     drag: struct { p: sketch_.PointRef, to: geom.Point },
+    /// A dimension made reference (it reports) or driving again.
+    reference: struct { c: sketch_.ConstraintId, on: bool },
+    /// A dimension's expression (empty: its plain value).
+    expr: struct { c: sketch_.ConstraintId, text: []const u8 },
+    /// A parameter added or changed.
+    param: struct { name: []const u8, expr: []const u8 },
+    unparam: []const u8,
 };
 
 pub const Image = struct {
@@ -2176,6 +2183,10 @@ pub const Model = struct {
             },
             .unconstrain => |c| try sk.removeConstraint(c),
             .value => |e| try sk.setValue(e.c, e.value),
+            .reference => |e| try sk.setDriving(e.c, !e.on),
+            .expr => |e| try sk.setExpr(al, e.c, e.text),
+            .param => |e| try sk.setParam(al, e.name, e.expr),
+            .unparam => |name| try sk.removeParam(name),
             .drag => |e| {
                 _ = try sk.drag(al, gpa, e.p, e.to);
                 m.revision += 1;

@@ -103,6 +103,8 @@ fn build(s: *Sketch, a: Allocator) root.Error!System {
         else => {},
     };
     for (s.constraints.items, 0..) |c, ci| {
+        // A reference dimension only reports.
+        if (!c.driving) continue;
         var l: root.Local = .{ .s = s };
         var out: [2]dual.D = undefined;
         const k = try l.residuals(c, &out);

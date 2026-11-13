@@ -509,6 +509,19 @@ test "a sketch is drawn and constrained through the history, and saves and reope
     try testing.expectEqualStrings("len", bk.sketch.constraints.items[2].name);
     _ = try back.editSketch(0, 0, .{ .value = .{ .c = 2, .value = 15 } });
     try testing.expectApproxEqAbs(@as(f64, 15), (try bk.sketch.point(.{ .geom = seg, .role = .end })).x, 1e-9);
+    // A parameter drives the length by expression, through the history,
+    // and both reload.
+    _ = try h.do(&m, .editSketch, .{ 0, si, .{ .param = .{ .name = "w", .expr = "20" } } });
+    _ = try h.do(&m, .editSketch, .{ 0, si, .{ .expr = .{ .c = 2, .text = "w / 2" } } });
+    try testing.expectApproxEqAbs(@as(f64, 10), (try m.spaces.items[0].sketches.items[0].sketch.point(.{ .geom = seg, .role = .end })).x, 1e-9);
+    const bytes2 = try native.encode(gpa, &m);
+    defer gpa.free(bytes2);
+    var back2 = try native.decode(gpa, bytes2);
+    defer back2.deinit();
+    try testing.expectEqualStrings("w / 2", back2.spaces.items[0].sketches.items[0].sketch.constraints.items[2].expr);
+    try testing.expectEqualStrings("w", back2.spaces.items[0].sketches.items[0].sketch.params.items[0].name);
+    try testing.expect(try h.undo(&m));
+    try testing.expectEqual(@as(usize, 0), m.spaces.items[0].sketches.items[0].sketch.constraints.items[2].expr.len);
 }
 
 test "ops with one merge key make one step; joined ops undo with their step; snapshots replay" {

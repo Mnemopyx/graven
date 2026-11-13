@@ -9884,7 +9884,7 @@ fn circleThrough(a: geom.Point, b: geom.Point, c: geom.Point) ?geom.Point {
 
 // Constraints from the selection --------------------------------------------------
 
-const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, angle, fixed };
+const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, angle, fixed, parallel, perpendicular, tangent, equal, symmetric };
 
 const SkSelParts = struct {
     points: [8]skl.PointRef = undefined,
@@ -10005,6 +10005,41 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
                 n += 1;
             }
         },
+        .parallel, .perpendicular => if (p.np == 0 and p.nc == 2 and skIsStraight(s, p.curves[0]) and skIsStraight(s, p.curves[1])) {
+            out[0] = if (kind == .parallel) .{ .kind = .{ .parallel = .{ .a = p.curves[0], .b = p.curves[1] } } } else .{ .kind = .{ .perpendicular = .{ .a = p.curves[0], .b = p.curves[1] } } };
+            n = 1;
+        },
+        .tangent => if (p.np == 0 and p.nc == 2) {
+            const a = p.curves[0];
+            const b = p.curves[1];
+            const ok = (skIsRound(s, a) and skIsRound(s, b)) or (skIsRound(s, a) and skIsStraight(s, b)) or (skIsStraight(s, a) and skIsRound(s, b));
+            if (ok) {
+                out[0] = .{ .kind = .{ .tangent = .{ .a = a, .b = b } } };
+                n = 1;
+            }
+        },
+        // The first with each of the others: all segments, or all round.
+        .equal => if (p.np == 0 and p.nc >= 2) {
+            const round = skIsRound(s, p.curves[0]);
+            for (p.curves[0..p.nc]) |g| {
+                if (round != skIsRound(s, g)) return 0;
+                if (!round and s.geometry.items[g].kind != .segment) return 0;
+            }
+            for (p.curves[1..p.nc]) |g| {
+                out[n] = .{ .kind = .{ .equal = .{ .a = p.curves[0], .b = g } } };
+                n += 1;
+            }
+        },
+        // Two points about a straight geometry, or about a third point.
+        .symmetric => {
+            if (p.np == 2 and p.nc == 1 and skIsStraight(s, p.curves[0])) {
+                out[0] = .{ .kind = .{ .symmetric = .{ .p = p.points[0], .q = p.points[1], .line = p.curves[0] } } };
+                n = 1;
+            } else if (p.np == 3 and p.nc == 0) {
+                out[0] = .{ .kind = .{ .symmetric = .{ .p = p.points[0], .q = p.points[1], .point = p.points[2] } } };
+                n = 1;
+            }
+        },
     }
     return n;
 }
@@ -10063,11 +10098,20 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .line_distance => "Distance to line",
         .radius => "Radius",
         .angle => "Angle",
+        .parallel => "Parallel",
+        .perpendicular => "Perpendicular",
+        .tangent => "Tangent",
+        .equal => "Equal",
+        .symmetric => "Symmetric",
     };
     if (skShownValue(c)) |v| {
         const u = if (c.kind == .angle) "°" else unit;
-        if (c.name.len > 0) return std.fmt.bufPrint(buf, "{s} {s} = {d:.3}{s}", .{ name, c.name, v, u }) catch name;
-        return std.fmt.bufPrint(buf, "{s} {d:.3}{s}", .{ name, v, u }) catch name;
+        // A reference dimension in parentheses; an expression before what
+        // it comes to.
+        const open: []const u8 = if (c.driving) "" else "(";
+        const close: []const u8 = if (c.driving) "" else ")";
+        if (c.expr.len > 0) return std.fmt.bufPrint(buf, "{s}{s} = {s}  ({d:.3}{s}){s}", .{ open, name, c.expr, v, u, close }) catch name;
+        return std.fmt.bufPrint(buf, "{s}{s} {d:.3}{s}{s}", .{ open, name, v, u, close }) catch name;
     }
     return name;
 }
@@ -10118,6 +10162,8 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
         .line_distance => |d| s.point(d.p) catch null,
         .radius => |r| curveMid(s, r.g),
         .angle => |a| curveMid(s, a.b),
+        inline .parallel, .perpendicular, .tangent, .equal => |a| curveMid(s, a.b),
+        .symmetric => |sy| skMid(s.point(sy.p) catch return null, s.point(sy.q) catch return null),
     };
 }
 
@@ -10170,6 +10216,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             .h => skConstrain(.horizontal, area),
             .v => skConstrain(.vertical, area),
             .o => skConstrain(.point_on, area),
+            .t => skConstrain(.tangent, area),
+            .p => skConstrain(.perpendicular, area),
+            .e => skConstrain(.equal, area),
             .d => skConstrain(.distance, area),
             .r => skConstrain(.radius, area),
             .a => skConstrain(.angle, area),
@@ -10182,6 +10231,8 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
         return;
     }
     if (e.evt != .mouse) return;
+    // Only the canvas's own: a click in a pane is the pane's.
+    if (!dvui.eventMatchSimple(e, box.data())) return;
     const me = e.evt.mouse;
     const at_space = state.view.toMm(area, me.p);
     const q = skLocal(it, at_space);
@@ -10527,6 +10578,11 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             .vertical => "V",
             .point_on => "on",
             .fixed => "lock",
+            .parallel => "||",
+            .perpendicular => "perp",
+            .tangent => "tan",
+            .equal => "=",
+            .symmetric => "sym",
             .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
                 const v = skShownValue(c).?;
                 const u: []const u8 = if (c.kind == .angle) "°" else "";
@@ -10536,6 +10592,12 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                     .distance_y => "↕",
                     else => "",
                 };
+                // A reference dimension in parentheses, fainter.
+                if (!c.driving) {
+                    colour = colour.opacity(0.55);
+                    break :blk std.fmt.bufPrint(&tb, "({s}{d:.2}{s})", .{ pre, @abs(v), u }) catch "";
+                }
+                if (c.expr.len > 0) break :blk std.fmt.bufPrint(&tb, "{s}{s} = {d:.2}{s}", .{ pre, c.expr, @abs(v), u }) catch "";
                 break :blk std.fmt.bufPrint(&tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
             },
         };
@@ -10644,7 +10706,8 @@ fn skDimEntry(area: dvui.Rect.Physical) void {
     if (d.fresh) {
         var buf: [32]u8 = undefined;
         const v = skShownValue(c) orelse 0;
-        te.textSet(std.fmt.bufPrint(&buf, "{d:.3}", .{if (c.kind == .angle) v else @abs(v)}) catch "", true);
+        const shown = if (c.expr.len > 0) c.expr else std.fmt.bufPrint(&buf, "{d:.3}", .{if (c.kind == .angle) v else @abs(v)}) catch "";
+        te.textSet(shown, true);
         d.fresh = false;
     }
     // Asked for over a few frames: a new entry takes focus once it exists.
@@ -10659,7 +10722,21 @@ fn skDimEntry(area: dvui.Rect.Physical) void {
         }
     }
     if (enter) {
-        if (std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " "))) |v| {
+        const text = std.mem.trim(u8, te.textGet(), " ");
+        // An expression of the parameters (mm, or degrees), kept with the
+        // dimension; a plain number, in the document's units, is a value.
+        if (!skl.expr.isNumber(text) and text.len > 0) {
+            _ = skEdit(.{ .expr = .{ .c = d.c, .text = text } });
+            if (skItem()) |it2| if (it2.sketch.exprError(d.c)) |err| {
+                state.status = switch (err) {
+                    error.UnknownName => "That expression names a parameter the sketch does not have. ",
+                    error.Syntax => "That expression cannot be read. ",
+                    error.Cycle => "Those parameters refer to each other in a circle. ",
+                    error.Domain => "That expression has no value (a division by zero, say). ",
+                };
+            };
+        } else if (std.fmt.parseFloat(f64, text)) |v| {
+            if (c.expr.len > 0) _ = skEdit(.{ .expr = .{ .c = d.c, .text = "" } });
             // Lengths keep their sign as made (a horizontal distance runs
             // one way).
             var val = skFromShown(c, v);
@@ -10767,6 +10844,11 @@ fn sketchConstrainButtons() void {
         .{ .k = .radius, .name = "Radius R" },
         .{ .k = .angle, .name = "Angle A" },
         .{ .k = .fixed, .name = "Lock" },
+        .{ .k = .tangent, .name = "Tangent T" },
+        .{ .k = .perpendicular, .name = "Perpendicular P" },
+        .{ .k = .parallel, .name = "Parallel" },
+        .{ .k = .equal, .name = "Equal E" },
+        .{ .k = .symmetric, .name = "Symmetric" },
     };
     var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
     defer flex.deinit();
@@ -10828,13 +10910,75 @@ fn sketchModeProperties() void {
                 sk_dim = .{ .c = @intCast(ci), .at = at };
             }
         }
+        // A dimension drives, or (in parentheses) only reports.
+        if (c.isDimension()) {
+            if (dvui.button(@src(), if (c.driving) "drive" else "ref", .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } })) {
+                _ = skEdit(.{ .reference = .{ .c = @intCast(ci), .on = c.driving } });
+            }
+        }
         if (dvui.buttonIcon(@src(), "Remove constraint", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
             _ = skEdit(.{ .unconstrain = @intCast(ci) });
             sk_sel.clearRetainingCapacity();
             break;
         }
     }
+    sketchParameters(it);
 }
+
+/// What the parameter entry holds: "name = expression".
+var sk_param_text: [128]u8 = @splat(0);
+
+/// The sketch's parameters: each with its expression and value; a line to
+/// add or change one ("name = expression"), Enter or Set to apply.
+fn sketchParameters(it: *layout.model.SketchItem) void {
+    heading("{s}", .{"Parameters"}, 8300);
+    for (it.sketch.params.items, 0..) |p, pi| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = pi });
+        defer row.deinit();
+        var tb: [160]u8 = undefined;
+        const text = if (it.sketch.paramValue(p.name)) |v|
+            (std.fmt.bufPrint(&tb, "{s} = {s}  ({d:.3})", .{ p.name, p.expr, v }) catch p.name)
+        else |_|
+            (std.fmt.bufPrint(&tb, "{s} = {s} (no value)", .{ p.name, p.expr }) catch p.name);
+        // A click puts it in the entry, to change.
+        if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{ .expand = .horizontal })) {
+            const line = std.fmt.bufPrint(sk_param_text[0 .. sk_param_text.len - 1], "{s} = {s}", .{ p.name, p.expr }) catch "";
+            sk_param_text[line.len] = 0;
+            sk_param_reset = true;
+        }
+        if (dvui.buttonIcon(@src(), "Remove parameter", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
+            _ = skEdit(.{ .unparam = p.name });
+            break;
+        }
+    }
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9999 });
+    defer row.deinit();
+    var enter = false;
+    var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = sk_param_text[0 .. sk_param_text.len - 1] }, .placeholder = "name = expression" }, .{ .expand = .horizontal, .font = .theme(.mono) });
+    if (sk_param_reset) {
+        sk_param_reset = false;
+        te.textLayout.selection.moveCursor(std.mem.indexOfScalar(u8, &sk_param_text, 0) orelse 0, false);
+    }
+    enter = te.enter_pressed;
+    te.deinit();
+    if (dvui.button(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
+        const line = std.mem.sliceTo(&sk_param_text, 0);
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+            state.status = "Write a parameter as name = expression. ";
+            return;
+        };
+        const name = std.mem.trim(u8, line[0..eq], " ");
+        const text = std.mem.trim(u8, line[eq + 1 ..], " ");
+        if (!skl.expr.validName(name)) {
+            state.status = "A parameter's name is a letter or _, then letters, digits or _ (not a function's name). ";
+            return;
+        }
+        _ = skEdit(.{ .param = .{ .name = name, .expr = text } });
+        @memset(&sk_param_text, 0);
+    }
+}
+
+var sk_param_reset = false;
 
 /// A sketch's properties, outside sketch mode.
 fn sketchProperties(space: usize, index: usize) void {

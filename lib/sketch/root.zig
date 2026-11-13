@@ -21,6 +21,7 @@ const std = @import("std");
 const geom = @import("graven_geom");
 pub const dual = @import("dual.zig");
 pub const solver = @import("solve.zig");
+pub const expr = @import("expr.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -89,11 +90,46 @@ pub const Constraint = struct {
         radius: struct { g: GeomId, value: f64 },
         /// From `a`'s direction to `b`'s, counter-clockwise.
         angle: struct { a: GeomId, b: GeomId, value: f64 },
+        /// Two straight geometries.
+        parallel: struct { a: GeomId, b: GeomId },
+        perpendicular: struct { a: GeomId, b: GeomId },
+        /// A straight geometry and a circle or arc, or two circles or arcs,
+        /// touching: on the side, and (for two round ones) outside or
+        /// inside each other, as they were when it was made (set by
+        /// `addConstraint`).
+        tangent: struct { a: GeomId, b: GeomId, side: f64 = 1, internal: bool = false },
+        /// Two segments of one length, or two circles or arcs of one radius.
+        equal: struct { a: GeomId, b: GeomId },
+        /// `p` and `q` mirrored about a straight geometry (`line`), or
+        /// about a point (`point`): one of them.
+        symmetric: struct { p: PointRef, q: PointRef, line: ?GeomId = null, point: ?PointRef = null },
     },
     name: []const u8 = "",
+    /// Driving: it sets the geometry. Reference (a dimension only): it
+    /// reports what the geometry measures, and takes no part in solving.
+    driving: bool = true,
+    /// For a dimension: an expression of the sketch's parameters that sets
+    /// its value (mm, or degrees for an angle) each time it is solved;
+    /// empty for a plain value.
+    expr: []const u8 = "",
+
+    /// Whether it has a value (a dimension).
+    pub fn isDimension(c: Constraint) bool {
+        return switch (c.kind) {
+            .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => true,
+            else => false,
+        };
+    }
 };
 
-pub const Error = Allocator.Error || error{ NoSuchGeometry, NoSuchPoint, WrongKind, NotConstruction, NoSuchConstraint };
+/// A named parameter: an expression (often a plain number) other
+/// expressions may use by name.
+pub const Param = struct {
+    name: []const u8,
+    expr: []const u8,
+};
+
+pub const Error = Allocator.Error || error{ NoSuchGeometry, NoSuchPoint, WrongKind, NotConstruction, NoSuchConstraint, BadName, NoSuchParameter };
 
 pub const origin: GeomId = 0;
 pub const h_axis: GeomId = 1;
@@ -107,6 +143,7 @@ pub const Sketch = struct {
     fixed: std.ArrayList(bool) = .empty,
     geometry: std.ArrayList(Geometry) = .empty,
     constraints: std.ArrayList(Constraint) = .empty,
+    params: std.ArrayList(Param) = .empty,
 
     pub fn init(a: Allocator) Error!Sketch {
         var s: Sketch = .{};
@@ -123,6 +160,7 @@ pub const Sketch = struct {
         s.fixed.deinit(a);
         s.geometry.deinit(a);
         s.constraints.deinit(a);
+        s.params.deinit(a);
     }
 
     /// A copy in `a`, sharing nothing with this one (constraint names
@@ -133,7 +171,11 @@ pub const Sketch = struct {
         try c.fixed.appendSlice(a, s.fixed.items);
         try c.geometry.appendSlice(a, s.geometry.items);
         try c.constraints.appendSlice(a, s.constraints.items);
-        for (c.constraints.items) |*k| k.name = try a.dupe(u8, k.name);
+        for (c.constraints.items) |*k| {
+            k.name = try a.dupe(u8, k.name);
+            k.expr = try a.dupe(u8, k.expr);
+        }
+        for (s.params.items) |p| try c.params.append(a, .{ .name = try a.dupe(u8, p.name), .expr = try a.dupe(u8, p.expr) });
         return c;
     }
 
@@ -223,7 +265,7 @@ pub const Sketch = struct {
         try s.constraints.append(a, .{ .kind = .{ .fixed = .{ .p = r, .at = to } } });
         _ = try solver.solve(s, gpa);
         _ = s.constraints.pop();
-        return solver.solve(s, gpa);
+        return s.solve(gpa);
     }
 
     /// Sets geometry `g` to construction or not (infinite lines and rays
@@ -279,6 +321,21 @@ pub const Sketch = struct {
                 const d = try local.signedDistance(ld.p, ld.line);
                 ld.side = if (d.v < 0) -1 else 1;
             },
+            .tangent => |*t| {
+                var local: Local = .{ .s = s };
+                // The straight one first.
+                if (local.isRound(t.a) and !local.isRound(t.b)) std.mem.swap(GeomId, &t.a, &t.b);
+                if (local.isRound(t.a)) {
+                    const ca = try local.round(t.a);
+                    const cb = try local.round(t.b);
+                    const d = ca.c.sub(cb.c).len().v;
+                    t.internal = d < @max(ca.r.v, cb.r.v);
+                    t.side = if (ca.r.v >= cb.r.v) 1 else -1;
+                } else {
+                    const d = try local.signedDistance(.{ .geom = t.b, .role = .centre }, t.a);
+                    t.side = if (d.v < 0) -1 else 1;
+                }
+            },
             else => {},
         }
         try s.constraints.append(a, c);
@@ -299,6 +356,115 @@ pub const Sketch = struct {
         }
     }
 
+    /// Makes a dimension driving or reference.
+    pub fn setDriving(s: *Sketch, id: ConstraintId, on: bool) Error!void {
+        if (id >= s.constraints.items.len) return error.NoSuchConstraint;
+        const c = &s.constraints.items[id];
+        if (!c.isDimension()) return error.WrongKind;
+        c.driving = on;
+    }
+
+    /// Sets a dimension's expression (empty for a plain value), copied into
+    /// `a`. An expression that does not evaluate is kept, and leaves the
+    /// value as it was (see `exprError`).
+    pub fn setExpr(s: *Sketch, a: Allocator, id: ConstraintId, text: []const u8) Error!void {
+        if (id >= s.constraints.items.len) return error.NoSuchConstraint;
+        const c = &s.constraints.items[id];
+        if (!c.isDimension()) return error.WrongKind;
+        c.expr = try a.dupe(u8, std.mem.trim(u8, text, " "));
+    }
+
+    /// Adds parameter `name`, or changes its expression.
+    pub fn setParam(s: *Sketch, a: Allocator, name: []const u8, text: []const u8) Error!void {
+        if (!expr.validName(name)) return error.BadName;
+        const t = try a.dupe(u8, std.mem.trim(u8, text, " "));
+        for (s.params.items) |*p| if (std.mem.eql(u8, p.name, name)) {
+            p.expr = t;
+            return;
+        };
+        try s.params.append(a, .{ .name = try a.dupe(u8, name), .expr = t });
+    }
+
+    pub fn removeParam(s: *Sketch, name: []const u8) Error!void {
+        for (s.params.items, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) {
+            _ = s.params.orderedRemove(i);
+            return;
+        };
+        return error.NoSuchParameter;
+    }
+
+    fn lookup(ctx: *const anyopaque, name: []const u8, depth: u8) expr.Error!?f64 {
+        const s: *const Sketch = @ptrCast(@alignCast(ctx));
+        if (depth > 32) return error.Cycle;
+        for (s.params.items) |p| if (std.mem.eql(u8, p.name, name)) {
+            return try expr.eval(p.expr, .{ .ctx = s, .get = lookup, .depth = depth + 1 });
+        };
+        return null;
+    }
+
+    /// The value of expression `text` with this sketch's parameters.
+    pub fn evalExpr(s: *const Sketch, text: []const u8) expr.Error!f64 {
+        return expr.eval(text, .{ .ctx = s, .get = lookup });
+    }
+
+    /// A parameter's value.
+    pub fn paramValue(s: *const Sketch, name: []const u8) expr.Error!f64 {
+        return (try lookup(s, name, 0)) orelse error.UnknownName;
+    }
+
+    /// What is wrong with constraint `id`'s expression, if it has one.
+    pub fn exprError(s: *const Sketch, id: ConstraintId) ?expr.Error {
+        const c = s.constraints.items[id];
+        if (c.expr.len == 0) return null;
+        _ = s.evalExpr(c.expr) catch |e| return e;
+        return null;
+    }
+
+    /// Sets each driving dimension with an expression to its value (angles
+    /// from degrees).
+    pub fn applyExpressions(s: *Sketch) void {
+        for (s.constraints.items) |*c| {
+            if (c.expr.len == 0 or !c.driving) continue;
+            const v = s.evalExpr(c.expr) catch continue;
+            switch (c.kind) {
+                .angle => |*an| an.value = v * std.math.pi / 180,
+                inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = v,
+                else => {},
+            }
+        }
+    }
+
+    /// What a dimension measures now (mm, or radians for an angle), whatever
+    /// its value says.
+    pub fn measure(s: *const Sketch, c: Constraint) ?f64 {
+        var l: Local = .{ .s = s };
+        var zero = c;
+        switch (zero.kind) {
+            .angle => |an| {
+                const da = l.direction(an.a) catch return null;
+                const db = l.direction(an.b) catch return null;
+                return std.math.atan2(da.cross(db).v, da.dot(db).v);
+            },
+            inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = 0,
+            else => return null,
+        }
+        var out: [2]D = undefined;
+        _ = l.residuals(zero, &out) catch return null;
+        return out[0].v;
+    }
+
+    /// Sets each reference dimension's value to what it measures.
+    pub fn updateReferences(s: *Sketch) void {
+        for (s.constraints.items) |*c| {
+            if (c.driving) continue;
+            const v = s.measure(c.*) orelse continue;
+            switch (c.kind) {
+                inline .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => |*d| d.value = v,
+                else => {},
+            }
+        }
+    }
+
     fn check(s: *Sketch, c: Constraint) Error!void {
         // Evaluating it checks every reference and kind.
         var local: Local = .{ .s = s };
@@ -309,7 +475,10 @@ pub const Sketch = struct {
     /// Solves the sketch in place (see `solver.solve`), with scratch
     /// space from `gpa`.
     pub fn solve(s: *Sketch, gpa: Allocator) Error!solver.Result {
-        return solver.solve(s, gpa);
+        s.applyExpressions();
+        const res = try solver.solve(s, gpa);
+        s.updateReferences();
+        return res;
     }
 
     /// What is left free, and what is redundant or conflicts (see
@@ -435,7 +604,8 @@ pub fn refersTo(c: Constraint, g: GeomId) bool {
         inline .distance, .distance_x, .distance_y => |d| d.a.geom == g or d.b.geom == g,
         .line_distance => |d| d.p.geom == g or d.line == g,
         .radius => |r| r.g == g,
-        .angle => |an| an.a == g or an.b == g,
+        inline .angle, .parallel, .perpendicular, .tangent, .equal => |an| an.a == g or an.b == g,
+        .symmetric => |sy| sy.p.geom == g or sy.q.geom == g or (sy.line != null and sy.line.? == g) or (sy.point != null and sy.point.?.geom == g),
     };
 }
 
@@ -510,6 +680,30 @@ pub const Local = struct {
         };
     }
 
+    fn isRound(l: *Local, g: GeomId) bool {
+        const geo_ = l.geo(g) catch return false;
+        return geo_.kind == .circle or geo_.kind == .arc;
+    }
+
+    /// A circle's or arc's centre and radius.
+    fn round(l: *Local, g: GeomId) Error!struct { c: V, r: D } {
+        return switch ((try l.geo(g)).kind) {
+            .circle => |ci| .{ .c = l.p(ci.c), .r = l.get(ci.r) },
+            .arc => |ar| blk: {
+                const c = l.p(ar.c);
+                break :blk .{ .c = c, .r = l.p(ar.a).sub(c).len() };
+            },
+            else => error.WrongKind,
+        };
+    }
+
+    fn segLength(l: *Local, g: GeomId) Error!D {
+        return switch ((try l.geo(g)).kind) {
+            .segment => |sg| l.p(sg.b).sub(l.p(sg.a)).len(),
+            else => error.WrongKind,
+        };
+    }
+
     fn horizontalOrVertical(l: *Local, lin: Linear, vertical: bool) Error!D {
         switch (lin) {
             .points => |ps| {
@@ -572,6 +766,55 @@ pub const Local = struct {
                 const db = try l.direction(an.b);
                 out[0] = da.cross(db).scale(@cos(an.value)).sub(da.dot(db).scale(@sin(an.value)));
             },
+            .parallel => |pa| out[0] = (try l.direction(pa.a)).cross(try l.direction(pa.b)),
+            .perpendicular => |pa| out[0] = (try l.direction(pa.a)).dot(try l.direction(pa.b)),
+            .tangent => |t| {
+                if (l.isRound(t.a) and l.isRound(t.b)) {
+                    // Two round ones: centres apart by the radii's sum, or
+                    // (one inside the other) their difference.
+                    const ca = try l.round(t.a);
+                    const cb = try l.round(t.b);
+                    const d = ca.c.sub(cb.c).len();
+                    out[0] = if (t.internal) d.sub(ca.r.sub(cb.r).scale(t.side)) else d.sub(ca.r.add(cb.r));
+                } else {
+                    // The centre as far from the line as the radius (in
+                    // either order: `addConstraint` puts the line first).
+                    const line, const rnd = if (l.isRound(t.a)) .{ t.b, t.a } else .{ t.a, t.b };
+                    const cb = try l.round(rnd);
+                    out[0] = (try l.signedDistance(.{ .geom = rnd, .role = .centre }, line)).scale(t.side).sub(cb.r);
+                }
+            },
+            .equal => |e| {
+                if (l.isRound(e.a) and l.isRound(e.b)) {
+                    out[0] = (try l.round(e.a)).r.sub((try l.round(e.b)).r);
+                } else out[0] = (try l.segLength(e.a)).sub(try l.segLength(e.b));
+            },
+            .symmetric => |sy| {
+                const pp = try l.ref(sy.p);
+                const q = try l.ref(sy.q);
+                if (sy.line) |ln| {
+                    // The midpoint on the line, and the join across it.
+                    const d = try l.direction(ln);
+                    const mid: V = .{ .x = pp.x.add(q.x).scale(0.5), .y = pp.y.add(q.y).scale(0.5) };
+                    const o: V = switch ((try l.geo(ln)).kind) {
+                        .segment => |sg| l.p(sg.a),
+                        .ray => |ry| l.p(ry.o),
+                        .line => |li| blk: {
+                            const th = l.get(li.theta);
+                            const rho = l.get(li.rho);
+                            break :blk .{ .x = th.cos().mul(rho), .y = th.sin().mul(rho) };
+                        },
+                        else => return error.WrongKind,
+                    };
+                    out[0] = d.cross(mid.sub(o));
+                    out[1] = d.dot(q.sub(pp));
+                    return 2;
+                }
+                const m = try l.ref(sy.point orelse return error.WrongKind);
+                out[0] = pp.x.add(q.x).sub(m.x.scale(2));
+                out[1] = pp.y.add(q.y).sub(m.y.scale(2));
+                return 2;
+            },
         }
         return 1;
     }
@@ -586,5 +829,6 @@ pub const Local = struct {
 test {
     _ = dual;
     _ = solver;
+    _ = expr;
     _ = @import("tests.zig");
 }

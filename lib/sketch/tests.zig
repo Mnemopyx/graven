@@ -194,3 +194,137 @@ test "dragging moves a point only where its constraints let it; removing takes i
     _ = try s.solve(ga);
     try testing.expectApproxEqAbs(@as(f64, 3), s.vars.items[s.geometry.items[c].kind.circle.r], 1e-9);
 }
+
+fn mkSeg(s: *Sketch, a: geom.Point, b: geom.Point) !sk.GeomId {
+    return s.addSegment(ga, a, b, false);
+}
+
+fn fixIn(s: *Sketch, al: std.mem.Allocator, g: sk.GeomId, role: @FieldType(sk.PointRef, "role"), at: geom.Point) !void {
+    _ = try s.addConstraint(al, .{ .kind = .{ .fixed = .{ .p = .{ .geom = g, .role = role }, .at = at } } });
+}
+
+fn fix(s: *Sketch, g: sk.GeomId, role: @FieldType(sk.PointRef, "role"), at: geom.Point) !void {
+    _ = try s.addConstraint(ga, .{ .kind = .{ .fixed = .{ .p = .{ .geom = g, .role = role }, .at = at } } });
+}
+
+test "parallel, perpendicular and equal" {
+    var s = try Sketch.init(ga);
+    defer s.deinit(ga);
+    const a = try mkSeg(&s, pt(0, 0), pt(10, 1));
+    const b = try mkSeg(&s, pt(0, 5), pt(7, 6.5));
+    const c = try mkSeg(&s, pt(20, 0), pt(21, 8));
+    try fix(&s, a, .start, pt(0, 0));
+    try fix(&s, a, .end, pt(10, 0));
+    try fix(&s, b, .start, pt(0, 5));
+    try fix(&s, c, .start, pt(20, 0));
+    _ = try s.addConstraint(ga, .{ .kind = .{ .parallel = .{ .a = a, .b = b } } });
+    _ = try s.addConstraint(ga, .{ .kind = .{ .perpendicular = .{ .a = a, .b = c } } });
+    _ = try s.addConstraint(ga, .{ .kind = .{ .equal = .{ .a = a, .b = b } } });
+    _ = try s.addConstraint(ga, .{ .kind = .{ .equal = .{ .a = b, .b = c } } });
+    try testing.expect((try s.solve(ga)).solved);
+    const be = try s.point(.{ .geom = b, .role = .end });
+    try testing.expectApproxEqAbs(@as(f64, 10), be.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), be.y, 1e-9);
+    const ce = try s.point(.{ .geom = c, .role = .end });
+    try testing.expectApproxEqAbs(@as(f64, 20), ce.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), ce.y, 1e-9);
+    var arena: std.heap.ArenaAllocator = .init(ga);
+    defer arena.deinit();
+    try testing.expect((try s.analyse(ga, arena.allocator())).fully_constrained);
+}
+
+test "tangent: a circle on a line, and two circles touching outside" {
+    var s = try Sketch.init(ga);
+    defer s.deinit(ga);
+    const line = try mkSeg(&s, pt(-10, 0.5), pt(10, -0.3));
+    try fix(&s, line, .start, pt(-10, 0));
+    try fix(&s, line, .end, pt(10, 0));
+    const c1 = try s.addCircle(ga, pt(0, 7), 4, false);
+    try fix(&s, c1, .centre, pt(0, 6));
+    _ = try s.addConstraint(ga, .{ .kind = .{ .tangent = .{ .a = c1, .b = line } } });
+    const c2 = try s.addCircle(ga, pt(9, 6), 2, false);
+    _ = try s.addConstraint(ga, .{ .kind = .{ .point_on = .{ .p = .{ .geom = c2, .role = .centre }, .on = sk.h_axis } } });
+    _ = try s.addConstraint(ga, .{ .kind = .{ .tangent = .{ .a = c1, .b = c2 } } });
+    // Just one way for c2 along the axis: fix its side by its centre's x.
+    _ = try s.addConstraint(ga, .{ .kind = .{ .distance_x = .{ .a = .{ .geom = sk.origin }, .b = .{ .geom = c2, .role = .centre }, .value = 8 } } });
+    const res = try s.solve(ga);
+    try testing.expect(res.solved);
+    // c1's radius is its height above the line.
+    try testing.expectApproxEqAbs(@as(f64, 6), s.vars.items[s.geometry.items[c1].kind.circle.r], 1e-9);
+    // c2 sits at (8, 0), 10 from c1's centre: touching outside, its
+    // radius is what is left of that after c1's 6.
+    try testing.expectApproxEqAbs(@as(f64, 4), s.vars.items[s.geometry.items[c2].kind.circle.r], 1e-9);
+}
+
+test "symmetric about a line and about a point" {
+    var s = try Sketch.init(ga);
+    defer s.deinit(ga);
+    const p = try s.addPoint(ga, pt(3, 4), false);
+    const q = try s.addPoint(ga, pt(-2, 5), false);
+    try fix(&s, p, .point, pt(3, 4));
+    _ = try s.addConstraint(ga, .{ .kind = .{ .symmetric = .{ .p = .{ .geom = p }, .q = .{ .geom = q }, .line = sk.v_axis } } });
+    try testing.expect((try s.solve(ga)).solved);
+    const qq = try s.point(.{ .geom = q });
+    try testing.expectApproxEqAbs(@as(f64, -3), qq.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4), qq.y, 1e-9);
+    const r = try s.addPoint(ga, pt(-2, -5), false);
+    _ = try s.addConstraint(ga, .{ .kind = .{ .symmetric = .{ .p = .{ .geom = p }, .q = .{ .geom = r }, .point = .{ .geom = sk.origin } } } });
+    try testing.expect((try s.solve(ga)).solved);
+    const rr = try s.point(.{ .geom = r });
+    try testing.expectApproxEqAbs(@as(f64, -3), rr.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -4), rr.y, 1e-9);
+}
+
+test "a reference dimension reports and does not drive; parameters drive by expression" {
+    // Its strings live in an arena, as the model's do.
+    var ar: std.heap.ArenaAllocator = .init(ga);
+    defer ar.deinit();
+    const al = ar.allocator();
+    var s = try Sketch.init(al);
+    const a = try s.addSegment(al, pt(0, 0), pt(12, 0), false);
+    try fixIn(&s, al, a, .start, pt(0, 0));
+    _ = try s.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = a } } });
+    const len = try s.addConstraint(al, .{ .kind = .{ .distance = .{ .a = .{ .geom = a, .role = .start }, .b = .{ .geom = a, .role = .end }, .value = 12 } } });
+    // A second length, as reference: it adds no constraint, and reads 12.
+    const ref = try s.addConstraint(al, .{ .kind = .{ .distance_x = .{ .a = .{ .geom = a, .role = .start }, .b = .{ .geom = a, .role = .end }, .value = 99 } }, .driving = false });
+    _ = try s.solve(ga);
+    var arena: std.heap.ArenaAllocator = .init(ga);
+    defer arena.deinit();
+    var an = try s.analyse(ga, arena.allocator());
+    try testing.expect(an.fully_constrained);
+    try testing.expectEqual(@as(usize, 0), an.redundant.len);
+    try testing.expectApproxEqAbs(@as(f64, 12), s.constraints.items[ref].kind.distance_x.value, 1e-9);
+    // The length from a parameter.
+    try s.setParam(al, "w", "19.05");
+    try s.setParam(al, "inset", "w / 10");
+    try s.setExpr(al, len, "w - 2*inset");
+    _ = try s.solve(ga);
+    try testing.expectApproxEqAbs(19.05 * 0.8, (try s.point(.{ .geom = a, .role = .end })).x, 1e-9);
+    try testing.expectApproxEqAbs(19.05 * 0.8, s.constraints.items[ref].kind.distance_x.value, 1e-9);
+    // A new size re-solves from it.
+    try s.setParam(al, "w", "38.1");
+    _ = try s.solve(ga);
+    try testing.expectApproxEqAbs(38.1 * 0.8, (try s.point(.{ .geom = a, .role = .end })).x, 1e-9);
+    // A bad expression is reported and leaves the value.
+    try s.setExpr(al, len, "w - nope");
+    try testing.expectEqual(sk.expr.Error.UnknownName, s.exprError(len).?);
+    _ = try s.solve(ga);
+    try testing.expectApproxEqAbs(38.1 * 0.8, (try s.point(.{ .geom = a, .role = .end })).x, 1e-9);
+    try testing.expectError(error.BadName, s.setParam(al, "2w", "1"));
+    // Its parameters copy with the sketch.
+    var copy = try s.clone(ga);
+    defer {
+        for (copy.constraints.items) |c| {
+            ga.free(c.name);
+            ga.free(c.expr);
+        }
+        for (copy.params.items) |p| {
+            ga.free(p.name);
+            ga.free(p.expr);
+        }
+        copy.deinit(ga);
+    }
+    try testing.expectEqualStrings("w / 10", copy.params.items[1].expr);
+    an = try s.analyse(ga, arena.allocator());
+    try testing.expect(an.fully_constrained);
+}
