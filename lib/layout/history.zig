@@ -50,6 +50,7 @@ pub const actions = [_][:0]const u8{
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
+    "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "setInstanceSpan", "bindInstance", "removeInstance",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -556,6 +557,98 @@ test "ops with one merge key make one step; joined ops undo with their step; sna
 
 test "every action named has a model function" {
     inline for (actions) |a| _ = @field(Model, a);
+}
+
+test "a keypad grid: holes, legends and keys bound to its points, keys on a part that follows it" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const plate = try h.do(&m, .placePanel, .{model.Panel{ .name = "Plate", .space = 0, .origin = .{ .x = 0, .y = 0 }, .w = 140, .h = 60 }});
+    const keys = try h.do(&m, .placePanel, .{model.Panel{ .name = "Keys", .space = 0, .origin = .{ .x = 0, .y = 100 }, .w = 140, .h = 60 }});
+    const key_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }});
+    const legend_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Legend", .slots = &.{.{ .name = "f", .place = .{ .h = .centre, .v = .centre } }} }});
+    // 10 columns by 4 rows, 13 mm apart across and 12 down.
+    const g = try h.do(&m, .addGrid, .{ plate, .{ .x = 10, .y = 50 }, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12 } });
+    const holes = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Holes", .prototype = key_proto, .role = .hole, .w = 10, .h = 8 } });
+    const legends = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Legends", .prototype = legend_proto, .role = .legend, .w = 11, .h = 3, .offset = .{ .x = 0, .y = 6 } } });
+    try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ plate, g, holes }));
+    try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ plate, g, legends }));
+    // The keys: a part whose grid follows the plate's.
+    const plate_grid = m.panels.items[plate].grids.items[g].id;
+    const kg = try h.do(&m, .addLinkedGrid, .{ keys, .{ .x = 10, .y = 50 }, plate_grid });
+    const caps = try h.do(&m, .addStamp, .{ keys, kg, model.Stamp{ .name = "Keys", .prototype = key_proto, .w = 9, .h = 7 } });
+    _ = try h.do(&m, .fillGrid, .{ keys, kg, caps });
+    // ENTER: column 5, rows 2 and 3, on both grids.
+    const enter_hole = m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 2).?;
+    try h.do(&m, .setInstanceSpan, .{ plate, g, enter_hole, 1, 2 });
+    const enter_key = m.instanceAt(keys, kg, m.panels.items[keys].grids.items[kg].stamps.items[caps].id, 5, 2).?;
+    try h.do(&m, .setInstanceSpan, .{ keys, kg, enter_key, 1, 2 });
+    try testing.expectEqual(@as(usize, 79), m.panels.items[plate].grids.items[g].instances.items.len);
+    const eb = m.instanceBox(plate, g, m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 3).?).?;
+    try testing.expectApproxEqAbs(@as(f64, 8 + 12), eb.height(), 1e-9);
+    // Its centre is between rows 2 and 3.
+    try testing.expectApproxEqAbs(@as(f64, 50 - 2.5 * 12), (eb.y0 + eb.y1) / 2, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10 + 5 * 13), (eb.x0 + eb.x1) / 2, 1e-9);
+
+    // Stretching the plate's grid moves the holes, the legends and the
+    // keys on the other part together.
+    try h.do(&m, .setGridShape, .{ plate, g, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .leave });
+    const hole9 = m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 9, 0).?;
+    const key9 = m.instanceAt(keys, kg, m.panels.items[keys].grids.items[kg].stamps.items[caps].id, 9, 0).?;
+    const hb = m.instanceBox(plate, g, hole9).?;
+    const kb = m.instanceBox(keys, kg, key9).?;
+    try testing.expectApproxEqAbs(@as(f64, 10 + 9 * 13 * 1.1), (hb.x0 + hb.x1) / 2, 1e-9);
+    try testing.expectApproxEqAbs((hb.x0 + hb.x1) / 2, (kb.x0 + kb.x1) / 2, 1e-9);
+    // A legend sits above its hole, in line with it.
+    const leg9 = m.instanceBox(plate, g, m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[legends].id, 9, 0).?).?;
+    try testing.expectApproxEqAbs((hb.x0 + hb.x1) / 2, (leg9.x0 + leg9.x1) / 2, 1e-9);
+    try testing.expect(leg9.y0 > hb.y1);
+
+    // One column fewer: left in place, the last column's holes keep their
+    // places, unbound; the keys' grid follows and its keys are left too.
+    try h.do(&m, .setGridShape, .{ plate, g, model.GridShape{ .cols = 9, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .leave });
+    const left = m.panels.items[plate].grids.items[g].instances.items[hole9];
+    try testing.expect(left.loose != null);
+    try testing.expectApproxEqAbs((hb.x0 + hb.x1) / 2, left.loose.?.x, 1e-9);
+    try testing.expect(m.panels.items[keys].grids.items[kg].instances.items[key9].loose != null);
+    try testing.expectEqual(@as(u32, 9), m.gridShape(keys, kg).cols);
+    // Undone, and done again removing them instead.
+    try testing.expect(try h.undo(&m));
+    try testing.expectEqual(@as(u32, 10), m.gridShape(keys, kg).cols);
+    try h.do(&m, .setGridShape, .{ plate, g, model.GridShape{ .cols = 9, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .remove });
+    try testing.expectEqual(@as(usize, 79 - 8), m.panels.items[plate].grids.items[g].instances.items.len);
+    try testing.expectEqual(@as(usize, 39 - 4), m.panels.items[keys].grids.items[kg].instances.items.len);
+
+    // Placed: the holes are cut through the plate's outline; legends have
+    // no shapes; key labels sit on the keys.
+    const key0 = m.panels.items[keys].grids.items[kg].instances.items[0].tile;
+    try m.setContent(key0, "top", "x");
+    const place = @import("place.zig");
+    var labels: place.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var placed = try place.solve(gpa, &m, plate, &labels);
+    defer placed.deinit();
+    try testing.expect(placed.edge != null);
+    var cut: usize = 0;
+    for (placed.tiles) |t| {
+        if (t.grid == .hole) cut += 1;
+        if (t.grid == .legend) try testing.expectEqual(@as(usize, 0), t.shapes.len);
+    }
+    try testing.expectEqual(@as(usize, 4 * 9 - 1), cut);
+
+    // Saved and read back.
+    const bytes = try native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try native.decode(gpa, bytes);
+    defer back.deinit();
+    try testing.expectEqual(plate_grid, back.panels.items[keys].grids.items[kg].link);
+    const back_enter = back.instanceAt(plate, g, back.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 3).?;
+    try testing.expectEqual(@as(u32, 2), back.panels.items[plate].grids.items[g].instances.items[back_enter].rows);
+    try testing.expectEqual(model.GridRole.legend, back.panels.items[plate].grids.items[g].stamps.items[legends].role);
 }
 
 test "every op encodes and decodes, as the file's log will hold them" {

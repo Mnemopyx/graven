@@ -88,6 +88,7 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
         try w.print("<path fill=\"{s}\" fill-rule=\"evenodd\" stroke=\"{s}\" stroke-width=\"{d}\" d=\"", .{ opts.body, opts.edge, opts.edge_width });
         try pathData(w, e);
         for (placed.art) |pa| if (pa.cutout) for (pa.shapes) |s| try pathData(w, s.outline);
+        for (placed.tiles) |t| if (t.grid == .hole) for (t.shapes) |s| try pathData(w, s.outline);
         try w.writeAll("\"/>\n");
     }
     // Cutouts with no panel around them (loose, on a canvas): outlined.
@@ -98,7 +99,7 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     };
     // Tiles, then the panel's line art over them.
     var shapes: std.ArrayList(art.Shape) = .empty;
-    for (placed.tiles) |t| try shapes.appendSlice(a, t.shapes);
+    for (placed.tiles) |t| if (t.grid != .hole) try shapes.appendSlice(a, t.shapes);
     for (placed.art) |pa| if (!pa.cutout) try shapes.appendSlice(a, pa.shapes);
     for (shapes.items) |s| {
         if (s.outline.contours.len == 0) continue;

@@ -39,6 +39,10 @@ pub const PlacedTile = struct {
     shapes: []const art.Shape,
     /// A spacer (a blank): no shapes, left out of output and the bounds.
     spacer: bool = false,
+    /// What it is made as, when it is bound to a grid (see
+    /// `model.Grid`); then `region` and `row` mean nothing. A hole's shapes
+    /// are cut through the panel; a legend has none.
+    grid: ?model.GridRole = null,
 };
 
 pub const PlacedLabel = struct {
@@ -1508,6 +1512,51 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         if (past > 1e-9 and !m.panels.items[panel].unbounded) try issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
     }
 
+    // Grids' instances: tiles at their points.
+    for (m.panels.items[panel].grids.items, 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
+        const box = m.instanceBox(panel, gi, ii) orelse continue;
+        const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp).?];
+        const t = m.tileConst(inst.tile);
+        const proto = &m.prototypes.items[t.prototype];
+        const body = proto.body_inset.inset(box);
+        const unit = proto.unitIn(box.height());
+        const shapes: []const art.Shape = switch (st.role) {
+            .legend => &.{},
+            else => blk: {
+                const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| s: {
+                    const got = try labels.sketchShapes(a, ps, t.params.items, box);
+                    if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = inst.tile });
+                    break :s got;
+                } else null;
+                const all = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, box) catch |err| switch (err) {
+                    error.CurveCrossesCut => s: {
+                        try issues.append(a, .{ .kind = .tile_art, .tile = inst.tile });
+                        break :s try art.plainShapes(a, proto.*, unit, box);
+                    },
+                    else => |e| return e,
+                } else try art.plainShapes(a, proto.*, unit, box);
+                if (st.role == .part) break :blk all;
+                // A hole is cut by its prototype's outline: the largest of
+                // its shapes.
+                var best: ?art.Shape = null;
+                var best_area: f64 = -1;
+                for (all) |sh| {
+                    const b = sh.outline.bounds();
+                    const area = b.width() * b.height();
+                    if (area > best_area) {
+                        best_area = area;
+                        best = sh;
+                    }
+                }
+                const one = try a.alloc(art.Shape, if (best != null) 1 else 0);
+                if (best) |b| one[0] = b;
+                break :blk one;
+            },
+        };
+        try tiles.append(a, .{ .id = inst.tile, .region = 0, .row = 0, .pitch_box = box, .body = body, .face = proto.face_inset.inset(body), .shapes = shapes, .grid = st.role });
+        if (st.role != .legend) bounds = bounds.join(box);
+    };
+
     for (tiles.items) |pt| {
         for (0..m.slotCount(pt.id)) |si| {
             const slot = m.slot(pt.id, si);
@@ -1578,6 +1627,8 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     const this = m.panels.items[panel];
     const has_cutout = for (this.art.items) |pa| {
         if (pa.cutout) break true;
+    } else for (tiles.items) |t| {
+        if (t.grid == .hole) break true;
     } else false;
     var edge: ?geom.Outline = null;
     if (this.edge) |e| {

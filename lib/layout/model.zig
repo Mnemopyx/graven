@@ -894,6 +894,83 @@ pub const Group = struct {
     members: std.ArrayList(ObjectId) = .empty,
 };
 
+/// What a grid's instances are, as made: a part (a key, drawn as its
+/// prototype draws it), a hole (its prototype's outline cut through the
+/// panel: the prototype with inside and outside swapped), or a legend (only
+/// its prototype's slots and their labels).
+pub const GridRole = enum { part, hole, legend };
+
+/// One kind of thing a grid stamps at its points: a prototype, as what,
+/// at what size and where from the point. Every instance of a stamp shares
+/// its size, so changing it changes them all.
+pub const Stamp = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    prototype: PrototypeId,
+    role: GridRole = .part,
+    /// The box an instance on one point takes, mm. An instance spanning
+    /// more points grows by the pitch for each point more.
+    w: f64,
+    h: f64,
+    /// From the point (or the middle of the points spanned) to the box's
+    /// centre, mm.
+    offset: geom.Point = .{ .x = 0, .y = 0 },
+};
+
+/// A tile made from a stamp and bound to a grid point: it sits where the
+/// point is, and follows it. Spanning more than one point, it sits at
+/// their middle. Left behind when its grid lost the point, it keeps its
+/// place (`loose`) and is no longer bound.
+pub const GridInstance = struct {
+    tile: TileId,
+    stamp: ObjectId,
+    col: u32,
+    row: u32,
+    cols: u32 = 1,
+    rows: u32 = 1,
+    /// Its box's centre, mm in the panel frame, once unbound.
+    loose: ?geom.Point = null,
+};
+
+/// How a Cartesian grid's points lie: counts, spacing and stretch.
+pub const GridShape = struct {
+    cols: u32,
+    rows: u32,
+    /// Between points, mm, before stretching.
+    pitch_x: f64,
+    pitch_y: f64,
+    /// Scales the spacing, so the whole grid stretches.
+    stretch_x: f64 = 1,
+    stretch_y: f64 = 1,
+
+    pub fn stepX(g: GridShape) f64 {
+        return g.pitch_x * g.stretch_x;
+    }
+
+    pub fn stepY(g: GridShape) f64 {
+        return g.pitch_y * g.stretch_y;
+    }
+};
+
+/// A Cartesian grid on a panel: construction lines through its points
+/// (columns left to right, rows top to bottom from `origin`), adding and
+/// removing points as its counts change. Instances of its stamps are
+/// bound to its points. A grid may follow another (`link`), on this panel
+/// or another part: it then takes that grid's shape, so the two keep in
+/// step (keys over the holes they come through).
+pub const Grid = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    default_name: bool = false,
+    /// Point (0, 0), the top-left one, mm in the panel frame.
+    origin: geom.Point,
+    shape: GridShape,
+    /// The grid whose shape it takes, if any.
+    link: ObjectId = .none,
+    stamps: std.ArrayList(Stamp) = .empty,
+    instances: std.ArrayList(GridInstance) = .empty,
+};
+
 pub const Panel = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -937,6 +1014,8 @@ pub const Panel = struct {
     /// the even one inside it is cut, so inside a hole is an island, and so
     /// on. Without islands only the holes in the outermost outline are cut.
     islands: bool = true,
+    /// Its grids, whose instances are tiles bound to their points.
+    grids: std.ArrayList(Grid) = .empty,
 
     /// The panel's outline on the worksheet.
     pub fn box(p: Panel) geom.Box {
@@ -2314,6 +2393,325 @@ pub const Model = struct {
     }
 
     /// Whether a sketch panel cuts islands (see `Panel.islands`).
+    // Grids.
+
+    /// The shape grid `gi` of panel `panel` has: its own, or the one it
+    /// follows (through any chain of links).
+    pub fn gridShape(m: *const Model, panel: usize, gi: usize) GridShape {
+        var g = &m.panels.items[panel].grids.items[gi];
+        var hops: usize = 0;
+        while (g.link != .none and hops < 16) : (hops += 1) {
+            const at = m.findGrid(g.link) orelse break;
+            g = &m.panels.items[at.panel].grids.items[at.index];
+        }
+        return g.shape;
+    }
+
+    /// The panel and index of grid `id`.
+    pub fn findGrid(m: *const Model, id: ObjectId) ?struct { panel: usize, index: usize } {
+        if (id == .none) return null;
+        for (m.panels.items, 0..) |p, pi| for (p.grids.items, 0..) |g, gi| {
+            if (g.id == id) return .{ .panel = pi, .index = gi };
+        };
+        return null;
+    }
+
+    /// Where point (`col`, `row`) of grid `gi` is, mm in the panel frame.
+    pub fn gridPoint(m: *const Model, panel: usize, gi: usize, col: f64, row: f64) geom.Point {
+        const g = m.panels.items[panel].grids.items[gi];
+        const sh = m.gridShape(panel, gi);
+        return .{ .x = g.origin.x + col * sh.stepX(), .y = g.origin.y - row * sh.stepY() };
+    }
+
+    /// The stamp `id` of grid `gi`, by index.
+    pub fn stampIndex(m: *const Model, panel: usize, gi: usize, id: ObjectId) ?usize {
+        for (m.panels.items[panel].grids.items[gi].stamps.items, 0..) |st, i| if (st.id == id) return i;
+        return null;
+    }
+
+    /// The box instance `ii` of grid `gi` takes, mm in the panel frame.
+    pub fn instanceBox(m: *const Model, panel: usize, gi: usize, ii: usize) ?geom.Box {
+        const g = m.panels.items[panel].grids.items[gi];
+        const inst = g.instances.items[ii];
+        const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp) orelse return null];
+        const sh = m.gridShape(panel, gi);
+        const w = st.w + @as(f64, @floatFromInt(inst.cols - 1)) * sh.stepX();
+        const h = st.h + @as(f64, @floatFromInt(inst.rows - 1)) * sh.stepY();
+        const c: geom.Point = inst.loose orelse blk: {
+            const p = m.gridPoint(panel, gi, @as(f64, @floatFromInt(inst.col)) + @as(f64, @floatFromInt(inst.cols - 1)) / 2, @as(f64, @floatFromInt(inst.row)) + @as(f64, @floatFromInt(inst.rows - 1)) / 2);
+            break :blk .{ .x = p.x + st.offset.x, .y = p.y + st.offset.y };
+        };
+        return .{ .x0 = c.x - w / 2, .x1 = c.x + w / 2, .y0 = c.y - h / 2, .y1 = c.y + h / 2 };
+    }
+
+    /// The grid and instance tile `id` is bound to, if any.
+    pub fn gridInstanceOf(m: *const Model, id: TileId) ?struct { panel: usize, grid: usize, index: usize } {
+        for (m.panels.items, 0..) |p, pi| for (p.grids.items, 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
+            if (inst.tile == id) return .{ .panel = pi, .grid = gi, .index = ii };
+        };
+        return null;
+    }
+
+    /// Adds a grid to panel `panel`, point (0, 0) at `origin`; returns its
+    /// index.
+    pub fn addGrid(m: *Model, panel: usize, origin: geom.Point, shape: GridShape) Error!usize {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        if (shape.cols == 0 or shape.rows == 0 or !(shape.pitch_x > 0 and shape.pitch_y > 0) or !(shape.stretch_x > 0 and shape.stretch_y > 0)) return error.BadSize;
+        const p = &m.panels.items[panel];
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "Grid {d}", .{p.grids.items.len + 1}) catch "Grid";
+        try p.grids.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .default_name = true, .origin = origin, .shape = shape });
+        m.revision += 1;
+        return p.grids.items.len - 1;
+    }
+
+    /// Adds a grid to panel `panel` that follows grid `source` (on any
+    /// panel), point (0, 0) at `origin`; returns its index.
+    pub fn addLinkedGrid(m: *Model, panel: usize, origin: geom.Point, source: ObjectId) Error!usize {
+        const at = m.findGrid(source) orelse return error.NoSuchObject;
+        const gi = try m.addGrid(panel, origin, m.gridShape(at.panel, at.index));
+        m.panels.items[panel].grids.items[gi].link = source;
+        return gi;
+    }
+
+    /// What to do with instances on points a grid no longer has.
+    pub const Dropped = enum { remove, leave };
+
+    /// Changes grid `gi`'s shape (a grid that follows another takes this
+    /// as its own and stops following). Instances on points it no longer
+    /// has, on it and on every grid following it, are removed or left in
+    /// place, unbound, as `dropped` says.
+    pub fn setGridShape(m: *Model, panel: usize, gi: usize, shape: GridShape, dropped: Dropped) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        if (shape.cols == 0 or shape.rows == 0 or !(shape.pitch_x > 0 and shape.pitch_y > 0) or !(shape.stretch_x > 0 and shape.stretch_y > 0)) return error.BadSize;
+        const id = m.panels.items[panel].grids.items[gi].id;
+        // Settle the ones about to lose their points first, at their places
+        // under the old shape.
+        for (m.panels.items, 0..) |*p, pi| for (p.grids.items, 0..) |*g, gj| {
+            if (!(pi == panel and gj == gi) and !m.follows(g.*, id)) continue;
+            var ii: usize = 0;
+            while (ii < g.instances.items.len) {
+                const inst = g.instances.items[ii];
+                const off = inst.loose == null and (inst.col + inst.cols > shape.cols or inst.row + inst.rows > shape.rows);
+                if (!off) {
+                    ii += 1;
+                    continue;
+                }
+                switch (dropped) {
+                    .leave => {
+                        const b = m.instanceBox(pi, gj, ii).?;
+                        g.instances.items[ii].loose = .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 };
+                        ii += 1;
+                    },
+                    .remove => {
+                        m.tile(inst.tile).removed = true;
+                        _ = g.instances.orderedRemove(ii);
+                    },
+                }
+            }
+        };
+        const g = &m.panels.items[panel].grids.items[gi];
+        g.shape = shape;
+        g.link = .none;
+        m.revision += 1;
+    }
+
+    /// Whether grid `g` follows grid `id`, directly or through others.
+    fn follows(m: *const Model, g: Grid, id: ObjectId) bool {
+        var link = g.link;
+        var hops: usize = 0;
+        while (link != .none and hops < 16) : (hops += 1) {
+            if (link == id) return true;
+            const at = m.findGrid(link) orelse return false;
+            link = m.panels.items[at.panel].grids.items[at.index].link;
+        }
+        return false;
+    }
+
+    /// Moves grid `gi`'s point (0, 0) to `origin`.
+    pub fn moveGrid(m: *Model, panel: usize, gi: usize, origin: geom.Point) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        m.panels.items[panel].grids.items[gi].origin = origin;
+        m.revision += 1;
+    }
+
+    /// Removes grid `gi` and its instances. Grids following it keep its
+    /// shape as their own.
+    pub fn removeGrid(m: *Model, panel: usize, gi: usize) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const id = m.panels.items[panel].grids.items[gi].id;
+        const shape = m.gridShape(panel, gi);
+        for (m.panels.items) |*p| for (p.grids.items) |*g| if (g.link == id) {
+            g.shape = shape;
+            g.link = .none;
+        };
+        const g = m.panels.items[panel].grids.orderedRemove(gi);
+        for (g.instances.items) |inst| m.tile(inst.tile).removed = true;
+        m.revision += 1;
+    }
+
+    /// Adds a stamp to grid `gi`; returns its index.
+    pub fn addStamp(m: *Model, panel: usize, gi: usize, stamp: Stamp) Error!usize {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        if (stamp.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
+        var st = stamp;
+        st.id = m.newId();
+        st.name = try m.a().dupe(u8, stamp.name);
+        const g = &m.panels.items[panel].grids.items[gi];
+        try g.stamps.append(m.a(), st);
+        m.revision += 1;
+        return g.stamps.items.len - 1;
+    }
+
+    /// Changes stamp `si` of grid `gi` (its prototype, role, size, offset
+    /// or name), and with it every instance of it.
+    pub fn setStamp(m: *Model, panel: usize, gi: usize, si: usize, stamp: Stamp) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const g = &m.panels.items[panel].grids.items[gi];
+        if (si >= g.stamps.items.len) return error.NoSuchItem;
+        if (stamp.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
+        var st = stamp;
+        st.id = g.stamps.items[si].id;
+        st.name = try m.a().dupe(u8, stamp.name);
+        g.stamps.items[si] = st;
+        // The tiles take the stamp's prototype.
+        for (g.instances.items) |inst| if (inst.stamp == st.id) {
+            m.tile(inst.tile).prototype = st.prototype;
+        };
+        m.revision += 1;
+    }
+
+    /// Removes stamp `si` of grid `gi` and its instances.
+    pub fn removeStamp(m: *Model, panel: usize, gi: usize, si: usize) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const g = &m.panels.items[panel].grids.items[gi];
+        if (si >= g.stamps.items.len) return error.NoSuchItem;
+        const st = g.stamps.orderedRemove(si);
+        var ii: usize = 0;
+        while (ii < g.instances.items.len) {
+            if (g.instances.items[ii].stamp == st.id) {
+                m.tile(g.instances.items[ii].tile).removed = true;
+                _ = g.instances.orderedRemove(ii);
+            } else ii += 1;
+        }
+        m.revision += 1;
+    }
+
+    /// The first free designator `prefix` followed by a number.
+    fn freeDesignator(m: *Model, prefix: []const u8, buf: []u8) []const u8 {
+        var n: usize = 1;
+        while (true) : (n += 1) {
+            const d = std.fmt.bufPrint(buf, "{s}{d}", .{ prefix, n }) catch return prefix;
+            if (m.findTile(d) == null) return d;
+        }
+    }
+
+    /// The instance of stamp `stamp` on point (`col`, `row`) of grid `gi`,
+    /// by index (one spanning it counts).
+    pub fn instanceAt(m: *const Model, panel: usize, gi: usize, stamp: ObjectId, col: u32, row: u32) ?usize {
+        for (m.panels.items[panel].grids.items[gi].instances.items, 0..) |inst, ii| {
+            if (inst.stamp != stamp or inst.loose != null) continue;
+            if (col >= inst.col and col < inst.col + inst.cols and row >= inst.row and row < inst.row + inst.rows) return ii;
+        }
+        return null;
+    }
+
+    /// Makes a tile of stamp `si` and binds it to point (`col`, `row`) of
+    /// grid `gi`; returns the tile. A point already holding an instance of
+    /// the stamp is refused.
+    pub fn addInstance(m: *Model, panel: usize, gi: usize, si: usize, col: u32, row: u32) Error!TileId {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const st = blk: {
+            const g = m.panels.items[panel].grids.items[gi];
+            if (si >= g.stamps.items.len) return error.NoSuchItem;
+            break :blk g.stamps.items[si];
+        };
+        const sh = m.gridShape(panel, gi);
+        if (col >= sh.cols or row >= sh.rows) return error.NoSuchItem;
+        if (m.instanceAt(panel, gi, st.id, col, row) != null) return error.NoRoom;
+        var buf: [48]u8 = undefined;
+        const prefix: []const u8 = switch (st.role) {
+            .part => "K",
+            .hole => "H",
+            .legend => "L",
+        };
+        const id = try m.addTile(.{ .designator = m.freeDesignator(prefix, &buf), .prototype = st.prototype });
+        try m.panels.items[panel].grids.items[gi].instances.append(m.a(), .{ .tile = id, .stamp = st.id, .col = col, .row = row });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Fills every point of grid `gi` not holding an instance of stamp
+    /// `si` with one; returns how many were made.
+    pub fn fillGrid(m: *Model, panel: usize, gi: usize, si: usize) Error!usize {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const sh = m.gridShape(panel, gi);
+        const g = m.panels.items[panel].grids.items[gi];
+        if (si >= g.stamps.items.len) return error.NoSuchItem;
+        const sid = g.stamps.items[si].id;
+        var n: usize = 0;
+        for (0..sh.rows) |r| for (0..sh.cols) |c| {
+            if (m.instanceAt(panel, gi, sid, @intCast(c), @intCast(r)) != null) continue;
+            _ = try m.addInstance(panel, gi, si, @intCast(c), @intCast(r));
+            n += 1;
+        };
+        return n;
+    }
+
+    /// Sets how many points instance `ii` spans, from its point right and
+    /// down. Instances of the same stamp on the points it newly covers are
+    /// removed; refused past the grid's edge.
+    pub fn setInstanceSpan(m: *Model, panel: usize, gi: usize, ii: usize, cols: u32, rows: u32) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const sh = m.gridShape(panel, gi);
+        var g = &m.panels.items[panel].grids.items[gi];
+        if (ii >= g.instances.items.len) return error.NoSuchItem;
+        const inst = g.instances.items[ii];
+        if (cols == 0 or rows == 0 or inst.col + cols > sh.cols or inst.row + rows > sh.rows) return error.BadSize;
+        const tile_id = inst.tile;
+        var k: usize = 0;
+        while (k < g.instances.items.len) {
+            const o = g.instances.items[k];
+            const covered = o.tile != tile_id and o.stamp == inst.stamp and o.loose == null and
+                o.col >= inst.col and o.col < inst.col + cols and o.row >= inst.row and o.row < inst.row + rows;
+            if (covered) {
+                m.tile(o.tile).removed = true;
+                _ = g.instances.orderedRemove(k);
+            } else k += 1;
+        }
+        for (g.instances.items) |*o| if (o.tile == tile_id) {
+            o.cols = cols;
+            o.rows = rows;
+        };
+        m.revision += 1;
+    }
+
+    /// Binds instance `ii` to point (`col`, `row`) (an unbound one too).
+    pub fn bindInstance(m: *Model, panel: usize, gi: usize, ii: usize, col: u32, row: u32) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const sh = m.gridShape(panel, gi);
+        const g = &m.panels.items[panel].grids.items[gi];
+        if (ii >= g.instances.items.len) return error.NoSuchItem;
+        const inst = &g.instances.items[ii];
+        if (col + inst.cols > sh.cols or row + inst.rows > sh.rows) return error.BadSize;
+        inst.col = col;
+        inst.row = row;
+        inst.loose = null;
+        m.revision += 1;
+    }
+
+    /// Removes instance `ii` of grid `gi` and its tile.
+    pub fn removeInstance(m: *Model, panel: usize, gi: usize, ii: usize) Error!void {
+        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+        const g = &m.panels.items[panel].grids.items[gi];
+        if (ii >= g.instances.items.len) return error.NoSuchItem;
+        const inst = g.instances.orderedRemove(ii);
+        m.tile(inst.tile).removed = true;
+        m.revision += 1;
+    }
+
     pub fn setPanelIslands(m: *Model, panel: usize, on: bool) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         m.panels.items[panel].islands = on;
@@ -2707,6 +3105,14 @@ pub const Model = struct {
         for (p.regions.items) |region| for (region.items.items) |item| {
             const id = item.tileOf() orelse continue;
             if (!m.placedElsewhere(id)) m.tile(id).removed = true;
+        };
+        for (p.grids.items) |g| for (g.instances.items) |inst| {
+            m.tile(inst.tile).removed = true;
+        };
+        // Grids elsewhere following one of its own keep its shape.
+        for (p.grids.items) |gone| for (m.panels.items) |*q| for (q.grids.items) |*g| if (g.link == gone.id) {
+            g.shape = gone.shape;
+            g.link = .none;
         };
         m.revision += 1;
     }
@@ -3526,6 +3932,12 @@ pub const Model = struct {
     /// Removes tile `id`: it leaves every track it is in, which reflows.
     pub fn removeTile(m: *Model, id: TileId) void {
         m.unplace(id);
+        for (m.panels.items) |*p| for (p.grids.items) |*g| {
+            var ii: usize = 0;
+            while (ii < g.instances.items.len) {
+                if (g.instances.items[ii].tile == id) _ = g.instances.orderedRemove(ii) else ii += 1;
+            }
+        };
         m.tile(id).removed = true;
         m.revision += 1;
     }

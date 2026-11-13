@@ -180,6 +180,8 @@ const Context = union(enum) {
     /// The document's sketches, and one of them.
     sketches,
     sketch_def: usize,
+    /// A grid on a panel.
+    grid: struct { panel: usize, index: usize },
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -211,6 +213,7 @@ const Context = union(enum) {
             .sketch => "Sketch view",
             .sketches => "Sketches",
             .sketch_def => "Sketch",
+            .grid => "Grid",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
         };
@@ -1836,6 +1839,7 @@ fn contextValid(c: Context) bool {
         .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len,
         .sketches => true,
         .sketch_def => |i| i < m.sketches.items.len,
+        .grid => |g| g.panel < np and g.index < m.panels.items[g.panel].grids.items.len,
         .prototype => |id| id < m.prototypes.items.len,
     };
 }
@@ -2945,7 +2949,7 @@ fn groupTree(id: layout.model.ObjectId, d: usize) void {
 }
 
 fn hasChildren(panel: layout.model.Panel) bool {
-    return panel.regions.items.len > 0 or panel.art.items.len > 0;
+    return panel.regions.items.len > 0 or panel.art.items.len > 0 or panel.grids.items.len > 0;
 }
 
 /// A panel's art and tracks (with their rows and tiles) in the
@@ -2955,6 +2959,7 @@ fn panelChildren(pi: usize, d: usize) void {
     const panel = state.model.panels.items[pi];
     {
         for (panel.art.items, 0..) |pa, ai| _ = treeNode(.{ .art = .{ .panel = pi, .index = ai } }, pa.name, d, false, false);
+        for (panel.grids.items, 0..) |g, gi| _ = treeNode(.{ .grid = .{ .panel = pi, .index = gi } }, g.name, d, false, g.default_name);
         for (panel.regions.items, 0..) |region, ri| {
             // The rows lying in it; in a thread, numbered through the
             // thread's flow, and named by their place in this track.
@@ -3056,6 +3061,8 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .region => |r| r.panel == pi and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
+        // Every instance bound to the grid.
+        .grid => |g| g.panel == pi and t.grid != null and if (state.model.gridInstanceOf(t.id)) |at| at.grid == g.index else false,
         .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes => false,
     };
 }
@@ -3826,8 +3833,23 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         dashedOutline(area, trackOutline(pi, sr), colors.guide.opacity(0.6), px);
     };
     drawThreads(area, pi, placed);
+    drawGrids(area, pi);
     for (placed.tiles) |t| {
         const in_context = inContext(pi, t);
+        // Bound to a grid: a hole is outlined in the panel's edge colour;
+        // a legend's box shows faintly while editing (its label is drawn
+        // with the others).
+        if (t.grid) |role| if (role != .part) {
+            const sel = in_context and state.context == .tile;
+            if (role == .hole) {
+                const pieces = flatTile(&state.flat, t.shapes) catch &.{};
+                for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, if (in_context) colors.select else colors.panel_edge);
+            } else {
+                dashedBox(area, onSheet(pi, t.pitch_box), if (in_context) colors.select else colors.guide.opacity(0.35), px);
+            }
+            if (sel) marchingBox(area, onSheet(pi, t.pitch_box), colors.select, 1.5 * px);
+            continue;
+        };
         // A blank (a spacer tile): a faint outline while editing, nothing in
         // output.
         if (t.spacer) {
@@ -4234,6 +4256,299 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
             if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
         }
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
+    }
+}
+
+// Grids ---------------------------------------------------------------------
+//
+// A grid's points are where its construction lines cross; instances of its
+// stamps (a prototype as a part, a hole or a legend, at a size and offset)
+// are tiles bound to the points. Changing the grid's counts, spacing or
+// stretch moves them all; on a part whose grid follows another, too.
+
+/// What becomes of instances on points a grid no longer has.
+var grid_dropped: layout.model.Model.Dropped = .leave;
+
+/// A grid's construction lines on panel `pi`: faint, through its points,
+/// reaching half a step past the outer ones; the context grid's stronger.
+fn drawGrids(area: dvui.Rect.Physical, pi: usize) void {
+    const px = dvui.windowNaturalScale();
+    const panel = state.model.panels.items[pi];
+    for (panel.grids.items, 0..) |_, gi| {
+        const sh = state.model.gridShape(pi, gi);
+        const sel = switch (state.context) {
+            .grid => |g| g.panel == pi and g.index == gi,
+            else => false,
+        };
+        const colour = if (sel) colors.select.opacity(0.6) else colors.guide.opacity(0.25);
+        const cols: f64 = @floatFromInt(sh.cols);
+        const rows: f64 = @floatFromInt(sh.rows);
+        for (0..sh.cols) |c| {
+            const cf: f64 = @floatFromInt(c);
+            const a = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, cf, -0.5)));
+            const b = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, cf, rows - 0.5)));
+            strokeLine(area, .{ .x = a.x0, .y = a.y0 }, .{ .x = b.x0, .y = b.y0 }, colour, px);
+        }
+        for (0..sh.rows) |r| {
+            const rf: f64 = @floatFromInt(r);
+            const a = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, -0.5, rf)));
+            const b = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, cols - 0.5, rf)));
+            strokeLine(area, .{ .x = a.x0, .y = a.y0 }, .{ .x = b.x0, .y = b.y0 }, colour, px);
+        }
+    }
+}
+
+fn pointBox(p: geom.Point) geom.Box {
+    return .{ .x0 = p.x, .x1 = p.x, .y0 = p.y, .y1 = p.y };
+}
+
+/// A straight line between two sheet points.
+fn strokeLine(area: dvui.Rect.Physical, a: geom.Point, b: geom.Point, colour: dvui.Color, px: f32) void {
+    const pts = [_]dvui.Point.Physical{ state.view.toPx(area, a), state.view.toPx(area, b) };
+    dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = px, .color = .{ .color = colour } });
+}
+
+/// A number property row; returns the new value when it was changed.
+fn numberProp(name: []const u8, value: f64, min: f64, max: f64, n: usize) ?f64 {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    var v = value;
+    const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = min, .max = max }, .{ .expand = .horizontal, .id_extra = n });
+    if (r.changed and r.value == .Valid and v != value) return v;
+    return null;
+}
+
+/// A panel's grids, each opened by its name, and Add grid.
+fn panelGrids(pi: usize) !void {
+    const panel = state.model.panels.items[pi];
+    heading("Grids", .{}, 300);
+    for (panel.grids.items, 0..) |g, gi| {
+        if (dvui.button(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 301 + gi })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+    }
+    if (dvui.button(@src(), "Add grid", .{}, .{ .expand = .horizontal, .id_extra = 299 })) {
+        // Points 13 mm apart filling the ink area, from its top-left.
+        const step: f64 = 13.0;
+        const inner_w = panel.w - panel.margins.left - panel.margins.right;
+        const inner_h = panel.h - panel.margins.top - panel.margins.bottom;
+        const cols: u32 = @intFromFloat(@max(1, @floor(inner_w / step)));
+        const rows: u32 = @intFromFloat(@max(1, @floor(inner_h / step)));
+        const origin: geom.Point = .{ .x = panel.margins.left + step / 2, .y = panel.h - panel.margins.top - step / 2 };
+        const gi = act(.addGrid, .{ pi, origin, layout.model.GridShape{ .cols = cols, .rows = rows, .pitch_x = step, .pitch_y = step } }) catch {
+            state.status = "The grid could not be added. ";
+            return;
+        };
+        state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+    }
+}
+
+/// A grid: its shape (counts, spacing, stretch), where it starts, what it
+/// follows, and its stamps.
+fn gridProperties(pi: usize, gi: usize) !void {
+    const g = state.model.panels.items[pi].grids.items[gi];
+    var sh = state.model.gridShape(pi, gi);
+    propValue("Name", g.default_name, "{s}", .{g.name}, 1);
+    propText("On", "{s}", .{state.model.panels.items[pi].name}, 2);
+    if (state.model.findGrid(g.link)) |src| {
+        const sg = state.model.panels.items[src.panel].grids.items[src.index];
+        propText("Follows", "{s} on {s}", .{ sg.name, state.model.panels.items[src.panel].name }, 3);
+        if (dvui.button(@src(), "Show the grid it follows", .{}, .{ .expand = .horizontal, .id_extra = 4 })) state.context = .{ .grid = .{ .panel = src.panel, .index = src.index } };
+        propText("", "Changing its shape here stops it following.", .{}, 5);
+    } else {
+        var followers: usize = 0;
+        for (state.model.panels.items) |p| for (p.grids.items) |o| {
+            if (o.link == g.id) followers += 1;
+        };
+        if (followers > 0) propText("Followed by", "{d} grids", .{followers}, 3);
+    }
+    heading("Points", .{}, 10);
+    var changed = false;
+    if (numberProp("Columns", @floatFromInt(sh.cols), 1, 200, 11)) |v| {
+        sh.cols = @intFromFloat(@round(v));
+        changed = true;
+    }
+    if (numberProp("Rows", @floatFromInt(sh.rows), 1, 200, 12)) |v| {
+        sh.rows = @intFromFloat(@round(v));
+        changed = true;
+    }
+    if (numberProp("Spacing across, mm", sh.pitch_x, 0.1, 1000, 13)) |v| {
+        sh.pitch_x = v;
+        changed = true;
+    }
+    if (numberProp("Spacing down, mm", sh.pitch_y, 0.1, 1000, 14)) |v| {
+        sh.pitch_y = v;
+        changed = true;
+    }
+    if (numberProp("Stretch across", sh.stretch_x, 0.01, 100, 15)) |v| {
+        sh.stretch_x = v;
+        changed = true;
+    }
+    if (numberProp("Stretch down", sh.stretch_y, 0.01, 100, 16)) |v| {
+        sh.stretch_y = v;
+        changed = true;
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 17 });
+        defer row.deinit();
+        propName("Points removed");
+        const names = [_][]const u8{ "remove what is on them", "leave it in place" };
+        var choice: usize = if (grid_dropped == .remove) 0 else 1;
+        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 17 })) grid_dropped = if (choice == 0) .remove else .leave;
+    }
+    if (changed) actM(mergeKey(.{ "grid", pi, gi }), .setGridShape, .{ pi, gi, sh, grid_dropped }) catch {
+        state.status = "That shape cannot be used. ";
+    };
+    if (numberProp("First point across, mm", g.origin.x, -10000, 10000, 18)) |v| try actM(mergeKey(.{ "gridat", pi, gi }), .moveGrid, .{ pi, gi, geom.Point{ .x = v, .y = g.origin.y } });
+    if (numberProp("First point up, mm", g.origin.y, -10000, 10000, 19)) |v| try actM(mergeKey(.{ "gridat", pi, gi }), .moveGrid, .{ pi, gi, geom.Point{ .x = g.origin.x, .y = v } });
+
+    // Its stamps.
+    const lifo = dvui.currentWindow().lifo();
+    const proto_names = try lifo.alloc([]const u8, state.model.prototypes.items.len);
+    defer lifo.free(proto_names);
+    for (state.model.prototypes.items, proto_names) |p, *nm| nm.* = p.name;
+    const stamps = state.model.panels.items[pi].grids.items[gi].stamps.items;
+    for (stamps, 0..) |st, si| {
+        const n = 100 + si * 20;
+        heading("Stamp: {s}", .{st.name}, n);
+        var next = st;
+        var st_changed = false;
+        var used: usize = 0;
+        for (g.instances.items) |inst| {
+            if (inst.stamp == st.id) used += 1;
+        }
+        propText("Instances", "{d}", .{used}, n + 1);
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 2 });
+            defer row.deinit();
+            propName("Made as");
+            const roles = [_][]const u8{ "part", "hole (cut through)", "legend (labels only)" };
+            var choice: usize = @intFromEnum(st.role);
+            if (dvui.dropdown(@src(), &roles, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 2 })) {
+                next.role = @enumFromInt(choice);
+                st_changed = true;
+            }
+        }
+        if (proto_names.len > 0) {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
+            defer row.deinit();
+            propName("Prototype");
+            var choice: usize = st.prototype;
+            if (dvui.dropdown(@src(), proto_names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 3 })) {
+                next.prototype = @intCast(choice);
+                st_changed = true;
+            }
+        }
+        if (numberProp("Width, mm", st.w, 0.1, 1000, n + 4)) |v| {
+            next.w = v;
+            st_changed = true;
+        }
+        if (numberProp("Height, mm", st.h, 0.1, 1000, n + 5)) |v| {
+            next.h = v;
+            st_changed = true;
+        }
+        if (numberProp("Offset across, mm", st.offset.x, -1000, 1000, n + 6)) |v| {
+            next.offset.x = v;
+            st_changed = true;
+        }
+        if (numberProp("Offset up, mm", st.offset.y, -1000, 1000, n + 7)) |v| {
+            next.offset.y = v;
+            st_changed = true;
+        }
+        if (st_changed) actM(mergeKey(.{ "stamp", pi, gi, si }), .setStamp, .{ pi, gi, si, next }) catch {
+            state.status = "That stamp cannot be used. ";
+        };
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 8 });
+            defer row.deinit();
+            if (dvui.button(@src(), "Fill empty points", .{}, .{ .id_extra = n + 8 })) {
+                const made = act(.fillGrid, .{ pi, gi, si }) catch 0;
+                var buf: [64]u8 = undefined;
+                state.status = std.fmt.bufPrint(&buf, "{d} placed. ", .{made}) catch "";
+                state.status = dvui.currentWindow().arena().dupe(u8, state.status) catch "";
+            }
+            if (dvui.button(@src(), "Remove stamp", .{}, .{ .id_extra = n + 9 })) {
+                try act(.removeStamp, .{ pi, gi, si });
+                return;
+            }
+        }
+    }
+    heading("Add a stamp", .{}, 90);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 91 });
+        defer row.deinit();
+        inline for (.{ .{ "Parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "Holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "Legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
+            if (dvui.button(@src(), kind[0], .{}, .{ .id_extra = 92 + k })) {
+                if (state.model.prototypes.items.len == 0) _ = try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }});
+                const step_x = sh.stepX();
+                const step_y = sh.stepY();
+                _ = act(.addStamp, .{ pi, gi, layout.model.Stamp{ .name = kind[0], .prototype = 0, .role = kind[1], .w = step_x * kind[2], .h = step_y * kind[3], .offset = .{ .x = 0, .y = step_y * kind[4] } } }) catch {
+                    state.status = "The stamp could not be added. ";
+                };
+            }
+        }
+    }
+    // A grid on another part following this one: the keys over a plate's
+    // holes.
+    {
+        var others: std.ArrayList([]const u8) = .empty;
+        var which: std.ArrayList(usize) = .empty;
+        const arena = dvui.currentWindow().arena();
+        for (state.model.panels.items, 0..) |p, qi| {
+            if (qi == pi or p.unbounded) continue;
+            others.append(arena, p.name) catch {};
+            which.append(arena, qi) catch {};
+        }
+        if (others.items.len > 0) {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 96 });
+            defer row.deinit();
+            propName("Follow it on");
+            var choice: usize = others.items.len;
+            others.append(arena, "choose a part…") catch {};
+            if (dvui.dropdown(@src(), others.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 96 }) and choice < which.items.len) {
+                const qi = which.items[choice];
+                const ngi = try act(.addLinkedGrid, .{ qi, g.origin, g.id });
+                state.context = .{ .grid = .{ .panel = qi, .index = ngi } };
+                return;
+            }
+        }
+    }
+    if (dvui.button(@src(), "Remove grid", .{}, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } })) {
+        try act(.removeGrid, .{ pi, gi });
+        state.context = .{ .panel = pi };
+    }
+}
+
+/// A tile bound to a grid: its point, how many points it spans, and
+/// removing it; unbound, binding it again at the nearest point.
+fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
+    const g = state.model.panels.items[pi].grids.items[gi];
+    const inst = g.instances.items[ii];
+    const sh = state.model.gridShape(pi, gi);
+    if (dvui.button(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 40 })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+    if (state.model.stampIndex(pi, gi, inst.stamp)) |si| propText("Stamp", "{s}", .{g.stamps.items[si].name}, 41);
+    if (inst.loose) |c| {
+        propText("Point", "none: left at ({d:.2}, {d:.2}) mm", .{ c.x, c.y }, 42);
+        if (dvui.button(@src(), "Bind to the nearest point", .{}, .{ .expand = .horizontal, .id_extra = 43 })) {
+            const o = state.model.gridPoint(pi, gi, 0, 0);
+            const col = @min(@as(f64, @floatFromInt(sh.cols - inst.cols)), @max(0, @round((c.x - o.x) / sh.stepX())));
+            const row = @min(@as(f64, @floatFromInt(sh.rows - inst.rows)), @max(0, @round((o.y - c.y) / sh.stepY())));
+            act(.bindInstance, .{ pi, gi, ii, @as(u32, @intFromFloat(col)), @as(u32, @intFromFloat(row)) }) catch {
+                state.status = "It does not fit on the grid. ";
+            };
+        }
+    } else {
+        propText("Point", "column {d}, row {d}", .{ inst.col + 1, inst.row + 1 }, 42);
+        if (numberProp("Spans columns", @floatFromInt(inst.cols), 1, 200, 44)) |v| act(.setInstanceSpan, .{ pi, gi, ii, @as(u32, @intFromFloat(@round(v))), inst.rows }) catch {
+            state.status = "It would reach past the grid. ";
+        };
+        if (numberProp("Spans rows", @floatFromInt(inst.rows), 1, 200, 45)) |v| act(.setInstanceSpan, .{ pi, gi, ii, inst.cols, @as(u32, @intFromFloat(@round(v))) }) catch {
+            state.status = "It would reach past the grid. ";
+        };
+    }
+    if (state.model.instanceBox(pi, gi, ii)) |b| propText("Box", "{d:.2} × {d:.2} mm", .{ b.width(), b.height() }, 46);
+    if (dvui.button(@src(), "Remove from the grid", .{}, .{ .expand = .horizontal, .id_extra = 47 })) {
+        try act(.removeInstance, .{ pi, gi, ii });
+        state.context = .{ .grid = .{ .panel = pi, .index = gi } };
     }
 }
 
@@ -5876,6 +6191,7 @@ fn lowerKind() []const u8 {
         .sketch => "sketch view",
         .sketches => "sketches",
         .sketch_def => "sketch",
+        .grid => "grid",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
     };
@@ -6117,6 +6433,7 @@ fn properties() !void {
                 if (i.ink_outside > 0) propText("Issue", "ink area {d:.2} mm in margin", .{i.ink_outside}, 21);
             }
             try propFont("Legend font", 5);
+            try panelGrids(pi);
             if (state.model.has_sheet) return;
             if (dvui.button(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
                 const id = act(.releasePanel, .{pi}) catch {
@@ -6181,6 +6498,7 @@ fn properties() !void {
         .sketch => |sc| sketchProperties(sc.space, sc.index),
         .sketches => propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1),
         .sketch_def => |i| sketchDefProperties(i),
+        .grid => |g| try gridProperties(g.panel, g.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| {
             try prototypeProperties(id);
@@ -6192,9 +6510,13 @@ fn properties() !void {
 fn tileProperties(id: TileId) !void {
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
-    try sizeProperty(id, .horizontal);
-    try sizeProperty(id, .vertical);
-    const found = findTile(id);
+    const on_grid = state.model.gridInstanceOf(id);
+    if (on_grid) |at| try instanceProperties(at.panel, at.grid, at.index);
+    if (on_grid == null) {
+        try sizeProperty(id, .horizontal);
+        try sizeProperty(id, .vertical);
+    }
+    const found = if (on_grid == null) findTile(id) else null;
     if (found) |f| {
         const pt = f.tile;
         propText("Body", "{d:.2} × {d:.2} mm", .{ pt.body.width(), pt.body.height() }, 3);
