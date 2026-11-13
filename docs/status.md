@@ -94,7 +94,6 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
 
 ## Housekeeping
 
-- **The README's Status section is out of date.** It still says "typing makes a label", and it says nothing about threads, flow editing, constraints or equation mode.
 - **Known limitations:**
   - an unsaved-change log written before free labels were removed has not been tested for recovery;
   - the drawn hyphen ignores the word's bold or italic;

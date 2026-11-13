@@ -13,7 +13,49 @@ The full design is in the [Graven design blueprint](https://claude.ai/artifact/Q
 
 ## Status
 
-Early. The label engine renders a plain run of text in one face: HarfBuzz shaping, glyph outlines (lines, native quadratics, cubics), cap height measured from outlines, the baseline anchor, and SVG output. The markup parser turns KaTeX-style label markup into a neutral tree (`graven parse`), and `graven label` renders it in a style context: upright and italic faces with a fallback chain matched by cap height, superscripts and subscripts (settings from the font's `MATH` table when it has one), accents (`\hat`, `\bar`, `\overline`), math spaces, and space between operators by TeX's atom classes with amounts from the style. Neighbours and scripts are placed by their ink, through contact profiles (`--advance` places them by the fonts' advances instead). Lines break at `\\` and, within a hard box width, at spaces and `\allowbreak` (never at `~`); each line is aligned by the anchor, the block is moved inside the box when it fits, and anything that cannot fit overflows with a diagnostic instead of shrinking. The layout library has a first tile model (panels, and tracks: one flow of tiles made from tile prototypes (blanks are tiles of a built-in spacer prototype), runs of text or equations and hard breaks, poured through rows or columns; slots on the tiles) changed through action functions, with labels rendered through a cache that identical legends share. A GUI editor on DVUI and SDL3 opens on a canvas in the units you choose (mm, inches or mils), with no sheet or panel needed: typing makes a label, tracks and line art are drawn straight onto it, and File › Export SVG writes what it holds. Documents save as `.graven` files that keep their undo history, so undo reaches back past a save after reopening; unsaved work is autosaved into the file every few minutes and offered back after a crash, and a file changed by another session is never written over without asking. `graven dump` prints a document as text (usable as git's text converter) and `graven compact` drops its history. A separate tool, `graven-fonts`, indexes installed fonts (measuring their proportions from outlines and reading their stated licence and embedding terms) and searches them: by name, by likeness to another font, by the characters they must cover, and by style, math support, embedding permission or licence. In the editor, Text › Fonts… opens the same search in a window of its own, with side-by-side and glyph-by-glyph overlay comparison, and builds the document's composed fonts from what is chosen there; the canvas renders with them. Panels, the sample PC keyboard, live legend editing and stepping through installed fonts work as before. Features are built in the order real workflows need them. The OCCT bridge is a tested starting point.
+Early, with a working editor. For the full inventory, what is agreed but not built, and the gaps against the goals above, see [docs/status.md](docs/status.md).
+
+**Label engine.**
+- KaTeX-style label markup (`graven parse`), rendered in a style context (`graven label`).
+- HarfBuzz shaping and exact glyph outlines (lines, quadratics, cubics).
+- Scripts, `\frac`, `\sqrt`, accents, and TeX atom-class spacing.
+- Bold, italic and math-alphabet variants, plus underline and strikethrough.
+- Neighbours and scripts placed by their ink.
+- Line breaks at spaces, `\allowbreak` and soft hyphens. A word too long for its line is cut to wrap.
+
+**Layout library.**
+- **Canvas:** in mm, inches or mils, with frames, views, layers, images and groups.
+- **Panels:** with margins and compliance checks, made from closed paths with cutouts.
+- **Tiles:** made from tile prototypes.
+- **Tracks:**
+  - rows or columns along a path, with one flow each of tiles, text, equations, breaks and paragraphs;
+  - tracks can be threaded so one flow runs through several, across panels too.
+- **Constraints:** parametric constraints between object features, solved per axis.
+- **RTF import:** RTF text can be imported into a flow.
+
+**GUI editor (DVUI and SDL3).**
+- Opens on a canvas, with overlay panes for the tree, tools and properties.
+- Text and equations are edited in place in flows, like a word processor:
+  - Ctrl+\ starts equation mode, which builds an equation in the expression line;
+  - Tab steps through an equation's slots.
+- **Selection and moving:** Ctrl-click selects. Moves and resizes stay within constraints.
+- **Background reflow:** changes that spread across pages reflow on a worker thread.
+- **Export:** File › Export SVG writes the canvas.
+
+**Documents.**
+- `.graven` files keep their undo history across saves.
+- Unsaved work is autosaved and offered back after a crash.
+- A file changed by another session is never written over without asking.
+- `graven dump` prints a document as text, and `graven compact` drops its history.
+
+**Fonts.**
+- `graven-fonts` and the editor's Fonts window index, search and compare installed fonts and build composed fonts.
+
+**Not yet built.**
+- **STEP output:** the OCCT bridge is a tested shim that nothing calls yet.
+- **Design-rule checks and per-process output:** not started.
+- **Proof sheet:** not started.
+- **HP-15C sample:** not started. The PC keyboard is the only sample, and its output is the regression check.
 
 ## Layout
 
@@ -24,6 +66,7 @@ Early. The label engine renders a plain run of text in one face: HarfBuzz shapin
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
 | `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes, tiles, slots, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
+| `docs` | Project notes: [status.md](docs/status.md), what exists today and what is still to come |
 | `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
 | `apps/samples` | Sample models built through the library actions (PC keyboard) |
 | `lib/testdata` | Test fonts with known glyph areas, made by `tools/make-test-fonts.py` |
