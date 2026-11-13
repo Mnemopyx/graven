@@ -231,6 +231,8 @@ pub const TilePrototype = struct {
     /// Its tiles are spacers: no art and no labels, shown faintly while
     /// editing and left out of output (the built-in Blank prototype).
     spacer: bool = false,
+    /// A sketch its tiles are drawn from, in place of `art`.
+    sketch: ?PrototypeSketch = null,
     /// What happens to one of its tiles that lands at the start of a
     /// segment after a soft break: kept (blanks, like a keyboard's gaps), or
     /// dropped (a space between words).
@@ -302,6 +304,27 @@ pub const Tile = struct {
     prototype: PrototypeId = 0,
     fills: std.ArrayList(SlotFill) = .empty,
     removed: bool = false,
+    /// Its own values for its prototype's sketch parameters (a homing bump
+    /// switched on); the sketch's own expressions give the rest.
+    params: std.ArrayList(TileParam) = .empty,
+};
+
+pub const TileParam = struct { name: []const u8, value: f64 };
+
+/// A tile prototype's own copy of a sketch (see `Model.applySketch`): how its
+/// tiles are drawn, solved again for each tile's size.
+pub const PrototypeSketch = struct {
+    /// The copy's own ID.
+    id: ObjectId,
+    /// The sketch it was copied from.
+    from: ObjectId,
+    sketch: sketch_.Sketch,
+    /// The parameters that take a tile's horizontal and vertical size, mm.
+    width_param: []const u8,
+    height_param: []const u8,
+    /// Where the sketch's origin sits from the tile's origin (its pitch
+    /// box's bottom-left corner), mm.
+    offset: geom.Point = .{ .x = 0, .y = 0 },
 };
 
 /// A run of label markup in a track's flow: words, an equation, or both
@@ -767,6 +790,9 @@ pub const SketchEdit = union(enum) {
     /// A parameter added or changed.
     param: struct { name: []const u8, expr: []const u8 },
     unparam: []const u8,
+    /// Construction geometry output while a parameter is not 0 (empty name:
+    /// never).
+    physical_when: struct { g: sketch_.GeomId, param: []const u8 },
 };
 
 pub const Image = struct {
@@ -1142,7 +1168,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchSlot, NoSuchLayer, DuplicateSlot, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -2187,6 +2213,7 @@ pub const Model = struct {
             .expr => |e| try sk.setExpr(al, e.c, e.text),
             .param => |e| try sk.setParam(al, e.name, e.expr),
             .unparam => |name| try sk.removeParam(name),
+            .physical_when => |e| try sk.setPhysicalWhen(al, e.g, e.param),
             .drag => |e| {
                 _ = try sk.drag(al, gpa, e.p, e.to);
                 m.revision += 1;
@@ -3418,6 +3445,66 @@ pub const Model = struct {
     }
 
     /// Sets or clears a prototype's art; null draws it plain from its insets.
+    /// Gives prototype `id` its own copy of sketch `index` of space `space`,
+    /// which must be fully constrained: its tiles are then drawn from it,
+    /// solved for each tile's size with parameter `width_param` set to the
+    /// tile's width and `height_param` to its height (mm), the sketch's
+    /// origin `offset` from the tile's origin. Refused for a sketch that is
+    /// not fully constrained or lacks the parameters.
+    pub fn applySketch(m: *Model, id: PrototypeId, space: usize, index: usize, width_param: []const u8, height_param: []const u8, offset: geom.Point) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const src = try m.sketchAt(space, index);
+        var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+        defer scratch.deinit();
+        var copy = try src.sketch.clone(m.a());
+        _ = try copy.solve(m.arena.child_allocator);
+        const an = try copy.analyse(m.arena.child_allocator, scratch.allocator());
+        if (!an.fully_constrained) return error.NotFullyConstrained;
+        for ([_][]const u8{ width_param, height_param }) |name| {
+            const found = for (copy.params.items) |p| {
+                if (std.mem.eql(u8, p.name, name)) break true;
+            } else false;
+            if (!found) return error.NoSuchParameter;
+        }
+        m.prototypes.items[id].sketch = .{
+            .id = m.newId(),
+            .from = src.id,
+            .sketch = copy,
+            .width_param = try m.a().dupe(u8, width_param),
+            .height_param = try m.a().dupe(u8, height_param),
+            .offset = offset,
+        };
+        m.revision += 1;
+    }
+
+    /// Moves the sketch of prototype `id` on its tiles.
+    pub fn setPrototypeSketchOffset(m: *Model, id: PrototypeId, offset: geom.Point) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const ps = &(m.prototypes.items[id].sketch orelse return error.NoSuchItem);
+        ps.offset = offset;
+        m.revision += 1;
+    }
+
+    /// Takes prototype `id`'s sketch away: its tiles are drawn as before.
+    pub fn removePrototypeSketch(m: *Model, id: PrototypeId) Error!void {
+        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        m.prototypes.items[id].sketch = null;
+        m.revision += 1;
+    }
+
+    /// Sets tile `id`'s own value for its prototype's sketch parameter
+    /// `name`; null takes it away, so the sketch's own expression holds.
+    pub fn setTileParam(m: *Model, id: TileId, name: []const u8, value: ?f64) Error!void {
+        const t = m.tile(id);
+        for (t.params.items, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) {
+            if (value) |v| t.params.items[i].value = v else _ = t.params.orderedRemove(i);
+            m.revision += 1;
+            return;
+        };
+        if (value) |v| try t.params.append(m.a(), .{ .name = try m.a().dupe(u8, name), .value = v });
+        m.revision += 1;
+    }
+
     pub fn setPrototypeArt(m: *Model, id: PrototypeId, art: ?art_.Art) Error!void {
         if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
         m.prototypes.items[id].art = if (art) |x| try art_.dupe(m.a(), x) else null;
@@ -3427,6 +3514,15 @@ pub const Model = struct {
     fn dupePrototype(m: *Model, p: TilePrototype) Allocator.Error!TilePrototype {
         var copy = p;
         copy.name = try m.a().dupe(u8, p.name);
+        // A copy of its sketch, with an ID of its own.
+        if (p.sketch) |ps| copy.sketch = .{
+            .id = m.newId(),
+            .from = ps.from,
+            .sketch = try ps.sketch.clone(m.a()),
+            .width_param = try m.a().dupe(u8, ps.width_param),
+            .height_param = try m.a().dupe(u8, ps.height_param),
+            .offset = ps.offset,
+        };
         const slots = try m.a().alloc(SlotPrototype, p.slots.len);
         for (p.slots, slots) |sp, *out| {
             out.* = sp;

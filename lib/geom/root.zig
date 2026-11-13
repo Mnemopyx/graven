@@ -216,6 +216,16 @@ pub const Segment = union(enum) {
         };
     }
 
+    /// The same curve, travelled the other way.
+    pub fn reversed(s: Segment) Segment {
+        return switch (s) {
+            .line => |p| .{ .line = .{ p[1], p[0] } },
+            .quad => |p| .{ .quad = .{ p[2], p[1], p[0] } },
+            .cubic => |p| .{ .cubic = .{ p[3], p[2], p[1], p[0] } },
+            .conic => |c| .{ .conic = .{ .p = .{ c.p[2], c.p[1], c.p[0] }, .w = c.w } },
+        };
+    }
+
     pub fn transformed(s: Segment, m: Affine) Segment {
         return switch (s) {
             .conic => |c| .{ .conic = .{ .p = .{ m.apply(c.p[0]), m.apply(c.p[1]), m.apply(c.p[2]) }, .w = c.w } },

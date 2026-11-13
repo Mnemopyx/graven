@@ -56,6 +56,11 @@ pub const Geometry = struct {
     reference: bool = false,
     /// Removed: kept in place so IDs hold, its unknowns fixed, ignored.
     removed: bool = false,
+    /// Construction geometry that is output all the same while this
+    /// parameter's value is not 0 (empty: never). Whatever uses the sketch
+    /// sets the parameter: a homing bump drawn as construction, made
+    /// physical on the keys that ask for it.
+    physical_when: []const u8 = "",
 };
 
 /// A point of a geometry: a point itself, a segment's or arc's start or
@@ -176,6 +181,7 @@ pub const Sketch = struct {
             k.expr = try a.dupe(u8, k.expr);
         }
         for (s.params.items) |p| try c.params.append(a, .{ .name = try a.dupe(u8, p.name), .expr = try a.dupe(u8, p.expr) });
+        for (c.geometry.items) |*g| g.physical_when = try a.dupe(u8, g.physical_when);
         return c;
     }
 
@@ -270,6 +276,25 @@ pub const Sketch = struct {
 
     /// Sets geometry `g` to construction or not (infinite lines and rays
     /// stay construction).
+    /// Makes construction geometry `g` output while parameter `param` is
+    /// not 0 (empty: never). Not for infinite lines and rays.
+    pub fn setPhysicalWhen(s: *Sketch, a: Allocator, g: GeomId, param: []const u8) Error!void {
+        const geo = try s.get(g);
+        if (geo.reference or geo.kind == .line or geo.kind == .ray) return error.WrongKind;
+        if (param.len > 0 and !expr.validName(param)) return error.BadName;
+        geo.physical_when = try a.dupe(u8, param);
+    }
+
+    /// Whether geometry `g` is output: neither construction (unless its
+    /// parameter switches it on) nor reference, nor removed.
+    pub fn isOutput(s: *const Sketch, g: Geometry) bool {
+        if (g.reference or g.removed or g.kind == .line or g.kind == .ray) return false;
+        if (!g.construction) return true;
+        if (g.physical_when.len == 0) return false;
+        const v = s.paramValue(g.physical_when) catch return false;
+        return v != 0;
+    }
+
     pub fn setConstruction(s: *Sketch, g: GeomId, on: bool) Error!void {
         const geo = try s.get(g);
         if (geo.reference) return error.WrongKind;
@@ -493,10 +518,68 @@ pub const Sketch = struct {
     pub fn physical(s: *const Sketch, a: Allocator) Allocator.Error![]geom.Segment {
         var out: std.ArrayList(geom.Segment) = .empty;
         for (s.geometry.items) |g| {
-            if (g.construction or g.reference or g.removed) continue;
+            if (!s.isOutput(g)) continue;
             try s.appendSegments(a, g, &out);
         }
         return out.items;
+    }
+
+    /// The output geometry joined end to end into closed contours (pieces
+    /// turned round as they need to be), and how many pieces were left that
+    /// close no contour. Allocated from `a`.
+    pub fn profiles(s: *const Sketch, a: Allocator) Allocator.Error!struct { contours: []geom.Contour, open: usize } {
+        const segs = try s.physical(a);
+        const used = try a.alloc(bool, segs.len);
+        @memset(used, false);
+        const near = struct {
+            fn f(p: Point, q: Point) bool {
+                return @abs(p.x - q.x) < 1e-9 and @abs(p.y - q.y) < 1e-9;
+            }
+        }.f;
+        var contours: std.ArrayList(geom.Contour) = .empty;
+        var open: usize = 0;
+        for (segs, 0..) |first, i| {
+            if (used[i]) continue;
+            used[i] = true;
+            var chain: std.ArrayList(geom.Segment) = .empty;
+            try chain.append(a, first);
+            var closed = near(first.end(), first.start());
+            while (!closed) {
+                const end = chain.items[chain.items.len - 1].end();
+                const next = for (segs, 0..) |sg, k| {
+                    if (used[k]) continue;
+                    if (near(sg.start(), end)) break .{ k, sg };
+                    if (near(sg.end(), end)) break .{ k, sg.reversed() };
+                } else null;
+                const nx = next orelse break;
+                used[nx[0]] = true;
+                try chain.append(a, nx[1]);
+                closed = near(nx[1].end(), chain.items[0].start());
+            }
+            if (!closed) {
+                open += chain.items.len;
+                continue;
+            }
+            // Exactly closed: each piece starts where the last ended.
+            for (chain.items[1..], 1..) |*sg, k| setStart(sg, chain.items[k - 1].end());
+            setEnd(&chain.items[chain.items.len - 1], chain.items[0].start());
+            try contours.append(a, .{ .segments = chain.items });
+        }
+        return .{ .contours = contours.items, .open = open };
+    }
+
+    fn setStart(sg: *geom.Segment, p: Point) void {
+        switch (sg.*) {
+            .conic => |*c| c.p[0] = p,
+            inline else => |*q| q[0] = p,
+        }
+    }
+
+    fn setEnd(sg: *geom.Segment, p: Point) void {
+        switch (sg.*) {
+            .conic => |*c| c.p[2] = p,
+            inline else => |*q| q[q.len - 1] = p,
+        }
     }
 
     fn val(s: *const Sketch, p: Pt) Point {

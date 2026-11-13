@@ -328,3 +328,30 @@ test "a reference dimension reports and does not drive; parameters drive by expr
     an = try s.analyse(ga, arena.allocator());
     try testing.expect(an.fully_constrained);
 }
+
+test "output joins into closed profiles; a parameter switches construction geometry on" {
+    var ar: std.heap.ArenaAllocator = .init(ga);
+    defer ar.deinit();
+    const al = ar.allocator();
+    var s = try Sketch.init(al);
+    // A rectangle drawn with one side the other way round, and a circle.
+    _ = try s.addSegment(al, pt(0, 0), pt(10, 0), false);
+    _ = try s.addSegment(al, pt(10, 0), pt(10, 5), false);
+    _ = try s.addSegment(al, pt(0, 5), pt(10, 5), false);
+    _ = try s.addSegment(al, pt(0, 5), pt(0, 0), false);
+    _ = try s.addCircle(al, pt(20, 2), 1, false);
+    // A loose piece, and a bump that is construction until asked for.
+    _ = try s.addSegment(al, pt(30, 0), pt(31, 0), false);
+    const bump = try s.addCircle(al, pt(5, 2), 0.5, true);
+    try s.setParam(al, "homing", "0");
+    try s.setPhysicalWhen(al, bump, "homing");
+    var p = try s.profiles(al);
+    try testing.expectEqual(@as(usize, 2), p.contours.len);
+    try testing.expectEqual(@as(usize, 1), p.open);
+    for (p.contours) |c| try testing.expect(c.isClosed());
+    try testing.expectApproxEqAbs(@as(f64, 50), @abs(p.contours[0].signedArea()), 1e-9);
+    try s.setParam(al, "homing", "1");
+    p = try s.profiles(al);
+    try testing.expectEqual(@as(usize, 3), p.contours.len);
+    try testing.expectError(error.WrongKind, s.setPhysicalWhen(al, try s.addLine(al, pt(0, 0), 0), "homing"));
+}

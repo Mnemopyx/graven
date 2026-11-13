@@ -6156,7 +6156,10 @@ fn properties() !void {
             }
             propText("Items", "{d}", .{held}, 3);
         },
-        .tile => |id| try tileProperties(id),
+        .tile => |id| {
+            try tileProperties(id);
+            tileSketchParams(id);
+        },
         .art => |l| try artProperties(l.panel, l.index),
         .group => |g| try groupProperties(g),
         .selection => try selectionProperties(),
@@ -6165,7 +6168,10 @@ fn properties() !void {
         .image => |im| try imageProperties(im.space, im.index),
         .sketch => |sc| sketchProperties(sc.space, sc.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
-        .prototype => |id| try prototypeProperties(id),
+        .prototype => |id| {
+            try prototypeProperties(id);
+            prototypeSketch(id);
+        },
     }
 }
 
@@ -10922,7 +10928,43 @@ fn sketchModeProperties() void {
             break;
         }
     }
+    sketchPhysicalWhen(it);
     sketchParameters(it);
+}
+
+var sk_pw_text: [64]u8 = @splat(0);
+var sk_pw_for: ?skl.GeomId = null;
+
+/// For one selected construction geometry: the parameter that makes it
+/// output while not 0 (a tile switches it on).
+fn sketchPhysicalWhen(it: *layout.model.SketchItem) void {
+    if (sk_sel.items.len != 1) return;
+    const g: skl.GeomId = switch (sk_sel.items[0]) {
+        .curve => |c| c,
+        .point => |r| if (r.role == .point) r.geom else return,
+        .constraint => return,
+    };
+    const geo = it.sketch.geometry.items[g];
+    if (!geo.construction or geo.kind == .line or geo.kind == .ray) return;
+    if (sk_pw_for == null or sk_pw_for.? != g) {
+        sk_pw_for = g;
+        @memset(&sk_pw_text, 0);
+        @memcpy(sk_pw_text[0..@min(geo.physical_when.len, 63)], geo.physical_when[0..@min(geo.physical_when.len, 63)]);
+    }
+    heading("{s}", .{"Output while a parameter is on"}, 8250);
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8251 });
+    defer row.deinit();
+    var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = sk_pw_text[0..63] }, .placeholder = "parameter (empty: never)" }, .{ .expand = .horizontal, .font = .theme(.mono) });
+    const enter = te.enter_pressed;
+    te.deinit();
+    if (dvui.button(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
+        const name = std.mem.trim(u8, std.mem.sliceTo(&sk_pw_text, 0), " ");
+        if (name.len > 0 and !skl.expr.validName(name)) {
+            state.status = "Not a parameter name. ";
+            return;
+        }
+        _ = skEdit(.{ .physical_when = .{ .g = g, .param = name } });
+    }
 }
 
 /// What the parameter entry holds: "name = expression".
@@ -10992,4 +11034,194 @@ fn sketchProperties(space: usize, index: usize) void {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
     if (dvui.button(@src(), "Edit sketch", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) enterSketch(.{ .space = space, .index = index });
+}
+
+// Tiles from sketches -------------------------------------------------------------
+//
+// A tile prototype takes its own copy of a fully constrained sketch (Apply,
+// from the prototype's properties): the sketch's parameters chosen for the
+// tile's horizontal and vertical size are set to each tile's size (mm), and
+// it is solved again for that size, its closed profiles drawn on the tile at
+// the offset from the tile's origin. Later edits to the sketch reach the
+// prototype only when it is applied again. Construction geometry a parameter
+// switches on is switched per tile, in the tile's properties.
+
+var proto_sk_choice: usize = 0;
+var proto_sk_w: usize = 0;
+var proto_sk_h: usize = 1;
+var proto_sk_off: [2]f64 = .{ 0, 0 };
+var proto_preview: [2]f64 = .{ 1, 1 };
+
+/// Every sketch in the document, as (space, index).
+fn allSketches(buf: []SketchRef) []SketchRef {
+    var n: usize = 0;
+    for (state.model.spaces.items, 0..) |sp, si| for (sp.sketches.items, 0..) |_, i| {
+        if (n >= buf.len) break;
+        buf[n] = .{ .space = si, .index = i };
+        n += 1;
+    };
+    return buf[0..n];
+}
+
+fn prototypeSketch(id: layout.model.PrototypeId) void {
+    const proto = state.model.prototypes.items[id];
+    heading("{s}", .{"Drawn from a sketch"}, 8400);
+    if (proto.sketch) |ps| {
+        // Its copy: where it came from, and how it sits on its tiles.
+        var from_name: []const u8 = "a sketch since removed";
+        var from_ref: ?SketchRef = null;
+        for (state.model.spaces.items, 0..) |sp, si| for (sp.sketches.items, 0..) |sk, i| if (sk.id == ps.from) {
+            from_name = sk.name;
+            from_ref = .{ .space = si, .index = i };
+        };
+        propText("Copy of", "{s}", .{from_name}, 8401);
+        propText("Width from", "{s}", .{ps.width_param}, 8402);
+        propText("Height from", "{s}", .{ps.height_param}, 8403);
+        propText("Offset", "({d:.2}, {d:.2}) mm", .{ ps.offset.x, ps.offset.y }, 8404);
+        // The size preview: solved at another size, the tiles untouched.
+        for ([_][]const u8{ "Preview width, u", "Preview height, u" }, 0..) |label, k| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8405 + k * 10 });
+            defer row.deinit();
+            propName(label);
+            _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_preview[k], .min = 0.25, .max = 20 }, .{ .expand = .horizontal });
+        }
+        sketchPreview(id, ps);
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8406 });
+            defer row.deinit();
+            if (from_ref) |fr| if (dvui.button(@src(), "Apply again", .{}, .{})) {
+                act(.applySketch, .{ id, fr.space, fr.index, ps.width_param, ps.height_param, ps.offset }) catch |err| {
+                    state.status = applyError(err);
+                };
+            };
+            if (dvui.button(@src(), "Remove", .{}, .{})) actV(.removePrototypeSketch, .{id});
+        }
+    }
+    // Apply a sketch: which one, its size parameters, the offset.
+    var refs_buf: [64]SketchRef = undefined;
+    const refs = allSketches(&refs_buf);
+    if (refs.len == 0) {
+        propText("Sketches", "{s}", .{"none in the document yet"}, 8410);
+        return;
+    }
+    const arena = dvui.currentWindow().arena();
+    const names = arena.alloc([]const u8, refs.len) catch return;
+    for (refs, names) |rf, *n| n.* = state.model.spaces.items[rf.space].sketches.items[rf.index].name;
+    if (proto_sk_choice >= refs.len) proto_sk_choice = 0;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8411 });
+        defer row.deinit();
+        propName("Sketch");
+        _ = dvui.dropdown(@src(), names, .{ .choice = &proto_sk_choice }, .{}, .{ .expand = .horizontal });
+    }
+    const chosen = refs[proto_sk_choice];
+    const sk = &state.model.spaces.items[chosen.space].sketches.items[chosen.index].sketch;
+    if (sk.params.items.len == 0) {
+        propText("Parameters", "{s}", .{"none: give the sketch two, for width and height"}, 8412);
+        return;
+    }
+    const pnames = arena.alloc([]const u8, sk.params.items.len) catch return;
+    for (sk.params.items, pnames) |pp, *n| n.* = pp.name;
+    if (proto_sk_w >= pnames.len) proto_sk_w = 0;
+    if (proto_sk_h >= pnames.len) proto_sk_h = @min(1, pnames.len - 1);
+    inline for (.{ .{ "Width from", &proto_sk_w, 8413 }, .{ "Height from", &proto_sk_h, 8414 } }) |row_def| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = row_def[2] });
+        defer row.deinit();
+        propName(row_def[0]);
+        _ = dvui.dropdown(@src(), pnames, .{ .choice = row_def[1] }, .{}, .{ .expand = .horizontal });
+    }
+    for ([_][]const u8{ "Offset across, mm", "Offset up, mm" }, 0..) |label, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8415 + k * 10 });
+        defer row.deinit();
+        propName(label);
+        _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_sk_off[k], .min = -1000, .max = 1000 }, .{ .expand = .horizontal });
+    }
+    if (dvui.button(@src(), "Apply sketch to this prototype", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
+        const off: geom.Point = .{ .x = proto_sk_off[0], .y = proto_sk_off[1] };
+        if (act(.applySketch, .{ id, chosen.space, chosen.index, pnames[proto_sk_w], pnames[proto_sk_h], off })) {
+            state.status = "Applied: the prototype has its own copy of the sketch. ";
+        } else |err| state.status = applyError(err);
+    }
+}
+
+fn applyError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.NotFullyConstrained => "Only a fully constrained sketch can be applied: finish constraining it first. ",
+        error.NoSuchParameter => "The sketch has no parameter of that name. ",
+        else => "The sketch could not be applied. ",
+    };
+}
+
+/// The prototype's sketch solved at the preview size, drawn to fit a box.
+fn sketchPreview(id: layout.model.PrototypeId, ps: layout.model.PrototypeSketch) void {
+    const proto = state.model.prototypes.items[id];
+    const unit = proto.unit orelse 19.05;
+    const w = proto_preview[0] * unit;
+    const h = proto_preview[1] * unit;
+    var box = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .h = 140 }, .background = true, .color_fill = .{ .color = colors.paper }, .border = .all(1), .id_extra = 8420 });
+    defer box.deinit();
+    const r = box.data().contentRectScale().r;
+    if (state.labels == null) return;
+    const labels = &state.labels.?;
+    const pitch: geom.Box = .{ .x0 = 0, .y0 = 0, .x1 = w, .y1 = h };
+    const shapes = (labels.sketchShapes(dvui.currentWindow().arena(), ps, &.{}, pitch) catch null) orelse {
+        dvui.labelNoFmt(@src(), "It does not solve at this size.", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_text = .{ .color = colors.overflow } });
+        return;
+    };
+    // Fit the pitch box, with a margin.
+    const m = 8 * dvui.windowNaturalScale();
+    const k = @min((r.w - 2 * m) / @as(f32, @floatCast(w)), (r.h - 2 * m) / @as(f32, @floatCast(h)));
+    const ox = r.x + (r.w - k * @as(f32, @floatCast(w))) / 2;
+    const oy = r.y + (r.h + k * @as(f32, @floatCast(h))) / 2;
+    const toPx = struct {
+        fn f(p: geom.Point, kk: f32, x0: f32, y0: f32) dvui.Point.Physical {
+            return .{ .x = x0 + kk * @as(f32, @floatCast(p.x)), .y = y0 - kk * @as(f32, @floatCast(p.y)) };
+        }
+    }.f;
+    const px = dvui.windowNaturalScale();
+    // The pitch box, faint.
+    const corners = [_]geom.Point{ .{ .x = 0, .y = 0 }, .{ .x = w, .y = 0 }, .{ .x = w, .y = h }, .{ .x = 0, .y = h } };
+    var cp: [4]dvui.Point.Physical = undefined;
+    for (corners, &cp) |c, *o| o.* = toPx(c, k, ox, oy);
+    dvui.Path.stroke(.{ .points = &cp }, .{ .thickness = px, .color = .{ .color = colors.guide.opacity(0.5) }, .closed = true });
+    const a = dvui.currentWindow().arena();
+    for (shapes) |sh| for (sh.outline.contours) |c| {
+        var pts: std.ArrayList(geom.Point) = .empty;
+        if (c.segments.len == 0) continue;
+        pts.append(a, c.segments[0].start()) catch return;
+        for (c.segments) |seg| flatten(a, &pts, seg, 0.5 / @as(f64, k)) catch return;
+        // Closed: the last point is the first again.
+        if (pts.items.len > 1) _ = pts.pop();
+        const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+        for (pts.items, phys) |p, *o| o.* = toPx(p, k, ox, oy);
+        dvui.Path.stroke(.{ .points = phys }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.ink }, .closed = true });
+    };
+}
+
+/// A tile's switches: each parameter its prototype's sketch uses to switch
+/// construction geometry on.
+fn tileSketchParams(id: TileId) void {
+    const t = state.model.tileConst(id);
+    const ps = state.model.prototypes.items[t.prototype].sketch orelse return;
+    var seen: [16][]const u8 = undefined;
+    var n: usize = 0;
+    for (ps.sketch.geometry.items) |g| {
+        if (g.removed or g.physical_when.len == 0) continue;
+        const dup = for (seen[0..n]) |x| {
+            if (std.mem.eql(u8, x, g.physical_when)) break true;
+        } else false;
+        if (dup or n >= seen.len) continue;
+        seen[n] = g.physical_when;
+        n += 1;
+    }
+    if (n == 0) return;
+    heading("{s}", .{"Sketch switches"}, 8500);
+    for (seen[0..n], 0..) |name, i| {
+        var on = for (t.params.items) |p| {
+            if (std.mem.eql(u8, p.name, name)) break p.value != 0;
+        } else ((ps.sketch.paramValue(name) catch 0) != 0);
+        if (dvui.checkbox(@src(), &on, name, .{ .id_extra = i })) {
+            actV(.setTileParam, .{ id, name, @as(?f64, if (on) 1 else 0) });
+        }
+    }
 }

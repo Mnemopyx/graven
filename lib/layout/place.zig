@@ -102,6 +102,9 @@ pub const Issue = struct {
         /// A tile's art cannot be stretched exactly (a curve crosses a cut);
         /// it is drawn plain.
         tile_art,
+        /// A tile's prototype sketch cannot be solved for its size (or is
+        /// not fully constrained there); the tile is drawn plain.
+        tile_sketch,
     },
     tile: ?TileId = null,
     slot: ?usize = null,
@@ -304,6 +307,11 @@ pub const Labels = struct {
     resolved: ?*const fonts.Resolved = null,
     contexts: std.ArrayList(?Ctx) = .empty,
     cache: std.HashMapUnmanaged(Key, Entry, KeyContext, 80) = .empty,
+    /// Prototype sketches solved for a tile's size and parameters: their
+    /// closed profiles in the sketch's frame (null: it did not solve), by
+    /// a hash of the copy's ID, the size and the parameters.
+    sketches: std.AutoHashMapUnmanaged(u64, ?[]const geom.Contour) = .empty,
+    sketch_arena: ?std.heap.ArenaAllocator = null,
 
     const Ctx = struct { spec: engine.style.Spec, ctx: ?engine.style.Context };
 
@@ -349,7 +357,74 @@ pub const Labels = struct {
         return .{ .gpa = gpa, .faces = faces };
     }
 
+    /// A tile's shapes from its prototype's sketch: the sketch solved with
+    /// its size parameters set to the pitch box's size (mm) and the tile's
+    /// own parameters, its closed profiles placed at the pitch box's corner
+    /// plus the offset, each drawn as an outline. Null when it does not
+    /// solve to full constraint. Solutions are cached.
+    pub fn sketchShapes(l: *Labels, a: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) Allocator.Error!?[]const art.Shape {
+        var h: std.hash.Wyhash = .init(1);
+        h.update(std.mem.asBytes(&ps.id));
+        h.update(std.mem.asBytes(&box.width()));
+        h.update(std.mem.asBytes(&box.height()));
+        for (params) |p| {
+            h.update(p.name);
+            h.update(std.mem.asBytes(&p.value));
+        }
+        const key = h.final();
+        const contours = if (l.sketches.get(key)) |hit| hit else blk: {
+            if (l.sketch_arena == null) l.sketch_arena = .init(l.gpa);
+            const got = solveTileSketch(l.gpa, l.sketch_arena.?.allocator(), ps, params, box) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Anything else: it does not solve here.
+                else => null,
+            };
+            try l.sketches.put(l.gpa, key, got);
+            break :blk got;
+        };
+        const cs = contours orelse return null;
+        const move = geom.Affine.translate(box.x0 + ps.offset.x, box.y0 + ps.offset.y);
+        const shapes = try a.alloc(art.Shape, cs.len);
+        for (cs, shapes) |c, *sh| {
+            const one = try a.alloc(geom.Contour, 1);
+            one[0] = c;
+            sh.* = .{
+                .name = "sketch",
+                .outline = try (geom.Outline{ .contours = one }).transformed(a, move),
+                .paint = .{ .edge = .hex("#1d1d1b"), .edge_width = 0.15 },
+            };
+        }
+        return shapes;
+    }
+
+    fn solveTileSketch(gpa: Allocator, keep: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) !?[]const geom.Contour {
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        var sk = try ps.sketch.clone(sa);
+        var buf: [64]u8 = undefined;
+        try sk.setParam(sa, ps.width_param, try std.fmt.bufPrint(&buf, "{d}", .{box.width()}));
+        try sk.setParam(sa, ps.height_param, try std.fmt.bufPrint(&buf, "{d}", .{box.height()}));
+        for (params) |p| for (sk.params.items) |sp| if (std.mem.eql(u8, sp.name, p.name)) {
+            try sk.setParam(sa, p.name, try std.fmt.bufPrint(&buf, "{d}", .{p.value}));
+        };
+        // An expression with no value at this size would leave the value
+        // from the size it was drawn at: it does not solve here.
+        for (sk.constraints.items, 0..) |c, ci| {
+            if (c.driving and sk.exprError(@intCast(ci)) != null) return null;
+        }
+        const res = try sk.solve(gpa);
+        const an = try sk.analyse(gpa, sa);
+        if (!res.solved or !an.fully_constrained) return null;
+        const prof = try sk.profiles(sa);
+        const out = try keep.alloc(geom.Contour, prof.contours.len);
+        for (prof.contours, out) |c, *o| o.* = .{ .segments = try keep.dupe(geom.Segment, c.segments) };
+        return out;
+    }
+
     pub fn deinit(l: *Labels) void {
+        l.sketches.deinit(l.gpa);
+        if (l.sketch_arena) |*ar| ar.deinit();
         l.clear();
         l.cache.deinit(l.gpa);
         l.contexts.deinit(l.gpa);
@@ -1336,7 +1411,12 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         try tiles.append(a, .{ .id = pid, .region = ri, .row = sg, .pitch_box = pitch_box, .body = pitch_box, .face = pitch_box, .shapes = &.{}, .spacer = true });
                         continue;
                     }
-                    const shapes = if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
+                    const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| blk: {
+                        const got = try labels.sketchShapes(a, ps, m.tileConst(pid).params.items, pitch_box);
+                        if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg });
+                        break :blk got;
+                    } else null;
+                    const shapes = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
                         error.CurveCrossesCut => blk: {
                             try issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = sg });
                             break :blk try art.plainShapes(a, proto.*, unit, pitch_box);
@@ -3022,4 +3102,78 @@ test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word do
         n += 1;
     }
     try testing.expectEqual(segs[0], segs[1]);
+}
+
+test "tiles drawn from a prototype's sketch, solved for each size; a size that does not solve is flagged" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    // A body 0.5 mm in from the pitch box on every side, from w and h; a
+    // homing bump, construction until a tile asks for it; and a slot that
+    // needs a tile wider than 25 mm.
+    const si = try m.addSketch(0, "Key", .{ .x = 0, .y = 0 });
+    const sk = &m.spaces.items[0].sketches.items[si].sketch;
+    const al = m.arena.allocator();
+    const P = struct { fn f(x: f64, y: f64) geom.Point { return .{ .x = x, .y = y }; } }.f;
+    try sk.setParam(al, "w", "19.05");
+    try sk.setParam(al, "h", "19.05");
+    try sk.setParam(al, "homing", "0");
+    const b = try sk.addSegment(al, P(0.5, 0.5), P(18.5, 0.5), false);
+    const rt = try sk.addSegment(al, P(18.5, 0.5), P(18.5, 18.5), false);
+    const t = try sk.addSegment(al, P(18.5, 18.5), P(0.5, 18.5), false);
+    const l = try sk.addSegment(al, P(0.5, 18.5), P(0.5, 0.5), false);
+    const segs = [_]u32{ b, rt, t, l };
+    for (0..4) |i| _ = try sk.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = segs[i], .role = .end }, .{ .geom = segs[(i + 1) % 4], .role = .start } } } });
+    _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = b } } });
+    _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = t } } });
+    _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = l } } });
+    _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = rt } } });
+    _ = try sk.addConstraint(al, .{ .kind = .{ .fixed = .{ .p = .{ .geom = b, .role = .start }, .at = P(0.5, 0.5) } } });
+    const dw = try sk.addConstraint(al, .{ .kind = .{ .distance_x = .{ .a = .{ .geom = b, .role = .start }, .b = .{ .geom = b, .role = .end }, .value = 18 } } });
+    const dh = try sk.addConstraint(al, .{ .kind = .{ .distance_y = .{ .a = .{ .geom = rt, .role = .start }, .b = .{ .geom = rt, .role = .end }, .value = 18 } } });
+    try sk.setExpr(al, dw, "w - 1");
+    try sk.setExpr(al, dh, "h - 1");
+    const bump = try sk.addCircle(al, P(9.5, 5), 1, true);
+    _ = try sk.addConstraint(al, .{ .kind = .{ .fixed = .{ .p = .{ .geom = bump, .role = .centre }, .at = P(9.5, 5) } } });
+    _ = try sk.addConstraint(al, .{ .kind = .{ .radius = .{ .g = bump, .value = 1 } } });
+    try sk.setPhysicalWhen(al, bump, "homing");
+    _ = try sk.solve(gpa);
+    const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
+    // Not the parameters it has: refused.
+    try testing.expectError(error.NoSuchParameter, m.applySketch(key, 0, si, "width", "h", .{ .x = 0, .y = 0 }));
+    try m.applySketch(key, 0, si, "w", "h", .{ .x = 0, .y = 0 });
+    const r = try m.addTracks(c, .{ .name = "row", .origin = .{ .x = 0, .y = 100 }, .prototype = key, .count = 1, .length = 6, .pitch = 19.05 });
+    _ = try m.insertTile(c, r, 0, key, 1);
+    _ = try m.insertTile(c, r, 1, key, 2);
+    const third = try m.insertTile(c, r, 2, key, 1);
+    try m.setTileParam(third, "homing", 1);
+    // The original changes; the prototype's copy does not.
+    try sk.setParam(al, "w", "50");
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, c, &labels);
+    defer s.deinit();
+    try testing.expectEqual(3, s.tiles.len);
+    // 1u: one profile, 18.05 wide; 2u: 37.1 wide; the third has its bump.
+    try testing.expectEqual(1, s.tiles[0].shapes.len);
+    try testing.expectApproxEqAbs(19.05 - 1, s.tiles[0].shapes[0].outline.bounds().width(), 1e-9);
+    try testing.expectApproxEqAbs(s.tiles[0].pitch_box.x0 + 0.5, s.tiles[0].shapes[0].outline.bounds().x0, 1e-9);
+    try testing.expectApproxEqAbs(38.1 - 1, s.tiles[1].shapes[0].outline.bounds().width(), 1e-9);
+    try testing.expectEqual(2, s.tiles[2].shapes.len);
+    for (s.issues) |i| try testing.expect(i.kind != .tile_sketch);
+    // A size it cannot take: the body's width must be at least 25 mm.
+    const psk = &m.prototypes.items[key].sketch.?.sketch;
+    try psk.setExpr(m.arena.allocator(), dw, "sqrt(w - 25)");
+    m.prototypes.items[key].sketch.?.id = m.newId();
+    var s2 = try solve(gpa, &m, c, &labels);
+    defer s2.deinit();
+    var flagged: usize = 0;
+    for (s2.issues) |i| if (i.kind == .tile_sketch) {
+        flagged += 1;
+    };
+    try testing.expectEqual(2, flagged);
 }
