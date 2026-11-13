@@ -33,7 +33,8 @@ pub const TileId = enum(u32) { _ };
 /// go stale as other objects come and go. A copy gets a new one.
 pub const ObjectId = enum(u32) { none = 0, _ };
 
-pub const PrototypeId = u16;
+/// A tile prototype's ID: its own object ID.
+pub const PrototypeId = ObjectId;
 
 /// Whether boxes `a` and `b` share any area (touching edges do not).
 pub fn overlaps(a: geom.Box, b: geom.Box) bool {
@@ -208,6 +209,7 @@ pub const Expand = struct {
 /// from it shares. Tiles refer to their prototype, never copy it, so a
 /// change to it changes them all.
 pub const TilePrototype = struct {
+    id: ObjectId = .none,
     name: []const u8,
     /// A tile's body: its pitch box less this inset, mm.
     body_inset: Sides = .{},
@@ -301,7 +303,8 @@ pub const Tile = struct {
     w: f64 = 1,
     h: f64 = 1,
     /// The kind of tile it is.
-    prototype: PrototypeId = 0,
+    /// `.none` takes the document's first prototype (see `addTile`).
+    prototype: PrototypeId = .none,
     fills: std.ArrayList(SlotFill) = .empty,
     removed: bool = false,
     /// Its own values for its prototype's sketch parameters (a homing bump
@@ -1292,9 +1295,21 @@ pub const Model = struct {
         return &m.tiles.items[@backingInt(id)];
     }
 
+    /// The index of prototype `id` in the list, if it is one.
+    pub fn protoIndex(m: *const Model, id: PrototypeId) ?usize {
+        if (id == .none) return null;
+        for (m.prototypes.items, 0..) |p, i| if (p.id == id) return i;
+        return null;
+    }
+
+    /// Prototype `id`, which must be one of the document's.
+    pub fn proto(m: *const Model, id: PrototypeId) *TilePrototype {
+        return &m.prototypes.items[m.protoIndex(id).?];
+    }
+
     /// The prototype tile `id` is an instance of.
     pub fn prototypeOf(m: *const Model, id: TileId) *const TilePrototype {
-        return &m.prototypes.items[m.tileConst(id).prototype];
+        return m.proto(m.tileConst(id).prototype);
     }
 
     /// How many slots tile `id` has: its prototype's.
@@ -1929,7 +1944,7 @@ pub const Model = struct {
                 .tile => |tid| {
                     const t = m.tileConst(tid);
                     var buf: [64]u8 = undefined;
-                    const prefix = if (m.prototypes.items[t.prototype].spacer) "B" else "T";
+                    const prefix = if (m.proto(t.prototype).spacer) "B" else "T";
                     var copy_t = t.*;
                     copy_t.designator = m.nextDesignator(&buf, prefix);
                     it.what = .{ .tile = try m.addTile(copy_t) };
@@ -2553,7 +2568,7 @@ pub const Model = struct {
     /// Adds a stamp to grid `gi`; returns its index.
     pub fn addStamp(m: *Model, panel: usize, gi: usize, stamp: Stamp) Error!usize {
         if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        if (stamp.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.protoIndex(stamp.prototype) == null) return error.NoSuchPrototype;
         if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
         var st = stamp;
         st.id = m.newId();
@@ -2570,7 +2585,7 @@ pub const Model = struct {
         if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
         const g = &m.panels.items[panel].grids.items[gi];
         if (si >= g.stamps.items.len) return error.NoSuchItem;
-        if (stamp.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.protoIndex(stamp.prototype) == null) return error.NoSuchPrototype;
         if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
         var st = stamp;
         st.id = g.stamps.items[si].id;
@@ -3258,10 +3273,10 @@ pub const Model = struct {
         var along: f64 = 0;
         var across: f64 = 1;
         if (t.prototype) |pid| {
-            if (pid >= m.prototypes.items.len) return error.NoSuchPrototype;
-            const proto = m.prototypes.items[pid];
-            along = proto.smallest(t.major, .along);
-            across = proto.smallest(t.major, .across);
+            if (m.protoIndex(pid) == null) return error.NoSuchPrototype;
+            const pr = m.proto(pid).*;
+            along = pr.smallest(t.major, .along);
+            across = pr.smallest(t.major, .across);
         } else if (t.style) |sid| {
             if (sid >= m.styles.items.len) return error.NoSuchStyle;
         } else return error.NoSuchPrototype;
@@ -3312,10 +3327,10 @@ pub const Model = struct {
     /// track's flow: `along` u long in the track's direction and the
     /// prototype's smallest size across. Returns it.
     pub fn insertTile(m: *Model, panel: usize, region: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
-        if (prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.protoIndex(prototype) == null) return error.NoSuchPrototype;
         if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
         const major = m.panels.items[panel].regions.items[region].major;
-        const across = m.prototypes.items[prototype].smallest(major, .across);
+        const across = m.proto(prototype).smallest(major, .across);
         var buf: [64]u8 = undefined;
         const id = try m.addTile(.{
             .designator = m.nextDesignator(&buf, "T"),
@@ -3336,12 +3351,12 @@ pub const Model = struct {
         const next = items[k + 1];
         if (item.binds(next)) return true;
         const id = item.tileOf() orelse return false;
-        if (!m.prototypes.items[m.tileConst(id).prototype].letter) return false;
+        if (!m.proto(m.tileConst(id).prototype).letter) return false;
         return switch (next.what) {
             .hard_break, .paragraph => false,
             .run => true,
             .tile => |nid| blk: {
-                const np = m.prototypes.items[m.tileConst(nid).prototype];
+                const np = m.proto(m.tileConst(nid).prototype).*;
                 break :blk !np.spacer;
             },
         };
@@ -3351,7 +3366,8 @@ pub const Model = struct {
     /// a spacer of any size, kept at soft breaks, in its track's unit.
     pub fn blankPrototype(m: *Model) Error!PrototypeId {
         if (m.blank_prototype) |id| return id;
-        // Tiles default to prototype 0: keep that a plain one, not Blank.
+        // Tiles default to the first prototype: keep that a plain one, not
+        // Blank.
         if (m.prototypes.items.len == 0) _ = try m.addPrototype(.{ .name = "Plain" });
         const id = try m.addPrototype(.{
             .name = "Blank",
@@ -3988,15 +4004,19 @@ pub const Model = struct {
 
 
     pub fn addPrototype(m: *Model, p: TilePrototype) Error!PrototypeId {
-        try m.prototypes.append(m.a(), try m.dupePrototype(p));
+        var copy = try m.dupePrototype(p);
+        copy.id = m.newId();
+        try m.prototypes.append(m.a(), copy);
         m.revision += 1;
-        return @intCast(m.prototypes.items.len - 1);
+        return copy.id;
     }
 
     /// Changes a prototype, and with it every tile made from it.
     pub fn setPrototype(m: *Model, id: PrototypeId, p: TilePrototype) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        m.prototypes.items[id] = try m.dupePrototype(p);
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        var copy = try m.dupePrototype(p);
+        copy.id = id;
+        m.proto(id).* = copy;
         m.revision += 1;
     }
 
@@ -4004,8 +4024,8 @@ pub const Model = struct {
     /// and so that slot on every tile made from it, except where a tile has
     /// its own.
     pub fn setPrototypeSlot(m: *Model, id: PrototypeId, i: usize, sp: SlotPrototype) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const p = &m.prototypes.items[id];
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
         if (i >= p.slots.len) return error.NoSuchSlot;
         const slots = try m.a().dupe(SlotPrototype, p.slots);
         slots[i] = sp;
@@ -4017,8 +4037,8 @@ pub const Model = struct {
     /// Changes how layer `i` of a prototype's art is painted. Its outline is
     /// left as drawn.
     pub fn setLayerPaint(m: *Model, id: PrototypeId, i: usize, paint: art_.Paint) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const p = &m.prototypes.items[id];
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
         const art = p.art orelse return error.NoSuchLayer;
         if (i >= art.layers.len) return error.NoSuchLayer;
         const layers = try m.a().dupe(art_.Layer, art.layers);
@@ -4033,13 +4053,17 @@ pub const Model = struct {
         for (m.tiles.items) |t| {
             if (!t.removed and t.prototype == id) n += 1;
         }
+        // A grid's stamp uses it whether or not it has instances yet.
+        for (m.panels.items) |p| for (p.grids.items) |g| for (g.stamps.items) |st| {
+            if (st.prototype == id) n += 1;
+        };
         return n;
     }
 
     /// Adds a slot to a prototype, and so to every tile made from it.
     pub fn addPrototypeSlot(m: *Model, id: PrototypeId, sp: SlotPrototype) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const p = &m.prototypes.items[id];
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
         for (p.slots) |s| if (std.mem.eql(u8, s.name, sp.name)) return error.DuplicateSlot;
         const slots = try m.a().alloc(SlotPrototype, p.slots.len + 1);
         @memcpy(slots[0..p.slots.len], p.slots);
@@ -4051,34 +4075,32 @@ pub const Model = struct {
 
     /// A copy of prototype `id` named `name`, art and all; returns its id.
     pub fn duplicatePrototype(m: *Model, id: PrototypeId, name: []const u8) Error!PrototypeId {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        var copy = m.prototypes.items[id];
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        var copy = m.proto(id).*;
         copy.name = name;
         return m.addPrototype(copy);
     }
 
-    /// Removes prototype `id`, which no tile may still be made from. Later
-    /// prototypes move down one, and tiles follow them.
+    /// Removes prototype `id`, which no tile or stamp may still use.
+    /// Tracks made for it no longer name a prototype.
     pub fn removePrototype(m: *Model, id: PrototypeId) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        const i = m.protoIndex(id) orelse return error.NoSuchPrototype;
         if (m.prototypeUses(id) > 0) return error.PrototypeInUse;
-        _ = m.prototypes.orderedRemove(id);
-        for (m.tiles.items) |*t| {
-            if (t.prototype > id) t.prototype -= 1;
-        }
-        // Regions made for it, and the built-in Blank, follow the renumbering.
+        _ = m.prototypes.orderedRemove(i);
         for (m.panels.items) |*panel| for (panel.regions.items) |*r| if (r.prototype) |rp| {
-            r.prototype = if (rp == id) null else if (rp > id) rp - 1 else rp;
+            if (rp == id) r.prototype = null;
         };
-        if (m.blank_prototype) |b| m.blank_prototype = if (b == id) null else if (b > id) b - 1 else b;
+        if (m.blank_prototype) |b| if (b == id) {
+            m.blank_prototype = null;
+        };
         m.revision += 1;
     }
 
     /// Renames slot `i` of a prototype; every tile made from it keeps its
     /// label and overrides under the new name.
     pub fn renamePrototypeSlot(m: *Model, id: PrototypeId, i: usize, name: []const u8) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const p = &m.prototypes.items[id];
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
         if (i >= p.slots.len) return error.NoSuchSlot;
         for (p.slots, 0..) |sp, k| {
             if (k != i and std.mem.eql(u8, sp.name, name)) return error.DuplicateSlot;
@@ -4099,8 +4121,8 @@ pub const Model = struct {
     /// Removes slot `i` from a prototype. Tiles keep what they had in it,
     /// unshown, so adding a slot of that name back brings it back.
     pub fn removePrototypeSlot(m: *Model, id: PrototypeId, i: usize) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const p = &m.prototypes.items[id];
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const p = m.proto(id);
         if (i >= p.slots.len) return error.NoSuchSlot;
         const slots = try m.a().alloc(SlotPrototype, p.slots.len - 1);
         @memcpy(slots[0..i], p.slots[0..i]);
@@ -4117,7 +4139,7 @@ pub const Model = struct {
     /// origin `offset` from the tile's origin. Refused for a sketch that is
     /// not fully constrained or lacks the parameters.
     pub fn applySketch(m: *Model, id: PrototypeId, index: usize, width_param: []const u8, height_param: []const u8, offset: geom.Point) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
         const src = try m.sketchAt(index);
         var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
         defer scratch.deinit();
@@ -4131,7 +4153,7 @@ pub const Model = struct {
             } else false;
             if (!found) return error.NoSuchParameter;
         }
-        m.prototypes.items[id].sketch = .{
+        m.proto(id).sketch = .{
             .id = m.newId(),
             .from = src.id,
             .sketch = copy,
@@ -4144,16 +4166,16 @@ pub const Model = struct {
 
     /// Moves the sketch of prototype `id` on its tiles.
     pub fn setPrototypeSketchOffset(m: *Model, id: PrototypeId, offset: geom.Point) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        const ps = &(m.prototypes.items[id].sketch orelse return error.NoSuchItem);
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        const ps = &(m.proto(id).sketch orelse return error.NoSuchItem);
         ps.offset = offset;
         m.revision += 1;
     }
 
     /// Takes prototype `id`'s sketch away: its tiles are drawn as before.
     pub fn removePrototypeSketch(m: *Model, id: PrototypeId) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        m.prototypes.items[id].sketch = null;
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        m.proto(id).sketch = null;
         m.revision += 1;
     }
 
@@ -4171,8 +4193,8 @@ pub const Model = struct {
     }
 
     pub fn setPrototypeArt(m: *Model, id: PrototypeId, art: ?art_.Art) Error!void {
-        if (id >= m.prototypes.items.len) return error.NoSuchPrototype;
-        m.prototypes.items[id].art = if (art) |x| try art_.dupe(m.a(), x) else null;
+        if (m.protoIndex(id) == null) return error.NoSuchPrototype;
+        m.proto(id).art = if (art) |x| try art_.dupe(m.a(), x) else null;
         m.revision += 1;
     }
 
@@ -4212,7 +4234,7 @@ pub const Model = struct {
 
     /// Makes tile `id` an instance of another prototype.
     pub fn setTilePrototype(m: *Model, id: TileId, prototype: PrototypeId) Error!void {
-        if (prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.protoIndex(prototype) == null) return error.NoSuchPrototype;
         m.tile(id).prototype = prototype;
         m.revision += 1;
     }
@@ -4222,9 +4244,10 @@ pub const Model = struct {
     pub fn addTile(m: *Model, t: Tile) Error!TileId {
         if (!(t.w > 0 and t.h > 0)) return error.BadSize;
         if (m.findTile(t.designator) != null) return error.DuplicateDesignator;
-        if (m.prototypes.items.len == 0 and t.prototype == 0) _ = try m.addPrototype(.{ .name = "Plain" });
-        if (t.prototype >= m.prototypes.items.len) return error.NoSuchPrototype;
+        if (m.prototypes.items.len == 0 and t.prototype == .none) _ = try m.addPrototype(.{ .name = "Plain" });
         var copy = t;
+        if (copy.prototype == .none) copy.prototype = m.prototypes.items[0].id;
+        if (m.protoIndex(copy.prototype) == null) return error.NoSuchPrototype;
         copy.designator = try m.a().dupe(u8, t.designator);
         copy.fills = .empty;
         for (t.fills.items) |f| {
@@ -4356,7 +4379,7 @@ test "designators are unique and actions bump the revision" {
     const key = try m.addPrototype(.{ .name = "key", .slots = &.{.{ .name = "top" }} });
     const q = try m.addTile(.{ .designator = "Q", .prototype = key });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
-    try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = 7 }));
+    try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = @enumFromInt(9999) }));
     try m.place(p, r, null, .{ .what = .{ .tile = q } });
     const before = m.revision;
     try m.setContent(q, "top", "q");
@@ -4407,7 +4430,7 @@ test "a tile's slots are its prototype's, with its own labels and overrides" {
     try std.testing.expectEqual(1, m.slot(k, 0).place.inset.left);
 
     // Changing the prototype's slot changes the tile's, where it has no own.
-    var top = m.prototypes.items[key].slots[0];
+    var top = m.proto(key).slots[0];
     top.place.h = .centre;
     try m.setPrototypeSlot(key, 0, top);
     try std.testing.expectEqual(Align.centre, m.slot(k, 0).place.h);
@@ -4440,9 +4463,9 @@ test "a layer's paint changes; its outline does not" {
         .face = .{ .solid = .hex("#eeeeee") },
     });
     const key = try m.addPrototype(.{ .name = "key", .art = look });
-    const before = m.prototypes.items[key].art.?.layers[0].outline.contours.ptr;
+    const before = m.proto(key).art.?.layers[0].outline.contours.ptr;
     try m.setLayerPaint(key, 0, .{ .fill = .{ .solid = .hex("#202020") }, .edge = .hex("#000000") });
-    const layer = m.prototypes.items[key].art.?.layers[0];
+    const layer = m.proto(key).art.?.layers[0];
     try std.testing.expectEqual(art_.Color.hex("#202020"), layer.paint.fill.solid);
     try std.testing.expectEqual(before, layer.outline.contours.ptr);
     try std.testing.expectError(error.NoSuchLayer, m.setLayerPaint(key, 5, .{}));
@@ -4459,10 +4482,10 @@ test "prototypes are duplicated, have slots renamed and removed, and are removed
 
     // A copy is independent of its original.
     const wide = try m.duplicatePrototype(key, "wide key");
-    try std.testing.expectEqualStrings("wide key", m.prototypes.items[wide].name);
-    try std.testing.expectEqual(2, m.prototypes.items[wide].slots.len);
+    try std.testing.expectEqualStrings("wide key", m.proto(wide).name);
+    try std.testing.expectEqual(2, m.proto(wide).slots.len);
     try m.addPrototypeSlot(wide, .{ .name = "side" });
-    try std.testing.expectEqual(2, m.prototypes.items[key].slots.len);
+    try std.testing.expectEqual(2, m.proto(key).slots.len);
     try std.testing.expectError(error.DuplicateSlot, m.addPrototypeSlot(wide, .{ .name = "side" }));
 
     // A renamed slot keeps each tile's label.
@@ -4477,12 +4500,12 @@ test "prototypes are duplicated, have slots renamed and removed, and are removed
     try m.addPrototypeSlot(key, .{ .name = "legend" });
     try std.testing.expectEqualStrings("A", m.slot(k, 1).content);
 
-    // Only an unused prototype goes; tiles of later ones follow them down.
+    // Only an unused prototype goes; tiles of others keep theirs.
     const spare = try m.addPrototype(.{ .name = "spare" });
     try m.setTilePrototype(k, spare);
     try std.testing.expectError(error.PrototypeInUse, m.removePrototype(spare));
     try m.removePrototype(key);
-    try std.testing.expectEqual(spare - 1, m.tileConst(k).prototype);
+    try std.testing.expectEqual(spare, m.tileConst(k).prototype);
     try std.testing.expectEqualStrings("spare", m.prototypeOf(k).name);
 }
 
@@ -4547,7 +4570,7 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     try std.testing.expectEqual(b, items[1].tileOf().?);
     try std.testing.expectEqual(0.25, m.tileConst(b).w);
     try std.testing.expectEqualStrings("B1", m.tileConst(b).designator);
-    try std.testing.expect(m.prototypes.items[m.tileConst(b).prototype].spacer);
+    try std.testing.expect(m.proto(m.tileConst(b).prototype).spacer);
     try std.testing.expectEqual(m.blank_prototype.?, try m.blankPrototype());
     try std.testing.expectEqual(t, items[2].tileOf().?);
     try std.testing.expectEqualStrings("T3", m.tileConst(t).designator);

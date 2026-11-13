@@ -587,7 +587,7 @@ const Flow = struct {
     /// a row, set on its baseline when its prototype has one.
     fn tileBox(f: Flow, id: TileId, band: Box, start: f64) Box {
         const t = f.m.tileConst(id);
-        const proto = f.m.prototypes.items[t.prototype];
+        const proto = f.m.proto(t.prototype).*;
         const unit = proto.unitIn(f.region.pitch);
         const w = t.w * unit;
         const h = t.h * unit;
@@ -1175,7 +1175,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 // track of another pitch.
                 .tile => |id| blk: {
                     const t = m.tileConst(id);
-                    const unit = m.prototypes.items[t.prototype].unitIn(flow_r.pitch);
+                    const unit = m.proto(t.prototype).unitIn(flow_r.pitch);
                     break :blk (if (rows) t.w else t.h) * unit;
                 },
                 .run => |run| blk: {
@@ -1251,7 +1251,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             // line's start is dropped here too.
             if (drop_first) {
                 drop_first = false;
-                const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(cuts.items, index);
+                const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
                 if (drops) {
                     segs_of[index] = seg;
                     spans[index] = .{ pos, pos };
@@ -1349,7 +1349,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 start = Flow.clear(closed.items, pos + gap, size);
                 // Landing at the start after a soft break, a tile whose
                 // prototype says so, or a space between words, is dropped.
-                const drops = if (item.tileOf()) |id| m.prototypes.items[m.tileConst(id).prototype].at_soft_break == .drop else isSpace(cuts.items, index);
+                const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
                 if (drops) {
                     para -= gap + size;
                     segs_of[index] = seg;
@@ -1406,9 +1406,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             switch (item.what) {
                 .tile => |pid| {
                     const t = m.tileConst(pid);
-                    const unit = m.prototypes.items[t.prototype].unitIn(region.pitch);
+                    const unit = m.proto(t.prototype).unitIn(region.pitch);
                     const pitch_box = flow.tileBox(pid, band, start);
-                    const proto = &m.prototypes.items[t.prototype];
+                    const proto = m.proto(t.prototype);
                     const body = proto.body_inset.inset(pitch_box);
                     // A spacer is drawn by nothing and bounds nothing.
                     if (proto.spacer) {
@@ -1517,7 +1517,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         const box = m.instanceBox(panel, gi, ii) orelse continue;
         const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp).?];
         const t = m.tileConst(inst.tile);
-        const proto = &m.prototypes.items[t.prototype];
+        const proto = m.proto(t.prototype);
         const body = proto.body_inset.inset(box);
         const unit = proto.unitIn(box.height());
         const shapes: []const art.Shape = switch (st.role) {
@@ -1905,7 +1905,7 @@ test "changing a prototype changes every tile made from it" {
     defer after.deinit();
     for (after.tiles[0..2]) |t| try testing.expectApproxEqAbs(@as(f64, 3.5), t.face.x0 - t.pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), after.tiles[2].face.x0 - after.tiles[2].pitch_box.x0, 1e-9);
-    try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, 9));
+    try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, @enumFromInt(9999)));
 }
 
 test "changing a prototype's slot moves every legend in it, but not a tile's own" {
@@ -2703,7 +2703,7 @@ test "with an indent, each hard break brings a blank, so new paragraphs start in
     var s = try solve(testing.allocator, &m, p, &labels);
     defer s.deinit();
     // The blank is an ordinary item, a spacer of the indent's length.
-    try testing.expect(m.prototypes.items[m.tileConst(items.items[2].tileOf().?).prototype].spacer);
+    try testing.expect(m.proto(m.tileConst(items.items[2].tileOf().?).prototype).spacer);
     try testing.expectApproxEqAbs(@as(f64, 5), s.items[3].span[0], 1e-9);
     try testing.expectEqual(1, s.items[3].segment);
 }
@@ -3217,9 +3217,9 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
     try testing.expectEqual(2, s.tiles[2].shapes.len);
     for (s.issues) |i| try testing.expect(i.kind != .tile_sketch);
     // A size it cannot take: the body's width must be at least 25 mm.
-    const psk = &m.prototypes.items[key].sketch.?.sketch;
+    const psk = &m.proto(key).sketch.?.sketch;
     try psk.setExpr(m.arena.allocator(), dw, "sqrt(w - 25)");
-    m.prototypes.items[key].sketch.?.id = m.newId();
+    m.proto(key).sketch.?.id = m.newId();
     var s2 = try solve(gpa, &m, c, &labels);
     defer s2.deinit();
     var flagged: usize = 0;

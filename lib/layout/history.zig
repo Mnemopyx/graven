@@ -575,6 +575,16 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     const g = try h.do(&m, .addGrid, .{ plate, .{ .x = 10, .y = 50 }, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12 } });
     const holes = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Holes", .prototype = key_proto, .role = .hole, .w = 10, .h = 8 } });
     const legends = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Legends", .prototype = legend_proto, .role = .legend, .w = 11, .h = 3, .offset = .{ .x = 0, .y = 6 } } });
+    // A prototype a stamp uses stays, even with no instances made yet; the
+    // stamp keeps naming it, not whatever comes to sit where it was.
+    const early = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Early" }});
+    const spare = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Spare" }});
+    const empty = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Empty", .prototype = spare, .w = 5, .h = 5 } });
+    try testing.expectError(error.PrototypeInUse, m.removePrototype(spare));
+    try h.do(&m, .removePrototype, .{early});
+    try testing.expectEqual(spare, m.panels.items[plate].grids.items[g].stamps.items[empty].prototype);
+    try testing.expectEqualStrings("Spare", m.proto(spare).name);
+    try h.do(&m, .removeStamp, .{ plate, g, empty });
     try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ plate, g, holes }));
     try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ plate, g, legends }));
     // The keys: a part whose grid follows the plate's.

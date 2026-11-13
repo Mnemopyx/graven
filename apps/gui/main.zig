@@ -142,7 +142,7 @@ var polygon_panel: usize = 0;
 /// The Add tracks tool's choices: what sizes the rows or columns (a tile
 /// prototype, or a text style), and which way the tracks run.
 var tracks_tool: struct {
-    size_to: SizeTo = .{ .prototype = 0 },
+    size_to: SizeTo = .{ .prototype = .none },
     major: layout.model.Major = .row,
 } = .{};
 
@@ -690,6 +690,12 @@ fn loadHp15c() !void {
     try hist.snapshot(&state.model);
     state.context = .{ .grid = .{ .panel = b.plate, .index = 0 } };
     state.view.fit = state.model.panels.items[b.plate].box().join(state.model.panels.items[b.keys].box());
+}
+
+/// Where prototype `id` is in the document's list, for dropdowns; 0 when
+/// it is none of them.
+fn protoPos(id: layout.model.PrototypeId) usize {
+    return state.model.protoIndex(id) orelse 0;
 }
 
 fn deinit(_: *dvui.Window) void {
@@ -1854,7 +1860,7 @@ fn contextValid(c: Context) bool {
         .sketches => true,
         .sketch_def => |i| i < m.sketches.items.len,
         .grid => |g| g.panel < np and g.index < m.panels.items[g.panel].grids.items.len,
-        .prototype => |id| id < m.prototypes.items.len,
+        .prototype => |id| m.protoIndex(id) != null,
     };
 }
 
@@ -2911,7 +2917,7 @@ fn treeContent() void {
     if (!treeNode(.file, state.file_name, 0, true, !state.file_name_set)) return;
     worksheetTree();
     if (treeNode(.prototypes, "Tile prototypes", 1, state.model.prototypes.items.len > 0, false)) {
-        for (state.model.prototypes.items, 0..) |p, i| _ = treeNode(.{ .prototype = @intCast(i) }, p.name, 2, false, false);
+        for (state.model.prototypes.items) |p| _ = treeNode(.{ .prototype = p.id }, p.name, 2, false, false);
     }
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
@@ -2999,7 +3005,7 @@ fn panelChildren(pi: usize, d: usize) void {
                     if (it.flow_panel != pt.flow_panel or it.region != flow_ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
                     const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
-                    if (state.model.prototypes.items[state.model.tileConst(id).prototype].spacer) continue;
+                    if (state.model.proto(state.model.tileConst(id).prototype).spacer) continue;
                     const t = state.model.tileConst(id);
                     const legend = if (state.model.slotCount(id) > 0) state.model.slot(id, 0).content else "";
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
@@ -4456,9 +4462,9 @@ fn gridProperties(pi: usize, gi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
             defer row.deinit();
             propName("Prototype");
-            var choice: usize = st.prototype;
+            var choice: usize = protoPos(st.prototype);
             if (dvui.dropdown(@src(), proto_names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 3 })) {
-                next.prototype = @intCast(choice);
+                next.prototype = state.model.prototypes.items[choice].id;
                 st_changed = true;
             }
         }
@@ -4502,10 +4508,10 @@ fn gridProperties(pi: usize, gi: usize) !void {
         defer row.deinit();
         inline for (.{ .{ "Parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "Holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "Legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
             if (dvui.button(@src(), kind[0], .{}, .{ .id_extra = 92 + k })) {
-                if (state.model.prototypes.items.len == 0) _ = try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }});
+                const proto_id = if (state.model.prototypes.items.len == 0) try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .slots = &.{.{ .name = "top", .place = .{ .h = .centre, .v = .centre } }} }}) else state.model.prototypes.items[0].id;
                 const step_x = sh.stepX();
                 const step_y = sh.stepY();
-                _ = act(.addStamp, .{ pi, gi, layout.model.Stamp{ .name = kind[0], .prototype = 0, .role = kind[1], .w = step_x * kind[2], .h = step_y * kind[3], .offset = .{ .x = 0, .y = step_y * kind[4] } } }) catch {
+                _ = act(.addStamp, .{ pi, gi, layout.model.Stamp{ .name = kind[0], .prototype = proto_id, .role = kind[1], .w = step_x * kind[2], .h = step_y * kind[3], .offset = .{ .x = 0, .y = step_y * kind[4] } } }) catch {
                     state.status = "The stamp could not be added. ";
                 };
             }
@@ -6083,8 +6089,8 @@ fn tracksToolOptions() !void {
     const styles = state.model.styles.items;
     // Keep the choice valid as prototypes and styles come and go.
     switch (tracks_tool.size_to) {
-        .prototype => |pid| if (pid >= protos.len) {
-            tracks_tool.size_to = if (protos.len > 0) .{ .prototype = 0 } else .{ .style = null };
+        .prototype => |pid| if (state.model.protoIndex(pid) == null) {
+            tracks_tool.size_to = if (protos.len > 0) .{ .prototype = protos[0].id } else .{ .style = null };
         },
         .style => |sid| if (sid != null and sid.? >= styles.len) {
             tracks_tool.size_to = .{ .style = null };
@@ -6105,12 +6111,12 @@ fn tracksToolOptions() !void {
         if (styles.len == 0) names[protos.len] = "Text: Label";
         for (styles, 0..) |st, i| names[protos.len + i] = try std.fmt.allocPrint(arena, "Text: {s}", .{st.name});
         var choice: usize = switch (tracks_tool.size_to) {
-            .prototype => |pid| pid,
+            .prototype => |pid| protoPos(pid),
             .style => |sid| protos.len + (sid orelse 0),
         };
         if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
             tracks_tool.size_to = if (choice < protos.len)
-                .{ .prototype = @intCast(choice) }
+                .{ .prototype = protos[choice].id }
             else if (styles.len == 0) .{ .style = null } else .{ .style = @intCast(choice - protos.len) };
         }
     }
@@ -6124,8 +6130,8 @@ fn tracksToolOptions() !void {
     }
     var buf: [96]u8 = undefined;
     switch (tracks_tool.size_to) {
-        .prototype => |pid| if (pid < protos.len) {
-            const p = protos[pid];
+        .prototype => |pid| if (state.model.protoIndex(pid)) |pidx| {
+            const p = protos[pidx];
             const along = p.smallest(tracks_tool.major, .along);
             const step_ = p.step(tracks_tool.major, .along);
             const across = p.smallest(tracks_tool.major, .across);
@@ -6202,8 +6208,8 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
     var across: f64 = 1;
     switch (tracks_tool.size_to) {
         .prototype => |pid| {
-            if (pid >= state.model.prototypes.items.len) return null;
-            const p = state.model.prototypes.items[pid];
+            if (state.model.protoIndex(pid) == null) return null;
+            const p = state.model.proto(pid).*;
             // Its own unit: a 1 u key is 19.05 mm in any track.
             pitch = p.unit orelse if (p.art) |art| art.pitch else 19.05;
             along_min = p.smallest(major, .along);
@@ -6755,7 +6761,7 @@ fn properties() !void {
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
-            if (region.prototype) |pid| if (pid < state.model.prototypes.items.len) propText("Prototype", "{s}", .{state.model.prototypes.items[pid].name}, 6);
+            if (region.prototype) |pid| if (state.model.protoIndex(pid) != null) propText("Prototype", "{s}", .{state.model.proto(pid).name}, 6);
             if (region.style) |sid| if (sid < state.model.styles.items.len) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.styles.items[sid].name, region.pitch }, 9);
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
@@ -6823,9 +6829,9 @@ fn tileProperties(id: TileId) !void {
         const names = try lifo.alloc([]const u8, state.model.prototypes.items.len);
         defer lifo.free(names);
         for (state.model.prototypes.items, names) |p, *nm| nm.* = p.name;
-        var choice: usize = t.prototype;
-        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != t.prototype) {
-            try act(.setTilePrototype, .{id, @intCast(choice)});
+        var choice: usize = protoPos(t.prototype);
+        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and state.model.prototypes.items[choice].id != t.prototype) {
+            try act(.setTilePrototype, .{ id, state.model.prototypes.items[choice].id });
         }
     }
 
@@ -6882,7 +6888,7 @@ fn tileProperties(id: TileId) !void {
 /// outlines are left as drawn. Every tile made from it is outlined on the
 /// canvas.
 fn prototypeProperties(id: layout.model.PrototypeId) !void {
-    const p = state.model.prototypes.items[id];
+    const p = state.model.proto(id).*;
     // Whole-prototype changes go through one copy, set once at the end.
     var next_proto = p;
     var proto_changed = false;
@@ -7199,7 +7205,7 @@ fn addPrototype() !void {
 
 fn duplicatePrototype(id: layout.model.PrototypeId) !void {
     var name_buf: [64]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "{s} copy", .{state.model.prototypes.items[id].name}) catch "copy";
+    const name = std.fmt.bufPrint(&name_buf, "{s} copy", .{state.model.proto(id).name}) catch "copy";
     state.context = .{ .prototype = try act(.duplicatePrototype, .{id, name}) };
 }
 
@@ -7541,12 +7547,12 @@ fn cyclePalettePrototype(back: bool) void {
     const c = track_cursor orelse return;
     const pal = paletteFor(c.panel, c.region) orelse return;
     const protos = state.model.prototypes.items;
-    var id = pal.prototype;
+    var at = protoPos(pal.prototype);
     for (0..protos.len) |_| {
-        id = if (back) (if (id == 0) @intCast(protos.len - 1) else id - 1) else @intCast((id + 1) % protos.len);
-        if (!protos[id].spacer) break;
+        at = if (back) (if (at == 0) protos.len - 1 else at - 1) else (at + 1) % protos.len;
+        if (!protos[at].spacer) break;
     }
-    palette_prototype = id;
+    palette_prototype = protos[at].id;
 }
 const blank_keys = "QWERTYUIOP";
 
@@ -7565,9 +7571,9 @@ fn paletteFor(panel: usize, region: usize) ?InsertPalette {
     const r = state.model.panels.items[panel].regions.items[region];
     // The prototype the tile row inserts: the one chosen with Tab, else the
     // track's own.
-    const own = r.prototype orelse 0;
-    const id = if (palette_prototype) |pp| (if (pp < state.model.prototypes.items.len and !state.model.prototypes.items[pp].spacer) pp else own) else own;
-    const p = state.model.prototypes.items[id];
+    const own = if (r.prototype) |rp| (if (state.model.protoIndex(rp) != null) rp else state.model.prototypes.items[0].id) else state.model.prototypes.items[0].id;
+    const id = if (palette_prototype) |pp| (if (state.model.protoIndex(pp) != null and !state.model.proto(pp).spacer) pp else own) else own;
+    const p = state.model.proto(id).*;
     var out: InsertPalette = .{ .prototype = id };
     const sizes = if (r.major == .row) p.widths else p.heights;
     const grows = if (r.major == .row) p.expand.horizontal else p.expand.vertical;
@@ -8255,7 +8261,7 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: 
             // The palette's blanks are in the prototype's u, as its tiles
             // are; a blank is stored in its track's unit.
             const r = state.model.panels.items[c.panel].regions.items[c.region];
-            const unit = state.model.prototypes.items[pal.prototype].unitIn(r.pitch);
+            const unit = state.model.proto(pal.prototype).unitIn(r.pitch);
             _ = act(.insertBlank, .{c.panel, c.region, c.index, size * unit / r.pitch}) catch return;
         },
         .hard_break => {
@@ -8668,7 +8674,7 @@ fn trackPalette() void {
     if (track_cursor == null) return;
     const palette = if (tile_palette_shown) paletteFor(track_cursor.?.panel, track_cursor.?.region) else null;
     if (palette) |pal| {
-        const name = state.model.prototypes.items[pal.prototype].name;
+        const name = state.model.proto(pal.prototype).name;
         dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
     } else dvui.labelNoFmt(@src(), "Insert text or equations, and breaks, at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
     if (palette) |pal| inline for (.{ .tile, .blank }) |kind| {
@@ -8800,7 +8806,7 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
             if (kind != .next_prototype) break :blk "";
             const c = track_cursor orelse break :blk "";
             const pal = paletteFor(c.panel, c.region) orelse break :blk "";
-            break :blk std.fmt.allocPrint(dvui.currentWindow().arena(), "Tiles: {s} · next kind", .{state.model.prototypes.items[pal.prototype].name}) catch "";
+            break :blk std.fmt.allocPrint(dvui.currentWindow().arena(), "Tiles: {s} · next kind", .{state.model.proto(pal.prototype).name}) catch "";
         };
         dvui.labelNoFmt(@src(), switch (kind) {
             .run => "Text or equation",
@@ -8870,7 +8876,7 @@ fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
 fn moveStep(panel: usize, region: usize) f64 {
     const r = state.model.panels.items[panel].regions.items[region];
     if (state.model.prototypes.items.len == 0) return 0.25;
-    const p = state.model.prototypes.items[r.prototype orelse 0];
+    const p = state.model.proto(r.prototype orelse state.model.prototypes.items[0].id).*;
     return @min(p.step(r.major, .along), p.step(r.major, .across));
 }
 
@@ -11770,7 +11776,7 @@ var proto_preview: [2]f64 = .{ 1, 1 };
 
 
 fn prototypeSketch(id: layout.model.PrototypeId) void {
-    const proto = state.model.prototypes.items[id];
+    const proto = state.model.proto(id).*;
     heading("{s}", .{"Drawn from a sketch"}, 8400);
     if (proto.sketch) |ps| {
         // Its copy: where it came from, and how it sits on its tiles.
@@ -11855,7 +11861,7 @@ fn applyError(err: anyerror) []const u8 {
 
 /// The prototype's sketch solved at the preview size, drawn to fit a box.
 fn sketchPreview(id: layout.model.PrototypeId, ps: layout.model.PrototypeSketch) void {
-    const proto = state.model.prototypes.items[id];
+    const proto = state.model.proto(id).*;
     const unit = proto.unit orelse 19.05;
     const w = proto_preview[0] * unit;
     const h = proto_preview[1] * unit;
@@ -11903,7 +11909,7 @@ fn sketchPreview(id: layout.model.PrototypeId, ps: layout.model.PrototypeSketch)
 /// construction geometry on.
 fn tileSketchParams(id: TileId) void {
     const t = state.model.tileConst(id);
-    const ps = state.model.prototypes.items[t.prototype].sketch orelse return;
+    const ps = state.model.proto(t.prototype).sketch orelse return;
     var seen: [16][]const u8 = undefined;
     var n: usize = 0;
     for (ps.sketch.geometry.items) |g| {
