@@ -73,8 +73,11 @@ see LICENSE_LGPL_21.txt and OCCT_LGPL_EXCEPTION.txt.
 EOF
 
 archive="$out/$name.tar.xz"
-(cd "$stage" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-    -cf - "$name") | xz -T1 -6 > "$archive"
+# The files at the archive's root, with no folder around them: Zig's package
+# hash is then the same however the archive is fetched. Unpack it into a
+# directory of its own (tar -xJf <archive> -C <dir>).
+(cd "$root" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+    -cf - .) | xz -T1 -6 > "$archive"
 (cd "$out" && sha256sum "$name.tar.xz" > "$name.tar.xz.sha256")
 
 echo "archive: $archive ($(du -h "$archive" | cut -f1))"
