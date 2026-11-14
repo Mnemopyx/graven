@@ -7,6 +7,7 @@
 //! Only the spacing across (11.43 mm on centre) is given. Everything else
 //! (the spacing down, key, hole and legend sizes, the plate) is a first
 //! guess, there to be changed in the grids' and stamps' properties. The
+//! holes are the ready-made rounded-rectangle sketch. The
 //! legends are from memory and may be wrong in places.
 
 const std = @import("std");
@@ -24,8 +25,11 @@ pub const spacing_down = 12.7;
 /// A key's top, mm: a guess.
 pub const key_w = 9.0;
 pub const key_h = 8.0;
-/// The hole a key comes through: the key with 0.25 mm clearance all round.
+/// The hole a key comes through: the key with 0.25 mm clearance all round,
+/// a rounded rectangle (the ready-made sketch) with this corner radius, mm:
+/// a guess.
 pub const clearance = 0.25;
+pub const hole_r = 1.0;
 /// The gold legend's strip above each hole, mm, and its centre's height
 /// above the key's centre.
 pub const legend_w = 11.0;
@@ -144,7 +148,8 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
 
     const shape: model.GridShape = .{ .cols = 10, .rows = 4, .pitch_x = spacing_across, .pitch_y = spacing_down };
     const pg = try m.addGrid(plate, first, shape);
-    const holes = try m.addStamp(plate, pg, .{ .name = "Holes", .prototype = key, .role = .hole, .w = key_w + 2 * clearance, .h = key_h + 2 * clearance });
+    const rounded = m.sketches.items[try m.addShapeSketch(.rounded_rectangle)].id;
+    const holes = try m.addStamp(plate, pg, .{ .name = "Holes", .prototype = key, .role = .hole, .w = key_w + 2 * clearance, .h = key_h + 2 * clearance, .sketch = rounded, .params = &.{.{ .name = "r", .value = hole_r }} });
     const golds = try m.addStamp(plate, pg, .{ .name = "Gold legends", .prototype = gold, .role = .legend, .w = legend_w, .h = legend_h, .offset = .{ .x = 0, .y = legend_up } });
     const kg = try m.addLinkedGrid(keys, first, m.panels.items[plate].grids.items[pg].id);
     const caps = try m.addStamp(keys, kg, .{ .name = "Keys", .prototype = key, .w = key_w, .h = key_h });
@@ -182,6 +187,9 @@ test "the HP-15C keypad: 39 holes and keys at 11.43 mm across, ENTER over two ro
         if (inst.stamp == pg.stamps.items[0].id) holes += 1;
     }
     try std.testing.expectEqual(@as(usize, 39), holes);
+    // The holes are the ready-made rounded rectangle.
+    const hs = pg.stamps.items[0];
+    try std.testing.expectEqual(model.ShapeSketch.rounded_rectangle, m.sketches.items[m.sketchIndex(hs.sketch).?].shape.?);
     // Keys one apart are 11.43 mm apart across, on the plate and the keys.
     const a = m.instanceBox(b.keys, 0, m.instanceAt(b.keys, 0, kg.stamps.items[0].id, 3, 0).?).?;
     const z = m.instanceBox(b.keys, 0, m.instanceAt(b.keys, 0, kg.stamps.items[0].id, 4, 0).?).?;
