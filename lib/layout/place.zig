@@ -372,6 +372,7 @@ pub const Labels = struct {
     pub fn sketchShapes(l: *Labels, a: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) Allocator.Error!?[]const art.Shape {
         var h: std.hash.Wyhash = .init(1);
         h.update(std.mem.asBytes(&ps.id));
+        h.update(std.mem.asBytes(&ps.version));
         h.update(std.mem.asBytes(&box.width()));
         h.update(std.mem.asBytes(&box.height()));
         for (params) |p| {
@@ -1086,8 +1087,21 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         const shapes: []const art.Shape = switch (st.role) {
             .legend => &.{},
             else => blk: {
-                const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| s: {
-                    const got = try labels.sketchShapes(a, ps, t.params.items, box);
+                // The stamp's sketch, live: solved for the instance's box,
+                // centred on it, with the stamp's parameters and then the
+                // tile's.
+                const stamp_sketch: ?model.PrototypeSketch = if (st.sketch != .none) if (m.sketchIndex(st.sketch)) |ski| s: {
+                    const item = m.sketches.items[ski];
+                    break :s .{ .id = item.id, .from = item.id, .sketch = item.sketch, .width_param = "w", .height_param = "h", .offset = .{ .x = box.width() / 2, .y = box.height() / 2 }, .version = item.version };
+                } else null else null;
+                const params: []const model.TileParam = if (stamp_sketch != null and st.params.len > 0) p: {
+                    const both = try a.alloc(model.TileParam, st.params.len + t.params.items.len);
+                    @memcpy(both[0..st.params.len], st.params);
+                    @memcpy(both[st.params.len..], t.params.items);
+                    break :p both;
+                } else t.params.items;
+                const from_sketch: ?[]const art.Shape = if (stamp_sketch orelse proto.sketch) |ps| s: {
+                    const got = try labels.sketchShapes(a, ps, params, box);
                     if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = inst.tile });
                     break :s got;
                 } else null;
@@ -2411,4 +2425,61 @@ test "a tile's tracks: a row wraps between words in the face; a column sets lett
     // The panel's own tracks know nothing of the tile's.
     for (s.tracks) |tr| try testing.expectEqual(@as(usize, 0), tr.region);
     for (s.issues) |i| try testing.expect(i.kind != .row_overflow);
+}
+
+test "a grid stamp drawn from a ready-made sketch: each hole is the sketch solved for its box, live" {
+    const gpa = testing.allocator;
+    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const plate = try m.placePanel(.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 60, .h = 30 });
+    const key = try m.addPrototype(.{ .name = "Key" });
+    const rr = try m.addShapeSketch(.rounded_rectangle);
+    const g = try m.addGrid(plate, .{ .x = 10, .y = 15 }, .{ .cols = 3, .rows = 1, .pitch_x = 15, .pitch_y = 12 });
+    _ = try m.addStamp(plate, g, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 9.5, .h = 8.5, .sketch = m.sketches.items[rr].id, .params = &.{.{ .name = "r", .value = 2 }} });
+    _ = try m.fillGrid(plate, g, 0);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    {
+        var placed = try solve(gpa, &m, plate, &labels);
+        defer placed.deinit();
+        try testing.expectEqual(@as(usize, 0), placed.issues.len);
+        var holes: usize = 0;
+        for (placed.tiles) |t| {
+            if (t.grid != .hole) continue;
+            holes += 1;
+            try testing.expectEqual(@as(usize, 1), t.shapes.len);
+            const b = t.shapes[0].outline.bounds();
+            try testing.expectApproxEqAbs(t.pitch_box.width(), b.width(), 1e-6);
+            try testing.expectApproxEqAbs(t.pitch_box.height(), b.height(), 1e-6);
+            try testing.expectApproxEqAbs((t.pitch_box.x0 + t.pitch_box.x1) / 2, (b.x0 + b.x1) / 2, 1e-6);
+            // Rounded: no corner of the box is on the outline.
+            const segs = t.shapes[0].outline.contours[0].segments;
+            var arcs: usize = 0;
+            for (segs) |sg| if (sg != .line) {
+                arcs += 1;
+            };
+            try testing.expectEqual(@as(usize, 4), arcs);
+        }
+        try testing.expectEqual(@as(usize, 3), holes);
+    }
+    // Live: an edit to the sketch reaches every hole. With the stamp's own
+    // radius gone, the sketch's is used; a bigger one shortens the sides.
+    m.panels.items[plate].grids.items[g].stamps.items[0].params = &.{};
+    var lens: [2]f64 = undefined;
+    for ([_][]const u8{ "1", "3" }, &lens) |r, *len| {
+        _ = try m.editSketch(rr, .{ .param = .{ .name = "r", .expr = r } });
+        var placed = try solve(gpa, &m, plate, &labels);
+        defer placed.deinit();
+        try testing.expectEqual(@as(usize, 0), placed.issues.len);
+        var longest: f64 = 0;
+        for (placed.tiles[0].shapes[0].outline.contours[0].segments) |sg| if (sg == .line) {
+            longest = @max(longest, @abs(sg.line[1].x - sg.line[0].x) + @abs(sg.line[1].y - sg.line[0].y));
+        };
+        len.* = longest;
+    }
+    try testing.expectApproxEqAbs(@as(f64, 4), lens[0] - lens[1], 1e-6);
 }

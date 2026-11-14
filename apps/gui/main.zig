@@ -4402,6 +4402,72 @@ fn panelGrids(pi: usize) !void {
 
 /// A grid: its shape (counts, spacing, stretch), where it starts, what it
 /// follows, and its stamps.
+/// A stamp's shape: its prototype's, a ready-made sketch (made in the
+/// document's sketches when first chosen), or one of the document's
+/// sketches; and the sketch's parameters other than its size, for this
+/// stamp.
+fn stampShape(pi: usize, gi: usize, si: usize, st: layout.model.Stamp, n: usize) !void {
+    const Shape = layout.model.ShapeSketch;
+    const kinds = std.enums.values(Shape);
+    const ready = [_][]const u8{ "Circle", "Rectangle", "Rounded rectangle", "Slot" };
+    const ar = dvui.currentWindow().arena();
+    const sketches = state.model.sketches.items;
+    var names: std.ArrayList([]const u8) = .empty;
+    // What each entry after the ready-made ones is: a sketch's index.
+    var others: std.ArrayList(usize) = .empty;
+    try names.append(ar, "The prototype's");
+    for (ready) |r| try names.append(ar, r);
+    for (sketches, 0..) |item, i| if (item.shape == null) {
+        try names.append(ar, try std.fmt.allocPrint(ar, "Sketch: {s}", .{item.name}));
+        try others.append(ar, i);
+    };
+    var choice: usize = 0;
+    const cur = if (st.sketch != .none) state.model.sketchIndex(st.sketch) else null;
+    if (cur) |ci| {
+        if (sketches[ci].shape) |k| choice = 1 + @intFromEnum(k) else for (others.items, 0..) |o, k| {
+            if (o == ci) choice = 1 + ready.len + k;
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+        defer row.deinit();
+        propName("Shape");
+        if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) {
+            var next = st;
+            next.sketch = if (choice == 0) .none else if (choice <= ready.len)
+                state.model.sketches.items[try act(.addShapeSketch, .{kinds[choice - 1]})].id
+            else
+                sketches[others.items[choice - 1 - ready.len]].id;
+            act(.setStamp, .{ pi, gi, si, next }) catch {
+                state.status = "That shape cannot be used. ";
+            };
+            return;
+        }
+    }
+    const ci = cur orelse return;
+    // Its parameters other than the size: the stamp's value, else the
+    // sketch's.
+    const sk = &state.model.sketches.items[ci].sketch;
+    for (sk.params.items, 0..) |p, k| {
+        if (std.mem.eql(u8, p.name, "w") or std.mem.eql(u8, p.name, "h")) continue;
+        var value = sk.paramValue(p.name) catch 0;
+        for (st.params) |sp| if (std.mem.eql(u8, sp.name, p.name)) {
+            value = sp.value;
+        };
+        const label = try std.fmt.allocPrint(ar, "{s}, mm", .{p.name});
+        if (numberProp(label, value, -1000, 1000, n + 1 + k)) |v| {
+            var params: std.ArrayList(layout.model.TileParam) = .empty;
+            for (st.params) |sp| if (!std.mem.eql(u8, sp.name, p.name)) try params.append(ar, sp);
+            try params.append(ar, .{ .name = p.name, .value = v });
+            var next = st;
+            next.params = params.items;
+            actM(mergeKey(.{ "stampparam", pi, gi, si, k }), .setStamp, .{ pi, gi, si, next }) catch {
+                state.status = "That value cannot be used. ";
+            };
+        }
+    }
+}
+
 fn gridProperties(pi: usize, gi: usize) !void {
     const g = state.model.panels.items[pi].grids.items[gi];
     var sh = state.model.gridShape(pi, gi);
@@ -4496,6 +4562,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
                 st_changed = true;
             }
         }
+        if (st.role != .legend) try stampShape(pi, gi, si, st, n + 10);
         if (numberProp("Width, mm", st.w, 0.1, 1000, n + 4)) |v| {
             next.w = v;
             st_changed = true;

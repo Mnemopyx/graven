@@ -328,6 +328,9 @@ pub const PrototypeSketch = struct {
     /// Where the sketch's origin sits from the tile's origin (its pitch
     /// box's bottom-left corner), mm.
     offset: geom.Point = .{ .x = 0, .y = 0 },
+    /// The source's version, when it is drawn from a sketch live (a grid
+    /// stamp's): a change to it solves its instances again.
+    version: u32 = 0,
 };
 
 /// A run of label markup in a track's flow: words, an equation, or both
@@ -766,7 +769,17 @@ pub const SketchItem = struct {
     /// True while the name is one the app gave it (Sketch 1).
     default_name: bool = false,
     sketch: sketch_.Sketch,
+    /// Bumped by every edit, so what is solved from it (its instances) is
+    /// solved again.
+    version: u32 = 0,
+    /// The ready-made shape it was made as (it may have been edited since).
+    shape: ?ShapeSketch = null,
 };
+
+/// The sketches Graven offers ready-made (see `Model.addShapeSketch`):
+/// closed shapes centred on their origin, sized by parameters `w` and `h`
+/// (and `r`, a rounded rectangle's corner radius).
+pub const ShapeSketch = enum { circle, rectangle, rounded_rectangle, slot };
 
 /// A view of a sketch placed in a space: what shows there of the sketch,
 /// its origin at `at`. A sketch is the document's; drawing one on a canvas
@@ -919,6 +932,13 @@ pub const Stamp = struct {
     /// From the point (or the middle of the points spanned) to the box's
     /// centre, mm.
     offset: geom.Point = .{ .x = 0, .y = 0 },
+    /// A sketch its instances are drawn from (by ID), solved for each
+    /// instance's box: its `w` and `h` parameters take the box's size, and
+    /// `params` its others. The sketch is the shape's prototype; each
+    /// instance is it with its parameters resolved. `.none`: drawn by the
+    /// stamp's prototype.
+    sketch: ObjectId = .none,
+    params: []const TileParam = &.{},
 };
 
 /// A tile made from a stamp and bound to a grid point: it sits where the
@@ -1243,6 +1263,118 @@ pub const LabelStyle = struct {
     /// (see `fonts.resolve`).
     spec: engine.style.Spec,
 };
+
+/// Draws ready-made shape `kind` into the empty sketch `sk` (see
+/// `Model.addShapeSketch`).
+fn buildShape(al: Allocator, gpa: Allocator, sk: *sketch_.Sketch, kind: ShapeSketch) sketch_.Error!void {
+    const P = struct {
+        fn f(x: f64, y: f64) geom.Point {
+            return .{ .x = x, .y = y };
+        }
+    }.f;
+    const Ref = sketch_.PointRef;
+    const o: Ref = .{ .geom = sketch_.origin };
+    const w = 10.0;
+    const h = 6.0;
+    const r = 1.5;
+    try sk.setParam(al, "w", "10");
+    try sk.setParam(al, "h", "6");
+    switch (kind) {
+        .circle => {
+            const c = try sk.addCircle(al, P(0, 0), w / 2, false);
+            _ = try sk.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = c, .role = .centre }, o } } });
+            const d = try sk.addConstraint(al, .{ .kind = .{ .radius = .{ .g = c, .value = w / 2 } } });
+            try sk.setExpr(al, d, "w / 2");
+        },
+        .rectangle => {
+            const b = try sk.addSegment(al, P(-w / 2, -h / 2), P(w / 2, -h / 2), false);
+            const rt = try sk.addSegment(al, P(w / 2, -h / 2), P(w / 2, h / 2), false);
+            const t = try sk.addSegment(al, P(w / 2, h / 2), P(-w / 2, h / 2), false);
+            const l = try sk.addSegment(al, P(-w / 2, h / 2), P(-w / 2, -h / 2), false);
+            const segs = [_]sketch_.GeomId{ b, rt, t, l };
+            for (0..4) |i| _ = try sk.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = segs[i], .role = .end }, .{ .geom = segs[(i + 1) % 4], .role = .start } } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = b } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = t } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = l } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = rt } } });
+            const corner: Ref = .{ .geom = b, .role = .start };
+            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = corner, .value = -w / 2 } }, "-w / 2");
+            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = corner, .value = -h / 2 } }, "-h / 2");
+            try dim(al, sk, .{ .distance_x = .{ .a = corner, .b = .{ .geom = b, .role = .end }, .value = w } }, "w");
+            try dim(al, sk, .{ .distance_y = .{ .a = .{ .geom = rt, .role = .start }, .b = .{ .geom = rt, .role = .end }, .value = h } }, "h");
+        },
+        .rounded_rectangle => {
+            try sk.setParam(al, "r", "1.5");
+            const x0 = -w / 2;
+            const x1 = w / 2;
+            const y0 = -h / 2;
+            const y1 = h / 2;
+            const b = try sk.addSegment(al, P(x0 + r, y0), P(x1 - r, y0), false);
+            const br = try sk.addArc(al, P(x1 - r, y0 + r), P(x1 - r, y0), P(x1, y0 + r), false);
+            const rt = try sk.addSegment(al, P(x1, y0 + r), P(x1, y1 - r), false);
+            const tr = try sk.addArc(al, P(x1 - r, y1 - r), P(x1, y1 - r), P(x1 - r, y1), false);
+            const t = try sk.addSegment(al, P(x1 - r, y1), P(x0 + r, y1), false);
+            const tl = try sk.addArc(al, P(x0 + r, y1 - r), P(x0 + r, y1), P(x0, y1 - r), false);
+            const l = try sk.addSegment(al, P(x0, y1 - r), P(x0, y0 + r), false);
+            const bl = try sk.addArc(al, P(x0 + r, y0 + r), P(x0, y0 + r), P(x0 + r, y0), false);
+            const ring = [_]sketch_.GeomId{ b, br, rt, tr, t, tl, l, bl };
+            for (0..8) |i| _ = try sk.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = ring[i], .role = .end }, .{ .geom = ring[(i + 1) % 8], .role = .start } } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = b } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = t } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = l } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = rt } } });
+            // Each corner meets its sides smoothly: its centre square with
+            // both its ends (a tangent at a shared end would be degenerate
+            // for the solver).
+            for ([_]sketch_.GeomId{ br, tr, tl, bl }, 0..) |arc, k| {
+                const c: Ref = .{ .geom = arc, .role = .centre };
+                const s0: Ref = .{ .geom = arc, .role = .start };
+                const s1: Ref = .{ .geom = arc, .role = .end };
+                // Corners 0 and 2 start on a horizontal side, 1 and 3 on a
+                // vertical one.
+                if (k % 2 == 0) {
+                    _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .points = .{ c, s0 } } } });
+                    _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .points = .{ c, s1 } } } });
+                } else {
+                    _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .points = .{ c, s0 } } } });
+                    _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .points = .{ c, s1 } } } });
+                }
+            }
+            for ([_]sketch_.GeomId{ tr, tl, bl }) |arc| _ = try sk.addConstraint(al, .{ .kind = .{ .equal = .{ .a = br, .b = arc } } });
+            try dim(al, sk, .{ .radius = .{ .g = br, .value = r } }, "r");
+            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = .{ .geom = l, .role = .start }, .value = x0 } }, "-w / 2");
+            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = .{ .geom = b, .role = .start }, .value = y0 } }, "-h / 2");
+            try dim(al, sk, .{ .distance_x = .{ .a = .{ .geom = l, .role = .start }, .b = .{ .geom = rt, .role = .start }, .value = w } }, "w");
+            try dim(al, sk, .{ .distance_y = .{ .a = .{ .geom = b, .role = .start }, .b = .{ .geom = t, .role = .start }, .value = h } }, "h");
+        },
+        .slot => {
+            const c = w / 2 - h / 2;
+            const b = try sk.addSegment(al, P(-c, -h / 2), P(c, -h / 2), false);
+            const ar = try sk.addArc(al, P(c, 0), P(c, -h / 2), P(c, h / 2), false);
+            const t = try sk.addSegment(al, P(c, h / 2), P(-c, h / 2), false);
+            const al_ = try sk.addArc(al, P(-c, 0), P(-c, h / 2), P(-c, -h / 2), false);
+            const ring = [_]sketch_.GeomId{ b, ar, t, al_ };
+            for (0..4) |i| _ = try sk.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = ring[i], .role = .end }, .{ .geom = ring[(i + 1) % 4], .role = .start } } } });
+            _ = try sk.addConstraint(al, .{ .kind = .{ .horizontal = .{ .geom = b } } });
+            // Each end meets the sides smoothly: its centre square with both
+            // its ends.
+            for ([_]sketch_.GeomId{ ar, al_ }) |arc| for ([_]@TypeOf(o.role){ .start, .end }) |role| {
+                _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .points = .{ .{ .geom = arc, .role = .centre }, .{ .geom = arc, .role = role } } } } });
+            };
+            _ = try sk.addConstraint(al, .{ .kind = .{ .equal = .{ .a = ar, .b = al_ } } });
+            try dim(al, sk, .{ .radius = .{ .g = ar, .value = h / 2 } }, "h / 2");
+            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = .{ .geom = ar, .role = .centre }, .value = c } }, "w / 2 - h / 2");
+            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = .{ .geom = ar, .role = .centre }, .value = 0 } }, "");
+            try dim(al, sk, .{ .distance_x = .{ .a = .{ .geom = al_, .role = .centre }, .b = .{ .geom = ar, .role = .centre }, .value = 2 * c } }, "w - h");
+        },
+    }
+    _ = try sk.solve(gpa);
+}
+
+fn dim(al: Allocator, sk: *sketch_.Sketch, kind: @FieldType(sketch_.Constraint, "kind"), expr: []const u8) sketch_.Error!void {
+    const id = try sk.addConstraint(al, .{ .kind = kind });
+    if (expr.len > 0) try sk.setExpr(al, id, expr);
+}
 
 pub const Model = struct {
     /// Owns every string and list in the model.
@@ -2588,9 +2720,11 @@ pub const Model = struct {
         if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
         if (m.protoIndex(stamp.prototype) == null) return error.NoSuchPrototype;
         if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
+        if (stamp.sketch != .none and m.sketchIndex(stamp.sketch) == null) return error.NoSuchItem;
         var st = stamp;
         st.id = m.newId();
         st.name = try m.a().dupe(u8, stamp.name);
+        st.params = try m.dupeParams(stamp.params);
         const g = &m.panels.items[panel].grids.items[gi];
         try g.stamps.append(m.a(), st);
         m.revision += 1;
@@ -2605,9 +2739,11 @@ pub const Model = struct {
         if (si >= g.stamps.items.len) return error.NoSuchItem;
         if (m.protoIndex(stamp.prototype) == null) return error.NoSuchPrototype;
         if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
+        if (stamp.sketch != .none and m.sketchIndex(stamp.sketch) == null) return error.NoSuchItem;
         var st = stamp;
         st.id = g.stamps.items[si].id;
         st.name = try m.a().dupe(u8, stamp.name);
+        st.params = try m.dupeParams(stamp.params);
         // The tiles take the stamp's new prototype, but for those given
         // one of their own (an ENTER key among the keys).
         const was = g.stamps.items[si].prototype;
@@ -2905,6 +3041,34 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    fn dupeParams(m: *Model, params: []const TileParam) Allocator.Error![]const TileParam {
+        const out = try m.a().alloc(TileParam, params.len);
+        for (params, out) |p, *o| o.* = .{ .name = try m.a().dupe(u8, p.name), .value = p.value };
+        return out;
+    }
+
+    /// Adds a ready-made shape sketch to the document's sketches (no view
+    /// of it is placed), unless there is one made as `kind` already;
+    /// returns its index. It is fully constrained,
+    /// centred on its origin, and sized by its parameters: `w` and `h` (a
+    /// circle's diameter is `w`), and a rounded rectangle's `r`.
+    pub fn addShapeSketch(m: *Model, kind: ShapeSketch) Error!usize {
+        // One of each is enough: the one there is, if any.
+        for (m.sketches.items, 0..) |item, i| if (item.shape == kind) return i;
+        const name: []const u8 = switch (kind) {
+            .circle => "Circle",
+            .rectangle => "Rectangle",
+            .rounded_rectangle => "Rounded rectangle",
+            .slot => "Slot",
+        };
+        var sk = try sketch_.Sketch.init(m.a());
+        try buildShape(m.a(), m.arena.child_allocator, &sk, kind);
+        const id = m.newId();
+        try m.sketches.append(m.a(), .{ .id = id, .name = name, .sketch = sk, .shape = kind });
+        m.revision += 1;
+        return m.sketches.items.len - 1;
+    }
+
     pub fn setPanelIslands(m: *Model, panel: usize, on: bool) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         m.panels.items[panel].islands = on;
@@ -2984,6 +3148,7 @@ pub const Model = struct {
     pub fn editSketch(m: *Model, index: usize, edit: SketchEdit) Error!u32 {
         const sk = &(try m.sketchAt(index)).sketch;
         const sid = m.sketches.items[index].id;
+        m.sketches.items[index].version +%= 1;
         defer for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) {
             m.syncSketchPanel(pi) catch {};
         };
@@ -5109,4 +5274,32 @@ test "a tile's track text reads back as set; a stamp's new prototype leaves a ti
     try m.setStamp(p, g, st, next);
     try std.testing.expectEqual(other, m.tileConst(a).prototype);
     try std.testing.expectEqual(tall, m.tileConst(b).prototype);
+}
+
+test "ready-made shape sketches are fully constrained, sized by their parameters" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer scratch.deinit();
+    for ([_]ShapeSketch{ .circle, .rectangle, .rounded_rectangle, .slot }) |kind| {
+        const si = try m.addShapeSketch(kind);
+        const sk = &m.sketches.items[si].sketch;
+        const an = try sk.analyse(std.testing.allocator, scratch.allocator());
+        std.testing.expect(an.fully_constrained and an.redundant.len == 0 and an.conflicting.len == 0) catch |err| {
+            std.debug.print("{s}: dof {d}, redundant {any}, conflicting {d}\n", .{ @tagName(kind), an.dof, an.redundant, an.conflicting.len });
+            for (an.redundant) |ci| std.debug.print("  {any}\n", .{sk.constraints.items[ci].kind});
+            return err;
+        };
+        // Resized by its parameters, its outline keeps centred.
+        try sk.setParam(m.a(), "w", "20");
+        try sk.setParam(m.a(), "h", "8");
+        _ = try sk.solve(std.testing.allocator);
+        const profiles = try sk.profiles(scratch.allocator());
+        try std.testing.expectEqual(@as(usize, 1), profiles.contours.len);
+        try std.testing.expectEqual(@as(usize, 0), profiles.open);
+        const bx = profiles.contours[0].bounds();
+        try std.testing.expectApproxEqAbs(@as(f64, 20), bx.width(), 1e-6);
+        if (kind != .circle) try std.testing.expectApproxEqAbs(@as(f64, 8), bx.height(), 1e-6);
+        try std.testing.expectApproxEqAbs(@as(f64, 0), (bx.x0 + bx.x1) / 2, 1e-6);
+    }
 }
