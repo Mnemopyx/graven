@@ -12,7 +12,8 @@
 
 const std = @import("std");
 const layout = @import("graven_layout");
-const geom = @import("graven_engine").geom;
+const engine = @import("graven_engine");
+const geom = engine.geom;
 
 const Model = layout.Model;
 const model = layout.model;
@@ -54,6 +55,24 @@ pub const Styles = struct {
     g: StyleId,
     f: StyleId,
 };
+
+/// Adds the legends' styles, set in face 0 with `fallbacks` (faces for
+/// what face 0 lacks, in order: Δ, Σ and ⇄ are missing from many text
+/// faces). Each legend is one line, so the line pitch is set at a cap
+/// height and a half rather than taken from the face's ascender and
+/// descender, which vary widely (Geist's are 1.83 cap heights apart).
+pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
+    const spec = struct {
+        fn of(cap: f64, members: []const engine.style.Member) engine.style.Spec {
+            return .{ .upright = 0, .cap_height = cap, .line_pitch = 1.5, .members = members };
+        }
+    }.of;
+    return .{
+        .key = try m.addStyle("15C key", spec(1.9, fallbacks)),
+        .g = try m.addStyle("15C g", spec(1.1, fallbacks)),
+        .f = try m.addStyle("15C f", spec(1.1, fallbacks)),
+    };
+}
 
 /// The keys, row by row: the white legend, the blue g, and the gold f.
 /// ENTER (row 3, column 6) spans rows 3 and 4; its row 4 point is empty.

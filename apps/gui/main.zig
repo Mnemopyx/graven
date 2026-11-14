@@ -681,12 +681,10 @@ fn loadSample() !void {
 /// Adds the rough HP-15C keypad (a plate and its keys) to the shown space,
 /// right of what it holds, and opens the plate's grid.
 fn loadHp15c() !void {
-    const key = try state.model.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
-    const g = try state.model.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
-    const f = try state.model.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
+    const styles = try samples.hp15c.addStyles(&state.model, &.{});
     const held = spaceExtents();
     const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 0 } else .{ .x = held.x1 + 20, .y = held.y0 };
-    const b = try samples.hp15c.build(&state.model, .{ .key = key, .g = g, .f = f }, shown_space, at);
+    const b = try samples.hp15c.build(&state.model, styles, shown_space, at);
     try hist.snapshot(&state.model);
     state.context = .{ .grid = .{ .panel = b.plate, .index = 0 } };
     state.view.fit = state.model.panels.items[b.plate].box().join(state.model.panels.items[b.keys].box());

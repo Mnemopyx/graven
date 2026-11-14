@@ -42,10 +42,7 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const key = try m.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
-    const g = try m.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
-    const f = try m.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
-    const b = try samples.hp15c.build(&m, .{ .key = key, .g = g, .f = f }, 0, .{ .x = 0, .y = 0 });
+    const b = try samples.hp15c.build(&m, try samples.hp15c.addStyles(&m, &.{}), 0, .{ .x = 0, .y = 0 });
 
     var labels: layout.Labels = .init(gpa, &faces);
     defer labels.deinit();

@@ -23,10 +23,10 @@ const usage =
     \\         --bold and --bold-italic give the family's bolds, for \\textbf and \\mathbf.
     \\       graven keyboard <font> <out.svg>
     \\         Lays out the sample PC keyboard in one font and writes it as SVG.
-    \\       graven hp15c <font> <plate.svg> <keys.svg>
+    \\       graven hp15c <font> <plate.svg> <keys.svg> [fallback font ...]
     \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
-    \\         and the keys, each written as SVG.
-    \\       graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf>
+    \\         and the keys, each written as SVG. Fallback fonts set what the font lacks.
+    \\       graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf> [fallback font ...]
     \\         The HP-15C keypad's plate and keys for multi-colour 3D printing, each part's
     \\         stack of layer operations as closed meshes, parts of one object, colours as
     \\         materials, written as 3MF. --parts colours (the default) gives one part per
@@ -49,8 +49,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "keyboard")) {
         return keyboard(init, args[2], args[3]);
     }
-    if (args.len == 5 and std.mem.eql(u8, args[1], "hp15c")) {
-        return hp15c(init, args[2], args[3], args[4]);
+    if (args.len >= 5 and std.mem.eql(u8, args[1], "hp15c")) {
+        return hp15c(init, args[2], args[3], args[4], args[5..]);
     }
     if (args.len >= 2 and std.mem.eql(u8, args[1], "3mf")) {
         var opts: ThreeMfOptions = .{};
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
                 opts.bed = std.meta.stringToEnum(layout.threemf.Bed, args[k + 1]) orelse break;
             } else break;
         }
-        if (args.len - k == 4 and std.mem.eql(u8, args[k], "hp15c")) return hp15c3mf(init, args[k + 1], args[k + 2], args[k + 3], opts);
+        if (args.len - k >= 4 and std.mem.eql(u8, args[k], "hp15c")) return hp15c3mf(init, args[k + 1], args[k + 2], args[k + 3], args[k + 4 ..], opts);
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "dump")) {
         if (args.len == 3) return dump(init, args[2], false);
@@ -161,25 +161,53 @@ fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8)
     std.debug.print("{s}: {d} tiles, {d} labels ({d} renders) in {d:.1} ms\n", .{ out_path, placed.tiles.len, placed.labels.len, labels.cache.count(), ms });
 }
 
-fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8) !void {
+/// Faces loaded from font files (kept with their bytes), the first the
+/// main face and the rest its fallbacks, as members.
+const LoadedFaces = struct {
+    faces: []*engine.Face,
+    bytes: [][]u8,
+    members: []engine.style.Member,
+
+    fn load(gpa: std.mem.Allocator, io: std.Io, paths: []const []const u8) !LoadedFaces {
+        const cwd = std.Io.Dir.cwd();
+        const faces = try gpa.alloc(*engine.Face, paths.len);
+        const bytes = try gpa.alloc([]u8, paths.len);
+        for (paths, faces, bytes) |path, *f, *b| {
+            b.* = try cwd.readFileAlloc(io, path, gpa, .limited(64 << 20));
+            f.* = try engine.Face.init(gpa, b.*, 0);
+        }
+        const members = try gpa.alloc(engine.style.Member, paths.len - 1);
+        for (members, 1..) |*mb, k| mb.* = .{ .upright = @intCast(k) };
+        return .{ .faces = faces, .bytes = bytes, .members = members };
+    }
+
+    fn deinit(l: LoadedFaces, gpa: std.mem.Allocator) void {
+        for (l.faces) |f| f.deinit();
+        for (l.bytes) |b| gpa.free(b);
+        gpa.free(l.faces);
+        gpa.free(l.bytes);
+        gpa.free(l.members);
+    }
+};
+
+fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8, fallbacks: []const [:0]const u8) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
-    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
-    defer gpa.free(bytes);
-    const face = try engine.Face.init(gpa, bytes, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const paths = try gpa.alloc([]const u8, fallbacks.len + 1);
+    defer gpa.free(paths);
+    paths[0] = font_path;
+    for (fallbacks, paths[1..]) |fb, *p| p.* = fb;
+    const loaded = try LoadedFaces.load(gpa, io, paths);
+    defer loaded.deinit(gpa);
+    const faces = loaded.faces;
 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const key = try m.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
-    const g = try m.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
-    const f = try m.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
-    const b = try samples.hp15c.build(&m, .{ .key = key, .g = g, .f = f }, 0, .{ .x = 0, .y = 0 });
+    const b = try samples.hp15c.build(&m, try samples.hp15c.addStyles(&m, loaded.members), 0, .{ .x = 0, .y = 0 });
 
-    var labels: layout.Labels = .init(gpa, &faces);
+    var labels: layout.Labels = .init(gpa, faces);
     defer labels.deinit();
     for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
         var placed = try layout.solve(gpa, &m, part.p, &labels);
@@ -188,7 +216,7 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
             const name = if (i.tile) |t| m.tileConst(t).designator else "-";
             std.debug.print("{s}: {s}\n", .{ name, @tagName(i.kind) });
         }
-        const doc = try layout.output.panelSvg(gpa, &placed, &faces, .{});
+        const doc = try layout.output.panelSvg(gpa, &placed, faces, .{});
         defer gpa.free(doc);
         try cwd.writeFile(io, .{ .sub_path = part.path, .data = doc });
         std.debug.print("{s}: {d} tiles, {d} labels\n", .{ part.path, placed.tiles.len, placed.labels.len });
@@ -200,25 +228,24 @@ const ThreeMfOptions = struct {
     bed: layout.threemf.Bed = .bottom,
 };
 
-fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8, opts: ThreeMfOptions) !void {
+fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8, fallbacks: []const [:0]const u8, opts: ThreeMfOptions) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
-    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
-    defer gpa.free(bytes);
-    const face = try engine.Face.init(gpa, bytes, 0);
-    defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const paths = try gpa.alloc([]const u8, fallbacks.len + 1);
+    defer gpa.free(paths);
+    paths[0] = font_path;
+    for (fallbacks, paths[1..]) |fb, *p| p.* = fb;
+    const loaded = try LoadedFaces.load(gpa, io, paths);
+    defer loaded.deinit(gpa);
+    const faces = loaded.faces;
 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const key = try m.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
-    const g = try m.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
-    const f = try m.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
-    const b = try samples.hp15c.build(&m, .{ .key = key, .g = g, .f = f }, 0, .{ .x = 0, .y = 0 });
+    const b = try samples.hp15c.build(&m, try samples.hp15c.addStyles(&m, loaded.members), 0, .{ .x = 0, .y = 0 });
 
-    var labels: layout.Labels = .init(gpa, &faces);
+    var labels: layout.Labels = .init(gpa, faces);
     defer labels.deinit();
     var sound = true;
     for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
@@ -228,7 +255,7 @@ fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u
         const t0 = monoNow();
         var placed = try layout.solve(gpa, &m, part.p, &labels);
         defer placed.deinit();
-        const p = try layout.fab.plan(a, &m, part.p, &placed, &faces);
+        const p = try layout.fab.plan(a, &m, part.p, &placed, faces);
         const slabs = try layout.fab.slabs(a, p.steps);
         const t1 = monoNow();
         const ps = try layout.threemf.orient(a, try layout.threemf.parts(a, slabs, layout.threemf.default_tolerance, opts.grouping), opts.bed);
