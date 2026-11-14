@@ -8,17 +8,21 @@
 extern "C" {
 #endif
 
-typedef struct os_doc os_doc; /* opaque XDE document */
+typedef struct os_doc os_doc;     /* opaque XDE document */
+typedef struct os_solid os_solid; /* opaque solid (or compound of solids) */
 
 enum { OS_OK = 0, OS_ERR = 1 };
 
-enum os_seg_kind { OS_LINE = 1, OS_QUAD = 2, OS_CUBIC = 3 };
+enum os_seg_kind { OS_LINE = 1, OS_QUAD = 2, OS_CUBIC = 3, OS_CONIC = 4 };
 
 /* One segment in the z = 0 plane. Uses 2, 3 or 4 points (x, y) by kind.
-   Consecutive segments share end and start points. */
+   OS_CONIC is a rational quadratic: 3 points, the middle one weighted w
+   (the ends weigh 1); an arc of a circle stays exact. w is ignored for the
+   other kinds. Consecutive segments share end and start points. */
 typedef struct {
     int kind;
     double pts[8];
+    double w;
 } os_segment;
 
 typedef struct {
@@ -39,6 +43,29 @@ int os_doc_add_face(os_doc *doc, const char *name, const double rgb[3],
                     const os_contour *contours, size_t n_contours, double *area_out);
 
 int os_doc_write_step(os_doc *doc, const char *path);
+
+/* Solids. Each call that makes one returns a new os_solid in *out, to be
+   freed with os_solid_free. */
+
+/* The region the contours fill under the even-odd rule (counting outlines
+   inward, what lies between an odd one and the even one inside it), swept
+   from z0 up to z1. Contours must not cross; their direction does not
+   matter. Several outer contours make a compound of solids. */
+int os_solid_extrude(const os_contour *contours, size_t n_contours, double z0, double z1, os_solid **out);
+
+/* a with b cut out of it; the overlap of a and b. */
+int os_solid_cut(const os_solid *a, const os_solid *b, os_solid **out);
+int os_solid_common(const os_solid *a, const os_solid *b, os_solid **out);
+
+/* Its volume, and whether OCCT's checker finds it valid (1) or not (0).
+   Either pointer may be NULL. */
+int os_solid_props(const os_solid *s, double *volume, int *valid);
+
+void os_solid_free(os_solid *s);
+
+/* Adds a solid to the document as one named, coloured part (a copy: the
+   solid can be freed afterwards). */
+int os_doc_add_solid(os_doc *doc, const char *name, const double rgb[3], const os_solid *s);
 
 #ifdef __cplusplus
 }

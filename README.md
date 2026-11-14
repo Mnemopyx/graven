@@ -124,7 +124,9 @@ zig fetch --save=occt_x86_64_linux_gnu https://github.com/Mnemopyx/graven/releas
 
 An archive is named `occt-<version>-<target>-zig<version>-<recipe>.tar.xz`, where `<recipe>` is the first 8 hex digits of the build script's SHA-256, so a changed recipe gets a new name. Its files sit at the archive's root (unpack it into a directory of its own: `tar -xJf <archive> -C <dir>`), so Zig's package hash comes out the same however it is fetched. It holds the static libraries stripped of debug information (19 MB compressed, against 1.2 GB unstripped), the headers, the `MANIFEST`, OCCT's licence (LGPL 2.1 with the Open CASCADE exception), and a `SOURCE` note naming the source tag and our patch. `scripts/package-occt.sh <prefix> <occt-source> <out-dir>` makes one locally too; the tar is reproducible (sorted, fixed times and owners).
 
-The bridge test builds planar faces from line, quadratic and cubic edges (one with a hole), checks their areas against exact values, checks that a zero-length edge is rejected, and writes `legend_test.step`.
+The bridge test builds planar faces from line, quadratic and cubic edges (one with a hole), checks their areas against exact values, checks that a zero-length edge is rejected, and writes `legend_test.step`. It then builds solids, as colour FDM will: a plate with a round hole made of exact conic arcs (its volume matches the one computed with π), an "O" legend inlaid 0.6 mm into its top and cut out of the plate (the two volumes add up to the plate's and their overlap is empty), and an outline with a hole holding an island (filled even-odd); every solid passes OCCT's checker. It writes them as two named, coloured solids to `fdm_test.step`.
+
+The shim's solids: `os_solid_extrude` sweeps the region a set of contours fills (even-odd, nesting found by containment) between two heights; `os_solid_cut` and `os_solid_common` are OCCT booleans; `os_solid_props` gives volume and validity; `os_doc_add_solid` adds a named, coloured solid to the STEP document. `OS_CONIC` segments are rational quadratics (weight on the middle point), so arcs stay exact.
 
 Notes for bridge code:
 
