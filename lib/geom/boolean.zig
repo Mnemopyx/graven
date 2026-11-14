@@ -235,19 +235,19 @@ const Bounded = struct { s: Segment, box: Box };
 /// crossings of the horizontal ray right from `p` with the curves
 /// themselves, found as roots of their polynomials. A ray through a vertex
 /// is moved off it by a hair first.
-fn insideExact(segs: []const Bounded, p0: Point, scale: f64) bool {
+fn insideExact(ix: *const YIndex, p0: Point, scale: f64) bool {
     var p = p0;
     var tries: usize = 0;
     while (tries < 8) : (tries += 1) {
         const eps = 1e-12 * scale;
-        const clear = for (segs) |b| {
+        const clear = for (ix.near(p.y)) |b| {
             if (@abs(b.s.start().y - p.y) <= eps) break false;
         } else true;
         if (clear) break;
         p.y += 7.3e-12 * scale;
     }
     var inside = false;
-    for (segs) |b| {
+    for (ix.near(p.y)) |b| {
         if (p.y < b.box.y0 or p.y > b.box.y1 or b.box.x1 <= p.x) continue;
         var roots: [3]f64 = undefined;
         for (rootsAtY(b.s, p.y, &roots)) |t| {
@@ -256,6 +256,70 @@ fn insideExact(segs: []const Bounded, p0: Point, scale: f64) bool {
     }
     return inside;
 }
+
+/// The roots in (0, 1) of c0 + c1 t + c2 t², in closed form (the stable
+/// quadratic formula).
+fn quadRoots(c0: f64, c1: f64, c2: f64, out: *[3]f64) []f64 {
+    var n: usize = 0;
+    const scale = @abs(c0) + @abs(c1) + @abs(c2);
+    if (scale == 0) return out[0..0];
+    if (@abs(c2) <= 1e-14 * scale) {
+        if (c1 != 0) {
+            const t = -c0 / c1;
+            if (t > 0 and t < 1) {
+                out[0] = t;
+                n = 1;
+            }
+        }
+        return out[0..n];
+    }
+    const disc = c1 * c1 - 4 * c2 * c0;
+    if (disc < 0) return out[0..0];
+    const sq = @sqrt(disc);
+    const qq = -0.5 * (c1 + (if (c1 >= 0) sq else -sq));
+    const r = [2]f64{ qq / c2, if (qq != 0) c0 / qq else qq / c2 };
+    for (r, 0..) |t, i| {
+        if (!(t > 0 and t < 1)) continue;
+        if (i == 1 and n == 1 and t == out[0]) continue;
+        out[n] = t;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// An input's segments in bands of height, so the inside test reads only
+/// those whose height range holds the point's.
+const YIndex = struct {
+    y0: f64,
+    step: f64,
+    bands: []const []const Bounded,
+
+    fn of(a: Allocator, segs: []const Bounded, box: Box) Allocator.Error!YIndex {
+        const n: usize = std.math.clamp(segs.len / 4, 1, 4096);
+        const h = @max(box.height(), 1e-12);
+        const step = h / @as(f64, @floatFromInt(n));
+        var lists = try a.alloc(std.ArrayList(Bounded), n);
+        for (lists) |*l| l.* = .empty;
+        for (segs) |b| {
+            const lo = band(box.y0, step, n, b.box.y0);
+            const hi = band(box.y0, step, n, b.box.y1);
+            for (lo..hi + 1) |k| try lists[k].append(a, b);
+        }
+        const bands = try a.alloc([]const Bounded, n);
+        for (lists, bands) |l, *o| o.* = l.items;
+        return .{ .y0 = box.y0, .step = step, .bands = bands };
+    }
+
+    fn band(y0: f64, step: f64, n: usize, y: f64) usize {
+        const k = @floor((y - y0) / step);
+        if (!(k > 0)) return 0;
+        return @min(n - 1, @as(usize, @intFromFloat(k)));
+    }
+
+    fn near(ix: *const YIndex, y: f64) []const Bounded {
+        return ix.bands[band(ix.y0, ix.step, ix.bands.len, y)];
+    }
+};
 
 /// The parameters in (0, 1) where `s` meets the line y = `y`.
 fn rootsAtY(s: Segment, y: f64, out: *[3]f64) []f64 {
@@ -278,6 +342,7 @@ fn rootsAtY(s: Segment, y: f64, out: *[3]f64) []f64 {
             -p[0].y + 3 * p[1].y - 3 * p[2].y + p[3].y,
         },
     }
+    if (c[3] == 0) return quadRoots(c[0], c[1], c[2], out);
     const f = struct {
         fn at(cc: [4]f64, t: f64) f64 {
             return ((cc[3] * t + cc[2]) * t + cc[1]) * t + cc[0];
@@ -365,12 +430,20 @@ pub fn cut(a: Allocator, base: Outline, cutters: []const Outline) Error!Outline 
 /// filled even-odd) each point lies in: exact contours, as `cut`'s. Union,
 /// difference, and "whose layer is on top here" are all rules.
 pub fn combine(a: Allocator, inputs: []const Outline, rule: Rule) Error!Outline {
+    const out = try combineMany(a, inputs, &.{rule});
+    defer a.free(out);
+    return out[0];
+}
+
+/// As `combine` for each of `rules`, cutting the inputs and judging the
+/// sides of their pieces once for all of them: one region per rule.
+pub fn combineMany(a: Allocator, inputs: []const Outline, rules: []const Rule) Error![]Outline {
     var scratch: std.heap.ArenaAllocator = .init(a);
     defer scratch.deinit();
     const sa = scratch.allocator();
 
     var segs: std.ArrayList(Seg) = .empty;
-    const exact = try sa.alloc([]const Bounded, inputs.len);
+    const exact = try sa.alloc(YIndex, inputs.len);
     const boxes = try sa.alloc(Box, inputs.len);
     var total = Box.empty;
     for (inputs, 0..) |o, k| {
@@ -385,17 +458,34 @@ pub fn combine(a: Allocator, inputs: []const Outline, rule: Rule) Error!Outline 
             b = b.join(sb);
             total = total.join(f.box);
         };
-        exact[k] = bs.items;
+        exact[k] = try YIndex.of(sa, bs.items, b);
         boxes[k] = b;
     }
-    if (segs.items.len == 0) return .blank;
+    if (segs.items.len == 0) {
+        const none = try a.alloc(Outline, rules.len);
+        @memset(none, .blank);
+        return none;
+    }
     const scale = @max(1.0, @max(total.width(), total.height()));
     const tol = 1e-9 * scale;
-    const region: Region = .{ .segs = exact, .boxes = boxes, .member = try sa.alloc(bool, inputs.len), .rule = rule, .scale = scale };
+    const region: Region = .{ .segs = exact, .boxes = boxes, .member = try sa.alloc(bool, inputs.len), .scale = scale };
 
     // Where segments meet: crossings, and ends lying on another segment.
-    for (segs.items, 0..) |*sa_, i| for (segs.items[i + 1 ..]) |*sb| {
-        if (!overlaps(sa_.flat.box, sb.flat.box, 1e-6 * scale)) continue;
+    // Pairs are found by sweeping across x: segments sorted by their left
+    // edge, each paired with those starting before it ends.
+    const margin = 1e-6 * scale;
+    const order = try sa.alloc(u32, segs.items.len);
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+    std.mem.sort(u32, order, segs.items, struct {
+        fn lt(ss: []const Seg, x: u32, y: u32) bool {
+            return ss[x].flat.box.x0 < ss[y].flat.box.x0;
+        }
+    }.lt);
+    for (order, 0..) |oi, i| for (order[i + 1 ..]) |oj| {
+        const sa_ = &segs.items[oi];
+        const sb = &segs.items[oj];
+        if (sb.flat.box.x0 > sa_.flat.box.x1 + margin) break;
+        if (!overlaps(sa_.flat.box, sb.flat.box, margin)) continue;
         const fa = sa_.flat;
         const fb = sb.flat;
         for (fa.pts[0 .. fa.pts.len - 1], fa.pts[1..], 0..) |a0, a1, ia| {
@@ -428,12 +518,10 @@ pub fn combine(a: Allocator, inputs: []const Outline, rule: Rule) Error!Outline 
         }
     };
 
-    // The pieces, each kept when the region is on one side only; the same
-    // piece from two outlines (edges along one another) once.
-    const Piece = struct { s: Segment, used: bool = false };
-    var pieces: std.ArrayList(Piece) = .empty;
-    var seen: std.AutoHashMapUnmanaged([6]i64, void) = .empty;
-    const q = 1e-6 * scale;
+    // The pieces, with which inputs lie on each side of them (those with the
+    // same on both sides bound no region, whatever the rule).
+    const Cand = struct { s: Segment, left: []const bool, right: []const bool };
+    var cands: std.ArrayList(Cand) = .empty;
     for (segs.items) |*sg| {
         std.mem.sort(Cut, sg.cuts.items, {}, struct {
             fn lt(_: void, x: Cut, y: Cut) bool {
@@ -473,14 +561,34 @@ pub fn combine(a: Allocator, inputs: []const Outline, rule: Rule) Error!Outline 
             const off = std.math.clamp(0.1 * chord, 1e-9 * scale, 1e-3);
             const left: Point = .{ .x = m.x - dy * off, .y = m.y + dx * off };
             const right: Point = .{ .x = m.x + dy * off, .y = m.y - dx * off };
-            const in_l = region.inside(left);
+            const in_l = try sa.dupe(bool, region.inside(left));
             const in_r = region.inside(right);
-            if (in_l == in_r) continue;
-            const kept = if (in_l) piece else piece.reversed();
-            const key = [6]i64{ cell(kept.start().x, q), cell(kept.start().y, q), cell(kept.end().x, q), cell(kept.end().y, q), cell(kept.at(0.5).x, q * 100), cell(kept.at(0.5).y, q * 100) };
-            if ((try seen.getOrPut(sa, key)).found_existing) continue;
-            try pieces.append(sa, .{ .s = kept });
+            if (std.mem.eql(bool, in_l, in_r)) continue;
+            try cands.append(sa, .{ .s = piece, .left = in_l, .right = try sa.dupe(bool, in_r) });
         }
+    }
+
+    const out = try a.alloc(Outline, rules.len);
+    for (rules, out) |rule, *o| o.* = try region_of(a, sa, cands.items, rule, scale);
+    return out;
+}
+
+/// The region `rule` keeps: each piece with it on one side only, travelling
+/// with it on the left (the same piece from two outlines once), joined end
+/// to start into contours.
+fn region_of(a: Allocator, sa: Allocator, cands: anytype, rule: Rule, scale: f64) Error!Outline {
+    const Piece = struct { s: Segment, used: bool = false };
+    var pieces: std.ArrayList(Piece) = .empty;
+    var seen: std.AutoHashMapUnmanaged([6]i64, void) = .empty;
+    const q = 1e-6 * scale;
+    for (cands) |cd| {
+        const in_l = rule.inside(rule.ctx, cd.left);
+        const in_r = rule.inside(rule.ctx, cd.right);
+        if (in_l == in_r) continue;
+        const kept = if (in_l) cd.s else cd.s.reversed();
+        const key = [6]i64{ cell(kept.start().x, q), cell(kept.start().y, q), cell(kept.end().x, q), cell(kept.end().y, q), cell(kept.at(0.5).x, q * 100), cell(kept.at(0.5).y, q * 100) };
+        if ((try seen.getOrPut(sa, key)).found_existing) continue;
+        try pieces.append(sa, .{ .s = kept });
     }
 
     // Joined end to start into contours: pieces found by where they start,
@@ -538,17 +646,17 @@ pub fn combine(a: Allocator, inputs: []const Outline, rule: Rule) Error!Outline 
 /// The inputs' polygons and boxes, for judging which side of a piece the
 /// region is on.
 const Region = struct {
-    segs: []const []const Bounded,
+    segs: []const YIndex,
     boxes: []const Box,
     member: []bool,
-    rule: Rule,
     scale: f64,
 
-    fn inside(r: Region, p: Point) bool {
-        for (r.segs, r.boxes, r.member) |segs, b, *m| {
-            m.* = p.x >= b.x0 and p.x <= b.x1 and p.y >= b.y0 and p.y <= b.y1 and insideExact(segs, p, r.scale);
+    /// Which inputs `p` lies inside (valid until the next call).
+    fn inside(r: Region, p: Point) []const bool {
+        for (r.segs, r.boxes, r.member) |*ix, b, *m| {
+            m.* = p.x >= b.x0 and p.x <= b.x1 and p.y >= b.y0 and p.y <= b.y1 and insideExact(ix, p, r.scale);
         }
-        return r.rule.inside(r.rule.ctx, r.member);
+        return r.member;
     }
 };
 

@@ -71,7 +71,7 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 
 - SVG export from the GUI, and from the `graven` CLI: `svg`, `label`, `parse`, `keyboard`, `rtf`, `dump`, `compact`.
 - The PC keyboard sample. Its output is the regression check run after each change.
-- Colour 3D printing: a part's stack of layer operations (Panel.fab: add, subtract, inlay; from the base's surfaces, up or down) is resolved into slabs of exact 2D colour regions (layout.fab), then written as 3MF (`graven 3mf hp15c`, about a second for both HP-15C parts: closed meshes per colour and height range, earcut faces, colours as materials) or, through OCCT, as STEP (`graven-fab`, slower: exact text is about a million STEP entities per part). Not yet: Manufacture mode in the GUI, manufacturing rules beyond the layer-height flag, slicer-specific filament assignment.
+- Colour 3D printing: a part's stack of layer operations (Panel.fab: add, subtract, inlay; from the base's surfaces, up or down) is resolved into slabs of exact 2D colour regions (layout.fab), then written as 3MF (`graven 3mf hp15c`, under a second for both HP-15C parts: closed meshes, one per colour (the union of its bands) or per colour and band, standing on the part's bottom or turned over onto its top; earcut faces, colours as materials) or, through OCCT, as STEP (`graven-fab`, slower: exact text is about a million STEP entities per part). Not yet: Manufacture mode in the GUI, manufacturing rules beyond the layer-height flag, slicer-specific filament assignment.
 
 ## Agreed but not built
 

@@ -115,10 +115,16 @@ pub fn slabs(a: Allocator, steps: []const Step) ![]const Slab {
             }
         }
         if (colours.items.len == 0) continue;
+        // Every colour's region from one pass over the inputs.
+        const ctxs = try a.alloc(Owner, colours.items.len);
+        const rules = try a.alloc(geom.boolean.Rule, colours.items.len);
+        for (ctxs, rules, 0..) |*cx, *r, ci| {
+            cx.* = .{ .owner = owner.items, .kinds = kinds.items, .colour = ci };
+            r.* = .{ .ctx = cx, .inside = Owner.inside };
+        }
+        const outs = try geom.boolean.combineMany(a, inputs.items, rules);
         var regions: std.ArrayList(Region) = .empty;
-        for (colours.items, 0..) |col, ci| {
-            const ctx: Owner = .{ .owner = owner.items, .kinds = kinds.items, .colour = ci };
-            const o = try geom.boolean.combine(a, inputs.items, .{ .ctx = &ctx, .inside = Owner.inside });
+        for (colours.items, outs) |col, o| {
             if (o.contours.len > 0) try regions.append(a, .{ .colour = col, .outline = o });
         }
         if (regions.items.len > 0) try out.append(a, .{ .z0 = lo, .z1 = hi, .regions = regions.items });

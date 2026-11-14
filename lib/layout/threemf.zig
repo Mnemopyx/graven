@@ -29,95 +29,193 @@ pub const default_tolerance = 0.005;
 /// it, clockwise, as geom.boolean gives them) triangulated by earcut, and
 /// walls along the same rings, so faces and walls share every edge.
 pub fn prism(a: Allocator, outline: geom.Outline, z0: f64, z1: f64, tol: f64) Allocator.Error!Mesh {
-    // Each contour flattened into a ring, repeats and exactly collinear
-    // points dropped (earcut would leave them unused, opening the walls).
-    var rings: std.ArrayList([]const geom.Point) = .empty;
+    var b: Builder = .{ .a = a, .tol = tol };
+    try b.face(outline, z1, .up);
+    try b.face(outline, z0, .down);
+    try b.walls(outline, z0, z1);
+    return b.mesh();
+}
+
+/// A region of one colour over a height range.
+pub const Band = struct { outline: geom.Outline, z0: f64, z1: f64 };
+
+/// The union of `bands` (one colour's, in order up, not overlapping in z)
+/// as one closed mesh: each band's walls; at each height where bands meet,
+/// faces only where one reaches past the other (the rest is inside). The
+/// regions there come from exact 2D booleans over all the bands' outlines
+/// at once, so every call cuts them into the same pieces and the faces meet
+/// the walls edge to edge.
+pub fn solid(a: Allocator, bands: []const Band, tol: f64) !Mesh {
+    var b: Builder = .{ .a = a, .tol = tol };
+    const inputs = try a.alloc(geom.Outline, bands.len);
+    for (bands, inputs) |bd, *o| o.* = bd.outline;
+    const Rule = struct {
+        /// Inside `in_` and (when `out` is set) outside `out`.
+        in_: usize,
+        out: ?usize,
+        fn inside(ctx: *const anyopaque, in: []const bool) bool {
+            const r: *const @This() = @ptrCast(@alignCast(ctx));
+            return in[r.in_] and !(if (r.out) |o| in[o] else false);
+        }
+    };
+    // Every region the union needs, from one pass over the bands: each
+    // band's walls (its outline cut where the others' cross it), and its
+    // faces below and above (what it covers that the band meeting it there
+    // does not).
+    var rules: std.ArrayList(Rule) = .empty;
+    var heights: std.ArrayList(struct { z0: f64, z1: f64, side: ?Side }) = .empty;
+    for (bands, 0..) |bd, k| {
+        try rules.append(a, .{ .in_ = k, .out = null });
+        try heights.append(a, .{ .z0 = bd.z0, .z1 = bd.z1, .side = null });
+        const below: ?usize = if (k > 0 and @abs(bands[k - 1].z1 - bd.z0) < 1e-9) k - 1 else null;
+        try rules.append(a, .{ .in_ = k, .out = below });
+        try heights.append(a, .{ .z0 = bd.z0, .z1 = bd.z0, .side = .down });
+        const above: ?usize = if (k + 1 < bands.len and @abs(bands[k + 1].z0 - bd.z1) < 1e-9) k + 1 else null;
+        try rules.append(a, .{ .in_ = k, .out = above });
+        try heights.append(a, .{ .z0 = bd.z1, .z1 = bd.z1, .side = .up });
+    }
+    const gen = try a.alloc(geom.boolean.Rule, rules.items.len);
+    for (rules.items, gen) |*r, *g| g.* = .{ .ctx = r, .inside = Rule.inside };
+    const regions = try geom.boolean.combineMany(a, inputs, gen);
+    for (regions, heights.items) |reg, h| {
+        if (h.side) |side| try b.face(reg, h.z0, side) else try b.walls(reg, h.z0, h.z1);
+    }
+    return b.mesh();
+}
+
+const Side = enum { up, down };
+
+/// Builds a mesh from faces and walls on shared vertices.
+const Builder = struct {
+    a: Allocator,
+    tol: f64,
+    verts: std.ArrayList([3]f64) = .empty,
+    index: std.AutoHashMapUnmanaged([3]u64, u32) = .empty,
+    tris: std.ArrayList([3]u32) = .empty,
+
+    fn vertex(b: *Builder, p: geom.Point, z: f64) Allocator.Error!u32 {
+        const v = [3]f64{ p.x + 0.0, p.y + 0.0, z + 0.0 };
+        const key = [3]u64{ @bitCast(v[0]), @bitCast(v[1]), @bitCast(v[2]) };
+        const g = try b.index.getOrPut(b.a, key);
+        if (!g.found_existing) {
+            g.value_ptr.* = @intCast(b.verts.items.len);
+            try b.verts.append(b.a, v);
+        }
+        return g.value_ptr.*;
+    }
+
+    fn mesh(b: *Builder) Mesh {
+        return .{ .vertices = b.verts.items, .triangles = b.tris.items };
+    }
+
+    /// A region's faces at height `z`, facing up or down.
+    fn face(b: *Builder, outline: geom.Outline, z: f64, side: Side) Allocator.Error!void {
+        const rs = try rings(b.a, outline, b.tol);
+        for (rs.rings, rs.areas, 0..) |outer, ar, k| {
+            if (ar <= 0) continue;
+            var holes: std.ArrayList([]const geom.Point) = .empty;
+            var pts: std.ArrayList(geom.Point) = .empty;
+            try pts.appendSlice(b.a, outer);
+            for (rs.rings, rs.owner) |ring, o| if (o == k) {
+                try holes.append(b.a, ring);
+                try pts.appendSlice(b.a, ring);
+            };
+            // Earcut can run a triangle's edge through vertices lying
+            // exactly on it (its ears are tested against reflex vertices
+            // only, and it drops collinear ones): split such triangles
+            // there, so faces meet the walls vertex to vertex.
+            const grid = try Grid.of(b.a, pts.items);
+            var tris: std.ArrayList([3]geom.Point) = .empty;
+            for (try geom.earcut.triangulate(b.a, outer, holes.items)) |t| {
+                try splitAt(b.a, &tris, &grid, .{ pts.items[t[0]], pts.items[t[1]], pts.items[t[2]] }, 0);
+            }
+            for (tris.items) |tri| {
+                var p = tri;
+                const cross = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[1].y - p[0].y) * (p[2].x - p[0].x);
+                if (cross == 0) continue;
+                if ((cross < 0) == (side == .up)) std.mem.swap(geom.Point, &p[1], &p[2]);
+                try b.tris.append(b.a, .{ try b.vertex(p[0], z), try b.vertex(p[1], z), try b.vertex(p[2], z) });
+            }
+        }
+    }
+
+    /// A region's walls from `z0` up to `z1`: every ring has the region on
+    /// its left (outer rings counter-clockwise, holes clockwise), so its
+    /// right is outward.
+    fn walls(b: *Builder, outline: geom.Outline, z0: f64, z1: f64) Allocator.Error!void {
+        const rs = try rings(b.a, outline, b.tol);
+        for (rs.rings, rs.areas, rs.owner) |ring, ar, o| {
+            if (ar < 0 and o == null) continue; // a hole in nothing
+            for (ring, 0..) |p, i| {
+                const q = ring[(i + 1) % ring.len];
+                const p0 = try b.vertex(p, z0);
+                const q0 = try b.vertex(q, z0);
+                const q1 = try b.vertex(q, z1);
+                const p1 = try b.vertex(p, z1);
+                try b.tris.append(b.a, .{ p0, q0, q1 });
+                try b.tris.append(b.a, .{ p0, q1, p1 });
+            }
+        }
+    }
+};
+
+const Rings = struct {
+    rings: []const []const geom.Point,
+    areas: []const f64,
+    /// For each hole, the smallest outer ring around it.
+    owner: []const ?usize,
+};
+
+/// An outline's contours flattened into rings: each segment in a fixed
+/// direction (so a piece shared by two regions gives the same points
+/// either way round), repeats dropped, holes given their outer ring.
+fn rings(a: Allocator, outline: geom.Outline, tol: f64) Allocator.Error!Rings {
+    var rs: std.ArrayList([]const geom.Point) = .empty;
     var areas: std.ArrayList(f64) = .empty;
     for (outline.contours) |ct| {
-        var pts: std.ArrayList(geom.Point) = .empty;
         if (ct.segments.len == 0) continue;
+        var pts: std.ArrayList(geom.Point) = .empty;
         try pts.append(a, ct.segments[0].start());
-        for (ct.segments) |sg| try flatten(a, &pts, sg, tol);
-        // Points a hair apart (segment ends computed separately) as one;
-        // the closing point onto the first exactly.
-        var merged: std.ArrayList(geom.Point) = .empty;
+        for (ct.segments) |sg| try flattenCanonical(a, &pts, sg, tol);
+        var ring: std.ArrayList(geom.Point) = .empty;
         for (pts.items) |q| {
-            if (merged.items.len > 0 and near(merged.items[merged.items.len - 1], q)) continue;
-            try merged.append(a, q);
+            if (ring.items.len > 0 and near(ring.items[ring.items.len - 1], q)) continue;
+            try ring.append(a, q);
         }
-        while (merged.items.len > 1 and near(merged.items[0], merged.items[merged.items.len - 1])) merged.items.len -= 1;
-        const ring = try geom.earcut.dropCollinear(a, merged.items);
-        if (ring.len < 3) continue;
-        try rings.append(a, ring);
-        try areas.append(a, ringArea(ring));
+        while (ring.items.len > 1 and near(ring.items[0], ring.items[ring.items.len - 1])) ring.items.len -= 1;
+        if (ring.items.len < 3) continue;
+        try rs.append(a, ring.items);
+        try areas.append(a, ringArea(ring.items));
     }
-    // Holes to the smallest outer around them.
-    const owner = try a.alloc(?usize, rings.items.len);
-    for (rings.items, areas.items, owner) |ring, ar, *o| {
+    const owner = try a.alloc(?usize, rs.items.len);
+    for (rs.items, areas.items, owner) |ring, ar, *o| {
         o.* = null;
         if (ar >= 0) continue;
-        for (rings.items, areas.items, 0..) |other, oa, k| {
+        for (rs.items, areas.items, 0..) |other, oa, k| {
             if (oa <= 0 or !inRing(other, ring[0])) continue;
             if (o.* == null or oa < areas.items[o.*.?]) o.* = k;
         }
     }
-    var verts: std.ArrayList([3]f64) = .empty;
-    var index: std.AutoHashMapUnmanaged([3]u64, u32) = .empty;
-    var tris: std.ArrayList([3]u32) = .empty;
-    const V = struct {
-        fn at(al: Allocator, vs: *std.ArrayList([3]f64), ix: *std.AutoHashMapUnmanaged([3]u64, u32), p: geom.Point, z: f64) Allocator.Error!u32 {
-            const v = [3]f64{ p.x, p.y, z };
-            const key = [3]u64{ @bitCast(v[0]), @bitCast(v[1]), @bitCast(v[2]) };
-            const g = try ix.getOrPut(al, key);
-            if (!g.found_existing) {
-                g.value_ptr.* = @intCast(vs.items.len);
-                try vs.append(al, v);
-            }
-            return g.value_ptr.*;
-        }
-    };
-    for (rings.items, areas.items, 0..) |outer, ar, k| {
-        if (ar <= 0) continue;
-        var holes: std.ArrayList([]const geom.Point) = .empty;
-        var pts: std.ArrayList(geom.Point) = .empty;
-        try pts.appendSlice(a, outer);
-        for (rings.items, owner) |ring, o| if (o == k) {
-            try holes.append(a, ring);
-            try pts.appendSlice(a, ring);
-        };
-        // Earcut can run a triangle's edge through vertices lying exactly
-        // on it (its ears are tested against reflex vertices only): split
-        // such triangles there, so faces meet the walls vertex to vertex.
-        const grid = try Grid.of(a, pts.items);
-        var face: std.ArrayList([3]geom.Point) = .empty;
-        for (try geom.earcut.triangulate(a, outer, holes.items)) |t| {
-            try splitAt(a, &face, &grid, .{ pts.items[t[0]], pts.items[t[1]], pts.items[t[2]] }, 0);
-        }
-        // Top (facing up) and bottom (facing down).
-        for (face.items) |tri| {
-            var p = tri;
-            const cross = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[1].y - p[0].y) * (p[2].x - p[0].x);
-            if (cross == 0) continue;
-            if (cross < 0) std.mem.swap(geom.Point, &p[1], &p[2]);
-            try tris.append(a, .{ try V.at(a, &verts, &index, p[0], z1), try V.at(a, &verts, &index, p[1], z1), try V.at(a, &verts, &index, p[2], z1) });
-            try tris.append(a, .{ try V.at(a, &verts, &index, p[0], z0), try V.at(a, &verts, &index, p[2], z0), try V.at(a, &verts, &index, p[1], z0) });
-        }
+    return .{ .rings = rs.items, .areas = areas.items, .owner = owner };
+}
+
+/// As `flatten`, but always sampled from the lesser end (by x, then y), so
+/// a segment and its reverse give exactly the same points.
+fn flattenCanonical(a: Allocator, pts: *std.ArrayList(geom.Point), s: geom.Segment, tol: f64) Allocator.Error!void {
+    const p = s.start();
+    const q = s.end();
+    const forward = p.x < q.x or (p.x == q.x and p.y <= q.y);
+    if (forward) return flatten(a, pts, s, tol);
+    var tmp: std.ArrayList(geom.Point) = .empty;
+    try tmp.append(a, q);
+    try flatten(a, &tmp, s.reversed(), tol);
+    // tmp runs q .. p: append it backwards, without q (already there as the
+    // previous point) and ending on p's exact value.
+    var k = tmp.items.len - 1;
+    while (k > 0) {
+        k -= 1;
+        try pts.append(a, tmp.items[k]);
     }
-    // Walls: every ring has the region on its left (outer rings
-    // counter-clockwise, holes clockwise), so its right is outward.
-    for (rings.items, areas.items, owner) |ring, ar, o| {
-        if (ar < 0 and o == null) continue; // a hole in nothing
-        for (ring, 0..) |p, i| {
-            const q = ring[(i + 1) % ring.len];
-            const p0 = try V.at(a, &verts, &index, p, z0);
-            const q0 = try V.at(a, &verts, &index, q, z0);
-            const q1 = try V.at(a, &verts, &index, q, z1);
-            const p1 = try V.at(a, &verts, &index, p, z1);
-            try tris.append(a, .{ p0, q0, q1 });
-            try tris.append(a, .{ p0, q1, p1 });
-        }
-    }
-    return .{ .vertices = verts.items, .triangles = tris.items };
 }
 
 /// A face's vertices in a grid of cells, to find those on an edge.
@@ -246,8 +344,17 @@ pub const Part = struct {
     mesh: Mesh,
 };
 
-/// The part's meshes: one per colour region of each slab.
-pub fn parts(a: Allocator, slabs: []const fab.Slab, tol: f64) Allocator.Error![]const Part {
+/// How a part's meshes are grouped.
+pub const Grouping = enum {
+    /// One per colour and height band (the slabs' regions).
+    bands,
+    /// One per colour: the union of its bands.
+    colours,
+};
+
+/// The part's meshes, grouped by `grouping`.
+pub fn parts(a: Allocator, slabs: []const fab.Slab, tol: f64, grouping: Grouping) ![]const Part {
+    if (grouping == .colours) return colourParts(a, slabs, tol);
     var out: std.ArrayList(Part) = .empty;
     for (slabs) |slab| for (slab.regions) |reg| {
         const mesh = try prism(a, reg.outline, slab.z0, slab.z1, tol);
@@ -260,6 +367,62 @@ pub fn parts(a: Allocator, slabs: []const fab.Slab, tol: f64) Allocator.Error![]
         });
     };
     return out.items;
+}
+
+fn colourParts(a: Allocator, slabs: []const fab.Slab, tol: f64) ![]const Part {
+    var names: std.ArrayList(@import("model.zig").FabColour) = .empty;
+    for (slabs) |sl| for (sl.regions) |reg| {
+        for (names.items) |n| {
+            if (std.mem.eql(u8, n.name, reg.colour.name)) break;
+        } else try names.append(a, reg.colour);
+    };
+    var out: std.ArrayList(Part) = .empty;
+    for (names.items) |col| {
+        var bands: std.ArrayList(Band) = .empty;
+        for (slabs) |sl| for (sl.regions) |reg| if (std.mem.eql(u8, reg.colour.name, col.name)) {
+            try bands.append(a, .{ .outline = reg.outline, .z0 = sl.z0, .z1 = sl.z1 });
+        };
+        const mesh = try solid(a, bands.items, tol);
+        if (mesh.triangles.len == 0) continue;
+        try out.append(a, .{ .name = col.name, .colour = col.name, .color = col.color, .mesh = mesh });
+    }
+    return out.items;
+}
+
+/// Which face of the part goes on the print bed.
+pub const Bed = enum {
+    /// Its lowest z, as built.
+    bottom,
+    /// Its highest z: turned over (half a turn about the y axis), so the
+    /// top's text lies on the bed, reading mirrored from below.
+    top,
+};
+
+/// `ps` turned so `bed` faces the print bed, standing on z = 0, in the same
+/// place across. A rotation, not a reflection: the triangles keep their
+/// facing.
+pub fn orient(a: Allocator, ps: []const Part, bed: Bed) Allocator.Error![]const Part {
+    var x0 = std.math.inf(f64);
+    var x1 = -std.math.inf(f64);
+    var z0 = std.math.inf(f64);
+    var z1 = -std.math.inf(f64);
+    for (ps) |p| for (p.mesh.vertices) |v| {
+        x0 = @min(x0, v[0]);
+        x1 = @max(x1, v[0]);
+        z0 = @min(z0, v[2]);
+        z1 = @max(z1, v[2]);
+    };
+    const out = try a.alloc(Part, ps.len);
+    for (ps, out) |p, *o| {
+        const vs = try a.alloc([3]f64, p.mesh.vertices.len);
+        for (p.mesh.vertices, vs) |v, *w| w.* = switch (bed) {
+            .bottom => .{ v[0], v[1], v[2] - z0 },
+            .top => .{ x0 + x1 - v[0], v[1], z1 - v[2] },
+        };
+        o.* = p;
+        o.mesh = .{ .vertices = vs, .triangles = p.mesh.triangles };
+    }
+    return out;
 }
 
 /// A 3MF package of `parts` as one object named `name`.
@@ -492,3 +655,43 @@ test "holes along one line (glyphs on a baseline): faces split there, the mesh c
     try testing.expectApproxEqAbs((400 - holes) * 0.6, volume(m), 1e-9);
 }
 
+
+test "one colour's bands as one closed solid, and turned over onto its top" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rect = struct {
+        fn ring(al: Allocator, x0: f64, y0: f64, x1: f64, y1: f64, ccw: bool) ![]const geom.Segment {
+            const c = [4]geom.Point{ .{ .x = x0, .y = y0 }, .{ .x = x1, .y = y0 }, .{ .x = x1, .y = y1 }, .{ .x = x0, .y = y1 } };
+            const segs = try al.alloc(geom.Segment, 4);
+            for (0..4) |i| segs[i] = if (ccw) .{ .line = .{ c[i], c[(i + 1) % 4] } } else .{ .line = .{ c[(4 - i) % 4], c[(3 - i + 4) % 4] } };
+            return segs;
+        }
+    }.ring;
+    // A plate 20 x 10, 0 to 1.4 whole; 1.4 to 2 with a pocket (an inlay's
+    // place) and a round hole through both.
+    var buf: [4]geom.Segment = undefined;
+    const ccw = geom.arc(.{ .x = 15, .y = 5 }, 2, 0, 2 * std.math.pi, &buf);
+    var hole: [4]geom.Segment = undefined;
+    for (ccw, 0..) |sg, i| hole[ccw.len - 1 - i] = sg.reversed();
+    const low = try a.dupe(geom.Contour, &.{ .{ .segments = try rect(a, 0, 0, 20, 10, true) }, .{ .segments = hole[0..ccw.len] } });
+    const high = try a.dupe(geom.Contour, &.{ .{ .segments = try rect(a, 0, 0, 20, 10, true) }, .{ .segments = hole[0..ccw.len] }, .{ .segments = try rect(a, 3, 3, 8, 6, false) } });
+    const bands = [_]Band{ .{ .outline = .{ .contours = low }, .z0 = 0, .z1 = 1.4 }, .{ .outline = .{ .contours = high }, .z0 = 1.4, .z1 = 2 } };
+    const m = try solid(a, &bands, default_tolerance);
+    try testing.expect(try closed(a, m));
+    const lo = try prism(a, bands[0].outline, 0, 1.4, default_tolerance);
+    const hi = try prism(a, bands[1].outline, 1.4, 2, default_tolerance);
+    // The same within the curves' flattening (the union's arcs are cut
+    // by the 2D booleans, so flattened at other points).
+    try testing.expectApproxEqAbs(volume(lo) + volume(hi), volume(m), 2 * std.math.pi * 2 * default_tolerance * 2);
+    try testing.expectApproxEqAbs((200 - std.math.pi * 4) * 2 - 15 * 0.6, volume(m), 0.05);
+
+    // Turned over: still closed and facing out, standing on z = 0.
+    const ps = [_]Part{.{ .name = "black", .colour = "black", .color = .hex("#000000"), .mesh = m }};
+    const flipped = try orient(a, &ps, .top);
+    try testing.expect(try closed(a, flipped[0].mesh));
+    try testing.expectApproxEqAbs(volume(m), volume(flipped[0].mesh), 1e-9);
+    var zmin = std.math.inf(f64);
+    for (flipped[0].mesh.vertices) |v| zmin = @min(zmin, v[2]);
+    try testing.expectEqual(@as(f64, 0), zmin);
+}

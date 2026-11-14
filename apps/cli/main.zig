@@ -26,10 +26,12 @@ const usage =
     \\       graven hp15c <font> <plate.svg> <keys.svg>
     \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
     \\         and the keys, each written as SVG.
-    \\       graven 3mf hp15c <font> <plate.3mf> <keys.3mf>
-    \\         The HP-15C keypad's plate and keys for multi-colour 3D printing: each part's
-    \\         stack of layer operations as one closed mesh per colour and height range,
-    \\         parts of one object, colours as materials, written as 3MF.
+    \\       graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf>
+    \\         The HP-15C keypad's plate and keys for multi-colour 3D printing, each part's
+    \\         stack of layer operations as closed meshes, parts of one object, colours as
+    \\         materials, written as 3MF. --parts colours (the default) gives one part per
+    \\         colour; bands, one per colour and height band. --bed bottom (the default)
+    \\         stands each part on its lowest face; top turns it over onto its top face.
     \\       graven dump [--log] <document>
     \\         Prints a document's model as text (for reading, or as git's text converter);
     \\         --log adds its history: the file's segments and every logged step.
@@ -50,8 +52,17 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 5 and std.mem.eql(u8, args[1], "hp15c")) {
         return hp15c(init, args[2], args[3], args[4]);
     }
-    if (args.len == 6 and std.mem.eql(u8, args[1], "3mf") and std.mem.eql(u8, args[2], "hp15c")) {
-        return hp15c3mf(init, args[3], args[4], args[5]);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "3mf")) {
+        var opts: ThreeMfOptions = .{};
+        var k: usize = 2;
+        while (k + 1 < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 2) {
+            if (std.mem.eql(u8, args[k], "--parts")) {
+                opts.grouping = std.meta.stringToEnum(layout.threemf.Grouping, args[k + 1]) orelse break;
+            } else if (std.mem.eql(u8, args[k], "--bed")) {
+                opts.bed = std.meta.stringToEnum(layout.threemf.Bed, args[k + 1]) orelse break;
+            } else break;
+        }
+        if (args.len - k == 4 and std.mem.eql(u8, args[k], "hp15c")) return hp15c3mf(init, args[k + 1], args[k + 2], args[k + 3], opts);
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "dump")) {
         if (args.len == 3) return dump(init, args[2], false);
@@ -184,7 +195,12 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
     }
 }
 
-fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8) !void {
+const ThreeMfOptions = struct {
+    grouping: layout.threemf.Grouping = .colours,
+    bed: layout.threemf.Bed = .bottom,
+};
+
+fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8, opts: ThreeMfOptions) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
@@ -215,7 +231,7 @@ fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u
         const p = try layout.fab.plan(a, &m, part.p, &placed, &faces);
         const slabs = try layout.fab.slabs(a, p.steps);
         const t1 = monoNow();
-        const ps = try layout.threemf.parts(a, slabs, layout.threemf.default_tolerance);
+        const ps = try layout.threemf.orient(a, try layout.threemf.parts(a, slabs, layout.threemf.default_tolerance, opts.grouping), opts.bed);
         const t2 = monoNow();
         const zip = try layout.threemf.package(a, m.panels.items[part.p].name, ps);
         try cwd.writeFile(io, .{ .sub_path = part.path, .data = zip });
