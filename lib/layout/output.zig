@@ -87,7 +87,7 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     // cut their union).
     if (placed.edge) |e| {
         try w.print("<path fill=\"{s}\" fill-rule=\"evenodd\" stroke=\"{s}\" stroke-width=\"{d}\" d=\"", .{ opts.body, opts.edge, opts.edge_width });
-        try pathData(w, try panelBody(a, placed, e));
+        try pathData(w, placed.body orelse e);
         try w.writeAll("\"/>\n");
     }
     // Cutouts with no panel around them (loose, on a canvas): outlined.
@@ -180,25 +180,6 @@ fn path(w: *std.Io.Writer, o: geom.Outline) !void {
     try w.writeAll("<path d=\"");
     try pathData(w, o);
     try w.writeAll("\"/>\n");
-}
-
-/// A panel's body: its edge with its cutouts' and hole tiles' outlines
-/// cut out. Should the cut not join up, the edge and the cutters together,
-/// to be filled even-odd as before.
-pub fn panelBody(a: std.mem.Allocator, placed: *const place.Placed, edge: geom.Outline) !geom.Outline {
-    var cutters: std.ArrayList(geom.Outline) = .empty;
-    for (placed.art) |pa| if (pa.cutout) for (pa.shapes) |s| try cutters.append(a, s.outline);
-    for (placed.tiles) |t| if (t.grid == .hole) for (t.shapes) |s| try cutters.append(a, s.outline);
-    if (cutters.items.len == 0) return edge;
-    return geom.boolean.cut(a, edge, cutters.items) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Unjoined => {
-            var all: std.ArrayList(geom.Contour) = .empty;
-            try all.appendSlice(a, edge.contours);
-            for (cutters.items) |c| try all.appendSlice(a, c.contours);
-            return .{ .contours = all.items };
-        },
-    };
 }
 
 fn pathData(w: *std.Io.Writer, o: geom.Outline) !void {

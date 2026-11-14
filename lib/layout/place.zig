@@ -229,6 +229,11 @@ pub const Placed = struct {
     /// plain rectangle: its edge path (Make panel), or its rectangle when
     /// it has cutouts. Null for a plain rectangle and for a space's panel.
     edge: ?geom.Outline = null,
+    /// The panel's body: its edge with its cutouts and hole tiles cut out
+    /// exactly (a hole across the edge leaves a notch; overlapping holes
+    /// cut their union). Null when it has no edge. Should the cut not join
+    /// up, the edge and the cutters together, filled even-odd.
+    body: ?geom.Outline = null,
 
     pub fn deinit(p: *Placed) void {
         p.arena.deinit();
@@ -1039,6 +1044,23 @@ const Path = struct {
 };
 
 /// Places every tile and label of one panel.
+/// See `Placed.body`.
+fn panelBody(a: Allocator, edge: geom.Outline, arts: []const PlacedArt, tiles: []const PlacedTile) Allocator.Error!geom.Outline {
+    var cutters: std.ArrayList(geom.Outline) = .empty;
+    for (arts) |pa| if (pa.cutout) for (pa.shapes) |sh| try cutters.append(a, sh.outline);
+    for (tiles) |t| if (t.grid == .hole) for (t.shapes) |sh| try cutters.append(a, sh.outline);
+    if (cutters.items.len == 0) return edge;
+    return geom.boolean.cut(a, edge, cutters.items) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Unjoined => {
+            var all: std.ArrayList(geom.Contour) = .empty;
+            try all.appendSlice(a, edge.contours);
+            for (cutters.items) |c| try all.appendSlice(a, c.contours);
+            return .{ .contours = all.items };
+        },
+    };
+}
+
 pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Error!Placed {
     return solveWith(gpa, m, panel, labels, &.{});
 }
@@ -1663,12 +1685,14 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         edge = shapes[0].outline;
     }
     if (edge) |e| bounds = bounds.join(e.bounds());
+    const body: ?geom.Outline = if (edge) |e| try panelBody(a, e, placed_art.items, tiles.items) else null;
 
     return .{
         .arena = arena,
         .exits = try exits.toOwnedSlice(a),
         .wraps = try wraps.toOwnedSlice(a),
         .edge = edge,
+        .body = body,
         .tiles = try tiles.toOwnedSlice(a),
         .tracks = try tracks.toOwnedSlice(a),
         .items = try placed_items.toOwnedSlice(a),

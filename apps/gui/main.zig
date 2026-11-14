@@ -3897,8 +3897,12 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         if (t.grid) |role| if (role != .part) {
             const sel = in_context and state.context == .tile;
             if (role == .hole) {
-                const pieces = flatTile(&state.flat, t.shapes) catch &.{};
-                for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, if (in_context) colors.select else colors.panel_edge);
+                // Drawn as part of the panel's body; its own outline only
+                // while it is in context (or when there is no body).
+                if (in_context or placed.body == null) {
+                    const pieces = flatTile(&state.flat, t.shapes) catch &.{};
+                    for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, if (in_context) colors.select else colors.panel_edge);
+                }
             } else {
                 dashedBox(area, onSheet(pi, t.pitch_box), if (in_context) colors.select else colors.guide.opacity(0.35), px);
             }
@@ -3935,9 +3939,9 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     for (placed.art) |pa| {
         const pieces = flatTile(&state.flat, pa.shapes) catch &.{};
         if (pa.cutout) {
-            // A hole: its outline, in the panel's edge colour, a little
-            // heavier than line art.
-            for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, colors.panel_edge);
+            // A hole: part of the panel's body, which draws it; on a
+            // canvas (no body), its outline, a little heavier than line art.
+            if (placed.body == null) for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, colors.panel_edge);
         } else for (pieces) |piece| {
             if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
             const edge = piece.shape.paint.edge orelse continue;
@@ -4306,12 +4310,18 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
         // A panel made from a closed path is drawn as that path; its
         // margins (still a band inside its box) are not shown.
         const shaped = pi < state.placed.items.len and state.model.panels.items[pi].edge != null and state.placed.items[pi].edge != null;
+        // Its body: the edge with its holes and cutouts cut out (notches
+        // where they cross it).
+        const body: ?geom.Outline = if (pi < state.placed.items.len) state.placed.items[pi].body else null;
         if (shaped) {
-            strokeOutline(area, state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
+            strokeOutline(area, body orelse state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
         } else {
             drawPanelMargins(area, pi);
             // The selected panel's outline marches; others are content edges.
-            if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
+            if (body) |b| {
+                strokeOutline(area, b, panelOrigin(pi), thickness, edge);
+                if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness);
+            } else if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
         }
         if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
     }
