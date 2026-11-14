@@ -126,6 +126,20 @@ static bool make_wire(const os_contour &c, TopoDS_Wire &wire, std::string &why) 
             why = "segment " + std::to_string(i) + ": degenerate (zero length)";
             return false;
         }
+        if (s.kind == OS_LINE) {
+            // A straight edge as a line, not a degree-1 B-spline.
+            BRepBuilderAPI_MakeEdge me(poles(1), poles(2));
+            if (!me.IsDone()) {
+                why = "segment " + std::to_string(i) + ": degenerate edge";
+                return false;
+            }
+            mw.Add(me.Edge());
+            if (!mw.IsDone()) {
+                why = "segment " + std::to_string(i) + ": does not connect";
+                return false;
+            }
+            continue;
+        }
         Handle(Geom_BezierCurve) curve;
         if (s.kind == OS_CONIC) {
             if (!(s.w > 0)) {
@@ -291,6 +305,31 @@ extern "C" int os_solid_extrude(const os_contour *contours, size_t n, double z0,
     });
 }
 
+extern "C" int os_solid_extrude_face(const os_contour *contours, size_t n, double z0, double z1, os_solid **out) {
+    return guarded([&]() -> int {
+        if (n == 0) return fail("no contours");
+        if (!(z1 > z0)) return fail("z1 must be above z0");
+        // On the plane at z0, normal up: the outer wire counter-clockwise,
+        // the holes clockwise, as given.
+        gp_Pln plane(gp_Pnt(0, 0, z0), gp::DZ());
+        gp_Trsf lift;
+        lift.SetTranslation(gp_Vec(0, 0, z0));
+        std::vector<TopoDS_Wire> wires(n);
+        for (size_t i = 0; i < n; ++i) {
+            std::string why;
+            if (!make_wire(contours[i], wires[i], why)) return fail("contour " + std::to_string(i) + ": " + why);
+            wires[i] = TopoDS::Wire(BRepBuilderAPI_Transform(wires[i], lift, true).Shape());
+        }
+        BRepBuilderAPI_MakeFace mf(plane, wires[0], true);
+        for (size_t i = 1; i < n; ++i) mf.Add(wires[i]);
+        if (!mf.IsDone()) return fail("face construction failed");
+        BRepPrimAPI_MakePrism prism(mf.Face(), gp_Vec(0, 0, z1 - z0));
+        if (!prism.IsDone()) return fail("sweep failed");
+        *out = new os_solid{prism.Shape()};
+        return OS_OK;
+    });
+}
+
 template <class Op> static int boolean(const os_solid *a, const os_solid *b, os_solid **out, const char *what) {
     return guarded([&]() -> int {
         Op op(a->shape, b->shape);
@@ -306,6 +345,17 @@ extern "C" int os_solid_cut(const os_solid *a, const os_solid *b, os_solid **out
 
 extern "C" int os_solid_common(const os_solid *a, const os_solid *b, os_solid **out) {
     return boolean<BRepAlgoAPI_Common>(a, b, out, "common");
+}
+
+extern "C" int os_solid_compound(const os_solid *const *solids, size_t n, os_solid **out) {
+    return guarded([&]() -> int {
+        BRep_Builder bb;
+        TopoDS_Compound all;
+        bb.MakeCompound(all);
+        for (size_t i = 0; i < n; ++i) bb.Add(all, solids[i]->shape);
+        *out = new os_solid{all};
+        return OS_OK;
+    });
 }
 
 extern "C" int os_solid_fuse(const os_solid *const *solids, size_t n, os_solid **out) {

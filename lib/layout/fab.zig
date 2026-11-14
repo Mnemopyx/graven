@@ -65,6 +65,84 @@ pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const pl
     return .{ .steps = steps.items, .off_layers = off.items };
 }
 
+/// A height range the plan is the same throughout, and each colour's
+/// footprint there: exact 2D regions, to be swept from `z0` to `z1`.
+pub const Slab = struct {
+    z0: f64,
+    z1: f64,
+    regions: []const Region,
+};
+
+pub const Region = struct {
+    colour: model.FabColour,
+    outline: geom.Outline,
+};
+
+/// The plan as slabs. Steps are straight sweeps along z, so between any two
+/// of their heights each point of the plane belongs to the colour of the
+/// last step covering it there (none, when that is a subtract): 2D
+/// booleans per slab, so no 3D booleans are needed, and the colours cannot
+/// overlap.
+pub fn slabs(a: Allocator, steps: []const Step) ![]const Slab {
+    var zs: std.ArrayList(f64) = .empty;
+    for (steps) |st| try zs.appendSlice(a, &.{ st.z0, st.z1 });
+    std.mem.sort(f64, zs.items, {}, std.sort.asc(f64));
+    var out: std.ArrayList(Slab) = .empty;
+    var k: usize = 0;
+    while (k + 1 < zs.items.len) : (k += 1) {
+        const lo = zs.items[k];
+        const hi = zs.items[k + 1];
+        if (hi - lo < 1e-9) continue;
+        // The steps covering this slab, in order, and their pieces.
+        var inputs: std.ArrayList(geom.Outline) = .empty;
+        var owner: std.ArrayList(usize) = .empty;
+        var kinds: std.ArrayList(?usize) = .empty;
+        var colours: std.ArrayList(model.FabColour) = .empty;
+        for (steps) |st| {
+            if (!(st.z0 <= lo + 1e-9 and st.z1 >= hi - 1e-9)) continue;
+            const kind: ?usize = switch (st.op) {
+                .subtract => null,
+                .add => |c| blk: {
+                    for (colours.items, 0..) |have, ci| if (std.mem.eql(u8, have.name, c.name)) break :blk ci;
+                    try colours.append(a, c);
+                    break :blk colours.items.len - 1;
+                },
+            };
+            try kinds.append(a, kind);
+            for (st.pieces) |pc| {
+                try inputs.append(a, pc);
+                try owner.append(a, kinds.items.len - 1);
+            }
+        }
+        if (colours.items.len == 0) continue;
+        var regions: std.ArrayList(Region) = .empty;
+        for (colours.items, 0..) |col, ci| {
+            const ctx: Owner = .{ .owner = owner.items, .kinds = kinds.items, .colour = ci };
+            const o = try geom.boolean.combine(a, inputs.items, .{ .ctx = &ctx, .inside = Owner.inside });
+            if (o.contours.len > 0) try regions.append(a, .{ .colour = col, .outline = o });
+        }
+        if (regions.items.len > 0) try out.append(a, .{ .z0 = lo, .z1 = hi, .regions = regions.items });
+    }
+    return out.items;
+}
+
+/// Whose a point is: the colour of the last covering step's add.
+const Owner = struct {
+    owner: []const usize,
+    kinds: []const ?usize,
+    colour: usize,
+
+    fn inside(ctx: *const anyopaque, in: []const bool) bool {
+        const o: *const Owner = @ptrCast(@alignCast(ctx));
+        var last: ?usize = null;
+        for (in, o.owner) |hit, step| if (hit) {
+            if (last == null or step > last.?) last = step;
+        };
+        const step = last orelse return false;
+        return if (o.kinds[step]) |k| k == o.colour else false;
+    }
+};
+
 /// The heights layer `l` spans; a through layer spans `lo` to `hi`.
 fn extent(fab: model.Fab, l: model.FabLayer, lo: f64, hi: f64) [2]f64 {
     const d = l.depth orelse return .{ lo, hi };
@@ -184,4 +262,22 @@ test "a plate's stack: base, holes through, an inlaid legend; heights from its s
     // Glyphs lie over the legend's box, above the first hole.
     const gb = p.steps[3].pieces[0].bounds();
     try testing.expect(gb.y0 > 8 + 2.5);
+
+    // As slabs: 0 to 1.5, the plate less its holes; 1.5 to 2, the plate
+    // less its holes and the glyphs, and the glyphs in gold. Every slab's
+    // colours fill the plate less its holes between them.
+    const sl = try slabs(arena.allocator(), p.steps);
+    try testing.expectEqual(@as(usize, 2), sl.len);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), sl[0].z1, 1e-12);
+    try testing.expectEqual(@as(usize, 1), sl[0].regions.len);
+    try testing.expectEqual(@as(usize, 2), sl[1].regions.len);
+    const solid = sl[0].regions[0].outline.signedArea();
+    var hole_area: f64 = 0;
+    for (holes.pieces) |h| hole_area += @abs(h.signedArea());
+    try testing.expectApproxEqAbs(800 - hole_area, solid, 1e-6);
+    const black = sl[1].regions[0].outline.signedArea();
+    const gold_area = sl[1].regions[1].outline.signedArea();
+    try testing.expectEqualStrings("gold", sl[1].regions[1].colour.name);
+    try testing.expect(gold_area > 1);
+    try testing.expectApproxEqAbs(solid, black + gold_area, 1e-6);
 }

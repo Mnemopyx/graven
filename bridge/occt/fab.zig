@@ -1,8 +1,7 @@
-//! Runs a part's fabrication plan (graven_layout's fab.Plan) through OCCT:
-//! one solid per colour, none overlapping. Each step's pieces are swept
-//! separately and joined; a subtract cuts its volume from every solid so
-//! far; an add cuts its volume from the other colours' solids and joins
-//! its own colour's.
+//! Builds a part's fabrication slabs (graven_layout's fab.slabs) as solids
+//! through OCCT: each slab's colour regions, exact 2D regions worked out
+//! beforehand, swept straight up as faces. No 3D booleans: the colours
+//! cannot overlap, and a part takes a fraction of a second.
 
 const std = @import("std");
 const c = @import("occt_shim");
@@ -15,15 +14,15 @@ pub const Error = Allocator.Error || error{Occt};
 pub const Part = struct {
     colour: layout.model.FabColour,
     solid: *c.os_solid,
+    /// As OCCT measures it, and as the 2D areas and heights give it, mm³.
     volume: f64 = 0,
+    expected: f64 = 0,
     valid: bool = false,
 };
 
 pub const Result = struct {
     parts: []Part,
-    /// The volume colours share (should be 0), mm³.
-    overlap: f64,
-    /// Pieces OCCT would not sweep: "layer: reason", skipped.
+    /// Faces OCCT would not sweep: "z0-z1 colour: reason", skipped.
     skipped: []const []const u8,
 
     pub fn deinit(r: Result, gpa: Allocator) void {
@@ -54,102 +53,103 @@ fn check(rc: c_int) Error!void {
     if (rc != c.OS_OK) return error.Occt;
 }
 
-/// Builds `steps`. `a` holds temporary geometry and the messages; the
-/// parts are allocated from `gpa` (free with `Result.deinit`).
-pub fn build(gpa: Allocator, a: Allocator, steps: []const layout.fab.Step, layer_names: []const []const u8, trace: bool) Error!Result {
+/// Builds `slabs`: one solid (a compound of swept faces) per colour. `a`
+/// holds temporary geometry and the messages; the parts are allocated from
+/// `gpa` (free with `Result.deinit`).
+pub fn build(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, opts: struct { trace: bool = false, check: bool = false }) Error!Result {
+    const Acc = struct { colour: layout.model.FabColour, solids: std.ArrayList(*c.os_solid) = .empty, expected: f64 = 0 };
+    var accs: std.ArrayList(Acc) = .empty;
+    defer for (accs.items) |*acc| for (acc.solids.items) |sd| c.os_solid_free(sd);
+    var skipped: std.ArrayList([]const u8) = .empty;
+    var clock = Clock.start();
+    var faces_n: usize = 0;
+    for (slabs) |slab| for (slab.regions) |reg| {
+        const acc = for (accs.items) |*acc| {
+            if (std.mem.eql(u8, acc.colour.name, reg.colour.name)) break acc;
+        } else blk: {
+            try accs.append(a, .{ .colour = reg.colour });
+            break :blk &accs.items[accs.items.len - 1];
+        };
+        acc.expected += reg.outline.signedArea() * (slab.z1 - slab.z0);
+        for (try facesOf(a, reg.outline)) |face| {
+            const contours = try contoursOf(a, face);
+            if (contours.len == 0) continue;
+            var sd: ?*c.os_solid = null;
+            if (c.os_solid_extrude_face(contours.ptr, contours.len, slab.z0, slab.z1, &sd) != c.OS_OK) {
+                try skipped.append(a, try std.fmt.allocPrint(a, "{d}-{d} {s}: {s}", .{ slab.z0, slab.z1, reg.colour.name, lastError() }));
+                continue;
+            }
+            try acc.solids.append(a, sd.?);
+            faces_n += 1;
+        }
+    };
+    const t_sweep = clock.lap();
     var parts: std.ArrayList(Part) = .empty;
     errdefer {
         for (parts.items) |p| c.os_solid_free(p.solid);
         parts.deinit(gpa);
     }
-    var skipped: std.ArrayList([]const u8) = .empty;
-    var clock = Clock.start();
-    for (steps, 0..) |st, si| {
-        _ = clock.lap();
-        const swept = (try sweep(a, st, layer_names, &skipped, trace)) orelse continue;
-        defer c.os_solid_free(swept);
-        const t_sweep = clock.lap();
-        defer if (trace) std.debug.print("    step {d} ({s}, {s}, {d} pieces): sweep+join {d:.0} ms, apply {d:.0} ms\n", .{ si, layer_names[st.layer], @tagName(st.op), st.pieces.len, t_sweep, clock.lap() });
-        switch (st.op) {
-            .subtract => for (parts.items) |*p| try replace(p, cutOf(p.solid, swept)),
-            .add => |col| {
-                var own: ?*Part = null;
-                for (parts.items) |*p| {
-                    if (std.mem.eql(u8, p.colour.name, col.name)) {
-                        own = p;
-                    } else try replace(p, cutOf(p.solid, swept));
-                }
-                if (own) |p| {
-                    var out: ?*c.os_solid = null;
-                    const both = [_]*const c.os_solid{ p.solid, swept };
-                    try check(c.os_solid_fuse(&both, 2, &out));
-                    c.os_solid_free(p.solid);
-                    p.solid = out.?;
-                } else {
-                    var copy: ?*c.os_solid = null;
-                    const one = [_]*const c.os_solid{swept};
-                    try check(c.os_solid_fuse(&one, 1, &copy));
-                    try parts.append(gpa, .{ .colour = col, .solid = copy.? });
-                }
-            },
-        }
+    for (accs.items) |*acc| {
+        var out: ?*c.os_solid = null;
+        try check(c.os_solid_compound(@ptrCast(acc.solids.items.ptr), acc.solids.items.len, &out));
+        // OCCT's own measure and checker, on request (they take longer
+        // than everything else); otherwise the volume is the 2D one.
+        var v: f64 = acc.expected;
+        var ok: c_int = 1;
+        if (opts.check) try check(c.os_solid_props(out.?, &v, &ok));
+        try parts.append(gpa, .{ .colour = acc.colour, .solid = out.?, .volume = v, .expected = acc.expected, .valid = ok == 1 });
     }
-    // Volumes, validity, and what colours share.
-    _ = clock.lap();
-    defer if (trace) std.debug.print("    checks {d:.0} ms\n", .{clock.lap()});
-    var overlap: f64 = 0;
-    for (parts.items, 0..) |*p, i| {
-        var v: f64 = 0;
-        var ok: c_int = 0;
-        try check(c.os_solid_props(p.solid, &v, &ok));
-        p.volume = v;
-        p.valid = ok == 1;
-        for (parts.items[i + 1 ..]) |q| {
-            var common: ?*c.os_solid = null;
-            try check(c.os_solid_common(p.solid, q.solid, &common));
-            defer c.os_solid_free(common);
-            var cv: f64 = 0;
-            try check(c.os_solid_props(common.?, &cv, null));
-            overlap += @abs(cv);
-        }
-    }
-    return .{ .parts = try parts.toOwnedSlice(gpa), .overlap = overlap, .skipped = skipped.items };
+    const trace = opts.trace;
+    if (trace) std.debug.print("    {d} slabs, {d} faces swept in {d:.0} ms, checked in {d:.0} ms\n", .{ slabs.len, faces_n, t_sweep, clock.lap() });
+    return .{ .parts = try parts.toOwnedSlice(gpa), .skipped = skipped.items };
 }
 
-fn cutOf(a: *const c.os_solid, b: *const c.os_solid) Error!*c.os_solid {
-    var out: ?*c.os_solid = null;
-    try check(c.os_solid_cut(a, b, &out));
-    return out.?;
-}
-
-fn replace(p: *Part, next: Error!*c.os_solid) Error!void {
-    const s = try next;
-    c.os_solid_free(p.solid);
-    p.solid = s;
-}
-
-/// A step's pieces swept and joined; null when none sweeps.
-fn sweep(a: Allocator, st: layout.fab.Step, layer_names: []const []const u8, skipped: *std.ArrayList([]const u8), trace: bool) Error!?*c.os_solid {
-    var clock = Clock.start();
-    var solids: std.ArrayList(*c.os_solid) = .empty;
-    defer for (solids.items) |s| c.os_solid_free(s);
-    for (st.pieces, 0..) |piece, pi| {
-        const contours = try contoursOf(a, piece);
-        if (contours.len == 0) continue;
-        var s: ?*c.os_solid = null;
-        if (c.os_solid_extrude(contours.ptr, contours.len, st.z0, st.z1, &s) != c.OS_OK) {
-            const name = if (st.layer < layer_names.len) layer_names[st.layer] else "?";
-            try skipped.append(a, try std.fmt.allocPrint(a, "{s}, piece {d}: {s}", .{ name, pi, lastError() }));
-            continue;
+/// A region's faces: each outer contour (counter-clockwise, as
+/// geom.boolean gives them) with the holes (clockwise) that lie in it, the
+/// outer first.
+fn facesOf(a: Allocator, o: geom.Outline) Allocator.Error![]const geom.Outline {
+    const n = o.contours.len;
+    const areas = try a.alloc(f64, n);
+    const polys = try a.alloc([]const geom.Point, n);
+    for (o.contours, areas, polys) |ct, *ar, *poly| {
+        ar.* = ct.signedArea();
+        var pts: std.ArrayList(geom.Point) = .empty;
+        for (ct.segments) |sg| {
+            const k: usize = if (sg == .line) 1 else 8;
+            for (0..k) |i| try pts.append(a, sg.at(@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(k))));
         }
-        try solids.append(a, s.?);
+        poly.* = pts.items;
     }
-    if (solids.items.len == 0) return null;
-    const t_extrude = clock.lap();
-    var out: ?*c.os_solid = null;
-    try check(c.os_solid_fuse(@ptrCast(solids.items.ptr), solids.items.len, &out));
-    if (trace) std.debug.print("      extrude {d} pieces {d:.0} ms, join {d:.0} ms\n", .{ solids.items.len, t_extrude, clock.lap() });
-    return out.?;
+    var groups = try a.alloc(std.ArrayList(geom.Contour), n);
+    for (groups, o.contours, areas) |*g, ct, ar| {
+        g.* = .empty;
+        if (ar > 0) try g.append(a, ct);
+    }
+    for (o.contours, areas) |ct, ar| {
+        if (ar > 0) continue;
+        // The smallest outer around it.
+        const p = ct.segments[0].at(0.5);
+        var best: ?usize = null;
+        for (polys, areas, 0..) |poly, oa, k| {
+            if (oa <= 0 or !inPoly(poly, p)) continue;
+            if (best == null or oa < areas[best.?]) best = k;
+        }
+        if (best) |k| try groups[k].append(a, ct);
+    }
+    var out: std.ArrayList(geom.Outline) = .empty;
+    for (groups) |g| if (g.items.len > 0) try out.append(a, .{ .contours = g.items });
+    return out.items;
+}
+
+fn inPoly(poly: []const geom.Point, p: geom.Point) bool {
+    var inside = false;
+    var j = poly.len - 1;
+    for (poly, 0..) |q, i| {
+        const r = poly[j];
+        if ((q.y > p.y) != (r.y > p.y) and q.x + (p.y - q.y) * (r.x - q.x) / (r.y - q.y) > p.x) inside = !inside;
+        j = i;
+    }
+    return inside;
 }
 
 /// An outline as the shim's contours, leaving out segments of no length.
@@ -200,7 +200,7 @@ fn degenerate(sg: geom.Segment) bool {
 }
 
 /// Milliseconds between laps (monotonic).
-const Clock = struct {
+pub const Clock = struct {
     last: i128,
 
     fn now() i128 {
@@ -209,11 +209,11 @@ const Clock = struct {
         return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
     }
 
-    fn start() Clock {
+    pub fn start() Clock {
         return .{ .last = now() };
     }
 
-    fn lap(cl: *Clock) f64 {
+    pub fn lap(cl: *Clock) f64 {
         const t = now();
         defer cl.last = t;
         return @as(f64, @floatFromInt(t - cl.last)) / 1e6;

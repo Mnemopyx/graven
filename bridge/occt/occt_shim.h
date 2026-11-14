@@ -53,9 +53,18 @@ int os_doc_write_step(os_doc *doc, const char *path);
    matter. Several outer contours make a compound of solids. */
 int os_solid_extrude(const os_contour *contours, size_t n_contours, double z0, double z1, os_solid **out);
 
+/* One face swept from z0 up to z1: contours[0] its outer boundary,
+   counter-clockwise, the rest its holes, clockwise, none crossing, all
+   already sorted (no containment tests or repairs are made: the fast
+   path, for faces from exact 2D booleans). */
+int os_solid_extrude_face(const os_contour *contours, size_t n_contours, double z0, double z1, os_solid **out);
+
 /* a with b cut out of it; the overlap of a and b. */
 int os_solid_cut(const os_solid *a, const os_solid *b, os_solid **out);
 int os_solid_common(const os_solid *a, const os_solid *b, os_solid **out);
+
+/* All of them gathered into one compound, unjoined (they must not overlap). */
+int os_solid_compound(const os_solid *const *solids, size_t n, os_solid **out);
 
 /* All of them joined into one (they may overlap). */
 int os_solid_fuse(const os_solid *const *solids, size_t n, os_solid **out);
