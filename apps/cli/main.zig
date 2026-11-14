@@ -26,6 +26,10 @@ const usage =
     \\       graven hp15c <font> <plate.svg> <keys.svg>
     \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
     \\         and the keys, each written as SVG.
+    \\       graven 3mf hp15c <font> <plate.3mf> <keys.3mf>
+    \\         The HP-15C keypad's plate and keys for multi-colour 3D printing: each part's
+    \\         stack of layer operations as one closed mesh per colour and height range,
+    \\         parts of one object, colours as materials, written as 3MF.
     \\       graven dump [--log] <document>
     \\         Prints a document's model as text (for reading, or as git's text converter);
     \\         --log adds its history: the file's segments and every logged step.
@@ -45,6 +49,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 5 and std.mem.eql(u8, args[1], "hp15c")) {
         return hp15c(init, args[2], args[3], args[4]);
+    }
+    if (args.len == 6 and std.mem.eql(u8, args[1], "3mf") and std.mem.eql(u8, args[2], "hp15c")) {
+        return hp15c3mf(init, args[3], args[4], args[5]);
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "dump")) {
         if (args.len == 3) return dump(init, args[2], false);
@@ -175,6 +182,84 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
         try cwd.writeFile(io, .{ .sub_path = part.path, .data = doc });
         std.debug.print("{s}: {d} tiles, {d} labels\n", .{ part.path, placed.tiles.len, placed.labels.len });
     }
+}
+
+fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
+    defer gpa.free(bytes);
+    const face = try engine.Face.init(gpa, bytes, 0);
+    defer face.deinit();
+    const faces = [_]*engine.Face{face};
+
+    var m: layout.Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const key = try m.addStyle("15C key", .{ .upright = 0, .cap_height = 1.9 });
+    const g = try m.addStyle("15C g", .{ .upright = 0, .cap_height = 1.1 });
+    const f = try m.addStyle("15C f", .{ .upright = 0, .cap_height = 1.1 });
+    const b = try samples.hp15c.build(&m, .{ .key = key, .g = g, .f = f }, 0, .{ .x = 0, .y = 0 });
+
+    var labels: layout.Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var sound = true;
+    for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const t0 = monoNow();
+        var placed = try layout.solve(gpa, &m, part.p, &labels);
+        defer placed.deinit();
+        const p = try layout.fab.plan(a, &m, part.p, &placed, &faces);
+        const slabs = try layout.fab.slabs(a, p.steps);
+        const t1 = monoNow();
+        const ps = try layout.threemf.parts(a, slabs, layout.threemf.default_tolerance);
+        const t2 = monoNow();
+        const zip = try layout.threemf.package(a, m.panels.items[part.p].name, ps);
+        try cwd.writeFile(io, .{ .sub_path = part.path, .data = zip });
+        const t3 = monoNow();
+        const stack = m.panels.items[part.p].fab;
+        std.debug.print("{s}: layout and 2D regions {d:.0} ms, meshes {d:.0} ms, 3MF {d:.0} ms\n", .{ m.panels.items[part.p].name, msBetween(t0, t1), msBetween(t1, t2), msBetween(t2, t3) });
+        for (p.off_layers) |li| std.debug.print("  flag: {s}: depth not a whole number of {d} mm layers\n", .{ stack.layers[li].name, stack.layer_height });
+        // Per colour: the meshes' volume against the regions' exact one.
+        var tris: usize = 0;
+        var names: std.ArrayList([]const u8) = .empty;
+        for (ps) |pt| {
+            tris += pt.mesh.triangles.len;
+            if (!try layout.threemf.closed(a, pt.mesh)) {
+                std.debug.print("  NOT CLOSED: {s}\n", .{pt.name});
+                sound = false;
+            }
+            for (names.items) |n| {
+                if (std.mem.eql(u8, n, pt.colour)) break;
+            } else try names.append(a, pt.colour);
+        }
+        for (names.items) |n| {
+            var mv: f64 = 0;
+            var ev: f64 = 0;
+            for (ps) |pt| if (std.mem.eql(u8, pt.colour, n)) {
+                mv += layout.threemf.volume(pt.mesh);
+            };
+            for (slabs) |sl| for (sl.regions) |reg| if (std.mem.eql(u8, reg.colour.name, n)) {
+                ev += reg.outline.signedArea() * (sl.z1 - sl.z0);
+            };
+            std.debug.print("  {s}: {d:.3} mm³ meshed, {d:.3} mm³ exact\n", .{ n, mv, ev });
+        }
+        std.debug.print("  {d} parts, {d} triangles, {d} KB: wrote {s}\n", .{ ps.len, tris, zip.len / 1024, part.path });
+    }
+    if (!sound) std.process.exit(1);
+}
+
+fn monoNow() i128 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+fn msBetween(a: i128, b: i128) f64 {
+    return @as(f64, @floatFromInt(b - a)) / 1e6;
 }
 
 const LabelFlags = struct {

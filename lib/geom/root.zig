@@ -9,6 +9,7 @@ pub const spring = @import("spring.zig");
 /// The nonzero region of overlapping polygons, as simple loops.
 pub const fill = @import("fill.zig");
 pub const boolean = @import("boolean.zig");
+pub const earcut = @import("earcut.zig");
 
 pub const Point = struct {
     x: f64,
@@ -513,4 +514,5 @@ test {
     _ = spring;
     _ = fill;
     _ = boolean;
+    _ = earcut;
 }

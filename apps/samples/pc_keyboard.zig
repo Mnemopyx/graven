@@ -215,11 +215,12 @@ fn keyPrototype(a: std.mem.Allocator, styles: Styles) !layout.model.TilePrototyp
             .face = back_to_front(.hex("#faf9f6"), .hex("#efede8")),
         }),
         // Symbols and shifted pairs in `top`; words, smaller, in `words`,
-        // over the same part of the face.
-        .tracks = &.{
+        // over the same part of the face. Allocated: built from the
+        // styles at run time, a literal array would not outlive this call.
+        .tracks = try a.dupe(layout.model.TileTrack, &.{
             .{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } },
             .{ .name = "words", .style = styles.small, .place = .{ .inset = .all(0.8) } },
-        },
+        }),
         .widths = &.{ 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25 },
         .heights = &.{ 1, 2 },
     };

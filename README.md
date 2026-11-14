@@ -52,7 +52,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 - `graven-fonts` and the editor's Fonts window index, search and compare installed fonts and build composed fonts.
 
 **Not yet built.**
-- **STEP output:** the OCCT bridge is a tested shim that nothing calls yet.
+- **3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven 3mf hp15c <font> <plate.3mf> <keys.3mf>`); `graven-fab` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
 - **Design-rule checks and per-process output:** not started.
 - **Proof sheet:** not started.
 - **HP-15C sample:** not started. The PC keyboard is the only sample, and its output is the regression check.

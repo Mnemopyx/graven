@@ -64,6 +64,92 @@ pub fn nonzero(a: Allocator, polygons: []const []const Point, eps: f64) Allocato
     var scratch_state: std.heap.ArenaAllocator = .init(a);
     defer scratch_state.deinit();
     const s = scratch_state.allocator();
+    const d = try decompose(a, s, polygons, eps);
+    return .{ .loops = try chain(a, s, d.pieces, eps), .triangles = d.triangles };
+}
+
+/// A region as a conforming mesh, for solids: triangles meeting edge to
+/// edge (no vertex of one lies inside another's edge), and its boundary as
+/// directed edges, the region on their left, made of exactly the triangles'
+/// outer edges. Swept up, its faces and walls close without cracks.
+pub const Mesh = struct {
+    triangles: []const [3]Point,
+    boundary: []const [2]Point,
+};
+
+/// The nonzero region of `polygons` as a conforming mesh (see `Mesh`),
+/// allocated from `a`; `eps` as for `nonzero`.
+pub fn mesh(a: Allocator, polygons: []const []const Point, eps: f64) Allocator.Error!Mesh {
+    var scratch_state: std.heap.ArenaAllocator = .init(a);
+    defer scratch_state.deinit();
+    const s = scratch_state.allocator();
+    const d = try decompose(a, s, polygons, eps);
+    var tris: std.ArrayList([3]Point) = .empty;
+    var bottom: std.ArrayList(Point) = .empty;
+    var top: std.ArrayList(Point) = .empty;
+    for (d.slabs, 0..) |spans, k| {
+        const y0 = d.levels[k];
+        const y1 = d.levels[k + 1];
+        for (spans) |sp| {
+            // Each edge split where any span above or below it meets its
+            // level, then the two chains zipped into triangles.
+            bottom.clearRetainingCapacity();
+            top.clearRetainingCapacity();
+            try chainAt(s, &bottom, d.breaks[k], sp.x0b, sp.x1b, y0);
+            try chainAt(s, &top, d.breaks[k + 1], sp.x0t, sp.x1t, y1);
+            try zip(a, &tris, bottom.items, top.items);
+        }
+    }
+    var edges: std.ArrayList([2]Point) = .empty;
+    for (d.pieces) |pc| if (!pc.from.eql(pc.to)) try edges.append(a, .{ pc.from, pc.to });
+    return .{ .triangles = tris.items, .boundary = edges.items };
+}
+
+/// The points from x0 to x1 at height y: the ends and the breaks between.
+fn chainAt(s: Allocator, out: *std.ArrayList(Point), breaks: []const f64, x0: f64, x1: f64, y: f64) Allocator.Error!void {
+    try out.append(s, .{ .x = x0, .y = y });
+    for (breaks) |x| if (x > x0 and x < x1) try out.append(s, .{ .x = x, .y = y });
+    if (x1 > x0) try out.append(s, .{ .x = x1, .y = y });
+}
+
+/// Triangles between a bottom chain and a top chain (both left to right),
+/// counter-clockwise: advancing along whichever is behind.
+fn zip(a: Allocator, tris: *std.ArrayList([3]Point), b: []const Point, t: []const Point) Allocator.Error!void {
+    if (b.len + t.len < 3) return;
+    const bw = b[b.len - 1].x - b[0].x;
+    const tw = t[t.len - 1].x - t[0].x;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i + 1 < b.len or j + 1 < t.len) {
+        const step_b = if (i + 1 >= b.len) false else if (j + 1 >= t.len) true else blk: {
+            const fb = if (bw > 0) (b[i + 1].x - b[0].x) / bw else 1;
+            const ft = if (tw > 0) (t[j + 1].x - t[0].x) / tw else 1;
+            break :blk fb <= ft;
+        };
+        if (step_b) {
+            try tris.append(a, .{ b[i], b[i + 1], t[j] });
+            i += 1;
+        } else {
+            try tris.append(a, .{ b[i], t[j + 1], t[j] });
+            j += 1;
+        }
+    }
+}
+
+const Span = struct { x0b: f64, x1b: f64, x0t: f64, x1t: f64 };
+
+/// The trapezoid decomposition: the levels, each slab's filled spans, the
+/// boundary pieces, simple triangles (two per trapezoid), and at each level
+/// the x where spans above or below begin or end.
+const Decomposition = struct {
+    levels: []const f64,
+    slabs: []const []const Span,
+    pieces: []const Piece,
+    triangles: []const [3]Point,
+    breaks: []const []const f64,
+};
+
+fn decompose(a: Allocator, s: Allocator, polygons: []const []const Point, eps: f64) Allocator.Error!Decomposition {
 
     // Edges, without horizontal ones: they bound no slab.
     var edges: std.ArrayList(Edge) = .empty;
@@ -74,7 +160,7 @@ pub fn nonzero(a: Allocator, polygons: []const []const Point, eps: f64) Allocato
             try edges.append(s, .{ .a = p, .b = q, .dir = if (q.y > p.y) 1 else -1 });
         }
     }
-    if (edges.items.len == 0) return .{ .loops = &.{}, .triangles = &.{} };
+    if (edges.items.len == 0) return .{ .levels = &.{}, .slabs = &.{}, .pieces = &.{}, .triangles = &.{}, .breaks = &.{} };
 
     // Levels: every vertex, and every crossing strictly inside two edges.
     var ys: std.ArrayList(f64) = .empty;
@@ -101,7 +187,6 @@ pub fn nonzero(a: Allocator, polygons: []const []const Point, eps: f64) Allocato
     }
 
     // Per slab, the filled spans' sides at the slab's bottom and top.
-    const Span = struct { x0b: f64, x1b: f64, x0t: f64, x1t: f64 };
     const slabs = try s.alloc([]const Span, lv.len -| 1);
     var pieces: std.ArrayList(Piece) = .empty;
     var triangles: std.ArrayList([3]Point) = .empty;
@@ -161,14 +246,21 @@ pub fn nonzero(a: Allocator, polygons: []const []const Point, eps: f64) Allocato
 
     // At each level, where the filled intervals above and below differ.
     var xs: std.ArrayList(f64) = .empty;
+    const breaks = try s.alloc([]const f64, lv.len);
     for (lv, 0..) |y, k| {
         const below: []const Span = if (k > 0) slabs[k - 1] else &.{};
         const above: []const Span = if (k < slabs.len) slabs[k] else &.{};
         xs.clearRetainingCapacity();
         for (below) |sp| try xs.appendSlice(s, &.{ sp.x0t, sp.x1t });
         for (above) |sp| try xs.appendSlice(s, &.{ sp.x0b, sp.x1b });
+        breaks[k] = &.{};
         if (xs.items.len == 0) continue;
         std.mem.sort(f64, xs.items, {}, std.sort.asc(f64));
+        // Each x once: spans meeting at a point (the bottom of a hole) give
+        // it twice.
+        var uniq: std.ArrayList(f64) = .empty;
+        for (xs.items) |x| if (uniq.items.len == 0 or uniq.items[uniq.items.len - 1] != x) try uniq.append(s, x);
+        breaks[k] = uniq.items;
         var i: usize = 0;
         while (i + 1 < xs.items.len) : (i += 1) {
             const x0 = xs.items[i];
@@ -186,7 +278,7 @@ pub fn nonzero(a: Allocator, polygons: []const []const Point, eps: f64) Allocato
         }
     }
 
-    return .{ .loops = try chain(a, s, pieces.items, eps), .triangles = triangles.items };
+    return .{ .levels = lv, .slabs = slabs, .pieces = pieces.items, .triangles = triangles.items, .breaks = breaks };
 }
 
 fn covers(spans: anytype, x: f64, side: enum { top, bottom }) bool {
