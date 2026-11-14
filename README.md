@@ -104,7 +104,25 @@ scripts/build-occt.sh /opt/occt-8.0.1-zig     # about 17 minutes on 4 cores
 zig build occt-test -Docct=/opt/occt-8.0.1-zig
 ```
 
-The script needs git, cmake and ninja. It applies one patch to OCCT: removing `stdc++` from `CSF_ThreadLibs` in `adm/cmake/occt_csf.cmake`, so GCC's libstdc++ is not linked beside libc++.
+The script needs git, cmake and ninja. It applies one patch to OCCT: removing `stdc++` from `CSF_ThreadLibs` in `adm/cmake/occt_csf.cmake`, so GCC's libstdc++ is not linked beside libc++. It compiles for a baseline CPU of the architecture (`CPU=native` tunes for the build machine only), and writes a `MANIFEST` into the install: the OCCT tag, the zig version and target that built it, the CPU, and the script's SHA-256. An OCCT build only works with the zig that made it (its libc++), so `build.zig` refuses one from another zig version.
+
+#### Prebuilt OCCT
+
+To skip the 17-minute build, fetch a prebuilt archive:
+
+```sh
+zig build occt-test -Docct-prebuilt
+```
+
+This fetches the package named `occt_<arch>_<os>_<abi>` in `build.zig.zon` (for example `occt_x86_64_linux_gnu`), checked by its hash like any Zig dependency. Without one for your target, it says so; build OCCT yourself and use `-Docct=<prefix>`.
+
+The archives are made by the **OCCT prebuilt** GitHub workflow (`.github/workflows/occt-prebuilt.yml`). Run it from the Actions tab (the file must be on the default branch), or push a tag named `occt-build-*` from any branch. It builds OCCT for a baseline CPU, checks the bridge against it, packages it with `scripts/package-occt.sh`, and publishes a release named after the archive, with the archive and its `.sha256`. Then record it:
+
+```sh
+zig fetch --save=occt_x86_64_linux_gnu https://github.com/Mnemopyx/graven/releases/download/<name>/<name>.tar.xz
+```
+
+An archive is named `occt-<version>-<target>-zig<version>-<recipe>.tar.xz`, where `<recipe>` is the first 8 hex digits of the build script's SHA-256, so a changed recipe gets a new name. It holds the static libraries stripped of debug information (about a sixth of their size), the headers, the `MANIFEST`, OCCT's licence (LGPL 2.1 with the Open CASCADE exception), and a `SOURCE` note naming the source tag and our patch. `scripts/package-occt.sh <prefix> <occt-source> <out-dir>` makes one locally too; the tar is reproducible (sorted, fixed times and owners).
 
 The bridge test builds planar faces from line, quadratic and cubic edges (one with a hole), checks their areas against exact values, checks that a zero-length edge is rejected, and writes `legend_test.step`.
 

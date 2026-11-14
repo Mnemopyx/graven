@@ -203,11 +203,65 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     }) })).step);
 
-    // Optional OCCT bridge: zig build occt-test -Docct=<prefix>
-    // <prefix> is an OCCT 8.0.1 install built static with scripts/build-occt.sh.
-    if (b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)")) |occt| {
-        addOcctBridge(b, target, optimize, occt);
+    // Optional OCCT bridge, from either
+    //   -Docct=<prefix>   an OCCT 8.0.1 install built with scripts/build-occt.sh
+    //   -Docct-prebuilt   the release archive of one (scripts/package-occt.sh),
+    //                     fetched as a package named in build.zig.zon
+    // then: zig build occt-test ...
+    const occt_prefix = b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)");
+    const occt_prebuilt = b.option(bool, "occt-prebuilt", "Fetch the prebuilt OCCT release archive (enables the OCCT bridge)") orelse false;
+    if (occt_prefix) |prefix| {
+        addOcctBridge(b, target, optimize, .{ .prefix = prefix });
+    } else if (occt_prebuilt) {
+        const name = occtPackageName(b, target) orelse return;
+        if (b.lazyDependency(name, .{})) |dep| addOcctBridge(b, target, optimize, .{ .dep = dep });
     }
+}
+
+/// The OCCT build to link: an install prefix, or the fetched release archive.
+const Occt = union(enum) {
+    prefix: []const u8,
+    dep: *std.Build.Dependency,
+
+    fn path(o: Occt, b: *std.Build, sub: []const u8) std.Build.LazyPath {
+        return switch (o) {
+            .prefix => |p| .{ .cwd_relative = b.fmt("{s}/{s}", .{ p, sub }) },
+            .dep => |d| d.path(sub),
+        };
+    }
+
+    /// Its MANIFEST (written by scripts/build-occt.sh), or null.
+    fn manifest(o: Occt, b: *std.Build) ?[]const u8 {
+        const io = b.graph.io;
+        return switch (o) {
+            .prefix => |p| std.Io.Dir.cwd().readFileAlloc(io, b.fmt("{s}/MANIFEST", .{p}), b.allocator, .limited(4096)) catch null,
+            .dep => |d| blk: {
+                const root = d.builder.root;
+                const sub = if (root.sub_path.len == 0) "MANIFEST" else b.fmt("{s}/MANIFEST", .{root.sub_path});
+                break :blk root.root_dir.handle.readFileAlloc(io, sub, b.allocator, .limited(4096)) catch null;
+            },
+        };
+    }
+};
+
+/// The build.zig.zon name of the prebuilt OCCT archive for `target`
+/// (occt_<arch>_<os>_<abi>), or null, with the reason reported, when there
+/// is none.
+fn occtPackageName(b: *std.Build, target: std.Build.ResolvedTarget) ?[]const u8 {
+    const t = target.result;
+    const name = b.fmt("occt_{s}_{s}_{s}", .{ @tagName(t.cpu.arch), @tagName(t.os.tag), @tagName(t.abi) });
+    for (b.available_deps) |d| if (std.mem.eql(u8, d[0], name)) return name;
+    occtFail(b, b.fmt(
+        "-Docct-prebuilt: no prebuilt OCCT for this target (no {s} in build.zig.zon). " ++
+            "Build one with scripts/build-occt.sh and use -Docct=<prefix>.",
+        .{name},
+    ));
+    return null;
+}
+
+/// The OCCT steps, failing with `msg`.
+fn occtFail(b: *std.Build, msg: []const u8) void {
+    b.step("occt-test", "Build and run the OCCT bridge test").dependOn(&b.addFail(msg).step);
 }
 
 /// Static OCCT toolkits needed for planar faces, XDE and STEP output.
@@ -218,7 +272,19 @@ const occt_toolkits = [_][]const u8{
     "TKGeomBase", "TKG3d",  "TKG2d",       "TKMath",    "TKernel",
 };
 
-fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: []const u8) void {
+fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt) void {
+    // A build is tied to the zig that made it: its C++ is Zig's libc++.
+    if (occt.manifest(b)) |text| {
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |line| if (std.mem.startsWith(u8, line, "zig=")) {
+            const built = std.mem.trim(u8, line["zig=".len..], " \r");
+            const running = @import("builtin").zig_version_string;
+            if (!std.mem.eql(u8, built, running)) {
+                occtFail(b, b.fmt("OCCT was built with zig {s}, but this is zig {s}: rebuild it with scripts/build-occt.sh", .{ built, running }));
+                return;
+            }
+        };
+    }
     // Zig 0.17 has no @cImport: the shim header becomes a module here.
     const shim_h = b.addTranslateC(.{
         .root_source_file = b.path("bridge/occt/occt_shim.h"),
@@ -235,10 +301,10 @@ fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     });
     mod.addImport("occt_shim", shim_h.createModule());
     mod.addIncludePath(b.path("bridge/occt"));
-    mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/opencascade", .{occt}) });
+    mod.addIncludePath(occt.path(b, "include/opencascade"));
     mod.addCSourceFile(.{ .file = b.path("bridge/occt/occt_shim.cpp"), .flags = &.{"-std=c++17"} });
     for (occt_toolkits) |tk| {
-        mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/lib{s}.a", .{ occt, tk }) });
+        mod.addObjectFile(occt.path(b, b.fmt("lib/lib{s}.a", .{tk})));
     }
 
     const exe = b.addExecutable(.{ .name = "occt-bridge-test", .root_module = mod });

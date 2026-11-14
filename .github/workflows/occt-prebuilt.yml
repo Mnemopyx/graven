@@ -1,0 +1,72 @@
+# Builds OCCT with scripts/build-occt.sh, packages it with
+# scripts/package-occt.sh, and publishes the archive and its SHA-256 as a
+# GitHub release, so a first Graven build can fetch it (-Docct-prebuilt)
+# instead of building OCCT.
+#
+# Run it by hand (Actions > OCCT prebuilt > Run workflow; this needs the file
+# on the default branch), or by pushing a tag named occt-build-* (from any
+# branch). Afterwards, record the archive in build.zig.zon:
+#   zig fetch --save=occt_x86_64_linux_gnu <the release asset's URL>
+name: OCCT prebuilt
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["occt-build-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          # The zig Graven builds with: the archive is tied to its libc++.
+          python3 -m pip install --user ziglang==0.17.0
+          echo "ZIG=$(python3 -c 'import ziglang, os; print(os.path.join(os.path.dirname(ziglang.__file__), "zig"))')" >> "$GITHUB_ENV"
+
+      - name: Build OCCT (baseline CPU)
+        run: CPU=baseline scripts/build-occt.sh "$RUNNER_TEMP/occt-install" "$RUNNER_TEMP/occt-work"
+
+      - name: Check the bridge against it
+        run: '"$ZIG" build occt-test -Docct="$RUNNER_TEMP/occt-install"'
+
+      - name: Package
+        id: package
+        run: |
+          scripts/package-occt.sh "$RUNNER_TEMP/occt-install" "$RUNNER_TEMP/occt-work/occt" "$RUNNER_TEMP/out" | tee "$RUNNER_TEMP/package.txt"
+          archive=$(ls "$RUNNER_TEMP"/out/*.tar.xz)
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$archive" .tar.xz)" >> "$GITHUB_OUTPUT"
+
+      - name: Keep as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ runner.temp }}/out/
+          compression-level: 0
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name='${{ steps.package.outputs.name }}'
+          {
+            echo "Prebuilt static OCCT for Graven (\`zig build -Docct-prebuilt\`)."
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/package.txt"
+            echo '```'
+            echo
+            echo "Built from commit ${GITHUB_SHA}. See SOURCE and the licence files in the archive."
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$name" --target "$GITHUB_SHA" --title "$name" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "$RUNNER_TEMP/out/$name.tar.xz" "$RUNNER_TEMP/out/$name.tar.xz.sha256"
