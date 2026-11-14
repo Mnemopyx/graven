@@ -114,7 +114,7 @@ To skip the 17-minute build, fetch a prebuilt archive:
 zig build occt-test -Docct-prebuilt
 ```
 
-This fetches the package named `occt_<arch>_<os>_<abi>` in `build.zig.zon` (for example `occt_x86_64_linux_gnu`), checked by its hash like any Zig dependency. Without one for your target, it says so; build OCCT yourself and use `-Docct=<prefix>`.
+This fetches the package named `occt_<arch>_<os>_<abi>` in `build.zig.zon`, checked by its hash like any Zig dependency. There is one so far: `occt_x86_64_linux_gnu`, OCCT 8.0.1 for x86-64 Linux (glibc) and zig 0.17.0, from the release `occt-8.0.1-x86_64-linux-gnu-zig0.17.0-47050a1a`. Without one for your target, it says so; build OCCT yourself and use `-Docct=<prefix>`.
 
 The archives are made by the **OCCT prebuilt** GitHub workflow (`.github/workflows/occt-prebuilt.yml`). Run it from the Actions tab (the file must be on the default branch), or push a tag named `occt-build-*` from any branch. It builds OCCT for a baseline CPU, checks the bridge against it, packages it with `scripts/package-occt.sh`, and publishes a release named after the archive, with the archive and its `.sha256`. Then record it:
 

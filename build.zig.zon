@@ -9,6 +9,14 @@
             .url = "git+https://github.com/harfbuzz/harfbuzz#3df40d9b98d6b32f0e4288d4ecfbb158ddb3a372",
             .hash = "N-V-__8AABCJSwZ_b-_pzs_bdrf6CKkC58JNxsp0b1FfvNqV",
         },
+        // Prebuilt OCCT 8.0.1 for the bridge, x86_64 Linux (glibc), baseline
+        // CPU, built with zig 0.17.0 by the OCCT prebuilt workflow; fetched
+        // only by -Docct-prebuilt. A package per target: occt_<arch>_<os>_<abi>.
+        .occt_x86_64_linux_gnu = .{
+            .url = "https://github.com/Mnemopyx/graven/releases/download/occt-8.0.1-x86_64-linux-gnu-zig0.17.0-47050a1a/occt-8.0.1-x86_64-linux-gnu-zig0.17.0-47050a1a.tar.xz",
+            .hash = "N-V-__8AAORc5QueVgyEZJ-GSQCUkWN22-dpBivERYVcc0EZ",
+            .lazy = true,
+        },
         // DVUI (pre-1.0, pinned to a commit) for the GUI; fetched only by `zig build gui`.
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui#76b90d415f2da915b1593feab601417e5519e687",
