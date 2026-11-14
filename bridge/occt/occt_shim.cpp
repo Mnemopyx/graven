@@ -3,6 +3,8 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -304,6 +306,27 @@ extern "C" int os_solid_cut(const os_solid *a, const os_solid *b, os_solid **out
 
 extern "C" int os_solid_common(const os_solid *a, const os_solid *b, os_solid **out) {
     return boolean<BRepAlgoAPI_Common>(a, b, out, "common");
+}
+
+extern "C" int os_solid_fuse(const os_solid *const *solids, size_t n, os_solid **out) {
+    return guarded([&]() -> int {
+        if (n == 0) return fail("nothing to fuse");
+        if (n == 1) {
+            *out = new os_solid{solids[0]->shape};
+            return OS_OK;
+        }
+        // One general fuse: the first as argument, the rest as tools.
+        TopTools_ListOfShape args, tools;
+        args.Append(solids[0]->shape);
+        for (size_t i = 1; i < n; ++i) tools.Append(solids[i]->shape);
+        BRepAlgoAPI_Fuse op;
+        op.SetArguments(args);
+        op.SetTools(tools);
+        op.Build();
+        if (!op.IsDone() || op.HasErrors()) return fail("fuse failed");
+        *out = new os_solid{op.Shape()};
+        return OS_OK;
+    });
 }
 
 extern "C" int os_solid_props(const os_solid *s, double *volume, int *valid) {

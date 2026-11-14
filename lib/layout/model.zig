@@ -1041,6 +1041,8 @@ pub const Panel = struct {
     islands: bool = true,
     /// Its grids, whose instances are tiles bound to their points.
     grids: std.ArrayList(Grid) = .empty,
+    /// How it is made: its stack of layer operations (see `Fab`).
+    fab: Fab = .{},
 
     /// The panel's outline on the worksheet.
     pub fn box(p: Panel) geom.Box {
@@ -1052,6 +1054,58 @@ pub const Panel = struct {
         return p.margins.inset(p.box());
     }
 };
+
+/// A part as made: a base of some thickness and a stack of layer
+/// operations, applied in order. Each layer takes geometry from the part by
+/// a rule and sweeps it from a plane up or down, adding solid in a colour
+/// or cutting it away. An add takes its volume from earlier solids of other
+/// colours, so the result is one solid per colour, none overlapping: what a
+/// multi-colour slicer wants.
+pub const Fab = struct {
+    /// The base's thickness, mm: the base's top is this far above its
+    /// bottom (z = 0).
+    thickness: f64 = 2,
+    /// The process's layer height, mm: depths should be whole multiples.
+    layer_height: f64 = 0.2,
+    layers: []const FabLayer = &.{},
+};
+
+pub const FabLayer = struct {
+    name: []const u8,
+    source: FabSource,
+    /// The plane it starts from: a surface of the base, plus `offset` mm.
+    surface: enum { base_bottom, base_top } = .base_top,
+    offset: f64 = 0,
+    dir: enum { up, down } = .down,
+    /// How far it reaches from its plane, mm; null: through the whole part.
+    depth: ?f64 = null,
+    op: FabOp,
+};
+
+/// The part's geometry a layer takes.
+pub const FabSource = union(enum) {
+    /// The part's outline, without its holes.
+    edge,
+    /// Its holes: hole tiles and cutouts, each its own outline.
+    cutouts,
+    /// Its grid parts (instances made as parts), each its own outline.
+    parts,
+    /// Its text: the labels in tiles' tracks of this name, or every label
+    /// (runs in its tracks too) when empty.
+    text: []const u8,
+};
+
+pub const FabOp = union(enum) {
+    /// Solid, in a colour (or material) of this name.
+    add: FabColour,
+    /// Cut away from every solid made so far.
+    subtract,
+    /// Cut away, then filled in this colour: a subtract and an add of the
+    /// same geometry and extent.
+    inlay: FabColour,
+};
+
+pub const FabColour = struct { name: []const u8, color: art_.Color };
 
 /// A standard paper size, portrait (w <= h), mm.
 pub const Paper = struct {
@@ -3067,6 +3121,29 @@ pub const Model = struct {
         try m.sketches.append(m.a(), .{ .id = id, .name = name, .sketch = sk, .shape = kind });
         m.revision += 1;
         return m.sketches.items.len - 1;
+    }
+
+    /// Sets how panel `panel` is made (see `Fab`); a copy is kept.
+    pub fn setPanelFab(m: *Model, panel: usize, fab: Fab) Error!void {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        if (!(fab.thickness > 0) or !(fab.layer_height > 0)) return error.BadSize;
+        const layers = try m.a().alloc(FabLayer, fab.layers.len);
+        for (fab.layers, layers) |l, *o| {
+            if (l.depth) |d| if (!(d > 0)) return error.BadSize;
+            o.* = l;
+            o.name = try m.a().dupe(u8, l.name);
+            o.source = switch (l.source) {
+                .text => |t| .{ .text = try m.a().dupe(u8, t) },
+                else => l.source,
+            };
+            o.op = switch (l.op) {
+                .add => |c| .{ .add = .{ .name = try m.a().dupe(u8, c.name), .color = c.color } },
+                .inlay => |c| .{ .inlay = .{ .name = try m.a().dupe(u8, c.name), .color = c.color } },
+                .subtract => .subtract,
+            };
+        }
+        m.panels.items[panel].fab = .{ .thickness = fab.thickness, .layer_height = fab.layer_height, .layers = layers };
+        m.revision += 1;
     }
 
     pub fn setPanelIslands(m: *Model, panel: usize, on: bool) Error!void {

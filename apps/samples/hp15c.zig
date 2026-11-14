@@ -36,6 +36,12 @@ pub const legend_w = 11.0;
 pub const legend_h = 2.6;
 pub const legend_up = 6.0;
 
+/// For colour FDM: the plate's and the keys' thickness, and how deep the
+/// legends are inlaid (3 layers of 0.2 mm), mm: guesses.
+pub const plate_thickness = 2.0;
+pub const key_height = 5.0;
+pub const inlay_depth = 0.6;
+
 pub const plate_w = 128.0;
 pub const plate_h = 62.0;
 /// The top-left key's centre on the plate, mm: the keys centred across.
@@ -170,6 +176,21 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
             try m.setTileTrackText(l, m.tileTrackNamed(l, "f").?, k.f);
         }
     };
+    // How they are made, in colour FDM: a black plate with the holes cut
+    // through and the gold legends inlaid; black keys with their white
+    // legends and the blue g inlaid in their tops (on the real keys the g
+    // is on the front, which a sweep from the top cannot reach).
+    const black: model.FabColour = .{ .name = "black", .color = .hex("#1e1e1e") };
+    try m.setPanelFab(plate, .{ .thickness = plate_thickness, .layers = &.{
+        .{ .name = "Plate", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = plate_thickness, .op = .{ .add = black } },
+        .{ .name = "Key holes", .source = .cutouts, .op = .subtract },
+        .{ .name = "Gold legends", .source = .{ .text = "f" }, .depth = inlay_depth, .op = .{ .inlay = .{ .name = "gold", .color = .hex("#c9a227") } } },
+    } });
+    try m.setPanelFab(keys, .{ .thickness = key_height, .layers = &.{
+        .{ .name = "Keys", .source = .parts, .surface = .base_bottom, .dir = .up, .depth = key_height, .op = .{ .add = black } },
+        .{ .name = "White legends", .source = .{ .text = "top" }, .depth = inlay_depth, .op = .{ .inlay = .{ .name = "white", .color = .hex("#f2f2f2") } } },
+        .{ .name = "Blue legends", .source = .{ .text = "g" }, .depth = inlay_depth, .op = .{ .inlay = .{ .name = "blue", .color = .hex("#3a7bd5") } } },
+    } });
     return .{ .plate = plate, .keys = keys };
 }
 

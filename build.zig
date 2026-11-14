@@ -209,12 +209,13 @@ pub fn build(b: *std.Build) void {
     //                     fetched as a package named in build.zig.zon
     // then: zig build occt-test ...
     const occt_prefix = b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)");
+    const fab_mods: FabModules = .{ .layout = layout, .engine = engine, .samples = samples };
     const occt_prebuilt = b.option(bool, "occt-prebuilt", "Fetch the prebuilt OCCT release archive (enables the OCCT bridge)") orelse false;
     if (occt_prefix) |prefix| {
-        addOcctBridge(b, target, optimize, .{ .prefix = prefix });
+        addOcctBridge(b, target, optimize, .{ .prefix = prefix }, fab_mods);
     } else if (occt_prebuilt) {
         const name = occtPackageName(b, target) orelse return;
-        if (b.lazyDependency(name, .{})) |dep| addOcctBridge(b, target, optimize, .{ .dep = dep });
+        if (b.lazyDependency(name, .{})) |dep| addOcctBridge(b, target, optimize, .{ .dep = dep }, fab_mods);
     }
 }
 
@@ -261,7 +262,9 @@ fn occtPackageName(b: *std.Build, target: std.Build.ResolvedTarget) ?[]const u8 
 
 /// The OCCT steps, failing with `msg`.
 fn occtFail(b: *std.Build, msg: []const u8) void {
-    b.step("occt-test", "Build and run the OCCT bridge test").dependOn(&b.addFail(msg).step);
+    const fail = &b.addFail(msg).step;
+    b.step("occt-test", "Build and run the OCCT bridge test").dependOn(fail);
+    b.step("fab", "Build graven-fab (parts as solids, through OCCT)").dependOn(fail);
 }
 
 /// Static OCCT toolkits needed for planar faces, XDE and STEP output.
@@ -272,7 +275,10 @@ const occt_toolkits = [_][]const u8{
     "TKGeomBase", "TKG3d",  "TKG2d",       "TKMath",    "TKernel",
 };
 
-fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt) void {
+/// The Graven modules graven-fab uses.
+const FabModules = struct { layout: *std.Build.Module, engine: *std.Build.Module, samples: *std.Build.Module };
+
+fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt, mods: FabModules) void {
     // A build is tied to the zig that made it: its C++ is Zig's libc++.
     if (occt.manifest(b)) |text| {
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
@@ -292,22 +298,50 @@ fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .optimize = optimize,
     });
 
+    const shim = shim_h.createModule();
+
+    // The bridge test.
+    const test_mod = occtModule(b, target, optimize, occt, b.path("bridge/occt/test/main.zig"), shim);
+    const exe = b.addExecutable(.{ .name = "occt-bridge-test", .root_module = test_mod });
+    b.installArtifact(exe);
+    b.step("occt-test", "Build and run the OCCT bridge test").dependOn(&b.addRunArtifact(exe).step);
+
+    // graven-fab: parts' fabrication plans built into solids.
+    const fab = b.createModule(.{
+        .root_source_file = b.path("bridge/occt/fab.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "occt_shim", .module = shim },
+            .{ .name = "graven_layout", .module = mods.layout },
+            .{ .name = "graven_engine", .module = mods.engine },
+        },
+    });
+    const fab_mod = occtModule(b, target, optimize, occt, b.path("apps/fab/main.zig"), shim);
+    fab_mod.addImport("occt_fab", fab);
+    fab_mod.addImport("graven_layout", mods.layout);
+    fab_mod.addImport("graven_engine", mods.engine);
+    fab_mod.addImport("graven_samples", mods.samples);
+    const fab_exe = b.addExecutable(.{ .name = "graven-fab", .root_module = fab_mod });
+    const install_fab = b.addInstallArtifact(fab_exe, .{});
+    b.step("fab", "Build graven-fab (parts as solids, through OCCT)").dependOn(&install_fab.step);
+}
+
+/// A module rooted at `root` that links the OCCT shim and OCCT itself.
+fn occtModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt, root: std.Build.LazyPath, shim: *std.Build.Module) *std.Build.Module {
     const mod = b.createModule(.{
-        .root_source_file = b.path("bridge/occt/test/main.zig"),
+        .root_source_file = root,
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .link_libcpp = true,
     });
-    mod.addImport("occt_shim", shim_h.createModule());
+    mod.addImport("occt_shim", shim);
     mod.addIncludePath(b.path("bridge/occt"));
     mod.addIncludePath(occt.path(b, "include/opencascade"));
     mod.addCSourceFile(.{ .file = b.path("bridge/occt/occt_shim.cpp"), .flags = &.{"-std=c++17"} });
     for (occt_toolkits) |tk| {
         mod.addObjectFile(occt.path(b, b.fmt("lib/lib{s}.a", .{tk})));
     }
-
-    const exe = b.addExecutable(.{ .name = "occt-bridge-test", .root_module = mod });
-    b.installArtifact(exe);
-    b.step("occt-test", "Build and run the OCCT bridge test").dependOn(&b.addRunArtifact(exe).step);
+    return mod;
 }

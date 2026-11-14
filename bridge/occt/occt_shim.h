@@ -57,6 +57,9 @@ int os_solid_extrude(const os_contour *contours, size_t n_contours, double z0, d
 int os_solid_cut(const os_solid *a, const os_solid *b, os_solid **out);
 int os_solid_common(const os_solid *a, const os_solid *b, os_solid **out);
 
+/* All of them joined into one (they may overlap). */
+int os_solid_fuse(const os_solid *const *solids, size_t n, os_solid **out);
+
 /* Its volume, and whether OCCT's checker finds it valid (1) or not (0).
    Either pointer may be NULL. */
 int os_solid_props(const os_solid *s, double *volume, int *valid);
