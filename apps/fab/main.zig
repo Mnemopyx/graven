@@ -64,7 +64,7 @@ fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const
     const name = m.panels.items[panel].name;
     std.debug.print("{s}: {d} layers, {d} steps\n", .{ name, stack.layers.len, p.steps.len });
     for (p.off_layers) |li| std.debug.print("  flag: {s}: depth not a whole number of {d} mm layers\n", .{ names[li], stack.layer_height });
-    const r = fab.build(gpa, a, p.steps, names) catch |err| {
+    const r = fab.build(gpa, a, p.steps, names, true) catch |err| {
         std.debug.print("  OCCT: {s}\n", .{fab.lastError()});
         return err;
     };

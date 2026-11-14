@@ -56,16 +56,20 @@ fn check(rc: c_int) Error!void {
 
 /// Builds `steps`. `a` holds temporary geometry and the messages; the
 /// parts are allocated from `gpa` (free with `Result.deinit`).
-pub fn build(gpa: Allocator, a: Allocator, steps: []const layout.fab.Step, layer_names: []const []const u8) Error!Result {
+pub fn build(gpa: Allocator, a: Allocator, steps: []const layout.fab.Step, layer_names: []const []const u8, trace: bool) Error!Result {
     var parts: std.ArrayList(Part) = .empty;
     errdefer {
         for (parts.items) |p| c.os_solid_free(p.solid);
         parts.deinit(gpa);
     }
     var skipped: std.ArrayList([]const u8) = .empty;
-    for (steps) |st| {
-        const swept = (try sweep(a, st, layer_names, &skipped)) orelse continue;
+    var clock = Clock.start();
+    for (steps, 0..) |st, si| {
+        _ = clock.lap();
+        const swept = (try sweep(a, st, layer_names, &skipped, trace)) orelse continue;
         defer c.os_solid_free(swept);
+        const t_sweep = clock.lap();
+        defer if (trace) std.debug.print("    step {d} ({s}, {s}, {d} pieces): sweep+join {d:.0} ms, apply {d:.0} ms\n", .{ si, layer_names[st.layer], @tagName(st.op), st.pieces.len, t_sweep, clock.lap() });
         switch (st.op) {
             .subtract => for (parts.items) |*p| try replace(p, cutOf(p.solid, swept)),
             .add => |col| {
@@ -91,6 +95,8 @@ pub fn build(gpa: Allocator, a: Allocator, steps: []const layout.fab.Step, layer
         }
     }
     // Volumes, validity, and what colours share.
+    _ = clock.lap();
+    defer if (trace) std.debug.print("    checks {d:.0} ms\n", .{clock.lap()});
     var overlap: f64 = 0;
     for (parts.items, 0..) |*p, i| {
         var v: f64 = 0;
@@ -123,7 +129,8 @@ fn replace(p: *Part, next: Error!*c.os_solid) Error!void {
 }
 
 /// A step's pieces swept and joined; null when none sweeps.
-fn sweep(a: Allocator, st: layout.fab.Step, layer_names: []const []const u8, skipped: *std.ArrayList([]const u8)) Error!?*c.os_solid {
+fn sweep(a: Allocator, st: layout.fab.Step, layer_names: []const []const u8, skipped: *std.ArrayList([]const u8), trace: bool) Error!?*c.os_solid {
+    var clock = Clock.start();
     var solids: std.ArrayList(*c.os_solid) = .empty;
     defer for (solids.items) |s| c.os_solid_free(s);
     for (st.pieces, 0..) |piece, pi| {
@@ -138,8 +145,10 @@ fn sweep(a: Allocator, st: layout.fab.Step, layer_names: []const []const u8, ski
         try solids.append(a, s.?);
     }
     if (solids.items.len == 0) return null;
+    const t_extrude = clock.lap();
     var out: ?*c.os_solid = null;
     try check(c.os_solid_fuse(@ptrCast(solids.items.ptr), solids.items.len, &out));
+    if (trace) std.debug.print("      extrude {d} pieces {d:.0} ms, join {d:.0} ms\n", .{ solids.items.len, t_extrude, clock.lap() });
     return out.?;
 }
 
@@ -189,3 +198,24 @@ fn degenerate(sg: geom.Segment) bool {
     for (pts[1..]) |p| if (@abs(p.x - pts[0].x) > 1e-9 or @abs(p.y - pts[0].y) > 1e-9) return false;
     return true;
 }
+
+/// Milliseconds between laps (monotonic).
+const Clock = struct {
+    last: i128,
+
+    fn now() i128 {
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
+        return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    }
+
+    fn start() Clock {
+        return .{ .last = now() };
+    }
+
+    fn lap(cl: *Clock) f64 {
+        const t = now();
+        defer cl.last = t;
+        return @as(f64, @floatFromInt(t - cl.last)) / 1e6;
+    }
+};
