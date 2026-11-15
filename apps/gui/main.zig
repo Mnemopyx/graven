@@ -1086,7 +1086,70 @@ fn onSheet(pi: usize, b: geom.Box) geom.Box {
 /// Whether the document named on the command line has been opened.
 var opened_arg = false;
 
+/// GRAVEN_DUMP_OUTLINES=file.svg: the exact outlines of every glyph drawn,
+/// in window pixels, written there (each frame's, at the start of the
+/// next); to lay over a screenshot and see how the display path renders
+/// them.
+var dump_path: ?[]const u8 = null;
+var dump_frame: u32 = 0;
+var dump_svg: std.ArrayList(u8) = .empty;
+
+fn dumpGlyph(area: dvui.Rect.Physical, face: *engine.Face, g: engine.render.GlyphItem, at: geom.Point) void {
+    if (dump_path == null) return;
+    const lifo = dvui.currentWindow().lifo();
+    var arena: std.heap.ArenaAllocator = .init(lifo);
+    defer arena.deinit();
+    const o = engine.render.glyphOutline(arena.allocator(), face, g) catch return;
+    for (o.contours) |c| {
+        if (c.segments.len == 0) continue;
+        const P = struct {
+            fn px(ar: dvui.Rect.Physical, a: geom.Point, q: geom.Point) dvui.Point.Physical {
+                return state.view.toPx(ar, .{ .x = q.x + a.x, .y = q.y + a.y });
+            }
+        };
+        const s0 = P.px(area, at, c.segments[0].start());
+        dumpPrint("M{d:.3} {d:.3}", .{ s0.x, s0.y });
+        for (c.segments) |seg| switch (seg) {
+            .line => |p| {
+                const q = P.px(area, at, p[1]);
+                dumpPrint("L{d:.3} {d:.3}", .{ q.x, q.y });
+            },
+            .quad => |p| {
+                const q1 = P.px(area, at, p[1]);
+                const q2 = P.px(area, at, p[2]);
+                dumpPrint("Q{d:.3} {d:.3} {d:.3} {d:.3}", .{ q1.x, q1.y, q2.x, q2.y });
+            },
+            .cubic => |p| {
+                const q1 = P.px(area, at, p[1]);
+                const q2 = P.px(area, at, p[2]);
+                const q3 = P.px(area, at, p[3]);
+                dumpPrint("C{d:.3} {d:.3} {d:.3} {d:.3} {d:.3} {d:.3}", .{ q1.x, q1.y, q2.x, q2.y, q3.x, q3.y });
+            },
+            .conic => |cc| {
+                const q = P.px(area, at, cc.p[2]);
+                dumpPrint("L{d:.3} {d:.3}", .{ q.x, q.y });
+            },
+        };
+        dumpPrint("Z", .{});
+    }
+}
+
+fn dumpPrint(comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    const t = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    dump_svg.appendSlice(state.gpa, t) catch {};
+}
+
 fn frame() !dvui.App.Result {
+    if (dump_path) |p| {
+        dump_frame += 1;
+        if (dump_svg.items.len > 0) {
+            const head = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"none\" d=\"";
+            const doc = std.mem.concat(state.gpa, u8, &.{ head, dump_svg.items, "\"/></svg>\n" }) catch "";
+            std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = p, .data = doc }) catch {};
+            dump_svg.clearAndFree(state.gpa);
+        }
+    }
     if (desktop.take()) |s| applyDesktop(dvui.currentWindow(), s);
     // `graven-gui file.graven` opens that document.
     if (!opened_arg) {
@@ -1098,6 +1161,7 @@ fn frame() !dvui.App.Result {
         // GRAVEN_SAMPLE=hp15c or keyboard: a new canvas with that sample, for
         // trying the app (and its tests) without the menus.
         exact_text = std.c.getenv("GRAVEN_EXACT_TEXT") != null;
+        if (std.c.getenv("GRAVEN_DUMP_OUTLINES")) |v| dump_path = std.mem.span(v);
         if (std.c.getenv("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.gamma;
         if (std.c.getenv("GRAVEN_TEXT_DARKEN")) |v| glyphs.darken = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.darken;
         if (std.c.getenv("GRAVEN_SAMPLE")) |v| {
@@ -4019,6 +4083,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         // Glyphs from the atlas, rules and marks from their outlines;
         // exact outlines throughout when construction is shown or a glyph
         // is too large to raster.
+        if (dump_path != null) for (l.render.items) |item| switch (item) {
+            .glyph => |g| if (g.face < faceTable().len) dumpGlyph(area, faceTable()[g.face], g, at),
+            .path => {},
+        };
         const from_atlas = !show_construction and !exact_text and drawLabelGlyphs(area, l.render, at, ink);
         const pieces = state.flat.getWith(l.render, faceTable(), from_atlas) catch continue;
         for (pieces) |piece| {
