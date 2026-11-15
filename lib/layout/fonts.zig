@@ -252,11 +252,11 @@ pub const libertinus: Package = .{
         // so, so drawn as it is (growing it fills the acute corners where
         // its hairlines meet its thick strokes, and Σ reads as slanted).
         .{ .font = lib_math, .coverage = .{ .ranges = bold_greek }, .weight = .{ .match = .{ .char = 0x1D408 } } },
-        // Italic variables, 1.15 times (their x-height, 0.68 of their cap
-        // height against Geist's 0.75, then a little more, for detail),
+        // Italic variables, 1.25 times (their x-height, 0.68 of their cap
+        // height against Geist's 0.75, then more, for detail),
         // their italic I's stem matched, and a touch more: their hairlines
         // make them read lighter than Geist.
-        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.15, .weight = .{ .match = .{ .char = 0x1D43C, .extra = 12 } } },
+        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.25, .weight = .{ .match = .{ .char = 0x1D43C, .extra = 12 } } },
         // Whatever else Geist lacks.
         .{ .font = lib_math, .weight = .{ .match = .bar } },
     },
@@ -469,7 +469,7 @@ test "the Libertinus package: Geist text; Libertinus Math operators, bold Greek 
     try testing.expectEqualStrings("Geist", p.text.family);
     try testing.expectEqual(engine.style.Greek.math_bold, p.greek);
     try testing.expectEqual(@as(usize, 4), p.members.len);
-    try testing.expectEqual(@as(f64, 1.15), p.members[2].scale);
+    try testing.expectEqual(@as(f64, 1.25), p.members[2].scale);
     try testing.expect(p.members[2].coverage.has(0x1D465)); // italic x
     try testing.expectEqual(@as(u21, 0x2212), p.members[0].weight.match.char);
     try testing.expect(p.members[0].coverage.has(0x2264)); // <=
