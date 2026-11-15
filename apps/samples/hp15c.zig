@@ -64,7 +64,10 @@ pub const Styles = struct {
 pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
     const spec = struct {
         fn of(cap: f64, members: []const engine.style.Member) engine.style.Spec {
-            return .{ .upright = 0, .cap_height = cap, .line_pitch = 1.5, .members = members, .arrows = .{} };
+            // Scripts pulled in toward the centre line from the math fonts'
+            // shifts (Libertinus 0.58 up, 0.32 down; STIX Two 0.55, 0.32), so
+            // a legend with scripts stands less tall.
+            return .{ .upright = 0, .cap_height = cap, .line_pitch = 1.5, .members = members, .arrows = .{}, .sup_raise = 0.5, .sub_drop = 0.24 };
         }
     }.of;
     return .{

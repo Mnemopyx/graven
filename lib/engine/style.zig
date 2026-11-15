@@ -137,6 +137,9 @@ pub const Member = struct {
     pub const Reference = struct {
         char: u21 = 'I',
         stroke: font.Face.Stroke = .vertical,
+        /// A further stroke increase after matching, in thousandths of cap
+        /// height: hairline faces read lighter than their stems say.
+        extra: f64 = 0,
 
         pub const stem: Reference = .{};
         pub const bar: Reference = .{ .char = 0x2212, .stroke = .horizontal };
@@ -433,7 +436,7 @@ pub const Context = struct {
                 const fs = (try c.faces[face].stroke(ref.char, ref.stroke)) orelse return 0;
                 // Both as fractions of cap height: the member's as it is
                 // drawn, at the scale its matching sets.
-                break :blk @max(0, ms / mc - fs * try c.scaleWith(face, m, 1));
+                break :blk @max(0, ms / mc - fs * try c.scaleWith(face, m, 1)) + ref.extra / 1000;
             },
         };
         return add * cap_mm / 2;

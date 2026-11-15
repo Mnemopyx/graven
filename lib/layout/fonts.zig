@@ -254,8 +254,9 @@ pub const libertinus: Package = .{
         .{ .font = lib_math, .coverage = .{ .ranges = bold_greek }, .weight = .{ .match = .{ .char = 0x1D408 } } },
         // Italic variables, 1.15 times (their x-height, 0.68 of their cap
         // height against Geist's 0.75, then a little more, for detail),
-        // their italic I's stem matched.
-        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.15, .weight = .{ .match = .{ .char = 0x1D43C } } },
+        // their italic I's stem matched, and a touch more: their hairlines
+        // make them read lighter than Geist.
+        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.15, .weight = .{ .match = .{ .char = 0x1D43C, .extra = 12 } } },
         // Whatever else Geist lacks.
         .{ .font = lib_math, .weight = .{ .match = .bar } },
     },
