@@ -133,6 +133,12 @@ pub const Options = struct {
     /// Colour every edge white: a plain signed distance field (corners
     /// rounded), for comparison.
     single_channel: bool = false,
+    /// Correct the field where its channels, read between texels, would
+    /// draw something the outline does not have (see `correct`).
+    error_correction: bool = true,
+    /// How far, texels, a reading may stray from the true distance before
+    /// it counts as an error.
+    tolerance: f64 = 0.35,
 };
 
 /// An edge: a run of a loop's pieces in one colour.
@@ -200,7 +206,8 @@ pub fn generate(a: Allocator, o: Outline, opts: Options) Allocator.Error!Field {
 
     // Edges by colour.
     var edges: std.ArrayList(Edge) = .empty;
-    for (region.loops) |loop| try colorLoop(s, &edges, loop, opts);
+    var corners: std.ArrayList(Point) = .empty;
+    for (region.loops) |loop| try colorLoop(s, &edges, &corners, loop, opts);
     for (edges.items) |*e| e.* = try withBounds(s, e.*);
     // Beyond the range every distance clamps: nothing further need be
     // measured.
@@ -246,11 +253,136 @@ pub fn generate(a: Allocator, o: Outline, opts: Options) Allocator.Error!Field {
             @memcpy(data[(j * w + i) * 3 ..][0..3], &ch);
         }
     }
-    return .{ .w = w, .h = h, .data = data, .scale = opts.scale, .origin = origin, .range = opts.range };
+    const f: Field = .{ .w = w, .h = h, .data = data, .scale = opts.scale, .origin = origin, .range = opts.range };
+    if (opts.error_correction and !opts.single_channel) try correct(s, f, edges.items, region.loops, corners.items, limit, opts.tolerance);
+    return f;
+}
+
+/// The true signed distance at `p`, texels within the field's range:
+/// nearest any edge, positive inside.
+fn trueDistance(f: Field, edges: []const Edge, loops: []const []const Point, p: Point, limit: f64) f32 {
+    var bound = limit;
+    var best: f64 = limit;
+    for (edges) |*e| {
+        if (boxDistance(e.box, p) > bound) continue;
+        const near = nearest(e, p, bound) orelse continue;
+        if (near.dist < best) {
+            best = near.dist;
+            bound = best;
+        }
+    }
+    const d = if (inside(loops, p)) best else -best;
+    return @floatCast(std.math.clamp(d * f.scale, -f.range, f.range));
+}
+
+/// Error correction. Where the field's median, at a texel or read halfway
+/// between two (as drawing reads it), strays from the true distance by more
+/// than `tol` texels, the texels involved are made plain: all three
+/// channels the true distance. The channels disagree there for no corner's
+/// sake, and interpolating them makes specks and notches (where grown
+/// strokes merge, say). Texels next to a corner are left alone: their
+/// disagreement is what keeps the corner sharp. Away from corners, the
+/// median past a convex corner is mitred where the true distance is round,
+/// so this also makes growth round there, as `grow.grow` makes it.
+fn correct(a: Allocator, f: Field, edges: []const Edge, loops: []const []const Point, corners: []const Point, limit: f64, tol: f64) Allocator.Error!void {
+    const w = f.w;
+    const h = f.h;
+    const protected = try a.alloc(bool, @as(usize, w) * h);
+    @memset(protected, false);
+    for (corners) |c| {
+        const cx = (c.x - f.origin.x) * f.scale - 0.5;
+        const cy = (c.y - f.origin.y) * f.scale - 0.5;
+        const ilo: i64 = @intFromFloat(@floor(cx - 1.5));
+        const jlo: i64 = @intFromFloat(@floor(cy - 1.5));
+        var j = jlo;
+        while (j <= jlo + 4) : (j += 1) {
+            var i = ilo;
+            while (i <= ilo + 4) : (i += 1) {
+                if (i < 0 or j < 0 or i >= w or j >= h) continue;
+                const fi: f64 = @floatFromInt(i);
+                const fj: f64 = @floatFromInt(j);
+                if (@abs(fi - cx) <= 1.5 and @abs(fj - cy) <= 1.5) protected[@as(usize, @intCast(j)) * w + @as(usize, @intCast(i))] = true;
+            }
+        }
+    }
+    const bad = try a.alloc(bool, @as(usize, w) * h);
+    @memset(bad, false);
+    const truth = try a.alloc(f32, @as(usize, w) * h);
+    const point = struct {
+        fn at(ff: Field, x: f64, y: f64) Point {
+            return .{ .x = ff.origin.x + x / ff.scale, .y = ff.origin.y + y / ff.scale };
+        }
+    }.at;
+    const texel = struct {
+        fn get(ff: Field, i: usize, j: usize) [3]f32 {
+            return ff.data[(j * ff.w + i) * 3 ..][0..3].*;
+        }
+        /// All channels clamped the same way: far from the outline.
+        fn far(ff: Field, c: [3]f32) bool {
+            const rr: f32 = @floatCast(ff.range);
+            return (c[0] == rr and c[1] == rr and c[2] == rr) or (c[0] == -rr and c[1] == -rr and c[2] == -rr);
+        }
+    };
+    for (0..h) |j| for (0..w) |i| {
+        const c = texel.get(f, i, j);
+        if (texel.far(f, c)) {
+            truth[j * w + i] = c[0];
+            continue;
+        }
+        const t = trueDistance(f, edges, loops, point(f, @as(f64, @floatFromInt(i)) + 0.5, @as(f64, @floatFromInt(j)) + 0.5), limit);
+        truth[j * w + i] = t;
+        if (!protected[j * w + i] and @abs(median(c) - t) > tol) bad[j * w + i] = true;
+    };
+    // Halfway between neighbours, across, up, and both diagonals; repeated,
+    // since a texel made plain can disagree with a neighbour that has not
+    // been, until nothing more is found.
+    const steps = [_][2][2]usize{ .{ .{ 0, 0 }, .{ 1, 0 } }, .{ .{ 0, 0 }, .{ 0, 1 } }, .{ .{ 0, 0 }, .{ 1, 1 } }, .{ .{ 1, 0 }, .{ 0, 1 } } };
+    // Midpoint truths, made once.
+    const mid_truth = try a.alloc(f32, @as(usize, w) * h * 4);
+    @memset(mid_truth, std.math.nan(f32));
+    var pass: usize = 0;
+    while (pass < 16) : (pass += 1) {
+        // Texels flagged so far are plain from now on.
+        for (bad, 0..) |b, k| if (b) {
+            const t = truth[k];
+            f.data[k * 3 ..][0..3].* = .{ t, t, t };
+        };
+        var found = false;
+        for (0..h - 1) |j| for (0..w - 1) |i| for (steps, 0..) |st, si| {
+            const ia = i + st[0][0];
+            const ja = j + st[0][1];
+            const ib = i + st[1][0];
+            const jb = j + st[1][1];
+            if (protected[ja * w + ia] or protected[jb * w + ib]) continue;
+            if (bad[ja * w + ia] and bad[jb * w + ib]) continue;
+            const ca = texel.get(f, ia, ja);
+            const cb = texel.get(f, ib, jb);
+            if (texel.far(f, ca) and texel.far(f, cb)) continue;
+            const mid = [3]f32{ (ca[0] + cb[0]) / 2, (ca[1] + cb[1]) / 2, (ca[2] + cb[2]) / 2 };
+            const m = median(mid);
+            const slot = &mid_truth[(j * w + i) * 4 + si];
+            if (std.math.isNan(slot.*)) slot.* = trueDistance(f, edges, loops, point(f, (@as(f64, @floatFromInt(ia + ib)) + 1) / 2, (@as(f64, @floatFromInt(ja + jb)) + 1) / 2), limit);
+            const t = slot.*;
+            // Only where reading the two plain would do better: a clash of
+            // channels, not a curve the straight interpolation misses.
+            const plain = (truth[ja * w + ia] + truth[jb * w + ib]) / 2;
+            if (@abs(m - t) > tol and @abs(plain - t) < @abs(m - t)) {
+                if (!bad[ja * w + ia]) {
+                    bad[ja * w + ia] = true;
+                    found = true;
+                }
+                if (!bad[jb * w + ib]) {
+                    bad[jb * w + ib] = true;
+                    found = true;
+                }
+            }
+        };
+        if (!found) break;
+    }
 }
 
 /// Splits `loop` (filled on its left) at its corners and colours the runs.
-fn colorLoop(a: Allocator, edges: *std.ArrayList(Edge), loop: []const Point, opts: Options) Allocator.Error!void {
+fn colorLoop(a: Allocator, edges: *std.ArrayList(Edge), corner_pts: *std.ArrayList(Point), loop: []const Point, opts: Options) Allocator.Error!void {
     const n = loop.len;
     if (n < 3) return;
     const min_cross = @sin(opts.corner_angle);
@@ -261,6 +393,7 @@ fn colorLoop(a: Allocator, edges: *std.ArrayList(Edge), loop: []const Point, opt
         const dot = din.x * dout.x + din.y * dout.y;
         if (dot <= 0 or @abs(din.cross(dout)) > min_cross) try corners.append(a, i);
     };
+    for (corners.items) |ci| try corner_pts.append(a, loop[ci]);
 
     // A run of the loop from vertex `from` to vertex `to` (inclusive,
     // wrapping).
@@ -555,4 +688,74 @@ test "curves: a circle's area, and the area of its growth" {
     const g = try f.rasterize(a, 14 * 24, 14 * 24, m, px, 1);
     defer a.free(g);
     try testing.expectApproxEqRel(std.math.pi * 36, coveredArea(g, px), 0.01);
+}
+
+/// The largest disagreement between the field's median and the true
+/// distance, texels, read halfway between neighbouring texels, away from
+/// `corners` (2.5 texels or more).
+fn worstMidpoint(a: Allocator, f: Field, o: Outline, corners: []const Point) !f64 {
+    _ = a;
+    var worst: f64 = 0;
+    var j: usize = 0;
+    while (j + 1 < f.h) : (j += 1) {
+        var i: usize = 0;
+        while (i + 1 < f.w) : (i += 1) {
+            const q: Point = .{ .x = @as(f64, @floatFromInt(i)) + 1, .y = @as(f64, @floatFromInt(j)) + 1 };
+            const p: Point = .{ .x = f.origin.x + q.x / f.scale, .y = f.origin.y + q.y / f.scale };
+            const near_corner = for (corners) |c| {
+                if (@abs(c.x - p.x) * f.scale < 2.5 and @abs(c.y - p.y) * f.scale < 2.5) break true;
+            } else false;
+            if (near_corner) continue;
+            const m = f.distance(p) * f.scale;
+            if (@abs(m) >= f.range - 0.5) continue;
+            // The true distance, by brute force over the flattened outline.
+            var best = std.math.inf(f64);
+            var in = false;
+            for (o.contours) |c| for (c.segments) |seg| {
+                const n: usize = 64;
+                var prev = seg.start();
+                for (1..n + 1) |k| {
+                    const pt = seg.at(@as(f64, @floatFromInt(k)) / n);
+                    const ab = sub(pt, prev);
+                    const len2 = ab.x * ab.x + ab.y * ab.y;
+                    if (len2 > 0) {
+                        const t = std.math.clamp(((p.x - prev.x) * ab.x + (p.y - prev.y) * ab.y) / len2, 0, 1);
+                        const dx = p.x - (prev.x + ab.x * t);
+                        const dy = p.y - (prev.y + ab.y * t);
+                        best = @min(best, @sqrt(dx * dx + dy * dy));
+                    }
+                    if ((prev.y > p.y) != (pt.y > p.y) and p.x < prev.x + (p.y - prev.y) * (pt.x - prev.x) / (pt.y - prev.y)) in = !in;
+                    prev = pt;
+                }
+            };
+            const t = std.math.clamp((if (in) best else -best) * f.scale, -f.range, f.range);
+            worst = @max(worst, @abs(m - t));
+        }
+    }
+    return worst;
+}
+
+test "error correction: read between texels, the field agrees with the true distance away from corners" {
+    const a = testing.allocator;
+    // Two circles almost touching and a square beside them: where shapes
+    // come close, interpolated channels clash without correction.
+    var b1: [4]root.Segment = undefined;
+    var b2: [4]root.Segment = undefined;
+    var sq: [4]root.Segment = undefined;
+    const c1 = root.arc(.{ .x = 0, .y = 0 }, 3, 0, 2 * std.math.pi, &b1);
+    const c2 = root.arc(.{ .x = 6.4, .y = 0.5 }, 3, 0, 2 * std.math.pi, &b2);
+    _ = squareOutline(&sq, -2, 3.8, 8, 5.5, true);
+    const o: Outline = .{ .contours = &.{ .{ .segments = c1 }, .{ .segments = c2 }, .{ .segments = &sq } } };
+    const corners = [_]Point{ .{ .x = -2, .y = 3.8 }, .{ .x = 8, .y = 3.8 }, .{ .x = 8, .y = 5.5 }, .{ .x = -2, .y = 5.5 } };
+    const fixed = try generate(a, o, .{ .scale = 3 });
+    defer fixed.deinit(a);
+    const raw = try generate(a, o, .{ .scale = 3, .error_correction = false });
+    defer raw.deinit(a);
+    const after = try worstMidpoint(a, fixed, o, &corners);
+    const before = try worstMidpoint(a, raw, o, &corners);
+    try testing.expect(after <= before);
+    try testing.expect(after < 0.5);
+    // Corners stay sharp.
+    try testing.expect(fixed.distance(.{ .x = 7.95, .y = 5.45 }) > 0);
+    try testing.expect(fixed.distance(.{ .x = 8.05, .y = 5.55 }) < 0);
 }

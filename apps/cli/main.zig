@@ -184,7 +184,9 @@ fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, te
             const grow = if (grown == 1) 0.04 * cap else 0;
             const n: u32 = @intCast(@min(cell - 4, @as(usize, @intFromFloat(@ceil((@max(b.width(), b.height()) + 2 * grow) / px + 2)))));
             const m: geom.Affine = .{ .a = px, .d = px, .e = b.x0 - grow - px, .f = b.y0 - grow - px };
-            const cov = try f.rasterize(a, n, n, m, px, grow);
+            // GRAVEN_MSDF_EXACT set: the exact outline (grown by geom.grow),
+            // supersampled 4 x 4, in place of the field, to compare.
+            const cov = if (std.c.getenv("GRAVEN_MSDF_EXACT") != null) try exactCoverage(a, o, n, m, grow) else try f.rasterize(a, n, n, m, px, grow);
             const ox = si * cell + 2;
             const oy = (gi * 2 + grown) * cell + 2;
             for (0..n) |j| for (0..n) |i| {
@@ -204,6 +206,38 @@ fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, te
     @memcpy(file[0..header.len], header);
     @memcpy(file[header.len..], sheet);
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = file });
+}
+
+/// Coverage of outline `o` grown by `grow`, an `n` × `n` raster whose pixel
+/// (i, j) maps by `m`, from 4 x 4 samples a pixel (even-odd on the grown
+/// outline's simple loops).
+fn exactCoverage(a: std.mem.Allocator, o: engine.geom.Outline, n: u32, m: engine.geom.Affine, grow: f64) ![]u8 {
+    const geom = engine.geom;
+    const g = try geom.grow.grow(a, o, grow, @max(grow, 1) / 20);
+    var loops: std.ArrayList([]geom.Point) = .empty;
+    for (g.contours) |c| {
+        const pts = try a.alloc(geom.Point, c.segments.len);
+        for (c.segments, pts) |seg, *q| q.* = seg.start();
+        try loops.append(a, pts);
+    }
+    const out = try a.alloc(u8, @as(usize, n) * n);
+    for (0..n) |j| for (0..n) |i| {
+        var hits: u32 = 0;
+        for (0..4) |sj| for (0..4) |si| {
+            const p = m.apply(.{ .x = @as(f64, @floatFromInt(i)) + (@as(f64, @floatFromInt(si)) + 0.5) / 4, .y = @as(f64, @floatFromInt(j)) + (@as(f64, @floatFromInt(sj)) + 0.5) / 4 });
+            var in = false;
+            for (loops.items) |l| {
+                var k = l.len - 1;
+                for (0..l.len) |q| {
+                    if ((l[q].y > p.y) != (l[k].y > p.y) and p.x < l[q].x + (p.y - l[q].y) * (l[k].x - l[q].x) / (l[k].y - l[q].y)) in = !in;
+                    k = q;
+                }
+            }
+            if (in) hits += 1;
+        };
+        out[j * n + i] = @intCast(hits * 255 / 16);
+    };
+    return out;
 }
 
 fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8) !void {

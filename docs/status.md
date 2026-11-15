@@ -114,7 +114,7 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
 
 - Round the cap height up (when more than about 0.3 px past a whole pixel) rather than to the nearest pixel, so capitals' tops are not trimmed.
 - Fit vertical stems to pixel columns (stem detection and a per-size outline distortion, in the manner of FreeType's autohinter).
-- The MSDF error-correction pass, for faint specks where grown strokes merge.
+- Field resolution by size: a gap narrower than about a texel (a % sign's, grown, at large sizes) is drawn broken, as dots; fields at 64 or 128 texels per cap height for large text, or exact outlines past a size, would draw it whole. (The error-correction pass, built, fixes channel clashes; it cannot add resolution.)
 - Make glyph fields off the drawing thread: a new face's first frame takes about 2 ms a glyph (120 ms for the HP-15C keypad in a release build, against 21 ms drawing outlines); steady frames are 2 to 3 ms either way.
 - Least-recently-used eviction in the atlas, in place of starting again when its 8 pages are full.
 - Frame timing on a dense document.
