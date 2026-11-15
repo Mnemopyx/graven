@@ -1098,6 +1098,8 @@ fn frame() !dvui.App.Result {
         // GRAVEN_SAMPLE=hp15c or keyboard: a new canvas with that sample, for
         // trying the app (and its tests) without the menus.
         exact_text = std.c.getenv("GRAVEN_EXACT_TEXT") != null;
+        if (std.c.getenv("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.gamma;
+        if (std.c.getenv("GRAVEN_TEXT_DARKEN")) |v| glyphs.darken = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.darken;
         if (std.c.getenv("GRAVEN_SAMPLE")) |v| {
             const which = std.mem.span(v);
             if (canvas_prompt) createCanvas(.mm);
@@ -4082,14 +4084,34 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const engine.Render, at: geom.P
         // mm per font unit (the transform's scale, rotation aside).
         const mm = @sqrt(@abs(m.a * m.d - m.b * m.c));
         if (!(mm > 0)) continue;
-        const sl = (ga.slot(face, g.gid, mm * ppm, g.grow / mm) catch return false) orelse {
-            // Blank, or too large: only the latter needs outlines.
-            const o = face.outline(g.gid) catch return false;
-            if (o.contours.len == 0) continue;
-            return false;
-        };
-        const color = if (g.faint) ink.opacity(0.35) else ink;
-        quads.append(lifo, glyphs.quad(sl, Map{ .m = m, .at = at, .area = area }, .fromColor(color))) catch return false;
+        const map: Map = .{ .m = m, .at = at, .area = area };
+        // Upright (no rotation, mirror or slant): on the pixel grid.
+        const upright = m.b == 0 and m.c == 0 and m.a > 0 and m.d > 0;
+        const color: dvui.Color.PMA = .fromColor(if (g.faint) ink.opacity(0.35) else ink);
+        if (upright) {
+            const o0 = map.map(.{ .x = 0, .y = 0 });
+            // The origin's pixel, its horizontal phase in quarters, the
+            // baseline on the nearest pixel row.
+            const fx = @floor(o0.x);
+            var phase: f32 = @round((o0.x - fx) * 4);
+            var px = fx;
+            if (phase >= 4) {
+                phase = 0;
+                px += 1;
+            }
+            const py = @round(o0.y);
+            if (ga.alignedSlot(face, g.gid, mm * ppm, g.grow / mm, @intFromFloat(phase)) catch return false) |sl| {
+                quads.append(lifo, glyphs.alignedQuad(sl, px, py, color)) catch return false;
+                continue;
+            }
+        } else if (ga.slot(face, g.gid, mm * ppm, g.grow / mm) catch return false) |sl| {
+            quads.append(lifo, glyphs.quad(sl, map, color)) catch return false;
+            continue;
+        }
+        // Blank, or too large: only the latter needs outlines.
+        const o = face.outline(g.gid) catch return false;
+        if (o.contours.len == 0) continue;
+        return false;
     }
     glyphs.drawQuads(ga, lifo, quads.items);
     return true;
