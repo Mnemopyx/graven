@@ -34,8 +34,8 @@ pub const hole_r = 1.0;
 /// The gold legend's strip above each hole, mm, and its centre's height
 /// above the key's centre.
 pub const legend_w = 11.0;
-pub const legend_h = 2.6;
-pub const legend_up = 6.0;
+pub const legend_h = 2.4;
+pub const legend_up = 5.55;
 
 /// For colour FDM: the plate's and the keys' thickness, and how deep the
 /// legends are inlaid (3 layers of 0.2 mm), mm: guesses.
@@ -73,7 +73,7 @@ pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
     return .{
         .key = try m.addStyle("15C key", spec(1.9, fallbacks)),
         .g = try m.addStyle("15C g", spec(1.1, fallbacks)),
-        .f = try m.addStyle("15C f", spec(1.1, fallbacks)),
+        .f = try m.addStyle("15C f", spec(1.4, fallbacks)),
     };
 }
 
