@@ -230,6 +230,10 @@ const lib_math: FontName = .{ .family = "Libertinus Math", .style = "Regular" };
 /// Mathematical bold Greek (U+1D6A8..U+1D6E1).
 const bold_greek: []const engine.style.Range = &.{.{ .first = 0x1D6A8, .last = 0x1D6E1 }};
 
+/// Mathematical italic (U+1D434..U+1D467) and Planck's h (U+210E), which
+/// stands in its gap.
+const math_italic: []const engine.style.Range = &.{ .{ .first = 0x1D434, .last = 0x1D467 }, .{ .first = 0x210E, .last = 0x210E } };
+
 /// Libertinus: Geist SemiBold text with Libertinus Math 7.051 for the rest
 /// (chosen 2026-11-15 for the HP-15C keypad): its operators and arrows,
 /// its mathematical bold Greek (U+1D6A8..) for Greek, and its mathematical
@@ -248,9 +252,12 @@ pub const libertinus: Package = .{
         // so, so drawn as it is (growing it fills the acute corners where
         // its hairlines meet its thick strokes, and Σ reads as slanted).
         .{ .font = lib_math, .coverage = .{ .ranges = bold_greek }, .weight = .{ .match = .{ .char = 0x1D408 } } },
-        // The rest: italic variables (their italic I's stem matched) and
-        // whatever else Geist lacks.
-        .{ .font = lib_math, .weight = .{ .match = .{ .char = 0x1D43C } } },
+        // Italic variables, 1.15 times (their x-height, 0.68 of their cap
+        // height against Geist's 0.75, then a little more, for detail),
+        // their italic I's stem matched.
+        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.15, .weight = .{ .match = .{ .char = 0x1D43C } } },
+        // Whatever else Geist lacks.
+        .{ .font = lib_math, .weight = .{ .match = .bar } },
     },
     .greek = .math_bold,
 };
@@ -460,7 +467,9 @@ test "the Libertinus package: Geist text; Libertinus Math operators, bold Greek 
     const p = package("libertinus").?;
     try testing.expectEqualStrings("Geist", p.text.family);
     try testing.expectEqual(engine.style.Greek.math_bold, p.greek);
-    try testing.expectEqual(@as(usize, 3), p.members.len);
+    try testing.expectEqual(@as(usize, 4), p.members.len);
+    try testing.expectEqual(@as(f64, 1.15), p.members[2].scale);
+    try testing.expect(p.members[2].coverage.has(0x1D465)); // italic x
     try testing.expectEqual(@as(u21, 0x2212), p.members[0].weight.match.char);
     try testing.expect(p.members[0].coverage.has(0x2264)); // <=
     try testing.expect(p.members[1].coverage.has(0x1D6BA)); // bold Sigma

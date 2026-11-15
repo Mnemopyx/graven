@@ -130,7 +130,7 @@ pub fn renderLabel(gpa: Allocator, ctx: *const style.Context, src: []const u8, o
             continue;
         };
         const ext = ctx.faces[face].extents();
-        const s = try ctx.scaleFor(face, e.cap_height);
+        const s = if (e.units > 0) e.units else try ctx.scaleFor(face, e.cap_height);
         design = design.join(.{
             .x0 = e.origin.x,
             .y0 = e.origin.y + ext.descender * s,
@@ -674,11 +674,11 @@ const Builder = struct {
         const face_id = b.ctx.faceFor(buf[0..n], .{}, true) orelse return b.diagnose(.missing_glyph, span.start);
         const face = b.ctx.faces[face_id];
         const gid = face.glyph(cp).?;
-        const s = try b.ctx.scaleFor(face_id, cap);
+        const s = try b.ctx.scaleOf(face_id, cp, cap);
         const own = (try face.outline(gid)).bounds();
         if (own.isEmpty()) return;
         const dx = (body.x0 + body.x1) / 2 - (own.x0 + own.x1) / 2 * s;
-        const dy = body.y1 + gap - own.y0 * s + b.ctx.shiftFor(face_id, cap);
+        const dy = body.y1 + gap - own.y0 * s + b.ctx.shiftOf(face_id, cp, cap);
         const item: render.GlyphItem = .{
             .face = face_id,
             .gid = gid,
@@ -734,6 +734,8 @@ const Builder = struct {
         var i = start;
         var run_start = start;
         var run_face: ?FaceId = null;
+        // Members can share a face and differ in size: a run is one member's.
+        var run_member: ?*const style.Member = null;
         while (i < end) {
             const next = @min(clusterEnd(t.utf8, i), end);
             if (b.ctx.spec.arrows != null and next - i <= 4) if (drawnArrow(firstCodepoint(t.utf8[i..next]))) |dir| {
@@ -746,11 +748,13 @@ const Builder = struct {
                 continue;
             };
             const face = try b.chooseFace(t, t.utf8[i..next]);
-            if (run_face != null and run_face.? != face) {
+            const member = b.ctx.memberFor(face, firstCodepoint(t.utf8[i..next]));
+            if (run_face != null and (run_face.? != face or run_member != member)) {
                 pen = try b.element(t, run_start, i, run_face.?, cap, level, pen, y);
                 run_start = i;
             }
             run_face = face;
+            run_member = member;
             i = next;
         }
         if (run_face) |f| pen = try b.element(t, run_start, end, f, cap, level, pen, y);
@@ -874,9 +878,11 @@ const Builder = struct {
 
     fn element(b: *Builder, t: markup.Text, start: usize, end: usize, face_id: FaceId, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
         const face = b.ctx.faces[face_id];
-        const s = try b.ctx.scaleFor(face_id, cap);
+        // Sized and shifted as the member that set it (one per element).
+        const lead = firstCodepoint(t.utf8[start..end]);
+        const s = try b.ctx.scaleOf(face_id, lead, cap);
         // A member's baseline shift moves its whole element.
-        const y_shifted = y + b.ctx.shiftFor(face_id, cap);
+        const y_shifted = y + b.ctx.shiftOf(face_id, lead, cap);
         const glyphs = try shaping.shape(b.a, face, t.utf8[start..end]);
         const element_id: u32 = @intCast(b.elements.items.len);
 
@@ -938,6 +944,7 @@ const Builder = struct {
             .origin = .{ .x = x, .y = y },
             .advance = advance,
             .ink = ink,
+            .units = s,
         });
         return x + advance;
     }

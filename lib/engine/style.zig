@@ -377,8 +377,23 @@ pub const Context = struct {
     /// face without the measure asked for (a symbol font has no H) is
     /// matched by em.
     pub fn scaleFor(c: *const Context, face: FaceId, cap_mm: f64) font.Error!f64 {
+        return c.scaleWith(face, c.memberOf(face), cap_mm);
+    }
+
+    /// As `scaleFor`, for `face` as the member that set `cp` (members can
+    /// share a face and differ in size).
+    pub fn scaleOf(c: *const Context, face: FaceId, cp: u21, cap_mm: f64) font.Error!f64 {
+        return c.scaleWith(face, c.memberFor(face, cp), cap_mm);
+    }
+
+    /// The baseline shift for `face` as the member that set `cp`, mm, up.
+    pub fn shiftOf(c: *const Context, face: FaceId, cp: u21, cap_mm: f64) f64 {
+        const m = c.memberFor(face, cp) orelse return 0;
+        return m.shift * cap_mm;
+    }
+
+    fn scaleWith(c: *const Context, face: FaceId, member: ?*const Member, cap_mm: f64) font.Error!f64 {
         const f = c.faces[face];
-        const member = c.memberOf(face);
         const match: Match = if (member) |m| m.match else .cap_height;
         const factor: f64 = if (member) |m| m.scale else 1;
         const main = c.faces[c.spec.upright];
@@ -418,7 +433,7 @@ pub const Context = struct {
                 const fs = (try c.faces[face].stroke(ref.char, ref.stroke)) orelse return 0;
                 // Both as fractions of cap height: the member's as it is
                 // drawn, at the scale its matching sets.
-                break :blk @max(0, ms / mc - fs * try c.scaleFor(face, 1));
+                break :blk @max(0, ms / mc - fs * try c.scaleWith(face, m, 1));
             },
         };
         return add * cap_mm / 2;

@@ -113,6 +113,8 @@ pub const Element = struct {
     origin: geom.Point,
     advance: f64,
     ink: Box,
+    /// mm per font unit of its face, as set (0 for a drawn mark).
+    units: f64 = 0,
 };
 
 /// Where a one-line render may break: a space between words, \allowbreak,

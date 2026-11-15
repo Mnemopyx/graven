@@ -148,17 +148,33 @@ pub const Face = struct {
     /// The thickness of `cp`'s stroke through its middle, font units: a
     /// vertical stroke's (an I's stem) across a horizontal line at half its
     /// height, or a horizontal stroke's (a minus sign's bar) across a
-    /// vertical line at half its width. Null if the face has no such glyph.
-    /// (The outermost crossings; a serif I has none there but its stem's.)
+    /// vertical line at half its width, a sloping stem's square to its
+    /// slope. Null if the face has no such glyph. (The outermost crossings;
+    /// a serif I has none there but its stem's.)
     pub fn stroke(self: *Face, cp: u21, which: Stroke) Error!?f64 {
         const gid = self.glyph(cp) orelse return null;
         const o = try self.outline(gid);
         const b = o.bounds();
         if (b.isEmpty()) return null;
-        const vertical = which == .vertical;
-        // Measured along u across a line at v = mid: (x, y) for a vertical
-        // stroke, (y, x) for a horizontal one.
-        const mid = if (vertical) (b.y0 + b.y1) / 2 else (b.x0 + b.x1) / 2;
+        if (which == .horizontal) {
+            const c = crossing(o, (b.x0 + b.x1) / 2, false) orelse return null;
+            return c.hi - c.lo;
+        }
+        // Across a sloping stem (an italic I), the horizontal width is the
+        // stroke over the cosine of its slope: measure the slope from the
+        // stem's middle at a third and two thirds of its height.
+        const h = b.y1 - b.y0;
+        const mid = crossing(o, b.y0 + h / 2, true) orelse return null;
+        const lo = crossing(o, b.y0 + h / 3, true) orelse return mid.hi - mid.lo;
+        const hi = crossing(o, b.y0 + 2 * h / 3, true) orelse return mid.hi - mid.lo;
+        const slope = ((hi.lo + hi.hi) - (lo.lo + lo.hi)) / 2 / (h / 3);
+        return (mid.hi - mid.lo) / @sqrt(1 + slope * slope);
+    }
+
+    /// The outermost crossings of `o` with the line u = `at`: a horizontal
+    /// line y = at (`horizontal_line`), crossings in x; else a vertical
+    /// line x = at, crossings in y.
+    fn crossing(o: Outline, at: f64, horizontal_line: bool) ?struct { lo: f64, hi: f64 } {
         var lo = std.math.inf(f64);
         var hi = -std.math.inf(f64);
         for (o.contours) |c| for (c.segments) |seg| {
@@ -167,19 +183,19 @@ pub const Face = struct {
             var prev = seg.start();
             for (1..n + 1) |i| {
                 const p = seg.at(@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n)));
-                const pv = if (vertical) prev.y else prev.x;
-                const qv = if (vertical) p.y else p.x;
-                const pu = if (vertical) prev.x else prev.y;
-                const qu = if (vertical) p.x else p.y;
-                if ((pv <= mid and mid < qv) or (qv <= mid and mid < pv)) {
-                    const u = pu + (mid - pv) * (qu - pu) / (qv - pv);
+                const pv = if (horizontal_line) prev.y else prev.x;
+                const qv = if (horizontal_line) p.y else p.x;
+                const pu = if (horizontal_line) prev.x else prev.y;
+                const qu = if (horizontal_line) p.x else p.y;
+                if ((pv <= at and at < qv) or (qv <= at and at < pv)) {
+                    const u = pu + (at - pv) * (qu - pu) / (qv - pv);
                     lo = @min(lo, u);
                     hi = @max(hi, u);
                 }
                 prev = p;
             }
         };
-        return if (hi > lo) hi - lo else null;
+        return if (hi > lo) .{ .lo = lo, .hi = hi } else null;
     }
 
     /// x-height measured from the top of x's outline, likewise. Null if the
