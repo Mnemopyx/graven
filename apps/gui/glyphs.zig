@@ -44,13 +44,13 @@ const SlotKey = struct {
 /// Coverage is raised to 1/gamma before it is stored: above 1 darkens the
 /// antialiased edge pixels, as text renderers do so small text holds its
 /// weight. GRAVEN_TEXT_GAMMA overrides it.
-pub var gamma: f64 = 1.45;
+pub var gamma: f64 = 2.2;
 
 /// Stem darkening, as FreeType and macOS do for small text: strokes grown by
 /// up to this many pixels at small sizes, fading to none at a cap height of
 /// `darken_until` pixels. Display only. GRAVEN_TEXT_DARKEN overrides it
 /// (0: none).
-pub var darken: f64 = 0.3;
+pub var darken: f64 = 0;
 pub const darken_until = 32.0;
 
 fn darkening(cap_px: f64) f64 {
