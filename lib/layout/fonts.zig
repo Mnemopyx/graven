@@ -227,8 +227,10 @@ const operators: []const engine.style.Range = &.{
 
 const lib_math: FontName = .{ .family = "Libertinus Math", .style = "Regular" };
 
-/// Mathematical bold Greek (U+1D6A8..U+1D6E1).
-const bold_greek: []const engine.style.Range = &.{.{ .first = 0x1D6A8, .last = 0x1D6E1 }};
+/// Mathematical bold Greek capitals (U+1D6A8..U+1D6C1), and its small
+/// letters and symbols (U+1D6C2..U+1D6E1: π among them).
+const bold_greek_capitals: []const engine.style.Range = &.{.{ .first = 0x1D6A8, .last = 0x1D6C1 }};
+const bold_greek_small: []const engine.style.Range = &.{.{ .first = 0x1D6C2, .last = 0x1D6E1 }};
 
 /// Mathematical italic (U+1D434..U+1D467) and Planck's h (U+210E), which
 /// stands in its gap.
@@ -251,7 +253,10 @@ pub const libertinus: Package = .{
         // Bold Greek, its bold I's stem as heavy as Geist's I's: already
         // so, so drawn as it is (growing it fills the acute corners where
         // its hairlines meet its thick strokes, and Σ reads as slanted).
-        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek }, .weight = .{ .match = .{ .char = 0x1D408 } } },
+        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_capitals }, .weight = .{ .match = .{ .char = 0x1D408 } } },
+        // Small bold Greek (π), 1.25 times as the variables are: small
+        // letters set beside Geist's.
+        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_small }, .scale = 1.25, .weight = .{ .match = .{ .char = 0x1D408 } } },
         // Italic variables, 1.25 times (their x-height, 0.68 of their cap
         // height against Geist's 0.75, then more, for detail),
         // their italic I's stem matched, and a touch more: their hairlines
@@ -468,11 +473,14 @@ test "the Libertinus package: Geist text; Libertinus Math operators, bold Greek 
     const p = package("libertinus").?;
     try testing.expectEqualStrings("Geist", p.text.family);
     try testing.expectEqual(engine.style.Greek.math_bold, p.greek);
-    try testing.expectEqual(@as(usize, 4), p.members.len);
+    try testing.expectEqual(@as(usize, 5), p.members.len);
     try testing.expectEqual(@as(f64, 1.25), p.members[2].scale);
-    try testing.expect(p.members[2].coverage.has(0x1D465)); // italic x
+    try testing.expect(p.members[2].coverage.has(0x1D6D1)); // bold pi
+    try testing.expectEqual(@as(f64, 1.25), p.members[3].scale);
+    try testing.expect(p.members[3].coverage.has(0x1D465)); // italic x
     try testing.expectEqual(@as(u21, 0x2212), p.members[0].weight.match.char);
     try testing.expect(p.members[0].coverage.has(0x2264)); // <=
     try testing.expect(p.members[1].coverage.has(0x1D6BA)); // bold Sigma
+    try testing.expect(!p.members[1].coverage.has(0x1D6D1));
     try testing.expect(package("stix-two") != null);
 }
