@@ -92,10 +92,10 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 
 The README sets the goals: HP-15C keypad legends first, aircraft panels last, SVG and STEP output, and checked production output.
 
-- **STEP export:** the bridge exists but nothing calls it.
-- **Design-rule checks and per-process output:** the README lists `geometry` and `drc` modules as "to come". Gerber and mirrored output for the manufacturing processes are not started.
+- **Design-rule checks and per-process output:** beyond margins and the layer-height flag, not started. Gerber and mirrored output for other processes are not started.
+- **Manufacture mode in the GUI:** not started; 3MF and STEP come from the command line.
 - **Proof sheet:** not started.
-- **HP-15C sample:** the first target application has no sample yet. The only sample is the PC keyboard.
+- **HP-15C sample:** a rough keypad exists (from memory and guesses; key size given); real measurements and EverCalc's legend list are still to come.
 
 ## Housekeeping
 
@@ -104,7 +104,8 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
   - the drawn hyphen ignores the word's bold or italic;
   - forced wraps and hyphen breaks work in rows only, not in columns;
   - copying text keeps no formatting.
-- **`ui-dev` is 81 commits ahead of `main`.**
+- **`ui-dev` is 33 commits ahead of `main`** (with this one); fast-forward `main` when the owner asks.
+- **Open threads and next steps:** [handoff.md](handoff.md). **The GUI as it stands:** [ui-inventory.md](ui-inventory.md).
 
 ## Display: MSDF glyphs (in progress)
 

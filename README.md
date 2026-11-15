@@ -9,14 +9,15 @@ Legends on a panel are recognised as pictures more than read, so Graven treats e
 - **Outputs:** SVG, and STEP (with colours and names) through an OCCT bridge.
 - **Processes, in order:** colour FDM 3D printing, PCB legends, dye sublimation.
 
-The full design is in the [Graven design blueprint](https://claude.ai/artifact/QGhg35uPYQE2q4crhg2uFQ).
+The full design is in the [Graven design blueprint](https://claude.ai/artifact/QGhg35uPYQE2q4crhg2uFQ). For working on the code, start with [CLAUDE.md](CLAUDE.md) (setup, commands, conventions), [docs/handoff.md](docs/handoff.md) (open threads) and [docs/ui-inventory.md](docs/ui-inventory.md) (the GUI as it stands).
 
 ## Status
 
 Early, with a working editor. For the full inventory, what is agreed but not built, and the gaps against the goals above, see [docs/status.md](docs/status.md).
 
 **Label engine.**
-- KaTeX-style label markup (`graven parse`), rendered in a style context (`graven label`).
+- KaTeX-style label markup (`graven parse`), rendered in a style context (`graven label`). Text with `$…$` has math between the dollars, as in KaTeX.
+- Composed fonts and math font packages (`stix-two`, `libertinus`): faces by role, each sized, shifted and weighted to match the text face; drawn arrows in the HP keypad style.
 - HarfBuzz shaping and exact glyph outlines (lines, quadratics, cubics).
 - Scripts, `\frac`, `\sqrt`, accents, and TeX atom-class spacing.
 - Bold, italic and math-alphabet variants, plus underline and strikethrough.
@@ -41,6 +42,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 - **Selection and moving:** Ctrl-click selects. Moves and resizes stay within constraints.
 - **Background reflow:** changes that spread across pages reflow on a worker thread.
 - **Export:** File › Export SVG writes the canvas.
+- **Text display:** glyphs drawn from multi-channel distance fields (made off the drawing thread, at three resolutions), crisp on the pixel grid; exact outlines remain the truth for export and checks.
 
 **Documents.**
 - `.graven` files keep their undo history across saves.
@@ -51,24 +53,30 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 **Fonts.**
 - `graven-fonts` and the editor's Fonts window index, search and compare installed fonts and build composed fonts.
 
+**Manufacture.**
+- **Colour 3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font|package> <plate.3mf> <keys.3mf>`); `graven-fab` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
+
+**Samples.** The PC keyboard (its output is the regression check) and a rough HP-15C keypad (`graven hp15c libertinus plate.svg keys.svg`).
+
 **Not yet built.**
-- **3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf>`: one part per colour, the union of its bands, or one per colour and band; standing on the part's bottom, or turned over onto its top); `graven-fab` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
-- **Design-rule checks and per-process output:** not started.
-- **Proof sheet:** not started.
-- **HP-15C sample:** not started. The PC keyboard is the only sample, and its output is the regression check.
+- **Design-rule checks and per-process output:** not started beyond a layer-height flag.
+- **Manufacture mode in the GUI.**
+- **Proof sheet.**
+- **Engine v2** (planned): a glyphic styling and positioning engine beside the current one; see the blueprint.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic), contours, exact areas and bounds; `spring`, the 1-D tension solver |
+| `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic, conic), contours, exact areas and bounds; exact booleans, overlap removal, earcut, outline growth, MSDF fields; `spring`, the 1-D tension solver |
 | `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
-| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `output` (SVG so far); `geometry` and `drc` to come |
+| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `fonts` (composed fonts, math packages), `fab` and `threemf` (colour FDM), `output` (SVG), `drc` (margins) |
+| `lib/sketch` | Parametric sketches and their solver |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
 | `docs` | Project notes: [status.md](docs/status.md), what exists today and what is still to come |
 | `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
-| `apps/samples` | Sample models built through the library actions (PC keyboard) |
+| `apps/samples` | Sample models built through the library actions (PC keyboard, HP-15C keypad) |
 | `lib/testdata` | Test fonts with known glyph areas, made by `tools/make-test-fonts.py` |
 | `apps/cli` | `graven` command-line tool |
 | `bridge/occt` | Optional OCCT bridge: a C shim over OCCT that writes STEP with XDE names and colours |
