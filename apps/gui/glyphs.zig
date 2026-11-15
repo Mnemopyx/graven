@@ -20,9 +20,21 @@ const geom = engine.geom;
 
 const Allocator = std.mem.Allocator;
 
-/// Texels per cap height in a glyph's field, and its range in texels.
+/// Texels per cap height in a glyph's field, and its range in texels, at
+/// resolution level 0; each level doubles both (the range stays an eighth
+/// of the cap height, so growth up to that can be drawn). A field must
+/// have at least a texel for every two pixels it is drawn at, or details
+/// thinner than a texel (a gap a grown stroke nearly closes) break up:
+/// level 0 to a 64 px cap height, 1 to 128, 2 past that.
 const field_texels = 32.0;
 const field_range = 4.0;
+const max_level = 2;
+
+fn levelFor(cap_px: f64) u2 {
+    var level: u2 = 0;
+    while (level < max_level and cap_px > field_texels * 2 * @as(f64, @floatFromInt(@as(u32, 1) << level))) level += 1;
+    return level;
+}
 /// An atlas page's side, pixels, and how many pages before the atlas starts
 /// again.
 const page_side = 1024;
@@ -30,7 +42,7 @@ const max_pages = 8;
 /// Glyphs drawn larger than this (raster height, pixels) are drawn exactly.
 pub const max_px = 256.0;
 
-const FieldKey = struct { face: *engine.Face, gid: u32 };
+const FieldKey = struct { face: *engine.Face, gid: u32, level: u2 };
 const SlotKey = struct {
     face: *engine.Face,
     gid: u32,
@@ -124,12 +136,13 @@ pub const Atlas = struct {
         }
     }
 
-    fn field(at: *Atlas, face: *engine.Face, gid: u32) !?geom.msdf.Field {
-        const key: FieldKey = .{ .face = face, .gid = gid };
+    fn field(at: *Atlas, face: *engine.Face, gid: u32, level: u2) !?geom.msdf.Field {
+        const key: FieldKey = .{ .face = face, .gid = gid, .level = level };
         if (at.fields.get(key)) |f| return f;
         const o = try face.outline(gid);
         const cap = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
-        const f: ?geom.msdf.Field = if (o.contours.len == 0) null else try geom.msdf.generate(at.gpa, o, .{ .scale = field_texels / cap, .range = field_range });
+        const k: f64 = @floatFromInt(@as(u32, 1) << level);
+        const f: ?geom.msdf.Field = if (o.contours.len == 0) null else try geom.msdf.generate(at.gpa, o, .{ .scale = field_texels * k / cap, .range = field_range * k });
         try at.fields.put(at.gpa, key, f);
         at.made_fields += 1;
         return f;
@@ -148,17 +161,21 @@ pub const Atlas = struct {
         const key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step };
         if (at.slots.get(key)) |sl| return sl;
 
-        const f = (try at.field(face, gid)) orelse {
-            try at.slots.put(at.gpa, key, null);
-            return null;
-        };
         const g = @as(f64, @floatFromInt(grow_step)) / 8 / s;
         const b = (try face.outline(gid)).bounds();
+        if (b.isEmpty()) {
+            try at.slots.put(at.gpa, key, null);
+            return null;
+        }
         const unit = 1 / s;
         // A pixel of margin all round, past the growth.
         const w: u32 = @intFromFloat(@ceil((b.width() + 2 * g) * s + 2));
         const h: u32 = @intFromFloat(@ceil((b.height() + 2 * g) * s + 2));
         if (@as(f64, @floatFromInt(@max(w, h))) > max_px) return null;
+        const f = (try at.field(face, gid, levelFor(cap0 * s))) orelse {
+            try at.slots.put(at.gpa, key, null);
+            return null;
+        };
         const origin: geom.Point = .{ .x = b.x0 - g - unit, .y = b.y0 - g - unit };
 
         const sl = try at.raster(f, w, h, .{ .a = unit, .d = unit, .e = origin.x, .f = origin.y }, unit, g, origin, unit);
@@ -183,16 +200,18 @@ pub const Atlas = struct {
         const grow_step: i16 = @intFromFloat(@round((@max(0, grow) * sx + darkening(cap0 * sx)) * 8));
         const key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step, .phase = phase };
         if (at.slots.get(key)) |sl| return sl;
-        const f = (try at.field(face, gid)) orelse {
-            try at.slots.put(at.gpa, key, null);
-            return null;
-        };
-        const cap = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
+        const cap = cap0;
         // The cap height on whole pixels (from 4 pixels up).
         const cap_px = cap * sx;
         const sy = if (cap_px >= 4) @round(cap_px) / cap else sx;
         const g = @as(f64, @floatFromInt(grow_step)) / 8 / sx;
         const b = (try face.outline(gid)).bounds();
+        if (b.isEmpty()) {
+            try at.slots.put(at.gpa, key, null);
+            return null;
+        }
+        // Too large to raster: drawn exactly (decided before a field is made).
+        if (@max(b.width(), b.height()) * sx > max_px) return null;
         const ph = @as(f64, @floatFromInt(phase)) / 4;
         // Pixel edges fall at font x = (k - ph) / sx and y = m / sy.
         const k: i32 = @as(i32, @intFromFloat(@floor((b.x0 - g) * sx + ph))) - 1;
@@ -202,6 +221,10 @@ pub const Atlas = struct {
         const w: u32 = @intCast(kr - k);
         const h: u32 = @intCast(mt - m);
         if (@as(f64, @floatFromInt(@max(w, h))) > max_px) return null;
+        const f = (try at.field(face, gid, levelFor(cap_px))) orelse {
+            try at.slots.put(at.gpa, key, null);
+            return null;
+        };
         const origin: geom.Point = .{ .x = (@as(f64, @floatFromInt(k)) - ph) / sx, .y = @as(f64, @floatFromInt(m)) / sy };
         var sl = try at.raster(f, w, h, .{ .a = 1 / sx, .d = 1 / sy, .e = origin.x, .f = origin.y }, 1 / @sqrt(sx * sy), g, origin, 1 / sx);
         sl.aligned = .{ .left = k, .bottom = -m };

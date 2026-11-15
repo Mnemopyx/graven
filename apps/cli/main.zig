@@ -174,7 +174,7 @@ fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, te
         const g = item.glyph;
         const o = try face.outline(g.gid);
         const t0 = std.Io.Clock.awake.now(io);
-        const f = try geom.msdf.generate(a, o, .{ .scale = texels / cap });
+        const f = try geom.msdf.generate(a, o, .{ .scale = texels / cap, .range = 4 * texels / 32 });
         const t1 = std.Io.Clock.awake.now(io);
         const ns: u64 = @intCast(t0.durationTo(t1).toNanoseconds());
         total_ns += ns;

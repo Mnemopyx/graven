@@ -4189,6 +4189,20 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const engine.Render, at: geom.P
         const mm = @sqrt(@abs(m.a * m.d - m.b * m.c));
         if (!(mm > 0)) continue;
         const map: Map = .{ .m = m, .at = at, .area = area };
+        // Off the canvas: nothing to draw, and no field or raster made for it.
+        {
+            const ob = (face.outline(g.gid) catch return false).bounds();
+            if (ob.isEmpty()) continue;
+            var lo: dvui.Point.Physical = .{ .x = std.math.inf(f32), .y = std.math.inf(f32) };
+            var hi: dvui.Point.Physical = .{ .x = -std.math.inf(f32), .y = -std.math.inf(f32) };
+            const pad = g.grow / mm;
+            for ([_]geom.Point{ .{ .x = ob.x0 - pad, .y = ob.y0 - pad }, .{ .x = ob.x1 + pad, .y = ob.y0 - pad }, .{ .x = ob.x1 + pad, .y = ob.y1 + pad }, .{ .x = ob.x0 - pad, .y = ob.y1 + pad } }) |c| {
+                const q = map.map(c);
+                lo = .{ .x = @min(lo.x, q.x), .y = @min(lo.y, q.y) };
+                hi = .{ .x = @max(hi.x, q.x), .y = @max(hi.y, q.y) };
+            }
+            if (hi.x < area.x - 2 or lo.x > area.x + area.w + 2 or hi.y < area.y - 2 or lo.y > area.y + area.h + 2) continue;
+        }
         // Upright (no rotation, mirror or slant): on the pixel grid.
         const upright = m.b == 0 and m.c == 0 and m.a > 0 and m.d > 0;
         const color: dvui.Color.PMA = .fromColor(if (g.faint) ink.opacity(0.35) else ink);
