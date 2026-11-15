@@ -72,7 +72,7 @@ pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
     }.of;
     return .{
         .key = try m.addStyle("15C key", spec(1.9, fallbacks)),
-        .g = try m.addStyle("15C g", spec(1.1, fallbacks)),
+        .g = try m.addStyle("15C g", spec(1.25, fallbacks)),
         .f = try m.addStyle("15C f", spec(1.4, fallbacks)),
     };
 }
@@ -154,7 +154,7 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
         .face_inset = .all(0.4),
         .tracks = &.{
             .{ .name = "top", .style = styles.key, .alignment = .centre, .place = .{ .inset = .{ .top = 0.8, .bottom = 3.0 } } },
-            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = 4.8 } } },
+            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = 5.1 } } },
         },
     });
     // ENTER: its legend in a column track down the key, a character at a
@@ -168,7 +168,7 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
             // One column wide (a cap height and a half at the 1.9 mm caps
             // the app gives it), so the letters centre on the key.
             .{ .name = "top", .style = styles.key, .major = .column, .alignment = .centre, .place = .{ .inset = .{ .top = 1.0, .bottom = 3.0, .left = 2.675, .right = 2.675 } } },
-            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = enter_face_h - 2.4 } } },
+            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = enter_face_h - 2.1 } } },
         },
     });
     // The gold legend above a hole: only its track.
