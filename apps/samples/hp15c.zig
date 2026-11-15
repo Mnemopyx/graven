@@ -75,41 +75,44 @@ pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
 }
 
 /// The keys, row by row: the white legend, the blue g, and the gold f.
+/// Math is between dollars, as in KaTeX: its letters are variables (set
+/// italic, from a package's face for variables), words in it \mathrm;
+/// outside the dollars is text.
 /// ENTER (row 3, column 6) spans rows 3 and 4; its row 4 point is empty.
 const Key = struct { top: []const u8, g: []const u8 = "", f: []const u8 = "" };
 
 const rows = [4][10]Key{
     .{
-        .{ .top = "\\sqrt{x}", .g = "x^2", .f = "A" },
-        .{ .top = "e^x", .g = "LN", .f = "B" },
-        .{ .top = "10^x", .g = "LOG", .f = "C" },
-        .{ .top = "y^x", .g = "\\%", .f = "D" },
-        .{ .top = "1/x", .g = "Δ\\%", .f = "E" },
+        .{ .top = "$\\sqrt{x}$", .g = "$x^2$", .f = "A" },
+        .{ .top = "$e^x$", .g = "LN", .f = "B" },
+        .{ .top = "$10^x$", .g = "LOG", .f = "C" },
+        .{ .top = "$y^x$", .g = "\\%", .f = "D" },
+        .{ .top = "$1/x$", .g = "Δ\\%", .f = "E" },
         .{ .top = "CHS", .g = "ABS", .f = "MATRIX" },
         .{ .top = "7", .g = "DEG", .f = "FIX" },
         .{ .top = "8", .g = "RAD", .f = "SCI" },
         .{ .top = "9", .g = "GRD", .f = "ENG" },
-        .{ .top = "÷", .g = "x<0", .f = "x≤y" },
+        .{ .top = "÷", .g = "$x<0$", .f = "$x\\le y$" },
     },
     .{
         .{ .top = "SST", .g = "BST", .f = "LBL" },
-        .{ .top = "GTO", .g = "HYP^{-1}", .f = "HYP" },
-        .{ .top = "SIN", .g = "SIN^{-1}", .f = "DIM" },
-        .{ .top = "COS", .g = "COS^{-1}", .f = "(i)" },
-        .{ .top = "TAN", .g = "TAN^{-1}", .f = "I" },
+        .{ .top = "GTO", .g = "$\\mathrm{HYP}^{-1}$", .f = "HYP" },
+        .{ .top = "SIN", .g = "$\\mathrm{SIN}^{-1}$", .f = "DIM" },
+        .{ .top = "COS", .g = "$\\mathrm{COS}^{-1}$", .f = "(i)" },
+        .{ .top = "TAN", .g = "$\\mathrm{TAN}^{-1}$", .f = "I" },
         .{ .top = "EEX", .g = "π", .f = "RESULT" },
-        .{ .top = "4", .g = "SF", .f = "x⇄" },
+        .{ .top = "4", .g = "SF", .f = "$x$⇄" },
         .{ .top = "5", .g = "CF", .f = "DSE" },
         .{ .top = "6", .g = "F?", .f = "ISG" },
-        .{ .top = "×", .g = "x=0", .f = "∫_x^y" },
+        .{ .top = "×", .g = "$x=0$", .f = "$\\int_x^y$" },
     },
     .{
         .{ .top = "R/S", .g = "P/R", .f = "PSE" },
         .{ .top = "GSB", .g = "RTN", .f = "Σ" },
         .{ .top = "R↓", .g = "R↑", .f = "PRGM" },
-        .{ .top = "x⇄y", .g = "RND", .f = "REG" },
-        .{ .top = "←", .g = "CLx", .f = "PREFIX" },
-        .{ .top = "ENTER", .g = "LSTx", .f = "RAN#" },
+        .{ .top = "$x$⇄$y$", .g = "RND", .f = "REG" },
+        .{ .top = "←", .g = "CL$x$", .f = "PREFIX" },
+        .{ .top = "ENTER", .g = "LST$x$", .f = "RAN#" },
         .{ .top = "1", .g = "→P", .f = "→R" },
         .{ .top = "2", .g = "→H", .f = "→H.MS" },
         .{ .top = "3", .g = "→DEG", .f = "→RAD" },
@@ -122,10 +125,10 @@ const rows = [4][10]Key{
         .{ .top = "STO", .g = "INT", .f = "FRAC" },
         .{ .top = "RCL", .g = "MEM", .f = "USER" },
         .{ .top = "" },
-        .{ .top = "0", .g = "\\bar{x}", .f = "x!" },
-        .{ .top = ".", .g = "s", .f = "ŷ,r" },
+        .{ .top = "0", .g = "$\\bar{x}$", .f = "$x!$" },
+        .{ .top = ".", .g = "$s$", .f = "$\\hat{y},r$" },
         .{ .top = "Σ+", .g = "Σ−", .f = "L.R." },
-        .{ .top = "+", .g = "Cy,x", .f = "Py,x" },
+        .{ .top = "+", .g = "$\\mathrm{C}_{y,x}$", .f = "$\\mathrm{P}_{y,x}$" },
     },
 };
 

@@ -9,7 +9,8 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 ### Label engine (`lib/engine`, `lib/font`, `lib/geom`)
 
 - **Shaping and outlines:** HarfBuzz shaping. Glyph outlines are kept exact (lines, quadratics and cubics), and cap height is measured from the outlines.
-- **Markup:** KaTeX-style label markup with a strict parse and a lenient preview parse.
+- **Markup:** KaTeX-style label markup with a strict parse and a lenient preview parse. A label with `$…$` is text with math between the dollars, as in KaTeX: math's letters are variables (italic; from a math font package's face for variables), words in it `\mathrm`; scripts belong in math. A label without dollars is all one markup, as before.
+- **Math font packages:** `stix-two` (Geist SemiBold text, STIX Two Math for constants and symbols, STIX Two Text Bold Greek, TeX Gyre Schola Bold Italic variables), fetched by `scripts/fetch-fonts.py`; `graven hp15c stix-two …` sets the keypad in it.
   - Superscripts and subscripts, `\frac`, `\sqrt`, accents and math spaces.
   - TeX atom-class spacing.
   - Variants: bold, italic and math alphabets.

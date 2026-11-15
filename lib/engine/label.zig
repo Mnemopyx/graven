@@ -753,7 +753,8 @@ const Builder = struct {
         return switch (t.variant.shape) {
             .italic => true,
             .upright => false,
-            .default => !t.variant.text and b.ctx.spec.letters == .italic,
+            // Math mode's letters are variables; elsewhere the style says.
+            .default => !t.variant.text and (t.variant.math or b.ctx.spec.letters == .italic),
         };
     }
 
@@ -1980,4 +1981,22 @@ test "a member for variables sets math's italic letters, and nothing else" {
     var ri = try renderTest(&ictx, "x");
     defer ri.deinit();
     try testing.expectEqual(@as(?FaceId, 2), ri.elements[0].face);
+}
+
+test "math mode's letters are variables: italic, from the member for variables" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.members = &.{.{ .upright = 2, .role = .variables }};
+    const ctx = try style.Context.init(&f.faces, spec);
+    // H in text upright from the main face; x in math, a variable.
+    var r = try renderTest(&ctx, "H$x$");
+    defer r.deinit();
+    try testing.expectEqual(@as(?FaceId, 0), r.elements[0].face);
+    try testing.expectEqual(@as(?FaceId, 2), r.elements[1].face);
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    // \mathrm in math stays upright: H from the main face.
+    var u = try renderTest(&ctx, "$\\mathrm{H}$");
+    defer u.deinit();
+    try testing.expectEqual(@as(?FaceId, 0), u.elements[0].face);
 }

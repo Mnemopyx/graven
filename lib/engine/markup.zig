@@ -55,10 +55,13 @@ pub const Variant = struct {
     /// subscript (\textsuperscript), which break with the words around
     /// them, unlike math scripts.
     script: Script = .none,
+    /// Inside $…$: math as KaTeX sets it, letters italic (variables) unless
+    /// asked otherwise (\mathrm), whatever the style's default.
+    math: bool = false,
 
     pub fn eql(a: Variant, b: Variant) bool {
         return a.shape == b.shape and a.bold == b.bold and a.alphabet == b.alphabet and a.text == b.text and
-            a.underline == b.underline and a.strike == b.strike and a.script == b.script;
+            a.underline == b.underline and a.strike == b.strike and a.script == b.script and a.math == b.math;
     }
 
     fn with(v: Variant, change: anytype) Variant {
@@ -172,6 +175,7 @@ pub const ErrorKind = enum {
     double_superscript,
     double_subscript,
     missing_argument,
+    unclosed_math,
 
     pub fn message(k: ErrorKind) []const u8 {
         return switch (k) {
@@ -189,6 +193,7 @@ pub const ErrorKind = enum {
             .double_superscript => "two superscripts on one base; use braces",
             .double_subscript => "two subscripts on one base; use braces",
             .missing_argument => "a missing argument",
+            .unclosed_math => "a '$' that is never closed",
         };
     }
 };
@@ -201,6 +206,20 @@ pub const Diagnostic = struct {
 };
 
 pub const Error = error{ Syntax, OutOfMemory };
+
+/// Whether `src` has math mode: an unescaped '$' outside comments. A label
+/// with none is all one markup, as before; one with any is text with math
+/// between dollars, as in KaTeX.
+pub fn hasMath(src: []const u8) bool {
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) switch (src[i]) {
+        '\\' => i += 1,
+        '%' => while (i < src.len and src[i] != '\n') : (i += 1) {},
+        '$' => return true,
+        else => {},
+    };
+    return false;
+}
 
 /// Parses `src` into a tree allocated from `arena`, with the built-in
 /// entity table. On error.Syntax, `diag` says what and where.
@@ -218,8 +237,8 @@ pub fn parsePreview(arena: Allocator, src: []const u8, names: *const entities.Ta
         return .{ .items = &.{}, .span = .{ .start = 0, .end = @intCast(src.len) } };
     }
     var unused: Diagnostic = undefined;
-    var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = &unused, .problems = problems };
-    const items = p.list(.{}, false, false) catch |err| switch (err) {
+    var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = &unused, .problems = problems, .dollars = hasMath(src) };
+    const items = p.list(p.topVariant(), false, p.dollars) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // Every failure is recovered from in preview.
         error.Syntax => unreachable,
@@ -234,8 +253,8 @@ pub fn parseWith(arena: Allocator, src: []const u8, names: *const entities.Table
         diag.* = .{ .kind = .invalid_utf8, .offset = 0 };
         return error.Syntax;
     }
-    var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = diag };
-    const items = try p.list(.{}, false, false);
+    var p: Parser = .{ .a = arena, .src = src, .names = names, .diag = diag, .dollars = hasMath(src) };
+    const items = try p.list(p.topVariant(), false, p.dollars);
     return .{ .items = items, .span = .{ .start = 0, .end = @intCast(src.len) } };
 }
 
@@ -348,6 +367,8 @@ const Parser = struct {
     /// Set for a preview parse: problems are recorded here and recovered
     /// from, rather than failing.
     problems: ?*std.ArrayList(Diagnostic) = null,
+    /// The label has math mode: text, with math between dollars.
+    dollars: bool = false,
 
     fn fail(p: *Parser, kind: ErrorKind, at: u32) Error {
         p.diag.* = .{ .kind = kind, .offset = at };
@@ -376,6 +397,11 @@ const Parser = struct {
 
     fn placeholder(at: u32) Node {
         return .{ .placeholder = .{ .span = .{ .start = at, .end = at } } };
+    }
+
+    /// The variant at the top: text, when the label has math mode.
+    fn topVariant(p: *const Parser) Variant {
+        return if (p.dollars) .{ .text = true } else .{};
     }
 
     fn peek(p: *Parser) ?u8 {
@@ -427,6 +453,25 @@ const Parser = struct {
                     p.i += 1;
                 },
                 '\\' => try p.command(&items, &run, variant, text_mode),
+                '$' => {
+                    if (!p.dollars) {
+                        try run.add(p.a, '$', p.i);
+                        p.i += 1;
+                        continue;
+                    }
+                    if (variant.math) {
+                        // The end of math: the math list ends here; a group
+                        // still open in it closes first.
+                        if (closing) try p.problem(.missing_close, open_at);
+                        break;
+                    }
+                    try run.flush(p.a, &items, variant);
+                    const start = p.i;
+                    p.i += 1;
+                    const math = try p.list(variant.with(.{ .math = true, .text = false, .shape = .default, .script = .none }), false, false);
+                    if (p.peek() == '$') p.i += 1 else try p.problem(.unclosed_math, start);
+                    try items.append(p.a, .{ .group = .{ .items = math, .span = .{ .start = start, .end = p.i } } });
+                },
                 else => {
                     const at = p.i;
                     const cp = p.char() orelse return p.fail(.invalid_utf8, at);
@@ -856,6 +901,7 @@ fn dumpNode(w: *std.Io.Writer, n: Node) std.Io.Writer.Error!void {
         .text => |t| {
             try w.writeAll(if (t.operator) "(op " else if (t.faint) "(faint " else "(text ");
             if (t.variant.text) try w.writeAll("text ");
+            if (t.variant.math) try w.writeAll("math ");
             if (t.variant.shape != .default) try w.print("{s} ", .{@tagName(t.variant.shape)});
             if (t.variant.bold) try w.writeAll("bold ");
             if (t.variant.alphabet != .normal) try w.print("{s} ", .{@tagName(t.variant.alphabet)});
@@ -944,6 +990,22 @@ test "scripts attach to the cluster, group or command before them" {
     try expectTree("y^x + 1", "(scripts (text \"y\") ^(text \"x\")) (text \" + 1\")");
     // A base with a combining mark stays one cluster.
     try expectTree("ex\\u{304}^2", "(text \"e\") (scripts (text \"x\u{0304}\") ^(text \"2\"))");
+}
+
+test "math mode: text outside dollars, math inside, as in KaTeX" {
+    // No dollars: all one markup, as before.
+    try expectTree("LOG", "(text \"LOG\")");
+    // Text, then math: the math a group of its own.
+    try expectTree("CL$x$", "(text text \"CL\") {(text math \"x\")}");
+    try expectTree("$x^2$", "{(scripts (text math \"x\") ^(text math \"2\"))}");
+    try expectTree("$\\mathrm{SIN}^{-1}$", "{(scripts {(text math upright \"SIN\")} ^{(text math \"-1\")})}");
+    // An escaped dollar is a dollar, and alone it makes no math mode.
+    try expectTree("\\$5", "(text \"$5\")");
+    try expectTree("\\$$x$", "(text text \"$\") {(text math \"x\")}");
+    // Scripts belong in math; a dollar must close.
+    try expectError("x^2 $y$", .script_in_text, 1);
+    try expectError("a $x", .unclosed_math, 2);
+    try expectError("${x$", .missing_close, 1);
 }
 
 test "named characters, raw codepoints, units and escapes" {
