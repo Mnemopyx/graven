@@ -110,6 +110,17 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
 
 `geom.msdf` makes a glyph's multi-channel signed distance field: overlaps resolved first, corners found and edges coloured, signed pseudo-distances per channel, signs checked against the true inside. Drawn back at any size its area is within 1 % of the outline's, corners stay sharp, and growing is a shifted threshold (the outline grown with round corners, as `geom.grow`). About 1.5 ms a glyph at 32 texels per cap height, made once per glyph. `graven msdf` draws a sheet of glyphs at several sizes, plain and grown. The GUI draws text from it (`apps/gui/glyphs.zig`): a field per face and glyph, sampled into coverage rasters by quarter octave of size and eighth of a pixel of growth, packed into 1024 px atlas pages (8, then the atlas starts again), each glyph a textured quad with its own transform; rules and drawn marks stay outlines, as does everything while construction is shown or when a glyph would raster past 256 px. Upright glyphs are rastered on the pixel grid at their exact size (64ths of an octave, horizontal phase in quarter pixels, baseline and cap height on pixel rows) and drawn texel for pixel; coverage takes a gamma of 2.2 (stem darkening, up to a set number of pixels fading out by 32 px cap height, is off by default) (`GRAVEN_TEXT_GAMMA`, `GRAVEN_TEXT_DARKEN`). `GRAVEN_EXACT_TEXT=1` draws text from its outlines instead, to compare; `GRAVEN_SAMPLE=hp15c|keyboard` and `GRAVEN_VIEW=cx,cy,ppm` open the app on a sample at a view. Next: the error-correction pass (faint specks where grown strokes merge), fields made off the drawing thread, least-recently-used eviction.
 
+### Text display: to do
+
+- Round the cap height up (when more than about 0.3 px past a whole pixel) rather than to the nearest pixel, so capitals' tops are not trimmed.
+- Fit vertical stems to pixel columns (stem detection and a per-size outline distortion, in the manner of FreeType's autohinter).
+- The MSDF error-correction pass, for faint specks where grown strokes merge.
+- Make glyph fields off the drawing thread: a new face's first frame takes about 2 ms a glyph (120 ms for the HP-15C keypad in a release build, against 21 ms drawing outlines); steady frames are 2 to 3 ms either way.
+- Least-recently-used eviction in the atlas, in place of starting again when its 8 pages are full.
+- Frame timing on a dense document.
+
+The status bar shows the average frame time over the last 30 s (building and drawing the UI, from the start of the frame to its end); `GRAVEN_FRAME_LOG=1` prints each frame's.
+
 ## Planned: engine v2
 
 A glyphic styling and positioning engine, written beside the v1 engine (`lib/engine`, which stays in use until v2 replaces it whole). Legends are stored as conceptual objects with typed parameters resolved through a cascade (font, package, style, element kind, legend, object), laid out in situ against the ground beneath them (track paths, segments, flows, process limits). KaTeX is a translation layer against it; objects carry tags for export. See the blueprint's "Engine v2" section for the stages.

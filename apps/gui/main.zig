@@ -1140,7 +1140,42 @@ fn dumpPrint(comptime fmt: []const u8, args: anytype) void {
     dump_svg.appendSlice(state.gpa, t) catch {};
 }
 
+/// Frame times over a sliding window: each frame's time from the start of
+/// `frame` to its end (building the UI and drawing it), kept for
+/// `frame_window_ns`, averaged for the status bar.
+const frame_window_ns: i96 = 30 * std.time.ns_per_s;
+const FrameSample = struct { at: i96, ns: i96 };
+var frame_samples: [8192]FrameSample = undefined;
+var frame_head: usize = 0;
+var frame_count: usize = 0;
+/// GRAVEN_FRAME_LOG set: each frame's time printed.
+var frame_log = false;
+
+fn recordFrame(at: i96, ns: i96) void {
+    frame_samples[(frame_head + frame_count) % frame_samples.len] = .{ .at = at, .ns = ns };
+    if (frame_count < frame_samples.len) frame_count += 1 else frame_head = (frame_head + 1) % frame_samples.len;
+    // Drop what has slid out of the window.
+    while (frame_count > 0 and at - frame_samples[frame_head].at > frame_window_ns) {
+        frame_head = (frame_head + 1) % frame_samples.len;
+        frame_count -= 1;
+    }
+}
+
+/// The average frame time in the window, ms, and how many frames it holds.
+fn frameAverage() struct { ms: f64, n: usize } {
+    if (frame_count == 0) return .{ .ms = 0, .n = 0 };
+    var total: i96 = 0;
+    for (0..frame_count) |k| total += frame_samples[(frame_head + k) % frame_samples.len].ns;
+    return .{ .ms = @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(frame_count)) / 1e6, .n = frame_count };
+}
+
 fn frame() !dvui.App.Result {
+    const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
+    defer {
+        const end: std.Io.Timestamp = .now(dvui.io, .awake);
+        recordFrame(end.nanoseconds, frame_start.durationTo(end).nanoseconds);
+        if (frame_log) std.debug.print("frame {d:.2} ms\n", .{@as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6});
+    }
     if (dump_path) |p| {
         dump_frame += 1;
         if (dump_svg.items.len > 0) {
@@ -1161,6 +1196,7 @@ fn frame() !dvui.App.Result {
         // GRAVEN_SAMPLE=hp15c or keyboard: a new canvas with that sample, for
         // trying the app (and its tests) without the menus.
         exact_text = std.c.getenv("GRAVEN_EXACT_TEXT") != null;
+        frame_log = std.c.getenv("GRAVEN_FRAME_LOG") != null;
         if (std.c.getenv("GRAVEN_DUMP_OUTLINES")) |v| dump_path = std.mem.span(v);
         if (std.c.getenv("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.gamma;
         if (std.c.getenv("GRAVEN_TEXT_DARKEN")) |v| glyphs.darken = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.darken;
@@ -7779,7 +7815,8 @@ fn statusContent() void {
 
     var right_buf: [160]u8 = undefined;
     const font = if (state.fonts.len > 0) state.fonts[state.font_choice].name else "-";
-    const right = std.fmt.bufPrint(&right_buf, "{s} · zoom {d:.2} px/mm · {d:.1} ms", .{ font, state.view.ppm, state.solve_ms }) catch "";
+    const fa = frameAverage();
+    const right = std.fmt.bufPrint(&right_buf, "{s} · {d:.1} px/mm · solve {d:.1} ms · frame {d:.1} ms", .{ font, state.view.ppm, state.solve_ms, fa.ms }) catch "";
     dvui.labelNoFmt(@src(), right, .{}, field.override(muted));
 }
 
