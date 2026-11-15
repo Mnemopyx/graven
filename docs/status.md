@@ -112,11 +112,12 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
 
 Fields come at three resolutions, chosen by the size a glyph is drawn: 32 texels per cap height up to a 64 px cap, 64 to 128 px, 128 past that (at least a texel for every two pixels; the range doubles with them, staying an eighth of the cap height). A gap a grown stroke nearly closes, drawn broken from a coarse field, is whole at the finer ones and matches the exact outline. Glyphs off the canvas are skipped before any field or raster is made. Release-build field times: about 4, 20 and 100 ms a glyph at the three levels.
 
+Fields are made off the drawing thread, by up to 4 worker threads (one fewer than the processors): the drawing thread asks for a field, keeps drawing the glyph from the finest coarser field it has (or the label from its outlines), and takes the finished fields in at the start of a frame; the workers wake it when some are done. Release build, HP-15C keypad, worst frame on opening: 139 to 205 ms with fields made inline, 22 to 56 ms now. `GRAVEN_FIELDS_INLINE=1` makes them inline, to compare.
+
 ### Text display: to do
 
 - Round the cap height up (when more than about 0.3 px past a whole pixel) rather than to the nearest pixel, so capitals' tops are not trimmed.
 - Fit vertical stems to pixel columns (stem detection and a per-size outline distortion, in the manner of FreeType's autohinter).
-- Make glyph fields off the drawing thread (most needed at the finer levels: zoomed in on large text, the first frame waits on 100 ms fields): a new face's first frame takes about 2 ms a glyph (120 ms for the HP-15C keypad in a release build, against 21 ms drawing outlines); steady frames are 2 to 3 ms either way.
 - Least-recently-used eviction in the atlas, in place of starting again when its 8 pages are full.
 - Frame timing on a dense document.
 

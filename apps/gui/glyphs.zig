@@ -46,6 +46,9 @@ const FieldKey = struct { face: *engine.Face, gid: u32, level: u2 };
 const SlotKey = struct {
     face: *engine.Face,
     gid: u32,
+    /// The field level it was made from: a coarser one stands in while the
+    /// right one is made.
+    level: u2 = 0,
     size: i16,
     grow: i16,
     /// Upright on the pixel grid (see `Atlas.alignedSlot`): its horizontal
@@ -97,8 +100,100 @@ const Page = struct {
     dirty: bool = false,
 };
 
+/// Makes glyph fields on threads of its own, so the drawing thread never
+/// waits on one: requests go in a queue, finished fields come back to be
+/// collected at the start of a frame, and `wake` asks for the frame that
+/// shows them.
+pub const FieldMaker = struct {
+    gpa: Allocator,
+    io: std.Io,
+    wake: *const fn () void,
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
+    threads: [4]?std.Thread = .{ null, null, null, null },
+    queue: std.ArrayList(Request) = .empty,
+    done: std.ArrayList(Done) = .empty,
+    stop: bool = false,
+
+    const Request = struct {
+        key: FieldKey,
+        generation: u32,
+        /// Its own copy of the outline (the face's cache is the drawing
+        /// thread's), freed with it.
+        arena: std.heap.ArenaAllocator,
+        outline: geom.Outline,
+        opts: geom.msdf.Options,
+    };
+    const Done = struct { key: FieldKey, generation: u32, field: ?geom.msdf.Field };
+
+    fn submit(fm: *FieldMaker, r: Request) void {
+        fm.mutex.lockUncancelable(fm.io);
+        defer fm.mutex.unlock(fm.io);
+        fm.queue.append(fm.gpa, r) catch {
+            var rr = r;
+            rr.arena.deinit();
+            return;
+        };
+        if (fm.threads[0] == null) {
+            const n = @min(fm.threads.len, @max(1, (std.Thread.getCpuCount() catch 2) -| 1));
+            for (fm.threads[0..n]) |*t| t.* = std.Thread.spawn(.{}, loop, .{fm}) catch null;
+        }
+        fm.cond.signal(fm.io);
+    }
+
+    fn loop(fm: *FieldMaker) void {
+        while (true) {
+            fm.mutex.lockUncancelable(fm.io);
+            while (fm.queue.items.len == 0 and !fm.stop) fm.cond.waitUncancelable(fm.io, &fm.mutex);
+            if (fm.stop) {
+                fm.mutex.unlock(fm.io);
+                return;
+            }
+            // The newest first: what was asked for last is most likely
+            // still in view.
+            var r = fm.queue.pop().?;
+            fm.mutex.unlock(fm.io);
+
+            const f = geom.msdf.generate(fm.gpa, r.outline, r.opts) catch null;
+            r.arena.deinit();
+
+            fm.mutex.lockUncancelable(fm.io);
+            fm.done.append(fm.gpa, .{ .key = r.key, .generation = r.generation, .field = f }) catch {
+                if (f) |ff| ff.deinit(fm.gpa);
+            };
+            fm.mutex.unlock(fm.io);
+            fm.wake();
+        }
+    }
+
+    /// Stops the threads (each finishes the field it is making) and frees
+    /// what is queued or done.
+    fn deinit(fm: *FieldMaker) void {
+        fm.mutex.lockUncancelable(fm.io);
+        fm.stop = true;
+        fm.cond.broadcast(fm.io);
+        fm.mutex.unlock(fm.io);
+        for (&fm.threads) |*t| if (t.*) |th| {
+            th.join();
+            t.* = null;
+        };
+        for (fm.queue.items) |*r| r.arena.deinit();
+        fm.queue.deinit(fm.gpa);
+        for (fm.done.items) |d| if (d.field) |f| f.deinit(fm.gpa);
+        fm.done.deinit(fm.gpa);
+    }
+};
+
 pub const Atlas = struct {
     gpa: Allocator,
+    /// Made off the drawing thread when set (see `startMaker`); else made
+    /// where asked for.
+    maker: ?*FieldMaker = null,
+    /// Fields asked of the maker and not yet back.
+    pending: std.AutoHashMapUnmanaged(FieldKey, void) = .empty,
+    /// Bumped when the fields are forgotten: fields made for an older
+    /// generation (of faces since freed) are dropped when they come back.
+    generation: u32 = 0,
     fields: std.AutoHashMapUnmanaged(FieldKey, ?geom.msdf.Field) = .empty,
     slots: std.AutoHashMapUnmanaged(SlotKey, ?Slot) = .empty,
     pages: std.ArrayList(Page) = .empty,
@@ -111,10 +206,44 @@ pub const Atlas = struct {
         return .{ .gpa = gpa };
     }
 
+    /// Makes fields off the drawing thread from now on; `wake` is called
+    /// when some are ready.
+    pub fn startMaker(at: *Atlas, io: std.Io, wake: *const fn () void) void {
+        if (at.maker != null) return;
+        const fm = at.gpa.create(FieldMaker) catch return;
+        fm.* = .{ .gpa = at.gpa, .io = io, .wake = wake };
+        at.maker = fm;
+    }
+
+    /// Takes in the fields made since the last frame; true if any came.
+    pub fn collect(at: *Atlas) bool {
+        const fm = at.maker orelse return false;
+        fm.mutex.lockUncancelable(fm.io);
+        defer fm.mutex.unlock(fm.io);
+        const any = fm.done.items.len > 0;
+        for (fm.done.items) |d| {
+            if (d.generation != at.generation) {
+                if (d.field) |f| f.deinit(at.gpa);
+                continue;
+            }
+            _ = at.pending.remove(d.key);
+            at.fields.put(at.gpa, d.key, d.field) catch if (d.field) |f| f.deinit(at.gpa);
+            at.made_fields += 1;
+        }
+        fm.done.clearRetainingCapacity();
+        return any;
+    }
+
     /// Frees the atlas's memory; its textures go with the window.
     pub fn deinit(at: *Atlas) void {
+        if (at.maker) |fm| {
+            fm.deinit();
+            at.gpa.destroy(fm);
+            at.maker = null;
+        }
         for (at.pages.items) |*p| p.texture = null;
         at.clear(true);
+        at.pending.deinit(at.gpa);
         at.fields.deinit(at.gpa);
         at.slots.deinit(at.gpa);
         at.pages.deinit(at.gpa);
@@ -133,19 +262,48 @@ pub const Atlas = struct {
             var it = at.fields.valueIterator();
             while (it.next()) |f| if (f.*) |ff| ff.deinit(at.gpa);
             at.fields.clearRetainingCapacity();
+            at.pending.clearRetainingCapacity();
+            at.generation +%= 1;
         }
     }
 
-    fn field(at: *Atlas, face: *engine.Face, gid: u32, level: u2) !?geom.msdf.Field {
+    /// A field for `gid` at `level`, or the finest coarser one made while
+    /// it is being made (the level used is returned); error.Pending when
+    /// none is ready yet. Made off the drawing thread when there is a maker.
+    fn field(at: *Atlas, face: *engine.Face, gid: u32, level: u2) !struct { field: ?geom.msdf.Field, level: u2 } {
         const key: FieldKey = .{ .face = face, .gid = gid, .level = level };
-        if (at.fields.get(key)) |f| return f;
+        if (at.fields.get(key)) |f| return .{ .field = f, .level = level };
         const o = try face.outline(gid);
         const cap = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
         const k: f64 = @floatFromInt(@as(u32, 1) << level);
-        const f: ?geom.msdf.Field = if (o.contours.len == 0) null else try geom.msdf.generate(at.gpa, o, .{ .scale = field_texels * k / cap, .range = field_range * k });
-        try at.fields.put(at.gpa, key, f);
-        at.made_fields += 1;
-        return f;
+        const opts: geom.msdf.Options = .{ .scale = field_texels * k / cap, .range = field_range * k };
+        const fm = at.maker orelse {
+            const f: ?geom.msdf.Field = if (o.contours.len == 0) null else try geom.msdf.generate(at.gpa, o, opts);
+            try at.fields.put(at.gpa, key, f);
+            at.made_fields += 1;
+            return .{ .field = f, .level = level };
+        };
+        if (o.contours.len == 0) {
+            try at.fields.put(at.gpa, key, null);
+            return .{ .field = null, .level = level };
+        }
+        if (!at.pending.contains(key)) {
+            // The maker's own copy of the outline.
+            var arena: std.heap.ArenaAllocator = .init(at.gpa);
+            const copy = copyOutline(arena.allocator(), o) catch {
+                arena.deinit();
+                return error.OutOfMemory;
+            };
+            try at.pending.put(at.gpa, key, {});
+            fm.submit(.{ .key = key, .generation = at.generation, .arena = arena, .outline = copy, .opts = opts });
+        }
+        // Meanwhile, the finest coarser field made.
+        var lv = level;
+        while (lv > 0) {
+            lv -= 1;
+            if (at.fields.get(.{ .face = face, .gid = gid, .level = lv })) |f| return .{ .field = f, .level = lv };
+        }
+        return error.Pending;
     }
 
     /// The raster of `gid` in `face` at `px_per_unit` pixels per font unit,
@@ -158,13 +316,15 @@ pub const Atlas = struct {
         const s = std.math.pow(f64, 2, @as(f64, @floatFromInt(size_step)) / 4);
         const cap0 = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
         const grow_step: i16 = @intFromFloat(@round((@max(0, grow) * s + darkening(cap0 * s)) * 8));
-        const key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step };
-        if (at.slots.get(key)) |sl| return sl;
+        const want = levelFor(cap0 * s);
+        // A raster made already at the right level: no field needed.
+        const want_key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step, .level = want };
+        if (at.slots.get(want_key)) |sl| return sl;
 
         const g = @as(f64, @floatFromInt(grow_step)) / 8 / s;
         const b = (try face.outline(gid)).bounds();
         if (b.isEmpty()) {
-            try at.slots.put(at.gpa, key, null);
+            try at.slots.put(at.gpa, want_key, null);
             return null;
         }
         const unit = 1 / s;
@@ -172,7 +332,11 @@ pub const Atlas = struct {
         const w: u32 = @intFromFloat(@ceil((b.width() + 2 * g) * s + 2));
         const h: u32 = @intFromFloat(@ceil((b.height() + 2 * g) * s + 2));
         if (@as(f64, @floatFromInt(@max(w, h))) > max_px) return null;
-        const f = (try at.field(face, gid, levelFor(cap0 * s))) orelse {
+        const got = try at.field(face, gid, want);
+        var key = want_key;
+        key.level = got.level;
+        if (at.slots.get(key)) |sl| return sl;
+        const f = got.field orelse {
             try at.slots.put(at.gpa, key, null);
             return null;
         };
@@ -198,16 +362,17 @@ pub const Atlas = struct {
         const sx = std.math.pow(f64, 2, @as(f64, @floatFromInt(size_step)) / 64);
         const cap0 = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
         const grow_step: i16 = @intFromFloat(@round((@max(0, grow) * sx + darkening(cap0 * sx)) * 8));
-        const key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step, .phase = phase };
-        if (at.slots.get(key)) |sl| return sl;
         const cap = cap0;
         // The cap height on whole pixels (from 4 pixels up).
         const cap_px = cap * sx;
+        const want = levelFor(cap_px);
+        const want_key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step, .phase = phase, .level = want };
+        if (at.slots.get(want_key)) |sl| return sl;
         const sy = if (cap_px >= 4) @round(cap_px) / cap else sx;
         const g = @as(f64, @floatFromInt(grow_step)) / 8 / sx;
         const b = (try face.outline(gid)).bounds();
         if (b.isEmpty()) {
-            try at.slots.put(at.gpa, key, null);
+            try at.slots.put(at.gpa, want_key, null);
             return null;
         }
         // Too large to raster: drawn exactly (decided before a field is made).
@@ -221,7 +386,11 @@ pub const Atlas = struct {
         const w: u32 = @intCast(kr - k);
         const h: u32 = @intCast(mt - m);
         if (@as(f64, @floatFromInt(@max(w, h))) > max_px) return null;
-        const f = (try at.field(face, gid, levelFor(cap_px))) orelse {
+        const got = try at.field(face, gid, want);
+        var key = want_key;
+        key.level = got.level;
+        if (at.slots.get(key)) |sl| return sl;
+        const f = got.field orelse {
             try at.slots.put(at.gpa, key, null);
             return null;
         };
@@ -302,6 +471,12 @@ pub const Atlas = struct {
         return at.pages.items[page].texture;
     }
 };
+
+fn copyOutline(a: Allocator, o: geom.Outline) Allocator.Error!geom.Outline {
+    const contours = try a.alloc(geom.Contour, o.contours.len);
+    for (o.contours, contours) |c, *d| d.* = .{ .segments = try a.dupe(geom.Segment, c.segments) };
+    return .{ .contours = contours };
+}
 
 /// A quad to draw: its corners on screen (bottom-left, bottom-right,
 /// top-right, top-left of the raster) and its texture coordinates.

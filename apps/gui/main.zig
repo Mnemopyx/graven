@@ -946,7 +946,12 @@ var exact_text = false;
 var atlas: ?glyphs.Atlas = null;
 
 fn glyphAtlas() *glyphs.Atlas {
-    if (atlas == null) atlas = .init(state.gpa);
+    if (atlas == null) {
+        atlas = .init(state.gpa);
+        // GRAVEN_FIELDS_INLINE set: fields made on the drawing thread (to
+        // compare).
+        if (std.c.getenv("GRAVEN_FIELDS_INLINE") == null) atlas.?.startMaker(dvui.io, wakeGui);
+    }
     return &atlas.?;
 }
 
@@ -1176,6 +1181,8 @@ fn frame() !dvui.App.Result {
         recordFrame(end.nanoseconds, frame_start.durationTo(end).nanoseconds);
         if (frame_log) std.debug.print("frame {d:.2} ms\n", .{@as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6});
     }
+    // Glyph fields made since the last frame.
+    if (atlas) |*ga| _ = ga.collect();
     if (dump_path) |p| {
         dump_frame += 1;
         if (dump_svg.items.len > 0) {
