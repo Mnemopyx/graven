@@ -138,27 +138,43 @@ pub const Face = struct {
     }
 
     /// The vertical stem of capital I at half its height, font units: a
-    /// measure of the face's weight. Null if the face has no I. (The
-    /// outermost crossings of a horizontal line through I's middle; a
-    /// serif I has none there.)
+    /// measure of the face's weight. Null if the face has no I.
     pub fn stem(self: *Face) Error!?f64 {
-        const gid = self.glyph('I') orelse return null;
+        return self.stroke('I', .vertical);
+    }
+
+    pub const Stroke = enum { vertical, horizontal };
+
+    /// The thickness of `cp`'s stroke through its middle, font units: a
+    /// vertical stroke's (an I's stem) across a horizontal line at half its
+    /// height, or a horizontal stroke's (a minus sign's bar) across a
+    /// vertical line at half its width. Null if the face has no such glyph.
+    /// (The outermost crossings; a serif I has none there but its stem's.)
+    pub fn stroke(self: *Face, cp: u21, which: Stroke) Error!?f64 {
+        const gid = self.glyph(cp) orelse return null;
         const o = try self.outline(gid);
         const b = o.bounds();
         if (b.isEmpty()) return null;
-        const y = (b.y0 + b.y1) / 2;
+        const vertical = which == .vertical;
+        // Measured along u across a line at v = mid: (x, y) for a vertical
+        // stroke, (y, x) for a horizontal one.
+        const mid = if (vertical) (b.y0 + b.y1) / 2 else (b.x0 + b.x1) / 2;
         var lo = std.math.inf(f64);
         var hi = -std.math.inf(f64);
         for (o.contours) |c| for (c.segments) |seg| {
-            // Sampled finely: an I's sides are straight or nearly so.
+            // Sampled finely: strokes are straight or nearly so.
             const n: usize = if (seg == .line) 1 else 64;
             var prev = seg.start();
             for (1..n + 1) |i| {
                 const p = seg.at(@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n)));
-                if ((prev.y <= y and y < p.y) or (p.y <= y and y < prev.y)) {
-                    const x = prev.x + (y - prev.y) * (p.x - prev.x) / (p.y - prev.y);
-                    lo = @min(lo, x);
-                    hi = @max(hi, x);
+                const pv = if (vertical) prev.y else prev.x;
+                const qv = if (vertical) p.y else p.x;
+                const pu = if (vertical) prev.x else prev.y;
+                const qu = if (vertical) p.x else p.y;
+                if ((pv <= mid and mid < qv) or (qv <= mid and mid < pv)) {
+                    const u = pu + (mid - pv) * (qu - pu) / (qv - pv);
+                    lo = @min(lo, u);
+                    hi = @max(hi, u);
                 }
                 prev = p;
             }

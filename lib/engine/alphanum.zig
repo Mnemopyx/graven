@@ -83,6 +83,26 @@ pub fn remap(cp: u21, alphabet: Alphabet, bold: bool, italic: bool) ?u21 {
     return hole(mapped) orelse mapped;
 }
 
+/// Greek letter `cp` (U+0391..U+03A9, U+03B1..U+03C9) as Unicode's
+/// mathematical bold Greek, or null for anything else.
+pub fn boldGreek(cp: u21) ?u21 {
+    return switch (cp) {
+        0x0391...0x03A1 => 0x1D6A8 + (cp - 0x0391),
+        0x03A3...0x03A9 => 0x1D6BA + (cp - 0x03A3),
+        0x03B1...0x03C9 => 0x1D6C2 + (cp - 0x03B1),
+        else => null,
+    };
+}
+
+test "Greek maps to mathematical bold Greek, around the gap at U+03A2" {
+    const t = std.testing;
+    try t.expectEqual(@as(?u21, 0x1D6AB), boldGreek(0x0394)); // Delta
+    try t.expectEqual(@as(?u21, 0x1D6BA), boldGreek(0x03A3)); // Sigma
+    try t.expectEqual(@as(?u21, 0x1D6D1), boldGreek(0x03C0)); // pi
+    try t.expectEqual(@as(?u21, null), boldGreek(0x03A2));
+    try t.expectEqual(@as(?u21, null), boldGreek('A'));
+}
+
 test "letters map into the block, holes to Letterlike Symbols" {
     const t = std.testing;
     try t.expectEqual(0x1D538, remap('A', .double_struck, false, false));

@@ -173,6 +173,7 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
             if (spec.bold_italic == spec.upright) spec.bold_italic = null;
             spec.members = r.members.items[span.start..][0..span.len];
             spec.math = try s.optFace(cf.id, cf.math);
+            spec.greek = cf.greek;
         }
         try r.specs.append(gpa, spec);
         try r.ids.append(gpa, st.id);
@@ -193,6 +194,7 @@ pub const Package = struct {
     text: FontName,
     math: FontName,
     members: []const model.FontMember,
+    greek: engine.style.Greek = .as_is,
 };
 
 /// Greek, upright: the Greek and Coptic block.
@@ -210,12 +212,51 @@ pub const stix_two: Package = .{
     .members = &.{
         .{ .font = .{ .family = "STIX Two Text", .style = "Bold" }, .coverage = .{ .ranges = greek } },
         .{ .font = .{ .family = "TeX Gyre Schola", .style = "Bold Italic" }, .role = .variables, .scale = 1.15 },
-        .{ .font = .{ .family = "STIX Two Math", .style = "Regular" }, .weight = .match },
+        .{ .font = .{ .family = "STIX Two Math", .style = "Regular" }, .weight = .{ .match = .bar } },
     },
 };
 
+/// Operators: Latin-1's and ASCII's (+ < = > ± × ÷), the minus sign, and
+/// the Mathematical Operators block.
+const operators: []const engine.style.Range = &.{
+    .{ .first = '+', .last = '+' },       .{ .first = '<', .last = '>' },
+    .{ .first = 0x00B1, .last = 0x00B1 }, .{ .first = 0x00D7, .last = 0x00D7 },
+    .{ .first = 0x00F7, .last = 0x00F7 }, .{ .first = 0x2190, .last = 0x21FF },
+    .{ .first = 0x2200, .last = 0x22FF },
+};
+
+const lib_math: FontName = .{ .family = "Libertinus Math", .style = "Regular" };
+
+/// Mathematical bold Greek (U+1D6A8..U+1D6E1).
+const bold_greek: []const engine.style.Range = &.{.{ .first = 0x1D6A8, .last = 0x1D6E1 }};
+
+/// Libertinus: Geist SemiBold text with Libertinus Math 7.051 for the rest
+/// (chosen 2026-11-15 for the HP-15C keypad): its operators and arrows,
+/// its mathematical bold Greek (U+1D6A8..) for Greek, and its mathematical
+/// italic (U+1D434.., ball terminals) for variables, all drawn as heavy as
+/// Geist's stems; and its MATH table for the constants. With no member for
+/// variables and no italic in Geist, math's letters become the italic
+/// alphanumerics, which only Libertinus Math has.
+pub const libertinus: Package = .{
+    .name = "Libertinus",
+    .text = .{ .family = "Geist", .style = "SemiBold" },
+    .math = lib_math,
+    .members = &.{
+        // Operators and arrows, as heavy as Geist's minus sign.
+        .{ .font = lib_math, .coverage = .{ .ranges = operators }, .weight = .{ .match = .bar } },
+        // Bold Greek, its bold I's stem as heavy as Geist's I's: already
+        // so, so drawn as it is (growing it fills the acute corners where
+        // its hairlines meet its thick strokes, and Σ reads as slanted).
+        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek }, .weight = .{ .match = .{ .char = 0x1D408 } } },
+        // The rest: italic variables (their italic I's stem matched) and
+        // whatever else Geist lacks.
+        .{ .font = lib_math, .weight = .{ .match = .{ .char = 0x1D43C } } },
+    },
+    .greek = .math_bold,
+};
+
 /// The packages Graven knows, by name.
-pub const packages = [_]*const Package{&stix_two};
+pub const packages = [_]*const Package{ &stix_two, &libertinus };
 
 /// The package named `name` (any case; spaces or hyphens alike), or null.
 pub fn package(name: []const u8) ?*const Package {
@@ -236,6 +277,7 @@ pub fn addPackage(m: *model.Model, pkg: *const Package, name: []const u8) model.
     const id = try m.addFont(name, pkg.text);
     for (pkg.members, 0..) |mb, i| _ = try m.addFontMember(id, i, mb);
     try m.setFontMath(id, pkg.math);
+    try m.setFontGreek(id, pkg.greek);
     return id;
 }
 
@@ -412,4 +454,15 @@ test "a package becomes a composed font: text, members by role, the math face" {
     try testing.expectEqual(engine.style.Member.Role.variables, f.members.items[1].role);
     try testing.expectEqual(@as(f64, 1.15), f.members.items[1].scale);
     try testing.expect(f.members.items[2].coverage == .fallback);
+}
+
+test "the Libertinus package: Geist text; Libertinus Math operators, bold Greek and the rest, each matched by its own stroke" {
+    const p = package("libertinus").?;
+    try testing.expectEqualStrings("Geist", p.text.family);
+    try testing.expectEqual(engine.style.Greek.math_bold, p.greek);
+    try testing.expectEqual(@as(usize, 3), p.members.len);
+    try testing.expectEqual(@as(u21, 0x2212), p.members[0].weight.match.char);
+    try testing.expect(p.members[0].coverage.has(0x2264)); // <=
+    try testing.expect(p.members[1].coverage.has(0x1D6BA)); // bold Sigma
+    try testing.expect(package("stix-two") != null);
 }

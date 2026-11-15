@@ -27,7 +27,7 @@ const usage =
     \\       graven hp15c <font|package> <plate.svg> <keys.svg> [fallback font ...]
     \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
     \\         and the keys, each written as SVG. Fallback fonts set what the font lacks.
-    \\         A math font package (stix-two) instead of a font sets the legends in its
+    \\         A math font package (stix-two, libertinus) instead of a font sets the legends in its
     \\         faces, from $GRAVEN_FONTS or fonts/ (fill it with scripts/fetch-fonts.py).
     \\       graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf> [fallback font ...]
     \\         The HP-15C keypad's plate and keys for multi-colour 3D printing, each part's

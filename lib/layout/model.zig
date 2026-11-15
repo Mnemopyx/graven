@@ -1298,6 +1298,8 @@ pub const ComposedFont = struct {
     bold: ?FontName = null,
     bold_italic: ?FontName = null,
     members: std.ArrayList(FontMember) = .empty,
+    /// Where its Greek letters come from (see `engine.style.Spec.greek`).
+    greek: engine.style.Greek = .as_is,
     /// The math face, whose MATH table gives the math constants (script
     /// sizes and shifts, rules, the axis); null for the main font's.
     math: ?FontName = null,
@@ -1637,6 +1639,13 @@ pub const Model = struct {
     pub fn setFontMath(m: *Model, id: ObjectId, math: ?FontName) Error!void {
         const f = try m.font(id);
         f.math = try m.dupeOptFontName(math);
+        m.revision += 1;
+    }
+
+    /// Sets where composed font `id`'s Greek letters come from.
+    pub fn setFontGreek(m: *Model, id: ObjectId, greek: engine.style.Greek) Error!void {
+        const f = try m.font(id);
+        f.greek = greek;
         m.revision += 1;
     }
 

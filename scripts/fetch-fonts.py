@@ -14,10 +14,15 @@ contents are left alone.
     STIX Two Text Bold, SemiBold 2.12 CTAN (.otf; SIL OFL): upright Greek
     TeX Gyre Schola Bold Italic 2.005 CTAN (.otf; GUST Font License):
                                       variables
+  Package "Libertinus" (`libertinus`):
+    Geist Sans 1.9.0                  as above: the text
+    Libertinus Math 7.051             CTAN (.otf; SIL OFL): operators, arrows,
+                                      bold Greek, italic variables, the
+                                      math constants
   with each family's licence.
 
-The sources, versions and hashes are those pinned by EverCalc's legend tool
-(tools/legend/fetch_fonts.py), where these choices were made.
+The STIX Two sources, versions and hashes are those pinned by EverCalc's
+legend tool (tools/legend/fetch_fonts.py), where those choices were made.
 
 Usage: scripts/fetch-fonts.py [--dest DIR]
 Standard library only.
@@ -81,6 +86,18 @@ PINNED = [
         "url": f"{CTAN}/fonts/tex-gyre/doc/GUST-FONT-LICENSE.txt",
         "sha256": "2bd69affc3da00715116f713f57eab9707e96daf3562ad0215987b15b9c16f73",
         "file": "TeXGyre-GUST-FONT-LICENSE.txt",
+    },
+    {
+        "name": "Libertinus Math 7.051 (CTAN)",
+        "url": f"{CTAN}/fonts/libertinus-fonts/otf/LibertinusMath-Regular.otf",
+        "sha256": "e81bd44acbb7119c8f00128b36fecc5d980e10d2450a226ba52402ccf4da9d32",
+        "file": "LibertinusMath-Regular.otf",
+    },
+    {
+        "name": "Libertinus licence (SIL OFL 1.1)",
+        "url": f"{CTAN}/fonts/libertinus-fonts/OFL.txt",
+        "sha256": "9aeecc8107c489ec1ec0068b0313e531a760edf3493705b32ab8ab8215a8794e",
+        "file": "Libertinus-OFL.txt",
     },
 ]
 

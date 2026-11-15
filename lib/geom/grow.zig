@@ -98,8 +98,9 @@ fn offset(a: Allocator, p: []const Point, d: f64, tol: f64) Allocator.Error![]Po
         const dot = din.x * dout.x + din.y * dout.y;
         if (turn > -1e-9) {
             // Convex (a left turn): round the corner.
-            const angle = std.math.atan2(turn, dot);
-            const k: usize = @intFromFloat(@ceil(angle / @max(step, 1e-6)));
+            // (A straight run, or a hair's turn the wrong way, is no arc.)
+            const angle = @max(0, std.math.atan2(turn, dot));
+            const k: usize = @max(1, @as(usize, @intFromFloat(@ceil(angle / @max(step, 1e-6)))));
             const a0 = std.math.atan2(nin.y, nin.x);
             for (1..k) |j| {
                 const t = a0 + angle * @as(f64, @floatFromInt(j)) / @as(f64, @floatFromInt(k));
@@ -207,4 +208,17 @@ test "an L's inner corner stays sharp" {
     // square where the inner corner's two edges' strips overlap.
     const expect = 7 + 8 + 5 * std.math.pi * 0.25 / 4.0 - 0.25;
     try testing.expectApproxEqAbs(expect, regionArea(g), 1e-2);
+}
+
+test "straight runs and hairline turns the wrong way make no arc" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A square with a collinear point in its bottom edge, and one nudged a
+    // hair inward (a turn of about -1e-12) in its top edge.
+    const pts = [_]Point{ .{ .x = 0, .y = 0 }, .{ .x = 5, .y = 0 }, .{ .x = 10, .y = 0 }, .{ .x = 10, .y = 10 }, .{ .x = 5, .y = 10 - 1e-11 }, .{ .x = 0, .y = 10 } };
+    var segs: [6]Segment = undefined;
+    for (0..6) |i| segs[i] = .{ .line = .{ pts[i], pts[(i + 1) % 6] } };
+    const g = try grow(a, .{ .contours = &.{.{ .segments = &segs }} }, 1, 1e-4);
+    try testing.expectApproxEqAbs(140 + std.math.pi, regionArea(g), 1e-2);
 }

@@ -684,7 +684,7 @@ const Builder = struct {
             .gid = gid,
             .transform = Affine.scale(s).then(Affine.translate(dx, dy)),
             .element = @intCast(b.elements.items.len),
-            .grow = try b.ctx.growFor(face_id, cap),
+            .grow = try b.ctx.growFor(face_id, cp, cap),
         };
         const item0 = b.items.items.len;
         try b.items.append(b.a, .{ .glyph = item });
@@ -818,7 +818,8 @@ const Builder = struct {
         const weight = math and v.bold and main.bold == null;
         // A member for variables draws math's italic letters as they are.
         const slant = math and italic and main.italic == null and !b.ctx.hasVariables();
-        if (!alphabet and !weight and !slant) return null;
+        const greek = b.ctx.spec.greek == .math_bold;
+        if (!alphabet and !weight and !slant and !greek) return null;
 
         var utf8: std.ArrayList(u8) = .empty;
         var source: std.ArrayList(u32) = .empty;
@@ -828,7 +829,9 @@ const Builder = struct {
             const at = start + it.i;
             const cp = it.nextCodepoint() orelse break;
             const src = t.source[at];
-            const mapped: ?u21 = if (alphabet)
+            const mapped: ?u21 = if (greek and alphanum.boldGreek(cp) != null)
+                alphanum.boldGreek(cp)
+            else if (alphabet)
                 alphanum.remap(cp, v.alphabet, v.bold, italic) orelse alphanum.remap(cp, v.alphabet, false, false)
             else
                 alphanum.remap(cp, .normal, v.bold and (weight or slant), italic and (slant or weight));
@@ -888,12 +891,15 @@ const Builder = struct {
         var pen: f64 = 0;
         var ink = Box.empty;
         const item0 = b.items.items.len;
-        // A member drawn heavier: each glyph grown all round, and spaced by
-        // the growth on both sides.
-        const grow = try b.ctx.growFor(face_id, cap);
-        for (glyphs, 0..) |g, i| {
+        // A member drawn heavier: each glyph grown all round (by the weight
+        // of the member that set its character), and spaced by the growth
+        // on both sides.
+        var grown: f64 = 0;
+        for (glyphs) |g| {
             if (g.gid == 0) try b.diagnose(.missing_glyph, t.source[start + g.cluster]);
-            const gx = x + (pen + @as(f64, @floatFromInt(g.x_offset))) * s + grow * @as(f64, @floatFromInt(2 * i + 1));
+            const grow = try b.ctx.growFor(face_id, firstCodepoint(t.utf8[start + g.cluster .. end]), cap);
+            const gx = x + (pen + @as(f64, @floatFromInt(g.x_offset))) * s + grown + grow;
+            grown += 2 * grow;
             const gy = y_shifted + @as(f64, @floatFromInt(g.y_offset)) * s;
             const item: render.GlyphItem = .{
                 .face = face_id,
@@ -908,7 +914,7 @@ const Builder = struct {
             try b.items.append(b.a, .{ .glyph = item });
             pen += @floatFromInt(g.x_advance);
         }
-        const advance = pen * s + 2 * grow * @as(f64, @floatFromInt(glyphs.len));
+        const advance = pen * s + grown;
         try b.addProfile(item0);
         // Decorations: rules along the element, from the face's own
         // underline and strikeout metrics (out of its contact profile).

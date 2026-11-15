@@ -44,7 +44,7 @@ pub const actions = [_][:0]const u8{
     "ungroup",           "moveGroup",          "moveToSpace",         "copyToSpace",        "addView",
     "moveView",          "setViewScale",       "removeView",          "addLayer",           "setLayer",
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
-    "addFont",           "renameFont",         "setFontMain", "setFontMath",         "addFontMember",      "setFontMember",
+    "addFont",           "renameFont",         "setFontMain", "setFontMath", "setFontGreek",         "addFontMember",      "setFontMember",
     "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
     "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",

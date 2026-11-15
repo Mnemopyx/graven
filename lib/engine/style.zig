@@ -127,7 +127,20 @@ pub const Member = struct {
     weight: Weight = .none,
 
     pub const Role = enum { characters, variables };
-    pub const Weight = union(enum) { none, match, add: f64 };
+    pub const Weight = union(enum) { none, match: Reference, add: f64 };
+
+    /// What matching compares: the thickness of this character's stroke
+    /// in the member and in the main face (which, lacking it, gives its
+    /// I's stem). An I's stem for letters; a minus sign's bar for operators,
+    /// whose strokes math fonts draw thinner than their letters'; the
+    /// member's own bold or italic I for its bold or italic letters.
+    pub const Reference = struct {
+        char: u21 = 'I',
+        stroke: font.Face.Stroke = .vertical,
+
+        pub const stem: Reference = .{};
+        pub const bar: Reference = .{ .char = 0x2212, .stroke = .horizontal };
+    };
 
     pub fn variants(m: Member) Variants {
         return .{ .upright = m.upright, .italic = m.italic, .bold = m.bold, .bold_italic = m.bold_italic };
@@ -204,6 +217,10 @@ pub const Spec = struct {
     /// Baseline-to-baseline distance between lines, as a fraction of cap
     /// height; null for the upright face's ascender to descender.
     line_pitch: ?f64 = null,
+    /// Where Greek letters come from: as they are (U+0391..), or Unicode's
+    /// mathematical bold Greek (U+1D6A8..), where a face has it: a math
+    /// font's bold Greek beside a heavy text face.
+    greek: Greek = .as_is,
     /// Arrows drawn rather than taken from a face (→ ← ↑ ↓ ⇄), as on
     /// calculator keys; null for the faces' glyphs.
     arrows: ?Arrows = null,
@@ -213,6 +230,8 @@ pub const Spec = struct {
 /// whose point is well under a right angle. ⇄ is two heads alone, right
 /// over left, each notched at the back where a shaft would go in: with no
 /// shafts, the notch says which way each points.
+pub const Greek = enum { as_is, math_bold };
+
 pub const Arrows = struct {
     /// A horizontal arrow's length, and a vertical one's (standing on the
     /// baseline).
@@ -375,21 +394,30 @@ pub const Context = struct {
         return factor * em_mm / @as(f64, @floatFromInt(f.upem));
     }
 
-    /// How far `face`'s glyphs are grown outward on each side at cap height
-    /// `cap_mm`, mm: its member's weight. Matching never thins a face
-    /// heavier than the main one, and a face without an I is not matched.
-    pub fn growFor(c: *const Context, face: FaceId, cap_mm: f64) font.Error!f64 {
-        const m = c.memberOf(face) orelse return 0;
+    /// The member that set `cp` in `face`: the first whose faces include it
+    /// and whose coverage takes `cp` (a fallback takes anything).
+    pub fn memberFor(c: *const Context, face: FaceId, cp: u21) ?*const Member {
+        if (c.mainVariants().has(face)) return null;
+        for (c.spec.members) |*m| if (m.variants().has(face) and m.coverage.has(cp)) return m;
+        return c.memberOf(face);
+    }
+
+    /// How far `face`'s glyphs for `cp` are grown outward on each side at
+    /// cap height `cap_mm`, mm: the weight of the member that set it.
+    /// Matching never thins a face heavier than the main one, and a stroke
+    /// that cannot be measured is not matched.
+    pub fn growFor(c: *const Context, face: FaceId, cp: u21, cap_mm: f64) font.Error!f64 {
+        const m = c.memberFor(face, cp) orelse return 0;
         const add: f64 = switch (m.weight) {
             .none => return 0,
             .add => |k| k / 1000,
-            .match => blk: {
+            .match => |ref| blk: {
                 const main = c.faces[c.spec.upright];
-                const ms = (try main.stem()) orelse return 0;
                 const mc = (try main.capHeight()) orelse return 0;
-                const fs = (try c.faces[face].stem()) orelse return 0;
-                // Both stems as fractions of cap height: the member's as it
-                // is drawn, at the scale its matching sets.
+                const ms = (try main.stroke(ref.char, ref.stroke)) orelse (try main.stem()) orelse return 0;
+                const fs = (try c.faces[face].stroke(ref.char, ref.stroke)) orelse return 0;
+                // Both as fractions of cap height: the member's as it is
+                // drawn, at the scale its matching sets.
                 break :blk @max(0, ms / mc - fs * try c.scaleFor(face, 1));
             },
         };
