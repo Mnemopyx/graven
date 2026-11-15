@@ -207,7 +207,7 @@ pub const Diagnostic = struct {
 
 pub const Error = error{ Syntax, OutOfMemory };
 
-/// Whether `src` has math mode: an unescaped '$' outside comments. A label
+/// Whether `src` has math mode: an unescaped '$' outside comments. Text
 /// with none is all one markup, as before; one with any is text with math
 /// between dollars, as in KaTeX.
 pub fn hasMath(src: []const u8) bool {
@@ -367,7 +367,7 @@ const Parser = struct {
     /// Set for a preview parse: problems are recorded here and recovered
     /// from, rather than failing.
     problems: ?*std.ArrayList(Diagnostic) = null,
-    /// The label has math mode: text, with math between dollars.
+    /// The text has math mode: text, with math between dollars.
     dollars: bool = false,
 
     fn fail(p: *Parser, kind: ErrorKind, at: u32) Error {
@@ -399,7 +399,7 @@ const Parser = struct {
         return .{ .placeholder = .{ .span = .{ .start = at, .end = at } } };
     }
 
-    /// The variant at the top: text, when the label has math mode.
+    /// The variant at the top: text, when it has math mode.
     fn topVariant(p: *const Parser) Variant {
         return if (p.dollars) .{ .text = true } else .{};
     }
