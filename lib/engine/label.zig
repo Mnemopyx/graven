@@ -736,6 +736,15 @@ const Builder = struct {
         var run_face: ?FaceId = null;
         while (i < end) {
             const next = @min(clusterEnd(t.utf8, i), end);
+            if (b.ctx.spec.arrows != null and next - i <= 4) if (drawnArrow(firstCodepoint(t.utf8[i..next]))) |dir| {
+                // A drawn arrow ends the run before it and is its own element.
+                if (run_face) |f| pen = try b.element(t, run_start, i, f, cap, level, pen, y);
+                run_face = null;
+                pen = try b.arrow(t, i, next, dir, cap, level, pen, y);
+                i = next;
+                run_start = i;
+                continue;
+            };
             const face = try b.chooseFace(t, t.utf8[i..next]);
             if (run_face != null and run_face.? != face) {
                 pen = try b.element(t, run_start, i, run_face.?, cap, level, pen, y);
@@ -746,6 +755,41 @@ const Builder = struct {
         }
         if (run_face) |f| pen = try b.element(t, run_start, end, f, cap, level, pen, y);
         return pen;
+    }
+
+    /// A drawn arrow for bytes `start..end` of `t` (one cluster), its
+    /// left edge at `x` on baseline `y`: a path item and its own element.
+    /// Returns the pen after it.
+    fn arrow(b: *Builder, t: markup.Text, start: usize, end: usize, dir: ArrowDir, cap: f64, level: u8, x: f64, y: f64) Error!f64 {
+        const st = b.ctx.spec.arrows.?;
+        const g = st.gap * cap;
+        const shape = try arrowOutline(b.a, st, dir, cap, try b.shaftFraction(st));
+        const outline = try shape.outline.transformed(b.a, Affine.translate(x + g, y));
+        const item0 = b.items.items.len;
+        try b.items.append(b.a, .{ .path = .{ .outline = outline, .element = @intCast(b.elements.items.len) } });
+        try b.addProfile(item0);
+        try b.elements.append(b.a, .{
+            .face = null,
+            .start = t.source[start],
+            .end = t.source[end - 1] + 1,
+            .level = level,
+            .line = b.line,
+            .cap_height = cap,
+            .origin = .{ .x = x, .y = y },
+            .advance = shape.width + 2 * g,
+            .ink = outline.bounds(),
+        });
+        return x + shape.width + 2 * g;
+    }
+
+    /// A drawn arrow's shaft thickness as a fraction of cap height: the
+    /// style's, else the main face's stem of I, else an eighth.
+    fn shaftFraction(b: *Builder, st: style.Arrows) Error!f64 {
+        if (st.shaft) |k| return k;
+        const main = b.ctx.faces[b.ctx.spec.upright];
+        const stem = (try main.stem()) orelse return 0.125;
+        const c = (try main.capHeight()) orelse return 0.125;
+        return stem / c;
     }
 
     /// Whether letters of `t` are set italic.
@@ -1168,6 +1212,75 @@ fn normal(p: geom.Point, q: geom.Point) geom.Point {
     const dy = q.y - p.y;
     const len = @sqrt(dx * dx + dy * dy);
     return .{ .x = -dy / len, .y = dx / len };
+}
+
+pub const ArrowDir = enum { right, left, up, down, exchange };
+
+/// The arrow `cp` is drawn as, if it is one.
+fn drawnArrow(cp: u21) ?ArrowDir {
+    return switch (cp) {
+        0x2192 => .right,
+        0x2190 => .left,
+        0x2191 => .up,
+        0x2193 => .down,
+        0x21C4 => .exchange,
+        else => null,
+    };
+}
+
+/// A drawn arrow at the origin (its left edge, on the baseline), mm, and
+/// its width. Horizontal arrows are centred on half cap height; vertical
+/// ones stand on the baseline. `shaft` is the shaft's thickness, a
+/// fraction of cap height.
+pub fn arrowOutline(a: Allocator, st: style.Arrows, dir: ArrowDir, cap: f64, shaft: f64) !struct { outline: geom.Outline, width: f64 } {
+    const P = geom.Point;
+    const mid = cap / 2;
+    if (dir == .exchange) {
+        // Two notched heads: right-pointing over left-pointing, overlapping
+        // along the line, centred on half cap height.
+        const hl = st.pair_head_length * cap;
+        const h = st.pair_head_width * cap / 2;
+        const n = st.pair_notch * hl;
+        const w = hl * (2 - st.pair_overlap);
+        const top = mid + st.pair_gap * cap / 2 + h;
+        const bot = mid - st.pair_gap * cap / 2 - h;
+        const right = [4]P{ .{ .x = w - hl, .y = top - h }, .{ .x = w, .y = top }, .{ .x = w - hl, .y = top + h }, .{ .x = w - hl + n, .y = top } };
+        const left = [4]P{ .{ .x = hl, .y = bot + h }, .{ .x = 0, .y = bot }, .{ .x = hl, .y = bot - h }, .{ .x = hl - n, .y = bot } };
+        return .{ .outline = try polygons(a, &.{ &right, &left }), .width = w };
+    }
+    const vertical = dir == .up or dir == .down;
+    const len = (if (vertical) st.vlength else st.length) * cap;
+    const hl = @min(st.head_length * cap, len);
+    const h = st.head_width * cap / 2;
+    const t = shaft * cap / 2;
+    // Pointing right along x from 0, centred on y = 0, counter-clockwise.
+    var pts = [7]P{
+        .{ .x = 0, .y = -t },       .{ .x = len - hl, .y = -t }, .{ .x = len - hl, .y = -h },
+        .{ .x = len, .y = 0 },      .{ .x = len - hl, .y = h },  .{ .x = len - hl, .y = t },
+        .{ .x = 0, .y = t },
+    };
+    for (&pts) |*q| {
+        const p = q.*;
+        q.* = switch (dir) {
+            .right => .{ .x = p.x, .y = p.y + mid },
+            .left => .{ .x = len - p.x, .y = -p.y + mid },
+            .up => .{ .x = h - p.y, .y = p.x },
+            .down => .{ .x = h + p.y, .y = len - p.x },
+            .exchange => unreachable,
+        };
+    }
+    return .{ .outline = try polygons(a, &.{&pts}), .width = if (vertical) 2 * h else len };
+}
+
+/// Closed polygons as one outline.
+fn polygons(a: Allocator, polys: []const []const geom.Point) !geom.Outline {
+    const contours = try a.alloc(geom.Contour, polys.len);
+    for (polys, contours) |p, *c| {
+        const segs = try a.alloc(geom.Segment, p.len);
+        for (segs, 0..) |*seg, k| seg.* = .{ .line = .{ p[k], p[(k + 1) % p.len] } };
+        c.* = .{ .segments = segs };
+    }
+    return .{ .contours = contours };
 }
 
 fn rectangle(a: Allocator, r: Box) !geom.Outline {
@@ -2033,4 +2146,41 @@ test "a member drawn heavier: its glyphs grown all round and spaced by the growt
     try testing.expectApproxEqAbs(heavy.ink.x0, b.x0, 1e-6);
     try testing.expectApproxEqAbs(heavy.ink.y1, b.y1, 1e-6);
     try testing.expect(@abs(o[0].signedArea()) > 0);
+}
+
+
+test "drawn arrows: solid heads pointed under a right angle; the exchange arrow is two notched heads" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    spec.arrows = .{ .shaft = 0.15 };
+    const ctx = try style.Context.init(&f.faces, spec);
+    var r = try renderTest(&ctx, "H→H");
+    defer r.deinit();
+    // H, the arrow (drawn: no face), H; no glyph is missing.
+    try testing.expectEqual(@as(usize, 3), r.elements.len);
+    try testing.expectEqual(@as(?FaceId, null), r.elements[1].face);
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const st: style.Arrows = .{};
+    try testing.expectApproxEqAbs((st.length + 2 * st.gap) * 7, r.elements[1].advance, 1e-9);
+    // The point: under a right angle.
+    try testing.expect(2 * std.math.atan(st.head_width / 2 / st.head_length) < std.math.pi / 2.0);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const ex = try arrowOutline(arena.allocator(), st, .exchange, 7, 0.15);
+    try testing.expectEqual(@as(usize, 2), ex.outline.contours.len);
+    for (ex.outline.contours) |c| {
+        // A notched head: four corners, less area than its whole triangle.
+        try testing.expectEqual(@as(usize, 4), c.segments.len);
+        const whole = st.pair_head_length * 7 * st.pair_head_width * 7 / 2;
+        try testing.expectApproxEqAbs(whole * (1 - st.pair_notch), c.signedArea(), 1e-9);
+    }
+    // Right over left.
+    const top = ex.outline.contours[0].bounds();
+    const bottom = ex.outline.contours[1].bounds();
+    try testing.expect(top.y0 > bottom.y1 and top.x1 > bottom.x1);
+    var up = try renderTest(&ctx, "↑");
+    defer up.deinit();
+    try testing.expectApproxEqAbs(st.vlength * 7, up.ink.height(), 1e-9);
 }

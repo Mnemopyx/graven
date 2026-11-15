@@ -204,6 +204,36 @@ pub const Spec = struct {
     /// Baseline-to-baseline distance between lines, as a fraction of cap
     /// height; null for the upright face's ascender to descender.
     line_pitch: ?f64 = null,
+    /// Arrows drawn rather than taken from a face (→ ← ↑ ↓ ⇄), as on
+    /// calculator keys; null for the faces' glyphs.
+    arrows: ?Arrows = null,
+};
+
+/// Drawn arrows, in cap heights: a short shaft and a solid triangular head
+/// whose point is well under a right angle. ⇄ is two heads alone, right
+/// over left, each notched at the back where a shaft would go in: with no
+/// shafts, the notch says which way each points.
+pub const Arrows = struct {
+    /// A horizontal arrow's length, and a vertical one's (standing on the
+    /// baseline).
+    length: f64 = 0.85,
+    vlength: f64 = 1.0,
+    /// The head: its length along the arrow and its width across it.
+    head_length: f64 = 0.45,
+    head_width: f64 = 0.5,
+    /// The shaft's thickness; null for the main face's stem of I, so as
+    /// heavy as the letters.
+    shaft: ?f64 = null,
+    /// Space each side.
+    gap: f64 = 0.06,
+    /// ⇄: each head's length and width, the notch's depth as a fraction
+    /// of the head's length, how far the heads overlap along the line as a
+    /// fraction of it, and the space between them.
+    pair_head_length: f64 = 0.62,
+    pair_head_width: f64 = 0.46,
+    pair_notch: f64 = 0.3,
+    pair_overlap: f64 = 0.3,
+    pair_gap: f64 = 0.1,
 };
 
 /// Automatic space beside operators, in mu. Tighter than TeX's 3, 4, 5 and 3

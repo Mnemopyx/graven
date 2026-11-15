@@ -64,7 +64,7 @@ pub const Styles = struct {
 pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
     const spec = struct {
         fn of(cap: f64, members: []const engine.style.Member) engine.style.Spec {
-            return .{ .upright = 0, .cap_height = cap, .line_pitch = 1.5, .members = members };
+            return .{ .upright = 0, .cap_height = cap, .line_pitch = 1.5, .members = members, .arrows = .{} };
         }
     }.of;
     return .{
