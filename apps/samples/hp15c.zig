@@ -23,9 +23,9 @@ const StyleId = model.StyleId;
 pub const spacing_across = 11.43;
 /// Between key centres down, mm: a guess.
 pub const spacing_down = 12.7;
-/// A key's top, mm: a guess.
-pub const key_w = 9.0;
-pub const key_h = 8.0;
+/// A key's top, mm: given (8 x 7.2).
+pub const key_w = 8.0;
+pub const key_h = 7.2;
 /// The hole a key comes through: the key with 0.25 mm clearance all round,
 /// a rounded rectangle (the ready-made sketch) with this corner radius, mm:
 /// a guess.
@@ -35,7 +35,7 @@ pub const hole_r = 1.0;
 /// above the key's centre.
 pub const legend_w = 11.0;
 pub const legend_h = 2.4;
-pub const legend_up = 5.55;
+pub const legend_up = 5.15;
 
 /// For colour FDM: the plate's and the keys' thickness, and how deep the
 /// legends are inlaid (3 layers of 0.2 mm), mm: guesses.
@@ -148,18 +148,18 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
 
     // A key: its top, a row track for the white legend in its upper part
     // and one for the blue g on its front, a band along the bottom. Its
-    // face is 8.2 x 7.2 mm.
+    // face is 7.2 x 6.4 mm.
     const key = try m.addPrototype(.{
         .name = "15C key",
         .face_inset = .all(0.4),
         .tracks = &.{
-            .{ .name = "top", .style = styles.key, .alignment = .centre, .place = .{ .inset = .{ .top = 0.8, .bottom = 3.0 } } },
-            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = 5.1 } } },
+            .{ .name = "top", .style = styles.key, .alignment = .centre, .place = .{ .inset = .{ .top = 0.7, .bottom = 2.65 } } },
+            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = 4.5 } } },
         },
     });
     // ENTER: its legend in a column track down the key, a character at a
     // time; the g legend on the front as on the others. Its face is
-    // 8.2 x (key_h + spacing_down - 0.8) mm.
+    // 7.2 x (key_h + spacing_down - 0.8) mm.
     const enter_face_h = key_h + spacing_down - 0.8;
     const enter_proto = try m.addPrototype(.{
         .name = "15C ENTER key",
@@ -167,8 +167,8 @@ pub fn build(m: *Model, styles: Styles, space: usize, at: geom.Point) !Built {
         .tracks = &.{
             // One column wide (a cap height and a half at the 1.9 mm caps
             // the app gives it), so the letters centre on the key.
-            .{ .name = "top", .style = styles.key, .major = .column, .alignment = .centre, .place = .{ .inset = .{ .top = 1.0, .bottom = 3.0, .left = 2.675, .right = 2.675 } } },
-            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = enter_face_h - 2.1 } } },
+            .{ .name = "top", .style = styles.key, .major = .column, .alignment = .centre, .place = .{ .inset = .{ .top = 1.0, .bottom = 2.65, .left = 2.175, .right = 2.175 } } },
+            .{ .name = "g", .style = styles.g, .alignment = .centre, .place = .{ .inset = .{ .top = enter_face_h - 1.9 } } },
         },
     });
     // The gold legend above a hole: only its track.
