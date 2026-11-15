@@ -254,14 +254,14 @@ pub const libertinus: Package = .{
         // so, so drawn as it is (growing it fills the acute corners where
         // its hairlines meet its thick strokes, and Σ reads as slanted).
         .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_capitals }, .weight = .{ .match = .{ .char = 0x1D408 } } },
-        // Small bold Greek (π), 1.25 times as the variables are: small
+        // Small bold Greek (π), 1.2 times as the variables are: small
         // letters set beside Geist's.
-        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_small }, .scale = 1.25, .weight = .{ .match = .{ .char = 0x1D408 } } },
-        // Italic variables, 1.25 times (their x-height, 0.68 of their cap
+        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_small }, .scale = 1.2, .weight = .{ .match = .{ .char = 0x1D408 } } },
+        // Italic variables, 1.2 times (their x-height, 0.68 of their cap
         // height against Geist's 0.75, then more, for detail),
         // their italic I's stem matched, and a touch more: their hairlines
         // make them read lighter than Geist.
-        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.25, .weight = .{ .match = .{ .char = 0x1D43C, .extra = 12 } } },
+        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.2, .weight = .{ .match = .{ .char = 0x1D43C, .extra = 12 } } },
         // Whatever else Geist lacks.
         .{ .font = lib_math, .weight = .{ .match = .bar } },
     },
@@ -474,9 +474,9 @@ test "the Libertinus package: Geist text; Libertinus Math operators, bold Greek 
     try testing.expectEqualStrings("Geist", p.text.family);
     try testing.expectEqual(engine.style.Greek.math_bold, p.greek);
     try testing.expectEqual(@as(usize, 5), p.members.len);
-    try testing.expectEqual(@as(f64, 1.25), p.members[2].scale);
+    try testing.expectEqual(@as(f64, 1.2), p.members[2].scale);
     try testing.expect(p.members[2].coverage.has(0x1D6D1)); // bold pi
-    try testing.expectEqual(@as(f64, 1.25), p.members[3].scale);
+    try testing.expectEqual(@as(f64, 1.2), p.members[3].scale);
     try testing.expect(p.members[3].coverage.has(0x1D465)); // italic x
     try testing.expectEqual(@as(u21, 0x2212), p.members[0].weight.match.char);
     try testing.expect(p.members[0].coverage.has(0x2264)); // <=
