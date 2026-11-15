@@ -12,6 +12,8 @@ pub const boolean = @import("boolean.zig");
 pub const earcut = @import("earcut.zig");
 /// Outlines grown outward: a heavier weight.
 pub const grow = @import("grow.zig");
+/// Multi-channel signed distance fields: glyphs drawn at any size, grown.
+pub const msdf = @import("msdf.zig");
 
 pub const Point = struct {
     x: f64,
@@ -518,4 +520,5 @@ test {
     _ = boolean;
     _ = earcut;
     _ = grow;
+    _ = msdf;
 }

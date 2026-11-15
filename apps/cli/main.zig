@@ -12,6 +12,10 @@ const samples = @import("graven_samples");
 const usage =
     \\usage: graven svg <font file> <text> <cap height mm> <out.svg>
     \\         Renders one run of text in one face and writes its outlines as SVG.
+    \\       graven msdf <font file> <text> <texels per cap height> <out.pgm>
+    \\         Makes each glyph's multi-channel signed distance field and draws it back
+    \\         at several sizes, plain and grown, into a greyscale sheet; reports each
+    \\         field's time and its drawn area against the outline's.
     \\       graven parse <markup>
     \\         Parses label markup and prints its tree, or where it went wrong.
     \\       graven rtf <file.rtf>
@@ -46,6 +50,7 @@ const usage =
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 6 and std.mem.eql(u8, args[1], "msdf")) return msdfSheet(init, args[2], args[3], args[4], args[5]);
     if (args.len == 6 and std.mem.eql(u8, args[1], "svg")) {
         return svg(init, args[2], args[3], args[4], args[5]);
     }
@@ -130,6 +135,75 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     const doc = try layout.output.svg(arena.allocator(), outlines, r.design.join(r.ink), .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
+}
+
+/// Each glyph of `text` as an MSDF `texels` texels per cap height, drawn back
+/// at several sizes, plain and grown, into a greyscale PGM sheet; with each
+/// field's time and its drawn area against the outline's.
+fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, texels_arg: []const u8, out_path: []const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    const texels = std.fmt.parseFloat(f64, texels_arg) catch {
+        std.debug.print("texels per cap height must be a number, not {s}\n", .{texels_arg});
+        std.process.exit(2);
+    };
+    const geom = engine.geom;
+    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
+    defer gpa.free(bytes);
+    const face = try engine.Face.init(gpa, bytes, 0);
+    defer face.deinit();
+    const cap = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
+    const faces = [_]*engine.Face{face};
+    var r = try engine.renderRun(gpa, &faces, 0, text, .{ .cap_height = cap });
+    defer r.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Sizes as cap height in pixels; each drawn plain, then grown by 4 % of
+    // the cap height.
+    const sizes = [_]f64{ 8, 12, 16, 24, 48, 120 };
+    const cell: usize = 160;
+    const W: usize = cell * sizes.len;
+    const H: usize = cell * 2 * r.items.len;
+    const sheet = try a.alloc(u8, W * H);
+    @memset(sheet, 255);
+    var total_ns: u64 = 0;
+    for (r.items, 0..) |item, gi| {
+        const g = item.glyph;
+        const o = try face.outline(g.gid);
+        const t0 = std.Io.Clock.awake.now(io);
+        const f = try geom.msdf.generate(a, o, .{ .scale = texels / cap });
+        const t1 = std.Io.Clock.awake.now(io);
+        const ns: u64 = @intCast(t0.durationTo(t1).toNanoseconds());
+        total_ns += ns;
+        const b = o.bounds();
+        for (0..2) |grown| for (sizes, 0..) |size, si| {
+            const px = cap / size; // font units per pixel
+            const grow = if (grown == 1) 0.04 * cap else 0;
+            const n: u32 = @intCast(@min(cell - 4, @as(usize, @intFromFloat(@ceil((@max(b.width(), b.height()) + 2 * grow) / px + 2)))));
+            const m: geom.Affine = .{ .a = px, .d = px, .e = b.x0 - grow - px, .f = b.y0 - grow - px };
+            const cov = try f.rasterize(a, n, n, m, px, grow);
+            const ox = si * cell + 2;
+            const oy = (gi * 2 + grown) * cell + 2;
+            for (0..n) |j| for (0..n) |i| {
+                sheet[(oy + (n - 1 - j)) * W + ox + i] = 255 - cov[j * n + i];
+            };
+            if (si == sizes.len - 1 and grown == 0) {
+                var s: f64 = 0;
+                for (cov) |c| s += @as(f64, @floatFromInt(c)) / 255;
+                const area = s * px * px;
+                std.debug.print("glyph {d}: {d}x{d} field in {d:.2} ms; area {d:.1}% of the outline's\n", .{ g.gid, f.w, f.h, @as(f64, @floatFromInt(ns)) / 1e6, 100 * area / @abs(o.signedArea()) });
+            }
+        };
+    }
+    std.debug.print("{d} fields in {d:.2} ms\n", .{ r.items.len, @as(f64, @floatFromInt(total_ns)) / 1e6 });
+    const header = try std.fmt.allocPrint(a, "P5\n{d} {d}\n255\n", .{ W, H });
+    const file = try a.alloc(u8, header.len + sheet.len);
+    @memcpy(file[0..header.len], header);
+    @memcpy(file[header.len..], sheet);
+    try cwd.writeFile(io, .{ .sub_path = out_path, .data = file });
 }
 
 fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8) !void {

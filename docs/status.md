@@ -106,6 +106,10 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
   - copying text keeps no formatting.
 - **`ui-dev` is 81 commits ahead of `main`.**
 
+## Display: MSDF glyphs (in progress)
+
+`geom.msdf` makes a glyph's multi-channel signed distance field: overlaps resolved first, corners found and edges coloured, signed pseudo-distances per channel, signs checked against the true inside. Drawn back at any size its area is within 1 % of the outline's, corners stay sharp, and growing is a shifted threshold (the outline grown with round corners, as `geom.grow`). About 1.5 ms a glyph at 32 texels per cap height, made once per glyph. `graven msdf` draws a sheet of glyphs at several sizes, plain and grown. Next: a per-glyph cache and atlas in the GUI, drawing every text item through it; then the error-correction pass (faint specks where grown strokes merge).
+
 ## Planned: engine v2
 
 A glyphic styling and positioning engine, written beside the v1 engine (`lib/engine`, which stays in use until v2 replaces it whole). Legends are stored as conceptual objects with typed parameters resolved through a cascade (font, package, style, element kind, legend, object), laid out in situ against the ground beneath them (track paths, segments, flows, process limits). KaTeX is a translation layer against it; objects carry tags for export. See the blueprint's "Engine v2" section for the stages.
