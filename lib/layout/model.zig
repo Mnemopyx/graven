@@ -1276,6 +1276,8 @@ pub const FontMember = struct {
     scale: f64 = 1,
     /// Baseline shift, a fraction of the cap height, up positive.
     shift: f64 = 0,
+    /// What it sets: characters, or math's italic letters (variables).
+    role: engine.style.Member.Role = .characters,
 };
 
 /// A composed font: a named, virtual font that styles reference. A main
@@ -1293,6 +1295,9 @@ pub const ComposedFont = struct {
     bold: ?FontName = null,
     bold_italic: ?FontName = null,
     members: std.ArrayList(FontMember) = .empty,
+    /// The math face, whose MATH table gives the math constants (script
+    /// sizes and shifts, rules, the axis); null for the main font's.
+    math: ?FontName = null,
 
     pub fn variants(f: ComposedFont) FontVariants {
         return .{ .italic = f.italic, .bold = f.bold, .bold_italic = f.bold_italic };
@@ -1622,6 +1627,13 @@ pub const Model = struct {
         f.italic = try m.dupeOptFontName(v.italic);
         f.bold = try m.dupeOptFontName(v.bold);
         f.bold_italic = try m.dupeOptFontName(v.bold_italic);
+        m.revision += 1;
+    }
+
+    /// Sets composed font `id`'s math face (null: its main font's).
+    pub fn setFontMath(m: *Model, id: ObjectId, math: ?FontName) Error!void {
+        const f = try m.font(id);
+        f.math = try m.dupeOptFontName(math);
         m.revision += 1;
     }
 

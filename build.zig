@@ -119,6 +119,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_layout", .module = layout },
                 .{ .name = "graven_engine", .module = engine },
                 .{ .name = "graven_samples", .module = samples },
+                .{ .name = "graven_fontsearch", .module = fontsearch },
             },
         }),
     });

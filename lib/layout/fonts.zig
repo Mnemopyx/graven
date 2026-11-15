@@ -152,6 +152,7 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
                 .match = mb.match,
                 .scale = mb.scale,
                 .shift = mb.shift,
+                .role = mb.role,
             });
             span.len += 1;
         }
@@ -170,11 +171,69 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
             if (spec.bold == spec.upright) spec.bold = null;
             if (spec.bold_italic == spec.upright) spec.bold_italic = null;
             spec.members = r.members.items[span.start..][0..span.len];
+            spec.math = try s.optFace(cf.id, cf.math);
         }
         try r.specs.append(gpa, spec);
         try r.ids.append(gpa, st.id);
     }
     return r;
+}
+
+// Math font packages -----------------------------------------------------------
+
+/// A math font package: a named set of faces from one family, with roles
+/// (decided 2026-11-15; after MathJax 4's fonts and EverCalc's HP-15C
+/// legends). Adding it to a document makes a composed font: the text face
+/// as its main font, its members (Greek, variables, then the math face as
+/// the fallback for symbols), and the math face for the math constants.
+/// The faces are fetched, pinned, by scripts/fetch-fonts.py.
+pub const Package = struct {
+    name: []const u8,
+    text: FontName,
+    math: FontName,
+    members: []const model.FontMember,
+};
+
+/// Greek, upright: the Greek and Coptic block.
+const greek: []const engine.style.Range = &.{.{ .first = 0x0370, .last = 0x03FF }};
+
+/// STIX Two: Geist SemiBold text; STIX Two Math 2.12 for the constants and
+/// symbols; STIX Two Text Bold for Greek (Sigma, Delta, pi); TeX Gyre Schola
+/// Bold Italic, 1.15 times, for variables (EverCalc's choices, 2026-11-02).
+pub const stix_two: Package = .{
+    .name = "STIX Two",
+    .text = .{ .family = "Geist", .style = "SemiBold" },
+    .math = .{ .family = "STIX Two Math", .style = "Regular" },
+    .members = &.{
+        .{ .font = .{ .family = "STIX Two Text", .style = "Bold" }, .coverage = .{ .ranges = greek } },
+        .{ .font = .{ .family = "TeX Gyre Schola", .style = "Bold Italic" }, .role = .variables, .scale = 1.15 },
+        .{ .font = .{ .family = "STIX Two Math", .style = "Regular" } },
+    },
+};
+
+/// The packages Graven knows, by name.
+pub const packages = [_]*const Package{&stix_two};
+
+/// The package named `name` (any case; spaces or hyphens alike), or null.
+pub fn package(name: []const u8) ?*const Package {
+    for (packages) |p| {
+        if (p.name.len != name.len) continue;
+        const same = for (p.name, name) |x, y| {
+            const xx = if (x == ' ') '-' else std.ascii.toLower(x);
+            const yy = if (y == ' ') '-' else std.ascii.toLower(y);
+            if (xx != yy) break false;
+        } else true;
+        if (same) return p;
+    }
+    return null;
+}
+
+/// Adds `pkg` to `m` as a composed font named `name`; returns its ID.
+pub fn addPackage(m: *model.Model, pkg: *const Package, name: []const u8) model.Model.Error!model.ObjectId {
+    const id = try m.addFont(name, pkg.text);
+    for (pkg.members, 0..) |mb, i| _ = try m.addFontMember(id, i, mb);
+    try m.setFontMath(id, pkg.math);
+    return id;
 }
 
 // Tests --------------------------------------------------------------------------
@@ -334,4 +393,20 @@ test "a label cache given resolved fonts keeps them when the model syncs it agai
     try labels.sync(&m);
     try testing.expectEqual(1, labels.context(legend).?.spec.members.len);
     try testing.expectEqual(2, labels.faces.len);
+}
+
+test "a package becomes a composed font: text, members by role, the math face" {
+    var m: model.Model = .init(testing.allocator);
+    defer m.deinit();
+    const p = package("stix-two").?;
+    try testing.expectEqualStrings("STIX Two", p.name);
+    const id = try addPackage(&m, p, "Legends");
+    const f = m.fonts.items[m.fontIndex(id).?];
+    try testing.expect(f.main.eql(.{ .family = "Geist", .style = "SemiBold" }));
+    try testing.expect(f.math.?.eql(.{ .family = "STIX Two Math" }));
+    try testing.expectEqual(@as(usize, 3), f.members.items.len);
+    try testing.expect(f.members.items[0].coverage.has(0x03A3)); // Sigma
+    try testing.expectEqual(engine.style.Member.Role.variables, f.members.items[1].role);
+    try testing.expectEqual(@as(f64, 1.15), f.members.items[1].scale);
+    try testing.expect(f.members.items[2].coverage == .fallback);
 }

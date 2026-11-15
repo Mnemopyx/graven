@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const layout = @import("graven_layout");
 const engine = @import("graven_engine");
+const fontsearch = @import("graven_fontsearch");
 const richtext = @import("graven_richtext");
 const samples = @import("graven_samples");
 
@@ -23,9 +24,11 @@ const usage =
     \\         --bold and --bold-italic give the family's bolds, for \\textbf and \\mathbf.
     \\       graven keyboard <font> <out.svg>
     \\         Lays out the sample PC keyboard in one font and writes it as SVG.
-    \\       graven hp15c <font> <plate.svg> <keys.svg> [fallback font ...]
+    \\       graven hp15c <font|package> <plate.svg> <keys.svg> [fallback font ...]
     \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
     \\         and the keys, each written as SVG. Fallback fonts set what the font lacks.
+    \\         A math font package (stix-two) instead of a font sets the legends in its
+    \\         faces, from $GRAVEN_FONTS or fonts/ (fill it with scripts/fetch-fonts.py).
     \\       graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf> [fallback font ...]
     \\         The HP-15C keypad's plate and keys for multi-colour 3D printing, each part's
     \\         stack of layer operations as closed meshes, parts of one object, colours as
@@ -161,6 +164,114 @@ fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8)
     std.debug.print("{s}: {d} tiles, {d} labels ({d} renders) in {d:.1} ms\n", .{ out_path, placed.tiles.len, placed.labels.len, labels.cache.count(), ms });
 }
 
+/// The legends' fonts: font files (the first the main face, the rest its
+/// fallbacks, as members), or a math font package by name (see
+/// layout.fonts.Package), its faces found by name in the fonts directory
+/// ($GRAVEN_FONTS, else fonts/; scripts/fetch-fonts.py fills it) and set
+/// through a composed font.
+const LegendFonts = struct {
+    files: ?LoadedFaces = null,
+    package: ?*const layout.fonts.Package = null,
+    dir: ?DirFonts = null,
+    resolved: ?layout.fonts.Resolved = null,
+
+    fn init(gpa: std.mem.Allocator, io: std.Io, font: []const u8, fallbacks: []const [:0]const u8) !LegendFonts {
+        if (layout.fonts.package(font)) |pkg| {
+            const set = if (std.c.getenv("GRAVEN_FONTS")) |v| std.mem.span(v) else "";
+            const dir = if (set.len > 0) set else "fonts";
+            return .{ .package = pkg, .dir = try DirFonts.load(gpa, io, dir) };
+        }
+        const paths = try gpa.alloc([]const u8, fallbacks.len + 1);
+        defer gpa.free(paths);
+        paths[0] = font;
+        for (fallbacks, paths[1..]) |fb, *p| p.* = fb;
+        return .{ .files = try LoadedFaces.load(gpa, io, paths) };
+    }
+
+    /// The members the legend styles name directly (font files' fallbacks).
+    fn members(f: *const LegendFonts) []const engine.style.Member {
+        return if (f.files) |l| l.members else &.{};
+    }
+
+    /// Sets the styles in the package's composed font and resolves it.
+    fn attach(f: *LegendFonts, gpa: std.mem.Allocator, m: *layout.Model, styles: samples.hp15c.Styles) !void {
+        const pkg = f.package orelse return;
+        const id = try layout.fonts.addPackage(m, pkg, "Legends");
+        for ([_]layout.model.StyleId{ styles.key, styles.g, styles.f }) |st| try m.setStyleFont(st, id);
+        const dir = &f.dir.?;
+        if (dir.faces.items.len == 0) {
+            std.debug.print("no fonts in the fonts directory: run scripts/fetch-fonts.py\n", .{});
+            return error.NoFonts;
+        }
+        f.resolved = try layout.fonts.resolve(gpa, m, dir.catalog(), dir.faces.items[0]);
+        for (f.resolved.?.substitutions.items) |sub| {
+            if (sub.got) |got| {
+                std.debug.print("{s} {s}: not found, {s} {s} used\n", .{ sub.wanted.family, sub.wanted.style, got.family, got.style });
+            } else std.debug.print("{s} {s}: not found (run scripts/fetch-fonts.py)\n", .{ sub.wanted.family, sub.wanted.style });
+        }
+    }
+
+    fn faces(f: *const LegendFonts) []const *engine.Face {
+        if (f.resolved) |r| return r.faces.items;
+        return f.files.?.faces;
+    }
+
+    fn sync(f: *LegendFonts, labels: *layout.Labels) !void {
+        if (f.resolved) |*r| try labels.syncResolved(r);
+    }
+
+    fn deinit(f: *LegendFonts, gpa: std.mem.Allocator) void {
+        if (f.resolved) |*r| r.deinit();
+        if (f.dir) |*d| d.deinit(gpa);
+        if (f.files) |l| l.deinit(gpa);
+    }
+};
+
+/// Every font in a directory, loaded and named, as a catalog.
+const DirFonts = struct {
+    arena: std.heap.ArenaAllocator,
+    faces: std.ArrayList(*engine.Face) = .empty,
+    bytes: std.ArrayList([]u8) = .empty,
+    names: std.ArrayList(layout.model.FontName) = .empty,
+
+    fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !DirFonts {
+        var d: DirFonts = .{ .arena = .init(gpa) };
+        const a = d.arena.allocator();
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return d;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            const ext = std.fs.path.extension(entry.name);
+            if (!std.ascii.eqlIgnoreCase(ext, ".ttf") and !std.ascii.eqlIgnoreCase(ext, ".otf")) continue;
+            const bytes = try dir.readFileAlloc(io, entry.name, gpa, .limited(64 << 20));
+            const face = engine.Face.init(gpa, bytes, 0) catch {
+                gpa.free(bytes);
+                continue;
+            };
+            const r = try fontsearch.describe(a, face, "", entry.name, 0, 0);
+            try d.faces.append(a, face);
+            try d.bytes.append(a, bytes);
+            try d.names.append(a, .{ .family = r.family, .style = r.style });
+        }
+        return d;
+    }
+
+    fn catalog(d: *DirFonts) layout.fonts.Catalog {
+        return .{ .names = d.names.items, .ctx = d, .load = struct {
+            fn f(ctx: *anyopaque, index: usize) ?*engine.Face {
+                const self: *DirFonts = @ptrCast(@alignCast(ctx));
+                return self.faces.items[index];
+            }
+        }.f };
+    }
+
+    fn deinit(d: *DirFonts, gpa: std.mem.Allocator) void {
+        for (d.faces.items) |f| f.deinit();
+        for (d.bytes.items) |b| gpa.free(b);
+        d.arena.deinit();
+    }
+};
+
 /// Faces loaded from font files (kept with their bytes), the first the
 /// main face and the rest its fallbacks, as members.
 const LoadedFaces = struct {
@@ -194,21 +305,20 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
-    const paths = try gpa.alloc([]const u8, fallbacks.len + 1);
-    defer gpa.free(paths);
-    paths[0] = font_path;
-    for (fallbacks, paths[1..]) |fb, *p| p.* = fb;
-    const loaded = try LoadedFaces.load(gpa, io, paths);
-    defer loaded.deinit(gpa);
-    const faces = loaded.faces;
+    var fonts = try LegendFonts.init(gpa, io, font_path, fallbacks);
+    defer fonts.deinit(gpa);
 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const b = try samples.hp15c.build(&m, try samples.hp15c.addStyles(&m, loaded.members), 0, .{ .x = 0, .y = 0 });
+    const styles = try samples.hp15c.addStyles(&m, fonts.members());
+    const b = try samples.hp15c.build(&m, styles, 0, .{ .x = 0, .y = 0 });
+    try fonts.attach(gpa, &m, styles);
+    const faces = fonts.faces();
 
     var labels: layout.Labels = .init(gpa, faces);
     defer labels.deinit();
+    try fonts.sync(&labels);
     for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
         var placed = try layout.solve(gpa, &m, part.p, &labels);
         defer placed.deinit();
@@ -232,21 +342,20 @@ fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u
     const gpa = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
-    const paths = try gpa.alloc([]const u8, fallbacks.len + 1);
-    defer gpa.free(paths);
-    paths[0] = font_path;
-    for (fallbacks, paths[1..]) |fb, *p| p.* = fb;
-    const loaded = try LoadedFaces.load(gpa, io, paths);
-    defer loaded.deinit(gpa);
-    const faces = loaded.faces;
+    var fonts = try LegendFonts.init(gpa, io, font_path, fallbacks);
+    defer fonts.deinit(gpa);
 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const b = try samples.hp15c.build(&m, try samples.hp15c.addStyles(&m, loaded.members), 0, .{ .x = 0, .y = 0 });
+    const styles = try samples.hp15c.addStyles(&m, fonts.members());
+    const b = try samples.hp15c.build(&m, styles, 0, .{ .x = 0, .y = 0 });
+    try fonts.attach(gpa, &m, styles);
+    const faces = fonts.faces();
 
     var labels: layout.Labels = .init(gpa, faces);
     defer labels.deinit();
+    try fonts.sync(&labels);
     var sound = true;
     for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
         var arena: std.heap.ArenaAllocator = .init(gpa);

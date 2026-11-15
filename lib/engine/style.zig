@@ -32,6 +32,9 @@ pub const Want = struct {
     italic: bool = false,
     bold: bool = false,
     alphabet: Alphabet = .normal,
+    /// In math (not \text, not an operator's name): a member for variables
+    /// sets its italic letters.
+    math: bool = false,
 };
 
 /// A family's faces by weight and slant. Missing ones fall back: bold
@@ -112,6 +115,12 @@ pub const Member = struct {
     scale: f64 = 1,
     /// Baseline shift, a fraction of the cap height, up positive.
     shift: f64 = 0,
+    /// What it sets: characters (by its coverage), or variables: the
+    /// italic letters of math, from its upright face (a bold italic face
+    /// drawn as variables, say), and nothing else.
+    role: Role = .characters,
+
+    pub const Role = enum { characters, variables };
 
     pub fn variants(m: Member) Variants {
         return .{ .upright = m.upright, .italic = m.italic, .bold = m.bold, .bold_italic = m.bold_italic };
@@ -131,6 +140,11 @@ pub const Spec = struct {
     /// coverage take their characters first; fallbacks are tried, in order,
     /// for clusters the chosen face lacks.
     members: []const Member = &.{},
+    /// The math face: the one whose OpenType MATH table gives the math
+    /// constants (script size and shifts, rule thickness, axis height)
+    /// when it has one; null for the upright face's. A text face rarely
+    /// has a MATH table: a package's math face supplies it.
+    math: ?FaceId = null,
     /// Size as cap height, mm. With `em_size` set, an estimate until the
     /// context is made, which sets it from the main face.
     cap_height: f64,
@@ -227,7 +241,13 @@ pub const Context = struct {
             spec.cap_height = em_mm * cap / @as(f64, @floatFromInt(main.upem));
         }
         if (!(spec.cap_height > 0)) return error.InvalidSize;
-        const has_math = hb.hb_ot_math_has_data(main.face) != 0;
+        // The math constants: from the math face's MATH table if it has
+        // one, else the upright face's; heights relative to that face's
+        // own cap height.
+        const math_face = if (spec_in.math) |m| faces[m] else main;
+        const mf = if (hb.hb_ot_math_has_data(math_face.face) != 0) math_face else main;
+        const has_math = hb.hb_ot_math_has_data(mf.face) != 0;
+        const mcap = if (mf == main) cap else (try mf.capHeight()) orelse cap;
         const k = struct {
             fn constant(f: *Face, c: hb.hb_ot_math_constant_t) f64 {
                 return @floatFromInt(hb.hb_ot_math_get_constant(f.font, c));
@@ -237,27 +257,27 @@ pub const Context = struct {
             .faces = faces,
             .spec = spec,
             .script_scale = spec.script_scale orelse if (has_math)
-                k.constant(main, hb.HB_OT_MATH_CONSTANT_SCRIPT_PERCENT_SCALE_DOWN) / 100
+                k.constant(mf, hb.HB_OT_MATH_CONSTANT_SCRIPT_PERCENT_SCALE_DOWN) / 100
             else
                 default_script_scale,
             .sup_raise = spec.sup_raise orelse if (has_math)
-                k.constant(main, hb.HB_OT_MATH_CONSTANT_SUPERSCRIPT_SHIFT_UP) / cap
+                k.constant(mf, hb.HB_OT_MATH_CONSTANT_SUPERSCRIPT_SHIFT_UP) / mcap
             else
                 default_sup_raise,
             .sub_drop = spec.sub_drop orelse if (has_math)
-                k.constant(main, hb.HB_OT_MATH_CONSTANT_SUBSCRIPT_SHIFT_DOWN) / cap
+                k.constant(mf, hb.HB_OT_MATH_CONSTANT_SUBSCRIPT_SHIFT_DOWN) / mcap
             else
                 default_sub_drop,
             .accent_gap = spec.accent_gap orelse if (has_math)
-                k.constant(main, hb.HB_OT_MATH_CONSTANT_OVERBAR_VERTICAL_GAP) / cap
+                k.constant(mf, hb.HB_OT_MATH_CONSTANT_OVERBAR_VERTICAL_GAP) / mcap
             else
                 default_accent_gap,
             .rule_thickness = spec.rule_thickness orelse if (has_math)
-                k.constant(main, hb.HB_OT_MATH_CONSTANT_OVERBAR_RULE_THICKNESS) / cap
+                k.constant(mf, hb.HB_OT_MATH_CONSTANT_OVERBAR_RULE_THICKNESS) / mcap
             else
                 default_rule_thickness,
             .axis_height = spec.axis_height orelse if (has_math)
-                k.constant(main, hb.HB_OT_MATH_CONSTANT_AXIS_HEIGHT) / cap
+                k.constant(mf, hb.HB_OT_MATH_CONSTANT_AXIS_HEIGHT) / mcap
             else
                 default_axis_height,
         };
@@ -286,6 +306,12 @@ pub const Context = struct {
     /// Whether a member sets `alphabet` from ordinary letters.
     pub fn hasAlphabet(c: *const Context, alphabet: Alphabet) bool {
         for (c.spec.members) |m| if (m.alphabet == alphabet) return true;
+        return false;
+    }
+
+    /// Whether a member sets math's variables.
+    pub fn hasVariables(c: *const Context) bool {
+        for (c.spec.members) |m| if (m.role == .variables) return true;
         return false;
     }
 
@@ -326,20 +352,24 @@ pub const Context = struct {
     pub fn faceFor(c: *const Context, cluster: []const u8, want: Want, strict: bool) ?FaceId {
         var it = (std.unicode.Utf8View.initUnchecked(cluster)).iterator();
         const cp = it.nextCodepoint() orelse 0;
+        if (want.math and want.italic and want.alphabet == .normal) for (c.spec.members) |m| {
+            if (m.role != .variables) continue;
+            if (covers(c.faces[m.upright], cluster)) return m.upright;
+        };
         if (want.alphabet != .normal) for (c.spec.members) |m| {
-            if (m.alphabet != want.alphabet) continue;
+            if (m.alphabet != want.alphabet or m.role != .characters) continue;
             const f = m.variants().pick(want);
             if (covers(c.faces[f], cluster)) return f;
         };
         for (c.spec.members) |m| {
-            if (m.alphabet != .normal or !m.coverage.has(cp)) continue;
+            if (m.alphabet != .normal or m.role != .characters or !m.coverage.has(cp)) continue;
             const f = m.variants().pick(want);
             if (covers(c.faces[f], cluster)) return f;
         }
         const wanted = c.mainVariants().pick(want);
         if (covers(c.faces[wanted], cluster)) return wanted;
         for (c.spec.members) |m| {
-            if (m.alphabet != .normal or m.coverage != .fallback) continue;
+            if (m.alphabet != .normal or m.role != .characters or m.coverage != .fallback) continue;
             const f = m.variants().pick(want);
             if (covers(c.faces[f], cluster)) return f;
         }

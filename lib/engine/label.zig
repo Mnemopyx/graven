@@ -770,7 +770,8 @@ const Builder = struct {
         const main = b.ctx.mainVariants();
         const math = !v.text and !t.operator;
         const weight = math and v.bold and main.bold == null;
-        const slant = math and italic and main.italic == null;
+        // A member for variables draws math's italic letters as they are.
+        const slant = math and italic and main.italic == null and !b.ctx.hasVariables();
         if (!alphabet and !weight and !slant) return null;
 
         var utf8: std.ArrayList(u8) = .empty;
@@ -818,6 +819,7 @@ const Builder = struct {
             .italic = letter and b.italicLetters(t),
             .bold = t.variant.bold,
             .alphabet = if (letter or (first >= '0' and first <= '9')) t.variant.alphabet else .normal,
+            .math = letter and !t.variant.text and !t.operator,
         }, false).?;
     }
 
@@ -830,7 +832,9 @@ const Builder = struct {
         const element_id: u32 = @intCast(b.elements.items.len);
 
         const first = firstCodepoint(t.utf8[start..end]);
-        if (b.ctx.spec.italic == null and t.variant.shape == .italic and isLetter(first))
+        // Italic asked for and not had (a member for variables has math's).
+        const variable = b.ctx.memberOf(face_id) != null and b.ctx.memberOf(face_id).?.role == .variables;
+        if (b.ctx.spec.italic == null and t.variant.shape == .italic and isLetter(first) and !variable)
             try b.diagnose(.no_italic, t.source[start]);
         if (t.variant.bold and !b.ctx.isBold(face_id) and !isMathAlphanumeric(first) and !isSpace(first))
             try b.diagnose(.no_bold, t.source[start]);
@@ -1948,4 +1952,32 @@ test "the caret follows the source offset through the drawing" {
     try testing.expect(in_script.y0 > a.y0);
     // Past the end stays at the end.
     try testing.expectApproxEqAbs(in_script.x, r.caret(99).?.x, 1e-9);
+}
+
+test "a member for variables sets math's italic letters, and nothing else" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    // Face 2 has the x the main face lacks.
+    spec.members = &.{.{ .upright = 2, .role = .variables, .scale = 1.15 }};
+    const ctx = try style.Context.init(&f.faces, spec);
+    // An italic variable, then an upright letter.
+    var r = try renderTest(&ctx, "\\mathit{x}H");
+    defer r.deinit();
+    try testing.expectEqual(@as(?FaceId, 2), r.elements[0].face);
+    try testing.expectEqual(@as(?FaceId, 0), r.elements[1].face);
+    // Drawn as x, not remapped to the mathematical italic alphabet.
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    // An upright x is not a variable: it is not the member's to set (it is
+    // not a fallback), so it is missing.
+    var up = try renderTest(&ctx, "x");
+    defer up.deinit();
+    try testing.expect(up.diagnostics.len > 0);
+    // With letters italic by default, a math letter is a variable.
+    var italic_spec = spec;
+    italic_spec.letters = .italic;
+    const ictx = try style.Context.init(&f.faces, italic_spec);
+    var ri = try renderTest(&ictx, "x");
+    defer ri.deinit();
+    try testing.expectEqual(@as(?FaceId, 2), ri.elements[0].face);
 }

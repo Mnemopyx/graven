@@ -95,6 +95,17 @@ HarfBuzz 15.1.0 is fetched by `zig build` (pinned in `build.zig.zon`) and built 
 
 The GUI needs an X11 or Wayland display. DVUI is pre-1.0, so it is pinned to a commit in `build.zig.zon` as a lazy dependency: plain `zig build` and `zig build test` never fetch it.
 
+### Fonts for math
+
+Equations need a math font. Graven's math font packages (`lib/layout/fonts.zig`) are named sets of faces from one family, each face with a role: text, the math face (its OpenType MATH table gives the math constants; it also sets symbols), Greek, and variables. The first, **STIX Two**, sets text in Geist SemiBold, Greek in STIX Two Text Bold, variables in TeX Gyre Schola Bold Italic (1.15 times), and symbols and the constants from STIX Two Math 2.12 (the choices of EverCalc's legend tool). Fetch its faces, pinned by SHA-256, with:
+
+```sh
+scripts/fetch-fonts.py          # into fonts/ (git ignores it), or $GRAVEN_FONTS
+zig build run -- hp15c stix-two plate.svg keys.svg
+```
+
+A missing glyph is reported, never taken silently from a system font.
+
 ### OCCT bridge (optional)
 
 The bridge needs OCCT built with the same C++ runtime as Zig (libc++), so build it with `zig c++`:

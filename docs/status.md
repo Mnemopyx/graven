@@ -20,7 +20,7 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 
 ### Fonts (`lib/fontsearch`, `apps/fonts`)
 
-- Composed fonts, with members and fallback.
+- Composed fonts, with members and fallback, a math face for the MATH constants, and members for variables. Math font packages (first: STIX Two, fetched by `scripts/fetch-fonts.py`) make them; `graven hp15c stix-two` sets the keypad in it.
 - Font search with the `graven-fonts` tool, by name, likeness, character coverage, style, math support, embedding permission and licence.
 - The Fonts window: search, side-by-side and overlay comparison, and composition.
 - Style sizes are given in points.
