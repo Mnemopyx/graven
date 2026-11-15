@@ -105,3 +105,7 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
   - forced wraps and hyphen breaks work in rows only, not in columns;
   - copying text keeps no formatting.
 - **`ui-dev` is 81 commits ahead of `main`.**
+
+## Planned: engine v2
+
+A glyphic styling and positioning engine, written beside the v1 engine (`lib/engine`, which stays in use until v2 replaces it whole). Legends are stored as conceptual objects with typed parameters resolved through a cascade (font, package, style, element kind, legend, object), laid out in situ against the ground beneath them (track paths, segments, flows, process limits). KaTeX is a translation layer against it; objects carry tags for export. See the blueprint's "Engine v2" section for the stages.
