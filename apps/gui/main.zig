@@ -24,6 +24,7 @@ const fontwin = @import("fontwin.zig");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const reflow = @import("reflow.zig");
+const glyphs = @import("glyphs.zig");
 
 const geom = engine.geom;
 const Model = layout.Model;
@@ -272,6 +273,9 @@ const TilePiece = struct {
 const Flat = struct {
     arena: std.heap.ArenaAllocator,
     map: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
+    /// As `map`, with glyphs left empty: what is drawn from outlines when
+    /// glyphs come from the atlas.
+    paths: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
     /// Tile art, by its placed shapes (owned by the placement, which resets
     /// this cache when it changes).
     tiles: std.AutoHashMapUnmanaged([*]const layout.art.Shape, []const TilePiece) = .empty,
@@ -279,17 +283,31 @@ const Flat = struct {
 
     fn reset(f: *Flat, tol: f64) void {
         f.map = .empty;
+        f.paths = .empty;
         f.tiles = .empty;
         _ = f.arena.reset(.retain_capacity);
         f.tol = tol;
     }
 
     fn get(f: *Flat, r: *const engine.Render, faces: []const *engine.Face) ![]const Piece {
-        if (f.map.get(r)) |c| return c;
+        return f.getWith(r, faces, false);
+    }
+
+    /// Item for item; with `paths_only`, glyphs' pieces empty.
+    fn getWith(f: *Flat, r: *const engine.Render, faces: []const *engine.Face, paths_only: bool) ![]const Piece {
+        const cache = if (paths_only) &f.paths else &f.map;
+        if (cache.get(r)) |c| return c;
         const a = f.arena.allocator();
         var contours: std.ArrayList(Piece) = .empty;
-        // `outlines` is item for item.
-        for (try r.outlines(a, faces), r.items) |o, item| {
+        for (r.items) |item| {
+            if (paths_only and item == .glyph) {
+                try contours.append(a, .{ .region = .{ .loops = &.{}, .triangles = &.{} }, .kind = .ink });
+                continue;
+            }
+            const o = switch (item) {
+                .glyph => |g| try engine.render.glyphOutline(a, faces[g.face], g),
+                .path => |p| p.outline,
+            };
             const kind: PieceKind = switch (item) {
                 .glyph => |g| if (g.faint) .faint else .ink,
                 .path => |p| if (p.role == .placeholder) .placeholder else .ink,
@@ -306,7 +324,7 @@ const Flat = struct {
             try contours.append(a, .{ .region = try geom.fill.nonzero(a, polys, f.tol * 0.1), .kind = kind });
         }
         const out = contours.items;
-        try f.map.put(a, r, out);
+        try cache.put(a, r, out);
         return out;
     }
 };
@@ -710,6 +728,7 @@ fn deinit(_: *dvui.Window) void {
     if (state.labels) |*l| l.deinit();
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
+    if (atlas) |*a| a.deinit();
     state.expanded.deinit(state.gpa);
     forgetThreads();
     state.model.deinit();
@@ -875,6 +894,7 @@ fn update() !void {
         state.placed_rev = std.math.maxInt(u64);
         if (resolved) |*r| r.deinit();
         resolved = null;
+        facesChanged();
     }
     const labels = if (state.labels) |*l| l else return;
     resolveFonts(labels);
@@ -917,6 +937,23 @@ var resolved_rev: u64 = std.math.maxInt(u64);
 
 /// The face table labels render with: the resolved one, or the chosen
 /// font alone.
+/// GRAVEN_EXACT_TEXT set: text drawn from its outlines, not the atlas (to
+/// compare the two).
+var exact_text = false;
+
+/// Glyph rasters from distance fields, for drawing text (see glyphs.zig).
+/// Keyed by face: cleared whenever the faces change.
+var atlas: ?glyphs.Atlas = null;
+
+fn glyphAtlas() *glyphs.Atlas {
+    if (atlas == null) atlas = .init(state.gpa);
+    return &atlas.?;
+}
+
+fn facesChanged() void {
+    if (atlas) |*a| a.clear(true);
+}
+
 fn faceTable() []const *engine.Face {
     if (resolved) |*r| return r.faces.items;
     return &state.faces;
@@ -932,6 +969,7 @@ fn resolveFonts(labels: *layout.Labels) void {
             labels.resolved = null;
             r.deinit();
             resolved = null;
+            facesChanged();
             labels.deinit();
             state.labels = .init(state.gpa, &state.faces);
         }
@@ -944,6 +982,7 @@ fn resolveFonts(labels: *layout.Labels) void {
     const cat = fontwin.catalog(names_arena.allocator()) orelse return;
     const next = layout.fonts.resolve(state.gpa, &state.model, cat, state.faces[0]) catch return;
     if (resolved) |*old| old.deinit();
+    facesChanged();
     resolved = next;
     resolved_rev = state.model.revision;
     labels.syncResolved(&resolved.?) catch {};
@@ -1055,6 +1094,24 @@ fn frame() !dvui.App.Result {
         if (dvui.App.main_init) |mi| {
             const args = mi.minimal.args.toSlice(dvui.currentWindow().arena()) catch &.{};
             if (args.len > 1) openDocument(args[1]);
+        }
+        // GRAVEN_SAMPLE=hp15c or keyboard: a new canvas with that sample, for
+        // trying the app (and its tests) without the menus.
+        exact_text = std.c.getenv("GRAVEN_EXACT_TEXT") != null;
+        if (std.c.getenv("GRAVEN_SAMPLE")) |v| {
+            const which = std.mem.span(v);
+            if (canvas_prompt) createCanvas(.mm);
+            if (std.mem.eql(u8, which, "hp15c")) loadHp15c() catch {} else if (std.mem.eql(u8, which, "keyboard")) loadSample() catch {};
+        }
+        // GRAVEN_VIEW=cx,cy,ppm: the view's centre (mm) and zoom (px/mm).
+        if (std.c.getenv("GRAVEN_VIEW")) |v| {
+            var it = std.mem.splitScalar(u8, std.mem.span(v), ',');
+            var vals: [3]f64 = .{ state.view.cx, state.view.cy, state.view.ppm };
+            for (&vals) |*x| x.* = std.fmt.parseFloat(f64, it.next() orelse break) catch x.*;
+            state.view.cx = vals[0];
+            state.view.cy = vals[1];
+            state.view.ppm = vals[2];
+            state.view.fit = null;
         }
     }
     try update();
@@ -3954,10 +4011,14 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
-        const pieces = state.flat.get(l.render, faceTable()) catch continue;
         // Ink in the sheet's margins is drawn in the warning colour.
         const ink = if (inMargin(pi, l.tile, l.slot, if (l.run) |r| r.region else null)) colors.overflow else colors.ink;
         const at: geom.Point = .{ .x = l.origin.x + o.x, .y = l.origin.y + o.y };
+        // Glyphs from the atlas, rules and marks from their outlines;
+        // exact outlines throughout when construction is shown or a glyph
+        // is too large to raster.
+        const from_atlas = !show_construction and !exact_text and drawLabelGlyphs(area, l.render, at, ink);
+        const pieces = state.flat.getWith(l.render, faceTable(), from_atlas) catch continue;
         for (pieces) |piece| {
             const color: dvui.Color = switch (piece.kind) {
                 .ink => ink,
@@ -3989,6 +4050,49 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     drawFlowMarks(area, pi, placed);
     // On whichever panel its segment lies: a thread runs across panels.
     if (track_cursor) |c| drawCursor(area, pi, placed, c);
+}
+
+/// Draws the glyphs of render `r`, placed at worksheet point `at`, from the
+/// glyph atlas. False (nothing drawn) when one is too large to raster, so
+/// the caller draws the label from its outlines.
+fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const engine.Render, at: geom.Point, ink: dvui.Color) bool {
+    const faces = faceTable();
+    const lifo = dvui.currentWindow().lifo();
+    const ga = glyphAtlas();
+    var quads: std.ArrayList(glyphs.Quad) = .empty;
+    defer quads.deinit(lifo);
+    const ppm: f64 = state.view.ppm;
+    const Map = struct {
+        m: geom.Affine,
+        at: geom.Point,
+        area: dvui.Rect.Physical,
+        pub fn map(self: @This(), q: geom.Point) dvui.Point.Physical {
+            const p = self.m.apply(q);
+            return state.view.toPx(self.area, .{ .x = p.x + self.at.x, .y = p.y + self.at.y });
+        }
+    };
+    for (r.items) |item| {
+        const g = switch (item) {
+            .glyph => |g| g,
+            .path => continue,
+        };
+        if (g.face >= faces.len) return false;
+        const face = faces[g.face];
+        const m = g.transform;
+        // mm per font unit (the transform's scale, rotation aside).
+        const mm = @sqrt(@abs(m.a * m.d - m.b * m.c));
+        if (!(mm > 0)) continue;
+        const sl = (ga.slot(face, g.gid, mm * ppm, g.grow / mm) catch return false) orelse {
+            // Blank, or too large: only the latter needs outlines.
+            const o = face.outline(g.gid) catch return false;
+            if (o.contours.len == 0) continue;
+            return false;
+        };
+        const color = if (g.faint) ink.opacity(0.35) else ink;
+        quads.append(lifo, glyphs.quad(sl, Map{ .m = m, .at = at, .area = area }, .fromColor(color))) catch return false;
+    }
+    glyphs.drawQuads(ga, lifo, quads.items);
+    return true;
 }
 
 /// Fills a resolved region placed at worksheet point `at`: its triangles as
