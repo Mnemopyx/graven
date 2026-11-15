@@ -153,6 +153,7 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
                 .scale = mb.scale,
                 .shift = mb.shift,
                 .role = mb.role,
+                .weight = mb.weight,
             });
             span.len += 1;
         }
@@ -200,6 +201,8 @@ const greek: []const engine.style.Range = &.{.{ .first = 0x0370, .last = 0x03FF 
 /// STIX Two: Geist SemiBold text; STIX Two Math 2.12 for the constants and
 /// symbols; STIX Two Text Bold for Greek (Sigma, Delta, pi); TeX Gyre Schola
 /// Bold Italic, 1.15 times, for variables (EverCalc's choices, 2026-11-02).
+/// STIX Two Math's symbols are drawn as heavy as Geist's stems (EverCalc's
+/// symbol_weight "match").
 pub const stix_two: Package = .{
     .name = "STIX Two",
     .text = .{ .family = "Geist", .style = "SemiBold" },
@@ -207,7 +210,7 @@ pub const stix_two: Package = .{
     .members = &.{
         .{ .font = .{ .family = "STIX Two Text", .style = "Bold" }, .coverage = .{ .ranges = greek } },
         .{ .font = .{ .family = "TeX Gyre Schola", .style = "Bold Italic" }, .role = .variables, .scale = 1.15 },
-        .{ .font = .{ .family = "STIX Two Math", .style = "Regular" } },
+        .{ .font = .{ .family = "STIX Two Math", .style = "Regular" }, .weight = .match },
     },
 };
 

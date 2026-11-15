@@ -137,6 +137,35 @@ pub const Face = struct {
         return if (b.isEmpty()) null else b.y1;
     }
 
+    /// The vertical stem of capital I at half its height, font units: a
+    /// measure of the face's weight. Null if the face has no I. (The
+    /// outermost crossings of a horizontal line through I's middle; a
+    /// serif I has none there.)
+    pub fn stem(self: *Face) Error!?f64 {
+        const gid = self.glyph('I') orelse return null;
+        const o = try self.outline(gid);
+        const b = o.bounds();
+        if (b.isEmpty()) return null;
+        const y = (b.y0 + b.y1) / 2;
+        var lo = std.math.inf(f64);
+        var hi = -std.math.inf(f64);
+        for (o.contours) |c| for (c.segments) |seg| {
+            // Sampled finely: an I's sides are straight or nearly so.
+            const n: usize = if (seg == .line) 1 else 64;
+            var prev = seg.start();
+            for (1..n + 1) |i| {
+                const p = seg.at(@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n)));
+                if ((prev.y <= y and y < p.y) or (p.y <= y and y < prev.y)) {
+                    const x = prev.x + (y - prev.y) * (p.x - prev.x) / (p.y - prev.y);
+                    lo = @min(lo, x);
+                    hi = @max(hi, x);
+                }
+                prev = p;
+            }
+        };
+        return if (hi > lo) hi - lo else null;
+    }
+
     /// x-height measured from the top of x's outline, likewise. Null if the
     /// face has no x.
     pub fn xHeight(self: *Face) Error!?f64 {

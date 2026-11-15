@@ -1278,6 +1278,9 @@ pub const FontMember = struct {
     shift: f64 = 0,
     /// What it sets: characters, or math's italic letters (variables).
     role: engine.style.Member.Role = .characters,
+    /// How much heavier to draw it: as heavy as the main font (by their
+    /// stems of I), a stroke increase in thousandths of cap height, or not.
+    weight: engine.style.Member.Weight = .none,
 };
 
 /// A composed font: a named, virtual font that styles reference. A main

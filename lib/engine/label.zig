@@ -301,7 +301,7 @@ const Builder = struct {
         var p = Profile.empty;
         for (b.items.items[from..]) |item| {
             const outline = switch (item) {
-                .glyph => |g| try (try b.ctx.faces[g.face].outline(g.gid)).transformed(b.a, g.transform),
+                .glyph => |g| try render.glyphOutline(b.a, b.ctx.faces[g.face], g),
                 .path => |q| q.outline,
             };
             p = try Profile.join(b.a, p, try Profile.fromOutline(b.a, outline, b.band));
@@ -684,6 +684,7 @@ const Builder = struct {
             .gid = gid,
             .transform = Affine.scale(s).then(Affine.translate(dx, dy)),
             .element = @intCast(b.elements.items.len),
+            .grow = try b.ctx.growFor(face_id, cap),
         };
         const item0 = b.items.items.len;
         try b.items.append(b.a, .{ .glyph = item });
@@ -843,9 +844,12 @@ const Builder = struct {
         var pen: f64 = 0;
         var ink = Box.empty;
         const item0 = b.items.items.len;
-        for (glyphs) |g| {
+        // A member drawn heavier: each glyph grown all round, and spaced by
+        // the growth on both sides.
+        const grow = try b.ctx.growFor(face_id, cap);
+        for (glyphs, 0..) |g, i| {
             if (g.gid == 0) try b.diagnose(.missing_glyph, t.source[start + g.cluster]);
-            const gx = x + (pen + @as(f64, @floatFromInt(g.x_offset))) * s;
+            const gx = x + (pen + @as(f64, @floatFromInt(g.x_offset))) * s + grow * @as(f64, @floatFromInt(2 * i + 1));
             const gy = y_shifted + @as(f64, @floatFromInt(g.y_offset)) * s;
             const item: render.GlyphItem = .{
                 .face = face_id,
@@ -854,12 +858,13 @@ const Builder = struct {
                 .element = element_id,
                 .source = t.source[start + g.cluster],
                 .faint = t.faint,
+                .grow = grow,
             };
             ink = ink.join(try render.glyphInk(b.a, face, item));
             try b.items.append(b.a, .{ .glyph = item });
             pen += @floatFromInt(g.x_advance);
         }
-        const advance = pen * s;
+        const advance = pen * s + 2 * grow * @as(f64, @floatFromInt(glyphs.len));
         try b.addProfile(item0);
         // Decorations: rules along the element, from the face's own
         // underline and strikeout metrics (out of its contact profile).
@@ -1999,4 +2004,33 @@ test "math mode's letters are variables: italic, from the member for variables" 
     var u = try renderTest(&ctx, "$\\mathrm{H}$");
     defer u.deinit();
     try testing.expectEqual(@as(?FaceId, 0), u.elements[0].face);
+}
+
+test "a member drawn heavier: its glyphs grown all round and spaced by the growth" {
+    var f = try Fonts.init();
+    defer f.deinit();
+    var spec = testSpec();
+    // Face 2 has the x the main face lacks.
+    spec.members = &.{.{ .upright = 2 }};
+    const thin_ctx = try style.Context.init(&f.faces, spec);
+    var thin = try renderTest(&thin_ctx, "x");
+    defer thin.deinit();
+    spec.members = &.{.{ .upright = 2, .weight = .{ .add = 40 } }};
+    const ctx = try style.Context.init(&f.faces, spec);
+    var heavy = try renderTest(&ctx, "x");
+    defer heavy.deinit();
+    // 40 thousandths of the 7 mm cap height, half on each side.
+    const g = 0.04 * 7.0 / 2.0;
+    try testing.expectApproxEqAbs(g, heavy.items[0].glyph.grow, 1e-12);
+    try testing.expectApproxEqAbs(thin.elements[0].advance + 2 * g, heavy.elements[0].advance, 1e-9);
+    try testing.expectApproxEqAbs(thin.ink.width() + 2 * g, heavy.ink.width(), 1e-9);
+    try testing.expectApproxEqAbs(thin.ink.x0 + g - g, heavy.ink.x0, 1e-9);
+    // The outline is the grown one: its bounds are the ink's.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const o = try heavy.outlines(arena.allocator(), &f.faces);
+    const b = o[0].bounds();
+    try testing.expectApproxEqAbs(heavy.ink.x0, b.x0, 1e-6);
+    try testing.expectApproxEqAbs(heavy.ink.y1, b.y1, 1e-6);
+    try testing.expect(@abs(o[0].signedArea()) > 0);
 }

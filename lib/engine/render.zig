@@ -32,6 +32,9 @@ pub const GlyphItem = struct {
     /// Preview only: source shown literally because it is not (yet) valid;
     /// not ink.
     faint: bool = false,
+    /// How far its outline is grown outward all round, label-frame mm: a
+    /// member drawn heavier (`style.Member.weight`).
+    grow: f64 = 0,
 };
 
 pub const PathItem = struct {
@@ -386,7 +389,7 @@ pub const Render = struct {
         const out = try gpa.alloc(Outline, self.items.len);
         for (self.items, out) |item, *o| {
             o.* = switch (item) {
-                .glyph => |g| try (try faces[g.face].outline(g.gid)).transformed(gpa, g.transform),
+                .glyph => |g| try glyphOutline(gpa, faces[g.face], g),
                 .path => |p| p.outline,
             };
         }
@@ -461,10 +464,26 @@ pub fn renderRun(gpa: Allocator, faces: []const *Face, face_id: FaceId, text: []
     };
 }
 
+/// A placed glyph's outline in the label frame, mm, grown as it says;
+/// allocated from `gpa` (an arena suits).
+pub fn glyphOutline(gpa: Allocator, face: *Face, g: GlyphItem) !Outline {
+    const o = try (try face.outline(g.gid)).transformed(gpa, g.transform);
+    // Flattened to a tenth of the growth: well under the ink's own
+    // precision at any size it is grown at.
+    return if (g.grow > 0) geom.grow.grow(gpa, o, g.grow, g.grow / 10) else o;
+}
+
 /// A placed glyph's ink: its font-unit bounds mapped directly when the
 /// transform only scales and moves, else the exact bounds of the
 /// transformed outline.
 pub fn glyphInk(scratch: Allocator, face: *Face, g: GlyphItem) !Box {
+    const b = try glyphInkUngrown(scratch, face, g);
+    // Growing by a disc grows the bounds by its radius exactly.
+    if (b.isEmpty() or !(g.grow > 0)) return b;
+    return .{ .x0 = b.x0 - g.grow, .y0 = b.y0 - g.grow, .x1 = b.x1 + g.grow, .y1 = b.y1 + g.grow };
+}
+
+fn glyphInkUngrown(scratch: Allocator, face: *Face, g: GlyphItem) !Box {
     const o = try face.outline(g.gid);
     const m = g.transform;
     if (m.b == 0 and m.c == 0) {

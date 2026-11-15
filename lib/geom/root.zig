@@ -10,6 +10,8 @@ pub const spring = @import("spring.zig");
 pub const fill = @import("fill.zig");
 pub const boolean = @import("boolean.zig");
 pub const earcut = @import("earcut.zig");
+/// Outlines grown outward: a heavier weight.
+pub const grow = @import("grow.zig");
 
 pub const Point = struct {
     x: f64,
@@ -515,4 +517,5 @@ test {
     _ = fill;
     _ = boolean;
     _ = earcut;
+    _ = grow;
 }

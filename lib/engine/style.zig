@@ -119,8 +119,15 @@ pub const Member = struct {
     /// italic letters of math, from its upright face (a bold italic face
     /// drawn as variables, say), and nothing else.
     role: Role = .characters,
+    /// How much heavier to draw it: not at all, as heavy as the main face
+    /// (its stem of I, relative to cap height, grown to the main face's),
+    /// or a stroke increase in thousandths of cap height. Its outlines are
+    /// grown outward by half the increase all round, and its advances by
+    /// the whole: a thin symbol font set beside a heavier text face.
+    weight: Weight = .none,
 
     pub const Role = enum { characters, variables };
+    pub const Weight = union(enum) { none, match, add: f64 };
 
     pub fn variants(m: Member) Variants {
         return .{ .upright = m.upright, .italic = m.italic, .bold = m.bold, .bold_italic = m.bold_italic };
@@ -336,6 +343,27 @@ pub const Context = struct {
         }
         const em_mm = cap_mm / main_cap * @as(f64, @floatFromInt(main.upem));
         return factor * em_mm / @as(f64, @floatFromInt(f.upem));
+    }
+
+    /// How far `face`'s glyphs are grown outward on each side at cap height
+    /// `cap_mm`, mm: its member's weight. Matching never thins a face
+    /// heavier than the main one, and a face without an I is not matched.
+    pub fn growFor(c: *const Context, face: FaceId, cap_mm: f64) font.Error!f64 {
+        const m = c.memberOf(face) orelse return 0;
+        const add: f64 = switch (m.weight) {
+            .none => return 0,
+            .add => |k| k / 1000,
+            .match => blk: {
+                const main = c.faces[c.spec.upright];
+                const ms = (try main.stem()) orelse return 0;
+                const mc = (try main.capHeight()) orelse return 0;
+                const fs = (try c.faces[face].stem()) orelse return 0;
+                // Both stems as fractions of cap height: the member's as it
+                // is drawn, at the scale its matching sets.
+                break :blk @max(0, ms / mc - fs * try c.scaleFor(face, 1));
+            },
+        };
+        return add * cap_mm / 2;
     }
 
     /// The baseline shift for `face` at cap height `cap_mm`, mm, up.
