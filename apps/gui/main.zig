@@ -1215,6 +1215,8 @@ fn frame() !dvui.App.Result {
         // GRAVEN_SAMPLE=hp15c or keyboard: a new canvas with that sample, for
         // trying the app (and its tests) without the menus.
         exact_text = std.c.getenv("GRAVEN_EXACT_TEXT") != null;
+        // GRAVEN_FONTS_WINDOW set: the Fonts window opens at start.
+        if (std.c.getenv("GRAVEN_FONTS_WINDOW") != null) fontwin.open = true;
         frame_log = std.c.getenv("GRAVEN_FRAME_LOG") != null;
         if (std.c.getenv("GRAVEN_DUMP_OUTLINES")) |v| dump_path = std.mem.span(v);
         if (std.c.getenv("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.gamma;

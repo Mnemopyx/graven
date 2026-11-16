@@ -43,7 +43,11 @@ The canvas has sub-modes entered from the properties pane, each with its own way
 
 ## Separate windows and prompts
 
-- **Fonts window** (Text › Fonts…): a window of its own (not a pane). It searches, compares and composes fonts and applies them to styles. Results are grouped by family (headings open and close); an open family shows its files, and under each the weights and styles it holds. Its toolbar has Install (font files or folders as user fonts) and Rescan; a user font file has Remove, which first lists every face and weight the file takes with it and the document's composed fonts that use them. Install and Remove prompts sit inside it.
+- **Fonts window** (Text › Fonts…): a window of its own (not a pane). It searches, compares and composes fonts and applies them to styles. Everything is visible at once:
+  - **Search** across the top, in three groups: Search (words, characters it must have, Like), Style (serif or sans, upright or italic, mono, math, variable), Licence terms.
+  - **Results** below on the left, as a tree: one line per family, with its style icons (Regular, Bold, Italic, Bold Italic: the letter a drawn in that face, empty where the family has none), each slant's pair followed by its weights in small boxes (VF for a variable font), and how many faces in how many files, whose. The italic groups line up in a column; a family too wide for the row puts its italic group on a line under. A click on an icon or weight box selects that face; a click elsewhere on the line opens or closes the family. An open family shows one line per file: pin, the style icon and weight box of each face it holds, the file name, what it is (whose, variable ranges or collection, serif or sans, licence, embedding) and, for a user font, Remove. Faces the search left out are faint.
+  - **Compare** beside the results, **Compose** to its right.
+  - The top bar has the status, Install (font files or folders as user fonts), Rescan and Close. Remove first lists every face and weight the file takes with it and the document's composed fonts that use them. Install and Remove prompts sit inside the window.
 - **New canvas prompt:** in the canvas, for units.
 - **Unsaved changes:** Save, Don't save, Cancel.
 - **Recovered work:** Keep them, Discard them, Not now.

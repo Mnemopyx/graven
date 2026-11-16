@@ -62,12 +62,14 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 | `GRAVEN_FIELDS_INLINE=1` | glyph fields made on the drawing thread |
 | `GRAVEN_FRAME_LOG=1` | each frame's time printed |
 | `GRAVEN_DUMP_OUTLINES=file.svg` | exact glyph outlines in window pixels, for `scripts/text-overlay.py` |
+| `GRAVEN_FONTS_WINDOW=1` | the Fonts window opens at start |
 
-`graven-gui file.graven` opens a document.
+`graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.
 
 ## Git
 
-- Work on `ui-dev`; `main` may be fast-forwarded from it (the owner has allowed this).
+- Work and commit directly on `ui-dev` (the sessions working for the owner are the only committers); `main` may be fast-forwarded from it (the owner has allowed this).
+- If another session pushed to `ui-dev` first, merge its work in (fetch, then merge or rebase your local commits onto it); never force-push.
 - After a push: `git fetch -q origin +refs/heads/ui-dev:refs/remotes/origin/ui-dev`.
 - Never put model identifiers in commits or files.
 

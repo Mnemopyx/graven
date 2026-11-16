@@ -259,7 +259,7 @@ pub fn window(host: Host, allocator: Allocator) void {
         keep(&sample, &sample_len, default_sample);
         sample_set = true;
     }
-    var ow = dvui.osWindow(@src(), .{ .title = "Fonts — Graven", .size = .{ .w = 1360, .h = 820 }, .min_size = .{ .w = 900, .h = 560 } }, .{ .open_flag = &open });
+    var ow = dvui.osWindow(@src(), .{ .title = "Fonts — Graven", .size = .{ .w = 1560, .h = 860 }, .min_size = .{ .w = 900, .h = 560 } }, .{ .open_flag = &open });
     defer ow.deinit();
     if (index_arena == null) _ = indexRecords(allocator, false);
 
@@ -277,15 +277,16 @@ pub fn window(host: Host, allocator: Allocator) void {
             install_report.clearRetainingCapacity();
         }
     }
+    // Search across the top; below it, the results tree and the comparison
+    // side by side, and the composition beside them.
+    criteria();
     var cols = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer cols.deinit();
     const a = dvui.currentWindow().arena();
-    // Fixed columns for criteria, results and composition; the comparison
-    // takes what is left.
     const total = cols.data().contentRect().w;
-    const rest = @max(300, total - (250 + 16) - (360 + 16) - (300 + 16) - 16);
-    criteria();
-    const hits = results(a);
+    const results_w = @max(520, (total - (300 + 16)) * 0.6);
+    const rest = @max(300, total - (results_w + 16) - (300 + 16) - 16);
+    const hits = results(a, results_w);
     _ = hits;
     compare(a, rest);
     compose(host);
@@ -296,56 +297,79 @@ pub fn window(host: Host, allocator: Allocator) void {
 // Search criteria --------------------------------------------------------------
 
 fn criteria() void {
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 250 }, .max_size_content = .width(250), .expand = .vertical, .padding = .all(8) });
-    defer col.deinit();
-    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay, .horizontal_bar = .hide }, .{ .expand = .both });
-    defer scroll.deinit();
-    var bar_room = keepBarRoom(@src());
-    defer bar_room.deinit();
-    heading(@src(), "Search");
-    dvui.labelNoFmt(@src(), "Family or style has every word", .{}, .{});
+    var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 8, .w = 8, .h = 6 }, .background = true, .style = .control });
+    defer strip.deinit();
     {
-        var te = dvui.textEntry(@src(), .{ .text_initial = text(&words, words_len) }, .{ .expand = .horizontal });
-        defer te.deinit();
-        keep(&words, &words_len, te.textGet());
+        // What to find: words, characters, likeness.
+        var g = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 330 }, .max_size_content = .width(330), .padding = .{ .w = 16 } });
+        defer g.deinit();
+        heading(@src(), "Search");
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            dvui.labelNoFmt(@src(), "Words", .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 82 } });
+            var te = dvui.textEntry(@src(), .{ .text_initial = text(&words, words_len), .placeholder = "in the family or style name" }, .{ .expand = .horizontal });
+            defer te.deinit();
+            keep(&words, &words_len, te.textGet());
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+            defer row.deinit();
+            dvui.labelNoFmt(@src(), "Characters", .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 82 } });
+            var te = dvui.textEntry(@src(), .{ .text_initial = text(&covers, covers_len), .placeholder = "it must have" }, .{ .expand = .horizontal });
+            defer te.deinit();
+            keep(&covers, &covers_len, te.textGet());
+        }
+        _ = dvui.checkbox(@src(), &allow_missing, "Also fonts missing some", .{});
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            dvui.labelNoFmt(@src(), "Like", .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 82 } });
+            if (like) |l| {
+                var buf: [96]u8 = undefined;
+                dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{s} {s}", .{ records[l].family, records[l].style }) catch "", .{}, .{ .gravity_y = 0.5 });
+                if (icons.button(@src(), .x_circle, "Stop ranking by likeness", .{ .opts = .{ .gravity_x = 1 } })) like = null;
+            } else dvui.labelNoFmt(@src(), "any", .{}, .{ .gravity_y = 0.5 });
+            if (selected) |sl| if (like == null or like.? != sl) {
+                if (icons.button(@src(), .magnet, "Rank by likeness to the selected font", .{ .opts = .{ .gravity_x = 1 } })) like = sl;
+            };
+        }
     }
-    dvui.labelNoFmt(@src(), "Must have these characters", .{}, .{ .margin = .{ .y = 6 } });
     {
-        var te = dvui.textEntry(@src(), .{ .text_initial = text(&covers, covers_len) }, .{ .expand = .horizontal });
-        defer te.deinit();
-        keep(&covers, &covers_len, te.textGet());
+        var g = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 260 }, .max_size_content = .width(260), .padding = .{ .w = 16 } });
+        defer g.deinit();
+        heading(@src(), "Style");
+        _ = dvui.dropdown(@src(), &.{ "Serif or sans", "Serif", "Sans" }, .{ .choice = &serif_choice }, .{}, .{ .expand = .horizontal });
+        _ = dvui.dropdown(@src(), &.{ "Upright or italic", "Upright", "Italic" }, .{ .choice = &slant_choice }, .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+            defer row.deinit();
+            _ = dvui.checkbox(@src(), &mono, "Mono", .{});
+            _ = dvui.checkbox(@src(), &math, "Math", .{});
+            _ = dvui.checkbox(@src(), &variable, "Variable", .{});
+        }
     }
-    _ = dvui.checkbox(@src(), &allow_missing, "Also fonts missing some", .{});
-
-    dvui.labelNoFmt(@src(), "Like", .{}, .{ .margin = .{ .y = 6 } });
     {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer row.deinit();
-        if (like) |l| {
-            var buf: [96]u8 = undefined;
-            dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{s} {s}", .{ records[l].family, records[l].style }) catch "", .{}, .{ .gravity_y = 0.5 });
-            if (icons.button(@src(), .x_circle, "Stop ranking by likeness", .{ .opts = .{ .gravity_x = 1 } })) like = null;
-        } else dvui.labelNoFmt(@src(), "— (any)", .{}, .{ .gravity_y = 0.5 });
-        if (selected) |s| if (like == null or like.? != s) {
-            if (icons.button(@src(), .magnet, "Rank by likeness to the selected font", .{ .opts = .{ .gravity_x = 1 } })) like = s;
-        };
+        var g = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+        defer g.deinit();
+        heading(@src(), "Licence terms");
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            dvui.labelNoFmt(@src(), "Embedding at least", .{}, .{ .gravity_y = 0.5 });
+            _ = dvui.dropdown(@src(), &.{ "Any", "Installable", "Editable", "Preview and print" }, .{ .choice = &embed_choice }, .{}, .{ .min_size_content = .{ .w = 150 } });
+        }
+        {
+            // Licences in a row (none ticked: any).
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .margin = .{ .y = 4 } });
+            defer row.deinit();
+            dvui.labelNoFmt(@src(), "Licence", .{}, .{ .gravity_y = 0.5 });
+            for (licence_names, 0..) |n, i| _ = dvui.checkbox(@src(), &licences[i], n, .{ .id_extra = i });
+        }
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .margin = .{ .y = 2 } });
+        tl.addText("None ticked: any. Terms are shown as each font states them; Graven does not set them, or judge what your own licence allows.", .{ .font = dvui.Font.theme(.body).larger(-2) });
+        tl.deinit();
     }
-
-    heading(@src(), "Style");
-    _ = dvui.dropdown(@src(), &.{ "Serif or sans", "Serif", "Sans" }, .{ .choice = &serif_choice }, .{}, .{ .expand = .horizontal });
-    _ = dvui.dropdown(@src(), &.{ "Upright or italic", "Upright", "Italic" }, .{ .choice = &slant_choice }, .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
-    _ = dvui.checkbox(@src(), &mono, "Monospaced", .{});
-    _ = dvui.checkbox(@src(), &math, "Math (has a MATH table)", .{});
-    _ = dvui.checkbox(@src(), &variable, "Variable", .{});
-
-    heading(@src(), "Licence terms");
-    dvui.labelNoFmt(@src(), "Embedding allowed at least", .{}, .{});
-    _ = dvui.dropdown(@src(), &.{ "Any", "Installable", "Editable", "Preview and print" }, .{ .choice = &embed_choice }, .{}, .{ .expand = .horizontal });
-    dvui.labelNoFmt(@src(), "Licence (none ticked: any)", .{}, .{ .margin = .{ .y = 6 } });
-    for (licence_names, 0..) |n, i| _ = dvui.checkbox(@src(), &licences[i], n, .{ .id_extra = i });
-    var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .margin = .{ .y = 8 } });
-    tl.addText("Terms are shown as each font states them. Graven does not set them, and does not judge what your own licence allows.", .{ .font = dvui.Font.theme(.body).larger(-2) });
-    tl.deinit();
 }
 
 fn query(a: Allocator) fs.Query {
@@ -408,8 +432,175 @@ fn setFamilyOpen(name: []const u8, v: bool) void {
     e.value_ptr.* = v;
 }
 
-fn results(a: Allocator) []const fs.Hit {
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 360 }, .max_size_content = .width(360), .expand = .vertical, .padding = .all(8) });
+/// The installed records of each family, by name (all of them, not only
+/// those a search finds): made once per index.
+var family_index: std.StringHashMapUnmanaged(std.ArrayList(usize)) = .empty;
+var family_index_of: ?[*]fs.Record = null;
+/// Each record's sample letter for the style icons, flattened at a cap
+/// height of 1: made once per index.
+var icon_glyphs: std.AutoHashMapUnmanaged(usize, ?Glyphs) = .empty;
+var icon_arena: ?std.heap.ArenaAllocator = null;
+const Glyphs = struct { lines: []const []const []const geom.Point, x0: f64, x1: f64 };
+
+/// The letter the style icons show.
+const icon_letter = "a";
+/// A style icon's side and its letter's cap height, logical pixels.
+const icon_side = 22;
+const icon_cap = 11;
+
+fn familyMembers(family: []const u8) []const usize {
+    if (family_index_of != records.ptr) {
+        var it = family_index.valueIterator();
+        while (it.next()) |l| l.deinit(gpa);
+        family_index.clearRetainingCapacity();
+        for (records, 0..) |r, i| {
+            const e = family_index.getOrPut(gpa, r.family) catch continue;
+            if (!e.found_existing) e.value_ptr.* = .empty;
+            e.value_ptr.append(gpa, i) catch {};
+        }
+        if (icon_arena) |*ia| ia.deinit();
+        icon_arena = .init(gpa);
+        icon_glyphs.clearRetainingCapacity();
+        family_index_of = records.ptr;
+    }
+    return if (family_index.get(family)) |l| l.items else &.{};
+}
+
+/// The member that stands for a style: upright or italic, regular (weight
+/// 300 to 500, nearest 400) or bold (600 and up, nearest 700).
+fn styleMember(members: []const usize, italic: bool, bold: bool) ?usize {
+    var best: ?usize = null;
+    var best_d: f32 = std.math.inf(f32);
+    for (members) |i| {
+        const r = &records[i];
+        if (r.italic != italic) continue;
+        const ok = if (bold) r.weight >= 600 else (r.weight >= 300 and r.weight <= 500) or r.variable;
+        if (!ok) continue;
+        const d = @abs(r.weight - @as(f32, if (bold) 700 else 400));
+        if (d < best_d) {
+            best_d = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+fn iconGlyphs(i: usize) ?Glyphs {
+    if (icon_glyphs.get(i)) |g| return g;
+    const a = icon_arena.?.allocator();
+    const g: ?Glyphs = if (glyphLines(a, i, icon_letter, 0.4 / @as(f64, icon_cap))) |gl| .{ .lines = gl.lines, .x0 = gl.x0, .x1 = gl.x1 } else null;
+    icon_glyphs.put(gpa, i, g) catch {};
+    return g;
+}
+
+/// Whether a press landed on `data` this frame (and takes it).
+fn pressed(data: *dvui.WidgetData) bool {
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, data)) continue;
+        if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
+            e.handle(@src(), data);
+            dvui.refresh(null, @src(), data.id);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// A style icon: the sample letter in record `rec`'s face, or an empty box
+/// when the family has no such style. A click selects the record.
+fn styleIcon(id: usize, rec: ?usize, name: []const u8, visible: bool) void {
+    const t = dvui.themeGet();
+    const sel = rec != null and selected != null and selected.? == rec.?;
+    var box = dvui.box(@src(), .{}, .{
+        .id_extra = id,
+        .min_size_content = .{ .w = icon_side, .h = icon_side },
+        .max_size_content = .size(.{ .w = icon_side, .h = icon_side }),
+        .background = true,
+        .border = .all(1),
+        .color_border = .{ .color = if (sel) t.focus else t.color(.control, .border) },
+        .color_fill = .{ .color = if (rec != null) paper else t.color(.window, .fill) },
+        .margin = .{ .w = 2 },
+        .gravity_y = 0.5,
+        .label = .{ .text = name },
+    });
+    defer box.deinit();
+    const r = rec orelse return;
+    if (pressed(box.data())) selected = r;
+    if (!visible) return;
+    const g = iconGlyphs(r) orelse return;
+    const rs = box.data().contentRectScale();
+    const cap: f32 = icon_cap * rs.s;
+    const cx = rs.r.x + rs.r.w / 2;
+    const place: Place = .{ .x = cx - @as(f32, @floatCast((g.x0 + g.x1) / 2)) * cap, .baseline = rs.r.y + rs.r.h * 0.78, .cap = cap };
+    fillGlyphs(dvui.currentWindow().arena(), g.lines, place, compare_colors[0], 0.4 / @as(f64, cap));
+}
+
+/// A weight box: the weight's number (VF for a variable font); a click
+/// selects the record.
+fn weightBox(id: usize, rec: usize) void {
+    const t = dvui.themeGet();
+    const r = &records[rec];
+    const sel = selected != null and selected.? == rec;
+    var buf: [8]u8 = undefined;
+    const label = if (r.variable) "VF" else std.fmt.bufPrint(&buf, "{d:.0}", .{r.weight}) catch "?";
+    var box = dvui.box(@src(), .{}, .{
+        .id_extra = id,
+        .min_size_content = .{ .w = 26, .h = icon_side },
+        .max_size_content = .size(.{ .w = 26, .h = icon_side }),
+        .background = true,
+        .border = .all(1),
+        .color_border = .{ .color = if (sel) t.focus else t.color(.control, .border) },
+        .color_fill = .{ .color = t.color(.control, .fill) },
+        .margin = .{ .w = 2 },
+        .gravity_y = 0.5,
+    });
+    defer box.deinit();
+    if (pressed(box.data())) selected = rec;
+    dvui.labelNoFmt(@src(), label, .{}, .{ .id_extra = id, .gravity_x = 0.5, .gravity_y = 0.5, .padding = .{}, .font = dvui.Font.theme(.body).larger(-3) });
+}
+
+/// Weights of `members` with the slant asked for, ascending, one record
+/// each.
+fn weightsOf(a: Allocator, members: []const usize, italic: bool) []const usize {
+    var out: std.ArrayList(usize) = .empty;
+    for (members) |i| {
+        const r = &records[i];
+        if (r.italic != italic) continue;
+        const dup = for (out.items) |j| {
+            if (records[j].weight == r.weight and records[j].variable == r.variable) break true;
+        } else false;
+        if (!dup) out.append(a, i) catch {};
+    }
+    std.mem.sort(usize, out.items, {}, struct {
+        fn lt(_: void, x: usize, y: usize) bool {
+            return records[x].weight < records[y].weight;
+        }
+    }.lt);
+    return out.items;
+}
+
+/// Room before a family's style groups: its disclosure and its name.
+const name_room = 18 + 150;
+
+/// A style group's width: two style icons and `n` weight boxes, and a gap.
+fn groupWidth(n: usize) f64 {
+    return 2 * (icon_side + 2) + @as(f64, @floatFromInt(n)) * 30 + 10;
+}
+
+/// One slant's group: its regular and bold icons, then its weights.
+/// Returns where it starts in its row, logical pixels.
+fn styleGroup(fk: usize, si: usize, members: []const usize, italic: bool, weights: []const usize, visible: bool) f32 {
+    var g = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = fk * 2 + si, .gravity_y = 0.5, .min_size_content = .{ .w = @floatCast(groupWidth(weights.len)) } });
+    defer g.deinit();
+    const x = g.data().rect.x;
+    styleIcon(fk * 8 + si * 2, styleMember(members, italic, false), if (italic) "Italic" else "Regular", visible);
+    styleIcon(fk * 8 + si * 2 + 1, styleMember(members, italic, true), if (italic) "Bold Italic" else "Bold", visible);
+    for (weights, 0..) |w, wk| weightBox((fk * 2 + si) * 64 + wk, w);
+    return x;
+}
+
+fn results(a: Allocator, width: f32) []const fs.Hit {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = width }, .max_size_content = .width(width), .expand = .vertical, .padding = .all(8) });
     defer col.deinit();
     const q = query(a);
     const hits = fs.search(a, records, q) catch &.{};
@@ -432,6 +623,17 @@ fn results(a: Allocator) []const fs.Hit {
     var bar_room = keepBarRoom(@src());
     defer bar_room.deinit();
     const default_open = hits.len <= open_by_default;
+    // The italic style groups line up in a column: after the widest
+    // upright group that leaves room for its family's italic one.
+    const avail: f64 = width - 16 - name_room - 8;
+    var slot: f64 = groupWidth(0);
+    for (fams) |f| {
+        const members = familyMembers(f.name);
+        const u = groupWidth(weightsOf(a, members, false).len);
+        const i = groupWidth(weightsOf(a, members, true).len);
+        if (u + i <= avail) slot = @max(slot, u);
+    }
+    const clip = dvui.clipGet();
     for (fams, 0..) |f, fk| {
         // The family's files, in the order of their first face found.
         var files: std.ArrayList([]const u8) = .empty;
@@ -443,129 +645,154 @@ fn results(a: Allocator) []const fs.Hit {
             if (!seen) files.append(a, loc) catch {};
         }
         const is_open = familyIsOpen(f.name, default_open);
-        familyRow(f, fk, files.items.len, is_open);
+        familyRow(a, f, fk, files.items.len, is_open, slot, avail, clip);
         if (!is_open) continue;
-        // Each file, then every face it holds: those the search left out
-        // shown faintly, so a file always shows all it carries.
+        // A line for each file, with every face it holds: those the
+        // search left out shown faintly, so a file always shows all it
+        // carries.
         for (files.items, 0..) |loc, k| {
             const info = fileInfo(loc) orelse continue;
-            fileRow(loc, info, fk * 4096 + k);
-            for (info.faces) |j| faceRow(j, by_record[j]);
+            fileRow(loc, info, by_record, fk * 4096 + k, clip);
         }
     }
     return hits;
 }
 
-/// A family's heading: open or close it, its name, how many faces and
-/// whose (system, user).
-fn familyRow(f: fs.Family, fk: usize, n_files: usize, is_open: bool) void {
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = fk, .expand = .horizontal, .margin = .{ .y = 4, .h = 1 } });
-    defer row.deinit();
-    var tb: [160]u8 = undefined;
-    const toggle = if (is_open)
-        icons.button(@src(), .caret_down, std.fmt.bufPrint(&tb, "Close {s}", .{f.name}) catch "Close", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } })
-    else
-        icons.button(@src(), .caret_right, std.fmt.bufPrint(&tb, "Open {s}", .{f.name}) catch "Open", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } });
-    var clicked = toggle;
-    dvui.labelNoFmt(@src(), f.name, .{}, .{ .id_extra = fk, .font = dvui.Font.theme(.heading).larger(-2), .gravity_y = 0.5 });
+/// A family's heading: open or close it, its name, its style icons
+/// (Regular, Bold, Italic, Bold Italic: a letter in each face, empty where
+/// the family has none) each slant's pair followed by its weights in small
+/// boxes, and how many faces and whose (system, user). The italic group
+/// sits in a column at `slot`, or on a line under the upright one when
+/// the row has no room for it.
+fn familyRow(a: Allocator, f: fs.Family, fk: usize, n_files: usize, is_open: bool, slot: f64, avail: f64, clip: dvui.Rect.Physical) void {
+    const members = familyMembers(f.name);
+    const up = weightsOf(a, members, false);
+    const it = weightsOf(a, members, true);
+    const pad = slot - groupWidth(up.len);
+    const wrap = pad < 0 or slot + groupWidth(it.len) > avail;
     var buf: [96]u8 = undefined;
     const whose: []const u8 = if (f.user > 0 and f.system > 0) "system and user" else if (f.user > 0) "user" else "system";
-    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{d} face{s} in {d} file{s} · {s}", .{ f.faces.len, if (f.faces.len == 1) "" else "s", n_files, if (n_files == 1) "" else "s", whose }) catch "", .{}, .{ .id_extra = fk, .gravity_y = 0.5, .margin = .{ .x = 8 }, .font = dvui.Font.theme(.body).larger(-2) });
-    // A click anywhere on the heading opens or closes it.
-    for (dvui.events()) |*e| {
-        if (!dvui.eventMatchSimple(e, row.data())) continue;
-        if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
-            e.handle(@src(), row.data());
-            clicked = true;
+    const summary = std.fmt.bufPrint(&buf, "{d} face{s} in {d} file{s} · {s}", .{ f.faces.len, if (f.faces.len == 1) "" else "s", n_files, if (n_files == 1) "" else "s", whose }) catch "";
+    var clicked = false;
+    var group_x: f32 = 0;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = fk, .expand = .horizontal, .margin = .{ .y = 3, .h = 1 } });
+        defer row.deinit();
+        const rect = row.data().rectScale().r;
+        const visible = rect.y < clip.y + clip.h + 40 and rect.y + 60 > clip.y;
+        var tb: [160]u8 = undefined;
+        const toggle = if (is_open)
+            icons.button(@src(), .caret_down, std.fmt.bufPrint(&tb, "Close {s}", .{f.name}) catch "Close", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } })
+        else
+            icons.button(@src(), .caret_right, std.fmt.bufPrint(&tb, "Open {s}", .{f.name}) catch "Open", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } });
+        clicked = toggle;
+        dvui.labelNoFmt(@src(), f.name, .{}, .{ .id_extra = fk, .font = dvui.Font.theme(.body).withWeight(.bold), .gravity_y = 0.5, .min_size_content = .{ .w = 150 }, .max_size_content = .width(150) });
+        group_x = styleGroup(fk, 0, members, false, up, visible);
+        if (!wrap) {
+            dvui.labelNoFmt(@src(), "", .{}, .{ .id_extra = fk, .min_size_content = .{ .w = @floatCast(pad) }, .padding = .{} });
+            _ = styleGroup(fk, 1, members, true, it, visible);
+            dvui.labelNoFmt(@src(), summary, .{}, .{ .id_extra = fk, .gravity_y = 0.5, .margin = .{ .x = 8 }, .font = dvui.Font.theme(.body).larger(-2) });
+        }
+        // A click elsewhere on the heading opens or closes it (the icons
+        // and weight boxes take their own).
+        for (dvui.events()) |*e| {
+            if (!dvui.eventMatchSimple(e, row.data())) continue;
+            if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
+                e.handle(@src(), row.data());
+                clicked = true;
+            }
+        }
+        if (clicked) {
+            setFamilyOpen(f.name, !is_open);
+            dvui.refresh(null, @src(), row.data().id);
         }
     }
-    if (clicked) {
-        setFamilyOpen(f.name, !is_open);
-        dvui.refresh(null, @src(), row.data().id);
+    if (wrap) {
+        // Under the upright group, where it starts.
+        var row2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = fk, .expand = .horizontal, .margin = .{ .h = 1 } });
+        defer row2.deinit();
+        const rect = row2.data().rectScale().r;
+        const visible = rect.y < clip.y + clip.h + 40 and rect.y + 60 > clip.y;
+        dvui.labelNoFmt(@src(), "", .{}, .{ .id_extra = fk, .min_size_content = .{ .w = group_x }, .padding = .{}, .margin = .{} });
+        _ = styleGroup(fk, 1, members, true, it, visible);
+        dvui.labelNoFmt(@src(), summary, .{}, .{ .id_extra = fk, .gravity_y = 0.5, .margin = .{ .x = 8 }, .font = dvui.Font.theme(.body).larger(-2) });
     }
 }
 
-/// An installed font file in a family: its name, whose it is, what it
-/// holds (a collection's count; a variable font's ranges and named styles),
-/// and for a user font, removing it.
-fn fileRow(loc: []const u8, info: FileInfo, id: usize) void {
-    const scope = records[info.faces[0]].scope;
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .margin = .{ .x = 18, .y = 2, .h = 1 } });
-    defer row.deinit();
-    if (scope == .user) {
-        if (icons.button(@src(), .trash, "Remove this user font file…", .{ .id_extra = id, .opts = .{ .gravity_y = 0.5 } })) removing = info.faces[0];
+/// An installed font file in a family, on one line: pin, a style icon and
+/// weight box for each face it holds, its name, what it is (whose; a
+/// collection's count; a variable font's ranges and named styles; the
+/// first face's look, licence and embedding), and for a user font,
+/// removing it. A click on the line selects its first face found.
+fn fileRow(loc: []const u8, info: FileInfo, by_record: []const ?fs.Hit, id: usize, clip: dvui.Rect.Physical) void {
+    const t = dvui.themeGet();
+    const first = info.faces[0];
+    const scope = records[first].scope;
+    // The face the line stands for: the selected one if it is in this
+    // file, else the first the search found, else the first.
+    var hit_face: ?usize = null;
+    var sel_here = false;
+    for (info.faces) |j| {
+        if (selected != null and selected.? == j) sel_here = true;
+        if (hit_face == null and by_record[j] != null) hit_face = j;
     }
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal });
-    defer col.deinit();
-    dvui.labelNoFmt(@src(), std.fs.path.basename(loc), .{}, .{ .id_extra = id, .font = dvui.Font.theme(.mono).larger(-1) });
-    var db: [600]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&db);
-    w.print("{s} font file · ", .{@tagName(scope)}) catch {};
-    if (info.wght != null or info.named.len > 0) {
-        w.writeAll("variable") catch {};
-        if (info.wght) |r| w.print(": weight {d:.0}–{d:.0}", .{ r[0], r[1] }) catch {};
-        if (info.wdth) |r| w.print(", width {d:.0}–{d:.0}%", .{ r[0], r[1] }) catch {};
-        if (info.named.len > 0) {
-            w.print(" · {d} named style{s}: ", .{ info.named.len, if (info.named.len == 1) "" else "s" }) catch {};
-            for (info.named, 0..) |n, k| w.print("{s}{s}", .{ if (k > 0) ", " else "", n }) catch {};
-        }
-    } else if (info.faces.len > 1) {
-        w.print("collection: {d} faces", .{info.faces.len}) catch {};
-    } else w.writeAll("1 face") catch {};
-    var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = id, .expand = .horizontal, .background = false });
-    tl.addText(w.buffered(), .{ .font = dvui.Font.theme(.body).larger(-2) });
-    tl.deinit();
-}
-
-/// One face in a file: pin it, its style and what it is. Faint when the
-/// search did not find it (it is shown as part of its file).
-fn faceRow(i: usize, hit: ?fs.Hit) void {
-    const r = &records[i];
-    const h = hit orelse fs.Hit{ .index = i };
-    const is_sel = selected != null and selected.? == i;
-    const text_color: ?dvui.Color = if (hit == null) dvui.themeGet().color(.window, .text).opacity(0.45) else null;
+    const lead = if (sel_here) selected.? else hit_face orelse first;
+    const faint = hit_face == null;
+    const tc: dvui.Options = if (faint) .{ .color_text = .{ .color = t.color(.window, .text).opacity(0.45) } } else .{};
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .id_extra = i,
+        .id_extra = id,
         .expand = .horizontal,
         .background = true,
-        .color_fill = .{ .color = if (is_sel) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) },
-        .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
-        .margin = .{ .x = 44, .h = 2 },
+        .color_fill = .{ .color = if (sel_here) t.color(.highlight, .fill).opacity(0.35) else t.color(.window, .fill) },
+        .padding = .{ .x = 2, .y = 1, .w = 4, .h = 1 },
+        .margin = .{ .x = 18, .h = 1 },
     });
     defer row.deinit();
-    // First, so a long description never squeezes it out.
-    const pin = if (isPinned(i))
-        icons.button(@src(), .push_pin_slash, "Unpin: take out of the comparison", .{ .id_extra = i, .opts = .{ .gravity_y = 0.5 } })
+    const rect = row.data().rectScale().r;
+    const visible = rect.y < clip.y + clip.h + 40 and rect.y + 60 > clip.y;
+    const pin = if (isPinned(lead))
+        icons.button(@src(), .push_pin_slash, "Unpin: take out of the comparison", .{ .id_extra = id, .size = 14, .opts = .{ .gravity_y = 0.5 } })
     else
-        icons.button(@src(), .push_pin, "Pin: keep in the comparison", .{ .id_extra = i, .opts = .{ .gravity_y = 0.5 } });
-    if (pin) togglePin(i);
-    {
-        var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
-        defer info.deinit();
-        var nb: [128]u8 = undefined;
-        const tc: dvui.Options = if (text_color) |c| .{ .color_text = .{ .color = c } } else .{};
-        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&nb, "{s}{s}", .{ r.style, if (hit == null) "  (not in these results)" else "" }) catch r.style, .{}, tc);
-        var db: [160]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&db);
+        icons.button(@src(), .push_pin, "Pin: keep in the comparison", .{ .id_extra = id, .size = 14, .opts = .{ .gravity_y = 0.5 } });
+    if (pin) togglePin(lead);
+    for (info.faces, 0..) |j, k| {
+        styleIcon(id * 64 + k, j, records[j].style, visible);
+        weightBox(id * 64 + k, j);
+    }
+    dvui.labelNoFmt(@src(), std.fs.path.basename(loc), .{}, tc.override(.{ .id_extra = id, .gravity_y = 0.5, .margin = .{ .x = 6 }, .font = dvui.Font.theme(.mono).larger(-2) }));
+    const r = &records[lead];
+    var db: [600]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&db);
+    if (by_record[lead]) |h| {
         if (h.distance) |d| w.print("like {d:.2} · ", .{d}) catch {};
         if (h.missing > 0) w.print("missing {d} · ", .{h.missing}) catch {};
-        w.print("{d:.0} · {s}{s}{s}{s} · {s} · embed {s}", .{
-            r.weight,
-            if (r.measures.serif) |sf| (if (sf) "serif" else "sans") else "?",
-            if (r.monospace) ", mono" else "",
-            if (r.math) ", math" else "",
-            if (r.variable) ", variable" else "",
-            licenceName(r.licence),
-            embedName(r.embedding),
-        }) catch {};
-        dvui.labelNoFmt(@src(), w.buffered(), .{}, tc.override(.{ .font = dvui.Font.theme(.body).larger(-2) }));
     }
-    // A click on the row selects it.
+    w.print("{s}", .{@tagName(scope)}) catch {};
+    if (info.wght != null or info.named.len > 0) {
+        w.writeAll(" · variable") catch {};
+        if (info.wght) |v| w.print(" {d:.0}–{d:.0}", .{ v[0], v[1] }) catch {};
+        if (info.wdth) |v| w.print(", width {d:.0}–{d:.0}%", .{ v[0], v[1] }) catch {};
+        if (info.named.len > 0) w.print(", {d} named", .{info.named.len}) catch {};
+    } else if (info.faces.len > 1) {
+        w.print(" · collection of {d}", .{info.faces.len}) catch {};
+    }
+    w.print(" · {s}{s}{s} · {s} · embed {s}", .{
+        if (r.measures.serif) |sf| (if (sf) "serif" else "sans") else "?",
+        if (r.monospace) ", mono" else "",
+        if (r.math) ", math" else "",
+        licenceName(r.licence),
+        embedName(r.embedding),
+    }) catch {};
+    if (faint) w.writeAll(" · not in these results") catch {};
+    dvui.labelNoFmt(@src(), w.buffered(), .{}, tc.override(.{ .id_extra = id, .gravity_y = 0.5, .margin = .{ .x = 8 }, .font = dvui.Font.theme(.body).larger(-3) }));
+    if (scope == .user) {
+        if (icons.button(@src(), .trash, "Remove this user font file…", .{ .id_extra = id, .size = 14, .opts = .{ .gravity_x = 1, .gravity_y = 0.5 } })) removing = first;
+    }
     for (dvui.events()) |*e| {
         if (!dvui.eventMatchSimple(e, row.data())) continue;
         if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
             e.handle(@src(), row.data());
-            selected = i;
+            selected = lead;
             dvui.refresh(null, @src(), row.data().id);
         }
     }
