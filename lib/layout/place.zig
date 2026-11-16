@@ -64,6 +64,10 @@ pub const PlacedLabel = struct {
     } = null,
     /// The tile whose track holds it; null for a run in a panel's track.
     tile: ?TileId,
+    /// For a tile's text, the run of its track's flow it sets: the item's
+    /// index there, and the piece's start and length in its source (as
+    /// `run`'s `from` and `len`).
+    tile_run: ?struct { item: usize, from: u32 = 0, len: u32 = 0 } = null,
     /// For a tile's text, the index of its track among its prototype's;
     /// for a run, the item's index.
     slot: usize,
@@ -1638,6 +1642,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                     try placed_labels.append(a, .{
                         .run = if (own) .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
+                        .tile_run = if (own) null else .{ .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] },
                         .tile = if (own) null else synth_owner.items[ri],
                         .slot = if (own) item_of.items[index] else synth_which.items[ri],
                         .box = box,

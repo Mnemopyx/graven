@@ -29,7 +29,7 @@ Four panes on the window's edges, each with a tab and three modes: **ghost** (se
 
 - Rulers in the document's units, a sheet or an open canvas, frames, views, layers, images, groups.
 - Panels, tiles, tracks with their flows of text and equations, art, sketches as views.
-- **Text editing** happens in place in a track's flow: a character cursor, Shift to select, typing, Backspace and Delete, cut, copy and paste, Enter for a paragraph, Shift+Enter for a line break, Ctrl+\\ to edit the equation at the cursor (or a new one) on the canvas itself (since 2026-11-16): a caret in it, typing into its source, Left and Right, Backspace and Delete, Tab and Shift+Tab through its heads and fields; a head is boxed, and single keys style it (= and - scale, arrows nudge, [ and ] turn, 0 clears, i the root's index, u and b the upper and lower slots); Esc, Enter or Ctrl+\\ leave. The expression line shows the same source meanwhile.
+- **Text editing** happens in place in a track's flow: a character cursor, Shift to select, typing, Backspace and Delete, cut, copy and paste, Enter for a paragraph, Shift+Enter for a line break, Ctrl+\\ to edit the equation at the cursor (or a new one), the inline math the cursor is in, or a selected tile's text, on the canvas itself (since 2026-11-16): a caret in it, typing into its source, Left and Right, Backspace and Delete, Tab and Shift+Tab through its heads and fields; a head is boxed, and single keys style it (= and - scale, arrows nudge, [ and ] turn, 0 clears, i the root's index, u and b the upper and lower slots); Esc, Enter or Ctrl+\\ leave. The expression line shows the same source meanwhile.
 - **Selection:** a click makes something the context; Ctrl-click selects; Tab hunts for the next-nearest object; drag moves, handles resize, within constraints. The pointer shows a hand or a lock.
 - **Text display:** glyphs come from a distance-field atlas (`glyphs.zig`): crisp on the pixel grid, gamma 2.2. Show text construction draws outlines and construction instead.
 
@@ -60,7 +60,7 @@ The canvas has sub-modes entered from the properties pane, each with its own way
 | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S | New canvas, Open, Save, Save As |
 | Ctrl+Z, Ctrl+Shift+Z (Ctrl+Y) | Undo, Redo |
 | Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A | Copy, cut, paste, select all (in text) |
-| Ctrl+\\ | Edit the equation at the cursor on the canvas (again to leave) |
+| Ctrl+\\ | Edit on the canvas: the equation or inline math at the cursor, or a selected tile's text (again to leave) |
 | = - [ ] 0 i u b, arrows | On an equation's head: scale, turn, clear, index, upper and lower slots, nudge |
 | Ctrl-click | Select |
 | Tab, Shift+Tab | Next or previous stop (head or field) in an equation; next-nearest object when selecting |

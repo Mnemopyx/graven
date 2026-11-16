@@ -214,6 +214,31 @@ pub fn splitAt(a: Allocator, src: []const u8, offset: u32) Allocator.Error!?[2][
     return .{ first.items, second.items };
 }
 
+/// The math region of legend `src` holding byte `at`: what lies between a
+/// pair of dollars (its ends included, so a caret just inside either
+/// dollar is in it). Null in text. A math region still open at the end
+/// runs to it.
+pub fn mathAt(src: []const u8, at: usize) ?[2]u32 {
+    var i: usize = 0;
+    var open: ?usize = null;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '\\') {
+            i += 2;
+            continue;
+        }
+        if (c == '$') {
+            if (open) |o| {
+                if (at >= o and at <= i) return .{ @intCast(o), @intCast(i) };
+                open = null;
+            } else open = i + 1;
+        }
+        i += 1;
+    }
+    if (open) |o| if (at >= o) return .{ @intCast(o), @intCast(src.len) };
+    return null;
+}
+
 /// The anchor points of equation `src` (all math): where each field of
 /// its structures starts (just inside its brace, or at an empty one): a
 /// fraction's parts, a root's body and index, an accent's body, a script,
@@ -313,4 +338,15 @@ test "an equation's characters: leaves, commands as one, structures' fields" {
     try testing.expectEqual(@as(u32, 3), cs[0].end);
     // Deleting the 2 leaves its braces.
     try testing.expectEqualStrings("\\pi r^{}", try deleteChars(a, "\\pi r^{2}", 7, 8, true));
+}
+
+test "a legend's math regions: between dollars, ends included; escaped dollars are text" {
+    // 0123456789012345
+    // Area $\pi r$ \$5
+    try testing.expectEqual(@as(?[2]u32, .{ 6, 11 }), mathAt("Area $\\pi r$ \\$5", 7));
+    try testing.expectEqual(@as(?[2]u32, .{ 6, 11 }), mathAt("Area $\\pi r$ \\$5", 11));
+    try testing.expectEqual(@as(?[2]u32, null), mathAt("Area $\\pi r$ \\$5", 3));
+    try testing.expectEqual(@as(?[2]u32, null), mathAt("Area $\\pi r$ \\$5", 13));
+    // Still being typed: open to the end.
+    try testing.expectEqual(@as(?[2]u32, .{ 3, 5 }), mathAt("a $x^", 5));
 }

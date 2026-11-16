@@ -2472,7 +2472,7 @@ const ExprTarget = union(enum) {
 };
 
 fn exprTarget() ?ExprTarget {
-    if (canvas_eq) |q| if (eqContent(q) != null) return .{ .run = .{ .panel = q.panel, .region = q.region, .item = q.item } };
+    if (canvas_eq) |q| if (eqContent(q) != null) return q.target;
     if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
     return switch (state.context) {
         .tile => |id| if (exprTrackOf(id)) |tr| .{ .tile_track = .{ .tile = id, .track = tr } } else null,
@@ -3449,9 +3449,10 @@ fn canvas() void {
     defer dvui.clipSet(clip);
 
     // With a panel or the canvas as the context, typed text makes a
-    // label, and at the flow cursor it goes into the flow: ask for text
+    // label, at the flow cursor it goes into the flow, and in an equation
+    // or a tile's text edited on the canvas, into that: ask for text
     // input, which the backend sends only on request.
-    if (((state.context == .panel and track_cursor == null) or track_cursor != null) and !canvas_prompt and cursorKeysReach()) {
+    if (((state.context == .panel and track_cursor == null) or track_cursor != null or canvas_eq != null) and !canvas_prompt and cursorKeysReach()) {
         const ns_ = dvui.windowNaturalScale();
         dvui.wantTextInput(.{ .x = area.x / ns_, .y = area.y / ns_, .w = area.w / ns_, .h = area.h / ns_ });
     }
@@ -5970,6 +5971,25 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             const k = e.evt.key;
             if ((k.action == .down or k.action == .repeat) and moveTrackKey(k.code)) {
                 e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
+        // A tile's text edited on the canvas ends when the tile is no
+        // longer the one selected.
+        if (canvas_eq) |q| if (q.target == .tile_track) {
+            const still = switch (state.context) {
+                .tile => |id| id == q.target.tile_track.tile,
+                else => false,
+            };
+            if (!still) canvas_eq = null;
+        };
+        // Ctrl+\ on a selected tile: its text edited on the canvas.
+        if (canvas_eq == null and e.evt == .key and !e.handled and !canvas_prompt and cursorKeysReach() and state.context == .tile) {
+            const k = e.evt.key;
+            if (k.action == .down and k.code == .backslash and primaryMod(k.mod)) {
+                e.handle(@src(), box.data());
+                enterTileTrack(state.context.tile);
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
@@ -8986,10 +9006,14 @@ fn tabEquation(back: bool) void {
 // or Ctrl+\ leave, the flow cursor after the equation.
 
 const CanvasEq = struct {
-    panel: usize,
-    region: usize,
-    item: usize,
-    /// The caret: a byte offset in the equation's source.
+    /// What is edited: a run of a track's flow (an equation, or a text
+    /// run's math between dollars), or a tile's track.
+    target: ExprTarget,
+    /// Its source is all math (an equation); else a legend (text, math
+    /// between dollars).
+    math: bool,
+    /// The caret: a byte offset in the source (a tile track's text: its
+    /// runs, a newline for each break).
     offset: u32,
     /// On a head: its structure's source start (the caret's offset).
     head: ?u32 = null,
@@ -8998,19 +9022,28 @@ const CanvasEq = struct {
 var canvas_eq: ?CanvasEq = null;
 var canvas_eq_seq: u64 = 0;
 
-/// The equation's source, while it is still an equation.
+/// What is edited's source, while it is still there (and an equation is
+/// still one).
 fn eqContent(q: CanvasEq) ?[]const u8 {
-    if (q.panel >= state.model.panels.items.len or q.region >= state.model.panels.items[q.panel].regions.items.len) return null;
-    const items = state.model.panels.items[q.panel].regions.items[q.region].items.items;
-    if (q.item >= items.len or items[q.item].what != .run or !items[q.item].what.run.equation) return null;
-    return items[q.item].what.run.content;
+    switch (q.target) {
+        .run => |r| {
+            if (r.panel >= state.model.panels.items.len or r.region >= state.model.panels.items[r.panel].regions.items.len) return null;
+            const items = state.model.panels.items[r.panel].regions.items[r.region].items.items;
+            if (r.item >= items.len or items[r.item].what != .run or items[r.item].what.run.equation != q.math) return null;
+            return items[r.item].what.run.content;
+        },
+        .tile_track => |tt| {
+            if (state.model.tileIndex(tt.tile) == null or state.model.tileTrackIndex(tt.tile, tt.track) == null) return null;
+            return state.model.tileTrackText(dvui.currentWindow().arena(), tt.tile, tt.track) catch null;
+        },
+    }
 }
 
 const EqParse = struct { e: glyphic.Expr, spans: glyphic.entry.Spans };
 
-fn eqParse(a: std.mem.Allocator, src: []const u8) ?EqParse {
+fn eqParse(a: std.mem.Allocator, src: []const u8, math: bool) ?EqParse {
     var p: EqParse = .{ .e = glyphic.Expr.init(a) catch return null, .spans = .{} };
-    glyphic.latex.parse(&p.e, &p.spans, src, .math) catch return null;
+    glyphic.latex.parse(&p.e, &p.spans, src, if (math) .math else .legend) catch return null;
     return p;
 }
 
@@ -9025,8 +9058,13 @@ fn headAt(p: *const EqParse, at: u32) ?glyphic.Id {
 }
 
 fn eqStore(q: CanvasEq, text: []const u8) void {
-    actM(mergeKey(.{ "canvas equation", q.panel, q.region, q.item, canvas_eq_seq }), .setRunContent, .{ q.panel, q.region, q.item, text }) catch {
-        state.status = "The equation could not be changed. ";
+    const key = mergeKey(.{ "canvas equation", q.target.key(), canvas_eq_seq });
+    const done = switch (q.target) {
+        .run => |r| actM(key, .setRunContent, .{ r.panel, r.region, r.item, text }),
+        .tile_track => |tt| actM(key, .setTileTrackText, .{ tt.tile, tt.track, text }),
+    };
+    done catch {
+        state.status = "The text could not be changed. ";
     };
 }
 
@@ -9035,21 +9073,25 @@ fn eqMove(offset: u32, head: ?u32) void {
     if (canvas_eq == null) return;
     canvas_eq.?.offset = offset;
     canvas_eq.?.head = head;
-    const e = canvas_eq.?;
-    expr_inspect = .{ .key = (ExprTarget{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } }).key(), .offset = offset };
+    expr_inspect = .{ .key = canvas_eq.?.target.key(), .offset = offset };
 }
 
 /// Every place in `src` the caret can stop, in order: its ends, each
 /// character's ends, each field's ends.
-fn eqPlaces(a: std.mem.Allocator, src: []const u8) []u32 {
+fn eqPlaces(a: std.mem.Allocator, src: []const u8, math: bool) []u32 {
     var out: std.ArrayList(u32) = .empty;
     out.append(a, 0) catch {};
     out.append(a, @intCast(src.len)) catch {};
-    for (layout.edit.chars(a, src, true) catch &.{}) |c| {
+    // In a legend, inside each pair of dollars too.
+    if (!math) for (src, 0..) |ch, i| if (ch == '$' and (i == 0 or src[i - 1] != '\\')) {
+        out.append(a, @intCast(i)) catch {};
+        out.append(a, @intCast(i + 1)) catch {};
+    };
+    for (layout.edit.chars(a, src, math) catch &.{}) |c| {
         out.append(a, c.start) catch {};
         out.append(a, c.end) catch {};
     }
-    if (eqParse(a, src)) |p| for (p.e.nodes.items, 0..) |n, k| {
+    if (eqParse(a, src, math)) |p| for (p.e.nodes.items, 0..) |n, k| {
         if (!n.live or n.kind != .row or k == @intFromEnum(p.e.root)) continue;
         const sp = p.spans.get(@enumFromInt(k));
         if (sp.start == glyphic.entry.Span.none.start) continue;
@@ -9060,10 +9102,46 @@ fn eqPlaces(a: std.mem.Allocator, src: []const u8) []u32 {
     return out.items;
 }
 
+/// The text run whose math (between dollars) the flow cursor is in, or
+/// just after (past its closing $, or at the start of the item after a run
+/// ending in math), with the caret's place in that run's source.
+fn inlineMathAt(c: TrackCursor) ?struct { item: usize, offset: u32 } {
+    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const isText = struct {
+        fn f(its: []const layout.model.Item, i: usize) bool {
+            return i < its.len and its[i].what == .run and !its[i].what.run.equation;
+        }
+    }.f;
+    var item = c.index;
+    var off = c.offset;
+    if (off == 0 and c.index > 0 and isText(items, c.index - 1)) {
+        item = c.index - 1;
+        off = @intCast(items[item].what.run.content.len);
+    }
+    if (!isText(items, item)) return null;
+    const src = items[item].what.run.content;
+    if (layout.edit.mathAt(src, off) != null) return .{ .item = item, .offset = off };
+    // Just past a closing $: before it, inside.
+    if (off > 0 and src[off - 1] == '$') if (layout.edit.mathAt(src, off - 1)) |m| return .{ .item = item, .offset = m[1] };
+    return null;
+}
+
 fn enterEquation() void {
     const c = track_cursor orelse return;
     var item: usize = 0;
     var offset: u32 = 0;
+    // In a text run's math (between dollars): that run, its source edited
+    // on the canvas as a legend.
+    if (inlineMathAt(c)) |at| {
+        {
+            flow_anchor = null;
+            canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
+            canvas_eq_seq += 1;
+            eqMove(at.offset, null);
+            state.status = "Inline math: type into it; Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
+            return;
+        }
+    }
     if (equationAtCursor(c)) |eq| {
         item = eq.item;
         offset = eq.offset;
@@ -9074,29 +9152,66 @@ fn enterEquation() void {
         item = act(.insertEquation, .{ cc.panel, cc.region, flowPos(cc), style }) catch return;
     }
     flow_anchor = null;
-    canvas_eq = .{ .panel = c.panel, .region = c.region, .item = item, .offset = offset };
+    canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = item } }, .math = true, .offset = offset };
     canvas_eq_seq += 1;
     eqMove(offset, null);
     state.status = "Equation: type into it; Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
 }
 
-/// Leaves the equation: an empty one goes; the flow cursor goes after it.
+/// Ctrl+\ on a selected tile: its track's text (the expression line's
+/// track) edited on the canvas as a legend, the caret at its end.
+fn enterTileTrack(id: TileId) void {
+    const tr = exprTrackOf(id) orelse return;
+    const target: ExprTarget = .{ .tile_track = .{ .tile = id, .track = tr } };
+    canvas_eq = .{ .target = target, .math = false, .offset = 0 };
+    const src = eqContent(canvas_eq.?) orelse {
+        canvas_eq = null;
+        return;
+    };
+    canvas_eq_seq += 1;
+    eqMove(@intCast(src.len), null);
+    state.status = "Tile text: type into it ($ starts math); Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
+}
+
+/// Leaves the equation: one with nothing in it goes; the flow cursor goes
+/// after it (in a text run, after the math the caret was in).
 fn leaveCanvasEquation() void {
     const q = canvas_eq orelse return;
+    const content = eqContent(q);
     canvas_eq = null;
     state.status = "";
     typing_seq += 1;
-    const content = eqContent(q) orelse return;
-    if (content.len == 0) {
-        const pos = act(.deleteRange, .{ q.panel, q.region, layout.model.FlowPos{ .index = q.item }, layout.model.FlowPos{ .index = q.item + 1 } }) catch return;
+    const src = content orelse return;
+    const r = switch (q.target) {
+        .run => |r| r,
+        // A tile stays selected.
+        .tile_track => return,
+    };
+    if (!q.math) {
+        // A text run: the flow cursor after the math the caret was in.
+        if (track_cursor) |*tc| if (tc.panel == r.panel and tc.region == r.region) {
+            const end = if (layout.edit.mathAt(src, q.offset)) |m| @min(m[1] + 1, @as(u32, @intCast(src.len))) else q.offset;
+            tc.index = r.item;
+            tc.offset = end;
+            if (end >= src.len) {
+                tc.index = r.item + 1;
+                tc.offset = 0;
+            }
+        };
+        flow_anchor = null;
+        return;
+    }
+    // Nothing in it (empty, or only empty structures): it goes.
+    if (!(layout.edit.hasChars(dvui.currentWindow().arena(), src, true) catch true)) {
+        const pos = act(.deleteRange, .{ r.panel, r.region, layout.model.FlowPos{ .index = r.item }, layout.model.FlowPos{ .index = r.item + 1 } }) catch return;
         if (track_cursor) |*tc| {
             tc.index = pos.index;
             tc.offset = pos.offset;
         }
         return;
     }
-    if (track_cursor) |*tc| if (tc.panel == q.panel and tc.region == q.region) {
-        tc.index = q.item + 1;
+    if (track_cursor) |*tc| if (tc.panel == r.panel and tc.region == r.region) {
+        tc.index = r.item + 1;
         tc.offset = 0;
     };
     flow_anchor = null;
@@ -9115,15 +9230,20 @@ fn eqType(txt: []const u8) void {
     }
     const a = dvui.currentWindow().arena();
     const at = @min(q.offset, @as(u32, @intCast(src.len)));
-    // } over a } already there: step past it.
-    if (std.mem.eql(u8, txt, "}") and at < src.len and src[at] == '}') {
+    // } over a } already there, or in a legend's math $ over its closing
+    // $: step past it.
+    const closes = (std.mem.eql(u8, txt, "}") and at < src.len and src[at] == '}') or
+        (!q.math and std.mem.eql(u8, txt, "$") and at < src.len and src[at] == '$' and layout.edit.mathAt(src, at) != null);
+    if (closes) {
         eqMove(at + 1, null);
         return;
     }
-    const insert = if (std.mem.eql(u8, txt, "{")) "{}" else txt;
+    // { with its }, and in a legend's text $ with its $: the caret between.
+    const pair = std.mem.eql(u8, txt, "{") or (!q.math and std.mem.eql(u8, txt, "$") and layout.edit.mathAt(src, at) == null);
+    const insert = if (!pair) txt else if (txt[0] == '{') "{}" else "$$";
     const next = std.mem.concat(a, u8, &.{ src[0..at], insert, src[at..] }) catch return;
     eqStore(q, next);
-    eqMove(at + @as(u32, @intCast(if (std.mem.eql(u8, txt, "{")) 1 else txt.len)), null);
+    eqMove(at + @as(u32, @intCast(if (pair) 1 else txt.len)), null);
 }
 
 /// A head's key: a parameter changed, or a slot opened, hidden or shown.
@@ -9133,7 +9253,7 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
     const head = q.head orelse return;
     const src = eqContent(q) orelse return;
     const a = dvui.currentWindow().arena();
-    var p = eqParse(a, src) orelse return;
+    var p = eqParse(a, src, q.math) orelse return;
     const id = headAt(&p, head) orelse {
         eqMove(q.offset, null);
         return;
@@ -9151,7 +9271,13 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
     // Opening a slot the source does not have yet: written in, the caret
     // in it.
     const open: ?struct { at: u32, text: []const u8, caret: u32 } = switch (ch) {
-        'i' => if (n.kind == .radical and p.e.slot(id, .index) == .none) .{ .at = head + @as(u32, @intCast("\\sqrt".len)), .text = "[]", .caret = 1 } else null,
+        'i' => blk: {
+            if (n.kind != .radical or p.e.slot(id, .index) != .none) break :blk null;
+            // After its \sqrt (a call around it comes first).
+            const sp = p.spans.get(id);
+            const at = std.mem.indexOfPos(u8, src[0..sp.end], sp.start, "\\sqrt") orelse break :blk null;
+            break :blk .{ .at = @as(u32, @intCast(at + "\\sqrt".len)), .text = "[]", .caret = 1 };
+        },
         'u', 'b' => blk: {
             const sl: glyphic.expr.Slot = if (ch == 'u') .sup else .sub;
             if (n.kind == .large_op and p.e.slot(id, sl) != .none) break :blk null;
@@ -9232,7 +9358,7 @@ fn eqKey(k: dvui.Event.Key) bool {
     };
     switch (k.code) {
         .tab => {
-            var p = eqParse(a, src) orelse return true;
+            var p = eqParse(a, src, q.math) orelse return true;
             var g = glyphic.Engine.init(state.gpa);
             defer g.deinit();
             const r = glyphic.Resolver.init(&g, &p.e, &.{});
@@ -9244,7 +9370,7 @@ fn eqKey(k: dvui.Event.Key) bool {
             return true;
         },
         .left, .right, .home, .end => {
-            const places = eqPlaces(a, src);
+            const places = eqPlaces(a, src, q.math);
             var to = q.offset;
             switch (k.code) {
                 .home => to = 0,
@@ -9270,7 +9396,7 @@ fn eqKey(k: dvui.Event.Key) bool {
                 eqMove(q.offset, null);
                 return true;
             }
-            const cs = layout.edit.chars(a, src, true) catch return true;
+            const cs = layout.edit.chars(a, src, q.math) catch return true;
             var hit: ?layout.edit.Char = null;
             if (k.code == .backspace) {
                 for (cs) |c| if (c.end <= q.offset) {
@@ -9281,7 +9407,7 @@ fn eqKey(k: dvui.Event.Key) bool {
                 break;
             };
             const c = hit orelse return true;
-            const next = layout.edit.deleteChars(a, src, c.start, c.start + 1, true) catch return true;
+            const next = layout.edit.deleteChars(a, src, c.start, c.start + 1, q.math) catch return true;
             eqStore(q, next);
             eqMove(if (k.code == .backspace) c.start else q.offset, null);
             return true;
@@ -9294,12 +9420,39 @@ fn eqKey(k: dvui.Event.Key) bool {
 /// head, a box round what the head draws. Drawn at worksheet offset `o`.
 fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel, o: geom.Point) void {
     const q = canvas_eq orelse return;
-    const run = l.run orelse return;
-    if (run.panel != q.panel or run.region != q.region or run.item != q.item or pi >= state.placed.items.len) return;
-    if (run.len > 0 and (q.offset < run.from or q.offset > run.from + run.len)) return;
+    if (pi >= state.placed.items.len) return;
+    // The piece's run, and where that run starts in the source edited: 0
+    // for a run of a flow; for a tile's track, past the runs and breaks
+    // before it.
+    const piece: struct { from: u32, len: u32, base: u32 } = switch (q.target) {
+        .run => |t| blk: {
+            const run = l.run orelse return;
+            if (run.panel != t.panel or run.region != t.region or run.item != t.item) return;
+            break :blk .{ .from = run.from, .len = run.len, .base = 0 };
+        },
+        .tile_track => |tt| blk: {
+            const tr = l.tile_run orelse return;
+            if (l.tile == null or l.tile.? != tt.tile) return;
+            const k = state.model.tileTrackIndex(tt.tile, tt.track) orelse return;
+            if (l.slot != k) return;
+            const f = state.model.tileFlow(tt.tile, tt.track) orelse return;
+            var base: u32 = 0;
+            for (f.items.items[0..@min(tr.item, f.items.items.len)]) |it| base += switch (it.what) {
+                .run => |r| @intCast(r.content.len),
+                .hard_break, .paragraph => 1,
+                .tile => 0,
+            };
+            break :blk .{ .from = tr.from, .len = tr.len, .base = base };
+        },
+    };
+    if (q.offset < piece.base) return;
+    const local = q.offset - piece.base;
+    if (piece.len > 0 and (local < piece.from or local > piece.from + piece.len)) return;
     const px = dvui.windowNaturalScale();
     const at: geom.Point = .{ .x = l.origin.x + o.x, .y = l.origin.y + o.y };
-    if (q.head) |h| {
+    if (q.head) |head| {
+        if (head < piece.base) return;
+        const h = head - piece.base;
         var box: geom.Box = .empty;
         const a = dvui.currentWindow().arena();
         for (l.render.items) |it| switch (it) {
@@ -9315,7 +9468,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
         marchingBox(area, .{ .x0 = at.x + box.x0 - m, .y0 = at.y + box.y0 - m, .x1 = at.x + box.x1 + m, .y1 = at.y + box.y1 + m }, colors.select, 1.5 * px);
         return;
     }
-    const c = l.render.caret(q.offset) orelse return;
+    const c = l.render.caret(local) orelse return;
     const p0 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y0 });
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2.5 * px, .color = .{ .color = colors.select.opacity(pulse()) } });
