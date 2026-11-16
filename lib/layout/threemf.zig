@@ -10,10 +10,10 @@
 //! _rels/.rels and 3D/3dmodel.model (3MF core specification, 2015/02).
 
 const std = @import("std");
-const engine = @import("graven_engine");
+
 const fab = @import("fab.zig");
 const art = @import("art.zig");
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const Allocator = std.mem.Allocator;
 
 pub const Mesh = struct {

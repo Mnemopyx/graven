@@ -23,7 +23,7 @@
 //! is left out and flagged.
 
 const std = @import("std");
-const geom = @import("graven_engine").geom;
+const geom = @import("graven_geom");
 const model = @import("model.zig");
 const native = @import("native.zig");
 

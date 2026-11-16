@@ -12,12 +12,11 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
-const engine = @import("graven_engine");
 const fs = @import("graven_fontsearch");
 const local = @import("graven_fonts_local");
 const icons = @import("icons.zig");
 
-const geom = engine.geom;
+const geom = layout.geom;
 const model = layout.model;
 const Allocator = std.mem.Allocator;
 const ObjectId = model.ObjectId;
@@ -53,13 +52,13 @@ var report: local.Report = .{};
 var status: []const u8 = "";
 var status_buf: [200]u8 = undefined;
 /// Faces loaded from records, by record index.
-var faces: std.AutoHashMapUnmanaged(usize, *engine.Face) = .empty;
+var faces: std.AutoHashMapUnmanaged(usize, *layout.Face) = .empty;
 
 /// The index's generation: each scan makes a new one. The editor resolves
 /// its fonts again when it changes; faces of an earlier generation, which
 /// it may still hold, are kept (retired) until it has (`releaseRetired`).
 pub var generation: u32 = 0;
-var retired: std.ArrayList(*engine.Face) = .empty;
+var retired: std.ArrayList(*layout.Face) = .empty;
 
 /// What a font file holds: its faces (all of them, by width, weight and
 /// slope), and for a variable face its ranges and named styles. Made when
@@ -158,12 +157,12 @@ fn reindex(allocator: Allocator) void {
 }
 
 /// The face record `i` describes, loaded once and kept.
-pub fn faceOf(i: usize) ?*engine.Face {
+pub fn faceOf(i: usize) ?*layout.Face {
     if (faces.get(i)) |f| return f;
     const r = &records[i];
     const bytes = local.read(dvui.io, gpa, r) catch return null;
     defer gpa.free(bytes);
-    const f = engine.Face.init(gpa, bytes, r.index) catch return null;
+    const f = layout.Face.init(gpa, bytes, r.index) catch return null;
     faces.put(gpa, i, f) catch {
         f.deinit();
         return null;
@@ -178,7 +177,7 @@ pub fn catalog(a: Allocator) ?layout.fonts.Catalog {
     const names = a.alloc(model.FontName, records.len) catch return null;
     for (records, names) |r, *n| n.* = .{ .family = r.family, .style = r.style };
     return .{ .names = names, .ctx = undefined, .load = struct {
-        fn load(_: *anyopaque, i: usize) ?*engine.Face {
+        fn load(_: *anyopaque, i: usize) ?*layout.Face {
             return faceOf(i);
         }
     }.load };
@@ -1229,8 +1228,8 @@ fn sampleText() []const u8 {
 /// flattened polylines per glyph, and its width.
 fn sampleLines(a: Allocator, i: usize, tol: f64) ?struct { glyphs: []const []const []const geom.Point, width: f64 } {
     const face = faceOf(i) orelse return null;
-    const fl = [_]*engine.Face{face};
-    var r = engine.renderRun(gpa, &fl, 0, sampleText(), .{ .cap_height = 1 }) catch return null;
+    const fl = [_]*layout.Face{face};
+    var r = layout.render.run(gpa, &fl, 0, sampleText(), 1) catch return null;
     defer r.deinit();
     const outlines = r.outlines(a, &fl) catch return null;
     const glyphs = a.alloc([]const []const geom.Point, outlines.len) catch return null;
@@ -1407,8 +1406,8 @@ fn overlayWidth(n: usize, k: usize) f32 {
 /// ink's horizontal extent.
 fn glyphLines(a: Allocator, i: usize, ch: []const u8, tol: f64) ?struct { lines: []const []const []const geom.Point, x0: f64, x1: f64 } {
     const face = faceOf(i) orelse return null;
-    const fl = [_]*engine.Face{face};
-    var r = engine.renderRun(gpa, &fl, 0, ch, .{ .cap_height = 1 }) catch return null;
+    const fl = [_]*layout.Face{face};
+    var r = layout.render.run(gpa, &fl, 0, ch, 1) catch return null;
     defer r.deinit();
     const outlines = r.outlines(a, &fl) catch return null;
     const glyphs = a.alloc([]const []const geom.Point, outlines.len) catch return null;

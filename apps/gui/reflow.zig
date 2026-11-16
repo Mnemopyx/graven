@@ -17,7 +17,6 @@
 
 const std = @import("std");
 const layout = @import("graven_layout");
-const engine = @import("graven_engine");
 
 const Handoff = layout.place.Handoff;
 
@@ -29,7 +28,7 @@ pub const Job = struct {
     /// Which document it is of (the GUI counts them).
     generation: u64,
     doc: []u8,
-    faces: []*engine.Face,
+    faces: []*layout.Face,
     start: []Handoff,
 
     fn deinit(j: *Job, gpa: std.mem.Allocator) void {

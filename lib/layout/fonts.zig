@@ -11,12 +11,13 @@
 //! face only when a style asks for it.
 
 const std = @import("std");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
+const rendering = @import("render.zig");
 const glyphic = @import("graven_glyphic");
 const model = @import("model.zig");
 
 const Allocator = std.mem.Allocator;
-const FaceId = engine.render.FaceId;
+const FaceId = rendering.FaceId;
 const FontName = model.FontName;
 const StyleId = model.StyleId;
 
@@ -26,7 +27,7 @@ pub const Catalog = struct {
     ctx: *anyopaque,
     /// The face for `names[index]`, loaded (and kept by the app, which owns
     /// it), or null when it cannot be.
-    load: *const fn (ctx: *anyopaque, index: usize) ?*engine.Face,
+    load: *const fn (ctx: *anyopaque, index: usize) ?*font.Face,
 };
 
 /// Styles tried, in order, when a family has the font asked for but not in
@@ -66,7 +67,7 @@ pub const Style = struct { id: StyleId, faces: []const RoleFace };
 pub const Resolved = struct {
     gpa: Allocator,
     /// The face table: 0 is the default face, the rest as styles need them.
-    faces: std.ArrayList(*engine.Face) = .empty,
+    faces: std.ArrayList(*font.Face) = .empty,
     /// Per style, in the model's order. Roles point into the model.
     styles: std.ArrayList(Style) = .empty,
     /// Every style's faces, in one list the styles' slices point into.
@@ -130,7 +131,7 @@ const Resolver = struct {
 /// `default`, the face of a style that names no text face (nor does its
 /// base). A font not found leaves its role out. The faces stay the app's;
 /// `Resolved` holds pointers to them.
-pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default: *engine.Face) Allocator.Error!Resolved {
+pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default: *font.Face) Allocator.Error!Resolved {
     var r: Resolved = .{ .gpa = gpa };
     errdefer r.deinit();
     try r.faces.append(gpa, default);
@@ -241,7 +242,7 @@ const testdata = @import("graven_testdata");
 const place = @import("place.zig");
 
 const TestFonts = struct {
-    faces: [3]*engine.Face,
+    faces: [3]*font.Face,
     loads: usize = 0,
 
     const names = [_]FontName{
@@ -252,9 +253,9 @@ const TestFonts = struct {
 
     fn init() !TestFonts {
         return .{ .faces = .{
-            try engine.Face.init(testing.allocator, testdata.truetype, 0),
-            try engine.Face.init(testing.allocator, testdata.cff, 0),
-            try engine.Face.init(testing.allocator, testdata.fallback, 0),
+            try font.Face.init(testing.allocator, testdata.truetype, 0),
+            try font.Face.init(testing.allocator, testdata.cff, 0),
+            try font.Face.init(testing.allocator, testdata.fallback, 0),
         } };
     }
 
@@ -262,7 +263,7 @@ const TestFonts = struct {
         for (t.faces) |f| f.deinit();
     }
 
-    fn load(ctx: *anyopaque, index: usize) ?*engine.Face {
+    fn load(ctx: *anyopaque, index: usize) ?*font.Face {
         const t: *TestFonts = @ptrCast(@alignCast(ctx));
         t.loads += 1;
         return t.faces[index];

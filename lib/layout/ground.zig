@@ -12,12 +12,12 @@
 
 const std = @import("std");
 const glyphic = @import("graven_glyphic");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
 const model = @import("model.zig");
 const place = @import("place.zig");
 
 const Allocator = std.mem.Allocator;
-const Box = engine.geom.Box;
+const Box = @import("graven_geom").Box;
 const G = glyphic.ground;
 
 /// The ground of a flow's leg on one panel: from track `track` (the leg's
@@ -178,9 +178,9 @@ fn near(want: f64, got: f64) !void {
 
 test "a row track's pieces are v1's segments: same bands, baselines where v1 sets text" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: model.Model = .init(gpa);
     defer m.deinit();
     const style = try m.addStyle("label", .{ .cap_height = 3 });

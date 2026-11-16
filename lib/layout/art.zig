@@ -17,10 +17,10 @@
 //! shapes `stretch` returns, so the two cannot drift apart.
 
 const std = @import("std");
-const engine = @import("graven_engine");
+
 const model = @import("model.zig");
 
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
 const Box = geom.Box;

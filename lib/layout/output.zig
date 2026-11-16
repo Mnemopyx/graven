@@ -1,11 +1,11 @@
 //! SVG now; the OCCT bridge handoff, Gerber and mirrored output later.
 
 const std = @import("std");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
 const place = @import("place.zig");
 const art = @import("art.zig");
 
-const geom = engine.geom;
+const geom = @import("graven_geom");
 
 pub const SvgOptions = struct {
     /// Margin around `box`, mm.
@@ -69,7 +69,7 @@ pub const PanelSvgOptions = struct {
 /// placement stretched it (gradients as SVG gradients), labels as their
 /// exact outlines (Q and C kept). Display output only; production geometry
 /// goes through union and DRC.
-pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []const *engine.Face, opts: PanelSvgOptions) ![]u8 {
+pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []const *font.Face, opts: PanelSvgOptions) ![]u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();

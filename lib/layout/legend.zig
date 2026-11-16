@@ -14,18 +14,19 @@
 //! `model.TextStyle`) become the engine's contexts here (see `contextOf`).
 
 const std = @import("std");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
+const rendering = @import("render.zig");
 const glyphic = @import("graven_glyphic");
 const model = @import("model.zig");
 const fonts = @import("fonts.zig");
 
 const Allocator = std.mem.Allocator;
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const Box = geom.Box;
 const Affine = geom.Affine;
-const Face = engine.Face;
-const Render = engine.Render;
-const R = engine.render;
+const Face = font.Face;
+const Render = rendering.Render;
+const R = rendering;
 
 /// A text style as legends are set in it.
 pub const Style = struct {
@@ -95,7 +96,7 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
     // Empty fields are drawn as holes (not ink), so markup being typed
     // shows where it goes on; each is reported as a missing argument.
     var lay: glyphic.layout.Layout = .{ .a = a, .r = &r, .editing = true };
-    var syntax: std.ArrayList(engine.markup.Diagnostic) = .empty;
+    var syntax: std.ArrayList(rendering.Syntax) = .empty;
     const cap = st.cap_height;
 
     const top = e.node(e.root).items.items;

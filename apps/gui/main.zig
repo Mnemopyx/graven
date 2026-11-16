@@ -14,7 +14,6 @@ const builtin = @import("builtin");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const glyphic = @import("graven_glyphic");
-const engine = @import("graven_engine");
 const samples = @import("graven_samples");
 const desktop = @import("desktop.zig");
 const ghost_pane = @import("ghost.zig");
@@ -27,7 +26,7 @@ const icons = @import("icons.zig");
 const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
 
-const geom = engine.geom;
+const geom = layout.geom;
 const Model = layout.Model;
 const TileId = layout.TileId;
 
@@ -47,7 +46,7 @@ fn start() dvui.App.StartOptions {
         _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
         // The identifier becomes the Wayland app id, which the desktop uses
         // to find Graven's .desktop file and icon.
-        _ = c.SDL_SetAppMetadata("Graven", engine.version, "com.mnemopyx.graven");
+        _ = c.SDL_SetAppMetadata("Graven", layout.version, "com.mnemopyx.graven");
     }
     return .{
         .size = .{ .w = 1500, .h = 820 },
@@ -82,8 +81,8 @@ const State = struct {
     fonts: []Font = &.{},
     font_choice: usize = 0,
     font_loaded: ?usize = null,
-    face: ?*engine.Face = null,
-    faces: [1]*engine.Face = undefined,
+    face: ?*layout.Face = null,
+    faces: [1]*layout.Face = undefined,
     model: Model,
     labels: ?layout.Labels = null,
     /// One solve per panel, in the panel's own frame.
@@ -273,10 +272,10 @@ const TilePiece = struct {
 
 const Flat = struct {
     arena: std.heap.ArenaAllocator,
-    map: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
+    map: std.AutoHashMapUnmanaged(*const layout.Render, []const Piece) = .empty,
     /// As `map`, with glyphs left empty: what is drawn from outlines when
     /// glyphs come from the atlas.
-    paths: std.AutoHashMapUnmanaged(*const engine.Render, []const Piece) = .empty,
+    paths: std.AutoHashMapUnmanaged(*const layout.Render, []const Piece) = .empty,
     /// Tile art, by its placed shapes (owned by the placement, which resets
     /// this cache when it changes).
     tiles: std.AutoHashMapUnmanaged([*]const layout.art.Shape, []const TilePiece) = .empty,
@@ -290,12 +289,12 @@ const Flat = struct {
         f.tol = tol;
     }
 
-    fn get(f: *Flat, r: *const engine.Render, faces: []const *engine.Face) ![]const Piece {
+    fn get(f: *Flat, r: *const layout.Render, faces: []const *layout.Face) ![]const Piece {
         return f.getWith(r, faces, false);
     }
 
     /// Item for item; with `paths_only`, glyphs' pieces empty.
-    fn getWith(f: *Flat, r: *const engine.Render, faces: []const *engine.Face, paths_only: bool) ![]const Piece {
+    fn getWith(f: *Flat, r: *const layout.Render, faces: []const *layout.Face, paths_only: bool) ![]const Piece {
         const cache = if (paths_only) &f.paths else &f.map;
         if (cache.get(r)) |c| return c;
         const a = f.arena.allocator();
@@ -306,7 +305,7 @@ const Flat = struct {
                 continue;
             }
             const o = switch (item) {
-                .glyph => |g| try engine.render.glyphOutline(a, faces[g.face], g),
+                .glyph => |g| try layout.render.glyphOutline(a, faces[g.face], g),
                 .path => |p| p.outline,
             };
             const kind: PieceKind = switch (item) {
@@ -861,7 +860,7 @@ fn followThreads(labels: *layout.Labels) !void {
     const doc = try layout.native.encode(gpa, &state.model);
     errdefer gpa.free(doc);
     const table = faceTable();
-    const faces = try gpa.alloc(*engine.Face, table.len);
+    const faces = try gpa.alloc(*layout.Face, table.len);
     var made: usize = 0;
     errdefer {
         for (faces[0..made]) |f| f.deinit();
@@ -884,7 +883,7 @@ fn update() !void {
         const f = state.fonts[state.font_choice];
         const bytes = try std.Io.Dir.cwd().readFileAlloc(dvui.io, f.path, state.gpa, .limited(64 << 20));
         defer state.gpa.free(bytes);
-        const face = try engine.Face.init(state.gpa, bytes, f.index);
+        const face = try layout.Face.init(state.gpa, bytes, f.index);
         clearPlaced();
         if (state.labels) |*l| l.deinit();
         if (state.face) |old| old.deinit();
@@ -963,7 +962,7 @@ fn facesChanged() void {
     if (atlas) |*a| a.clear(true);
 }
 
-fn faceTable() []const *engine.Face {
+fn faceTable() []const *layout.Face {
     if (resolved) |*r| return r.faces.items;
     return &state.faces;
 }
@@ -1091,12 +1090,12 @@ var dump_path: ?[]const u8 = null;
 var dump_frame: u32 = 0;
 var dump_svg: std.ArrayList(u8) = .empty;
 
-fn dumpGlyph(area: dvui.Rect.Physical, face: *engine.Face, g: engine.render.GlyphItem, at: geom.Point) void {
+fn dumpGlyph(area: dvui.Rect.Physical, face: *layout.Face, g: layout.render.GlyphItem, at: geom.Point) void {
     if (dump_path == null) return;
     const lifo = dvui.currentWindow().lifo();
     var arena: std.heap.ArenaAllocator = .init(lifo);
     defer arena.deinit();
-    const o = engine.render.glyphOutline(arena.allocator(), face, g) catch return;
+    const o = layout.render.glyphOutline(arena.allocator(), face, g) catch return;
     for (o.contours) |c| {
         if (c.segments.len == 0) continue;
         const P = struct {
@@ -2416,7 +2415,7 @@ fn bottomContent() !void {
 // The expression line -----------------------------------------------------
 //
 // Shows and edits the selected label's markup as typed. Whatever is typed
-// is stored, valid or not; the canvas draws it from the engine's lenient
+// is stored, valid or not; the canvas draws it from glyphic's lenient
 // parse (placeholders for what is still to come, unfinished commands
 // faint), and the first problem shows at the line's end. Braces pair as in
 // a code editor, so partial input stays renderable.
@@ -2706,7 +2705,7 @@ fn completionList(entry: dvui.Rect.Physical) void {
     }
 }
 
-fn firstSyntaxProblem(target: ExprTarget) ?engine.markup.Diagnostic {
+fn firstSyntaxProblem(target: ExprTarget) ?layout.render.Syntax {
     for (state.placed.items, 0..) |*p, pi| for (p.issues) |i| {
         if (i.kind != .markup_error) continue;
         const hit = switch (target) {
@@ -4185,7 +4184,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
 /// Draws the glyphs of render `r`, placed at worksheet point `at`, from the
 /// glyph atlas. False (nothing drawn) when one is too large to raster, so
 /// the caller draws the label from its outlines.
-fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const engine.Render, at: geom.Point, ink: dvui.Color) bool {
+fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.Point, ink: dvui.Color) bool {
     const faces = faceTable();
     const lifo = dvui.currentWindow().lifo();
     const ga = glyphAtlas();
@@ -4355,7 +4354,7 @@ fn ccw(p0: dvui.Point.Physical, p1: dvui.Point.Physical, p2: dvui.Point.Physical
 
 /// The expression line's cursor in placed label `l` of panel `pi`, if it
 /// is the one being edited.
-fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?engine.Caret {
+fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?layout.render.Caret {
     const c = expr_caret orelse return null;
     const mine = switch (c.target) {
         // A tile track's text is set piece by piece with no offsets kept:
@@ -7074,7 +7073,7 @@ fn properties() !void {
         .file => {
             // The file's name is its path, set by saving; it is not a property.
             propValue("Saved", true, "not yet", .{}, 1);
-            propText("Engine", "{s}", .{engine.version}, 2);
+            propText("Engine", "{s}", .{layout.version}, 2);
         },
         .worksheet => {
             try worksheetProperties();
@@ -8739,14 +8738,14 @@ fn charBeforeCursor(c: TrackCursor) ?layout.model.FlowPos {
     const a = dvui.currentWindow().arena();
     const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
     if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) {
-        const at = layout.edit.charBefore(a, items[c.index].what.run.content, c.offset) catch null;
+        const at = layout.edit.charBefore(a, items[c.index].what.run.content, c.offset, items[c.index].what.run.equation) catch null;
         return .{ .index = c.index, .offset = at orelse 0 };
     }
     if (c.index == 0) return null;
     const k = c.index - 1;
     if (items[k].what == .run) {
         const content = items[k].what.run.content;
-        if (layout.edit.charBefore(a, content, @intCast(content.len)) catch null) |at| return .{ .index = k, .offset = at };
+        if (layout.edit.charBefore(a, content, @intCast(content.len), items[k].what.run.equation) catch null) |at| return .{ .index = k, .offset = at };
     }
     return .{ .index = k };
 }
@@ -8757,7 +8756,7 @@ fn charAfterCursor(c: TrackCursor, len: usize) ?layout.model.FlowPos {
     const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
     if (items[c.index].what == .run) {
         const content = items[c.index].what.run.content;
-        const end = (layout.edit.charAfter(dvui.currentWindow().arena(), content, c.offset) catch null) orelse @as(u32, @intCast(content.len));
+        const end = (layout.edit.charAfter(dvui.currentWindow().arena(), content, c.offset, items[c.index].what.run.equation) catch null) orelse @as(u32, @intCast(content.len));
         return if (end >= content.len) .{ .index = c.index + 1 } else .{ .index = c.index, .offset = end };
     }
     return .{ .index = c.index + 1 };

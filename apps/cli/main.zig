@@ -4,7 +4,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const layout = @import("graven_layout");
-const engine = @import("graven_engine");
 const fontsearch = @import("graven_fontsearch");
 const richtext = @import("graven_richtext");
 const samples = @import("graven_samples");
@@ -17,15 +16,14 @@ const usage =
     \\         Makes each glyph's multi-channel signed distance field and draws it back
     \\         at several sizes, plain and grown, into a greyscale sheet; reports each
     \\         field's time and its drawn area against the outline's.
-    \\       graven parse <markup>
-    \\         Parses label markup and prints its tree, or where it went wrong.
+    \\       graven parse <legend>
+    \\         Parses a legend (text, math between dollars) and prints its objects.
     \\       graven rtf <file.rtf>
     \\         Reads an RTF file as an import would: each paragraph's settings and its
     \\         text as Graven markup, then what was left out.
-    \\       graven label [--advance] [--width mm] [--centre] [--bold font] [--bold-italic font] <upright font> <italic font|-> <cap height mm> <markup> <out.svg> [fallback font ...]
-    \\         Renders label markup; with an italic font, letters default to italic.
-    \\         Neighbours are placed by their ink unless --advance is given. --width gives a
-    \\         hard box that wide, so lines wrap; --centre centres each line on the anchor.
+    \\       graven label [--width mm] [--centre] [--bold font] [--bold-italic font] <upright font> <italic font|-> <cap height mm> <legend> <out.svg> [fallback font ...]
+    \\         Sets a legend with engine v2; with an italic font, math's variables are italic.
+    \\         --width breaks it into lines that wide; --centre centres each line.
     \\         --bold and --bold-italic give the family's bolds, for \\textbf and \\mathbf.
     \\       graven keyboard <font> <out.svg>
     \\         Lays out the sample PC keyboard in one font and writes it as SVG.
@@ -101,9 +99,7 @@ pub fn main(init: std.process.Init) !void {
         var flags: LabelFlags = .{};
         var k: usize = 2;
         while (k < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 1) {
-            if (std.mem.eql(u8, args[k], "--advance")) {
-                flags.contact = .advance;
-            } else if (std.mem.eql(u8, args[k], "--centre")) {
+            if (std.mem.eql(u8, args[k], "--centre")) {
                 flags.centre = true;
             } else if (std.mem.eql(u8, args[k], "--bold") and k + 1 < args.len) {
                 k += 1;
@@ -133,11 +129,11 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
 
     const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
     defer gpa.free(bytes);
-    const face = try engine.Face.init(gpa, bytes, 0);
+    const face = try layout.Face.init(gpa, bytes, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*layout.Face{face};
 
-    var r = try engine.renderRun(gpa, &faces, 0, text, .{ .cap_height = cap });
+    var r = try layout.render.run(gpa, &faces, 0, text, cap);
     defer r.deinit();
     for (r.diagnostics) |d| std.debug.print("warning: {s} at byte {d}\n", .{ @tagName(d.kind), d.offset });
 
@@ -165,12 +161,12 @@ fn v2(init: std.process.Init, text_path: []const u8, math_path: []const u8, out_
     var g = glyphic.Engine.init(gpa);
     defer g.deinit();
     const style = try g.addStyle("sample", .none);
-    var loaded: std.ArrayList(*engine.Face) = .empty;
+    var loaded: std.ArrayList(*layout.Face) = .empty;
     defer for (loaded.items) |f| f.deinit();
     for ([_]?[]const u8{ text_path, math_path, italic_path }, [_][]const u8{ "text", "math", "italic" }) |path, name| {
         const p = path orelse continue;
         const bytes = try cwd.readFileAlloc(io, p, a, .limited(64 << 20));
-        const f = try engine.Face.init(gpa, bytes, 0);
+        const f = try layout.Face.init(gpa, bytes, 0);
         try loaded.append(a, f);
         try g.setFace(style, name, f);
     }
@@ -183,8 +179,8 @@ fn v2(init: std.process.Init, text_path: []const u8, math_path: []const u8, out_
     try g.apply(&e, e.root, style);
     const r = glyphic.Resolver.init(&g, &e, &.{});
 
-    var outs: std.ArrayList(engine.geom.Outline) = .empty;
-    var box: engine.geom.Box = .empty;
+    var outs: std.ArrayList(layout.geom.Outline) = .empty;
+    var box: layout.geom.Box = .empty;
     // One long row; narrow rows, broken; a dial.
     var long: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = 0, .y = 0 }, .length = 160, .pitch = 14, .count = 1, .cap = 4 };
     var narrow: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = 0, .y = -24 }, .length = 75, .pitch = 16, .count = 3, .cap = 4 };
@@ -215,14 +211,14 @@ fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, te
         std.debug.print("texels per cap height must be a number, not {s}\n", .{texels_arg});
         std.process.exit(2);
     };
-    const geom = engine.geom;
+    const geom = layout.geom;
     const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
     defer gpa.free(bytes);
-    const face = try engine.Face.init(gpa, bytes, 0);
+    const face = try layout.Face.init(gpa, bytes, 0);
     defer face.deinit();
     const cap = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
-    const faces = [_]*engine.Face{face};
-    var r = try engine.renderRun(gpa, &faces, 0, text, .{ .cap_height = cap });
+    const faces = [_]*layout.Face{face};
+    var r = try layout.render.run(gpa, &faces, 0, text, cap);
     defer r.deinit();
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -278,8 +274,8 @@ fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, te
 /// Coverage of outline `o` grown by `grow`, an `n` × `n` raster whose pixel
 /// (i, j) maps by `m`, from 4 x 4 samples a pixel (even-odd on the grown
 /// outline's simple loops).
-fn exactCoverage(a: std.mem.Allocator, o: engine.geom.Outline, n: u32, m: engine.geom.Affine, grow: f64) ![]u8 {
-    const geom = engine.geom;
+fn exactCoverage(a: std.mem.Allocator, o: layout.geom.Outline, n: u32, m: layout.geom.Affine, grow: f64) ![]u8 {
+    const geom = layout.geom;
     const g = try geom.grow.grow(a, o, grow, @max(grow, 1) / 20);
     var loops: std.ArrayList([]geom.Point) = .empty;
     for (g.contours) |c| {
@@ -313,9 +309,9 @@ fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8)
     const cwd = std.Io.Dir.cwd();
     const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
     defer gpa.free(bytes);
-    const face = try engine.Face.init(gpa, bytes, 0);
+    const face = try layout.Face.init(gpa, bytes, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*layout.Face{face};
 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
@@ -390,7 +386,7 @@ const LegendFonts = struct {
         }
     }
 
-    fn faces(f: *const LegendFonts) []const *engine.Face {
+    fn faces(f: *const LegendFonts) []const *layout.Face {
         return f.resolved.?.faces.items;
     }
 
@@ -408,7 +404,7 @@ const LegendFonts = struct {
 /// the font files given.
 const DirFonts = struct {
     arena: std.heap.ArenaAllocator,
-    faces: std.ArrayList(*engine.Face) = .empty,
+    faces: std.ArrayList(*layout.Face) = .empty,
     bytes: std.ArrayList([]u8) = .empty,
     names: std.ArrayList(layout.model.FontName) = .empty,
 
@@ -439,7 +435,7 @@ const DirFonts = struct {
 
     fn add(d: *DirFonts, gpa: std.mem.Allocator, bytes: []u8, file: []const u8) !void {
         const a = d.arena.allocator();
-        const face = engine.Face.init(gpa, bytes, 0) catch |err| {
+        const face = layout.Face.init(gpa, bytes, 0) catch |err| {
             gpa.free(bytes);
             return err;
         };
@@ -451,7 +447,7 @@ const DirFonts = struct {
 
     fn catalog(d: *DirFonts) layout.fonts.Catalog {
         return .{ .names = d.names.items, .ctx = d, .load = struct {
-            fn f(ctx: *anyopaque, index: usize) ?*engine.Face {
+            fn f(ctx: *anyopaque, index: usize) ?*layout.Face {
                 const self: *DirFonts = @ptrCast(@alignCast(ctx));
                 return self.faces.items[index];
             }
@@ -579,13 +575,15 @@ fn msBetween(a: i128, b: i128) f64 {
 }
 
 const LabelFlags = struct {
-    contact: @FieldType(engine.style.Spec, "contact") = .ink,
     width: ?f64 = null,
     centre: bool = false,
     bold: ?[]const u8 = null,
     bold_italic: ?[]const u8 = null,
 };
 
+/// A legend set by glyphic in a style made of the font files given: the
+/// upright text face, its italic (variables italic in math), its bolds,
+/// then fallbacks; on one line, or broken into lines `--width` wide.
 fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -601,57 +599,60 @@ fn label(init: std.process.Init, args: []const [:0]const u8, flags: LabelFlags) 
     const src = args[3];
     const out_path = args[4];
 
-    // Faces: upright, then italic if given, then the bolds, then fallbacks.
-    var faces: std.ArrayList(*engine.Face) = .empty;
+    // Faces by role: text, italic if given, the bolds, then fallbacks.
+    var faces: std.ArrayList(*layout.Face) = .empty;
     defer for (faces.items) |f| f.deinit();
-    var paths: std.ArrayList([]const u8) = .empty;
-    try paths.append(a, args[0]);
+    var roles: std.ArrayList([]const u8) = .empty;
+    const load = struct {
+        fn f(al: std.mem.Allocator, g: std.mem.Allocator, i: std.Io, path: []const u8) !*layout.Face {
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(i, path, al, .limited(64 << 20));
+            return layout.Face.init(g, bytes, 0);
+        }
+    }.f;
+    try faces.append(a, try load(a, gpa, io, args[0]));
+    try roles.append(a, "text");
     const has_italic = !std.mem.eql(u8, args[1], "-");
-    if (has_italic) try paths.append(a, args[1]);
-    const bold_at: u32 = @intCast(paths.items.len);
-    if (flags.bold) |p| try paths.append(a, p);
-    const bold_italic_at: u32 = @intCast(paths.items.len);
-    if (flags.bold_italic) |p| try paths.append(a, p);
-    const first_fallback: u32 = @intCast(paths.items.len);
-    for (args[5..]) |fb| try paths.append(a, fb);
-    for (paths.items) |path| {
-        const bytes = try cwd.readFileAlloc(io, path, a, .limited(64 << 20));
-        try faces.append(a, try engine.Face.init(gpa, bytes, 0));
+    if (has_italic) {
+        try faces.append(a, try load(a, gpa, io, args[1]));
+        try roles.append(a, "italic");
     }
-    var members: std.ArrayList(engine.style.Member) = .empty;
-    for (first_fallback..faces.items.len) |k| try members.append(a, .{ .upright = @intCast(k) });
+    if (flags.bold) |p| {
+        try faces.append(a, try load(a, gpa, io, p));
+        try roles.append(a, "bold");
+    }
+    if (flags.bold_italic) |p| {
+        try faces.append(a, try load(a, gpa, io, p));
+        try roles.append(a, "bold_italic");
+    }
+    for (args[5..], 0..) |fb, k| {
+        try faces.append(a, try load(a, gpa, io, fb));
+        try roles.append(a, try std.fmt.allocPrint(a, "fallback{d}", .{k + 1}));
+    }
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const style = try g.addStyle("label", .none);
+    for (faces.items, roles.items) |f, r| try g.setFace(style, r, f);
+    if (has_italic) try g.setFor(style, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
 
-    const ctx = try engine.style.Context.init(faces.items, .{
-        .upright = 0,
-        .italic = if (has_italic) 1 else null,
-        .bold = if (flags.bold != null) bold_at else null,
-        .bold_italic = if (flags.bold_italic != null) bold_italic_at else null,
-        .members = members.items,
-        .cap_height = cap,
-        .letters = if (has_italic) .italic else .upright,
-        .contact = flags.contact,
-    });
-    var diag: engine.markup.Diagnostic = undefined;
-    const opts: engine.label.Options = .{
-        .anchor = if (flags.centre) engine.Anchor.centre else .start,
-        .hard_box = if (flags.width) |w| .{ .x0 = if (flags.centre) -w / 2 else 0, .y0 = -1e6, .x1 = if (flags.centre) w / 2 else w, .y1 = 1e6 } else null,
-    };
-    var r = engine.renderLabel(gpa, &ctx, src, opts, &diag) catch |err| switch (err) {
-        error.Syntax => {
-            std.debug.print("{s}\n{s} at byte {d}\n", .{ src, diag.kind.message(), diag.offset });
-            std.process.exit(1);
-        },
-        else => return err,
-    };
-    defer r.deinit();
-    for (r.diagnostics) |d| std.debug.print("warning: {s} at byte {d}\n", .{ @tagName(d.kind), d.offset });
-
-    const outlines = try r.outlines(a, faces.items);
-    const doc = try layout.output.svg(a, outlines, r.design.join(r.ink), .{});
+    var e = try glyphic.Expr.init(gpa);
+    defer e.deinit();
+    var spans: glyphic.entry.Spans = .{};
+    defer spans.deinit(gpa);
+    try glyphic.latex.parse(&e, &spans, src, .legend);
+    const r = glyphic.Resolver.init(&g, &e, &.{style});
+    const text = faces.items[0];
+    const ext = text.extents();
+    const pitch = (ext.ascender - ext.descender) * cap / glyphic.faces.capUnits(text);
+    var rows: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = 0, .y = 0 }, .length = flags.width orelse 1e6, .pitch = pitch, .count = 256, .cap = cap, .alignment = if (flags.centre) .centre else .start };
+    const set = try glyphic.setting.set(a, &r, rows.ground(), .{});
+    const outlines = try glyphic.setting.outlines(a, set.items, cap / 1000);
+    var box: layout.geom.Box = .empty;
+    for (outlines) |o| box = box.join(o.bounds());
+    const doc = try layout.output.svg(a, outlines, box, .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
-    std.debug.print("{s}: {d} elements, script scale {d:.3}, raise {d:.3}, drop {d:.3}\n", .{
-        out_path, r.elements.len, ctx.script_scale, ctx.sup_raise, ctx.sub_drop,
-    });
+    for (set.missing) |m| std.debug.print("warning: U+{X:0>4} is in no face\n", .{m.cp});
+    if (set.overflow) std.debug.print("warning: wider than {d} mm\n", .{flags.width orelse 0});
+    std.debug.print("{s}: {d} lines, {d} items\n", .{ out_path, set.lines.len, set.items.len });
 }
 
 fn rtfShow(init: std.process.Init, path: []const u8) !void {
@@ -691,20 +692,17 @@ fn rtfShow(init: std.process.Init, path: []const u8) !void {
     try w.flush();
 }
 
+/// A legend's objects as glyphic parses it (text, math between dollars).
 fn parse(init: std.process.Init, src: []const u8) !void {
-    var arena: std.heap.ArenaAllocator = .init(init.gpa);
-    defer arena.deinit();
-    var diag: engine.markup.Diagnostic = undefined;
-    const tree = engine.markup.parse(arena.allocator(), src, &diag) catch |err| switch (err) {
-        error.Syntax => {
-            std.debug.print("{s}\n{s}\n", .{ src, diag.kind.message() });
-            std.debug.print("at byte {d}: {s}\u{25B8}{s}\n", .{ diag.offset, src[0..diag.offset], src[diag.offset..] });
-            std.process.exit(1);
-        },
-        else => return err,
-    };
-    var out: std.Io.Writer.Allocating = .init(arena.allocator());
-    try engine.markup.dump(&out.writer, tree.items);
+    const gpa = init.gpa;
+    var e = try glyphic.Expr.init(gpa);
+    defer e.deinit();
+    var spans: glyphic.entry.Spans = .{};
+    defer spans.deinit(gpa);
+    try glyphic.latex.parse(&e, &spans, src, .legend);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try glyphic.entry.dump(&out.writer, &e, e.root);
     std.debug.print("{s}\n", .{out.written()});
 }
 

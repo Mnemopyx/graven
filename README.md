@@ -15,14 +15,13 @@ The full design is in the [Graven design blueprint](https://claude.ai/artifact/Q
 
 Early, with a working editor. For the full inventory, what is agreed but not built, and the gaps against the goals above, see [docs/status.md](docs/status.md).
 
-**Label engine.**
-- KaTeX-style label markup (`graven parse`), rendered in a style context (`graven label`). Text with `$…$` has math between the dollars, as in KaTeX.
+**Legend engine (glyphic).**
+- Legends entered in LaTeX as KaTeX takes it, or a Typst-style syntax, both to the same objects (`graven parse` prints them, `graven label` sets one). Text with `$…$` has math between the dollars; an equation is all math. An element's overrides are kept in the source in Graven's call form: `\set(scale: 1.2){x}`.
 - Text styles as glyphic style contexts: faces by role (text, italic, bold, math, fallbacks), parameter rules, bases; math font packages (`stix-two`, `libertinus`) as ready-made faces and rules.
 - HarfBuzz shaping and exact glyph outlines (lines, quadratics, cubics).
-- Scripts, `\frac`, `\sqrt`, accents, and TeX atom-class spacing.
-- Bold, italic and math-alphabet variants, plus underline and strikethrough.
-- Neighbours and scripts placed by their ink.
-- Line breaks at spaces, `\allowbreak` and soft hyphens. A word too long for its line is cut to wrap.
+- Scripts, `\frac` (stacked, slashed, diagonal), `\sqrt`, large operators with limits, fences, accents, relative rotation, and TeX atom-class spacing.
+- Bold and italic text and bold math; operator names.
+- Line breaks at spaces, soft hyphens, relations and binary operators; tracks straight or curved, rows or columns.
 
 **Layout library.**
 - **Canvas:** in mm, inches or mils, with frames, views, layers, images and groups.
@@ -62,7 +61,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 - **Design-rule checks and per-process output:** not started beyond a layer-height flag.
 - **Manufacture mode in the GUI.**
 - **Proof sheet.**
-- **Engine v2** (planned): a glyphic styling and positioning engine beside the current one; see the blueprint.
+- **Engine v2 against v1:** weight matching of member faces, spacing by ink, drawn arrows, math alphabets (\mathbb), MATH-table size variants; see the blueprint.
 
 ## Layout
 
@@ -70,10 +69,9 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 | --- | --- |
 | `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic, conic), contours, exact areas and bounds; exact booleans, overlap removal, earcut, outline growth, MSDF fields; `spring`, the 1-D tension solver |
 | `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
-| `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
-| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `fonts` (styles' fonts resolved, math packages), `legend` (legends set by glyphic), `fab` and `threemf` (colour FDM), `output` (SVG), `drc` (margins) |
+| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `fonts` (styles' fonts resolved, math packages), `legend` (legends set by glyphic), `render` (the placed glyphs and rules legends are set into), `edit` (editing a run's source in place), `fab` and `threemf` (colour FDM), `output` (SVG), `drc` (margins) |
 | `lib/sketch` | Parametric sketches and their solver |
-| `lib/glyphic` | Engine v2, being built beside `lib/engine`: legends as objects with typed parameters resolved through a cascade (stage 1 of 7: the object model) |
+| `lib/glyphic` | The legend engine: legends as objects with typed parameters resolved through style contexts; LaTeX and Typst entry; layout, ground and setting |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
 | `docs` | Project notes: [status.md](docs/status.md), what exists today and what is still to come |
 | `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
@@ -93,8 +91,8 @@ Requires Zig 0.17.0.
 zig build            # builds the graven CLI
 zig build test       # library tests
 zig build run -- svg <font file> "<text>" <cap mm> out.svg   # one run of text as SVG
-zig build run -- parse 'x_i^2'                                  # label markup as a tree
-zig build run -- label <upright> <italic|-> <cap mm> 'x_i^2' out.svg [fallback ...]   # a rendered label
+zig build run -- parse 'Area $\pi r^2$'                          # a legend's objects
+zig build run -- label <upright> <italic|-> <cap mm> '$x_i^2$' out.svg [fallback ...]   # a legend set
 zig build run -- keyboard examples/fonts/Inter-Medium.otf out.svg                 # the sample PC keyboard
 zig build gui        # builds and runs the GUI editor (fetches DVUI and SDL3 on first use)
 zig build run -- label --width 12 --centre <upright> - 3 'CAPS LOCK' out.svg         # wrapped in a 12 mm box

@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     const brotli = brotli_c.createModule();
     brotli.linkLibrary(brotli_dec);
 
-    // Libraries, dependencies one way only: geom <- font <- engine <- layout.
+    // Libraries, dependencies one way only: geom <- font <- glyphic <- layout.
     const testdata = b.createModule(.{ .root_source_file = b.path("lib/testdata/root.zig") });
     const geom = b.addModule("graven_geom", .{
         .root_source_file = b.path("lib/geom/root.zig"),
@@ -62,25 +62,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_testdata", .module = testdata },
         },
     });
-    const engine = b.addModule("graven_engine", .{
-        .root_source_file = b.path("lib/engine/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "hb", .module = hb },
-            .{ .name = "graven_geom", .module = geom },
-            .{ .name = "graven_font", .module = font },
-            .{ .name = "graven_testdata", .module = testdata },
-        },
-    });
     // Styled text as readers find it (RTF first), for importing.
     const richtext = b.addModule("graven_richtext", .{
         .root_source_file = b.path("lib/richtext/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // Engine v2 (glyphic), beside v1 and independent of it: stage 1, the
-    // object model, parameters and their cascade.
+    // Glyphic: the legend engine (objects, parameters, style contexts,
+    // entry syntaxes, layout and setting).
     const glyphic = b.addModule("graven_glyphic", .{
         .root_source_file = b.path("lib/glyphic/root.zig"),
         .target = target,
@@ -104,7 +93,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "graven_engine", .module = engine },
+            .{ .name = "graven_geom", .module = geom },
+            .{ .name = "graven_font", .module = font },
             .{ .name = "graven_richtext", .module = richtext },
             .{ .name = "graven_testdata", .module = testdata },
             .{ .name = "graven_sketch", .module = sketch },
@@ -140,7 +130,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "graven_layout", .module = layout },
-            .{ .name = "graven_engine", .module = engine },
         },
     });
     const cli = b.addExecutable(.{
@@ -152,7 +141,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "graven_richtext", .module = richtext },
                 .{ .name = "graven_layout", .module = layout },
-                .{ .name = "graven_engine", .module = engine },
                 .{ .name = "graven_samples", .module = samples },
                 .{ .name = "graven_fontsearch", .module = fontsearch },
                 .{ .name = "graven_glyphic", .module = glyphic },
@@ -205,7 +193,6 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "dvui", .module = dvui_dep.module("dvui_sdl3") },
                     .{ .name = "graven_layout", .module = layout },
-                    .{ .name = "graven_engine", .module = engine },
                     .{ .name = "graven_samples", .module = samples },
                     .{ .name = "graven_config", .module = config },
                     .{ .name = "graven_fontsearch", .module = fontsearch },
@@ -225,7 +212,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext, sketch, fonts_local, glyphic }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, layout, samples, config, fontsearch, richtext, sketch, fonts_local, glyphic }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).
@@ -247,7 +234,7 @@ pub fn build(b: *std.Build) void {
     //                     fetched as a package named in build.zig.zon
     // then: zig build occt-test ...
     const occt_prefix = b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)");
-    const fab_mods: FabModules = .{ .layout = layout, .engine = engine, .samples = samples };
+    const fab_mods: FabModules = .{ .layout = layout, .samples = samples };
     const occt_prebuilt = b.option(bool, "occt-prebuilt", "Fetch the prebuilt OCCT release archive (enables the OCCT bridge)") orelse false;
     if (occt_prefix) |prefix| {
         addOcctBridge(b, target, optimize, .{ .prefix = prefix }, fab_mods);
@@ -314,7 +301,7 @@ const occt_toolkits = [_][]const u8{
 };
 
 /// The Graven modules graven-fab uses.
-const FabModules = struct { layout: *std.Build.Module, engine: *std.Build.Module, samples: *std.Build.Module };
+const FabModules = struct { layout: *std.Build.Module, samples: *std.Build.Module };
 
 fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt, mods: FabModules) void {
     // A build is tied to the zig that made it: its C++ is Zig's libc++.
@@ -352,13 +339,11 @@ fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .imports = &.{
             .{ .name = "occt_shim", .module = shim },
             .{ .name = "graven_layout", .module = mods.layout },
-            .{ .name = "graven_engine", .module = mods.engine },
         },
     });
     const fab_mod = occtModule(b, target, optimize, occt, b.path("apps/fab/main.zig"), shim);
     fab_mod.addImport("occt_fab", fab);
     fab_mod.addImport("graven_layout", mods.layout);
-    fab_mod.addImport("graven_engine", mods.engine);
     fab_mod.addImport("graven_samples", mods.samples);
     const fab_exe = b.addExecutable(.{ .name = "graven-fab", .root_module = fab_mod });
     const install_fab = b.addInstallArtifact(fab_exe, .{});

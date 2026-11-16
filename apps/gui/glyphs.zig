@@ -15,8 +15,8 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
-const engine = @import("graven_engine");
-const geom = engine.geom;
+const layout = @import("graven_layout");
+const geom = layout.geom;
 
 const Allocator = std.mem.Allocator;
 
@@ -42,9 +42,9 @@ const max_pages = 8;
 /// Glyphs drawn larger than this (raster height, pixels) are drawn exactly.
 pub const max_px = 256.0;
 
-const FieldKey = struct { face: *engine.Face, gid: u32, level: u2 };
+const FieldKey = struct { face: *layout.Face, gid: u32, level: u2 };
 const SlotKey = struct {
-    face: *engine.Face,
+    face: *layout.Face,
     gid: u32,
     /// The field level it was made from: a coarser one stands in while the
     /// right one is made.
@@ -270,7 +270,7 @@ pub const Atlas = struct {
     /// A field for `gid` at `level`, or the finest coarser one made while
     /// it is being made (the level used is returned); error.Pending when
     /// none is ready yet. Made off the drawing thread when there is a maker.
-    fn field(at: *Atlas, face: *engine.Face, gid: u32, level: u2) !struct { field: ?geom.msdf.Field, level: u2 } {
+    fn field(at: *Atlas, face: *layout.Face, gid: u32, level: u2) !struct { field: ?geom.msdf.Field, level: u2 } {
         const key: FieldKey = .{ .face = face, .gid = gid, .level = level };
         if (at.fields.get(key)) |f| return .{ .field = f, .level = level };
         const o = try face.outline(gid);
@@ -309,7 +309,7 @@ pub const Atlas = struct {
     /// The raster of `gid` in `face` at `px_per_unit` pixels per font unit,
     /// grown by `grow` font units; null for a blank glyph, or one too large
     /// to raster (draw it exactly).
-    pub fn slot(at: *Atlas, face: *engine.Face, gid: u32, px_per_unit: f64, grow: f64) !?Slot {
+    pub fn slot(at: *Atlas, face: *layout.Face, gid: u32, px_per_unit: f64, grow: f64) !?Slot {
         if (!(px_per_unit > 0)) return null;
         // Quarter octaves of size, eighths of a pixel of growth.
         const size_step: i16 = @intFromFloat(@round(4 * std.math.log2(px_per_unit)));
@@ -354,7 +354,7 @@ pub const Atlas = struct {
     /// drawn texel for pixel, nothing resampled. Its height is fitted too:
     /// the cap height a whole number of pixels, so the baseline and the
     /// cap line both lie on pixel rows. Null as `slot`.
-    pub fn alignedSlot(at: *Atlas, face: *engine.Face, gid: u32, px_per_unit: f64, grow: f64, phase: u2) !?Slot {
+    pub fn alignedSlot(at: *Atlas, face: *layout.Face, gid: u32, px_per_unit: f64, grow: f64, phase: u2) !?Slot {
         if (!(px_per_unit > 0)) return null;
         // Sizes in 64ths of an octave: the quad is stretched by at most a
         // quarter of a percent.

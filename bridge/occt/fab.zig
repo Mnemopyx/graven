@@ -6,7 +6,7 @@
 const std = @import("std");
 const c = @import("occt_shim");
 const layout = @import("graven_layout");
-const geom = @import("graven_engine").geom;
+const geom = @import("graven_layout").geom;
 const Allocator = std.mem.Allocator;
 
 pub const Error = Allocator.Error || error{Occt};

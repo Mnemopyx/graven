@@ -77,8 +77,7 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 
 - `lib/geom`: points, segments, exact booleans (`boolean.zig`), overlap removal (`fill.zig`), earcut, outline growth (`grow.zig`), MSDF fields (`msdf.zig`).
 - `lib/font`: faces (HarfBuzz), outlines, measures (cap height, stems).
-- `lib/engine`: the v1 label engine, being retired (engine v2 route, step 5): its `Render` container and `Face` are still used; markup, style contexts and label layout are no longer used by placement.
-- `lib/glyphic`: engine v2: expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
-- `lib/layout`: the document model (text styles are stored glyphic contexts), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig`), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
+- `lib/glyphic`: the legend engine (v2; v1's `lib/engine` was deleted 2026-11-16): expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
+- `lib/layout`: the document model (text styles are stored glyphic contexts), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig` into `render.zig`'s geometry; `edit.zig` edits a run's source in place), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
 - `lib/sketch`: parametric sketches and their solver.
 - `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.

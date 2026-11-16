@@ -16,11 +16,11 @@
 //! and scripts make the same edits.
 
 const std = @import("std");
-const engine = @import("graven_engine");
+
 const glyphic = @import("graven_glyphic");
 
 const Allocator = std.mem.Allocator;
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const art_ = @import("art.zig");
 pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
@@ -4060,9 +4060,9 @@ pub const Model = struct {
         if (f.index > len or t.index > len) return error.NoSuchItem;
         if (f.index == t.index) {
             if (m.runAt(panel, region, f.index)) |r| if (t.offset > f.offset) {
-                r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, t.offset));
+                r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, t.offset, r.equation));
                 // Nothing left of it: it goes.
-                if (!try edit_.hasChars(sa, r.content)) {
+                if (!try edit_.hasChars(sa, r.content, r.equation)) {
                     try m.removeAt(panel, region, f.index);
                     f.offset = 0;
                 }
@@ -4072,12 +4072,12 @@ pub const Model = struct {
         }
         // The start of the run the range ends in.
         if (t.offset > 0) if (m.runAt(panel, region, t.index)) |r| {
-            r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, 0, t.offset));
+            r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, 0, t.offset, r.equation));
         };
         // The end of the run it starts in.
         var keep = f.index;
         if (f.offset > 0) if (m.runAt(panel, region, f.index)) |r| {
-            r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, @intCast(r.content.len)));
+            r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, @intCast(r.content.len), r.equation));
             keep = f.index + 1;
         };
         // Every item between.
@@ -4097,7 +4097,7 @@ pub const Model = struct {
             }
         };
         // A run left with nothing in it goes.
-        if (m.runAt(panel, region, result.index)) |r| if (!try edit_.hasChars(sa, r.content)) {
+        if (m.runAt(panel, region, result.index)) |r| if (!try edit_.hasChars(sa, r.content, r.equation)) {
             try m.removeAt(panel, region, result.index);
             result.offset = 0;
         };
@@ -4176,7 +4176,7 @@ pub const Model = struct {
             switch (items[k].what) {
                 .run => |r| {
                     const hi: u32 = if (k == t.index) t.offset else @intCast(r.content.len);
-                    if (hi > lo) try edit_.plainText(sa, r.content, lo, hi, &out);
+                    if (hi > lo) try edit_.plainText(sa, r.content, lo, hi, r.equation, &out);
                 },
                 .hard_break, .paragraph => if (k < t.index) try out.append(sa, '\n'),
                 else => {},

@@ -11,14 +11,15 @@
 
 const fonts = @import("fonts.zig");
 const std = @import("std");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
+const rendering = @import("render.zig");
 const glyphic = @import("graven_glyphic");
 const legend = @import("legend.zig");
 const model = @import("model.zig");
 const art = @import("art.zig");
 
 const Allocator = std.mem.Allocator;
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const spring = geom.spring;
 const Box = geom.Box;
 const Point = geom.Point;
@@ -73,7 +74,7 @@ pub const PlacedLabel = struct {
     origin: Point,
     style: StyleId,
     /// Owned by the `Labels` cache, valid until it next changes.
-    render: *const engine.Render,
+    render: *const rendering.Render,
 };
 
 pub const Issue = struct {
@@ -122,7 +123,7 @@ pub const Issue = struct {
     /// How far too long, mm, for overflows.
     amount: f64 = 0,
     /// For a markup error, the first problem the parse found.
-    syntax: ?engine.markup.Diagnostic = null,
+    syntax: ?rendering.Syntax = null,
 };
 
 /// A segment as placed: where its band lies.
@@ -273,7 +274,7 @@ pub const Placed = struct {
 };
 
 /// Whether a render asked for a weight, slant or alphabet it did not get.
-fn lacksVariant(diagnostics: []const engine.render.Diagnostic) bool {
+fn lacksVariant(diagnostics: []const rendering.Diagnostic) bool {
     for (diagnostics) |d| switch (d.kind) {
         .no_italic, .no_bold, .no_alphabet => return true,
         else => {},
@@ -284,7 +285,7 @@ fn lacksVariant(diagnostics: []const engine.render.Diagnostic) bool {
 /// Renders labels for one face table, caching each render.
 pub const Labels = struct {
     gpa: Allocator,
-    faces: []const *engine.Face,
+    faces: []const *font.Face,
     /// The resolved fonts last given to `syncResolved`, which `sync` then
     /// keeps to; the caller resolves again when the model changes.
     resolved: ?*const fonts.Resolved = null,
@@ -314,12 +315,12 @@ pub const Labels = struct {
         /// math between dollars).
         math: bool = false,
         /// Each line's open span, where art over the label closes the rest
-        /// (see `engine.label.Options.line_spans`); empty for none.
+        /// (each line's open stretch); empty for none.
         spans: []const ?[2]f64 = &.{},
     };
 
     const Entry = struct {
-        render: ?*engine.Render,
+        render: ?*rendering.Render,
     };
 
     const KeyContext = struct {
@@ -346,7 +347,7 @@ pub const Labels = struct {
     };
 
     /// `faces` must outlive the cache.
-    pub fn init(gpa: Allocator, faces: []const *engine.Face) Labels {
+    pub fn init(gpa: Allocator, faces: []const *font.Face) Labels {
         return .{ .gpa = gpa, .faces = faces };
     }
 
@@ -517,7 +518,7 @@ pub const Labels = struct {
 
     /// The face style `id` sets text in: its own, else its base's, else
     /// face 0.
-    fn textFace(l: *const Labels, m: *const Model, id: StyleId) *engine.Face {
+    fn textFace(l: *const Labels, m: *const Model, id: StyleId) *font.Face {
         var at = id;
         var n: usize = 0;
         while (at != .none and n <= m.styles.items.len) : (n += 1) {
@@ -585,15 +586,15 @@ pub const Labels = struct {
 
     /// The render for a label, from the cache or made now; null when the
     /// style cannot be used.
-    fn get(l: *Labels, k: Key) Allocator.Error!?*const engine.Render {
+    fn get(l: *Labels, k: Key) Allocator.Error!?*const rendering.Render {
         if (l.cache.get(k)) |e| return e.render;
         const st = l.context(k.style) orelse return null;
-        const render: ?*engine.Render = blk: {
+        const render: ?*rendering.Render = blk: {
             const r = legend.render(l.gpa, &l.g.?, l.faces, st.*, k.markup, if (k.math) .math else .legend) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blk null,
             };
-            const p = try l.gpa.create(engine.Render);
+            const p = try l.gpa.create(rendering.Render);
             p.* = r;
             break :blk p;
         };
@@ -904,9 +905,9 @@ pub fn lineIn(style: ?model.ParagraphStyle, first: bool, length: f64) Line {
 /// A piece of a run that breaks: the words (or part of a word) between two
 /// cuts of its render, or the space at a break opportunity.
 const Cut = struct {
-    render: *const engine.Render,
-    from: ?engine.Render.Cut = null,
-    to: ?engine.Render.Cut = null,
+    render: *const rendering.Render,
+    from: ?rendering.Render.Cut = null,
+    to: ?rendering.Render.Cut = null,
     /// The space of break opportunity `space`, alone.
     space: ?u32 = null,
     /// What ends it: a break between words, a soft hyphen (where a line
@@ -1253,7 +1254,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         const tol = 1e-9;
         // The flow as the pass sees it. A run in a row is set once on one
         // line, then cut where it may break (between words, see
-        // `engine.Render.opportunities`): a piece per word or stretch of
+        // `rendering.Render.opportunities`): a piece per word or stretch of
         // words, with a space piece between (dropped where a wrap leaves it
         // at a segment's start). A formula has no breaks and stays whole.
         // Each piece remembers its item, and its source bytes there.
@@ -1288,7 +1289,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             // soft hyphen) and, inside words, between glyphs (taken only
             // for a word longer than its line). The pieces between them
             // inside a word are bound, so the word breaks as one.
-            const Bound = struct { cut: engine.Render.Cut, end: @TypeOf(@as(Cut, undefined).end), opp: ?u32 };
+            const Bound = struct { cut: rendering.Render.Cut, end: @TypeOf(@as(Cut, undefined).end), opp: ?u32 };
             var cut_at: std.ArrayList(Bound) = .empty;
             for (full.opportunities, 0..) |o, k| try cut_at.append(a, .{ .cut = .at(full, @intCast(k)), .end = if (o.hyphen) .hyphen else .space, .opp = @intCast(k) });
             // In a column, text is set a character at a time, upright:
@@ -1304,7 +1305,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 }
             }.lt);
             const content_len: u32 = @intCast(run.?.content.len);
-            var prev: ?engine.Render.Cut = null;
+            var prev: ?rendering.Render.Cut = null;
             for (0..cut_at.items.len + 1) |k| {
                 const next: ?Bound = if (k < cut_at.items.len) cut_at.items[k] else null;
                 const from: u32 = if (prev) |p_| p_.src1 else 0;
@@ -1332,7 +1333,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
 
         // First, every item's size along, and for a run its render.
         const sizes = try a.alloc(f64, items.len);
-        const renders = try a.alloc(?*const engine.Render, items.len);
+        const renders = try a.alloc(?*const rendering.Render, items.len);
         for (items, sizes, renders, 0..) |item, *size, *rr, index| {
             rr.* = null;
             size.* = switch (item.what) {
@@ -1606,7 +1607,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 },
                 .run => |run| {
                     const render = if (cuts.items[index]) |c| blk: {
-                        const piece = try a.create(engine.Render);
+                        const piece = try a.create(rendering.Render);
                         if (c.space) |k| {
                             // A space is drawn only where a decoration
                             // runs under it.
@@ -1871,9 +1872,9 @@ test "a row too long wraps on into a new one, past the soft area, flagged" {
 
 test "legends render once per identical text and sit on their track's line" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
 
     var m: Model = .init(gpa);
     defer m.deinit();
@@ -1909,9 +1910,9 @@ test "legends render once per identical text and sit on their track's line" {
 
 test "a run being typed is stored as typed, flagged, and still drawn" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const style = try m.addStyle("label", .{ .cap_height = 3 });
@@ -1940,9 +1941,9 @@ test "a run being typed is stored as typed, flagged, and still drawn" {
 
 test "a legend with characters no face covers is reported on its tile" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 3 });
@@ -1963,9 +1964,9 @@ test "a legend with characters no face covers is reported on its tile" {
 
 test "changing a prototype changes every tile made from it" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
@@ -1993,9 +1994,9 @@ test "changing a prototype changes every tile made from it" {
 
 test "changing a prototype's track moves every tile's text in it" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 3 });
@@ -2022,9 +2023,9 @@ test "changing a prototype's track moves every tile's text in it" {
 
 test "a tile's text wraps around art placed over its track" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 8 });
@@ -2063,9 +2064,9 @@ test "a tile's text wraps around art placed over its track" {
 
 test "a run of text breaks between its words; a space a wrap leaves at a row's start is dropped" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
@@ -2109,11 +2110,11 @@ test "a run of text breaks between its words; a space a wrap leaves at a row's s
 
 test "a run with markup breaks between words, inside a bold group too, keeping its faces" {
     const gpa = testing.allocator;
-    const regular = try engine.Face.init(gpa, testdata.truetype, 0);
+    const regular = try font.Face.init(gpa, testdata.truetype, 0);
     defer regular.deinit();
-    const bold = try engine.Face.init(gpa, testdata.cff, 0);
+    const bold = try font.Face.init(gpa, testdata.cff, 0);
     defer bold.deinit();
-    const faces = [_]*engine.Face{ regular, bold };
+    const faces = [_]*font.Face{ regular, bold };
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
@@ -2140,10 +2141,10 @@ test "a run with markup breaks between words, inside a bold group too, keeping i
         n += 1;
     };
     try testing.expectEqual(4, n);
-    try testing.expectEqual(@as(?engine.render.FaceId, 0), words[0].render.elements[0].face);
-    try testing.expectEqual(@as(?engine.render.FaceId, 1), words[1].render.elements[0].face);
-    try testing.expectEqual(@as(?engine.render.FaceId, 1), words[2].render.elements[0].face);
-    try testing.expectEqual(@as(?engine.render.FaceId, 0), words[3].render.elements[0].face);
+    try testing.expectEqual(@as(?rendering.FaceId, 0), words[0].render.elements[0].face);
+    try testing.expectEqual(@as(?rendering.FaceId, 1), words[1].render.elements[0].face);
+    try testing.expectEqual(@as(?rendering.FaceId, 1), words[2].render.elements[0].face);
+    try testing.expectEqual(@as(?rendering.FaceId, 0), words[3].render.elements[0].face);
     // Each knows its source, up to the next break: the second bold word
     // with the group's closing brace.
     try testing.expectEqualStrings("HOD}", src[words[2].run.?.from..][0..words[2].run.?.len]);
@@ -2164,9 +2165,9 @@ test "a run with markup breaks between words, inside a bold group too, keeping i
 
 test "paragraphs: indents, a justified paragraph, a centred one, and space between them" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 200);
@@ -2228,9 +2229,9 @@ test "paragraphs: indents, a justified paragraph, a centred one, and space betwe
 
 test "text on a canvas, with no sheet or panel, solves and exports" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
@@ -2257,9 +2258,9 @@ test "text on a canvas, with no sheet or panel, solves and exports" {
 
 test "a panel made from a rounded rectangle exports its outline with the cutouts as holes" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
@@ -2293,9 +2294,9 @@ test "a panel made from a rounded rectangle exports its outline with the cutouts
 
 test "a word longer than its line is cut to wrap, and the wrap recorded, not flagged" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
@@ -2331,9 +2332,9 @@ test "a word longer than its line is cut to wrap, and the wrap recorded, not fla
 
 test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word does not fit" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
@@ -2375,9 +2376,9 @@ test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word do
 
 test "tiles drawn from a prototype's sketch, solved for each size; a size that does not solve is flagged" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
@@ -2449,9 +2450,9 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
 
 test "a tile's tracks: a row wraps between words in the face; a column sets letters upright, one below another" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 2 });
@@ -2494,9 +2495,9 @@ test "a tile's tracks: a row wraps between words in the face; a column sets lett
 
 test "a grid stamp drawn from a ready-made sketch: each hole is the sketch solved for its box, live" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);

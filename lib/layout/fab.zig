@@ -5,11 +5,11 @@
 //! solids, one per colour.
 
 const std = @import("std");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
 const model = @import("model.zig");
 const place = @import("place.zig");
 const art = @import("art.zig");
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const Allocator = std.mem.Allocator;
 
 pub const Step = struct {
@@ -32,7 +32,7 @@ pub const Plan = struct {
 
 /// The plan for panel `panel` as `placed` lays it out; `faces` are the
 /// faces the labels were set in. Allocated from `a`.
-pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *engine.Face) !Plan {
+pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face) !Plan {
     const fab = m.panels.items[panel].fab;
     // The extent of everything but the through layers, for those to cut
     // clean through.
@@ -163,7 +163,7 @@ fn extent(fab: model.Fab, l: model.FabLayer, lo: f64, hi: f64) [2]f64 {
 }
 
 /// The outlines source `src` takes from the placed part.
-fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *engine.Face, src: model.FabSource) ![]const geom.Outline {
+fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face, src: model.FabSource) ![]const geom.Outline {
     var out: std.ArrayList(geom.Outline) = .empty;
     switch (src) {
         .edge => {
@@ -217,9 +217,9 @@ const testdata = @import("graven_testdata");
 
 test "a plate's stack: base, holes through, an inlaid legend; heights from its surfaces" {
     const gpa = testing.allocator;
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
     var m: model.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);

@@ -12,8 +12,7 @@
 
 const std = @import("std");
 const layout = @import("graven_layout");
-const engine = @import("graven_engine");
-const geom = engine.geom;
+const geom = layout.geom;
 
 const Model = layout.Model;
 const model = layout.model;

@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const layout = @import("graven_layout");
-const engine = @import("graven_engine");
 const samples = @import("graven_samples");
 const c = @import("occt_shim");
 const fab = @import("occt_fab");
@@ -35,9 +34,9 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
     const io = init.io;
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, font_path, gpa, .limited(64 << 20));
     defer gpa.free(bytes);
-    const face = try engine.Face.init(gpa, bytes, 0);
+    const face = try layout.Face.init(gpa, bytes, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*layout.Face{face};
 
     var m: layout.Model = .init(gpa);
     defer m.deinit();
@@ -54,7 +53,7 @@ fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, 
 }
 
 /// Builds and writes one part; false when its solids are not sound.
-fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const u8, labels: *layout.Labels, faces: []const *engine.Face) !bool {
+fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const u8, labels: *layout.Labels, faces: []const *layout.Face) !bool {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();

@@ -5,11 +5,11 @@
 //! margins; their ink may not.
 
 const std = @import("std");
-const engine = @import("graven_engine");
+const font = @import("graven_font");
 const model = @import("model.zig");
 const place = @import("place.zig");
 
-const geom = engine.geom;
+const geom = @import("graven_geom");
 const Box = geom.Box;
 
 /// A panel out of compliance: its outline past the sheet's edge, or its ink
@@ -127,9 +127,9 @@ pub fn marginIntrusions(gpa: std.mem.Allocator, m: *const model.Model, placed: [
 test "ink past a margin is found; a panel in the margin alone is not" {
     const gpa = std.testing.allocator;
     const testdata = @import("graven_testdata");
-    const face = try engine.Face.init(gpa, testdata.truetype, 0);
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
     defer face.deinit();
-    const faces = [_]*engine.Face{face};
+    const faces = [_]*font.Face{face};
 
     var m: model.Model = .init(gpa);
     defer m.deinit();
