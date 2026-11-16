@@ -20,12 +20,6 @@ const Allocator = std.mem.Allocator;
 const Box = engine.geom.Box;
 const G = glyphic.ground;
 
-/// The process limits of panel `panel`, as the ground gives them.
-pub fn limitsOf(m: *const model.Model, panel: usize) G.Limits {
-    const f = m.panels.items[panel].fab;
-    return .{ .min_stroke = f.min_stroke, .min_gap = f.min_gap, .min_cap = f.min_cap };
-}
-
 /// The ground of a flow's leg on one panel: from track `track` (the leg's
 /// first track here: a thread's head, or where the thread enters this
 /// panel) through the tracks threaded after it on the same panel.
@@ -152,7 +146,6 @@ pub const TrackGround = struct {
                 .below = y - band.y0,
                 .cap = cap,
                 .alignment = alignment,
-                .limits = limitsOf(g.m, g.panel),
             };
         } else .{
             // A column: down its middle, its up to the right.
@@ -163,7 +156,6 @@ pub const TrackGround = struct {
             .below = band.width() / 2,
             .cap = cap,
             .alignment = alignment,
-            .limits = limitsOf(g.m, g.panel),
         };
         try g.pieces.append(a, piece);
         try g.bands.append(a, band);
@@ -221,8 +213,6 @@ test "a row track's pieces are v1's segments: same bands, baselines where v1 set
     try near(s.labels[0].origin.y, first.frame(0).point.y);
     try testing.expect(!g.beyond.items[0]);
     try testing.expect(!gr.more());
-    // Process limits from the panel: the defaults, until set.
-    try near(0.4, first.limits.min_stroke);
 }
 
 test "art closes stretches of a piece, as it does v1's lines" {
@@ -298,7 +288,7 @@ test "a column's pieces run down the page, up to the right" {
     try near(40, piece.length);
 }
 
-test "process limits are the panel's, kept through a save" {
+test "a panel's process limits are kept through a save (for the manufacture stage)" {
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
@@ -309,8 +299,8 @@ test "process limits are the panel's, kept through a save" {
     defer gpa.free(bytes);
     var back = try native.decode(gpa, bytes);
     defer back.deinit();
-    const l = limitsOf(&back, p);
-    try near(0.3, l.min_stroke);
-    try near(0.5, l.min_gap);
-    try near(1.5, l.min_cap);
+    const f = back.panels.items[p].fab;
+    try near(0.3, f.min_stroke);
+    try near(0.5, f.min_gap);
+    try near(1.5, f.min_cap);
 }

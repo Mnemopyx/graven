@@ -1070,8 +1070,9 @@ pub const Fab = struct {
     layers: []const FabLayer = &.{},
     /// What the process can make, mm: the thinnest stroke it holds, the
     /// narrowest gap it keeps open, the smallest cap height that stays
-    /// legible. Defaults for colour FDM with a 0.4 mm nozzle. Layout keeps
-    /// within them as it works (engine v2), and checks report what does not.
+    /// legible. Defaults for colour FDM with a 0.4 mm nozzle. Read by the
+    /// manufacture stage, which checks a design against them and reports
+    /// what does not fit; layout does not limit by them.
     min_stroke: f64 = 0.4,
     min_gap: f64 = 0.4,
     min_cap: f64 = 1.0,

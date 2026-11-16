@@ -6,7 +6,11 @@
 //! piece gives its baseline as a path (a frame at every distance along
 //! it: point, direction, normal, curvature), the stretches of it that are
 //! open, the room above and below the baseline, the cap height of the text
-//! it holds, how it aligns, and the process's limits.
+//! it holds, and how it aligns.
+//!
+//! The making process's limits are not part of it: they belong to the
+//! manufacture stage, which checks a design against them and reports what
+//! does not fit. Layout sets what was designed.
 //!
 //! Rotation of objects relative to one another is glyphic's own, in its
 //! flat expression space; the ground only maps that space onto its paths.
@@ -75,14 +79,6 @@ pub const Span = struct { lo: f64, hi: f64 };
 
 pub const Align = enum { start, centre, end, justify };
 
-/// What the making process allows, mm: the thinnest stroke it holds, the
-/// narrowest gap it keeps open, the smallest cap height that stays legible.
-pub const Limits = struct {
-    min_stroke: f64 = 0,
-    min_gap: f64 = 0,
-    min_cap: f64 = 0,
-};
-
 /// One piece of ground.
 pub const Piece = struct {
     baseline: Baseline,
@@ -97,7 +93,6 @@ pub const Piece = struct {
     /// heights become mm by it).
     cap: f64,
     alignment: Align = .start,
-    limits: Limits = .{},
 
     pub fn frame(p: Piece, s: f64) Frame {
         return p.baseline.frame(s);
@@ -187,7 +182,6 @@ pub const Rows = struct {
     cap: f64,
     closed: []const []const Span = &.{},
     alignment: Align = .start,
-    limits: Limits = .{},
     made: std.ArrayList(Piece) = .empty,
     leads: f64 = 0,
 
@@ -221,7 +215,6 @@ pub const Rows = struct {
                 .below = (r.pitch - r.cap) / 2,
                 .cap = r.cap,
                 .alignment = r.alignment,
-                .limits = r.limits,
             }) catch {
                 r.a.free(open);
                 return null;
