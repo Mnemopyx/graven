@@ -487,10 +487,14 @@ pub const Family = struct {
     remote: u32 = 0,
 };
 
+/// How families are ordered: by name, or by where each first appears in
+/// the subset (a ranked search's order, families by their best face).
+pub const FamilyOrder = enum { name, first };
+
 /// The families of `records` (or of those `subset` names, in its terms),
-/// named without regard to case, sorted by name. Lists from `gpa`; free
-/// with `freeFamilies`.
-pub fn families(gpa: Allocator, records: []const Record, subset: ?[]const usize) Allocator.Error![]Family {
+/// named without regard to case. Lists from `gpa`; free with
+/// `freeFamilies`.
+pub fn families(gpa: Allocator, records: []const Record, subset: ?[]const usize, order: FamilyOrder) Allocator.Error![]Family {
     var by_name: std.StringHashMapUnmanaged(usize) = .empty;
     defer {
         var it = by_name.keyIterator();
@@ -539,7 +543,7 @@ pub fn families(gpa: Allocator, records: []const Record, subset: ?[]const usize)
         std.mem.sort(usize, l.items, Order{ .recs = records }, Order.face);
         f.faces = try l.toOwnedSlice(gpa);
     }
-    std.mem.sort(Family, out.items, {}, Order.family);
+    if (order == .name) std.mem.sort(Family, out.items, {}, Order.family);
     return out.toOwnedSlice(gpa);
 }
 
@@ -725,7 +729,7 @@ test "faces group into families, by width, weight and slope" {
         .{ .source = "", .location = "", .family = "Serif", .style = "Regular", .weight = 400 },
         .{ .source = "", .location = "", .family = "Serif", .style = "Condensed", .weight = 400, .width = 75 },
     };
-    const fams = try families(testing.allocator, &recs, null);
+    const fams = try families(testing.allocator, &recs, null, .name);
     defer freeFamilies(testing.allocator, fams);
     try testing.expectEqual(2, fams.len);
     try testing.expectEqualStrings("Mono", fams[0].name);
@@ -734,11 +738,13 @@ test "faces group into families, by width, weight and slope" {
     try testing.expectEqualSlices(usize, &.{ 4, 3, 2, 0 }, fams[1].faces);
     try testing.expectEqual(3, fams[1].system);
     try testing.expectEqual(1, fams[1].user);
-    // A subset: only the faces a search found.
-    const some = try families(testing.allocator, &recs, &.{ 0, 1 });
+    // A subset: only the faces a search found; in its order, a family where
+    // its first face is.
+    const some = try families(testing.allocator, &recs, &.{ 0, 1, 3 }, .first);
     defer freeFamilies(testing.allocator, some);
     try testing.expectEqual(2, some.len);
-    try testing.expectEqualSlices(usize, &.{0}, some[1].faces);
+    try testing.expectEqualStrings("Serif", some[0].name);
+    try testing.expectEqualSlices(usize, &.{ 3, 0 }, some[0].faces);
 }
 
 test "a face's italic and bolds are found in its family" {

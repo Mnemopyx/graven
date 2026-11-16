@@ -934,6 +934,9 @@ fn update() !void {
 /// The document's composed fonts resolved, while it has any.
 var resolved: ?layout.fonts.Resolved = null;
 var resolved_rev: u64 = std.math.maxInt(u64);
+/// The font index's generation they were resolved against: a scan, an
+/// install or a removal makes a new one (see fontwin.generation).
+var resolved_gen: u32 = 0;
 
 /// The face table labels render with: the resolved one, or the chosen
 /// font alone.
@@ -978,9 +981,14 @@ fn resolveFonts(labels: *layout.Labels) void {
             labels.deinit();
             state.labels = .init(state.gpa, &state.faces);
         }
+        // Nothing holds the index's faces: earlier generations' can go.
+        fontwin.releaseRetired();
         return;
     }
-    if (resolved != null and resolved_rev == state.model.revision) return;
+    if (resolved != null and resolved_rev == state.model.revision and resolved_gen == fontwin.generation) {
+        fontwin.releaseRetired();
+        return;
+    }
     _ = fontwin.indexRecords(state.gpa, false);
     var names_arena: std.heap.ArenaAllocator = .init(state.gpa);
     defer names_arena.deinit();
@@ -990,6 +998,10 @@ fn resolveFonts(labels: *layout.Labels) void {
     facesChanged();
     resolved = next;
     resolved_rev = state.model.revision;
+    // Fonts may have come or gone without the document changing: place
+    // again, with the faces resolved now.
+    if (resolved_gen != fontwin.generation) state.placed_rev = std.math.maxInt(u64);
+    resolved_gen = fontwin.generation;
     labels.syncResolved(&resolved.?) catch {};
     if (resolved.?.substitutions.items.len > 0) {
         const sub = resolved.?.substitutions.items[0];

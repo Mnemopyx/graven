@@ -4,8 +4,10 @@
 //!
 //! Search criteria on the left, results in the middle, the comparison of
 //! pinned fonts on the right, and the composition being built at the far
-//! right. Fonts come from the local source's index (installed fonts);
-//! remote sources come later through the same API.
+//! right. Fonts come from the local source's index (system and user
+//! fonts), grouped by family; remote sources come later through the same
+//! API. Font files are installed as user fonts here, and user font files
+//! removed, the removal saying first what goes with the file.
 
 const std = @import("std");
 const dvui = @import("dvui");
@@ -51,15 +53,30 @@ var status_buf: [200]u8 = undefined;
 /// Faces loaded from records, by record index.
 var faces: std.AutoHashMapUnmanaged(usize, *engine.Face) = .empty;
 
+/// The index's generation: each scan makes a new one. The editor resolves
+/// its fonts again when it changes; faces of an earlier generation, which
+/// it may still hold, are kept (retired) until it has (`releaseRetired`).
+pub var generation: u32 = 0;
+var retired: std.ArrayList(*engine.Face) = .empty;
+
+/// Frees the faces of earlier generations. The editor calls it once its
+/// fonts are resolved against the current one.
+pub fn releaseRetired() void {
+    for (retired.items) |f| f.deinit();
+    retired.clearAndFree(gpa);
+}
+
 /// The installed fonts' records: the saved index, or a fresh scan when
 /// there is none. `rescan` scans again (describing only what changed).
 pub fn indexRecords(allocator: Allocator, rescan: bool) []fs.Record {
     gpa = allocator;
     if (index_arena != null and !rescan) return records;
+    // Faces first: the arena holds the records they were loaded from.
+    dropFaces();
     if (index_arena) |*a| a.deinit();
     index_arena = .init(gpa);
+    generation +%= 1;
     const a = index_arena.?.allocator();
-    dropFaces();
     records = if (rescan) &.{} else local.load(dvui.io, a);
     if (records.len == 0) {
         records = local.build(dvui.io, gpa, a, &report) catch &.{};
@@ -70,8 +87,37 @@ pub fn indexRecords(allocator: Allocator, rescan: bool) []fs.Record {
 
 fn dropFaces() void {
     var it = faces.valueIterator();
-    while (it.next()) |f| f.*.deinit();
+    while (it.next()) |f| retired.append(gpa, f.*) catch f.*.deinit();
     faces.clearAndFree(gpa);
+}
+
+/// Scans again, keeping the selection, the likeness reference and the pins
+/// where their fonts still are.
+fn reindex(allocator: Allocator) void {
+    const Key = struct { loc: []u8, index: u32 };
+    const keyOf = struct {
+        fn f(i: ?usize) ?Key {
+            const k = i orelse return null;
+            return .{ .loc = gpa.dupe(u8, records[k].location) catch return null, .index = records[k].index };
+        }
+    }.f;
+    const find = struct {
+        fn f(key: ?Key) ?usize {
+            const k = key orelse return null;
+            for (records, 0..) |r, i| if (r.index == k.index and std.mem.eql(u8, r.location, k.loc)) return i;
+            return null;
+        }
+    }.f;
+    const sel = keyOf(selected);
+    const lk = keyOf(like);
+    var pins: [max_pinned]?Key = @splat(null);
+    for (pinned.items, 0..) |p, k| pins[k] = keyOf(p);
+    defer for ([_]?Key{ sel, lk } ++ pins) |k| if (k) |kk| gpa.free(kk.loc);
+    _ = indexRecords(allocator, true);
+    selected = find(sel);
+    like = find(lk);
+    pinned.clearRetainingCapacity();
+    for (pins) |p| if (find(p)) |i| pinned.append(gpa, i) catch {};
 }
 
 /// The face record `i` describes, loaded once and kept.
@@ -189,11 +235,11 @@ pub fn window(host: Host, allocator: Allocator) void {
         defer top.deinit();
         dvui.labelNoFmt(@src(), status, .{}, .{ .gravity_y = 0.5 });
         if (icons.button(@src(), .x, "Close the fonts window", .{ .opts = .{ .gravity_x = 1 } })) open = false;
-        if (icons.button(@src(), .arrows_clockwise, "Scan installed fonts again", .{ .opts = .{ .gravity_x = 1 } })) {
-            _ = indexRecords(allocator, true);
-            selected = null;
-            like = null;
-            pinned.clearRetainingCapacity();
+        if (icons.button(@src(), .arrows_clockwise, "Scan system and user fonts again", .{ .opts = .{ .gravity_x = 1 } })) reindex(allocator);
+        if (icons.button(@src(), .download_simple, "Install font files as user fonts…", .{ .opts = .{ .gravity_x = 1 } })) {
+            install_open = true;
+            install_new = true;
+            install_report.clearRetainingCapacity();
         }
     }
     var cols = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
@@ -208,6 +254,8 @@ pub fn window(host: Host, allocator: Allocator) void {
     _ = hits;
     compare(a, rest);
     compose(host);
+    if (install_open) installPrompt(allocator, root.data().rect);
+    if (removing) |i| removePrompt(host, allocator, i, root.data().rect);
 }
 
 // Search criteria --------------------------------------------------------------
@@ -306,67 +354,139 @@ fn togglePin(i: usize) void {
     } else if (pinned.items.len < max_pinned) pinned.append(gpa, i) catch {};
 }
 
+/// Families shown open or closed by the user, by name in lower case
+/// (others follow the default: open when the results are few).
+var family_open: std.StringHashMapUnmanaged(bool) = .empty;
+/// At most this many faces in the results, and families start open.
+const open_by_default = 60;
+
+fn familyIsOpen(name: []const u8, default: bool) bool {
+    var buf: [256]u8 = undefined;
+    const key = std.ascii.lowerString(buf[0..@min(name.len, buf.len)], name[0..@min(name.len, buf.len)]);
+    return family_open.get(key) orelse default;
+}
+
+fn setFamilyOpen(name: []const u8, v: bool) void {
+    const key = std.ascii.allocLowerString(gpa, name) catch return;
+    const e = family_open.getOrPut(gpa, key) catch return gpa.free(key);
+    if (e.found_existing) gpa.free(key);
+    e.value_ptr.* = v;
+}
+
 fn results(a: Allocator) []const fs.Hit {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 360 }, .max_size_content = .width(360), .expand = .vertical, .padding = .all(8) });
     defer col.deinit();
     const q = query(a);
     const hits = fs.search(a, records, q) catch &.{};
+    // Families in the order of their best-ranked face, faces in each by
+    // width, weight and slope.
+    const by_record = a.alloc(?fs.Hit, records.len) catch return hits;
+    @memset(by_record, null);
+    const subset = a.alloc(usize, hits.len) catch return hits;
+    for (hits, subset) |h, *i| {
+        i.* = h.index;
+        by_record[h.index] = h;
+    }
+    const fams = fs.families(a, records, subset, .first) catch &.{};
     {
-        var buf: [64]u8 = undefined;
-        heading(@src(), std.fmt.bufPrint(&buf, "Results ({d})", .{hits.len}) catch "Results");
+        var buf: [96]u8 = undefined;
+        heading(@src(), std.fmt.bufPrint(&buf, "Results ({d} famil{s}, {d} face{s})", .{ fams.len, if (fams.len == 1) "y" else "ies", hits.len, if (hits.len == 1) "" else "s" }) catch "Results");
     }
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay, .horizontal_bar = .hide }, .{ .expand = .both });
     defer scroll.deinit();
     var bar_room = keepBarRoom(@src());
     defer bar_room.deinit();
-    for (hits, 0..) |h, k| {
-        const r = &records[h.index];
-        const is_sel = selected != null and selected.? == h.index;
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .id_extra = k,
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = if (is_sel) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) },
-            .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
-            .margin = .{ .h = 2 },
-        });
-        defer row.deinit();
-        // First, so a long description never squeezes it out.
-        const pin = if (isPinned(h.index))
-            icons.button(@src(), .push_pin_slash, "Unpin: take out of the comparison", .{ .id_extra = k, .opts = .{ .gravity_y = 0.5 } })
-        else
-            icons.button(@src(), .push_pin, "Pin: keep in the comparison", .{ .id_extra = k, .opts = .{ .gravity_y = 0.5 } });
-        if (pin) togglePin(h.index);
-        {
-            var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
-            defer info.deinit();
-            var nb: [128]u8 = undefined;
-            dvui.labelNoFmt(@src(), std.fmt.bufPrint(&nb, "{s} {s}", .{ r.family, r.style }) catch r.family, .{}, .{});
-            var db: [160]u8 = undefined;
-            var w: std.Io.Writer = .fixed(&db);
-            if (h.distance) |d| w.print("like {d:.2} · ", .{d}) catch {};
-            if (h.missing > 0) w.print("missing {d} · ", .{h.missing}) catch {};
-            w.print("{s}{s}{s}{s} · {s} · embed {s}", .{
-                if (r.measures.serif) |s| (if (s) "serif" else "sans") else "?",
-                if (r.monospace) ", mono" else "",
-                if (r.math) ", math" else "",
-                if (r.variable) ", variable" else "",
-                licenceName(r.licence),
-                embedName(r.embedding),
-            }) catch {};
-            dvui.labelNoFmt(@src(), w.buffered(), .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
-        }
-        // A click on the row selects it.
-        for (dvui.events()) |*e| {
-            if (!dvui.eventMatchSimple(e, row.data())) continue;
-            if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
-                e.handle(@src(), row.data());
-                selected = h.index;
-                dvui.refresh(null, @src(), row.data().id);
-            }
-        }
+    const default_open = hits.len <= open_by_default;
+    for (fams, 0..) |f, fk| {
+        const is_open = familyIsOpen(f.name, default_open);
+        familyRow(f, fk, is_open);
+        if (!is_open) continue;
+        for (f.faces) |i| faceRow(i, by_record[i].?);
     }
     return hits;
+}
+
+/// A family's heading: open or close it, its name, how many faces and
+/// whose (system, user).
+fn familyRow(f: fs.Family, fk: usize, is_open: bool) void {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = fk, .expand = .horizontal, .margin = .{ .y = 4, .h = 1 } });
+    defer row.deinit();
+    var tb: [160]u8 = undefined;
+    const toggle = if (is_open)
+        icons.button(@src(), .caret_down, std.fmt.bufPrint(&tb, "Close {s}", .{f.name}) catch "Close", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } })
+    else
+        icons.button(@src(), .caret_right, std.fmt.bufPrint(&tb, "Open {s}", .{f.name}) catch "Open", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } });
+    var clicked = toggle;
+    dvui.labelNoFmt(@src(), f.name, .{}, .{ .id_extra = fk, .font = dvui.Font.theme(.heading).larger(-2), .gravity_y = 0.5 });
+    var buf: [96]u8 = undefined;
+    const whose: []const u8 = if (f.user > 0 and f.system > 0) "system and user" else if (f.user > 0) "user" else "system";
+    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{d} face{s} · {s}", .{ f.faces.len, if (f.faces.len == 1) "" else "s", whose }) catch "", .{}, .{ .id_extra = fk, .gravity_y = 0.5, .margin = .{ .x = 8 }, .font = dvui.Font.theme(.body).larger(-2) });
+    // A click anywhere on the heading opens or closes it.
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, row.data())) continue;
+        if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
+            e.handle(@src(), row.data());
+            clicked = true;
+        }
+    }
+    if (clicked) {
+        setFamilyOpen(f.name, !is_open);
+        dvui.refresh(null, @src(), row.data().id);
+    }
+}
+
+/// One face of a family: pin it, its style and what it is, and for a user
+/// font, remove its file.
+fn faceRow(i: usize, h: fs.Hit) void {
+    const r = &records[i];
+    const is_sel = selected != null and selected.? == i;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = i,
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = if (is_sel) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) },
+        .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
+        .margin = .{ .x = 18, .h = 2 },
+    });
+    defer row.deinit();
+    // First, so a long description never squeezes it out.
+    const pin = if (isPinned(i))
+        icons.button(@src(), .push_pin_slash, "Unpin: take out of the comparison", .{ .id_extra = i, .opts = .{ .gravity_y = 0.5 } })
+    else
+        icons.button(@src(), .push_pin, "Pin: keep in the comparison", .{ .id_extra = i, .opts = .{ .gravity_y = 0.5 } });
+    if (pin) togglePin(i);
+    if (r.scope == .user) {
+        if (icons.button(@src(), .trash, "Remove this user font's file…", .{ .id_extra = i, .opts = .{ .gravity_y = 0.5 } })) removing = i;
+    }
+    {
+        var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+        defer info.deinit();
+        var nb: [128]u8 = undefined;
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&nb, "{s}{s}", .{ r.style, if (r.scope == .user) "  · user font" else "" }) catch r.style, .{}, .{});
+        var db: [160]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&db);
+        if (h.distance) |d| w.print("like {d:.2} · ", .{d}) catch {};
+        if (h.missing > 0) w.print("missing {d} · ", .{h.missing}) catch {};
+        w.print("{d:.0} · {s}{s}{s}{s} · {s} · embed {s}", .{
+            r.weight,
+            if (r.measures.serif) |sf| (if (sf) "serif" else "sans") else "?",
+            if (r.monospace) ", mono" else "",
+            if (r.math) ", math" else "",
+            if (r.variable) ", variable" else "",
+            licenceName(r.licence),
+            embedName(r.embedding),
+        }) catch {};
+        dvui.labelNoFmt(@src(), w.buffered(), .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
+    }
+    // A click on the row selects it.
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, row.data())) continue;
+        if (e.evt == .mouse and e.evt.mouse.action == .press and e.evt.mouse.button.pointer()) {
+            e.handle(@src(), row.data());
+            selected = i;
+            dvui.refresh(null, @src(), row.data().id);
+        }
+    }
 }
 
 fn licenceName(l: fs.Licence) []const u8 {
@@ -388,6 +508,357 @@ fn embedName(e: fs.Embedding) []const u8 {
         .restricted => "restricted",
         .unknown => "not stated",
     };
+}
+
+// Installing and removing ------------------------------------------------------
+
+/// The install prompt is open; it was opened this frame (to focus it).
+var install_open = false;
+var install_new = false;
+var install_replace = false;
+/// Paths chosen with Browse, added to the entry on the next frame.
+var install_chosen: ?[]u8 = null;
+/// What the last install did, a line per file (from `report_arena`).
+var install_report: std.ArrayList([]const u8) = .empty;
+var report_arena: ?std.heap.ArenaAllocator = null;
+/// The record whose file is to be removed, while its prompt is open.
+var removing: ?usize = null;
+
+fn centered(area: dvui.Rect, w: f32, h: f32) dvui.Rect {
+    return .{ .x = area.x + @max(0, (area.w - w) / 2), .y = area.y + @max(0, (area.h - h) / 3), .w = @min(w, area.w), .h = @min(h, area.h) };
+}
+
+fn setStatus(comptime fmt: []const u8, args: anytype) void {
+    status = std.fmt.bufPrint(&status_buf, fmt, args) catch status;
+}
+
+/// Install font files (or every font file in folders) as user fonts.
+fn installPrompt(allocator: Allocator, area: dvui.Rect) void {
+    var r = centered(area, 600, 470);
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none, .modal = true }, .{});
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    heading(@src(), "Install fonts as user fonts");
+    const fa = dvui.currentWindow().arena();
+    {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false });
+        defer tl.deinit();
+        var buf: [600]u8 = undefined;
+        tl.addText(std.fmt.bufPrint(&buf, "Into {s}, where every application finds them. WOFF and WOFF2 are converted to .ttf or .otf; files are named by family and style, and where each came from is recorded.", .{local.userDir(fa) catch "the user's font folder"}) catch "", .{ .font = dvui.Font.theme(.body).larger(-1) });
+    }
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        if (e.evt.key.action == .down and e.evt.key.code == .escape) {
+            cancel = true;
+            e.handle(@src(), fw.data());
+        }
+    }
+    if (install_report.items.len > 0) {
+        // What happened, file by file.
+        {
+            // Room kept below for the buttons.
+            var sc = dvui.scrollArea(@src(), .{ .vertical_bar = .auto, .horizontal_bar = .hide }, .{ .expand = .horizontal, .min_size_content = .{ .h = 230 }, .max_size_content = .height(230), .margin = .{ .y = 8 } });
+            defer sc.deinit();
+            for (install_report.items, 0..) |line, k| {
+                var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = k, .expand = .horizontal, .background = false, .margin = .{ .h = 3 } });
+                tl.addText(line, .{ .font = dvui.Font.theme(.body).larger(-1) });
+                tl.deinit();
+            }
+        }
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Install more", .{}, .{})) {
+            install_report.clearRetainingCapacity();
+            install_new = true;
+        }
+        if (dvui.button(@src(), "Done", .{}, .{}) or cancel) install_open = false;
+        return;
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        dvui.labelNoFmt(@src(), "Font files or folders, one per line", .{}, .{ .gravity_y = 0.5 });
+        if (dvui.useTinyFileDialogs) {
+            if (icons.button(@src(), .folder_open, "Choose font files…", .{ .opts = .{ .gravity_x = 1 } })) {
+                const chosen = dvui.dialogNativeFileOpenMultiple(fa, .{
+                    .title = "Install fonts",
+                    .filters = &.{ "*.ttf", "*.otf", "*.ttc", "*.otc", "*.woff", "*.woff2" },
+                    .filter_description = "font files",
+                }) catch null;
+                if (chosen) |files| {
+                    var joined: std.ArrayList(u8) = .empty;
+                    for (files, 0..) |f, k| {
+                        if (k > 0) joined.append(gpa, '\n') catch {};
+                        joined.appendSlice(gpa, f) catch {};
+                    }
+                    if (install_chosen) |old| gpa.free(old);
+                    install_chosen = joined.toOwnedSlice(gpa) catch null;
+                }
+            }
+        }
+    }
+    var te = dvui.textEntry(@src(), .{ .multiline = true, .break_lines = false, .placeholder = "~/Downloads/SomeFont.woff2" }, .{ .expand = .horizontal, .min_size_content = .{ .h = 96 } });
+    if (install_new) {
+        dvui.focusSubwindow(fw.data().id, null);
+        dvui.focusWidget(te.data().id, fw.data().id, null);
+        install_new = false;
+    }
+    if (install_chosen) |c| {
+        const cur = std.mem.trimEnd(u8, te.textGet(), "\n ");
+        const next = std.mem.concat(fa, u8, &.{ cur, if (cur.len > 0) "\n" else "", c }) catch c;
+        te.textSet(next, false);
+        gpa.free(c);
+        install_chosen = null;
+    }
+    const entered = fa.dupe(u8, te.textGet()) catch "";
+    te.deinit();
+    _ = dvui.checkbox(@src(), &install_replace, "Install over a user font of the same family and style", .{ .margin = .{ .y = 6 } });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+    defer row.deinit();
+    if (dvui.button(@src(), "Cancel", .{}, .{}) or cancel) {
+        install_open = false;
+        return;
+    }
+    if (dvui.button(@src(), "Install", .{}, .{})) runInstall(allocator, entered);
+}
+
+/// The font files `entered` names (folders searched), installed one by
+/// one, a report line for each.
+fn runInstall(allocator: Allocator, entered: []const u8) void {
+    if (report_arena) |*ra| ra.deinit();
+    report_arena = .init(gpa);
+    const ra = report_arena.?.allocator();
+    install_report.clearRetainingCapacity();
+    const io = dvui.io;
+    const cwd = std.Io.Dir.cwd();
+    var files: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeAny(u8, entered, "\n\r");
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\"'");
+        if (line.len == 0) continue;
+        const path = expandHome(ra, line);
+        if (cwd.openDir(io, path, .{ .iterate = true })) |d| {
+            var dir = d;
+            defer dir.close(io);
+            var walker = dir.walk(gpa) catch continue;
+            defer walker.deinit();
+            const before = files.items.len;
+            while (walker.next(io) catch null) |entry| {
+                if (entry.kind != .file or !local.isFontFile(entry.basename)) continue;
+                files.append(ra, std.fs.path.join(ra, &.{ path, entry.path }) catch continue) catch {};
+            }
+            if (files.items.len == before) addReport(ra, "{s}: no font files in this folder", .{path});
+        } else |_| files.append(ra, path) catch {};
+    }
+    std.mem.sort([]const u8, files.items, {}, struct {
+        fn f(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.f);
+    if (files.items.len == 0) {
+        addReport(ra, "Nothing to install: name font files, or folders holding them.", .{});
+        return;
+    }
+    var installed: usize = 0;
+    var kept: usize = 0;
+    var failed: usize = 0;
+    for (files.items) |path| {
+        const name = std.fs.path.basename(path);
+        const bytes = cwd.readFileAlloc(io, path, ra, .limited(256 << 20)) catch |e| {
+            addReport(ra, "{s}: cannot be read ({s})", .{ name, @errorName(e) });
+            failed += 1;
+            continue;
+        };
+        const from = cwd.realPathFileAlloc(io, path, ra) catch path;
+        const res = local.install(io, gpa, ra, bytes, records, .{ .from = from, .replace = install_replace }) catch |e| {
+            switch (e) {
+                error.NotAFont => addReport(ra, "{s}: not a font Graven can read", .{name}),
+                error.Conflict => addReport(ra, "{s}: a different user font of the same family and style is installed; tick \"Install over\" to replace it", .{name}),
+                else => addReport(ra, "{s}: not installed ({s})", .{ name, @errorName(e) }),
+            }
+            failed += 1;
+            continue;
+        };
+        switch (res.outcome) {
+            .installed, .replaced => installed += 1,
+            .already_installed => kept += 1,
+        }
+        var desc_buf: [400]u8 = undefined;
+        addReport(ra, "{s}: {s}{s}{s}", .{
+            local.describeInstalled(&desc_buf, res),
+            switch (res.outcome) {
+                .installed => "installed",
+                .replaced => "installed over the earlier one",
+                .already_installed => "already installed",
+            },
+            if (res.container.isWeb() and res.outcome != .already_installed) ", converted from a web font" else "",
+            if (res.shadows_system) "; a system font has the same name, and applications may take either" else "",
+        });
+    }
+    if (installed > 0) reindex(allocator);
+    setStatus("Installed {d} font file{s}{s}{s}.", .{
+        installed,
+        if (installed == 1) "" else "s",
+        if (kept > 0) std.fmt.bufPrint(&status_extra, ", {d} already installed", .{kept}) catch "" else "",
+        if (failed > 0) std.fmt.bufPrint(status_extra[64..], ", {d} not installed", .{failed}) catch "" else "",
+    });
+}
+var status_extra: [128]u8 = undefined;
+
+fn addReport(ra: Allocator, comptime fmt: []const u8, args: anytype) void {
+    install_report.append(gpa, std.fmt.allocPrint(ra, fmt, args) catch return) catch {};
+}
+
+fn expandHome(a: Allocator, path: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, path, "~/")) return path;
+    const home = std.mem.span(std.c.getenv("HOME") orelse return path);
+    return std.fs.path.join(a, &.{ home, path[2..] }) catch path;
+}
+
+/// Faces by width, weight and slope, as families list them.
+fn byShape(_: void, a: usize, b: usize) bool {
+    const x = records[a];
+    const y = records[b];
+    if (x.width != y.width) return x.width < y.width;
+    if (x.weight != y.weight) return x.weight < y.weight;
+    return !x.italic and y.italic;
+}
+
+fn sameName(n: model.FontName, r: *const fs.Record) bool {
+    return std.ascii.eqlIgnoreCase(n.family, r.family) and std.ascii.eqlIgnoreCase(n.style, r.style);
+}
+
+/// Before a user font's file is removed: every face that goes with it
+/// (for a variable font, its weights and named instances), what stays of
+/// each family, and which of the document's composed fonts use them.
+fn removePrompt(host: Host, allocator: Allocator, i: usize, area: dvui.Rect) void {
+    if (i >= records.len or records[i].scope != .user) {
+        removing = null;
+        return;
+    }
+    const fa = dvui.currentWindow().arena();
+    const file = records[i].location;
+    const in_file = local.facesInFile(fa, records, file) catch return;
+    var r = centered(area, 640, 460);
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none, .modal = true }, .{});
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    heading(@src(), "Remove this font file?");
+    dvui.labelNoFmt(@src(), std.fs.path.basename(file), .{}, .{});
+    {
+        var buf: [600]u8 = undefined;
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "in {s}", .{std.fs.path.dirname(file) orelse ""}) catch "", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
+    }
+    std.mem.sort(usize, in_file, {}, byShape);
+    var w: std.Io.Writer.Allocating = .init(fa);
+    const out = &w.writer;
+    {
+        var sc = dvui.scrollArea(@src(), .{ .vertical_bar = .auto, .horizontal_bar = .hide }, .{ .expand = .both, .margin = .{ .y = 8 } });
+        defer sc.deinit();
+        // What goes.
+        const one_variable = in_file.len == 1 and records[in_file[0]].variable;
+        if (one_variable) {
+            out.writeAll("It holds one variable face. Removing the file removes every weight and style it draws:\n") catch {};
+        } else if (in_file.len == 1) {
+            out.writeAll("It holds one face. Removing the file removes it:\n") catch {};
+        } else out.print("It holds {d} faces. Removing the file removes all of them:\n", .{in_file.len}) catch {};
+        for (in_file) |j| {
+            const fr = &records[j];
+            out.print("    {s} {s}: weight {d:.0}{s}", .{ fr.family, fr.style, fr.weight, if (fr.italic) ", italic" else "" }) catch {};
+            if (fr.width != 100) out.print(", width {d:.0}%", .{fr.width}) catch {};
+            out.writeAll("\n") catch {};
+            if (fr.variable) if (faceOf(j)) |face| {
+                if (face.axis("wght")) |ax| out.print("        variable: every weight from {d:.0} to {d:.0}\n", .{ ax.min, ax.max }) catch {};
+                if (face.axis("wdth")) |ax| out.print("        and every width from {d:.0}% to {d:.0}%\n", .{ ax.min, ax.max }) catch {};
+                const named = face.namedInstances(fa) catch &.{};
+                if (named.len > 0) {
+                    out.writeAll("        named styles: ") catch {};
+                    for (named, 0..) |n, k| out.print("{s}{s}", .{ if (k > 0) ", " else "", n }) catch {};
+                    out.writeAll("\n") catch {};
+                }
+            };
+        }
+        // What stays of each family.
+        var done: std.ArrayList([]const u8) = .empty;
+        for (in_file) |j| {
+            const fam = records[j].family;
+            const seen = for (done.items) |d| {
+                if (std.ascii.eqlIgnoreCase(d, fam)) break true;
+            } else false;
+            if (seen) continue;
+            done.append(fa, fam) catch {};
+            var left: std.ArrayList(usize) = .empty;
+            for (records, 0..) |o, k| {
+                if (std.ascii.eqlIgnoreCase(o.family, fam) and !std.mem.eql(u8, o.location, file)) left.append(fa, k) catch {};
+            }
+            std.mem.sort(usize, left.items, {}, byShape);
+            if (left.items.len == 0) {
+                out.print("\nNo other face of {s} is installed: the family goes.\n", .{fam}) catch {};
+            } else {
+                out.print("\n{s} keeps {d} face{s}:\n", .{ fam, left.items.len, if (left.items.len == 1) "" else "s" }) catch {};
+                for (left.items) |k| out.print("    {s} ({s} font)\n", .{ records[k].style, @tagName(records[k].scope) }) catch {};
+            }
+        }
+        // The document's composed fonts that use them.
+        var uses: usize = 0;
+        for (host.model.fonts.items) |cf| {
+            const Role = struct { name: []const u8, font: ?model.FontName };
+            var roles: std.ArrayList(Role) = .empty;
+            roles.append(fa, .{ .name = "main font", .font = cf.main }) catch {};
+            roles.append(fa, .{ .name = "italic", .font = cf.italic }) catch {};
+            roles.append(fa, .{ .name = "bold", .font = cf.bold }) catch {};
+            roles.append(fa, .{ .name = "bold italic", .font = cf.bold_italic }) catch {};
+            for (cf.members.items) |mb| roles.append(fa, .{ .name = "member", .font = mb.font }) catch {};
+            for (roles.items) |role| {
+                const n = role.font orelse continue;
+                const hit = for (in_file) |j| {
+                    if (sameName(n, &records[j])) break true;
+                } else false;
+                if (!hit) continue;
+                if (uses == 0) out.writeAll("\nThis document uses them:\n") catch {};
+                uses += 1;
+                const other = for (records, 0..) |o, k| {
+                    if (sameName(n, &o) and !std.mem.eql(u8, o.location, file)) break k;
+                } else null;
+                out.print("    {s}: {s} {s}, its {s}; ", .{ cf.name, n.family, n.style, role.name }) catch {};
+                if (other) |k| {
+                    out.print("the {s} font of that name will be used instead\n", .{@tagName(records[k].scope)}) catch {};
+                } else out.writeAll("its text will fall back to another face, and the canvas will say so\n") catch {};
+            }
+        }
+        out.writeAll("\nThe file is deleted; Graven keeps no copy.") catch {};
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false });
+        tl.addText(w.written(), .{ .font = dvui.Font.theme(.body).larger(-1) });
+        tl.deinit();
+    }
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        if (e.evt.key.action == .down and e.evt.key.code == .escape) {
+            cancel = true;
+            e.handle(@src(), fw.data());
+        }
+    }
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+    defer row.deinit();
+    if (dvui.button(@src(), "Cancel", .{}, .{}) or cancel) {
+        removing = null;
+        return;
+    }
+    var lb: [64]u8 = undefined;
+    if (dvui.button(@src(), std.fmt.bufPrint(&lb, "Remove the file ({d} face{s})", .{ in_file.len, if (in_file.len == 1) "" else "s" }) catch "Remove the file", .{}, .{})) {
+        removing = null;
+        const name = fa.dupe(u8, std.fs.path.basename(file)) catch "the file";
+        local.removeFile(dvui.io, gpa, fa, records, file) catch |e| {
+            setStatus("{s} was not removed ({s}).", .{ name, @errorName(e) });
+            return;
+        };
+        reindex(allocator);
+        setStatus("Removed {s} ({d} face{s}).", .{ name, in_file.len, if (in_file.len == 1) "" else "s" });
+    }
 }
 
 // Comparison -------------------------------------------------------------------

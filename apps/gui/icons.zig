@@ -32,6 +32,9 @@ pub const Icon = enum {
     hand,
     hand_grabbing,
     lock,
+    download_simple,
+    caret_right,
+    folder_open,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {

@@ -99,6 +99,45 @@ pub const Face = struct {
         self.gpa.destroy(self);
     }
 
+    /// A variation axis's range, as the font's fvar table states it; null
+    /// when the face has no such axis (or is not variable).
+    pub fn axis(self: *const Face, tag: *const [4]u8) ?struct { min: f32, default: f32, max: f32 } {
+        var info: hb.hb_ot_var_axis_info_t = undefined;
+        const t = (@as(u32, tag[0]) << 24) | (@as(u32, tag[1]) << 16) | (@as(u32, tag[2]) << 8) | tag[3];
+        if (hb.hb_ot_var_find_axis_info(self.face, t, &info) == 0) return null;
+        return .{ .min = info.min_value, .default = info.default_value, .max = info.max_value };
+    }
+
+    /// A variable face's axis tags ("wght", "wdth"…), in the font's order,
+    /// from `a`; empty when it is not variable.
+    pub fn axisTags(self: *const Face, a: Allocator) Allocator.Error![]const [4]u8 {
+        var n: c_uint = hb.hb_ot_var_get_axis_count(self.face);
+        const infos = try a.alloc(hb.hb_ot_var_axis_info_t, n);
+        _ = hb.hb_ot_var_get_axis_infos(self.face, 0, &n, infos.ptr);
+        const out = try a.alloc([4]u8, n);
+        for (infos[0..n], out) |info, *t| t.* = .{ @truncate(info.tag >> 24), @truncate(info.tag >> 16), @truncate(info.tag >> 8), @truncate(info.tag) };
+        return out;
+    }
+
+    /// The names of a variable face's named instances ("Light", "Bold
+    /// Italic"…), from `a`; empty when it has none.
+    pub fn namedInstances(self: *const Face, a: Allocator) Allocator.Error![]const []const u8 {
+        const n = hb.hb_ot_var_get_named_instance_count(self.face);
+        const out = try a.alloc([]const u8, n);
+        var k: usize = 0;
+        for (0..n) |i| {
+            const id = hb.hb_ot_var_named_instance_get_subfamily_name_id(self.face, @intCast(i));
+            var len: c_uint = hb.hb_ot_name_get_utf8(self.face, id, hb.HB_LANGUAGE_INVALID, null, null);
+            if (len == 0) continue;
+            const buf = try a.alloc(u8, len + 1);
+            len += 1;
+            _ = hb.hb_ot_name_get_utf8(self.face, id, hb.HB_LANGUAGE_INVALID, &len, buf.ptr);
+            out[k] = buf[0..len];
+            k += 1;
+        }
+        return out[0..k];
+    }
+
     /// The nominal glyph for a codepoint, or null if the face has none.
     pub fn glyph(self: *Face, codepoint: u21) ?u32 {
         var gid: hb.hb_codepoint_t = 0;

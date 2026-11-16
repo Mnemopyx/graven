@@ -245,9 +245,22 @@ fn today(io: Io, a: Allocator) ![]const u8 {
 // Installing and removing ----------------------------------------------------------
 
 /// A file name for a font: its family and style, with what file systems
-/// refuse (and spaces) left out.
-fn fileName(a: Allocator, family: []const u8, style: ?[]const u8, ext: []const u8) ![]const u8 {
+/// refuse (and spaces) left out; a variable font's axes in brackets after
+/// its family, as variable fonts are named ("Geist[wght].ttf").
+fn fileName(a: Allocator, family: []const u8, style: ?[]const u8, axes: []const [4]u8, ext: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
+    if (axes.len > 0) {
+        try appendClean(a, &out, family);
+        if (out.items.len == 0) try out.appendSlice(a, "font");
+        try out.append(a, '[');
+        for (axes, 0..) |t, k| {
+            if (k > 0) try out.append(a, ',');
+            try appendClean(a, &out, std.mem.trimEnd(u8, &t, " "));
+        }
+        try out.append(a, ']');
+        try out.appendSlice(a, ext);
+        return out.items;
+    }
     for ([_]?[]const u8{ family, style }, 0..) |part, k| {
         const p = part orelse continue;
         if (p.len == 0) continue;
@@ -262,6 +275,13 @@ fn fileName(a: Allocator, family: []const u8, style: ?[]const u8, ext: []const u
     return out.items;
 }
 
+fn appendClean(a: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| switch (c) {
+        ' ', '/', '\\', ':', '*', '?', '"', '<', '>', '|' => {},
+        else => if (c >= 0x20 and c != 0x7F) try out.append(a, c),
+    };
+}
+
 pub const InstallOptions = struct {
     /// Where the font came from, for its provenance (a path or a URL).
     from: []const u8,
@@ -273,8 +293,12 @@ pub const Installed = struct {
     outcome: enum { installed, already_installed, replaced },
     file: []const u8,
     family: []const u8,
+    /// The first face's style; `styles` has every face's.
     style: []const u8,
     faces: u32,
+    styles: []const []const u8 = &.{},
+    /// A variable font's axes ("wght"…); empty for a static one.
+    axes: []const [4]u8 = &.{},
     container: font.container.Kind,
     /// User fonts it replaced (their files, now removed).
     replaced: []const []const u8 = &.{},
@@ -282,6 +306,22 @@ pub const Installed = struct {
     /// either.
     shadows_system: bool = false,
 };
+
+/// What an install brought, in words: "Geist Bold", "Geist (2 faces:
+/// Black, ExtraBold)", "Geist, variable (wght; default Regular)".
+pub fn describeInstalled(buf: []u8, r: Installed) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (r.axes.len > 0) {
+        w.print("{s}, variable (", .{r.family}) catch {};
+        for (r.axes, 0..) |t, k| w.print("{s}{s}", .{ if (k > 0) ", " else "", std.mem.trimEnd(u8, &t, " ") }) catch {};
+        w.print("; default {s})", .{r.style}) catch {};
+    } else if (r.faces > 1) {
+        w.print("{s} ({d} faces: ", .{ r.family, r.faces }) catch {};
+        for (r.styles, 0..) |st, k| w.print("{s}{s}", .{ if (k > 0) ", " else "", st }) catch {};
+        w.writeAll(")") catch {};
+    } else w.print("{s} {s}", .{ r.family, r.style }) catch {};
+    return w.buffered();
+}
 
 pub const InstallError = error{
     /// Not a font Graven can read.
@@ -305,11 +345,20 @@ pub fn install(io: Io, gpa: Allocator, a: Allocator, bytes: []const u8, records:
     const desc = try fs.describe(a, face, "local", "", 0, 0);
     const ext = font.container.extension(sfnt).?;
     const dir = try userDir(a);
-    const name = try fileName(a, desc.family, if (faces == 1) desc.style else null, ext);
+    const axes = try face.axisTags(a);
+    const name = try fileName(a, desc.family, if (faces == 1) desc.style else null, axes, ext);
+    // Every face's style, for saying what came in.
+    const styles = try a.alloc([]const u8, faces);
+    styles[0] = desc.style;
+    for (1..faces) |k| {
+        const fk = font.Face.init(gpa, sfnt, @intCast(k)) catch return InstallError.NotAFont;
+        defer fk.deinit();
+        styles[k] = (try fs.describe(a, fk, "local", "", @intCast(k), 0)).style;
+    }
     const file = try std.fs.path.join(a, &.{ dir, name });
     const sha = try sha256Hex(a, sfnt);
 
-    var result: Installed = .{ .outcome = .installed, .file = file, .family = desc.family, .style = desc.style, .faces = faces, .container = kind };
+    var result: Installed = .{ .outcome = .installed, .file = file, .family = desc.family, .style = desc.style, .faces = faces, .styles = styles, .axes = axes, .container = kind };
     // The same file already there: nothing to do but record where it came from.
     const existing: ?[]u8 = Io.Dir.cwd().readFileAlloc(io, file, a, .limited(256 << 20)) catch null;
     if (existing) |e| if (std.mem.eql(u8, try sha256Hex(a, e), sha)) {
@@ -366,9 +415,37 @@ pub fn install(io: Io, gpa: Allocator, a: Allocator, bytes: []const u8, records:
 pub const RemoveError = error{
     /// No font of that name is installed.
     NotInstalled,
-    /// Only system fonts have that name: Graven does not remove them.
+    /// Only system fonts have that name, or the file is not a user font:
+    /// Graven does not remove system fonts.
     SystemFont,
 };
+
+/// The faces a font file holds, as indexes into `records` (by face index).
+pub fn facesInFile(a: Allocator, records: []const Record, file: []const u8) ![]usize {
+    var out: std.ArrayList(usize) = .empty;
+    for (records, 0..) |r, i| if (std.mem.eql(u8, r.location, file)) try out.append(a, i);
+    std.mem.sort(usize, out.items, records, struct {
+        fn f(recs: []const Record, x: usize, y: usize) bool {
+            return recs[x].index < recs[y].index;
+        }
+    }.f);
+    return out.items;
+}
+
+/// Removes one user font file, every face in it, and its provenance. A
+/// file the index does not know as a user font is refused.
+pub fn removeFile(io: Io, gpa: Allocator, a: Allocator, records: []const Record, file: []const u8) !void {
+    const user = for (records) |r| {
+        if (std.mem.eql(u8, r.location, file)) break r.scope == .user;
+    } else return RemoveError.NotInstalled;
+    if (!user) return RemoveError.SystemFont;
+    try Io.Dir.cwd().deleteFile(io, file);
+    var list: std.ArrayList(Provenance) = .empty;
+    for (loadProvenance(io, a)) |p| {
+        if (!std.mem.eql(u8, p.file, file)) try list.append(a, p);
+    }
+    try saveProvenance(io, gpa, a, list.items);
+}
 
 /// Removes the user fonts of `family` (and `style`, when given): their
 /// files, and their provenance. A collection goes whole. Returns the files
@@ -389,15 +466,7 @@ pub fn remove(io: Io, gpa: Allocator, a: Allocator, records: []const Record, fam
         if (!dup) try files.append(a, r.location);
     }
     if (files.items.len == 0) return if (system) RemoveError.SystemFont else RemoveError.NotInstalled;
-    for (files.items) |f| try Io.Dir.cwd().deleteFile(io, f);
-    var list: std.ArrayList(Provenance) = .empty;
-    for (loadProvenance(io, a)) |p| {
-        const gone = for (files.items) |f| {
-            if (std.mem.eql(u8, p.file, f)) break true;
-        } else false;
-        if (!gone) try list.append(a, p);
-    }
-    try saveProvenance(io, gpa, a, list.items);
+    for (files.items) |f| try removeFile(io, gpa, a, records, f);
     return files.items;
 }
 
@@ -405,8 +474,9 @@ test "file names come from family and style, without what file systems refuse" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("SourceSerif4-SemiboldItalic.otf", try fileName(a, "Source Serif 4", "Semibold Italic", ".otf"));
-    try std.testing.expectEqualStrings("NotoSans.ttc", try fileName(a, "Noto: Sans", null, ".ttc"));
-    try std.testing.expectEqualStrings("font.ttf", try fileName(a, "", "", ".ttf"));
-    try std.testing.expectEqualStrings("Ünïcode-Bold.ttf", try fileName(a, "Ünïcode", "Bold", ".ttf"));
+    try std.testing.expectEqualStrings("SourceSerif4-SemiboldItalic.otf", try fileName(a, "Source Serif 4", "Semibold Italic", &.{}, ".otf"));
+    try std.testing.expectEqualStrings("NotoSans.ttc", try fileName(a, "Noto: Sans", null, &.{}, ".ttc"));
+    try std.testing.expectEqualStrings("font.ttf", try fileName(a, "", "", &.{}, ".ttf"));
+    try std.testing.expectEqualStrings("Ünïcode-Bold.ttf", try fileName(a, "Ünïcode", "Bold", &.{}, ".ttf"));
+    try std.testing.expectEqualStrings("Geist[wght,ital].ttf", try fileName(a, "Geist", "Regular", &.{ "wght".*, "ital".* }, ".ttf"));
 }

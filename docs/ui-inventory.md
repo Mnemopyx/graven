@@ -43,7 +43,7 @@ The canvas has sub-modes entered from the properties pane, each with its own way
 
 ## Separate windows and prompts
 
-- **Fonts window** (Text › Fonts…): a window of its own (not a pane). It searches, compares and composes fonts and applies them to styles.
+- **Fonts window** (Text › Fonts…): a window of its own (not a pane). It searches, compares and composes fonts and applies them to styles. Results are grouped by family (headings open and close). Its toolbar has Install (font files or folders as user fonts) and Rescan; a user face has Remove (its file), which first lists every face and weight the file takes with it and the document's composed fonts that use them. Install and Remove prompts sit inside it.
 - **New canvas prompt:** in the canvas, for units.
 - **Unsaved changes:** Save, Don't save, Cancel.
 - **Recovered work:** Keep them, Discard them, Not now.

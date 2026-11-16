@@ -229,7 +229,7 @@ fn families(init: std.process.Init, a: std.mem.Allocator, args: []const []const 
         } else true;
         if (ok) try subset.append(a, i);
     }
-    const fams = try fs.families(a, all, subset.items);
+    const fams = try fs.families(a, all, subset.items, .name);
     if (fams.len == 0) {
         std.debug.print("No families match.\n", .{});
         return;
@@ -285,7 +285,8 @@ fn install(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
             .replaced => "installed over the earlier one, as",
             .already_installed => "already installed, as",
         };
-        std.debug.print("{s} {s}: {s} {s}{s}\n", .{ r.family, r.style, what, r.file, if (r.container.isWeb()) " (converted from web font)" else "" });
+        var desc_buf: [400]u8 = undefined;
+        std.debug.print("{s}: {s} {s}{s}\n", .{ local.describeInstalled(&desc_buf, r), what, r.file, if (r.container.isWeb()) " (converted from web font)" else "" });
         if (r.shadows_system) std.debug.print("  note: a system font has the same family and style; applications may take either\n", .{});
         if (r.outcome != .already_installed) {
             changed = true;
