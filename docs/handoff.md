@@ -12,7 +12,8 @@ The GUI is inconsistent: no principles have been applied across it. [docs/ui-inv
 - **Agreed to test against use cases:** three layers of text (text, arrangement, glyphic), and glyphic text live by default.
 - **Stages:** 1 object model and parameters; 2 the ground; 3 layout and output (HP-15C through v2, compared with v1); 4 KaTeX translation; 5 curved tracks and threads; 6 GUI picking and inspection; 7 drawn glyphs as sketches, text design-rule checks.
 - **Decided 2026-11-16:** two entry syntaxes over the same objects, LaTeX/KaTeX (default) and Typst-style; math only in math regions, so Typst's `/` is a fraction; Graven's own parameters in Typst's call form in both. Stage 4 becomes "entry syntaxes".
-- **Next:** stage 1, once the object and parameter list is reviewed.
+- **Built 2026-11-16: stage 1, the object model** (`lib/glyphic`): objects, typed parameters, the cascade with provenance, derived context, Tab's stops with head stops and slot toggles, break candidates; tested on the Leibniz series. The object model's design, worked out by example, is in the blueprint ("Engine v2: the object model by example").
+- **Next:** stage 2 (the ground) or stage 4 (entry syntaxes: LaTeX and Typst-style parsers with greedy partial build-up, source spans, identity matching).
 
 ## 3. Sketch mode: constraining against external geometry (proposed, awaiting answers)
 

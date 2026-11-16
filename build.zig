@@ -79,6 +79,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Engine v2 (glyphic), beside v1 and independent of it: stage 1, the
+    // object model, parameters and their cascade.
+    const glyphic = b.addModule("graven_glyphic", .{
+        .root_source_file = b.path("lib/glyphic/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     // Parametric sketches: geometry held by constraints, solved together.
     const sketch = b.addModule("graven_sketch", .{
         .root_source_file = b.path("lib/sketch/root.zig"),
@@ -210,7 +217,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext, sketch, fonts_local }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext, sketch, fonts_local, glyphic }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).

@@ -73,6 +73,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
 | `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `fonts` (composed fonts, math packages), `fab` and `threemf` (colour FDM), `output` (SVG), `drc` (margins) |
 | `lib/sketch` | Parametric sketches and their solver |
+| `lib/glyphic` | Engine v2, being built beside `lib/engine`: legends as objects with typed parameters resolved through a cascade (stage 1 of 7: the object model) |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
 | `docs` | Project notes: [status.md](docs/status.md), what exists today and what is still to come |
 | `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
