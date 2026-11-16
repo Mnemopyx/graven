@@ -42,6 +42,9 @@ pub const PathItem = struct {
     /// Already in the label frame, mm.
     outline: Outline,
     element: u32,
+    /// The source byte of the object it draws (a fraction's rule: the
+    /// fraction's).
+    source: u32 = 0,
     /// `placeholder` marks an empty slot in a preview: not ink.
     role: enum { ink, placeholder } = .ink,
 };
@@ -195,7 +198,7 @@ pub const Render = struct {
                 const bounds = q.outline.bounds();
                 // A slot takes the cursor in its middle.
                 const x = if (q.role == .placeholder) (bounds.x0 + bounds.x1) / 2 else bounds.x0;
-                consider(&best, &best_source, &best_start, .at(e, x), e.start, true, offset);
+                consider(&best, &best_source, &best_start, .at(e, x), @max(e.start, q.source), true, offset);
             },
         };
         for (self.elements) |e| {

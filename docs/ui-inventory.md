@@ -29,7 +29,7 @@ Four panes on the window's edges, each with a tab and three modes: **ghost** (se
 
 - Rulers in the document's units, a sheet or an open canvas, frames, views, layers, images, groups.
 - Panels, tiles, tracks with their flows of text and equations, art, sketches as views.
-- **Text editing** happens in place in a track's flow: a character cursor, Shift to select, typing, Backspace and Delete, cut, copy and paste, Enter for a paragraph, Shift+Enter for a line break, Ctrl+\\ for equation mode, Tab through an equation's slots.
+- **Text editing** happens in place in a track's flow: a character cursor, Shift to select, typing, Backspace and Delete, cut, copy and paste, Enter for a paragraph, Shift+Enter for a line break, Ctrl+\\ to edit the equation at the cursor (or a new one) on the canvas itself (since 2026-11-16): a caret in it, typing into its source, Left and Right, Backspace and Delete, Tab and Shift+Tab through its heads and fields; a head is boxed, and single keys style it (= and - scale, arrows nudge, [ and ] turn, 0 clears, i the root's index, u and b the upper and lower slots); Esc, Enter or Ctrl+\\ leave. The expression line shows the same source meanwhile.
 - **Selection:** a click makes something the context; Ctrl-click selects; Tab hunts for the next-nearest object; drag moves, handles resize, within constraints. The pointer shows a hand or a lock.
 - **Text display:** glyphs come from a distance-field atlas (`glyphs.zig`): crisp on the pixel grid, gamma 2.2. Show text construction draws outlines and construction instead.
 
@@ -60,9 +60,10 @@ The canvas has sub-modes entered from the properties pane, each with its own way
 | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S | New canvas, Open, Save, Save As |
 | Ctrl+Z, Ctrl+Shift+Z (Ctrl+Y) | Undo, Redo |
 | Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A | Copy, cut, paste, select all (in text) |
-| Ctrl+\\ | Equation mode in a flow |
+| Ctrl+\\ | Edit the equation at the cursor on the canvas (again to leave) |
+| = - [ ] 0 i u b, arrows | On an equation's head: scale, turn, clear, index, upper and lower slots, nudge |
 | Ctrl-click | Select |
-| Tab | Next slot in an equation; next-nearest object when selecting |
+| Tab, Shift+Tab | Next or previous stop (head or field) in an equation; next-nearest object when selecting |
 | Enter, Shift+Enter | New paragraph, line break; Enter also finishes a sketch |
 | Esc | Cancel the tool or mode in progress |
 | Delete, Backspace | Delete in text; delete the selection |
@@ -89,6 +90,9 @@ These are observations to start the discussion from, not decisions.
 - The Expression object section shows the object at the expression line's cursor, but nothing on the canvas marks which object that is.
 - A rule's kind or parameter changed in the style section moves the rule to the end of the list (it is removed and added again).
 - Number entries in the inspector write on every keystroke, so typing 1.5 sets 1 first (one undo step, as they merge).
+
+- On-canvas equation editing has no visible mode marker but its caret and the status line; a click elsewhere leaves it.
+- Arrow keys on a head nudge it, while elsewhere in the equation they move the caret: the same keys, two meanings, by where the caret is.
 
 ## Things to decide in the UI discussion
 

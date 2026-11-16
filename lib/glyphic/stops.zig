@@ -145,6 +145,14 @@ pub fn fieldAt(spans: Spans, stops: []const Stop, at: usize) ?Stop {
 /// field it is in to the next stop (wrapping); outside every field, to the
 /// first stop after it (before it, going back). Null when there is none.
 pub fn tab(gpa: Allocator, r: *const Resolver, spans: Spans, at: usize, back: bool) Allocator.Error!?usize {
+    const s = (try tabStop(gpa, r, spans, at, null, back)) orelse return null;
+    return offset(spans, s);
+}
+
+/// As `tab`, the stop itself. `on`: the head the caret is on, if it is
+/// on one (a head's place is its structure's start, which a field may
+/// hold too).
+pub fn tabStop(gpa: Allocator, r: *const Resolver, spans: Spans, at: usize, on: ?Id, back: bool) Allocator.Error!?Stop {
     const all = try list(gpa, r);
     defer gpa.free(all);
     // Only stops with a place in the source.
@@ -153,14 +161,15 @@ pub fn tab(gpa: Allocator, r: *const Resolver, spans: Spans, at: usize, back: bo
     for (all) |s| if (offset(spans, s) != null) try placed.append(gpa, s);
     const ss = placed.items;
     if (ss.len == 0) return null;
-    if (fieldAt(spans, ss, at)) |cur| return offset(spans, next(ss, cur, back).?);
+    if (on) |h| return next(ss, .{ .head = h }, back);
+    if (fieldAt(spans, ss, at)) |cur| return next(ss, cur, back);
     if (back) {
         var k = ss.len;
-        while (k > 0) : (k -= 1) if (offset(spans, ss[k - 1]).? < at) return offset(spans, ss[k - 1]);
-        return offset(spans, ss[ss.len - 1]);
+        while (k > 0) : (k -= 1) if (offset(spans, ss[k - 1]).? < at) return ss[k - 1];
+        return ss[ss.len - 1];
     }
-    for (ss) |s| if (offset(spans, s).? > at) return offset(spans, s);
-    return offset(spans, ss[0]);
+    for (ss) |s| if (offset(spans, s).? > at) return s;
+    return ss[0];
 }
 
 test "Tab in the source: field to field in field order, heads before their structures" {
@@ -186,4 +195,26 @@ test "Tab in the source: field to field in field order, heads before their struc
     try std.testing.expectEqual(@as(?usize, 11), try tab(gpa, &r, spans, 9, false));
     try std.testing.expectEqual(@as(?usize, 18), try tab(gpa, &r, spans, 11, false));
     try std.testing.expectEqual(@as(?usize, 0), try tab(gpa, &r, spans, 18, false));
+}
+
+test "Tab from a head goes on to its first field; the head is reported" {
+    const latex = @import("latex.zig");
+    const styles = @import("styles.zig");
+    const gpa = std.testing.allocator;
+    var e = try Expr.init(gpa);
+    defer e.deinit();
+    var spans: Spans = .{};
+    defer spans.deinit(gpa);
+    try latex.parse(&e, &spans, "x+\\sqrt{y}", .math);
+    var g = styles.Engine.init(gpa);
+    defer g.deinit();
+    const r = Resolver.init(&g, &e, &.{});
+    // From x: the root's head.
+    const h = (try tabStop(gpa, &r, spans, 0, null, false)).?;
+    try std.testing.expect(h == .head);
+    try std.testing.expectEqual(@as(?usize, 2), offset(spans, h));
+    // From the head: its body, at its end.
+    const b = (try tabStop(gpa, &r, spans, 2, h.head, false)).?;
+    try std.testing.expect(b == .field);
+    try std.testing.expectEqual(@as(?usize, 9), offset(spans, b));
 }

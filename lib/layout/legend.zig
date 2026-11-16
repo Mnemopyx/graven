@@ -129,7 +129,11 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
                     face = fid;
                     units = cap / glyphic.faces.capUnits(gl.face);
                 }
-                const src = if (cuttable(node.kind)) @min(span.start + gl.cluster, @max(span.end, span.start + 1) - 1) else span.start;
+                // A text leaf's glyphs: their own bytes. Inside a structure,
+                // the start of the object each draws (its head's: the
+                // structure's), so the caret and the editor find it.
+                const own = spans.get(gl.object);
+                const src = if (cuttable(node.kind)) @min(span.start + gl.cluster, @max(span.end, span.start + 1) - 1) else if (own.start != glyphic.entry.Span.none.start) own.start else span.start;
                 try items.append(a, .{ .glyph = .{ .face = fid, .gid = gl.gid, .transform = gl.m.then(move), .element = @intCast(k), .source = src, .grow = gl.grow } });
             },
             .rule, .hole => {
@@ -142,7 +146,13 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
                     cs[0] = .{ .segments = segs };
                     break :blk geom.Outline{ .contours = cs };
                 };
-                try items.append(a, .{ .path = .{ .outline = outline, .element = @intCast(k), .role = if (it == .hole) .placeholder else .ink } });
+                const object = switch (it) {
+                    .rule => |ru| ru.object,
+                    .hole => |h| h.object,
+                    .glyph => unreachable,
+                };
+                const own = spans.get(object);
+                try items.append(a, .{ .path = .{ .outline = outline, .element = @intCast(k), .source = if (own.start != glyphic.entry.Span.none.start) own.start else span.start, .role = if (it == .hole) .placeholder else .ink } });
                 if (it == .hole) try syntax.append(a, .{ .kind = .missing_argument, .offset = span.end });
             },
         };
@@ -254,4 +264,30 @@ test "an equation run is all math: its fraction is a fraction, not text" {
     try testing.expectEqual(1, rules);
     try testing.expect(math.ink.y1 > 3 and math.ink.y0 < 0);
     try testing.expect(math.items.len < text.items.len);
+}
+
+test "inside a structure, glyphs carry their own objects' sources; a rule its fraction's" {
+    const gpa = testing.allocator;
+    const face = try Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*Face{face};
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const st = (try contextOf(&g, &faces, .{ .name = "s", .cap_height = 3 }, &.{}, face, "s")).?;
+    // 0123456789012
+    // H+\frac{H}{D}
+    var r = try render(gpa, &g, &faces, st, "H+\\frac{H}{D}", .math);
+    defer r.deinit();
+    var sources: [8]u32 = undefined;
+    var n: usize = 0;
+    for (r.items) |it| {
+        sources[n] = switch (it) {
+            .glyph => |gl| gl.source,
+            .path => |p| p.source,
+        };
+        n += 1;
+    }
+    std.mem.sort(u32, sources[0..n], {}, std.sort.asc(u32));
+    // H, +, the rule (the fraction's start), its H, its D.
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 8, 11 }, sources[0..n]);
 }

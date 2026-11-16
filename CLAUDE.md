@@ -55,7 +55,7 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 
 | Switch | Effect |
 |---|---|
-| `GRAVEN_SAMPLE=hp15c` or `keyboard` | opens on a new canvas with that sample |
+| `GRAVEN_SAMPLE=hp15c`, `keyboard` or `text` | opens on a new canvas with that sample (`text`: a track with text and an equation, the cursor in it) |
 | `GRAVEN_VIEW=cx,cy,ppm` | view centre (mm) and zoom (px/mm) |
 | `GRAVEN_EXACT_TEXT=1` | text from outlines instead of the glyph atlas |
 | `GRAVEN_TEXT_GAMMA`, `GRAVEN_TEXT_DARKEN` | display gamma (2.2), stem darkening (0) |

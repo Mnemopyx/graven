@@ -708,6 +708,20 @@ fn loadHp15c() !void {
     state.view.fit = state.model.panels.items[b.plate].box().join(state.model.panels.items[b.keys].box());
 }
 
+/// Adds the text sample (a track of text with an equation in it) to the
+/// shown space's canvas, right of what it holds, with the cursor in it.
+fn loadText() !void {
+    const space = state.model.spaces.items[shown_space];
+    const pi = state.model.panelIndex(space.root) orelse return;
+    const held = spaceExtents();
+    const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 30 } else .{ .x = held.x1 + 20, .y = held.y1 };
+    const r = try samples.text.build(&state.model, pi, try labelStyle(), at);
+    try hist.snapshot(&state.model);
+    state.context = .{ .region = .{ .panel = pi, .region = r } };
+    track_cursor = .{ .panel = pi, .region = r, .index = 1, .offset = 0 };
+    state.view.fit = .{ .x0 = at.x - 5, .y0 = at.y - 25, .x1 = at.x + 65, .y1 = at.y + 5 };
+}
+
 /// Where prototype `id` is in the document's list, for dropdowns; 0 when
 /// it is none of them.
 /// The ID of space `si` (by position); `.none` without spaces (a
@@ -1203,7 +1217,7 @@ fn frame() !dvui.App.Result {
         if (std.c.getenv("GRAVEN_SAMPLE")) |v| {
             const which = std.mem.span(v);
             if (canvas_prompt) createCanvas(.mm);
-            if (std.mem.eql(u8, which, "hp15c")) loadHp15c() catch {} else if (std.mem.eql(u8, which, "keyboard")) loadSample() catch {};
+            if (std.mem.eql(u8, which, "hp15c")) loadHp15c() catch {} else if (std.mem.eql(u8, which, "keyboard")) loadSample() catch {} else if (std.mem.eql(u8, which, "text")) loadText() catch {};
         }
         // GRAVEN_VIEW=cx,cy,ppm: the view's centre (mm) and zoom (px/mm).
         if (std.c.getenv("GRAVEN_VIEW")) |v| {
@@ -2458,6 +2472,7 @@ const ExprTarget = union(enum) {
 };
 
 fn exprTarget() ?ExprTarget {
+    if (canvas_eq) |q| if (eqContent(q) != null) return .{ .run = .{ .panel = q.panel, .region = q.region, .item = q.item } };
     if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
     return switch (state.context) {
         .tile => |id| if (exprTrackOf(id)) |tr| .{ .tile_track = .{ .tile = id, .track = tr } } else null,
@@ -4168,6 +4183,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             }
         }
         if (show_construction) drawConstruction(area, l, o);
+        drawCanvasEq(area, pi, l, o);
         if (caretIn(pi, l)) |c| {
             const x = l.origin.x + o.x + c.x;
             const y = l.origin.y + o.y;
@@ -4178,7 +4194,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     }
     drawFlowMarks(area, pi, placed);
     // On whichever panel its segment lies: a thread runs across panels.
-    if (track_cursor) |c| drawCursor(area, pi, placed, c);
+    if (track_cursor) |c| if (canvas_eq == null) drawCursor(area, pi, placed, c);
 }
 
 /// Draws the glyphs of render `r`, placed at worksheet point `at`, from the
@@ -5956,6 +5972,28 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
+            }
+        }
+        // Editing an equation on the canvas: its keys and its typing first.
+        if (canvas_eq != null and !e.handled and !canvas_prompt and cursorKeysReach()) {
+            if (e.evt == .key) {
+                const k = e.evt.key;
+                if ((k.action == .down or k.action == .repeat) and eqKey(k)) {
+                    e.handle(@src(), box.data());
+                    dvui.refresh(null, @src(), box.data().id);
+                    continue;
+                }
+            } else if (e.evt == .text) {
+                const txt = switch (e.evt.text.action) {
+                    .value => |v| v.txt,
+                    else => "",
+                };
+                if (txt.len > 0 and txt[0] >= ' ') {
+                    e.handle(@src(), box.data());
+                    eqType(txt);
+                    dvui.refresh(null, @src(), box.data().id);
+                    continue;
+                }
             }
         }
         // Typing at the flow cursor goes into the flow.
@@ -8203,6 +8241,7 @@ fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
 /// The cursor a click at worksheet point `at` puts in the context region's
 /// tracks: in the row or column under it, between the items either side.
 fn cursorAt(at: geom.Point) ?TrackCursor {
+    if (canvas_eq != null) leaveCanvasEquation();
     const cr = contextRegion() orelse return null;
     if (cr.panel >= state.placed.items.len) return null;
     // In any of the context's thread's segments on its panel: a cursor in
@@ -8868,29 +8907,6 @@ fn equationAtCursor(c: TrackCursor) ?struct { item: usize, offset: u32 } {
     return null;
 }
 
-fn enterEquation() void {
-    const c = track_cursor orelse return;
-    var item: usize = 0;
-    var offset: u32 = 0;
-    if (equationAtCursor(c)) |eq| {
-        item = eq.item;
-        offset = eq.offset;
-    } else {
-        _ = deleteFlowSelection();
-        const cc = track_cursor orelse return;
-        const style = state.model.panels.items[cc.panel].regions.items[cc.region].style orelse (labelStyle() catch return);
-        item = act(.insertEquation, .{ cc.panel, cc.region, flowPos(cc), style }) catch return;
-    }
-    flow_anchor = null;
-    track_cursor.?.index = item + 1;
-    track_cursor.?.offset = 0;
-    equation_edit = .{ .panel = c.panel, .region = c.region, .item = item };
-    focus_expression = true;
-    focus_expression_at = offset;
-    typing_seq += 1;
-    state.status = "Equation mode: typing goes to the expression line. Ctrl+\\ returns to the flow. ";
-}
-
 /// Ends equation mode: an empty equation goes; with `to_flow`, the flow
 /// cursor goes after it.
 fn leaveEquation(to_flow: bool) void {
@@ -8953,6 +8969,356 @@ fn tabEquation(back: bool) void {
     track_cursor.?.offset = to;
     flow_anchor = null;
     typing_seq += 1;
+}
+
+// Editing an equation on the canvas -------------------------------------------
+//
+// Ctrl+\ at or in an equation (or a new one) puts an editing caret into it.
+// Typing goes into its source as it is typed (math: ^ is a script), { pairs
+// with its }, Left and Right step through the source's characters and
+// fields, Backspace and Delete take a character. Tab and Shift+Tab go
+// through its stops in field order: each structure's head (its own
+// symbol: a fraction's rule, √, Σ, a fence, an accent), then its fields.
+// On a head, single keys style it, written into the source in the call
+// form (\set(…){…}): = and - scale it by a tenth, the arrow keys nudge it,
+// [ and ] turn it 15°, 0 clears what was set; i opens or hides a root's
+// index, u and b the upper and lower slots (limits, scripts). Esc, Enter
+// or Ctrl+\ leave, the flow cursor after the equation.
+
+const CanvasEq = struct {
+    panel: usize,
+    region: usize,
+    item: usize,
+    /// The caret: a byte offset in the equation's source.
+    offset: u32,
+    /// On a head: its structure's source start (the caret's offset).
+    head: ?u32 = null,
+};
+
+var canvas_eq: ?CanvasEq = null;
+var canvas_eq_seq: u64 = 0;
+
+/// The equation's source, while it is still an equation.
+fn eqContent(q: CanvasEq) ?[]const u8 {
+    if (q.panel >= state.model.panels.items.len or q.region >= state.model.panels.items[q.panel].regions.items.len) return null;
+    const items = state.model.panels.items[q.panel].regions.items[q.region].items.items;
+    if (q.item >= items.len or items[q.item].what != .run or !items[q.item].what.run.equation) return null;
+    return items[q.item].what.run.content;
+}
+
+const EqParse = struct { e: glyphic.Expr, spans: glyphic.entry.Spans };
+
+fn eqParse(a: std.mem.Allocator, src: []const u8) ?EqParse {
+    var p: EqParse = .{ .e = glyphic.Expr.init(a) catch return null, .spans = .{} };
+    glyphic.latex.parse(&p.e, &p.spans, src, .math) catch return null;
+    return p;
+}
+
+/// The structure whose head starts at byte `at`.
+fn headAt(p: *const EqParse, at: u32) ?glyphic.Id {
+    for (p.e.nodes.items, 0..) |n, k| {
+        if (!n.live or !n.kind.hasHead()) continue;
+        const id: glyphic.Id = @enumFromInt(k);
+        if (p.spans.get(id).start == at) return id;
+    }
+    return null;
+}
+
+fn eqStore(q: CanvasEq, text: []const u8) void {
+    actM(mergeKey(.{ "canvas equation", q.panel, q.region, q.item, canvas_eq_seq }), .setRunContent, .{ q.panel, q.region, q.item, text }) catch {
+        state.status = "The equation could not be changed. ";
+    };
+}
+
+/// Sets the caret, leaving any head; the inspector follows it.
+fn eqMove(offset: u32, head: ?u32) void {
+    if (canvas_eq == null) return;
+    canvas_eq.?.offset = offset;
+    canvas_eq.?.head = head;
+    const e = canvas_eq.?;
+    expr_inspect = .{ .key = (ExprTarget{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } }).key(), .offset = offset };
+}
+
+/// Every place in `src` the caret can stop, in order: its ends, each
+/// character's ends, each field's ends.
+fn eqPlaces(a: std.mem.Allocator, src: []const u8) []u32 {
+    var out: std.ArrayList(u32) = .empty;
+    out.append(a, 0) catch {};
+    out.append(a, @intCast(src.len)) catch {};
+    for (layout.edit.chars(a, src, true) catch &.{}) |c| {
+        out.append(a, c.start) catch {};
+        out.append(a, c.end) catch {};
+    }
+    if (eqParse(a, src)) |p| for (p.e.nodes.items, 0..) |n, k| {
+        if (!n.live or n.kind != .row or k == @intFromEnum(p.e.root)) continue;
+        const sp = p.spans.get(@enumFromInt(k));
+        if (sp.start == glyphic.entry.Span.none.start) continue;
+        out.append(a, sp.start) catch {};
+        out.append(a, sp.end) catch {};
+    };
+    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+    return out.items;
+}
+
+fn enterEquation() void {
+    const c = track_cursor orelse return;
+    var item: usize = 0;
+    var offset: u32 = 0;
+    if (equationAtCursor(c)) |eq| {
+        item = eq.item;
+        offset = eq.offset;
+    } else {
+        _ = deleteFlowSelection();
+        const cc = track_cursor orelse return;
+        const style = state.model.panels.items[cc.panel].regions.items[cc.region].style orelse (labelStyle() catch return);
+        item = act(.insertEquation, .{ cc.panel, cc.region, flowPos(cc), style }) catch return;
+    }
+    flow_anchor = null;
+    canvas_eq = .{ .panel = c.panel, .region = c.region, .item = item, .offset = offset };
+    canvas_eq_seq += 1;
+    eqMove(offset, null);
+    state.status = "Equation: type into it; Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
+}
+
+/// Leaves the equation: an empty one goes; the flow cursor goes after it.
+fn leaveCanvasEquation() void {
+    const q = canvas_eq orelse return;
+    canvas_eq = null;
+    state.status = "";
+    typing_seq += 1;
+    const content = eqContent(q) orelse return;
+    if (content.len == 0) {
+        const pos = act(.deleteRange, .{ q.panel, q.region, layout.model.FlowPos{ .index = q.item }, layout.model.FlowPos{ .index = q.item + 1 } }) catch return;
+        if (track_cursor) |*tc| {
+            tc.index = pos.index;
+            tc.offset = pos.offset;
+        }
+        return;
+    }
+    if (track_cursor) |*tc| if (tc.panel == q.panel and tc.region == q.region) {
+        tc.index = q.item + 1;
+        tc.offset = 0;
+    };
+    flow_anchor = null;
+}
+
+/// Text typed into the equation (or, on a head, a head's key).
+fn eqType(txt: []const u8) void {
+    const q = canvas_eq orelse return;
+    const src = eqContent(q) orelse {
+        canvas_eq = null;
+        return;
+    };
+    if (q.head != null and txt.len == 1 and std.mem.indexOfScalar(u8, "=+-[]0iub", txt[0]) != null) {
+        eqHeadKey(txt[0], 0, 0);
+        return;
+    }
+    const a = dvui.currentWindow().arena();
+    const at = @min(q.offset, @as(u32, @intCast(src.len)));
+    // } over a } already there: step past it.
+    if (std.mem.eql(u8, txt, "}") and at < src.len and src[at] == '}') {
+        eqMove(at + 1, null);
+        return;
+    }
+    const insert = if (std.mem.eql(u8, txt, "{")) "{}" else txt;
+    const next = std.mem.concat(a, u8, &.{ src[0..at], insert, src[at..] }) catch return;
+    eqStore(q, next);
+    eqMove(at + @as(u32, @intCast(if (std.mem.eql(u8, txt, "{")) 1 else txt.len)), null);
+}
+
+/// A head's key: a parameter changed, or a slot opened, hidden or shown.
+/// `dx`, `dy`: an arrow's nudge, cap heights.
+fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
+    const q = canvas_eq orelse return;
+    const head = q.head orelse return;
+    const src = eqContent(q) orelse return;
+    const a = dvui.currentWindow().arena();
+    var p = eqParse(a, src) orelse return;
+    const id = headAt(&p, head) orelse {
+        eqMove(q.offset, null);
+        return;
+    };
+    const n = p.e.node(id);
+    const P = glyphic.Param;
+    const num = struct {
+        fn f(e: *const glyphic.Expr, i: glyphic.Id, prm: P) f32 {
+            return if (e.override(i, prm)) |v| v.number else glyphic.param.def(prm).default.number;
+        }
+        fn round(x: f32) f32 {
+            return @round(x * 1000) / 1000;
+        }
+    };
+    // Opening a slot the source does not have yet: written in, the caret
+    // in it.
+    const open: ?struct { at: u32, text: []const u8, caret: u32 } = switch (ch) {
+        'i' => if (n.kind == .radical and p.e.slot(id, .index) == .none) .{ .at = head + @as(u32, @intCast("\\sqrt".len)), .text = "[]", .caret = 1 } else null,
+        'u', 'b' => blk: {
+            const sl: glyphic.expr.Slot = if (ch == 'u') .sup else .sub;
+            if (n.kind == .large_op and p.e.slot(id, sl) != .none) break :blk null;
+            break :blk .{ .at = p.spans.get(id).end, .text = if (ch == 'u') "^{}" else "_{}", .caret = 2 };
+        },
+        else => null,
+    };
+    if (open) |o| {
+        const next = std.mem.concat(a, u8, &.{ src[0..o.at], o.text, src[o.at..] }) catch return;
+        eqStore(q, next);
+        eqMove(o.at + o.caret, null);
+        return;
+    }
+    switch (ch) {
+        '=', '+' => p.e.set(id, .scale, glyphic.param.num(num.round(@min(10, num.f(&p.e, id, .scale) * 1.1)))) catch {},
+        '-' => p.e.set(id, .scale, glyphic.param.num(num.round(@max(0.1, num.f(&p.e, id, .scale) / 1.1)))) catch {},
+        '[' => p.e.set(id, .rotate, glyphic.param.num(std.math.clamp(num.f(&p.e, id, .rotate) - 15, -180, 180))) catch {},
+        ']' => p.e.set(id, .rotate, glyphic.param.num(std.math.clamp(num.f(&p.e, id, .rotate) + 15, -180, 180))) catch {},
+        '0' => {
+            var k = p.e.node(id).overrides.items.len;
+            while (k > 0) {
+                k -= 1;
+                const o = p.e.node(id).overrides.items[k];
+                if (!glyphic.entry.implied(&p.e, id, o.param)) p.e.clear(id, o.param);
+            }
+        },
+        'i', 'u', 'b' => {
+            // A slot there: hidden (its contents kept), or shown again.
+            const sl: glyphic.expr.Slot = if (ch == 'i') .index else if (ch == 'u') .sup else .sub;
+            const prm = sl.showParam().?;
+            const hidden = if (p.e.override(id, prm)) |v| glyphic.param.as(glyphic.param.SlotShow, v) == .hidden else false;
+            if (hidden) p.e.clear(id, prm) else p.e.set(id, prm, glyphic.param.of(glyphic.param.SlotShow.hidden)) catch {};
+        },
+        0 => {
+            if (dx != 0) p.e.set(id, .shift_x, glyphic.param.num(num.round(std.math.clamp(num.f(&p.e, id, .shift_x) + dx, -4, 4)))) catch {};
+            if (dy != 0) p.e.set(id, .shift_y, glyphic.param.num(num.round(std.math.clamp(num.f(&p.e, id, .shift_y) + dy, -4, 4)))) catch {};
+        },
+        else => return,
+    }
+    const next = glyphic.entry.rewriteCall(a, src, p.spans.get(id), &p.e, id) catch return;
+    eqStore(q, next);
+    // The structure starts where it did: its call, if any, begins there.
+    eqMove(head, head);
+}
+
+/// A key while editing an equation on the canvas; whether it was one.
+fn eqKey(k: dvui.Event.Key) bool {
+    const q = canvas_eq orelse return false;
+    const src = eqContent(q) orelse {
+        canvas_eq = null;
+        return false;
+    };
+    const a = dvui.currentWindow().arena();
+    const back = k.mod.shift();
+    if ((k.code == .backslash and primaryMod(k.mod)) or k.code == .escape or k.code == .enter or k.code == .kp_enter) {
+        if (k.action != .down) return true;
+        leaveCanvasEquation();
+        return true;
+    }
+    if (q.head != null) switch (k.code) {
+        .left => {
+            eqHeadKey(0, -0.05, 0);
+            return true;
+        },
+        .right => {
+            eqHeadKey(0, 0.05, 0);
+            return true;
+        },
+        .up => {
+            eqHeadKey(0, 0, 0.05);
+            return true;
+        },
+        .down => {
+            eqHeadKey(0, 0, -0.05);
+            return true;
+        },
+        else => {},
+    };
+    switch (k.code) {
+        .tab => {
+            var p = eqParse(a, src) orelse return true;
+            var g = glyphic.Engine.init(state.gpa);
+            defer g.deinit();
+            const r = glyphic.Resolver.init(&g, &p.e, &.{});
+            const on: ?glyphic.Id = if (q.head) |h| headAt(&p, h) else null;
+            const to = (glyphic.stops.tabStop(a, &r, p.spans, q.offset, on, back) catch null) orelse return true;
+            const off: u32 = @intCast(glyphic.stops.offset(p.spans, to) orelse return true);
+            canvas_eq_seq += 1;
+            eqMove(off, if (to == .head) off else null);
+            return true;
+        },
+        .left, .right, .home, .end => {
+            const places = eqPlaces(a, src);
+            var to = q.offset;
+            switch (k.code) {
+                .home => to = 0,
+                .end => to = @intCast(src.len),
+                .left => {
+                    var i = places.len;
+                    while (i > 0) : (i -= 1) if (places[i - 1] < q.offset) {
+                        to = places[i - 1];
+                        break;
+                    };
+                },
+                else => for (places) |x| if (x > q.offset) {
+                    to = x;
+                    break;
+                },
+            }
+            canvas_eq_seq += 1;
+            eqMove(to, null);
+            return true;
+        },
+        .backspace, .delete => {
+            if (q.head != null) {
+                eqMove(q.offset, null);
+                return true;
+            }
+            const cs = layout.edit.chars(a, src, true) catch return true;
+            var hit: ?layout.edit.Char = null;
+            if (k.code == .backspace) {
+                for (cs) |c| if (c.end <= q.offset) {
+                    hit = c;
+                };
+            } else for (cs) |c| if (c.start >= q.offset) {
+                hit = c;
+                break;
+            };
+            const c = hit orelse return true;
+            const next = layout.edit.deleteChars(a, src, c.start, c.start + 1, true) catch return true;
+            eqStore(q, next);
+            eqMove(if (k.code == .backspace) c.start else q.offset, null);
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// The equation's caret in placed label `l` of panel `pi`: a bar, or on a
+/// head, a box round what the head draws. Drawn at worksheet offset `o`.
+fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel, o: geom.Point) void {
+    const q = canvas_eq orelse return;
+    const run = l.run orelse return;
+    if (run.panel != q.panel or run.region != q.region or run.item != q.item or pi >= state.placed.items.len) return;
+    if (run.len > 0 and (q.offset < run.from or q.offset > run.from + run.len)) return;
+    const px = dvui.windowNaturalScale();
+    const at: geom.Point = .{ .x = l.origin.x + o.x, .y = l.origin.y + o.y };
+    if (q.head) |h| {
+        var box: geom.Box = .empty;
+        const a = dvui.currentWindow().arena();
+        for (l.render.items) |it| switch (it) {
+            .glyph => |g| if (g.source == h and g.face < faceTable().len) {
+                box = box.join(layout.render.glyphInk(a, faceTable()[g.face], g) catch continue);
+            },
+            .path => |pth| if (pth.source == h) {
+                box = box.join(pth.outline.bounds());
+            },
+        };
+        if (box.isEmpty()) return;
+        const m = 0.25;
+        marchingBox(area, .{ .x0 = at.x + box.x0 - m, .y0 = at.y + box.y0 - m, .x1 = at.x + box.x1 + m, .y1 = at.y + box.y1 + m }, colors.select, 1.5 * px);
+        return;
+    }
+    const c = l.render.caret(q.offset) orelse return;
+    const p0 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y0 });
+    const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
+    dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2.5 * px, .color = .{ .color = colors.select.opacity(pulse()) } });
 }
 
 /// The cursor: a bar across its row or column between items.
