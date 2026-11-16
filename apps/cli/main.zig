@@ -183,15 +183,16 @@ fn v2hp15c(init: std.process.Init, folder: []const u8) !void {
         f.* = try engine.Face.init(gpa, bytes, 0);
     }
     defer for (loaded) |f| f.deinit();
-    const members = [_]glyphic.faces.Member{ .{ .name = "text", .face = loaded[0] }, .{ .name = "math", .face = loaded[1] } };
-    const fs: glyphic.faces.FaceSet = .{ .members = &members };
-    // The package's rules, as v1's libertinus has them: italic variables
-    // and π at 1.2 times.
-    const package = [_]glyphic.Rule{
-        .{ .selector = .{ .kind = .variable }, .param = .shape, .value = glyphic.param.of(glyphic.param.Shape.italic) },
-        .{ .selector = .{ .kind = .variable }, .param = .scale, .value = glyphic.param.num(1.2) },
-        .{ .selector = .{ .kind = .constant }, .param = .scale, .value = glyphic.param.num(1.2) },
-    };
+    // The style context this app configures, as v1's libertinus package
+    // has it: its faces, italic variables and π at 1.2 times.
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const style = try g.addStyle("libertinus", .none);
+    try g.setFace(style, "text", loaded[0]);
+    try g.setFace(style, "math", loaded[1]);
+    try g.setFor(style, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
+    try g.setFor(style, .{ .kind = .variable }, .scale, glyphic.param.num(1.2));
+    try g.setFor(style, .{ .kind = .constant }, .scale, glyphic.param.num(1.2));
 
     try cwd.createDirPath(io, folder);
     var missing: usize = 0;
@@ -237,12 +238,13 @@ fn v2hp15c(init: std.process.Init, folder: []const u8) !void {
             var spans: glyphic.entry.Spans = .{};
             defer spans.deinit(gpa);
             try glyphic.latex.parse(&e, &spans, text, .legend);
-            const r = glyphic.Resolver.init(&e, .{ .package = &package });
+            // The style reaches each legend from its track.
+            const r = glyphic.Resolver.init(&g, &e, &.{style});
             var row: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = band.x0, .y = l.origin.y }, .length = band.width(), .pitch = band.height(), .count = 1, .cap = cap, .alignment = alignment };
             // A column track: down its middle, a character at a time.
             var col: glyphic.ground.Columns = .{ .origin = .{ .x = (band.x0 + band.x1) / 2, .y = band.y1 }, .length = band.height(), .pitch = band.width(), .count = 1, .cap = cap };
             const column = if (l.tile) |t| m.proto(m.tileConst(t).prototype).tracks[l.slot].major == .column else false;
-            const s = try glyphic.setting.set(a, &r, fs, if (column) col.ground() else row.ground(), .{});
+            const s = try glyphic.setting.set(a, &r, if (column) col.ground() else row.ground(), .{});
             try outs.appendSlice(a, try glyphic.setting.outlines(a, s.items, 0.002));
             if (s.overflow) {
                 std.debug.print("{s}: wider than its box\n", .{text});
@@ -273,7 +275,11 @@ fn v2(init: std.process.Init, text_path: []const u8, math_path: []const u8, out_
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var members: std.ArrayList(glyphic.faces.Member) = .empty;
+    // The style context this app configures: the faces given, italic
+    // variables, display style.
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const style = try g.addStyle("sample", .none);
     var loaded: std.ArrayList(*engine.Face) = .empty;
     defer for (loaded.items) |f| f.deinit();
     for ([_]?[]const u8{ text_path, math_path, italic_path }, [_][]const u8{ "text", "math", "italic" }) |path, name| {
@@ -281,18 +287,16 @@ fn v2(init: std.process.Init, text_path: []const u8, math_path: []const u8, out_
         const bytes = try cwd.readFileAlloc(io, p, a, .limited(64 << 20));
         const f = try engine.Face.init(gpa, bytes, 0);
         try loaded.append(a, f);
-        try members.append(a, .{ .name = name, .face = f });
+        try g.setFace(style, name, f);
     }
-    const fs: glyphic.faces.FaceSet = .{ .members = members.items };
+    try g.setFor(style, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
+    try g.set(style, .math_style, glyphic.param.of(glyphic.param.MathStyle.display));
 
     var e = try glyphic.Expr.init(gpa);
     defer e.deinit();
     _ = try glyphic.samples.leibniz(&e);
-    const package = [_]glyphic.Rule{
-        .{ .selector = .{ .kind = .variable }, .param = .shape, .value = glyphic.param.of(glyphic.param.Shape.italic) },
-    };
-    try e.legend.append(gpa, .{ .param = .math_style, .value = glyphic.param.of(glyphic.param.MathStyle.display) });
-    const r = glyphic.Resolver.init(&e, .{ .package = &package });
+    try g.apply(&e, e.root, style);
+    const r = glyphic.Resolver.init(&g, &e, &.{});
 
     var outs: std.ArrayList(engine.geom.Outline) = .empty;
     var box: engine.geom.Box = .empty;
@@ -302,8 +306,8 @@ fn v2(init: std.process.Init, text_path: []const u8, math_path: []const u8, out_
     var dial: glyphic.ground.Dial = .{ .centre = .{ .x = 120, .y = -110 }, .radius = 55, .start = std.math.pi * 0.95, .sweep = std.math.pi * 0.9, .pitch = 12, .count = 2, .cap = 3 };
     const grounds = [_]glyphic.ground.Ground{ long.ground(), narrow.ground(), dial.ground() };
     const names = [_][]const u8{ "row", "narrow rows", "dial" };
-    for (grounds, names) |g, name| {
-        const s = try glyphic.setting.set(a, &r, fs, g, .{});
+    for (grounds, names) |gr, name| {
+        const s = try glyphic.setting.set(a, &r, gr, .{});
         const o = try glyphic.setting.outlines(a, s.items, 0.005);
         for (o) |ol| box = box.join(ol.bounds());
         try outs.appendSlice(a, o);

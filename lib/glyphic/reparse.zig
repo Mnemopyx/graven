@@ -19,13 +19,12 @@ const Slot = ex.Slot;
 pub const IdMap = std.AutoHashMapUnmanaged(Id, Id);
 
 /// Matches `new`'s objects to `old`'s, copies matched objects' overrides
-/// (and the legend's rules, when `new` has none) from `old`, and returns
-/// the map of matched ids, from `gpa`.
+/// and applied style contexts from `old`, and returns the map of matched
+/// ids, from `gpa`.
 pub fn carry(gpa: Allocator, old: *const Expr, new: *Expr) !IdMap {
     var map: IdMap = .empty;
     errdefer map.deinit(gpa);
     try match(gpa, old, old.root, new, new.root, &map);
-    if (new.legend.items.len == 0) try new.legend.appendSlice(new.gpa, old.legend.items);
     return map;
 }
 
@@ -77,6 +76,7 @@ fn match(gpa: Allocator, old: *const Expr, o: Id, new: *Expr, n: Id, map: *IdMap
 
 fn pair(old: *const Expr, o: Id, new: *Expr, n: Id, map: *IdMap, gpa: Allocator) !void {
     try map.put(gpa, o, n);
+    if (new.node(n).style == .none) new.node(n).style = old.node(o).style;
     for (old.node(o).overrides.items) |ov| {
         if (new.override(n, ov.param) == null) try new.set(n, ov.param, ov.value);
     }

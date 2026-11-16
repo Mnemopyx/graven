@@ -173,8 +173,8 @@ test "a reparse keeps what was set on the objects that stayed" {
     var old = try parseLatex("x+y", .math);
     defer old.deinit();
     const y = old.e.node(old.e.root).items.items[2];
-    try old.e.set(y, .weight, param.num(0.05));
-    try old.e.legend.append(old.e.gpa, .{ .param = .math_style, .value = param.of(param.MathStyle.display) });
+    try old.e.set(y, .scale, param.num(1.3));
+    old.e.node(old.e.root).style = @enumFromInt(0);
     // Edited: a term added before and after.
     var new = try parseLatex("w+x+y+z", .math);
     defer new.deinit();
@@ -182,8 +182,9 @@ test "a reparse keeps what was set on the objects that stayed" {
     defer map.deinit(testing.allocator);
     const ny = map.get(y).?;
     try testing.expectEqualStrings("y", new.e.node(ny).text);
-    try testing.expectEqual(@as(f32, 0.05), new.e.override(ny, .weight).?.number);
-    try testing.expectEqual(@as(usize, 1), new.e.legend.items.len);
+    try testing.expectEqual(@as(f32, 1.3), new.e.override(ny, .scale).?.number);
+    // The style context applied to the expression stays applied.
+    try testing.expectEqual(@as(ex.StyleId, @enumFromInt(0)), new.e.node(new.e.root).style);
     // y changed to z: a new object, nothing carried.
     var edited = try parseLatex("x+z", .math);
     defer edited.deinit();

@@ -25,7 +25,6 @@ const Affine = geom.Affine;
 const Id = ex.Id;
 const Kind = ex.Kind;
 const Resolver = cascade.Resolver;
-const FaceSet = faces_mod.FaceSet;
 const Face = faces_mod.Face;
 
 pub const Item = union(enum) {
@@ -91,7 +90,6 @@ pub const Missing = struct { object: Id, cp: u21 };
 pub const Layout = struct {
     a: Allocator,
     r: *const Resolver,
-    faces: FaceSet,
     /// Show empty fields as holes.
     editing: bool = false,
     /// Characters no face had.
@@ -111,8 +109,9 @@ pub const Layout = struct {
 
     /// The math axis, mm, for text of cap height `cap`: from the math
     /// face's MATH table, else about a half cap.
-    fn axis(l: *const Layout, cap: f64) f64 {
-        const f = l.faces.get("math") orelse return 0.36 * cap;
+    fn axis(l: *const Layout, id: Id, cap: f64) f64 {
+        const fs = l.r.faces(l.a, id) catch return 0.36 * cap;
+        const f = fs.get("math") orelse return 0.36 * cap;
         const ax = f.mathAxis() orelse return 0.36 * cap;
         return ax / faces_mod.capUnits(f) * cap;
     }
@@ -198,6 +197,7 @@ pub const Layout = struct {
         var out: Laid = .{};
         const shape = param.as(param.Shape, l.r.get(id, .shape));
         const named = l.r.get(id, .face).name;
+        const fs = try l.r.faces(l.a, id);
         const grow = @max(0, l.val(id, .weight)) * cap / 2;
         const slant = l.val(id, .slant);
         var x: f64 = 0;
@@ -207,7 +207,7 @@ pub const Layout = struct {
         var run_face: ?faces_mod.Choice = null;
         while (true) {
             const cp_opt = it.nextCodepoint();
-            const choice: ?faces_mod.Choice = if (cp_opt) |cp| faces_mod.choose(l.faces, named, kind, shape, cp) else null;
+            const choice: ?faces_mod.Choice = if (cp_opt) |cp| faces_mod.choose(fs, named, kind, shape, cp) else null;
             if (cp_opt != null and choice == null) {
                 try l.missing.append(a, .{ .object = id, .cp = cp_opt.? });
             }
@@ -314,7 +314,7 @@ pub const Layout = struct {
         var out: Laid = .{};
         switch (param.as(param.FractionForm, l.r.get(id, .fraction_form))) {
             .stacked => {
-                const ax = l.axis(cap);
+                const ax = l.axis(id, cap);
                 const t = l.val(id, .rule_thickness) * cap;
                 const over = l.val(id, .rule_overhang) * cap;
                 const w = @max(num.width, den.width) + 2 * over;
@@ -377,7 +377,7 @@ pub const Layout = struct {
         return out;
     }
 
-    fn layLargeOp(l: *Layout, id: Id, cap0: f64, cap: f64, style: cascade.Style) !Laid {
+    fn layLargeOp(l: *Layout, id: Id, cap0: f64, cap: f64, style: cascade.TexStyle) !Laid {
         const e = l.r.e;
         const a = l.a;
         const display = switch (param.as(param.OpSize, l.r.get(id, .op_size))) {
@@ -389,7 +389,7 @@ pub const Layout = struct {
         var op = try l.symbol(id, e.node(id).text, size, .large_op);
         // Centred on the axis.
         if (!op.ink.isEmpty()) {
-            const dy = l.axis(cap) - (op.ink.y0 + op.ink.y1) / 2;
+            const dy = l.axis(id, cap) - (op.ink.y0 + op.ink.y1) / 2;
             op.transform(Affine.translate(0, dy));
             op.height = @max(0, op.ink.y1);
             op.depth = @max(0, -op.ink.y0);
@@ -488,7 +488,7 @@ pub const Layout = struct {
         const a = l.a;
         const node = e.node(id);
         const body = try l.lay(e.slot(id, .body), cap0);
-        const ax = l.axis(cap);
+        const ax = l.axis(id, cap);
         const half = @max(body.height - ax, ax + body.depth) + 0.1 * cap;
         const gap = l.val(id, .fence_gap) * cap;
         const mode = param.as(param.FenceSize, l.r.get(id, .fence_size));

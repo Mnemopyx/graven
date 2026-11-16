@@ -52,12 +52,12 @@ pub const Options = struct {
     editing: bool = false,
 };
 
-/// Sets the expression `r` resolves on `g`, its faces `faces`; from `a`
-/// (an arena suits).
-pub fn set(a: Allocator, r: *const Resolver, faces: faces_mod.FaceSet, g: ground_mod.Ground, opts: Options) !Set {
+/// Sets the expression `r` resolves (its faces from its style contexts)
+/// on `g`; from `a` (an arena suits).
+pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options) !Set {
     const e = r.e;
     const top = e.node(e.root).items.items;
-    var lay: layout.Layout = .{ .a = a, .r = r, .faces = faces, .editing = opts.editing };
+    var lay: layout.Layout = .{ .a = a, .r = r, .editing = opts.editing };
     const first = g.piece(0, 0) orelse return .{ .items = &.{}, .lines = &.{}, .overflow = top.len > 0, .missing = &.{} };
     const cap = first.cap;
     if (first.stacked) return setStacked(a, r, &lay, g, cap);

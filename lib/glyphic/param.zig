@@ -52,7 +52,17 @@ pub const Def = struct {
     default: Value,
     /// What it decides, in a sentence (shown by the inspector).
     doc: []const u8,
+    /// Whether an element may override it. Style contexts set every
+    /// parameter; an element only its relative scale and placement and the
+    /// structural choices its head offers.
+    element: bool = false,
 };
+
+fn el(d: Def) Def {
+    var x = d;
+    x.element = true;
+    return x;
+}
 
 // Choices, as Zig enums for code and as names for the schema. A choice
 // value is the enum's integer.
@@ -152,22 +162,22 @@ pub const Param = enum {
 };
 
 pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
-    .scale = number(.scale, 0.1, 10, 1, "Size, relative to what its place in the structure gives it."),
-    .shift_x = number(.cap, -4, 4, 0, "Moved right (negative: left)."),
-    .shift_y = number(.cap, -4, 4, 0, "Moved up (negative: down)."),
+    .scale = el(number(.scale, 0.1, 10, 1, "Size, relative to what its place in the structure gives it.")),
+    .shift_x = el(number(.cap, -4, 4, 0, "Moved right (negative: left).")),
+    .shift_y = el(number(.cap, -4, 4, 0, "Moved up (negative: down).")),
     .weight = number(.cap, -0.1, 0.25, 0, "Strokes grown by this in all (half on each side); negative thins them."),
     .slant = number(.degrees, -30, 30, 0, "Leaned right by this angle (negative: left), on top of its face's own slant."),
     .shape = choice(Shape, .upright, "Upright or italic."),
-    .rotate = number(.degrees, -180, 180, 0, "Turned by this angle (anticlockwise) relative to what holds it; on a curved track it turns with the path."),
-    .rotate_pivot = choice(Pivot, .ink_centre, "What it turns about: its box's centre, its ink's centre, its start, or where its baseline starts."),
-    .rotate_space = choice(RotateSpace, .box, "Whether its neighbours make room for its rotated extent, or it turns in its unrotated place."),
+    .rotate = el(number(.degrees, -180, 180, 0, "Turned by this angle (anticlockwise) relative to what holds it; on a curved track it turns with the path.")),
+    .rotate_pivot = el(choice(Pivot, .ink_centre, "What it turns about: its box's centre, its ink's centre, its start, or where its baseline starts.")),
+    .rotate_space = el(choice(RotateSpace, .box, "Whether its neighbours make room for its rotated extent, or it turns in its unrotated place.")),
     .face = .{ .type = .name, .default = .{ .name = "" }, .doc = "The composed font member that sets it (empty: the one its kind and style choose)." },
     .thin_space = number(.cap, 0, 2, 0.24, "The thin space: after a large operator, around punctuation."),
     .medium_space = number(.cap, 0, 2, 0.32, "The medium space: around a binary operator (not in scripts)."),
     .thick_space = number(.cap, 0, 2, 0.40, "The thick space: around a relation (not in scripts)."),
     .column_step = number(.cap, 0.5, 5, 1.5, "In a column, how far down each character is from the one before (a taller object takes more)."),
     .column_space = number(.cap, 0, 5, 0.5, "In a column, how far down a space between words goes."),
-    .break_before = choice(BreakMark, .auto, "Whether the line may break before it: as its neighbours' kinds decide, never, allowed, preferred, or always."),
+    .break_before = el(choice(BreakMark, .auto, "Whether the line may break before it: as its neighbours' kinds decide, never, allowed, preferred, or always.")),
     .relation_break_cost = number(.cost, 0, 10000, 500, "What a break after a relation costs."),
     .binary_break_cost = number(.cost, 0, 10000, 700, "What a break after a binary operator costs."),
     .operator_at_break = choice(OperatorAtBreak, .end, "Where the operator goes at a break: ending the line, starting the next, or both."),
@@ -176,22 +186,22 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .scriptscript_scale = number(.scale, 0.3, 1, 0.5, "Size of a second-level script, relative to text."),
     .sup_raise = number(.cap, 0, 2, 0.5, "How far a superscript's baseline sits above its base's."),
     .sub_drop = number(.cap, 0, 2, 0.24, "How far a subscript's baseline sits below its base's."),
-    .show_sub = choice(SlotShow, .auto, "The subscript or lower limit: shown when it exists, or set shown or hidden."),
-    .show_sup = choice(SlotShow, .auto, "The superscript or upper limit: shown when it exists, or set shown or hidden."),
-    .limits = choice(Limits, .auto, "A large operator's limits: above and below, or beside (auto: above and below in display style)."),
-    .op_size = choice(OpSize, .auto, "A large operator's size variant (auto: display size in display style)."),
+    .show_sub = el(choice(SlotShow, .auto, "The subscript or lower limit: shown when it exists, or set shown or hidden.")),
+    .show_sup = el(choice(SlotShow, .auto, "The superscript or upper limit: shown when it exists, or set shown or hidden.")),
+    .limits = el(choice(Limits, .auto, "A large operator's limits: above and below, or beside (auto: above and below in display style).")),
+    .op_size = el(choice(OpSize, .auto, "A large operator's size variant (auto: display size in display style).")),
     .display_op_scale = number(.scale, 1, 3, 1.5, "How much larger a large operator is set in display size."),
     .limit_gap = number(.cap, 0, 2, 0.15, "Gap between a large operator and its stacked limits."),
-    .fraction_form = choice(FractionForm, .stacked, "Numerator over denominator, with a slash between, or on a diagonal."),
+    .fraction_form = el(choice(FractionForm, .stacked, "Numerator over denominator, with a slash between, or on a diagonal.")),
     .rule_thickness = number(.cap, 0, 0.5, 0.06, "Thickness of a fraction's rule."),
     .rule_overhang = number(.cap, 0, 1, 0.05, "How far a fraction's rule reaches past the wider of its parts."),
     .num_gap = number(.cap, 0, 2, 0.15, "Gap between a numerator and the rule."),
     .den_gap = number(.cap, 0, 2, 0.15, "Gap between the rule and a denominator."),
-    .show_index = choice(SlotShow, .auto, "A radical's index: shown when it exists, or set shown or hidden."),
+    .show_index = el(choice(SlotShow, .auto, "A radical's index: shown when it exists, or set shown or hidden.")),
     .radical_gap = number(.cap, 0, 1, 0.12, "Gap between a radical's bar and what it covers."),
     .radical_rule = number(.cap, 0, 0.5, 0.06, "Thickness of a radical's bar."),
-    .fence_size = choice(FenceSize, .grown, "Delimiters at their natural size, grown to what they hold, or at a set step."),
-    .fence_step = number(.steps, 0, 4, 0, "The size step of delimiters set to a step."),
+    .fence_size = el(choice(FenceSize, .grown, "Delimiters at their natural size, grown to what they hold, or at a set step.")),
+    .fence_step = el(number(.steps, 0, 4, 0, "The size step of delimiters set to a step.")),
     .fence_gap = number(.cap, 0, 1, 0, "Gap inside each delimiter."),
     .accent_raise = number(.cap, -1, 1, 0, "An accent moved up from where it sits on its base."),
     .math_style = choice(MathStyle, .text, "The expression set in display style (large operators, stacked limits) or text style."),

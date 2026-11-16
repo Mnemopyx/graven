@@ -114,6 +114,16 @@ pub const Slot = enum {
     }
 };
 
+/// A style context in the engine (styles.zig).
+pub const StyleId = enum(u32) {
+    none = std.math.maxInt(u32),
+    _,
+
+    pub fn index(id: StyleId) usize {
+        return @intFromEnum(id);
+    }
+};
+
 /// TeX's atom classes, recorded for export.
 pub const Atom = enum { ord, op, bin, rel, open, close, punct, inner };
 pub const Syntax = enum { none, latex, typst };
@@ -146,12 +156,16 @@ pub const Node = struct {
     items: std.ArrayList(Id) = .empty,
     /// A structure's rows.
     slots: std.EnumArray(Slot, Id) = .initFill(.none),
+    /// What it overrides of its style, in the limited ways an element
+    /// may (see `param.Def.element`).
     overrides: std.ArrayList(Override) = .empty,
+    /// The style context applied to it (and what it holds), if any.
+    style: StyleId = .none,
     tags: Tags = .{},
     live: bool = true,
 };
 
-pub const Error = Allocator.Error || param.Error || error{ NotARow, NotAStructure, NoSuchSlot, Dead };
+pub const Error = Allocator.Error || param.Error || error{ NotARow, NotAStructure, NoSuchSlot, Dead, NotForElements };
 
 /// One expression (a math region of a legend).
 pub const Expr = struct {
@@ -160,9 +174,6 @@ pub const Expr = struct {
     strings: std.heap.ArenaAllocator,
     nodes: std.ArrayList(Node) = .empty,
     root: Id = .none,
-    /// The legend level of the cascade: rules for this expression as a
-    /// whole, or for its objects of a kind ("every n").
-    legend: std.ArrayList(@import("cascade.zig").Rule) = .empty,
 
     pub fn init(gpa: Allocator) Allocator.Error!Expr {
         var e: Expr = .{ .gpa = gpa, .strings = .init(gpa) };
@@ -176,7 +187,6 @@ pub const Expr = struct {
             n.overrides.deinit(e.gpa);
         }
         e.nodes.deinit(e.gpa);
-        e.legend.deinit(e.gpa);
         e.strings.deinit();
     }
 
@@ -280,8 +290,11 @@ pub const Expr = struct {
         while (it.next()) |s| if (s.value.* != .none) e.end(s.value.*);
     }
 
-    /// Sets a parameter on an object (its object-level override).
+    /// Sets a parameter on an object, overriding its style. Only the
+    /// parameters an element may override are taken (mostly its relative
+    /// scale); the rest belong to style contexts.
     pub fn set(e: *Expr, id: Id, p: Param, v: Value) Error!void {
+        if (!param.def(p).element) return error.NotForElements;
         try param.check(p, v);
         const val: Value = if (v == .name) .{ .name = try e.str(v.name) } else v;
         const n = e.node(id);
@@ -342,7 +355,7 @@ test "ids are stable: removing or moving one leaves the rest, overrides travel" 
     const b = try e.leaf(.variable, "b");
     const c = try e.leaf(.variable, "c");
     for ([_]Id{ a, b, c }) |x| try e.append(e.root, x);
-    try e.set(c, .weight, param.num(0.02));
+    try e.set(c, .scale, param.num(1.2));
     e.remove(b);
     try testing.expect(!e.node(b).live);
     try testing.expectEqualSlices(Id, &.{ a, c }, e.node(e.root).items.items);
@@ -351,10 +364,12 @@ test "ids are stable: removing or moving one leaves the rest, overrides travel" 
     try e.append(e.root, f);
     e.detach(c);
     try e.append(e.slot(f, .num), c);
-    try testing.expectEqual(@as(f32, 0.02), e.override(c, .weight).?.number);
+    try testing.expectEqual(@as(f32, 1.2), e.override(c, .scale).?.number);
     try testing.expectEqual(f, e.holder(c).?.structure);
     try testing.expectEqual(Slot.num, e.holder(c).?.slot);
-    try testing.expectError(param.Error.OutOfRange, e.set(c, .weight, param.num(3)));
-    e.clear(c, .weight);
-    try testing.expectEqual(null, e.override(c, .weight));
+    try testing.expectError(param.Error.OutOfRange, e.set(c, .scale, param.num(30)));
+    // Its face, weight or spacing are its style's, not its own.
+    try testing.expectError(error.NotForElements, e.set(c, .weight, param.num(0.02)));
+    e.clear(c, .scale);
+    try testing.expectEqual(null, e.override(c, .scale));
 }

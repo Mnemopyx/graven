@@ -3,9 +3,10 @@
 //!
 //! Stage 1, the object model: legends' math as conceptual objects with
 //! stable identities, named slots, overrides and tags (expr.zig); every
-//! decision a typed parameter (param.zig) resolved through a cascade of
-//! font defaults, package, style, legend and object, with rules for
-//! objects of a kind (cascade.zig); the context an object's place gives it
+//! decision a typed parameter (param.zig) resolved through style contexts
+//! an application configures in the engine and applies to elements or
+//! groups (styles.zig), with rules for objects of a kind, an element
+//! overriding only in a limited way (cascade.zig); the context an object's place gives it
 //! (math style, script level), derived and never stored; Tab's stops,
 //! heads and fields in field order (stops.zig); where an expression may
 //! break (breaks.zig).
@@ -39,6 +40,7 @@ pub const faces = @import("faces.zig");
 pub const layout = @import("layout.zig");
 pub const setting = @import("setting.zig");
 pub const symbols = @import("symbols.zig");
+pub const styles = @import("styles.zig");
 pub const entry = @import("entry.zig");
 pub const latex = @import("latex.zig");
 pub const typst = @import("typst.zig");
@@ -51,6 +53,8 @@ pub const Kind = expr.Kind;
 pub const Param = param.Param;
 pub const Value = param.Value;
 pub const Resolver = cascade.Resolver;
+pub const Engine = styles.Engine;
+pub const StyleId = expr.StyleId;
 pub const Rule = cascade.Rule;
 pub const Stop = stops.Stop;
 
@@ -86,65 +90,82 @@ test "Leibniz: math style and script level come from the structure" {
     var e = try Expr.init(testing.allocator);
     defer e.deinit();
     const l = try samples.leibniz(&e);
-    // Set in display style.
-    try e.legend.append(e.gpa, .{ .param = .math_style, .value = of(param.MathStyle.display) });
-    var r = Resolver.init(&e, .{});
-    try testing.expectEqual(cascade.Style.display, r.root);
-    try testing.expectEqual(cascade.Style.text, r.context(l.pi).style);
+    // Set in display style: a style context applied to the expression.
+    var g = Engine.init(testing.allocator);
+    defer g.deinit();
+    const display = try g.addStyle("display", .none);
+    try g.set(display, .math_style, of(param.MathStyle.display));
+    try g.apply(&e, e.root, display);
+    var r = Resolver.init(&g, &e, &.{});
+    try testing.expectEqual(cascade.TexStyle.display, r.root);
+    try testing.expectEqual(cascade.TexStyle.text, r.context(l.pi).style);
     try testing.expect(r.context(l.four).cramped);
     try testing.expectEqual(@as(u2, 1), r.context(l.n_limit).script_level);
     try testing.expect(r.context(l.n_limit).cramped);
     // The exponent in a numerator: text style for the numerator, script for the exponent.
-    try testing.expectEqual(cascade.Style.script, r.context(l.n_exponent).style);
+    try testing.expectEqual(cascade.TexStyle.script, r.context(l.n_exponent).style);
     try testing.expectEqual(@as(u2, 0), r.context(l.n_den).script_level);
     // In text style everything sits a level lower.
-    e.legend.clearRetainingCapacity();
-    r = Resolver.init(&e, .{});
-    try testing.expectEqual(cascade.Style.script, r.context(l.pi).style);
+    try g.apply(&e, e.root, .none);
+    r = Resolver.init(&g, &e, &.{});
+    try testing.expectEqual(cascade.TexStyle.script, r.context(l.pi).style);
     try testing.expectEqual(@as(u2, 2), r.context(l.n_exponent).script_level);
 }
 
-test "the cascade: each level over the last, the most specific rule within one, and who set it" {
+test "style contexts: innermost applied first, each before its base, an element only in its limited ways" {
     var e = try Expr.init(testing.allocator);
     defer e.deinit();
     const l = try samples.leibniz(&e);
-    const package = [_]Rule{
-        .{ .selector = .{ .kind = .variable }, .param = .shape, .value = of(param.Shape.italic) },
-        .{ .selector = .{ .kind = .variable }, .param = .scale, .value = num(1.2) },
-        .{ .selector = .{ .kind = .variable, .script_level = 1 }, .param = .scale, .value = num(1.1) },
-        .{ .selector = .{ .kind = .variable }, .param = .weight, .value = num(0.01) },
-    };
-    const style = [_]Rule{
-        .{ .param = .weight, .value = num(0.03) },
-    };
-    try e.legend.append(e.gpa, .{ .selector = .{ .symbol = "n" }, .param = .weight, .value = num(0.04) });
-    try e.legend.append(e.gpa, .{ .param = .math_style, .value = of(param.MathStyle.display) });
-    try e.set(l.n_den, .weight, num(0.05));
-    const r = Resolver.init(&e, .{ .package = &package, .style = &style });
+    var g = Engine.init(testing.allocator);
+    defer g.deinit();
+    // A package as a base context; a style built on it; a context for this
+    // legend applied to the expression; one applied to a single element.
+    const package = try g.addStyle("package", .none);
+    try g.setFor(package, .{ .kind = .variable }, .shape, of(param.Shape.italic));
+    try g.setFor(package, .{ .kind = .variable }, .scale, num(1.2));
+    try g.setFor(package, .{ .kind = .variable, .script_level = 1 }, .scale, num(1.1));
+    try g.setFor(package, .{ .kind = .variable }, .weight, num(0.01));
+    const style = try g.addStyle("label", package);
+    try g.set(style, .weight, num(0.03));
+    const legend = try g.addStyle("this legend", .none);
+    try g.setFor(legend, .{ .symbol = "n" }, .weight, num(0.04));
+    try g.set(legend, .math_style, of(param.MathStyle.display));
+    const heavy = try g.addStyle("heavy", .none);
+    try g.set(heavy, .weight, num(0.06));
+    try g.apply(&e, e.root, legend);
+    try g.apply(&e, l.summand, heavy);
+    // The label style reaches the expression from outside (its track).
+    const r = Resolver.init(&g, &e, &.{style});
 
-    // From the package, for its kind.
-    var v = r.resolve(l.n_den, .shape);
+    // From the package, through the style's base.
+    var v = r.resolve(l.n_limit, .shape);
     try testing.expectEqual(param.Shape.italic, param.as(param.Shape, v.value));
-    try testing.expectEqual(cascade.Level.package, v.level);
-    // π is not a variable: the font default.
+    try testing.expectEqual(cascade.From.style, v.from);
+    try testing.expectEqual(package, v.style);
+    // π is not a variable: the default.
     v = r.resolve(l.pi, .shape);
-    try testing.expectEqual(cascade.Level.font, v.level);
-    try testing.expectEqual(param.Shape.upright, param.as(param.Shape, v.value));
-    // The more specific rule wins within the package, whatever its order.
+    try testing.expectEqual(cascade.From.default, v.from);
+    // The more specific rule wins within a context, whatever its order.
     try testing.expectEqual(@as(f32, 1.1), r.get(l.n_limit, .scale).number);
-    try testing.expectEqual(@as(f32, 1.1), r.get(l.n_exponent, .scale).number);
     try testing.expectEqual(@as(f32, 1.2), r.get(l.n_den, .scale).number);
-    // Weight: the style's general rule over the package's rule for variables;
-    // the legend's "every n" over the style; the object over all.
+    // Weight: the style's general value over its base's rule for
+    // variables; the legend's "every n" over the style; the context
+    // applied to the summand over the legend's, for what it holds.
     try testing.expectEqual(@as(f32, 0.03), r.get(l.pi, .weight).number);
-    try testing.expectEqual(cascade.Level.legend, r.resolve(l.n_limit, .weight).level);
     try testing.expectEqual(@as(f32, 0.04), r.get(l.n_limit, .weight).number);
-    v = r.resolve(l.n_den, .weight);
-    try testing.expectEqual(cascade.Level.object, v.level);
-    try testing.expectEqual(@as(f32, 0.05), v.value.number);
-    // Clearing the override gives the legend's value back.
-    e.clear(l.n_den, .weight);
-    try testing.expectEqual(@as(f32, 0.04), r.get(l.n_den, .weight).number);
+    try testing.expectEqual(legend, r.resolve(l.n_limit, .weight).style);
+    try testing.expectEqual(@as(f32, 0.06), r.get(l.n_den, .weight).number);
+    try testing.expectEqual(heavy, r.resolve(l.n_exponent, .weight).style);
+    // An element overrides its scale; not its weight, which is its style's.
+    try e.set(l.n_den, .scale, num(1.5));
+    v = r.resolve(l.n_den, .scale);
+    try testing.expectEqual(cascade.From.element, v.from);
+    try testing.expectError(error.NotForElements, e.set(l.n_den, .weight, num(0.05)));
+    // Cleared, the style's value again.
+    e.clear(l.n_den, .scale);
+    try testing.expectEqual(@as(f32, 1.2), r.get(l.n_den, .scale).number);
+    // Faces come from the contexts too, the innermost naming a role first.
+    try testing.expectEqual(@as(usize, 0), (try r.faces(testing.allocator, l.pi)).members.len);
 }
 
 test "a field turns relative to what holds it, set on the object or by a rule" {
@@ -152,12 +173,16 @@ test "a field turns relative to what holds it, set on the object or by a rule" {
     defer e.deinit();
     const l = try samples.leibniz(&e);
     // Every fraction in this legend stood on end; one turned its own way.
-    try e.legend.append(e.gpa, .{ .selector = .{ .kind = .fraction }, .param = .rotate, .value = num(90) });
+    var g = Engine.init(testing.allocator);
+    defer g.deinit();
+    const turned = try g.addStyle("turned", .none);
+    try g.setFor(turned, .{ .kind = .fraction }, .rotate, num(90));
+    try g.apply(&e, e.root, turned);
     try e.set(l.summand, .rotate, num(-45));
     try e.set(l.summand, .rotate_pivot, of(param.Pivot.baseline_start));
-    const r = Resolver.init(&e, .{});
+    const r = Resolver.init(&g, &e, &.{});
     try testing.expectEqual(@as(f32, 90), r.get(l.pi_over_4, .rotate).number);
-    try testing.expectEqual(cascade.Level.legend, r.resolve(l.pi_over_4, .rotate).level);
+    try testing.expectEqual(turned, r.resolve(l.pi_over_4, .rotate).style);
     try testing.expectEqual(@as(f32, -45), r.get(l.summand, .rotate).number);
     try testing.expectEqual(param.Pivot.baseline_start, param.as(param.Pivot, r.get(l.summand, .rotate_pivot)));
     // By default a turned object takes its rotated room, turning about its ink.
@@ -175,7 +200,9 @@ test "Leibniz: Tab's stops, heads before fields, in field order" {
     var e = try Expr.init(testing.allocator);
     defer e.deinit();
     const l = try samples.leibniz(&e);
-    const r = Resolver.init(&e, .{});
+    var g = Engine.init(testing.allocator);
+    defer g.deinit();
+    const r = Resolver.init(&g, &e, &.{});
     const s = try stops.list(testing.allocator, &r);
     defer testing.allocator.free(s);
     var want: std.ArrayList(Stop) = .empty;
@@ -203,7 +230,9 @@ test "a radical's index is toggled from its head, kept while hidden" {
     const rad = try e.structure(.radical, "√", "");
     try e.append(e.root, rad);
     try e.append(e.slot(rad, .body), try e.leaf(.variable, "x"));
-    var r = Resolver.init(&e, .{});
+    var g = Engine.init(testing.allocator);
+    defer g.deinit();
+    var r = Resolver.init(&g, &e, &.{});
     const a = testing.allocator;
     var s = try stops.list(a, &r);
     try expectStops(&.{ .{ .head = rad }, .{ .field = e.slot(rad, .body) } }, s);
@@ -222,8 +251,9 @@ test "a radical's index is toggled from its head, kept while hidden" {
     try testing.expectEqual(idx, (try stops.toggle(&e, &r, rad, .index)).?);
     try testing.expectEqual(@as(usize, 1), e.node(idx).items.items.len);
     // A style can hide indexes; the object's own setting still wins.
-    const hide = [_]Rule{.{ .selector = .{ .kind = .radical }, .param = .show_index, .value = of(param.SlotShow.hidden) }};
-    r = Resolver.init(&e, .{ .style = &hide });
+    const hide = try g.addStyle("no indexes", .none);
+    try g.setFor(hide, .{ .kind = .radical }, .show_index, of(param.SlotShow.hidden));
+    r = Resolver.init(&g, &e, &.{hide});
     try testing.expect(stops.shown(&r, rad, .index));
     e.clear(rad, .show_index);
     try testing.expect(!stops.shown(&r, rad, .index));
@@ -234,7 +264,9 @@ test "Leibniz: breaks after relations and binary operators, never inside structu
     var e = try Expr.init(testing.allocator);
     defer e.deinit();
     const l = try samples.leibniz(&e);
-    var r = Resolver.init(&e, .{});
+    var g = Engine.init(testing.allocator);
+    defer g.deinit();
+    var r = Resolver.init(&g, &e, &.{});
     const a = testing.allocator;
     var c = try breaks.candidates(a, &r);
     // After each =, and after −, +, −, but not after the last + (before ⋯).
@@ -251,8 +283,9 @@ test "Leibniz: breaks after relations and binary operators, never inside structu
     const top = e.node(e.root).items.items;
     const after_eq = top[std.mem.indexOfScalar(Id, top, l.second_eq).? + 1];
     try e.set(after_eq, .break_before, of(param.BreakMark.forbid));
-    const pkg = [_]Rule{.{ .param = .relation_break_cost, .value = num(900) }};
-    r = Resolver.init(&e, .{ .package = &pkg });
+    const pkg = try g.addStyle("dear relations", .none);
+    try g.set(pkg, .relation_break_cost, num(900));
+    r = Resolver.init(&g, &e, &.{pkg});
     c = try breaks.candidates(a, &r);
     defer a.free(c);
     try testing.expectEqual(@as(usize, 5), c.len);
