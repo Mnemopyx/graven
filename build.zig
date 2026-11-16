@@ -163,7 +163,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // The font search tool: graven-fonts index | search | show.
+    // The font tool: graven-fonts index | search | show | families | install | remove | convert.
     const fonts_tool = b.addExecutable(.{
         .name = "graven-fonts",
         .root_module = b.createModule(.{
@@ -210,7 +210,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext, sketch }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, engine, layout, samples, config, fontsearch, richtext, sketch, fonts_local }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).

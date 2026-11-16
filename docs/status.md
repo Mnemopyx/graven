@@ -125,9 +125,14 @@ Fields are made off the drawing thread, by up to 4 worker threads (one fewer tha
 
 The status bar shows the average frame time over the last 30 s (building and drawing the UI, from the start of the frame to its end); `GRAVEN_FRAME_LOG=1` prints each frame's.
 
-## Font management (stage 1 of 5 built)
+## Font management (stages 1 and 2 of 5 built)
 
-Decided 2026-11-15 (blueprint, "Font management"): Graven reads the system's fonts, keeps a library of its own (a folder it owns, not the OS font folder; "install for other apps" a separate step), searches remote repositories through several access methods, and stores what it fetches as plain sfnt with a provenance record beside it. Stages: 1 containers (built: WOFF/WOFF2 to sfnt, `graven-fonts convert`); 2 the library (add, remove, list, provenance, the `library` source); 3 remote sources (repository list, access methods, catalogue cache, unmeasured records); 4 repositories (Fontsource, Google Fonts, GitHub releases, CTAN, URL manifests); 5 the Fonts window.
+Decided 2026-11-15, revised 2026-11-16 to the owner's model (blueprint, "Font management"): system fonts and user fonts are scanned into one index, each face marked system or user, and the local interface groups faces by typeface family. Font files are installed as user fonts, in the OS's per-user font folder where every application finds them (no separate Graven library); system fonts are never written. Remote search and fetch go through plugins or access methods on URLs, and fetched fonts may be installed for the user. Everything installed is plain sfnt, with a provenance record in Graven's data folder.
+
+- **Built, stage 1 (containers):** WOFF/WOFF2 to sfnt, `graven-fonts convert`.
+- **Built, stage 2 (local fonts):** `Record.scope` (system, user, remote; index version 6); `fontsearch.families` (faces by typographic family, ordered by width, weight and slope, counted by scope); the local source scans the user's folder (Linux `$XDG_DATA_HOME/fonts` or `~/.local/share/fonts`, and `~/.fonts`; macOS `~/Library/Fonts`; Windows `%LOCALAPPDATA%\Microsoft\Windows\Fonts`) as user fonts. `graven-fonts families [words] [--user|--system]`, `install FILE... [--replace]` (converted, named Family-Style.ext, a same-content repeat does nothing, a different user font of the same family and style kept unless `--replace`, a system font of the same name noted), `remove "Family" [--style S]` (user fonts only); `show` gives scope and provenance (`installed-fonts.json` in `$XDG_DATA_HOME/graven`, `~/Library/Application Support/Graven` or `%LOCALAPPDATA%\Graven`: SHA-256 of the file and of what came in, from, container, date, family, style, licence as stated).
+- **Not yet:** Windows per-user fonts also need a registry entry (HKCU `...\Windows NT\CurrentVersion\Fonts`) for applications to see them; not written, and not tested on Windows or macOS. The Fonts window still lists faces one per row and has no Install or Remove (stage 5).
+- **Next stages:** 3 remote search and fetch (plugins, access methods on URLs, catalogue cache, unmeasured records); 4 repositories (Fontsource, Google Fonts, GitHub releases, CTAN, URL manifests); 5 the Fonts window (families, scope, Install and Remove, remote sources, provenance).
 
 ## Planned: engine v2
 

@@ -1,5 +1,6 @@
-//! graven-fonts: find, compare and choose fonts. A separate tool on the font
-//! search library; Graven opens it, and it runs on its own.
+//! graven-fonts: find, compare and choose fonts, and manage the user's own:
+//! install font files as user fonts, remove them. A separate tool on the
+//! font search library; Graven opens it, and it runs on its own.
 //!
 //! This is the local source: installed fonts, found in the system's font
 //! folders, described once and kept in an index cache, so later runs only
@@ -28,6 +29,18 @@ const usage =
     \\         --limit N            (default 25)
     \\       graven-fonts show "Family" [--style "Style"]
     \\         Everything known about a font, with where each fact came from.
+    \\       graven-fonts families [words] [--user | --system]
+    \\         Lists typeface families (whose name holds every word), each with
+    \\         its faces by width, weight and slope, and whether they are
+    \\         system or user fonts.
+    \\       graven-fonts install FILE... [--replace]
+    \\         Installs font files as user fonts, in the user's font folder where
+    \\         every application finds them. WOFF and WOFF2 are converted to
+    \\         .ttf or .otf; files are named by family and style; where each
+    \\         came from is recorded. A user font of the same family and style
+    \\         is kept unless --replace.
+    \\       graven-fonts remove "Family" [--style "Style"]
+    \\         Removes user fonts (system fonts are never touched).
     \\       graven-fonts convert FILE... [--to FOLDER]
     \\         Writes each font as a plain sfnt: WOFF and WOFF2 unwrapped, named
     \\         .ttf (TrueType outlines), .otf (CFF), .ttc or .otc (collections).
@@ -145,7 +158,7 @@ fn search(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8
         const r = &all[h.index];
         var label_buf: [160]u8 = undefined;
         const label = std.fmt.bufPrint(&label_buf, "{s} {s}", .{ r.family, r.style }) catch r.family;
-        try w.print("{s:<44}", .{label});
+        try w.print("{s:<44}{s}", .{ label, if (r.scope == .user) " user" else "     " });
         if (h.distance) |d| try w.print("  {d:>5.2}", .{d});
         if (q.covers.len > 0 and h.missing > 0) try w.print("  missing {d}", .{h.missing});
         try w.print("  {s}{s}{s}{s}  {s}, embed {s}\n", .{
@@ -174,7 +187,13 @@ fn show(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) 
     var out = std.Io.File.stdout().writerStreaming(init.io, &buf);
     const w = &out.interface;
     try w.print("{s} {s}  ({s})\n", .{ r.family, r.style, r.full_name });
-    try w.print("  source: {s}, {s} (face {d})\n", .{ r.source, r.location, r.index });
+    try w.print("  {s} font: {s} (face {d})\n", .{ @tagName(r.scope), r.location, r.index });
+    if (r.scope == .user) {
+        if (local.provenanceOf(local.loadProvenance(init.io, a), r.location)) |p| {
+            try w.print("  installed by Graven on {s}, from {s} ({s})\n", .{ p.installed, p.from, p.container });
+            try w.print("    sha-256 {s}\n", .{p.sha256});
+        }
+    }
     try w.print("  weight {d:.0}, width {d:.0}%, {s}, slant {d:.1}°{s}{s}{s}\n", .{ r.weight, r.width, if (r.italic) "italic" else "upright", r.slant, if (r.monospace) ", monospaced" else "", if (r.variable) ", variable" else "", if (r.math) ", MATH table" else "" });
     try w.print("  {d} glyphs, {d} codepoint ranges, units per em {d}\n", .{ r.glyphs, r.coverage.len, r.upem });
     const m = r.measures;
@@ -193,6 +212,106 @@ fn show(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) 
     if (r.licence_url.len > 0) try w.print("    {s}\n", .{r.licence_url});
     try w.writeAll("  These are the terms as the font states them. Graven does not set them,\n  and does not judge what your own licence allows.\n");
     try w.flush();
+}
+
+fn families(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    var scope: ?fs.Scope = null;
+    var words: std.ArrayList([]const u8) = .empty;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--user")) scope = .user else if (std.mem.eql(u8, arg, "--system")) scope = .system else try words.append(a, arg);
+    }
+    const all = try indexedRecords(init, a);
+    var subset: std.ArrayList(usize) = .empty;
+    for (all, 0..) |r, i| {
+        if (scope) |sc| if (r.scope != sc) continue;
+        const ok = for (words.items) |word| {
+            if (std.ascii.findIgnoreCase(r.family, word) == null) break false;
+        } else true;
+        if (ok) try subset.append(a, i);
+    }
+    const fams = try fs.families(a, all, subset.items);
+    if (fams.len == 0) {
+        std.debug.print("No families match.\n", .{});
+        return;
+    }
+    var buf: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(init.io, &buf);
+    const w = &out.interface;
+    var faces: usize = 0;
+    for (fams) |f| {
+        const where: []const u8 = if (f.user > 0 and f.system > 0) "system and user" else if (f.user > 0) "user" else "system";
+        try w.print("{s}  ({d} face{s}, {s})\n", .{ f.name, f.faces.len, if (f.faces.len == 1) "" else "s", where });
+        for (f.faces) |i| {
+            const r = &all[i];
+            try w.print("    {s:<28} weight {d:>4.0}", .{ r.style, r.weight });
+            if (r.width != 100) try w.print(", width {d:.0}%", .{r.width});
+            try w.print("{s}\n", .{if (r.scope == .user and f.system > 0) "  (user)" else ""});
+        }
+        faces += f.faces.len;
+    }
+    try w.print("{d} famil{s}, {d} face{s}\n", .{ fams.len, if (fams.len == 1) "y" else "ies", faces, if (faces == 1) "" else "s" });
+    try w.flush();
+}
+
+fn install(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    var replace = false;
+    var files: std.ArrayList([]const u8) = .empty;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--replace")) replace = true else try files.append(a, arg);
+    }
+    if (files.items.len == 0) return error.Usage;
+    const cwd = std.Io.Dir.cwd();
+    var records = try indexedRecords(init, a);
+    var failed = false;
+    var changed = false;
+    for (files.items) |path| {
+        const bytes = cwd.readFileAlloc(init.io, path, a, .limited(256 << 20)) catch |e| {
+            std.debug.print("{s}: cannot read ({s})\n", .{ path, @errorName(e) });
+            failed = true;
+            continue;
+        };
+        const from = cwd.realPathFileAlloc(init.io, path, a) catch path;
+        const r = local.install(init.io, init.gpa, a, bytes, records, .{ .from = from, .replace = replace }) catch |e| {
+            switch (e) {
+                error.NotAFont => std.debug.print("{s}: not a font Graven can read\n", .{path}),
+                error.Conflict => std.debug.print("{s}: a different user font of the same family and style is installed; --replace installs over it\n", .{path}),
+                else => std.debug.print("{s}: not installed ({s})\n", .{ path, @errorName(e) }),
+            }
+            failed = true;
+            continue;
+        };
+        const what: []const u8 = switch (r.outcome) {
+            .installed => "installed as",
+            .replaced => "installed over the earlier one, as",
+            .already_installed => "already installed, as",
+        };
+        std.debug.print("{s} {s}: {s} {s}{s}\n", .{ r.family, r.style, what, r.file, if (r.container.isWeb()) " (converted from web font)" else "" });
+        if (r.shadows_system) std.debug.print("  note: a system font has the same family and style; applications may take either\n", .{});
+        if (r.outcome != .already_installed) {
+            changed = true;
+            // Later files in this run see it.
+            records = try buildIndex(init, a, true);
+        }
+    }
+    if (changed) _ = try buildIndex(init, a, false);
+    if (failed) std.process.exit(1);
+}
+
+fn remove(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len == 0) return error.Usage;
+    var style: ?[]const u8 = null;
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--style")) style = args[2];
+    const records = try indexedRecords(init, a);
+    const files = local.remove(init.io, init.gpa, a, records, args[0], style) catch |e| {
+        switch (e) {
+            error.NotInstalled => std.debug.print("No user font is called \"{s}\"{s}{s}.\n", .{ args[0], if (style != null) " " else "", style orelse "" }),
+            error.SystemFont => std.debug.print("\"{s}\" is a system font: Graven does not remove system fonts.\n", .{args[0]}),
+            else => return e,
+        }
+        std.process.exit(1);
+    };
+    for (files) |f| std.debug.print("removed {s}\n", .{f});
+    _ = try buildIndex(init, a, false);
 }
 
 fn convert(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
@@ -264,6 +383,9 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "search")) return search(init, a, rest);
         if (std.mem.eql(u8, cmd, "show") and rest.len >= 1) return show(init, a, rest);
         if (std.mem.eql(u8, cmd, "convert") and rest.len >= 1) return convert(init, a, rest);
+        if (std.mem.eql(u8, cmd, "families")) return families(init, a, rest);
+        if (std.mem.eql(u8, cmd, "install") and rest.len >= 1) return install(init, a, rest);
+        if (std.mem.eql(u8, cmd, "remove") and rest.len >= 1) return remove(init, a, rest);
     }
     std.debug.print("{s}", .{usage});
     std.process.exit(2);

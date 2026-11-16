@@ -1,6 +1,13 @@
-//! The local source: installed fonts, found in the system's font folders,
-//! described once and kept in an index cache, so later scans describe only
-//! files that are new or changed. Shared by graven-fonts and Graven.
+//! The local source: the fonts on this machine, system and user, found in
+//! the system's font folders, described once and kept in an index cache, so
+//! later scans describe only files that are new or changed. Shared by
+//! graven-fonts and Graven.
+//!
+//! System fonts are read only. User fonts live in the OS's per-user font
+//! folder, where every application finds them; Graven installs font files
+//! there (WOFF and WOFF2 converted to plain sfnt first) and removes them,
+//! and keeps a provenance record for each file it installs in its own data
+//! folder, so the font folder holds only fonts.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,6 +17,7 @@ const font = @import("graven_font");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 pub const Record = fs.Record;
+pub const Scope = fs.Scope;
 
 fn env(name: [*:0]const u8) ?[]const u8 {
     const v = std.c.getenv(name) orelse return null;
@@ -17,25 +25,35 @@ fn env(name: [*:0]const u8) ?[]const u8 {
     return if (s.len == 0) null else s;
 }
 
-/// The system's font folders, user folders included.
-pub fn fontDirs(a: Allocator) ![]const []const u8 {
-    var dirs: std.ArrayList([]const u8) = .empty;
+/// A font folder and whose fonts it holds.
+pub const FontDir = struct { path: []const u8, scope: Scope };
+
+/// The folder user fonts are installed in: the OS's per-user font folder.
+pub fn userDir(a: Allocator) ![]const u8 {
+    const home = env("HOME");
+    return switch (builtin.os.tag) {
+        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Microsoft", "Windows", "Fonts" }),
+        .macos => std.fs.path.join(a, &.{ home orelse return error.NoHome, "Library", "Fonts" }),
+        else => if (env("XDG_DATA_HOME")) |x| std.fs.path.join(a, &.{ x, "fonts" }) else std.fs.path.join(a, &.{ home orelse return error.NoHome, ".local", "share", "fonts" }),
+    };
+}
+
+/// The system's font folders, each with its scope; the user's own first.
+pub fn fontDirs(a: Allocator) ![]const FontDir {
+    var dirs: std.ArrayList(FontDir) = .empty;
+    if (userDir(a)) |u| try dirs.append(a, .{ .path = u, .scope = .user }) else |_| {}
     const home = env("HOME");
     switch (builtin.os.tag) {
-        .windows => {
-            try dirs.append(a, try std.fs.path.join(a, &.{ env("WINDIR") orelse "C:\\Windows", "Fonts" }));
-            if (env("LOCALAPPDATA")) |l| try dirs.append(a, try std.fs.path.join(a, &.{ l, "Microsoft", "Windows", "Fonts" }));
-        },
+        .windows => try dirs.append(a, .{ .path = try std.fs.path.join(a, &.{ env("WINDIR") orelse "C:\\Windows", "Fonts" }), .scope = .system }),
         .macos => {
-            try dirs.append(a, "/System/Library/Fonts");
-            try dirs.append(a, "/Library/Fonts");
-            if (home) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, "Library", "Fonts" }));
+            try dirs.append(a, .{ .path = "/System/Library/Fonts", .scope = .system });
+            try dirs.append(a, .{ .path = "/Library/Fonts", .scope = .system });
         },
         else => {
-            try dirs.append(a, "/usr/share/fonts");
-            try dirs.append(a, "/usr/local/share/fonts");
-            if (env("XDG_DATA_HOME")) |x| try dirs.append(a, try std.fs.path.join(a, &.{ x, "fonts" })) else if (home) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, ".local", "share", "fonts" }));
-            if (home) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, ".fonts" }));
+            // The older per-user folder, still read by fontconfig.
+            if (home) |h| try dirs.append(a, .{ .path = try std.fs.path.join(a, &.{ h, ".fonts" }), .scope = .user });
+            try dirs.append(a, .{ .path = "/usr/share/fonts", .scope = .system });
+            try dirs.append(a, .{ .path = "/usr/local/share/fonts", .scope = .system });
         },
     }
     return dirs.items;
@@ -54,7 +72,19 @@ pub fn indexPath(a: Allocator) ![]const u8 {
     };
 }
 
-fn isFontFile(name: []const u8) bool {
+/// Where Graven keeps the provenance of the fonts it installed.
+pub fn provenancePath(a: Allocator) ![]const u8 {
+    return switch (builtin.os.tag) {
+        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Graven", "installed-fonts.json" }),
+        .macos => std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, "Library", "Application Support", "Graven", "installed-fonts.json" }),
+        else => if (env("XDG_DATA_HOME")) |x|
+            std.fs.path.join(a, &.{ x, "graven", "installed-fonts.json" })
+        else
+            std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, ".local", "share", "graven", "installed-fonts.json" }),
+    };
+}
+
+pub fn isFontFile(name: []const u8) bool {
     const ext = std.fs.path.extension(name);
     for ([_][]const u8{ ".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2" }) |e| {
         if (std.ascii.eqlIgnoreCase(ext, e)) return true;
@@ -78,8 +108,9 @@ pub const Report = struct {
     path: []const u8 = "",
 };
 
-/// Finds installed fonts, describes what is new or changed since the
-/// saved index, saves the index, and returns its records (from `a`).
+/// Finds the system's and the user's fonts, describes what is new or
+/// changed since the saved index, saves the index, and returns its records
+/// (from `a`).
 pub fn build(io: Io, gpa: Allocator, a: Allocator, report: ?*Report) ![]Record {
     const old = load(io, a);
     // Old records by location, to keep those whose file has not changed.
@@ -91,19 +122,26 @@ pub fn build(io: Io, gpa: Allocator, a: Allocator, report: ?*Report) ![]Record {
     }
     var rep: Report = .{};
     var records: std.ArrayList(Record) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     for (try fontDirs(a)) |root| {
-        var dir = Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch continue;
+        var dir = Io.Dir.cwd().openDir(io, root.path, .{ .iterate = true }) catch continue;
         defer dir.close(io);
         var walker = try dir.walk(gpa);
         defer walker.deinit();
         while (walker.next(io) catch null) |entry| {
             if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!isFontFile(entry.basename)) continue;
-            const path = try std.fs.path.join(a, &.{ root, entry.path });
+            const path = try std.fs.path.join(a, &.{ root.path, entry.path });
+            // A folder inside another (XDG_DATA_HOME under /usr/share) once.
+            if ((try seen.getOrPut(a, path)).found_existing) continue;
             const st = entry.dir.statFile(io, entry.basename, .{}) catch continue;
             const stamp: u64 = st.size ^ (@as(u64, @truncate(@as(u96, @bitCast(st.mtime.toNanoseconds())))) *% 0x9E3779B97F4A7C15);
             if (by_path.get(path)) |list| if (list.items.len > 0 and list.items[0].stamp == stamp) {
-                try records.appendSlice(a, list.items);
+                for (list.items) |r| {
+                    var k = r;
+                    k.scope = root.scope;
+                    try records.append(a, k);
+                }
                 rep.kept += list.items.len;
                 continue;
             };
@@ -119,10 +157,11 @@ pub fn build(io: Io, gpa: Allocator, a: Allocator, report: ?*Report) ![]Record {
                     continue;
                 };
                 defer face.deinit();
-                const r = fs.describe(a, face, "local", path, @intCast(k), stamp) catch {
+                var r = fs.describe(a, face, "local", path, @intCast(k), stamp) catch {
                     rep.failed += 1;
                     continue;
                 };
+                r.scope = root.scope;
                 try records.append(a, r);
                 rep.described += 1;
             }
@@ -140,4 +179,234 @@ pub fn build(io: Io, gpa: Allocator, a: Allocator, report: ?*Report) ![]Record {
 /// The bytes of the file a local record describes, from `gpa`.
 pub fn read(io: Io, gpa: Allocator, r: *const Record) ![]u8 {
     return Io.Dir.cwd().readFileAlloc(io, r.location, gpa, .limited(256 << 20));
+}
+
+// Provenance ---------------------------------------------------------------------
+
+/// Where an installed file came from.
+pub const Provenance = struct {
+    /// The installed file's SHA-256, in hex.
+    sha256: []const u8,
+    /// The installed file's path.
+    file: []const u8,
+    /// Where it was installed from: a path, or a URL.
+    from: []const u8,
+    /// The container it came in (truetype, cff, collection, woff, woff2).
+    container: []const u8,
+    /// The SHA-256 of what came in, when it was converted.
+    original_sha256: []const u8 = "",
+    /// The day it was installed, YYYY-MM-DD.
+    installed: []const u8,
+    family: []const u8,
+    style: []const u8,
+    /// The licence as the font states it (name IDs 13 and 14).
+    licence_text: []const u8 = "",
+    licence_url: []const u8 = "",
+};
+
+const ProvenanceFile = struct { version: u32 = 1, fonts: []const Provenance };
+
+/// The provenance records, from `a`; empty when there are none.
+pub fn loadProvenance(io: Io, a: Allocator) []Provenance {
+    const path = provenancePath(a) catch return &.{};
+    const bytes = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch return &.{};
+    const f = std.json.parseFromSliceLeaky(ProvenanceFile, a, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return &.{};
+    return @constCast(f.fonts);
+}
+
+fn saveProvenance(io: Io, gpa: Allocator, a: Allocator, list: []const Provenance) !void {
+    const path = try provenancePath(a);
+    if (std.fs.path.dirname(path)) |d| try Io.Dir.cwd().createDirPath(io, d);
+    const out = try std.json.Stringify.valueAlloc(gpa, ProvenanceFile{ .fonts = list }, .{ .whitespace = .indent_2 });
+    defer gpa.free(out);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out });
+}
+
+/// The provenance of an installed file, when Graven installed it.
+pub fn provenanceOf(list: []const Provenance, file: []const u8) ?*const Provenance {
+    for (list) |*p| if (std.mem.eql(u8, p.file, file)) return p;
+    return null;
+}
+
+fn sha256Hex(a: Allocator, bytes: []const u8) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.allocPrint(a, "{x}", .{&digest});
+}
+
+fn today(io: Io, a: Allocator) ![]const u8 {
+    const secs = Io.Timestamp.now(io, .real).toSeconds();
+    const day = (std.time.epoch.EpochSeconds{ .secs = @intCast(@max(secs, 0)) }).getEpochDay();
+    const yd = day.calculateYearDay();
+    const md = yd.calculateMonthDay();
+    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}", .{ yd.year, md.month.numeric(), md.day_index + 1 });
+}
+
+// Installing and removing ----------------------------------------------------------
+
+/// A file name for a font: its family and style, with what file systems
+/// refuse (and spaces) left out.
+fn fileName(a: Allocator, family: []const u8, style: ?[]const u8, ext: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for ([_]?[]const u8{ family, style }, 0..) |part, k| {
+        const p = part orelse continue;
+        if (p.len == 0) continue;
+        if (k > 0 and out.items.len > 0) try out.append(a, '-');
+        for (p) |c| switch (c) {
+            ' ', '/', '\\', ':', '*', '?', '"', '<', '>', '|' => {},
+            else => if (c >= 0x20 and c != 0x7F) try out.append(a, c),
+        };
+    }
+    if (out.items.len == 0) try out.appendSlice(a, "font");
+    try out.appendSlice(a, ext);
+    return out.items;
+}
+
+pub const InstallOptions = struct {
+    /// Where the font came from, for its provenance (a path or a URL).
+    from: []const u8,
+    /// Install over a user font of the same family and style.
+    replace: bool = false,
+};
+
+pub const Installed = struct {
+    outcome: enum { installed, already_installed, replaced },
+    file: []const u8,
+    family: []const u8,
+    style: []const u8,
+    faces: u32,
+    container: font.container.Kind,
+    /// User fonts it replaced (their files, now removed).
+    replaced: []const []const u8 = &.{},
+    /// A system font with the same family and style: applications may take
+    /// either.
+    shadows_system: bool = false,
+};
+
+pub const InstallError = error{
+    /// Not a font Graven can read.
+    NotAFont,
+    /// A user font of the same family and style is installed, with other
+    /// contents; `InstallOptions.replace` installs over it.
+    Conflict,
+};
+
+/// Installs a font's bytes as a user font: converted to plain sfnt, named
+/// by family and style, written into the user's font folder, and its
+/// provenance recorded. `records` is the current index (for conflicts).
+/// Strings from `a`. The index is not rebuilt here.
+pub fn install(io: Io, gpa: Allocator, a: Allocator, bytes: []const u8, records: []const Record, opts: InstallOptions) !Installed {
+    const kind = font.container.kindOf(bytes);
+    const sfnt = font.container.toSfnt(a, bytes) catch return InstallError.NotAFont;
+    const faces = font.container.faceCount(sfnt);
+    if (faces == 0) return InstallError.NotAFont;
+    const face = font.Face.init(gpa, sfnt, 0) catch return InstallError.NotAFont;
+    defer face.deinit();
+    const desc = try fs.describe(a, face, "local", "", 0, 0);
+    const ext = font.container.extension(sfnt).?;
+    const dir = try userDir(a);
+    const name = try fileName(a, desc.family, if (faces == 1) desc.style else null, ext);
+    const file = try std.fs.path.join(a, &.{ dir, name });
+    const sha = try sha256Hex(a, sfnt);
+
+    var result: Installed = .{ .outcome = .installed, .file = file, .family = desc.family, .style = desc.style, .faces = faces, .container = kind };
+    // The same file already there: nothing to do but record where it came from.
+    const existing: ?[]u8 = Io.Dir.cwd().readFileAlloc(io, file, a, .limited(256 << 20)) catch null;
+    if (existing) |e| if (std.mem.eql(u8, try sha256Hex(a, e), sha)) {
+        result.outcome = .already_installed;
+    };
+    // Other user fonts of the same family and style, and system ones.
+    var others: std.ArrayList([]const u8) = .empty;
+    for (records) |r| {
+        if (!std.ascii.eqlIgnoreCase(r.family, desc.family) or !std.ascii.eqlIgnoreCase(r.style, desc.style)) continue;
+        switch (r.scope) {
+            .system => result.shadows_system = true,
+            .user => if (!std.mem.eql(u8, r.location, file)) try others.append(a, r.location),
+            .remote => {},
+        }
+    }
+    if (result.outcome != .already_installed and (others.items.len > 0 or existing != null)) {
+        if (!opts.replace) return InstallError.Conflict;
+        result.outcome = .replaced;
+    }
+    if (result.outcome != .already_installed) {
+        try Io.Dir.cwd().createDirPath(io, dir);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = sfnt });
+        for (others.items) |o| Io.Dir.cwd().deleteFile(io, o) catch {};
+        result.replaced = others.items;
+    }
+
+    // Provenance: this file's record replaces any earlier one, and those of
+    // the files it replaced go.
+    var list: std.ArrayList(Provenance) = .empty;
+    for (loadProvenance(io, a)) |p| {
+        if (std.mem.eql(u8, p.file, file)) continue;
+        const gone = for (others.items) |o| {
+            if (std.mem.eql(u8, p.file, o)) break true;
+        } else false;
+        if (!gone) try list.append(a, p);
+    }
+    const converted = kind.isWeb();
+    try list.append(a, .{
+        .sha256 = sha,
+        .file = file,
+        .from = opts.from,
+        .container = @tagName(kind),
+        .original_sha256 = if (converted) try sha256Hex(a, bytes) else "",
+        .installed = try today(io, a),
+        .family = desc.family,
+        .style = desc.style,
+        .licence_text = desc.licence_text,
+        .licence_url = desc.licence_url,
+    });
+    try saveProvenance(io, gpa, a, list.items);
+    return result;
+}
+
+pub const RemoveError = error{
+    /// No font of that name is installed.
+    NotInstalled,
+    /// Only system fonts have that name: Graven does not remove them.
+    SystemFont,
+};
+
+/// Removes the user fonts of `family` (and `style`, when given): their
+/// files, and their provenance. A collection goes whole. Returns the files
+/// removed (from `a`). The index is not rebuilt here.
+pub fn remove(io: Io, gpa: Allocator, a: Allocator, records: []const Record, family: []const u8, style: ?[]const u8) ![]const []const u8 {
+    var files: std.ArrayList([]const u8) = .empty;
+    var system = false;
+    for (records) |r| {
+        if (!std.ascii.eqlIgnoreCase(r.family, family)) continue;
+        if (style) |s| if (!std.ascii.eqlIgnoreCase(r.style, s)) continue;
+        if (r.scope != .user) {
+            system = system or r.scope == .system;
+            continue;
+        }
+        const dup = for (files.items) |f| {
+            if (std.mem.eql(u8, f, r.location)) break true;
+        } else false;
+        if (!dup) try files.append(a, r.location);
+    }
+    if (files.items.len == 0) return if (system) RemoveError.SystemFont else RemoveError.NotInstalled;
+    for (files.items) |f| try Io.Dir.cwd().deleteFile(io, f);
+    var list: std.ArrayList(Provenance) = .empty;
+    for (loadProvenance(io, a)) |p| {
+        const gone = for (files.items) |f| {
+            if (std.mem.eql(u8, p.file, f)) break true;
+        } else false;
+        if (!gone) try list.append(a, p);
+    }
+    try saveProvenance(io, gpa, a, list.items);
+    return files.items;
+}
+
+test "file names come from family and style, without what file systems refuse" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("SourceSerif4-SemiboldItalic.otf", try fileName(a, "Source Serif 4", "Semibold Italic", ".otf"));
+    try std.testing.expectEqualStrings("NotoSans.ttc", try fileName(a, "Noto: Sans", null, ".ttc"));
+    try std.testing.expectEqualStrings("font.ttf", try fileName(a, "", "", ".ttf"));
+    try std.testing.expectEqualStrings("Ünïcode-Bold.ttf", try fileName(a, "Ünïcode", "Bold", ".ttf"));
 }

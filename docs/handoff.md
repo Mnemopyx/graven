@@ -38,7 +38,13 @@ Built: distance fields per glyph at three resolutions, error correction, an atla
 - **Built:** math mode (`$…$`) in track text; packages `stix-two` and `libertinus` (`scripts/fetch-fonts.py`); member weights matched by a named stroke; per-member size, shift and weight.
 - **Open:** a weight control in the Fonts window; glyphs composed from parts; real radicals and big operators from the MATH table.
 
-## 7. Manufacture
+## 7. Font management (stages 1 and 2 of 5 built)
+
+- **Built:** WOFF/WOFF2 read and converted to .ttf/.otf; system and user fonts scanned with their scope; families; `graven-fonts families`, `install`, `remove`, `convert`.
+- **Next:** stage 3, remote search and fetch through plugins and access methods on URLs, fetched fonts installable as user fonts. Then the repositories (Fontsource first) and the Fonts window by family with Install and Remove.
+- **Open:** the Windows registry entry for per-user fonts.
+
+## 8. Manufacture
 
 - **Built:** colour FDM: layer stacks, exact 2D slabs, 3MF (per colour or per band, either bed side), STEP through OCCT.
 - **Open:** Manufacture mode in the GUI; nozzle-width and other design-rule checks; slicer filament assignment.

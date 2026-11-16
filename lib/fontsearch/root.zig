@@ -101,10 +101,17 @@ pub const Measures = struct {
     serif: ?bool = null,
 };
 
+/// Where a face lives, for what may be done to it: system fonts are read
+/// only; user fonts are the user's own, installed and removed through
+/// Graven or elsewhere; remote faces are in a repository, not on this
+/// machine until fetched.
+pub const Scope = enum { system, user, remote };
+
 /// One face, described.
 pub const Record = struct {
     /// The source it came from ("local", or an addon's name).
     source: []const u8,
+    scope: Scope = .system,
     /// Where the source keeps it (a path, a URL, a repository ID).
     location: []const u8,
     /// The face's index within its file.
@@ -467,6 +474,80 @@ pub fn find(records: []const Record, family: []const u8, style: ?[]const u8) ?us
     return null;
 }
 
+/// A typeface family: the faces that share a typographic family name.
+pub const Family = struct {
+    /// The family's name, as its first face gives it.
+    name: []const u8,
+    /// Its faces, as indexes into the records: by width, then weight, then
+    /// upright before italic.
+    faces: []const usize,
+    /// How many of its faces are of each scope.
+    system: u32 = 0,
+    user: u32 = 0,
+    remote: u32 = 0,
+};
+
+/// The families of `records` (or of those `subset` names, in its terms),
+/// named without regard to case, sorted by name. Lists from `gpa`; free
+/// with `freeFamilies`.
+pub fn families(gpa: Allocator, records: []const Record, subset: ?[]const usize) Allocator.Error![]Family {
+    var by_name: std.StringHashMapUnmanaged(usize) = .empty;
+    defer {
+        var it = by_name.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        by_name.deinit(gpa);
+    }
+    var lists: std.ArrayList(std.ArrayList(usize)) = .empty;
+    defer lists.deinit(gpa);
+    errdefer for (lists.items) |*l| l.deinit(gpa);
+    var out: std.ArrayList(Family) = .empty;
+    defer out.deinit(gpa);
+    const count = if (subset) |s| s.len else records.len;
+    for (0..count) |j| {
+        const i = if (subset) |s| s[j] else j;
+        const r = &records[i];
+        const key = try std.ascii.allocLowerString(gpa, r.family);
+        const e = try by_name.getOrPut(gpa, key);
+        if (e.found_existing) gpa.free(key) else {
+            e.value_ptr.* = out.items.len;
+            try out.append(gpa, .{ .name = r.family, .faces = &.{} });
+            try lists.append(gpa, .empty);
+        }
+        const f = &out.items[e.value_ptr.*];
+        try lists.items[e.value_ptr.*].append(gpa, i);
+        switch (r.scope) {
+            .system => f.system += 1,
+            .user => f.user += 1,
+            .remote => f.remote += 1,
+        }
+    }
+    const Order = struct {
+        recs: []const Record,
+        fn face(o: @This(), a: usize, b: usize) bool {
+            const x = o.recs[a];
+            const y = o.recs[b];
+            if (x.width != y.width) return x.width < y.width;
+            if (x.weight != y.weight) return x.weight < y.weight;
+            if (x.italic != y.italic) return !x.italic;
+            return std.ascii.lessThanIgnoreCase(x.style, y.style);
+        }
+        fn family(_: void, a: Family, b: Family) bool {
+            return std.ascii.lessThanIgnoreCase(a.name, b.name);
+        }
+    };
+    for (out.items, lists.items) |*f, *l| {
+        std.mem.sort(usize, l.items, Order{ .recs = records }, Order.face);
+        f.faces = try l.toOwnedSlice(gpa);
+    }
+    std.mem.sort(Family, out.items, {}, Order.family);
+    return out.toOwnedSlice(gpa);
+}
+
+pub fn freeFamilies(gpa: Allocator, list: []Family) void {
+    for (list) |f| gpa.free(f.faces);
+    gpa.free(list);
+}
+
 /// A face's family companions: its italic, bold and bold italic, as
 /// indexes into `records`.
 pub const Variants = struct {
@@ -533,7 +614,7 @@ pub const Source = struct {
 
 /// The version of the index's layout; a cache of another is described
 /// afresh.
-pub const index_version: u32 = 5;
+pub const index_version: u32 = 6;
 
 const IndexFile = struct {
     version: u32,
@@ -634,6 +715,30 @@ test "search filters, covers characters, and ranks by likeness" {
     defer testing.allocator.free(ofl);
     try testing.expectEqual(1, ofl.len);
     try testing.expectEqual(2, find(&records, "alpha sans", "regular").?);
+}
+
+test "faces group into families, by width, weight and slope" {
+    const recs = [_]Record{
+        .{ .source = "", .location = "", .family = "Serif", .style = "Bold", .weight = 700 },
+        .{ .source = "", .location = "", .family = "Mono", .style = "Regular", .scope = .user },
+        .{ .source = "", .location = "", .family = "serif", .style = "Italic", .weight = 400, .italic = true, .scope = .user },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Regular", .weight = 400 },
+        .{ .source = "", .location = "", .family = "Serif", .style = "Condensed", .weight = 400, .width = 75 },
+    };
+    const fams = try families(testing.allocator, &recs, null);
+    defer freeFamilies(testing.allocator, fams);
+    try testing.expectEqual(2, fams.len);
+    try testing.expectEqualStrings("Mono", fams[0].name);
+    try testing.expectEqual(1, fams[0].user);
+    try testing.expectEqualStrings("Serif", fams[1].name);
+    try testing.expectEqualSlices(usize, &.{ 4, 3, 2, 0 }, fams[1].faces);
+    try testing.expectEqual(3, fams[1].system);
+    try testing.expectEqual(1, fams[1].user);
+    // A subset: only the faces a search found.
+    const some = try families(testing.allocator, &recs, &.{ 0, 1 });
+    defer freeFamilies(testing.allocator, some);
+    try testing.expectEqual(2, some.len);
+    try testing.expectEqualSlices(usize, &.{0}, some[1].faces);
 }
 
 test "a face's italic and bolds are found in its family" {
