@@ -6,6 +6,8 @@
 //! Libraries never touch the file system or the console: callers pass bytes in.
 
 const face = @import("face.zig");
+/// Containers: sfnt kinds and outlines, WOFF and WOFF2 unwrapped.
+pub const container = @import("container.zig");
 
 pub const Face = face.Face;
 pub const faceCount = face.faceCount;
@@ -15,6 +17,7 @@ pub const Error = face.Error;
 test {
     @import("std").testing.refAllDecls(@This());
     _ = face;
+    _ = container;
 }
 
 test "x-height is measured from x's outline" {

@@ -6,6 +6,7 @@
 const std = @import("std");
 const hb = @import("hb");
 const geom = @import("graven_geom");
+const container = @import("container.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -16,8 +17,9 @@ const Outline = geom.Outline;
 pub const Error = error{ InvalidFont, OutOfMemory };
 
 /// How many faces a font file holds (more than one for a collection, such
-/// as .ttc); 0 when it is not a font.
+/// as .ttc); 0 when it is not a font. WOFF and WOFF2 count too.
 pub fn faceCount(bytes: []const u8) u32 {
+    if (container.kindOf(bytes).isWeb()) return container.faceCount(bytes);
     const blob = hb.hb_blob_create(bytes.ptr, @intCast(bytes.len), hb.HB_MEMORY_MODE_READONLY, null, null) orelse return 0;
     defer hb.hb_blob_destroy(blob);
     return hb.hb_face_count(blob);
@@ -38,10 +40,11 @@ pub const Face = struct {
     arena: std.heap.ArenaAllocator,
 
     /// Loads face `index` from a copy of `bytes`; the caller keeps its own.
+    /// WOFF and WOFF2 are unwrapped to sfnt first (HarfBuzz reads sfnt only).
     pub fn init(gpa: Allocator, bytes: []const u8, index: u32) Error!*Face {
         const self = try gpa.create(Face);
         errdefer gpa.destroy(self);
-        const copy = try gpa.dupe(u8, bytes);
+        const copy = if (container.kindOf(bytes).isWeb()) try container.toSfnt(gpa, bytes) else try gpa.dupe(u8, bytes);
         errdefer gpa.free(copy);
 
         const blob = hb.hb_blob_create(copy.ptr, @intCast(copy.len), hb.HB_MEMORY_MODE_READONLY, null, null) orelse return error.OutOfMemory;

@@ -29,6 +29,7 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 - Font search with the `graven-fonts` tool, by name, likeness, character coverage, style, math support, embedding permission and licence.
 - The Fonts window: search, side-by-side and overlay comparison, and composition.
 - Style sizes are given in points.
+- **Web containers:** WOFF and WOFF2 are read wherever a font is (`lib/font/container.zig`; `Face.init` unwraps them, so indexing and labels take them too). WOFF is unwrapped table by table (zlib); WOFF2 decoded (Brotli 1.1.0's C decoder, pinned; the `glyf`/`loca` and `hmtx` transforms reversed; collections, shared tables once). `graven-fonts convert FILE... [--to FOLDER]` stores a font as a plain `.ttf`, `.otf`, `.ttc` or `.otc`, named by its outlines (never converted between kinds). Checked against fontTools on 33 fonts (system fonts and the math packages): every WOFF came back byte-identical, every WOFF2 with the same tables and all 51,786 glyphs point for point. Graven does not write WOFF or WOFF2.
 
 ### Layout model (`lib/layout`)
 
@@ -123,6 +124,10 @@ Fields are made off the drawing thread, by up to 4 worker threads (one fewer tha
 - Frame timing on a dense document.
 
 The status bar shows the average frame time over the last 30 s (building and drawing the UI, from the start of the frame to its end); `GRAVEN_FRAME_LOG=1` prints each frame's.
+
+## Font management (stage 1 of 5 built)
+
+Decided 2026-11-15 (blueprint, "Font management"): Graven reads the system's fonts, keeps a library of its own (a folder it owns, not the OS font folder; "install for other apps" a separate step), searches remote repositories through several access methods, and stores what it fetches as plain sfnt with a provenance record beside it. Stages: 1 containers (built: WOFF/WOFF2 to sfnt, `graven-fonts convert`); 2 the library (add, remove, list, provenance, the `library` source); 3 remote sources (repository list, access methods, catalogue cache, unmeasured records); 4 repositories (Fontsource, Google Fonts, GitHub releases, CTAN, URL manifests); 5 the Fonts window.
 
 ## Planned: engine v2
 

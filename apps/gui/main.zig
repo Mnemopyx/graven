@@ -776,7 +776,7 @@ fn listFonts(gpa: std.mem.Allocator) ![]Font {
         const index = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
         const path = fields.rest();
         const ext = std.fs.path.extension(path);
-        const known = for ([_][]const u8{ ".otf", ".ttf", ".ttc", ".otc" }) |e| {
+        const known = for ([_][]const u8{ ".otf", ".ttf", ".ttc", ".otc", ".woff", ".woff2" }) |e| {
             if (std.ascii.eqlIgnoreCase(ext, e)) break true;
         } else false;
         // Named instances of a variable font carry the instance above bit 16.

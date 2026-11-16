@@ -23,6 +23,27 @@ pub fn build(b: *std.Build) void {
     const hb = hb_c.createModule();
     hb.linkLibrary(harfbuzz);
 
+    // Brotli's decoder (C), for WOFF2 fonts.
+    const brotli_src = b.dependency("brotli", .{}).path("c");
+    const brotli_dec = b.addLibrary(.{
+        .name = "brotlidec",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    brotli_dec.root_module.addIncludePath(brotli_src.path(b, "include"));
+    brotli_dec.root_module.addCSourceFiles(.{
+        .root = brotli_src,
+        .files = &.{
+            "common/constants.c",     "common/context.c",   "common/dictionary.c", "common/platform.c",
+            "common/shared_dictionary.c", "common/transform.c", "dec/bit_reader.c", "dec/decode.c",
+            "dec/huffman.c",          "dec/state.c",
+        },
+    });
+    const brotli_c = b.addTranslateC(.{ .root_source_file = b.path("lib/brotli/brotli.h"), .target = target, .optimize = optimize });
+    brotli_c.addIncludePath(brotli_src.path(b, "include"));
+    const brotli = brotli_c.createModule();
+    brotli.linkLibrary(brotli_dec);
+
     // Libraries, dependencies one way only: geom <- font <- engine <- layout.
     const testdata = b.createModule(.{ .root_source_file = b.path("lib/testdata/root.zig") });
     const geom = b.addModule("graven_geom", .{
@@ -36,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "hb", .module = hb },
+            .{ .name = "brotli", .module = brotli },
             .{ .name = "graven_geom", .module = geom },
             .{ .name = "graven_testdata", .module = testdata },
         },

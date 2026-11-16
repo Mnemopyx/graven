@@ -9,6 +9,12 @@
             .url = "git+https://github.com/harfbuzz/harfbuzz#3df40d9b98d6b32f0e4288d4ecfbb158ddb3a372",
             .hash = "N-V-__8AABCJSwZ_b-_pzs_bdrf6CKkC58JNxsp0b1FfvNqV",
         },
+        // Brotli 1.1.0 (tag v1.1.0, commit ed738e842d2fbdf2d6459e39267a633c4a9b2f5d):
+        // its decoder only, for WOFF2 fonts.
+        .brotli = .{
+            .url = "git+https://github.com/google/brotli#ed738e842d2fbdf2d6459e39267a633c4a9b2f5d",
+            .hash = "N-V-__8AAIgn4APR8Smd_123K4liHh5-u1Vsg83sw_j1xS4Q",
+        },
         // Prebuilt OCCT 8.0.1 for the bridge, x86_64 Linux (glibc), baseline
         // CPU, built with zig 0.17.0 by the OCCT prebuilt workflow; fetched
         // only by -Docct-prebuilt. A package per target: occt_<arch>_<os>_<abi>.

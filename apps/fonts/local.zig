@@ -56,7 +56,7 @@ pub fn indexPath(a: Allocator) ![]const u8 {
 
 fn isFontFile(name: []const u8) bool {
     const ext = std.fs.path.extension(name);
-    for ([_][]const u8{ ".ttf", ".otf", ".ttc", ".otc" }) |e| {
+    for ([_][]const u8{ ".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2" }) |e| {
         if (std.ascii.eqlIgnoreCase(ext, e)) return true;
     }
     return false;

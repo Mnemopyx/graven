@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const fs = @import("graven_fontsearch");
+const font = @import("graven_font");
 const local = @import("local.zig");
 
 const Record = fs.Record;
@@ -27,6 +28,11 @@ const usage =
     \\         --limit N            (default 25)
     \\       graven-fonts show "Family" [--style "Style"]
     \\         Everything known about a font, with where each fact came from.
+    \\       graven-fonts convert FILE... [--to FOLDER]
+    \\         Writes each font as a plain sfnt: WOFF and WOFF2 unwrapped, named
+    \\         .ttf (TrueType outlines), .otf (CFF), .ttc or .otc (collections).
+    \\         Outlines are never converted between kinds. Beside each input
+    \\         unless --to is given; an existing file is not written over.
     \\
     \\Licence terms are shown as each font states them. Graven does not set
     \\them, and does not judge what your own licence allows.
@@ -189,6 +195,60 @@ fn show(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) 
     try w.flush();
 }
 
+fn convert(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    var files: std.ArrayList([]const u8) = .empty;
+    var to: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--to") and i + 1 < args.len) {
+            to = args[i + 1];
+            i += 1;
+        } else try files.append(a, args[i]);
+    }
+    if (files.items.len == 0) return error.Usage;
+    if (to) |d| try cwd.createDirPath(io, d);
+    var failed = false;
+    for (files.items) |path| {
+        const bytes = cwd.readFileAlloc(io, path, init.gpa, .limited(256 << 20)) catch |e| {
+            std.debug.print("{s}: cannot read ({s})\n", .{ path, @errorName(e) });
+            failed = true;
+            continue;
+        };
+        defer init.gpa.free(bytes);
+        const kind = font.container.kindOf(bytes);
+        const sfnt = font.container.toSfnt(init.gpa, bytes) catch |e| {
+            std.debug.print("{s}: not a font Graven can read ({s}, {s})\n", .{ path, @tagName(kind), @errorName(e) });
+            failed = true;
+            continue;
+        };
+        defer init.gpa.free(sfnt);
+        const ext = font.container.extension(sfnt).?;
+        const base = std.fs.path.basename(path);
+        const stem = base[0 .. base.len - std.fs.path.extension(base).len];
+        const dir = to orelse std.fs.path.dirname(path) orelse ".";
+        const out = try std.fs.path.join(a, &.{ dir, try std.mem.concat(a, u8, &.{ stem, ext }) });
+        if (std.mem.eql(u8, out, path)) {
+            std.debug.print("{s}: already a plain {s}, nothing to do\n", .{ path, ext });
+            continue;
+        }
+        if (cwd.statFile(io, out, .{})) |_| {
+            std.debug.print("{s}: {s} exists, not written over\n", .{ path, out });
+            failed = true;
+            continue;
+        } else |_| {}
+        try cwd.writeFile(io, .{ .sub_path = out, .data = sfnt });
+        const faces = font.container.faceCount(sfnt);
+        std.debug.print("{s} ({s}) -> {s}: {s} outlines, {d} face{s}, {d} bytes\n", .{
+            path,                                                @tagName(kind), out, @tagName(font.container.outlinesOf(sfnt, 0)),
+            faces,                                               if (faces == 1) "" else "s",
+            sfnt.len,
+        });
+    }
+    if (failed) std.process.exit(1);
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena.deinit();
@@ -203,6 +263,7 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, cmd, "search")) return search(init, a, rest);
         if (std.mem.eql(u8, cmd, "show") and rest.len >= 1) return show(init, a, rest);
+        if (std.mem.eql(u8, cmd, "convert") and rest.len >= 1) return convert(init, a, rest);
     }
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
