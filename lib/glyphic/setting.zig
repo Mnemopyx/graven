@@ -115,7 +115,7 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
             try ends.append(a, top.len);
         }
         for (ends.items) |en| {
-            const w = width(laid, before, start, en);
+            const w = width(laid, before, start, en) + hyphenWidth(&lay, cands, en, cap);
             const x = piece.fit(lead, w) orelse break;
             const room = @max(piece.openLength() - lead, 1e-9);
             const unused = std.math.clamp(1 - w / room, 0, 1);
@@ -154,6 +154,10 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
             if (k > start) x += before[k];
             for (laid[k].items.items) |it| try items.append(a, onPath(piece, it, x));
             x += laid[k].width;
+            if (k + 1 == en) if (candidateAt(cands, en)) |c| if (c.hyphen) {
+                const h = try lay.hyphen(top[k], cap);
+                for (h.items.items) |it| try items.append(a, onPath(piece, it, x));
+            };
             // The first line's first relation: what follows starts here.
             if (start == 0 and under_relation == null and e.node(top[k]).kind == .relation and k + 1 < top.len) {
                 under_relation = x + before[k + 1] - (at + shift);
@@ -162,9 +166,11 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
         if (start == 0) indent = switch (cont) {
             .own => 0,
             .indent => 2 * cap,
-            .relation => under_relation orelse 2 * cap,
+            // Under the first relation; with none (text), from the start.
+            .relation => under_relation orelse 0,
         };
-        start = en;
+        // A space at the break is dropped: the next line starts after it.
+        start = en + if (candidateAt(cands, en)) |c| c.skip else 0;
     }
     return .{ .items = items.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
 }
@@ -185,7 +191,8 @@ fn setStacked(a: Allocator, r: *const Resolver, lay: *layout.Layout, g: ground_m
     var line_first: usize = 0;
     for (top, 0..) |id, k| {
         const kind = e.node(id).kind;
-        const split = kind == .word or kind == .number or kind == .variable;
+        if (kind == .soft_hyphen) continue;
+        const split = kind == .word or kind == .number or kind == .variable or kind == .space;
         const units: []const layout.Layout.Each = if (split) try lay.layEach(id, cap) else blk: {
             const one = try a.alloc(layout.Layout.Each, 1);
             one[0] = .{ .laid = try lay.lay(id, cap) };
@@ -227,6 +234,20 @@ fn moveItem(it: Item, m: Affine) Item {
         .rule => |ru| .{ .rule = .{ .corners = .{ m.apply(ru.corners[0]), m.apply(ru.corners[1]), m.apply(ru.corners[2]), m.apply(ru.corners[3]) }, .object = ru.object } },
         .hole => |h| .{ .hole = .{ .corners = .{ m.apply(h.corners[0]), m.apply(h.corners[1]), m.apply(h.corners[2]), m.apply(h.corners[3]) }, .object = h.object } },
     };
+}
+
+fn candidateAt(cands: []const breaks.Candidate, index: usize) ?breaks.Candidate {
+    for (cands) |c| if (c.index == index) return c;
+    return null;
+}
+
+/// The hyphen a line ending at `end` adds, when it breaks at a soft hyphen.
+fn hyphenWidth(lay: *layout.Layout, cands: []const breaks.Candidate, end: usize, cap: f64) f64 {
+    const c = candidateAt(cands, end) orelse return 0;
+    if (!c.hyphen) return 0;
+    const e = lay.r.e;
+    const h = lay.hyphen(e.node(e.root).items.items[end - 1], cap) catch return 0;
+    return h.width;
 }
 
 /// The width of top objects [from, to) set together (the space before the

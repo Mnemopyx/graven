@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ex = @import("expr.zig");
+const param = @import("param.zig");
 
 const Allocator = std.mem.Allocator;
 const Expr = ex.Expr;
@@ -61,6 +62,63 @@ pub const Spans = struct {
         return best;
     }
 };
+
+/// The marker the legend parsers put in text for a break allowed there
+/// (`\allowbreak`): a zero-width space.
+pub const allow_mark = "\u{200B}";
+pub const soft_hyphen = "\u{AD}";
+
+/// Text of a legend into `row`: words, spaces (a run of them one object)
+/// and soft hyphens, each its own object, so text breaks between words
+/// and at soft hyphens; an allowed-break mark sets the next object's
+/// break mark. All are tagged as text (source "").
+pub fn textObjects(e: *Expr, spans: *Spans, row: Id, text: []const u8, start: usize) ex.Error!void {
+    const span: Span = .{ .start = @intCast(start), .end = @intCast(start + text.len) };
+    var allow = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const ch = text[i..@min(text.len, i + n)];
+        var kind: Kind = .word;
+        var j = i;
+        if (std.mem.eql(u8, ch, allow_mark)) {
+            allow = true;
+            i += ch.len;
+            continue;
+        } else if (std.mem.eql(u8, ch, soft_hyphen)) {
+            kind = .soft_hyphen;
+            j = i + ch.len;
+        } else if (ch[0] == ' ') {
+            kind = .space;
+            while (j < text.len and text[j] == ' ') j += 1;
+        } else {
+            // A word: up to a space, a soft hyphen or a break mark.
+            while (j < text.len) {
+                if (text[j] == ' ') break;
+                if (std.mem.startsWith(u8, text[j..], soft_hyphen) or std.mem.startsWith(u8, text[j..], allow_mark)) break;
+                j += std.unicode.utf8ByteSequenceLength(text[j]) catch 1;
+            }
+        }
+        const id = try e.leaf(kind, text[i..@min(j, text.len)]);
+        try e.append(row, id);
+        try spans.set(e.gpa, id, span);
+        if (allow) {
+            try e.set(id, .break_before, param.of(param.BreakMark.allow));
+            allow = false;
+        }
+        i = j;
+    }
+}
+
+/// Whether a top-row object is a legend's text (not math).
+pub fn isText(e: *const Expr, id: Id) bool {
+    const n = e.node(id);
+    return switch (n.kind) {
+        .space, .soft_hyphen => true,
+        .word => n.tags.source.len == 0,
+        else => false,
+    };
+}
 
 /// The row a script goes into: the `which` slot of the last object in
 /// `row` (a large operator's limits, a scripts' free slot), or of a new

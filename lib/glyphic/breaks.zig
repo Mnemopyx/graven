@@ -26,6 +26,12 @@ pub const Candidate = struct {
     cost: f32,
     /// A break that must be taken.
     forced: bool = false,
+    /// Objects dropped at the break (a space between words): the next
+    /// line starts after them.
+    skip: u8 = 0,
+    /// The line ends with a hyphen (a break at a soft hyphen, which is the
+    /// object before `index`).
+    hyphen: bool = false,
 };
 
 /// What a break after `left` costs as the kinds decide, or null where they
@@ -47,6 +53,15 @@ pub fn candidates(gpa: Allocator, r: *const Resolver) Allocator.Error![]Candidat
     for (1..items.len) |k| {
         const left = items[k - 1];
         const right = items[k];
+        // Text: at a space (dropped there), after a soft hyphen (drawn).
+        if (r.e.node(right).kind == .space) {
+            try out.append(gpa, .{ .index = k, .before = right, .cost = r.get(right, .space_break_cost).number, .skip = 1 });
+            continue;
+        }
+        if (r.e.node(left).kind == .soft_hyphen) {
+            try out.append(gpa, .{ .index = k, .before = right, .cost = r.get(left, .hyphen_break_cost).number, .hyphen = true });
+            continue;
+        }
         const auto = byKinds(r, left, right);
         const c: ?Candidate = switch (param.as(param.BreakMark, r.get(right, .break_before))) {
             .auto => if (auto) |cost| .{ .index = k, .before = right, .cost = cost } else null,

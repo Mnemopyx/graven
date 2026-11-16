@@ -192,3 +192,23 @@ test "a reparse keeps what was set on the objects that stayed" {
     defer m2.deinit(testing.allocator);
     try testing.expectEqual(null, m2.get(y));
 }
+
+test "legend text: words, spaces and soft hyphens, each an object, read and written back" {
+    var p = try parseLatex("SHIFT LOCK hy\\-phen\\allowbreak AB $x$", .legend);
+    defer p.deinit();
+    const top = p.e.node(p.e.root).items.items;
+    const kinds = [_]ex.Kind{ .word, .space, .word, .space, .word, .soft_hyphen, .word, .word, .space, .variable };
+    try testing.expectEqual(kinds.len, top.len);
+    for (kinds, top) |k, id| try testing.expectEqual(k, p.e.node(id).kind);
+    // \allowbreak: a break allowed before AB.
+    try testing.expect(p.e.override(top[7], .break_before) != null);
+    const back = try latexOut(&p.e, .legend);
+    defer testing.allocator.free(back);
+    try testing.expectEqualStrings("SHIFT LOCK hy\\-phen\\allowbreak AB $x$", back);
+    // Typst writes the soft hyphen as -?, and reads it back.
+    const t = try typstOut(&p.e, .legend);
+    defer testing.allocator.free(t);
+    var q = try parseTypst(t, .legend);
+    defer q.deinit();
+    try expectSame(&p.e, &q.e);
+}

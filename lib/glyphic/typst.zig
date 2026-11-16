@@ -92,6 +92,11 @@ const Parser = struct {
                 start = p.i;
                 continue;
             }
+            if (std.mem.startsWith(u8, p.src[p.i..], "-?")) {
+                try text.appendSlice(p.gpa(), entry.soft_hyphen);
+                p.i += 2;
+                continue;
+            }
             if (c == '\\' and p.i + 1 < p.src.len) {
                 try text.append(p.gpa(), p.src[p.i + 1]);
                 p.i += 2;
@@ -105,9 +110,7 @@ const Parser = struct {
 
     fn flushText(p: *Parser, text: *std.ArrayList(u8), start: usize) ex.Error!void {
         if (text.items.len == 0) return;
-        const w = try p.e.leaf(.word, text.items);
-        try p.e.append(p.e.root, w);
-        try p.mark(w, start);
+        try entry.textObjects(p.e, p.spans, p.e.root, text.items, start);
         text.clearRetainingCapacity();
     }
 
@@ -449,8 +452,11 @@ pub fn write(w: *std.Io.Writer, e: *const Expr, mode: Mode) std.Io.Writer.Error!
     var k: usize = 0;
     while (k < items.len) {
         const n = e.node(items[k]);
-        if (n.kind == .word and n.tags.source.len == 0) {
-            for (n.text) |ch| {
+        if (entry.isText(e, items[k])) {
+            if (e.override(items[k], .break_before)) |v| if (param.as(param.BreakMark, v) == .allow) try w.writeAll(entry.allow_mark);
+            if (n.kind == .soft_hyphen) {
+                try w.writeAll("-?");
+            } else for (n.text) |ch| {
                 if (ch == '$' or ch == '#' or ch == '\\' or ch == '*' or ch == '_') try w.writeByte('\\');
                 try w.writeByte(ch);
             }
@@ -458,7 +464,7 @@ pub fn write(w: *std.Io.Writer, e: *const Expr, mode: Mode) std.Io.Writer.Error!
             continue;
         }
         var end = k;
-        while (end < items.len and !(e.node(items[end]).kind == .word and e.node(items[end]).tags.source.len == 0)) end += 1;
+        while (end < items.len and !entry.isText(e, items[end])) end += 1;
         try w.writeByte('$');
         try wr.items(items[k..end]);
         try w.writeByte('$');
@@ -520,6 +526,8 @@ const Writer = struct {
         const n = e.node(id);
         switch (n.kind) {
             .row => try wr.items(n.items.items),
+            .space => try wr.w.writeAll(n.text),
+            .soft_hyphen => try wr.w.writeAll("-?"),
             .word => {
                 if (std.mem.eql(u8, n.tags.source, "?")) return wr.w.writeAll(n.text);
                 try wr.w.print("\"{s}\"", .{n.text});

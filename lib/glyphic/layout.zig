@@ -126,7 +126,9 @@ pub const Layout = struct {
         const cap = cap0 * l.levelScale(id, ctx.script_level);
         var out: Laid = switch (node.kind) {
             .row => try l.layRow(id, cap0, cap),
-            .number, .variable, .constant, .symbol, .operator, .relation, .punct, .word, .ellipsis => try l.layText(id, node.text, cap, node.kind),
+            .number, .variable, .constant, .symbol, .operator, .relation, .punct, .word, .ellipsis, .space => try l.layText(id, node.text, cap, node.kind),
+            // Nothing, until a line breaks there (see `hyphen`).
+            .soft_hyphen => .{},
             .fraction => try l.layFraction(id, cap0, cap),
             .scripts => try l.layScripts(id, cap0, cap),
             .large_op => try l.layLargeOp(id, cap0, cap, ctx.style),
@@ -187,6 +189,13 @@ pub const Layout = struct {
     }
 
     pub const Each = struct { laid: Laid, space: bool = false };
+
+    /// The hyphen a line broken at soft hyphen `id` ends with.
+    pub fn hyphen(l: *Layout, id: Id, cap0: f64) !Laid {
+        const ctx = l.r.context(id);
+        const cap = cap0 * l.val(id, .scale) * l.levelScale(id, ctx.script_level);
+        return l.layText(id, "-", cap, .word);
+    }
 
     // Text --------------------------------------------------------------------------
 

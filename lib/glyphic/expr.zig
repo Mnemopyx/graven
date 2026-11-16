@@ -44,6 +44,12 @@ pub const Kind = enum {
     /// Upright text inside math (a function name, a word).
     word,
     ellipsis,
+    /// A space between words in text: a place to break, dropped at a
+    /// line's ends.
+    space,
+    /// A soft hyphen in a word: a place to break, drawn as a hyphen only
+    /// when the line breaks there.
+    soft_hyphen,
     // Structures.
     fraction,
     /// A base with scripts.

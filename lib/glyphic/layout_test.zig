@@ -299,3 +299,44 @@ test "a column: a structure stays whole and upright; a full column goes on into 
     try testing.expectEqual(@as(usize, 1), rules);
     try testing.expect(!s.overflow);
 }
+
+test "text breaks between words, the space dropped, and at a soft hyphen, drawn" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var spans: @import("entry.zig").Spans = .{};
+    defer spans.deinit(testing.allocator);
+    // Three words; rows room for two.
+    try @import("latex.zig").parse(&f.e, &spans, "HOD HOD HOD", .legend);
+    const r = f.resolver();
+    var rows: ground.Rows = .{ .a = testing.allocator, .origin = .{ .x = 0, .y = 50 }, .length = 21, .pitch = 6, .count = 3, .cap = 3 };
+    defer rows.deinit();
+    const s = try setting.set(f.arena.allocator(), &r, rows.ground(), .{});
+    try testing.expectEqual(@as(usize, 2), s.lines.len);
+    // The second line starts after the dropped space: at the row's start.
+    try testing.expectEqual(@as(usize, 4), s.lines[1].first);
+    var first_on_second: ?f64 = null;
+    for (s.items) |it| if (it == .glyph and it.glyph.m.f < 50 - 1) {
+        if (first_on_second == null) first_on_second = it.glyph.m.e;
+    };
+    try near(0, first_on_second.?);
+    try testing.expect(!s.overflow);
+}
+
+test "a soft hyphen breaks a word, the line ending with a hyphen" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var spans: @import("entry.zig").Spans = .{};
+    defer spans.deinit(testing.allocator);
+    try @import("latex.zig").parse(&f.e, &spans, "HODA\\-HODA", .legend);
+    const r = f.resolver();
+    var rows: ground.Rows = .{ .a = testing.allocator, .origin = .{ .x = 0, .y = 50 }, .length = 20, .pitch = 6, .count = 3, .cap = 3 };
+    defer rows.deinit();
+    const s = try setting.set(f.arena.allocator(), &r, rows.ground(), .{});
+    try testing.expectEqual(@as(usize, 2), s.lines.len);
+    // The hyphen was asked for (the test fonts have none: reported missing).
+    var hyphen = false;
+    for (s.missing) |m| if (m.cp == '-') {
+        hyphen = true;
+    };
+    try testing.expect(hyphen);
+}
