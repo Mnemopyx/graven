@@ -120,6 +120,25 @@ test "the cascade: each level over the last, the most specific rule within one, 
     try testing.expectEqual(@as(f32, 0.04), r.get(l.n_den, .weight).number);
 }
 
+test "a field turns relative to what holds it, set on the object or by a rule" {
+    var e = try Expr.init(testing.allocator);
+    defer e.deinit();
+    const l = try samples.leibniz(&e);
+    // Every fraction in this legend stood on end; one turned its own way.
+    try e.legend.append(e.gpa, .{ .selector = .{ .kind = .fraction }, .param = .rotate, .value = num(90) });
+    try e.set(l.summand, .rotate, num(-45));
+    try e.set(l.summand, .rotate_pivot, of(param.Pivot.baseline_start));
+    const r = Resolver.init(&e, .{});
+    try testing.expectEqual(@as(f32, 90), r.get(l.pi_over_4, .rotate).number);
+    try testing.expectEqual(cascade.Level.legend, r.resolve(l.pi_over_4, .rotate).level);
+    try testing.expectEqual(@as(f32, -45), r.get(l.summand, .rotate).number);
+    try testing.expectEqual(param.Pivot.baseline_start, param.as(param.Pivot, r.get(l.summand, .rotate_pivot)));
+    // By default a turned object takes its rotated room, turning about its ink.
+    try testing.expectEqual(param.RotateSpace.box, param.as(param.RotateSpace, r.get(l.pi_over_4, .rotate_space)));
+    try testing.expectEqual(param.Pivot.ink_centre, param.as(param.Pivot, r.get(l.pi_over_4, .rotate_pivot)));
+    try testing.expectError(param.Error.OutOfRange, e.set(l.pi, .rotate, num(270)));
+}
+
 fn expectStops(want: []const Stop, got: []const Stop) !void {
     try testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try testing.expect(w.eql(g));

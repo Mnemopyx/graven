@@ -69,6 +69,10 @@ pub const OpSize = enum { auto, text, display };
 pub const FractionForm = enum { stacked, slashed, diagonal };
 pub const FenceSize = enum { natural, grown, step };
 pub const MathStyle = enum { display, text };
+/// What a rotated object turns about.
+pub const Pivot = enum { centre, ink_centre, start, baseline_start };
+/// Whether a rotated object takes its rotated extent in its row.
+pub const RotateSpace = enum { box, none };
 
 fn names(comptime E: type) []const []const u8 {
     const fields = @typeInfo(E).@"enum".field_names;
@@ -99,6 +103,11 @@ pub const Param = enum {
     slant,
     shape,
     face,
+    // Rotation relative to the parent's frame (the ground's path frame
+    // comes on top, at layout).
+    rotate,
+    rotate_pivot,
+    rotate_space,
     // Breaking.
     break_before,
     relation_break_cost,
@@ -141,6 +150,9 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .weight = number(.cap, -0.1, 0.25, 0, "Strokes grown by this in all (half on each side); negative thins them."),
     .slant = number(.degrees, -30, 30, 0, "Leaned right by this angle (negative: left), on top of its face's own slant."),
     .shape = choice(Shape, .upright, "Upright or italic."),
+    .rotate = number(.degrees, -180, 180, 0, "Turned by this angle (anticlockwise) relative to what holds it; on a curved track it turns with the path."),
+    .rotate_pivot = choice(Pivot, .ink_centre, "What it turns about: its box's centre, its ink's centre, its start, or where its baseline starts."),
+    .rotate_space = choice(RotateSpace, .box, "Whether its neighbours make room for its rotated extent, or it turns in its unrotated place."),
     .face = .{ .type = .name, .default = .{ .name = "" }, .doc = "The composed font member that sets it (empty: the one its kind and style choose)." },
     .break_before = choice(BreakMark, .auto, "Whether the line may break before it: as its neighbours' kinds decide, never, allowed, preferred, or always."),
     .relation_break_cost = number(.cost, 0, 10000, 500, "What a break after a relation costs."),
