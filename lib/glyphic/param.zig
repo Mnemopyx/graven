@@ -112,6 +112,9 @@ pub const Param = enum {
     thin_space,
     medium_space,
     thick_space,
+    // Columns.
+    column_step,
+    column_space,
     // Breaking.
     break_before,
     relation_break_cost,
@@ -162,6 +165,8 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .thin_space = number(.cap, 0, 2, 0.24, "The thin space: after a large operator, around punctuation."),
     .medium_space = number(.cap, 0, 2, 0.32, "The medium space: around a binary operator (not in scripts)."),
     .thick_space = number(.cap, 0, 2, 0.40, "The thick space: around a relation (not in scripts)."),
+    .column_step = number(.cap, 0.5, 5, 1.5, "In a column, how far down each character is from the one before (a taller object takes more)."),
+    .column_space = number(.cap, 0, 5, 0.5, "In a column, how far down a space between words goes."),
     .break_before = choice(BreakMark, .auto, "Whether the line may break before it: as its neighbours' kinds decide, never, allowed, preferred, or always."),
     .relation_break_cost = number(.cost, 0, 10000, 500, "What a break after a relation costs."),
     .binary_break_cost = number(.cost, 0, 10000, 700, "What a break after a binary operator costs."),

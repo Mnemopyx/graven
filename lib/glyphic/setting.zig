@@ -60,6 +60,7 @@ pub fn set(a: Allocator, r: *const Resolver, faces: faces_mod.FaceSet, g: ground
     var lay: layout.Layout = .{ .a = a, .r = r, .faces = faces, .editing = opts.editing };
     const first = g.piece(0, 0) orelse return .{ .items = &.{}, .lines = &.{}, .overflow = top.len > 0, .missing = &.{} };
     const cap = first.cap;
+    if (first.stacked) return setStacked(a, r, &lay, g, cap);
 
     // Each top object laid out alone, and the space before it.
     const laid = try a.alloc(Laid, top.len);
@@ -166,6 +167,66 @@ pub fn set(a: Allocator, r: *const Resolver, faces: faces_mod.FaceSet, g: ground
         start = en;
     }
     return .{ .items = items.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
+}
+
+/// A column's setting: the top row's objects a step each down the
+/// pieces (words, numbers and letters a character at a time; a structure
+/// whole), each upright and centred on the baseline, on into the next
+/// piece when one is full.
+fn setStacked(a: Allocator, r: *const Resolver, lay: *layout.Layout, g: ground_mod.Ground, cap: f64) !Set {
+    const e = r.e;
+    const top = e.node(e.root).items.items;
+    var items: std.ArrayList(Item) = .empty;
+    var lines: std.ArrayList(Line) = .empty;
+    var overflow = false;
+    var pi: usize = 0;
+    var piece = g.piece(0, 0).?;
+    var s: f64 = 0;
+    var line_first: usize = 0;
+    for (top, 0..) |id, k| {
+        const kind = e.node(id).kind;
+        const split = kind == .word or kind == .number or kind == .variable;
+        const units: []const layout.Layout.Each = if (split) try lay.layEach(id, cap) else blk: {
+            const one = try a.alloc(layout.Layout.Each, 1);
+            one[0] = .{ .laid = try lay.lay(id, cap) };
+            break :blk one;
+        };
+        for (units) |u| {
+            const step = if (u.space) r.get(id, .column_space).number * cap else @max(r.get(id, .column_step).number * cap, u.laid.height + u.laid.depth + 0.5 * cap);
+            // Full: on into the next piece (a space at a piece's end is dropped).
+            if (s > 0 and s + step > piece.length + 1e-9) {
+                try lines.append(a, .{ .piece = pi, .first = line_first, .end = k, .at = 0, .width = s });
+                line_first = k;
+                if (g.piece(pi + 1, 0)) |next| {
+                    pi += 1;
+                    piece = next;
+                    s = 0;
+                } else overflow = true;
+                if (u.space) continue;
+            }
+            if (!u.space) {
+                // Its capitals a quarter cap below the step's start (its
+                // baseline 1.25 cap down), or a tall object's top there.
+                const down = s + @max(1.25 * cap, u.laid.height + 0.25 * cap);
+                const f = piece.frame(down);
+                // Upright: across the baseline is its x, back up it its y.
+                const upright: Affine = .{ .a = f.up.x, .b = f.up.y, .c = -f.along.x, .d = -f.along.y, .e = f.point.x, .f = f.point.y };
+                const m = Affine.translate(-u.laid.width / 2, 0).then(upright);
+                for (u.laid.items.items) |it| try items.append(a, moveItem(it, m));
+            }
+            s += step;
+        }
+    }
+    try lines.append(a, .{ .piece = pi, .first = line_first, .end = top.len, .at = 0, .width = s });
+    return .{ .items = items.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
+}
+
+fn moveItem(it: Item, m: Affine) Item {
+    return switch (it) {
+        .glyph => |gl| .{ .glyph = .{ .face = gl.face, .gid = gl.gid, .m = gl.m.then(m), .grow = gl.grow, .object = gl.object } },
+        .rule => |ru| .{ .rule = .{ .corners = .{ m.apply(ru.corners[0]), m.apply(ru.corners[1]), m.apply(ru.corners[2]), m.apply(ru.corners[3]) }, .object = ru.object } },
+        .hole => |h| .{ .hole = .{ .corners = .{ m.apply(h.corners[0]), m.apply(h.corners[1]), m.apply(h.corners[2]), m.apply(h.corners[3]) }, .object = h.object } },
+    };
 }
 
 /// The width of top objects [from, to) set together (the space before the

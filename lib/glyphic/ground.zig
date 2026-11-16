@@ -93,6 +93,10 @@ pub const Piece = struct {
     /// heights become mm by it).
     cap: f64,
     alignment: Align = .start,
+    /// A column: its content set a character at a time down its length,
+    /// each upright (standing across the baseline, its up back along it)
+    /// and centred on the baseline, rather than running along it.
+    stacked: bool = false,
 
     pub fn frame(p: Piece, s: f64) Frame {
         return p.baseline.frame(s);
@@ -221,6 +225,41 @@ pub const Rows = struct {
             };
         }
         return r.made.items[k];
+    }
+};
+
+/// Columns side by side, `pitch` apart, each `length` long, the first's
+/// centre line starting at `origin` (its top) and running down: stacked
+/// pieces.
+pub const Columns = struct {
+    origin: Vec,
+    length: f64,
+    pitch: f64,
+    count: usize,
+    cap: f64,
+    whole: [32][1]Span = undefined,
+
+    pub fn ground(c: *Columns) Ground {
+        return .{ .ctx = c, .vtable = &.{ .piece = piece, .more = none } };
+    }
+
+    fn none(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn piece(ctx: *anyopaque, k: usize, _: f64) ?Piece {
+        const c: *Columns = @ptrCast(@alignCast(ctx));
+        if (k >= c.count or k >= c.whole.len) return null;
+        c.whole[k] = .{.{ .lo = 0, .hi = c.length }};
+        return .{
+            .baseline = .{ .line = .{ .start = .{ .x = c.origin.x + @as(f64, @floatFromInt(k)) * c.pitch, .y = c.origin.y }, .dir = .{ .x = 0, .y = -1 } } },
+            .length = c.length,
+            .open = &c.whole[k],
+            .above = c.pitch / 2,
+            .below = c.pitch / 2,
+            .cap = c.cap,
+            .stacked = true,
+        };
     }
 };
 

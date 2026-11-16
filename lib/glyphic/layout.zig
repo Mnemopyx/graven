@@ -168,6 +168,27 @@ pub const Layout = struct {
         }
     }
 
+    /// A leaf's characters laid out one by one, for a column: each its own
+    /// box (a space as an empty one, `space` set).
+    pub fn layEach(l: *Layout, id: Id, cap0: f64) ![]Each {
+        const e = l.r.e;
+        const node = e.node(id);
+        const ctx = l.r.context(id);
+        const cap = cap0 * l.val(id, .scale) * l.levelScale(id, ctx.script_level);
+        var out: std.ArrayList(Each) = .empty;
+        var it = (std.unicode.Utf8View.init(node.text) catch return out.items).iterator();
+        while (it.nextCodepointSlice()) |ch| {
+            if (std.mem.eql(u8, ch, " ")) {
+                try out.append(l.a, .{ .laid = .{}, .space = true });
+                continue;
+            }
+            try out.append(l.a, .{ .laid = try l.layText(id, ch, cap, node.kind) });
+        }
+        return out.items;
+    }
+
+    pub const Each = struct { laid: Laid, space: bool = false };
+
     // Text --------------------------------------------------------------------------
 
     /// A leaf's characters, each from the face its kind and shape choose,

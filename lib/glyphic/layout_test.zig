@@ -232,3 +232,56 @@ test "set round a dial: each glyph stands on the arc, turned with it" {
     try testing.expect(g0.b > 0); // rising on the left
     try testing.expect(g5.b < 0); // falling on the right
 }
+
+test "a column: a word a character at a time, each upright, centred, a step apart" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.word(f.e.root, .word, "HOD");
+    const r = cascade.Resolver.init(&f.e, .{});
+    var cols: ground.Columns = .{ .origin = .{ .x = 20, .y = 60 }, .length = 40, .pitch = 8, .count = 2, .cap = 3 };
+    const s = try setting.set(f.arena.allocator(), &r, f.faces(), cols.ground(), .{});
+    try testing.expectEqual(@as(usize, 3), s.items.len);
+    for (s.items, 0..) |it, k| {
+        const m = it.glyph.m;
+        // Upright: no turn.
+        try near(3.0 / 700.0, m.a);
+        try near(0, m.b);
+        // The first baseline 1.25 cap below the top, then 1.5 cap steps.
+        try near(60 - 3.75 - @as(f64, @floatFromInt(k)) * 4.5, m.f);
+        // Centred on the column: each glyph's middle (by its advance:
+        // H and O 600 units, D 700) at x 20.
+        const adv = [_]f64{ 600, 600, 700 };
+        try near(20 - adv[k] * 3.0 / 700.0 / 2.0, m.e);
+    }
+    try testing.expect(!s.overflow);
+}
+
+test "a column: a structure stays whole and upright; a full column goes on into the next" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.word(f.e.root, .word, "HO HO");
+    const fr = try f.e.structure(.fraction, "", "");
+    try f.e.append(f.e.root, fr);
+    _ = try f.word(f.e.slot(fr, .num), .variable, "H");
+    _ = try f.word(f.e.slot(fr, .den), .variable, "O");
+    const r = cascade.Resolver.init(&f.e, .{});
+    // 12 mm columns: room for two characters each.
+    var cols: ground.Columns = .{ .origin = .{ .x = 20, .y = 60 }, .length = 10, .pitch = 8, .count = 4, .cap = 3 };
+    const s = try setting.set(f.arena.allocator(), &r, f.faces(), cols.ground(), .{});
+    // H O (space) H O, then the fraction: its two glyphs and its rule.
+    var xs: std.ArrayList(f64) = .empty;
+    defer xs.deinit(testing.allocator);
+    for (s.items) |it| if (it == .glyph) try xs.append(testing.allocator, it.glyph.m.e);
+    try testing.expectEqual(@as(usize, 6), xs.items.len);
+    // Columns 8 mm apart: the second H and O in the second, the fraction in the third.
+    try testing.expect(xs.items[2] > xs.items[1] + 7);
+    try testing.expect(xs.items[4] > xs.items[3] + 7);
+    var rules: usize = 0;
+    for (s.items) |it| if (it == .rule) {
+        rules += 1;
+        // Level: its corners at one height pairwise.
+        try near(it.rule.corners[0].y, it.rule.corners[1].y);
+    };
+    try testing.expectEqual(@as(usize, 1), rules);
+    try testing.expect(!s.overflow);
+}

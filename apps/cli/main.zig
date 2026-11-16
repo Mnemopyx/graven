@@ -42,7 +42,8 @@ const usage =
     \\         stands each part on its lowest face; top turns it over onto its top face.
     \\       graven v2 hp15c <folder>
     \\         Engine v2 against v1: the HP-15C keypad (libertinus) as v1 sets it, and with every
-    \\         legend parsed from its markup and set by v2 in the same place: v1-plate.svg,
+    \\         legend parsed from its markup and set by v2 in the same place (column tracks
+    \\         too): v1-plate.svg,
     \\         v1-keys.svg, v2-plate.svg, v2-keys.svg in <folder>.
     \\       graven v2 <text font> <math font> <out.svg> [italic font]
     \\         Engine v2: sets the Leibniz series (built as objects) on three grounds: one
@@ -210,11 +211,6 @@ fn v2hp15c(init: std.process.Init, folder: []const u8) !void {
                 const proto = m.proto(m.tileConst(t).prototype);
                 if (l.slot >= proto.tracks.len) continue;
                 const tr = proto.tracks[l.slot];
-                // v2 declines column tracks for now: v1's render stands.
-                if (tr.major == .column) {
-                    for (try l.render.outlines(a, faces)) |o| try outs.append(a, try o.transformed(a, .translate(l.origin.x, l.origin.y)));
-                    continue;
-                }
                 // A track's text is set once, whatever pieces v1 cut it into.
                 if ((try done.getOrPut(a, .{ .tile = t, .slot = l.slot })).found_existing) continue;
                 // Its line: the track's box on the tile's face.
@@ -243,7 +239,10 @@ fn v2hp15c(init: std.process.Init, folder: []const u8) !void {
             try glyphic.latex.parse(&e, &spans, text, .legend);
             const r = glyphic.Resolver.init(&e, .{ .package = &package });
             var row: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = band.x0, .y = l.origin.y }, .length = band.width(), .pitch = band.height(), .count = 1, .cap = cap, .alignment = alignment };
-            const s = try glyphic.setting.set(a, &r, fs, row.ground(), .{});
+            // A column track: down its middle, a character at a time.
+            var col: glyphic.ground.Columns = .{ .origin = .{ .x = (band.x0 + band.x1) / 2, .y = band.y1 }, .length = band.height(), .pitch = band.width(), .count = 1, .cap = cap };
+            const column = if (l.tile) |t| m.proto(m.tileConst(t).prototype).tracks[l.slot].major == .column else false;
+            const s = try glyphic.setting.set(a, &r, fs, if (column) col.ground() else row.ground(), .{});
             try outs.appendSlice(a, try glyphic.setting.outlines(a, s.items, 0.002));
             if (s.overflow) {
                 std.debug.print("{s}: wider than its box\n", .{text});

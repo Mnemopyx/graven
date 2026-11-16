@@ -156,6 +156,7 @@ pub const TrackGround = struct {
             .below = band.width() / 2,
             .cap = cap,
             .alignment = alignment,
+            .stacked = true,
         };
         try g.pieces.append(a, piece);
         try g.bands.append(a, band);
@@ -286,6 +287,7 @@ test "a column's pieces run down the page, up to the right" {
     try near(12.5, f.point.x);
     try near(50, f.point.y);
     try near(40, piece.length);
+    try testing.expect(piece.stacked);
 }
 
 test "a panel's process limits are kept through a save (for the manufacture stage)" {
