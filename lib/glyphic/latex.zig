@@ -219,12 +219,17 @@ const Parser = struct {
         const c = p.src[p.i];
         if (c == '{') {
             p.i += 1;
+            const s0 = p.i;
             try p.row(dest, .{ .brace = true });
+            // The field: what the braces hold.
+            try p.spans.set(p.gpa(), dest, .{ .start = @intCast(s0), .end = @intCast(p.i) });
             if (!p.eof() and p.src[p.i] == '}') p.i += 1;
             return;
         }
         if (c == '}' or c == ']' or c == '$' or c == '^' or c == '_') return;
+        const s0 = p.i;
         try p.one(dest, true);
+        try p.spans.set(p.gpa(), dest, .{ .start = @intCast(s0), .end = @intCast(p.i) });
         entry.fixRoles(p.e, dest);
     }
 
@@ -344,7 +349,10 @@ const Parser = struct {
             p.skip();
             if (!p.eof() and p.src[p.i] == '[') {
                 p.i += 1;
-                try p.row(try p.e.openSlot(rad, .index), .{ .bracket = true });
+                const s0 = p.i;
+                const ix = try p.e.openSlot(rad, .index);
+                try p.row(ix, .{ .bracket = true });
+                try p.spans.set(p.gpa(), ix, .{ .start = @intCast(s0), .end = @intCast(p.i) });
                 if (!p.eof() and p.src[p.i] == ']') p.i += 1;
             }
             try p.arg(p.e.slot(rad, .body));
@@ -368,6 +376,16 @@ const Parser = struct {
                 p.e.node(f).close = try p.e.strings.allocator().dupe(u8, p.delimiter());
             }
             return p.mark(f, start);
+        }
+        if (is(cmd, "\\set") and !p.eof() and p.src[p.i] == '(') {
+            // Graven's call form: overrides on what the braces hold.
+            const g = try p.e.structure(.group, "", "");
+            try p.e.append(r, g);
+            p.tag(g, cmd);
+            p.i = try entry.parseArgs(p.e, g, p.src, p.i + 1);
+            if (!p.eof() and p.src[p.i] == ')') p.i += 1;
+            try p.arg(p.e.slot(g, .body));
+            return p.mark(try entry.unwrapCall(p.e, g), start);
         }
         if (is(cmd, "\\mathbf") or is(cmd, "\\boldsymbol") or is(cmd, "\\bm")) {
             // Bold letterforms: what it holds, kept as a group.
@@ -409,6 +427,8 @@ const Parser = struct {
             return p.add(r, symbols.kindOfChar(cmd[1..]), cmd[1..], start, cmd);
         }
         if (symbols.byLatex(cmd)) |s| return p.add(r, s.kind, s.char, start, cmd);
+        // An operator name: an upright word, written back as its command.
+        if (symbols.isOperatorName(cmd[1..])) return p.add(r, .word, cmd[1..], start, cmd);
         // Not known (or still being typed): kept as upright text.
         return p.add(r, .word, cmd, start, "?");
     }
@@ -525,6 +545,21 @@ const Writer = struct {
 
     fn obj(wr: *Writer, id: Id) std.Io.Writer.Error!void {
         const e = wr.e;
+        if (!entry.hasCall(e, id)) return wr.uncalled(id);
+        // Its overrides in Graven's call form around it; a group made by
+        // the call writes only what it holds.
+        try wr.raw("\\set");
+        try entry.writeArgs(wr.w, e, id);
+        try wr.w.writeByte('{');
+        wr.word_end = false;
+        const n = e.node(id);
+        if (n.kind == .group and std.mem.eql(u8, n.tags.source, "\\set")) try wr.items(e.node(e.slot(id, .body)).items.items) else try wr.uncalled(id);
+        try wr.w.writeByte('}');
+        wr.word_end = false;
+    }
+
+    fn uncalled(wr: *Writer, id: Id) std.Io.Writer.Error!void {
+        const e = wr.e;
         const n = e.node(id);
         switch (n.kind) {
             .row => try wr.items(n.items.items),
@@ -532,6 +567,7 @@ const Writer = struct {
             .soft_hyphen => try wr.raw("\\-"),
             .word => {
                 if (std.mem.eql(u8, n.tags.source, "?")) return wr.raw(n.text);
+                if (n.tags.source.len > 1 and n.tags.source[0] == '\\' and symbols.isOperatorName(n.tags.source[1..])) return wr.raw(n.tags.source);
                 try wr.raw("\\mathrm");
                 try wr.w.writeByte('{');
                 try wr.w.writeAll(n.text);

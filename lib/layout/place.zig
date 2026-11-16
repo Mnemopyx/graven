@@ -310,6 +310,9 @@ pub const Labels = struct {
         /// The hard box relative to the anchor point; null for none.
         box: ?[4]f64,
         markup: []const u8,
+        /// All math (an equation run), rather than a legend (text with
+        /// math between dollars).
+        math: bool = false,
         /// Each line's open span, where art over the label closes the rest
         /// (see `engine.label.Options.line_spans`); empty for none.
         spans: []const ?[2]f64 = &.{},
@@ -327,6 +330,7 @@ pub const Labels = struct {
             h.update(std.mem.asBytes(&(k.box orelse [4]f64{ 0, 0, 0, 0 })));
             h.update(&.{@intFromBool(k.box != null)});
             h.update(k.markup);
+            h.update(&.{@intFromBool(k.math)});
             for (k.spans) |sp| h.update(std.mem.asBytes(&(sp orelse [2]f64{ -1, -1 })));
             return h.final();
         }
@@ -337,7 +341,7 @@ pub const Labels = struct {
                 if ((p == null) != (q == null)) return false;
                 if (p != null and !std.mem.eql(f64, &p.?, &q.?)) return false;
             }
-            return x.style == y.style and x.anchor == y.anchor and boxes and std.mem.eql(u8, x.markup, y.markup);
+            return x.style == y.style and x.anchor == y.anchor and x.math == y.math and boxes and std.mem.eql(u8, x.markup, y.markup);
         }
     };
 
@@ -585,7 +589,7 @@ pub const Labels = struct {
         if (l.cache.get(k)) |e| return e.render;
         const st = l.context(k.style) orelse return null;
         const render: ?*engine.Render = blk: {
-            const r = legend.render(l.gpa, &l.g.?, l.faces, st.*, k.markup) catch |err| switch (err) {
+            const r = legend.render(l.gpa, &l.g.?, l.faces, st.*, k.markup, if (k.math) .math else .legend) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blk null,
             };
@@ -1276,7 +1280,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
             }
-            const full = (try labels.get(.{ .style = run.?.style, .anchor = .start, .box = null, .markup = run.?.content })) orelse {
+            const full = (try labels.get(.{ .style = run.?.style, .anchor = .start, .box = null, .markup = run.?.content, .math = run.?.equation })) orelse {
                 try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                 continue;
             };
@@ -1346,7 +1350,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         try out_issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
                         break :blk 0.5 * region.pitch;
                     };
-                    const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content })) orelse break :blk 0.5 * region.pitch;
+                    const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content, .math = run.equation })) orelse break :blk 0.5 * region.pitch;
                     rr.* = render;
                     const d = render.design;
                     break :blk if (d.isEmpty()) 0 else if (rows) d.x1 - d.x0 else d.y1 - d.y0;
@@ -2070,7 +2074,7 @@ test "a run of text breaks between its words; a space a wrap leaves at a row's s
     // Three words in one run; 30 mm rows hold two.
     try m.insertRun(p, r, 0, .{ .style = body, .content = "HOD ADD HOD" });
     // An equation stays whole, spaces and all.
-    try m.insertRun(p, r, 1, .{ .style = body, .content = "A = \\frac{H}{D}" });
+    try m.insertRun(p, r, 1, .{ .style = body, .content = "A = \\frac{H}{D}", .equation = true });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);

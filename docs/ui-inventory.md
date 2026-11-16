@@ -20,8 +20,8 @@ Four panes on the window's edges, each with a tab and three modes: **ghost** (se
 
 - **Tree** (left): the document as a component tree. Canvas, panels, grids, tile prototypes, sketches, layers. Selecting a node makes it the context.
 - **Tools** (right, upper): the canvas tools. Select, Add panel, Add tracks, Add shape (art), Select area, Constrain, Join, New sketch. Some tools have options here (shape kind; what new tracks are sized to and which way they run).
-- **Properties** (right, lower): the context's fields and its actions as buttons. Many commands live only here (see below).
-- **Bottom bar:** the expression line and the status bar.
+- **Properties** (right, lower): the context's fields and its actions as buttons. Many commands live only here (see below). For a tile or a track with a flow, two sections at the end (since 2026-11-16): **Expression object** (the object at the expression line's cursor; for math, every parameter an element may override, italic when it is its style's, an x to clear; a change is written into the source as `\set(…){…}`) and **Text style** (size, base, faces, and its rules: kind, parameter and value dropdowns or entries, a bin, Add a rule).
+- **Bottom bar:** the expression line and the status bar. The expression line edits the source (LaTeX legends, or math for an equation run); completions come from glyphic's symbols; Tab and Shift+Tab go to the next and previous stop in the expression's field order.
   - **Expression line:** edits the markup of the selected text or tile, with brace pairing, command completion and a live preview.
   - **Status bar:** pointer position, counts (panels, tiles, text pieces, missing glyphs, overflows, in margins), the current tool's hint, the font, zoom, solve time, average frame time (30 s).
 
@@ -85,6 +85,10 @@ These are observations to start the discussion from, not decisions.
 10. **Pane appearance is still experimental:** several View menu options exist only to compare looks (ghost style, halo, vivid colour).
 11. **Text entry:** the expression line and in-place flow editing both edit text, with overlapping roles.
 12. **Development switches are environment variables only:** sample loading, the view, text display settings and frame logging have no UI.
+
+- The Expression object section shows the object at the expression line's cursor, but nothing on the canvas marks which object that is.
+- A rule's kind or parameter changed in the style section moves the rule to the end of the list (it is removed and added again).
+- Number entries in the inspector write on every keystroke, so typing 1.5 sets 1 first (one undo step, as they merge).
 
 ## Things to decide in the UI discussion
 

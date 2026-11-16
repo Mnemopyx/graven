@@ -101,3 +101,89 @@ pub fn toggle(e: *Expr, r: *const Resolver, id: Id, s: Slot) ex.Error!?Id {
     try e.set(id, p, param.of(param.SlotShow.shown));
     return e.slot(id, s);
 }
+
+// Stops in the source -------------------------------------------------------------
+//
+// An entry line edits the source; Tab moves its caret from stop to stop in
+// field order, through the spans the parser recorded.
+
+const entry = @import("entry.zig");
+const Spans = entry.Spans;
+
+/// Where the caret goes for stop `s`: a head before its structure; a field
+/// at the end of what it holds (between the braces of an empty one). Null
+/// for a stop the source has no place for.
+pub fn offset(spans: Spans, s: Stop) ?usize {
+    const sp = switch (s) {
+        .head => |id| spans.get(id),
+        .field => |row| spans.get(row),
+    };
+    if (sp.start == entry.Span.none.start) return null;
+    return switch (s) {
+        .head => sp.start,
+        .field => sp.end,
+    };
+}
+
+/// The field holding byte `at` (its ends included): the narrowest.
+pub fn fieldAt(spans: Spans, stops: []const Stop, at: usize) ?Stop {
+    var best: ?Stop = null;
+    var width: usize = std.math.maxInt(usize);
+    for (stops) |s| {
+        if (s != .field) continue;
+        const sp = spans.get(s.field);
+        if (sp.start == entry.Span.none.start) continue;
+        if (at >= sp.start and at <= sp.end and sp.end - sp.start <= width) {
+            best = s;
+            width = sp.end - sp.start;
+        }
+    }
+    return best;
+}
+
+/// Where Tab (Shift+Tab: `back`) takes a caret at byte `at`: from the
+/// field it is in to the next stop (wrapping); outside every field, to the
+/// first stop after it (before it, going back). Null when there is none.
+pub fn tab(gpa: Allocator, r: *const Resolver, spans: Spans, at: usize, back: bool) Allocator.Error!?usize {
+    const all = try list(gpa, r);
+    defer gpa.free(all);
+    // Only stops with a place in the source.
+    var placed: std.ArrayList(Stop) = .empty;
+    defer placed.deinit(gpa);
+    for (all) |s| if (offset(spans, s) != null) try placed.append(gpa, s);
+    const ss = placed.items;
+    if (ss.len == 0) return null;
+    if (fieldAt(spans, ss, at)) |cur| return offset(spans, next(ss, cur, back).?);
+    if (back) {
+        var k = ss.len;
+        while (k > 0) : (k -= 1) if (offset(spans, ss[k - 1]).? < at) return offset(spans, ss[k - 1]);
+        return offset(spans, ss[ss.len - 1]);
+    }
+    for (ss) |s| if (offset(spans, s).? > at) return offset(spans, s);
+    return offset(spans, ss[0]);
+}
+
+test "Tab in the source: field to field in field order, heads before their structures" {
+    const latex = @import("latex.zig");
+    const styles = @import("styles.zig");
+    const gpa = std.testing.allocator;
+    var e = try Expr.init(gpa);
+    defer e.deinit();
+    var spans: Spans = .{};
+    defer spans.deinit(gpa);
+    //          0123456789012345678
+    const src = "\\frac{a}{}+\\sqrt{x}";
+    try latex.parse(&e, &spans, src, .math);
+    var g = styles.Engine.init(gpa);
+    defer g.deinit();
+    const r = Resolver.init(&g, &e, &.{});
+    // At the start (the fraction's head): on to its numerator; back from
+    // there to the head; on to the empty denominator, between its braces.
+    try std.testing.expectEqual(@as(?usize, 7), try tab(gpa, &r, spans, 0, false));
+    try std.testing.expectEqual(@as(?usize, 0), try tab(gpa, &r, spans, 6, true));
+    try std.testing.expectEqual(@as(?usize, 9), try tab(gpa, &r, spans, 7, false));
+    // On to the root's head, then its body; and round again.
+    try std.testing.expectEqual(@as(?usize, 11), try tab(gpa, &r, spans, 9, false));
+    try std.testing.expectEqual(@as(?usize, 18), try tab(gpa, &r, spans, 11, false));
+    try std.testing.expectEqual(@as(?usize, 0), try tab(gpa, &r, spans, 18, false));
+}

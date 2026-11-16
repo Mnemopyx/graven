@@ -211,6 +211,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_fontsearch", .module = fontsearch },
                     .{ .name = "graven_fonts_local", .module = fonts_local },
                     .{ .name = "graven_richtext", .module = richtext },
+                    .{ .name = "graven_glyphic", .module = glyphic },
                 },
             }),
         });

@@ -168,3 +168,94 @@ pub fn kindOfChar(c: []const u8) Kind {
     if (c.len == 1 and std.ascii.isAlphabetic(c[0])) return .variable;
     return .symbol;
 }
+
+/// Operator names: upright words written as commands in LaTeX (`\sin`) and
+/// as names in Typst.
+pub const operator_names = [_][]const u8{
+    "sin",  "cos",  "tan",  "cot",  "sec",  "csc",  "arcsin", "arccos", "arctan",
+    "sinh", "cosh", "tanh", "log",  "ln",   "lg",   "exp",    "lim",    "max",
+    "min",  "sup",  "inf",  "det",  "dim",  "ker",  "deg",    "gcd",    "arg",
+    "mod",
+};
+
+pub fn isOperatorName(name: []const u8) bool {
+    for (operator_names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+/// A LaTeX command offered while one is being typed.
+pub const Completion = struct {
+    /// Its name, without the backslash.
+    name: []const u8,
+    /// What completing it inserts after the name: "{}" per argument.
+    args: []const u8 = "",
+    /// The character it stands for, for a named character.
+    cp: ?u21 = null,
+    /// A short description, for anything else.
+    note: []const u8 = "",
+};
+
+/// The LaTeX commands glyphic reads that make structures or set things.
+const structural = [_]Completion{
+    .{ .name = "frac", .args = "{}{}", .note = "fraction" },
+    .{ .name = "dfrac", .args = "{}{}", .note = "fraction, display size" },
+    .{ .name = "tfrac", .args = "{}{}", .note = "fraction, text size" },
+    .{ .name = "sqrt", .args = "{}", .note = "root (\\sqrt[n]{} for an index)" },
+    .{ .name = "set", .args = "(){}", .note = "overrides: \\set(scale: 1.2){x}" },
+    .{ .name = "left", .note = "grown delimiter, with \\right" },
+    .{ .name = "right", .note = "closes \\left" },
+    .{ .name = "mathrm", .args = "{}", .note = "upright word" },
+    .{ .name = "text", .args = "{}", .note = "upright word" },
+    .{ .name = "operatorname", .args = "{}", .note = "operator name" },
+    .{ .name = "mathbf", .args = "{}", .note = "bold" },
+    .{ .name = "boldsymbol", .args = "{}", .note = "bold" },
+    .{ .name = "limits", .note = "limits above and below" },
+    .{ .name = "nolimits", .note = "limits beside" },
+    .{ .name = "textbf", .args = "{}", .note = "bold text" },
+    .{ .name = "textit", .args = "{}", .note = "italic text" },
+    .{ .name = "emph", .args = "{}", .note = "emphasis" },
+    .{ .name = "textbackslash", .note = "a backslash in text" },
+    .{ .name = "allowbreak", .note = "a break allowed here" },
+};
+
+/// LaTeX commands starting with `prefix` (no backslash): named characters,
+/// accents, operator names and structural commands, shortest first, then
+/// in alphabetical order.
+pub fn completions(gpa: std.mem.Allocator, prefix: []const u8, out: *std.ArrayList(Completion)) std.mem.Allocator.Error!void {
+    const start = out.items.len;
+    for (&table) |*s| for ([_][]const u8{ s.latex, s.latex_also }) |cmd| {
+        if (cmd.len < 2 or cmd[0] != '\\' or !std.mem.startsWith(u8, cmd[1..], prefix)) continue;
+        const cp = std.unicode.utf8Decode(s.char) catch null;
+        try out.append(gpa, .{ .name = cmd[1..], .cp = cp });
+    };
+    for (accents) |acc| if (std.mem.startsWith(u8, acc.latex[1..], prefix)) {
+        try out.append(gpa, .{ .name = acc.latex[1..], .args = "{}", .note = "accent" });
+    };
+    for (operator_names) |n| if (std.mem.startsWith(u8, n, prefix)) {
+        try out.append(gpa, .{ .name = n, .note = "operator name" });
+    };
+    for (structural) |c| if (std.mem.startsWith(u8, c.name, prefix)) try out.append(gpa, c);
+    std.mem.sort(Completion, out.items[start..], {}, struct {
+        fn less(_: void, x: Completion, y: Completion) bool {
+            if (x.name.len != y.name.len) return x.name.len < y.name.len;
+            return std.mem.lessThan(u8, x.name, y.name);
+        }
+    }.less);
+}
+
+test "completions: characters, operator names and structures, shortest first" {
+    var out: std.ArrayList(Completion) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try completions(std.testing.allocator, "si", &out);
+    const has_sin = for (out.items) |c| {
+        if (std.mem.eql(u8, c.name, "sin")) break true;
+    } else false;
+    try std.testing.expect(has_sin);
+    out.clearRetainingCapacity();
+    try completions(std.testing.allocator, "fr", &out);
+    try std.testing.expectEqualStrings("frac", out.items[0].name);
+    try std.testing.expectEqualStrings("{}{}", out.items[0].args);
+    out.clearRetainingCapacity();
+    try completions(std.testing.allocator, "alp", &out);
+    try std.testing.expectEqual(@as(?u21, 'α'), out.items[0].cp);
+}

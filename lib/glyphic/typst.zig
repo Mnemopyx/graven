@@ -329,7 +329,11 @@ const Parser = struct {
                 } else p.i = save;
             }
             const g = try p.e.structure(.group, "", "");
+            p.skip();
+            const s0 = p.i;
             try p.row(p.e.slot(g, .body), .{ .close = ')', .comma = true });
+            // The field: the argument's source, given to the row it fills.
+            try p.spans.set(p.gpa(), g, .{ .start = @intCast(s0), .end = @intCast(p.i) });
             if (dest_slot) |d| d.* = g else if (out.n < out.pos.len) {
                 out.pos[out.n] = g;
                 out.n += 1;
@@ -343,6 +347,7 @@ const Parser = struct {
     /// Moves a call argument's contents into `dest` and ends the argument.
     fn take(p: *Parser, arg: Id, dest: Id) ex.Error!void {
         if (arg == .none) return;
+        try p.spans.set(p.gpa(), dest, p.spans.get(arg));
         const body = p.e.slot(arg, .body);
         const inner = try p.gpa().dupe(Id, p.e.node(body).items.items);
         defer p.gpa().free(inner);
@@ -360,6 +365,18 @@ const Parser = struct {
                 return std.mem.eql(u8, a, b);
             }
         }.g;
+        if (is(f, "set")) {
+            // Graven's call form: `set(body, name: value, …)`.
+            p.i += 1; // (
+            const g = try p.e.structure(.group, "", "");
+            try p.e.append(r, g);
+            p.tag(g, f);
+            try p.row(p.e.slot(g, .body), .{ .close = ')', .comma = true });
+            if (p.peek() == ',') p.i = try entry.parseArgs(p.e, g, p.src, p.i + 1);
+            if (p.peek() == ')') p.i += 1;
+            try p.mark(try entry.unwrapCall(p.e, g), start);
+            return true;
+        }
         if (is(f, "frac")) {
             const a = try p.args();
             const fr = try p.e.structure(.fraction, "", "");
@@ -516,13 +533,29 @@ const Writer = struct {
 
     fn obj(wr: *Writer, id: Id) std.Io.Writer.Error!void {
         const e = wr.e;
+        if (!entry.hasCall(e, id)) return wr.uncalled(id);
+        // Its overrides in Graven's call form: `set(it, name: value, …)`.
+        try wr.w.writeAll("set(");
+        const n = e.node(id);
+        if (n.kind == .group and std.mem.eql(u8, n.tags.source, "set")) try wr.items(wr.rowItems(e.slot(id, .body))) else try wr.uncalled(id);
+        var buf: std.Io.Writer.Allocating = .init(e.gpa);
+        defer buf.deinit();
+        try entry.writeArgs(&buf.writer, e, id);
+        // "(a: 1, b: 2)" → ", a: 1, b: 2)"
+        const args = buf.written();
+        try wr.w.writeAll(", ");
+        try wr.w.writeAll(args[1..]);
+    }
+
+    fn uncalled(wr: *Writer, id: Id) std.Io.Writer.Error!void {
+        const e = wr.e;
         const n = e.node(id);
         switch (n.kind) {
             .row => try wr.items(n.items.items),
             .space => try wr.w.writeAll(n.text),
             .soft_hyphen => try wr.w.writeAll("-?"),
             .word => {
-                if (std.mem.eql(u8, n.tags.source, "?")) return wr.w.writeAll(n.text);
+                if (std.mem.eql(u8, n.tags.source, "?") or symbols.isOperatorName(n.text)) return wr.w.writeAll(n.text);
                 try wr.w.print("\"{s}\"", .{n.text});
             },
             .number, .variable, .constant, .symbol, .operator, .relation, .punct, .ellipsis => try wr.leaf(n),

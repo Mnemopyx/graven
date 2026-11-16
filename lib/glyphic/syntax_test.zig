@@ -212,3 +212,95 @@ test "legend text: words, spaces and soft hyphens, each an object, read and writ
     defer q.deinit();
     try expectSame(&p.e, &q.e);
 }
+
+test "overrides in Graven's call form: parsed onto the object, written back, in both syntaxes" {
+    // One object: the overrides go on it, and its span covers the call.
+    var p = try parseLatex("\\set(scale: 1.2, rotate: 15){\\pi}r^2", .math);
+    defer p.deinit();
+    const pi = p.e.node(p.e.root).items.items[0];
+    try testing.expectEqual(ex.Kind.constant, p.e.node(pi).kind);
+    try testing.expectEqual(@as(f32, 1.2), p.e.override(pi, .scale).?.number);
+    try testing.expectEqual(@as(f32, 15), p.e.override(pi, .rotate).?.number);
+    try testing.expectEqual(0, p.spans.get(pi).start);
+    const out = try latexOut(&p.e, .math);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\\set(scale: 1.2, rotate: 15){\\pi}r^2", out);
+    // The same in Typst, and back.
+    const t = try typstOut(&p.e, .math);
+    defer testing.allocator.free(t);
+    try testing.expectEqualStrings("set(pi, scale: 1.2, rotate: 15) r^2", t);
+    var q = try parseTypst(t, .math);
+    defer q.deinit();
+    try expectSame(&p.e, &q.e);
+    try testing.expectEqual(@as(f32, 1.2), q.e.override(q.e.node(q.e.root).items.items[0], .scale).?.number);
+}
+
+test "the call form: several objects stay grouped; a style's parameter and partial input are let be" {
+    var p = try parseLatex("\\set(shift_y: 0.1, fraction_form: slashed){a+b}", .math);
+    defer p.deinit();
+    const g = p.e.node(p.e.root).items.items[0];
+    try testing.expectEqual(ex.Kind.group, p.e.node(g).kind);
+    try testing.expectEqual(@as(f32, 0.1), p.e.override(g, .shift_y).?.number);
+    const out = try latexOut(&p.e, .math);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\\set(shift_y: 0.1, fraction_form: slashed){a+b}", out);
+    // Weight is a style's, not an element's: left out.
+    var w = try parseLatex("\\set(weight: 0.1, scale: 2){x}", .math);
+    defer w.deinit();
+    const wo = try latexOut(&w.e, .math);
+    defer testing.allocator.free(wo);
+    try testing.expectEqualStrings("\\set(scale: 2){x}", wo);
+    // Being typed: every prefix parses.
+    const full = "\\set(scale: 1.5){x}";
+    for (0..full.len + 1) |n| {
+        var part = try parseLatex(full[0..n], .math);
+        part.deinit();
+    }
+    // In a legend's math.
+    var l = try parseLatex("Area $\\set(scale: 1.2){\\pi}r^2$", .legend);
+    defer l.deinit();
+    const lo = try latexOut(&l.e, .legend);
+    defer testing.allocator.free(lo);
+    try testing.expectEqualStrings("Area $\\set(scale: 1.2){\\pi}r^2$", lo);
+}
+
+test "operator names: upright words, written back as commands, and as names in Typst" {
+    var p = try parseLatex("\\sin x+\\log y", .math);
+    defer p.deinit();
+    const sin = p.e.node(p.e.root).items.items[0];
+    try testing.expectEqual(ex.Kind.word, p.e.node(sin).kind);
+    try testing.expectEqualStrings("sin", p.e.node(sin).text);
+    const out = try latexOut(&p.e, .math);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\\sin x+\\log y", out);
+    const t = try typstOut(&p.e, .math);
+    defer testing.allocator.free(t);
+    try testing.expectEqualStrings("sin x + log y", t);
+}
+
+test "an object's overrides rewritten in place: wrapped, changed, unwrapped, the rest kept as typed" {
+    const gpa = testing.allocator;
+    const src = "A = \\pi r^{2}";
+    var p = try parseLatex(src, .math);
+    defer p.deinit();
+    const pi = entry.objectAt(&p.e, p.spans, 5).?;
+    try testing.expectEqualStrings("π", p.e.node(pi).text);
+    try p.e.set(pi, .scale, param.num(1.2));
+    const one = try entry.rewriteCall(gpa, src, p.spans.get(pi), &p.e, pi);
+    defer gpa.free(one);
+    try testing.expectEqualStrings("A = \\set(scale: 1.2){\\pi} r^{2}", one);
+    // Again from that source: its arguments rewritten.
+    var q = try parseLatex(one, .math);
+    defer q.deinit();
+    const pi2 = entry.objectAt(&q.e, q.spans, 10).?;
+    try q.e.set(pi2, .shift_y, param.num(0.1));
+    const two = try entry.rewriteCall(gpa, one, q.spans.get(pi2), &q.e, pi2);
+    defer gpa.free(two);
+    try testing.expectEqualStrings("A = \\set(scale: 1.2, shift_y: 0.1){\\pi} r^{2}", two);
+    // Cleared: unwrapped.
+    q.e.clear(pi2, .scale);
+    q.e.clear(pi2, .shift_y);
+    const three = try entry.rewriteCall(gpa, one, q.spans.get(pi2), &q.e, pi2);
+    defer gpa.free(three);
+    try testing.expectEqualStrings(src, three);
+}

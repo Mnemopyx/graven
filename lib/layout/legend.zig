@@ -81,15 +81,15 @@ fn faceId(faces: []const *Face, f: *Face) ?R.FaceId {
     return null;
 }
 
-/// `markup` set on one line in style `st` of `g`, its glyphs' faces given
+/// `markup` (a legend, or all math: `mode`) set on one line in style `st` of `g`, its glyphs' faces given
 /// by their place in `faces`. The render owns its memory (`deinit`).
-pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st: Style, markup: []const u8) !Render {
+pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st: Style, markup: []const u8, mode: glyphic.latex.Mode) !Render {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
     var e = try glyphic.Expr.init(a);
     var spans: glyphic.entry.Spans = .{};
-    try glyphic.latex.parse(&e, &spans, markup, .legend);
+    try glyphic.latex.parse(&e, &spans, markup, mode);
     const outer = try a.dupe(glyphic.StyleId, &.{st.id});
     const r = glyphic.Resolver.init(g, &e, outer);
     // Empty fields are drawn as holes (not ink), so markup being typed
@@ -209,7 +209,7 @@ test "a legend set by glyphic: words, the spaces between them, and its source" {
     defer g.deinit();
     const st = (try contextOf(&g, &faces, .{ .name = "s", .cap_height = 3 }, &.{}, face, "s")).?;
     try testing.expectApproxEqAbs(3, st.cap_height, 1e-9);
-    var r = try render(gpa, &g, &faces, st, "HO DA");
+    var r = try render(gpa, &g, &faces, st, "HO DA", .legend);
     defer r.deinit();
     // Words and a space: three elements, one break between the words.
     try testing.expectEqual(3, r.elements.len);
@@ -229,4 +229,28 @@ test "a legend set by glyphic: words, the spaces between them, and its source" {
     try testing.expectEqual(2, cuts.len);
     // The caret sits after the first word at its end.
     try testing.expectApproxEqAbs(o.x0, r.caret(2).?.x, 1e-9);
+}
+
+test "an equation run is all math: its fraction is a fraction, not text" {
+    const gpa = testing.allocator;
+    const face = try Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*Face{face};
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const st = (try contextOf(&g, &faces, .{ .name = "s", .cap_height = 3 }, &.{}, face, "s")).?;
+    var math = try render(gpa, &g, &faces, st, "\\frac{H}{D}", .math);
+    defer math.deinit();
+    var text = try render(gpa, &g, &faces, st, "\\frac{H}{D}", .legend);
+    defer text.deinit();
+    // Stacked: H, a rule, D (scripts' size in text style), standing
+    // above the capitals and below the baseline; as text, eleven glyphs.
+    try testing.expectEqual(3, math.items.len);
+    var rules: usize = 0;
+    for (math.items) |it| if (it == .path) {
+        rules += 1;
+    };
+    try testing.expectEqual(1, rules);
+    try testing.expect(math.ink.y1 > 3 and math.ink.y0 < 0);
+    try testing.expect(math.items.len < text.items.len);
 }

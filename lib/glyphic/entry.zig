@@ -152,6 +152,158 @@ pub fn setVariant(e: *Expr, id: Id, v: ex.Variant) void {
     }
 }
 
+// Overrides in the source: Graven's call form ----------------------------------
+//
+// An element's overrides are written around it in Typst's call form with
+// named arguments, in both syntaxes (decided 2026-11-16): LaTeX
+// `\set(scale: 1.2, shift_y: 0.1){x}`, Typst `set(scale: 1.2)[x]`. Values
+// are numbers, a choice's name, true or false, or a quoted name. An
+// override the syntax already says another way (`\limits`, a plain
+// fence's natural size, `\allowbreak`) is not written again.
+
+/// Whether override `p` of `id` is written by the syntax itself.
+pub fn implied(e: *const Expr, id: Id, p: param.Param) bool {
+    const n = e.node(id);
+    return switch (p) {
+        .limits => n.kind == .large_op,
+        .fence_size => n.kind == .fence and (std.mem.eql(u8, n.tags.source, "(") or std.mem.eql(u8, n.tags.source, "[")),
+        .break_before => if (e.override(id, .break_before)) |v| param.as(param.BreakMark, v) == .allow else false,
+        else => false,
+    };
+}
+
+/// Whether `id` has overrides to write in the call form.
+pub fn hasCall(e: *const Expr, id: Id) bool {
+    for (e.node(id).overrides.items) |o| if (!implied(e, id, o.param)) return true;
+    return false;
+}
+
+/// `(name: value, …)` for `id`'s overrides the syntax does not imply.
+pub fn writeArgs(w: *std.Io.Writer, e: *const Expr, id: Id) std.Io.Writer.Error!void {
+    try w.writeByte('(');
+    var first = true;
+    for (e.node(id).overrides.items) |o| {
+        if (implied(e, id, o.param)) continue;
+        if (!first) try w.writeAll(", ");
+        first = false;
+        try w.print("{s}: ", .{@tagName(o.param)});
+        switch (o.value) {
+            .number => |x| try w.print("{d}", .{x}),
+            .choice => |c| try w.writeAll(param.def(o.param).choices[c]),
+            .flag => |f| try w.writeAll(if (f) "true" else "false"),
+            .name => |t| try w.print("\"{s}\"", .{t}),
+        }
+    }
+    try w.writeByte(')');
+}
+
+/// The arguments at `src[i..]`, which starts after the call's '(': up to
+/// the matching ')' (quoted names may hold one), whose index it returns
+/// (or the end). Each known parameter an element may take is set on
+/// `id`; the rest are ignored.
+pub fn parseArgs(e: *Expr, id: Id, src: []const u8, from: usize) ex.Error!usize {
+    var i = from;
+    while (i < src.len and src[i] != ')') {
+        // name
+        while (i < src.len and (src[i] == ' ' or src[i] == ',')) i += 1;
+        const n0 = i;
+        while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
+        const name = src[n0..i];
+        while (i < src.len and src[i] == ' ') i += 1;
+        if (i < src.len and src[i] == ':') i += 1;
+        while (i < src.len and src[i] == ' ') i += 1;
+        // value
+        const v0 = i;
+        if (i < src.len and src[i] == '"') {
+            i += 1;
+            while (i < src.len and src[i] != '"') i += 1;
+            if (i < src.len) i += 1;
+        } else while (i < src.len and src[i] != ',' and src[i] != ')') i += 1;
+        const raw = std.mem.trim(u8, src[v0..i], " ");
+        if (name.len == 0 and raw.len == 0) {
+            // Nothing parsed: step on, so a stray character cannot stall.
+            if (i < src.len and src[i] != ')') i += 1;
+            continue;
+        }
+        const p = std.meta.stringToEnum(param.Param, name) orelse continue;
+        const d = param.def(p);
+        const v: ?param.Value = switch (d.type) {
+            .number => if (std.fmt.parseFloat(f32, raw)) |x| param.num(x) else |_| null,
+            .choice => param.choiceNamed(p, raw),
+            .flag => if (std.mem.eql(u8, raw, "true")) .{ .flag = true } else if (std.mem.eql(u8, raw, "false")) .{ .flag = false } else null,
+            .name => .{ .name = try e.strings.allocator().dupe(u8, std.mem.trim(u8, raw, "\"")) },
+        };
+        if (v) |val| e.set(id, p, val) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Not an element's to set, or out of range: left out.
+            else => {},
+        };
+    }
+    return i;
+}
+
+/// After a call's body was parsed into group `g` (in row `r`): one object
+/// in it takes the group's place and its overrides; more stay grouped,
+/// the overrides on the group. Returns what holds them.
+pub fn unwrapCall(e: *Expr, g: Id) ex.Error!Id {
+    const body = e.slot(g, .body);
+    const items = e.node(body).items.items;
+    if (items.len != 1) return g;
+    const only = items[0];
+    const row = e.node(g).parent;
+    const at = std.mem.indexOfScalar(Id, e.node(row).items.items, g).?;
+    e.detach(only);
+    try e.insert(row, at, only);
+    for (e.node(g).overrides.items) |o| try e.set(only, o.param, o.value);
+    e.remove(g);
+    return only;
+}
+
+/// LaTeX source `src` with object `id`'s call form brought up to date with
+/// its overrides in `e`: `src[span]` (the object's source, as parsed)
+/// wrapped in `\set(…){…}`, its arguments rewritten, or unwrapped when it
+/// has none left. Everything else in `src` is kept as typed. Allocated
+/// from `a`.
+pub fn rewriteCall(a: Allocator, src: []const u8, span: Span, e: *const Expr, id: Id) Allocator.Error![]u8 {
+    const piece = src[span.start..span.end];
+    // What the call (if any) holds.
+    var body = piece;
+    if (std.mem.startsWith(u8, piece, "\\set(")) {
+        var i: usize = "\\set(".len;
+        var quoted = false;
+        while (i < piece.len and (quoted or piece[i] != ')')) : (i += 1) {
+            if (piece[i] == '"') quoted = !quoted;
+        }
+        i += 1;
+        if (i < piece.len and piece[i] == '{') {
+            const inner = piece[i + 1 ..];
+            body = if (std.mem.endsWith(u8, inner, "}")) inner[0 .. inner.len - 1] else inner;
+        } else body = piece[@min(i, piece.len)..];
+    }
+    var out: std.Io.Writer.Allocating = .init(a);
+    errdefer out.deinit();
+    const w = &out.writer;
+    w.writeAll(src[0..span.start]) catch return error.OutOfMemory;
+    if (hasCall(e, id)) {
+        w.writeAll("\\set") catch return error.OutOfMemory;
+        writeArgs(w, e, id) catch return error.OutOfMemory;
+        w.print("{{{s}}}", .{body}) catch return error.OutOfMemory;
+    } else w.writeAll(body) catch return error.OutOfMemory;
+    w.writeAll(src[span.end..]) catch return error.OutOfMemory;
+    return out.toOwnedSlice();
+}
+
+/// The object the caret at byte `at` is on, for the inspector: the
+/// innermost object whose source holds it (or the byte before it), past
+/// rows and the expression's top row. Null when there is none.
+pub fn objectAt(e: *const Expr, spans: Spans, at: usize) ?Id {
+    const id = spans.at(at) orelse (if (at > 0) spans.at(at - 1) else null) orelse return null;
+    var cur = id;
+    while (cur != .none and e.node(cur).kind == .row) cur = e.node(cur).parent;
+    if (cur == .none or cur == e.root) return null;
+    return cur;
+}
+
 /// Whether a top-row object is a legend's text (not math).
 pub fn isText(e: *const Expr, id: Id) bool {
     const n = e.node(id);

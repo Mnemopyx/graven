@@ -13,6 +13,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
+const glyphic = @import("graven_glyphic");
 const engine = @import("graven_engine");
 const samples = @import("graven_samples");
 const desktop = @import("desktop.zig");
@@ -2442,6 +2443,14 @@ const ExprTarget = union(enum) {
         }
     }
 
+    /// Whether it is all math (an equation run), rather than a legend.
+    fn isMath(t: ExprTarget) bool {
+        return switch (t) {
+            .tile_track => false,
+            .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.equation,
+        };
+    }
+
     fn key(t: ExprTarget) u64 {
         var h: std.hash.Wyhash = .init(7);
         std.hash.autoHash(&h, t);
@@ -2476,12 +2485,16 @@ var expr_prev_key: u64 = 0;
 /// Command completion: the list shown while a command is being typed, the
 /// highlighted entry, and a pending acceptance or dismissal.
 var expr_entry_id: ?dvui.Id = null;
-var comp: std.ArrayList(engine.markup.Completion) = .empty;
+var comp: std.ArrayList(glyphic.symbols.Completion) = .empty;
 var comp_index: usize = 0;
 var comp_accept: ?usize = null;
 /// The cursor position at which Esc dismissed the list, until it moves.
 var comp_dismissed_at: ?usize = null;
 const comp_max = 8;
+
+/// Where the expression line's cursor last was, for the inspector, which
+/// keeps showing the object there after the line loses focus.
+var expr_inspect: ?struct { key: u64, offset: usize } = null;
 
 /// While the expression line has focus: what it edits and where its cursor
 /// is, so the canvas draws the cursor in the rendered label too.
@@ -2500,7 +2513,7 @@ fn partialCommand(text: []const u8, cur: usize) ?struct { at: usize, prefix: []c
 
 /// Replaces the partial command before the cursor with a completion, and
 /// leaves the cursor inside its first argument, or after it.
-fn acceptCompletion(te: *dvui.TextEntryWidget, c: engine.markup.Completion) void {
+fn acceptCompletion(te: *dvui.TextEntryWidget, c: glyphic.symbols.Completion) void {
     const cur = te.textLayout.selection.cursor;
     const part = partialCommand(te.textGet(), cur) orelse return;
     setCursor(te, part.at + 1);
@@ -2564,15 +2577,16 @@ fn expressionLine() !void {
         return;
     }
 
-    // Otherwise Tab moves to the next argument slot, taken before the
-    // entry sees it, as the entry would move focus.
-    var next_slot = false;
+    // Otherwise Tab moves to the next stop (Shift+Tab the one before), in
+    // the expression's field order, taken before the entry sees it, as the
+    // entry would move focus.
+    var next_slot: ?bool = null;
     if (was_focused) for (dvui.events()) |*e| {
         if (e.evt != .key or e.handled) continue;
         const k = e.evt.key;
         if (k.code == .tab and (k.action == .down or k.action == .repeat)) {
             e.handle(@src(), dvui.currentWindow().data());
-            next_slot = true;
+            next_slot = k.mod.shift();
         }
     };
     var te = dvui.textEntry(@src(), .{ .text_initial = content }, .{
@@ -2607,7 +2621,7 @@ fn expressionLine() !void {
             return;
         }
     }
-    if (next_slot) nextSlot(te);
+    if (next_slot) |back| nextSlot(te, target.isMath(), back);
     // Kept in step with edits made elsewhere (the Text property).
     if (!focused and !std.mem.eql(u8, te.textGet(), content)) te.textSet(content, false);
     expr_entry_id = te.data().id;
@@ -2623,7 +2637,7 @@ fn expressionLine() !void {
     }
     comp.clearRetainingCapacity();
     if (focused and comp_dismissed_at == null) if (partialCommand(te.textGet(), cursor)) |part| {
-        try engine.markup.completions(state.gpa, &engine.entities.Table.builtin, part.prefix, &comp);
+        try glyphic.symbols.completions(state.gpa, part.prefix, &comp);
         if (comp.items.len > comp_max) comp.shrinkRetainingCapacity(comp_max);
         // Nothing to offer once the name is complete and alone.
         if (comp.items.len == 1 and std.mem.eql(u8, comp.items[0].name, part.prefix)) comp.clearRetainingCapacity();
@@ -2634,6 +2648,7 @@ fn expressionLine() !void {
     const caret: @TypeOf(expr_caret) = if (focused) .{ .target = target, .offset = te.textLayout.selection.cursor } else null;
     if (!std.meta.eql(caret, expr_caret)) dvui.refresh(null, @src(), null);
     expr_caret = caret;
+    if (caret) |c| expr_inspect = .{ .key = c.target.key(), .offset = c.offset };
     const text = te.textGet();
     const changed = !std.mem.eql(u8, text, content);
     if (changed) try target.store(text);
@@ -2746,11 +2761,23 @@ fn setCursor(te: *dvui.TextEntryWidget, at: usize) void {
 }
 
 /// Tab: the cursor goes just inside the next '{' after it, or to the end.
-fn nextSlot(te: *dvui.TextEntryWidget) void {
+/// Moves the cursor to the next stop of the expression (the one before
+/// when `back`), in its field order: a structure's head, then its fields
+/// (an empty one between its braces), as glyphic parses the line.
+fn nextSlot(te: *dvui.TextEntryWidget, math: bool, back: bool) void {
+    const gpa = state.gpa;
     const text = te.textGet();
     const cur = te.textLayout.selection.cursor;
-    const next = if (cur < text.len) std.mem.indexOfScalarPos(u8, text, cur, '{') else null;
-    setCursor(te, if (next) |n| n + 1 else text.len);
+    var e = glyphic.Expr.init(gpa) catch return;
+    defer e.deinit();
+    var spans: glyphic.entry.Spans = .{};
+    defer spans.deinit(gpa);
+    glyphic.latex.parse(&e, &spans, text, if (math) .math else .legend) catch return;
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const r = glyphic.Resolver.init(&g, &e, &.{});
+    const to = glyphic.stops.tab(gpa, &r, spans, cur, back) catch return;
+    if (to) |at| setCursor(te, @min(at, text.len));
 }
 
 // The title bar -----------------------------------------------------------
@@ -7114,6 +7141,7 @@ fn properties() !void {
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
             threadProperties(r.panel, r.region);
+            try expressionProperties();
         },
         .row => |r| {
             const pt = placedTrack(r.panel, r.region, r.row);
@@ -7132,6 +7160,7 @@ fn properties() !void {
         .tile => |id| {
             try tileProperties(id);
             tileSketchParams(id);
+            try expressionProperties();
         },
         .art => |l| try artProperties(l.panel, l.index),
         .group => |g| try groupProperties(g),
@@ -7501,6 +7530,172 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         }
     }
     if (changed) _ = try actM(key, .setParagraphStyle, .{ id, ps });
+}
+
+// The expression and its style ---------------------------------------------
+//
+// The object at the expression line's cursor, as glyphic parses the line:
+// the parameters an element may override, each its override or (italic)
+// what it takes from its style; a change rewrites that object's source in
+// Graven's call form, `\set(scale: 1.2){x}`. Then the text style it is
+// set in: its base and faces, and its rules, which can be edited.
+
+const element_params = blk: {
+    var n: usize = 0;
+    for (std.enums.values(glyphic.Param)) |p| {
+        if (glyphic.param.def(p).element) n += 1;
+    }
+    var out: [n]glyphic.Param = undefined;
+    var k: usize = 0;
+    for (std.enums.values(glyphic.Param)) |p| if (glyphic.param.def(p).element) {
+        out[k] = p;
+        k += 1;
+    };
+    break :blk out;
+};
+
+/// A parameter's name as the inspector shows it: "shift_x" as "Shift x".
+fn paramLabel(buf: []u8, p: glyphic.Param) []const u8 {
+    const name = @tagName(p);
+    const n = @min(name.len, buf.len);
+    for (name[0..n], buf[0..n], 0..) |c, *o, i| o.* = if (c == '_') ' ' else if (i == 0) std.ascii.toUpper(c) else c;
+    return buf[0..n];
+}
+
+/// Edits a parameter value in place; true when it changed. Numbers in an
+/// entry, choices in a dropdown, flags as a checkbox. `default` shows it
+/// in italic (a value not set here).
+fn valueEditor(p: glyphic.Param, v: *glyphic.Value, default: bool, n: usize) bool {
+    const d = glyphic.param.def(p);
+    switch (d.type) {
+        .number => {
+            var x: f32 = v.number;
+            const r = dvui.textEntryNumber(@src(), f32, .{ .value = &x, .min = d.min, .max = d.max }, .{ .expand = .horizontal, .id_extra = n, .font = styled(.theme(.body), default) });
+            if (r.changed and r.value == .Valid and x != v.number) {
+                v.* = .{ .number = x };
+                return true;
+            }
+        },
+        .choice => {
+            var c: usize = v.choice;
+            if (dvui.dropdown(@src(), d.choices, .{ .choice = &c }, .{}, .{ .expand = .horizontal, .id_extra = n, .font = styled(.theme(.body), default) }) and c != v.choice) {
+                v.* = .{ .choice = @intCast(c) };
+                return true;
+            }
+        },
+        .flag => {
+            var f = v.flag;
+            if (dvui.checkbox(@src(), &f, null, .{ .id_extra = n })) {
+                v.* = .{ .flag = f };
+                return true;
+            }
+        },
+        .name => dvui.labelNoFmt(@src(), v.name, .{}, .{ .id_extra = n }),
+    }
+    return false;
+}
+
+/// The text style the expression line's target is set in.
+fn exprStyle(target: ExprTarget) ?layout.model.StyleId {
+    return switch (target) {
+        .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.style,
+        .tile_track => |tt| for (state.model.prototypeOf(tt.tile).tracks) |t| {
+            if (t.id == tt.track) break t.style;
+        } else null,
+    };
+}
+
+fn expressionProperties() !void {
+    const target = exprTarget() orelse return;
+    const a = dvui.currentWindow().arena();
+    const src = target.content();
+    const at: usize = if (expr_inspect) |ei| (if (ei.key == target.key()) @min(ei.offset, src.len) else src.len) else src.len;
+    var e = try glyphic.Expr.init(a);
+    var spans: glyphic.entry.Spans = .{};
+    try glyphic.latex.parse(&e, &spans, src, if (target.isMath()) .math else .legend);
+    heading("Expression object", .{}, 4000);
+    if (glyphic.entry.objectAt(&e, spans, at)) |id| {
+        const n = e.node(id);
+        propText("At the cursor", "{s} {s}", .{ @tagName(n.kind), n.text }, 4001);
+        if (glyphic.entry.isText(&e, id)) {
+            propText("Overrides", "text takes its style's", .{}, 4002);
+        } else for (element_params, 0..) |p, k| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4010 + k });
+            defer row.deinit();
+            var lb: [32]u8 = undefined;
+            propName(paramLabel(&lb, p));
+            const own = e.override(id, p);
+            var v = own orelse glyphic.param.def(p).default;
+            const changed = valueEditor(p, &v, own == null, 4100 + k);
+            var cleared = false;
+            if (own != null and icons.button(@src(), .x, "Back to its style's", .{ .id_extra = 4200 + k, .size = 14 })) cleared = true;
+            if (!changed and !cleared) continue;
+            if (cleared) e.clear(id, p) else e.set(id, p, v) catch continue;
+            target.store(try glyphic.entry.rewriteCall(a, src, spans.get(id), &e, id)) catch {
+                state.status = "The override could not be set. ";
+            };
+        }
+    } else propText("At the cursor", "nothing: put the cursor in the expression line", .{}, 4001);
+    if (exprStyle(target)) |sid| if (state.model.styleIndex(sid) != null) try styleRuleProperties(sid);
+}
+const kind_names = blk: {
+    const fields = @typeInfo(glyphic.Kind).@"enum".field_names;
+    var out: [fields.len + 1][]const u8 = undefined;
+    out[0] = "every object";
+    for (fields, 1..) |f, i| out[i] = f;
+    break :blk out;
+};
+
+const param_names = @typeInfo(glyphic.Param).@"enum".field_names;
+
+/// A text style: what it is based on, its faces (set in the Fonts
+/// window), and its rules, each a parameter for every object or one kind:
+/// edited, removed, added.
+fn styleRuleProperties(sid: layout.model.StyleId) !void {
+    const st = state.model.textStyle(sid).*;
+    heading("Text style {s}", .{st.name}, 4500);
+    try styleSizeProps(sid, false);
+    if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
+    if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
+    for (st.faces.items, 0..) |f, k| propText(f.role, "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
+    propValue("Rules", st.rules.items.len == 0, "{s}", .{if (st.rules.items.len == 0) "none: its base's and glyphic's defaults" else ""}, 4590);
+    for (st.rules.items, 0..) |r, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4600 + k });
+        defer row.deinit();
+        const key = mergeKey(.{ "style rule", sid, k });
+        var kind_choice: usize = if (r.kind) |kd| @as(usize, @intFromEnum(kd)) + 1 else 0;
+        if (dvui.dropdown(@src(), &kind_names, .{ .choice = &kind_choice }, .{}, .{ .id_extra = 4700 + k, .min_size_content = .{ .w = 90 } })) {
+            const kind: ?glyphic.Kind = if (kind_choice == 0) null else @enumFromInt(kind_choice - 1);
+            _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, null }) catch {};
+            _ = actM(key, .setStyleRule, .{ sid, kind, r.param, @as(?glyphic.Value, r.value) }) catch {};
+            return;
+        }
+        var param_choice: usize = @intFromEnum(r.param);
+        if (dvui.dropdown(@src(), param_names, .{ .choice = &param_choice }, .{}, .{ .id_extra = 4800 + k, .min_size_content = .{ .w = 110 } })) {
+            const p: glyphic.Param = @enumFromInt(param_choice);
+            _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, null }) catch {};
+            _ = actM(key, .setStyleRule, .{ sid, r.kind, p, @as(?glyphic.Value, glyphic.param.def(p).default) }) catch {};
+            return;
+        }
+        var v = r.value;
+        if (valueEditor(r.param, &v, false, 4900 + k)) {
+            _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, @as(?glyphic.Value, v) }) catch {};
+        }
+        if (icons.button(@src(), .trash, "Remove this rule", .{ .id_extra = 5000 + k, .size = 14 })) {
+            _ = act(.setStyleRule, .{ sid, r.kind, r.param, null }) catch {};
+            return;
+        }
+    }
+    if (dvui.button(@src(), "Add a rule", .{}, .{ .id_extra = 5100, .margin = .{ .y = 4 } })) {
+        // The first parameter it does not set for every object yet.
+        const p = for (std.enums.values(glyphic.Param)) |q| {
+            const used = for (st.rules.items) |r| {
+                if (r.kind == null and r.param == q) break true;
+            } else false;
+            if (!used) break q;
+        } else return;
+        _ = act(.setStyleRule, .{ sid, null, p, @as(?glyphic.Value, glyphic.param.def(p).default) }) catch {};
+    }
 }
 
 /// A style's size, two ways: as a point size (its em, as other software
