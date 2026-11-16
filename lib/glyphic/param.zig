@@ -108,6 +108,10 @@ pub const Param = enum {
     rotate,
     rotate_pivot,
     rotate_space,
+    // Spacing between neighbours, by their kinds (TeX's three spaces).
+    thin_space,
+    medium_space,
+    thick_space,
     // Breaking.
     break_before,
     relation_break_cost,
@@ -123,6 +127,7 @@ pub const Param = enum {
     show_sup,
     limits,
     op_size,
+    display_op_scale,
     limit_gap,
     // Fractions.
     fraction_form,
@@ -154,6 +159,9 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .rotate_pivot = choice(Pivot, .ink_centre, "What it turns about: its box's centre, its ink's centre, its start, or where its baseline starts."),
     .rotate_space = choice(RotateSpace, .box, "Whether its neighbours make room for its rotated extent, or it turns in its unrotated place."),
     .face = .{ .type = .name, .default = .{ .name = "" }, .doc = "The composed font member that sets it (empty: the one its kind and style choose)." },
+    .thin_space = number(.cap, 0, 2, 0.24, "The thin space: after a large operator, around punctuation."),
+    .medium_space = number(.cap, 0, 2, 0.32, "The medium space: around a binary operator (not in scripts)."),
+    .thick_space = number(.cap, 0, 2, 0.40, "The thick space: around a relation (not in scripts)."),
     .break_before = choice(BreakMark, .auto, "Whether the line may break before it: as its neighbours' kinds decide, never, allowed, preferred, or always."),
     .relation_break_cost = number(.cost, 0, 10000, 500, "What a break after a relation costs."),
     .binary_break_cost = number(.cost, 0, 10000, 700, "What a break after a binary operator costs."),
@@ -167,6 +175,7 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .show_sup = choice(SlotShow, .auto, "The superscript or upper limit: shown when it exists, or set shown or hidden."),
     .limits = choice(Limits, .auto, "A large operator's limits: above and below, or beside (auto: above and below in display style)."),
     .op_size = choice(OpSize, .auto, "A large operator's size variant (auto: display size in display style)."),
+    .display_op_scale = number(.scale, 1, 3, 1.5, "How much larger a large operator is set in display size."),
     .limit_gap = number(.cap, 0, 2, 0.15, "Gap between a large operator and its stacked limits."),
     .fraction_form = choice(FractionForm, .stacked, "Numerator over denominator, with a slash between, or on a diagonal."),
     .rule_thickness = number(.cap, 0, 0.5, 0.06, "Thickness of a fraction's rule."),

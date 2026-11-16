@@ -8,6 +8,7 @@ const engine = @import("graven_engine");
 const fontsearch = @import("graven_fontsearch");
 const richtext = @import("graven_richtext");
 const samples = @import("graven_samples");
+const glyphic = @import("graven_glyphic");
 
 const usage =
     \\usage: graven svg <font file> <text> <cap height mm> <out.svg>
@@ -39,6 +40,9 @@ const usage =
     \\         materials, written as 3MF. --parts colours (the default) gives one part per
     \\         colour; bands, one per colour and height band. --bed bottom (the default)
     \\         stands each part on its lowest face; top turns it over onto its top face.
+    \\       graven v2 <text font> <math font> <out.svg> [italic font]
+    \\         Engine v2: sets the Leibniz series (built as objects) on three grounds: one
+    \\         long row in display style, narrow rows it must break across, and a dial.
     \\       graven dump [--log] <document>
     \\         Prints a document's model as text (for reading, or as git's text converter);
     \\         --log adds its history: the file's segments and every logged step.
@@ -71,6 +75,9 @@ pub fn main(init: std.process.Init) !void {
             } else break;
         }
         if (args.len - k >= 4 and std.mem.eql(u8, args[k], "hp15c")) return hp15c3mf(init, args[k + 1], args[k + 2], args[k + 3], args[k + 4 ..], opts);
+    }
+    if ((args.len == 5 or args.len == 6) and std.mem.eql(u8, args[1], "v2")) {
+        return v2(init, args[2], args[3], args[4], if (args.len == 6) args[5] else null);
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "dump")) {
         if (args.len == 3) return dump(init, args[2], false);
@@ -135,6 +142,56 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     const doc = try layout.output.svg(arena.allocator(), outlines, r.design.join(r.ink), .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
+}
+
+/// Engine v2's sample: the Leibniz series set on three grounds.
+fn v2(init: std.process.Init, text_path: []const u8, math_path: []const u8, out_path: []const u8, italic_path: ?[]const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var members: std.ArrayList(glyphic.faces.Member) = .empty;
+    var loaded: std.ArrayList(*engine.Face) = .empty;
+    defer for (loaded.items) |f| f.deinit();
+    for ([_]?[]const u8{ text_path, math_path, italic_path }, [_][]const u8{ "text", "math", "italic" }) |path, name| {
+        const p = path orelse continue;
+        const bytes = try cwd.readFileAlloc(io, p, a, .limited(64 << 20));
+        const f = try engine.Face.init(gpa, bytes, 0);
+        try loaded.append(a, f);
+        try members.append(a, .{ .name = name, .face = f });
+    }
+    const fs: glyphic.faces.FaceSet = .{ .members = members.items };
+
+    var e = try glyphic.Expr.init(gpa);
+    defer e.deinit();
+    _ = try glyphic.samples.leibniz(&e);
+    const package = [_]glyphic.Rule{
+        .{ .selector = .{ .kind = .variable }, .param = .shape, .value = glyphic.param.of(glyphic.param.Shape.italic) },
+    };
+    try e.legend.append(gpa, .{ .param = .math_style, .value = glyphic.param.of(glyphic.param.MathStyle.display) });
+    const r = glyphic.Resolver.init(&e, .{ .package = &package });
+
+    var outs: std.ArrayList(engine.geom.Outline) = .empty;
+    var box: engine.geom.Box = .empty;
+    // One long row; narrow rows, broken; a dial.
+    var long: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = 0, .y = 0 }, .length = 160, .pitch = 14, .count = 1, .cap = 4 };
+    var narrow: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = 0, .y = -24 }, .length = 75, .pitch = 16, .count = 3, .cap = 4 };
+    var dial: glyphic.ground.Dial = .{ .centre = .{ .x = 120, .y = -110 }, .radius = 55, .start = std.math.pi * 0.95, .sweep = std.math.pi * 0.9, .pitch = 12, .count = 2, .cap = 3 };
+    const grounds = [_]glyphic.ground.Ground{ long.ground(), narrow.ground(), dial.ground() };
+    const names = [_][]const u8{ "row", "narrow rows", "dial" };
+    for (grounds, names) |g, name| {
+        const s = try glyphic.setting.set(a, &r, fs, g, .{});
+        const o = try glyphic.setting.outlines(a, s.items, 0.005);
+        for (o) |ol| box = box.join(ol.bounds());
+        try outs.appendSlice(a, o);
+        std.debug.print("{s}: {d} lines{s}\n", .{ name, s.lines.len, if (s.overflow) ", overflow" else "" });
+        for (s.missing) |m| std.debug.print("  missing U+{X:0>4}\n", .{m.cp});
+    }
+    const doc = try layout.output.svg(a, outs.items, box, .{ .margin = 4 });
+    try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
+    std.debug.print("{s}: {d} outlines, {d:.1} x {d:.1} mm\n", .{ out_path, outs.items.len, box.width(), box.height() });
 }
 
 /// Each glyph of `text` as an MSDF `texels` texels per cap height, drawn back

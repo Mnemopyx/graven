@@ -138,6 +138,34 @@ pub const Face = struct {
         return out[0..k];
     }
 
+    /// A shaped glyph: its glyph, the byte offset of its cluster in the
+    /// text, and its advance and offset, font units.
+    pub const Shaped = struct { gid: u32, cluster: u32, advance: i32, x_offset: i32, y_offset: i32 };
+
+    /// UTF-8 `text` shaped in this face (left to right), from `a`.
+    pub fn shape(self: *Face, a: Allocator, text: []const u8) Error![]Shaped {
+        const buf = hb.hb_buffer_create() orelse return error.OutOfMemory;
+        defer hb.hb_buffer_destroy(buf);
+        hb.hb_buffer_add_utf8(buf, text.ptr, @intCast(text.len), 0, @intCast(text.len));
+        hb.hb_buffer_set_direction(buf, hb.HB_DIRECTION_LTR);
+        hb.hb_buffer_guess_segment_properties(buf);
+        hb.hb_shape(self.font, buf, null, 0);
+        if (hb.hb_buffer_allocation_successful(buf) == 0) return error.OutOfMemory;
+        var n: c_uint = 0;
+        const infos = hb.hb_buffer_get_glyph_infos(buf, &n);
+        const pos = hb.hb_buffer_get_glyph_positions(buf, &n);
+        const out = try a.alloc(Shaped, n);
+        for (infos[0..n], pos[0..n], out) |info, p, *g| g.* = .{ .gid = info.codepoint, .cluster = info.cluster, .advance = p.x_advance, .x_offset = p.x_offset, .y_offset = p.y_offset };
+        return out;
+    }
+
+    /// The math axis height (where fraction rules and the minus sign sit),
+    /// font units, from the face's MATH table; null without one.
+    pub fn mathAxis(self: *Face) ?f64 {
+        if (hb.hb_ot_math_has_data(self.face) == 0) return null;
+        return @floatFromInt(hb.hb_ot_math_get_constant(self.font, hb.HB_OT_MATH_CONSTANT_AXIS_HEIGHT));
+    }
+
     /// The nominal glyph for a codepoint, or null if the face has none.
     pub fn glyph(self: *Face, codepoint: u21) ?u32 {
         var gid: hb.hb_codepoint_t = 0;

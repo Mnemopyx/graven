@@ -85,6 +85,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("lib/glyphic/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "graven_font", .module = font },
+            .{ .name = "graven_geom", .module = geom },
+            .{ .name = "graven_testdata", .module = testdata },
+        },
     });
     // Parametric sketches: geometry held by constraints, solved together.
     const sketch = b.addModule("graven_sketch", .{
@@ -150,6 +155,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_engine", .module = engine },
                 .{ .name = "graven_samples", .module = samples },
                 .{ .name = "graven_fontsearch", .module = fontsearch },
+                .{ .name = "graven_glyphic", .module = glyphic },
             },
         }),
     });

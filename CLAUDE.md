@@ -47,7 +47,7 @@ Regression check after any engine or layout change: the PC keyboard sample's SVG
 cmp kb.svg kb_before.svg   # keep a copy from before the change
 ```
 
-Samples to look at: `graven hp15c libertinus plate.svg keys.svg` (or `stix-two`), `graven 3mf hp15c libertinus plate.3mf keys.3mf`, `graven msdf <font> <text> <texels per cap> out.pgm`.
+Samples to look at: `graven hp15c libertinus plate.svg keys.svg` (or `stix-two`), `graven 3mf hp15c libertinus plate.3mf keys.3mf`, `graven msdf <font> <text> <texels per cap> out.pgm`, `graven v2 fonts/Geist-SemiBold.ttf fonts/LibertinusMath-Regular.otf v2.svg` (engine v2: the Leibniz series on a row, broken rows and a dial). An SVG becomes a PNG to look at with Playwright's Chromium (load it in a page sized to its viewBox and screenshot).
 
 ## The GUI without a person at it
 

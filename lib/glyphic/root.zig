@@ -14,7 +14,14 @@
 //! cursor of pieces (baseline paths, open stretches, room, cap height,
 //! process limits); lib/layout provides it for tracks.
 //!
-//! Not yet: entry syntaxes (stage 4), layout (stage 3).
+//! Stage 3, layout (layout.zig, setting.zig): objects into boxes in flat
+//! expression space (faces chosen by kind, TeX's spacing, fractions in
+//! three forms, scripts, large operators with limits, radicals, fences,
+//! accents, relative rotation), then set on the ground: broken into lines
+//! at the break candidates, aligned in open stretches, each item stood on
+//! the baseline path where it falls; exact outlines out.
+//!
+//! Not yet: entry syntaxes (stage 4).
 
 const std = @import("std");
 
@@ -24,6 +31,9 @@ pub const cascade = @import("cascade.zig");
 pub const stops = @import("stops.zig");
 pub const breaks = @import("breaks.zig");
 pub const ground = @import("ground.zig");
+pub const faces = @import("faces.zig");
+pub const layout = @import("layout.zig");
+pub const setting = @import("setting.zig");
 pub const samples = @import("samples.zig");
 
 pub const Expr = expr.Expr;
@@ -40,6 +50,7 @@ test {
     _ = param;
     _ = expr;
     _ = ground;
+    _ = @import("layout_test.zig");
 }
 
 const testing = std.testing;

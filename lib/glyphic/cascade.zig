@@ -72,15 +72,22 @@ pub const Context = struct {
     script_level: u2,
 };
 
-/// The context of `id`, the expression set in `root` style.
+/// The context of `id`, the expression set in `root` style, every
+/// fraction stacked (see `Resolver.context`, which reads their forms).
 pub fn contextOf(e: *const Expr, id: Id, root: Style) Context {
+    return derive(e, id, root, null);
+}
+
+/// The context of `id`; with a resolver, a slashed fraction keeps its
+/// parts at its own style, as it sets them inline.
+fn derive(e: *const Expr, id: Id, root: Style, r: ?*const Resolver) Context {
     // The structures above, innermost first.
-    var path: [64]struct { kind: Kind, slot: Slot } = undefined;
+    var path: [64]struct { kind: Kind, slot: Slot, id: Id } = undefined;
     var n: usize = 0;
     var cur = id;
     while (e.holder(cur)) |h| {
         if (n < path.len) {
-            path[n] = .{ .kind = e.node(h.structure).kind, .slot = h.slot };
+            path[n] = .{ .kind = e.node(h.structure).kind, .slot = h.slot, .id = h.structure };
             n += 1;
         }
         cur = h.structure;
@@ -93,8 +100,11 @@ pub fn contextOf(e: *const Expr, id: Id, root: Style) Context {
         const p = path[k];
         switch (p.kind) {
             .fraction => {
-                style = style.fractionPart();
-                if (p.slot == .den) cramped = true;
+                const inline_form = if (r) |rr| param.as(param.FractionForm, rr.get(p.id, .fraction_form)) == .slashed else false;
+                if (!inline_form) {
+                    style = style.fractionPart();
+                    if (p.slot == .den) cramped = true;
+                }
             },
             .scripts, .large_op => switch (p.slot) {
                 .sub, .sup => {
@@ -211,7 +221,7 @@ pub const Resolver = struct {
     }
 
     pub fn context(r: *const Resolver, id: Id) Context {
-        return contextOf(r.e, id, r.root);
+        return derive(r.e, id, r.root, r);
     }
 
     pub fn resolve(r: *const Resolver, id: Id, p: Param) Resolved {

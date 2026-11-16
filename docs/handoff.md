@@ -14,7 +14,8 @@ The GUI is inconsistent: no principles have been applied across it. [docs/ui-inv
 - **Decided 2026-11-16:** two entry syntaxes over the same objects, LaTeX/KaTeX (default) and Typst-style; math only in math regions, so Typst's `/` is a fraction; Graven's own parameters in Typst's call form in both. Stage 4 becomes "entry syntaxes".
 - **Built 2026-11-16: stage 1, the object model** (`lib/glyphic`): objects, typed parameters, the cascade with provenance, derived context, Tab's stops with head stops and slot toggles, break candidates; tested on the Leibniz series. The object model's design, worked out by example, is in the blueprint ("Engine v2: the object model by example").
 - **Built 2026-11-16: stage 2, the ground** (`glyphic.ground`, `lib/layout/ground.zig`): pieces with baseline frames, open stretches, room, cap height and alignment (process limits are the manufacture stage's, not layout's); tracks give v1's own segments. Relative rotation is glyphic's and separate (owner's decision).
-- **Next:** stage 3 (layout on the ground; HP-15C through v2 against v1), with stage 4 (entry syntaxes) before or alongside to give it typed input.
+- **Built 2026-11-16: stage 3 in large part** (`faces.zig`, `layout.zig`, `setting.zig`; `graven v2` renders the Leibniz series on a row, broken rows and a dial). Not yet: HP-15C through v2 (needs the parser), ink spacing, MATH size variants, operators repeated at breaks.
+- **Next:** stage 4, the entry syntaxes (LaTeX, Typst-style), then the HP-15C keypad through v2 against v1.
 
 ## 3. Sketch mode: constraining against external geometry (proposed, awaiting answers)
 
