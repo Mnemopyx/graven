@@ -93,7 +93,7 @@ Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 N
 
 The README sets the goals: HP-15C keypad legends first, aircraft panels last, SVG and STEP output, and checked production output.
 
-- **Design-rule checks and per-process output:** beyond margins and the layer-height flag, not started. Gerber and mirrored output for other processes are not started.
+- **Design-rule checks and per-process output:** beyond margins and the layer-height flag, not started. Decided 2026-11-16: the design stage describes the ideal; manufacturing DRC flags where it is out of compliance with the process's capabilities by chosen margins (pass, marginal, fail), pointing at the geometry, never changing the design (blueprint, "Process limits belong to manufacture, not layout"). Gerber and mirrored output for other processes are not started.
 - **Manufacture mode in the GUI:** not started; 3MF and STEP come from the command line.
 - **Proof sheet:** not started.
 - **HP-15C sample:** a rough keypad exists (from memory and guesses; key size given); real measurements and EverCalc's legend list are still to come.
