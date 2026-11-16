@@ -106,6 +106,13 @@ pub fn set(a: Allocator, r: *const Resolver, faces: faces_mod.FaceSet, g: ground
         } else false;
         if (!forced_stop) try ends.append(a, top.len);
         if (lead > 0 and piece.fit(lead, width(laid, before, start, ends.items[0])) == null) lead = 0;
+        // The last piece takes everything left, fitting or not: nothing is
+        // ever dropped (the overflow is flagged).
+        const last_piece = g.piece(pi + 1, 0) == null;
+        if (last_piece and !forced_stop and ends.items[ends.items.len - 1] == top.len) {
+            ends.clearRetainingCapacity();
+            try ends.append(a, top.len);
+        }
         for (ends.items) |en| {
             const w = width(laid, before, start, en);
             const x = piece.fit(lead, w) orelse break;
@@ -122,7 +129,8 @@ pub fn set(a: Allocator, r: *const Resolver, faces: faces_mod.FaceSet, g: ground
             }
         }
         const en = end orelse blk: {
-            // Nothing fits: the shortest line, flagged.
+            // Nothing fits: the shortest line (or, on the last piece, all
+            // that is left), flagged.
             overflow = true;
             at = if (piece.open.len > 0) piece.open[0].lo else 0;
             break :blk ends.items[0];

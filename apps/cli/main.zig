@@ -40,6 +40,10 @@ const usage =
     \\         materials, written as 3MF. --parts colours (the default) gives one part per
     \\         colour; bands, one per colour and height band. --bed bottom (the default)
     \\         stands each part on its lowest face; top turns it over onto its top face.
+    \\       graven v2 hp15c <folder>
+    \\         Engine v2 against v1: the HP-15C keypad (libertinus) as v1 sets it, and with every
+    \\         legend parsed from its markup and set by v2 in the same place: v1-plate.svg,
+    \\         v1-keys.svg, v2-plate.svg, v2-keys.svg in <folder>.
     \\       graven v2 <text font> <math font> <out.svg> [italic font]
     \\         Engine v2: sets the Leibniz series (built as objects) on three grounds: one
     \\         long row in display style, narrow rows it must break across, and a dial.
@@ -75,6 +79,9 @@ pub fn main(init: std.process.Init) !void {
             } else break;
         }
         if (args.len - k >= 4 and std.mem.eql(u8, args[k], "hp15c")) return hp15c3mf(init, args[k + 1], args[k + 2], args[k + 3], args[k + 4 ..], opts);
+    }
+    if (args.len == 4 and std.mem.eql(u8, args[1], "v2") and std.mem.eql(u8, args[2], "hp15c")) {
+        return v2hp15c(init, args[3]);
     }
     if ((args.len == 5 or args.len == 6) and std.mem.eql(u8, args[1], "v2")) {
         return v2(init, args[2], args[3], args[4], if (args.len == 6) args[5] else null);
@@ -142,6 +149,121 @@ fn svg(init: std.process.Init, font_path: []const u8, text: []const u8, cap_arg:
     const doc = try layout.output.svg(arena.allocator(), outlines, r.design.join(r.ink), .{});
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
     std.debug.print("{s}: {d} glyphs, ink {d:.3} x {d:.3} mm\n", .{ out_path, r.items.len, r.ink.width(), r.ink.height() });
+}
+
+/// The HP-15C keypad as v1 sets it, and with each legend parsed (LaTeX,
+/// as a legend) and set by engine v2 where v1 set it: on one row along
+/// its box, at its style's cap height, aligned as its track is.
+fn v2hp15c(init: std.process.Init, folder: []const u8) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
+    var fonts = try LegendFonts.init(gpa, io, "libertinus", &.{});
+    defer fonts.deinit(gpa);
+    var m: layout.Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const styles = try samples.hp15c.addStyles(&m, fonts.members());
+    const b = try samples.hp15c.build(&m, styles, 0, .{ .x = 0, .y = 0 });
+    try fonts.attach(gpa, &m, styles);
+    const faces = fonts.faces();
+    var labels: layout.Labels = .init(gpa, faces);
+    defer labels.deinit();
+    try fonts.sync(&labels);
+
+    // v2's faces: the package's text and math faces.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = if (std.c.getenv("GRAVEN_FONTS")) |v| std.mem.span(v) else "fonts";
+    var loaded: [2]*engine.Face = undefined;
+    for ([_][]const u8{ "Geist-SemiBold.ttf", "LibertinusMath-Regular.otf" }, &loaded) |file, *f| {
+        const bytes = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, file }), a, .limited(64 << 20));
+        f.* = try engine.Face.init(gpa, bytes, 0);
+    }
+    defer for (loaded) |f| f.deinit();
+    const members = [_]glyphic.faces.Member{ .{ .name = "text", .face = loaded[0] }, .{ .name = "math", .face = loaded[1] } };
+    const fs: glyphic.faces.FaceSet = .{ .members = &members };
+    // The package's rules, as v1's libertinus has them: italic variables
+    // and π at 1.2 times.
+    const package = [_]glyphic.Rule{
+        .{ .selector = .{ .kind = .variable }, .param = .shape, .value = glyphic.param.of(glyphic.param.Shape.italic) },
+        .{ .selector = .{ .kind = .variable }, .param = .scale, .value = glyphic.param.num(1.2) },
+        .{ .selector = .{ .kind = .constant }, .param = .scale, .value = glyphic.param.num(1.2) },
+    };
+
+    try cwd.createDirPath(io, folder);
+    var missing: usize = 0;
+    var set_count: usize = 0;
+    for ([_]struct { p: usize, name: []const u8 }{ .{ .p = b.plate, .name = "plate" }, .{ .p = b.keys, .name = "keys" } }) |part| {
+        var placed = try layout.solve(gpa, &m, part.p, &labels);
+        defer placed.deinit();
+        var outs: std.ArrayList(engine.geom.Outline) = .empty;
+        var done: std.AutoHashMapUnmanaged(struct { tile: layout.TileId, slot: usize }, void) = .empty;
+        var overflows: usize = 0;
+        for (placed.labels) |l| {
+            // Its markup and its track's alignment.
+            var text: []const u8 = "";
+            var alignment: glyphic.ground.Align = .start;
+            var band = l.box;
+            if (l.tile) |t| {
+                const proto = m.proto(m.tileConst(t).prototype);
+                if (l.slot >= proto.tracks.len) continue;
+                const tr = proto.tracks[l.slot];
+                // v2 declines column tracks for now: v1's render stands.
+                if (tr.major == .column) {
+                    for (try l.render.outlines(a, faces)) |o| try outs.append(a, try o.transformed(a, .translate(l.origin.x, l.origin.y)));
+                    continue;
+                }
+                // A track's text is set once, whatever pieces v1 cut it into.
+                if ((try done.getOrPut(a, .{ .tile = t, .slot = l.slot })).found_existing) continue;
+                // Its line: the track's box on the tile's face.
+                for (placed.tiles) |pt| if (pt.id == t) {
+                    band = tr.place.inset.inset(pt.face);
+                };
+                text = try m.tileTrackText(a, t, tr.id);
+                alignment = switch (tr.alignment) {
+                    .start => .start,
+                    .centre => .centre,
+                    .end => .end,
+                };
+            } else if (l.run) |run| {
+                const item = m.panels.items[run.panel].regions.items[run.region].items.items[run.item];
+                text = switch (item.what) {
+                    .run => |rr| rr.content,
+                    else => "",
+                };
+            }
+            if (text.len == 0) continue;
+            const cap = if (labels.context(l.style)) |ctx| ctx.spec.cap_height else continue;
+            var e = try glyphic.Expr.init(gpa);
+            defer e.deinit();
+            var spans: glyphic.entry.Spans = .{};
+            defer spans.deinit(gpa);
+            try glyphic.latex.parse(&e, &spans, text, .legend);
+            const r = glyphic.Resolver.init(&e, .{ .package = &package });
+            var row: glyphic.ground.Rows = .{ .a = a, .origin = .{ .x = band.x0, .y = l.origin.y }, .length = band.width(), .pitch = band.height(), .count = 1, .cap = cap, .alignment = alignment };
+            const s = try glyphic.setting.set(a, &r, fs, row.ground(), .{});
+            try outs.appendSlice(a, try glyphic.setting.outlines(a, s.items, 0.002));
+            if (s.overflow) {
+                std.debug.print("{s}: wider than its box\n", .{text});
+                overflows += 1;
+            }
+            for (s.missing) |ms| {
+                std.debug.print("{s}: missing U+{X:0>4}\n", .{ text, ms.cp });
+                missing += 1;
+            }
+            set_count += 1;
+        }
+        if (overflows > 0) std.debug.print("{s}: {d} legends wider than their boxes\n", .{ part.name, overflows });
+        for ([_]bool{ false, true }) |second| {
+            const doc = try layout.output.panelSvg(gpa, &placed, faces, if (second) .{ .labels = false, .extra = outs.items } else .{});
+            defer gpa.free(doc);
+            const path = try std.fmt.allocPrint(a, "{s}/{s}-{s}.svg", .{ folder, if (second) "v2" else "v1", part.name });
+            try cwd.writeFile(io, .{ .sub_path = path, .data = doc });
+        }
+    }
+    std.debug.print("{d} legends set by v2, {d} characters missing; written to {s}\n", .{ set_count, missing, folder });
 }
 
 /// Engine v2's sample: the Leibniz series set on three grounds.

@@ -58,6 +58,11 @@ pub const PanelSvgOptions = struct {
     body: []const u8 = "#f2efe8",
     edge: []const u8 = "#333333",
     edge_width: f64 = 0.2,
+    /// Draw the placed labels (v1's renders).
+    labels: bool = true,
+    /// Further outlines drawn in the ink, mm in the panel frame (engine
+    /// v2's legends, set in place of v1's).
+    extra: []const geom.Outline = &.{},
 };
 
 /// A placed panel for display: each tile drawn from its prototype's art as
@@ -126,13 +131,14 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
         try w.writeAll("\"/>\n");
     }
     try w.print("<g fill=\"{s}\" fill-rule=\"nonzero\">\n", .{opts.ink});
-    for (placed.labels) |l| {
+    for (opts.extra) |o| try path(w, o);
+    if (opts.labels) for (placed.labels) |l| {
         const outlines = try l.render.outlines(a, faces);
         for (outlines) |o| {
             const moved = try o.transformed(a, .translate(l.origin.x, l.origin.y));
             try path(w, moved);
         }
-    }
+    };
     try w.writeAll("</g>\n</g>\n</svg>\n");
     return out.toOwnedSlice();
 }

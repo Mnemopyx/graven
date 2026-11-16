@@ -21,7 +21,11 @@
 //! at the break candidates, aligned in open stretches, each item stood on
 //! the baseline path where it falls; exact outlines out.
 //!
-//! Not yet: entry syntaxes (stage 4).
+//! Stage 4, entry syntaxes (latex.zig, typst.zig, with symbols.zig,
+//! entry.zig, reparse.zig): LaTeX and Typst-style math, and legends (text
+//! with math between dollars), to objects and back; parsers that never
+//! fail, so every prefix gives a whole tree with holes; source spans;
+//! identity carried across a reparse.
 
 const std = @import("std");
 
@@ -34,6 +38,11 @@ pub const ground = @import("ground.zig");
 pub const faces = @import("faces.zig");
 pub const layout = @import("layout.zig");
 pub const setting = @import("setting.zig");
+pub const symbols = @import("symbols.zig");
+pub const entry = @import("entry.zig");
+pub const latex = @import("latex.zig");
+pub const typst = @import("typst.zig");
+pub const reparse = @import("reparse.zig");
 pub const samples = @import("samples.zig");
 
 pub const Expr = expr.Expr;
@@ -51,6 +60,7 @@ test {
     _ = expr;
     _ = ground;
     _ = @import("layout_test.zig");
+    _ = @import("syntax_test.zig");
 }
 
 const testing = std.testing;
