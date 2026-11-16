@@ -100,6 +100,7 @@ const Parser = struct {
                 .{ "\\emph{", .italic },
                 .{ "\\textrm{", .normal },
                 .{ "\\textup{", .normal },
+                .{ "\\textnormal{", .normal },
                 .{ "{", .normal },
             }) |o| {
                 if (p.startsWith(o[0])) break o[1];
@@ -135,6 +136,13 @@ const Parser = struct {
                 try text.add(p.gpa(), entry.allow_mark, p.i);
                 p.i += "\\allowbreak".len;
                 if (p.startsWith("{}")) p.i += 2 else if (p.startsWith(" ")) p.i += 1;
+                continue;
+            }
+            // A quad (an imported tab): a space, a place to break.
+            if (p.startsWith("\\qquad") or p.startsWith("\\quad")) {
+                try text.add(p.gpa(), " ", p.i);
+                p.i += if (p.startsWith("\\qquad")) "\\qquad".len else "\\quad".len;
+                if (p.startsWith("{}")) p.i += 2;
                 continue;
             }
             if (p.startsWith("\\textbackslash")) {

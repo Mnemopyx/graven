@@ -34,9 +34,11 @@ pub const magic = "GRAVEN\x00\x01";
 
 /// The model block's type and the version written.
 pub const model_block = "MODL".*;
-pub const model_version: u16 = 1;
+/// 2: text styles became glyphic contexts (2026-11-16); version 1 files
+/// are not read (no migration was wanted).
+pub const model_version: u16 = 2;
 
-pub const Error = Allocator.Error || error{ BadFile, BadChecksum, Truncated, UnknownTag, NoModel, TooNew };
+pub const Error = Allocator.Error || error{ BadFile, BadChecksum, Truncated, UnknownTag, NoModel, TooNew, TooOld };
 
 fn crc(bytes: []const u8) u32 {
     return std.hash.crc.@"CRC-32/ISCSI".hash(bytes);
@@ -378,6 +380,7 @@ pub fn checksum(bytes: []const u8) u32 {
 /// The model held in a model block's payload, in a new model's arena.
 pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
     if (b.version > model_version) return error.TooNew;
+    if (b.version < model_version) return error.TooOld;
     var m: model.Model = .init(gpa);
     errdefer m.deinit();
     var r: Reader = .{ .in = b.payload, .a = m.arena.allocator() };
@@ -526,7 +529,9 @@ test "a model writes and reads back to the same bytes, with its content" {
     var m: model.Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.inch);
-    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3, .script_scale = 0.7 });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
+    try m.setStyleFace(style, "math", .{ .family = "Libertinus Math" });
+    try m.setStyleRule(style, .variable, .scale, .{ .number = 1.2 });
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
     const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 10, .y = 50 }, .prototype = key, .count = 2, .length = 4, .pitch = 19.05 });
     _ = try m.insertTile(c, r, 0, key, 1);
@@ -549,7 +554,8 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqual(.inch, back.units);
     try testing.expectEqualStrings("V = \\frac{1}{2}", back.panels.items[c].regions.items[r].items.items[1].what.run.content);
     try testing.expect(back.panels.items[c].regions.items[r].items.items[1].what.run.equation);
-    try testing.expectEqual(0.7, back.textStyle(style).spec.script_scale.?);
+    try testing.expectEqualStrings("Libertinus Math", back.textStyle(style).face("math").?.family);
+    try testing.expectEqual(1.2, back.textStyle(style).rules.items[0].value.number);
     try testing.expectEqual(0.1 + 0.2, back.panels.items[p].h);
     try testing.expectEqual(2, back.spaces.items.len);
     try testing.expectEqual(1, back.spaces.items[0].views.items.len);
@@ -607,7 +613,7 @@ test "a model dumps as text, a field a line" {
     var m: model.Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
-    const style = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("Body", .{ .cap_height = 3 });
     const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = 1.5, .y = 2 }, .style = style, .count = 1, .length = 40, .pitch = 5 });
     try m.insertRun(c, r, 0, .{ .style = style, .content = "Hello \"you\"" });
     var out: std.Io.Writer.Allocating = .init(gpa);

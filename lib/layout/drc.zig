@@ -133,7 +133,7 @@ test "ink past a margin is found; a panel in the margin alone is not" {
 
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("legend", .{ .cap_height = 3 });
     // A panel reaching 15 mm into the 20 mm left margin.
     const p = try m.placePanel(.{ .name = "P", .origin = .{ .x = 5, .y = 100 }, .w = 60, .h = 30 });
     // No panel margins: this test is about the sheet's.

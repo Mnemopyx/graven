@@ -685,8 +685,8 @@ fn exportPrompt() void {
 /// Adds the sample PC keyboard as a new panel and makes it the context.
 fn loadSample() !void {
     // Built by the sample's own calls, then logged as one step: a snapshot.
-    const main_style = try state.model.addStyle("legend", .{ .upright = 0, .cap_height = 2.6 });
-    const small = try state.model.addStyle("legend words", .{ .upright = 0, .cap_height = 1.6 });
+    const main_style = try state.model.addStyle("legend", .{ .cap_height = 2.6 });
+    const small = try state.model.addStyle("legend words", .{ .cap_height = 1.6 });
     const pi = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
     // Top-left of the sheet, 20 mm in; on a canvas, at its origin.
     const panel = state.model.panels.items[pi];
@@ -699,7 +699,7 @@ fn loadSample() !void {
 /// Adds the rough HP-15C keypad (a plate and its keys) to the shown space,
 /// right of what it holds, and opens the plate's grid.
 fn loadHp15c() !void {
-    const styles = try samples.hp15c.addStyles(&state.model, &.{});
+    const styles = try samples.hp15c.addStyles(&state.model, try layout.fonts.addPackage(&state.model, &layout.fonts.libertinus, "Libertinus"));
     const held = spaceExtents();
     const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 0 } else .{ .x = held.x1 + 20, .y = held.y0 };
     const b = try samples.hp15c.build(&state.model, styles, shown_space, at);
@@ -967,10 +967,10 @@ fn faceTable() []const *engine.Face {
     return &state.faces;
 }
 
-/// Resolves the document's composed fonts again when the document changed.
+/// Resolves the document's styles' fonts again when the document changed.
 fn resolveFonts(labels: *layout.Labels) void {
     const uses = for (state.model.styles.items) |st| {
-        if (st.font != .none) break true;
+        if (st.faces.items.len > 0) break true;
     } else false;
     if (!uses) {
         if (resolved) |*r| {
@@ -1013,49 +1013,28 @@ var font_status_buf: [160]u8 = undefined;
 /// Each font-window change that takes two actions is undone as one.
 var font_step: u64 = 0;
 
-fn hostAddFont(name: []const u8, main_font: layout.model.FontName, variants: layout.model.FontVariants) ?layout.model.ObjectId {
+fn hostSetStyleFace(style: layout.model.StyleId, role: []const u8, font: ?layout.model.FontName) void {
+    act(.setStyleFace, .{ style, role, font }) catch {};
+}
+fn hostSetStyleFamily(style: layout.model.StyleId, main_font: layout.model.FontName, variants: fontwin.Variants) void {
     font_step += 1;
-    const key = mergeKey(.{ "font family", font_step });
-    const id = actM(key, .addFont, .{ name, main_font }) catch return null;
-    _ = actM(key, .setFontVariants, .{ id, variants }) catch {};
-    return id;
+    setFamily(mergeKey(.{ "font family", font_step }), style, main_font, variants);
 }
-fn hostSetFontFamily(id: layout.model.ObjectId, main_font: layout.model.FontName, variants: layout.model.FontVariants) void {
-    font_step += 1;
-    const key = mergeKey(.{ "font family", font_step });
-    _ = actM(key, .setFontMain, .{ id, main_font, variants.italic }) catch return;
-    _ = actM(key, .setFontVariants, .{ id, variants }) catch {};
-}
-fn hostSetFontVariants(id: layout.model.ObjectId, variants: layout.model.FontVariants) void {
-    act(.setFontVariants, .{ id, variants }) catch {};
-}
-fn hostSetFontMember(id: layout.model.ObjectId, index: usize, member: layout.model.FontMember) void {
-    act(.setFontMember, .{ id, index, member }) catch {};
-}
-fn hostAddFontMember(id: layout.model.ObjectId, member: layout.model.FontMember) void {
-    _ = act(.addFontMember, .{ id, std.math.maxInt(usize), member }) catch {};
-}
-fn hostMoveFontMember(id: layout.model.ObjectId, index: usize, up: bool) void {
-    _ = act(.moveFontMember, .{ id, index, up }) catch {};
-}
-fn hostRemoveFontMember(id: layout.model.ObjectId, index: usize) void {
-    act(.removeFontMember, .{ id, index }) catch {};
-}
-fn hostSetStyleFont(style: layout.model.StyleId, id: layout.model.ObjectId) void {
-    act(.setStyleFont, .{ style, id }) catch {};
+
+/// Style `style`'s text face and its italic and bolds, as one step (merge
+/// key `key`); a variant the family lacks is cleared.
+fn setFamily(key: u64, style: layout.model.StyleId, main_font: layout.model.FontName, variants: fontwin.Variants) void {
+    _ = actM(key, .setStyleFace, .{ style, "text", @as(?layout.model.FontName, main_font) }) catch return;
+    _ = actM(key, .setStyleFace, .{ style, "italic", variants.italic }) catch {};
+    _ = actM(key, .setStyleFace, .{ style, "bold", variants.bold }) catch {};
+    _ = actM(key, .setStyleFace, .{ style, "bold_italic", variants.bold_italic }) catch {};
 }
 
 fn fontHost() fontwin.Host {
     return .{
         .model = &state.model,
-        .addFont = hostAddFont,
-        .setFontFamily = hostSetFontFamily,
-        .setFontVariants = hostSetFontVariants,
-        .setFontMember = hostSetFontMember,
-        .addFontMember = hostAddFontMember,
-        .moveFontMember = hostMoveFontMember,
-        .removeFontMember = hostRemoveFontMember,
-        .setStyleFont = hostSetStyleFont,
+        .setStyleFace = hostSetStyleFace,
+        .setStyleFamily = hostSetStyleFamily,
     };
 }
 
@@ -1628,15 +1607,12 @@ fn importText(path: []const u8) void {
     // Fonts made for the text's families: their installed faces, with
     // their own italic and bolds.
     var missing: usize = 0;
-    for (rep.fonts_made.items) |id| {
-        const i = state.model.fontIndex(id) orelse continue;
-        const fam = state.model.fonts.items[i].name;
-        const found = fontwin.installedFamily(state.gpa, fam) orelse {
+    for (rep.fonts_made.items) |made| {
+        const found = fontwin.installedFamily(state.gpa, made.family) orelse {
             missing += 1;
             continue;
         };
-        _ = hist.doMerged(&state.model, key, .setFontMain, .{ id, found.main, found.variants.italic }) catch {};
-        _ = hist.doMerged(&state.model, key, .setFontVariants, .{ id, found.variants }) catch {};
+        setFamily(key, made.style, found.main, found.variants);
     }
     var notes: std.Io.Writer.Allocating = .init(arena.allocator());
     const w = &notes.writer;
@@ -3554,7 +3530,7 @@ fn labelStyle() !layout.model.StyleId {
 /// merged under `key`.
 fn labelStyleIn(key: ?u64) !layout.model.StyleId {
     if (state.label_style) |s| return s;
-    const s = if (key) |k| try actM(k, .addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } }) else try act(.addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } });
+    const s = if (key) |k| try actM(k, .addStyle, .{ "Label", .{ .cap_height = 3 } }) else try act(.addStyle, .{ "Label", .{ .cap_height = 3 } });
     state.label_style = s;
     return s;
 }
@@ -7534,9 +7510,9 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
 fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
     const style = state.model.textStyle(sid).*;
     const ctx = if (state.labels) |*l| l.context(sid) else null;
-    const cap = if (ctx) |c| c.spec.cap_height else style.spec.cap_height;
-    const em_mm = style.spec.em_size orelse if (ctx) |c| (c.em(cap) catch cap / layout.model.cap_per_em) else cap / layout.model.cap_per_em;
-    const by_em = style.spec.em_size != null;
+    const cap = if (ctx) |c| c.cap_height else style.cap_height;
+    const em_mm = style.em_size orelse if (ctx) |c| cap * @as(f64, @floatFromInt(c.text.upem)) / layout.legend.capUnits(c.text) else cap / layout.model.cap_per_em;
+    const by_em = style.em_size != null;
     const muted: dvui.Options = .{ .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) } };
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });

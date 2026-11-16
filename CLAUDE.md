@@ -47,7 +47,7 @@ Regression check after any engine or layout change: the PC keyboard sample's SVG
 cmp kb.svg kb_before.svg   # keep a copy from before the change
 ```
 
-Samples to look at: `graven hp15c libertinus plate.svg keys.svg` (or `stix-two`), `graven 3mf hp15c libertinus plate.3mf keys.3mf`, `graven msdf <font> <text> <texels per cap> out.pgm`, `graven v2 fonts/Geist-SemiBold.ttf fonts/LibertinusMath-Regular.otf v2.svg` (engine v2: the Leibniz series on a row, broken rows and a dial), `graven v2 hp15c out/` (the keypad's legends set by v1 and by v2, side by side files). An SVG becomes a PNG to look at with Playwright's Chromium (load it in a page sized to its viewBox and screenshot).
+Samples to look at: `graven hp15c libertinus plate.svg keys.svg` (or `stix-two`), `graven 3mf hp15c libertinus plate.3mf keys.3mf`, `graven msdf <font> <text> <texels per cap> out.pgm`, `graven v2 fonts/Geist-SemiBold.ttf fonts/LibertinusMath-Regular.otf v2.svg` (engine v2: the Leibniz series on a row, broken rows and a dial). An SVG becomes a PNG to look at with Playwright's Chromium (load it in a page sized to its viewBox and screenshot).
 
 ## The GUI without a person at it
 
@@ -77,7 +77,8 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 
 - `lib/geom`: points, segments, exact booleans (`boolean.zig`), overlap removal (`fill.zig`), earcut, outline growth (`grow.zig`), MSDF fields (`msdf.zig`).
 - `lib/font`: faces (HarfBuzz), outlines, measures (cap height, stems).
-- `lib/engine`: the v1 label engine: markup (KaTeX-style, `$…$` math mode), style context (composed fonts, members, weights), layout of a legend (`label.zig`), render items.
-- `lib/layout`: the document model, history and undo, placement (`place.zig`), fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
+- `lib/engine`: the v1 label engine, being retired (engine v2 route, step 5): its `Render` container and `Face` are still used; markup, style contexts and label layout are no longer used by placement.
+- `lib/glyphic`: engine v2: expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
+- `lib/layout`: the document model (text styles are stored glyphic contexts), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig`), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
 - `lib/sketch`: parametric sketches and their solver.
 - `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.

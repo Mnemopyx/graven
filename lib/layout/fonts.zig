@@ -1,20 +1,24 @@
-//! Composed fonts to faces: the document names its fonts by family and
-//! style (see `model.ComposedFont`); an app knows which fonts it has and
+//! Text styles' fonts to faces: the document names fonts by family and
+//! style (see `model.TextStyle.faces`); an app knows which fonts it has and
 //! how to load them. `resolve` matches the two and gives the face table to
-//! render with and each style's spec in it, with every substitution it had
-//! to make, for the dump and for flagging.
+//! set legends with and each style's faces by role in it, with every
+//! substitution it had to make, for the dump and for flagging.
+//!
+//! Packages: ready-made faces and rules for math legends, applied to a
+//! style (`applyPackage`).
 //!
 //! No file access: the app supplies its fonts as a `Catalog`, loading a
-//! face only when a composed font asks for it.
+//! face only when a style asks for it.
 
 const std = @import("std");
 const engine = @import("graven_engine");
+const glyphic = @import("graven_glyphic");
 const model = @import("model.zig");
 
 const Allocator = std.mem.Allocator;
 const FaceId = engine.render.FaceId;
 const FontName = model.FontName;
-const ObjectId = model.ObjectId;
+const StyleId = model.StyleId;
 
 /// The fonts an app can supply: their names, and a way to load each.
 pub const Catalog = struct {
@@ -42,38 +46,45 @@ pub fn find(names: []const FontName, want: FontName) ?struct { index: usize, exa
     return null;
 }
 
-/// A font a composed font asked for and did not get as named.
+/// A font a style asked for and did not get as named.
 pub const Substitution = struct {
-    /// The composed font that asked.
-    font: ObjectId,
+    /// The style that asked.
+    style: StyleId,
     wanted: FontName,
     /// What it got instead: another style of the family; null for none
-    /// (the default face for a main font, nothing for a member).
+    /// (the role is then left out).
     got: ?FontName,
 };
+
+/// A face of a style, for a role, in the face table.
+pub const RoleFace = struct { role: []const u8, face: FaceId };
+
+/// A style resolved: its own faces by role (its base's are its base's).
+pub const Style = struct { id: StyleId, faces: []const RoleFace };
 
 /// A document's fonts, resolved.
 pub const Resolved = struct {
     gpa: Allocator,
-    /// The face table: 0 is the default face, the rest as composed fonts
-    /// need them.
+    /// The face table: 0 is the default face, the rest as styles need them.
     faces: std.ArrayList(*engine.Face) = .empty,
-    /// Per style, in the model's order, its spec with its faces in
-    /// `faces`, and the style's ID. A spec's coverage ranges point into the
-    /// model.
-    specs: std.ArrayList(engine.style.Spec) = .empty,
-    ids: std.ArrayList(model.StyleId) = .empty,
-    /// The members of each spec, in one list the specs' slices point into.
-    members: std.ArrayList(engine.style.Member) = .empty,
+    /// Per style, in the model's order. Roles point into the model.
+    styles: std.ArrayList(Style) = .empty,
+    /// Every style's faces, in one list the styles' slices point into.
+    roles: std.ArrayList(RoleFace) = .empty,
     substitutions: std.ArrayList(Substitution) = .empty,
 
     pub fn deinit(r: *Resolved) void {
         r.faces.deinit(r.gpa);
-        r.specs.deinit(r.gpa);
-        r.ids.deinit(r.gpa);
-        r.members.deinit(r.gpa);
+        r.styles.deinit(r.gpa);
+        r.roles.deinit(r.gpa);
         r.substitutions.deinit(r.gpa);
         r.* = undefined;
+    }
+
+    /// Style `id`'s own faces (none for a style it does not have).
+    pub fn of(r: *const Resolved, id: StyleId) []const RoleFace {
+        for (r.styles.items) |st| if (st.id == id) return st.faces;
+        return &.{};
     }
 };
 
@@ -85,14 +96,14 @@ const Resolver = struct {
 
     /// The face for `want`, recording a substitution; null when the
     /// catalog has nothing of its family, or cannot load it.
-    fn face(s: *Resolver, font: ObjectId, want: FontName) Allocator.Error!?FaceId {
+    fn face(s: *Resolver, style: StyleId, want: FontName) Allocator.Error!?FaceId {
         const hit = find(s.catalog.names, want) orelse {
-            try s.note(font, want, null);
+            try s.note(style, want, null);
             return null;
         };
         const id = if (s.loaded.get(hit.index)) |id| id else blk: {
             const f = s.catalog.load(s.catalog.ctx, hit.index) orelse {
-                try s.note(font, want, null);
+                try s.note(style, want, null);
                 return null;
             };
             // The same face as one in the table (the default, say): its id.
@@ -105,167 +116,93 @@ const Resolver = struct {
             try s.loaded.put(s.r.gpa, hit.index, id);
             break :blk id;
         };
-        if (!hit.exact) try s.note(font, want, s.catalog.names[hit.index]);
+        if (!hit.exact) try s.note(style, want, s.catalog.names[hit.index]);
         return id;
     }
 
-    fn optFace(s: *Resolver, font: ObjectId, want: ?FontName) Allocator.Error!?FaceId {
-        return if (want) |n| try s.face(font, n) else null;
-    }
-
-    fn note(s: *Resolver, font: ObjectId, want: FontName, got: ?FontName) Allocator.Error!void {
-        for (s.r.substitutions.items) |e| if (e.font == font and e.wanted.eql(want)) return;
-        try s.r.substitutions.append(s.r.gpa, .{ .font = font, .wanted = want, .got = got });
+    fn note(s: *Resolver, style: StyleId, want: FontName, got: ?FontName) Allocator.Error!void {
+        for (s.r.substitutions.items) |e| if (e.style == style and e.wanted.eql(want)) return;
+        try s.r.substitutions.append(s.r.gpa, .{ .style = style, .wanted = want, .got = got });
     }
 };
 
-/// Resolves the composed fonts of `m` against `catalog`. Face 0 is
-/// `default`, the face a style set in no composed font names as 0 (and the
-/// one a composed font's missing main font falls back to). The faces stay
-/// the app's; `Resolved` holds pointers to them.
+/// Resolves the styles' fonts of `m` against `catalog`. Face 0 is
+/// `default`, the face of a style that names no text face (nor does its
+/// base). A font not found leaves its role out. The faces stay the app's;
+/// `Resolved` holds pointers to them.
 pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default: *engine.Face) Allocator.Error!Resolved {
     var r: Resolved = .{ .gpa = gpa };
     errdefer r.deinit();
     try r.faces.append(gpa, default);
     var s: Resolver = .{ .r = &r, .catalog = catalog };
     defer s.loaded.deinit(gpa);
-
-    // Members first, into one list, so the specs' slices into it stay put.
-    const Span = struct { start: usize, len: usize };
-    const spans = try gpa.alloc(Span, m.styles.items.len);
-    defer gpa.free(spans);
-    for (m.styles.items, spans) |st, *span| {
-        span.* = .{ .start = r.members.items.len, .len = 0 };
-        const i = m.fontIndex(st.font) orelse continue;
-        const cf = m.fonts.items[i];
-        for (cf.members.items) |mb| {
-            // A member that cannot be found is left out: its characters
-            // fall to the faces after it, and are reported if none has them.
-            const up = (try s.face(cf.id, mb.font)) orelse continue;
-            try r.members.append(gpa, .{
-                .upright = up,
-                .italic = try s.optFace(cf.id, mb.italic),
-                .bold = try s.optFace(cf.id, mb.bold),
-                .bold_italic = try s.optFace(cf.id, mb.bold_italic),
-                .alphabet = mb.alphabet,
-                .coverage = mb.coverage,
-                .match = mb.match,
-                .scale = mb.scale,
-                .shift = mb.shift,
-                .role = mb.role,
-                .weight = mb.weight,
-            });
-            span.len += 1;
+    const starts = try gpa.alloc(usize, m.styles.items.len);
+    defer gpa.free(starts);
+    for (m.styles.items, starts) |st, *start| {
+        start.* = r.roles.items.len;
+        for (st.faces.items) |f| {
+            const id = (try s.face(st.id, f.font)) orelse continue;
+            try r.roles.append(gpa, .{ .role = f.role, .face = id });
         }
     }
-    for (m.styles.items, spans) |st, span| {
-        var spec = st.spec;
-        if (m.fontIndex(st.font)) |i| {
-            const cf = m.fonts.items[i];
-            spec.upright = (try s.face(cf.id, cf.main)) orelse 0;
-            spec.italic = try s.optFace(cf.id, cf.italic);
-            spec.bold = try s.optFace(cf.id, cf.bold);
-            spec.bold_italic = try s.optFace(cf.id, cf.bold_italic);
-            // A variant found only as the regular face is no variant: the
-            // engine then reports what it lacks.
-            if (spec.italic == spec.upright) spec.italic = null;
-            if (spec.bold == spec.upright) spec.bold = null;
-            if (spec.bold_italic == spec.upright) spec.bold_italic = null;
-            spec.members = r.members.items[span.start..][0..span.len];
-            spec.math = try s.optFace(cf.id, cf.math);
-            spec.greek = cf.greek;
-        }
-        try r.specs.append(gpa, spec);
-        try r.ids.append(gpa, st.id);
+    for (m.styles.items, starts, 0..) |st, start, i| {
+        const end = if (i + 1 < starts.len) starts[i + 1] else r.roles.items.len;
+        try r.styles.append(gpa, .{ .id = st.id, .faces = r.roles.items[start..end] });
     }
     return r;
 }
 
 // Math font packages -----------------------------------------------------------
 
-/// A math font package: a named set of faces from one family, with roles
+/// A math font package: faces by role and the rules that go with them
 /// (decided 2026-11-15; after MathJax 4's fonts and EverCalc's HP-15C
-/// legends). Adding it to a document makes a composed font: the text face
-/// as its main font, its members (Greek, variables, then the math face as
-/// the fallback for symbols), and the math face for the math constants.
-/// The faces are fetched, pinned, by scripts/fetch-fonts.py.
+/// legends), applied to a style. The faces are fetched, pinned, by
+/// scripts/fetch-fonts.py.
 pub const Package = struct {
     name: []const u8,
-    text: FontName,
-    math: FontName,
-    members: []const model.FontMember,
-    greek: engine.style.Greek = .as_is,
+    faces: []const model.StyleFace,
+    rules: []const model.StyleRule = &.{},
 };
 
-/// Greek, upright: the Greek and Coptic block.
-const greek: []const engine.style.Range = &.{.{ .first = 0x0370, .last = 0x03FF }};
+fn num(x: f32) glyphic.Value {
+    return .{ .number = x };
+}
+
+const italic: glyphic.Value = .{ .choice = @intFromEnum(glyphic.param.Shape.italic) };
 
 /// STIX Two: Geist SemiBold text; STIX Two Math 2.12 for the constants and
-/// symbols; STIX Two Text Bold for Greek (Sigma, Delta, pi); TeX Gyre Schola
-/// Bold Italic, 1.15 times, for variables (EverCalc's choices, 2026-11-02).
-/// STIX Two Math's symbols are drawn as heavy as Geist's stems (EverCalc's
-/// symbol_weight "match").
+/// symbols; TeX Gyre Schola Bold Italic, 1.15 times, for variables
+/// (EverCalc's choices, 2026-11-02); STIX Two Text Bold as a fallback
+/// (Greek).
 pub const stix_two: Package = .{
     .name = "STIX Two",
-    .text = .{ .family = "Geist", .style = "SemiBold" },
-    .math = .{ .family = "STIX Two Math", .style = "Regular" },
-    .members = &.{
-        .{ .font = .{ .family = "STIX Two Text", .style = "Bold" }, .coverage = .{ .ranges = greek } },
-        .{ .font = .{ .family = "TeX Gyre Schola", .style = "Bold Italic" }, .role = .variables, .scale = 1.15 },
-        .{ .font = .{ .family = "STIX Two Math", .style = "Regular" }, .weight = .{ .match = .bar } },
+    .faces = &.{
+        .{ .role = "text", .font = .{ .family = "Geist", .style = "SemiBold" } },
+        .{ .role = "math", .font = .{ .family = "STIX Two Math", .style = "Regular" } },
+        .{ .role = "italic", .font = .{ .family = "TeX Gyre Schola", .style = "Bold Italic" } },
+        .{ .role = "greek", .font = .{ .family = "STIX Two Text", .style = "Bold" } },
+    },
+    .rules = &.{
+        .{ .kind = .variable, .param = .shape, .value = italic },
+        .{ .kind = .variable, .param = .scale, .value = num(1.15) },
     },
 };
-
-/// Operators: Latin-1's and ASCII's (+ < = > ± × ÷), the minus sign, and
-/// the Mathematical Operators block.
-const operators: []const engine.style.Range = &.{
-    .{ .first = '+', .last = '+' },       .{ .first = '<', .last = '>' },
-    .{ .first = 0x00B1, .last = 0x00B1 }, .{ .first = 0x00D7, .last = 0x00D7 },
-    .{ .first = 0x00F7, .last = 0x00F7 }, .{ .first = 0x2190, .last = 0x21FF },
-    .{ .first = 0x2200, .last = 0x22FF },
-};
-
-const lib_math: FontName = .{ .family = "Libertinus Math", .style = "Regular" };
-
-/// Mathematical bold Greek capitals (U+1D6A8..U+1D6C1), and its small
-/// letters and symbols (U+1D6C2..U+1D6E1: π among them).
-const bold_greek_capitals: []const engine.style.Range = &.{.{ .first = 0x1D6A8, .last = 0x1D6C1 }};
-const bold_greek_small: []const engine.style.Range = &.{.{ .first = 0x1D6C2, .last = 0x1D6E1 }};
-
-/// Mathematical italic (U+1D434..U+1D467) and Planck's h (U+210E), which
-/// stands in its gap.
-const math_italic: []const engine.style.Range = &.{ .{ .first = 0x1D434, .last = 0x1D467 }, .{ .first = 0x210E, .last = 0x210E } };
 
 /// Libertinus: Geist SemiBold text with Libertinus Math 7.051 for the rest
-/// (chosen 2026-11-15 for the HP-15C keypad): its operators and arrows,
-/// its mathematical bold Greek (U+1D6A8..) for Greek, and its mathematical
-/// italic (U+1D434.., ball terminals) for variables, all drawn as heavy as
-/// Geist's stems; and its MATH table for the constants. With no member for
-/// variables and no italic in Geist, math's letters become the italic
-/// alphanumerics, which only Libertinus Math has.
+/// (chosen 2026-11-15 for the HP-15C keypad): its operators and arrows, its
+/// mathematical italic for variables and its MATH table; variables and
+/// constants (π) 1.2 times, set beside Geist's capitals.
 pub const libertinus: Package = .{
     .name = "Libertinus",
-    .text = .{ .family = "Geist", .style = "SemiBold" },
-    .math = lib_math,
-    .members = &.{
-        // Operators and arrows, as heavy as Geist's minus sign.
-        .{ .font = lib_math, .coverage = .{ .ranges = operators }, .weight = .{ .match = .bar } },
-        // Bold Greek, its bold I's stem as heavy as Geist's I's: already
-        // so, so drawn as it is (growing it fills the acute corners where
-        // its hairlines meet its thick strokes, and Σ reads as slanted).
-        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_capitals }, .weight = .{ .match = .{ .char = 0x1D408 } } },
-        // Small bold Greek (π), 1.2 times as the variables are: small
-        // letters set beside Geist's.
-        .{ .font = lib_math, .coverage = .{ .ranges = bold_greek_small }, .scale = 1.2, .weight = .{ .match = .{ .char = 0x1D408 } } },
-        // Italic variables, 1.2 times (their x-height, 0.68 of their cap
-        // height against Geist's 0.75, then more, for detail),
-        // their italic I's stem matched, and a touch more: their hairlines
-        // make them read lighter than Geist.
-        .{ .font = lib_math, .coverage = .{ .ranges = math_italic }, .scale = 1.2, .weight = .{ .match = .{ .char = 0x1D43C, .extra = 12 } } },
-        // Whatever else Geist lacks.
-        .{ .font = lib_math, .weight = .{ .match = .bar } },
+    .faces = &.{
+        .{ .role = "text", .font = .{ .family = "Geist", .style = "SemiBold" } },
+        .{ .role = "math", .font = .{ .family = "Libertinus Math", .style = "Regular" } },
     },
-    .greek = .math_bold,
+    .rules = &.{
+        .{ .kind = .variable, .param = .shape, .value = italic },
+        .{ .kind = .variable, .param = .scale, .value = num(1.2) },
+        .{ .kind = .constant, .param = .scale, .value = num(1.2) },
+    },
 };
 
 /// The packages Graven knows, by name.
@@ -285,19 +222,23 @@ pub fn package(name: []const u8) ?*const Package {
     return null;
 }
 
-/// Adds `pkg` to `m` as a composed font named `name`; returns its ID.
-pub fn addPackage(m: *model.Model, pkg: *const Package, name: []const u8) model.Model.Error!model.ObjectId {
-    const id = try m.addFont(name, pkg.text);
-    for (pkg.members, 0..) |mb, i| _ = try m.addFontMember(id, i, mb);
-    try m.setFontMath(id, pkg.math);
-    try m.setFontGreek(id, pkg.greek);
+/// Sets `pkg`'s faces and rules in style `style`.
+pub fn applyPackage(m: *model.Model, style: StyleId, pkg: *const Package) model.Model.Error!void {
+    for (pkg.faces) |f| try m.setStyleFace(style, f.role, f.font);
+    for (pkg.rules) |r| try m.setStyleRule(style, r.kind, r.param, r.value);
+}
+
+/// A new style named `name` set in `pkg`, for other styles to take as
+/// their base; returns its ID.
+pub fn addPackage(m: *model.Model, pkg: *const Package, name: []const u8) model.Model.Error!StyleId {
+    const id = try m.addStyle(name, .{});
+    try applyPackage(m, id, pkg);
     return id;
 }
 
-// Tests --------------------------------------------------------------------------
-
 const testing = std.testing;
 const testdata = @import("graven_testdata");
+const place = @import("place.zig");
 
 const TestFonts = struct {
     faces: [3]*engine.Face,
@@ -332,64 +273,29 @@ const TestFonts = struct {
     }
 };
 
-test "a style set in a composed font gets its faces, members and all" {
+test "a style's faces resolve by role; one it lacks falls back to the default face" {
     var t = try TestFonts.init();
     defer t.deinit();
     var m: model.Model = .init(testing.allocator);
     defer m.deinit();
-    const plain = try m.addStyle("Plain", .{ .upright = 0, .cap_height = 3 });
-    const legend = try m.addStyle("Legend", .{ .upright = 0, .cap_height = 7 });
-    const f = try m.addFont("Legend", .{ .family = "Graven Test" });
-    _ = try m.addFontMember(f, 0, .{ .font = .{ .family = "Graven Fallback" }, .shift = 0.1 });
-    try m.setStyleFont(legend, f);
+    const plain = try m.addStyle("Plain", .{ .cap_height = 3 });
+    const legend = try m.addStyle("Legend", .{ .cap_height = 7 });
+    try m.setStyleFace(legend, "text", .{ .family = "Graven Test" });
+    try m.setStyleFace(legend, "bold", .{ .family = "Graven Test", .style = "Bold" });
+    try m.setStyleFace(legend, "fallback", .{ .family = "Graven Fallback" });
 
     var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
     defer r.deinit();
-    // The main font is the default face itself: one face for both, and the
-    // fallback beside it.
-    try testing.expectEqual(2, r.faces.items.len);
-    try testing.expectEqual(0, r.specs.items[m.styleIndex(plain).?].upright);
-    const spec = r.specs.items[m.styleIndex(legend).?];
-    try testing.expectEqual(0, spec.upright);
-    try testing.expectEqual(7, spec.cap_height);
-    try testing.expectEqual(1, spec.members.len);
-    try testing.expectEqual(t.faces[2], r.faces.items[spec.members[0].upright]);
-    try testing.expectEqual(0.1, spec.members[0].shift);
+    // The text font is the default face itself: one face for both.
+    try testing.expectEqual(3, r.faces.items.len);
+    try testing.expectEqual(0, r.of(plain).len);
+    const fs = r.of(legend);
+    try testing.expectEqual(3, fs.len);
+    try testing.expectEqual(0, fs[0].face);
+    try testing.expectEqualStrings("bold", fs[1].role);
+    try testing.expectEqual(t.faces[1], r.faces.items[fs[1].face]);
+    try testing.expectEqual(t.faces[2], r.faces.items[fs[2].face]);
     try testing.expectEqual(0, r.substitutions.items.len);
-
-    // It renders: x, which the main face lacks, from the member.
-    const ctx = try engine.style.Context.init(r.faces.items, spec);
-    var diag: engine.markup.Diagnostic = undefined;
-    var render = try engine.renderLabel(testing.allocator, &ctx, "HxH", .{}, &diag);
-    defer render.deinit();
-    try testing.expectEqual(@as(?FaceId, spec.members[0].upright), render.elements[1].face);
-}
-
-test "a composed font's bold resolves to the family's bold face" {
-    var t = try TestFonts.init();
-    defer t.deinit();
-    var m: model.Model = .init(testing.allocator);
-    defer m.deinit();
-    const legend = try m.addStyle("Legend", .{ .upright = 0, .cap_height = 7 });
-    const f = try m.addFont("Legend", .{ .family = "Graven Test" });
-    // An italic the family lacks becomes its regular: no italic.
-    try m.setFontVariants(f, .{ .bold = .{ .family = "Graven Test", .style = "Bold" }, .italic = .{ .family = "Graven Test", .style = "Italic" } });
-    _ = try m.addFontMember(f, 0, .{ .font = .{ .family = "Graven Fallback" }, .alphabet = .double_struck });
-    try m.setStyleFont(legend, f);
-    var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
-    defer r.deinit();
-    const spec = r.specs.items[m.styleIndex(legend).?];
-    try testing.expectEqual(t.faces[1], r.faces.items[spec.bold.?]);
-    try testing.expectEqual(null, spec.italic);
-    try testing.expectEqual(null, spec.bold_italic);
-    try testing.expect(spec.members[0].alphabet == .double_struck);
-
-    const ctx = try engine.style.Context.init(r.faces.items, spec);
-    var diag: engine.markup.Diagnostic = undefined;
-    var render = try engine.renderLabel(testing.allocator, &ctx, "H\\textbf{H}\\mathbb{H}", .{}, &diag);
-    defer render.deinit();
-    try testing.expectEqual(spec.bold, render.elements[1].face);
-    try testing.expectEqual(@as(?FaceId, spec.members[0].upright), render.elements[2].face);
 }
 
 test "fonts not found as named are substituted and reported" {
@@ -397,37 +303,17 @@ test "fonts not found as named are substituted and reported" {
     defer t.deinit();
     var m: model.Model = .init(testing.allocator);
     defer m.deinit();
-    const legend = try m.addStyle("Legend", .{ .upright = 0, .cap_height = 7 });
-    // A style the family lacks, an italic nobody has, a member family
-    // nobody has, and one asked for twice.
-    const f = try m.addFont("Legend", .{ .family = "Graven Test", .style = "Light" });
-    try m.setFontMain(f, .{ .family = "Graven Test", .style = "Light" }, .{ .family = "Nowhere", .style = "Italic" });
-    _ = try m.addFontMember(f, 0, .{ .font = .{ .family = "Missing Sans" } });
-    _ = try m.addFontMember(f, 9, .{ .font = .{ .family = "graven fallback", .style = "regular" } });
-    _ = try m.addFontMember(f, 9, .{ .font = .{ .family = "Graven Fallback" }, .scale = 2 });
-    try m.setStyleFont(legend, f);
-
-    var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[1]);
+    const st = try m.addStyle("Legend", .{ .cap_height = 3 });
+    // Another style of a family it has; a family it lacks.
+    try m.setStyleFace(st, "text", .{ .family = "Graven Test", .style = "Light" });
+    try m.setStyleFace(st, "math", .{ .family = "Nowhere Math" });
+    var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
     defer r.deinit();
-    const spec = r.specs.items[m.styleIndex(legend).?];
-    // Light → Regular of the same family, the plain style first.
-    try testing.expectEqual(t.faces[0], r.faces.items[spec.upright]);
-    try testing.expectEqual(null, spec.italic);
-    // The missing member is left out; the fallback, named in any case,
-    // loaded once for both members that ask for it.
-    try testing.expectEqual(2, spec.members.len);
-    try testing.expectEqual(spec.members[0].upright, spec.members[1].upright);
-    try testing.expectEqual(2, t.loads);
-    try testing.expectEqual(3, r.substitutions.items.len);
-    var nulls: usize = 0;
-    for (r.substitutions.items) |sub| {
-        if (sub.got) |got| {
-            try testing.expectEqualStrings("Light", sub.wanted.style);
-            try testing.expectEqualStrings("Regular", got.style);
-        } else nulls += 1;
-    }
-    // Missing Sans and the Nowhere italic: nothing.
-    try testing.expectEqual(2, nulls);
+    try testing.expectEqual(2, r.substitutions.items.len);
+    try testing.expectEqualStrings("Regular", r.substitutions.items[0].got.?.style);
+    try testing.expectEqual(null, r.substitutions.items[1].got);
+    // The math role is left out.
+    try testing.expectEqual(1, r.of(st).len);
 }
 
 test "a label cache given resolved fonts keeps them when the model syncs it again" {
@@ -435,52 +321,30 @@ test "a label cache given resolved fonts keeps them when the model syncs it agai
     defer t.deinit();
     var m: model.Model = .init(testing.allocator);
     defer m.deinit();
-    const legend = try m.addStyle("Legend", .{ .upright = 0, .cap_height = 7 });
-    const f = try m.addFont("Legend", .{ .family = "Graven Test" });
-    _ = try m.addFontMember(f, 0, .{ .font = .{ .family = "Graven Fallback" } });
-    try m.setStyleFont(legend, f);
+    const legend = try m.addStyle("Legend", .{ .cap_height = 3 });
+    try m.setStyleFace(legend, "fallback", .{ .family = "Graven Fallback" });
     var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
     defer r.deinit();
-
-    const place = @import("place.zig");
     var labels: place.Labels = .init(testing.allocator, &.{t.faces[0]});
     defer labels.deinit();
     try labels.syncResolved(&r);
-    try testing.expectEqual(1, labels.specOf(legend).?.members.len);
-    // As `solve` does: the resolved specs stay.
-    try labels.sync(&m);
-    try testing.expectEqual(1, labels.specOf(legend).?.members.len);
     try testing.expectEqual(2, labels.faces.len);
+    try labels.sync(&m);
+    try testing.expectEqual(2, labels.faces.len);
+    try testing.expect(labels.context(legend) != null);
 }
 
-test "a package becomes a composed font: text, members by role, the math face" {
+test "a package sets a style's faces and rules; styles take it as their base" {
     var m: model.Model = .init(testing.allocator);
     defer m.deinit();
-    const p = package("stix-two").?;
-    try testing.expectEqualStrings("STIX Two", p.name);
-    const id = try addPackage(&m, p, "Legends");
-    const f = m.fonts.items[m.fontIndex(id).?];
-    try testing.expect(f.main.eql(.{ .family = "Geist", .style = "SemiBold" }));
-    try testing.expect(f.math.?.eql(.{ .family = "STIX Two Math" }));
-    try testing.expectEqual(@as(usize, 3), f.members.items.len);
-    try testing.expect(f.members.items[0].coverage.has(0x03A3)); // Sigma
-    try testing.expectEqual(engine.style.Member.Role.variables, f.members.items[1].role);
-    try testing.expectEqual(@as(f64, 1.15), f.members.items[1].scale);
-    try testing.expect(f.members.items[2].coverage == .fallback);
-}
-
-test "the Libertinus package: Geist text; Libertinus Math operators, bold Greek and the rest, each matched by its own stroke" {
-    const p = package("libertinus").?;
-    try testing.expectEqualStrings("Geist", p.text.family);
-    try testing.expectEqual(engine.style.Greek.math_bold, p.greek);
-    try testing.expectEqual(@as(usize, 5), p.members.len);
-    try testing.expectEqual(@as(f64, 1.2), p.members[2].scale);
-    try testing.expect(p.members[2].coverage.has(0x1D6D1)); // bold pi
-    try testing.expectEqual(@as(f64, 1.2), p.members[3].scale);
-    try testing.expect(p.members[3].coverage.has(0x1D465)); // italic x
-    try testing.expectEqual(@as(u21, 0x2212), p.members[0].weight.match.char);
-    try testing.expect(p.members[0].coverage.has(0x2264)); // <=
-    try testing.expect(p.members[1].coverage.has(0x1D6BA)); // bold Sigma
-    try testing.expect(!p.members[1].coverage.has(0x1D6D1));
-    try testing.expect(package("stix-two") != null);
+    const base = try addPackage(&m, package("libertinus").?, "Libertinus");
+    const key = try m.addStyle("Key", .{ .cap_height = 1.9, .base = base });
+    const st = m.textStyle(base);
+    try testing.expectEqualStrings("Geist", st.face("text").?.family);
+    try testing.expectEqualStrings("Libertinus Math", st.face("math").?.family);
+    try testing.expectEqual(3, st.rules.items.len);
+    try testing.expectEqual(base, m.textStyle(key).base);
+    try testing.expectEqual(null, m.textStyle(key).face("text"));
+    try testing.expectEqual(&stix_two, package("stix-two").?);
+    try testing.expectError(error.StyleLoop, m.setStyleBase(base, key));
 }

@@ -44,9 +44,8 @@ pub const actions = [_][:0]const u8{
     "ungroup",           "moveGroup",          "moveToSpace",         "copyToSpace",        "addView",
     "moveView",          "setViewScale",       "removeView",          "addLayer",           "setLayer",
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
-    "addFont",           "renameFont",         "setFontMain", "setFontMath", "setFontGreek",         "addFontMember",      "setFontMember",
-    "moveFontMember",    "removeFontMember",   "removeFont",          "setStyleFont",
-    "setFontVariants",   "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
+    "renameStyle",       "setStyleBase",       "setStyleFace",        "setStyleRule",
+    "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
     "setEmSize",         "addConstraint",      "setConstraintValue",  "removeConstraint",   "setObjectOrigin",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
@@ -1327,37 +1326,32 @@ test "not saving drops the autosaved steps from the file" {
     try testing.expectEqual(1, o.model.panels.items[c].art.items.len);
 }
 
-test "composed-font edits undo and redo, and survive saving and reopening" {
+test "style edits undo and redo, and survive saving and reopening" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
-    _ = c;
+    _ = try m.startCanvas(.mm);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
-    const style = try h.do(&m, .addStyle, .{ "Label", .{ .upright = 0, .cap_height = 3 } });
-    const f = try h.do(&m, .addFont, .{ "Legend", .{ .family = "Inter" } });
-    _ = try h.do(&m, .addFontMember, .{ f, 0, .{ .font = .{ .family = "Symbols" }, .coverage = .{ .ranges = &.{.{ .first = 0x2190, .last = 0x21FF }} }, .scale = 1.1 } });
-    try h.do(&m, .setStyleFont, .{ style, f });
-    try testing.expectEqual(f, m.textStyle(style).font);
-    // Undo the style's font and the member; redo the member.
+    const style = try h.do(&m, .addStyle, .{ "Label", .{ .cap_height = 3 } });
+    try h.do(&m, .setStyleFace, .{ style, "text", @as(?model.FontName, .{ .family = "Inter" }) });
+    try h.do(&m, .setStyleRule, .{ style, @as(?@import("graven_glyphic").Kind, .variable), .scale, @as(?@import("graven_glyphic").Value, .{ .number = 1.1 }) });
+    // Undo the rule; redo it.
     _ = try h.undo(&m);
-    _ = try h.undo(&m);
-    try testing.expectEqual(0, m.fonts.items[0].members.items.len);
-    try testing.expectEqual(.none, m.textStyle(style).font);
+    try testing.expectEqual(0, m.textStyle(style).rules.items.len);
     _ = try h.redoStep(&m);
-    try testing.expectEqual(1.1, m.fonts.items[0].members.items[0].scale);
+    try testing.expectEqual(1.1, m.textStyle(style).rules.items[0].value.number);
 
     const bytes = try fileBytes(&h, gpa, test_writer, 1);
     defer gpa.free(bytes);
     var o = try openFile(gpa, bytes);
     defer o.model.deinit();
     defer o.history.deinit();
-    const back = o.model.fonts.items[0];
-    try testing.expectEqualStrings("Legend", back.name);
-    try testing.expectEqualStrings("Symbols", back.members.items[0].font.family);
-    try testing.expectEqual(0x21FF, back.members.items[0].coverage.ranges[0].last);
+    const back = o.model.textStyle(style);
+    try testing.expectEqualStrings("Label", back.name);
+    try testing.expectEqualStrings("Inter", back.face("text").?.family);
+    try testing.expectEqual(.variable, back.rules.items[0].kind.?);
 }
 
 test "a thread of tracks is kept in the file, and its join is a step undo takes back" {

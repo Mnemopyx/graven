@@ -286,7 +286,7 @@ test "the keyboard solves with no overflow and 104 tiles" {
     const gpa = std.testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const s = try m.addStyle("main", .{ .upright = 0, .cap_height = 2.6 });
+    const s = try m.addStyle("main", .{ .cap_height = 2.6 });
     const p = try build(gpa, &m, .{ .main = s, .small = s });
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
@@ -304,7 +304,7 @@ test "a key sized outside the key prototype's rules is flagged, not refused" {
     const gpa = std.testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const s = try m.addStyle("main", .{ .upright = 0, .cap_height = 2.6 });
+    const s = try m.addStyle("main", .{ .cap_height = 2.6 });
     const p = try build(gpa, &m, .{ .main = s, .small = s });
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
@@ -328,7 +328,7 @@ test "the keyboard saved and read back lays out and exports exactly the same" {
     const gpa = std.testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const s = try m.addStyle("main", .{ .upright = 0, .cap_height = 2.6 });
+    const s = try m.addStyle("main", .{ .cap_height = 2.6 });
     const p = try build(gpa, &m, .{ .main = s, .small = s });
     const bytes = try layout.native.encode(gpa, &m);
     defer gpa.free(bytes);

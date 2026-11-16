@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const engine = @import("graven_engine");
+const glyphic = @import("graven_glyphic");
 
 const Allocator = std.mem.Allocator;
 const geom = engine.geom;
@@ -1264,76 +1265,51 @@ pub const FontName = struct {
     }
 };
 
-/// One face of a composed font besides its main one, and how it is set
-/// beside the main face (see `engine.style.Member`).
-pub const FontMember = struct {
+/// A face a text style sets in, for a role (see `Model.setStyleFace`).
+pub const StyleFace = struct {
+    role: []const u8,
     font: FontName,
-    /// Its italic, for letters asked to be italic; else `font`.
-    italic: ?FontName = null,
-    /// Its bold and bold italic, for bold text; else the weights above.
-    bold: ?FontName = null,
-    bold_italic: ?FontName = null,
-    /// The math alphabet it sets from ordinary letters (a blackboard face
-    /// for \mathbb); normal for a member that sets characters as they are.
-    alphabet: engine.style.Alphabet = .normal,
-    /// The characters it sets: what the faces before it lack (a fallback),
-    /// or codepoint ranges, taken even where the main face has them.
-    coverage: engine.style.Coverage = .fallback,
-    /// How it is sized against the main face, then a further factor.
-    match: engine.style.Match = .cap_height,
-    scale: f64 = 1,
-    /// Baseline shift, a fraction of the cap height, up positive.
-    shift: f64 = 0,
-    /// What it sets: characters, or math's italic letters (variables).
-    role: engine.style.Member.Role = .characters,
-    /// How much heavier to draw it: as heavy as the main font (by their
-    /// stems of I), a stroke increase in thousandths of cap height, or not.
-    weight: engine.style.Member.Weight = .none,
 };
 
-/// A composed font: a named, virtual font that styles reference. A main
-/// font (and its italic) and an ordered list of members, each with its
-/// coverage and its size and baseline adjustments. Styles share it, so
-/// changing it restyles every label set in it.
-pub const ComposedFont = struct {
+/// A parameter a text style sets: for every object, or for objects of
+/// one kind (see `glyphic.param`).
+pub const StyleRule = struct {
+    kind: ?glyphic.Kind = null,
+    param: glyphic.Param,
+    value: glyphic.Value,
+};
+
+/// A text style's size and base, as a new style is made with.
+pub const StyleSize = struct {
+    /// Cap height, mm.
+    cap_height: f64 = 3,
+    /// Sized by its em instead, mm (see `Model.setEmSize`).
+    em_size: ?f64 = null,
+    /// Baseline to baseline, in cap heights; null for its text face's
+    /// ascender to descender.
+    line_pitch: ?f64 = null,
+    base: StyleId = .none,
+};
+
+/// A text style: a glyphic style context the document keeps (decided
+/// 2026-11-16). Its faces by role and its rules are what glyphic's
+/// context gets; what it does not set comes from its base, then from
+/// glyphic's defaults. Its size is the text's cap height.
+pub const TextStyle = struct {
     id: ObjectId = .none,
     name: []const u8,
-    main: FontName,
-    italic: ?FontName = null,
-    /// Its bold and bold italic: bold text falls back to the regular
-    /// weight (and is reported) without them, or in math to Unicode's
-    /// mathematical bold where a face has it.
-    bold: ?FontName = null,
-    bold_italic: ?FontName = null,
-    members: std.ArrayList(FontMember) = .empty,
-    /// Where its Greek letters come from (see `engine.style.Spec.greek`).
-    greek: engine.style.Greek = .as_is,
-    /// The math face, whose MATH table gives the math constants (script
-    /// sizes and shifts, rules, the axis); null for the main font's.
-    math: ?FontName = null,
+    base: StyleId = .none,
+    cap_height: f64,
+    em_size: ?f64 = null,
+    line_pitch: ?f64 = null,
+    faces: std.ArrayList(StyleFace) = .empty,
+    rules: std.ArrayList(StyleRule) = .empty,
 
-    pub fn variants(f: ComposedFont) FontVariants {
-        return .{ .italic = f.italic, .bold = f.bold, .bold_italic = f.bold_italic };
+    /// Its font for `role`, if it sets one itself.
+    pub fn face(st: TextStyle, role: []const u8) ?FontName {
+        for (st.faces.items) |f| if (std.mem.eql(u8, f.role, role)) return f.font;
+        return null;
     }
-};
-
-/// A family's other weights and slants beside its regular face.
-pub const FontVariants = struct {
-    italic: ?FontName = null,
-    bold: ?FontName = null,
-    bold_italic: ?FontName = null,
-};
-
-pub const LabelStyle = struct {
-    id: ObjectId = .none,
-    name: []const u8,
-    /// The composed font the style is set in; none: the faces `spec`
-    /// names directly, in the caller's face table.
-    font: ObjectId = .none,
-    /// Face ids index the face table the caller renders with; a style set
-    /// in a composed font has them filled in when its font is resolved
-    /// (see `fonts.resolve`).
-    spec: engine.style.Spec,
 };
 
 /// Draws ready-made shape `kind` into the empty sketch `sk` (see
@@ -1469,17 +1445,15 @@ pub const Model = struct {
     sketches: std.ArrayList(SketchItem) = .empty,
     /// The built-in Blank prototype, once a blank has been made.
     blank_prototype: ?PrototypeId = null,
-    styles: std.ArrayList(LabelStyle) = .empty,
+    styles: std.ArrayList(TextStyle) = .empty,
     /// Named paragraph settings, which paragraphs of flows take.
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
-    /// The document's composed fonts, which styles reference.
-    fonts: std.ArrayList(ComposedFont) = .empty,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, NoSuchFont, FontInUse, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -1529,16 +1503,14 @@ pub const Model = struct {
 
     // Actions -----------------------------------------------------------
 
-    pub fn addStyle(m: *Model, name: []const u8, spec: engine.style.Spec) Error!StyleId {
+    /// A new text style named `name`, of size `size`, with no faces of its
+    /// own (its base's, else the default face) and no rules.
+    pub fn addStyle(m: *Model, name: []const u8, size: StyleSize) Error!StyleId {
+        if (!(size.cap_height > 0)) return error.BadSize;
         const id = m.newId();
-        try m.styles.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .spec = spec });
+        try m.styles.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .cap_height = size.cap_height, .em_size = size.em_size, .line_pitch = size.line_pitch, .base = size.base });
         m.revision += 1;
         return id;
-    }
-
-    pub fn setStyle(m: *Model, id: StyleId, spec: engine.style.Spec) void {
-        m.textStyle(id).spec = spec;
-        m.revision += 1;
     }
 
     /// The index of text style `id` in the list (`.none`: the first one).
@@ -1549,7 +1521,7 @@ pub const Model = struct {
     }
 
     /// Text style `id`, which must be one of the document's.
-    pub fn textStyle(m: *const Model, id: StyleId) *LabelStyle {
+    pub fn textStyle(m: *const Model, id: StyleId) *TextStyle {
         return &m.styles.items[m.styleIndex(id).?];
     }
 
@@ -1565,163 +1537,79 @@ pub const Model = struct {
         return &m.paragraph_styles.items[m.paraIndex(id) orelse return null];
     }
 
-    // Composed fonts ---------------------------------------------------------
+    // Text styles ------------------------------------------------------------
 
     fn dupeFontName(m: *Model, n: FontName) Allocator.Error!FontName {
         return .{ .family = try m.a().dupe(u8, n.family), .style = try m.a().dupe(u8, n.style) };
     }
 
-    fn dupeOptFontName(m: *Model, n: ?FontName) Allocator.Error!?FontName {
-        return if (n) |v| try m.dupeFontName(v) else null;
+    fn styleMut(m: *Model, id: StyleId) Error!*TextStyle {
+        return &m.styles.items[m.styleIndex(id) orelse return error.NoSuchStyle];
     }
 
-    fn dupeMember(m: *Model, mb: FontMember) Allocator.Error!FontMember {
-        var out = mb;
-        out.font = try m.dupeFontName(mb.font);
-        out.italic = try m.dupeOptFontName(mb.italic);
-        out.bold = try m.dupeOptFontName(mb.bold);
-        out.bold_italic = try m.dupeOptFontName(mb.bold_italic);
-        out.coverage = switch (mb.coverage) {
-            .fallback => .fallback,
-            .ranges => |rs| .{ .ranges = try m.a().dupe(engine.style.Range, rs) },
-        };
-        return out;
-    }
-
-    /// The index of composed font `id`.
-    pub fn fontIndex(m: *const Model, id: ObjectId) ?usize {
-        for (m.fonts.items, 0..) |f, i| if (f.id == id) return i;
-        return null;
-    }
-
-    fn font(m: *Model, id: ObjectId) Error!*ComposedFont {
-        return &m.fonts.items[m.fontIndex(id) orelse return error.NoSuchFont];
-    }
-
-    /// A new composed font named `name`, its main font `main`, with no
-    /// members yet. Returns its ID.
-    pub fn addFont(m: *Model, name: []const u8, main: FontName) Error!ObjectId {
-        const id = m.newId();
-        try m.fonts.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .main = try m.dupeFontName(main) });
+    /// Renames style `id`.
+    pub fn renameStyle(m: *Model, id: StyleId, name: []const u8) Error!void {
+        (try m.styleMut(id)).name = try m.a().dupe(u8, name);
         m.revision += 1;
-        return id;
     }
 
-    /// The first "Font N" no composed font uses yet.
-    pub fn nextFontName(m: *const Model, buf: []u8) []const u8 {
-        var n: usize = m.fonts.items.len + 1;
-        while (true) : (n += 1) {
-            const name = std.fmt.bufPrint(buf, "Font {d}", .{n}) catch return "Font";
-            for (m.fonts.items) |f| {
-                if (std.mem.eql(u8, f.name, name)) break;
-            } else return name;
+    /// Sets the style style `id` takes its faces and rules from where it
+    /// sets none of its own (none: no base). Refused where it would loop.
+    pub fn setStyleBase(m: *Model, id: StyleId, base: StyleId) Error!void {
+        if (base != .none) {
+            if (m.styleIndex(base) == null) return error.NoSuchStyle;
+            var at = base;
+            var n: usize = 0;
+            while (at != .none) : (n += 1) {
+                if (at == id or n > m.styles.items.len) return error.StyleLoop;
+                at = m.textStyle(at).base;
+            }
         }
-    }
-
-    pub fn renameFont(m: *Model, id: ObjectId, name: []const u8) Error!void {
-        const f = try m.font(id);
-        f.name = try m.a().dupe(u8, name);
+        (try m.styleMut(id)).base = base;
         m.revision += 1;
     }
 
-    /// Sets the main font of composed font `id`, and its italic (null for
-    /// none: letters asked to be italic are then upright, and reported).
-    pub fn setFontMain(m: *Model, id: ObjectId, main: FontName, italic: ?FontName) Error!void {
-        const f = try m.font(id);
-        f.main = try m.dupeFontName(main);
-        f.italic = if (italic) |it| try m.dupeFontName(it) else null;
+    /// Sets the font style `id` sets role `role` in ("text", "italic",
+    /// "bold", "bold_italic", "math", or any other name: a fallback, tried
+    /// in the order they were set); null removes it.
+    pub fn setStyleFace(m: *Model, id: StyleId, role: []const u8, font: ?FontName) Error!void {
+        const st = try m.styleMut(id);
+        const at: ?usize = for (st.faces.items, 0..) |f, i| {
+            if (std.mem.eql(u8, f.role, role)) break i;
+        } else null;
+        if (font) |f| {
+            const v: StyleFace = .{ .role = try m.a().dupe(u8, role), .font = try m.dupeFontName(f) };
+            if (at) |i| st.faces.items[i] = v else try st.faces.append(m.a(), v);
+        } else if (at) |i| _ = st.faces.orderedRemove(i);
         m.revision += 1;
     }
 
-    /// Sets the italic, bold and bold italic of composed font `id`'s main
-    /// font (null for each it lacks).
-    pub fn setFontVariants(m: *Model, id: ObjectId, v: FontVariants) Error!void {
-        const f = try m.font(id);
-        f.italic = try m.dupeOptFontName(v.italic);
-        f.bold = try m.dupeOptFontName(v.bold);
-        f.bold_italic = try m.dupeOptFontName(v.bold_italic);
+    /// Sets parameter `param` to `value` in style `id`, for every object
+    /// (kind null) or for objects of `kind`; null removes the rule.
+    pub fn setStyleRule(m: *Model, id: StyleId, kind: ?glyphic.Kind, param: glyphic.Param, value: ?glyphic.Value) Error!void {
+        const st = try m.styleMut(id);
+        const at: ?usize = for (st.rules.items, 0..) |r, i| {
+            if (r.kind == kind and r.param == param) break i;
+        } else null;
+        if (value) |v| {
+            glyphic.param.check(param, v) catch return error.BadValue;
+            var owned = v;
+            if (v == .name) owned = .{ .name = try m.a().dupe(u8, v.name) };
+            const r: StyleRule = .{ .kind = kind, .param = param, .value = owned };
+            if (at) |i| st.rules.items[i] = r else try st.rules.append(m.a(), r);
+        } else if (at) |i| _ = st.rules.orderedRemove(i);
         m.revision += 1;
     }
 
-    /// Sets composed font `id`'s math face (null: its main font's).
-    pub fn setFontMath(m: *Model, id: ObjectId, math: ?FontName) Error!void {
-        const f = try m.font(id);
-        f.math = try m.dupeOptFontName(math);
-        m.revision += 1;
-    }
-
-    /// Sets where composed font `id`'s Greek letters come from.
-    pub fn setFontGreek(m: *Model, id: ObjectId, greek: engine.style.Greek) Error!void {
-        const f = try m.font(id);
-        f.greek = greek;
-        m.revision += 1;
-    }
-
-    /// Inserts `member` into composed font `id` at `at` (past the end:
-    /// last). Returns where it went.
-    pub fn addFontMember(m: *Model, id: ObjectId, at: usize, member: FontMember) Error!usize {
-        const f = try m.font(id);
-        const i = @min(at, f.members.items.len);
-        try f.members.insert(m.a(), i, try m.dupeMember(member));
-        m.revision += 1;
-        return i;
-    }
-
-    pub fn setFontMember(m: *Model, id: ObjectId, index: usize, member: FontMember) Error!void {
-        const f = try m.font(id);
-        if (index >= f.members.items.len) return error.NoSuchItem;
-        f.members.items[index] = try m.dupeMember(member);
-        m.revision += 1;
-    }
-
-    /// Moves member `index` one place earlier (`up`) or later in the order
-    /// faces are tried. Returns its new index.
-    pub fn moveFontMember(m: *Model, id: ObjectId, index: usize, up: bool) Error!usize {
-        const list = (try m.font(id)).members.items;
-        if (index >= list.len) return error.NoSuchItem;
-        const to = if (up) (if (index == 0) return index else index - 1) else index + 1;
-        if (to >= list.len) return index;
-        std.mem.swap(FontMember, &list[index], &list[to]);
-        m.revision += 1;
-        return to;
-    }
-
-    pub fn removeFontMember(m: *Model, id: ObjectId, index: usize) Error!void {
-        const f = try m.font(id);
-        if (index >= f.members.items.len) return error.NoSuchItem;
-        _ = f.members.orderedRemove(index);
-        m.revision += 1;
-    }
-
-    /// How many styles are set in composed font `id`.
-    pub fn fontUsers(m: *const Model, id: ObjectId) usize {
+    /// How many styles take style `id` as their base.
+    pub fn styleUsers(m: *const Model, id: StyleId) usize {
         var n: usize = 0;
         for (m.styles.items) |st| {
-            if (st.font == id) n += 1;
+            if (st.base == id) n += 1;
         }
         return n;
     }
 
-    /// Removes composed font `id`; refused while a style is set in it.
-    pub fn removeFont(m: *Model, id: ObjectId) Error!void {
-        const i = m.fontIndex(id) orelse return error.NoSuchFont;
-        if (m.fontUsers(id) > 0) return error.FontInUse;
-        _ = m.fonts.orderedRemove(i);
-        m.revision += 1;
-    }
-
-    /// Sets style `style` in composed font `font` (none: back to the faces
-    /// its spec names).
-    pub fn setStyleFont(m: *Model, style: StyleId, font_id: ObjectId) Error!void {
-        if (m.styleIndex(style) == null) return error.NoSuchStyle;
-        if (font_id != .none and m.fontIndex(font_id) == null) return error.NoSuchFont;
-        m.textStyle(style).font = font_id;
-        m.revision += 1;
-    }
-
-    /// Starts an empty document as a canvas: an open drafting space in
-    /// `units`, with no sheet, its loose objects held by one unbounded
-    /// panel at the origin. Returns that panel's index.
     pub fn startCanvas(m: *Model, units: Units) Error!usize {
         if (m.panels.items.len > 0) return error.NoRoom;
         m.units = units;
@@ -3531,8 +3419,8 @@ pub const Model = struct {
     pub fn setCapHeight(m: *Model, style: StyleId, cap_height: f64) Error!void {
         if (!(cap_height > 0)) return error.BadSize;
         if (m.styleIndex(style) == null) return error.NoSuchStyle;
-        m.textStyle(style).spec.cap_height = cap_height;
-        m.textStyle(style).spec.em_size = null;
+        m.textStyle(style).cap_height = cap_height;
+        m.textStyle(style).em_size = null;
         m.revision += 1;
     }
 
@@ -3543,8 +3431,8 @@ pub const Model = struct {
     pub fn setEmSize(m: *Model, style: StyleId, em: f64) Error!void {
         if (!(em > 0)) return error.BadSize;
         if (m.styleIndex(style) == null) return error.NoSuchStyle;
-        m.textStyle(style).spec.em_size = em;
-        m.textStyle(style).spec.cap_height = em * cap_per_em;
+        m.textStyle(style).em_size = em;
+        m.textStyle(style).cap_height = em * cap_per_em;
         m.revision += 1;
     }
 
@@ -4886,7 +4774,7 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const body = try m.addStyle("Body", .{ .cap_height = 3 });
     // A 4.2 mm line pitch (the caller measures it from the style's font).
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 5, .y = 95 }, .style = body, .count = 3, .length = 20, .pitch = 4.2 });
     const region = m.panels.items[p].regions.items[r];
@@ -5169,44 +5057,12 @@ test "layers: a background image under a panel, and blending on an engrave layer
     try std.testing.expectEqual(.none, m.panels.items[p].layer);
 }
 
-test "composed fonts: members in order, styles set in them, and a font in use kept" {
-    var m: Model = .init(std.testing.allocator);
-    defer m.deinit();
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
-    var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("Font 1", m.nextFontName(&buf));
-    const f = try m.addFont("Legend", .{ .family = "Inter", .style = "Medium" });
-    try std.testing.expectEqualStrings("Font 2", m.nextFontName(&buf));
-    try m.setFontMain(f, .{ .family = "Inter", .style = "Medium" }, .{ .family = "Inter", .style = "Medium Italic" });
-    // A fallback, then Greek from another family taken before it.
-    var greek_ranges = [_]engine.style.Range{.{ .first = 0x0370, .last = 0x03FF }};
-    _ = try m.addFontMember(f, 99, .{ .font = .{ .family = "Noto Sans Symbols" } });
-    const g = try m.addFontMember(f, 0, .{ .font = .{ .family = "GFS Didot" }, .coverage = .{ .ranges = &greek_ranges }, .match = .x_height, .shift = -0.02 });
-    try std.testing.expectEqual(0, g);
-    // The model keeps its own copy of the ranges.
-    greek_ranges[0].last = 0;
-    const cf = m.fonts.items[m.fontIndex(f).?];
-    try std.testing.expectEqual(2, cf.members.items.len);
-    try std.testing.expectEqual(0x03FF, cf.members.items[0].coverage.ranges[0].last);
-    try std.testing.expectEqual(1, try m.moveFontMember(f, 0, false));
-    try std.testing.expectEqualStrings("Noto Sans Symbols", m.fonts.items[0].members.items[0].font.family);
-
-    try m.setStyleFont(body, f);
-    try std.testing.expectEqual(1, m.fontUsers(f));
-    try std.testing.expectError(error.FontInUse, m.removeFont(f));
-    try std.testing.expectError(error.NoSuchFont, m.setStyleFont(body, @enumFromInt(9999)));
-    try m.setStyleFont(body, .none);
-    try m.removeFontMember(f, 0);
-    try m.removeFont(f);
-    try std.testing.expectEqual(0, m.fonts.items.len);
-}
-
 test "a flow is edited in place: typed into, deleted across items, broken and joined" {
     const gpa = std.testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 100, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2.5 });
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
     const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
     const items = &m.panels.items[p].regions.items[r].items;
     // Typing into an empty flow makes a run; more goes on its end.
@@ -5244,7 +5100,7 @@ test "an equation is its own item: put in a run of text, kept apart from it" {
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 100, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2.5 });
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
     const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
     const items = &m.panels.items[p].regions.items[r].items;
     _ = try m.insertText(p, r, .{ .index = 0 }, "area is ", body);
@@ -5298,7 +5154,7 @@ test "a panel made from an enclosed sketch: cut by nesting, following its sketch
     _ = try sk.addCircle(al, P(28, 15), 8, false);
     _ = try sk.addCircle(al, P(28, 15), 3, false);
     // A track on the canvas inside the outline, and one outside it.
-    const st = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2 });
+    const st = try m.addStyle("Body", .{ .cap_height = 2 });
     _ = try m.addTracks(c, .{ .name = "in", .origin = .{ .x = 12, .y = 40 }, .style = st, .count = 1, .length = 1, .pitch = 5 });
     _ = try m.addTracks(c, .{ .name = "out", .origin = .{ .x = 100, .y = 100 }, .style = st, .count = 1, .length = 1, .pitch = 5 });
     const pi = try m.makeSketchPanel(0, 0);

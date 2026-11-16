@@ -223,7 +223,7 @@ test "a plate's stack: base, holes through, an inlaid legend; heights from its s
     var m: model.Model = .init(gpa);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const style = try m.addStyle("Legend", .{ .upright = 0, .cap_height = 2 });
+    const style = try m.addStyle("Legend", .{ .cap_height = 2 });
     const plate = try m.placePanel(.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 40, .h = 20 });
     const key = try m.addPrototype(.{ .name = "Key" });
     const legend = try m.addPrototype(.{ .name = "Legend", .tracks = &.{.{ .name = "f", .style = style, .alignment = .centre }} });

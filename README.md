@@ -17,7 +17,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 
 **Label engine.**
 - KaTeX-style label markup (`graven parse`), rendered in a style context (`graven label`). Text with `$…$` has math between the dollars, as in KaTeX.
-- Composed fonts and math font packages (`stix-two`, `libertinus`): faces by role, each sized, shifted and weighted to match the text face; drawn arrows in the HP keypad style.
+- Text styles as glyphic style contexts: faces by role (text, italic, bold, math, fallbacks), parameter rules, bases; math font packages (`stix-two`, `libertinus`) as ready-made faces and rules.
 - HarfBuzz shaping and exact glyph outlines (lines, quadratics, cubics).
 - Scripts, `\frac`, `\sqrt`, accents, and TeX atom-class spacing.
 - Bold, italic and math-alphabet variants, plus underline and strikethrough.
@@ -51,7 +51,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 - `graven dump` prints a document as text, and `graven compact` drops its history.
 
 **Fonts.**
-- `graven-fonts` and the editor's Fonts window index, search and compare installed fonts and build composed fonts.
+- `graven-fonts` and the editor's Fonts window index, search and compare installed fonts and set them as text styles' faces.
 
 **Manufacture.**
 - **Colour 3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font|package> <plate.3mf> <keys.3mf>`); `graven-fab` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
@@ -71,7 +71,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 | `lib/geom` | Planar geometry: points, affine transforms, segments (line, quad, cubic, conic), contours, exact areas and bounds; exact booleans, overlap removal, earcut, outline growth, MSDF fields; `spring`, the 1-D tension solver |
 | `lib/font` | Font library: a thin Zig layer over HarfBuzz (faces from bytes, outlines in font units, measured metrics) |
 | `lib/engine` | Label engine: renders content into placed items, with outlines expanded only on request |
-| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `fonts` (composed fonts, math packages), `fab` and `threemf` (colour FDM), `output` (SVG), `drc` (margins) |
+| `lib/layout` | Layout library: `model` (panels, tracks and their flows, tile prototypes and their tracks, tiles, actions), `art` (tile art drawn at 1u and stretched), `place` (the flow pass, solve and label cache), `fonts` (styles' fonts resolved, math packages), `legend` (legends set by glyphic), `fab` and `threemf` (colour FDM), `output` (SVG), `drc` (margins) |
 | `lib/sketch` | Parametric sketches and their solver |
 | `lib/glyphic` | Engine v2, being built beside `lib/engine`: legends as objects with typed parameters resolved through a cascade (stage 1 of 7: the object model) |
 | `apps/gui` | GUI editor on DVUI over SDL3 |

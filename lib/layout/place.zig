@@ -272,9 +272,6 @@ pub const Placed = struct {
     }
 };
 
-/// Whether two specs set text alike: their fields, and their members'
-/// fields and coverage, compared by value (a spec's slices are rebuilt by
-/// each resolve).
 /// Whether a render asked for a weight, slant or alphabet it did not get.
 fn lacksVariant(diagnostics: []const engine.render.Diagnostic) bool {
     for (diagnostics) |d| switch (d.kind) {
@@ -282,32 +279,6 @@ fn lacksVariant(diagnostics: []const engine.render.Diagnostic) bool {
         else => {},
     };
     return false;
-}
-
-fn specEql(a: engine.style.Spec, b: engine.style.Spec) bool {
-    var x = a;
-    var y = b;
-    x.members = &.{};
-    y.members = &.{};
-    if (!std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&y))) return false;
-    if (a.members.len != b.members.len) return false;
-    for (a.members, b.members) |p, q| {
-        var pp = p;
-        var qq = q;
-        pp.coverage = .fallback;
-        qq.coverage = .fallback;
-        if (!std.mem.eql(u8, std.mem.asBytes(&pp), std.mem.asBytes(&qq))) return false;
-        switch (p.coverage) {
-            .fallback => if (q.coverage != .fallback) return false,
-            .ranges => |rs| {
-                if (q.coverage != .ranges) return false;
-                const ts = q.coverage.ranges;
-                if (rs.len != ts.len) return false;
-                for (rs, ts) |u, v| if (u.first != v.first or u.last != v.last) return false;
-            },
-        }
-    }
-    return true;
 }
 
 /// Renders labels for one face table, caching each render.
@@ -329,7 +300,9 @@ pub const Labels = struct {
     sketches: std.AutoHashMapUnmanaged(u64, ?[]const geom.Contour) = .empty,
     sketch_arena: ?std.heap.ArenaAllocator = null,
 
-    const Ctx = struct { spec: engine.style.Spec, style: ?legend.Style };
+    /// A style as last synced: a hash of all that sets its legends (size,
+    /// rules, faces, its base's), and what glyphic made of it.
+    const Ctx = struct { hash: u64, style: ?legend.Style };
 
     const Key = struct {
         style: StyleId,
@@ -467,30 +440,10 @@ pub const Labels = struct {
     }
 
     /// Brings the style contexts up to date with the model, dropping renders
-    /// of any style whose spec changed. For a model whose styles name
-    /// faces directly (no composed fonts); see `syncResolved`.
+    /// of any style that changed. Without resolved fonts (see
+    /// `syncResolved`), every style is set in face 0.
     pub fn sync(l: *Labels, m: *const Model) Allocator.Error!void {
-        if (l.resolved) |r| return l.syncSpecs(r.faces.items, r.specs.items, r.ids.items);
-        const specs = try l.gpa.alloc(engine.style.Spec, m.styles.items.len);
-        defer l.gpa.free(specs);
-        const ids = try l.gpa.alloc(StyleId, m.styles.items.len);
-        defer l.gpa.free(ids);
-        for (m.styles.items, specs, ids) |st, *sp, *id| {
-            sp.* = st.spec;
-            id.* = st.id;
-        }
-        try l.syncSpecs(l.faces, specs, ids);
-    }
-
-    /// As `sync`, with the face table and specs that resolving the model's
-    /// composed fonts gave (see `fonts.resolve`). A changed face table
-    /// drops every render.
-    pub fn syncResolved(l: *Labels, r: *const fonts.Resolved) Allocator.Error!void {
-        l.resolved = r;
-        try l.syncSpecs(r.faces.items, r.specs.items, r.ids.items);
-    }
-
-    fn syncSpecs(l: *Labels, faces: []const *engine.Face, specs: []const engine.style.Spec, ids: []const StyleId) Allocator.Error!void {
+        const faces = if (l.resolved) |r| r.faces.items else l.faces;
         var changed = l.g == null;
         if (faces.ptr != l.faces.ptr or faces.len != l.faces.len) {
             l.faces = faces;
@@ -498,36 +451,105 @@ pub const Labels = struct {
             l.clear();
             changed = true;
         }
-        while (l.contexts.items.len < specs.len) try l.contexts.append(l.gpa, null);
-        while (l.ids.items.len < specs.len) try l.ids.append(l.gpa, .none);
-        for (specs, ids, 0..) |spec, id, i| {
+        const n = m.styles.items.len;
+        while (l.contexts.items.len < n) try l.contexts.append(l.gpa, null);
+        while (l.ids.items.len < n) try l.ids.append(l.gpa, .none);
+        for (m.styles.items, 0..) |st, i| {
             const cur = &l.contexts.items[i];
             // A style now in another style's place: its context is new.
-            if (l.ids.items[i] != id) {
+            if (l.ids.items[i] != st.id) {
                 if (l.ids.items[i] != .none) l.dropStyle(l.ids.items[i]);
-                l.ids.items[i] = id;
+                l.ids.items[i] = st.id;
                 cur.* = null;
             }
-            if (cur.*) |c| if (specEql(c.spec, spec)) continue;
-            cur.* = .{ .spec = spec, .style = null };
+            const h = l.styleHash(m, st.id, 0);
+            if (cur.*) |c| if (c.hash == h) continue;
+            cur.* = .{ .hash = h, .style = null };
             changed = true;
-            l.dropStyle(id);
+            l.dropStyle(st.id);
             // Renders cached under `.none` (the first style) too.
             if (i == 0) l.dropStyle(.none);
         }
-        if (!changed) return;
+        if (!changed or n == 0) return;
         // The glyphic contexts, made again for every style: renders keep
         // nothing of them, so those of unchanged styles stay.
         if (l.g) |*g| g.deinit();
         l.g = glyphic.Engine.init(l.gpa);
+        const g = &l.g.?;
         var buf: [32]u8 = undefined;
-        for (l.contexts.items[0..specs.len], 0..) |*c, i| {
+        for (m.styles.items, 0..) |st, i| {
+            // No faces at all: nothing can be set.
+            if (l.faces.len == 0) break;
             const name = std.fmt.bufPrint(&buf, "style{d}", .{i}) catch unreachable;
-            c.*.?.style = legend.contextOf(&l.g.?, l.faces, c.*.?.spec, name) catch |err| switch (err) {
+            l.contexts.items[i].?.style = legend.contextOf(g, l.faces, st, l.roles(st.id), l.textFace(m, st.id), name) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => null,
             };
         }
+        // Bases, now every style has its context.
+        for (m.styles.items, 0..) |st, i| {
+            const own = l.contexts.items[i].?.style orelse continue;
+            const bi = m.styleIndex(st.base) orelse continue;
+            if (st.base == .none) continue;
+            if (l.contexts.items[bi].?.style) |b| g.style(own.id).base = b.id;
+        }
+    }
+
+    /// As `sync`, with the face table and the styles' faces that resolving
+    /// the model's fonts gave (see `fonts.resolve`). A changed face table
+    /// drops every render.
+    pub fn syncResolved(l: *Labels, r: *const fonts.Resolved) Allocator.Error!void {
+        l.resolved = r;
+        l.faces = r.faces.items;
+        for (l.contexts.items) |*c| c.* = null;
+        l.clear();
+        if (l.g) |*g| g.deinit();
+        l.g = null;
+    }
+
+    fn roles(l: *const Labels, id: StyleId) []const fonts.RoleFace {
+        return if (l.resolved) |r| r.of(id) else &.{};
+    }
+
+    /// The face style `id` sets text in: its own, else its base's, else
+    /// face 0.
+    fn textFace(l: *const Labels, m: *const Model, id: StyleId) *engine.Face {
+        var at = id;
+        var n: usize = 0;
+        while (at != .none and n <= m.styles.items.len) : (n += 1) {
+            for (l.roles(at)) |rf| if (std.mem.eql(u8, rf.role, "text") and rf.face < l.faces.len) return l.faces[rf.face];
+            at = if (m.styleIndex(at)) |i| m.styles.items[i].base else .none;
+        }
+        return l.faces[0];
+    }
+
+    /// A hash of all that sets style `id`'s legends, its base's included.
+    fn styleHash(l: *const Labels, m: *const Model, id: StyleId, depth: usize) u64 {
+        const i = m.styleIndex(id) orelse return 0;
+        const st = m.styles.items[i];
+        var h: std.hash.Wyhash = .init(0x5713);
+        h.update(std.mem.asBytes(&st.cap_height));
+        h.update(std.mem.asBytes(&(st.em_size orelse @as(f64, -1))));
+        h.update(std.mem.asBytes(&(st.line_pitch orelse @as(f64, -1))));
+        for (st.rules.items) |r| {
+            h.update(&.{if (r.kind) |k| @as(u8, @intFromEnum(k)) else 255});
+            h.update(std.mem.asBytes(&r.param));
+            switch (r.value) {
+                .number => |x| h.update(std.mem.asBytes(&x)),
+                .choice => |c| h.update(&.{c}),
+                .flag => |f| h.update(&.{@intFromBool(f)}),
+                .name => |t| h.update(t),
+            }
+        }
+        for (l.roles(id)) |rf| {
+            h.update(rf.role);
+            h.update(std.mem.asBytes(&rf.face));
+        }
+        if (st.base != .none and depth < 16) {
+            const bh = l.styleHash(m, st.base, depth + 1);
+            h.update(std.mem.asBytes(&bh));
+        }
+        return h.final();
     }
 
     fn dropStyle(l: *Labels, style: StyleId) void {
@@ -555,12 +577,6 @@ pub const Labels = struct {
         const i = l.index(style) orelse return null;
         if (l.contexts.items[i].?.style) |*st| return st;
         return null;
-    }
-
-    /// The spec text style `style` was last synced with.
-    pub fn specOf(l: *const Labels, style: StyleId) ?*const engine.style.Spec {
-        const i = l.index(style) orelse return null;
-        return &l.contexts.items[i].?.spec;
     }
 
     /// The render for a label, from the cache or made now; null when the
@@ -866,7 +882,7 @@ pub fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
 pub fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
     const sid = region.style orelse return 0;
     if (labels.context(sid)) |ctx| return ctx.cap_height;
-    return if (m.styleIndex(sid) != null) m.textStyle(sid).spec.cap_height else 0;
+    return if (m.styleIndex(sid) != null) m.textStyle(sid).cap_height else 0;
 }
 
 /// The bounds and alignment of a segment of a paragraph in `style` (null:
@@ -1857,7 +1873,7 @@ test "legends render once per identical text and sit on their track's line" {
 
     var m: Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("legend", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
@@ -1880,7 +1896,7 @@ test "legends render once per identical text and sit on their track's line" {
     try testing.expect(l.origin.x + l.render.ink.x0 >= l.box.x0 - 1e-9);
 
     // A style change drops its renders.
-    m.setStyle(style, .{ .upright = 0, .cap_height = 2.5 });
+    try m.setCapHeight(style, 2.5);
     var s2 = try solve(gpa, &m, p, &labels);
     defer s2.deinit();
     try testing.expectEqual(1, labels.cache.count());
@@ -1894,7 +1910,7 @@ test "a run being typed is stored as typed, flagged, and still drawn" {
     const faces = [_]*engine.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 10, .y = 40 }, .style = style, .count = 1, .length = 10, .pitch = 5 });
     try m.insertRun(p, r, 0, .{ .style = style, .content = "$H^" });
@@ -1925,7 +1941,7 @@ test "a legend with characters no face covers is reported on its tile" {
     const faces = [_]*engine.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("legend", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top", .style = style }} });
@@ -1978,7 +1994,7 @@ test "changing a prototype's track moves every tile's text in it" {
     const faces = [_]*engine.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("legend", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
@@ -2007,7 +2023,7 @@ test "a tile's text wraps around art placed over its track" {
     const faces = [_]*engine.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 8 });
+    const style = try m.addStyle("legend", .{ .cap_height = 8 });
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key", .unit = 40, .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 1, .pitch = 40 });
@@ -2049,7 +2065,7 @@ test "a run of text breaks between its words; a space a wrap leaves at a row's s
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    const body = try m.addStyle("Body", .{ .cap_height = 4 });
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
     // Three words in one run; 30 mm rows hold two.
     try m.insertRun(p, r, 0, .{ .style = body, .content = "HOD ADD HOD" });
@@ -2097,12 +2113,19 @@ test "a run with markup breaks between words, inside a bold group too, keeping i
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .bold = 1, .cap_height = 4 });
+    const body = try m.addStyle("Body", .{ .cap_height = 4 });
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
     const src = "HOD \\textbf{ADD HOD} HOD";
     try m.insertRun(p, r, 0, .{ .style = body, .content = src });
+    // Its fonts as resolving them would give: the bold face second.
+    var resolved: fonts.Resolved = .{ .gpa = gpa };
+    defer resolved.deinit();
+    try resolved.faces.appendSlice(gpa, &faces);
+    try resolved.roles.append(gpa, .{ .role = "bold", .face = 1 });
+    try resolved.styles.append(gpa, .{ .id = body, .faces = resolved.roles.items });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
+    try labels.syncResolved(&resolved);
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
     // Four word pieces: HOD, ADD (bold), HOD (bold), HOD.
@@ -2143,7 +2166,7 @@ test "paragraphs: indents, a justified paragraph, a centred one, and space betwe
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 200);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    const body = try m.addStyle("Body", .{ .cap_height = 4 });
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 200 }, .style = body, .count = 12, .length = 6, .pitch = 10 });
     const just = try m.addParagraphStyle(.{ .name = "Body", .alignment = .justify, .indent_start = 4, .first = 6, .indent_end = 2, .space_after = 5 });
     const centred = try m.addParagraphStyle(.{ .name = "Centred", .alignment = .centre, .space_before = 3, .line_gap = 2 });
@@ -2207,7 +2230,7 @@ test "text on a canvas, with no sheet or panel, solves and exports" {
     var m: Model = .init(gpa);
     defer m.deinit();
     const c = try m.startCanvas(.mm);
-    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
     // A track far from the origin, below and left of it: the canvas has
     // no edge.
     const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = -40, .y = -20 }, .style = style, .count = 1, .length = 20, .pitch = 5 });
@@ -2246,7 +2269,7 @@ test "a panel made from a rounded rectangle exports its outline with the cutouts
         const ai = try m.addArt(c, .{ .name = "Hole", .at = .{ .x = x, .y = 22 }, .shapes = try art.primitive(a, "Hole", hole, .{}), .prim = hole });
         try m.setArtCutout(c, ai, true);
     }
-    const style = try m.addStyle("Label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
     const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = 30, .y = 30 }, .style = style, .count = 1, .length = 6, .pitch = 5 });
     try m.insertRun(c, r, 0, .{ .style = style, .content = "HOD" });
     const p = try m.makePanel(c, outline);
@@ -2272,7 +2295,7 @@ test "a word longer than its line is cut to wrap, and the wrap recorded, not fla
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    const body = try m.addStyle("Body", .{ .cap_height = 4 });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     try labels.sync(&m);
@@ -2310,7 +2333,7 @@ test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word do
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 4 });
+    const body = try m.addStyle("Body", .{ .cap_height = 4 });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     try labels.sync(&m);
@@ -2427,7 +2450,7 @@ test "a tile's tracks: a row wraps between words in the face; a column sets lett
     const faces = [_]*engine.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("legend", .{ .upright = 0, .cap_height = 2 });
+    const style = try m.addStyle("legend", .{ .cap_height = 2 });
     const p = try m.addPanel("board", 100, 60);
     const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 60 }, .w = 3, .h = 2, .pitch = 19.05 });
     // A tall key: a row track across its top, a column track below it.

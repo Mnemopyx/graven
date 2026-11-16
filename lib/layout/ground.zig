@@ -183,7 +183,7 @@ test "a row track's pieces are v1's segments: same bands, baselines where v1 set
     const faces = [_]*engine.Face{face};
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 60);
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 10, .y = 50 }, .style = style, .count = 3, .length = 5, .pitch = 6 });
     // Enough words for several 30 mm rows.
@@ -220,7 +220,7 @@ test "art closes stretches of a piece, as it does v1's lines" {
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 60);
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 2, .length = 15, .pitch = 6 });
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -246,7 +246,7 @@ test "a thread: pieces go on into the next track; one on another panel says ther
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("left", 100, 60);
     const q = try m.addPanel("right", 100, 60);
     const a = try m.addTracks(p, .{ .name = "a", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
@@ -273,7 +273,7 @@ test "a column's pieces run down the page, up to the right" {
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 60);
     const r = try m.addTracks(p, .{ .name = "down", .origin = .{ .x = 10, .y = 50 }, .style = style, .count = 2, .length = 8, .pitch = 5, .major = .column });
     var labels: place.Labels = .init(gpa, &.{});

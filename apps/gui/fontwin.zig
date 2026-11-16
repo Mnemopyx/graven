@@ -1,5 +1,5 @@
-//! The fonts window: find, compare and choose fonts, and compose them into
-//! the document's composed fonts. A window of its own, apart from the
+//! The fonts window: find, compare and choose fonts, and set them as the
+//! faces of the document's text styles. A window of its own, apart from the
 //! canvas and its panes; Text › Fonts… opens it.
 //!
 //! Search criteria on the left, results in the middle, the comparison of
@@ -29,16 +29,18 @@ pub var open = false;
 /// takes on it (each undoable there).
 pub const Host = struct {
     model: *const layout.Model,
-    /// A new composed font, its main font and that font's variants.
-    addFont: *const fn (name: []const u8, main: model.FontName, variants: model.FontVariants) ?ObjectId,
-    /// The main font and its variants, as one change.
-    setFontFamily: *const fn (id: ObjectId, main: model.FontName, variants: model.FontVariants) void,
-    setFontVariants: *const fn (id: ObjectId, variants: model.FontVariants) void,
-    addFontMember: *const fn (id: ObjectId, member: model.FontMember) void,
-    setFontMember: *const fn (id: ObjectId, index: usize, member: model.FontMember) void,
-    moveFontMember: *const fn (id: ObjectId, index: usize, up: bool) void,
-    removeFontMember: *const fn (id: ObjectId, index: usize) void,
-    setStyleFont: *const fn (style: model.StyleId, id: ObjectId) void,
+    /// Sets the font style `style` sets role `role` in (null: none).
+    setStyleFace: *const fn (style: model.StyleId, role: []const u8, font: ?model.FontName) void,
+    /// A family's regular as the text face and its italic and bolds, as
+    /// one change.
+    setStyleFamily: *const fn (style: model.StyleId, main: model.FontName, variants: Variants) void,
+};
+
+/// A family's other weights and slants beside its regular face.
+pub const Variants = struct {
+    italic: ?model.FontName = null,
+    bold: ?model.FontName = null,
+    bold_italic: ?model.FontName = null,
 };
 
 // The index ---------------------------------------------------------------------
@@ -169,7 +171,7 @@ pub fn faceOf(i: usize) ?*engine.Face {
     return f;
 }
 
-/// The catalog the document's composed fonts are resolved against: the
+/// The catalog the document's styles' fonts are resolved against: the
 /// installed fonts by family and style.
 pub fn catalog(a: Allocator) ?layout.fonts.Catalog {
     if (records.len == 0) return null;
@@ -210,8 +212,7 @@ var like: ?usize = null;
 var pinned: std.ArrayList(usize) = .empty;
 const max_pinned = 5;
 var overlay = false;
-/// The composed font being built (in the document).
-var target: ?ObjectId = null;
+/// The style whose faces are being set.
 var style_choice: usize = 0;
 
 /// The comparison's ground: Graven's paper.
@@ -1041,7 +1042,7 @@ fn sameName(n: model.FontName, r: *const fs.Record) bool {
 
 /// Before a user font's file is removed: every face that goes with it
 /// (for a variable font, its weights and named instances), what stays of
-/// each family, and which of the document's composed fonts use them.
+/// each family, and which of the document's styles use them.
 fn removePrompt(host: Host, allocator: Allocator, i: usize, area: dvui.Rect) void {
     if (i >= records.len or records[i].scope != .user) {
         removing = null;
@@ -1111,18 +1112,11 @@ fn removePrompt(host: Host, allocator: Allocator, i: usize, area: dvui.Rect) voi
                 for (left.items) |k| out.print("    {s} ({s} font)\n", .{ records[k].style, @tagName(records[k].scope) }) catch {};
             }
         }
-        // The document's composed fonts that use them.
+        // The document's styles that use them.
         var uses: usize = 0;
-        for (host.model.fonts.items) |cf| {
-            const Role = struct { name: []const u8, font: ?model.FontName };
-            var roles: std.ArrayList(Role) = .empty;
-            roles.append(fa, .{ .name = "main font", .font = cf.main }) catch {};
-            roles.append(fa, .{ .name = "italic", .font = cf.italic }) catch {};
-            roles.append(fa, .{ .name = "bold", .font = cf.bold }) catch {};
-            roles.append(fa, .{ .name = "bold italic", .font = cf.bold_italic }) catch {};
-            for (cf.members.items) |mb| roles.append(fa, .{ .name = "member", .font = mb.font }) catch {};
-            for (roles.items) |role| {
-                const n = role.font orelse continue;
+        for (host.model.styles.items) |st| {
+            for (st.faces.items) |sf| {
+                const n = sf.font;
                 const hit = for (in_file) |j| {
                     if (sameName(n, &records[j])) break true;
                 } else false;
@@ -1132,7 +1126,7 @@ fn removePrompt(host: Host, allocator: Allocator, i: usize, area: dvui.Rect) voi
                 const other = for (records, 0..) |o, k| {
                     if (sameName(n, &o) and !std.mem.eql(u8, o.location, file)) break k;
                 } else null;
-                out.print("    {s}: {s} {s}, its {s}; ", .{ cf.name, n.family, n.style, role.name }) catch {};
+                out.print("    {s}: {s} {s}, its {s} face; ", .{ st.name, n.family, n.style, sf.role }) catch {};
                 if (other) |k| {
                     out.print("the {s} font of that name will be used instead\n", .{@tagName(records[k].scope)}) catch {};
                 } else out.writeAll("its text will fall back to another face, and the canvas will say so\n") catch {};
@@ -1465,23 +1459,16 @@ fn details(i: usize) void {
 
 // Composition ------------------------------------------------------------------
 
-/// What a member's alphabet choice reads as, in `Alphabet`'s order.
-const alphabet_names = [_][]const u8{ "as is", "\\mathbb", "\\mathfrak", "\\mathscr", "\\mathcal", "\\mathsf", "\\mathtt" };
-
-comptime {
-    std.debug.assert(alphabet_names.len == @typeInfo(engine.style.Alphabet).@"enum".field_names.len);
-}
-
 /// An installed family's regular face (or its first) and its italic and
 /// bolds, as names; null when no installed font is of that family.
-pub fn installedFamily(allocator: Allocator, family: []const u8) ?struct { main: model.FontName, variants: model.FontVariants } {
+pub fn installedFamily(allocator: Allocator, family: []const u8) ?struct { main: model.FontName, variants: Variants } {
     _ = indexRecords(allocator, false);
     const k = fs.find(records, family, "Regular") orelse fs.find(records, family, "Book") orelse fs.find(records, family, null) orelse return null;
     return .{ .main = nameOf(k), .variants = familyVariants(k) };
 }
 
 /// The italic, bold and bold italic of record `k`'s family, as names.
-fn familyVariants(k: usize) model.FontVariants {
+fn familyVariants(k: usize) Variants {
     const v = fs.variantsOf(records, k);
     return .{
         .italic = if (v.italic) |i| nameOf(i) else null,
@@ -1490,32 +1477,26 @@ fn familyVariants(k: usize) model.FontVariants {
     };
 }
 
-fn findRecord(n: model.FontName) ?usize {
-    return fs.find(records, n.family, n.style);
-}
-
-fn optEql(a: ?model.FontName, b: ?model.FontName) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return a.?.eql(b.?);
-}
-
 fn nameOf(i: usize) model.FontName {
     return .{ .family = records[i].family, .style = records[i].style };
 }
 
-/// The characters of `s` as sorted, merged codepoint ranges.
-fn rangesOf(a: Allocator, s: []const u8) []engine.style.Range {
-    const cps = codepoints(a, s);
-    std.mem.sort(u21, cps, {}, std.sort.asc(u21));
-    var out: std.ArrayList(engine.style.Range) = .empty;
-    for (cps) |cp| {
-        if (out.items.len > 0 and out.items[out.items.len - 1].last + 1 == cp) {
-            out.items[out.items.len - 1].last = cp;
-        } else out.append(a, .{ .first = cp, .last = cp }) catch break;
-    }
-    return out.items;
+/// The roles a style's faces are set for, besides fallbacks.
+const roles = [_]struct { role: []const u8, name: []const u8 }{
+    .{ .role = "text", .name = "Text" },
+    .{ .role = "italic", .name = "Italic" },
+    .{ .role = "bold", .name = "Bold" },
+    .{ .role = "bold_italic", .name = "Bold italic" },
+    .{ .role = "math", .name = "Math" },
+};
+
+fn isFallback(role: []const u8) bool {
+    for (roles) |r| if (std.mem.eql(u8, r.role, role)) return false;
+    return true;
 }
 
+/// A style's faces: each role set from the selected font or cleared, and
+/// its fallbacks, in the order tried.
 fn compose(host: Host) void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 300 }, .max_size_content = .width(300), .expand = .vertical, .padding = .all(8) });
     defer col.deinit();
@@ -1524,138 +1505,67 @@ fn compose(host: Host) void {
     var bar_room = keepBarRoom(@src());
     defer bar_room.deinit();
     const m = host.model;
-    heading(@src(), "Compose");
-    // Which composed font: the document's, or a new one.
-    if (target) |t| if (m.fontIndex(t) == null) {
-        target = null;
-    };
-    if (target == null and m.fonts.items.len > 0) target = m.fonts.items[0].id;
+    heading(@src(), "Style faces");
+    if (m.styles.items.len == 0) {
+        dvui.labelNoFmt(@src(), "The document has no styles yet.", .{}, .{});
+        return;
+    }
     const a = dvui.currentWindow().arena();
+    const snames = a.alloc([]const u8, m.styles.items.len) catch return;
+    for (m.styles.items, snames) |st, *n| n.* = st.name;
+    style_choice = @min(style_choice, snames.len - 1);
+    _ = dvui.dropdown(@src(), snames, .{ .choice = &style_choice }, .{}, .{ .expand = .horizontal });
+    const st = m.styles.items[style_choice];
     const sel = selected;
     var sel_name: [128]u8 = undefined;
     const sel_label: []const u8 = if (sel) |s| std.fmt.bufPrint(&sel_name, "{s} {s}", .{ records[s].family, records[s].style }) catch "the selected font" else "";
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer row.deinit();
-        if (m.fonts.items.len > 0) {
-            const names = a.alloc([]const u8, m.fonts.items.len) catch return;
-            var choice: usize = 0;
-            for (m.fonts.items, names, 0..) |f, *n, k| {
-                n.* = f.name;
-                if (target != null and f.id == target.?) choice = k;
-            }
-            if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .gravity_y = 0.5 })) target = m.fonts.items[choice].id;
-        } else dvui.labelNoFmt(@src(), "No composed fonts yet.", .{}, .{ .expand = .horizontal, .gravity_y = 0.5 });
-        if (sel) |s| {
-            var tb: [200]u8 = undefined;
-            if (icons.button(@src(), .plus_circle, std.fmt.bufPrint(&tb, "New composed font from {s}", .{sel_label}) catch "New composed font", .{ .opts = .{ .gravity_y = 0.5 } })) {
-                if (host.addFont(records[s].family, nameOf(s), familyVariants(s))) |id| target = id;
-            }
-        }
-    }
-    const t = target orelse {
-        dvui.labelNoFmt(@src(), "Select a font to start one.", .{}, .{});
-        return;
+    if (st.base != .none) if (m.styleIndex(st.base)) |bi| {
+        var buf: [160]u8 = undefined;
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "Based on {s}: what it sets none of comes from there.", .{m.styles.items[bi].name}) catch "", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .margin = .{ .y = 4 } });
     };
-    const cf = m.fonts.items[m.fontIndex(t).?];
-    {
+    inline for (roles, 0..) |r, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .expand = .horizontal });
+        defer row.deinit();
+        const cur = st.face(r.role);
+        var tb: [200]u8 = undefined;
+        if (sel) |s| {
+            if (icons.button(@src(), .arrow_square_in, std.fmt.bufPrint(&tb, "Use {s} as the {s} face", .{ sel_label, r.role }) catch "Use the selected font", .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, r.role, nameOf(s));
+        }
+        if (cur == null) {
+            // The clear button's room, so the names line up.
+            _ = dvui.spacer(@src(), .{ .id_extra = k, .min_size_content = .{ .w = 22 } });
+        } else if (icons.button(@src(), .x, "None: from its base, else the default", .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, r.role, null);
         var buf: [256]u8 = undefined;
-        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "Main: {s} {s}", .{ cf.main.family, cf.main.style }) catch "", .{}, .{ .margin = .{ .y = 6 } });
-        // Its weights and slants: each set from the selected font, or
-        // cleared (bold and italic then fall back, and are reported).
-        const kinds = [_]struct { name: []const u8, field: []const u8 }{
-            .{ .name = "Italic", .field = "italic" },
-            .{ .name = "Bold", .field = "bold" },
-            .{ .name = "Bold italic", .field = "bold_italic" },
-        };
-        inline for (kinds, 0..) |kind, k| {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .expand = .horizontal });
-            defer row.deinit();
-            var v = cf.variants();
-            const cur = @field(v, kind.field);
-            var tb: [200]u8 = undefined;
-            if (sel) |s| {
-                if (icons.button(@src(), .arrow_square_in, std.fmt.bufPrint(&tb, "Use {s} as the {s}", .{ sel_label, kind.field }) catch "Use the selected font", .{ .id_extra = k, .size = 14 })) {
-                    @field(v, kind.field) = nameOf(s);
-                    host.setFontVariants(t, v);
-                }
-            }
-            if (cur == null) {
-                // The clear button's room, so the names line up.
-                _ = dvui.spacer(@src(), .{ .id_extra = k, .min_size_content = .{ .w = 22 } });
-            } else if (icons.button(@src(), .x, "None: fall back to the regular weight or upright", .{ .id_extra = k, .size = 14 })) {
-                @field(v, kind.field) = null;
-                host.setFontVariants(t, v);
-            }
-            const shown = if (cur) |n| std.fmt.bufPrint(&buf, "{s}: {s} {s}", .{ kind.name, n.family, n.style }) catch "" else std.fmt.bufPrint(&buf, "{s}: none", .{kind.name}) catch "";
-            dvui.labelNoFmt(@src(), shown, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
-        }
-        if (findRecord(cf.main)) |k| {
-            const auto = familyVariants(k);
-            const differs = !optEql(auto.italic, cf.italic) or !optEql(auto.bold, cf.bold) or !optEql(auto.bold_italic, cf.bold_italic);
-            if (differs and (auto.italic != null or auto.bold != null or auto.bold_italic != null)) {
-                var tb: [200]u8 = undefined;
-                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-                defer row.deinit();
-                if (icons.button(@src(), .magic_wand, std.fmt.bufPrint(&tb, "Use {s}'s own italic and bolds", .{cf.main.family}) catch "Use the family's italic and bolds", .{ .size = 14 })) host.setFontVariants(t, auto);
-                dvui.labelNoFmt(@src(), "The family has others", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 }, .font = dvui.Font.theme(.body).larger(-2) });
-            }
-        }
+        const shown = if (cur) |n| std.fmt.bufPrint(&buf, "{s}: {s} {s}", .{ r.name, n.family, n.style }) catch "" else std.fmt.bufPrint(&buf, "{s}: none", .{r.name}) catch "";
+        dvui.labelNoFmt(@src(), shown, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
     }
-    // What the selected font can become in it, as one row of icons.
     if (sel) |s| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         dvui.labelNoFmt(@src(), "Selected:", .{}, .{ .gravity_y = 0.5, .margin = .{ .w = 4 } });
         var tb: [200]u8 = undefined;
-        if (icons.button(@src(), .text_aa, std.fmt.bufPrint(&tb, "Use {s} as the main font, with its family's italic and bolds", .{sel_label}) catch "Use as the main font", .{})) host.setFontFamily(t, nameOf(s), familyVariants(s));
-        if (icons.button(@src(), .list_plus, std.fmt.bufPrint(&tb, "Add {s} as a fallback member", .{sel_label}) catch "Add as a fallback member", .{})) host.addFontMember(t, .{ .font = nameOf(s) });
-        const want = text(&covers, covers_len);
-        if (want.len > 0) {
-            if (icons.button(@src(), .selection_plus, std.fmt.bufPrint(&tb, "Add {s} as a member for {s}", .{ sel_label, want[0..@min(want.len, 40)] }) catch "Add as a member for the searched characters", .{})) {
-                host.addFontMember(t, .{ .font = nameOf(s), .coverage = .{ .ranges = rangesOf(a, want) } });
-            }
+        if (icons.button(@src(), .text_aa, std.fmt.bufPrint(&tb, "Use {s} as the text face, with its family's italic and bolds", .{sel_label}) catch "Use as the text face", .{})) host.setStyleFamily(st.id, nameOf(s), familyVariants(s));
+        if (icons.button(@src(), .list_plus, std.fmt.bufPrint(&tb, "Add {s} as a fallback", .{sel_label}) catch "Add as a fallback", .{})) {
+            // The first fallback name the style does not use yet.
+            var n: usize = 1;
+            var nb: [32]u8 = undefined;
+            const role = while (n < 1000) : (n += 1) {
+                const r = std.fmt.bufPrint(&nb, "fallback{d}", .{n}) catch break null;
+                if (st.face(r) == null) break r;
+            } else null;
+            if (role) |r| host.setStyleFace(st.id, r, nameOf(s));
         }
     } else dvui.labelNoFmt(@src(), "Select a font to use it here.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
-    heading(@src(), "Members, in order tried");
-    if (cf.members.items.len == 0) dvui.labelNoFmt(@src(), "None yet.", .{}, .{});
-    for (cf.members.items, 0..) |mb, k| {
+    heading(@src(), "Fallbacks, in order tried");
+    var any = false;
+    for (st.faces.items, 0..) |sf, k| {
+        if (!isFallback(sf.role)) continue;
+        any = true;
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .expand = .horizontal, .margin = .{ .h = 2 } });
         defer row.deinit();
+        if (icons.button(@src(), .trash, "Remove this fallback", .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, sf.role, null);
         var buf: [160]u8 = undefined;
-        const what = switch (mb.coverage) {
-            .fallback => "fallback",
-            .ranges => |rs| std.fmt.bufPrint(buf[100..], "{d} range{s}", .{ rs.len, if (rs.len == 1) "" else "s" }) catch "ranges",
-        };
-        // The icons first: a long name is clipped, never them.
-        if (icons.button(@src(), .caret_up, "Try earlier", .{ .id_extra = k, .size = 14 })) host.moveFontMember(t, k, true);
-        if (icons.button(@src(), .caret_down, "Try later", .{ .id_extra = k, .size = 14 })) host.moveFontMember(t, k, false);
-        if (icons.button(@src(), .trash, "Remove this member", .{ .id_extra = k, .size = 14 })) host.removeFontMember(t, k);
-        // The math alphabet it sets (\mathbb …), or none: it sets
-        // characters as they are.
-        var alpha: usize = @intFromEnum(mb.alphabet);
-        if (dvui.dropdown(@src(), &alphabet_names, .{ .choice = &alpha }, .{}, .{ .id_extra = k, .gravity_y = 0.5, .min_size_content = .{ .w = 90 } })) {
-            var changed = mb;
-            changed.alphabet = @enumFromInt(alpha);
-            host.setFontMember(t, k, changed);
-        }
-        dvui.labelNoFmt(@src(), std.fmt.bufPrint(buf[0..100], "{s} {s} ({s})", .{ mb.font.family, mb.font.style, what }) catch "", .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{s} {s}", .{ sf.font.family, sf.font.style }) catch "", .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
     }
-    heading(@src(), "Set a style in it");
-    if (m.styles.items.len == 0) {
-        dvui.labelNoFmt(@src(), "The document has no styles yet.", .{}, .{});
-        return;
-    }
-    const snames = a.alloc([]const u8, m.styles.items.len) catch return;
-    for (m.styles.items, snames) |st, *n| n.* = st.name;
-    style_choice = @min(style_choice, snames.len - 1);
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer row.deinit();
-    _ = dvui.dropdown(@src(), snames, .{ .choice = &style_choice }, .{}, .{ .expand = .horizontal, .gravity_y = 0.5 });
-    const st = m.styles.items[style_choice];
-    if (st.font == t) {
-        dvui.labelNoFmt(@src(), "set", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 6 } });
-    } else if (icons.button(@src(), .paint_brush, "Set this style in the composed font", .{ .opts = .{ .gravity_y = 0.5 } })) {
-        host.setStyleFont(st.id, t);
-    }
+    if (!any) dvui.labelNoFmt(@src(), "None.", .{}, .{});
 }

@@ -18,6 +18,8 @@ const StyleId = model.StyleId;
 const ParaId = model.ParaId;
 
 /// What an import made, and what it could not carry over.
+pub const FontMade = struct { style: StyleId, family: []const u8 };
+
 pub const Report = struct {
     paragraphs: usize = 0,
     runs: usize = 0,
@@ -26,9 +28,9 @@ pub const Report = struct {
     tabs: usize = 0,
     styles_made: usize = 0,
     paragraph_styles_made: usize = 0,
-    /// Composed fonts made for families the document had none for; the
-    /// caller may fill in their bold and italic from the installed fonts.
-    fonts_made: std.ArrayList(model.ObjectId) = .empty,
+    /// Styles made for a family, set in its regular face; the caller may
+    /// fill in its italic and bolds from the installed fonts.
+    fonts_made: std.ArrayList(FontMade) = .empty,
     /// Spans in a colour other than black: kept as text, not yet as a
     /// colour tag.
     coloured: usize = 0,
@@ -129,7 +131,7 @@ fn paragraphStyle(h: *history.History, m: *Model, key: u64, s: rt.Settings, trac
 
 /// The style for text that looks like `look`: `base` when it names no
 /// font or size, else the style named for them ("Arial 12 pt"), made when
-/// there is none, set in a composed font of that family.
+/// there is none: based on `base`, its text face that family's.
 fn textStyle(gpa: Allocator, h: *history.History, m: *Model, key: u64, doc: rt.Doc, look: rt.Look, base: StyleId, rep: *Report) !StyleId {
     const family: ?[]const u8 = if (look.font) |f| (if (f < doc.fonts.len and doc.fonts[f].name.len > 0) doc.fonts[f].name else null) else null;
     if (family == null and look.size == null) return base;
@@ -141,22 +143,19 @@ fn textStyle(gpa: Allocator, h: *history.History, m: *Model, key: u64, doc: rt.D
         std.fmt.bufPrint(&name_buf, "{s}", .{family.?}) catch "Imported";
     for (m.styles.items) |st| if (std.mem.eql(u8, st.name, name)) return st.id;
 
-    var spec = base_style.spec;
     // A size in points is the em, as the source meant it: the cap height
     // follows from the font once it is resolved.
+    var size: model.StyleSize = .{ .cap_height = base_style.cap_height, .em_size = base_style.em_size, .line_pitch = base_style.line_pitch, .base = base };
     if (look.size) |pt| {
-        spec.em_size = pt * mm_per_pt;
-        spec.cap_height = pt * mm_per_pt * model.cap_per_em;
+        size.em_size = pt * mm_per_pt;
+        size.cap_height = pt * mm_per_pt * model.cap_per_em;
     }
-    const style = try h.doMerged(m, key, .addStyle, .{ name, spec });
+    const style = try h.doMerged(m, key, .addStyle, .{ name, size });
     rep.styles_made += 1;
-    const font_id: model.ObjectId = if (family) |fam| blk: {
-        for (m.fonts.items) |f| if (std.ascii.eqlIgnoreCase(f.name, fam)) break :blk f.id;
-        const id = try h.doMerged(m, key, .addFont, .{ fam, .{ .family = fam } });
-        try rep.fonts_made.append(gpa, id);
-        break :blk id;
-    } else base_style.font;
-    if (font_id != .none) _ = try h.doMerged(m, key, .setStyleFont, .{ style, font_id });
+    if (family) |fam| {
+        try h.doMerged(m, key, .setStyleFace, .{ style, "text", @as(?model.FontName, .{ .family = fam }) });
+        try rep.fonts_made.append(gpa, .{ .style = style, .family = m.textStyle(style).face("text").?.family });
+    }
     return style;
 }
 
@@ -172,7 +171,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
     defer h.deinit();
     try h.reset(&m);
     const p = try m.startCanvas(.mm);
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 2.5 });
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 10, .length = 10, .pitch = 6 });
     try h.reset(&m);
 
@@ -205,7 +204,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
     try testing.expectEqualStrings("\\textnormal{Second\\quad{}one.}", items[4].what.run.content);
     const carlito = m.textStyle(items[4].what.run.style).*;
     try testing.expectEqualStrings("Carlito 12 pt", carlito.name);
-    try testing.expectApproxEqAbs(12 * mm_per_pt, carlito.spec.em_size.?, 1e-9);
+    try testing.expectApproxEqAbs(12 * mm_per_pt, carlito.em_size.?, 1e-9);
     try testing.expectEqual(m.paragraph_styles.items[0].alignment, .justify);
     try testing.expectEqual(m.paragraphStyleAt(p, r, 0), m.paragraphStyleAt(p, r, 4));
 

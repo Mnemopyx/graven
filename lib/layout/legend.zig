@@ -10,12 +10,14 @@
 //! shaped from. Only a text leaf's glyphs may be cut apart (a word longer
 //! than its line); a structure's never are.
 //!
-//! The model's text styles become glyphic style contexts here (see
-//! `contextOf`), until the model keeps glyphic contexts itself.
+//! The model's text styles (stored glyphic contexts, see
+//! `model.TextStyle`) become the engine's contexts here (see `contextOf`).
 
 const std = @import("std");
 const engine = @import("graven_engine");
 const glyphic = @import("graven_glyphic");
+const model = @import("model.zig");
+const fonts = @import("fonts.zig");
 
 const Allocator = std.mem.Allocator;
 const geom = engine.geom;
@@ -37,50 +39,28 @@ pub const Style = struct {
     text: *Face,
 };
 
-/// A model text style (v1's spec) made a glyphic context in `g`: its
-/// upright face as "text", its italic as "italic", its bold and bold
-/// italic as "bold" and "bold_italic", its math face as
-/// "math", each member after them in order; variables italic; its script
-/// scale. A member that sets variables is the italic face
-/// for math, at its scale. Null when a face it names is not in `faces`.
-pub fn contextOf(g: *glyphic.Engine, faces: []const *Face, spec: engine.style.Spec, name: []const u8) !?Style {
-    const n = faces.len;
-    if (spec.upright >= n) return null;
-    const text = faces[spec.upright];
+/// A model text style made a glyphic context in `g`: its faces by role
+/// (`roles`, from `fonts.resolve`, in `faces`), its rules, and its size.
+/// `text` is the face its text is set in (its own, its base's, or the
+/// default), for its cap height and line pitch. Its base is set by the
+/// caller, once every style has its context.
+pub fn contextOf(g: *glyphic.Engine, faces: []const *Face, st: model.TextStyle, roles: []const fonts.RoleFace, text: *Face, name: []const u8) !?Style {
     const id = try g.addStyle(name, .none);
-    try g.setFace(id, "text", text);
-    if (spec.italic) |f| if (f < n) try g.setFace(id, "italic", faces[f]);
-    if (spec.bold) |f| if (f < n) try g.setFace(id, "bold", faces[f]);
-    if (spec.bold_italic) |f| if (f < n) try g.setFace(id, "bold_italic", faces[f]);
-    if (spec.math) |f| if (f < n and f != spec.upright) try g.setFace(id, "math", faces[f]);
-    var buf: [32]u8 = undefined;
-    for (spec.members, 0..) |mb, k| {
-        if (mb.upright >= n) return null;
-        if (mb.role == .variables) {
-            // Its letters are the variables: italic, from this face.
-            try g.setFace(id, "italic", faces[mb.upright]);
-            try g.setFor(id, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
-            if (mb.scale != 1) try g.setFor(id, .{ .kind = .variable }, .scale, glyphic.param.num(@floatCast(std.math.clamp(mb.scale, 0.1, 10))));
-            continue;
-        }
-        try g.setFace(id, try std.fmt.bufPrint(&buf, "member{d}", .{k}), faces[mb.upright]);
+    for (roles) |rf| if (rf.face < faces.len) try g.setFace(id, rf.role, faces[rf.face]);
+    // No text face found of its own (none set, or not installed) and no
+    // base: the default face.
+    const has_text = for (roles) |rf| {
+        if (std.mem.eql(u8, rf.role, "text")) break true;
+    } else false;
+    if (st.base == .none and !has_text) try g.setFace(id, "text", text);
+    for (st.rules.items) |r| {
+        if (r.kind) |k| try g.setFor(id, .{ .kind = k }, r.param, r.value) else try g.set(id, r.param, r.value);
     }
-    // Variables italic, as math has them (`letters` is the text's).
-    try g.setFor(id, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
-    // A member that sizes the mathematical italic letters or the small
-    // Greek sizes the variables or the constants (π) set from it.
-    for (spec.members) |mb| {
-        if (mb.scale == 1) continue;
-        const sc = glyphic.param.num(@floatCast(std.math.clamp(mb.scale, 0.1, 10)));
-        if (mb.coverage.has(0x1D465)) try g.setFor(id, .{ .kind = .variable }, .scale, sc);
-        if (mb.coverage.has(0x1D6D1) or mb.coverage.has(0x03C0)) try g.setFor(id, .{ .kind = .constant }, .scale, sc);
-    }
-    if (spec.script_scale) |s| try g.set(id, .script_scale, glyphic.param.num(@floatCast(std.math.clamp(s, 0.3, 1))));
     const cap_units = glyphic.faces.capUnits(text);
-    const cap = if (spec.em_size) |em| em * cap_units / @as(f64, @floatFromInt(text.upem)) else spec.cap_height;
+    const cap = if (st.em_size) |em| em * cap_units / @as(f64, @floatFromInt(text.upem)) else st.cap_height;
     if (!(cap > 0)) return null;
     const ext = text.extents();
-    const pitch = if (spec.line_pitch) |f| f * cap else (ext.ascender - ext.descender) * cap / cap_units;
+    const pitch = if (st.line_pitch) |f| f * cap else (ext.ascender - ext.descender) * cap / cap_units;
     return .{ .id = id, .cap_height = cap, .line_pitch = pitch, .text = text };
 }
 
@@ -227,7 +207,7 @@ test "a legend set by glyphic: words, the spaces between them, and its source" {
     const faces = [_]*Face{face};
     var g = glyphic.Engine.init(gpa);
     defer g.deinit();
-    const st = (try contextOf(&g, &faces, .{ .upright = 0, .cap_height = 3 }, "s")).?;
+    const st = (try contextOf(&g, &faces, .{ .name = "s", .cap_height = 3 }, &.{}, face, "s")).?;
     try testing.expectApproxEqAbs(3, st.cap_height, 1e-9);
     var r = try render(gpa, &g, &faces, st, "HO DA");
     defer r.deinit();

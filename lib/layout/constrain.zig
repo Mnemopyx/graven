@@ -335,7 +335,7 @@ fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
             if (r.major != .row) return null;
             const sid = r.style orelse return null;
             if (m.styleIndex(sid) == null) return null;
-            const cap = m.textStyle(sid).spec.cap_height;
+            const cap = m.textStyle(sid).cap_height;
             // The first row is at the region's top.
             return .{ .g = 1 - at, .c = -(r.pitch + cap) / 2 };
         },
@@ -742,7 +742,7 @@ test "sizes change about the origin, follow a resized parent, and conflicts are 
     defer h.deinit();
     const c = try m.startCanvas(.mm);
     const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 60 });
-    const style = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const style = try m.addStyle("Body", .{ .cap_height = 3 });
     const r = try m.addTracks(p, .{ .name = "t", .origin = .{ .x = 9, .y = 52 }, .style = style, .count = 4, .length = 10, .pitch = 5 });
     _ = c;
     try h.reset(&m);
@@ -821,8 +821,8 @@ test "side-by-side text columns share their first baseline" {
     defer h.deinit();
     _ = try m.startCanvas(.mm);
     const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 100 });
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
-    const big = try m.addStyle("Big", .{ .upright = 0, .cap_height = 5 });
+    const body = try m.addStyle("Body", .{ .cap_height = 3 });
+    const big = try m.addStyle("Big", .{ .cap_height = 5 });
     const left = try m.addTracks(p, .{ .name = "left", .origin = .{ .x = 10, .y = 90 }, .style = body, .count = 5, .length = 10, .pitch = 6 });
     const right = try m.addTracks(p, .{ .name = "right", .origin = .{ .x = 110, .y = 83.7 }, .style = big, .count = 5, .length = 8, .pitch = 9 });
     try h.reset(&m);
@@ -895,7 +895,7 @@ test "a track's control point can be constrained, and the rows follow it" {
     defer h.deinit();
     _ = try m.startCanvas(.mm);
     const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 120 });
-    const body = try m.addStyle("Body", .{ .upright = 0, .cap_height = 3 });
+    const body = try m.addStyle("Body", .{ .cap_height = 3 });
     const r = try m.addTracks(p, .{ .name = "poem", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
     try h.reset(&m);
     const cp = try h.do(&m, .addControlPoint, .{ p, r, 2.0, 4.0 });

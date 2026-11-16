@@ -56,25 +56,25 @@ pub const Styles = struct {
     f: StyleId,
 };
 
-/// Adds the legends' styles, set in face 0 with `fallbacks` (faces for
-/// what face 0 lacks, in order: Δ, Σ and ⇄ are missing from many text
-/// faces). Each legend is one line, so the line pitch is set at a cap
-/// height and a half rather than taken from the face's ascender and
-/// descender, which vary widely (Geist's are 1.83 cap heights apart).
-pub fn addStyles(m: *Model, fallbacks: []const engine.style.Member) !Styles {
-    const spec = struct {
-        fn of(cap: f64, members: []const engine.style.Member) engine.style.Spec {
-            // Scripts pulled in toward the centre line from the math fonts'
-            // shifts (Libertinus 0.58 up, 0.32 down; STIX Two 0.55, 0.32), so
-            // a legend with scripts stands less tall.
-            return .{ .upright = 0, .cap_height = cap, .line_pitch = 1.5, .members = members, .arrows = .{}, .sup_raise = 0.5, .sub_drop = 0.24 };
-        }
-    }.of;
-    return .{
-        .key = try m.addStyle("15C key", spec(1.9, fallbacks)),
-        .g = try m.addStyle("15C g", spec(1.25, fallbacks)),
-        .f = try m.addStyle("15C f", spec(1.4, fallbacks)),
-    };
+/// Adds the legends' styles, based on `base` (their faces and rules: a
+/// math font package, say). Each legend is one line, so the line pitch is
+/// set at a cap height and a half rather than taken from the face's
+/// ascender and descender, which vary widely (Geist's are 1.83 cap
+/// heights apart). Scripts are pulled in toward the centre line from the
+/// math fonts' shifts (Libertinus 0.58 up, 0.32 down; STIX Two 0.55,
+/// 0.32), so a legend with scripts stands less tall.
+pub fn addStyles(m: *Model, base: StyleId) !Styles {
+    var out: Styles = undefined;
+    for ([_]struct { *StyleId, []const u8, f64 }{
+        .{ &out.key, "15C key", 1.9 },
+        .{ &out.g, "15C g", 1.25 },
+        .{ &out.f, "15C f", 1.4 },
+    }) |s| {
+        s[0].* = try m.addStyle(s[1], .{ .cap_height = s[2], .line_pitch = 1.5, .base = base });
+        try m.setStyleRule(s[0].*, null, .sup_raise, .{ .number = 0.5 });
+        try m.setStyleRule(s[0].*, null, .sub_drop, .{ .number = 0.24 });
+    }
+    return out;
 }
 
 /// The keys, row by row: the white legend, the blue g, and the gold f.
@@ -223,7 +223,7 @@ test "the HP-15C keypad: 39 holes and keys at 11.43 mm across, ENTER over two ro
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     _ = try m.startCanvas(.mm);
-    const st = try m.addStyle("key", .{ .upright = 0, .cap_height = 1.9 });
+    const st = try m.addStyle("key", .{ .cap_height = 1.9 });
     const b = try build(&m, .{ .key = st, .g = st, .f = st }, 0, .{ .x = 0, .y = 0 });
     const pg = m.panels.items[b.plate].grids.items[0];
     const kg = m.panels.items[b.keys].grids.items[0];
