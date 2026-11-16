@@ -20,6 +20,7 @@ pub const edit = @import("edit.zig");
 pub const fab = @import("fab.zig");
 pub const threemf = @import("threemf.zig");
 pub const ground = @import("ground.zig");
+pub const legend = @import("legend.zig");
 
 pub const Model = model.Model;
 pub const TileId = model.TileId;

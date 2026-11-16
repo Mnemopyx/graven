@@ -22,6 +22,7 @@ const Allocator = std.mem.Allocator;
 const Expr = ex.Expr;
 const Id = ex.Id;
 const Kind = ex.Kind;
+const Variant = ex.Variant;
 const Span = entry.Span;
 const Spans = entry.Spans;
 
@@ -84,46 +85,75 @@ const Parser = struct {
 
     fn legend(p: *Parser) ex.Error!void {
         const root = p.e.root;
-        var text: std.ArrayList(u8) = .empty;
+        var text: entry.Text = .{};
         defer text.deinit(p.gpa());
-        var start = p.i;
+        // Groups open in the text: the letterforms outside each.
+        var outside: [32]ex.Variant = undefined;
+        var depth: usize = 0;
         while (!p.eof()) {
             const c = p.src[p.i];
+            // Emphasis: \textbf{…}, \textit{…}, \emph{…}; a bare group
+            // keeps what it is in.
+            const opens: ?ex.Variant = for ([_]struct { []const u8, ex.Variant }{
+                .{ "\\textbf{", .bold },
+                .{ "\\textit{", .italic },
+                .{ "\\emph{", .italic },
+                .{ "\\textrm{", .normal },
+                .{ "\\textup{", .normal },
+                .{ "{", .normal },
+            }) |o| {
+                if (p.startsWith(o[0])) break o[1];
+            } else null;
+            if (opens) |v| if (depth < outside.len) {
+                try text.flush(p.e, p.spans, p.e.root, p.i);
+                p.i = std.mem.indexOfScalarPos(u8, p.src, p.i, '{').? + 1;
+                outside[depth] = text.variant;
+                depth += 1;
+                text.variant = text.variant.with(v);
+                continue;
+            };
+            if (c == '}' and depth > 0) {
+                try text.flush(p.e, p.spans, p.e.root, p.i);
+                p.i += 1;
+                depth -= 1;
+                text.variant = outside[depth];
+                continue;
+            }
             if (c == '$') {
-                try p.flushText(&text, start);
+                try text.flush(p.e, p.spans, p.e.root, p.i);
                 p.i += 1;
                 try p.row(root, .{ .dollar = true });
                 if (!p.eof() and p.src[p.i] == '$') p.i += 1;
-                start = p.i;
                 continue;
             }
             if (p.startsWith("\\-")) {
-                try text.appendSlice(p.gpa(), entry.soft_hyphen);
+                try text.add(p.gpa(), entry.soft_hyphen, p.i);
                 p.i += 2;
                 continue;
             }
             if (p.startsWith("\\allowbreak")) {
-                try text.appendSlice(p.gpa(), entry.allow_mark);
+                try text.add(p.gpa(), entry.allow_mark, p.i);
                 p.i += "\\allowbreak".len;
                 if (p.startsWith("{}")) p.i += 2 else if (p.startsWith(" ")) p.i += 1;
                 continue;
             }
+            if (p.startsWith("\\textbackslash")) {
+                try text.add(p.gpa(), "\\", p.i);
+                p.i += "\\textbackslash".len;
+                if (p.startsWith("{}")) p.i += 2;
+                continue;
+            }
             if (c == '\\' and p.i + 1 < p.src.len and !std.ascii.isAlphabetic(p.src[p.i + 1])) {
-                try text.append(p.gpa(), p.src[p.i + 1]);
+                try text.add(p.gpa(), p.src[p.i + 1 .. p.i + 2], p.i);
                 p.i += 2;
                 continue;
             }
-            try text.append(p.gpa(), c);
+            try text.add(p.gpa(), p.src[p.i .. p.i + 1], p.i);
             p.i += 1;
         }
-        try p.flushText(&text, start);
+        try text.flush(p.e, p.spans, p.e.root, p.i);
     }
 
-    fn flushText(p: *Parser, text: *std.ArrayList(u8), start: usize) ex.Error!void {
-        if (text.items.len == 0) return;
-        try entry.textObjects(p.e, p.spans, p.e.root, text.items, start);
-        text.clearRetainingCapacity();
-    }
 
     // Math -----------------------------------------------------------------------
 
@@ -331,6 +361,15 @@ const Parser = struct {
             }
             return p.mark(f, start);
         }
+        if (is(cmd, "\\mathbf") or is(cmd, "\\boldsymbol") or is(cmd, "\\bm")) {
+            // Bold letterforms: what it holds, kept as a group.
+            const g = try p.e.structure(.group, "", "");
+            try p.e.append(r, g);
+            p.tag(g, cmd);
+            try p.arg(p.e.slot(g, .body));
+            entry.setVariant(p.e, p.e.slot(g, .body), .bold);
+            return p.mark(g, start);
+        }
         if (is(cmd, "\\mathrm") or is(cmd, "\\text") or is(cmd, "\\operatorname") or is(cmd, "\\textrm") or is(cmd, "\\mathrm")) {
             p.skip();
             var text: []const u8 = "";
@@ -380,8 +419,25 @@ pub fn write(w: *std.Io.Writer, e: *const Expr, mode: Mode) std.Io.Writer.Error!
     }
     // Text runs as they are; the rest between dollars.
     var k: usize = 0;
+    // Emphasis open, closed and opened again where it changes.
+    var open: Variant = .normal;
     while (k < items.len) {
         const n = e.node(items[k]);
+        const want: Variant = if (entry.isText(e, items[k])) n.variant else .normal;
+        if (want != open) {
+            try w.writeAll(switch (open) {
+                .normal => "",
+                .bold, .italic => "}",
+                .bold_italic => "}}",
+            });
+            try w.writeAll(switch (want) {
+                .normal => "",
+                .bold => "\\textbf{",
+                .italic => "\\textit{",
+                .bold_italic => "\\textbf{\\textit{",
+            });
+            open = want;
+        }
         if (entry.isText(e, items[k])) {
             if (e.override(items[k], .break_before)) |v| if (param.as(param.BreakMark, v) == .allow) try w.writeAll("\\allowbreak ");
             if (n.kind == .soft_hyphen) {
@@ -401,6 +457,11 @@ pub fn write(w: *std.Io.Writer, e: *const Expr, mode: Mode) std.Io.Writer.Error!
         try w.writeByte('$');
         k = end;
     }
+    try w.writeAll(switch (open) {
+        .normal => "",
+        .bold, .italic => "}",
+        .bold_italic => "}}",
+    });
 }
 
 const Writer = struct {
@@ -518,7 +579,10 @@ const Writer = struct {
                 try wr.raw(if (acc) |a| a.latex else "\\hat");
                 try wr.braced(e.slot(id, .body));
             },
-            .group => {
+            .group => if (n.tags.source.len > 1 and n.tags.source[0] == '\\') {
+                try wr.raw(n.tags.source);
+                try wr.braced(e.slot(id, .body));
+            } else {
                 try wr.w.writeByte('{');
                 wr.word_end = false;
                 try wr.items(e.node(e.slot(id, .body)).items.items);

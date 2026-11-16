@@ -30,7 +30,8 @@ const Face = faces_mod.Face;
 pub const Item = union(enum) {
     /// A glyph: `m` takes its outline (font units) to expression space.
     /// `grow` thickens it all round, mm.
-    glyph: struct { face: *Face, gid: u32, m: Affine, grow: f64, object: Id },
+    /// `cluster`: the byte of the object's text it was shaped from.
+    glyph: struct { face: *Face, gid: u32, m: Affine, grow: f64, object: Id, cluster: u32 = 0 },
     /// A filled quadrilateral: a fraction's rule, a radical's bar.
     rule: struct { corners: [4]Point, object: Id },
     /// An empty field, shown while editing: its corners.
@@ -38,7 +39,7 @@ pub const Item = union(enum) {
 
     fn moved(it: Item, m: Affine) Item {
         return switch (it) {
-            .glyph => |g| .{ .glyph = .{ .face = g.face, .gid = g.gid, .m = g.m.then(m), .grow = g.grow, .object = g.object } },
+            .glyph => |g| .{ .glyph = .{ .face = g.face, .gid = g.gid, .m = g.m.then(m), .grow = g.grow, .object = g.object, .cluster = g.cluster } },
             .rule => |r| .{ .rule = .{ .corners = corners(r.corners, m), .object = r.object } },
             .hole => |h| .{ .hole = .{ .corners = corners(h.corners, m), .object = h.object } },
         };
@@ -204,7 +205,8 @@ pub const Layout = struct {
     fn layText(l: *Layout, id: Id, text: []const u8, cap: f64, kind: Kind) !Laid {
         const a = l.a;
         var out: Laid = .{};
-        const shape = param.as(param.Shape, l.r.get(id, .shape));
+        const variant = l.r.e.node(id).variant;
+        const shape: param.Shape = if (variant.isItalic()) .italic else param.as(param.Shape, l.r.get(id, .shape));
         const named = l.r.get(id, .face).name;
         const fs = try l.r.faces(l.a, id);
         const grow = @max(0, l.val(id, .weight)) * cap / 2;
@@ -213,17 +215,23 @@ pub const Layout = struct {
         var it = (std.unicode.Utf8View.init(text) catch return out).iterator();
         // Runs: consecutive characters with the same choice.
         var run: std.ArrayList(u8) = .empty;
+        // Each run byte's byte in `text`.
+        var run_src: std.ArrayList(u32) = .empty;
         var run_face: ?faces_mod.Choice = null;
         while (true) {
+            const at: u32 = @intCast(it.i);
             const cp_opt = it.nextCodepoint();
-            const choice: ?faces_mod.Choice = if (cp_opt) |cp| faces_mod.choose(fs, named, kind, shape, cp) else null;
+            var choice: ?faces_mod.Choice = if (cp_opt) |cp| faces_mod.chooseBold(fs, named, kind, shape, variant.isBold(), cp) else null;
             if (cp_opt != null and choice == null) {
                 try l.missing.append(a, .{ .object = id, .cp = cp_opt.? });
+                // Drawn as the first face's .notdef, so it shows.
+                if (fs.members.len > 0) choice = .{ .face = fs.members[0].face, .cp = cp_opt.? };
             }
             const same = if (run_face) |rf| (choice != null and rf.face == choice.?.face and rf.slanted == choice.?.slanted) else false;
             if (run.items.len > 0 and (!same or cp_opt == null)) {
-                x = try l.setRun(&out, run_face.?, run.items, x, cap, grow, slant, id);
+                x = try l.setRun(&out, run_face.?, run.items, run_src.items, x, cap, grow, slant, id);
                 run.clearRetainingCapacity();
+                run_src.clearRetainingCapacity();
             }
             const cp = cp_opt orelse break;
             if (choice) |c| {
@@ -231,8 +239,9 @@ pub const Layout = struct {
                 var buf: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(c.cp, &buf) catch continue;
                 try run.appendSlice(a, buf[0..n]);
+                for (0..n) |_| try run_src.append(a, at);
             } else {
-                // Missing everywhere: its room kept, nothing drawn.
+                // No face at all: its room kept, nothing drawn.
                 _ = cp;
                 x += 0.6 * cap;
             }
@@ -245,7 +254,7 @@ pub const Layout = struct {
         return out;
     }
 
-    fn setRun(l: *Layout, out: *Laid, c: faces_mod.Choice, text: []const u8, x0: f64, cap: f64, grow: f64, slant_deg: f64, id: Id) !f64 {
+    fn setRun(l: *Layout, out: *Laid, c: faces_mod.Choice, text: []const u8, src: []const u32, x0: f64, cap: f64, grow: f64, slant_deg: f64, id: Id) !f64 {
         const k = cap / faces_mod.capUnits(c.face);
         const slant = (slant_deg + if (c.slanted) @as(f64, 12) else 0) * std.math.pi / 180;
         const shear: Affine = .{ .c = @tan(slant) };
@@ -253,7 +262,7 @@ pub const Layout = struct {
         var x = x0;
         for (shaped) |g| {
             const m = Affine.scale(k).then(shear).then(Affine.translate(x + @as(f64, @floatFromInt(g.x_offset)) * k, @as(f64, @floatFromInt(g.y_offset)) * k));
-            try out.items.append(l.a, .{ .glyph = .{ .face = c.face, .gid = g.gid, .m = m, .grow = grow, .object = id } });
+            try out.items.append(l.a, .{ .glyph = .{ .face = c.face, .gid = g.gid, .m = m, .grow = grow, .object = id, .cluster = if (g.cluster < src.len) src[g.cluster] else 0 } });
             const b = (try c.face.outline(g.gid)).bounds();
             if (!b.isEmpty()) {
                 const ib = boundsOf(corners(rect(b.x0, b.y0, b.x1, b.y1), m));

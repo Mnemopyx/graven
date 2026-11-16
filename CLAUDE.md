@@ -40,7 +40,7 @@ $Z build gui-build -Doptimize=ReleaseFast --prefix /tmp/rel   # for timing
 $Z build fab -Docct-prebuilt  # graven-fab, with the OCCT bridge (prebuilt release archive)
 ```
 
-Regression check after any engine or layout change: the PC keyboard sample's SVG must not change.
+Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2.)
 
 ```sh
 ./zig-out/bin/graven keyboard /usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf kb.svg

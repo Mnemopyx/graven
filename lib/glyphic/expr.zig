@@ -144,6 +144,31 @@ pub const Tags = struct {
 
 pub const Override = struct { param: Param, value: Value };
 
+/// A leaf's letterforms as content: bold or italic text (`\textbf`), a
+/// bold vector (`\mathbf`). Part of what it says, not of its style: the
+/// style decides which faces are bold, not whether this is.
+pub const Variant = enum {
+    normal,
+    bold,
+    italic,
+    bold_italic,
+
+    pub fn isBold(v: Variant) bool {
+        return v == .bold or v == .bold_italic;
+    }
+
+    pub fn isItalic(v: Variant) bool {
+        return v == .italic or v == .bold_italic;
+    }
+
+    /// `v` with `w`'s weight and slant added.
+    pub fn with(v: Variant, w: Variant) Variant {
+        const b = v.isBold() or w.isBold();
+        const i = v.isItalic() or w.isItalic();
+        return if (b and i) .bold_italic else if (b) .bold else if (i) .italic else .normal;
+    }
+};
+
 pub const Node = struct {
     kind: Kind,
     role: Role = .none,
@@ -167,6 +192,8 @@ pub const Node = struct {
     overrides: std.ArrayList(Override) = .empty,
     /// The style context applied to it (and what it holds), if any.
     style: StyleId = .none,
+    /// A leaf's letterforms (see `Variant`).
+    variant: Variant = .normal,
     tags: Tags = .{},
     live: bool = true,
 };

@@ -6522,12 +6522,13 @@ const text_track_step = 0.5;
 fn styleLinePitch(style: ?layout.model.StyleId) ?f64 {
     const labels = if (state.labels) |*l| l else return null;
     if (style) |sid| {
-        const ctx = labels.context(sid) orelse return null;
-        return ctx.linePitch() catch null;
+        const st = labels.context(sid) orelse return null;
+        return st.line_pitch;
     }
     if (state.faces.len == 0) return null;
-    const ctx = engine.style.Context.init(&state.faces, .{ .upright = 0, .cap_height = 3 }) catch return null;
-    return ctx.linePitch() catch null;
+    const f = state.faces[0];
+    const ext = f.extents();
+    return (ext.ascender - ext.descender) * 3 / layout.legend.capUnits(f);
 }
 
 /// "Row" or "Column".

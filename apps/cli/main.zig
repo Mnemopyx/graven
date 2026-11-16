@@ -232,7 +232,7 @@ fn v2hp15c(init: std.process.Init, folder: []const u8) !void {
                 };
             }
             if (text.len == 0) continue;
-            const cap = if (labels.context(l.style)) |ctx| ctx.spec.cap_height else continue;
+            const cap = if (labels.context(l.style)) |st| st.cap_height else continue;
             var e = try glyphic.Expr.init(gpa);
             defer e.deinit();
             var spans: glyphic.entry.Spans = .{};

@@ -12,6 +12,8 @@
 const fonts = @import("fonts.zig");
 const std = @import("std");
 const engine = @import("graven_engine");
+const glyphic = @import("graven_glyphic");
+const legend = @import("legend.zig");
 const model = @import("model.zig");
 const art = @import("art.zig");
 
@@ -316,6 +318,8 @@ pub const Labels = struct {
     /// keeps to; the caller resolves again when the model changes.
     resolved: ?*const fonts.Resolved = null,
     contexts: std.ArrayList(?Ctx) = .empty,
+    /// The glyphic contexts the styles became, remade when one changes.
+    g: ?glyphic.Engine = null,
     /// The style each of `contexts` is for, in the model's order.
     ids: std.ArrayList(StyleId) = .empty,
     cache: std.HashMapUnmanaged(Key, Entry, KeyContext, 80) = .empty,
@@ -325,7 +329,7 @@ pub const Labels = struct {
     sketches: std.AutoHashMapUnmanaged(u64, ?[]const geom.Contour) = .empty,
     sketch_arena: ?std.heap.ArenaAllocator = null,
 
-    const Ctx = struct { spec: engine.style.Spec, ctx: ?engine.style.Context };
+    const Ctx = struct { spec: engine.style.Spec, style: ?legend.Style };
 
     const Key = struct {
         style: StyleId,
@@ -442,6 +446,7 @@ pub const Labels = struct {
         l.cache.deinit(l.gpa);
         l.contexts.deinit(l.gpa);
         l.ids.deinit(l.gpa);
+        if (l.g) |*g| g.deinit();
         l.* = undefined;
     }
 
@@ -486,10 +491,12 @@ pub const Labels = struct {
     }
 
     fn syncSpecs(l: *Labels, faces: []const *engine.Face, specs: []const engine.style.Spec, ids: []const StyleId) Allocator.Error!void {
+        var changed = l.g == null;
         if (faces.ptr != l.faces.ptr or faces.len != l.faces.len) {
             l.faces = faces;
             for (l.contexts.items) |*c| c.* = null;
             l.clear();
+            changed = true;
         }
         while (l.contexts.items.len < specs.len) try l.contexts.append(l.gpa, null);
         while (l.ids.items.len < specs.len) try l.ids.append(l.gpa, .none);
@@ -502,21 +509,24 @@ pub const Labels = struct {
                 cur.* = null;
             }
             if (cur.*) |c| if (specEql(c.spec, spec)) continue;
-            const n = l.faces.len;
-            const inTable = struct {
-                fn f(v: engine.style.Variants, len: usize) bool {
-                    return v.upright < len and (v.italic orelse 0) < len and (v.bold orelse 0) < len and (v.bold_italic orelse 0) < len;
-                }
-            }.f;
-            const main: engine.style.Variants = .{ .upright = spec.upright, .italic = spec.italic, .bold = spec.bold, .bold_italic = spec.bold_italic };
-            const usable = inTable(main, n) and for (spec.members) |mb| {
-                if (!inTable(mb.variants(), n)) break false;
-            } else true;
-            const ctx = if (usable) engine.style.Context.init(l.faces, spec) catch null else null;
-            cur.* = .{ .spec = spec, .ctx = ctx };
+            cur.* = .{ .spec = spec, .style = null };
+            changed = true;
             l.dropStyle(id);
             // Renders cached under `.none` (the first style) too.
             if (i == 0) l.dropStyle(.none);
+        }
+        if (!changed) return;
+        // The glyphic contexts, made again for every style: renders keep
+        // nothing of them, so those of unchanged styles stay.
+        if (l.g) |*g| g.deinit();
+        l.g = glyphic.Engine.init(l.gpa);
+        var buf: [32]u8 = undefined;
+        for (l.contexts.items[0..specs.len], 0..) |*c, i| {
+            const name = std.fmt.bufPrint(&buf, "style{d}", .{i}) catch unreachable;
+            c.*.?.style = legend.contextOf(&l.g.?, l.faces, c.*.?.spec, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => null,
+            };
         }
     }
 
@@ -532,36 +542,34 @@ pub const Labels = struct {
         }
     }
 
-    /// The context of text style `style` (`.none`: the first style).
-    pub fn context(l: *const Labels, style: StyleId) ?*const engine.style.Context {
+    fn index(l: *const Labels, style: StyleId) ?usize {
         const i: usize = if (style == .none) 0 else for (l.ids.items, 0..) |id, k| {
             if (id == style) break k;
         } else return null;
-        if (i >= l.contexts.items.len) return null;
-        if (l.contexts.items[i]) |*c| if (c.ctx) |*ctx| return ctx;
+        return if (i < l.contexts.items.len and l.contexts.items[i] != null) i else null;
+    }
+
+    /// Text style `style` as legends are set in it (`.none`: the first
+    /// style); null when it cannot be used.
+    pub fn context(l: *const Labels, style: StyleId) ?*const legend.Style {
+        const i = l.index(style) orelse return null;
+        if (l.contexts.items[i].?.style) |*st| return st;
         return null;
     }
 
+    /// The spec text style `style` was last synced with.
+    pub fn specOf(l: *const Labels, style: StyleId) ?*const engine.style.Spec {
+        const i = l.index(style) orelse return null;
+        return &l.contexts.items[i].?.spec;
+    }
+
     /// The render for a label, from the cache or made now; null when the
-    /// markup does not parse or the style cannot be used.
+    /// style cannot be used.
     fn get(l: *Labels, k: Key) Allocator.Error!?*const engine.Render {
         if (l.cache.get(k)) |e| return e.render;
-        const ctx = l.context(k.style) orelse return null;
-        const anchor: engine.Anchor = switch (k.anchor) {
-            .start => .start,
-            .centre => .centre,
-            .end => .end,
-        };
-        var syntax: engine.markup.Diagnostic = undefined;
+        const st = l.context(k.style) orelse return null;
         const render: ?*engine.Render = blk: {
-            // Always the lenient parse: markup being typed still draws, and
-            // its problems come back in the render's `syntax`.
-            const r = engine.renderLabel(l.gpa, ctx, k.markup, .{
-                .anchor = anchor,
-                .hard_box = if (k.box) |b| .{ .x0 = b[0], .y0 = b[1], .x1 = b[2], .y1 = b[3] } else null,
-                .line_spans = k.spans,
-                .preview = true,
-            }, &syntax) catch |err| switch (err) {
+            const r = legend.render(l.gpa, &l.g.?, l.faces, st.*, k.markup) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blk null,
             };
@@ -857,7 +865,7 @@ pub fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
 /// style sized by its em gets its font's), else as the model gives it.
 pub fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
     const sid = region.style orelse return 0;
-    if (labels.context(sid)) |ctx| return ctx.spec.cap_height;
+    if (labels.context(sid)) |ctx| return ctx.cap_height;
     return if (m.styleIndex(sid) != null) m.textStyle(sid).spec.cap_height else 0;
 }
 
@@ -928,7 +936,7 @@ fn pointOn(s: geom.Segment, t: f64) Point {
 /// How far down a column one piece of text reaches: a character, a cap
 /// height and a half; a space between words, half a cap.
 fn columnStep(labels: *Labels, style: StyleId, c: Cut) f64 {
-    const cap = if (labels.context(style)) |ctx| ctx.spec.cap_height else 2;
+    const cap = if (labels.context(style)) |st| st.cap_height else 2;
     return if (c.space != null) 0.5 * cap else 1.5 * cap;
 }
 
@@ -948,8 +956,8 @@ fn tileRegions(a: Allocator, m: *const Model, labels: *Labels, tiles: []const Pl
             const box = tt.place.inset.inset(pt.face);
             if (!(box.width() > 0 and box.height() > 0)) continue;
             const ctx = labels.context(tt.style);
-            const cap = if (ctx) |c| c.spec.cap_height else 2;
-            const pitch: f64 = if (tt.major == .row) (if (ctx) |c| (c.linePitch() catch 1.4 * cap) else 1.4 * cap) else 1.5 * cap;
+            const cap = if (ctx) |c| c.cap_height else 2;
+            const pitch: f64 = if (tt.major == .row) (if (ctx) |c| c.line_pitch else 1.4 * cap) else 1.5 * cap;
             const along = (if (tt.major == .row) box.width() else box.height()) / pitch;
             const across = (if (tt.major == .row) box.height() else box.width()) / pitch;
             try out.append(a, .{
@@ -1529,7 +1537,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             const line_ends = (index + 1 < leg_hi and segs_of[index + 1] != sg) or (index + 1 == leg_hi and exited);
             if (line_ends and endsIn(cuts.items, index, .forced)) try out_wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
             if (line_ends and endsIn(cuts.items, index, .hyphen)) if (try labels.get(.{ .style = item.what.run.style, .anchor = .start, .box = null, .markup = hyphen_markup })) |hr| {
-                const cap = labels.context(item.what.run.style).?.spec.cap_height;
+                const cap = labels.context(item.what.run.style).?.cap_height;
                 const hd = hr.design;
                 try placed_labels.append(a, .{
                     .tile = if (own) null else synth_owner.items[ri],
@@ -1592,7 +1600,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     } else renders[index] orelse continue;
                     if (render.syntax.len > 0) try out_issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
                     const d = render.design;
-                    const cap = labels.context(run.style).?.spec.cap_height;
+                    const cap = labels.context(run.style).?.cap_height;
                     // On a baseline that centres its capitals across a
                     // row; centred across a column, one line below another.
                     // In a column, a character's capitals sit a quarter cap
@@ -1889,12 +1897,12 @@ test "a run being typed is stored as typed, flagged, and still drawn" {
     const style = try m.addStyle("label", .{ .upright = 0, .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
     const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 10, .y = 40 }, .style = style, .count = 1, .length = 10, .pitch = 5 });
-    try m.insertRun(p, r, 0, .{ .style = style, .content = "H^" });
+    try m.insertRun(p, r, 0, .{ .style = style, .content = "$H^" });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectEqualStrings("H^", m.panels.items[p].regions.items[r].items.items[0].what.run.content);
+    try testing.expectEqualStrings("$H^", m.panels.items[p].regions.items[r].items.items[0].what.run.content);
     try testing.expectEqual(1, s.labels.len);
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.markup_error, s.issues[0].kind);

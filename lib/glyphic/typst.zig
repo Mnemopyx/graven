@@ -79,40 +79,33 @@ const Parser = struct {
     }
 
     fn legend(p: *Parser) ex.Error!void {
-        var text: std.ArrayList(u8) = .empty;
+        var text: entry.Text = .{};
         defer text.deinit(p.gpa());
-        var start = p.i;
         while (!p.eof()) {
             const c = p.src[p.i];
             if (c == '$') {
-                try p.flushText(&text, start);
+                try text.flush(p.e, p.spans, p.e.root, p.i);
                 p.i += 1;
                 try p.row(p.e.root, .{ .dollar = true });
                 if (p.peek() == '$') p.i += 1;
-                start = p.i;
                 continue;
             }
             if (std.mem.startsWith(u8, p.src[p.i..], "-?")) {
-                try text.appendSlice(p.gpa(), entry.soft_hyphen);
+                try text.add(p.gpa(), entry.soft_hyphen, p.i);
                 p.i += 2;
                 continue;
             }
             if (c == '\\' and p.i + 1 < p.src.len) {
-                try text.append(p.gpa(), p.src[p.i + 1]);
+                try text.add(p.gpa(), p.src[p.i + 1 .. p.i + 2], p.i);
                 p.i += 2;
                 continue;
             }
-            try text.append(p.gpa(), c);
+            try text.add(p.gpa(), p.src[p.i .. p.i + 1], p.i);
             p.i += 1;
         }
-        try p.flushText(&text, start);
+        try text.flush(p.e, p.spans, p.e.root, p.i);
     }
 
-    fn flushText(p: *Parser, text: *std.ArrayList(u8), start: usize) ex.Error!void {
-        if (text.items.len == 0) return;
-        try entry.textObjects(p.e, p.spans, p.e.root, text.items, start);
-        text.clearRetainingCapacity();
-    }
 
     fn stops(p: *Parser, s: Stop) bool {
         if (p.eof()) return true;

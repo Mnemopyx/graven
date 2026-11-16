@@ -446,10 +446,10 @@ test "a label cache given resolved fonts keeps them when the model syncs it agai
     var labels: place.Labels = .init(testing.allocator, &.{t.faces[0]});
     defer labels.deinit();
     try labels.syncResolved(&r);
-    try testing.expectEqual(1, labels.context(legend).?.spec.members.len);
+    try testing.expectEqual(1, labels.specOf(legend).?.members.len);
     // As `solve` does: the resolved specs stay.
     try labels.sync(&m);
-    try testing.expectEqual(1, labels.context(legend).?.spec.members.len);
+    try testing.expectEqual(1, labels.specOf(legend).?.members.len);
     try testing.expectEqual(2, labels.faces.len);
 }
 

@@ -68,12 +68,42 @@ pub const Spans = struct {
 pub const allow_mark = "\u{200B}";
 pub const soft_hyphen = "\u{AD}";
 
+/// A legend's text as a parser collects it: its bytes (escapes undone,
+/// break marks put in) and, for each, the source byte it came from.
+pub const Text = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    src: std.ArrayList(u32) = .empty,
+    /// The letterforms of what is collected.
+    variant: ex.Variant = .normal,
+
+    pub fn deinit(t: *Text, gpa: Allocator) void {
+        t.bytes.deinit(gpa);
+        t.src.deinit(gpa);
+    }
+
+    /// `bytes`, from the source at `at`.
+    pub fn add(t: *Text, gpa: Allocator, bytes: []const u8, at: usize) Allocator.Error!void {
+        try t.bytes.appendSlice(gpa, bytes);
+        for (bytes) |_| try t.src.append(gpa, @intCast(at));
+    }
+
+    /// Its objects into `row` (see `textObjects`), the text ending at
+    /// source byte `end`; then empty.
+    pub fn flush(t: *Text, e: *Expr, spans: *Spans, row: Id, end: usize) ex.Error!void {
+        if (t.bytes.items.len == 0) return;
+        try t.src.append(e.gpa, @intCast(end));
+        try textObjects(e, spans, row, t.bytes.items, t.src.items, t.variant);
+        t.bytes.clearRetainingCapacity();
+        t.src.clearRetainingCapacity();
+    }
+};
+
 /// Text of a legend into `row`: words, spaces (a run of them one object)
 /// and soft hyphens, each its own object, so text breaks between words
 /// and at soft hyphens; an allowed-break mark sets the next object's
-/// break mark. All are tagged as text (source "").
-pub fn textObjects(e: *Expr, spans: *Spans, row: Id, text: []const u8, start: usize) ex.Error!void {
-    const span: Span = .{ .start = @intCast(start), .end = @intCast(start + text.len) };
+/// break mark. All are tagged as text (source ""). `src` gives each
+/// byte's source offset, and one more for the end.
+pub fn textObjects(e: *Expr, spans: *Spans, row: Id, text: []const u8, src: []const u32, variant: ex.Variant) ex.Error!void {
     var allow = false;
     var i: usize = 0;
     while (i < text.len) {
@@ -100,13 +130,25 @@ pub fn textObjects(e: *Expr, spans: *Spans, row: Id, text: []const u8, start: us
             }
         }
         const id = try e.leaf(kind, text[i..@min(j, text.len)]);
+        e.node(id).variant = variant;
         try e.append(row, id);
-        try spans.set(e.gpa, id, span);
+        try spans.set(e.gpa, id, .{ .start = src[i], .end = src[@min(j, text.len)] });
         if (allow) {
             try e.set(id, .break_before, param.of(param.BreakMark.allow));
             allow = false;
         }
         i = j;
+    }
+}
+
+/// `v`'s weight and slant added to every object under `id`.
+pub fn setVariant(e: *Expr, id: Id, v: ex.Variant) void {
+    const n = e.node(id);
+    n.variant = n.variant.with(v);
+    for (n.items.items) |c| setVariant(e, c, v);
+    for (std.enums.values(ex.Slot)) |sl| {
+        const c = n.slots.get(sl);
+        if (c != .none) setVariant(e, c, v);
     }
 }
 

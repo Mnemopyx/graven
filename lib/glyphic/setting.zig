@@ -230,7 +230,7 @@ fn setStacked(a: Allocator, r: *const Resolver, lay: *layout.Layout, g: ground_m
 
 fn moveItem(it: Item, m: Affine) Item {
     return switch (it) {
-        .glyph => |gl| .{ .glyph = .{ .face = gl.face, .gid = gl.gid, .m = gl.m.then(m), .grow = gl.grow, .object = gl.object } },
+        .glyph => |gl| .{ .glyph = .{ .face = gl.face, .gid = gl.gid, .m = gl.m.then(m), .grow = gl.grow, .object = gl.object, .cluster = gl.cluster } },
         .rule => |ru| .{ .rule = .{ .corners = .{ m.apply(ru.corners[0]), m.apply(ru.corners[1]), m.apply(ru.corners[2]), m.apply(ru.corners[3]) }, .object = ru.object } },
         .hole => |h| .{ .hole = .{ .corners = .{ m.apply(h.corners[0]), m.apply(h.corners[1]), m.apply(h.corners[2]), m.apply(h.corners[3]) }, .object = h.object } },
     };
@@ -275,7 +275,7 @@ fn onPath(piece: ground_mod.Piece, it: Item, x: f64) Item {
     };
     const m = Affine.translate(-anchor, 0).then(frameAt(piece, x + anchor));
     return switch (it) {
-        .glyph => |g| .{ .glyph = .{ .face = g.face, .gid = g.gid, .m = g.m.then(m), .grow = g.grow, .object = g.object } },
+        .glyph => |g| .{ .glyph = .{ .face = g.face, .gid = g.gid, .m = g.m.then(m), .grow = g.grow, .object = g.object, .cluster = g.cluster } },
         .rule => |r| .{ .rule = .{ .corners = .{ m.apply(r.corners[0]), m.apply(r.corners[1]), m.apply(r.corners[2]), m.apply(r.corners[3]) }, .object = r.object } },
         .hole => |h| .{ .hole = .{ .corners = .{ m.apply(h.corners[0]), m.apply(h.corners[1]), m.apply(h.corners[2]), m.apply(h.corners[3]) }, .object = h.object } },
     };

@@ -55,12 +55,23 @@ fn mathKind(k: Kind) bool {
 }
 
 /// The face that sets `cp` in an object of `kind` and `shape`, its face
-/// parameter `named` (empty: by kind). Null when no member has it.
+/// parameter `named` (empty: by kind). Bold, the "bold" member (with
+/// italic, "bold_italic") comes first. Null when no member has it.
 pub fn choose(fs: FaceSet, named: []const u8, kind: Kind, shape: param.Shape, cp: u21) ?Choice {
+    return chooseBold(fs, named, kind, shape, false, cp);
+}
+
+pub fn chooseBold(fs: FaceSet, named: []const u8, kind: Kind, shape: param.Shape, bold: bool, cp: u21) ?Choice {
     const italic = shape == .italic;
     // Preferred members, in order, then every member as a fallback.
     var order: [8][]const u8 = undefined;
     var n: usize = 0;
+    if (bold and named.len == 0) {
+        if (italic) {
+            if (fs.get("bold_italic")) |f| if (f.glyph(cp) != null) return .{ .face = f, .cp = cp };
+        }
+        if (fs.get("bold")) |f| if (f.glyph(cp) != null) return .{ .face = f, .cp = cp, .slanted = italic };
+    }
     if (named.len > 0) {
         order[n] = named;
         n += 1;

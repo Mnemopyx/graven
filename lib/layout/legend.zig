@@ -1,0 +1,252 @@
+//! Legends set by engine v2 (glyphic). A run's markup is parsed as a
+//! legend (text, with math between dollars), laid out on one line, and
+//! handed back as a `Render`: placed glyphs and rules in the label frame
+//! (mm, y up, the origin on the baseline at the start), with a source span
+//! per top-row object and the places it may break, so the flow pass cuts
+//! it into pieces as it did v1's renders.
+//!
+//! Each top-row object (a word, a space, a soft hyphen, a symbol, a
+//! fraction…) is one element; its glyphs carry the source bytes they were
+//! shaped from. Only a text leaf's glyphs may be cut apart (a word longer
+//! than its line); a structure's never are.
+//!
+//! The model's text styles become glyphic style contexts here (see
+//! `contextOf`), until the model keeps glyphic contexts itself.
+
+const std = @import("std");
+const engine = @import("graven_engine");
+const glyphic = @import("graven_glyphic");
+
+const Allocator = std.mem.Allocator;
+const geom = engine.geom;
+const Box = geom.Box;
+const Affine = geom.Affine;
+const Face = engine.Face;
+const Render = engine.Render;
+const R = engine.render;
+
+/// A text style as legends are set in it.
+pub const Style = struct {
+    /// Its glyphic context.
+    id: glyphic.StyleId,
+    /// Size, cap height in mm.
+    cap_height: f64,
+    /// Baseline to baseline, mm.
+    line_pitch: f64,
+    /// The face whose extents give a line's design box.
+    text: *Face,
+};
+
+/// A model text style (v1's spec) made a glyphic context in `g`: its
+/// upright face as "text", its italic as "italic", its bold and bold
+/// italic as "bold" and "bold_italic", its math face as
+/// "math", each member after them in order; variables italic; its script
+/// scale. A member that sets variables is the italic face
+/// for math, at its scale. Null when a face it names is not in `faces`.
+pub fn contextOf(g: *glyphic.Engine, faces: []const *Face, spec: engine.style.Spec, name: []const u8) !?Style {
+    const n = faces.len;
+    if (spec.upright >= n) return null;
+    const text = faces[spec.upright];
+    const id = try g.addStyle(name, .none);
+    try g.setFace(id, "text", text);
+    if (spec.italic) |f| if (f < n) try g.setFace(id, "italic", faces[f]);
+    if (spec.bold) |f| if (f < n) try g.setFace(id, "bold", faces[f]);
+    if (spec.bold_italic) |f| if (f < n) try g.setFace(id, "bold_italic", faces[f]);
+    if (spec.math) |f| if (f < n and f != spec.upright) try g.setFace(id, "math", faces[f]);
+    var buf: [32]u8 = undefined;
+    for (spec.members, 0..) |mb, k| {
+        if (mb.upright >= n) return null;
+        if (mb.role == .variables) {
+            // Its letters are the variables: italic, from this face.
+            try g.setFace(id, "italic", faces[mb.upright]);
+            try g.setFor(id, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
+            if (mb.scale != 1) try g.setFor(id, .{ .kind = .variable }, .scale, glyphic.param.num(@floatCast(std.math.clamp(mb.scale, 0.1, 10))));
+            continue;
+        }
+        try g.setFace(id, try std.fmt.bufPrint(&buf, "member{d}", .{k}), faces[mb.upright]);
+    }
+    // Variables italic, as math has them (`letters` is the text's).
+    try g.setFor(id, .{ .kind = .variable }, .shape, glyphic.param.of(glyphic.param.Shape.italic));
+    // A member that sizes the mathematical italic letters or the small
+    // Greek sizes the variables or the constants (π) set from it.
+    for (spec.members) |mb| {
+        if (mb.scale == 1) continue;
+        const sc = glyphic.param.num(@floatCast(std.math.clamp(mb.scale, 0.1, 10)));
+        if (mb.coverage.has(0x1D465)) try g.setFor(id, .{ .kind = .variable }, .scale, sc);
+        if (mb.coverage.has(0x1D6D1) or mb.coverage.has(0x03C0)) try g.setFor(id, .{ .kind = .constant }, .scale, sc);
+    }
+    if (spec.script_scale) |s| try g.set(id, .script_scale, glyphic.param.num(@floatCast(std.math.clamp(s, 0.3, 1))));
+    const cap_units = glyphic.faces.capUnits(text);
+    const cap = if (spec.em_size) |em| em * cap_units / @as(f64, @floatFromInt(text.upem)) else spec.cap_height;
+    if (!(cap > 0)) return null;
+    const ext = text.extents();
+    const pitch = if (spec.line_pitch) |f| f * cap else (ext.ascender - ext.descender) * cap / cap_units;
+    return .{ .id = id, .cap_height = cap, .line_pitch = pitch, .text = text };
+}
+
+/// A face's cap height, font units.
+pub const capUnits = glyphic.faces.capUnits;
+
+/// Whether a top-row object of `kind` is text whose glyphs may be cut
+/// apart.
+fn cuttable(kind: glyphic.Kind) bool {
+    return switch (kind) {
+        .word, .number, .variable, .space => true,
+        else => false,
+    };
+}
+
+fn faceId(faces: []const *Face, f: *Face) ?R.FaceId {
+    for (faces, 0..) |x, i| if (x == f) return @intCast(i);
+    return null;
+}
+
+/// `markup` set on one line in style `st` of `g`, its glyphs' faces given
+/// by their place in `faces`. The render owns its memory (`deinit`).
+pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st: Style, markup: []const u8) !Render {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    var e = try glyphic.Expr.init(a);
+    var spans: glyphic.entry.Spans = .{};
+    try glyphic.latex.parse(&e, &spans, markup, .legend);
+    const outer = try a.dupe(glyphic.StyleId, &.{st.id});
+    const r = glyphic.Resolver.init(g, &e, outer);
+    // Empty fields are drawn as holes (not ink), so markup being typed
+    // shows where it goes on; each is reported as a missing argument.
+    var lay: glyphic.layout.Layout = .{ .a = a, .r = &r, .editing = true };
+    var syntax: std.ArrayList(engine.markup.Diagnostic) = .empty;
+    const cap = st.cap_height;
+
+    const top = e.node(e.root).items.items;
+    // Each object's start along the line, and its first item; one more
+    // for the end.
+    const xs = try a.alloc(f64, top.len + 1);
+    const ends = try a.alloc(f64, top.len);
+    const first_item = try a.alloc(u32, top.len + 1);
+    var items: std.ArrayList(R.Item) = .empty;
+    var elements: std.ArrayList(R.Element) = .empty;
+    var diagnostics: std.ArrayList(R.Diagnostic) = .empty;
+    var ink: Box = .empty;
+    var x: f64 = 0;
+    var prev: ?glyphic.layout.Class = null;
+    for (top, 0..) |c, k| {
+        const laid = try lay.lay(c, cap);
+        if (prev) |p| x += lay.space(c, p, laid.class, false) * cap;
+        prev = laid.class;
+        xs[k] = x;
+        first_item[k] = @intCast(items.items.len);
+        const span = spans.get(c);
+        const node = e.node(c);
+        const move = Affine.translate(x, 0);
+        var face: ?R.FaceId = null;
+        var units: f64 = 0;
+        for (laid.items.items) |it| switch (it) {
+            .glyph => |gl| {
+                const fid = faceId(faces, gl.face) orelse continue;
+                if (face == null) {
+                    face = fid;
+                    units = cap / glyphic.faces.capUnits(gl.face);
+                }
+                const src = if (cuttable(node.kind)) @min(span.start + gl.cluster, @max(span.end, span.start + 1) - 1) else span.start;
+                try items.append(a, .{ .glyph = .{ .face = fid, .gid = gl.gid, .transform = gl.m.then(move), .element = @intCast(k), .source = src, .grow = gl.grow } });
+            },
+            .rule, .hole => {
+                const o = try glyphic.setting.outlines(a, &.{it}, 0.002);
+                const outline = if (o.len > 0) try o[0].transformed(a, move) else blk: {
+                    const h = it.hole.corners;
+                    const segs = try a.alloc(geom.Segment, 4);
+                    for (segs, 0..) |*s, q| s.* = .{ .line = .{ move.apply(h[q]), move.apply(h[(q + 1) % 4]) } };
+                    const cs = try a.alloc(geom.Contour, 1);
+                    cs[0] = .{ .segments = segs };
+                    break :blk geom.Outline{ .contours = cs };
+                };
+                try items.append(a, .{ .path = .{ .outline = outline, .element = @intCast(k), .role = if (it == .hole) .placeholder else .ink } });
+                if (it == .hole) try syntax.append(a, .{ .kind = .missing_argument, .offset = span.end });
+            },
+        };
+        const el_ink: Box = if (laid.ink.isEmpty()) .empty else .{ .x0 = laid.ink.x0 + x, .y0 = laid.ink.y0, .x1 = laid.ink.x1 + x, .y1 = laid.ink.y1 };
+        ink = ink.join(el_ink);
+        try elements.append(a, .{
+            .face = face,
+            .start = span.start,
+            .end = span.end,
+            .level = if (cuttable(node.kind)) 0 else 1,
+            .cap_height = cap,
+            .origin = .{ .x = x, .y = 0 },
+            .advance = laid.width,
+            .ink = el_ink,
+            .units = units,
+        });
+        x += laid.width;
+        ends[k] = x;
+    }
+    xs[top.len] = x;
+    first_item[top.len] = @intCast(items.items.len);
+    for (lay.missing.items) |ms| try diagnostics.append(a, .{ .kind = .missing_glyph, .offset = spans.get(ms.object).start });
+
+    // Where it may break: at a space (left out), after a soft hyphen
+    // (where a hyphen is then drawn), and where the kinds allow.
+    var opportunities: std.ArrayList(R.Opportunity) = .empty;
+    for (try glyphic.breaks.candidates(a, &r)) |cd| {
+        const k = cd.index;
+        if (cd.skip > 0) {
+            const after = @min(k + cd.skip, top.len);
+            const sp = spans.get(top[k]);
+            try opportunities.append(a, .{ .start = sp.start, .end = spans.get(top[after - 1]).end, .x0 = ends[k - 1], .x1 = xs[after], .item0 = first_item[k], .elem0 = @intCast(k), .item1 = first_item[after], .elem1 = @intCast(after) });
+        } else if (cd.hyphen) {
+            const sp = spans.get(top[k - 1]);
+            try opportunities.append(a, .{ .start = sp.start, .end = sp.end, .x0 = xs[k], .x1 = xs[k], .item0 = first_item[k], .elem0 = @intCast(k - 1), .item1 = first_item[k], .elem1 = @intCast(k), .hyphen = true });
+        } else {
+            const at = spans.get(top[k]).start;
+            try opportunities.append(a, .{ .start = at, .end = at, .x0 = ends[k - 1], .x1 = xs[k], .item0 = first_item[k], .elem0 = @intCast(k), .item1 = first_item[k], .elem1 = @intCast(k) });
+        }
+    }
+
+    const ext = st.text.extents();
+    const k_text = cap / glyphic.faces.capUnits(st.text);
+    return .{
+        .arena = arena,
+        .items = items.items,
+        .design = .{ .x0 = 0, .y0 = ext.descender * k_text, .x1 = x, .y1 = ext.ascender * k_text },
+        .ink = ink,
+        .diagnostics = diagnostics.items,
+        .elements = elements.items,
+        .opportunities = opportunities.items,
+        .syntax = syntax.items,
+    };
+}
+
+const testing = std.testing;
+const testdata = @import("graven_testdata");
+
+test "a legend set by glyphic: words, the spaces between them, and its source" {
+    const gpa = testing.allocator;
+    const face = try Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*Face{face};
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const st = (try contextOf(&g, &faces, .{ .upright = 0, .cap_height = 3 }, "s")).?;
+    try testing.expectApproxEqAbs(3, st.cap_height, 1e-9);
+    var r = try render(gpa, &g, &faces, st, "HO DA");
+    defer r.deinit();
+    // Words and a space: three elements, one break between the words.
+    try testing.expectEqual(3, r.elements.len);
+    try testing.expectEqual(1, r.opportunities.len);
+    const o = r.opportunities[0];
+    try testing.expectEqual(2, o.start);
+    try testing.expectEqual(3, o.end);
+    try testing.expect(o.x1 > o.x0);
+    // Cap height: the ink of capitals reaches about 3 mm up.
+    try testing.expectApproxEqAbs(3, r.ink.y1, 0.1);
+    // Glyphs carry their source bytes, so a long word may be cut.
+    try testing.expectEqual(1, r.items[1].glyph.source);
+    try testing.expectEqual(3, r.items[r.items.len - 2].glyph.source);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const cuts = try r.forcedCuts(scratch.allocator());
+    try testing.expectEqual(2, cuts.len);
+    // The caret sits after the first word at its end.
+    try testing.expectApproxEqAbs(o.x0, r.caret(2).?.x, 1e-9);
+}
