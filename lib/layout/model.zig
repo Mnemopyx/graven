@@ -1068,6 +1068,13 @@ pub const Fab = struct {
     /// The process's layer height, mm: depths should be whole multiples.
     layer_height: f64 = 0.2,
     layers: []const FabLayer = &.{},
+    /// What the process can make, mm: the thinnest stroke it holds, the
+    /// narrowest gap it keeps open, the smallest cap height that stays
+    /// legible. Defaults for colour FDM with a 0.4 mm nozzle. Layout keeps
+    /// within them as it works (engine v2), and checks report what does not.
+    min_stroke: f64 = 0.4,
+    min_gap: f64 = 0.4,
+    min_cap: f64 = 1.0,
 };
 
 pub const FabLayer = struct {
@@ -3151,6 +3158,7 @@ pub const Model = struct {
     pub fn setPanelFab(m: *Model, panel: usize, fab: Fab) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         if (!(fab.thickness > 0) or !(fab.layer_height > 0)) return error.BadSize;
+        if (!(fab.min_stroke >= 0) or !(fab.min_gap >= 0) or !(fab.min_cap >= 0)) return error.BadSize;
         const layers = try m.a().alloc(FabLayer, fab.layers.len);
         for (fab.layers, layers) |l, *o| {
             if (l.depth) |d| if (!(d > 0)) return error.BadSize;
@@ -3166,7 +3174,7 @@ pub const Model = struct {
                 .subtract => .subtract,
             };
         }
-        m.panels.items[panel].fab = .{ .thickness = fab.thickness, .layer_height = fab.layer_height, .layers = layers };
+        m.panels.items[panel].fab = .{ .thickness = fab.thickness, .layer_height = fab.layer_height, .layers = layers, .min_stroke = fab.min_stroke, .min_gap = fab.min_gap, .min_cap = fab.min_cap };
         m.revision += 1;
     }
 

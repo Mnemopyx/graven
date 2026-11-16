@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_richtext", .module = richtext },
             .{ .name = "graven_testdata", .module = testdata },
             .{ .name = "graven_sketch", .module = sketch },
+            .{ .name = "graven_glyphic", .module = glyphic },
         },
     });
 

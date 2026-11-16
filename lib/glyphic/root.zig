@@ -10,7 +10,11 @@
 //! heads and fields in field order (stops.zig); where an expression may
 //! break (breaks.zig).
 //!
-//! Not yet: entry syntaxes (stage 4), the ground (stage 2), layout (stage 3).
+//! Stage 2, the ground (ground.zig): where an expression stands, as a
+//! cursor of pieces (baseline paths, open stretches, room, cap height,
+//! process limits); lib/layout provides it for tracks.
+//!
+//! Not yet: entry syntaxes (stage 4), layout (stage 3).
 
 const std = @import("std");
 
@@ -19,6 +23,7 @@ pub const expr = @import("expr.zig");
 pub const cascade = @import("cascade.zig");
 pub const stops = @import("stops.zig");
 pub const breaks = @import("breaks.zig");
+pub const ground = @import("ground.zig");
 pub const samples = @import("samples.zig");
 
 pub const Expr = expr.Expr;
@@ -34,6 +39,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = param;
     _ = expr;
+    _ = ground;
 }
 
 const testing = std.testing;

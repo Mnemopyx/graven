@@ -604,10 +604,9 @@ const Flow = struct {
     /// for a track with no style.
     cap: f64 = 0,
 
-    /// Where a row's text baseline sits: its style's capitals centred
-    /// across the band, or the band's middle for a track with no style.
+    /// Where a row's text baseline sits (see `baselineIn`).
     fn baseline(f: Flow, band: Box) f64 {
-        return (band.y0 + band.y1 - f.cap) / 2;
+        return baselineIn(band, f.cap);
     }
 
     /// Tile `id`'s pitch box at `start` mm along a segment with band
@@ -725,10 +724,17 @@ const Flow = struct {
     }
 };
 
+/// Where a row's text baseline sits in a segment's band `band`: capitals
+/// of cap height `cap` centred across it (the band's middle for 0). The
+/// ground (ground.zig) puts v2's baselines where v1's are by it.
+pub fn baselineIn(band: Box, cap: f64) f64 {
+    return (band.y0 + band.y1 - cap) / 2;
+}
+
 /// How one segment's content is set: between `lo` and `hi` along it (its
 /// paragraph's indents), aligned as its paragraph says (null: as its
 /// track says), and whether a wrap ended it (so a justified one fills).
-const Line = struct {
+pub const Line = struct {
     lo: f64,
     hi: f64,
     alignment: ?model.ParagraphAlign = null,
@@ -737,13 +743,13 @@ const Line = struct {
 
 /// Line art the tracks flow around: its bounds, and for ink its outline
 /// flattened to polygons, mm in the panel frame.
-const KeepOut = struct {
+pub const KeepOut = struct {
     box: Box,
     /// Empty to wrap by the bounds.
     polys: []const []const Point,
     clearance: f64,
 
-    fn of(a: Allocator, pa: model.PanelArt) Allocator.Error!KeepOut {
+    pub fn of(a: Allocator, pa: model.PanelArt) Allocator.Error!KeepOut {
         const b = pa.box();
         if (pa.wrap != .ink) return .{ .box = b, .polys = &.{}, .clearance = pa.clearance };
         var polys: std.ArrayList([]const Point) = .empty;
@@ -767,7 +773,7 @@ const KeepOut = struct {
     /// `out`: where its ink (or its box), grown by the clearance, crosses
     /// the band. Ink is measured on lines across the band, as contact
     /// profiles measure glyphs, so a gap in the art leaves an open span.
-    fn closes(k: KeepOut, a: Allocator, rows: bool, band: Box, out: *std.ArrayList([2]f64)) Allocator.Error!void {
+    pub fn closes(k: KeepOut, a: Allocator, rows: bool, band: Box, out: *std.ArrayList([2]f64)) Allocator.Error!void {
         const c = k.clearance;
         const grown: Box = .{ .x0 = k.box.x0 - c, .x1 = k.box.x1 + c, .y0 = k.box.y0 - c, .y1 = k.box.y1 + c };
         if (k.box.isEmpty() or !model.overlaps(grown, band)) return;
@@ -842,14 +848,14 @@ const KeepOut = struct {
 
 /// Segment `seg`'s length along, mm: a whole segment's, wherever the path
 /// puts it.
-fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
+pub fn segLength(path: *const Path, rows: bool, seg: usize) f64 {
     const b = path.boxes.items[seg];
     return if (rows) b.width() else b.height();
 }
 
 /// The cap height of `region`'s style: as its context resolves it (a
 /// style sized by its em gets its font's), else as the model gives it.
-fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
+pub fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f64 {
     const sid = region.style orelse return 0;
     if (labels.context(sid)) |ctx| return ctx.spec.cap_height;
     return if (m.styleIndex(sid) != null) m.textStyle(sid).spec.cap_height else 0;
@@ -858,7 +864,7 @@ fn trackCap(m: *const Model, labels: *const Labels, region: model.TileRegion) f6
 /// The bounds and alignment of a segment of a paragraph in `style` (null:
 /// none, the whole segment as its track sets it); `first` for its first
 /// line. Indents larger than the segment leave it no room, not less.
-fn lineIn(style: ?model.ParagraphStyle, first: bool, length: f64) Line {
+pub fn lineIn(style: ?model.ParagraphStyle, first: bool, length: f64) Line {
     const st = style orelse return .{ .lo = 0, .hi = length };
     const lo = std.math.clamp(st.indent_start + (if (first) st.first else 0), 0, length);
     const hi = std.math.clamp(length - st.indent_end, lo, length);
@@ -970,7 +976,7 @@ const max_segments = 4096;
 /// A track's segments as its flow reaches them, each one step on across
 /// from the one before and where the track's path is along, skipping on
 /// past places already taken (by earlier segments here, or `avoid`).
-const Path = struct {
+pub const Path = struct {
     /// The panel's tracks, and the thread's, in order: the flow goes on
     /// into the next once one is full across.
     regions: []const model.TileRegion,
@@ -987,7 +993,7 @@ const Path = struct {
     /// space before and after, or its lines' gap).
     lead: f64 = 0,
 
-    fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
+    pub fn ensure(p: *Path, a: Allocator, k: usize) Allocator.Error!void {
         while (p.origins.items.len <= k) {
             const n = p.origins.items.len;
             var at: usize = if (n == 0) 0 else p.member.items[n - 1];
@@ -1022,7 +1028,7 @@ const Path = struct {
 
     /// Whether segment `n` (the next) would take the flow past the last of
     /// these tracks, while the thread goes on elsewhere.
-    fn leaves(p: *const Path, n: usize) bool {
+    pub fn leaves(p: *const Path, n: usize) bool {
         if (!p.more or n == 0 or n < p.origins.items.len) return false;
         const at = p.member.items[n - 1];
         if (at + 1 < p.thread.len) return false;
@@ -1032,7 +1038,7 @@ const Path = struct {
     }
 
     /// The track segment `seg` lies in.
-    fn regionOf(p: *const Path, seg: usize) *const model.TileRegion {
+    pub fn regionOf(p: *const Path, seg: usize) *const model.TileRegion {
         return &p.regions[p.thread[p.member.items[seg]]];
     }
 
