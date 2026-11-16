@@ -11,6 +11,7 @@ The GUI is inconsistent: no principles have been applied across it. [docs/ui-inv
 - **Decided:** a rewrite beside v1 (`lib/engine` stays in use until v2 replaces it whole). Legends are stored as conceptual objects with typed parameters resolved through a cascade (font, package, style, element kind, legend, object). KaTeX is a translation layer with tags on objects for export. Layout happens in situ against the ground (track paths, segments, flows, process limits).
 - **Agreed to test against use cases:** three layers of text (text, arrangement, glyphic), and glyphic text live by default.
 - **Stages:** 1 object model and parameters; 2 the ground; 3 layout and output (HP-15C through v2, compared with v1); 4 KaTeX translation; 5 curved tracks and threads; 6 GUI picking and inspection; 7 drawn glyphs as sketches, text design-rule checks.
+- **Decided 2026-11-16:** two entry syntaxes over the same objects, LaTeX/KaTeX (default) and Typst-style; math only in math regions, so Typst's `/` is a fraction; Graven's own parameters in Typst's call form in both. Stage 4 becomes "entry syntaxes".
 - **Next:** stage 1, once the object and parameter list is reviewed.
 
 ## 3. Sketch mode: constraining against external geometry (proposed, awaiting answers)
