@@ -6,6 +6,8 @@ Where each line of work stood at the end of the session that built math mode, th
 
 Working through the UI in the order of the user's workflow. Built 2026-11-17: the start screen (splash, News pane with a per-version message of the day, Start pane with new canvas mm/in, Open, recent files). Open: the licence to name on the splash; the message fetch through an HTTP proxy (stalls in this cloud environment, see status); keyboard focus through the start screen's choices. Built since: the background grid (adaptive graph paper, lines/dots/none); display correction (gamma and white level for screens that show Graven washed out, View › Display correction… or D on the start screen; the owner should set it on the COSMIC machine and say whether the two knobs are enough or a black-level/contrast one is wanted too); screen size calibration with a bank card and View › Actual size (the owner should measure on each screen; a single key for actual size is still to be chosen, since letters type into flows). Next in the workflow: what the new canvas shows first.
 
+Under discussion (not built): named hierarchical actions, key modes and keymaps (major/minor modes, modal-advance prefix keys as in FreeCAD's sketcher, parameterised bindings, i18n message IDs from action names, a follow-the-selection viewport). The blueprint's section "Actions, key modes and keymaps" records what is decided and what awaits the owner; nothing is to be built until the owner says so.
+
 Before that work began, the GUI was inconsistent: no principles have been applied across it. [docs/ui-inventory.md](ui-inventory.md) lists its surfaces, the inconsistencies seen, and the questions to settle. Start there.
 
 ## 2. Engine v2: a glyphic styling and positioning engine (decided, not started)
