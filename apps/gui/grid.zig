@@ -35,6 +35,9 @@ pub fn strength(spacing_px: f64, lo: f64) f32 {
     return @floatCast(t * t);
 }
 
+/// The most lines of one decade along one axis that are drawn.
+pub const max_lines: f64 = 4000;
+
 /// One decade to draw: its spacing in document units and its strength.
 pub const Level = struct { step: f64, strength: f32 };
 
@@ -63,6 +66,9 @@ pub fn levels(px_per_unit: f64, lo: f64, out: *[4]Level) []Level {
 pub fn lines(lv: []const Level, lo: f64, hi: f64, ctx: anytype, comptime f: fn (@TypeOf(ctx), f64, f32) void) void {
     for (lv, 0..) |l, k| {
         if (l.strength <= 0) continue;
+        if (!(hi >= lo) or !std.math.isFinite(lo) or !std.math.isFinite(hi)) return;
+        // Never more lines than a screen could show (a view gone wrong).
+        if ((hi - lo) / l.step > max_lines) continue;
         const first: i64 = @intFromFloat(@ceil(lo / l.step));
         const last: i64 = @intFromFloat(@floor(hi / l.step));
         var i = first;

@@ -2482,12 +2482,13 @@ fn runAction(inv: keymap.Invocation) bool {
                 else => redo(),
             }
         },
-        kact("view.zoom-fit"), kact("view.zoom-all"), kact("view.zoom-to"), kact("view.zoom-in"), kact("view.zoom-out") => {
+        kact("view.zoom-fit"), kact("view.zoom-all"), kact("view.zoom-to"), kact("view.zoom-in"), kact("view.zoom-out"), kact("view.frame-edit") => {
             if (canvas_prompt or !(state.view.ppm > 0)) return false;
             switch (inv.action) {
                 kact("view.zoom-fit") => zoomToContext(),
                 kact("view.zoom-all") => state.view.fit = contentExtents(),
                 kact("view.zoom-to") => zoomToPercent(@floatFromInt(inv.arg)),
+                kact("view.frame-edit") => frameEdit(),
                 kact("view.zoom-in") => zoomToPercent(display.nextZoom(zoomPercent(), true)),
                 else => zoomToPercent(display.nextZoom(zoomPercent(), false)),
             }
@@ -3617,6 +3618,7 @@ fn menu() ?dvui.App.Result {
         defer fw.deinit();
         if (menuAction("    Zoom to context", "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
         if (menuAction("    Zoom to everything", "view", kact("view.zoom-all"), 0, false, 2)) m.close();
+        if (menuAction("    Frame the edit", "view", kact("view.frame-edit"), 0, false, 7)) m.close();
         if (menuAction("    Actual size", "view", kact("view.zoom-to"), 100, false, 3)) m.close();
         if (menuAction("    200 %", "view", kact("view.zoom-to"), 200, false, 4)) m.close();
         if (menuAction("    Zoom in", "view", kact("view.zoom-in"), 0, false, 5)) m.close();
@@ -3921,6 +3923,154 @@ fn contentExtents() geom.Box {
     return if (b.isEmpty()) canvas_view else b;
 }
 
+/// The canvas area this frame, the part of it the overlays leave clear
+/// (device pixels) and the rulers' width.
+var canvas_free: ?struct { area: dvui.Rect.Physical, free: dvui.Rect.Physical, rw: f32 } = null;
+
+/// The zoom (device pixels per mm) at which box `b` fills the clear part
+/// of the canvas, room left for the rulers.
+fn fitPpm(b: geom.Box) f64 {
+    const cf = canvas_free orelse return state.view.ppm;
+    // Where the overlays leave too little (a narrow window), into the
+    // whole canvas instead.
+    const w = @max(cf.free.w - 2.5 * cf.rw, 0.5 * cf.area.w);
+    const h = @max(cf.free.h - 2.5 * cf.rw, 0.5 * cf.area.h);
+    const z = 0.96 * @min(w / @max(b.width(), 1e-6), h / @max(b.height(), 1e-6));
+    return if (std.math.isFinite(z) and z > 0) z else state.view.ppm;
+}
+
+/// Puts worksheet point `p` at the centre of the clear part of the canvas.
+fn centreOn(p: geom.Point) void {
+    const cf = canvas_free orelse return;
+    const dx = (cf.free.x + cf.free.w / 2) - (cf.area.x + cf.area.w / 2);
+    const dy = (cf.free.y + cf.free.h / 2) - (cf.area.y + cf.area.h / 2);
+    state.view.cx = p.x - dx / state.view.ppm;
+    state.view.cy = p.y + dy / state.view.ppm;
+}
+
+/// Text is legible on screen when its x-height there is at least this,
+/// mm (about that of 10 pt text), measured with the screen's calibration.
+const legible_x_height_mm = 1.5;
+/// The x-height of text, from its cap height (the renders keep only
+/// that): about seven tenths of it in most faces.
+const x_per_cap = 0.7;
+
+/// View › Frame the edit (Ctrl+9): what is being edited, legible, with as
+/// much around it as the canvas can show legibly. Of the units round the
+/// edit (the segment, its track, the panel, the page or canvas; or a tile,
+/// its panel, the page), the largest that fits the clear part of the
+/// canvas with the edited text legible is shown whole; when none does,
+/// the view zooms to the legible size, centred on the edit. Measured
+/// against the window as it is now. Without an edit, the context.
+fn frameEdit() void {
+    var units: [6]geom.Box = undefined;
+    var n: usize = 0;
+    var cap: ?f64 = null;
+    var focus: ?geom.Point = null;
+    var pi_edit: ?usize = null;
+    const add = struct {
+        fn f(buf: *[6]geom.Box, len: *usize, b: geom.Box) void {
+            if (b.isEmpty() or len.* >= buf.len) return;
+            buf[len.*] = b;
+            len.* += 1;
+        }
+    }.f;
+    const tile_id: ?layout.model.TileId = if (canvas_eq) |q| switch (q.target) {
+        .tile_track => |tt| tt.tile,
+        else => null,
+    } else if (track_cursor == null and state.context == .tile) state.context.tile else null;
+    if (tile_id) |id| {
+        for (state.placed.items, 0..) |*pl, pi| for (pl.tiles) |t| if (t.id == id) {
+            const b = onSheet(pi, t.pitch_box);
+            add(&units, &n, b);
+            focus = .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 };
+            pi_edit = pi;
+            for (pl.labels) |l| if (l.tile != null and l.tile.? == id) {
+                cap = @max(cap orelse 0, mainCap(l.render));
+            };
+        };
+    } else if (track_cursor) |c| {
+        const stops = flowStops(c.panel, c.region);
+        const at: ?struct { panel: usize, segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k|
+            .{ .panel = stops[k].panel, .segment = stops[k].segment, .along = stops[k].along }
+        else if (cursorPlace(c)) |cp| .{ .panel = c.panel, .segment = cp.segment, .along = cp.along } else null;
+        if (at) |a| if (a.panel < state.placed.items.len) {
+            const pl = &state.placed.items[a.panel];
+            var track: geom.Box = .empty;
+            for (pl.tracks) |t| {
+                if (t.flow_panel != c.panel or t.region != c.region) continue;
+                const b = onSheet(a.panel, t.box);
+                track = track.join(b);
+                if (t.track == a.segment) {
+                    add(&units, &n, b);
+                    focus = if (t.major == .row) .{ .x = b.x0 + a.along, .y = (b.y0 + b.y1) / 2 } else .{ .x = (b.x0 + b.x1) / 2, .y = b.y1 - a.along };
+                    // An empty track: its text will be about half its pitch.
+                    if (cap == null) cap = 0.5 * @min(b.width(), b.height());
+                }
+            }
+            add(&units, &n, track);
+            pi_edit = a.panel;
+            var found: ?f64 = null;
+            for (pl.labels) |l| if (l.run) |r| if (r.panel == c.panel and r.region == c.region) {
+                found = @max(found orelse 0, mainCap(l.render));
+            };
+            if (found) |f| if (f > 0) {
+                cap = f;
+            };
+        };
+    }
+    const fc = focus orelse {
+        zoomToContext();
+        return;
+    };
+    if (pi_edit) |pi| if (!state.model.panels.items[pi].unbounded) add(&units, &n, panelBox(pi));
+    add(&units, &n, if (openCanvas()) contentExtents() else state.model.sheet.box());
+    const c = cap orelse 0;
+    if (!(c > 0)) {
+        zoomToContext();
+        return;
+    }
+    // The zoom at which the edited text's x-height is legible.
+    const legible = display.pxPerMm(dvui.windowNaturalScale()) * legible_x_height_mm / (x_per_cap * c);
+    var k = n;
+    while (k > 0) : (k -= 1) {
+        const u = units[k - 1];
+        const z = fitPpm(u);
+        if (z < legible) continue;
+        if (k == n) {
+            // The page (or all of the canvas) fits: shown whole.
+            state.view.fit = u;
+            state.status = "Framed: all of it, legible. ";
+        } else {
+            // A smaller unit: shown whole, but zoomed in no further than a
+            // little past legible, so what is round it shows too.
+            state.view.fit = null;
+            state.view.ppm = @min(z, 1.25 * legible);
+            centreOn(.{ .x = (u.x0 + u.x1) / 2, .y = (u.y0 + u.y1) / 2 });
+            state.status = "Framed: as much as shows legibly. ";
+        }
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    state.view.fit = null;
+    state.view.ppm = legible;
+    centreOn(fc);
+    state.status = "Framed: the text at a legible size (the window shows less than all of it). ";
+    dvui.refresh(null, @src(), null);
+}
+
+/// The cap height of a render's own text, mm: of its level-0 elements,
+/// else (a legend that is all one equation) of any; 0 when it has none.
+fn mainCap(r: *const layout.Render) f64 {
+    var own: f64 = 0;
+    var any: f64 = 0;
+    for (r.elements) |el| {
+        if (el.level == 0) own = @max(own, el.cap_height);
+        any = @max(any, el.cap_height);
+    }
+    return if (own > 0) own else any;
+}
+
 /// Centres the context in the canvas and zooms it to fill the canvas.
 fn zoomToContext() void {
     state.view.fit = contextExtents();
@@ -4020,15 +4170,18 @@ fn canvas() void {
     if (state.view.ppm == 0 and state.view.fit == null) state.view.fit = if (open) canvas_view else sheet.box();
     const ns = dvui.windowNaturalScale();
     canvas_rect = .{ .x = area.x / ns, .y = area.y / ns, .w = area.w / ns, .h = area.h / ns };
-    if (state.view.fit) |b| {
-        // Fit into the part of the canvas overlays leave clear.
+    {
+        // The part of the canvas overlays leave clear, for fitting.
         const ins = overlayInsets();
-        const free: dvui.Rect.Physical = .{ .x = area.x + ins.left * ns, .y = area.y, .w = @max(1, area.w - (ins.left + ins.right) * ns), .h = @max(1, area.h - ins.bottom * ns) };
-        state.view.ppm = 0.96 * @min((free.w - 2.5 * rw) / b.width(), (free.h - 2.5 * rw) / b.height());
-        const dx = (free.x + free.w / 2) - (area.x + area.w / 2);
-        const dy = (free.y + free.h / 2) - (area.y + area.h / 2);
-        state.view.cx = (b.x0 + b.x1) / 2 - dx / state.view.ppm;
-        state.view.cy = (b.y0 + b.y1) / 2 + dy / state.view.ppm;
+        canvas_free = .{
+            .area = area,
+            .free = .{ .x = area.x + ins.left * ns, .y = area.y, .w = @max(1, area.w - (ins.left + ins.right) * ns), .h = @max(1, area.h - ins.bottom * ns) },
+            .rw = rw,
+        };
+    }
+    if (state.view.fit) |b| {
+        state.view.ppm = fitPpm(b);
+        centreOn(.{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 });
     }
     // Drawn last, over everything.
     defer drawRulers(area);
@@ -6502,6 +6655,8 @@ fn drawGrid(area: dvui.Rect.Physical) void {
         const d: f32 = @max(2, @round(2 * dvui.windowNaturalScale()));
         for (lv, 0..) |l, k| {
             if (l.strength <= 0) continue;
+            // Never more dots than a screen could show (a view gone wrong).
+            if (!((x1 - x0) / l.step <= bg_grid.max_lines and (y1 - y0) / l.step <= bg_grid.max_lines)) continue;
             const coarser = k + 1 < lv.len;
             var i: i64 = @intFromFloat(@ceil(x0 / l.step));
             while (@as(f64, @floatFromInt(i)) * l.step <= x1) : (i += 1) {

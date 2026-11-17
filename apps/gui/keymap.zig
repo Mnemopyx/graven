@@ -63,6 +63,8 @@ pub const action_defs = [_]A{
     .{ .name = "view.zoom-all" },
     // Per cent of actual size.
     .{ .name = "view.zoom-to", .param = .int },
+    // What is being edited, legible, with as much around it as shows so.
+    .{ .name = "view.frame-edit" },
     .{ .name = "view.zoom-in", .repeat = true },
     .{ .name = "view.zoom-out", .repeat = true },
 
@@ -230,6 +232,8 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "primary+kp_add", .action = "view.zoom-in" },
     .{ .mode = "view", .chord = "primary+minus", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "primary+kp_subtract", .action = "view.zoom-out" },
+    .{ .mode = "view", .chord = "primary+nine", .action = "view.frame-edit" },
+    .{ .mode = "view", .chord = "nine", .action = "view.frame-edit" },
     .{ .mode = "view", .chord = "zero", .action = "view.zoom-fit" },
     .{ .mode = "view", .chord = "one", .action = "view.zoom-to", .arg = 100 },
     .{ .mode = "view", .chord = "two", .action = "view.zoom-to", .arg = 200 },
