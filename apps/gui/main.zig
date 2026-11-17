@@ -904,8 +904,13 @@ fn sizeWindow() void {
 /// View › Actual size: the zoom at which a millimetre on screen is a
 /// millimetre, about the view's centre.
 fn actualSize() void {
+    zoomToPercent(100);
+}
+
+/// Zooms to `pct` per cent of actual size, about the view's centre.
+fn zoomToPercent(pct: f64) void {
     state.view.fit = null;
-    state.view.ppm = display.pxPerMm(dvui.windowNaturalScale());
+    state.view.ppm = display.pxPerMm(dvui.windowNaturalScale()) * pct / 100;
     dvui.refresh(null, @src(), null);
 }
 
@@ -2454,18 +2459,43 @@ fn historyKeys(wd: *dvui.WidgetData) void {
     if (file_prompt != null or leave_prompt != null) return;
     for (dvui.events()) |*e| {
         const inv = keymap.match1(e, kmode("global")) orelse continue;
-        switch (inv.action) {
-            kact("edit.undo") => if (!canvas_prompt) undo(),
-            kact("edit.redo") => if (!canvas_prompt) redo(),
-            kact("file.save") => if (!canvas_prompt) save(),
-            kact("file.save-as") => if (!canvas_prompt) saveAs(),
-            kact("file.open") => leave(.open),
-            kact("file.new") => leave(.new_canvas),
-            else => continue,
-        }
+        // Taken even where it does nothing (Ctrl+S with no document).
+        _ = runAction(inv);
         e.handle(@src(), wd);
         dvui.refresh(null, @src(), null);
     }
+}
+
+/// Runs an action of the app's own (`file.*`, `edit.*`) or of the view
+/// (`view.*`): for keys and menus alike. Whether it was one of those and
+/// could be done now.
+fn runAction(inv: keymap.Invocation) bool {
+    switch (inv.action) {
+        kact("file.new") => leave(.new_canvas),
+        kact("file.open") => leave(.open),
+        kact("file.save"), kact("file.save-as"), kact("edit.undo"), kact("edit.redo") => {
+            if (canvas_prompt) return false;
+            switch (inv.action) {
+                kact("file.save") => save(),
+                kact("file.save-as") => saveAs(),
+                kact("edit.undo") => undo(),
+                else => redo(),
+            }
+        },
+        kact("view.zoom-fit"), kact("view.zoom-all"), kact("view.zoom-to"), kact("view.zoom-in"), kact("view.zoom-out") => {
+            if (canvas_prompt or !(state.view.ppm > 0)) return false;
+            switch (inv.action) {
+                kact("view.zoom-fit") => zoomToContext(),
+                kact("view.zoom-all") => state.view.fit = contentExtents(),
+                kact("view.zoom-to") => zoomToPercent(@floatFromInt(inv.arg)),
+                kact("view.zoom-in") => zoomToPercent(display.nextZoom(zoomPercent(), true)),
+                else => zoomToPercent(display.nextZoom(zoomPercent(), false)),
+            }
+        },
+        else => return false,
+    }
+    dvui.refresh(null, @src(), null);
+    return true;
 }
 
 fn undo() void {
@@ -3492,6 +3522,27 @@ fn windowButtons(buttons: []const desktop.Button) ?dvui.App.Result {
     return null;
 }
 
+/// A menu item that runs action `a` (with `arg`), its shortcut in mode
+/// `mode_name` shown at its right from the keymap, so the two never
+/// disagree; `faint` when there is nothing for it to do. Whether it was
+/// chosen (and the action run).
+fn menuAction(label: []const u8, comptime mode_name: []const u8, a: keymap.ActionId, arg: i32, faint: bool, id: usize) bool {
+    var mi = dvui.menuItem(@src(), .{}, .{ .expand = .horizontal, .id_extra = id });
+    defer mi.deinit();
+    const chosen = mi.activeRect() != null;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    const ink = dvui.themeGet().color(.window, .text);
+    const base = mi.style().strip().override(.{ .label = .{ .for_id = mi.data().id } });
+    dvui.labelNoFmt(@src(), label, .{}, base.override(.{ .expand = .horizontal, .color_text = if (faint) .{ .color = ink.opacity(0.4) } else null }));
+    var kb: [48]u8 = undefined;
+    if (keymap.shortcut(&kb, kmode(mode_name), a, arg)) |sc| {
+        dvui.labelNoFmt(@src(), sc, .{}, mi.style().strip().override(.{ .padding = .{ .x = 28, .y = 0, .w = 0, .h = 0 }, .color_text = .{ .color = ink.opacity(0.55) } }));
+    }
+    if (chosen) _ = runAction(.{ .action = a, .arg = arg });
+    return chosen;
+}
+
 fn menu() ?dvui.App.Result {
     var m = dvui.menu(@src(), .horizontal, .{ .gravity_y = 0.5 });
     frameHole(m.data().borderRectScale().r);
@@ -3499,25 +3550,11 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        const mod = if (builtin.os.tag == .macos) "Cmd" else "Ctrl";
-        var kb: [4][48]u8 = undefined;
-        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[0], "New canvas…      {s}+N", .{mod}) catch "New canvas…", .{}, .{ .expand = .horizontal }) != null) {
-            leave(.new_canvas);
-            m.close();
-        }
-        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[1], "Open…      {s}+O", .{mod}) catch "Open…", .{}, .{ .expand = .horizontal }) != null) {
-            leave(.open);
-            m.close();
-        }
+        if (menuAction("New canvas…", "global", kact("file.new"), 0, false, 1)) m.close();
+        if (menuAction("Open…", "global", kact("file.open"), 0, false, 2)) m.close();
         if (!canvas_prompt) {
-            if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[2], "Save      {s}+S", .{mod}) catch "Save", .{}, .{ .expand = .horizontal }) != null) {
-                save();
-                m.close();
-            }
-            if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&kb[3], "Save As…      {s}+Shift+S", .{mod}) catch "Save As…", .{}, .{ .expand = .horizontal }) != null) {
-                saveAs();
-                m.close();
-            }
+            if (menuAction("Save", "global", kact("file.save"), 0, false, 3)) m.close();
+            if (menuAction("Save As…", "global", kact("file.save-as"), 0, false, 4)) m.close();
         }
         if (dvui.menuItemLabel(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
@@ -3562,15 +3599,8 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "Edit", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        const mod = if (builtin.os.tag == .macos) "Cmd" else "Ctrl";
-        var ub: [48]u8 = undefined;
-        var rb: [48]u8 = undefined;
-        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&ub, "Undo      {s}+Z", .{mod}) catch "Undo", .{}, .{ .expand = .horizontal, .color_text = if (hist.canUndo()) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.4) } }) != null) {
-            undo();
-            m.close();
-        }
-        if (dvui.menuItemLabel(@src(), std.fmt.bufPrint(&rb, "Redo      {s}+Shift+Z", .{mod}) catch "Redo", .{}, .{ .expand = .horizontal, .color_text = if (hist.canRedo()) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.4) } }) != null) {
-            redo();
+        if (menuAction("Undo", "global", kact("edit.undo"), 0, !hist.canUndo(), 1)) m.close();
+        if (menuAction("Redo", "global", kact("edit.redo"), 0, !hist.canRedo(), 2)) {
             m.close();
         }
     }
@@ -3585,10 +3615,13 @@ fn menu() ?dvui.App.Result {
     if (dvui.menuItemLabel(@src(), "View", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (dvui.menuItemLabel(@src(), "    Zoom to context", .{}, .{ .expand = .horizontal }) != null) {
-            zoomToContext();
-            m.close();
-        }
+        if (menuAction("    Zoom to context", "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
+        if (menuAction("    Zoom to everything", "view", kact("view.zoom-all"), 0, false, 2)) m.close();
+        if (menuAction("    Actual size", "view", kact("view.zoom-to"), 100, false, 3)) m.close();
+        if (menuAction("    200 %", "view", kact("view.zoom-to"), 200, false, 4)) m.close();
+        if (menuAction("    Zoom in", "view", kact("view.zoom-in"), 0, false, 5)) m.close();
+        if (menuAction("    Zoom out", "view", kact("view.zoom-out"), 0, false, 6)) m.close();
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 91 });
         // DVUI's interface font has no check mark; a bullet marks what is on.
         // The grid: lines, dots or none.
         for ([_]bg_grid.Mode{ .lines, .dots, .none }, [_][]const u8{ "Grid: lines", "Grid: dots", "Grid: none" }, 0..) |gm, label, gi| {
@@ -3598,10 +3631,6 @@ fn menu() ?dvui.App.Result {
                 grid_mode = gm;
                 m.close();
             }
-        }
-        if (dvui.menuItemLabel(@src(), "    Actual size", .{}, .{ .expand = .horizontal }) != null) {
-            actualSize();
-            m.close();
         }
         if (dvui.menuItemLabel(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
             display_window = true;
@@ -6619,11 +6648,14 @@ fn updateModeStack() void {
         push(&st, &n, kmode("start"));
     } else if (sketch_edit != null) {
         push(&st, &n, kmode("sketch"));
+        push(&st, &n, kmode("view"));
         if (sk_summary) push(&st, &n, kmode("sketch.summary"));
     } else if (panel_edit != null) {
         push(&st, &n, kmode("panel-edit"));
+        push(&st, &n, kmode("view"));
     } else {
         push(&st, &n, kmode("canvas"));
+        push(&st, &n, kmode("view"));
         if (selection.items.len > 0 and track_cursor == null) push(&st, &n, kmode("canvas.selection"));
         if (track_cursor != null) push(&st, &n, kmode("canvas.flow"));
         if (canvas_eq) |q| {
@@ -6674,6 +6706,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 dvui.refresh(null, @src(), box.data().id);
             }
             continue;
+        }
+        // The view's keys (zoom), in any mode the canvas is in; an
+        // unchorded one only while no text field has the keyboard.
+        if (keymap.match1(e, kmode("view"))) |inv| {
+            if ((inv.chorded or cursorKeysReach()) and runAction(inv)) {
+                e.handle(@src(), box.data());
+                continue;
+            }
         }
         // Sketch mode takes the canvas's events.
         if (sketch_edit != null) {

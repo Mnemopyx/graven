@@ -27,6 +27,9 @@ pub const modes = [_]M{
     // text field takes typed text.
     .{ .name = "dialog", .kind = .dialog, .lifetime = .until_left, .parent = "global", .takes_text = true, .allows = &.{"dialog"} },
     .{ .name = "dialog.calibrate-size", .kind = .dialog, .lifetime = .until_left, .parent = "global", .extends = "dialog", .allows = &.{"dialog.calibrate-size"} },
+    // The view of the canvas, a sketch or a panel being edited: zoom.
+    // Layered on those major modes; its unchorded keys give way to typing.
+    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{"view"} },
     // No document yet.
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
@@ -53,6 +56,15 @@ pub const action_defs = [_]A{
     .{ .name = "file.save-as" },
     .{ .name = "edit.undo", .repeat = true },
     .{ .name = "edit.redo", .repeat = true },
+
+    // Zoom to fit the context (the selection, else what holds it).
+    .{ .name = "view.zoom-fit" },
+    // Zoom to fit everything on the canvas.
+    .{ .name = "view.zoom-all" },
+    // Per cent of actual size.
+    .{ .name = "view.zoom-to", .param = .int },
+    .{ .name = "view.zoom-in", .repeat = true },
+    .{ .name = "view.zoom-out", .repeat = true },
 
     .{ .name = "dialog.confirm" },
     .{ .name = "dialog.cancel" },
@@ -206,6 +218,26 @@ pub const binds = [_]B{
     .{ .mode = "global", .chord = "primary+z", .action = "edit.undo" },
     .{ .mode = "global", .chord = "primary+shift+z", .action = "edit.redo" },
     .{ .mode = "global", .chord = "primary+y", .action = "edit.redo", .os = .not_mac },
+
+    // As illustration and publishing apps have them; and unchorded where
+    // nothing takes typed text.
+    .{ .mode = "view", .chord = "primary+zero", .action = "view.zoom-fit" },
+    .{ .mode = "view", .chord = "primary+alt+zero", .action = "view.zoom-all" },
+    .{ .mode = "view", .chord = "primary+one", .action = "view.zoom-to", .arg = 100 },
+    .{ .mode = "view", .chord = "primary+two", .action = "view.zoom-to", .arg = 200 },
+    .{ .mode = "view", .chord = "primary+equal", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "primary+shift+equal", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "primary+kp_add", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "primary+minus", .action = "view.zoom-out" },
+    .{ .mode = "view", .chord = "primary+kp_subtract", .action = "view.zoom-out" },
+    .{ .mode = "view", .chord = "zero", .action = "view.zoom-fit" },
+    .{ .mode = "view", .chord = "one", .action = "view.zoom-to", .arg = 100 },
+    .{ .mode = "view", .chord = "two", .action = "view.zoom-to", .arg = 200 },
+    .{ .mode = "view", .chord = "equal", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "shift+equal", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "kp_add", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "minus", .action = "view.zoom-out" },
+    .{ .mode = "view", .chord = "kp_subtract", .action = "view.zoom-out" },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
     .{ .mode = "dialog.calibrate-size", .chord = "left", .action = "dialog.calibrate-size.grow", .arg = -1 },
@@ -326,6 +358,8 @@ pub fn mode(comptime name: []const u8) ModeId {
 pub const Invocation = struct {
     action: ActionId,
     arg: i32,
+    /// By a key with Ctrl, Alt or Cmd (not one that types).
+    chorded: bool = true,
 
     pub fn dir(inv: Invocation) Direction {
         return @enumFromInt(inv.arg);
@@ -398,7 +432,7 @@ pub fn match(e: *const dvui.Event, in: []const ModeId) ?Invocation {
                         .bind => |name| k.matchBind(name),
                         .char => false,
                     };
-                    if (hit) return logged(.{ .action = b.action, .arg = b.arg }, m);
+                    if (hit) return logged(.{ .action = b.action, .arg = b.arg, .chorded = b.chord.what != .code or b.chord.mods.chorded() }, m);
                 }
             }
             return null;
@@ -411,7 +445,7 @@ pub fn match(e: *const dvui.Event, in: []const ModeId) ?Invocation {
             for (in) |m| {
                 if (maskedByText(m)) continue;
                 for (R.tables[m]) |b| switch (b.chord.what) {
-                    .char => |ch| if (std.mem.eql(u8, ch, txt)) return logged(.{ .action = b.action, .arg = b.arg }, m),
+                    .char => |ch| if (std.mem.eql(u8, ch, txt)) return logged(.{ .action = b.action, .arg = b.arg, .chorded = false }, m),
                     else => {},
                 };
             }
@@ -437,4 +471,85 @@ fn logged(inv: Invocation, m: ModeId) Invocation {
 /// `match` in one mode.
 pub fn match1(e: *const dvui.Event, m: ModeId) ?Invocation {
     return match(e, &.{m});
+}
+
+// Shortcuts shown ---------------------------------------------------------
+
+/// The key that does `a` (with argument `arg`) in mode `m`, as a menu
+/// shows it ("Ctrl+Shift+S"): the first chorded binding, else the first;
+/// null when none. `bind:` chords are the toolkit's and not shown.
+pub fn shortcut(buf: []u8, m: ModeId, a: ActionId, arg: i32) ?[]const u8 {
+    var best: ?R.Binding = null;
+    for (R.tables[m]) |b| {
+        if (b.action != a or b.arg != arg or b.chord.what == .bind) continue;
+        if (best == null or (!best.?.chord.mods.chorded() and b.chord.mods.chorded())) best = b;
+    }
+    const b = best orelse return null;
+    var w: std.Io.Writer = .fixed(buf);
+    const cmd_name = if (builtin.os.tag == .macos) "Cmd+" else "Super+";
+    if (b.chord.mods.ctrl) w.writeAll("Ctrl+") catch return null;
+    if (b.chord.mods.cmd) w.writeAll(cmd_name) catch return null;
+    if (b.chord.mods.alt) w.writeAll(if (builtin.os.tag == .macos) "Option+" else "Alt+") catch return null;
+    if (b.chord.mods.shift) w.writeAll("Shift+") catch return null;
+    switch (b.chord.what) {
+        .char => |c| w.writeAll(c) catch return null,
+        .code => |k| w.writeAll(keyName(k)) catch return null,
+        .bind => unreachable,
+    }
+    return w.buffered();
+}
+
+/// A key's name as shown.
+pub fn keyName(k: dvui.enums.Key) []const u8 {
+    return switch (k) {
+        inline .a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z => |c| comptime upper(@tagName(c)),
+        .zero => "0",
+        .one => "1",
+        .two => "2",
+        .three => "3",
+        .four => "4",
+        .five => "5",
+        .six => "6",
+        .seven => "7",
+        .eight => "8",
+        .nine => "9",
+        .equal => "=",
+        .minus => "-",
+        .left_bracket => "[",
+        .right_bracket => "]",
+        .backslash => "\\",
+        .semicolon => ";",
+        .apostrophe => "'",
+        .comma => ",",
+        .period => ".",
+        .slash => "/",
+        .grave => "`",
+        .kp_add => "Num +",
+        .kp_subtract => "Num -",
+        .kp_enter => "Num Enter",
+        .enter => "Enter",
+        .escape => "Esc",
+        .tab => "Tab",
+        .space => "Space",
+        .delete => "Del",
+        .backspace => "Backspace",
+        .home => "Home",
+        .end => "End",
+        .page_up => "PgUp",
+        .page_down => "PgDn",
+        .left => "Left",
+        .right => "Right",
+        .up => "Up",
+        .down => "Down",
+        else => @tagName(k),
+    };
+}
+
+fn upper(comptime s: []const u8) []const u8 {
+    comptime {
+        var out: [s.len]u8 = undefined;
+        for (s, 0..) |c, i| out[i] = std.ascii.toUpper(c);
+        const final = out;
+        return &final;
+    }
 }

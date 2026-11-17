@@ -174,6 +174,21 @@ pub fn dpi(px_per_mm: f32) f32 {
     return px_per_mm * 25.4;
 }
 
+/// Zoom in and out step through these, per cent of actual size (as
+/// illustration apps do); past either end, by halves and doubles.
+pub const zoom_levels = [_]f64{ 3.125, 6.25, 12.5, 25, 100.0 / 3.0, 50, 200.0 / 3.0, 100, 150, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 6400, 12800 };
+
+/// The next zoom level in (or out) from `pct` per cent.
+pub fn nextZoom(pct: f64, in: bool) f64 {
+    if (in) {
+        for (zoom_levels) |l| if (l > pct * 1.001) return l;
+        return pct * 2;
+    }
+    var i = zoom_levels.len;
+    while (i > 0) : (i -= 1) if (zoom_levels[i - 1] < pct / 1.001) return zoom_levels[i - 1];
+    return pct / 2;
+}
+
 const testing = std.testing;
 
 test "card width to scale, and the estimate" {
@@ -235,4 +250,13 @@ test "fixAll reaches nested and optional colours" {
     try testing.expectEqual(128, s.b.?.g);
     try testing.expectEqual(128, s.inner.d.?.b);
     try testing.expect(s.c == null);
+}
+
+test "zoom steps through the levels, from anywhere" {
+    try testing.expectEqual(150, nextZoom(100, true));
+    try testing.expectEqual(200.0 / 3.0, nextZoom(100, false));
+    try testing.expectEqual(150, nextZoom(120, true));
+    try testing.expectEqual(100, nextZoom(120, false));
+    try testing.expectEqual(25600, nextZoom(12800, true));
+    try testing.expectEqual(1.5625, nextZoom(3.125, false));
 }

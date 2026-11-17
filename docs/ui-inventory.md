@@ -44,7 +44,9 @@ Four panes on the window's edges, each with a tab and three modes: **ghost** (se
 - **Text display:** glyphs come from a distance-field atlas (`glyphs.zig`): crisp on the pixel grid, gamma 2.2. Show text construction draws outlines and construction instead.
 - **Display correction** (since 2026-11-17; `display.zig`): a small opaque window from View › Display correction… or D on the start screen (a row there too). Midtones (gamma, 0.6 to 2.4) and Brightest (white level, 0.5 to 1), in steps of 0.05, live; a grey ramp in tenths and a 50 % gauge (fine black and white lines around a solid sRGB 50 % grey) to judge by; Reset, Close, Esc. Every interface colour goes through it; kept per machine. Not reached: the pixels of placed images (only dimmed) and the canvas's diagnostic construction colours. Its Screen size… button opens the next.
 - **Screen size** (since 2026-11-17): View › Calibrate screen size…. An opaque window placed once when opened (so the card's corner stays put); a bank-card outline with centimetre ticks, its width dragged with the pointer or Left/Right (Shift: 10 device px); the scale in px/mm and dpi, against the 96 dpi estimate; Use estimate, Cancel (Esc), Save (Enter). Kept per machine.
-- **Zoom readout** (status bar, after the pointer position): the zoom as a percentage of actual size, `*` while the screen is not measured; a click (or View › Actual size) zooms to 100 %. No single key yet: the canvas's letter keys go to text in flows.
+- **Zoom readout** (status bar, after the pointer position): the zoom as a percentage of actual size, `*` while the screen is not measured; a click (or View › Actual size) zooms to 100 %.
+- **View keys** (since 2026-11-17): Ctrl+0 zoom to context, Ctrl+Alt+0 to everything, Ctrl+1 actual size, Ctrl+2 200 %, Ctrl+= and Ctrl+- in and out through levels of actual size; 0, 1, 2, = and - alone too, except where text is typed. In the View menu with their shortcuts.
+- **Menus show shortcuts** at the right of each item, from the keymap (File, Edit, View so far); the rest of the menu items have none yet.
 
 ## Modes
 
