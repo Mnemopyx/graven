@@ -34,6 +34,8 @@ pub const modes = [_]M{
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
     .{ .name = "canvas", .kind = .major, .parent = "global", .allows = &.{ "canvas.object", "canvas.tile", "canvas.tool" } },
+    // Engagement points near the pointer (or one locked onto).
+    .{ .name = "canvas.engage", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.engage"} },
     .{ .name = "canvas.selection", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.selection"} },
     .{ .name = "canvas.flow", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.flow"} },
     .{ .name = "canvas.equation", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.equation"} },
@@ -94,6 +96,9 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.tool.cancel" },
     .{ .name = "canvas.tool.finish" },
 
+    // Locks onto the nearest engagement point, then the next (1: back).
+    .{ .name = "canvas.engage.lock", .repeat = true, .param = .int },
+    .{ .name = "canvas.engage.release" },
     // 0 forward, 1 back.
     .{ .name = "canvas.selection.hunt", .repeat = true, .param = .int },
     .{ .name = "canvas.selection.clear" },
@@ -266,6 +271,9 @@ pub const binds = [_]B{
     .{ .mode = "canvas", .chord = "primary+backslash", .action = "canvas.tile.edit-text" },
     .{ .mode = "canvas", .chord = "escape", .action = "canvas.tool.cancel" },
 } ++ enters("canvas", "canvas.tool.finish") ++ arrows("canvas.selection", "canvas.selection.nudge") ++ [_]B{
+    .{ .mode = "canvas.engage", .chord = "tab", .action = "canvas.engage.lock", .arg = 0 },
+    .{ .mode = "canvas.engage", .chord = "shift+tab", .action = "canvas.engage.lock", .arg = 1 },
+    .{ .mode = "canvas.engage", .chord = "escape", .action = "canvas.engage.release" },
     .{ .mode = "canvas.selection", .chord = "tab", .action = "canvas.selection.hunt", .arg = 0 },
     .{ .mode = "canvas.selection", .chord = "shift+tab", .action = "canvas.selection.hunt", .arg = 1 },
     .{ .mode = "canvas.selection", .chord = "escape", .action = "canvas.selection.clear" },

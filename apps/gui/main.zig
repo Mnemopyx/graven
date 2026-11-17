@@ -4580,6 +4580,7 @@ fn canvas() void {
     drawTrackPath(area);
     drawConstraintMarks(area);
     drawPointerMark();
+    drawEngagement(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -7153,6 +7154,7 @@ fn updateModeStack() void {
     } else {
         push(&st, &n, kmode("canvas"));
         push(&st, &n, kmode("view"));
+        if ((engage_n > 0 or engage_lock != null) and engaging()) push(&st, &n, kmode("canvas.engage"));
         if (selection.items.len > 0 and track_cursor == null) push(&st, &n, kmode("canvas.selection"));
         if (track_cursor != null) push(&st, &n, kmode("canvas.flow"));
         if (canvas_eq) |q| {
@@ -7329,6 +7331,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // The selection's keys: Tab hunts on to the next-nearest container
         // of the last Ctrl-click (Shift+Tab back), Esc empties it, and the
         // arrows move it.
+        // Engagement: Tab locks onto the point the pointer engages.
+        if ((engage_n > 0 or engage_lock != null) and engaging() and cursorKeysReach()) {
+            if (if (keymap.match1(e, kmode("canvas.engage"))) |inv| engageAction(inv) else false) {
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        }
         if (selection.items.len > 0 and track_cursor == null and cursorKeysReach()) {
             if (if (keymap.match1(e, kmode("canvas.selection"))) |inv| selectionAction(inv) else false) {
                 e.handle(@src(), box.data());
@@ -7449,6 +7459,19 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 // The pointer's worksheet position, for the rulers and readout.
                 const at = state.view.toMm(area, me.p);
                 state.mouse = if (area.contains(me.p) and (openCanvas() or contains(state.model.sheet.box(), at))) at else null;
+                // Engagement points near the pointer; a lock lets go when
+                // the pointer goes well away.
+                if (engage_drag == null) {
+                    const had = engage_n > 0 or engage_lock != null;
+                    if (area.contains(me.p)) findEngagements(area, at) else engage_n = 0;
+                    if (engage_lock != null) {
+                        const lx = me.p.x - engage_lock_px.x;
+                        const ly = me.p.y - engage_lock_px.y;
+                        const ns_ = dvui.windowNaturalScale();
+                        if (lx * lx + ly * ly > 60 * 60 * ns_ * ns_) engage_lock = null;
+                    }
+                    if (had or engage_n > 0) dvui.refresh(null, @src(), box.data().id);
+                }
                 if (state.tool == .constrain) {
                     const was = constrain_hover;
                     constrain_hover = if (area.contains(me.p)) featureHit(at) else null;
@@ -7530,6 +7553,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // in or out of the selection.
                     ctrlPick(state.view.toMm(area, me.p));
                     state.press_consumed = true;
+                } else if (state.tool == .select and me.button.pointer() and engaging() and engagePress(state.view.toMm(area, me.p))) {
+                    hunt_clear();
                 } else if (state.tool == .select and me.button.pointer() and selectionPress(state.view.toMm(area, me.p))) {
                     hunt_clear();
                 } else if (state.tool == .select and me.button.pointer() and pathHit(state.view.toMm(area, me.p)) != null) {
@@ -7547,7 +7572,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (resize_drag != null or sel_press != null) {
+                if (engage_drag != null) {
+                    e.handle(@src(), box.data());
+                    engageMotion(state.view.toMm(area, me.p));
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (resize_drag != null or sel_press != null) {
                     e.handle(@src(), box.data());
                     selectionDrag(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
@@ -7578,7 +7607,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
-                if (resize_drag != null or sel_press != null) {
+                if (engage_drag != null) {
+                    // A press on an engagement point that did not drag is
+                    // a click.
+                    if (!engageRelease()) pick(state.view.toMm(area, me.p));
+                } else if (resize_drag != null or sel_press != null) {
                     // A click on a selected box that did not drag keeps
                     // its plain meaning.
                     const clicked = sel_press != null and !sel_press.?.moved;
@@ -11923,6 +11956,363 @@ fn selectionMovable() bool {
     return movable;
 }
 
+
+// Engagement points ---------------------------------------------------------
+//
+// As in sketches, the pointer engages what it is near: every container on
+// the canvas offers its corners and edge midpoints (resize two edges, one
+// edge), its edges (resize one) and its centre (move). The nearest within
+// a few pixels is highlighted, and an annunciator beside the pointer says
+// what a press would do, or what holds it. Tab locks onto it (and on to the
+// next-nearest; Shift+Tab back; Esc lets go, as does going well away). A
+// drag from an engagement point moves that point itself, so it lands
+// exactly where it is taken; the system pointer cannot be put on it
+// (Wayland does not allow it), so while dragging it is hidden and the
+// point, standing in for it, scintillates.
+//
+// A policy for the whole interface: a point that stands in for the
+// pointer (a locked point, a point being dragged with the pointer hidden)
+// scintillates, to draw the eye.
+
+const EngageKind = enum { corner, edge_mid, edge, centre };
+
+const EngageHit = struct {
+    id: layout.model.ObjectId,
+    kind: EngageKind,
+    /// The edges it moves (none: it moves the whole).
+    edges: Edges,
+    /// Where it is, on the canvas (the shown space's frame), mm.
+    at: geom.Point,
+    /// Distance from the pointer, device pixels.
+    d: f32,
+};
+
+var engage_hits: [16]EngageHit = undefined;
+var engage_n: usize = 0;
+/// The hit Tab locked onto, and the pointer's place then (device pixels).
+var engage_lock: ?EngageHit = null;
+var engage_lock_px: dvui.Point.Physical = .{};
+var engage_lock_index: usize = 0;
+/// A drag from an engagement point: the container, what moves, its box at
+/// the start (its parent's frame), the frame's offset, where the point was
+/// and where the pointer was (canvas mm).
+var engage_drag: ?struct {
+    hit: EngageHit,
+    box: geom.Box,
+    offset: geom.Point,
+    pointer0: geom.Point,
+    moved: bool = false,
+    key: u64,
+    /// The point now (canvas mm), standing in for the pointer.
+    now: geom.Point,
+} = null;
+
+/// Whether engaging is on: the select tool, the canvas itself (no sketch,
+/// panel editing or equation on the canvas).
+fn engaging() bool {
+    return state.tool == .select and sketch_edit == null and panel_edit == null and canvas_eq == null and !canvas_prompt;
+}
+
+/// Finds the engagement points near device point `px` (canvas mm `at`),
+/// nearest first: points within 10 px before edges within 6 px.
+fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
+    engage_n = 0;
+    if (!engaging()) return;
+    const a = dvui.currentWindow().arena();
+    const ns = dvui.windowNaturalScale();
+    const point_r: f32 = 10 * ns;
+    const edge_r: f32 = 6 * ns;
+    var points: std.ArrayList(EngageHit) = .empty;
+    var edges: std.ArrayList(EngageHit) = .empty;
+    const pp = state.view.toPx(area, at);
+    for (constrainables(a)) |id| {
+        if (isControlPoint(id)) continue;
+        const b = containerBox(id) orelse continue;
+        const mx = (b.x0 + b.x1) / 2;
+        const my = (b.y0 + b.y1) / 2;
+        const group = state.model.group(id) != null;
+        const cands = [_]struct { at: geom.Point, kind: EngageKind, edges: Edges }{
+            .{ .at = .{ .x = mx, .y = my }, .kind = .centre, .edges = .{} },
+            .{ .at = .{ .x = b.x0, .y = b.y0 }, .kind = .corner, .edges = .{ .left = true, .bottom = true } },
+            .{ .at = .{ .x = b.x1, .y = b.y0 }, .kind = .corner, .edges = .{ .right = true, .bottom = true } },
+            .{ .at = .{ .x = b.x0, .y = b.y1 }, .kind = .corner, .edges = .{ .left = true, .top = true } },
+            .{ .at = .{ .x = b.x1, .y = b.y1 }, .kind = .corner, .edges = .{ .right = true, .top = true } },
+            .{ .at = .{ .x = b.x0, .y = my }, .kind = .edge_mid, .edges = .{ .left = true } },
+            .{ .at = .{ .x = b.x1, .y = my }, .kind = .edge_mid, .edges = .{ .right = true } },
+            .{ .at = .{ .x = mx, .y = b.y0 }, .kind = .edge_mid, .edges = .{ .bottom = true } },
+            .{ .at = .{ .x = mx, .y = b.y1 }, .kind = .edge_mid, .edges = .{ .top = true } },
+        };
+        for (cands) |c| {
+            // A group moves as a whole: only its centre.
+            if (group and c.kind != .centre) continue;
+            const q = state.view.toPx(area, c.at);
+            const d = @sqrt((q.x - pp.x) * (q.x - pp.x) + (q.y - pp.y) * (q.y - pp.y));
+            if (d <= point_r) points.append(a, .{ .id = id, .kind = c.kind, .edges = c.edges, .at = c.at, .d = d }) catch {};
+        }
+        if (group) continue;
+        // The edges: the nearest place on each.
+        const sides = [_]struct { e: Edges, p: geom.Point }{
+            .{ .e = .{ .left = true }, .p = .{ .x = b.x0, .y = std.math.clamp(at.y, b.y0, b.y1) } },
+            .{ .e = .{ .right = true }, .p = .{ .x = b.x1, .y = std.math.clamp(at.y, b.y0, b.y1) } },
+            .{ .e = .{ .bottom = true }, .p = .{ .x = std.math.clamp(at.x, b.x0, b.x1), .y = b.y0 } },
+            .{ .e = .{ .top = true }, .p = .{ .x = std.math.clamp(at.x, b.x0, b.x1), .y = b.y1 } },
+        };
+        for (sides) |sd| {
+            const q = state.view.toPx(area, sd.p);
+            const d = @sqrt((q.x - pp.x) * (q.x - pp.x) + (q.y - pp.y) * (q.y - pp.y));
+            if (d <= edge_r) edges.append(a, .{ .id = id, .kind = .edge, .edges = sd.e, .at = sd.p, .d = d }) catch {};
+        }
+    }
+    const by_d = struct {
+        fn lt(_: void, x: EngageHit, y: EngageHit) bool {
+            return x.d < y.d;
+        }
+    }.lt;
+    std.mem.sort(EngageHit, points.items, {}, by_d);
+    std.mem.sort(EngageHit, edges.items, {}, by_d);
+    for (points.items) |h| if (engage_n < engage_hits.len) {
+        engage_hits[engage_n] = h;
+        engage_n += 1;
+    };
+    for (edges.items) |h| if (engage_n < engage_hits.len) {
+        engage_hits[engage_n] = h;
+        engage_n += 1;
+    };
+}
+
+/// What a press would engage: the locked point, else the nearest.
+fn engageTarget() ?EngageHit {
+    if (engage_lock) |l| return l;
+    if (engage_n > 0) return engage_hits[0];
+    return null;
+}
+
+/// Whether hit `h`'s container may do what it offers: move (centre) or
+/// move those edges.
+fn engageFree(h: EngageHit) bool {
+    if (state.model.group(h.id) != null) return true;
+    const f = freedomOf(h.id);
+    if (h.kind == .centre) return f.x or f.y;
+    if (h.edges.left and !f.left) return false;
+    if (h.edges.right and !f.right) return false;
+    if (h.edges.bottom and !f.bottom) return false;
+    if (h.edges.top and !f.top) return false;
+    return true;
+}
+
+fn edgesName(e: Edges) []const u8 {
+    if (e.left and e.bottom) return "bottom-left corner";
+    if (e.right and e.bottom) return "bottom-right corner";
+    if (e.left and e.top) return "top-left corner";
+    if (e.right and e.top) return "top-right corner";
+    if (e.left) return "left edge";
+    if (e.right) return "right edge";
+    if (e.bottom) return "bottom edge";
+    return "top edge";
+}
+
+var engage_text_buf: [160]u8 = undefined;
+
+/// The annunciator's words for hit `h`.
+fn engageText(h: EngageHit) []const u8 {
+    const name = objectName(h.id);
+    if (!engageFree(h)) {
+        return std.fmt.bufPrint(&engage_text_buf, "{s}: {s} held by a constraint", .{ name, if (h.kind == .centre) "position" else edgesName(h.edges) }) catch "";
+    }
+    return switch (h.kind) {
+        .centre => std.fmt.bufPrint(&engage_text_buf, "Move {s}", .{name}) catch "",
+        else => std.fmt.bufPrint(&engage_text_buf, "Resize {s}: {s}", .{ name, edgesName(h.edges) }) catch "",
+    };
+}
+
+/// Tab: locks the pointer onto the nearest engagement point, then onto
+/// the next (Shift+Tab: the one before). Whether there was one.
+fn engageLock(back: bool) bool {
+    if (engage_n == 0 and engage_lock == null) return false;
+    if (engage_n == 0) return true;
+    if (engage_lock == null) {
+        engage_lock_index = 0;
+    } else {
+        engage_lock_index = if (back) (engage_lock_index + engage_n - 1) % engage_n else (engage_lock_index + 1) % engage_n;
+    }
+    engage_lock = engage_hits[@min(engage_lock_index, engage_n - 1)];
+    engage_lock_px = dvui.currentWindow().mouse_pt;
+    warpPointerTo(engage_lock.?.at);
+    return true;
+}
+
+/// Puts the system pointer on canvas point `p` where the system allows it
+/// (X11; not Wayland).
+fn warpPointerTo(p: geom.Point) void {
+    if (dvui.backend.kind != .sdl3) return;
+    const c = dvui.backend.c;
+    const drv = c.SDL_GetCurrentVideoDriver() orelse return;
+    if (std.mem.eql(u8, std.mem.span(drv), "wayland")) return;
+    const area = canvas_px orelse return;
+    const q = state.view.toPx(area, p);
+    const ns = dvui.windowNaturalScale();
+    c.SDL_WarpMouseInWindow(dvui.currentWindow().backend.impl.window, q.x / ns, q.y / ns);
+    engage_lock_px = q;
+}
+
+/// The canvas area last drawn, device pixels.
+var canvas_px: ?dvui.Rect.Physical = null;
+
+/// A press with the select tool at canvas point `at` on an engagement
+/// point: a drag from it starts. Whether it was on one (one held by a
+/// constraint takes the press and says so).
+fn engagePress(at: geom.Point) bool {
+    const h = engageTarget() orelse return false;
+    if (!engageFree(h)) {
+        state.status = engageText(h);
+        return true;
+    }
+    const parent = constrain.parentOf(&state.model, h.id);
+    const offset = if (parent) |pr| constrain.frameOffset(&state.model, pr) else geom.Point{ .x = 0, .y = 0 };
+    const box = if (state.model.group(h.id) != null) (containerBox(h.id) orelse return false) else (constrain.boxOf(&state.model, h.id) orelse return false);
+    drag_count += 1;
+    engage_drag = .{ .hit = h, .box = box, .offset = offset, .pointer0 = at, .key = mergeKey(.{ "engage", drag_count }), .now = h.at };
+    return true;
+}
+
+/// The drag goes on: the engaged point follows the pointer's motion from
+/// where it was taken; its container moves or resizes to put it there.
+fn engageMotion(at: geom.Point) void {
+    const d = &(engage_drag orelse return);
+    const dx = at.x - d.pointer0.x;
+    const dy = at.y - d.pointer0.y;
+    if (!d.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 3) return;
+    d.moved = true;
+    const p: geom.Point = .{ .x = d.hit.at.x + dx, .y = d.hit.at.y + dy };
+    d.now = p;
+    // The point in the container's parent's frame.
+    const q: geom.Point = .{ .x = p.x - d.offset.x, .y = p.y - d.offset.y };
+    const h0: geom.Point = .{ .x = d.hit.at.x - d.offset.x, .y = d.hit.at.y - d.offset.y };
+    var b = d.box;
+    if (d.hit.kind == .centre) {
+        const mx = q.x - h0.x;
+        const my = q.y - h0.y;
+        b = .{ .x0 = b.x0 + mx, .x1 = b.x1 + mx, .y0 = b.y0 + my, .y1 = b.y1 + my };
+        if (state.model.group(d.hit.id) != null) {
+            actM(mergeKey(.{ "moveGroupKey", d.key }), .moveGroup, .{ d.hit.id, b.x0 - groupBox0(d).x0, b.y0 - groupBox0(d).y0 }) catch {};
+            return;
+        }
+    } else {
+        const min = 1.0;
+        // Edges go exactly where the point is (a midpoint moves its one
+        // edge; an edge's point moves it across).
+        if (d.hit.edges.left) b.x0 = @min(q.x, b.x1 - min);
+        if (d.hit.edges.right) b.x1 = @max(q.x, b.x0 + min);
+        if (d.hit.edges.bottom) b.y0 = @min(q.y, b.y1 - min);
+        if (d.hit.edges.top) b.y1 = @max(q.y, b.y0 + min);
+    }
+    _ = actM(d.key, .placeObjects, .{ &[_]layout.model.ObjectId{d.hit.id}, &[_]geom.Box{b} }) catch {};
+}
+
+/// A group's box as it is now (it moves by steps, from where it was).
+fn groupBox0(d: anytype) geom.Box {
+    return containerBox(d.hit.id) orelse d.box;
+}
+
+/// The drag ends; a press that did not move was a click.
+fn engageRelease() bool {
+    const d = engage_drag orelse return false;
+    engage_drag = null;
+    engage_lock = null;
+    return d.moved;
+}
+
+/// What engaging draws: the hovered point (a ring; an edge, thickened) and
+/// the annunciator; a locked or dragged point scintillates.
+fn drawEngagement(area: dvui.Rect.Physical) void {
+    canvas_px = area;
+    if (!engaging()) return;
+    const ns = dvui.windowNaturalScale();
+    if (engage_drag) |d| {
+        if (!d.moved) return;
+        const q = state.view.toPx(area, d.now);
+        scintillate(q, 8 * ns);
+        dvui.cursorSet(.hidden);
+        annunciate(area, q, engageText(d.hit));
+        return;
+    }
+    const h = engageTarget() orelse return;
+    const free = engageFree(h);
+    const colour = if (free) colors.select else colors.overflow;
+    const q = state.view.toPx(area, h.at);
+    if (h.kind == .edge) {
+        const b = containerBox(h.id) orelse return;
+        const pts: [2]geom.Point = if (h.edges.left) .{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x0, .y = b.y1 } } else if (h.edges.right) .{ .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x1, .y = b.y1 } } else if (h.edges.bottom) .{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x1, .y = b.y0 } } else .{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 } };
+        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, pts[0]), state.view.toPx(area, pts[1]) } }, .{ .thickness = 3 * ns, .color = .{ .color = colour.opacity(0.8) } });
+    }
+    if (engage_lock != null) {
+        scintillate(q, 8 * ns);
+    } else {
+        skRing(q, 6 * ns, colour, 1.5 * ns);
+    }
+    annunciate(area, q, engageText(h));
+}
+
+/// A label beside canvas point `q` (device pixels): what a press there does.
+fn annunciate(area: dvui.Rect.Physical, q: dvui.Point.Physical, text: []const u8) void {
+    const font = dvui.Font.theme(.body).larger(-2);
+    const ns = dvui.windowNaturalScale();
+    var r = annotationRect(area, .{ .x = q.x + 14 * ns, .y = q.y - 6 * ns }, font, 300);
+    // Its text, its padding and its border.
+    r.w = font.textSize(text).w + 2 * (annotation_pad + 2) + 8;
+    dvui.labelNoFmt(@src(), text, .{}, .{
+        .rect = r,
+        .padding = .{ .x = annotation_pad + 2, .w = annotation_pad + 2, .y = annotation_pad, .h = annotation_pad },
+        .background = true,
+        .color_fill = .{ .color = colors.paper.opacity(0.92) },
+        .color_text = .{ .color = colors.ink },
+        .border = .all(1),
+        .color_border = .{ .color = colors.select.opacity(0.6) },
+        .corners = .all(3),
+        .font = font,
+        .id_extra = 71000,
+    });
+}
+
+/// A point standing in for the pointer: a ring of short rays that turns,
+/// in two colours that trade places, brightening and dimming quickly, so
+/// the eye finds it at once (the interface's sign for it).
+fn scintillate(q: dvui.Point.Physical, r: f32) void {
+    animate();
+    const t: f32 = @floatCast(@as(f64, @floatFromInt(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms))) / 1000);
+    const ns = dvui.windowNaturalScale();
+    const glow = 0.55 + 0.45 * @sin(t * 2 * std.math.pi * 2.5);
+    const rays = 8;
+    for (0..rays) |i| {
+        const ang = @as(f32, @floatFromInt(i)) * 2 * std.math.pi / rays + t * 2.2;
+        const c = @cos(ang);
+        const s_ = @sin(ang);
+        const inner = r * 0.75;
+        const outer = r * 1.55;
+        const col = if ((i + @as(usize, @intFromFloat(@floor(t * 6)))) % 2 == 0) colors.select else colors.overflow;
+        dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x + c * inner, .y = q.y + s_ * inner }, .{ .x = q.x + c * outer, .y = q.y + s_ * outer } } }, .{ .thickness = 2 * ns, .color = .{ .color = col.opacity(glow) } });
+    }
+    skRing(q, r * 0.55, colors.select, 1.5 * ns);
+    // The exact point.
+    const l: f32 = r * 0.4;
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x - l, .y = q.y }, .{ .x = q.x + l, .y = q.y } } }, .{ .thickness = ns, .color = .{ .color = colors.ink } });
+    dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = q.y - l }, .{ .x = q.x, .y = q.y + l } } }, .{ .thickness = ns, .color = .{ .color = colors.ink } });
+}
+
+/// An action of mode `canvas.engage`: Tab locks onto the next engagement
+/// point (Shift+Tab the one before), Esc lets go. Whether it was done.
+fn engageAction(inv: keymap.Invocation) bool {
+    switch (inv.action) {
+        kact("canvas.engage.lock") => return engageLock(inv.arg == 1),
+        kact("canvas.engage.release") => {
+            if (engage_lock == null) return false;
+            engage_lock = null;
+            return true;
+        },
+        else => return false,
+    }
+}
+
 /// The hand or lock at the pointer, over the selection.
 fn drawPointerMark() void {
     const pm = pointer_mark orelse return;
@@ -13646,14 +14036,8 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
     if (skTarget()) |t| {
         const q = skPx(area, it, t.at);
         const locked = sk_lock != null;
-        const ring: f32 = if (locked) 7 else 6;
-        const ring_t: f32 = if (locked) 2 else 1.5;
-        skRing(q, ring * px, colors.select, ring_t * px);
-        if (locked) {
-            const l: f32 = 11 * px;
-            dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x - l, .y = q.y }, .{ .x = q.x + l, .y = q.y } } }, .{ .thickness = px, .color = .{ .color = colors.select } });
-            dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = q.y - l }, .{ .x = q.x, .y = q.y + l } } }, .{ .thickness = px, .color = .{ .color = colors.select } });
-        }
+        // Locked, it stands in for the pointer: it scintillates.
+        if (locked) scintillate(q, 8 * px) else skRing(q, 6 * px, colors.select, 1.5 * px);
     }
     // The drawing tool's clicks so far, to the pointer.
     if (sk_tool != .none and sk_nclicks > 0) if (skClickPoint()) |p| {
