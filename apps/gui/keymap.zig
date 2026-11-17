@@ -92,7 +92,7 @@ pub const action_defs = [_]A{
     // Which recent file, from 0.
     .{ .name = "start.open-recent", .param = .int },
 
-    // By the grid's finest step showing (`…-far`: ten of them).
+    // By the grid's minor unit showing (`…-far`: its major unit).
     .{ .name = "canvas.object.nudge", .repeat = true, .param = .direction },
     .{ .name = "canvas.object.nudge-far", .repeat = true, .param = .direction },
     .{ .name = "canvas.object.delete" },

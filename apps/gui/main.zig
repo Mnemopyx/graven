@@ -1501,12 +1501,22 @@ fn resolveFonts(labels: *layout.Labels) void {
     if (resolved_gen != fontwin.generation) state.placed_rev = std.math.maxInt(u64);
     resolved_gen = fontwin.generation;
     labels.syncResolved(&resolved.?) catch {};
+    // Said once, when it changes: re-resolving after every edit would
+    // otherwise put it over whatever the edit had to say.
     if (resolved.?.substitutions.items.len > 0) {
         const sub = resolved.?.substitutions.items[0];
-        state.status = std.fmt.bufPrint(&font_status_buf, "Font {s} {s} is not installed: {s}. ", .{ sub.wanted.family, sub.wanted.style, if (sub.got) |g| g.style else "left out" }) catch state.status;
-    }
+        var tmp: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&tmp, "Font {s} {s} is not installed: {s}. ", .{ sub.wanted.family, sub.wanted.style, if (sub.got) |g| g.style else "left out" }) catch "";
+        const h = std.hash.Wyhash.hash(0, msg);
+        if (h != font_status_hash) {
+            font_status_hash = h;
+            @memcpy(font_status_buf[0..msg.len], msg);
+            state.status = font_status_buf[0..msg.len];
+        }
+    } else font_status_hash = 0;
 }
 var font_status_buf: [160]u8 = undefined;
+var font_status_hash: u64 = 0;
 
 /// Each font-window change that takes two actions is undone as one.
 var font_step: u64 = 0;
@@ -6955,8 +6965,8 @@ fn drawGrid(area: dvui.Rect.Physical) void {
     const unit_mm = 1 / docUnits().perMm();
     const px_per_unit = state.view.ppm * unit_mm;
     const lo = if (grid_mode == .dots) bg_grid.dots_lo else bg_grid.fade_lo;
-    var buf: [4]bg_grid.Level = undefined;
-    const lv = bg_grid.levels(px_per_unit, lo, &buf);
+    var buf: [8]bg_grid.Level = undefined;
+    const lv = bg_grid.levels(px_per_unit, lo, gridScale(), &buf);
     if (lv.len == 0) return;
     const a = dvui.currentWindow().arena();
     var quads: std.ArrayList(GridQuad) = .empty;
@@ -7009,7 +7019,7 @@ fn drawGrid(area: dvui.Rect.Physical) void {
             while (@as(f64, @floatFromInt(i)) * l.step <= x1) : (i += 1) {
                 var j: i64 = @intFromFloat(@ceil(y0 / l.step));
                 while (@as(f64, @floatFromInt(j)) * l.step <= y1) : (j += 1) {
-                    if (coarser and @mod(i, 10) == 0 and @mod(j, 10) == 0) continue;
+                    if (coarser and @mod(i, l.ratio) == 0 and @mod(j, l.ratio) == 0) continue;
                     const p = state.view.toPx(area, .{ .x = @as(f64, @floatFromInt(i)) * l.step * unit_mm, .y = @as(f64, @floatFromInt(j)) * l.step * unit_mm });
                     // A dot is a few pixels where a line is a long run of them:
                     // it needs more contrast to read.
@@ -7185,7 +7195,7 @@ fn canvasNudge(e: *const dvui.Event) ?keymap.Direction {
     const inv = keymap.match1(e, kmode("canvas")) orelse return null;
     const far = inv.action == kact("canvas.object.nudge-far");
     if (inv.action != kact("canvas.object.nudge") and !far) return null;
-    nudge_mm = nudgeStep() * @as(f64, if (far) 10 else 1);
+    nudge_mm = nudgeStep(far);
     nudge_far = far;
     return inv.dir();
 }
@@ -7194,15 +7204,34 @@ fn canvasNudge(e: *const dvui.Event) ?keymap.Direction {
 var nudge_mm: f64 = 1;
 var nudge_far = false;
 
-/// A nudge's step, mm: the finest grid decade that shows at this zoom (in
-/// the document's units: 0.1, 1, 10 mm … or 0.1, 1 in …), so a nudge
-/// moves by what the paper shows. Shift: ten of them.
-fn nudgeStep() f64 {
+/// How the document's unit divides on the grid and in nudges: inches in
+/// fractions as a ruler has them, the rest in tenths.
+fn gridScale() bg_grid.Scale {
+    return if (docUnits() == .inch) .imperial else .decimal;
+}
+
+/// A nudge's step, mm: the grid's minor unit at this zoom (its finest
+/// lines that show: 0.1, 1, 10 mm …, or 1/16, 1/8 … in), or with Shift
+/// its major one (its strongest lines), so a nudge moves by what the paper
+/// shows.
+fn nudgeStep(major: bool) f64 {
     const unit_mm = 1 / docUnits().perMm();
-    var buf: [4]bg_grid.Level = undefined;
-    const lv = bg_grid.levels(state.view.ppm * unit_mm, bg_grid.fade_lo, &buf);
-    for (lv) |l| if (l.strength >= 0.1) return l.step * unit_mm;
-    return if (lv.len > 0) lv[lv.len - 1].step * unit_mm else unit_mm;
+    var buf: [8]bg_grid.Level = undefined;
+    const lv = bg_grid.levels(state.view.ppm * unit_mm, bg_grid.fade_lo, gridScale(), &buf);
+    const u = bg_grid.units(lv) orelse return unit_mm;
+    return (if (major) u.major else u.minor) * unit_mm;
+}
+
+/// A length `mm` in the document's units as a person reads it: inches as
+/// a fraction (3/16 in) where it is one, else a decimal.
+fn lengthText(buf: []u8, mm: f64) []const u8 {
+    const u = docUnits();
+    const v = mm * u.perMm();
+    if (u == .inch) {
+        var fb: [24]u8 = undefined;
+        if (bg_grid.fraction(&fb, v)) |f| return std.fmt.bufPrint(buf, "{s} in", .{f}) catch "";
+    }
+    return std.fmt.bufPrint(buf, "{d} {s}", .{ @round(v * 1000) / 1000, u.symbol() }) catch "";
 }
 
 /// An arrow key's code for direction `d` (what the move functions take).
@@ -7265,8 +7294,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // palette has the keyboard.
         if (track_cursor == null and state.context == .row and cursorKeysReach()) {
             if (canvasNudge(e)) |d| {
-                // A track's segment moves by its own step (Shift: ten).
-                for (0..@as(usize, if (nudge_far) 10 else 1)) |_| moveTrackArrow(switch (d) {
+                // A track's segment moves by its own step (Shift: four,
+                // a whole unit of a quarter-step track).
+                for (0..@as(usize, if (nudge_far) 4 else 1)) |_| moveTrackArrow(switch (d) {
                     .left => .left,
                     .right => .right,
                     .up => .up,
@@ -12011,8 +12041,7 @@ fn selectionAction(inv: keymap.Invocation) bool {
             return true;
         },
         kact("canvas.selection.nudge"), kact("canvas.selection.nudge-far") => {
-            const far: f64 = if (inv.action == kact("canvas.selection.nudge-far")) 10 else 1;
-            const step = far * selectionStep();
+            const step = selectionStep(inv.action == kact("canvas.selection.nudge-far"));
             const d: geom.Point = switch (inv.dir()) {
                 .left => .{ .x = -step, .y = 0 },
                 .right => .{ .x = step, .y = 0 },
@@ -12020,7 +12049,8 @@ fn selectionAction(inv: keymap.Invocation) bool {
                 .down => .{ .x = 0, .y = -step },
             };
             moveSelectionBy(d, mergeKey(.{ "nudge", selection.items.len, selection.items[0] }));
-            state.status = std.fmt.bufPrint(&nudge_status, "Moved {d} {s}. ", .{ step * docUnits().perMm(), docUnits().symbol() }) catch "";
+            var lb: [32]u8 = undefined;
+            state.status = std.fmt.bufPrint(&nudge_status, "Moved {s}. ", .{lengthText(&lb, step)}) catch "";
             return true;
         },
         else => return false,
@@ -12030,14 +12060,15 @@ fn selectionAction(inv: keymap.Invocation) bool {
 var nudge_status: [64]u8 = undefined;
 
 /// The selection's nudge step, mm: a lone track's own step (its pitch
-/// times its tiles' step), else the grid's (`nudgeStep`).
-fn selectionStep() f64 {
+/// times its tiles' step; major: its pitch, a whole unit), else the grid's
+/// minor or major unit (`nudgeStep`).
+fn selectionStep(major: bool) f64 {
     if (selection.items.len == 1) {
         for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
-            if (r.id == selection.items[0]) return moveStep(pi, ri) * r.pitch;
+            if (r.id == selection.items[0]) return if (major) r.pitch else moveStep(pi, ri) * r.pitch;
         };
     }
-    return nudgeStep();
+    return nudgeStep(major);
 }
 
 /// Moves the selection by `d` mm from where each is now (a group as a
