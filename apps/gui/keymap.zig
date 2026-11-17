@@ -52,6 +52,11 @@ pub const modes = [_]M{
 pub const action_defs = [_]A{
     // Bring every auto-hide pane in, or let them all go (a hot corner's).
     .{ .name = "panes.toggle-auto" },
+    // The pane layouts (layouts.zig): the next one, the panes as they are
+    // saved as a new one, this machine's changes to the one in use dropped.
+    .{ .name = "panes.layout-next" },
+    .{ .name = "panes.layout-save-as" },
+    .{ .name = "panes.layout-reset" },
     .{ .name = "file.new" },
     .{ .name = "file.open" },
     .{ .name = "file.save" },

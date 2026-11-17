@@ -87,6 +87,19 @@ pub const Doc = struct {
 
     /// Writes the document: its root keys, then each table's keys under
     /// its header, tables in the order their first key appears.
+    /// Removes every key that starts with `prefix`; how many went.
+    pub fn removePrefix(d: *Doc, prefix: []const u8) usize {
+        var i: usize = 0;
+        var n: usize = 0;
+        while (i < d.entries.items.len) {
+            if (std.mem.startsWith(u8, d.entries.items[i].key, prefix)) {
+                _ = d.entries.orderedRemove(i);
+                n += 1;
+            } else i += 1;
+        }
+        return n;
+    }
+
     pub fn write(d: *const Doc, w: *std.Io.Writer) std.Io.Writer.Error!void {
         var any_root = false;
         for (d.entries.items) |e| if (tableOf(e.key).len == 0) {
@@ -606,4 +619,12 @@ test "what it cannot read is reported with its line" {
         try testing.expectEqual(c.line, diag.line);
         try testing.expect(diag.message.len > 0);
     }
+}
+
+test "removing keys by prefix" {
+    var d = try parse(std.testing.allocator, "[a.b]\nx = 1\ny = 2\n[a.c]\nz = 3\n", null);
+    defer d.deinit();
+    try std.testing.expectEqual(2, d.removePrefix("a.b."));
+    try std.testing.expect(d.get("a.b.x") == null);
+    try std.testing.expect(d.get("a.c.z") != null);
 }

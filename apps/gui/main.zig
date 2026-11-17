@@ -25,6 +25,7 @@ const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
+const layouts = @import("layouts.zig");
 const keymap = @import("keymap.zig");
 const kact = keymap.act;
 const kmode = keymap.mode;
@@ -1748,10 +1749,10 @@ fn frame() !dvui.App.Result {
         narrowPanes();
         const size = rest.data().contentRect();
         const t: f32 = tab_size;
-        const status_h: f32 = if (bottom_pane.mode == .docked) status_height else 0;
+        const status_h: f32 = if (bottom_pane.mode == .docked) statusHeight() else 0;
         const body_h = @max(0, size.h - status_h - t);
         // A side pane stops above a ghost bottom bar, so they never overlap.
-        const side_h = @max(0, body_h - if (bottom_pane.mode == .ghost) @as(f32, status_height) else 0);
+        const side_h = @max(0, body_h - if (bottom_pane.mode == .ghost) @as(f32, statusHeight()) else 0);
         {
             var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .rect = .{ .x = 0, .y = 0, .w = size.w, .h = body_h } });
             defer body.deinit();
@@ -1804,12 +1805,12 @@ fn frame() !dvui.App.Result {
 // pane's mode (ghost over the canvas, docked beside it, or hidden), and
 // whose body makes a ghost pane active or ghost again.
 
-var tree_pane: ghost_pane.Pane = .{ .name = "Tree", .edge = .left, .size = tree_width, .look = .{ .hue = 165 } };
+var tree_pane: ghost_pane.Pane = .{ .id = "browser", .name = "Browser", .edge = .left, .size = default_tree_width, .look = .{ .hue = 165 } };
 /// The right edge holds two panes, one above the other: the tool palette
 /// and the properties. They meet at `tools_height` below the top, which
 /// the grip between their tabs moves.
-var tools_pane: ghost_pane.Pane = .{ .name = "Tools", .edge = .right, .size = properties_width, .look = .{ .hue = 330 } };
-var props_pane: ghost_pane.Pane = .{ .name = "Properties", .edge = .right, .size = properties_width, .look = .{ .hue = 230 } };
+var tools_pane: ghost_pane.Pane = .{ .id = "tools", .name = "Tools", .edge = .right, .size = default_properties_width, .look = .{ .hue = 330 } };
+var props_pane: ghost_pane.Pane = .{ .id = "properties", .name = "Properties", .edge = .right, .size = default_properties_width, .look = .{ .hue = 230 } };
 /// The tool palette's height, logical pixels.
 var tools_height: f32 = 120;
 const split_grip = 8;
@@ -1817,7 +1818,7 @@ const split_grip = 8;
 var split_dragging = false;
 const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
-var bottom_pane: ghost_pane.Pane = .{ .name = "Expression and status", .edge = .bottom, .size = status_height, .mode = .docked, .look = .{ .hue = 300 } };
+var bottom_pane: ghost_pane.Pane = .{ .id = "expression-bar", .name = "Expression bar", .edge = .bottom, .size = default_status_height, .mode = .docked, .look = .{ .hue = 300 } };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
 
 // Files ------------------------------------------------------------------------
@@ -2474,6 +2475,12 @@ fn historyKeys(wd: *dvui.WidgetData) void {
 fn runAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
         kact("panes.toggle-auto") => toggleAutoPanes(),
+        kact("panes.layout-next") => nextLayout(),
+        kact("panes.layout-save-as") => {
+            layout_prompt = true;
+            layout_prompt_new = true;
+        },
+        kact("panes.layout-reset") => resetLayout(),
         kact("file.new") => leave(.new_canvas),
         kact("file.open") => leave(.open),
         kact("file.save"), kact("file.save-as"), kact("edit.undo"), kact("edit.redo") => {
@@ -2572,23 +2579,26 @@ const Prefs = struct {
     display: display.Correction,
     px_per_mm: ?f32,
     hot_edges: bool,
-    modes: [all_panes.len]ghost_pane.Mode,
-    tools_height: f32,
+    /// The pane layout in use: its name and how the panes are now.
+    layout_name: [40]u8,
+    layout_name_len: usize,
+    layout: layouts.Layout,
 
     fn eql(a: Prefs, b: Prefs) bool {
         return std.meta.eql(a, b);
     }
 };
 
-/// The keys of each pane's mode, in `all_panes` order.
+/// The keys of each pane's mode before layouts (read once, to carry a
+/// machine's arrangement over), in `all_panes` order.
 const pane_keys = [all_panes.len][]const u8{ "panes.tree.mode", "panes.tools.mode", "panes.properties.mode", "panes.bottom.mode" };
 
 var saved_prefs: ?Prefs = null;
 
 fn currentPrefs() Prefs {
-    var modes: [all_panes.len]ghost_pane.Mode = undefined;
-    for (all_panes, &modes) |p, *m| m.* = p.chosen();
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
+    var name: [40]u8 = @splat(0);
+    @memcpy(name[0..layout_name.len], layout_name);
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -2649,14 +2659,19 @@ fn loadPrefs() void {
             } else state.status = "A hot corner names an action Graven does not have. ";
         };
     }
-    for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (std.meta.stringToEnum(ghost_pane.Mode, v.string)) |m| {
-        p.mode = m;
-    };
-    if (ps.get("panes.tools_height")) |v| switch (v) {
-        .float => |f| tools_height = @floatCast(f),
-        .integer => |i| tools_height = @floatFromInt(i),
-        else => {},
-    };
+    // The pane layout in use (local.toml), as the config has it.
+    if (ps.get("panes.layout")) |v| if (v == .string) if (layouts.validName(v.string)) setLayoutName(v.string);
+    applyLayout(layouts.read(&ps, layout_name));
+    // From before layouts: the panes' modes and the split, carried over
+    // into the layout (written back as this machine's overrides).
+    if (ps.get("panes.layout") == null) {
+        for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (std.meta.stringToEnum(ghost_pane.Mode, v.string)) |m| {
+            p.mode = m;
+        };
+        if (ps.get("panes.tools_height")) |v| if (tomlFloat(v)) |f| {
+            tools_height = f;
+        };
+    }
     if (ps.problem()) |msg| state.status = msg;
     loadRecent(&ps);
     prefs_store = ps;
@@ -2744,13 +2759,197 @@ fn savePrefsIfChanged() void {
     // Measured, else the estimate (written as 0: not measured).
     ps.put("display.px_per_mm", .{ .float = if (now.px_per_mm) |v| roundTo(v, 10000) else 0 }, .local);
     ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
-    for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .local);
-    ps.put("panes.tools_height", .{ .integer = @intFromFloat(@round(now.tools_height)) }, .local);
+    // The layout in use is this machine's; what has been changed by hand
+    // goes in as this machine's overrides of it.
+    ps.put("panes.layout", .{ .string = layout_name }, .local);
+    writeLayout(ps, layout_name, now.layout, .local, false);
     if (ps.save(dvui.io)) |msg| state.status = msg;
 }
 
 /// Hot edges: holding the pointer on a ghost pane's tab activates it.
 var hot_edges = false;
+
+// Pane layouts ----------------------------------------------------------------
+//
+// Named arrangements of the panes (layouts.zig): each pane's mode, size
+// and text scale. One is in use; View › Pane layout switches, saves the
+// arrangement as a new one, or drops this machine's changes to it.
+
+var layout_name_buf: [40]u8 = undefined;
+var layout_name: []const u8 = "standard";
+
+fn setLayoutName(n: []const u8) void {
+    const k = @min(n.len, layout_name_buf.len);
+    std.mem.copyForwards(u8, layout_name_buf[0..k], n[0..k]);
+    layout_name = layout_name_buf[0..k];
+}
+
+fn toLayoutMode(m: ghost_pane.Mode) layouts.Mode {
+    return std.meta.stringToEnum(layouts.Mode, @tagName(m)).?;
+}
+
+/// Sets the panes as layout `l` has them.
+fn applyLayout(l: layouts.Layout) void {
+    for (all_panes, l.panes) |p, set| {
+        p.mode = std.meta.stringToEnum(ghost_pane.Mode, @tagName(set.mode)).?;
+        p.forced = null;
+        p.active = false;
+        p.hot = .{};
+        if (set.size > 0) p.size = set.size;
+        p.text_scale = set.text_scale;
+    }
+    tools_height = l.tools_height;
+    // A narrow window makes the side panes auto-hide again.
+    was_narrow = null;
+}
+
+/// The panes as they are, as a layout (each pane's own mode, not one a
+/// narrow window forced).
+fn currentLayout() layouts.Layout {
+    var l: layouts.Layout = .{ .panes = undefined, .tools_height = @round(tools_height) };
+    for (all_panes, &l.panes) |p, *set| set.* = .{
+        .mode = toLayoutMode(p.chosen()),
+        .size = if (p.edge == .bottom) 0 else @round(p.size),
+        .text_scale = p.text_scale,
+    };
+    return l;
+}
+
+/// Writes layout `l` under `name` into `home`: every key (`all`), or only
+/// those that differ from what the config already gives.
+fn writeLayout(ps: *settings_file.Store, name: []const u8, l: layouts.Layout, home: anytype, all: bool) void {
+    const was = layouts.read(ps, name);
+    var kb: [160]u8 = undefined;
+    for (std.enums.values(layouts.PaneId), l.panes, was.panes) |pid, set, old| {
+        if (all or set.mode != old.mode) ps.put(layouts.key(&kb, name, pid, "mode"), .{ .string = @tagName(set.mode) }, home);
+        // The column's width is the properties' to keep.
+        if (pid != .@"expression-bar" and pid != .tools and (all or set.size != old.size)) ps.put(layouts.key(&kb, name, pid, "size"), .{ .integer = @intFromFloat(set.size) }, home);
+        if (all or set.text_scale != old.text_scale) ps.put(layouts.key(&kb, name, pid, "text_scale"), .{ .float = roundTo(set.text_scale, 100) }, home);
+    }
+    if (all or l.tools_height != was.tools_height) ps.put(layouts.key(&kb, name, .tools, "height"), .{ .integer = @intFromFloat(l.tools_height) }, home);
+}
+
+/// The names of the layouts there are: the built-ins, then the config's.
+fn layoutNames() []const []const u8 {
+    const a = dvui.currentWindow().arena();
+    const ps = &(prefs_store orelse return &.{});
+    const keys = ps.keys(a) catch return &.{};
+    return layouts.names(a, keys) catch &.{};
+}
+
+/// Puts layout `name` in use, as the config has it.
+fn useLayout(name: []const u8) void {
+    const ps = &(prefs_store orelse return);
+    setLayoutName(name);
+    applyLayout(layouts.read(ps, layout_name));
+    state.status = "";
+    dvui.refresh(null, @src(), null);
+}
+
+/// `panes.layout-next`: the next layout in the list.
+fn nextLayout() void {
+    const ns = layoutNames();
+    if (ns.len == 0) return;
+    var i: usize = 0;
+    for (ns, 0..) |n, k| {
+        if (std.mem.eql(u8, n, layout_name)) i = k;
+    }
+    const name = ns[(i + 1) % ns.len];
+    useLayout(name);
+    state.status = std.fmt.bufPrint(&layout_status, "Pane layout: {s}. ", .{name}) catch "";
+}
+
+var layout_status: [96]u8 = undefined;
+
+/// Saves the panes as they are as layout `raw_name` (cleaned to a bare
+/// key) in the shared settings, and puts it in use.
+fn saveLayoutAs(raw_name: []const u8) void {
+    const ps = &(prefs_store orelse return);
+    var nb: [64]u8 = undefined;
+    const name = layouts.cleanName(&nb, raw_name);
+    if (!layouts.validName(name)) {
+        state.status = "A layout's name needs letters or digits. ";
+        return;
+    }
+    const now = currentLayout();
+    writeLayout(ps, name, now, .shared, true);
+    setLayoutName(name);
+    applyLayout(layouts.read(ps, layout_name));
+    if (ps.save(dvui.io)) |msg| state.status = msg else {
+        state.status = std.fmt.bufPrint(&layout_status, "Saved the pane layout \"{s}\". ", .{layout_name}) catch "";
+    }
+}
+
+/// Drops this machine's changes to the layout in use, back to the shared
+/// settings' (or the built-in's) arrangement.
+fn resetLayout() void {
+    const ps = &(prefs_store orelse return);
+    var kb: [80]u8 = undefined;
+    _ = ps.dropLocal(layouts.prefix(&kb, layout_name));
+    applyLayout(layouts.read(ps, layout_name));
+    saved_prefs = currentPrefs();
+    if (ps.save(dvui.io)) |msg| state.status = msg;
+    dvui.refresh(null, @src(), null);
+}
+
+/// View › Pane layout › Save layout as… is asking for a name.
+var layout_prompt = false;
+var layout_prompt_new = false;
+
+fn layoutPrompt() void {
+    const c = canvas_rect;
+    if (c.w <= 0 or c.h <= 0) return;
+    const w: f32 = 420;
+    const h: f32 = 170;
+    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(16).override(.{ .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } }));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), "Save the pane layout as", .{}, .{ .font = dvui.Font.theme(.heading) });
+    var go = false;
+    var cancel = false;
+    for (dvui.events()) |*e| {
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        switch (inv.action) {
+            kact("dialog.confirm") => go = true,
+            kact("dialog.cancel") => cancel = true,
+            else => continue,
+        }
+        e.handle(@src(), fw.data());
+    }
+    var name: []const u8 = "";
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        propName("Name");
+        var te = dvui.textEntry(@src(), .{ .text_initial = layout_name }, .{ .expand = .horizontal });
+        defer te.deinit();
+        if (layout_prompt_new) {
+            dvui.focusSubwindow(fw.data().id, null);
+            dvui.focusWidget(te.data().id, fw.data().id, null);
+            layout_prompt_new = false;
+        }
+        if (te.enter_pressed) go = true;
+        name = dvui.currentWindow().arena().dupe(u8, te.textGet()) catch "";
+    }
+    dvui.labelNoFmt(@src(), "Kept in the shared settings; letters, digits, - and _.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (dvui.button(@src(), "Save", .{}, .{ .style = .highlight })) go = true;
+    }
+    if (cancel) {
+        layout_prompt = false;
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    if (!go) return;
+    layout_prompt = false;
+    saveLayoutAs(name);
+    dvui.refresh(null, @src(), null);
+}
 
 /// Below this window width (logical pixels) the side panes, ghost or
 /// docked, auto-hide, and get their own mode back when it widens; 0:
@@ -2850,12 +3049,23 @@ fn toggleAutoPanes() void {
 /// pixels.
 const tab_size = 18;
 
-const tree_width = 240;
-const properties_width = 320;
-/// The bottom area: the expression line above the status line.
-const expression_height = 38;
+/// The panes' sizes as Graven first opens (a layout sets them: see
+/// layouts.zig).
+const default_tree_width = 240;
+const default_properties_width = 320;
+/// The bottom area: the expression line above the status line, at the
+/// interface's own text size (scaled with the bar's text).
+const expression_line_height = 38;
 const status_line_height = 32;
-const status_height = expression_height + status_line_height;
+const default_status_height = expression_line_height + status_line_height;
+
+fn expressionHeight() f32 {
+    return @round(expression_line_height * bottom_pane.text_scale);
+}
+
+fn statusHeight() f32 {
+    return @round(default_status_height * bottom_pane.text_scale);
+}
 /// Space between the key palette and the panes beside it.
 const overlay_gap = 6;
 /// How opaque an overlay's background is.
@@ -2957,7 +3167,7 @@ fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
 /// The right edge's docked column: the tool palette above (or room for it,
 /// when it is not docked), the properties below.
 fn rightColumn() !void {
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = properties_width }, .max_size_content = .width(properties_width), .expand = .vertical, .border = .{ .x = 1 } });
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = props_pane.size }, .max_size_content = .width(props_pane.size), .expand = .vertical, .border = .{ .x = 1 } });
     defer col.deinit();
     const th = toolsHeight(col.data().contentRect().h);
     {
@@ -2993,9 +3203,9 @@ fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
 /// fitting a view keeps its subject clear of them.
 fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
     return .{
-        .left = if (tree_pane.mode == .ghost) tree_width + overlay_gap else 0,
-        .right = if (!rightDocked() and (props_pane.mode == .ghost or tools_pane.mode == .ghost)) properties_width + overlay_gap else 0,
-        .bottom = if (bottom_pane.mode == .ghost) status_height + overlay_gap else 0,
+        .left = if (tree_pane.mode == .ghost) tree_pane.size + overlay_gap else 0,
+        .right = if (!rightDocked() and (props_pane.mode == .ghost or tools_pane.mode == .ghost)) props_pane.size + overlay_gap else 0,
+        .bottom = if (bottom_pane.mode == .ghost) statusHeight() + overlay_gap else 0,
     };
 }
 
@@ -3032,31 +3242,31 @@ fn overlays() !void {
     const c = canvas_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const g: f32 = overlay_gap;
-    const bottom: f32 = if (bottom_pane.mode == .ghost) status_height else 0;
+    const bottom: f32 = if (bottom_pane.mode == .ghost) statusHeight() else 0;
     if (tree_pane.drawn()) {
-        var o = ghost_pane.begin(&tree_pane, tree_pane.slid(.{ .x = c.x, .y = c.y, .w = tree_width, .h = @max(60, c.h - bottom) }), 1);
+        var o = ghost_pane.begin(&tree_pane, tree_pane.slid(.{ .x = c.x, .y = c.y, .w = tree_pane.size, .h = @max(60, c.h - bottom) }), 1);
         defer o.end();
         treeContent();
     }
     {
         // The right edge: over the canvas's right side, or over the docked
         // column's room when the other pane there is docked.
-        const x = if (rightDocked()) c.x + c.w + 1 else c.x + c.w - properties_width;
+        const x = if (rightDocked()) c.x + c.w + 1 else c.x + c.w - props_pane.size;
         const h = @max(2 * min_pane_height + split_grip, c.h - if (rightDocked()) 0 else bottom);
         const th = toolsHeight(h);
         if (tools_pane.drawn()) {
-            var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = properties_width, .h = th }), 2);
+            var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = props_pane.size, .h = th }), 2);
             defer o.end();
             toolsContent();
         }
         if (props_pane.drawn()) {
-            var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y + th + split_grip, .w = properties_width, .h = h - th - split_grip }), 4);
+            var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y + th + split_grip, .w = props_pane.size, .h = h - th - split_grip }), 4);
             defer o.end();
             try propertiesBody();
         }
     }
     if (bottom_pane.drawn()) {
-        var o = ghost_pane.begin(&bottom_pane, bottom_pane.slid(.{ .x = c.x, .y = c.y + c.h - status_height, .w = c.w, .h = status_height }), 3);
+        var o = ghost_pane.begin(&bottom_pane, bottom_pane.slid(.{ .x = c.x, .y = c.y + c.h - statusHeight(), .w = c.w, .h = statusHeight() }), 3);
         defer o.end();
         try bottomContent();
     }
@@ -3065,8 +3275,8 @@ fn overlays() !void {
     // selected track.
     const moving_track = track_cursor == null and state.context == .row;
     if (track_cursor != null or moving_track) {
-        const left: f32 = if (tree_pane.mode == .ghost) tree_width + g else g;
-        const right: f32 = if (!rightDocked() and tools_pane.mode == .ghost) properties_width + g else g;
+        const left: f32 = if (tree_pane.mode == .ghost) tree_pane.size + g else g;
+        const right: f32 = if (!rightDocked() and tools_pane.mode == .ghost) props_pane.size + g else g;
         var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = if (moving_track) move_palette_height else palette_height };
         // Lighter than the panes: the tracks being filled show through.
         var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4).override(.{
@@ -3076,6 +3286,7 @@ fn overlays() !void {
         if (moving_track) movePalette() else trackPalette();
     }
     if (export_prompt) exportPrompt();
+    if (layout_prompt) layoutPrompt();
     if (image_prompt) imagePrompt();
     if (file_prompt) |kind| filePrompt(kind);
     if (constrain_prompt != null) constrainPromptWindow();
@@ -3087,7 +3298,7 @@ fn overlays() !void {
 /// The bottom area: the expression line, then the status line.
 fn bottomContent() !void {
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = expression_height - 2 } });
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = expressionHeight() - 2 } });
         defer line.deinit();
         try expressionLine();
     }
@@ -3760,6 +3971,24 @@ fn menu() ?dvui.App.Result {
             show_construction = !show_construction;
             m.close();
         }
+        // Pane layouts: which is in use, and saving or resetting it.
+        if (dvui.menuItemLabel(@src(), "    Pane layout", .{ .submenu = true }, .{ .expand = .horizontal })) |lr| {
+            var lm = dvui.floatingMenu(@src(), .{ .from = lr }, .{});
+            defer lm.deinit();
+            for (layoutNames(), 0..) |n, li| {
+                var lb: [64]u8 = undefined;
+                const on = std.mem.eql(u8, n, layout_name);
+                const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (on) "•  " else "    ", n }) catch n;
+                if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = li }) != null) {
+                    useLayout(n);
+                    m.close();
+                }
+            }
+            _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
+            if (menuAction("    Next layout", "global", kact("panes.layout-next"), 0, false, 20)) m.close();
+            if (menuAction("    Save layout as…", "global", kact("panes.layout-save-as"), 0, false, 21)) m.close();
+            if (menuAction("    Reset this layout", "global", kact("panes.layout-reset"), 0, false, 22)) m.close();
+        }
         // Pane modes, as the tabs' icons set them, and hot edges.
         for (all_panes, 0..) |pane, pi| {
             _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = pi });
@@ -3807,7 +4036,7 @@ fn menu() ?dvui.App.Result {
 /// The component tree: file, panels, regions, rows, tiles. Clicking a node
 /// makes it the context; its arrow opens or closes it.
 fn treePane() void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_width }, .max_size_content = .width(tree_width), .expand = .vertical, .border = .{ .w = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tree_pane) } });
+    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_pane.size }, .max_size_content = .width(tree_pane.size), .expand = .vertical, .border = .{ .w = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tree_pane) } });
     defer pane.deinit();
     treeContent();
 }
@@ -6936,7 +7165,7 @@ fn updateModeStack() void {
             if (equation_edit != null) push(&st, &n, kmode("expression-line.run"));
         }
     }
-    if (filePromptOpen() or export_prompt or image_prompt or constrain_prompt != null or display_window) {
+    if (filePromptOpen() or export_prompt or layout_prompt or image_prompt or constrain_prompt != null or display_window) {
         push(&st, &n, kmode("dialog"));
     } else if (size_window) push(&st, &n, kmode("dialog.calibrate-size"));
     keymap.setStack(st[0..n]);

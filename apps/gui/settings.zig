@@ -60,6 +60,21 @@ pub const Store = struct {
         s.files.put(key, value, home) catch {};
     }
 
+    /// Every key either file holds (each may appear twice).
+    pub fn keys(s: *const Store, a: std.mem.Allocator) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for ([_]*const config.toml.Doc{ &s.files.shared, &s.files.local }) |d| {
+            for (d.entries.items) |e| try out.append(a, e.key);
+        }
+        return out.items;
+    }
+
+    /// Drops the local file's keys under `prefix` (its overrides), so the
+    /// shared file's values are in force again. How many went.
+    pub fn dropLocal(s: *Store, prefix: []const u8) usize {
+        return s.files.local.removePrefix(prefix);
+    }
+
     /// Writes each file whose text has changed (and that was readable).
     /// Returns a problem to show, if any.
     pub fn save(s: *Store, io: std.Io) ?[]const u8 {

@@ -233,6 +233,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }) })).step);
+    // Pane layouts: names, built-ins, reading the config.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/gui/layouts.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) })).step);
     // Display correction's curve.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("apps/gui/display.zig"),

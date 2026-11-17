@@ -54,6 +54,9 @@ pub const Look = struct {
 };
 
 pub const Pane = struct {
+    /// Its official name: in the config, and its label's message ID
+    /// (`browser`, `tools`, `properties`, `expression-bar`).
+    id: []const u8,
     name: []const u8,
     edge: Edge,
     /// Its size across its edge (a side pane's width, a bottom pane's
@@ -72,6 +75,8 @@ pub const Pane = struct {
     sub_id: ?dvui.Id = null,
     /// How far an auto-hide pane is in, 0 (out of sight) to 1.
     reveal: f32 = 0,
+    /// Its text and controls, against the interface's own size.
+    text_scale: f32 = 1,
     /// The mode the user chose, while a narrow window has made it
     /// auto-hide; given back when the window widens.
     forced: ?Mode = null,
@@ -440,8 +445,19 @@ pub fn fill(p: *const Pane) dvui.Color {
 /// Sets the pane's theme for content drawn until `themePop`.
 pub fn themePush(p: *const Pane) dvui.Theme {
     const prev = dvui.themeGet();
-    dvui.themeSet(theme(p.look, paneBase(p, prev)));
+    dvui.themeSet(scaled(theme(p.look, paneBase(p, prev)), p.text_scale));
     return prev;
+}
+
+/// Theme `t` with its fonts `k` times their size.
+pub fn scaled(t: dvui.Theme, k: f32) dvui.Theme {
+    if (k == 1) return t;
+    var out = t;
+    out.font_body.size *= k;
+    out.font_heading.size *= k;
+    out.font_title.size *= k;
+    out.font_mono.size *= k;
+    return out;
 }
 
 pub fn themePop(prev: dvui.Theme) void {
@@ -494,7 +510,7 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     if (dvui.currentWindow().subwindows.get(id)) |sw| sw.mouse_events = p.active;
     // An inactive ghost's content: one alpha for all of it, or each colour
     // at its own presence.
-    if (!p.active and style != .uniform) dvui.themeSet(ghostTheme(p.look, prev_theme, style));
+    if (!p.active and style != .uniform) dvui.themeSet(scaled(ghostTheme(p.look, prev_theme, style), p.text_scale));
     const prev_alpha = if (p.active or style != .uniform) dvui.alpha(1) else dvui.alpha(p.look.ghost_content);
     var o: Open = .{ .fw = fw, .prev_theme = prev_theme, .prev_alpha = prev_alpha };
     if (!p.active and style == .haloed and dvui.backend.kind == .sdl3) {
