@@ -72,6 +72,8 @@ pub const action_defs = [_]A{
     .{ .name = "view.zoom-all" },
     // Per cent of actual size.
     .{ .name = "view.zoom-to", .param = .int },
+    // Held: a drag pans, whatever is under it (a while-held mode).
+    .{ .name = "view.pan-hold" },
     // What is being edited, legible, with as much around it as shows so.
     .{ .name = "view.frame-edit" },
     .{ .name = "view.zoom-in", .repeat = true },
@@ -244,6 +246,7 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "primary+kp_add", .action = "view.zoom-in" },
     .{ .mode = "view", .chord = "primary+minus", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "primary+kp_subtract", .action = "view.zoom-out" },
+    .{ .mode = "view", .chord = "space", .action = "view.pan-hold" },
     .{ .mode = "view", .chord = "primary+nine", .action = "view.frame-edit" },
     .{ .mode = "view", .chord = "nine", .action = "view.frame-edit" },
     .{ .mode = "view", .chord = "zero", .action = "view.zoom-fit" },
@@ -485,6 +488,22 @@ fn logged(inv: Invocation, m: ModeId) Invocation {
         std.debug.print("]\n", .{});
     }
     return inv;
+}
+
+/// For a key released (event `e`): the action its key is bound to in mode
+/// `m` (whatever the modifiers now), for actions held down (`view.pan-hold`).
+pub fn released(e: *const dvui.Event, m: ModeId) ?ActionId {
+    if (e.handled) return null;
+    const k = switch (e.evt) {
+        .key => |k| k,
+        else => return null,
+    };
+    if (k.action != .up) return null;
+    for (R.tables[m]) |b| switch (b.chord.what) {
+        .code => |code| if (code == k.code) return b.action,
+        else => {},
+    };
+    return null;
 }
 
 /// `match` in one mode.

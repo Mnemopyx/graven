@@ -7211,10 +7211,22 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // The view's keys (zoom), in any mode the canvas is in; an
         // unchorded one only while no text field has the keyboard.
         if (keymap.match1(e, kmode("view"))) |inv| {
-            if ((inv.chorded or cursorKeysReach()) and runAction(inv)) {
+            if (inv.action == kact("view.pan-hold")) {
+                if (cursorKeysReach()) {
+                    space_pan = true;
+                    dvui.cursorSet(.hand);
+                    e.handle(@src(), box.data());
+                    continue;
+                }
+            } else if ((inv.chorded or cursorKeysReach()) and runAction(inv)) {
                 e.handle(@src(), box.data());
                 continue;
             }
+        }
+        if (space_pan and keymap.released(e, kmode("view")) == kact("view.pan-hold")) {
+            space_pan = false;
+            e.handle(@src(), box.data());
+            continue;
         }
         // Sketch mode takes the canvas's events.
         if (sketch_edit != null) {
@@ -7556,10 +7568,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .join and me.button.pointer()) {
                     joinClick(state.view.toMm(area, me.p));
                     state.press_consumed = true;
-                } else if (state.tool == .select and me.button.pointer() and primaryMod(me.mod)) {
-                    // Ctrl-click (or Cmd-click) near a container's edge:
-                    // in or out of the selection.
-                    ctrlPick(state.view.toMm(area, me.p));
+                } else if (space_pan and me.button.pointer()) {
+                    // Space held: a drag pans, whatever is under it.
+                    state.press_at = null;
+                    dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
+                } else if (state.tool == .select and me.button.pointer() and (me.mod.shift() or primaryMod(me.mod))) {
+                    // Shift-click (or Ctrl-click): the container there in
+                    // or out of the selection.
+                    shiftClick(state.view.toMm(area, me.p));
                     state.press_consumed = true;
                 } else if (state.tool == .select and me.button.pointer() and engaging() and engagePress(state.view.toMm(area, me.p))) {
                     hunt_clear();
@@ -7590,7 +7606,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     dvui.refresh(null, @src(), box.data().id);
                 } else if (state.drag) |*d| {
                     e.handle(@src(), box.data());
-                    d.at = if (state.tool == .add_tracks) state.view.toMm(area, me.p) else snap(state.view.toMm(area, me.p));
+                    d.at = if (state.tool == .add_tracks or band_drag) state.view.toMm(area, me.p) else snap(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
                 } else if (state.moving) |*mv| {
                     e.handle(@src(), box.data());
@@ -7602,13 +7618,28 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     dvui.refresh(null, @src(), box.data().id);
                 } else if (dvui.dragging(me, null)) |d| {
                     e.handle(@src(), box.data());
-                    // Dragging the selected panel moves it; anything else pans.
-                    if (grabbedPanel()) |pi| {
-                        state.moving = .{ .panel = pi, .start = state.press_at.?, .at = state.view.toMm(area, me.p) };
-                    } else {
+                    // A drag from a panel moves it; from line art, an
+                    // image or a group, selects and moves it; from empty
+                    // canvas, draws out an area. Space held (or the middle
+                    // button) pans.
+                    const from = state.press_at;
+                    if (from == null or space_pan or state.tool != .select) {
                         state.view.fit = null;
                         state.view.cx -= d.x / state.view.ppm;
                         state.view.cy += d.y / state.view.ppm;
+                    } else if (grabbedPanel() != null or (dragTakes(from.?) != null and isPanelId(dragTakes(from.?).?))) {
+                        if (grabbedPanel() == null) clickAt(from.?, me.p);
+                        if (grabbedPanel()) |pi| state.moving = .{ .panel = pi, .start = from.?, .at = state.view.toMm(area, me.p) };
+                    } else if (dragTakes(from.?)) |id| {
+                        if (selectedAt(id) == null) {
+                            pick(from.?);
+                            selection.clearRetainingCapacity();
+                            selection.append(state.gpa, id) catch {};
+                        }
+                        if (selectionPress(from.?)) selectionDrag(state.view.toMm(area, me.p));
+                    } else if (track_cursor == null) {
+                        band_drag = true;
+                        state.drag = .{ .start = from.?, .at = state.view.toMm(area, me.p) };
                     }
                     dvui.refresh(null, @src(), box.data().id);
                 }
@@ -7618,13 +7649,19 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 if (engage_drag != null) {
                     // A press on an engagement point that did not drag is
                     // a click.
-                    if (!engageRelease()) pick(state.view.toMm(area, me.p));
+                    if (!engageRelease()) clickAt(state.view.toMm(area, me.p), me.p);
                 } else if (resize_drag != null or sel_press != null) {
                     // A click on a selected box that did not drag keeps
                     // its plain meaning.
                     const clicked = sel_press != null and !sel_press.?.moved;
                     selectionDragEnd();
-                    if (clicked) pick(state.view.toMm(area, me.p));
+                    if (clicked) clickAt(state.view.toMm(area, me.p), me.p);
+                } else if (state.drag != null and band_drag) {
+                    const d = state.drag.?;
+                    state.drag = null;
+                    band_drag = false;
+                    selectArea(dragBox(d.start, d.at));
+                    last_click = null;
                 } else if (state.drag) |d| {
                     state.drag = null;
                     switch (state.tool) {
@@ -7640,7 +7677,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.press_consumed) {
                     state.press_consumed = false;
                 } else if (dvui.dragging(me, null) == null) {
-                    pick(state.view.toMm(area, me.p));
+                    clickAt(state.view.toMm(area, me.p), me.p);
                 }
                 state.press_at = null;
                 dvui.captureMouse(null, e.num);
@@ -7650,6 +7687,167 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             else => {},
         }
     }
+}
+
+
+// One selection -------------------------------------------------------------
+//
+// A click selects: the context (what the properties show) is what lies
+// under the pointer, as `pick` finds it, and the container it is (a panel,
+// a track, line art, an image, a group) is the selection, with its box
+// and the handles its constraints leave. Another click at the same place
+// selects the container it sits in, and so on out, then back in. Shift
+// (or Ctrl) and a click add the container there to the selection or take
+// it out. A drag on a selected container moves the selection; on an
+// unselected panel, line art, image or group it selects it and moves it;
+// on empty canvas it draws out an area, selecting what lies wholly inside.
+// Panning: Space held and a drag, a middle-button drag, or the wheel.
+// A click that sets the flow cursor in a text track selects nothing (its
+// text is being typed into).
+
+/// Where and what the last plain click selected, to step out from.
+var last_click: ?struct { px: dvui.Point.Physical, depth: usize } = null;
+
+/// Space is held: a drag pans.
+var space_pan = false;
+
+/// A drag on empty canvas drawing out an area to select (in `state.drag`).
+var band_drag = false;
+
+/// The container context `c` is, if it is one.
+fn objectOfContext(c: Context) ?layout.model.ObjectId {
+    const id = switch (c) {
+        .panel => |pi| if (pi < state.model.panels.items.len and !state.model.panels.items[pi].unbounded) state.model.panels.items[pi].id else return null,
+        .region => |r| state.model.idAt(.{ .region = .{ .panel = r.panel, .index = r.region } }),
+        .row => |r| state.model.idAt(.{ .region = .{ .panel = r.panel, .index = r.region } }),
+        .art => |l| state.model.idAt(.{ .art = .{ .panel = l.panel, .index = l.index } }),
+        .group => |g| g,
+        .image => |im| if (imageAt(im.space, im.index)) |image| image.id else return null,
+        else => return null,
+    };
+    return if (id == .none) null else id;
+}
+
+/// The context that shows container `id`: the panel holding it, for a
+/// panel; else the selection.
+fn contextOfObject(id: layout.model.ObjectId) Context {
+    for (state.model.panels.items, 0..) |p, pi| if (p.id == id) return .{ .panel = pi };
+    return .selection;
+}
+
+/// The container `id` sits in (a track's or line art's panel), if any.
+fn parentObject(id: layout.model.ObjectId) ?layout.model.ObjectId {
+    if (state.model.group(id) != null) return null;
+    const pr = constrain.parentOf(&state.model, id) orelse return null;
+    return switch (pr) {
+        .panel => |pi| if (pi < state.model.panels.items.len and !state.model.panels.items[pi].unbounded) state.model.panels.items[pi].id else null,
+        .space => null,
+    };
+}
+
+/// A plain click at canvas point `at` (device point `p`): picks, and
+/// selects the container picked, or (clicked again in the same place) the
+/// one it sits in.
+fn clickAt(at: geom.Point, p: dvui.Point.Physical) void {
+    const ns = dvui.windowNaturalScale();
+    const again = if (last_click) |lc| @abs(lc.px.x - p.x) <= 4 * ns and @abs(lc.px.y - p.y) <= 4 * ns else false;
+    pick(at);
+    if (track_cursor != null or sketch_edit != null) {
+        last_click = null;
+        return;
+    }
+    // A tile is no container: clicked again, its track is the first one out.
+    const tile_track: ?layout.model.ObjectId = switch (state.context) {
+        // A grid's tile sits in no track: its panel, then.
+        .tile => |tid| if (findTile(tid)) |f| (if (f.panel >= state.model.panels.items.len) null else if (f.tile.region < state.model.panels.items[f.panel].regions.items.len) state.model.panels.items[f.panel].regions.items[f.tile.region].id else state.model.panels.items[f.panel].id) else null,
+        else => null,
+    };
+    const inner = objectOfContext(state.context) orelse tile_track orelse {
+        last_click = .{ .px = p, .depth = 0 };
+        return;
+    };
+    var depth: usize = if (again) last_click.?.depth + 1 else 0;
+    if (tile_track != null and !again) {
+        // The tile itself, first: nothing selected.
+        last_click = .{ .px = p, .depth = 0 };
+        return;
+    }
+    if (tile_track != null) depth -= 1;
+    var cur = inner;
+    var k: usize = 0;
+    while (k < depth) : (k += 1) {
+        cur = parentObject(cur) orelse {
+            // Past the outermost: back in.
+            depth = 0;
+            cur = inner;
+            break;
+        };
+    }
+    if (cur != inner or tile_track != null) state.context = contextOfObject(cur);
+    selection.clearRetainingCapacity();
+    selection.append(state.gpa, cur) catch {};
+    hunt_clear();
+    last_click = .{ .px = p, .depth = if (tile_track != null) depth + 1 else depth };
+    if (cur != inner or tile_track != null) {
+        state.status = std.fmt.bufPrint(&status_hunt_buf, "Selected {s}, which holds it (click again: further out). ", .{objectName(cur)}) catch "";
+    }
+}
+
+fn isPanelId(id: layout.model.ObjectId) bool {
+    for (state.model.panels.items) |p| if (p.id == id) return true;
+    return false;
+}
+
+/// The innermost container whose box holds canvas point `at`: the
+/// smallest of them.
+fn containerAt(at: geom.Point) ?layout.model.ObjectId {
+    const a = dvui.currentWindow().arena();
+    var best: ?layout.model.ObjectId = null;
+    var best_area: f64 = std.math.inf(f64);
+    for (constrainables(a)) |id| {
+        if (isControlPoint(id)) continue;
+        const b = containerBox(id) orelse continue;
+        if (!contains(b, at)) continue;
+        const ar = b.width() * b.height();
+        if (ar < best_area) {
+            best_area = ar;
+            best = id;
+        }
+    }
+    // Grouped, it is taken as its group.
+    if (best) |id| {
+        const top = state.model.topLevel(id);
+        if (top != id) return top;
+    }
+    return best;
+}
+
+/// Shift-click (or Ctrl-click) at `at`: the container there in or out of
+/// the selection.
+fn shiftClick(at: geom.Point) void {
+    const id = containerAt(at) orelse {
+        state.status = "No container there. ";
+        return;
+    };
+    hunt_clear();
+    track_cursor = null;
+    toggleSelected(id);
+    state.context = if (selection.items.len == 0) (if (spaceRoot()) |r| Context{ .panel = r } else .worksheet) else if (selection.items.len == 1) contextOfObject(selection.items[0]) else .selection;
+}
+
+/// Whether a drag from `at` should take what is there along: an
+/// unselected panel, line art, image or group (a track is selected by a
+/// click first: a drag in its text is the text's).
+fn dragTakes(at: geom.Point) ?layout.model.ObjectId {
+    const id = containerAt(at) orelse return null;
+    if (selectedAt(id) != null) return id;
+    if (state.model.group(id) != null) return id;
+    for (state.model.panels.items) |pnl| {
+        if (pnl.id == id) return id;
+        for (pnl.art.items) |x| if (x.id == id) return id;
+    }
+    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].images.items) |im| if (im.id == id) return id;
+    return null;
 }
 
 /// The selected panel, when the pointer went down on it: a drag then moves it.
