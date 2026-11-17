@@ -227,6 +227,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     }) })).step);
+    // The background grid's decades and strengths.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/gui/grid.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) })).step);
 
     // Optional OCCT bridge, from either
     //   -Docct=<prefix>   an OCCT 8.0.1 install built with scripts/build-occt.sh

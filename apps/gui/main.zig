@@ -24,6 +24,7 @@ const fontwin = @import("fontwin.zig");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const motd = @import("motd.zig");
+const bg_grid = @import("grid.zig");
 const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
 
@@ -2275,6 +2276,7 @@ var prefs_store: ?settings_file.Store = null;
 const Prefs = struct {
     units: layout.model.Units,
     show_construction: bool,
+    grid: bg_grid.Mode,
     hot_edges: bool,
     modes: [all_panes.len]ghost_pane.Mode,
     tools_height: f32,
@@ -2292,7 +2294,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var modes: [all_panes.len]ghost_pane.Mode = undefined;
     for (all_panes, &modes) |p, *m| m.* = p.mode;
-    return .{ .units = last_units, .show_construction = show_construction, .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -2306,6 +2308,9 @@ fn loadPrefs() void {
     };
     if (ps.get("canvas.units")) |v| if (v == .string) if (std.meta.stringToEnum(layout.model.Units, v.string)) |u| {
         last_units = u;
+    };
+    if (ps.get("view.grid")) |v| if (v == .string) if (std.meta.stringToEnum(bg_grid.Mode, v.string)) |g| {
+        grid_mode = g;
     };
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
@@ -2397,6 +2402,7 @@ fn savePrefsIfChanged() void {
     saved_prefs = now;
     ps.put("canvas.units", .{ .string = @tagName(now.units) }, .shared);
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
+    ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
     ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
     for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .local);
     ps.put("panes.tools_height", .{ .integer = @intFromFloat(@round(now.tools_height)) }, .local);
@@ -3299,6 +3305,16 @@ fn menu() ?dvui.App.Result {
             m.close();
         }
         // DVUI's interface font has no check mark; a bullet marks what is on.
+        // The grid: lines, dots or none.
+        for ([_]bg_grid.Mode{ .lines, .dots, .none }, [_][]const u8{ "Grid: lines", "Grid: dots", "Grid: none" }, 0..) |gm, label, gi| {
+            var lb: [48]u8 = undefined;
+            const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (grid_mode == gm) "•  " else "    ", label }) catch label;
+            if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = gi }) != null) {
+                grid_mode = gm;
+                m.close();
+            }
+        }
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
         if (dvui.menuItemLabel(@src(), if (show_construction) "•  Show text construction" else "    Show text construction", .{}, .{ .expand = .horizontal }) != null) {
             show_construction = !show_construction;
             m.close();
@@ -3612,6 +3628,10 @@ const Palette = struct {
     select: dvui.Color = .{ .r = 0x1f, .g = 0x6f, .b = 0xe0 },
     /// What fails a check: overflow, past an edge, ink in a margin.
     overflow: dvui.Color = .{ .r = 0xf3, .g = 0x46, .b = 0x00 },
+    /// The background grid's ink: a cool neutral, laid on at low opacity
+    /// (grid.zig); its major lines at `grid_major`, minor ones fading.
+    grid: dvui.Color = .{ .r = 0x3c, .g = 0x4a, .b = 0x5c },
+    grid_major: f32 = 0.26,
 };
 
 const light_palette: Palette = .{
@@ -3627,6 +3647,8 @@ const dark_palette: Palette = .{
     .titlebar = .{ .r = 0x30, .g = 0x30, .b = 0x33 },
     .ruler_ink = .{ .r = 0xc8, .g = 0xc6, .b = 0xc2 },
     .edge = .{ .r = 0x6a, .g = 0x68, .b = 0x64 },
+    .grid = .{ .r = 0xb8, .g = 0xc4, .b = 0xd4 },
+    .grid_major = 0.16,
 };
 
 var colors: Palette = light_palette;
@@ -3698,6 +3720,7 @@ fn canvas() void {
         // An open canvas: drafting surface everywhere, and its axes
         // through the origin.
         area.fill(.square, .{ .color = .{ .color = colors.paper } });
+        drawGrid(area);
         drawAxes(area);
     } else {
         // Work happens on the worksheet: the view's centre stays on the sheet.
@@ -3705,6 +3728,8 @@ fn canvas() void {
         state.view.cy = std.math.clamp(state.view.cy, 0, sheet.h);
         const sheet_rect = state.view.rect(area, sheet.box());
         sheet_rect.fill(.square, .{ .color = .{ .color = colors.paper } });
+        // The grid across the whole canvas, desk and sheet alike.
+        drawGrid(area);
         drawMargins(area, sheet);
         sheet_rect.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.edge } });
     }
@@ -6086,6 +6111,104 @@ fn spaceExtents() geom.Box {
 }
 
 /// The canvas's axes through its origin, faint, with a mark at the origin.
+/// View › Grid: graph paper behind the canvas (grid.zig).
+var grid_mode: bg_grid.Mode = .lines;
+
+/// One rectangle of the grid, device pixels, and its colour.
+const GridQuad = struct { r: dvui.Rect.Physical, col: dvui.Color.PMA };
+
+/// The background grid across `area`, under everything drawn on it: in the
+/// document's units, each line one device pixel wide on the pixel grid
+/// (or a dot at each crossing), all of it in a few batched draws.
+fn drawGrid(area: dvui.Rect.Physical) void {
+    if (grid_mode == .none or !(state.view.ppm > 0)) return;
+    const unit_mm = 1 / docUnits().perMm();
+    const px_per_unit = state.view.ppm * unit_mm;
+    const lo = if (grid_mode == .dots) bg_grid.dots_lo else bg_grid.fade_lo;
+    var buf: [4]bg_grid.Level = undefined;
+    const lv = bg_grid.levels(px_per_unit, lo, &buf);
+    if (lv.len == 0) return;
+    const a = dvui.currentWindow().arena();
+    var quads: std.ArrayList(GridQuad) = .empty;
+    // The visible span, document units.
+    const tl = state.view.toMm(area, .{ .x = area.x, .y = area.y });
+    const br = state.view.toMm(area, .{ .x = area.x + area.w, .y = area.y + area.h });
+    const x0 = tl.x / unit_mm;
+    const x1 = br.x / unit_mm;
+    const y0 = br.y / unit_mm;
+    const y1 = tl.y / unit_mm;
+    const t: f32 = @max(1, @round(dvui.windowNaturalScale()));
+    const Ctx = struct {
+        a: std.mem.Allocator,
+        quads: *std.ArrayList(GridQuad),
+        area: dvui.Rect.Physical,
+        unit_mm: f64,
+        t: f32,
+        vertical: bool,
+
+        fn col(s: f32) dvui.Color.PMA {
+            return .fromColor(colors.grid.opacity(colors.grid_major * s));
+        }
+
+        fn line(c: @This(), at: f64, s: f32) void {
+            const p = state.view.toPx(c.area, if (c.vertical) .{ .x = at * c.unit_mm, .y = 0 } else .{ .x = 0, .y = at * c.unit_mm });
+            // On the pixel grid: crisp at any pan.
+            const r: dvui.Rect.Physical = if (c.vertical)
+                .{ .x = @floor(p.x), .y = c.area.y, .w = c.t, .h = c.area.h }
+            else
+                .{ .x = c.area.x, .y = @floor(p.y), .w = c.area.w, .h = c.t };
+            c.quads.append(c.a, .{ .r = r, .col = col(s) }) catch {};
+        }
+    };
+    if (grid_mode == .lines) {
+        const base: Ctx = .{ .a = a, .quads = &quads, .area = area, .unit_mm = unit_mm, .t = t, .vertical = true };
+        bg_grid.lines(lv, x0, x1, base, Ctx.line);
+        var h = base;
+        h.vertical = false;
+        bg_grid.lines(lv, y0, y1, h, Ctx.line);
+    } else {
+        // Dots at the crossings, each at the strength of the coarsest
+        // decade both its lines are on.
+        const d: f32 = @max(2, @round(2 * dvui.windowNaturalScale()));
+        for (lv, 0..) |l, k| {
+            if (l.strength <= 0) continue;
+            const coarser = k + 1 < lv.len;
+            var i: i64 = @intFromFloat(@ceil(x0 / l.step));
+            while (@as(f64, @floatFromInt(i)) * l.step <= x1) : (i += 1) {
+                var j: i64 = @intFromFloat(@ceil(y0 / l.step));
+                while (@as(f64, @floatFromInt(j)) * l.step <= y1) : (j += 1) {
+                    if (coarser and @mod(i, 10) == 0 and @mod(j, 10) == 0) continue;
+                    const p = state.view.toPx(area, .{ .x = @as(f64, @floatFromInt(i)) * l.step * unit_mm, .y = @as(f64, @floatFromInt(j)) * l.step * unit_mm });
+                    // A dot is a few pixels where a line is a long run of them:
+                    // it needs more contrast to read.
+                    const dot: dvui.Color.PMA = .fromColor(colors.grid.opacity(@min(0.85, 3 * colors.grid_major * @sqrt(l.strength))));
+                    quads.append(a, .{ .r = .{ .x = @floor(p.x - d / 2), .y = @floor(p.y - d / 2), .w = d, .h = d }, .col = dot }) catch {};
+                }
+            }
+        }
+    }
+    // Vertex indices may be 16-bit: in batches.
+    const Index = dvui.Vertex.Index;
+    const batch = 12000;
+    const lifo = dvui.currentWindow().lifo();
+    var from: usize = 0;
+    while (from < quads.items.len) : (from += batch) {
+        const part = quads.items[from..@min(from + batch, quads.items.len)];
+        var b = dvui.Triangles.Builder.init(lifo, 4 * part.len, 6 * part.len) catch return;
+        defer b.deinit(lifo);
+        for (part, 0..) |q, k| {
+            const r = q.r;
+            b.appendVertex(.{ .pos = .{ .x = r.x, .y = r.y }, .col = q.col });
+            b.appendVertex(.{ .pos = .{ .x = r.x, .y = r.y + r.h }, .col = q.col });
+            b.appendVertex(.{ .pos = .{ .x = r.x + r.w, .y = r.y + r.h }, .col = q.col });
+            b.appendVertex(.{ .pos = .{ .x = r.x + r.w, .y = r.y }, .col = q.col });
+            const i: Index = @intCast(4 * k);
+            b.appendTriangles(&.{ i, i + 1, i + 2, i, i + 2, i + 3 });
+        }
+        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    }
+}
+
 fn drawAxes(area: dvui.Rect.Physical) void {
     const px = dvui.windowNaturalScale();
     const o = state.view.toPx(area, .{ .x = 0, .y = 0 });
