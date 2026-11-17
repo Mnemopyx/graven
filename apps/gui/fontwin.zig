@@ -10,6 +10,7 @@
 //! removed, the removal saying first what goes with the file.
 
 const std = @import("std");
+const display = @import("display.zig");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const fs = @import("graven_fontsearch");
@@ -518,7 +519,7 @@ fn styleIcon(id: usize, rec: ?usize, name: []const u8, visible: bool) void {
         .background = true,
         .border = .all(1),
         .color_border = .{ .color = if (sel) t.focus else t.color(.control, .border) },
-        .color_fill = .{ .color = if (rec != null) paper else t.color(.window, .fill) },
+        .color_fill = .{ .color = if (rec != null) display.fix(paper) else t.color(.window, .fill) },
         .margin = .{ .w = 2 },
         .gravity_y = 0.5,
         .label = .{ .text = name },
@@ -1328,7 +1329,7 @@ fn drawRow(a: Allocator, i: usize, k: usize, cap: f32) void {
     var nb: [128]u8 = undefined;
     const r = &records[i];
     dvui.labelNoFmt(@src(), std.fmt.bufPrint(&nb, "{s} {s}{s}", .{ r.family, r.style, if (isPinned(i)) "" else "  (selected)" }) catch r.family, .{}, .{ .id_extra = k, .margin = .{ .y = 6 } });
-    var box = dvui.box(@src(), .{}, .{ .id_extra = k, .expand = .horizontal, .min_size_content = .{ .h = cap * 2 }, .background = true, .color_fill = .{ .color = paper } });
+    var box = dvui.box(@src(), .{}, .{ .id_extra = k, .expand = .horizontal, .min_size_content = .{ .h = cap * 2 }, .background = true, .color_fill = .{ .color = display.fix(paper) } });
     defer box.deinit();
     const rect = box.data().contentRectScale().r;
     const place: Place = .{ .x = rect.x + 8, .baseline = rect.y + rect.h * 0.72, .cap = cap * box.data().contentRectScale().s };
@@ -1367,7 +1368,7 @@ fn drawOverlay(a: Allocator, shown: []const usize, width: f32) void {
     const cell_h: f32 = cap_lp * 2.1;
     const per_row: usize = @max(1, @as(usize, @intFromFloat(@floor((width - 24) / cell_w))));
     const rows = (n_chars + per_row - 1) / per_row;
-    var box = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .h = cell_h * @as(f32, @floatFromInt(rows)) }, .background = true, .color_fill = .{ .color = paper } });
+    var box = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .h = cell_h * @as(f32, @floatFromInt(rows)) }, .background = true, .color_fill = .{ .color = display.fix(paper) } });
     defer box.deinit();
     const rs = box.data().contentRectScale();
     const s = rs.s;

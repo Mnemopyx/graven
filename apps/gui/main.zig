@@ -24,6 +24,7 @@ const fontwin = @import("fontwin.zig");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const motd = @import("motd.zig");
+const display = @import("display.zig");
 const bg_grid = @import("grid.zig");
 const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
@@ -445,6 +446,8 @@ fn init(win: *dvui.Window) !void {
     }
     state.font_choice = defaultFont(state.fonts);
     loadPrefs();
+    // The display correction the config (or GRAVEN_DISPLAY) sets.
+    applyDesktop(win, desk);
     // This version's news for the start screen: the cache at once, a
     // fetch (at most daily) on a thread of its own.
     motd.start(state.gpa, dvui.io, layout.version);
@@ -652,7 +655,112 @@ fn startPaneOptions(id: usize, r: dvui.Rect) dvui.Options {
     return overlayOptions(id).override(.{ .rect = r, .padding = .all(14) });
 }
 
-/// M, I, O and 1 to 9, while no prompt is open over the start screen.
+/// View › Display correction… (or D on the start screen) is open.
+var display_window = false;
+
+/// The display correction window: midtones (gamma) and the brightest the
+/// interface gets (white), live, with a gauge to judge them by. Esc or
+/// Close closes it; Reset puts both back to 1.
+fn displayWindow() void {
+    if (!display_window) return;
+    const win = dvui.currentWindow();
+    const ws = win.rect_pixels;
+    const ns = dvui.windowNaturalScale();
+    const w: f32 = 440;
+    const h: f32 = 340;
+    var r: dvui.Rect = .{ .x = (ws.w / ns - w) / 2, .y = (ws.h / ns - h) / 2, .w = w, .h = h };
+    // Opaque: the gauge is judged against nothing showing through.
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(14).override(.{ .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } }));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(14) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), "Display correction", .{}, .{ .font = dvui.Font.theme(.heading) });
+    const ink = dvui.themeGet().color(.window, .text);
+    {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 4, .h = 8 } });
+        tl.addText("For a screen that shows Graven too bright or washed out. Midtones above 1 darken greys and deepen colour; Brightest lowers white. Kept for this machine; exports are not affected.", .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.75) } });
+        tl.deinit();
+    }
+    var close = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .key or e.handled) continue;
+        const k = e.evt.key;
+        if (k.action != .down or k.code != .escape) continue;
+        close = true;
+        e.handle(@src(), fw.data());
+    }
+    var dc = display.get();
+    const before = dc;
+    displayGauge();
+    displaySlider("Midtones", &dc.gamma, display.gamma_min, display.gamma_max, 1);
+    displaySlider("Brightest", &dc.white, display.white_min, display.white_max, 2);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Reset", .{}, .{})) dc = .{};
+        if (dvui.button(@src(), "Close", .{}, .{})) close = true;
+    }
+    if (!std.meta.eql(dc, before)) {
+        display.set(dc);
+        applyDesktop(win, desk);
+        dvui.refresh(null, @src(), null);
+    }
+    if (close) {
+        display_window = false;
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+/// A slider from `lo` to `hi` with its value beside it.
+fn displaySlider(name: []const u8, v: *f32, lo: f32, hi: f32, id: usize) void {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .y = 4 } });
+    defer row.deinit();
+    dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = 80 }, .gravity_y = 0.5 });
+    var frac = (v.* - lo) / (hi - lo);
+    var vb: [16]u8 = undefined;
+    const shown = std.fmt.bufPrint(&vb, "{d:.2}", .{v.*}) catch "";
+    dvui.labelNoFmt(@src(), shown, .{}, .{ .gravity_x = 1, .gravity_y = 0.5, .font = dvui.Font.theme(.mono), .min_size_content = .{ .w = 44 } });
+    if (dvui.slider(@src(), .{ .fraction = &frac }, .{ .expand = .horizontal, .gravity_y = 0.5 })) {
+        // In steps of 0.05.
+        v.* = @round((lo + std.math.clamp(frac, 0, 1) * (hi - lo)) * 20) / 20;
+    }
+}
+
+/// What to judge the correction by: a ramp of greys from black to white
+/// in tenths (each step should stand apart from its neighbours), and a
+/// 50 % patch of fine black and white lines around a solid grey of the
+/// same light on a standard (sRGB) screen. With the correction right for
+/// the screen, the grey all but vanishes into the lines when seen from a
+/// little way off.
+fn displayGauge() void {
+    var g = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .h = 96 }, .margin = .{ .y = 4, .h = 8 } });
+    defer g.deinit();
+    const r = g.data().contentRectScale().r;
+    const ramp_h = @round(r.h * 0.38);
+    const steps = 11;
+    const sw = r.w / steps;
+    for (0..steps) |i| {
+        const v: u8 = @intFromFloat(@round(@as(f32, @floatFromInt(i)) * 25.5));
+        const cell: dvui.Rect.Physical = .{ .x = @round(r.x + @as(f32, @floatFromInt(i)) * sw), .y = r.y, .w = @round(sw) + 1, .h = ramp_h };
+        cell.fill(.square, .{ .color = .{ .color = display.fix(dvui.Color{ .r = v, .g = v, .b = v }) } });
+    }
+    // The lines: black and white, one device pixel each, so their light
+    // averages to half of white's.
+    const top = @round(r.y + ramp_h + 10);
+    const lines: dvui.Rect.Physical = .{ .x = r.x, .y = top, .w = r.w, .h = @round(r.y + r.h - top) };
+    const white = display.fix(dvui.Color{ .r = 255, .g = 255, .b = 255 });
+    lines.fill(.square, .{ .color = .{ .color = .black } });
+    var y = lines.y;
+    while (y < lines.y + lines.h) : (y += 2) {
+        (dvui.Rect.Physical{ .x = lines.x, .y = y, .w = lines.w, .h = 1 }).fill(.square, .{ .color = .{ .color = white } });
+    }
+    // Half of white's light, in sRGB: 188 of 255.
+    const grey = display.fix(dvui.Color{ .r = 188, .g = 188, .b = 188 });
+    const inner: dvui.Rect.Physical = .{ .x = @round(lines.x + lines.w / 3), .y = lines.y + 8, .w = @round(lines.w / 3), .h = @max(1, lines.h - 16) };
+    inner.fill(.square, .{ .color = .{ .color = grey } });
+}
+
+/// M, I, O, D and 1 to 9, while no prompt is open over the start screen.
 fn startKeys(wd: *dvui.WidgetData) void {
     if (filePromptOpen() or recovery != null) return;
     for (dvui.events()) |*e| {
@@ -663,6 +771,7 @@ fn startKeys(wd: *dvui.WidgetData) void {
             .m => createCanvas(.mm),
             .i => createCanvas(.inch),
             .o => proceed(.open),
+            .d => display_window = true,
             .one, .two, .three, .four, .five, .six, .seven, .eight, .nine => openRecent(@intFromEnum(k.code) - @intFromEnum(dvui.enums.Key.one)),
             else => continue,
         }
@@ -771,6 +880,7 @@ fn startChoices() void {
     if (startRow(.file_plus, "New canvas, millimetres", "", "M", 1, false)) createCanvas(.mm);
     if (startRow(.file_plus, "New canvas, inches", "", "I", 2, false)) createCanvas(.inch);
     if (startRow(.folder_open, "Open file…", "", "O", 3, false)) proceed(.open);
+    if (startRow(.monitor, "Display correction…", "If Graven looks too bright or washed out", "D", 4, false)) display_window = true;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 14, .h = 6 } });
         defer row.deinit();
@@ -1453,6 +1563,7 @@ fn frame() !dvui.App.Result {
     autosaveTick(root.data().id);
     // The fonts window, a window of its own, while open.
     fontwin.window(fontHost(), state.gpa);
+    displayWindow();
 
     if (titleBar()) |r| return r;
 
@@ -2277,6 +2388,7 @@ const Prefs = struct {
     units: layout.model.Units,
     show_construction: bool,
     grid: bg_grid.Mode,
+    display: display.Correction,
     hot_edges: bool,
     modes: [all_panes.len]ghost_pane.Mode,
     tools_height: f32,
@@ -2294,11 +2406,19 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var modes: [all_panes.len]ghost_pane.Mode = undefined;
     for (all_panes, &modes) |p, *m| m.* = p.mode;
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .display = display.get(), .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
 }
 
 /// Reads the config files and applies what they set; what they leave out
 /// keeps its default.
+fn tomlFloat(v: settings_file.Value) ?f32 {
+    return switch (v) {
+        .float => |f| @floatCast(f),
+        .integer => |i| @floatFromInt(i),
+        else => null,
+    };
+}
+
 fn loadPrefs() void {
     var ps = settings_file.load(state.gpa, dvui.io);
     loadLocale(&ps);
@@ -2312,6 +2432,19 @@ fn loadPrefs() void {
     if (ps.get("view.grid")) |v| if (v == .string) if (std.meta.stringToEnum(bg_grid.Mode, v.string)) |g| {
         grid_mode = g;
     };
+    {
+        var dc: display.Correction = .{};
+        if (ps.get("display.gamma")) |v| if (tomlFloat(v)) |f| {
+            dc.gamma = f;
+        };
+        if (ps.get("display.white")) |v| if (tomlFloat(v)) |f| {
+            dc.white = f;
+        };
+        if (std.c.getenv("GRAVEN_DISPLAY")) |e| if (display.Correction.parse(std.mem.span(e))) |c| {
+            dc = c;
+        };
+        display.set(dc);
+    }
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
     };
@@ -2393,6 +2526,10 @@ fn loadLocale(ps: *const settings_file.Store) void {
 
 /// Writes the preferences back when one has changed since they were last
 /// read or written.
+fn roundTo(v: f32, k: f64) f64 {
+    return @round(@as(f64, v) * k) / k;
+}
+
 fn savePrefsIfChanged() void {
     const ps = &(prefs_store orelse return);
     const now = currentPrefs();
@@ -2403,6 +2540,9 @@ fn savePrefsIfChanged() void {
     ps.put("canvas.units", .{ .string = @tagName(now.units) }, .shared);
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
     ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
+    // The screen's correction belongs to this machine.
+    ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
+    ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
     ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
     for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .local);
     ps.put("panes.tools_height", .{ .integer = @intFromFloat(@round(now.tools_height)) }, .local);
@@ -3314,6 +3454,10 @@ fn menu() ?dvui.App.Result {
                 m.close();
             }
         }
+        if (dvui.menuItemLabel(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
+            display_window = true;
+            m.close();
+        }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
         if (dvui.menuItemLabel(@src(), if (show_construction) "•  Show text construction" else "    Show text construction", .{}, .{ .expand = .horizontal }) != null) {
             show_construction = !show_construction;
@@ -3663,8 +3807,11 @@ fn applyDesktop(win: *dvui.Window, s: desktop.Settings) void {
     const dark = s.scheme == .dark;
     var theme = if (dark) dvui.Theme.builtin.adwaita_dark else dvui.Theme.builtin.adwaita_light;
     if (s.accent) |a| theme.focus = .{ .r = @intFromFloat(a[0] * 255), .g = @intFromFloat(a[1] * 255), .b = @intFromFloat(a[2] * 255) };
+    // Every colour through the display correction (display.zig).
+    display.fixAll(dvui.Color, &theme);
     win.themeSet(theme);
     colors = if (dark) dark_palette else light_palette;
+    display.fixAll(dvui.Color, &colors);
 }
 
 var main_window: ?*dvui.Window = null;
@@ -4609,7 +4756,7 @@ const Paint = union(enum) {
     fn at(p: Paint, q: geom.Point) dvui.Color.PMA {
         const c: dvui.Color = switch (p) {
             .flat => |c| c,
-            .art => |f| if (f.at(q)) |ac| .{ .r = ac.r, .g = ac.g, .b = ac.b, .a = ac.a } else .transparent,
+            .art => |f| if (f.at(q)) |ac| display.fix(dvui.Color{ .r = ac.r, .g = ac.g, .b = ac.b, .a = ac.a }) else .transparent,
         };
         return .fromColor(c.opacity(dvui.currentWindow().alpha));
     }
@@ -5575,7 +5722,8 @@ fn drawImages(area: dvui.Rect.Physical, space: usize, layer: layout.model.Object
         // replayed after the current alpha is back to 1.
         const a = dvui.currentWindow().alpha;
         dvui.alphaSet(1);
-        dvui.renderTexture(tex, .{ .r = r, .s = px }, .{ .colormod = (dvui.Color{ .r = 255, .g = 255, .b = 255 }).opacity(a) }) catch {};
+        // The display's white level dims it; its gamma cannot reach pixels.
+        dvui.renderTexture(tex, .{ .r = r, .s = px }, .{ .colormod = display.fix(dvui.Color{ .r = 255, .g = 255, .b = 255 }).opacity(a) }) catch {};
         dvui.alphaSet(a);
         const sel = switch (state.context) {
             .image => |c| c.space == space and c.index == ii,

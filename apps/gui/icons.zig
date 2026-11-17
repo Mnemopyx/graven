@@ -39,6 +39,7 @@ pub const Icon = enum {
     file,
     clock_counter_clockwise,
     megaphone,
+    monitor,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {

@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
+const display = @import("display.zig");
 pub const dwell = @import("dwell.zig");
 
 pub const Edge = enum { left, right, top, bottom };
@@ -150,8 +151,30 @@ const Levels = struct { text: f32, muted: f32, fill: f32, control: f32, hover: f
 const light: Levels = .{ .text = 0.30, .muted = 0.45, .fill = 0.97, .control = 0.91, .hover = 0.87, .press = 0.82, .border = 0.72, .focus = 0.55, .highlight = 0.86 };
 const dark: Levels = .{ .text = 0.90, .muted = 0.75, .fill = 0.24, .control = 0.32, .hover = 0.37, .press = 0.42, .border = 0.48, .focus = 0.72, .highlight = 0.40 };
 
-/// `base` with its colours drawn from the pane's hue.
+/// `base` with its colours drawn from the pane's hue, through the display
+/// correction.
 pub fn theme(look: Look, base: dvui.Theme) dvui.Theme {
+    var t = rawTheme(look, base);
+    fixDerived(&t);
+    return t;
+}
+
+/// The colours `rawTheme` sets, through the display correction (the rest
+/// came from `base`, already corrected).
+fn fixDerived(t: *dvui.Theme) void {
+    t.text = display.fix(t.text);
+    t.text_hover = display.fixOpt(t.text_hover);
+    t.text_press = display.fixOpt(t.text_press);
+    t.fill = display.fix(t.fill);
+    t.border = display.fix(t.border);
+    t.focus = display.fix(t.focus);
+    t.text_select = display.fixOpt(t.text_select);
+    display.fixAll(dvui.Color, &t.control);
+    display.fixAll(dvui.Color, &t.window);
+    display.fixAll(dvui.Color, &t.highlight);
+}
+
+fn rawTheme(look: Look, base: dvui.Theme) dvui.Theme {
     const lv = if (base.dark) dark else light;
     const h = look.hue;
     var t = base;
@@ -293,10 +316,13 @@ fn atPresence(c: dvui.Color, target: f32, b: dvui.Color) dvui.Color {
 
 /// The theme of a ghost's content in style `st`.
 pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
-    var t = theme(look, base);
-    if (st == .uniform) return t;
+    var t = rawTheme(look, base);
+    if (st == .uniform) {
+        fixDerived(&t);
+        return t;
+    }
     const h = look.hue;
-    const gf = ghostFill(look);
+    const gf = rawGhostFill(look);
     const b = over(gf, @as(f32, @floatFromInt(gf.a)) / 255, backdrop);
     const pr = presence;
     // Text roles keep their colours.
@@ -331,6 +357,7 @@ pub fn ghostTheme(look: Look, base: dvui.Theme, st: Style) dvui.Theme {
         .text = t.text,
         .border = border,
     };
+    fixDerived(&t);
     return t;
 }
 
@@ -352,6 +379,10 @@ fn paneBase(p: *const Pane, base: dvui.Theme) dvui.Theme {
 /// An inactive ghost's background: a tint of its hue at the opacity that
 /// sets it `ghost_presence` from the paper.
 pub fn ghostFill(look: Look) dvui.Color {
+    return display.fix(rawGhostFill(look));
+}
+
+fn rawGhostFill(look: Look) dvui.Color {
     const l: f32 = 0.6;
     return atPresence(oklch(l, 0.9 * maxChroma(l, look.hue), look.hue, 1), look.ghost_presence, backdrop);
 }
@@ -444,7 +475,7 @@ pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
         .rect = r,
         .id_extra = id_extra,
         .background = true,
-        .color_fill = .{ .color = oklch(body_l, chroma(body_l, p.look.hue, 0.09, 0.9), p.look.hue, 1) },
+        .color_fill = .{ .color = display.fix(oklch(body_l, chroma(body_l, p.look.hue, 0.09, 0.9), p.look.hue, 1)) },
         .padding = .all(1),
     });
     defer tb.deinit();
@@ -655,8 +686,8 @@ fn haloContent(fw: *dvui.FloatingWindowWidget, start: usize, start_after: usize,
         cw.renderCommands(after) catch {};
         _ = dvui.renderTarget(prev);
         content = dvui.textureFromTarget(t) catch return;
-        outer = silhouette(content, r, oklch(0.985, chroma(0.985, hue, 0.012, 0.9), hue, 1));
-        inner = silhouette(content, r, oklch(0.30, chroma(0.30, hue, 0.05, 0.9), hue, 1));
+        outer = silhouette(content, r, display.fix(oklch(0.985, chroma(0.985, hue, 0.012, 0.9), hue, 1)));
+        inner = silhouette(content, r, display.fix(oklch(0.30, chroma(0.30, hue, 0.05, 0.9), hue, 1)));
     }
     // The replayed commands give way to the textures, queued in their
     // place, so the pane's background (queued before them) stays under.

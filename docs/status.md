@@ -66,6 +66,7 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
 - **Constraint editor:** the Constrain tool, glyphs and an origin picker.
 - **Background reflow:** changes that spread across pages reflow on a worker thread, in batches.
 - **Settings:** shared and local TOML config, and locale detection for language and measurement system.
+- **Display correction** (2026-11-17; `display.zig`): for screens that show Graven too bright or washed out on desktops with no colour management (COSMIC; SDL3 sets no gamma ramp). Per channel on the sRGB value, `white · v^gamma`, applied to colours (theme, palette, pane themes, tab strips, document fills), not to the finished frame: DVUI's loop has no pass after drawing. Placed images are only dimmed by `white`. Exports are untouched. View › Display correction… or D on the start screen: Midtones and Brightest sliders, live, over a grey ramp and a 50 % line gauge. Local config `display.gamma`, `display.white`; `GRAVEN_DISPLAY=gamma,white` for a run.
 
 ### Output and command line
 
