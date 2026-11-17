@@ -35,6 +35,10 @@ pub const Icon = enum {
     download_simple,
     caret_right,
     folder_open,
+    file_plus,
+    file,
+    clock_counter_clockwise,
+    megaphone,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {
@@ -136,6 +140,20 @@ pub fn button(src: std.builtin.SourceLocation, comptime i: Icon, tip: []const u8
     const tip_id = (@as(usize, src.line) *% 1_000_003) +% (@as(usize, src.column) *% 7919) +% bo.id_extra;
     dvui.tooltip(@src(), .{ .active_rect = rect }, "{s}", .{tip}, .{ .id_extra = tip_id });
     return clicked;
+}
+
+/// Icon `i` as a widget of its own, `size` logical pixels square: for a
+/// row that is a button as a whole (an icon beside its label).
+pub fn image(src: std.builtin.SourceLocation, comptime i: Icon, size: f32, id_extra: usize, tone: ?dvui.Color) void {
+    const t = dvui.themeGet();
+    const line_color = t.color(.control, .text);
+    const tone_color = tone orelse t.focus.opacity(0.35);
+    var ov = dvui.overlay(src, .{ .id_extra = id_extra, .gravity_y = 0.5, .min_size_content = .{ .w = size, .h = size }, .max_size_content = .{ .w = size, .h = size } });
+    defer ov.deinit();
+    const l = layers(i) orelse return;
+    const icon_opts: dvui.Options = .{ .expand = .both, .role = .none };
+    dvui.icon(@src(), "", l.tone, .{ .fill_color = .{ .color = tone_color }, .stroke_color = .{ .color = tone_color } }, icon_opts);
+    dvui.icon(@src(), "", l.line, .{ .fill_color = .{ .color = line_color }, .stroke_color = .{ .color = line_color } }, icon_opts.override(.{ .id_extra = 1 }));
 }
 
 /// Draws icon `i` into `r` (physical pixels), its lines in `line` and

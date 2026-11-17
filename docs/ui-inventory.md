@@ -4,9 +4,18 @@ An inventory of the editor's surfaces, written as the starting point for UI desi
 
 The editor is `apps/gui` (DVUI on SDL3, about 15,500 lines; `main.zig` is most of it).
 
+## Start screen (since 2026-11-17)
+
+What the app opens on, before there is a document: none of the canvas's interface (no rulers, tree, tools, properties or bottom bar; the menus stay in the title bar).
+
+- **Splash**, centred on the desk: Graven's mark (a keycap with G and √x on it), the name, a line on what it does, the version, the licence ("not yet chosen": there is no licence file).
+- **News** pane, left: the message of the day for this version (`motd/<version>.md` in the repository, fetched at most daily on a thread of its own and cached; a built-in welcome until then), a note at the foot on where it came from.
+- **Start** pane, right: New canvas, millimetres (M); New canvas, inches (I); Open file… (O); then Recent: up to nine files opened or saved, latest first, each with its folder (shortened from the left) and its key (1 to 9); one no longer there is faint, and dropped when chosen.
+- Choosing a canvas, opening a file, or a `GRAVEN_SAMPLE` launches the main interface; File › New canvas (after asking about unsaved changes) comes back here.
+
 ## Window
 
-- **Title bar:** drawn by the app (`GRAVEN_NATIVE_FRAME` gives the system's). It shows the file name, a • when unsaved, and the context (Canvas, mm; New canvas).
+- **Title bar:** drawn by the app (`GRAVEN_NATIVE_FRAME` gives the system's). It shows the file name, a • when unsaved, and the context (Canvas, mm); on the start screen, Graven — Start.
 - **Menus:** four, in the title bar.
   - **File:** New canvas… (Ctrl+N), Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import text…, Place image…, Export SVG…, Add sample: PC keyboard, Add sample: HP-15C keypad, Quit.
   - **Edit:** Undo (Ctrl+Z), Redo (Ctrl+Shift+Z).
@@ -48,7 +57,6 @@ The canvas has sub-modes entered from the properties pane, each with its own way
   - **Results** below on the left, as a tree: one line per family, with its style icons (Regular, Bold, Italic, Bold Italic: the letter a drawn in that face, empty where the family has none), each slant's pair followed by its weights in small boxes (VF for a variable font), and how many faces in how many files, whose. The italic groups line up in a column; a family too wide for the row puts its italic group on a line under. A click on an icon or weight box selects that face; a click elsewhere on the line opens or closes the family. An open family shows one line per file: pin, the style icon and weight box of each face it holds, the file name, what it is (whose, variable ranges or collection, serif or sans, licence, embedding) and, for a user font, Remove. Faces the search left out are faint.
   - **Compare** beside the results, **Style faces** to its right (since 2026-11-16: a style's text, italic, bold, bold italic and math faces, each set from the selected font or cleared; its family's italic and bolds in one click; fallbacks added and removed; the base it inherits from named). The pane redraws only on the next event after a change (seen driving it under Xvfb).
   - The top bar has the status, Install (font files or folders as user fonts), Rescan and Close. Remove first lists every face and weight the file takes with it and the document's styles that use them. Install and Remove prompts sit inside the window.
-- **New canvas prompt:** in the canvas, for units.
 - **Unsaved changes:** Save, Don't save, Cancel.
 - **Recovered work:** Keep them, Discard them, Not now.
 - **A file changed by another session:** Load theirs, Overwrite with mine, Save mine as…
@@ -93,6 +101,9 @@ These are observations to start the discussion from, not decisions.
 
 - On-canvas equation editing has no visible mode marker but its caret and the status line; a click elsewhere leaves it.
 - Arrow keys on a head nudge it, while elsewhere in the equation they move the caret: the same keys, two meanings, by where the caret is.
+
+- The start screen's choices are not reachable by Tab or arrows yet, only by pointer and their single keys; and Mils, which the old new-canvas prompt offered, is no longer offered for a new canvas.
+- The start screen's menus (Edit, Text, View) offer commands that need a document.
 
 ## Things to decide in the UI discussion
 

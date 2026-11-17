@@ -2,9 +2,11 @@
 
 Where each line of work stood at the end of the session that built math mode, the math font packages, drawn arrows, the MSDF text display and the 3MF export. Each thread names its next step. The blueprint has the full reasoning; `docs/status.md` has the inventory.
 
-## 1. UI design (next session)
+## 1. UI design (in progress)
 
-The GUI is inconsistent: no principles have been applied across it. [docs/ui-inventory.md](ui-inventory.md) lists its surfaces, the inconsistencies seen, and the questions to settle. Start there.
+Working through the UI in the order of the user's workflow. Built 2026-11-17: the start screen (splash, News pane with a per-version message of the day, Start pane with new canvas mm/in, Open, recent files). Open: the licence to name on the splash; the message fetch through an HTTP proxy (stalls in this cloud environment, see status); keyboard focus through the start screen's choices. Next in the workflow: what the new canvas shows first.
+
+Before that work began, the GUI was inconsistent: no principles have been applied across it. [docs/ui-inventory.md](ui-inventory.md) lists its surfaces, the inconsistencies seen, and the questions to settle. Start there.
 
 ## 2. Engine v2: a glyphic styling and positioning engine (decided, not started)
 

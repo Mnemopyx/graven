@@ -23,6 +23,7 @@ const locale = @import("locale.zig");
 const fontwin = @import("fontwin.zig");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
+const motd = @import("motd.zig");
 const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
 
@@ -443,6 +444,9 @@ fn init(win: *dvui.Window) !void {
     }
     state.font_choice = defaultFont(state.fonts);
     loadPrefs();
+    // This version's news for the start screen: the cache at once, a
+    // fetch (at most daily) on a thread of its own.
+    motd.start(state.gpa, dvui.io, layout.version);
 }
 
 /// Asking for a new canvas's units, before anything is drawn.
@@ -552,38 +556,244 @@ fn createCanvas(units: layout.model.Units) void {
     state.view.fit = canvas_view;
 }
 
-/// The new-canvas prompt, centred on the canvas: its units, then Create
-/// (or Enter).
-fn newCanvasPrompt() void {
-    const c = canvas_rect;
-    if (c.w <= 0 or c.h <= 0) return;
-    const w: f32 = 340;
-    const h: f32 = 175;
-    var r: dvui.Rect = .{ .x = c.x + (c.w - w) / 2, .y = c.y + (c.h - h) / 2, .w = w, .h = h };
-    var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(9));
-    defer fw.deinit();
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
-    defer body.deinit();
-    dvui.labelNoFmt(@src(), "New canvas", .{}, .{ .font = dvui.Font.theme(.heading) });
-    dvui.labelNoFmt(@src(), "An open drafting space. Its units come first.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .y = 2, .h = 8 } });
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer row.deinit();
-        propName("Units");
-        const names = [_][]const u8{ "Millimetres", "Inches", "Mils" };
-        var choice: usize = @intFromEnum(last_units);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) last_units = @enumFromInt(choice);
+// The start screen ---------------------------------------------------------
+//
+// Before there is a document, none of the canvas's interface shows: the
+// window's middle is a splash (Graven's mark, name, version, licence), with
+// two panes over it. On the left, the message of the day (news for this
+// version, fetched and cached: motd.zig); on the right, what to start
+// with: a new canvas in millimetres or in inches, Open file…, and the
+// files opened or saved lately. Single keys: M, I, O, and 1 to 9 for the
+// recent files. Choosing a canvas launches the main interface.
+
+const start_pane_width = 300;
+
+/// What the splash says the licence is (no licence file yet).
+const licence_text = "Licence: not yet chosen";
+
+/// Files opened or saved lately, the latest first (absolute paths), kept
+/// in the local config as `files.recent`.
+var recent_files: std.ArrayList([]u8) = .empty;
+const recent_max = 9;
+
+fn loadRecent(ps: *const settings_file.Store) void {
+    const v = ps.get("files.recent") orelse return;
+    if (v != .array) return;
+    for (v.array) |x| {
+        if (x != .string or recent_files.items.len >= recent_max) continue;
+        recent_files.append(state.gpa, state.gpa.dupe(u8, x.string) catch continue) catch {};
     }
-    var enter = false;
+}
+
+/// Puts `path` first in the recent files, and writes them out.
+fn noteRecent(path: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const z = state.gpa.dupeSentinel(u8, path, 0) catch return;
+    defer state.gpa.free(z);
+    const abs: []const u8 = if (std.c.realpath(z.ptr, &buf)) |r| std.mem.span(@as([*:0]u8, @ptrCast(r))) else path;
+    var k: usize = 0;
+    while (k < recent_files.items.len) {
+        if (std.mem.eql(u8, recent_files.items[k], abs)) {
+            state.gpa.free(recent_files.orderedRemove(k));
+        } else k += 1;
+    }
+    recent_files.insert(state.gpa, 0, state.gpa.dupe(u8, abs) catch return) catch return;
+    while (recent_files.items.len > recent_max) state.gpa.free(recent_files.pop().?);
+    const ps = &(prefs_store orelse return);
+    const a = dvui.currentWindow().arena();
+    const vals = a.alloc(settings_file.Value, recent_files.items.len) catch return;
+    for (recent_files.items, vals) |f, *v| v.* = .{ .string = f };
+    ps.put("files.recent", .{ .array = vals }, .local);
+    if (ps.save(dvui.io)) |msg| state.status = msg;
+}
+
+/// Opens recent file `k`; one no longer there is dropped from the list.
+fn openRecent(k: usize) void {
+    if (k >= recent_files.items.len) return;
+    const path = recent_files.items[k];
+    std.Io.Dir.cwd().access(dvui.io, path, .{}) catch {
+        state.status = "That file is no longer there: it is taken off the list. ";
+        state.gpa.free(recent_files.orderedRemove(k));
+        return;
+    };
+    const copy = dvui.currentWindow().arena().dupe(u8, path) catch return;
+    openDocument(copy);
+}
+
+fn startScreen() void {
+    var area = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.desk } });
+    defer area.deinit();
+    const ns = dvui.windowNaturalScale();
+    const ar = area.data().contentRectScale().r;
+    // Prompts (Open) centre on it.
+    canvas_rect = .{ .x = ar.x / ns, .y = ar.y / ns, .w = ar.w / ns, .h = ar.h / ns };
+    if (motd.poll()) dvui.refresh(null, @src(), null);
+    // While the news is being fetched, look again now and then: nothing
+    // else wakes an idle window.
+    if (motd.busy() and dvui.timerDoneOrNone(area.data().id)) dvui.timer(area.data().id, 300_000);
+    startKeys(area.data());
+    splash();
+    const g: f32 = 16;
+    const h = @max(120, ar.h / ns - 2 * g);
+    {
+        var left = dvui.box(@src(), .{ .dir = .vertical }, startPaneOptions(1, .{ .x = g, .y = g, .w = start_pane_width, .h = h }));
+        defer left.deinit();
+        motdPane();
+    }
+    {
+        var right = dvui.box(@src(), .{ .dir = .vertical }, startPaneOptions(2, .{ .x = @max(g, ar.w / ns - start_pane_width - g), .y = g, .w = start_pane_width, .h = h }));
+        defer right.deinit();
+        startChoices();
+    }
+}
+
+fn startPaneOptions(id: usize, r: dvui.Rect) dvui.Options {
+    return overlayOptions(id).override(.{ .rect = r, .padding = .all(14) });
+}
+
+/// M, I, O and 1 to 9, while no prompt is open over the start screen.
+fn startKeys(wd: *dvui.WidgetData) void {
+    if (filePromptOpen() or recovery != null) return;
     for (dvui.events()) |*e| {
         if (e.evt != .key or e.handled) continue;
         const k = e.evt.key;
-        if (k.action == .down and (k.code == .enter or k.code == .kp_enter)) {
-            e.handle(@src(), fw.data());
-            enter = true;
+        if (k.action != .down or k.mod.control() or k.mod.alt() or k.mod.command()) continue;
+        switch (k.code) {
+            .m => createCanvas(.mm),
+            .i => createCanvas(.inch),
+            .o => proceed(.open),
+            .one, .two, .three, .four, .five, .six, .seven, .eight, .nine => openRecent(@intFromEnum(k.code) - @intFromEnum(dvui.enums.Key.one)),
+            else => continue,
+        }
+        e.handle(@src(), wd);
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+/// Graven's mark (a keycap with a legend on it), its name, version and
+/// licence, centred.
+fn splash() void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .gravity_y = 0.42 });
+    defer col.deinit();
+    {
+        const size: f32 = 150;
+        var mark = dvui.box(@src(), .{}, .{ .gravity_x = 0.5, .min_size_content = .{ .w = size, .h = size }, .margin = .{ .h = 18 } });
+        defer mark.deinit();
+        const r = mark.data().contentRectScale().r;
+        const ns = dvui.windowNaturalScale();
+        const ink = dvui.themeGet().color(.window, .text);
+        // The key: its body, and its face a little up from the skirt.
+        r.fill(.all(26 * ns), .{ .color = .{ .color = ink.opacity(0.14) } });
+        const inset = 14 * ns;
+        const face: dvui.Rect.Physical = .{ .x = r.x + inset, .y = r.y + inset * 0.6, .w = r.w - 2 * inset, .h = r.h - 2.2 * inset };
+        face.fill(.all(18 * ns), .{ .color = .{ .color = colors.desk } });
+        face.stroke(.all(18 * ns), .{ .thickness = 1.5 * ns, .color = .{ .color = ink.opacity(0.35) } });
+        // Its legends: G, and √x set small below, as on a calculator key.
+        var ov = dvui.overlay(@src(), .{ .expand = .both });
+        defer ov.deinit();
+        dvui.labelNoFmt(@src(), "G", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.36, .font = dvui.Font.theme(.title).larger(30) });
+        dvui.labelNoFmt(@src(), "√x", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.8, .font = dvui.Font.theme(.body).larger(2), .color_text = .{ .color = ink.opacity(0.6) } });
+    }
+    dvui.labelNoFmt(@src(), "Graven", .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.title).larger(14) });
+    dvui.labelNoFmt(@src(), "Legends for control panels and keycaps, as exact geometry", .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 10 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) } });
+    dvui.label(@src(), "Version {s}", .{layout.version}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-1) });
+    dvui.labelNoFmt(@src(), licence_text, .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) } });
+}
+
+/// The message of the day: a `# ` line a heading, paragraphs between
+/// blank lines.
+fn motdPane() void {
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .h = 8 } });
+        defer row.deinit();
+        icons.image(@src(), .megaphone, 22, 0, null);
+        dvui.labelNoFmt(@src(), "News", .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.heading), .padding = .{ .x = 8 } });
+    }
+    {
+        var scroll = dvui.scrollArea(@src(), .{ .horizontal = .none }, .{ .expand = .both });
+        defer scroll.deinit();
+        var it = std.mem.splitSequence(u8, motd.text(), "\n\n");
+        var k: usize = 0;
+        while (it.next()) |para_raw| : (k += 1) {
+            const para = std.mem.trim(u8, para_raw, " \n\r");
+            if (para.len == 0) continue;
+            const is_heading = std.mem.startsWith(u8, para, "# ");
+            const body = if (is_heading) para[2..] else para;
+            var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = k, .expand = .horizontal, .background = false, .padding = .{ .h = 8 } });
+            // Line breaks inside a paragraph are spaces.
+            var lines = std.mem.splitScalar(u8, body, '\n');
+            var first = true;
+            while (lines.next()) |line| {
+                if (!first) tl.addText(" ", .{});
+                first = false;
+                tl.addText(line, .{ .font = if (is_heading) dvui.Font.theme(.heading).larger(-1) else dvui.Font.theme(.body) });
+            }
+            tl.deinit();
         }
     }
-    if (dvui.button(@src(), "Create", .{}, .{ .gravity_x = 1, .margin = .{ .y = 10 } }) or enter) createCanvas(last_units);
+    const note = switch (motd.from()) {
+        .builtin => if (motd.busy()) "Fetching the news…" else "No news fetched yet.",
+        .cache => if (motd.busy()) "Checking for newer news…" else "Fetched earlier.",
+        .fetched => "Fetched just now.",
+    };
+    dvui.labelNoFmt(@src(), note, .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } });
+}
+
+/// A choice on the start screen: an icon, its label (and below it, faint,
+/// `sub`), and its key at the right. Whether it was chosen.
+fn startRow(comptime i: icons.Icon, label: []const u8, sub: []const u8, key: []const u8, id: usize, faint: bool) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{ .id_extra = id, .expand = .horizontal, .padding = .{ .x = 8, .w = 8, .y = 6, .h = 6 }, .margin = .{ .h = 2 }, .corners = .all(6), .label = .{ .text = label } });
+    bw.processEvents();
+    bw.drawBackground();
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        icons.image(@src(), i, 26, 0, null);
+        const text_col = dvui.themeGet().color(.window, .text);
+        {
+            var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .padding = .{ .x = 10 } });
+            defer col.deinit();
+            dvui.labelNoFmt(@src(), label, .{}, .{ .color_text = .{ .color = text_col.opacity(if (faint) 0.5 else 1) } });
+            if (sub.len > 0) dvui.labelNoFmt(@src(), sub, .{}, .{ .font = dvui.Font.theme(.body).larger(-3), .color_text = .{ .color = text_col.opacity(0.55) } });
+        }
+        if (key.len > 0) dvui.labelNoFmt(@src(), key, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono), .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .background = true, .corners = .all(4), .color_fill = .{ .color = text_col.opacity(0.08) }, .color_text = .{ .color = text_col.opacity(0.7) } });
+    }
+    const clicked = bw.clicked();
+    bw.drawFocus();
+    bw.deinit();
+    return clicked;
+}
+
+fn startChoices() void {
+    dvui.labelNoFmt(@src(), "Start", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .h = 8 } });
+    if (startRow(.file_plus, "New canvas, millimetres", "", "M", 1, false)) createCanvas(.mm);
+    if (startRow(.file_plus, "New canvas, inches", "", "I", 2, false)) createCanvas(.inch);
+    if (startRow(.folder_open, "Open file…", "", "O", 3, false)) proceed(.open);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 14, .h = 6 } });
+        defer row.deinit();
+        icons.image(@src(), .clock_counter_clockwise, 20, 0, null);
+        dvui.labelNoFmt(@src(), "Recent", .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.heading).larger(-2), .padding = .{ .x = 8 } });
+    }
+    if (recent_files.items.len == 0) {
+        dvui.labelNoFmt(@src(), "Files you open or save show here.", .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } });
+        return;
+    }
+    var scroll = dvui.scrollArea(@src(), .{ .horizontal = .none }, .{ .expand = .both });
+    defer scroll.deinit();
+    var chosen: ?usize = null;
+    for (recent_files.items, 0..) |path, k| {
+        var kb: [4]u8 = undefined;
+        const key = std.fmt.bufPrint(&kb, "{d}", .{k + 1}) catch "";
+        const there = if (std.Io.Dir.cwd().access(dvui.io, path, .{})) true else |_| false;
+        // A long folder shown by its end, which tells files apart.
+        const dir = std.fs.path.dirname(path) orelse "";
+        const keep = 34;
+        const shown = if (dir.len <= keep) dir else std.fmt.allocPrint(dvui.currentWindow().arena(), "…{s}", .{dir[dir.len - keep ..]}) catch dir;
+        if (startRow(.file, std.fs.path.basename(path), shown, key, 10 + k, !there)) chosen = k;
+    }
+    if (chosen) |k| openRecent(k);
 }
 
 /// File › Export SVG is asking where to write.
@@ -735,6 +945,9 @@ fn protoPos(id: layout.model.PrototypeId) usize {
 }
 
 fn deinit(_: *dvui.Window) void {
+    motd.deinit();
+    for (recent_files.items) |f| state.gpa.free(f);
+    recent_files.deinit(state.gpa);
     hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
     clearPlaced();
@@ -1242,6 +1455,16 @@ fn frame() !dvui.App.Result {
 
     if (titleBar()) |r| return r;
 
+    // No document yet: the start screen, none of the canvas's interface.
+    if (canvas_prompt) {
+        startScreen();
+        startPrompts();
+        savePrefsIfChanged();
+        updateWindowTitle();
+        if (quit_now) return .close;
+        return .ok;
+    }
+
     {
         // The body, the docked bottom bar and the bottom edge's strip are
         // placed explicitly, so a tall pane can never push them off the
@@ -1355,6 +1578,7 @@ fn setFilePath(path: ?[]const u8) void {
     if (file_path) |p| {
         state.file_name = std.fs.path.basename(p);
         state.file_name_set = true;
+        noteRecent(p);
     } else {
         state.file_name = "untitled";
         state.file_name_set = false;
@@ -2098,6 +2322,7 @@ fn loadPrefs() void {
         else => {},
     };
     if (ps.problem()) |msg| state.status = msg;
+    loadRecent(&ps);
     prefs_store = ps;
     saved_prefs = currentPrefs();
 }
@@ -2348,6 +2573,15 @@ fn overlayOptions(id: usize) dvui.Options {
 
 /// The ghost panes over the canvas, attached to its edges, then the key
 /// palette and any prompt.
+/// The prompts the start screen can show: opening a file (and what it
+/// asks), recovered work, a file changed elsewhere.
+fn startPrompts() void {
+    if (file_prompt) |kind| filePrompt(kind);
+    if (leave_prompt) |p| leavePrompt(p);
+    if (recovery != null) recoveryPrompt();
+    if (contention) |k| contentionPrompt(k);
+}
+
 fn overlays() !void {
     for (all_panes) |p| {
         if (p.mode != .ghost) {
@@ -2401,9 +2635,6 @@ fn overlays() !void {
         defer fw.deinit();
         if (moving_track) movePalette() else trackPalette();
     }
-    // The new-canvas prompt waits under an open or save prompt, so Enter
-    // goes to the prompt on top.
-    if (canvas_prompt and !filePromptOpen()) newCanvasPrompt();
     if (export_prompt) exportPrompt();
     if (image_prompt) imagePrompt();
     if (file_prompt) |kind| filePrompt(kind);
@@ -2928,11 +3159,16 @@ fn titleBar() ?dvui.App.Result {
         defer title.deinit();
         // A bullet while there are unsaved changes.
         if (!canvas_prompt and hist.isDirty()) dvui.labelNoFmt(@src(), "• ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
-        dvui.labelNoFmt(@src(), state.file_name, .{}, .{ .font = styled(.theme(.body), !state.file_name_set), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        // On the start screen there is no document to name.
+        if (canvas_prompt) {
+            dvui.labelNoFmt(@src(), "Graven", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        } else {
+            dvui.labelNoFmt(@src(), state.file_name, .{}, .{ .font = styled(.theme(.body), !state.file_name_set), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
+        }
         dvui.labelNoFmt(@src(), "  —  ", .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         if (openCanvas()) {
             var tb: [64]u8 = undefined;
-            const t = if (canvas_prompt) "New canvas" else if (shown_space > 0 and shown_space < state.model.spaces.items.len) std.fmt.bufPrint(&tb, "{s}, {s}", .{ state.model.spaces.items[shown_space].name, state.model.units.symbol() }) catch "Frame" else std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
+            const t = if (canvas_prompt) "Start" else if (shown_space > 0 and shown_space < state.model.spaces.items.len) std.fmt.bufPrint(&tb, "{s}, {s}", .{ state.model.spaces.items[shown_space].name, state.model.units.symbol() }) catch "Frame" else std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas";
             dvui.labelNoFmt(@src(), t, .{}, .{ .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
         } else dvui.labelNoFmt(@src(), state.model.sheet.name, .{}, .{ .font = styled(.theme(.body), state.model.sheet.default_name), .padding = .{ .x = 0, .w = 0, .y = 4, .h = 4 } });
     }
