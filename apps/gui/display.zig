@@ -125,7 +125,69 @@ fn hasColor(comptime Color: type, comptime T: type) bool {
     return false;
 }
 
+// Physical size ------------------------------------------------------------
+//
+// How many device pixels make a millimetre on this screen, so that "actual
+// size" shows a design at the size it will be made. Desktops report no
+// trustworthy figure (X11 and Wayland often say 96 dpi whatever the
+// screen), so the user measures it: an outline of a bank card (ID-1,
+// ISO/IEC 7810: 85.60 x 53.98 mm, corners of 3.18 mm radius) is dragged
+// until it covers a real card held against the screen. Until then, an
+// estimate: 96 dpi times the desktop's scale.
+
+pub const card_w_mm: f32 = 85.60;
+pub const card_h_mm: f32 = 53.98;
+pub const card_radius_mm: f32 = 3.18;
+
+/// Plausible bounds, device pixels per mm (about 50 to 1270 dpi).
+pub const px_per_mm_min: f32 = 2;
+pub const px_per_mm_max: f32 = 50;
+
+/// The measured scale, device pixels per mm; null until measured.
+var measured: ?f32 = null;
+
+pub fn setPxPerMm(v: ?f32) void {
+    // 0 (or less) in the config: not measured.
+    measured = if (v) |x| (if (std.math.isFinite(x) and x > 0) std.math.clamp(x, px_per_mm_min, px_per_mm_max) else null) else null;
+}
+
+pub fn measuredPxPerMm() ?f32 {
+    return measured;
+}
+
+/// 96 dpi at `scale` device pixels per logical pixel.
+pub fn estimatePxPerMm(scale: f32) f32 {
+    return 96.0 / 25.4 * scale;
+}
+
+/// Device pixels per mm: measured, else the estimate.
+pub fn pxPerMm(scale: f32) f32 {
+    return measured orelse estimatePxPerMm(scale);
+}
+
+/// The scale a card outline `width_px` device pixels wide measures.
+pub fn fromCardWidth(width_px: f32) f32 {
+    return std.math.clamp(width_px / card_w_mm, px_per_mm_min, px_per_mm_max);
+}
+
+pub fn dpi(px_per_mm: f32) f32 {
+    return px_per_mm * 25.4;
+}
+
 const testing = std.testing;
+
+test "card width to scale, and the estimate" {
+    // A card 323.5 px wide: 3.78 px/mm, 96 dpi.
+    try testing.expectApproxEqAbs(96, dpi(fromCardWidth(85.6 * 96 / 25.4)), 1e-3);
+    try testing.expectApproxEqAbs(192, dpi(estimatePxPerMm(2)), 1e-3);
+    setPxPerMm(null);
+    try testing.expectApproxEqAbs(estimatePxPerMm(1), pxPerMm(1), 1e-6);
+    setPxPerMm(4.2);
+    defer setPxPerMm(null);
+    try testing.expectEqual(4.2, pxPerMm(1));
+    setPxPerMm(1000);
+    try testing.expectEqual(px_per_mm_max, measuredPxPerMm().?);
+}
 
 const Rgb = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 

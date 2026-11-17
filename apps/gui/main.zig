@@ -697,6 +697,10 @@ fn displayWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
+        if (dvui.button(@src(), "Screen size…", .{}, .{})) {
+            display_window = false;
+            openSizeWindow();
+        }
         if (dvui.button(@src(), "Reset", .{}, .{})) dc = .{};
         if (dvui.button(@src(), "Close", .{}, .{})) close = true;
     }
@@ -758,6 +762,155 @@ fn displayGauge() void {
     const grey = display.fix(dvui.Color{ .r = 188, .g = 188, .b = 188 });
     const inner: dvui.Rect.Physical = .{ .x = @round(lines.x + lines.w / 3), .y = lines.y + 8, .w = @round(lines.w / 3), .h = @max(1, lines.h - 16) };
     inner.fill(.square, .{ .color = .{ .color = grey } });
+}
+
+/// View › Calibrate screen size… is open; the card outline's width while
+/// it is (device pixels).
+var size_window = false;
+var card_px: f32 = 0;
+/// Where the window is: placed once when opened, so the card's corner
+/// stays put while its edge is dragged (it can be moved by its title).
+var size_rect: dvui.Rect = .{};
+
+/// Opens the screen size calibration, the card at the scale in use.
+fn openSizeWindow() void {
+    size_window = true;
+    const ns = dvui.windowNaturalScale();
+    card_px = display.pxPerMm(ns) * display.card_w_mm;
+    const ws = dvui.currentWindow().rect_pixels;
+    // Room for a card a third bigger than the estimate.
+    const w = @max(520, 1.33 * card_px / ns + 60);
+    size_rect = .{ .x = @max(0, (ws.w / ns - w) / 2), .y = @max(0, ws.h / ns * 0.2), .w = w, .h = 0 };
+    dvui.refresh(null, @src(), null);
+}
+
+/// The screen size calibration: an outline of a bank card, dragged (or
+/// moved with Left and Right, a device pixel at a time; Shift: ten) until
+/// it covers a real card held against the screen. Save keeps the scale for
+/// this machine; Use estimate forgets it; Cancel or Esc leaves it as it was.
+fn sizeWindow() void {
+    if (!size_window) return;
+    const ns = dvui.windowNaturalScale();
+    const card_w = card_px / ns;
+    const card_h = card_w * display.card_h_mm / display.card_w_mm;
+    size_rect.w = @max(size_rect.w, card_w + 60);
+    size_rect.h = card_h + 300;
+    var fw = dvui.floatingWindow(@src(), .{ .rect = &size_rect, .resize = .none }, overlayOptions(15).override(.{ .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } }));
+    defer fw.deinit();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(14) });
+    defer body.deinit();
+    dvui.labelNoFmt(@src(), "Screen size", .{}, .{ .font = dvui.Font.theme(.heading) });
+    const ink = dvui.themeGet().color(.window, .text);
+    {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 4, .h = 8 } });
+        tl.addText("Hold a bank card (or any card of that size, 85.6 × 54 mm) against the screen, its top left corner on the outline's. Drag the outline, or press Left and Right (Shift for bigger steps), until its right edge meets the card's. Then View › Actual size shows designs at the size they will be made.", .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.75) } });
+        tl.deinit();
+    }
+    var do_save = false;
+    var cancel = false;
+    // The card.
+    {
+        var area = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = card_w, .h = card_h }, .max_size_content = .{ .w = card_w, .h = card_h }, .margin = .{ .y = 6, .h = 10 } });
+        defer area.deinit();
+        const cr = area.data().contentRectScale().r;
+        const card: dvui.Rect.Physical = .{ .x = @round(cr.x), .y = @round(cr.y), .w = @round(card_px), .h = @round(card_px * display.card_h_mm / display.card_w_mm) };
+        const rad = card_px / display.card_w_mm * display.card_radius_mm;
+        card.fill(.round(rad), .{ .color = .{ .color = colors.select.opacity(0.10) } });
+        card.stroke(.round(rad), .{ .thickness = 1, .color = .{ .color = colors.select } });
+        // The right edge, to meet the card's.
+        const edge: dvui.Rect.Physical = .{ .x = card.x + card.w - 2, .y = card.y + rad, .w = 2, .h = @max(1, card.h - 2 * rad) };
+        edge.fill(.square, .{ .color = .{ .color = colors.select } });
+        // Centimetre ticks along the top, as a check against a ruler.
+        var mm: f32 = 10;
+        while (mm < display.card_w_mm) : (mm += 10) {
+            const x = @round(card.x + mm * card_px / display.card_w_mm);
+            (dvui.Rect.Physical{ .x = x, .y = card.y, .w = 1, .h = 6 * ns }).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.7) } });
+        }
+        const ad = area.data();
+        for (dvui.events()) |*e| {
+            if (e.evt == .key and !e.handled) {
+                const k = e.evt.key;
+                if (k.action != .down and k.action != .repeat) continue;
+                const step: f32 = if (k.mod.shift()) 10 else 1;
+                switch (k.code) {
+                    .left => card_px -= step,
+                    .right => card_px += step,
+                    .escape => cancel = true,
+                    .enter, .kp_enter => do_save = true,
+                    else => continue,
+                }
+                e.handle(@src(), fw.data());
+                dvui.refresh(null, @src(), null);
+                continue;
+            }
+            if (!dvui.eventMatchSimple(e, ad)) continue;
+            if (e.evt != .mouse) continue;
+            const me = e.evt.mouse;
+            switch (me.action) {
+                .press => if (me.button.pointer()) {
+                    e.handle(@src(), ad);
+                    dvui.captureMouse(ad, e.num);
+                    dvui.dragPreStart(me.button, me.p, .{ .cursor = .arrow_w_e });
+                },
+                .release => if (dvui.captured(ad.id)) {
+                    e.handle(@src(), ad);
+                    dvui.captureMouse(null, e.num);
+                    dvui.dragEnd(me.button);
+                },
+                .motion => if (dvui.captured(ad.id)) {
+                    e.handle(@src(), ad);
+                    // The right edge follows the pointer.
+                    card_px = me.p.x - card.x;
+                    dvui.refresh(null, @src(), null);
+                },
+                .position => dvui.cursorSet(.arrow_w_e),
+                else => {},
+            }
+        }
+        card_px = std.math.clamp(card_px, display.px_per_mm_min * display.card_w_mm, display.px_per_mm_max * display.card_w_mm);
+    }
+    {
+        const ppm = display.fromCardWidth(card_px);
+        const est = display.estimatePxPerMm(ns);
+        var lb: [96]u8 = undefined;
+        const text = std.fmt.bufPrint(&lb, "{d:.3} pixels per mm: {d:.1} dpi", .{ ppm, display.dpi(ppm) }) catch "";
+        dvui.labelNoFmt(@src(), text, .{}, .{ .font = dvui.Font.theme(.mono) });
+        var sb: [128]u8 = undefined;
+        const sub = std.fmt.bufPrint(&sb, "{d:.0} % of the estimate (96 dpi × {d:.2}). {s}", .{
+            100 * ppm / est, ns,
+            if (display.measuredPxPerMm() != null) "Measured before." else "Not measured yet.",
+        }) catch "";
+        dvui.labelNoFmt(@src(), sub, .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.7) } });
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Use estimate", .{}, .{})) {
+            display.setPxPerMm(null);
+            size_window = false;
+        }
+        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (dvui.button(@src(), "Save", .{}, .{ .style = .highlight })) do_save = true;
+    }
+    if (do_save) {
+        display.setPxPerMm(display.fromCardWidth(card_px));
+        size_window = false;
+    }
+    if (cancel) size_window = false;
+    if (!size_window) dvui.refresh(null, @src(), null);
+}
+
+/// View › Actual size: the zoom at which a millimetre on screen is a
+/// millimetre, about the view's centre.
+fn actualSize() void {
+    state.view.fit = null;
+    state.view.ppm = display.pxPerMm(dvui.windowNaturalScale());
+    dvui.refresh(null, @src(), null);
+}
+
+/// The zoom, as a share of actual size.
+fn zoomPercent() f64 {
+    return 100 * state.view.ppm / display.pxPerMm(dvui.windowNaturalScale());
 }
 
 /// M, I, O, D and 1 to 9, while no prompt is open over the start screen.
@@ -1564,6 +1717,7 @@ fn frame() !dvui.App.Result {
     // The fonts window, a window of its own, while open.
     fontwin.window(fontHost(), state.gpa);
     displayWindow();
+    sizeWindow();
 
     if (titleBar()) |r| return r;
 
@@ -2389,6 +2543,7 @@ const Prefs = struct {
     show_construction: bool,
     grid: bg_grid.Mode,
     display: display.Correction,
+    px_per_mm: ?f32,
     hot_edges: bool,
     modes: [all_panes.len]ghost_pane.Mode,
     tools_height: f32,
@@ -2406,7 +2561,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var modes: [all_panes.len]ghost_pane.Mode = undefined;
     for (all_panes, &modes) |p, *m| m.* = p.mode;
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .display = display.get(), .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -2444,6 +2599,7 @@ fn loadPrefs() void {
             dc = c;
         };
         display.set(dc);
+        if (ps.get("display.px_per_mm")) |v| display.setPxPerMm(tomlFloat(v));
     }
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
@@ -2543,6 +2699,8 @@ fn savePrefsIfChanged() void {
     // The screen's correction belongs to this machine.
     ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
     ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
+    // Measured, else the estimate (written as 0: not measured).
+    ps.put("display.px_per_mm", .{ .float = if (now.px_per_mm) |v| roundTo(v, 10000) else 0 }, .local);
     ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
     for (now.modes, pane_keys) |m, key| ps.put(key, .{ .string = @tagName(m) }, .local);
     ps.put("panes.tools_height", .{ .integer = @intFromFloat(@round(now.tools_height)) }, .local);
@@ -3454,8 +3612,16 @@ fn menu() ?dvui.App.Result {
                 m.close();
             }
         }
+        if (dvui.menuItemLabel(@src(), "    Actual size", .{}, .{ .expand = .horizontal }) != null) {
+            actualSize();
+            m.close();
+        }
         if (dvui.menuItemLabel(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
             display_window = true;
+            m.close();
+        }
+        if (dvui.menuItemLabel(@src(), "    Calibrate screen size…", .{}, .{ .expand = .horizontal }) != null) {
+            openSizeWindow();
             m.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
@@ -8559,6 +8725,15 @@ fn statusContent() void {
         } catch "";
     } else std.fmt.bufPrint(&pos_buf, "x –   y – {s}", .{u.symbol()}) catch "";
     dvui.labelNoFmt(@src(), pos, .{}, field.override(.{ .min_size_content = .{ .w = 190 }, .font = .theme(.mono) }));
+    {
+        // The zoom against actual size; a click goes to actual size.
+        var zb: [24]u8 = undefined;
+        const pct = zoomPercent();
+        const zt = std.fmt.bufPrint(&zb, "{d:.0} %{s}", .{ pct, if (display.measuredPxPerMm() == null) "*" else "" }) catch "";
+        var zwd: dvui.WidgetData = undefined;
+        if (dvui.button(@src(), zt, .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd })) actualSize();
+        dvui.tooltip(@src(), .{ .active_rect = zwd.borderRectScale().r }, "{s}", .{if (display.measuredPxPerMm() == null) "Zoom against actual size, estimated (View › Calibrate screen size…). Click: actual size." else "Zoom against actual size. Click: actual size."}, .{});
+    }
 
     var counts_buf: [260]u8 = undefined;
     var flags_buf: [40]u8 = undefined;
