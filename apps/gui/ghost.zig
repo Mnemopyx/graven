@@ -9,6 +9,11 @@
 //!   its bounds. Clicking the tab again returns it to ghost.
 //! * docked: always takes events within its bounds; the caller lays the
 //!   canvas out beside it.
+//! * auto (auto-hide): out of sight, only its tab showing. Holding the
+//!   pointer on the tab slides it in from its edge over the canvas, ready
+//!   to use; once the pointer has been away a moment (and none of its
+//!   fields has the keyboard) it slides back out. A click on the tab pins
+//!   it in, another lets it go.
 //! * hidden: only the tab shows.
 //!
 //! Each pane's content is drawn in one hue at several lightness levels
@@ -27,7 +32,7 @@ const display = @import("display.zig");
 pub const dwell = @import("dwell.zig");
 
 pub const Edge = enum { left, right, top, bottom };
-pub const Mode = enum { ghost, docked, hidden };
+pub const Mode = enum { ghost, auto, docked, hidden };
 
 /// How a pane looks: its dominant hue, and how opaque it is.
 ///
@@ -65,18 +70,57 @@ pub const Pane = struct {
     tab_px: dvui.Rect.Physical = .{},
     /// Its floating window's subwindow, while it is a ghost.
     sub_id: ?dvui.Id = null,
+    /// How far an auto-hide pane is in, 0 (out of sight) to 1.
+    reveal: f32 = 0,
+    /// The mode the user chose, while a narrow window has made it
+    /// auto-hide; given back when the window widens.
+    forced: ?Mode = null,
 
     /// Whether it takes events within its bounds.
     pub fn interactive(p: *const Pane) bool {
-        return p.mode == .docked or (p.mode == .ghost and p.active);
+        return p.mode == .docked or ((p.mode == .ghost or p.mode == .auto) and p.active);
+    }
+
+    /// Whether it is drawn over the canvas this frame: a ghost, or an
+    /// auto-hide pane at all in.
+    pub fn drawn(p: *const Pane) bool {
+        return p.mode == .ghost or (p.mode == .auto and p.reveal > 0);
     }
 
     /// Whether one of its fields (or any of its widgets) has the keyboard.
     pub fn hasFocus(p: *const Pane) bool {
         const id = p.sub_id orelse return false;
-        return p.mode == .ghost and dvui.focusedSubwindowId() == id;
+        return (p.mode == .ghost or p.mode == .auto) and dvui.focusedSubwindowId() == id;
+    }
+
+    /// The mode to keep in the settings: the user's own.
+    pub fn chosen(p: *const Pane) Mode {
+        return p.forced orelse p.mode;
+    }
+
+    /// `r`, where the pane is drawn in place, moved out past its edge by as
+    /// much as it is not yet in (an auto-hide pane sliding).
+    pub fn slid(p: *const Pane, r: dvui.Rect) dvui.Rect {
+        if (p.mode != .auto) return r;
+        // Eased: quick at first, settling into place.
+        const t = 1 - p.reveal;
+        const out = t * t * t;
+        var q = r;
+        switch (p.edge) {
+            .left => q.x -= out * (r.w + r.x),
+            .right => q.x += out * r.w,
+            .top => q.y -= out * (r.h + r.y),
+            .bottom => q.y += out * r.h,
+        }
+        return q;
     }
 };
+
+/// How long an auto-hide pane takes to slide in or out, s.
+pub const slide_s: f32 = 0.16;
+/// How long the pointer must stay on an auto-hide pane's tab to bring it
+/// in, ns: sooner than a ghost's hot edge.
+pub const auto_delay_ns: i128 = 250 * std.time.ns_per_ms;
 
 /// A colour from OKLCH (perceptual lightness `l` 0..1, chroma `c`, hue
 /// `h` degrees), clipped into sRGB.
@@ -430,6 +474,7 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     var rect = r;
     const prev_theme = themePush(p);
     const t = dvui.themeGet();
+    const had_focus = dvui.focusedSubwindowId();
     const fw = dvui.floatingWindow(@src(), .{ .rect = &rect, .resize = .none }, .{
         .id_extra = id_extra,
         .background = true,
@@ -440,6 +485,9 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
         .box_shadow = null,
     });
     const id = fw.data().id;
+    // A floating window takes the keyboard when it first appears; a pane
+    // appearing (an auto-hide pane sliding in) gives it back.
+    if (dvui.firstFrame(id) and had_focus != id) dvui.focusSubwindow(had_focus, null);
     p.sub_id = id;
     p.rect_px = fw.data().borderRectScale().r;
     // A ghost lets the pointer through to what lies under it.
@@ -469,7 +517,7 @@ pub const TabResult = union(enum) { none, toggle, mode: Mode };
 pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
     const t = theme(p.look, dvui.themeGet());
     const lv = if (dvui.themeGet().dark) dark else light;
-    const body_l: f32 = if (p.interactive()) lv.focus else if (p.mode == .hidden) lv.border else lv.highlight;
+    const body_l: f32 = if (p.interactive()) lv.focus else if (p.mode == .hidden or p.mode == .auto) lv.border else lv.highlight;
     const vertical = p.edge == .left or p.edge == .right;
     var tb = dvui.box(@src(), .{ .dir = if (vertical) .vertical else .horizontal }, .{
         .rect = r,
@@ -484,6 +532,7 @@ pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
     _ = dvui.spacer(@src(), .{ .expand = if (vertical) .vertical else .horizontal });
     const icons = [_]struct { mode: Mode, name: []const u8, icon: []const u8, tip: []const u8 }{
         .{ .mode = .ghost, .name = "Ghost", .icon = dvui.entypo.layers, .tip = "Ghost: over the canvas, letting clicks through until its tab is clicked" },
+        .{ .mode = .auto, .name = "Auto-hide", .icon = dvui.entypo.login, .tip = "Auto-hide: out of sight until the pointer rests on this tab; slides in, and away again when the pointer leaves (a click pins it)" },
         .{ .mode = .docked, .name = "Dock", .icon = dvui.entypo.pin, .tip = "Docked: beside the canvas, always taking clicks" },
         .{ .mode = .hidden, .name = "Hide", .icon = dvui.entypo.eye_with_line, .tip = "Hidden: only this tab shows" },
     };
@@ -525,7 +574,7 @@ pub fn apply(panes: []const *Pane, p: *Pane, r: TabResult) void {
         .toggle => {
             p.hot.clicked();
             switch (p.mode) {
-                .ghost => if (p.active) deactivate(p) else activate(panes, p),
+                .ghost, .auto => if (p.active) deactivate(p) else activate(panes, p),
                 .hidden => {
                     p.mode = .ghost;
                     activate(panes, p);
@@ -535,6 +584,9 @@ pub fn apply(panes: []const *Pane, p: *Pane, r: TabResult) void {
         },
         .mode => |m| {
             p.hot.clicked();
+            // The user's choice stands, narrow window or not.
+            p.forced = null;
+            if (p.mode != .auto and m == .auto) p.reveal = if (p.mode == .ghost) 1 else 0;
             p.mode = m;
             if (m != .ghost) deactivate(p);
         },
@@ -545,7 +597,7 @@ pub fn apply(panes: []const *Pane, p: *Pane, r: TabResult) void {
 /// drawn) returns to ghost.
 pub fn activate(panes: []const *Pane, p: *Pane) void {
     for (panes) |q| {
-        if (q == p or !q.active or q.mode != .ghost) continue;
+        if (q == p or !q.active or (q.mode != .ghost and q.mode != .auto)) continue;
         if (overlap(q.rect_px, p.rect_px)) deactivate(q);
     }
     p.active = true;
@@ -566,21 +618,25 @@ fn overlap(a: dvui.Rect.Physical, b: dvui.Rect.Physical) bool {
 /// Hot edges, once a frame: holding the pointer on a ghost pane's tab
 /// activates it; moving off a pane activated that way returns it to ghost.
 /// Keeps a timer running while one is waiting.
-pub fn hotEdges(panes: []const *Pane, timer_id: dvui.Id) void {
+pub fn hotEdges(panes: []const *Pane, timer_id: dvui.Id, ghosts: bool) void {
     const now = dvui.frameTimeNS();
     const mouse = dvui.currentWindow().mouse_pt;
     var soonest: ?i128 = null;
     for (panes) |p| {
-        if (p.mode != .ghost) {
+        // Auto-hide panes always answer the pointer; ghosts when hot edges
+        // are on.
+        if (!(p.mode == .auto or (ghosts and p.mode == .ghost))) {
             p.hot = .{};
             continue;
         }
+        const on_delay: i128 = if (p.mode == .auto) auto_delay_ns else dwell.delay_ns;
         const action = dwell.step(&p.hot, .{
             .now = now,
             .active = p.active,
             .on_tab = p.tab_px.contains(mouse),
             .on_pane = p.rect_px.contains(mouse),
             .editing = p.hasFocus(),
+            .on_delay = on_delay,
         });
         switch (action) {
             .none => {},
@@ -594,7 +650,7 @@ pub fn hotEdges(panes: []const *Pane, timer_id: dvui.Id) void {
                 dvui.refresh(null, @src(), timer_id);
             },
         }
-        if (dwell.wait(p.hot, now)) |w| soonest = if (soonest) |s| @min(s, w) else w;
+        if (dwell.wait(p.hot, now, on_delay)) |w| soonest = if (soonest) |s| @min(s, w) else w;
     }
     if (soonest) |w| {
         const us: i32 = @intCast(@min(@divTrunc(w, 1000) + 1, std.math.maxInt(i32)));
@@ -724,4 +780,23 @@ fn haloContent(fw: *dvui.FloatingWindowWidget, start: usize, start_after: usize,
     dvui.alphaSet(a);
     dvui.renderTexture(content, .{ .r = r, .s = 1 }, .{}) catch {};
     dvui.textureDestroyLater(content);
+}
+
+/// Moves each auto-hide pane's slide on by this frame's time, toward in
+/// while it is active and out while not; keeps frames coming while one
+/// moves.
+pub fn slide(panes: []const *Pane, timer_id: dvui.Id) void {
+    const step: f32 = @min(1, dvui.secondsSinceLastFrame() / slide_s);
+    var moving = false;
+    for (panes) |p| {
+        if (p.mode != .auto) {
+            p.reveal = 0;
+            continue;
+        }
+        const target: f32 = if (p.active) 1 else 0;
+        if (p.reveal == target) continue;
+        p.reveal = if (target > p.reveal) @min(target, p.reveal + step) else @max(target, p.reveal - step);
+        moving = true;
+    }
+    if (moving) dvui.refresh(null, @src(), timer_id);
 }

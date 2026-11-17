@@ -22,7 +22,7 @@ const A = actions.ActionDef;
 const B = actions.BindDef;
 
 pub const modes = [_]M{
-    .{ .name = "global", .kind = .root, .allows = &.{ "file", "edit" } },
+    .{ .name = "global", .kind = .root, .allows = &.{ "file", "edit", "panes" } },
     // Prompts and small windows over the rest: Enter and Esc. One with a
     // text field takes typed text.
     .{ .name = "dialog", .kind = .dialog, .lifetime = .until_left, .parent = "global", .takes_text = true, .allows = &.{"dialog"} },
@@ -50,6 +50,8 @@ pub const modes = [_]M{
 };
 
 pub const action_defs = [_]A{
+    // Bring every auto-hide pane in, or let them all go (a hot corner's).
+    .{ .name = "panes.toggle-auto" },
     .{ .name = "file.new" },
     .{ .name = "file.open" },
     .{ .name = "file.save" },

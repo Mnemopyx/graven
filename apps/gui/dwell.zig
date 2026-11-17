@@ -29,6 +29,9 @@ pub const Input = struct {
     on_pane: bool,
     /// One of the pane's fields has the keyboard.
     editing: bool,
+    /// How long the pointer must stay on the tab to activate (an
+    /// auto-hide pane answers sooner than a ghost).
+    on_delay: i128 = delay_ns,
 };
 
 pub const Action = enum { none, activate, deactivate };
@@ -44,7 +47,7 @@ pub fn step(s: *State, in: Input) Action {
         }
         const since = s.on_since orelse in.now;
         s.on_since = since;
-        if (in.now - since < delay_ns) return .none;
+        if (in.now - since < in.on_delay) return .none;
         s.on_since = null;
         s.by_hover = true;
         return .activate;
@@ -62,9 +65,11 @@ pub fn step(s: *State, in: Input) Action {
     return .deactivate;
 }
 
-/// How long until `step` could act, ns, if it is waiting on the clock.
-pub fn wait(s: State, now: i128) ?i128 {
-    const since = s.on_since orelse s.off_since orelse return null;
+/// How long until `step` could act, ns, if it is waiting on the clock
+/// (`on_delay` as given to `step`).
+pub fn wait(s: State, now: i128, on_delay: i128) ?i128 {
+    if (s.on_since) |since| return @max(0, since + on_delay - now);
+    const since = s.off_since orelse return null;
     return @max(0, since + delay_ns - now);
 }
 
@@ -74,7 +79,7 @@ const ms = std.time.ns_per_ms;
 test "holding the pointer on a tab activates its pane after the delay" {
     var s: State = .{};
     try testing.expectEqual(.none, step(&s, .{ .now = 0, .active = false, .on_tab = true, .on_pane = false, .editing = false }));
-    try testing.expectEqual(@as(?i128, 400 * ms), wait(s, 0));
+    try testing.expectEqual(@as(?i128, 400 * ms), wait(s, 0, delay_ns));
     try testing.expectEqual(.none, step(&s, .{ .now = 399 * ms, .active = false, .on_tab = true, .on_pane = false, .editing = false }));
     try testing.expectEqual(.activate, step(&s, .{ .now = 400 * ms, .active = false, .on_tab = true, .on_pane = false, .editing = false }));
     try testing.expect(s.by_hover);
@@ -112,4 +117,14 @@ test "a pane activated by a click stays active when the pointer leaves" {
     s.clicked();
     try testing.expectEqual(.none, step(&s, .{ .now = 0, .active = true, .on_tab = false, .on_pane = false, .editing = false }));
     try testing.expectEqual(.none, step(&s, .{ .now = 5000 * ms, .active = true, .on_tab = false, .on_pane = false, .editing = false }));
+}
+
+test "a shorter delay to activate, the same to return" {
+    var s: State = .{};
+    const fast: i128 = 250 * ms;
+    try testing.expectEqual(.none, step(&s, .{ .now = 0, .active = false, .on_tab = true, .on_pane = false, .editing = false, .on_delay = fast }));
+    try testing.expectEqual(@as(?i128, 250 * ms), wait(s, 0, fast));
+    try testing.expectEqual(.activate, step(&s, .{ .now = 250 * ms, .active = false, .on_tab = true, .on_pane = false, .editing = false, .on_delay = fast }));
+    try testing.expectEqual(.none, step(&s, .{ .now = 300 * ms, .active = true, .on_tab = false, .on_pane = false, .editing = false, .on_delay = fast }));
+    try testing.expectEqual(.deactivate, step(&s, .{ .now = 700 * ms, .active = true, .on_tab = false, .on_pane = false, .editing = false, .on_delay = fast }));
 }

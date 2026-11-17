@@ -1744,6 +1744,8 @@ fn frame() !dvui.App.Result {
         // bottom of the window.
         var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
         defer rest.deinit();
+        body_px = rest.data().borderRectScale().r;
+        narrowPanes();
         const size = rest.data().contentRect();
         const t: f32 = tab_size;
         const status_h: f32 = if (bottom_pane.mode == .docked) status_height else 0;
@@ -1786,11 +1788,11 @@ fn frame() !dvui.App.Result {
     savePrefsIfChanged();
     updateWindowTitle();
     if (quit_now) return .close;
-    if (hot_edges) {
-        ghost_pane.hotEdges(&all_panes, root.data().id);
-    } else for (all_panes) |p| {
-        p.hot = .{};
-    }
+    // Ghosts answer the pointer on their tabs when hot edges are on;
+    // auto-hide panes always. Then the slides, and the hot corners.
+    ghost_pane.hotEdges(&all_panes, root.data().id, hot_edges);
+    ghost_pane.slide(&all_panes, root.data().id);
+    hotCorners(root.data().id);
     return .ok;
 }
 
@@ -2471,6 +2473,7 @@ fn historyKeys(wd: *dvui.WidgetData) void {
 /// could be done now.
 fn runAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
+        kact("panes.toggle-auto") => toggleAutoPanes(),
         kact("file.new") => leave(.new_canvas),
         kact("file.open") => leave(.open),
         kact("file.save"), kact("file.save-as"), kact("edit.undo"), kact("edit.redo") => {
@@ -2584,7 +2587,7 @@ var saved_prefs: ?Prefs = null;
 
 fn currentPrefs() Prefs {
     var modes: [all_panes.len]ghost_pane.Mode = undefined;
-    for (all_panes, &modes) |p, *m| m.* = p.mode;
+    for (all_panes, &modes) |p, *m| m.* = p.chosen();
     return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .modes = modes, .tools_height = tools_height };
 }
 
@@ -2631,6 +2634,21 @@ fn loadPrefs() void {
     if (ps.get("panes.hot_edges")) |v| if (v == .boolean) {
         hot_edges = v.boolean;
     };
+    if (ps.get("panes.auto_hide_below")) |v| if (tomlFloat(v)) |f| {
+        auto_hide_below = @max(0, f);
+    };
+    // Hot corners: an action's name each, or "" for nothing.
+    for ([_][]const u8{ "top_left", "top_right", "bottom_left", "bottom_right" }, 0..) |name, i| {
+        var kb: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&kb, "panes.hot_corners.{s}", .{name}) catch continue;
+        if (ps.get(key)) |v| if (v == .string) {
+            if (v.string.len == 0) {
+                corner_actions[i] = null;
+            } else if (keymap.R.actionByName(v.string)) |a| {
+                corner_actions[i] = a;
+            } else state.status = "A hot corner names an action Graven does not have. ";
+        };
+    }
     for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (std.meta.stringToEnum(ghost_pane.Mode, v.string)) |m| {
         p.mode = m;
     };
@@ -2733,6 +2751,100 @@ fn savePrefsIfChanged() void {
 
 /// Hot edges: holding the pointer on a ghost pane's tab activates it.
 var hot_edges = false;
+
+/// Below this window width (logical pixels) the side panes, ghost or
+/// docked, auto-hide, and get their own mode back when it widens; 0:
+/// never. `panes.auto_hide_below` in the local config.
+var auto_hide_below: f32 = 1000;
+var was_narrow: ?bool = null;
+
+/// Side panes to auto-hide in a narrow window, back as they were in a wide
+/// one (only when the width crosses the line, so a mode chosen meanwhile
+/// stands).
+fn narrowPanes() void {
+    const w = dvui.windowRect().w;
+    const narrow = auto_hide_below > 0 and w < auto_hide_below;
+    if (was_narrow != null and was_narrow.? == narrow) return;
+    was_narrow = narrow;
+    for (all_panes) |p| {
+        if (p.edge != .left and p.edge != .right) continue;
+        if (narrow) {
+            if (p.mode == .ghost or p.mode == .docked) {
+                p.forced = p.mode;
+                p.mode = .auto;
+                ghost_pane.deactivate(p);
+            }
+        } else if (p.forced) |m| {
+            p.mode = m;
+            p.forced = null;
+            ghost_pane.deactivate(p);
+        }
+    }
+    dvui.refresh(null, @src(), null);
+}
+
+/// Where the body (all below the title bar) is, device pixels: its corners
+/// are the hot corners.
+var body_px: dvui.Rect.Physical = .{};
+
+pub const Corner = enum { top_left, top_right, bottom_left, bottom_right };
+
+/// What each hot corner does: an action, by name in the config
+/// (`[panes.hot_corners]`, `bottom_right = "panes.toggle-auto"`), or
+/// nothing. Bottom right shows or hides the auto-hide panes by default.
+var corner_actions: [4]?keymap.ActionId = .{ null, null, null, kact("panes.toggle-auto") };
+var corner_state: [4]struct { since: ?i128 = null, fired: bool = false } = @splat(.{});
+
+/// How long the pointer must rest in a corner, ns.
+const corner_delay_ns: i128 = 300 * std.time.ns_per_ms;
+
+/// Hot corners, once a frame: the pointer resting in a corner of the body
+/// (a tab's width square) runs that corner's action, once until it leaves.
+fn hotCorners(timer_id: dvui.Id) void {
+    if (canvas_prompt or body_px.w <= 0) return;
+    const now = dvui.frameTimeNS();
+    const m = dvui.currentWindow().mouse_pt;
+    const t: f32 = tab_size * dvui.windowNaturalScale();
+    const b = body_px;
+    const squares = [4]dvui.Rect.Physical{
+        .{ .x = b.x, .y = b.y, .w = t, .h = t },
+        .{ .x = b.x + b.w - t, .y = b.y, .w = t, .h = t },
+        .{ .x = b.x, .y = b.y + b.h - t, .w = t, .h = t },
+        .{ .x = b.x + b.w - t, .y = b.y + b.h - t, .w = t, .h = t },
+    };
+    for (squares, &corner_state, corner_actions) |square, *st, act_id| {
+        const a = act_id orelse continue;
+        if (!square.contains(m)) {
+            st.* = .{};
+            continue;
+        }
+        if (st.fired) continue;
+        const since = st.since orelse now;
+        st.since = since;
+        if (now - since >= corner_delay_ns) {
+            st.fired = true;
+            _ = runAction(.{ .action = a, .arg = 0 });
+        } else {
+            const us: i32 = @intCast(@divTrunc(since + corner_delay_ns - now, 1000) + 1);
+            dvui.timer(timer_id, us);
+        }
+    }
+}
+
+/// `panes.toggle-auto`: brings every auto-hide pane in (and keeps it in,
+/// as a click on its tab would), or, when all are in, lets them all go.
+fn toggleAutoPanes() void {
+    var any_out = false;
+    for (all_panes) |p| if (p.mode == .auto and !p.active) {
+        any_out = true;
+    };
+    for (all_panes) |p| {
+        if (p.mode != .auto) continue;
+        p.hot.clicked();
+        if (any_out) p.active = true else ghost_pane.deactivate(p);
+    }
+    dvui.refresh(null, @src(), null);
+}
 
 /// The strips along the window's edges that hold the panes' tabs, logical
 /// pixels.
@@ -2912,7 +3024,7 @@ fn startPrompts() void {
 
 fn overlays() !void {
     for (all_panes) |p| {
-        if (p.mode != .ghost) {
+        if (!p.drawn()) {
             p.rect_px = .{};
             p.sub_id = null;
         }
@@ -2921,8 +3033,8 @@ fn overlays() !void {
     if (c.w <= 0 or c.h <= 0) return;
     const g: f32 = overlay_gap;
     const bottom: f32 = if (bottom_pane.mode == .ghost) status_height else 0;
-    if (tree_pane.mode == .ghost) {
-        var o = ghost_pane.begin(&tree_pane, .{ .x = c.x, .y = c.y, .w = tree_width, .h = @max(60, c.h - bottom) }, 1);
+    if (tree_pane.drawn()) {
+        var o = ghost_pane.begin(&tree_pane, tree_pane.slid(.{ .x = c.x, .y = c.y, .w = tree_width, .h = @max(60, c.h - bottom) }), 1);
         defer o.end();
         treeContent();
     }
@@ -2932,19 +3044,19 @@ fn overlays() !void {
         const x = if (rightDocked()) c.x + c.w + 1 else c.x + c.w - properties_width;
         const h = @max(2 * min_pane_height + split_grip, c.h - if (rightDocked()) 0 else bottom);
         const th = toolsHeight(h);
-        if (tools_pane.mode == .ghost) {
-            var o = ghost_pane.begin(&tools_pane, .{ .x = x, .y = c.y, .w = properties_width, .h = th }, 2);
+        if (tools_pane.drawn()) {
+            var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = properties_width, .h = th }), 2);
             defer o.end();
             toolsContent();
         }
-        if (props_pane.mode == .ghost) {
-            var o = ghost_pane.begin(&props_pane, .{ .x = x, .y = c.y + th + split_grip, .w = properties_width, .h = h - th - split_grip }, 4);
+        if (props_pane.drawn()) {
+            var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y + th + split_grip, .w = properties_width, .h = h - th - split_grip }), 4);
             defer o.end();
             try propertiesBody();
         }
     }
-    if (bottom_pane.mode == .ghost) {
-        var o = ghost_pane.begin(&bottom_pane, .{ .x = c.x, .y = c.y + c.h - status_height, .w = c.w, .h = status_height }, 3);
+    if (bottom_pane.drawn()) {
+        var o = ghost_pane.begin(&bottom_pane, bottom_pane.slid(.{ .x = c.x, .y = c.y + c.h - status_height, .w = c.w, .h = status_height }), 3);
         defer o.end();
         try bottomContent();
     }
@@ -3619,6 +3731,7 @@ fn menu() ?dvui.App.Result {
         if (menuAction("    Zoom to context", "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
         if (menuAction("    Zoom to everything", "view", kact("view.zoom-all"), 0, false, 2)) m.close();
         if (menuAction("    Frame the edit", "view", kact("view.frame-edit"), 0, false, 7)) m.close();
+        if (menuAction("    Show or hide auto-hide panes", "global", kact("panes.toggle-auto"), 0, false, 8)) m.close();
         if (menuAction("    Actual size", "view", kact("view.zoom-to"), 100, false, 3)) m.close();
         if (menuAction("    200 %", "view", kact("view.zoom-to"), 200, false, 4)) m.close();
         if (menuAction("    Zoom in", "view", kact("view.zoom-in"), 0, false, 5)) m.close();
@@ -3650,11 +3763,11 @@ fn menu() ?dvui.App.Result {
         // Pane modes, as the tabs' icons set them, and hot edges.
         for (all_panes, 0..) |pane, pi| {
             _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = pi });
-            for ([_]ghost_pane.Mode{ .ghost, .docked, .hidden }, 0..) |mode, mi| {
+            for ([_]ghost_pane.Mode{ .ghost, .auto, .docked, .hidden }, [_][]const u8{ "ghost", "auto-hide", "docked", "hidden" }, 0..) |mode, mode_name, mi| {
                 var buf: [64]u8 = undefined;
                 const on = pane.mode == mode;
-                const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane.name, @tagName(mode) }) catch pane.name;
-                if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 3 + mi }) != null) {
+                const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane.name, mode_name }) catch pane.name;
+                if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 4 + mi }) != null) {
                     applyTab(pane, .{ .mode = mode });
                     m.close();
                 }
