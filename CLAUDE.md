@@ -65,6 +65,7 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 | `GRAVEN_FONTS_WINDOW=1` | the Fonts window opens at start |
 | `GRAVEN_DISPLAY=gamma,white` | display correction for the run (e.g. `1.5,0.85`) |
 | `GRAVEN_KEY_LOG=1` | each action a key asks for printed, with the active modes |
+| `GRAVEN_DRAWN_SPARK=1` | a point standing in for the pointer is drawn on the canvas (25 frames a second), not made the animated cursor |
 
 `graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.
 
@@ -82,4 +83,4 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 - `lib/glyphic`: the legend engine (v2; v1's `lib/engine` was deleted 2026-11-16): expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
 - `lib/layout`: the document model (text styles are stored glyphic contexts), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig` into `render.zig`'s geometry; `edit.zig` edits a run's source in place), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
 - `lib/sketch`: parametric sketches and their solver.
-- `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes; `layouts.zig` the named pane layouts and the panes' official names; `actions.zig` the action/mode/keymap registry and `keymap.zig` Graven's actions, modes and default keys: a key is matched there, never by code inline). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.
+- `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes; `layouts.zig` the named pane layouts and the panes' official names; `cursor.zig` the scintillating spark's frames, for the animated cursor; `actions.zig` the action/mode/keymap registry and `keymap.zig` Graven's actions, modes and default keys: a key is matched there, never by code inline). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.

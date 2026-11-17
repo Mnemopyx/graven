@@ -25,6 +25,7 @@ const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
+const spark = @import("cursor.zig");
 const layouts = @import("layouts.zig");
 const keymap = @import("keymap.zig");
 const kact = keymap.act;
@@ -1794,6 +1795,7 @@ fn frame() !dvui.App.Result {
     ghost_pane.hotEdges(&all_panes, root.data().id, hot_edges);
     ghost_pane.slide(&all_panes, root.data().id);
     hotCorners(root.data().id);
+    sparkFrameEnd();
     return .ok;
 }
 
@@ -7472,7 +7474,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         const ns_ = dvui.windowNaturalScale();
                         if (lx * lx + ly * ly > 60 * 60 * ns_ * ns_) engage_lock = null;
                     }
-                    if (engageKey() != before) dvui.refresh(null, @src(), box.data().id);
+                    // Locked, the spark's offset from the pointer changes as
+                    // it moves.
+                    const moved = me.p.x != engage_last_px.x or me.p.y != engage_last_px.y;
+                    engage_last_px = me.p;
+                    if (engageKey() != before or (engage_lock != null and moved)) dvui.refresh(null, @src(), box.data().id);
                 }
                 if (state.tool == .constrain) {
                     const was = constrain_hover;
@@ -11995,6 +12001,9 @@ var engage_n: usize = 0;
 var engage_lock: ?EngageHit = null;
 var engage_lock_px: dvui.Point.Physical = .{};
 var engage_lock_index: usize = 0;
+/// Where the pointer was at the last position event (one comes every
+/// frame, moved or not).
+var engage_last_px: dvui.Point.Physical = .{};
 /// A drag from an engagement point: the container, what moves, its box at
 /// the start (its parent's frame), the frame's offset, where the point was
 /// and where the pointer was (canvas mm).
@@ -12240,8 +12249,10 @@ fn drawEngagement(area: dvui.Rect.Physical) void {
     if (engage_drag) |d| {
         if (!d.moved) return;
         const q = state.view.toPx(area, d.now);
-        scintillate(q, 8 * ns);
-        dvui.cursorSet(.hidden);
+        if (!sparkCursor(q, false)) {
+            scintillate(q, 8 * ns);
+            dvui.cursorSet(.hidden);
+        }
         annunciate(area, q, engageText(d.hit));
         return;
     }
@@ -12255,11 +12266,150 @@ fn drawEngagement(area: dvui.Rect.Physical) void {
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, pts[0]), state.view.toPx(area, pts[1]) } }, .{ .thickness = 3 * ns, .color = .{ .color = colour.opacity(0.8) } });
     }
     if (engage_lock != null) {
-        scintillate(q, 8 * ns);
+        if (!sparkCursor(q, true)) scintillate(q, 8 * ns);
     } else {
         skRing(q, 6 * ns, colour, 1.5 * ns);
     }
     annunciate(area, q, engageText(h));
+}
+
+
+// The spark as the cursor --------------------------------------------------
+//
+// A point standing in for the pointer scintillates (see "Engagement
+// points"). Where SDL can make an animated cursor, the spark is the
+// cursor: its image holds the spark where the point is, off from the
+// hotspot by the point's offset from the pointer, and the compositor plays
+// it, so Graven draws nothing while it runs. Made afresh when the offset
+// changes; otherwise (no animated cursors, a point too far for a cursor's
+// image, or GRAVEN_DRAWN_SPARK set) the spark is drawn, redrawing the
+// canvas 25 times a second.
+
+var spark_cursor: ?*dvui.backend.c.SDL_Cursor = null;
+/// One made before, to free once it is no longer the cursor.
+var spark_old: ?*dvui.backend.c.SDL_Cursor = null;
+var spark_key: u64 = 0;
+/// Whether a spark cursor was asked for this frame.
+var spark_wanted = false;
+var spark_drawn_only: ?bool = null;
+
+fn sparkColor(c: dvui.Color) spark.Color {
+    return .{ .r = @as(f32, @floatFromInt(c.r)) / 255, .g = @as(f32, @floatFromInt(c.g)) / 255, .b = @as(f32, @floatFromInt(c.b)) / 255, .a = @as(f32, @floatFromInt(c.a)) / 255 };
+}
+
+/// Point `q` (device pixels) standing in for the pointer, as the cursor;
+/// with `arrow`, the pointer's own arrow shows at the hotspot. Whether it
+/// could be (else the caller draws the spark).
+fn sparkCursor(q: dvui.Point.Physical, arrow: bool) bool {
+    if (dvui.backend.kind != .sdl3) return false;
+    if (spark_drawn_only == null) spark_drawn_only = std.c.getenv("GRAVEN_DRAWN_SPARK") != null;
+    if (spark_drawn_only.?) return false;
+    const c = dvui.backend.c;
+    const win = dvui.currentWindow();
+    const m = win.mouse_pt;
+    const ns = dvui.windowNaturalScale();
+    // Cursor images are in the window's own (logical) pixels.
+    const dx = @round((q.x - m.x) / ns);
+    const dy = @round((q.y - m.y) / ns);
+    const key = mergeKey(.{ @as(i32, @intFromFloat(dx)), @as(i32, @intFromFloat(dy)), arrow, @as(i32, @intFromFloat(@round(ns * 100))) });
+    if (spark_cursor == null or key != spark_key) {
+        const made = makeSpark(dx, dy, arrow, ns) orelse return false;
+        if (spark_cursor) |old| {
+            if (spark_old) |o| c.SDL_DestroyCursor(o);
+            spark_old = old;
+        }
+        spark_cursor = made;
+        spark_key = key;
+    }
+    spark_wanted = true;
+    keepSpark();
+    return true;
+}
+
+/// Makes the animated cursor for a spark `dx`, `dy` from the pointer.
+fn makeSpark(dx: f32, dy: f32, arrow: bool, ns: f32) ?*dvui.backend.c.SDL_Cursor {
+    const c = dvui.backend.c;
+    const base: spark.Spec = .{
+        .dx = dx,
+        .dy = dy,
+        .arrow = arrow,
+        .a = sparkColor(colors.select),
+        .b = sparkColor(colors.overflow),
+        .ink = sparkColor(colors.ink),
+        .paper = sparkColor(colors.paper),
+    };
+    const sz1 = spark.size(base) orelse return null;
+    var hi = base;
+    hi.scale = ns;
+    const szh: ?spark.Size = if (ns > 1.01) spark.size(hi) else null;
+    var infos: [spark.frames]c.SDL_CursorFrameInfo = undefined;
+    var made: usize = 0;
+    defer for (infos[0..made]) |f| c.SDL_DestroySurface(f.surface);
+    for (0..spark.frames) |k| {
+        const surf = sparkSurface(base, sz1, k) orelse return null;
+        infos[k] = .{ .surface = surf, .duration = spark.frame_ms };
+        made += 1;
+        // At the screen's scale, where it is not 1.
+        if (szh) |sh| if (sparkSurface(hi, sh, k)) |alt| {
+            _ = c.SDL_AddSurfaceAlternateImage(surf, alt);
+            c.SDL_DestroySurface(alt);
+        };
+    }
+    return c.SDL_CreateAnimatedCursor(&infos, @intCast(made), @intCast(sz1.hot_x), @intCast(sz1.hot_y));
+}
+
+fn sparkSurface(sp: spark.Spec, sz: spark.Size, k: usize) ?*dvui.backend.c.SDL_Surface {
+    const c = dvui.backend.c;
+    const surf = c.SDL_CreateSurface(@intCast(sz.w), @intCast(sz.h), c.SDL_PIXELFORMAT_RGBA32) orelse return null;
+    const a = dvui.currentWindow().arena();
+    const buf = a.alloc(u8, sz.w * sz.h * 4) catch {
+        c.SDL_DestroySurface(surf);
+        return null;
+    };
+    spark.frame(sp, sz, k, buf);
+    const pitch: usize = @intCast(surf.*.pitch);
+    const dst: [*]u8 = @ptrCast(surf.*.pixels orelse {
+        c.SDL_DestroySurface(surf);
+        return null;
+    });
+    for (0..sz.h) |y| @memcpy(dst[y * pitch ..][0 .. sz.w * 4], buf[y * sz.w * 4 ..][0 .. sz.w * 4]);
+    return surf;
+}
+
+/// Keeps the spark the cursor: DVUI sets the cursor only when the one asked
+/// for changes, so it is asked for the one it set last (if that was "none",
+/// a visible one first, then the spark again next frame).
+fn keepSpark() void {
+    const c = dvui.backend.c;
+    const cur = spark_cursor orelse return;
+    const back = dvui.currentWindow().backend.impl;
+    if (back.cursor_last == .hidden) {
+        dvui.cursorSet(.arrow);
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    dvui.cursorSet(back.cursor_last);
+    if (c.SDL_GetCursor() != cur) _ = c.SDL_SetCursor(cur);
+}
+
+/// Once a frame, after drawing: a spark cursor not asked for this frame
+/// gives way to DVUI's again, and one no longer the cursor is freed.
+fn sparkFrameEnd() void {
+    if (dvui.backend.kind != .sdl3) return;
+    const c = dvui.backend.c;
+    if (spark_old) |o| if (c.SDL_GetCursor() != o) {
+        c.SDL_DestroyCursor(o);
+        spark_old = null;
+    };
+    if (!spark_wanted) if (spark_cursor) |cur| {
+        // DVUI puts its own back at the frame's end.
+        dvui.currentWindow().backend.impl.cursor_last = .bad;
+        if (spark_old) |o| c.SDL_DestroyCursor(o);
+        spark_old = cur;
+        spark_cursor = null;
+        dvui.refresh(null, @src(), null);
+    };
+    spark_wanted = false;
 }
 
 /// A label beside canvas point `q` (device pixels): what a press there does.
@@ -12290,15 +12440,15 @@ fn scintillate(q: dvui.Point.Physical, r: f32) void {
     animate();
     const t: f32 = @floatCast(@as(f64, @floatFromInt(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms))) / 1000);
     const ns = dvui.windowNaturalScale();
-    const glow = 0.55 + 0.45 * @sin(t * 2 * std.math.pi * 2.5);
-    const rays = 8;
+    const glow = spark.glow(t);
+    const rays = spark.rays;
     for (0..rays) |i| {
-        const ang = @as(f32, @floatFromInt(i)) * 2 * std.math.pi / rays + t * 2.2;
+        const ang = @as(f32, @floatFromInt(i)) * 2 * std.math.pi / rays + spark.angle(t);
         const c = @cos(ang);
         const s_ = @sin(ang);
         const inner = r * 0.75;
         const outer = r * 1.55;
-        const col = if ((i + @as(usize, @intFromFloat(@floor(t * 6)))) % 2 == 0) colors.select else colors.overflow;
+        const col = if (spark.firstColour(i, t)) colors.select else colors.overflow;
         dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x + c * inner, .y = q.y + s_ * inner }, .{ .x = q.x + c * outer, .y = q.y + s_ * outer } } }, .{ .thickness = 2 * ns, .color = .{ .color = col.opacity(glow) } });
     }
     skRing(q, r * 0.55, colors.select, 1.5 * ns);
@@ -12942,6 +13092,8 @@ var sk_nhits: usize = 0;
 /// The hit Tab locked the pointer onto, and where on the screen.
 var sk_lock: ?SkHit = null;
 var sk_lock_px: dvui.Point.Physical = .{};
+/// Where the pointer was at the last position event in sketch mode.
+var sk_last_px: dvui.Point.Physical = .{};
 var sk_lock_index: usize = 0;
 /// The pointer, in the sketch's frame.
 var sk_pointer: ?geom.Point = null;
@@ -13663,6 +13815,10 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             dvui.focusWidget(box.data().id, null, e.num);
         },
         .position => {
+            // A position event comes every frame: redrawn only when the
+            // pointer has moved.
+            const moved = me.p.x != sk_last_px.x or me.p.y != sk_last_px.y;
+            sk_last_px = me.p;
             state.mouse = at_space;
             sk_pointer = q;
             const radius = 10 * dvui.windowNaturalScale() / state.view.ppm;
@@ -13674,7 +13830,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 if (dx * dx + dy * dy > 60 * 60 * dvui.windowNaturalScale() * dvui.windowNaturalScale()) sk_lock = null;
             }
             dvui.cursorSet(if (sk_tool != .none) .crosshair else .arrow);
-            dvui.refresh(null, @src(), box.data().id);
+            if (moved) dvui.refresh(null, @src(), box.data().id);
         },
         .wheel_y => |dy| {
             e.handle(@src(), box.data());
@@ -14046,7 +14202,9 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
         const q = skPx(area, it, t.at);
         const locked = sk_lock != null;
         // Locked, it stands in for the pointer: it scintillates.
-        if (locked) scintillate(q, 8 * px) else skRing(q, 6 * px, colors.select, 1.5 * px);
+        if (locked) {
+            if (!sparkCursor(q, true)) scintillate(q, 8 * px);
+        } else skRing(q, 6 * px, colors.select, 1.5 * px);
     }
     // The drawing tool's clicks so far, to the pointer.
     if (sk_tool != .none and sk_nclicks > 0) if (skClickPoint()) |p| {
