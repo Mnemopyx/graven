@@ -7462,7 +7462,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 // Engagement points near the pointer; a lock lets go when
                 // the pointer goes well away.
                 if (engage_drag == null) {
-                    const had = engage_n > 0 or engage_lock != null;
+                    // Redrawn only when what is engaged changes (a
+                    // position event comes every frame).
+                    const before = engageKey();
                     if (area.contains(me.p)) findEngagements(area, at) else engage_n = 0;
                     if (engage_lock != null) {
                         const lx = me.p.x - engage_lock_px.x;
@@ -7470,7 +7472,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         const ns_ = dvui.windowNaturalScale();
                         if (lx * lx + ly * ly > 60 * 60 * ns_ * ns_) engage_lock = null;
                     }
-                    if (had or engage_n > 0) dvui.refresh(null, @src(), box.data().id);
+                    if (engageKey() != before) dvui.refresh(null, @src(), box.data().id);
                 }
                 if (state.tool == .constrain) {
                     const was = constrain_hover;
@@ -12078,6 +12080,13 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
         engage_hits[engage_n] = h;
         engage_n += 1;
     };
+}
+
+/// What is engaged, as a number that changes when it does (the target,
+/// whether locked, where an edge's point is).
+fn engageKey() u64 {
+    const t = engageTarget() orelse return 0;
+    return mergeKey(.{ t.id, @intFromEnum(t.kind), t.edges.left, t.edges.right, t.edges.bottom, t.edges.top, @as(i64, @intFromFloat(@round(t.at.x * 100))), @as(i64, @intFromFloat(@round(t.at.y * 100))), engage_lock != null });
 }
 
 /// What a press would engage: the locked point, else the nearest.
