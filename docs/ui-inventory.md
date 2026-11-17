@@ -86,7 +86,7 @@ The owner prefers single keys with no modifiers for commands. Today nearly every
 
 These are observations to start the discussion from, not decisions.
 
-1. **Where commands live:** some are menu items, some are tools, most are buttons in the properties pane (about 70 distinct buttons, among them Add grid, Add track, Add layer, Make panel, Release panel, Group, Ungroup, Edit sketch, Apply sketch to this prototype, Fit frame to its contents). There is no rule for which is which, and no command list or palette.
+1. **Where commands live:** some are menu items, some are tools, most are buttons in the properties pane (about 70 distinct buttons, among them Add grid, Add track, Add layer, Make panel, Release panel, Group, Ungroup, Edit sketch, Apply sketch to this prototype, Fit frame to its contents). There is no rule for which is which, and no command list or palette. (Keys, since 2026-11-17, are named actions in modes, `keymap.zig`: the ground for menus, a palette and the buttons to share.)
 2. **Menus are thin:** Edit has only Undo and Redo; Text only Fonts…; samples sit in File.
 3. **Modes are entered and left in different ways:** Edit panel / Leave panel editing; Edit sketch / Finish sketch… / Accept and leave / Back to sketching. Esc and Enter do not mean the same thing in every mode.
 4. **Selection:** Ctrl-click selects, a plain click sets the context, and Select area is a separate tool. The context, the selection and the flow cursor are three separate ideas, shown in different ways.

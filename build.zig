@@ -227,6 +227,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     }) })).step);
+    // The action registry: names, modes, keymaps, checked when built.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/gui/actions.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) })).step);
     // Display correction's curve.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("apps/gui/display.zig"),

@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const display = @import("display.zig");
+const keymap = @import("keymap.zig");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const fs = @import("graven_fontsearch");
@@ -859,8 +860,8 @@ fn installPrompt(allocator: Allocator, area: dvui.Rect) void {
     }
     var cancel = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        if (e.evt.key.action == .down and e.evt.key.code == .escape) {
+        const inv = keymap.match1(e, keymap.mode("dialog")) orelse continue;
+        if (inv.action == keymap.act("dialog.cancel")) {
             cancel = true;
             e.handle(@src(), fw.data());
         }
@@ -1139,8 +1140,8 @@ fn removePrompt(host: Host, allocator: Allocator, i: usize, area: dvui.Rect) voi
     }
     var cancel = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        if (e.evt.key.action == .down and e.evt.key.code == .escape) {
+        const inv = keymap.match1(e, keymap.mode("dialog")) orelse continue;
+        if (inv.action == keymap.act("dialog.cancel")) {
             cancel = true;
             e.handle(@src(), fw.data());
         }

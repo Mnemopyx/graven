@@ -25,6 +25,12 @@ const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
+const keymap = @import("keymap.zig");
+const kact = keymap.act;
+const kmode = keymap.mode;
+comptime {
+    _ = keymap.R.tables;
+}
 const bg_grid = @import("grid.zig");
 const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
@@ -683,9 +689,8 @@ fn displayWindow() void {
     }
     var close = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down or k.code != .escape) continue;
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        if (inv.action != kact("dialog.cancel")) continue;
         close = true;
         e.handle(@src(), fw.data());
     }
@@ -828,15 +833,11 @@ fn sizeWindow() void {
         }
         const ad = area.data();
         for (dvui.events()) |*e| {
-            if (e.evt == .key and !e.handled) {
-                const k = e.evt.key;
-                if (k.action != .down and k.action != .repeat) continue;
-                const step: f32 = if (k.mod.shift()) 10 else 1;
-                switch (k.code) {
-                    .left => card_px -= step,
-                    .right => card_px += step,
-                    .escape => cancel = true,
-                    .enter, .kp_enter => do_save = true,
+            if (keymap.match1(e, kmode("dialog.calibrate-size"))) |inv| {
+                switch (inv.action) {
+                    kact("dialog.calibrate-size.grow") => card_px += @floatFromInt(inv.arg),
+                    kact("dialog.cancel") => cancel = true,
+                    kact("dialog.confirm") => do_save = true,
                     else => continue,
                 }
                 e.handle(@src(), fw.data());
@@ -917,15 +918,12 @@ fn zoomPercent() f64 {
 fn startKeys(wd: *dvui.WidgetData) void {
     if (filePromptOpen() or recovery != null) return;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down or k.mod.control() or k.mod.alt() or k.mod.command()) continue;
-        switch (k.code) {
-            .m => createCanvas(.mm),
-            .i => createCanvas(.inch),
-            .o => proceed(.open),
-            .d => display_window = true,
-            .one, .two, .three, .four, .five, .six, .seven, .eight, .nine => openRecent(@intFromEnum(k.code) - @intFromEnum(dvui.enums.Key.one)),
+        const inv = keymap.match1(e, kmode("start")) orelse continue;
+        switch (inv.action) {
+            kact("start.new-canvas") => createCanvas(if (inv.arg == 1) .inch else .mm),
+            kact("start.open") => proceed(.open),
+            kact("start.display-correction") => display_window = true,
+            kact("start.open-recent") => openRecent(@intCast(inv.arg)),
             else => continue,
         }
         e.handle(@src(), wd);
@@ -1100,10 +1098,12 @@ fn exportPrompt() void {
     var go = false;
     var cancel = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down) continue;
-        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        switch (inv.action) {
+            kact("dialog.confirm") => go = true,
+            kact("dialog.cancel") => cancel = true,
+            else => continue,
+        }
         e.handle(@src(), fw.data());
     }
     var path: []const u8 = "graven.svg";
@@ -1688,6 +1688,7 @@ fn frame() !dvui.App.Result {
         // GRAVEN_FONTS_WINDOW set: the Fonts window opens at start.
         if (std.c.getenv("GRAVEN_FONTS_WINDOW") != null) fontwin.open = true;
         frame_log = std.c.getenv("GRAVEN_FRAME_LOG") != null;
+        keymap.log = std.c.getenv("GRAVEN_KEY_LOG") != null;
         if (std.c.getenv("GRAVEN_DUMP_OUTLINES")) |v| dump_path = std.mem.span(v);
         if (std.c.getenv("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.gamma;
         if (std.c.getenv("GRAVEN_TEXT_DARKEN")) |v| glyphs.darken = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.darken;
@@ -1708,6 +1709,7 @@ fn frame() !dvui.App.Result {
         }
     }
     try update();
+    updateModeStack();
 
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .style = .window });
     defer root.deinit();
@@ -2325,10 +2327,12 @@ fn filePrompt(kind: FilePromptKind) void {
     var go = false;
     var cancel = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down) continue;
-        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        switch (inv.action) {
+            kact("dialog.confirm") => go = true,
+            kact("dialog.cancel") => cancel = true,
+            else => continue,
+        }
         e.handle(@src(), fw.data());
     }
     var path: []const u8 = "";
@@ -2443,34 +2447,23 @@ fn mergeKey(parts: anytype) u64 {
     return h.final();
 }
 
-/// Ctrl+Z undoes; Ctrl+Shift+Z (and Ctrl+Y off macOS) redoes. Cmd on
-/// macOS. Held, they repeat.
+/// The app's own keys (mode `global`): undo and redo (Ctrl+Z, Ctrl+Shift+Z,
+/// and Ctrl+Y off macOS; held, they repeat), save, save as, open, new. Cmd
+/// on macOS.
 fn historyKeys(wd: *dvui.WidgetData) void {
     if (file_prompt != null or leave_prompt != null) return;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down and k.action != .repeat) continue;
-        const primary = if (builtin.os.tag == .macos) k.mod.command() else k.mod.control();
-        if (!primary) continue;
-        if (k.code == .z and !k.mod.shift()) {
-            e.handle(@src(), wd);
-            if (!canvas_prompt) undo();
-        } else if (k.code == .s and k.action == .down) {
-            e.handle(@src(), wd);
-            if (!canvas_prompt) {
-                if (k.mod.shift()) saveAs() else save();
-            }
-        } else if (k.code == .o and k.action == .down) {
-            e.handle(@src(), wd);
-            leave(.open);
-        } else if (k.code == .n and k.action == .down) {
-            e.handle(@src(), wd);
-            leave(.new_canvas);
-        } else if ((k.code == .z and k.mod.shift()) or (k.code == .y and builtin.os.tag != .macos)) {
-            e.handle(@src(), wd);
-            if (!canvas_prompt) redo();
-        } else continue;
+        const inv = keymap.match1(e, kmode("global")) orelse continue;
+        switch (inv.action) {
+            kact("edit.undo") => if (!canvas_prompt) undo(),
+            kact("edit.redo") => if (!canvas_prompt) redo(),
+            kact("file.save") => if (!canvas_prompt) save(),
+            kact("file.save-as") => if (!canvas_prompt) saveAs(),
+            kact("file.open") => leave(.open),
+            kact("file.new") => leave(.new_canvas),
+            else => continue,
+        }
+        e.handle(@src(), wd);
         dvui.refresh(null, @src(), null);
     }
 }
@@ -3093,14 +3086,12 @@ fn expressionLine() !void {
     // sees them: Up and Down move, Tab or Enter accepts, Esc dismisses.
     const was_focused = expr_entry_id != null and expr_entry_id.? == dvui.focusedWidgetId();
     if (was_focused and comp.items.len > 0) for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down and k.action != .repeat) continue;
-        switch (k.code) {
-            .up => comp_index = if (comp_index == 0) comp.items.len - 1 else comp_index - 1,
-            .down => comp_index = (comp_index + 1) % comp.items.len,
-            .tab, .enter, .kp_enter => comp_accept = comp_index,
-            .escape => comp_dismissed_at = std.math.maxInt(usize),
+        const inv = keymap.match1(e, kmode("expression-line.completion")) orelse continue;
+        switch (inv.action) {
+            kact("expression-line.completion.previous") => comp_index = if (comp_index == 0) comp.items.len - 1 else comp_index - 1,
+            kact("expression-line.completion.next") => comp_index = (comp_index + 1) % comp.items.len,
+            kact("expression-line.completion.accept") => comp_accept = comp_index,
+            kact("expression-line.completion.dismiss") => comp_dismissed_at = std.math.maxInt(usize),
             else => continue,
         }
         e.handle(@src(), dvui.currentWindow().data());
@@ -3111,11 +3102,8 @@ fn expressionLine() !void {
     // flow cursor (after the equation), where Enter is a hard break.
     var back_to_flow = false;
     if (was_focused and target == .run) for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down) continue;
-        const toggle = k.code == .backslash and primaryMod(k.mod);
-        if (!toggle and (comp.items.len > 0 or (k.code != .enter and k.code != .kp_enter and k.code != .escape))) continue;
+        const inv = keymap.match1(e, kmode("expression-line.run")) orelse continue;
+        if (inv.action != kact("expression-line.run.leave")) continue;
         e.handle(@src(), dvui.currentWindow().data());
         back_to_flow = true;
     };
@@ -3131,11 +3119,10 @@ fn expressionLine() !void {
     // entry would move focus.
     var next_slot: ?bool = null;
     if (was_focused) for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.code == .tab and (k.action == .down or k.action == .repeat)) {
+        const inv = keymap.match1(e, kmode("expression-line")) orelse continue;
+        if (inv.action == kact("expression-line.tab")) {
             e.handle(@src(), dvui.currentWindow().data());
-            next_slot = k.mod.shift();
+            next_slot = inv.arg == 1;
         }
     };
     var te = dvui.textEntry(@src(), .{ .text_initial = content }, .{
@@ -5641,16 +5628,14 @@ fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical
     if (e.handled) return;
     if (e.evt == .key) {
         if (!cursorKeysReach()) return;
-        const k = e.evt.key;
-        if (k.action != .down) return;
-        if (primaryMod(k.mod)) return;
-        switch (k.code) {
-            .escape => {
+        const inv = keymap.match1(e, kmode("panel-edit")) orelse return;
+        switch (inv.action) {
+            kact("panel-edit.cancel") => {
                 if (pe_press != null) {
                     pe_press = null;
                 } else state.context = .{ .panel = pe.panel };
             },
-            .delete, .backspace => {
+            kact("panel-edit.remove-tile") => {
                 const id = switch (state.context) {
                     .tile => |id| id,
                     else => return,
@@ -6115,10 +6100,12 @@ fn imagePrompt() void {
     var go = false;
     var cancel = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down) continue;
-        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        switch (inv.action) {
+            kact("dialog.confirm") => go = true,
+            kact("dialog.cancel") => cancel = true,
+            else => continue,
+        }
         e.handle(@src(), fw.data());
     }
     var path: []const u8 = "";
@@ -6612,6 +6599,65 @@ fn dragBox(a: geom.Point, b: geom.Point) geom.Box {
     return .{ .x0 = @min(a.x, b.x), .y0 = @min(a.y, b.y), .x1 = @max(a.x, b.x), .y1 = @max(a.y, b.y) };
 }
 
+/// The key modes active now, outermost first, from the interface's state
+/// (keymap.zig): the major mode, what is nested in it, and a dialog over
+/// it. A mode that takes typed text keeps the unchorded printable keys of
+/// those it sits in.
+fn updateModeStack() void {
+    var st: [8]keymap.ModeId = undefined;
+    var n: usize = 0;
+    const push = struct {
+        fn f(buf: *[8]keymap.ModeId, len: *usize, m: keymap.ModeId) void {
+            if (len.* < buf.len) {
+                buf[len.*] = m;
+                len.* += 1;
+            }
+        }
+    }.f;
+    push(&st, &n, kmode("global"));
+    if (canvas_prompt) {
+        push(&st, &n, kmode("start"));
+    } else if (sketch_edit != null) {
+        push(&st, &n, kmode("sketch"));
+        if (sk_summary) push(&st, &n, kmode("sketch.summary"));
+    } else if (panel_edit != null) {
+        push(&st, &n, kmode("panel-edit"));
+    } else {
+        push(&st, &n, kmode("canvas"));
+        if (selection.items.len > 0 and track_cursor == null) push(&st, &n, kmode("canvas.selection"));
+        if (track_cursor != null) push(&st, &n, kmode("canvas.flow"));
+        if (canvas_eq) |q| {
+            push(&st, &n, kmode("canvas.equation"));
+            if (q.head != null) push(&st, &n, kmode("canvas.equation.head"));
+        }
+        if (expr_entry_id != null and expr_entry_id.? == dvui.focusedWidgetId()) {
+            push(&st, &n, kmode("expression-line"));
+            if (comp.items.len > 0) push(&st, &n, kmode("expression-line.completion"));
+            if (equation_edit != null) push(&st, &n, kmode("expression-line.run"));
+        }
+    }
+    if (filePromptOpen() or export_prompt or image_prompt or constrain_prompt != null or display_window) {
+        push(&st, &n, kmode("dialog"));
+    } else if (size_window) push(&st, &n, kmode("dialog.calibrate-size"));
+    keymap.setStack(st[0..n]);
+}
+
+/// The direction of `canvas.object.nudge` if event `e` asks for it.
+fn canvasNudge(e: *const dvui.Event) ?keymap.Direction {
+    const inv = keymap.match1(e, kmode("canvas")) orelse return null;
+    return if (inv.action == kact("canvas.object.nudge")) inv.dir() else null;
+}
+
+/// An arrow key's code for direction `d` (what the move functions take).
+fn arrowCode(d: keymap.Direction) dvui.enums.Key {
+    return switch (d) {
+        .left => .left,
+        .right => .right,
+        .up => .up,
+        .down => .down,
+    };
+}
+
 fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
     const drawing = state.tool != .select;
@@ -6622,7 +6668,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // input but Enter, which makes it (unless an open or save prompt
         // is on top, which takes the Enter).
         if (canvas_prompt) {
-            if (!filePromptOpen() and e.evt == .key and e.evt.key.action == .down and (e.evt.key.code == .enter or e.evt.key.code == .kp_enter)) {
+            if (!filePromptOpen() and if (keymap.match1(e, kmode("start"))) |inv| inv.action == kact("start.new-canvas-last") else false) {
                 e.handle(@src(), box.data());
                 createCanvas(last_units);
                 dvui.refresh(null, @src(), box.data().id);
@@ -6640,9 +6686,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         }
         // A selected track's arrow keys move it, while the canvas or the
         // palette has the keyboard.
-        if (e.evt == .key and track_cursor == null and state.context == .row and !e.handled and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and moveTrackKey(k.code)) {
+        if (track_cursor == null and state.context == .row and cursorKeysReach()) {
+            if (canvasNudge(e)) |d| {
+                moveTrackArrow(switch (d) {
+                    .left => .left,
+                    .right => .right,
+                    .up => .up,
+                    .down => .down,
+                });
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -6658,9 +6709,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             if (!still) canvas_eq = null;
         };
         // Ctrl+\ on a selected tile: its text edited on the canvas.
-        if (canvas_eq == null and e.evt == .key and !e.handled and !canvas_prompt and cursorKeysReach() and state.context == .tile) {
-            const k = e.evt.key;
-            if (k.action == .down and k.code == .backslash and primaryMod(k.mod)) {
+        if (canvas_eq == null and !canvas_prompt and cursorKeysReach() and state.context == .tile) {
+            if (if (keymap.match1(e, kmode("canvas"))) |inv| inv.action == kact("canvas.tile.edit-text") else false) {
                 e.handle(@src(), box.data());
                 enterTileTrack(state.context.tile);
                 dvui.refresh(null, @src(), box.data().id);
@@ -6669,14 +6719,18 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         }
         // Editing an equation on the canvas: its keys and its typing first.
         if (canvas_eq != null and !e.handled and !canvas_prompt and cursorKeysReach()) {
-            if (e.evt == .key) {
-                const k = e.evt.key;
-                if ((k.action == .down or k.action == .repeat) and eqKey(k)) {
+            // The head's keys first (when the caret is on a head), then
+            // the equation's.
+            const head_modes = [_]keymap.ModeId{ kmode("canvas.equation.head"), kmode("canvas.equation") };
+            const in: []const keymap.ModeId = if (canvas_eq.?.head != null) &head_modes else head_modes[1..];
+            if (keymap.match(e, in)) |inv| {
+                if (eqAction(inv)) {
                     e.handle(@src(), box.data());
                     dvui.refresh(null, @src(), box.data().id);
                     continue;
                 }
-            } else if (e.evt == .text) {
+            }
+            if (e.evt == .text) {
                 const txt = switch (e.evt.text.action) {
                     .value => |v| v.txt,
                     else => "",
@@ -6703,27 +6757,24 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
         }
         // A selected group: arrow keys move all of it 1 mm.
-        if (e.evt == .key and state.context == .group and !e.handled and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and moveGroupKey(k.code)) {
+        if (state.context == .group and cursorKeysReach()) {
+            if (if (canvasNudge(e)) |d| moveGroupKey(arrowCode(d)) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
         }
         // A selected image: arrow keys move it 1 mm.
-        if (e.evt == .key and state.context == .image and !e.handled and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and moveImageKey(k.code)) {
+        if (state.context == .image and cursorKeysReach()) {
+            if (if (canvasNudge(e)) |d| moveImageKey(arrowCode(d)) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
         }
         // A selected view: arrow keys move it 1 mm.
-        if (e.evt == .key and state.context == .view and !e.handled and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and moveViewKey(k.code)) {
+        if (state.context == .view and cursorKeysReach()) {
+            if (if (canvasNudge(e)) |d| moveViewKey(arrowCode(d)) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -6731,9 +6782,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         }
         // Selected line art: arrow keys move it 1 mm, and the tracks under
         // it reflow.
-        if (e.evt == .key and state.context == .art and !e.handled and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and moveArtKey(k.code)) {
+        if (state.context == .art and cursorKeysReach()) {
+            if (if (canvasNudge(e)) |d| moveArtKey(arrowCode(d)) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -6742,9 +6792,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // The selection's keys: Tab hunts on to the next-nearest container
         // of the last Ctrl-click (Shift+Tab back), Esc empties it, and the
         // arrows move it.
-        if (e.evt == .key and selection.items.len > 0 and !e.handled and track_cursor == null and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and selectionKey(k.code, k.mod.shift())) {
+        if (selection.items.len > 0 and track_cursor == null and cursorKeysReach()) {
+            if (if (keymap.match1(e, kmode("canvas.selection"))) |inv| selectionAction(inv) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -6752,17 +6801,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         }
         // The flow cursor's keys, while the canvas or the palette has the
         // keyboard: never from a text entry.
-        if (e.evt == .key and track_cursor != null and !e.handled and cursorKeysReach()) {
-            const k = e.evt.key;
-            if ((k.action == .down or k.action == .repeat) and cursorKey(k)) {
+        if (track_cursor != null and cursorKeysReach()) {
+            if (if (keymap.match1(e, kmode("canvas.flow"))) |inv| flowAction(inv) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
         }
         if (e.evt == .key and state.moving != null) {
-            const k = e.evt.key;
-            if (k.code == .escape and k.action == .down) {
+            if (if (keymap.match1(e, kmode("canvas"))) |inv| inv.action == kact("canvas.tool.cancel") else false) {
                 e.handle(@src(), box.data());
                 state.moving = null;
                 dvui.refresh(null, @src(), box.data().id);
@@ -6770,8 +6817,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             continue;
         }
         if (e.evt == .key and drawing) {
-            const k = e.evt.key;
-            if (k.code == .escape and k.action == .down) {
+            const inv = keymap.match1(e, kmode("canvas"));
+            const is = struct {
+                fn f(i: ?keymap.Invocation, a: keymap.ActionId) bool {
+                    return if (i) |x| x.action == a else false;
+                }
+            }.f;
+            if (is(inv, kact("canvas.tool.cancel"))) {
                 e.handle(@src(), box.data());
                 state.tool = .select;
                 state.drag = null;
@@ -6779,7 +6831,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 constrain_hover = null;
                 polygon_pts.clearRetainingCapacity();
                 dvui.refresh(null, @src(), box.data().id);
-            } else if ((k.code == .enter or k.code == .kp_enter) and k.action == .down and state.tool == .add_art and polygon_pts.items.len > 0) {
+            } else if (is(inv, kact("canvas.tool.finish")) and state.tool == .add_art and polygon_pts.items.len > 0) {
                 e.handle(@src(), box.data());
                 finishPolygon();
                 dvui.refresh(null, @src(), box.data().id);
@@ -6789,14 +6841,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (!dvui.eventMatchSimple(e, box.data())) continue;
         if (e.evt == .key) {
             // Keys reach the canvas only while it has focus.
-            const k = e.evt.key;
-            if (k.code == .delete and k.action == .down and path_selected != null and pathRegion() != null) {
+            const del = if (keymap.match1(e, kmode("canvas"))) |inv| inv.action == kact("canvas.object.delete") else false;
+            if (del and path_selected != null and pathRegion() != null) {
                 act(.removeControlPoint, .{path_selected.?}) catch {};
                 path_selected = null;
                 e.handle(@src(), box.data());
                 continue;
             }
-            if (k.code == .delete and k.action == .down and state.moving == null) {
+            if (del and state.moving == null) {
                 switch (state.context) {
                     .panel => |pi| if (!state.model.panels.items[pi].unbounded) {
                         e.handle(@src(), box.data());
@@ -6833,7 +6885,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         e.handle(@src(), box.data());
                         const found = findTile(id);
                         actV(.removeTile, .{id});
-                        state.context = if (found) |f| .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } } else .worksheet;
+                        // Its track, while that still exists (a grid's tile
+                        // may leave none behind), else its panel.
+                        state.context = if (found) |f| blk: {
+                            if (f.panel >= state.model.panels.items.len) break :blk .worksheet;
+                            if (f.tile.region >= state.model.panels.items[f.panel].regions.items.len) break :blk .{ .panel = f.panel };
+                            break :blk .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } };
+                        } else .worksheet;
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     else => {},
@@ -7877,6 +7935,8 @@ fn properties() !void {
             const pt = placedTrack(r.panel, r.region, r.row);
             const member = if (pt) |x| x.member else r.region;
             const on = if (pt) |x| x.panel else r.panel;
+            // A track that no longer exists shows nothing.
+            if (on >= state.model.panels.items.len or member >= state.model.panels.items[on].regions.items.len) return;
             const region = state.model.panels.items[on].regions.items[member];
             propText(trackWord(region.major), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(on, member).len, region.name }, 1);
             var where_buf: [96]u8 = undefined;
@@ -9098,36 +9158,23 @@ fn isWordChar(ch: ?u8) bool {
 
 /// A movement key for the flow cursor (dvui's text-field bindings), with
 /// Shift selecting. Whether it was one.
-fn flowMoveKey(k: dvui.Event.Key) bool {
+/// A caret movement of the flow (`canvas.flow.caret.*`, or with Shift
+/// `canvas.flow.select.*`); whether `a` was one.
+fn flowMoveAction(a: keymap.ActionId) bool {
     const c = track_cursor orelse return false;
     const Move = enum { char_left, char_right, word_left, word_right, line_start, line_end, text_start, text_end, char_up, char_down };
-    const names = [_]struct { name: []const u8, move: Move, select: bool }{
-        .{ .name = "char_left", .move = .char_left, .select = false },
-        .{ .name = "char_left_select", .move = .char_left, .select = true },
-        .{ .name = "char_right", .move = .char_right, .select = false },
-        .{ .name = "char_right_select", .move = .char_right, .select = true },
-        .{ .name = "word_left", .move = .word_left, .select = false },
-        .{ .name = "word_left_select", .move = .word_left, .select = true },
-        .{ .name = "word_right", .move = .word_right, .select = false },
-        .{ .name = "word_right_select", .move = .word_right, .select = true },
-        .{ .name = "line_start", .move = .line_start, .select = false },
-        .{ .name = "line_start_select", .move = .line_start, .select = true },
-        .{ .name = "line_end", .move = .line_end, .select = false },
-        .{ .name = "line_end_select", .move = .line_end, .select = true },
-        .{ .name = "text_start", .move = .text_start, .select = false },
-        .{ .name = "text_start_select", .move = .text_start, .select = true },
-        .{ .name = "text_end", .move = .text_end, .select = false },
-        .{ .name = "text_end_select", .move = .text_end, .select = true },
-        .{ .name = "char_up", .move = .char_up, .select = false },
-        .{ .name = "char_up_select", .move = .char_up, .select = true },
-        .{ .name = "char_down", .move = .char_down, .select = false },
-        .{ .name = "char_down_select", .move = .char_down, .select = true },
+    const moves = [_]struct { name: []const u8, move: Move }{
+        .{ .name = "char-left", .move = .char_left },   .{ .name = "char-right", .move = .char_right },
+        .{ .name = "word-left", .move = .word_left },   .{ .name = "word-right", .move = .word_right },
+        .{ .name = "line-start", .move = .line_start }, .{ .name = "line-end", .move = .line_end },
+        .{ .name = "text-start", .move = .text_start }, .{ .name = "text-end", .move = .text_end },
+        .{ .name = "line-up", .move = .char_up },       .{ .name = "line-down", .move = .char_down },
     };
     var found: ?struct { move: Move, select: bool } = null;
-    for (names) |n| if (k.matchBind(n.name)) {
-        found = .{ .move = n.move, .select = n.select };
-        break;
-    };
+    inline for (moves) |m| {
+        if (a == kact("canvas.flow.caret." ++ m.name)) found = .{ .move = m.move, .select = false };
+        if (a == kact("canvas.flow.select." ++ m.name)) found = .{ .move = m.move, .select = true };
+    }
     const f = found orelse return false;
     const stops = flowStops(c.panel, c.region);
     const i = stopAt(stops, c.index, c.offset) orelse return true;
@@ -9307,109 +9354,76 @@ fn cursorKeysReach() bool {
 /// character palettes.
 const tile_palette_shown = false;
 
-fn cursorKey(key: dvui.Event.Key) bool {
-    const code = key.code;
-    const shift = key.mod.shift();
+/// An action of mode `canvas.flow`, at the flow cursor; whether it was
+/// done.
+fn flowAction(inv: keymap.Invocation) bool {
     const c = track_cursor orelse return false;
-    // Movement as in a text field (dvui's bindings), Shift selecting.
-    if (flowMoveKey(key)) {
+    // Movement as in a text field (the toolkit's bindings), Shift
+    // selecting.
+    if (flowMoveAction(inv.action)) {
         typing_seq += 1;
         return true;
     }
-    if (key.action == .down) {
-        if (key.matchBind("copy")) {
-            copyFlowSelection(false);
-            return true;
-        }
-        if (key.matchBind("cut")) {
-            copyFlowSelection(true);
-            return true;
-        }
-        if (key.matchBind("paste")) {
+    const region = state.model.panels.items[c.panel].regions.items[c.region];
+    const len = region.items.items.len;
+    switch (inv.action) {
+        kact("canvas.flow.copy") => copyFlowSelection(false),
+        kact("canvas.flow.cut") => copyFlowSelection(true),
+        kact("canvas.flow.paste") => {
             const text = dvui.clipboardText();
             if (text.len > 0) typeIntoFlow(text);
             typing_seq += 1;
-            return true;
-        }
-        if (key.matchBind("select_all")) {
+        },
+        kact("canvas.flow.select.all") => {
             const stops = flowStops(c.panel, c.region);
             if (stops.len > 0) {
                 flow_anchor = .{ .index = stops[0].index, .offset = stops[0].offset };
                 track_cursor.?.index = stops[stops.len - 1].index;
                 track_cursor.?.offset = stops[stops.len - 1].offset;
             }
-            return true;
-        }
-    }
-    const tile_codes = [_]dvui.enums.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
-    const blank_codes = [_]dvui.enums.Key{ .q, .w, .e, .r, .t, .y, .u, .i, .o, .p };
-    // Tiles and blanks while the document has a prototype; text and
-    // breaks always.
-    if (tile_palette_shown) if (paletteFor(c.panel, c.region)) |pal| {
-        for (tile_codes, 0..) |k, i| if (code == k) {
-            if (i < pal.tile_count) insertAtCursor(.tile, pal.tiles[i]);
-            return true;
-        };
-        for (blank_codes, 0..) |k, i| if (code == k) {
-            insertAtCursor(.blank, pal.blanks[i]);
-            return true;
-        };
-    };
-    // Ctrl+\: equation mode, typing going to the expression line.
-    if (code == .backslash and key.action == .down and primaryMod(key.mod)) {
-        enterEquation();
-        return true;
-    }
-    const region = state.model.panels.items[c.panel].regions.items[c.region];
-    const len = region.items.items.len;
-    switch (code) {
-        .tab => {
+        },
+        // Equation mode, typing going to the expression line.
+        kact("canvas.flow.edit-equation") => enterEquation(),
+        kact("canvas.flow.tab") => {
             // At or in an equation, Tab goes round its anchor points
             // (Shift+Tab back).
-            if (equationAtCursor(c) != null) {
-                tabEquation(shift);
-                return true;
-            }
-            if (!tile_palette_shown) return false;
-            cyclePalettePrototype(false);
-            return true;
+            if (equationAtCursor(c) == null) return false;
+            tabEquation(inv.arg == 1);
         },
-        // In text, Enter ends the paragraph and Shift+Enter the line (a
-        // run is split where the cursor is); in a track of tiles, Enter
-        // ends the row.
-        .enter, .kp_enter => {
+        // In text, Enter ends the paragraph and Shift+Enter the line (a run
+        // is split where the cursor is); in a track of tiles, Enter ends
+        // the row.
+        kact("canvas.flow.new-paragraph"), kact("canvas.flow.new-line") => {
             _ = deleteFlowSelection();
             const cc = track_cursor.?;
-            const pos = act(.breakAt, .{ cc.panel, cc.region, flowPos(cc), !(shift or region.style == null) }) catch return true;
+            const line = inv.action == kact("canvas.flow.new-line");
+            const pos = act(.breakAt, .{ cc.panel, cc.region, flowPos(cc), !(line or region.style == null) }) catch return true;
             setFlowPos(pos);
             typing_seq += 1;
-            return true;
         },
-        .backspace => {
+        kact("canvas.flow.delete-back") => {
             if (deleteFlowSelection()) return true;
             const from = charBeforeCursor(c) orelse return true;
             const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, from, flowPos(c) }) catch return true;
             setFlowPos(pos);
-            return true;
         },
-        .delete => {
+        kact("canvas.flow.delete-forward") => {
             if (deleteFlowSelection()) return true;
             const to = charAfterCursor(c, len) orelse return true;
             const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, flowPos(c), to }) catch return true;
             setFlowPos(pos);
-            return true;
         },
-        .escape => {
+        kact("canvas.flow.leave") => {
             // A selection first; then the cursor.
             if (flow_anchor != null) {
                 flow_anchor = null;
                 return true;
             }
             track_cursor = null;
-            return true;
         },
         else => return false,
     }
+    return true;
 }
 
 // Editing the flow in place -----------------------------------------------------
@@ -9906,10 +9920,6 @@ fn eqType(txt: []const u8) void {
         canvas_eq = null;
         return;
     };
-    if (q.head != null and txt.len == 1 and std.mem.indexOfScalar(u8, "=+-[]0iub", txt[0]) != null) {
-        eqHeadKey(txt[0], 0, 0);
-        return;
-    }
     const a = dvui.currentWindow().arena();
     const at = @min(q.offset, @as(u32, @intCast(src.len)));
     // } over a } already there, or in a legend's math $ over its closing
@@ -10006,40 +10016,44 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
 }
 
 /// A key while editing an equation on the canvas; whether it was one.
-fn eqKey(k: dvui.Event.Key) bool {
+/// An action of mode `canvas.equation` (or, on a head,
+/// `canvas.equation.head`); whether it was done.
+fn eqAction(inv: keymap.Invocation) bool {
     const q = canvas_eq orelse return false;
     const src = eqContent(q) orelse {
         canvas_eq = null;
         return false;
     };
     const a = dvui.currentWindow().arena();
-    const back = k.mod.shift();
-    if ((k.code == .backslash and primaryMod(k.mod)) or k.code == .escape or k.code == .enter or k.code == .kp_enter) {
-        if (k.action != .down) return true;
-        leaveCanvasEquation();
-        return true;
-    }
-    if (q.head != null) switch (k.code) {
-        .left => {
-            eqHeadKey(0, -0.05, 0);
-            return true;
-        },
-        .right => {
-            eqHeadKey(0, 0.05, 0);
-            return true;
-        },
-        .up => {
-            eqHeadKey(0, 0, 0.05);
-            return true;
-        },
-        .down => {
-            eqHeadKey(0, 0, -0.05);
-            return true;
-        },
-        else => {},
+    const back = inv.arg == 1;
+    // On a head: its keys, as the character each is.
+    const head_chars = [_]struct { name: []const u8, ch: u8 }{
+        .{ .name = "scale-up", .ch = '=' },   .{ .name = "scale-down", .ch = '-' },
+        .{ .name = "turn-left", .ch = '[' },  .{ .name = "turn-right", .ch = ']' },
+        .{ .name = "reset", .ch = '0' },      .{ .name = "slot-index", .ch = 'i' },
+        .{ .name = "slot-upper", .ch = 'u' }, .{ .name = "slot-lower", .ch = 'b' },
     };
-    switch (k.code) {
-        .tab => {
+    inline for (head_chars) |hc| if (inv.action == kact("canvas.equation.head." ++ hc.name)) {
+        if (q.head == null) return false;
+        eqHeadKey(hc.ch, 0, 0);
+        return true;
+    };
+    switch (inv.action) {
+        kact("canvas.equation.leave") => {
+            leaveCanvasEquation();
+            return true;
+        },
+        kact("canvas.equation.head.nudge") => {
+            if (q.head == null) return false;
+            switch (inv.dir()) {
+                .left => eqHeadKey(0, -0.05, 0),
+                .right => eqHeadKey(0, 0.05, 0),
+                .up => eqHeadKey(0, 0, 0.05),
+                .down => eqHeadKey(0, 0, -0.05),
+            }
+            return true;
+        },
+        kact("canvas.equation.tab") => {
             var p = eqParse(a, src, q.math) orelse return true;
             var g = glyphic.Engine.init(state.gpa);
             defer g.deinit();
@@ -10051,13 +10065,13 @@ fn eqKey(k: dvui.Event.Key) bool {
             eqMove(off, if (to == .head) off else null);
             return true;
         },
-        .left, .right, .home, .end => {
+        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end") => {
             const places = eqPlaces(a, src, q.math);
             var to = q.offset;
-            switch (k.code) {
-                .home => to = 0,
-                .end => to = @intCast(src.len),
-                .left => {
+            switch (inv.action) {
+                kact("canvas.equation.caret.start") => to = 0,
+                kact("canvas.equation.caret.end") => to = @intCast(src.len),
+                kact("canvas.equation.caret.left") => {
                     var i = places.len;
                     while (i > 0) : (i -= 1) if (places[i - 1] < q.offset) {
                         to = places[i - 1];
@@ -10073,14 +10087,15 @@ fn eqKey(k: dvui.Event.Key) bool {
             eqMove(to, null);
             return true;
         },
-        .backspace, .delete => {
+        kact("canvas.equation.delete-back"), kact("canvas.equation.delete-forward") => {
+            const backspace = inv.action == kact("canvas.equation.delete-back");
             if (q.head != null) {
                 eqMove(q.offset, null);
                 return true;
             }
             const cs = layout.edit.chars(a, src, q.math) catch return true;
             var hit: ?layout.edit.Char = null;
-            if (k.code == .backspace) {
+            if (backspace) {
                 for (cs) |c| if (c.end <= q.offset) {
                     hit = c;
                 };
@@ -10091,7 +10106,7 @@ fn eqKey(k: dvui.Event.Key) bool {
             const c = hit orelse return true;
             const next = layout.edit.deleteChars(a, src, c.start, c.start + 1, q.math) catch return true;
             eqStore(q, next);
-            eqMove(if (k.code == .backspace) c.start else q.offset, null);
+            eqMove(if (backspace) c.start else q.offset, null);
             return true;
         },
         else => return false,
@@ -11182,23 +11197,26 @@ fn huntNext(back: bool) bool {
 }
 var status_hunt_buf: [128]u8 = undefined;
 
-fn selectionKey(code: dvui.enums.Key, shift: bool) bool {
-    switch (code) {
-        .tab => return huntNext(shift),
-        .escape => {
+/// An action of mode `canvas.selection`: Tab hunts on to the next-nearest
+/// container of the last Ctrl-click (Shift+Tab back), Esc empties the
+/// selection, the arrows move it. Whether it was done.
+fn selectionAction(inv: keymap.Invocation) bool {
+    switch (inv.action) {
+        kact("canvas.selection.hunt") => return huntNext(inv.arg == 1),
+        kact("canvas.selection.clear") => {
             selection.clearRetainingCapacity();
             hunt_clear();
             if (state.context == .selection) state.context = .worksheet;
             return true;
         },
-        .left, .right, .up, .down => {
+        kact("canvas.selection.nudge") => {
             if (state.context != .selection) return false;
             const step = 1.0;
-            const d: geom.Point = switch (code) {
+            const d: geom.Point = switch (inv.dir()) {
                 .left => .{ .x = -step, .y = 0 },
                 .right => .{ .x = step, .y = 0 },
                 .up => .{ .x = 0, .y = step },
-                else => .{ .x = 0, .y = -step },
+                .down => .{ .x = 0, .y = -step },
             };
             moveSelectionBy(d, mergeKey(.{ "nudge", selection.items.len, selection.items[0] }));
             return true;
@@ -11497,10 +11515,12 @@ fn constrainPromptWindow() void {
     var go = false;
     var cancel = false;
     for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled) continue;
-        const k = e.evt.key;
-        if (k.action != .down) continue;
-        if (k.code == .enter or k.code == .kp_enter) go = true else if (k.code == .escape) cancel = true else continue;
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        switch (inv.action) {
+            kact("dialog.confirm") => go = true,
+            kact("dialog.cancel") => cancel = true,
+            else => continue,
+        }
         e.handle(@src(), fw.data());
     }
     const two_objects = pr.b.object != pr.a.object;
@@ -12645,12 +12665,11 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
         // Keys reach the sketch only while the canvas has the keyboard (a
         // dimension's entry takes its own).
         if (!cursorKeysReach()) return;
-        const k = e.evt.key;
-        if (k.action != .down and k.action != .repeat) return;
         if (sk_summary) {
-            switch (k.code) {
-                .enter, .kp_enter => leaveSketch(),
-                .escape => sk_summary = false,
+            const inv = keymap.match1(e, kmode("sketch.summary")) orelse return;
+            switch (inv.action) {
+                kact("sketch.summary.leave") => leaveSketch(),
+                kact("sketch.summary.back") => sk_summary = false,
                 else => return,
             }
             e.handle(@src(), box.data());
@@ -12658,12 +12677,12 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             return;
         }
         // Ctrl or Cmd with a letter is the app's (undo, copy), not a
-        // constraint.
-        if (primaryMod(k.mod) and k.code != .tab) return;
+        // constraint: the sketch's letters are bound unchorded.
+        const inv = keymap.match1(e, kmode("sketch")) orelse return;
         var used = true;
-        switch (k.code) {
-            .tab => skTab(area, k.mod.shift()),
-            .escape => {
+        switch (inv.action) {
+            kact("sketch.tab") => skTab(area, inv.arg == 1),
+            kact("sketch.cancel") => {
                 if (sk_lock != null) {
                     sk_lock = null;
                 } else if (sk_nclicks > 0) {
@@ -12672,22 +12691,22 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                     sk_tool = .none;
                 } else sk_sel.clearRetainingCapacity();
             },
-            .enter, .kp_enter => {
+            kact("sketch.finish") => {
                 sk_nclicks = 0;
                 sk_summary = true;
             },
-            .delete, .backspace => skDeleteSelection(),
-            .c => skConstrain(.coincident, area),
-            .h => skConstrain(.horizontal, area),
-            .v => skConstrain(.vertical, area),
-            .o => skConstrain(.point_on, area),
-            .t => skConstrain(.tangent, area),
-            .p => skConstrain(.perpendicular, area),
-            .e => skConstrain(.equal, area),
-            .d => skConstrain(.distance, area),
-            .r => skConstrain(.radius, area),
-            .a => skConstrain(.angle, area),
-            .m => skCycleTool(),
+            kact("sketch.delete") => skDeleteSelection(),
+            kact("sketch.constraint.coincident") => skConstrain(.coincident, area),
+            kact("sketch.constraint.horizontal") => skConstrain(.horizontal, area),
+            kact("sketch.constraint.vertical") => skConstrain(.vertical, area),
+            kact("sketch.constraint.point-on") => skConstrain(.point_on, area),
+            kact("sketch.constraint.tangent") => skConstrain(.tangent, area),
+            kact("sketch.constraint.perpendicular") => skConstrain(.perpendicular, area),
+            kact("sketch.constraint.equal") => skConstrain(.equal, area),
+            kact("sketch.constraint.distance") => skConstrain(.distance, area),
+            kact("sketch.constraint.radius") => skConstrain(.radius, area),
+            kact("sketch.constraint.angle") => skConstrain(.angle, area),
+            kact("sketch.tool.next") => skCycleTool(),
             else => used = false,
         }
         if (used) {
@@ -13161,10 +13180,10 @@ fn skDimEntry(area: dvui.Rect.Physical) void {
     var enter = false;
     var close = false;
     if (sk_dim_id) |id| if (id == dvui.focusedWidgetId()) for (dvui.events()) |*e| {
-        if (e.evt != .key or e.handled or e.evt.key.action != .down) continue;
-        switch (e.evt.key.code) {
-            .enter, .kp_enter => enter = true,
-            .escape => close = true,
+        const inv = keymap.match1(e, kmode("dialog")) orelse continue;
+        switch (inv.action) {
+            kact("dialog.confirm") => enter = true,
+            kact("dialog.cancel") => close = true,
             else => continue,
         }
         e.handle(@src(), holder.data());

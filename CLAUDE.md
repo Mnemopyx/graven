@@ -63,6 +63,8 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 | `GRAVEN_FRAME_LOG=1` | each frame's time printed |
 | `GRAVEN_DUMP_OUTLINES=file.svg` | exact glyph outlines in window pixels, for `scripts/text-overlay.py` |
 | `GRAVEN_FONTS_WINDOW=1` | the Fonts window opens at start |
+| `GRAVEN_DISPLAY=gamma,white` | display correction for the run (e.g. `1.5,0.85`) |
+| `GRAVEN_KEY_LOG=1` | each action a key asks for printed, with the active modes |
 
 `graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.
 
@@ -80,4 +82,4 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 - `lib/glyphic`: the legend engine (v2; v1's `lib/engine` was deleted 2026-11-16): expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
 - `lib/layout`: the document model (text styles are stored glyphic contexts), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig` into `render.zig`'s geometry; `edit.zig` edits a run's source in place), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
 - `lib/sketch`: parametric sketches and their solver.
-- `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.
+- `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes; `actions.zig` the action/mode/keymap registry and `keymap.zig` Graven's actions, modes and default keys: a key is matched there, never by code inline). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.
