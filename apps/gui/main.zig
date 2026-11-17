@@ -12199,6 +12199,10 @@ var engage_n: usize = 0;
 var engage_lock: ?EngageHit = null;
 var engage_lock_px: dvui.Point.Physical = .{};
 var engage_lock_index: usize = 0;
+/// Where the pointer was when the points were found (canvas mm), and the
+/// model's revision then: a change (an undo, say) finds them again.
+var engage_at: ?geom.Point = null;
+var engage_rev: u64 = 0;
 /// Where the pointer was at the last position event (one comes every
 /// frame, moved or not).
 var engage_last_px: dvui.Point.Physical = .{};
@@ -12226,6 +12230,8 @@ fn engaging() bool {
 /// nearest first: points within 10 px before edges within 6 px.
 fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
     engage_n = 0;
+    engage_at = at;
+    engage_rev = state.model.revision;
     if (!engaging()) return;
     const a = dvui.currentWindow().arena();
     const ns = dvui.windowNaturalScale();
@@ -12443,6 +12449,18 @@ fn engageRelease() bool {
 fn drawEngagement(area: dvui.Rect.Physical) void {
     canvas_px = area;
     if (!engaging()) return;
+    // The model changed under them (an undo, a redo, an edit): the points
+    // as they are now, and a lock on one no longer there lets go.
+    if (engage_drag == null and state.model.revision != engage_rev) {
+        if (engage_at) |at| findEngagements(area, at) else engage_n = 0;
+        engage_rev = state.model.revision;
+        if (engage_lock) |l| {
+            const still = for (engage_hits[0..engage_n]) |h| {
+                if (h.id == l.id and h.kind == l.kind and std.meta.eql(h.edges, l.edges)) break true;
+            } else false;
+            if (!still) engage_lock = null;
+        }
+    }
     const ns = dvui.windowNaturalScale();
     if (engage_drag) |d| {
         if (!d.moved) return;
