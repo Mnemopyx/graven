@@ -5160,17 +5160,19 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         const colour = if (outside) colors.overflow else if (past_soft) colors.overflow.opacity(0.5) else colors.guide.opacity(0.35);
         state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
-    // The context track's boundary, which its rows or columns expand
-    // into, as a faint dashed outline: a segment's length centred on its
-    // path, as far across as the space it was drawn out for.
+    // Every track's full extent, which its rows or columns expand into,
+    // as a dashed outline (a segment's length centred on its path, as far
+    // across as the space it was drawn out for): faint, and stronger for
+    // the context's track.
     const soft_region: ?usize = switch (state.context) {
         .region => |r| if (r.panel == pi) r.region else null,
         .row => |r| if (placedTrack(r.panel, r.region, r.row)) |pt| (if (pt.panel == pi) pt.member else null) else (if (r.panel == pi) r.region else null),
         else => null,
     };
-    if (soft_region) |sr| if (sr < state.model.panels.items[pi].regions.items.len) {
-        dashedOutline(area, trackOutline(pi, sr), colors.guide.opacity(0.6), px);
-    };
+    for (0..state.model.panels.items[pi].regions.items.len) |ri| {
+        const on = soft_region != null and soft_region.? == ri;
+        dashedOutline(area, trackOutline(pi, ri), colors.guide.opacity(if (on) 0.6 else 0.3), px);
+    }
     drawThreads(area, pi, placed);
     drawGrids(area, pi);
     for (placed.tiles) |t| {
