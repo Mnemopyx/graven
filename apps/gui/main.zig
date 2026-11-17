@@ -4889,10 +4889,10 @@ fn moveGroupKey(code: dvui.enums.Key) bool {
         else => return false,
     };
     const d: geom.Point = switch (code) {
-        .up => .{ .x = 0, .y = 1 },
-        .down => .{ .x = 0, .y = -1 },
-        .left => .{ .x = -1, .y = 0 },
-        .right => .{ .x = 1, .y = 0 },
+        .up => .{ .x = 0, .y = nudge_mm },
+        .down => .{ .x = 0, .y = -nudge_mm },
+        .left => .{ .x = -nudge_mm, .y = 0 },
+        .right => .{ .x = nudge_mm, .y = 0 },
         else => return false,
     };
     actM(mergeKey(.{ "moveGroupKey", state.context }), .moveGroup, .{g, d.x, d.y}) catch return false;
@@ -5047,10 +5047,10 @@ fn moveArtKey(code: dvui.enums.Key) bool {
         else => return false,
     };
     const d: geom.Point = switch (code) {
-        .up => .{ .x = 0, .y = 1 },
-        .down => .{ .x = 0, .y = -1 },
-        .left => .{ .x = -1, .y = 0 },
-        .right => .{ .x = 1, .y = 0 },
+        .up => .{ .x = 0, .y = nudge_mm },
+        .down => .{ .x = 0, .y = -nudge_mm },
+        .left => .{ .x = -nudge_mm, .y = 0 },
+        .right => .{ .x = nudge_mm, .y = 0 },
         else => return false,
     };
     const at = state.model.panels.items[l.panel].art.items[l.index].at;
@@ -6598,10 +6598,10 @@ fn moveImageKey(code: dvui.enums.Key) bool {
     };
     const im = imageAt(c.space, c.index) orelse return false;
     const d: geom.Point = switch (code) {
-        .up => .{ .x = 0, .y = 1 },
-        .down => .{ .x = 0, .y = -1 },
-        .left => .{ .x = -1, .y = 0 },
-        .right => .{ .x = 1, .y = 0 },
+        .up => .{ .x = 0, .y = nudge_mm },
+        .down => .{ .x = 0, .y = -nudge_mm },
+        .left => .{ .x = -nudge_mm, .y = 0 },
+        .right => .{ .x = nudge_mm, .y = 0 },
         else => return false,
     };
     actM(mergeKey(.{ "moveImageKey", state.context }), .setImage, .{c.space, c.index, .{ .x = im.at.x + d.x, .y = im.at.y + d.y }, im.w, im.layer}) catch return false;
@@ -6904,10 +6904,10 @@ fn moveViewKey(code: dvui.enums.Key) bool {
     };
     const sv = viewAt(v.space, v.index) orelse return false;
     const d: geom.Point = switch (code) {
-        .up => .{ .x = 0, .y = 1 },
-        .down => .{ .x = 0, .y = -1 },
-        .left => .{ .x = -1, .y = 0 },
-        .right => .{ .x = 1, .y = 0 },
+        .up => .{ .x = 0, .y = nudge_mm },
+        .down => .{ .x = 0, .y = -nudge_mm },
+        .left => .{ .x = -nudge_mm, .y = 0 },
+        .right => .{ .x = nudge_mm, .y = 0 },
         else => return false,
     };
     actM(mergeKey(.{ "moveViewKey", state.context }), .moveView, .{v.space, v.index, .{ .x = sv.at.x + d.x, .y = sv.at.y + d.y }}) catch return false;
@@ -7177,10 +7177,32 @@ fn updateModeStack() void {
     keymap.setStack(st[0..n]);
 }
 
-/// The direction of `canvas.object.nudge` if event `e` asks for it.
+/// The direction of `canvas.object.nudge` (or `…-far`) if event `e` asks
+/// for it, with `nudge_mm` set to the step. A selection takes the arrows
+/// itself (`selectionAction`).
 fn canvasNudge(e: *const dvui.Event) ?keymap.Direction {
+    if (selection.items.len > 0) return null;
     const inv = keymap.match1(e, kmode("canvas")) orelse return null;
-    return if (inv.action == kact("canvas.object.nudge")) inv.dir() else null;
+    const far = inv.action == kact("canvas.object.nudge-far");
+    if (inv.action != kact("canvas.object.nudge") and !far) return null;
+    nudge_mm = nudgeStep() * @as(f64, if (far) 10 else 1);
+    nudge_far = far;
+    return inv.dir();
+}
+
+/// The step of the nudge being made, mm, and whether it is the far one.
+var nudge_mm: f64 = 1;
+var nudge_far = false;
+
+/// A nudge's step, mm: the finest grid decade that shows at this zoom (in
+/// the document's units: 0.1, 1, 10 mm … or 0.1, 1 in …), so a nudge
+/// moves by what the paper shows. Shift: ten of them.
+fn nudgeStep() f64 {
+    const unit_mm = 1 / docUnits().perMm();
+    var buf: [4]bg_grid.Level = undefined;
+    const lv = bg_grid.levels(state.view.ppm * unit_mm, bg_grid.fade_lo, &buf);
+    for (lv) |l| if (l.strength >= 0.1) return l.step * unit_mm;
+    return if (lv.len > 0) lv[lv.len - 1].step * unit_mm else unit_mm;
 }
 
 /// An arrow key's code for direction `d` (what the move functions take).
@@ -7243,7 +7265,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // palette has the keyboard.
         if (track_cursor == null and state.context == .row and cursorKeysReach()) {
             if (canvasNudge(e)) |d| {
-                moveTrackArrow(switch (d) {
+                // A track's segment moves by its own step (Shift: ten).
+                for (0..@as(usize, if (nudge_far) 10 else 1)) |_| moveTrackArrow(switch (d) {
                     .left => .left,
                     .right => .right,
                     .up => .up,
@@ -11987,9 +12010,9 @@ fn selectionAction(inv: keymap.Invocation) bool {
             if (state.context == .selection) state.context = .worksheet;
             return true;
         },
-        kact("canvas.selection.nudge") => {
-            if (state.context != .selection) return false;
-            const step = 1.0;
+        kact("canvas.selection.nudge"), kact("canvas.selection.nudge-far") => {
+            const far: f64 = if (inv.action == kact("canvas.selection.nudge-far")) 10 else 1;
+            const step = far * selectionStep();
             const d: geom.Point = switch (inv.dir()) {
                 .left => .{ .x = -step, .y = 0 },
                 .right => .{ .x = step, .y = 0 },
@@ -11997,18 +12020,37 @@ fn selectionAction(inv: keymap.Invocation) bool {
                 .down => .{ .x = 0, .y = -step },
             };
             moveSelectionBy(d, mergeKey(.{ "nudge", selection.items.len, selection.items[0] }));
+            state.status = std.fmt.bufPrint(&nudge_status, "Moved {d} {s}. ", .{ step * docUnits().perMm(), docUnits().symbol() }) catch "";
             return true;
         },
         else => return false,
     }
 }
 
-/// Moves the selection by `d` mm from where each is now.
+var nudge_status: [64]u8 = undefined;
+
+/// The selection's nudge step, mm: a lone track's own step (its pitch
+/// times its tiles' step), else the grid's (`nudgeStep`).
+fn selectionStep() f64 {
+    if (selection.items.len == 1) {
+        for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
+            if (r.id == selection.items[0]) return moveStep(pi, ri) * r.pitch;
+        };
+    }
+    return nudgeStep();
+}
+
+/// Moves the selection by `d` mm from where each is now (a group as a
+/// whole).
 fn moveSelectionBy(d: geom.Point, key: u64) void {
     const a = dvui.currentWindow().arena();
     var ids: std.ArrayList(layout.model.ObjectId) = .empty;
     var boxes: std.ArrayList(geom.Box) = .empty;
+    for (selection.items) |id| if (state.model.group(id) != null) {
+        _ = actM(key, .moveGroup, .{ id, d.x, d.y }) catch {};
+    };
     for (selection.items) |id| {
+        if (state.model.group(id) != null) continue;
         const b = constrain.boxOf(&state.model, id) orelse continue;
         ids.append(a, id) catch return;
         boxes.append(a, .{ .x0 = b.x0 + d.x, .x1 = b.x1 + d.x, .y0 = b.y0 + d.y, .y1 = b.y1 + d.y }) catch return;

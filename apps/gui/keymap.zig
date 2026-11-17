@@ -92,7 +92,9 @@ pub const action_defs = [_]A{
     // Which recent file, from 0.
     .{ .name = "start.open-recent", .param = .int },
 
+    // By the grid's finest step showing (`…-far`: ten of them).
     .{ .name = "canvas.object.nudge", .repeat = true, .param = .direction },
+    .{ .name = "canvas.object.nudge-far", .repeat = true, .param = .direction },
     .{ .name = "canvas.object.delete" },
     .{ .name = "canvas.tile.edit-text" },
     .{ .name = "canvas.tool.cancel" },
@@ -105,6 +107,7 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.selection.hunt", .repeat = true, .param = .int },
     .{ .name = "canvas.selection.clear" },
     .{ .name = "canvas.selection.nudge", .repeat = true, .param = .direction },
+    .{ .name = "canvas.selection.nudge-far", .repeat = true, .param = .direction },
 
     .{ .name = "canvas.flow.caret.char-left", .repeat = true },
     .{ .name = "canvas.flow.caret.char-right", .repeat = true },
@@ -201,6 +204,16 @@ fn arrows(comptime md: []const u8, comptime ac: []const u8) [4]B {
     };
 }
 
+/// The four arrows with Shift, bound to `ac` in `md`.
+fn shiftArrows(comptime md: []const u8, comptime ac: []const u8) [4]B {
+    return .{
+        .{ .mode = md, .chord = "shift+left", .action = ac, .arg = left },
+        .{ .mode = md, .chord = "shift+right", .action = ac, .arg = right },
+        .{ .mode = md, .chord = "shift+up", .action = ac, .arg = up },
+        .{ .mode = md, .chord = "shift+down", .action = ac, .arg = down },
+    };
+}
+
 /// Enter and the keypad's Enter.
 fn enters(comptime md: []const u8, comptime ac: []const u8) [2]B {
     return .{
@@ -269,11 +282,11 @@ pub const binds = [_]B{
     .{ .mode = "start", .chord = "o", .action = "start.open" },
     .{ .mode = "start", .chord = "d", .action = "start.display-correction" },
 } ++ enters("start", "start.new-canvas-last") ++ recents() ++
-    arrows("canvas", "canvas.object.nudge") ++ [_]B{
+    arrows("canvas", "canvas.object.nudge") ++ shiftArrows("canvas", "canvas.object.nudge-far") ++ [_]B{
     .{ .mode = "canvas", .chord = "delete", .action = "canvas.object.delete" },
     .{ .mode = "canvas", .chord = "primary+backslash", .action = "canvas.tile.edit-text" },
     .{ .mode = "canvas", .chord = "escape", .action = "canvas.tool.cancel" },
-} ++ enters("canvas", "canvas.tool.finish") ++ arrows("canvas.selection", "canvas.selection.nudge") ++ [_]B{
+} ++ enters("canvas", "canvas.tool.finish") ++ arrows("canvas.selection", "canvas.selection.nudge") ++ shiftArrows("canvas.selection", "canvas.selection.nudge-far") ++ [_]B{
     .{ .mode = "canvas.engage", .chord = "tab", .action = "canvas.engage.lock", .arg = 0 },
     .{ .mode = "canvas.engage", .chord = "shift+tab", .action = "canvas.engage.lock", .arg = 1 },
     .{ .mode = "canvas.engage", .chord = "escape", .action = "canvas.engage.release" },
