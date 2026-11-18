@@ -75,6 +75,11 @@ pub const Pane = struct {
     sub_id: ?dvui.Id = null,
     /// How far an auto-hide pane is in, 0 (out of sight) to 1.
     reveal: f32 = 0,
+    /// The slide under way: where it started, toward where, and when
+    /// (frame time, ns).
+    slide_from: f32 = 0,
+    slide_to: f32 = 0,
+    slide_t0: i128 = 0,
     /// Its text and controls, against the interface's own size.
     text_scale: f32 = 1,
     /// The mode the user chose, while a narrow window has made it
@@ -798,20 +803,35 @@ fn haloContent(fw: *dvui.FloatingWindowWidget, start: usize, start_after: usize,
     dvui.textureDestroyLater(content);
 }
 
-/// Moves each auto-hide pane's slide on by this frame's time, toward in
-/// while it is active and out while not; keeps frames coming while one
-/// moves.
+/// Moves each auto-hide pane's slide on, toward in while it is active and
+/// out while not; keeps frames coming while one moves.
+///
+/// Timed from when the slide began, not by the time since the last frame:
+/// an idle window draws no frames, so the first frame of a slide can come
+/// long after the one before it, and a step by that time would finish the
+/// slide at once (the pane appearing or vanishing with no slide).
 pub fn slide(panes: []const *Pane, timer_id: dvui.Id) void {
-    const step: f32 = @min(1, dvui.secondsSinceLastFrame() / slide_s);
+    const now = dvui.frameTimeNS();
     var moving = false;
     for (panes) |p| {
         if (p.mode != .auto) {
             p.reveal = 0;
+            p.slide_to = 0;
             continue;
         }
         const target: f32 = if (p.active) 1 else 0;
+        if (target != p.slide_to) {
+            // A new slide (or a turn back mid-slide): from where it is now.
+            p.slide_from = p.reveal;
+            p.slide_to = target;
+            p.slide_t0 = now;
+        }
         if (p.reveal == target) continue;
-        p.reveal = if (target > p.reveal) @min(target, p.reveal + step) else @max(target, p.reveal - step);
+        const t: f32 = @floatCast(@as(f64, @floatFromInt(now - p.slide_t0)) / std.time.ns_per_s);
+        // The whole way takes `slide_s`; part of it, its share of that.
+        const dist = @abs(target - p.slide_from);
+        const done = if (dist > 0) @min(1, t / (slide_s * dist)) else 1;
+        p.reveal = p.slide_from + (target - p.slide_from) * done;
         moving = true;
     }
     if (moving) dvui.refresh(null, @src(), timer_id);
