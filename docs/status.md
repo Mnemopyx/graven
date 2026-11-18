@@ -152,6 +152,22 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
      - **Checked:** tests (made from a keypad with a linked plate grid; cells driving key and plate legends; edits on a key writing the cell; renames and their clash; problems; undo and the file); the HP-15C sample as a sheet (39 rows; top, g, f; a gold legend set from it; holes untouched). Sample SVGs identical. In the GUI: the sheet made from the HP-15C keys, its keys and gold legends highlighted.
      - **Not yet:** a sheet pane to edit cells (step 2); naming keys by legend or position (the HP-15C's are K1…); the cost of syncing after every action is not measured (small keypads; a large one may want it incremental).
 
+10. **Views: a tabbed, tiled document interface** (decided 2026-11-18; blueprint "Views: a tabbed, tiled document interface"):
+    - **The central region holds views of the one document:** canvas views (several allowed), sheet views, later a flow editor.
+    - **Layout:** split side by side or stacked, with tabs in each split. The panes stay around the view area, and the active view drives keys and panes.
+    - **Shared and kept:** each view keeps its own position; one selection and one undo history. The last layout is saved with the file.
+    - **Double-click** on a tab or a Browser object maximizes its view.
+    - **Order:** the view frame with canvas views; the sheet view; the flow editor.
+    - **Step 1 built 2026-11-18** (`apps/gui/views.zig`; main.zig "Views"):
+      - **The layout:** a split tree with tabbed leaves, up to 16 views, with the active and the maximized one. It is fixed in size and checked (`valid`) before a layout read from a file is used.
+      - **Canvas views:** the canvas is now a view kind, and several can show the same or different spaces at their own zooms. The active view works on the canvas's state as before. Each other view keeps its own (view, shown space, outline cache, canvas rectangles) in a slot, swapped in only while it is drawn. An inactive view shows content and the picked objects but takes no input; a press activates it. A re-solve resets every view's outline cache.
+      - **Tabs** above each split: click selects and activates, a double-click fills the window with the view (again: the splits back), × closes it (not the last). Views of one space are numbered: Canvas (1), Canvas (2).
+      - **Commands:** View › New view side by side / stacked (a copy of where the active view looks), Fill the window with this view, Next view (Ctrl+Tab, Shift back), Close this view (`views.*` actions). A double-click on the canvas or a frame in the Browser fills the window with its view, opening one if needed.
+      - **Ghost panes and prompts** lie over the whole view region below the top tabs (`region_rect`), not one view. The tab strip is a fixed 26 px, so the region is known before it is drawn: measured, it was 1 px on a strip's first frame and a ghost pane covered the tab.
+      - **Saved with the file:** each written segment carries the layout (`Segment.views`, read by name, absent in older files). Opening takes the last intact segment's, with each view where it looked.
+      - **Checked:** tests (splits, tabs, closing and collapsing, maximizing, validity, the layout in segments); keyboard SVG identical. In the GUI on the HP-15C sample: two views side by side at 34 % and 150 %, a click activating the other, saved, reopened as left, a tab double-clicked to fill the window.
+      - **Not yet:** dragging tabs between splits; single-key view commands (only Ctrl+Tab); the sheet view (next); two views cost two draws (not measured).
+
 ## Gaps against the project's stated goals
 
 The README sets the goals: HP-15C keypad legends first, aircraft panels last, SVG and STEP output, and checked production output.

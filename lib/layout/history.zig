@@ -162,6 +162,9 @@ pub const History = struct {
     arena: std.heap.ArenaAllocator,
     /// The model the log runs from, as native-format bytes.
     checkpoint: []u8 = &.{},
+    /// The app's views of the document, written with each segment (see
+    /// `Segment.views`); the app sets it before writing. Not owned.
+    views: []const u8 = &.{},
     log: std.ArrayList(Entry) = .empty,
     /// Undone steps, the most recently undone last.
     redo: std.ArrayList(Entry) = .empty,
@@ -747,6 +750,10 @@ pub const Segment = struct {
     /// replaced.
     first: u64 = 0,
     entries: []const Entry = &.{},
+    /// The app's views of the document as they were when written (the
+    /// app's own encoding; empty when it gave none). Opening takes the
+    /// last intact segment's.
+    views: []const u8 = &.{},
 };
 
 const Trailer = struct {
@@ -840,9 +847,9 @@ pub const WriteError = Error || error{
     SavedStateLost,
 };
 
-fn appendSegment(gpa: Allocator, out: *std.ArrayList(u8), base: u64, previous: u32, who: Writer, now: i64, first: usize, entries: []const Entry, log_len: usize, saved: bool) Allocator.Error!struct { at: u64, crc: u32 } {
+fn appendSegment(gpa: Allocator, out: *std.ArrayList(u8), base: u64, previous: u32, who: Writer, now: i64, first: usize, entries: []const Entry, log_len: usize, saved: bool, views: []const u8) Allocator.Error!struct { at: u64, crc: u32 } {
     const at = out.items.len;
-    const seg: Segment = .{ .writer = who.id, .device = who.device, .time = now, .tool = who.tool, .first = first, .entries = entries };
+    const seg: Segment = .{ .writer = who.id, .device = who.device, .time = now, .tool = who.tool, .first = first, .entries = entries, .views = views };
     const payload = try native.encodeValue(gpa, Segment, seg);
     defer gpa.free(payload);
     try native.appendBlock(gpa, out, segment_block, segment_version, payload);
@@ -872,7 +879,7 @@ pub fn prepareWrite(h: *const History, gpa: Allocator, who: Writer, now: i64, ki
     errdefer out.deinit(gpa);
     if (!fresh) if (h.file) |f| if (f.appendable) {
         const first = @min(h.stable, f.entries);
-        const t = try appendSegment(gpa, &out, f.len, f.trailer_crc, who, now, first, log[first..], log.len, save);
+        const t = try appendSegment(gpa, &out, f.len, f.trailer_crc, who, now, first, log[first..], log.len, save, h.views);
         const len = f.len + out.items.len;
         return .{
             .bytes = try out.toOwnedSlice(gpa),
@@ -885,8 +892,8 @@ pub fn prepareWrite(h: *const History, gpa: Allocator, who: Writer, now: i64, ki
     // autosave) the unsaved steps after it.
     const saved_len: usize = if (save) log.len else h.savedInLog() orelse return error.SavedStateLost;
     try out.appendSlice(gpa, h.checkpoint);
-    var t = try appendSegment(gpa, &out, 0, 0, who, now, 0, log[0..saved_len], saved_len, true);
-    if (saved_len < log.len) t = try appendSegment(gpa, &out, 0, t.crc, who, now, saved_len, log[saved_len..], log.len, false);
+    var t = try appendSegment(gpa, &out, 0, 0, who, now, 0, log[0..saved_len], saved_len, true, h.views);
+    if (saved_len < log.len) t = try appendSegment(gpa, &out, 0, t.crc, who, now, saved_len, log[saved_len..], log.len, false, h.views);
     const len = out.items.len;
     return .{
         .bytes = try out.toOwnedSlice(gpa),
@@ -908,14 +915,14 @@ pub fn prepareDiscard(h: *const History, gpa: Allocator, who: Writer, now: i64) 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var at: ?u64 = null;
-    var t: @TypeOf(try appendSegment(gpa, &out, 0, 0, who, now, 0, &.{}, 0, true)) = undefined;
+    var t: @TypeOf(try appendSegment(gpa, &out, 0, 0, who, now, 0, &.{}, 0, true, h.views)) = undefined;
     if (f.appendable) {
         const first = @min(h.stable, f.entries, saved_len);
-        t = try appendSegment(gpa, &out, f.len, f.trailer_crc, who, now, first, log[first..saved_len], saved_len, true);
+        t = try appendSegment(gpa, &out, f.len, f.trailer_crc, who, now, first, log[first..saved_len], saved_len, true, h.views);
         at = f.len;
     } else {
         try out.appendSlice(gpa, h.checkpoint);
-        t = try appendSegment(gpa, &out, 0, 0, who, now, 0, log[0..saved_len], saved_len, true);
+        t = try appendSegment(gpa, &out, 0, 0, who, now, 0, log[0..saved_len], saved_len, true, h.views);
     }
     const len = (at orelse 0) + out.items.len;
     return .{
@@ -985,6 +992,9 @@ pub const Opened = struct {
     unsaved: ?Unsaved = null,
     /// The log as saved.
     saved_log: []const Entry = &.{},
+    /// The app's views as the last intact segment kept them (empty when
+    /// none did). In the history's arena.
+    views: []const u8 = &.{},
 
     /// Back to the document as last saved: the unsaved steps are dropped.
     /// The file still holds them, so the next write is the whole file.
@@ -1024,6 +1034,7 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
     var file: FileState = .{ .len = i, .appendable = false };
     var saved_log: []const Entry = &.{};
     var unsaved: ?Unsaved = null;
+    var views: []const u8 = &.{};
     while (i < bytes.len) {
         const b = native.readBlock(bytes, i) catch {
             damaged = true;
@@ -1059,6 +1070,7 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
             }
             h.log.shrinkRetainingCapacity(@intCast(seg.first));
             try h.log.appendSlice(gpa, seg.entries);
+            if (seg.views.len > 0) views = seg.views;
             pending = null;
             previous = native.checksum(b.payload);
             if (t.saved) {
@@ -1090,7 +1102,7 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
     h.saved = .{ .len = saved_log.len, .last = if (saved_log.len > 0) saved_log[saved_log.len - 1].step else 0 };
     h.file = file;
     h.stable = h.log.items.len;
-    return .{ .model = m, .history = h, .damaged = damaged, .unsaved = unsaved, .saved_log = saved_log };
+    return .{ .model = m, .history = h, .damaged = damaged, .unsaved = unsaved, .saved_log = saved_log, .views = views };
 }
 
 const test_writer: Writer = .{ .id = @splat(7), .device = "test", .tool = "test" };
@@ -1410,4 +1422,33 @@ test "a sheet's edits are steps undo takes back, and the sheet is kept in the fi
     defer gpa.free(text);
     try testing.expectEqualStrings("", text);
     try testing.expectEqualStrings("", o.model.sheets.items[0].rows.items[0].cells.items[0]);
+}
+
+test "the app's views go with each segment, and the last intact one's come back" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    _ = try h.do(&m, .startCanvas, .{.mm});
+    h.views = "first";
+    var w = try prepareWrite(&h, gpa, test_writer, 1, .save, true);
+    var file: std.ArrayList(u8) = .empty;
+    defer file.deinit(gpa);
+    try file.appendSlice(gpa, w.bytes);
+    wrote(&h, &w);
+    gpa.free(w.bytes);
+    // An append with other views: they are the ones read back.
+    _ = try h.do(&m, .setCanvasUnits, .{.inch});
+    h.views = "second";
+    w = try prepareWrite(&h, gpa, test_writer, 2, .autosave, false);
+    try testing.expect(w.at != null);
+    try file.appendSlice(gpa, w.bytes);
+    wrote(&h, &w);
+    gpa.free(w.bytes);
+    var o = try openFile(gpa, file.items);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    try testing.expectEqualStrings("second", o.views);
 }

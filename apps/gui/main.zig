@@ -27,6 +27,7 @@ const motd = @import("motd.zig");
 const display = @import("display.zig");
 const spark = @import("cursor.zig");
 const layouts = @import("layouts.zig");
+const docviews = @import("views.zig");
 const keymap = @import("keymap.zig");
 const kact = keymap.act;
 const kmode = keymap.mode;
@@ -546,6 +547,7 @@ fn docUnits() layout.model.Units {
 
 /// Starts over with an empty document and asks for the new canvas's units.
 fn newCanvas() void {
+    resetViews();
     setFilePath(null);
     clearPlaced();
     forgetThreads();
@@ -649,6 +651,7 @@ fn startScreen() void {
     const ar = area.data().contentRectScale().r;
     // Prompts (Open) centre on it.
     canvas_rect = .{ .x = ar.x / ns, .y = ar.y / ns, .w = ar.w / ns, .h = ar.h / ns };
+    region_rect = canvas_rect;
     if (motd.poll()) dvui.refresh(null, @src(), null);
     // While the news is being fetched, look again now and then: nothing
     // else wakes an idle window.
@@ -1100,7 +1103,7 @@ fn exportPanel() ?usize {
 /// The export prompt: the file to write, then Export (or Enter); Esc or
 /// Cancel closes it.
 fn exportPrompt() void {
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
     const h: f32 = 185;
@@ -1424,6 +1427,8 @@ fn update() !void {
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
     state.placed_rev = state.model.revision;
     state.flat.reset(state.flat.tol);
+    // Every view's: they hold the placement's renders.
+    for (&view_slots) |*sl| if (sl.flat) |*f| f.reset(f.tol);
     // A selected row the flow no longer reaches gives way to its track.
     switch (state.context) {
         .row => |r| if (placedTrack(r.panel, r.region, r.row) == null and r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len) {
@@ -1792,7 +1797,7 @@ fn frame() !dvui.App.Result {
                 defer ghost_pane.themePop(prev);
                 treePane();
             }
-            canvas();
+            viewArea();
             if (rightDocked()) try rightColumn();
             rightStrip(if (rightDocked()) body_h else side_h);
         }
@@ -2067,6 +2072,8 @@ fn writeTo(path: []const u8, kind: history.WriteKind, fresh_asked: bool) bool {
         // Gone: written afresh.
         if (std.Io.Dir.cwd().access(dvui.io, path, .{})) |_| {} else |_| fresh = true;
     }
+    // The views as they are, written with it.
+    hist.views = encodeViews();
     var w = history.prepareWrite(&hist, state.gpa, this_run, nowSeconds(), kind, fresh) catch |err| {
         if (err == error.SavedStateLost) {
             autosave_paused = true;
@@ -2286,6 +2293,7 @@ fn install(opened: *history.Opened, path: []const u8) void {
         if (std.mem.eql(u8, st.name, "Label")) state.label_style = st.id;
     }
     state.view.fit = canvas_view;
+    loadViews(opened.views);
     setFilePath(path);
     autosave_paused = false;
     dvui.refresh(null, @src(), null);
@@ -2293,7 +2301,7 @@ fn install(opened: *history.Opened, path: []const u8) void {
 
 /// A centred modal prompt over the canvas.
 fn promptWindow(src: std.builtin.SourceLocation, id: usize, w: f32, h: f32) ?*dvui.FloatingWindowWidget {
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return null;
     const S = struct {
         var r: dvui.Rect = .{};
@@ -2408,7 +2416,7 @@ fn contentionPrompt(kind: history.WriteKind) void {
 /// The file prompt: a name to open or save as; Enter or the button does
 /// it, Esc or Cancel closes it.
 fn filePrompt(kind: FilePromptKind) void {
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
     const h: f32 = 185;
@@ -2482,7 +2490,7 @@ fn filePrompt(kind: FilePromptKind) void {
 
 /// Unsaved changes: Save (then go on), Don't save, or Cancel.
 fn leavePrompt(p: Pending) void {
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
     const h: f32 = 150;
@@ -2565,6 +2573,25 @@ fn historyKeys(wd: *dvui.WidgetData) void {
 fn runAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
         kact("panes.toggle-auto") => toggleAutoPanes(),
+        kact("views.split-across"), kact("views.split-down"), kact("views.close"), kact("views.maximize"), kact("views.next") => {
+            if (canvas_prompt) return false;
+            switch (inv.action) {
+                kact("views.split-across") => splitView(.across),
+                kact("views.split-down") => splitView(.down),
+                kact("views.close") => if (vl.open[vl.active]) closeView(vl.active),
+                kact("views.maximize") => vl.toggleMaximize(vl.active),
+                else => {
+                    // The next open view (Shift: the one before), in order.
+                    var k: usize = vl.active;
+                    for (0..docviews.max_views) |_| {
+                        k = if (inv.arg == 1) (k + docviews.max_views - 1) % docviews.max_views else (k + 1) % docviews.max_views;
+                        if (vl.open[k]) break;
+                    }
+                    if (k != vl.active) activateView(@intCast(k));
+                },
+            }
+            dvui.refresh(null, @src(), null);
+        },
         kact("panes.layout-next") => nextLayout(),
         kact("panes.layout-save-as") => {
             layout_prompt = true;
@@ -3001,7 +3028,7 @@ var layout_prompt = false;
 var layout_prompt_new = false;
 
 fn layoutPrompt() void {
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 420;
     const h: f32 = 170;
@@ -3178,6 +3205,9 @@ const overlay_alpha = 0.84;
 /// The canvas's rectangle in logical pixels, from the last frame: overlays
 /// anchor to it.
 var canvas_rect: dvui.Rect = .{};
+/// The views' whole region below the top tabs (logical): what the ghost
+/// panes lie over and prompts centre on, whatever the splits.
+var region_rect: dvui.Rect = .{};
 
 /// A side edge's strip, holding its pane's tab as tall as the pane.
 fn sideStrip(p: *ghost_pane.Pane, h: f32, id: usize) void {
@@ -3343,7 +3373,7 @@ fn overlays() !void {
             p.sub_id = null;
         }
     }
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const g: f32 = overlay_gap;
     const bottom: f32 = if (bottom_pane.mode == .ghost) statusHeight() else 0;
@@ -4043,6 +4073,18 @@ fn menu() ?dvui.App.Result {
         if (menuAction("    Zoom to everything", "view", kact("view.zoom-all"), 0, false, 2)) m.close();
         if (menuAction("    Frame the edit", "view", kact("view.frame-edit"), 0, false, 7)) m.close();
         if (menuAction("    Show or hide auto-hide panes", "global", kact("panes.toggle-auto"), 0, false, 8)) m.close();
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
+        if (menuAction("    New view side by side", "global", kact("views.split-across"), 0, false, 20)) m.close();
+        if (menuAction("    New view stacked", "global", kact("views.split-down"), 0, false, 21)) m.close();
+        if (menuAction(if (vl.maximized != docviews.none) "•  Fill the window with this view" else "    Fill the window with this view", "global", kact("views.maximize"), 0, false, 22)) m.close();
+        if (menuAction("    Next view", "global", kact("views.next"), 0, false, 23)) m.close();
+        if (menuAction("    Close this view", "global", kact("views.close"), 0, vl.open[vl.active] and blk: {
+            var c: usize = 0;
+            for (vl.open) |o| {
+                if (o) c += 1;
+            }
+            break :blk c <= 1;
+        }, 24)) m.close();
         if (menuAction("    Actual size", "view", kact("view.zoom-to"), 100, false, 3)) m.close();
         if (menuAction("    200 %", "view", kact("view.zoom-to"), 200, false, 4)) m.close();
         if (menuAction("    Zoom in", "view", kact("view.zoom-in"), 0, false, 5)) m.close();
@@ -4378,6 +4420,15 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
         .color_fill = if (selected) .{ .color = dvui.themeGet().focus.opacity(0.25) } else null,
         .font = styled(if (depth == 0) .theme(.heading) else .theme(.body), default),
     })) {
+        // Twice on a canvas or a frame: its view fills the window (or the
+        // splits come back).
+        const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
+        if (tree_click.key == key and now - tree_click.ms < 400) {
+            tree_click = .{};
+            if (ctx == .panel) if (ctx.panel < state.model.panels.items.len and state.model.panels.items[ctx.panel].unbounded) {
+                showSpaceView(state.model.spaceOf(ctx.panel));
+            };
+        } else tree_click = .{ .key = key, .ms = now };
         state.context = ctx;
         // The keyboard goes to the canvas, where keys act on the context
         // (Delete, arrows moving a track).
@@ -4385,6 +4436,9 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
     }
     return open;
 }
+
+/// When and which Browser row was last clicked, for double-clicks.
+var tree_click: struct { key: u64 = 0, ms: i64 = 0 } = .{};
 
 /// Opens the tree down to `ctx`, so a context chosen on the canvas shows.
 fn revealInTree(ctx: Context) void {
@@ -4689,12 +4743,325 @@ fn wakeGui() void {
     if (main_window) |w| dvui.refresh(w, @src(), null);
 }
 
+// Views -----------------------------------------------------------------------
+//
+// The central region: the document's views (views.zig), split side by
+// side or stacked, each split's views as tabs. The active view uses the
+// canvas's state as it always has (the view, the shown space, the outline
+// cache); each other canvas view keeps its own in a slot, swapped in only
+// while it is drawn, and takes no input but a press, which makes it the
+// active one. The layout goes with the file.
+
+var vl: docviews.Layout = docviews.Layout.init(.{});
+
+const ViewSlot = struct {
+    view: View = .{},
+    space: usize = 0,
+    flat: ?Flat = null,
+    rect: dvui.Rect = .{},
+    free: @TypeOf(canvas_free) = null,
+    px: ?dvui.Rect.Physical = null,
+};
+
+/// Each view's canvas state while it is not the active one.
+var view_slots: [docviews.max_views]ViewSlot = @splat(.{});
+
+/// A press in an inactive view, taken at the end of the frame.
+var view_to_activate: ?u8 = null;
+
+/// Exchanges the canvas's state with view `i`'s slot (twice: as it was).
+fn swapView(i: u8) void {
+    const sl = &view_slots[i];
+    if (sl.flat == null) sl.flat = .{ .arena = .init(state.gpa) };
+    std.mem.swap(View, &state.view, &sl.view);
+    std.mem.swap(usize, &shown_space, &sl.space);
+    std.mem.swap(Flat, &state.flat, &sl.flat.?);
+    std.mem.swap(dvui.Rect, &canvas_rect, &sl.rect);
+    std.mem.swap(@TypeOf(canvas_free), &canvas_free, &sl.free);
+    std.mem.swap(?dvui.Rect.Physical, &canvas_px, &sl.px);
+}
+
+/// Makes view `to` the active one: the canvas's state becomes its, and the
+/// one active before keeps its own in its slot.
+fn activateView(to: u8) void {
+    const from = vl.active;
+    if (to == from) {
+        vl.select(to);
+        return;
+    }
+    swapView(to);
+    // Slot `to` now holds what was active: it is `from`'s.
+    if (view_slots[from].flat) |*f| f.arena.deinit();
+    view_slots[from] = view_slots[to];
+    view_slots[to] = .{};
+    vl.select(to);
+    if (shown_space >= @max(1, state.model.spaces.items.len)) shown_space = 0;
+}
+
+/// A new view's state: a copy of where the active view looks.
+fn seedSlot(i: u8, space: usize) void {
+    if (view_slots[i].flat) |*f| f.arena.deinit();
+    view_slots[i] = .{ .view = state.view, .space = space };
+}
+
+/// The views back to one canvas view, as a document starts.
+fn resetViews() void {
+    for (&view_slots) |*sl| {
+        if (sl.flat) |*f| f.arena.deinit();
+        sl.* = .{};
+    }
+    vl = docviews.Layout.init(.{});
+    view_to_activate = null;
+}
+
+/// A space's ID as a view's target, and back.
+fn spaceTarget(space: usize) u32 {
+    if (space >= state.model.spaces.items.len) return 0;
+    return @intFromEnum(state.model.spaces.items[space].id);
+}
+
+fn targetSpace(target: u32) usize {
+    for (state.model.spaces.items, 0..) |sp, i| if (@intFromEnum(sp.id) == target) return i;
+    return 0;
+}
+
+/// The layout with where each view looks now, for writing.
+fn syncViews() void {
+    for (0..docviews.max_views) |k| {
+        const i: u8 = @intCast(k);
+        if (!vl.open[i]) continue;
+        const v: View = if (i == vl.active) state.view else view_slots[i].view;
+        const space = if (i == vl.active) shown_space else view_slots[i].space;
+        vl.views[i] = .{ .kind = .canvas, .target = spaceTarget(space), .cx = v.cx, .cy = v.cy, .ppm = v.ppm };
+    }
+}
+
+var views_bytes: []u8 = &.{};
+
+/// The layout encoded, for the file (owned here until the next write).
+fn encodeViews() []const u8 {
+    syncViews();
+    state.gpa.free(views_bytes);
+    views_bytes = layout.native.encodeValue(state.gpa, docviews.Layout, vl) catch &.{};
+    return views_bytes;
+}
+
+/// The layout a file kept, if it is sound: each view where it looked.
+fn loadViews(bytes: []const u8) void {
+    resetViews();
+    if (bytes.len == 0) return;
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const got = layout.native.decodeValue(arena.allocator(), docviews.Layout, bytes) catch return;
+    if (!got.valid()) return;
+    vl = got;
+    for (0..docviews.max_views) |k| {
+        const i: u8 = @intCast(k);
+        if (!vl.open[i]) continue;
+        const v = vl.views[i];
+        const look: View = if (v.ppm > 0) .{ .cx = v.cx, .cy = v.cy, .ppm = v.ppm } else .{ .fit = canvas_view };
+        if (i == vl.active) {
+            state.view = look;
+            shown_space = targetSpace(v.target);
+        } else view_slots[i] = .{ .view = look, .space = targetSpace(v.target) };
+    }
+}
+
+/// A view's tab label: its space's name (numbered when two show it).
+fn viewLabel(buf: []u8, i: u8) []const u8 {
+    const space = if (i == vl.active) shown_space else view_slots[i].space;
+    var name: []const u8 = "Canvas";
+    if (space < state.model.spaces.items.len) name = if (space == 0) "Canvas" else state.model.spaces.items[space].name;
+    if (state.model.spaces.items.len == 0) name = "Worksheet";
+    // Its number among the views of the same space.
+    var nth: usize = 0;
+    var alike: usize = 0;
+    for (0..docviews.max_views) |k| {
+        const j: u8 = @intCast(k);
+        if (!vl.open[j]) continue;
+        const sp = if (j == vl.active) shown_space else view_slots[j].space;
+        if (sp != space) continue;
+        alike += 1;
+        if (j == i) nth = alike;
+    }
+    if (alike <= 1) return name;
+    return std.fmt.bufPrint(buf, "{s} ({d})", .{ name, nth }) catch name;
+}
+
+/// The central region: the views as laid out, or the one maximized.
+fn viewArea() void {
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+    defer box.deinit();
+    {
+        const ns = dvui.windowNaturalScale();
+        const r = box.data().contentRectScale().r;
+        region_rect = .{ .x = r.x / ns, .y = r.y / ns + tab_strip_h, .w = r.w / ns, .h = @max(0, r.h / ns - tab_strip_h) };
+    }
+    if (vl.maximized != docviews.none) {
+        if (vl.leafOf(vl.maximized)) |leaf| viewLeaf(leaf, vl.maximized);
+    } else viewNode(vl.root);
+    if (view_to_activate) |v| {
+        view_to_activate = null;
+        if (v < docviews.max_views and vl.open[v]) activateView(v);
+    }
+}
+
+fn viewNode(n: u8) void {
+    const node = vl.nodes[n];
+    if (!node.split) return viewLeaf(n, vl.currentOf(n));
+    var paned = dvui.paned(@src(), .{
+        .direction = if (node.dir == .across) .horizontal else .vertical,
+        .collapsed_size = 0,
+        .split_ratio = &vl.nodes[n].ratio,
+        .handle_size = 5,
+    }, .{ .expand = .both, .id_extra = n });
+    defer paned.deinit();
+    if (paned.showFirst()) viewNode(node.first);
+    if (paned.showSecond()) viewNode(node.second);
+}
+
+/// A tab strip's height, logical: fixed, so what lies over the views
+/// knows it before the strips are drawn.
+const tab_strip_h: f32 = 26;
+
+/// When and which tab was last clicked, for double-clicks.
+var tab_click: struct { view: u8 = docviews.none, ms: i64 = 0 } = .{};
+
+/// A split: its tabs, then the view chosen, `shown`.
+fn viewLeaf(leaf: u8, shown: u8) void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .id_extra = leaf });
+    defer col.deinit();
+    {
+        var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = tab_strip_h - 1 }, .max_size_content = .{ .w = dvui.max_float_safe, .h = tab_strip_h - 1 }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) } });
+        defer strip.deinit();
+        const n = vl.nodes[leaf];
+        const many = blk: {
+            var c: usize = 0;
+            for (vl.open) |o| {
+                if (o) c += 1;
+            }
+            break :blk c > 1;
+        };
+        for (n.tabList(), 0..) |v, k| {
+            var lb: [96]u8 = undefined;
+            const label = viewLabel(&lb, v);
+            const current = v == shown;
+            const is_active = v == vl.active;
+            var tab = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .id_extra = k,
+                .background = current,
+                .color_fill = .{ .color = if (is_active) dvui.themeGet().focus.opacity(0.25) else colors.paper },
+                .border = .{ .x = if (k == 0) 0 else 1 },
+                .color_border = .{ .color = colors.edge.opacity(0.3) },
+                .padding = .{ .x = 6, .w = 2, .y = 1, .h = 1 },
+            });
+            defer tab.deinit();
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .gravity_y = 0.5, .id_extra = k })) {
+                const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
+                if (tab_click.view == v and now - tab_click.ms < 400) {
+                    vl.toggleMaximize(v);
+                    tab_click = .{};
+                } else tab_click = .{ .view = v, .ms = now };
+                if (v != vl.active) view_to_activate = v else vl.select(v);
+            }
+            if (many) if (dvui.buttonIcon(@src(), "Close view", dvui.entypo.cross, .{}, .{}, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(2), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k })) {
+                closeView(v);
+            };
+        }
+    }
+    if (vl.open[shown]) canvasView(shown);
+}
+
+/// Draws view `v`: the active one as the canvas always was; another with
+/// its own state swapped in for the drawing.
+fn canvasView(v: u8) void {
+    if (v == vl.active) return canvas(true, v);
+    swapView(v);
+    if (shown_space >= @max(1, state.model.spaces.items.len)) shown_space = 0;
+    canvas(false, v);
+    swapView(v);
+}
+
+/// A new view beside the active one (`dir`), looking where it looks.
+fn splitView(dir: docviews.Dir) void {
+    const from = vl.active;
+    const look = state.view;
+    const space = shown_space;
+    const nv = vl.split(from, dir, .{ .target = spaceTarget(space) }) orelse {
+        state.status = "No more views fit. ";
+        return;
+    };
+    // The split made it active in the layout; the canvas state still is
+    // `from`'s: seed the new one, then switch as a click would.
+    vl.active = from;
+    view_slots[nv] = .{ .view = look, .space = space };
+    view_slots[nv].view.fit = null;
+    activateView(nv);
+}
+
+fn closeView(v: u8) void {
+    const was_active = v == vl.active;
+    if (!was_active) {
+        if (view_slots[v].flat) |*f| f.arena.deinit();
+        view_slots[v] = .{};
+        _ = vl.close(v);
+        return;
+    }
+    // The active one: the view taking its place becomes active first.
+    var next: ?u8 = null;
+    if (vl.leafOf(v)) |leaf| {
+        const n = vl.nodes[leaf];
+        for (n.tabList()) |t| if (t != v) {
+            next = t;
+            break;
+        };
+    }
+    if (next == null) for (0..docviews.max_views) |k| {
+        const j: u8 = @intCast(k);
+        if (vl.open[j] and j != v) {
+            next = j;
+            break;
+        }
+    };
+    const to = next orelse return;
+    activateView(to);
+    if (view_slots[v].flat) |*f| f.arena.deinit();
+    view_slots[v] = .{};
+    _ = vl.close(v);
+    vl.select(to);
+}
+
+/// Shows space `space` in a view filling the region: one already showing
+/// it, else a new tab beside the active view. Again: the splits back.
+fn showSpaceView(space: usize) void {
+    const target = spaceTarget(space);
+    for (0..docviews.max_views) |k| {
+        const j: u8 = @intCast(k);
+        if (!vl.open[j]) continue;
+        const sp = if (j == vl.active) shown_space else view_slots[j].space;
+        if (sp == space) {
+            activateView(j);
+            vl.toggleMaximize(j);
+            return;
+        }
+    }
+    const from = vl.active;
+    const nv = vl.addTab(from, .{ .target = target }) orelse {
+        state.status = "No more views fit. ";
+        return;
+    };
+    vl.active = from;
+    view_slots[nv] = .{ .view = .{ .fit = if (space == 0) canvas_view else null }, .space = space };
+    activateView(nv);
+    vl.toggleMaximize(nv);
+}
+
 /// The canvas: the worksheet at true proportions, with every panel on it.
 /// Wheel zooms about the pointer and dragging pans. With the select tool a
 /// click makes a tile, panel or the worksheet the context; with the add
 /// panel tool a drag draws out a new panel. The context is outlined.
-fn canvas() void {
-    var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.desk } });
+fn canvas(active: bool, view: u8) void {
+    var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.desk }, .id_extra = view });
     defer box.deinit();
     const area = box.data().contentRectScale().r;
     const rw: f32 = ruler_size * dvui.windowNaturalScale();
@@ -4729,11 +5096,19 @@ fn canvas() void {
     // label, at the flow cursor it goes into the flow, and in an equation
     // or a tile's text edited on the canvas, into that: ask for text
     // input, which the backend sends only on request.
-    if (((state.context == .panel and track_cursor == null) or track_cursor != null or canvas_eq != null) and !canvas_prompt and cursorKeysReach()) {
+    if (active and ((state.context == .panel and track_cursor == null) or track_cursor != null or canvas_eq != null) and !canvas_prompt and cursorKeysReach()) {
         const ns_ = dvui.windowNaturalScale();
         dvui.wantTextInput(.{ .x = area.x / ns_, .y = area.y / ns_, .w = area.w / ns_, .h = area.h / ns_ });
     }
-    canvasEvents(box, area);
+    // An inactive view only shows: a press in it makes it the active one.
+    if (active) canvasEvents(box, area) else for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, box.data())) continue;
+        if (e.evt == .mouse and e.evt.mouse.action == .press) {
+            e.handle(@src(), box.data());
+            view_to_activate = view;
+            dvui.refresh(null, @src(), box.data().id);
+        }
+    }
     const px = dvui.windowNaturalScale();
     if (open) {
         // An open canvas: drafting surface everywhere, and its axes
@@ -4760,6 +5135,12 @@ fn canvas() void {
     if (open) drawFrameBound(area);
     if (open) drawSpace(area, shown_space, 0) else drawSpacePanels(area, null, null);
     if (open) drawSketches(area);
+    // What only the active view shows: modes and the pointer's marks.
+    if (!active) {
+        drawPicked(area);
+        drawConstraintMarks(area);
+        return;
+    }
     if (sketch_edit != null) {
         drawSketchMode(area);
         return;
@@ -6819,7 +7200,7 @@ var image_prompt_new = false;
 /// The Place image prompt: a PNG or JPEG file, placed in the shown space
 /// at 150 dpi on the active layer.
 fn imagePrompt() void {
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
     const h: f32 = 185;
@@ -13405,7 +13786,7 @@ fn endText(buf: []u8, end: ConstraintEnd, self: ?layout.model.ObjectId) []const 
 /// The prompt after the second pick: the relation, and its value.
 fn constrainPromptWindow() void {
     const pr = &(constrain_prompt orelse return);
-    const c = canvas_rect;
+    const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 470;
     const h: f32 = 215;

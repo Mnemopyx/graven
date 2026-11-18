@@ -22,7 +22,7 @@ const A = actions.ActionDef;
 const B = actions.BindDef;
 
 pub const modes = [_]M{
-    .{ .name = "global", .kind = .root, .allows = &.{ "file", "edit", "panes" } },
+    .{ .name = "global", .kind = .root, .allows = &.{ "file", "edit", "panes", "views" } },
     // Prompts and small windows over the rest: Enter and Esc. One with a
     // text field takes typed text.
     .{ .name = "dialog", .kind = .dialog, .lifetime = .until_left, .parent = "global", .takes_text = true, .allows = &.{"dialog"} },
@@ -54,6 +54,13 @@ pub const modes = [_]M{
 pub const action_defs = [_]A{
     // Bring every auto-hide pane in, or let them all go (a hot corner's).
     .{ .name = "panes.toggle-auto" },
+    // The document's views: a new one beside the active one, closing it,
+    // filling the window with it, the next one.
+    .{ .name = "views.split-across" },
+    .{ .name = "views.split-down" },
+    .{ .name = "views.close" },
+    .{ .name = "views.maximize" },
+    .{ .name = "views.next", .repeat = true, .param = .int },
     // The pane layouts (layouts.zig): the next one, the panes as they are
     // saved as a new one, this machine's changes to the one in use dropped.
     .{ .name = "panes.layout-next" },
@@ -243,6 +250,8 @@ fn flowMoves() [20]B {
 
 pub const binds = [_]B{
     .{ .mode = "global", .chord = "primary+n", .action = "file.new" },
+    .{ .mode = "global", .chord = "primary+tab", .action = "views.next", .arg = 0 },
+    .{ .mode = "global", .chord = "primary+shift+tab", .action = "views.next", .arg = 1 },
     .{ .mode = "global", .chord = "primary+o", .action = "file.open" },
     .{ .mode = "global", .chord = "primary+s", .action = "file.save" },
     .{ .mode = "global", .chord = "primary+shift+s", .action = "file.save-as" },
