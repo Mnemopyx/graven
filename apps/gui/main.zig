@@ -12115,10 +12115,11 @@ fn resizeHandles(buf: []Handle) usize {
         .{ .at = .{ .x = b.x1, .y = my }, .edges = .{ .right = true }, .ok = f.right },
         .{ .at = .{ .x = mx, .y = b.y0 }, .edges = .{ .bottom = true }, .ok = f.bottom },
         .{ .at = .{ .x = mx, .y = b.y1 }, .edges = .{ .top = true }, .ok = f.top },
-        .{ .at = .{ .x = b.x0, .y = b.y0 }, .edges = .{ .left = true, .bottom = true }, .ok = f.left and f.bottom },
-        .{ .at = .{ .x = b.x1, .y = b.y0 }, .edges = .{ .right = true, .bottom = true }, .ok = f.right and f.bottom },
-        .{ .at = .{ .x = b.x0, .y = b.y1 }, .edges = .{ .left = true, .top = true }, .ok = f.left and f.top },
-        .{ .at = .{ .x = b.x1, .y = b.y1 }, .edges = .{ .right = true, .top = true }, .ok = f.right and f.top },
+        // A corner with either edge free: it goes along that one.
+        .{ .at = .{ .x = b.x0, .y = b.y0 }, .edges = .{ .left = f.left, .bottom = f.bottom }, .ok = f.left or f.bottom },
+        .{ .at = .{ .x = b.x1, .y = b.y0 }, .edges = .{ .right = f.right, .bottom = f.bottom }, .ok = f.right or f.bottom },
+        .{ .at = .{ .x = b.x0, .y = b.y1 }, .edges = .{ .left = f.left, .top = f.top }, .ok = f.left or f.top },
+        .{ .at = .{ .x = b.x1, .y = b.y1 }, .edges = .{ .right = f.right, .top = f.top }, .ok = f.right or f.top },
     };
     for (all) |h| if (h.ok and n < buf.len) {
         buf[n] = .{ .at = h.at, .edges = h.edges };
@@ -12406,17 +12407,36 @@ fn engageTarget() ?EngageHit {
     return null;
 }
 
-/// Whether hit `h`'s container may do what it offers: move (centre) or
-/// move those edges.
-fn engageFree(h: EngageHit) bool {
-    if (state.model.group(h.id) != null) return true;
+/// What of hit `h` its container's constraints leave free: for a move,
+/// the axes; for a resize, the edges. As in sketches, a point goes as far
+/// as its constraints let it: along a free axis though the other is held.
+fn engageFreedom(h: EngageHit) struct { x: bool, y: bool, edges: Edges } {
+    if (state.model.group(h.id) != null) return .{ .x = true, .y = true, .edges = h.edges };
     const f = freedomOf(h.id);
-    if (engageMoves(h.kind)) return f.x or f.y;
-    if (h.edges.left and !f.left) return false;
-    if (h.edges.right and !f.right) return false;
-    if (h.edges.bottom and !f.bottom) return false;
-    if (h.edges.top and !f.top) return false;
-    return true;
+    return .{
+        .x = f.x,
+        .y = f.y,
+        .edges = .{ .left = h.edges.left and f.left, .right = h.edges.right and f.right, .bottom = h.edges.bottom and f.bottom, .top = h.edges.top and f.top },
+    };
+}
+
+fn anyEdge(e: Edges) bool {
+    return e.left or e.right or e.bottom or e.top;
+}
+
+/// Whether hit `h` can do anything at all: move along one axis, or move
+/// one of its edges.
+fn engageFree(h: EngageHit) bool {
+    const fr = engageFreedom(h);
+    return if (engageMoves(h.kind)) fr.x or fr.y else anyEdge(fr.edges);
+}
+
+/// Whether hit `h` is held in part: a corner with one edge held, a move
+/// along one axis only.
+fn engagePartly(h: EngageHit) bool {
+    const fr = engageFreedom(h);
+    if (engageMoves(h.kind)) return fr.x != fr.y;
+    return !std.meta.eql(fr.edges, h.edges) and anyEdge(fr.edges);
 }
 
 fn edgesName(e: Edges) []const u8 {
@@ -12437,6 +12457,15 @@ fn engageText(h: EngageHit) []const u8 {
     const name = objectName(h.id);
     if (!engageFree(h)) {
         return std.fmt.bufPrint(&engage_text_buf, "{s}: {s} held by a constraint", .{ name, if (engageMoves(h.kind)) "position" else edgesName(h.edges) }) catch "";
+    }
+    if (engagePartly(h)) {
+        const fr = engageFreedom(h);
+        if (engageMoves(h.kind)) {
+            return std.fmt.bufPrint(&engage_text_buf, "Move {s}{s}: {s} only, {s} held by a constraint", .{ name, if (h.kind == .origin) " by its origin" else "", if (fr.x) "across" else "up and down", if (fr.x) "up and down" else "across" }) catch "";
+        }
+        var held: Edges = .{ .left = h.edges.left and !fr.edges.left, .right = h.edges.right and !fr.edges.right, .bottom = h.edges.bottom and !fr.edges.bottom, .top = h.edges.top and !fr.edges.top };
+        _ = &held;
+        return std.fmt.bufPrint(&engage_text_buf, "Resize {s}: {s} ({s} only; {s} held by a constraint)", .{ name, edgesName(h.edges), edgesName(fr.edges), edgesName(held) }) catch "";
     }
     return switch (h.kind) {
         .centre => std.fmt.bufPrint(&engage_text_buf, "Move {s}", .{name}) catch "",
@@ -12503,15 +12532,21 @@ fn engageMotion(at: geom.Point) void {
     const dy = at.y - d.pointer0.y;
     if (!d.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 3) return;
     d.moved = true;
-    const p: geom.Point = .{ .x = d.hit.at.x + dx, .y = d.hit.at.y + dy };
+    // The point goes only where it may: a held axis keeps it in place.
+    const fr0 = engageFreedom(d.hit);
+    const free_x = if (engageMoves(d.hit.kind)) fr0.x else (fr0.edges.left or fr0.edges.right);
+    const free_y = if (engageMoves(d.hit.kind)) fr0.y else (fr0.edges.bottom or fr0.edges.top);
+    const p: geom.Point = .{ .x = d.hit.at.x + (if (free_x) dx else 0), .y = d.hit.at.y + (if (free_y) dy else 0) };
     d.now = p;
     // The point in the container's parent's frame.
     const q: geom.Point = .{ .x = p.x - d.offset.x, .y = p.y - d.offset.y };
     const h0: geom.Point = .{ .x = d.hit.at.x - d.offset.x, .y = d.hit.at.y - d.offset.y };
     var b = d.box;
+    const fr = engageFreedom(d.hit);
     if (engageMoves(d.hit.kind)) {
-        const mx = q.x - h0.x;
-        const my = q.y - h0.y;
+        // Along the free axes only: a held one stays where it is.
+        const mx = if (fr.x) q.x - h0.x else 0;
+        const my = if (fr.y) q.y - h0.y else 0;
         b = .{ .x0 = b.x0 + mx, .x1 = b.x1 + mx, .y0 = b.y0 + my, .y1 = b.y1 + my };
         if (state.model.group(d.hit.id) != null) {
             actM(mergeKey(.{ "moveGroupKey", d.key }), .moveGroup, .{ d.hit.id, b.x0 - groupBox0(d).x0, b.y0 - groupBox0(d).y0 }) catch {};
@@ -12521,10 +12556,11 @@ fn engageMotion(at: geom.Point) void {
         const min = 1.0;
         // Edges go exactly where the point is (a midpoint moves its one
         // edge; an edge's point moves it across).
-        if (d.hit.edges.left) b.x0 = @min(q.x, b.x1 - min);
-        if (d.hit.edges.right) b.x1 = @max(q.x, b.x0 + min);
-        if (d.hit.edges.bottom) b.y0 = @min(q.y, b.y1 - min);
-        if (d.hit.edges.top) b.y1 = @max(q.y, b.y0 + min);
+        // Only the edges its constraints leave free.
+        if (fr.edges.left) b.x0 = @min(q.x, b.x1 - min);
+        if (fr.edges.right) b.x1 = @max(q.x, b.x0 + min);
+        if (fr.edges.bottom) b.y0 = @min(q.y, b.y1 - min);
+        if (fr.edges.top) b.y1 = @max(q.y, b.y0 + min);
     }
     _ = actM(d.key, .placeObjects, .{ &[_]layout.model.ObjectId{d.hit.id}, &[_]geom.Box{b} }) catch {};
 }
