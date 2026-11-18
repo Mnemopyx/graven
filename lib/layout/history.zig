@@ -51,7 +51,7 @@ pub const actions = [_][:0]const u8{
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
-    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn",
+    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -103,6 +103,8 @@ pub const Error = Model.Error || native.Error;
 /// constrain follows (see `constrain`).
 pub fn apply(m: *Model, op: Op) Error!void {
     try applyOnly(m, op);
+    // The keys show their sheets, whatever the op changed.
+    try m.syncSheets();
     try constrain.solve(m, m.arena.child_allocator, null);
 }
 
@@ -276,7 +278,9 @@ pub const History = struct {
         const f = @field(Model, @tagName(tag));
         const R = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
         const result = if (@typeInfo(R) == .error_union) try @call(.auto, f, .{m} ++ args) else @call(.auto, f, .{m} ++ args);
-        // What constraints hold follows, as replaying the op does.
+        // The keys show their sheets, and what constraints hold follows,
+        // as replaying the op does.
+        try m.syncSheets();
         try constrain.solve(m, h.gpa, null);
         // The arguments, copied: what the caller passed may not outlive it.
         const bytes = try native.encodeValue(h.gpa, Args(@tagName(tag)), args);
@@ -1375,4 +1379,35 @@ test "a thread of tracks is kept in the file, and its join is a step undo takes 
     try testing.expectEqual(b, o.model.threadAfter(p, a).?.region);
     try testing.expect(try o.history.undo(&o.model));
     try testing.expect(o.model.threadAfter(p, a) == null);
+}
+
+test "a sheet's edits are steps undo takes back, and the sheet is kept in the file" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.addPanel("Keys", 60, 30);
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
+    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 1, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    const k = try m.addInstance(p, g, st, 0, 0);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const sheet = try h.do(&m, .makeSheet, .{ "Legends", m.panels.items[p].grids.items[g].id });
+    _ = try h.do(&m, .setSheetCell, .{ sheet, 0, 1, "ENTER" });
+    const bytes = try fileBytes(&h, gpa, test_writer, 1);
+    defer gpa.free(bytes);
+    var o = try openFile(gpa, bytes);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    const top = o.model.tileTrackNamed(k, "top").?;
+    var text = try o.model.tileTrackText(gpa, k, top);
+    try testing.expectEqualStrings("ENTER", text);
+    gpa.free(text);
+    try testing.expect(try o.history.undo(&o.model));
+    text = try o.model.tileTrackText(gpa, k, top);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("", text);
+    try testing.expectEqualStrings("", o.model.sheets.items[0].rows.items[0].cells.items[0]);
 }

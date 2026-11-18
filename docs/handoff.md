@@ -66,4 +66,4 @@ Flows as objects (decided 2026-11-18; blueprint "Flows as objects, and text impo
 
 Next is step 4, an editor for unplaced flows. Later: updating a flow from a changed source. The keycap legend mapping (text lines to tile, grid and slot positions) is still to be designed.
 
-Legend sheets (decided 2026-11-18; blueprint "Legend sheets: keys' slot content from a spreadsheet"; status, agreed item 9). Nothing is built yet. Step 1 is the model: the sheet object, its binding, slot content resolved from it, on-canvas slot edits writing cells, making a sheet from a keypad, undo and the file format.
+Legend sheets (decided 2026-11-18; blueprint "Legend sheets: keys' slot content from a spreadsheet"; status, agreed item 9). Step 1 (the model, with a minimal GUI: make, list, summarise, remove) was built the same day. Next is step 2, the sheet pane: editing cells, rows and columns; a row selecting its key and a key its row; problems marked; a helper naming keys by position or legend.

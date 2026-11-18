@@ -143,6 +143,14 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
    - **Cells hold markup.** Problems are flagged in their cells. Keys outside every sheet keep their own content, and making a sheet gathers a keypad's present content.
    - **Later:** numeric columns and expression cells; CSV or TSV import with its source.
    - **Order:** the model; a sheet pane; import; numbers and expressions.
+   - **Step 1 built 2026-11-18** (`model.LegendSheet`, `Model.sheets`):
+     - **The sheet:** a scope (a grid's, a track's or a panel's ID); the slot names, one column each; rows with a key name and a cell for each column; a list of sources.
+     - **What a row reaches:** its key, found by designator in the scope, and the tiles at the same grid place in grids linked with the key's (the HP-15C's gold legends on the plate). Holes are left out: they show no text.
+     - **Driving:** `syncSheets` writes every driven slot from its cell. It runs after every action, done or replayed, as constraints are solved; the first sheet wins a slot two drive, and slots no column names keep their own content. `setTileTrackText` on a driven slot sets its cell instead, so every edit on a key writes the sheet.
+     - **Actions:** `addSheet`, `makeSheet` (a row per key in the scope's order, a column per slot name among its keys and the tiles beside them, the cells holding what they show), `setSheetCell` (column 0 renames the key too), add and remove a row or column (removing leaves the slots as they are, undriven), `renameSheet`, `removeSheet`, and `renameTile` (designators stay unique). `sheetProblems` lists rows naming no key and columns matching no slot.
+     - **GUI, for now:** Make a legend sheet on a grid's properties; Legend sheets in the Browser; a sheet's summary (columns, rows, problems, Remove); its keys highlighted. Editing the cells is step 2.
+     - **Checked:** tests (made from a keypad with a linked plate grid; cells driving key and plate legends; edits on a key writing the cell; renames and their clash; problems; undo and the file); the HP-15C sample as a sheet (39 rows; top, g, f; a gold legend set from it; holes untouched). Sample SVGs identical. In the GUI: the sheet made from the HP-15C keys, its keys and gold legends highlighted.
+     - **Not yet:** a sheet pane to edit cells (step 2); naming keys by legend or position (the HP-15C's are K1…); the cost of syncing after every action is not measured (small keypads; a large one may want it incremental).
 
 ## Gaps against the project's stated goals
 

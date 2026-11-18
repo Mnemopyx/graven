@@ -200,6 +200,9 @@ const Context = union(enum) {
     /// The document's flows, and one of them.
     flows,
     flow: layout.model.ObjectId,
+    /// The document's legend sheets, and one of them.
+    sheets,
+    sheet: layout.model.ObjectId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -233,6 +236,8 @@ const Context = union(enum) {
             .prototype => "Tile prototype",
             .flows => "Flows",
             .flow => "Flow",
+            .sheets => "Legend sheets",
+            .sheet => "Legend sheet",
         };
     }
 };
@@ -2651,6 +2656,8 @@ fn contextValid(c: Context) bool {
         .prototype => |id| m.protoIndex(id) != null,
         .flows => true,
         .flow => |id| m.flowIndex(id) != null,
+        .sheets => true,
+        .sheet => |id| m.sheetIndex(id) != null,
     };
 }
 
@@ -4152,6 +4159,7 @@ fn treeContent() void {
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
     };
+    sheetsTree();
     // The flows: each with its tracks in order; one with none is unplaced.
     if (state.model.flows.items.len > 0) if (treeNode(.flows, "Flows", 1, true, false)) {
         for (state.model.flows.items) |f| {
@@ -4166,6 +4174,57 @@ fn treeContent() void {
             };
         }
     };
+}
+
+/// The legend sheets, in the Browser.
+fn sheetsTree() void {
+    if (state.model.sheets.items.len == 0) return;
+    if (!treeNode(.sheets, "Legend sheets", 1, true, false)) return;
+    for (state.model.sheets.items) |sh| _ = treeNode(.{ .sheet = sh.id }, sh.name, 2, false, false);
+}
+
+/// Whether tile `t` is a key a row of sheet `id` names, or beside one.
+fn sheetCovers(id: layout.model.ObjectId, t: layout.model.TileId) bool {
+    const m = &state.model;
+    const si = m.sheetIndex(id) orelse return false;
+    const a = dvui.currentWindow().arena();
+    for (m.sheets.items[si].rows.items) |row| {
+        const key = (m.keyInScope(a, m.sheets.items[si].scope, row.key) catch return false) orelse continue;
+        var near: std.ArrayList(layout.model.TileId) = .empty;
+        m.companions(a, key, &near) catch return false;
+        if (std.mem.indexOfScalar(layout.model.TileId, near.items, t) != null) return true;
+    }
+    return false;
+}
+
+/// A legend sheet, for now in brief (its pane comes next): its name, what
+/// it covers, its columns, its rows, what is wrong, and its removal.
+fn sheetProperties(id: layout.model.ObjectId) void {
+    const m = &state.model;
+    const si = m.sheetIndex(id) orelse return;
+    const sh = m.sheets.items[si];
+    propText("Name", "{s}", .{sh.name}, 1);
+    var cb: [200]u8 = undefined;
+    var n: usize = 0;
+    for (sh.columns.items, 0..) |c, k| {
+        const piece = std.fmt.bufPrint(cb[n..], "{s}{s}", .{ if (k > 0) ", " else "", c }) catch break;
+        n += piece.len;
+    }
+    propText("Columns", "name, {s}", .{cb[0..n]}, 2);
+    propText("Rows", "{d}", .{sh.rows.items.len}, 3);
+    const a = dvui.currentWindow().arena();
+    var rows: std.ArrayList(usize) = .empty;
+    var cols: std.ArrayList(usize) = .empty;
+    m.sheetProblems(a, id, &rows, &cols) catch {};
+    if (rows.items.len > 0) propText("Not found", "{d} row{s} name no key", .{ rows.items.len, if (rows.items.len == 1) "" else "s" }, 4);
+    if (cols.items.len > 0) propText("Unused", "{d} column{s} match no slot", .{ cols.items.len, if (cols.items.len == 1) "" else "s" }, 5);
+    propText("", "Its keys' legends come from it; editing one on its key edits its cell.", .{}, 6);
+    if (dvui.button(@src(), "Remove sheet", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        if (act(.removeSheet, .{id})) {
+            state.context = .sheets;
+            state.status = "Sheet removed: its keys keep their legends, now their own. ";
+        } else |_| {}
+    }
 }
 
 /// A track's name with where it is: its panel's name, unless it lies on
@@ -4356,7 +4415,9 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .grid => |g| g.panel == pi and t.grid != null and if (state.model.gridInstanceOf(t.id)) |at| at.grid == g.index else false,
         // A flow's tiles: those in its tracks.
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows => false,
+        // A sheet's keys: those of its rows.
+        .sheet => |id| sheetCovers(id, t.id),
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets => false,
     };
 }
 
@@ -5988,6 +6049,15 @@ fn gridProperties(pi: usize, gi: usize) !void {
     var sh = state.model.gridShape(pi, gi);
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
     propText("On", "{s}", .{state.model.panels.items[pi].name}, 2);
+    // Its keys' legends as a sheet (theirs and those beside them).
+    if (g.instances.items.len > 0) if (dvui.button(@src(), "Make a legend sheet", .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
+        var nb: [96]u8 = undefined;
+        const name = std.fmt.bufPrint(&nb, "Legends of {s}", .{state.model.panels.items[pi].name}) catch "Legends";
+        if (act(.makeSheet, .{ name, g.id })) |id| {
+            state.context = .{ .sheet = id };
+            state.status = "Sheet made: the keys' legends now come from it. ";
+        } else |_| state.status = "The sheet was not made. ";
+    };
     if (state.model.findGrid(g.link)) |src| {
         const sg = state.model.panels.items[src.panel].grids.items[src.index];
         propText("Follows", "{s} on {s}", .{ sg.name, state.model.panels.items[src.panel].name }, 3);
@@ -8696,6 +8766,8 @@ fn lowerKind() []const u8 {
         .prototype => "tiles of the prototype",
         .flows => "flows",
         .flow => "the flow's tracks",
+        .sheets => "legend sheets",
+        .sheet => "the sheet's keys",
     };
 }
 
@@ -9018,6 +9090,8 @@ fn properties() !void {
         },
         .flows => flowsProperties(),
         .flow => |id| flowProperties(id),
+        .sheets => propText("Legend sheets", "{d}", .{state.model.sheets.items.len}, 1),
+        .sheet => |id| sheetProperties(id),
     }
 }
 

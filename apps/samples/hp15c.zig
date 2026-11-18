@@ -252,3 +252,38 @@ test "the HP-15C keypad: 39 holes and keys at 11.43 mm across, ENTER over two ro
         try std.testing.expect(bx.x0 >= 0 and bx.x1 <= plate_w and bx.y0 >= 0 and bx.y1 <= plate_h);
     }
 }
+
+test "the HP-15C keypad as a legend sheet: a row a key, its white, blue and gold legends" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const st = try m.addStyle("key", .{ .cap_height = 1.9 });
+    const b = try build(&m, .{ .key = st, .g = st, .f = st }, 0, .{ .x = 0, .y = 0 });
+    const kg = m.panels.items[b.keys].grids.items[0];
+    const id = try m.makeSheet("HP-15C legends", kg.id);
+    const sh = m.sheets.items[m.sheetIndex(id).?];
+    try std.testing.expectEqual(@as(usize, 39), sh.rows.items.len);
+    // The keys' white and blue legends, then the gold legend beside them.
+    try std.testing.expectEqual(@as(usize, 3), sh.columns.items.len);
+    try std.testing.expectEqualStrings("top", sh.columns.items[0]);
+    try std.testing.expectEqualStrings("g", sh.columns.items[1]);
+    try std.testing.expectEqualStrings("f", sh.columns.items[2]);
+    // The first key: √x, x², and A in gold.
+    try std.testing.expectEqualStrings("K1", sh.rows.items[0].key);
+    try std.testing.expectEqualStrings("$\\sqrt{x}$", sh.rows.items[0].cells.items[0]);
+    try std.testing.expectEqualStrings("$x^2$", sh.rows.items[0].cells.items[1]);
+    try std.testing.expectEqualStrings("A", sh.rows.items[0].cells.items[2]);
+    // A gold legend set from the sheet reaches the plate.
+    try m.setSheetCell(id, 0, 3, "A^{\\prime}");
+    const gold = m.panels.items[b.plate].grids.items[0];
+    const at = m.instanceAt(b.plate, 0, gold.stamps.items[1].id, 0, 0).?;
+    const t = gold.instances.items[at].tile;
+    const text = try m.tileTrackText(std.testing.allocator, t, m.tileTrackNamed(t, "f").?);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("A^{\\prime}", text);
+    // The holes under the keys are not driven: they show no text.
+    const hole = gold.instances.items[m.instanceAt(b.plate, 0, gold.stamps.items[0].id, 0, 0).?].tile;
+    const ht = try m.tileTrackText(std.testing.allocator, hole, m.tileTrackNamed(hole, "top").?);
+    defer std.testing.allocator.free(ht);
+    try std.testing.expectEqualStrings("", ht);
+}

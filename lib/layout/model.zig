@@ -328,6 +328,33 @@ pub const Tile = struct {
 
 pub const TileParam = struct { name: []const u8, value: f64 };
 
+/// A legend sheet: the content of a keypad's keys' slots, as a table, as
+/// in a spreadsheet. Each row is a key, found by its name (its tile's
+/// designator) among the keys in the sheet's scope; each column a slot,
+/// by its name (a prototype track's), on the key or on a tile at the same
+/// grid place in a grid linked with the key's (a legend printed on the
+/// plate beside it). The sheet drives those slots: their content is the
+/// cells', and editing a slot on its key edits the cell (`syncSheets`).
+pub const LegendSheet = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    /// The keys it covers: those of a grid, of a track's flow, or of a
+    /// panel (its grids' and tracks'), by the ID of that object.
+    scope: ObjectId,
+    /// The slots' names, a column each (after the name column).
+    columns: std.ArrayList([]const u8) = .empty,
+    rows: std.ArrayList(SheetRow) = .empty,
+    /// Where it was imported from, if it was.
+    sources: std.ArrayList(FlowSource) = .empty,
+};
+
+/// A key's row: its name, and a cell for each column (markup; missing
+/// ones are empty).
+pub const SheetRow = struct {
+    key: []const u8,
+    cells: std.ArrayList([]const u8) = .empty,
+};
+
 /// A tile prototype's own copy of a sketch (see `Model.applySketch`): how its
 /// tiles are drawn, solved again for each tile's size.
 pub const PrototypeSketch = struct {
@@ -1496,6 +1523,8 @@ pub const Model = struct {
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
     /// The flows: content and the tracks it runs through (see `Flow`).
     flows: std.ArrayList(Flow) = .empty,
+    /// Legend sheets: keypads' slot content as tables (see `LegendSheet`).
+    sheets: std.ArrayList(LegendSheet) = .empty,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
@@ -3067,8 +3096,23 @@ pub const Model = struct {
 
     /// Sets tile `tile_id`'s content in its prototype's track `track` to
     /// `text`: runs in the track's style, a hard break at each newline.
+    /// Where a legend sheet drives that slot, its cell is set instead.
     pub fn setTileTrackText(m: *Model, tile_id: TileId, track: ObjectId, text: []const u8) Error!void {
         if (m.tileIndex(tile_id) == null) return error.NoSuchTile;
+        const tt = for (m.prototypeOf(tile_id).tracks) |tt| {
+            if (tt.id == track) break tt;
+        } else return error.NoSuchTrack;
+        if (m.sheetCellOf(tile_id, tt.name)) |c| {
+            m.sheets.items[c.sheet].rows.items[c.row].cells.items[c.col] = try m.a().dupe(u8, text);
+            try m.syncSheets();
+            m.revision += 1;
+            return;
+        }
+        try m.writeSlot(tile_id, track, text);
+    }
+
+    /// Sets a slot's content as `setTileTrackText` does, whatever drives it.
+    fn writeSlot(m: *Model, tile_id: TileId, track: ObjectId, text: []const u8) Error!void {
         const tt = for (m.prototypeOf(tile_id).tracks) |tt| {
             if (tt.id == track) break tt;
         } else return error.NoSuchTrack;
@@ -3086,6 +3130,353 @@ pub const Model = struct {
             if (line.len > 0) try f.items.append(m.a(), .{ .what = .{ .run = .{ .style = tt.style, .content = try m.a().dupe(u8, line) } } });
         }
         m.revision += 1;
+    }
+
+    // Legend sheets ------------------------------------------------------
+
+    pub fn sheetIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.sheets.items, 0..) |sh, i| if (sh.id == id) return i;
+        return null;
+    }
+
+    fn sheetById(m: *Model, id: ObjectId) Error!*LegendSheet {
+        return &m.sheets.items[m.sheetIndex(id) orelse return error.NoSuchObject];
+    }
+
+    /// Whether `id` names a grid, a track or a panel: something a sheet's
+    /// scope may be.
+    fn isScope(m: *const Model, id: ObjectId) bool {
+        if (id == .none) return false;
+        for (m.panels.items) |p| {
+            if (p.id == id) return true;
+            for (p.grids.items) |g| if (g.id == id) return true;
+            for (p.regions.items) |r| if (r.id == id) return true;
+        }
+        return false;
+    }
+
+    /// The keys in scope `scope` (a grid's, in rows, then columns; a
+    /// track's, in its flow's order; a panel's grids' and tracks'), into
+    /// `out`.
+    pub fn scopeTiles(m: *const Model, al: Allocator, scope: ObjectId, out: *std.ArrayList(TileId)) Allocator.Error!void {
+        for (m.panels.items, 0..) |p, pi| {
+            const whole = p.id == scope;
+            for (p.grids.items) |g| if (whole or g.id == scope) try gridTiles(m, al, g, out);
+            for (p.regions.items, 0..) |r, ri| if (whole or r.id == scope) {
+                for (m.ownItems(pi, ri)) |item| if (item.tileOf()) |t| if (!m.tileConst(t).removed) try out.append(al, t);
+            };
+        }
+    }
+
+    fn gridTiles(m: *const Model, al: Allocator, g: Grid, out: *std.ArrayList(TileId)) Allocator.Error!void {
+        const start = out.items.len;
+        for (g.instances.items) |inst| if (m.tileIndex(inst.tile) != null and !m.tileConst(inst.tile).removed) try out.append(al, inst.tile);
+        // In rows, then columns.
+        const Ctx = struct {
+            g: Grid,
+            fn at(c: @This(), t: TileId) [2]u32 {
+                for (c.g.instances.items) |inst| if (inst.tile == t) return .{ inst.row, inst.col };
+                return .{ 0, 0 };
+            }
+            fn lt(c: @This(), a_: TileId, b_: TileId) bool {
+                const x = c.at(a_);
+                const y = c.at(b_);
+                return x[0] < y[0] or (x[0] == y[0] and x[1] < y[1]);
+            }
+        };
+        std.mem.sort(TileId, out.items[start..], Ctx{ .g = g }, Ctx.lt);
+    }
+
+    /// Tile `t` and the tiles at its grid place in grids linked with its
+    /// grid (sharing a shape: a key and the legend printed beside it on
+    /// the plate), into `out`. Holes are left out: they show no text.
+    pub fn companions(m: *const Model, al: Allocator, t: TileId, out: *std.ArrayList(TileId)) Allocator.Error!void {
+        try out.append(al, t);
+        const at = m.gridInstanceOf(t) orelse return;
+        const g = m.panels.items[at.panel].grids.items[at.grid];
+        const inst = g.instances.items[at.index];
+        const root = if (g.link != .none) g.link else g.id;
+        for (m.panels.items) |p| for (p.grids.items) |h| {
+            if (h.id == g.id) continue;
+            const hroot = if (h.link != .none) h.link else h.id;
+            if (hroot != root) continue;
+            for (h.instances.items) |hi| if (hi.col == inst.col and hi.row == inst.row and m.tileIndex(hi.tile) != null and !m.tileConst(hi.tile).removed) {
+                const hole = for (h.stamps.items) |st| {
+                    if (st.id == hi.stamp) break st.role == .hole;
+                } else false;
+                if (!hole) try out.append(al, hi.tile);
+            };
+        };
+    }
+
+    /// The key named `name` among those in scope `scope`.
+    pub fn keyInScope(m: *const Model, al: Allocator, scope: ObjectId, name: []const u8) Allocator.Error!?TileId {
+        var keys: std.ArrayList(TileId) = .empty;
+        defer keys.deinit(al);
+        try m.scopeTiles(al, scope, &keys);
+        for (keys.items) |t| if (std.mem.eql(u8, m.tileConst(t).designator, name)) return t;
+        return null;
+    }
+
+    /// The cell that drives slot `slot` of tile `t`, if a sheet's does: the
+    /// first sheet's whose row's key is `t`, or has `t` beside it, with a
+    /// column of that name.
+    pub fn sheetCellOf(m: *const Model, t: TileId, slot: []const u8) ?struct { sheet: usize, row: usize, col: usize } {
+        const al = m.arena.child_allocator;
+        var keys: std.ArrayList(TileId) = .empty;
+        defer keys.deinit(al);
+        var near: std.ArrayList(TileId) = .empty;
+        defer near.deinit(al);
+        for (m.sheets.items, 0..) |sh, si| {
+            const col = for (sh.columns.items, 0..) |c, k| {
+                if (std.mem.eql(u8, c, slot)) break k;
+            } else continue;
+            keys.clearRetainingCapacity();
+            m.scopeTiles(al, sh.scope, &keys) catch return null;
+            for (sh.rows.items, 0..) |row, ri| {
+                const key = for (keys.items) |k| {
+                    if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
+                } else continue;
+                near.clearRetainingCapacity();
+                m.companions(al, key, &near) catch return null;
+                if (std.mem.indexOfScalar(TileId, near.items, t) != null) return .{ .sheet = si, .row = ri, .col = col };
+            }
+        }
+        return null;
+    }
+
+    /// Writes every slot a sheet drives from its cell: for each row whose
+    /// key is in its sheet's scope, each column's slot on the key and on
+    /// the tiles beside it that have one of that name. A slot two sheets
+    /// drive takes the first's. Slots no column names keep their own
+    /// content. Run after every action (as constraints are solved), so
+    /// the keys always show their sheets.
+    pub fn syncSheets(m: *Model) Error!void {
+        if (m.sheets.items.len == 0) return;
+        const al = m.arena.child_allocator;
+        var keys: std.ArrayList(TileId) = .empty;
+        defer keys.deinit(al);
+        var near: std.ArrayList(TileId) = .empty;
+        defer near.deinit(al);
+        var done: std.AutoHashMapUnmanaged([2]u32, void) = .empty;
+        defer done.deinit(al);
+        for (m.sheets.items) |sh| {
+            keys.clearRetainingCapacity();
+            try m.scopeTiles(al, sh.scope, &keys);
+            for (sh.rows.items) |row| {
+                const key = for (keys.items) |k| {
+                    if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
+                } else continue;
+                near.clearRetainingCapacity();
+                try m.companions(al, key, &near);
+                for (sh.columns.items, 0..) |col, ci| {
+                    const text = if (ci < row.cells.items.len) row.cells.items[ci] else "";
+                    for (near.items) |t| {
+                        const track = m.tileTrackNamed(t, col) orelse continue;
+                        const gop = try done.getOrPut(al, .{ @intFromEnum(t), @intFromEnum(track) });
+                        if (gop.found_existing) continue;
+                        const now = try m.tileTrackText(al, t, track);
+                        defer al.free(now);
+                        if (!std.mem.eql(u8, now, text)) try m.writeSlot(t, track, text);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A new legend sheet named `name` over scope `scope` (a grid's, a
+    /// track's or a panel's ID), with columns for the slots `columns` and
+    /// no rows. Returns its ID.
+    pub fn addSheet(m: *Model, name: []const u8, scope: ObjectId, columns: []const []const u8) Error!ObjectId {
+        if (!m.isScope(scope)) return error.NoSuchObject;
+        var sh: LegendSheet = .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .scope = scope };
+        for (columns) |c| try sh.columns.append(m.a(), try m.a().dupe(u8, c));
+        try m.sheets.append(m.a(), sh);
+        m.revision += 1;
+        return sh.id;
+    }
+
+    /// A legend sheet for the keys in scope `scope`, holding what their
+    /// slots hold now (nothing changes on them): a row for each key, by
+    /// its name, and a column for each slot name its keys and the tiles
+    /// beside them have, in their prototypes' order. Named `name`.
+    /// Returns its ID.
+    pub fn makeSheet(m: *Model, name: []const u8, scope: ObjectId) Error!ObjectId {
+        if (!m.isScope(scope)) return error.NoSuchObject;
+        const al = m.arena.child_allocator;
+        var keys: std.ArrayList(TileId) = .empty;
+        defer keys.deinit(al);
+        try m.scopeTiles(al, scope, &keys);
+        var near: std.ArrayList(TileId) = .empty;
+        defer near.deinit(al);
+        var cols: std.ArrayList([]const u8) = .empty;
+        defer cols.deinit(al);
+        for (keys.items) |k| {
+            near.clearRetainingCapacity();
+            try m.companions(al, k, &near);
+            for (near.items) |t| for (m.prototypeOf(t).tracks) |tt| {
+                for (cols.items) |c| {
+                    if (std.mem.eql(u8, c, tt.name)) break;
+                } else try cols.append(al, tt.name);
+            };
+        }
+        const id = try m.addSheet(name, scope, cols.items);
+        const sh = &m.sheets.items[m.sheetIndex(id).?];
+        for (keys.items) |k| {
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, m.tileConst(k).designator) };
+            near.clearRetainingCapacity();
+            try m.companions(al, k, &near);
+            for (sh.columns.items) |c| {
+                var text: []const u8 = "";
+                for (near.items) |t| if (m.tileTrackNamed(t, c)) |track| {
+                    const got = try m.tileTrackText(m.a(), t, track);
+                    if (got.len > 0) {
+                        text = got;
+                        break;
+                    }
+                };
+                try row.cells.append(m.a(), text);
+            }
+            try sh.rows.append(m.a(), row);
+        }
+        try m.syncSheets();
+        return id;
+    }
+
+    /// Sets the cell of sheet `id` at row `row`, column `col`: column 0
+    /// is the key's name (renaming the key too, when there is one), the
+    /// others the columns' slots, which follow.
+    pub fn setSheetCell(m: *Model, id: ObjectId, row: usize, col: usize, text: []const u8) Error!void {
+        const sh = try m.sheetById(id);
+        if (row >= sh.rows.items.len or col > sh.columns.items.len) return error.NoSuchItem;
+        const r = &sh.rows.items[row];
+        if (col == 0) {
+            if (std.mem.eql(u8, r.key, text)) return;
+            const al = m.arena.child_allocator;
+            if (try m.keyInScope(al, sh.scope, r.key)) |t| try m.renameTile(t, text);
+            m.sheets.items[m.sheetIndex(id).?].rows.items[row].key = try m.a().dupe(u8, text);
+        } else {
+            while (r.cells.items.len < sh.columns.items.len) try r.cells.append(m.a(), "");
+            r.cells.items[col - 1] = try m.a().dupe(u8, text);
+        }
+        try m.syncSheets();
+        m.revision += 1;
+    }
+
+    /// Adds a row for key `key` to sheet `id` at `at` (null: last), its
+    /// cells empty.
+    pub fn addSheetRow(m: *Model, id: ObjectId, at: ?usize, key: []const u8) Error!void {
+        const sh = try m.sheetById(id);
+        var row: SheetRow = .{ .key = try m.a().dupe(u8, key) };
+        for (sh.columns.items) |_| try row.cells.append(m.a(), "");
+        try sh.rows.insert(m.a(), @min(at orelse sh.rows.items.len, sh.rows.items.len), row);
+        try m.syncSheets();
+        m.revision += 1;
+    }
+
+    /// Removes row `row` of sheet `id`: its key's slots keep what they
+    /// hold, no longer driven.
+    pub fn removeSheetRow(m: *Model, id: ObjectId, row: usize) Error!void {
+        const sh = try m.sheetById(id);
+        if (row >= sh.rows.items.len) return error.NoSuchItem;
+        _ = sh.rows.orderedRemove(row);
+        try m.syncSheets();
+        m.revision += 1;
+    }
+
+    /// Adds a column for slot `slot` to sheet `id` at `at` (null: last),
+    /// each row's cell holding what its key's slot holds now.
+    pub fn addSheetColumn(m: *Model, id: ObjectId, at: ?usize, slot: []const u8) Error!void {
+        const si = m.sheetIndex(id) orelse return error.NoSuchObject;
+        const al = m.arena.child_allocator;
+        const sh = &m.sheets.items[si];
+        const k = @min(at orelse sh.columns.items.len, sh.columns.items.len);
+        try sh.columns.insert(m.a(), k, try m.a().dupe(u8, slot));
+        var near: std.ArrayList(TileId) = .empty;
+        defer near.deinit(al);
+        for (sh.rows.items) |*row| {
+            while (row.cells.items.len < k) try row.cells.append(m.a(), "");
+            var text: []const u8 = "";
+            if (try m.keyInScope(al, sh.scope, row.key)) |key| {
+                near.clearRetainingCapacity();
+                try m.companions(al, key, &near);
+                for (near.items) |t| if (m.tileTrackNamed(t, slot)) |track| {
+                    const got = try m.tileTrackText(m.a(), t, track);
+                    if (got.len > 0) {
+                        text = got;
+                        break;
+                    }
+                };
+            }
+            try row.cells.insert(m.a(), k, text);
+        }
+        try m.syncSheets();
+        m.revision += 1;
+    }
+
+    /// Removes column `col` (from 0, after the name column) of sheet `id`:
+    /// its slots keep what they hold, no longer driven.
+    pub fn removeSheetColumn(m: *Model, id: ObjectId, col: usize) Error!void {
+        const sh = try m.sheetById(id);
+        if (col >= sh.columns.items.len) return error.NoSuchItem;
+        _ = sh.columns.orderedRemove(col);
+        for (sh.rows.items) |*row| if (col < row.cells.items.len) {
+            _ = row.cells.orderedRemove(col);
+        };
+        try m.syncSheets();
+        m.revision += 1;
+    }
+
+    pub fn renameSheet(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        (try m.sheetById(id)).name = try m.a().dupe(u8, name);
+        m.revision += 1;
+    }
+
+    /// Removes sheet `id`: the slots it drove keep what they hold.
+    pub fn removeSheet(m: *Model, id: ObjectId) Error!void {
+        _ = m.sheets.orderedRemove(m.sheetIndex(id) orelse return error.NoSuchObject);
+        try m.syncSheets();
+        m.revision += 1;
+    }
+
+    /// Renames tile `id` (its designator), which must stay unique.
+    pub fn renameTile(m: *Model, id: TileId, designator: []const u8) Error!void {
+        if (m.tileIndex(id) == null) return error.NoSuchTile;
+        if (designator.len == 0) return error.BadValue;
+        if (m.findTile(designator)) |other| if (other != id) return error.DuplicateDesignator;
+        m.tile(id).designator = try m.a().dupe(u8, designator);
+        m.revision += 1;
+    }
+
+    /// What is wrong with sheet `id`, cell by cell: rows whose name is no
+    /// key in its scope, and columns no key there (or beside one) has a
+    /// slot for. Into `rows` and `cols` (indices).
+    pub fn sheetProblems(m: *const Model, al: Allocator, id: ObjectId, rows: *std.ArrayList(usize), cols: *std.ArrayList(usize)) Allocator.Error!void {
+        const si = m.sheetIndex(id) orelse return;
+        const sh = m.sheets.items[si];
+        var keys: std.ArrayList(TileId) = .empty;
+        defer keys.deinit(al);
+        try m.scopeTiles(al, sh.scope, &keys);
+        var near: std.ArrayList(TileId) = .empty;
+        defer near.deinit(al);
+        var used = try al.alloc(bool, sh.columns.items.len);
+        defer al.free(used);
+        @memset(used, false);
+        for (sh.rows.items, 0..) |row, ri| {
+            const key = for (keys.items) |k| {
+                if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
+            } else {
+                try rows.append(al, ri);
+                continue;
+            };
+            near.clearRetainingCapacity();
+            try m.companions(al, key, &near);
+            for (sh.columns.items, 0..) |c, ci| for (near.items) |t| if (m.tileTrackNamed(t, c) != null) {
+                used[ci] = true;
+            };
+        }
+        for (used, 0..) |u, ci| if (!u) try cols.append(al, ci);
     }
 
     fn dupeParams(m: *Model, params: []const TileParam) Allocator.Error![]const TileParam {
@@ -5837,4 +6228,106 @@ test "flows: a flow's tracks run one way" {
     const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
     const col = try m.addTracks(p, .{ .name = "Col", .origin = .{ .x = 50, .y = 90 }, .major = .column, .style = body, .count = 2, .length = 40, .pitch = 6 });
     try std.testing.expectError(error.BadJoin, m.assignTrack(p, col, m.trackFlow(p, a).?.id, null));
+}
+
+/// A two-key keypad with a gold legend beside one key on a plate grid
+/// linked to the keys' (as the HP-15C is built), for the sheet tests.
+const SheetFixture = struct {
+    keys_grid: ObjectId,
+    a: TileId,
+    b: TileId,
+    gold: TileId,
+
+    fn make(m: *Model) !SheetFixture {
+        _ = try m.startCanvas(.mm);
+        const plate = try m.addPanel("Plate", 60, 30);
+        const keys = try m.addPanel("Keys", 60, 30);
+        const key = try m.addPrototype(.{ .name = "key", .tracks = &.{ .{ .name = "top" }, .{ .name = "g" } } });
+        const goldp = try m.addPrototype(.{ .name = "gold", .tracks = &.{.{ .name = "f" }} });
+        const pg = try m.addGrid(plate, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+        const golds = try m.addStamp(plate, pg, .{ .name = "Gold", .prototype = goldp, .w = 8, .h = 3 });
+        const kg = try m.addLinkedGrid(keys, .{ .x = 10, .y = 20 }, m.panels.items[plate].grids.items[pg].id);
+        const caps = try m.addStamp(keys, kg, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+        const a = try m.addInstance(keys, kg, caps, 0, 0);
+        const b = try m.addInstance(keys, kg, caps, 1, 0);
+        const gold = try m.addInstance(plate, pg, golds, 1, 0);
+        try m.renameTile(a, "SIN");
+        try m.renameTile(b, "COS");
+        try m.setTileTrackText(a, m.tileTrackNamed(a, "top").?, "SIN");
+        try m.setTileTrackText(b, m.tileTrackNamed(b, "top").?, "COS");
+        try m.setTileTrackText(gold, m.tileTrackNamed(gold, "f").?, "ACOS");
+        return .{ .keys_grid = m.panels.items[keys].grids.items[kg].id, .a = a, .b = b, .gold = gold };
+    }
+};
+
+fn slotText(m: *const Model, t: TileId, slot: []const u8) ![]u8 {
+    return m.tileTrackText(std.testing.allocator, t, m.tileTrackNamed(t, slot).?);
+}
+
+test "a sheet made from a keypad holds what its keys and the legends beside them show" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const fx = try SheetFixture.make(&m);
+    const id = try m.makeSheet("Legends", fx.keys_grid);
+    const sh = m.sheets.items[m.sheetIndex(id).?];
+    // Columns: the keys' slots, then the plate legend's.
+    try std.testing.expectEqual(3, sh.columns.items.len);
+    try std.testing.expectEqualStrings("top", sh.columns.items[0]);
+    try std.testing.expectEqualStrings("f", sh.columns.items[2]);
+    try std.testing.expectEqual(2, sh.rows.items.len);
+    try std.testing.expectEqualStrings("SIN", sh.rows.items[0].key);
+    try std.testing.expectEqualStrings("COS", sh.rows.items[1].cells.items[0]);
+    try std.testing.expectEqualStrings("ACOS", sh.rows.items[1].cells.items[2]);
+    try std.testing.expectEqualStrings("", sh.rows.items[0].cells.items[2]);
+}
+
+test "the sheet drives the slots: a cell sets them, an edit on the key sets the cell" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const fx = try SheetFixture.make(&m);
+    const id = try m.makeSheet("Legends", fx.keys_grid);
+    // A cell: the key's slot, and the gold legend beside it.
+    try m.setSheetCell(id, 1, 1, "cos");
+    try m.setSheetCell(id, 1, 3, "cos^{-1}");
+    const t1 = try slotText(&m, fx.b, "top");
+    defer std.testing.allocator.free(t1);
+    try std.testing.expectEqualStrings("cos", t1);
+    const t2 = try slotText(&m, fx.gold, "f");
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("cos^{-1}", t2);
+    // On the key: the cell changes, and so the slot.
+    try m.setTileTrackText(fx.a, m.tileTrackNamed(fx.a, "g").?, "ASIN");
+    const si = m.sheetIndex(id).?;
+    try std.testing.expectEqualStrings("ASIN", m.sheets.items[si].rows.items[0].cells.items[1]);
+    const t3 = try slotText(&m, fx.a, "g");
+    defer std.testing.allocator.free(t3);
+    try std.testing.expectEqualStrings("ASIN", t3);
+    // The name column renames the key.
+    try m.setSheetCell(id, 0, 0, "sin");
+    try std.testing.expectEqualStrings("sin", m.tileConst(fx.a).designator);
+    try std.testing.expectError(error.DuplicateDesignator, m.setSheetCell(id, 0, 0, "COS"));
+    // A column removed: its slots keep what they show, no longer driven.
+    try m.removeSheetColumn(id, 0);
+    try m.setTileTrackText(fx.b, m.tileTrackNamed(fx.b, "top").?, "own");
+    try std.testing.expectEqualStrings("ASIN", m.sheets.items[si].rows.items[0].cells.items[0]);
+}
+
+test "a sheet's problems: rows naming no key, columns no key has" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const fx = try SheetFixture.make(&m);
+    const id = try m.addSheet("Legends", fx.keys_grid, &.{ "top", "nothing" });
+    try m.addSheetRow(id, null, "SIN");
+    try m.addSheetRow(id, null, "TAN");
+    var rows: std.ArrayList(usize) = .empty;
+    defer rows.deinit(std.testing.allocator);
+    var cols: std.ArrayList(usize) = .empty;
+    defer cols.deinit(std.testing.allocator);
+    try m.sheetProblems(std.testing.allocator, id, &rows, &cols);
+    try std.testing.expectEqualSlices(usize, &.{1}, rows.items);
+    try std.testing.expectEqualSlices(usize, &.{1}, cols.items);
+    // A row for a key the sheet drives: its empty cell empties the slot.
+    const t = try slotText(&m, fx.a, "top");
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("", t);
 }
