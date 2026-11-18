@@ -116,6 +116,14 @@ pub const testing_api = struct {
     pub fn contextName() []const u8 {
         return @tagName(state.context);
     }
+    /// Grid `gi` of panel `pi`'s point at `col`, `row` on the screen.
+    pub fn gridPoint(pi: usize, gi: usize, col: u32, row: u32) ?dvui.Point.Physical {
+        return toScreen(onSheetPoint(pi, state.model.gridPoint(pi, gi, @floatFromInt(col), @floatFromInt(row))));
+    }
+    pub fn panelNamed(name: []const u8) ?usize {
+        for (state.model.panels.items, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) return i;
+        return null;
+    }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
         state.view.cy = cy;
@@ -1314,8 +1322,12 @@ fn deinit(_: *dvui.Window) void {
     if (fonts_from) |f| state.gpa.free(f);
     fonts_from = null;
     // Started again (the GUI's tests start Graven several times in one
-    // process): a fresh start screen.
+    // process): a fresh start screen, one view, nothing chosen.
     canvas_prompt = true;
+    resetViews();
+    selection.clearRetainingCapacity();
+    track_cursor = null;
+    panel_edit = null;
     dg_table.deinit(state.gpa);
     dg_table = .{};
     tags_given.deinit(state.gpa);
@@ -1326,6 +1338,9 @@ fn deinit(_: *dvui.Window) void {
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
     if (atlas) |*a| a.deinit();
+    atlas = null;
+    if (resolved) |*r| r.deinit();
+    resolved = null;
     state.expanded.deinit(state.gpa);
     forgetThreads();
     state.model.deinit();
@@ -11495,6 +11510,8 @@ fn styleRules(sid: layout.model.StyleId) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4600 + k });
         defer row.deinit();
         const key = mergeKey(.{ "style rule", sid, k });
+        var tb: [32]u8 = undefined;
+        tagParent(std.fmt.bufPrint(&tb, "rule {d} kind", .{k + 1}) catch "rule");
         var kind_choice: usize = if (r.kind) |kd| @as(usize, @intFromEnum(kd)) + 1 else 0;
         if (tdropdown(@src(), &kind_names, .{ .choice = &kind_choice }, .{}, .{ .id_extra = 4700 + k, .min_size_content = .{ .w = 90 } })) {
             const kind: ?glyphic.Kind = if (kind_choice == 0) null else @enumFromInt(kind_choice - 1);
@@ -11502,6 +11519,7 @@ fn styleRules(sid: layout.model.StyleId) !void {
             _ = actM(key, .setStyleRule, .{ sid, kind, r.param, @as(?glyphic.Value, r.value) }) catch {};
             return;
         }
+        tagParent(std.fmt.bufPrint(&tb, "rule {d} parameter", .{k + 1}) catch "rule");
         var param_choice: usize = @intFromEnum(r.param);
         if (tdropdown(@src(), param_names, .{ .choice = &param_choice }, .{}, .{ .id_extra = 4800 + k, .min_size_content = .{ .w = 110 } })) {
             const p: glyphic.Param = @enumFromInt(param_choice);
@@ -11510,8 +11528,14 @@ fn styleRules(sid: layout.model.StyleId) !void {
             return;
         }
         var v = r.value;
-        if (valueEditor(r.param, &v, false, 4900 + k)) {
-            _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, @as(?glyphic.Value, v) }) catch {};
+        {
+            // Its own box, tagged, so the value is found apart from the row.
+            var vb = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = 4950 + k, .gravity_y = 0.5 });
+            defer vb.deinit();
+            tagParent(std.fmt.bufPrint(&tb, "rule {d} value", .{k + 1}) catch "rule");
+            if (valueEditor(r.param, &v, false, 4900 + k)) {
+                _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, @as(?glyphic.Value, v) }) catch {};
+            }
         }
         if (icons.button(@src(), .trash, "Remove this rule", .{ .id_extra = 5000 + k, .size = 14 })) {
             _ = act(.setStyleRule, .{ sid, r.kind, r.param, null }) catch {};

@@ -148,7 +148,8 @@ pub const Run = struct {
         try r.clickIn(tag, 0.8, 0.5);
         try dvui.testing.pressKey(.a, .lcontrol);
         try r.frames(1);
-        try dvui.testing.writeText(text);
+        // Typing replaces the selection; nothing typed, it is deleted.
+        if (text.len == 0) try dvui.testing.pressKey(.backspace, .none) else try dvui.testing.writeText(text);
         try r.frames(3);
     }
 
@@ -479,4 +480,89 @@ fn sameAsExample(m: *layout.Model, path: []const u8, names: []const []const u8) 
         std.debug.print("{s}: differs from {s} at byte {d} (of {d} and {d}): {s}/made.svg, example.svg\n", .{ name, path, at, made.len, want.len, scratch });
         return error.NotTheSame;
     }
+}
+
+// The HP-15C, made in the GUI ------------------------------------------------
+
+/// A legend style on the Libertinus style: its cap height, 1.5 cap
+/// heights between lines, superscripts raised and subscripts dropped.
+fn make15cStyle(r: *Run, name: []const u8, cap: []const u8) !void {
+    try r.click("tree/untitled/Text styles");
+    try r.click("Text styles/Add a style");
+    try r.set("Text style/Name", name);
+    try r.choose("Text style/Based on", "Libertinus");
+    try r.set("Text style/Cap height, mm", cap);
+    try r.set("Text style/Line pitch, cap heights", "1.5");
+    try r.click("Faces/Add a rule");
+    try r.choose("Faces/rule 1 parameter", "sup_raise");
+    try r.set("Faces/rule 1 value", "0.5");
+    try r.click("Faces/Add a rule");
+    try r.choose("Faces/rule 2 parameter", "sub_drop");
+    try r.set("Faces/rule 2 value", "0.24");
+}
+
+/// A plain prototype: its tracks' size from the grid it is placed on (no
+/// unit), no body inset, the face inset given, no art.
+fn makePlainPrototype(r: *Run, name: []const u8, face: []const u8) !void {
+    try r.click("tree/untitled/Tile prototypes");
+    try r.click("icon/Add prototype");
+    try r.set("Tile prototype/Name", name);
+    try r.set("Tile prototype/Unit, mm per u", "");
+    inline for (.{ "left", "right", "top", "bottom" }) |side| {
+        try r.set("Tile prototype/Body inset " ++ side ++ ", mm", "0");
+        try r.set("Tile prototype/Face inset " ++ side ++ ", mm", face);
+    }
+    try r.click("Layer face/Remove art");
+}
+
+/// A track's style, alignment and insets (left, right, top, bottom).
+fn setTrack(r: *Run, track: []const u8, style: []const u8, from: []const u8, insets: [4][]const u8) !void {
+    var b: [96]u8 = undefined;
+    try r.choose(try std.fmt.bufPrint(&b, "Track {s}/Style", .{track}), style);
+    try r.choose(try std.fmt.bufPrint(&b, "Track {s}/Set from", .{track}), from);
+    for (insets, [_][]const u8{ "left", "right", "top", "bottom" }) |v, side| {
+        try r.set(try std.fmt.bufPrint(&b, "Track {s}/Inset {s}, mm", .{ track, side }), v);
+    }
+}
+
+fn addTrack(r: *Run, after: []const u8, number: usize, name: []const u8) !void {
+    var b: [96]u8 = undefined;
+    try r.click(try std.fmt.bufPrint(&b, "Track {s}/Add track", .{after}));
+    try r.set(try std.fmt.bufPrint(&b, "Track track {d}/Name", .{number}), name);
+}
+
+fn make15c(r: *Run) !void {
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Text styles");
+    try r.click("From a math package/Add a Libertinus style");
+    try make15cStyle(r, "15C key", "1.9");
+    try make15cStyle(r, "15C g", "1.25");
+    try make15cStyle(r, "15C f", "1.4");
+
+    try makePlainPrototype(r, "15C key", "0.4");
+    try setTrack(r, "top", "15C key", "centre", .{ "0", "0", "0.7", "2.65" });
+    try addTrack(r, "top", 2, "g");
+    try setTrack(r, "g", "15C g", "centre", .{ "0", "0", "4.5", "0" });
+
+    try makePlainPrototype(r, "15C ENTER key", "0.4");
+    try setTrack(r, "top", "15C key", "centre", .{ "2.175", "2.175", "1", "2.65" });
+    try r.choose("Track top/Runs", "down columns");
+    try addTrack(r, "top", 2, "g");
+    try setTrack(r, "g", "15C g", "centre", .{ "0", "0", "17.2", "0" });
+
+    try makePlainPrototype(r, "15C gold legend", "0");
+    try r.set("Track top/Name", "f");
+    try setTrack(r, "f", "15C f", "centre", .{ "0", "0", "0", "0" });
+}
+
+test "the HP-15C, made in the GUI" {
+    var r = try Run.start();
+    defer r.stop();
+    try make15c(&r);
+    const m = api.model();
+    try std.testing.expectEqual(3, m.prototypes.items.len);
+    const enter = m.prototypes.items[1];
+    try std.testing.expectEqual(null, enter.unit);
+    try std.testing.expectEqual(null, enter.art);
+    try std.testing.expect(enter.tracks[0].major == .column);
 }
