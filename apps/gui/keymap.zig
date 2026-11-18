@@ -78,6 +78,8 @@ pub const action_defs = [_]A{
     .{ .name = "view.frame-edit" },
     .{ .name = "view.zoom-in", .repeat = true },
     .{ .name = "view.zoom-out", .repeat = true },
+    // Drags snap to the grid, or not.
+    .{ .name = "view.snap-grid" },
 
     .{ .name = "dialog.confirm" },
     .{ .name = "dialog.cancel" },
@@ -270,6 +272,8 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "kp_add", .action = "view.zoom-in" },
     .{ .mode = "view", .chord = "minus", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "kp_subtract", .action = "view.zoom-out" },
+    // Inkscape's key for snapping.
+    .{ .mode = "view", .chord = "char:%", .action = "view.snap-grid" },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
     .{ .mode = "dialog.calibrate-size", .chord = "left", .action = "dialog.calibrate-size.grow", .arg = -1 },
