@@ -447,10 +447,10 @@ fn init(win: *dvui.Window) !void {
     // Match the desktop now, then follow its changes.
     main_window = win;
     // Text fields and cells in a font with legends' characters (Greek,
-    // arrows, mathematical operators): Graven Sans, built in
+    // arrows, mathematical operators): DejaVu Sans, built in
     // (uifont/README.md).
-    if (win.addFont("Graven Sans", @embedFile("uifont/GravenSans.ttf"), null)) {
-        ghost_pane.field_family = "Graven Sans";
+    if (win.addFont("DejaVu Sans", @embedFile("uifont/DejaVuSans.ttf"), null)) {
+        ghost_pane.field_family = "DejaVu Sans";
     } else |_| {}
     const settings = desktop.read(gpa, dvui.io);
     applyDesktop(win, settings);
