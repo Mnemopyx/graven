@@ -1630,6 +1630,14 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Sets style `id`'s line pitch, baseline to baseline in cap heights;
+    /// null takes it from its text face (ascender to descender).
+    pub fn setLinePitch(m: *Model, id: StyleId, pitch: ?f64) Error!void {
+        if (pitch) |p| if (!(p > 0)) return error.BadSize;
+        (try m.styleMut(id)).line_pitch = pitch;
+        m.revision += 1;
+    }
+
     /// Sets the style style `id` takes its faces and rules from where it
     /// sets none of its own (none: no base). Refused where it would loop.
     pub fn setStyleBase(m: *Model, id: StyleId, base: StyleId) Error!void {

@@ -206,6 +206,9 @@ const Context = union(enum) {
     /// The document's legend sheets, and one of them.
     sheets,
     sheet: layout.model.ObjectId,
+    /// The document's text styles, and one of them.
+    styles,
+    style: layout.model.StyleId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -241,6 +244,8 @@ const Context = union(enum) {
             .flow => "Flow",
             .sheets => "Legend sheets",
             .sheet => "Legend sheet",
+            .styles => "Text styles",
+            .style => "Text style",
         };
     }
 };
@@ -2973,6 +2978,8 @@ fn contextValid(c: Context) bool {
         .flow => |id| m.flowIndex(id) != null,
         .sheets => true,
         .sheet => |id| m.sheetIndex(id) != null,
+        .styles => true,
+        .style => |id| m.styleIndex(id) != null,
     };
 }
 
@@ -4542,6 +4549,10 @@ fn treeContent() void {
     if (treeNode(.prototypes, "Tile prototypes", 1, state.model.prototypes.items.len > 0, false)) {
         for (state.model.prototypes.items) |p| _ = treeNode(.{ .prototype = p.id }, p.name, 2, false, false);
     }
+    // Always listed: a document's styles are made here.
+    if (treeNode(.styles, "Text styles", 1, state.model.styles.items.len > 0, false)) {
+        for (state.model.styles.items) |st| _ = treeNode(.{ .style = st.id }, st.name, 2, false, false);
+    }
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
     };
@@ -4817,7 +4828,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style => false,
     };
 }
 
@@ -10412,6 +10423,8 @@ fn lowerKind() []const u8 {
         .flow => "the flow's tracks",
         .sheets => "legend sheets",
         .sheet => "the sheet's keys",
+        .styles => "text styles",
+        .style => "text style",
     };
 }
 
@@ -10753,6 +10766,8 @@ fn properties() !void {
         .flows => flowsProperties(),
         .flow => |id| flowProperties(id),
         .sheets => propText("Legend sheets", "{d}", .{state.model.sheets.items.len}, 1),
+        .styles => try stylesProperties(),
+        .style => |sid| try styleProperties(sid),
         .sheet => |id| sheetProperties(id),
     }
 }
@@ -11235,6 +11250,12 @@ fn styleRuleProperties(sid: layout.model.StyleId) !void {
     if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
     if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
     for (st.faces.items, 0..) |f, k| propText(f.role, "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
+    try styleRules(sid);
+}
+
+/// A style's rules, each editable, and Add a rule.
+fn styleRules(sid: layout.model.StyleId) !void {
+    const st = state.model.textStyle(sid).*;
     propValue("Rules", st.rules.items.len == 0, "{s}", .{if (st.rules.items.len == 0) "none: its base's and glyphic's defaults" else ""}, 4590);
     for (st.rules.items, 0..) |r, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4600 + k });
@@ -11419,6 +11440,102 @@ fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: 
     if (!dvui.dropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
     if (choice < first) return @as(?layout.model.StyleId, null);
     return @as(?layout.model.StyleId, styles[choice - first].id);
+}
+
+/// The document's text styles: how many, and new ones: a plain style, or
+/// one from a math font package (its faces and rules), to base others on.
+fn stylesProperties() !void {
+    propText("Text styles", "{d}", .{state.model.styles.items.len}, 1);
+    if (dvui.button(@src(), "Add a style", .{}, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } })) {
+        var buf: [32]u8 = undefined;
+        var k: usize = state.model.styles.items.len + 1;
+        const name = while (true) : (k += 1) {
+            const candidate = std.fmt.bufPrint(&buf, "Style {d}", .{k}) catch "Style";
+            if (styleNamed(candidate) == null) break candidate;
+        };
+        state.context = .{ .style = try act(.addStyle, .{ name, layout.model.StyleSize{ .cap_height = 3 } }) };
+    }
+    heading("From a math package", .{}, 10);
+    for (layout.fonts.packages, 0..) |pkg, i| {
+        var lb: [64]u8 = undefined;
+        if (dvui.button(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+            const name = if (styleNamed(pkg.name) == null) pkg.name else std.fmt.bufPrint(&lb, "{s} {d}", .{ pkg.name, state.model.styles.items.len + 1 }) catch pkg.name;
+            // One step: the style and the package's faces and rules on it.
+            const key = mergeKey(.{ "package style", pkg.name, state.model.styles.items.len });
+            const id = actM(key, .addStyle, .{ name, layout.model.StyleSize{} }) catch continue;
+            for (pkg.faces) |f| _ = actM(key, .setStyleFace, .{ id, f.role, @as(?layout.model.FontName, f.font) }) catch {};
+            for (pkg.rules) |r| _ = actM(key, .setStyleRule, .{ id, r.kind, r.param, r.value }) catch {};
+            state.context = .{ .style = id };
+        }
+    }
+}
+
+fn styleNamed(name: []const u8) ?layout.model.StyleId {
+    for (state.model.styles.items) |st| if (std.mem.eql(u8, st.name, name)) return st.id;
+    return null;
+}
+
+/// A text style: its name, what it is based on, its size and line pitch,
+/// its text face (by family and style, as the document names it), its
+/// other faces, and its rules.
+fn styleProperties(sid: layout.model.StyleId) !void {
+    const si = state.model.styleIndex(sid) orelse return;
+    const st = state.model.styles.items[si];
+    if (textProp("Name", st.name, 1)) |name| actM(mergeKey(.{ "style name", sid }), .renameStyle, .{ sid, name }) catch {};
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 2 });
+        defer row.deinit();
+        propName("Based on");
+        const ar = dvui.currentWindow().arena();
+        var names: std.ArrayList([]const u8) = .empty;
+        var ids: std.ArrayList(layout.model.StyleId) = .empty;
+        try names.append(ar, "nothing");
+        try ids.append(ar, .none);
+        for (state.model.styles.items) |o| if (o.id != sid) {
+            try names.append(ar, o.name);
+            try ids.append(ar, o.id);
+        };
+        var choice: usize = std.mem.indexOfScalar(layout.model.StyleId, ids.items, st.base) orelse 0;
+        if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and ids.items[choice] != st.base) {
+            act(.setStyleBase, .{ sid, ids.items[choice] }) catch {
+                state.status = "That would base the style on itself. ";
+            };
+        }
+    }
+    try styleSizeProps(sid, false);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3 });
+        defer row.deinit();
+        propName("Line pitch, cap heights");
+        // Empty: from its text face.
+        var buf: [32]u8 = undefined;
+        const shown: []const u8 = if (st.line_pitch) |lp| std.fmt.bufPrint(&buf, "{d}", .{lp}) catch "" else "";
+        var te = dvui.textEntry(@src(), .{ .text_initial = shown, .placeholder = "from its face" }, .{ .expand = .horizontal, .id_extra = 3 });
+        defer te.deinit();
+        if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), shown)) te.textSet(shown, false);
+        if (te.text_changed) {
+            const typed = std.mem.trim(u8, te.textGet(), " ");
+            if (typed.len == 0) {
+                actM(mergeKey(.{ "line pitch", sid }), .setLinePitch, .{ sid, @as(?f64, null) }) catch {};
+            } else if (std.fmt.parseFloat(f64, typed)) |v| {
+                if (v > 0) actM(mergeKey(.{ "line pitch", sid }), .setLinePitch, .{ sid, @as(?f64, v) }) catch {};
+            } else |_| {}
+        }
+    }
+    heading("Faces", .{}, 20);
+    const text_face = st.face("text");
+    if (textProp("Text face family", if (text_face) |f| f.family else "", 21)) |fam| {
+        actM(mergeKey(.{ "text face", sid }), .setStyleFace, .{ sid, "text", @as(?layout.model.FontName, .{ .family = fam, .style = if (text_face) |f| f.style else "Regular" }) }) catch {};
+    }
+    if (text_face) |tf| if (textProp("Text face style", tf.style, 22)) |sty| {
+        actM(mergeKey(.{ "text face", sid }), .setStyleFace, .{ sid, "text", @as(?layout.model.FontName, .{ .family = tf.family, .style = sty }) }) catch {};
+    };
+    for (st.faces.items, 0..) |f, k| {
+        if (std.mem.eql(u8, f.role, "text")) continue;
+        propText(f.role, "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
+    }
+    if (dvui.button(@src(), "Fonts… (every face, and searching the installed fonts)", .{}, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } })) fontwin.open = true;
+    try styleRules(sid);
 }
 
 /// Edits how an art layer is painted: its fill's colours (one, or a
