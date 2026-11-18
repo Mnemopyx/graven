@@ -52,6 +52,11 @@ pub const modes = [_]M{
     // A sketch being drawn and constrained, and its summary.
     .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool" } },
     .{ .name = "sketch.summary", .kind = .sub, .parent = "sketch", .allows = &.{"sketch.summary"} },
+    // Text being typed somewhere, the canvas or a field (whatever asked
+    // for text input last frame): the digraph key, and the two characters
+    // after it.
+    .{ .name = "text-entry", .kind = .minor, .parent = "global", .allows = &.{"text"} },
+    .{ .name = "digraph", .kind = .sub, .lifetime = .until_left, .parent = "text-entry", .takes_text = true, .allows = &.{"digraph"} },
 };
 
 pub const action_defs = [_]A{
@@ -206,6 +211,11 @@ pub const action_defs = [_]A{
     .{ .name = "sketch.tool.next", .repeat = true },
     .{ .name = "sketch.summary.leave", .repeat = true },
     .{ .name = "sketch.summary.back", .repeat = true },
+
+    // Two characters typed next stand for a third (digraphs.zig).
+    .{ .name = "text.digraph" },
+    .{ .name = "digraph.cancel" },
+    .{ .name = "digraph.back" },
 };
 
 const left: i32 = @intFromEnum(Direction.left);
@@ -302,6 +312,10 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "char:%", .action = "view.snap-grid" },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
+    // Vim's digraph key (RFC 1345's mnemonics), where text is typed.
+    .{ .mode = "text-entry", .chord = "ctrl+k", .action = "text.digraph" },
+    .{ .mode = "digraph", .chord = "escape", .action = "digraph.cancel" },
+    .{ .mode = "digraph", .chord = "backspace", .action = "digraph.back" },
     .{ .mode = "dialog.calibrate-size", .chord = "left", .action = "dialog.calibrate-size.grow", .arg = -1 },
     .{ .mode = "dialog.calibrate-size", .chord = "right", .action = "dialog.calibrate-size.grow", .arg = 1 },
     .{ .mode = "dialog.calibrate-size", .chord = "shift+left", .action = "dialog.calibrate-size.grow", .arg = -10 },
@@ -456,7 +470,7 @@ fn maskedByText(m: ModeId) bool {
     return false;
 }
 
-fn printable(k: dvui.enums.Key) bool {
+pub fn printable(k: dvui.enums.Key) bool {
     const i = @intFromEnum(k);
     return (i >= @intFromEnum(dvui.enums.Key.a) and i <= @intFromEnum(dvui.enums.Key.nine)) or
         (i >= @intFromEnum(dvui.enums.Key.space) and i <= @intFromEnum(dvui.enums.Key.grave)) or

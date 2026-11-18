@@ -184,6 +184,14 @@ pub fn build(b: *std.Build) void {
     // GUI editor: zig build gui (fetches DVUI and SDL3 on first use).
     const gui_step = b.step("gui", "Build and run the GUI editor");
     if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui_dep| {
+        // FreeType 2.14.1's autohinter subtracts from an empty contour's
+        // sentinel (LONG_MIN) when it adjusts accents (aflatin.c, vertical
+        // separation): harmless as compiled for release, but a trap in a
+        // Debug build's C sanitizer, on ā, ē and the like. The same
+        // dependency DVUI links, so its sanitizer is off for FreeType alone.
+        if (dvui_dep.builder.lazyDependency("freetype", .{ .target = target, .optimize = optimize })) |ft| {
+            ft.artifact("freetype").root_module.sanitize_c = .off;
+        }
         const gui = b.addExecutable(.{
             .name = "graven-gui",
             .root_module = b.createModule(.{
@@ -242,6 +250,12 @@ pub fn build(b: *std.Build) void {
     // The views: splits, tabs, maximizing.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("apps/gui/views.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) })).step);
+    // Digraphs: the table, the user's pairs, typing one.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/gui/digraphs.zig"),
         .target = target,
         .optimize = optimize,
     }) })).step);

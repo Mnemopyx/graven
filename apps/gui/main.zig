@@ -29,6 +29,7 @@ const spark = @import("cursor.zig");
 const layouts = @import("layouts.zig");
 const docviews = @import("views.zig");
 const keymap = @import("keymap.zig");
+const digraphs = @import("digraphs.zig");
 const kact = keymap.act;
 const kmode = keymap.mode;
 comptime {
@@ -1240,6 +1241,7 @@ fn deinit(_: *dvui.Window) void {
     recent_files.deinit(state.gpa);
     hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
+    dg_table.deinit(state.gpa);
     clearPlaced();
     state.placed.deinit(state.gpa);
     if (state.labels) |*l| l.deinit();
@@ -1758,6 +1760,14 @@ fn frame() !dvui.App.Result {
     }
     try update();
     updateModeStack();
+    // Digraphs take their characters before anything reads them; then the
+    // place text is typed this frame is the next one's.
+    digraphEvents();
+    caret_mark = null;
+    defer {
+        digraphHint();
+        text_wanted = dvui.currentWindow().textInputRequested();
+    }
 
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .style = .window });
     defer root.deinit();
@@ -2956,6 +2966,7 @@ fn loadPrefs() void {
     }
     if (ps.problem()) |msg| state.status = msg;
     loadRecent(&ps);
+    loadDigraphs(&ps);
     prefs_store = ps;
     saved_prefs = currentPrefs();
 }
@@ -8428,7 +8439,189 @@ fn updateModeStack() void {
     if (filePromptOpen() or export_prompt or layout_prompt or image_prompt or constrain_prompt != null or display_window) {
         push(&st, &n, kmode("dialog"));
     } else if (size_window) push(&st, &n, kmode("dialog.calibrate-size"));
+    if (text_wanted != null or dg_entry.active()) push(&st, &n, kmode("text-entry"));
+    if (dg_entry.active()) push(&st, &n, kmode("digraph"));
     keymap.setStack(st[0..n]);
+}
+
+// Digraphs ----------------------------------------------------------------
+//
+// Ctrl+K, then two characters, types the character they stand for
+// (digraphs.zig): in canvas text and the toolkit's fields alike, because
+// the typed text is changed before anything reads it. Text is being typed
+// where the last frame asked for text input (`text_wanted`, its place).
+
+var dg_table: digraphs.Table = .{};
+var dg_entry: digraphs.Entry = .{};
+/// Where text input was asked for last frame (natural pixels), if it was.
+var text_wanted: ?dvui.Rect.Natural = null;
+/// Where the digraph's hint shows: the text's place when Ctrl+K was typed.
+var dg_rect: dvui.Rect.Natural = .{};
+/// The canvas's caret this frame (its bar's box, physical pixels), when it
+/// is drawn: the digraph's hint goes by it.
+var caret_mark: ?dvui.Rect.Physical = null;
+
+fn markCaret(a: dvui.Point.Physical, b: dvui.Point.Physical) void {
+    caret_mark = .{ .x = @min(a.x, b.x), .y = @min(a.y, b.y), .w = @abs(a.x - b.x), .h = @abs(a.y - b.y) };
+}
+/// A pair that stood for nothing, shown in the hint for a moment.
+var dg_miss: ?digraphs.Pair = null;
+var dg_miss_until: i128 = 0;
+
+/// The user's digraphs, from the config's `[digraphs]` table: each key two
+/// characters, each value what they stand for ("" takes a built-in away).
+fn loadDigraphs(ps: *const settings_file.Store) void {
+    dg_table.user.clearRetainingCapacity();
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const keys = ps.keys(arena.allocator()) catch return;
+    var bad: usize = 0;
+    for (keys) |k| {
+        if (!std.mem.startsWith(u8, k, "digraphs.")) continue;
+        const v = ps.get(k) orelse continue;
+        const pair = digraphs.parseKey(k["digraphs.".len..]) orelse {
+            bad += 1;
+            continue;
+        };
+        if (v != .string or !(dg_table.put(state.gpa, pair, v.string) catch false)) bad += 1;
+    }
+    if (bad > 0) state.status = "A [digraphs] entry is not two characters standing for some text: it is left out. ";
+}
+
+/// Before any widget reads the frame's events: Ctrl+K where text is typed
+/// starts a digraph; the characters typed after it are taken, and the
+/// second one's text event carries what the pair stands for instead, so
+/// whatever has the keyboard types that.
+fn digraphEvents() void {
+    for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        if (!dg_entry.active()) {
+            if (text_wanted == null) continue;
+            const inv = keymap.match1(e, kmode("text-entry")) orelse continue;
+            if (inv.action != kact("text.digraph")) continue;
+            e.handled = true;
+            dg_entry.start();
+            dg_rect = text_wanted.?;
+            dg_miss = null;
+            continue;
+        }
+        switch (e.evt) {
+            .key => |k| {
+                if (keymap.match1(e, kmode("digraph"))) |inv| {
+                    if (inv.action == kact("digraph.cancel")) dg_entry.cancel();
+                    if (inv.action == kact("digraph.back")) dg_entry.back();
+                    e.handled = true;
+                    continue;
+                }
+                if (k.action == .up or k.code.isModifier()) continue;
+                // A key that types: its text follows, taken below. Any other
+                // key (an arrow, Enter, a chord) ends the digraph and acts.
+                const m = k.mod;
+                if (keymap.printable(k.code) and !m.control() and !m.alt() and !m.command()) {
+                    e.handled = true;
+                } else dg_entry.cancel();
+            },
+            .text => |*t| switch (t.action) {
+                .value => |*v| {
+                    var it = (std.unicode.Utf8View.init(v.txt) catch {
+                        dg_entry.cancel();
+                        continue;
+                    }).iterator();
+                    var out: ?[]const u8 = null;
+                    while (dg_entry.active()) {
+                        const cp = it.nextCodepoint() orelse break;
+                        switch (dg_entry.feed(&dg_table, cp)) {
+                            .more => {},
+                            .done => |s| out = s,
+                            .none => |pair| {
+                                dg_miss = pair;
+                                dg_miss_until = std.Io.Timestamp.now(dvui.io, .awake).nanoseconds + 2 * std.time.ns_per_s;
+                            },
+                        }
+                    }
+                    // What the pair stands for, and anything typed after it.
+                    const rest = v.txt[it.i..];
+                    const a = dvui.currentWindow().arena();
+                    if (std.mem.concat(a, u8, &.{ out orelse "", rest })) |txt| {
+                        if (txt.len == 0) e.handled = true else v.txt = txt;
+                    } else |_| e.handled = true;
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+/// While a digraph is typed: the pairs the first character starts, by
+/// the text being typed; a moment after a pair that stood for nothing,
+/// that.
+fn digraphHint() void {
+    const S = struct {
+        var shown: [3]u32 = .{ 0, 0, 0 };
+    };
+    const now = std.Io.Timestamp.now(dvui.io, .awake).nanoseconds;
+    const miss = if (dg_miss != null and now < dg_miss_until) dg_miss else null;
+    // A new hint is laid out over two frames: ask for the second.
+    const key: [3]u32 = .{ @intFromEnum(dg_entry.state), dg_entry.first, if (miss) |p| p[0] +% p[1] *% 31 +% 1 else 0 };
+    if (!std.mem.eql(u32, &key, &S.shown)) dvui.refresh(null, @src(), null);
+    S.shown = key;
+    if (!dg_entry.active() and miss == null) return;
+    if (miss != null) dvui.refresh(null, @src(), null);
+    var buf: [160]digraphs.Candidate = undefined;
+    const cands: []const digraphs.Candidate = if (dg_entry.state == .second) dg_table.candidates(dg_entry.first, &buf) else &.{};
+    const per_row: usize = 8;
+    const rows = (cands.len + per_row - 1) / per_row;
+    const font = ghost_pane.fieldFont();
+    const line_h = font.textHeight() + 6;
+    const w: f32 = if (cands.len > 0) 8 + @as(f32, @floatFromInt(@min(cands.len, per_row))) * 58 else 340;
+    const h: f32 = 12 + line_h * @as(f32, @floatFromInt(1 + rows));
+    // By the canvas's caret, below it (above when there is no room); over
+    // a field, above it; else inside the place's top left corner.
+    const ns = dvui.windowNaturalScale();
+    const win = dvui.windowRect();
+    const at: dvui.Rect.Natural = if (caret_mark) |c| blk: {
+        const below = (c.y + c.h) / ns + 8;
+        const y = if (below + h > win.h) @max(0, c.y / ns - h - 8) else below;
+        break :blk .{ .x = @min(@max(0, c.x / ns - 16), @max(0, win.w - w)), .y = y, .w = w, .h = h };
+    } else if (dg_rect.h > 120)
+        .{ .x = dg_rect.x + 12, .y = dg_rect.y + 12, .w = w, .h = h }
+    else
+        .{ .x = dg_rect.x, .y = if (dg_rect.y - h - 4 >= 0) dg_rect.y - h - 4 else dg_rect.y + dg_rect.h + 4, .w = w, .h = h };
+    var fw: dvui.FloatingWidget = undefined;
+    // Over everything, the panes too; the pointer goes through it.
+    fw.init(@src(), .{ .stay_above_parent = false, .mouse_events = false }, .{
+        .rect = .{ .x = at.x, .y = at.y, .w = at.w, .h = at.h },
+        .background = true,
+        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
+        .border = .all(1),
+        .corners = .all(6),
+        .padding = .all(4),
+    });
+    defer fw.deinit();
+    dvui.raiseSubwindow(fw.data().id);
+    var tb: [96]u8 = undefined;
+    var a8: [4]u8 = undefined;
+    var b8: [4]u8 = undefined;
+    const title = if (miss) |p|
+        std.fmt.bufPrint(&tb, "No digraph for {s}{s}", .{ a8[0 .. std.unicode.utf8Encode(p[0], &a8) catch 0], b8[0 .. std.unicode.utf8Encode(p[1], &b8) catch 0] }) catch ""
+    else if (dg_entry.state == .first)
+        "Digraph: type two characters  (Esc: cancel)"
+    else if (cands.len == 0)
+        std.fmt.bufPrint(&tb, "Digraph {s}…  (no pairs start so)", .{a8[0 .. std.unicode.utf8Encode(dg_entry.first, &a8) catch 0]}) catch ""
+    else
+        std.fmt.bufPrint(&tb, "Digraph {s}…", .{a8[0 .. std.unicode.utf8Encode(dg_entry.first, &a8) catch 0]}) catch "";
+    dvui.labelNoFmt(@src(), title, .{}, .{ .font = font, .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 } });
+    for (0..rows) |row| {
+        var hb = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = row });
+        defer hb.deinit();
+        for (cands[row * per_row .. @min(cands.len, (row + 1) * per_row)], 0..) |c, i| {
+            var lb: [48]u8 = undefined;
+            const second = b8[0 .. std.unicode.utf8Encode(c.second, &b8) catch 0];
+            const txt = std.fmt.bufPrint(&lb, "{s} {s}", .{ second, c.out }) catch "";
+            dvui.labelNoFmt(@src(), txt, .{}, .{ .id_extra = i, .font = font, .min_size_content = .{ .w = 50 }, .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 } });
+        }
+    }
 }
 
 /// The direction of `canvas.object.nudge` (or `…-far`) if event `e` asks
@@ -12389,6 +12582,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
     const c = l.render.caret(local) orelse return;
     const p0 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y0 });
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
+    markCaret(p0, p1);
     dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2.5 * px, .color = .{ .color = colors.select.opacity(pulse()) } });
 }
 
@@ -12416,6 +12610,7 @@ fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.P
         const p0: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y0 - over } else .{ .x = b.x0 - over, .y = b.y1 - pos };
         const p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 3 * px, .color = .{ .color = focus } });
+        markCaret(state.view.toPx(area, p0), state.view.toPx(area, p1));
         return;
     }
 }
