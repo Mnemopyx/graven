@@ -501,6 +501,18 @@ pub const Flow = struct {
     /// key) reaches into the segments after it, closing the stretch it
     /// covers there; their content flows around it.
     items: std.ArrayList(Item) = .empty,
+    /// Where text imported into it came from, in the order it came.
+    sources: std.ArrayList(FlowSource) = .empty,
+};
+
+/// Where imported text came from: the source's URI (relative to the
+/// document when it lies in the document's folder, else absolute; a
+/// fragment may name a part of it), the SHA-256 of what was read (64 hex
+/// digits), so a change since can be seen, and when (Unix seconds).
+pub const FlowSource = struct {
+    uri: []const u8,
+    sha256: []const u8 = "",
+    imported: i64 = 0,
 };
 
 /// A region holding a track: one flow of items (tiles, blanks, runs of
@@ -3859,6 +3871,83 @@ pub const Model = struct {
             m.trackPtr(t).flow = m.flows.items[ni].id;
         };
         m.revision += 1;
+    }
+
+    /// Flow `id`, to change.
+    fn flowById(m: *Model, id: ObjectId) Error!*Flow {
+        return &m.flows.items[m.flowIndex(id) orelse return error.NoSuchObject];
+    }
+
+    /// Records that text was imported into flow `id` from `src`.
+    pub fn addFlowSource(m: *Model, id: ObjectId, src: FlowSource) Error!void {
+        const f = try m.flowById(id);
+        try f.sources.append(m.a(), .{ .uri = try m.a().dupe(u8, src.uri), .sha256 = try m.a().dupe(u8, src.sha256), .imported = src.imported });
+        m.revision += 1;
+    }
+
+    /// Inserts `item` (a run, a hard break or a paragraph separator; not a
+    /// tile) at position `index` of flow `id` (null: its end), whether or
+    /// not it has tracks.
+    pub fn placeInFlow(m: *Model, id: ObjectId, index: ?usize, item: Item) Error!void {
+        if (item.what == .tile) return error.NoSuchItem;
+        if (item.what == .paragraph) if (item.what.paragraph) |ps| if (m.paraIndex(ps) == null) return error.NoSuchStyle;
+        const f = try m.flowById(id);
+        const at = index orelse f.items.items.len;
+        if (at > f.items.items.len) return error.NoSuchItem;
+        var it = item;
+        if (it.what == .run) it.what.run.content = try m.a().dupe(u8, it.what.run.content);
+        try f.items.insert(m.a(), at, it);
+        m.revision += 1;
+    }
+
+    /// As `insertBreak`, in flow `id`: a hard break at `index`, and the
+    /// flow's indent after it. How many items went in.
+    pub fn insertBreakIn(m: *Model, id: ObjectId, index: usize) Error!usize {
+        try m.placeInFlow(id, index, .{ .what = .hard_break });
+        const f = try m.flowById(id);
+        if (!(f.indent > 0)) return 1;
+        // A blank as long as the indent, running the flow's way.
+        var major: Major = .row;
+        for (f.tracks.items) |tid| if (m.trackById(tid)) |t| {
+            major = m.trackPtr(t).major;
+            break;
+        };
+        const blank = try m.blankPrototype();
+        var buf: [64]u8 = undefined;
+        const tile_id = try m.addTile(.{
+            .designator = m.nextDesignator(&buf, "B"),
+            .prototype = blank,
+            .w = if (major == .row) f.indent else 1,
+            .h = if (major == .row) 1 else f.indent,
+        });
+        const g = try m.flowById(id);
+        try g.items.insert(m.a(), index + 1, .{ .what = .{ .tile = tile_id } });
+        m.revision += 1;
+        return 2;
+    }
+
+    /// As `setParagraphAt`, in flow `id`.
+    pub fn setParagraphAtIn(m: *Model, id: ObjectId, index: usize, style: ?ParaId) Error!void {
+        if (style) |ps| if (m.paraIndex(ps) == null) return error.NoSuchStyle;
+        const f = try m.flowById(id);
+        var k = @min(index, f.items.items.len);
+        while (k > 0) {
+            k -= 1;
+            if (f.items.items[k].what == .paragraph) {
+                f.items.items[k].what = .{ .paragraph = style };
+                m.revision += 1;
+                return;
+            }
+        }
+        f.paragraph = style;
+        m.revision += 1;
+    }
+
+    /// The pitch of flow `id`'s first track, if it has one, mm.
+    pub fn flowPitch(m: *const Model, id: ObjectId) ?f64 {
+        const fi = m.flowIndex(id) orelse return null;
+        for (m.flows.items[fi].tracks.items) |tid| if (m.trackById(tid)) |t| return m.panels.items[t.panel].regions.items[t.region].pitch;
+        return null;
     }
 
     /// Reads an older document's threads into flows: each thread (a

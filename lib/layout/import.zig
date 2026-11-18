@@ -1,4 +1,7 @@
-//! Importing styled text (see the richtext library) into a track's flow:
+//! Importing text into a flow, at a position in it (a flow with tracks
+//! or an unplaced one): styled text (see the richtext library), or plain
+//! text read as styled text with nothing set (`plain`). Styled text comes
+//! in so:
 //! each paragraph after a paragraph separator, in a paragraph style made
 //! for its settings (identical ones shared, existing ones reused); each
 //! stretch of one font and size as a run in a style made for them (named
@@ -43,24 +46,24 @@ pub const Report = struct {
 
 const mm_per_pt = model.mm_per_pt;
 
-/// Imports `doc` into the flow of track (`panel`, `region`) at item
-/// `at`, with `base` the style of text that names no font or size. Returns
-/// what was done; `gpa` holds the report's list and scratch work.
-pub fn rich(gpa: Allocator, h: *history.History, m: *Model, key: u64, panel: usize, region: usize, at: usize, doc: rt.Doc, base: StyleId) !Report {
+/// Imports `doc` into flow `flow` at item `at`, with `base` the style of
+/// text that names no font or size, and `track_pitch` its lines' spacing
+/// (mm; a paragraph's wider spacing becomes its line gap). Returns what
+/// was done; `gpa` holds the report's list and scratch work.
+pub fn rich(gpa: Allocator, h: *history.History, m: *Model, key: u64, flow: model.ObjectId, at: usize, doc: rt.Doc, base: StyleId, track_pitch: f64) !Report {
     var rep: Report = .{ .skipped = doc.skipped };
     errdefer rep.deinit(gpa);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var index = at;
-    const track_pitch = m.panels.items[panel].regions.items[region].pitch;
 
     for (doc.paragraphs, 0..) |para, pi| {
         const ps = try paragraphStyle(h, m, key, para.settings, track_pitch, &rep);
         if (pi == 0 and index == 0) {
-            _ = try h.doMerged(m, key, .setParagraphAt, .{ panel, region, 0, ps });
+            _ = try h.doMerged(m, key, .setParagraphAtIn, .{ flow, 0, ps });
         } else {
-            _ = try h.doMerged(m, key, .insertParagraph, .{ panel, region, index, ps });
+            _ = try h.doMerged(m, key, .placeInFlow, .{ flow, index, .{ .what = .{ .paragraph = ps } } });
             index += 1;
         }
         rep.paragraphs += 1;
@@ -70,7 +73,7 @@ pub fn rich(gpa: Allocator, h: *history.History, m: *Model, key: u64, panel: usi
         const spans = para.spans;
         while (k < spans.len) {
             if (spans[k].kind == .line_break) {
-                index += try h.doMerged(m, key, .insertBreak, .{ panel, region, index });
+                index += try h.doMerged(m, key, .insertBreakIn, .{ flow, index });
                 rep.line_breaks += 1;
                 k += 1;
                 continue;
@@ -88,7 +91,7 @@ pub fn rich(gpa: Allocator, h: *history.History, m: *Model, key: u64, panel: usi
             try rt.writeMarkup(&out.writer, spans[k..end]);
             try out.writer.writeAll("}");
             const style = try textStyle(gpa, h, m, key, doc, look, base, &rep);
-            _ = try h.doMerged(m, key, .insertRun, .{ panel, region, index, .{ .style = style, .content = out.written() } });
+            _ = try h.doMerged(m, key, .placeInFlow, .{ flow, index, .{ .what = .{ .run = .{ .style = style, .content = out.written() } } } });
             index += 1;
             rep.runs += 1;
             k = end;
@@ -97,9 +100,11 @@ pub fn rich(gpa: Allocator, h: *history.History, m: *Model, key: u64, panel: usi
     return rep;
 }
 
-/// The paragraph style for `s`: an existing one with the same settings,
-/// else a new one.
-fn paragraphStyle(h: *history.History, m: *Model, key: u64, s: rt.Settings, track_pitch: f64, rep: *Report) !ParaId {
+/// The paragraph style for `s`: none when it sets nothing (the track's
+/// alignment), else an existing one with the same settings, else a new
+/// one.
+fn paragraphStyle(h: *history.History, m: *Model, key: u64, s: rt.Settings, track_pitch: f64, rep: *Report) !?ParaId {
+    if (s.eql(.{})) return null;
     const want: model.ParagraphStyle = .{
         .name = "",
         .alignment = switch (s.alignment) {
@@ -126,7 +131,7 @@ fn paragraphStyle(h: *history.History, m: *Model, key: u64, s: rt.Settings, trac
     var named = want;
     named.name = m.nextParagraphStyleName(&buf);
     rep.paragraph_styles_made += 1;
-    return h.doMerged(m, key, .addParagraphStyle, .{named});
+    return try h.doMerged(m, key, .addParagraphStyle, .{named});
 }
 
 /// The style for text that looks like `look`: `base` when it names no
@@ -161,6 +166,89 @@ fn textStyle(gpa: Allocator, h: *history.History, m: *Model, key: u64, doc: rt.D
 
 // Tests ---------------------------------------------------------------------------
 
+
+/// Plain text as styled text with nothing set: each line a paragraph
+/// (CR LF and CR read as LF), tabs as tabs. A byte-order mark is dropped;
+/// text that is not UTF-8 is read as Latin-1. In `a`.
+pub fn plain(a: Allocator, bytes: []const u8) Allocator.Error!rt.Doc {
+    var text = bytes;
+    if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) text = text[3..];
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        var out: std.ArrayList(u8) = .empty;
+        for (text) |c| {
+            var b: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(c, &b) catch unreachable;
+            try out.appendSlice(a, b[0..n]);
+        }
+        text = out.items;
+    }
+    var paras: std.ArrayList(rt.Paragraph) = .empty;
+    var i: usize = 0;
+    while (i <= text.len) {
+        var end = i;
+        while (end < text.len and text[end] != '\n' and text[end] != '\r') end += 1;
+        const line = text[i..end];
+        var spans: std.ArrayList(rt.Span) = .empty;
+        var it = std.mem.splitScalar(u8, line, '\t');
+        var first = true;
+        while (it.next()) |part| {
+            if (!first) try spans.append(a, .{ .kind = .tab });
+            first = false;
+            if (part.len > 0) try spans.append(a, .{ .text = part });
+        }
+        // The text's last line break ends it: no empty paragraph after.
+        if (!(end == text.len and line.len == 0 and paras.items.len > 0)) try paras.append(a, .{ .spans = spans.items });
+        if (end >= text.len) break;
+        i = end + 1;
+        if (text[end] == '\r' and i < text.len and text[i] == '\n') i += 1;
+    }
+    return .{ .paragraphs = paras.items };
+}
+
+/// The URI to record for a file at absolute path `path`: relative to
+/// `doc_dir` (the document's folder) when it lies in it, else a `file:`
+/// URI; percent-encoded (RFC 3986). In `a`.
+pub fn sourceUri(a: Allocator, path: []const u8, doc_dir: ?[]const u8) Allocator.Error![]u8 {
+    var p: std.ArrayList(u8) = .empty;
+    for (path) |c| try p.append(a, if (c == '\\') '/' else c);
+    var rest = p.items;
+    var out: std.ArrayList(u8) = .empty;
+    if (doc_dir) |dir_in| {
+        var dir = dir_in;
+        while (dir.len > 1 and (dir[dir.len - 1] == '/' or dir[dir.len - 1] == '\\')) dir = dir[0 .. dir.len - 1];
+        if (dir.len > 0 and rest.len > dir.len + 1 and std.mem.startsWith(u8, rest, dir) and rest[dir.len] == '/') {
+            try percent(a, &out, rest[dir.len + 1 ..]);
+            return out.items;
+        }
+    }
+    try out.appendSlice(a, "file://");
+    // A drive letter: file:///C:/…
+    if (rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') try out.append(a, '/');
+    try percent(a, &out, rest);
+    _ = &rest;
+    return out.items;
+}
+
+/// `s` percent-encoded as a URI path: unreserved characters, sub-delims,
+/// ':', '@' and '/' kept, every other byte as %XX.
+fn percent(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
+    for (s) |c| {
+        const keep = std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~!$&'()*+,;=:@/", c) != null;
+        if (keep) try out.append(a, c) else {
+            var b: [3]u8 = undefined;
+            _ = std.fmt.bufPrint(&b, "%{X:0>2}", .{c}) catch unreachable;
+            try out.appendSlice(a, &b);
+        }
+    }
+}
+
+/// SHA-256 of `bytes` as 64 lowercase hex digits.
+pub fn sha256Hex(bytes: []const u8) [64]u8 {
+    var d: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &d, .{});
+    return std.fmt.bytesToHex(d, .lower);
+}
+
 const testing = std.testing;
 
 test "an RTF document comes in as paragraphs, styles and runs, undone as one step" {
@@ -183,7 +271,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
         \\\pard\qj\sa120\f1\fs24 Second\tab one.\par
         \\\pard\qc Third.{\pict x}\par}
     );
-    var rep = try rich(gpa, &h, &m, 42, p, r, 0, doc, body);
+    var rep = try rich(gpa, &h, &m, 42, m.trackFlow(p, r).?.id, 0, doc, body, 6);
     defer rep.deinit(gpa);
     try testing.expectEqual(3, rep.paragraphs);
     try testing.expectEqual(1, rep.line_breaks);
@@ -213,4 +301,59 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
     try testing.expectEqual(0, m.flowItems(p, r).len);
     try testing.expectEqual(0, m.paragraph_styles.items.len);
     try testing.expectEqual(1, m.styles.items.len);
+}
+
+
+test "plain text: a paragraph a line, tabs kept, line ends of any kind, Latin-1 read" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const d = try plain(a, "\xEF\xBB\xBFOne\ttwo\r\n\r\nThree $5 {x}\n");
+    try testing.expectEqual(3, d.paragraphs.len);
+    try testing.expectEqual(3, d.paragraphs[0].spans.len);
+    try testing.expectEqualStrings("One", d.paragraphs[0].spans[0].text);
+    try testing.expectEqual(0, d.paragraphs[1].spans.len);
+    try testing.expectEqualStrings("Three $5 {x}", d.paragraphs[2].spans[0].text);
+    const l1 = try plain(a, "caf\xe9");
+    try testing.expectEqualStrings("caf\u{e9}", l1.paragraphs[0].spans[0].text);
+}
+
+test "a source's URI: relative in the document's folder, else file:, percent-encoded" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("notes/chapter%202.md", try sourceUri(a, "/home/me/book/notes/chapter 2.md", "/home/me/book/"));
+    try testing.expectEqualStrings("file:///home/me/other/caf%C3%A9%23.txt", try sourceUri(a, "/home/me/other/caf\u{e9}#.txt", "/home/me/book"));
+    try testing.expectEqualStrings("file:///C:/Users/me/a.rtf", try sourceUri(a, "C:\\Users\\me\\a.rtf", null));
+    // A folder of the same name's start is not the document's.
+    try testing.expectEqualStrings("file:///home/me/bookends/x.txt", try sourceUri(a, "/home/me/bookends/x.txt", "/home/me/book"));
+    try testing.expectEqualStrings("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &sha256Hex(""));
+}
+
+test "plain text into a new, unplaced flow: escaped, one undo step, its source kept" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    try h.reset(&m);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const doc = try plain(arena.allocator(), "First line costs $5\nSecond\n");
+    const f = try h.doMerged(&m, 7, .addFlow, .{"notes"});
+    var rep = try rich(gpa, &h, &m, 7, f, 0, doc, body, 4);
+    defer rep.deinit(gpa);
+    _ = try h.doMerged(&m, 7, .addFlowSource, .{ f, .{ .uri = "notes.txt", .sha256 = &sha256Hex("x"), .imported = 1763424000 } });
+    const fl = m.flows.items[m.flowIndex(f).?];
+    try testing.expectEqual(0, fl.tracks.items.len);
+    // Run; separator, run.
+    try testing.expectEqual(3, fl.items.items.len);
+    try testing.expectEqualStrings("\\textnormal{First line costs \\$5}", fl.items.items[0].what.run.content);
+    try testing.expectEqualStrings("notes.txt", fl.sources.items[0].uri);
+    // Paragraphs that set nothing take no paragraph style.
+    try testing.expectEqual(0, m.paragraph_styles.items.len);
+    try testing.expect(fl.items.items[1].what.paragraph == null);
+    _ = try h.undo(&m);
+    try testing.expectEqual(0, m.flows.items.len);
 }

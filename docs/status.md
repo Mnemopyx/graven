@@ -124,6 +124,18 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
      - Messages that said "thread" now say "flow".
      - **Checked:** tests (assign, move within, detach, add, rename, remove, one direction, unique names); sample SVGs identical. In the GUI, on an older file: the Flows section, a flow's properties, moving a track to another flow by the picker (the canvas link moved with it), taking the last track out (the text became an unplaced flow and left the canvas), and undo.
      - **Not yet:** dragging a flow onto a track in the Browser (the picker does it); placing an unplaced flow by clicking a track on the canvas.
+   - **Step 3 built 2026-11-18 (import):**
+     - **File › Import text…** reads RTF (recognised by its `{\rtf` start) or else plain text.
+     - **Where it goes:** at the flow cursor; else, with a flow chosen in the Browser, at that flow's end; else into a new flow named after the file, unplaced and then selected. The dialog's title says which. One undo step takes it all back, the new flow included.
+     - **Plain text:** a paragraph a line (CR LF and CR read as LF), tabs as tabs, a BOM dropped, non-UTF-8 read as Latin-1. Markup characters are escaped.
+     - **Paragraph styles:** a paragraph that sets nothing (any plain text, some RTF) takes no paragraph style, rather than an all-default one.
+     - **Sources:** each import adds a source to the flow (`Flow.sources`: URI, SHA-256 in hex, Unix time).
+       - The URI is relative to the document's folder when the file lies in it (`src/chapter%202.txt`), else `file:///…` (drive letters as `file:///C:/…`), percent-encoded.
+       - A flow may hold text from several imports, so it keeps a list, not one source.
+       - The flow's properties list them with their dates.
+     - **Flow-addressed actions** (`placeInFlow`, `insertBreakIn`, `setParagraphAtIn`, `addFlowSource`) let the import write into a flow with no track; `import.rich` now takes a flow.
+     - **Checked:** tests (plain text reading, URIs, hashing, import into an unplaced flow escaped and undone as one step, the RTF test on flows); sample SVGs identical. In the GUI: a plain-text file into a new flow, which was then given a track with the Flow picker; and into a flow chosen in the Browser, its source recorded relative to the saved document.
+     - **Not yet:** updating from a changed source; `https:` sources; fragments (free-form, nothing reads them yet); Markdown read as anything but plain text.
 
 ## Gaps against the project's stated goals
 

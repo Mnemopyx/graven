@@ -59,4 +59,9 @@ Built: distance fields per glyph at three resolutions, error correction, an atla
 - **Built:** colour FDM: layer stacks, exact 2D slabs, 3MF (per colour or per band, either bed side), STEP through OCCT.
 - **Open:** Manufacture mode in the GUI; nozzle-width and other design-rule checks; slicer filament assignment.
 
-Flows as objects (decided 2026-11-18; blueprint "Flows as objects, and text import"; status, agreed item 8). Step 1 was built the same day: the flow object, flows of tracks replacing threads, and conversion of older files. Step 2 was built the same day: the Browser's Flows section, flow and track properties with the flow picker, assigning, detaching, removing, and unique names. Next is step 3, import into a flow or a new flow with its source URI, and step 4, an editor for unplaced flows. The keycap legend mapping (text lines to tile, grid and slot positions) is still to be designed.
+Flows as objects (decided 2026-11-18; blueprint "Flows as objects, and text import" and the step sections after it; status, agreed item 8). Steps 1 to 3 were built the same day:
+- **Step 1:** the flow object, with flows of tracks replacing threads, and conversion of older files.
+- **Step 2:** the Browser's Flows section; flow and track properties with the flow picker; assigning, detaching and removing; unique names.
+- **Step 3:** import into a flow, or into a new flow, recording the source's URI, hash and time.
+
+Next is step 4, an editor for unplaced flows. Later: updating a flow from a changed source. The keycap legend mapping (text lines to tile, grid and slot positions) is still to be designed.

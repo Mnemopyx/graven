@@ -2120,10 +2120,30 @@ fn discardAutosaved() void {
 var import_count: u64 = 0;
 var import_status_buf: [320]u8 = undefined;
 
-/// Reads the RTF file at `path` into the track at the flow cursor, as one
-/// undoable step, and says what came in and what did not.
+/// Where imported text goes: at the flow cursor; else at the end of the
+/// flow chosen in the Browser; else into a new flow, unplaced.
+const ImportTarget = union(enum) { cursor, flow_end: layout.model.ObjectId, new_flow };
+
+fn importTarget() ImportTarget {
+    if (track_cursor != null) return .cursor;
+    if (state.context == .flow) if (state.model.flowIndex(state.context.flow) != null) return .{ .flow_end = state.context.flow };
+    return .new_flow;
+}
+
+var import_title_buf: [160]u8 = undefined;
+
+fn importTitle() []const u8 {
+    return switch (importTarget()) {
+        .cursor => "Import text (RTF or plain) at the flow cursor",
+        .flow_end => |id| std.fmt.bufPrint(&import_title_buf, "Import text (RTF or plain) at the end of {s}", .{state.model.flows.items[state.model.flowIndex(id).?].name}) catch "Import text at the end of the flow",
+        .new_flow => "Import text (RTF or plain) as a new flow",
+    };
+}
+
+/// Reads the file at `path` (RTF, else plain text) into a flow (see
+/// `importTarget`), recording where it came from, as one undoable step,
+/// and says what came in and what did not.
 fn importText(path: []const u8) void {
-    const c = track_cursor orelse return;
     const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(64 << 20)) catch {
         state.status = "That file could not be read. ";
         return;
@@ -2131,18 +2151,56 @@ fn importText(path: []const u8) void {
     defer state.gpa.free(bytes);
     var arena: std.heap.ArenaAllocator = .init(state.gpa);
     defer arena.deinit();
-    const doc = richtext.rtf.read(arena.allocator(), bytes) catch |err| {
-        state.status = if (err == error.NotRtf) "That is not an RTF file. " else "That file could not be read. ";
+    const aa = arena.allocator();
+    const is_rtf = std.mem.startsWith(u8, std.mem.trimStart(u8, bytes, " \t\r\n"), "{\\rtf");
+    const doc = if (is_rtf) richtext.rtf.read(aa, bytes) catch {
+        state.status = "That RTF file could not be read. ";
         return;
-    };
-    const region = state.model.panels.items[c.panel].regions.items[c.region];
-    const base = region.style orelse (labelStyle() catch return);
+    } else layout.import.plain(aa, bytes) catch return;
     import_count += 1;
     const key = mergeKey(.{ "import", import_count });
-    var rep = layout.import.rich(state.gpa, &hist, &state.model, key, c.panel, c.region, c.index, doc, base) catch {
+    const target = importTarget();
+    // The flow, the place in it, the base style and the lines' spacing.
+    var flow: layout.model.ObjectId = .none;
+    var at: usize = 0;
+    var base: layout.model.StyleId = undefined;
+    switch (target) {
+        .cursor => {
+            const c = track_cursor.?;
+            const region = state.model.panels.items[c.panel].regions.items[c.region];
+            flow = region.flow;
+            at = c.index;
+            base = region.style orelse (labelStyleIn(key) catch return);
+        },
+        .flow_end => |id| {
+            flow = id;
+            at = state.model.flows.items[state.model.flowIndex(id).?].items.items.len;
+            base = labelStyleIn(key) catch return;
+        },
+        .new_flow => {
+            const stem = std.fs.path.stem(path);
+            flow = hist.doMerged(&state.model, key, .addFlow, .{if (stem.len > 0) stem else "Imported"}) catch {
+                state.status = "The text could not be imported. ";
+                return;
+            };
+            base = labelStyleIn(key) catch return;
+        },
+    }
+    const pitch = state.model.flowPitch(flow) orelse styleLinePitch(base) orelse 5;
+    var rep = layout.import.rich(state.gpa, &hist, &state.model, key, flow, at, doc, base, pitch) catch {
         state.status = "The text could not be imported. ";
         return;
     };
+    // Where it came from: a URI (relative in the document's folder), the
+    // hash of what was read, and when.
+    {
+        const abs = std.fs.path.resolve(aa, &.{path}) catch path;
+        const doc_dir: ?[]const u8 = if (file_path) |fp| std.fs.path.dirname(std.fs.path.resolve(aa, &.{fp}) catch fp) else null;
+        const uri = layout.import.sourceUri(aa, abs, doc_dir) catch "";
+        const hash = layout.import.sha256Hex(bytes);
+        if (uri.len > 0) _ = hist.doMerged(&state.model, key, .addFlowSource, .{ flow, .{ .uri = uri, .sha256 = &hash, .imported = nowSeconds() } }) catch {};
+    }
+    if (target == .new_flow) state.context = .{ .flow = flow };
     defer rep.deinit(state.gpa);
     // Fonts made for the text's families: their installed faces, with
     // their own italic and bolds.
@@ -2157,6 +2215,7 @@ fn importText(path: []const u8) void {
     var notes: std.Io.Writer.Allocating = .init(arena.allocator());
     const w = &notes.writer;
     w.print("Imported {d} paragraph{s}", .{ rep.paragraphs, if (rep.paragraphs == 1) "" else "s" }) catch {};
+    if (target == .new_flow) w.print(" into a new flow, {s}, unplaced (give it a track from a track's Flow)", .{state.model.flows.items[state.model.flowIndex(flow).?].name}) catch {};
     if (rep.styles_made > 0) w.print(", {d} new style{s}", .{ rep.styles_made, if (rep.styles_made == 1) "" else "s" }) catch {};
     if (rep.paragraph_styles_made > 0) w.print(", {d} new paragraph style{s}", .{ rep.paragraph_styles_made, if (rep.paragraph_styles_made == 1) "" else "s" }) catch {};
     w.writeAll(".") catch {};
@@ -2356,7 +2415,7 @@ fn filePrompt(kind: FilePromptKind) void {
     dvui.labelNoFmt(@src(), switch (kind) {
         .open => "Open a document",
         .save_as => "Save the document as",
-        .import_text => "Import text (RTF) at the flow cursor",
+        .import_text => importTitle(),
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -3918,15 +3977,11 @@ fn menu() ?dvui.App.Result {
             if (menuAction("Save", "global", kact("file.save"), 0, false, 3)) m.close();
             if (menuAction("Save As…", "global", kact("file.save-as"), 0, false, 4)) m.close();
         }
-        if (dvui.menuItemLabel(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
-            if (track_cursor == null) {
-                state.status = "Click in a track first: text comes in at its flow cursor. ";
-            } else {
-                file_prompt = .import_text;
-                file_prompt_new = true;
-            }
-        }
+            file_prompt = .import_text;
+            file_prompt_new = true;
+        };
         if (dvui.menuItemLabel(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (!canvas_prompt and openCanvas()) {
@@ -12068,6 +12123,11 @@ fn flowProperties(id: layout.model.ObjectId) void {
         else => {},
     };
     if (tiles > 0) propText("Holds", "{d} words, {d} tiles", .{ words, tiles }, 3) else propText("Holds", "{d} words", .{words}, 3);
+    // Where its imported text came from.
+    for (f.sources.items, 0..) |src, k| {
+        var tb: [24]u8 = undefined;
+        propText(if (k == 0) "Source" else "", "{s}, {s}", .{ src.uri, stamp(&tb, src.imported, ':') }, 40 + k);
+    }
     if (flow_remove_armed != null and flow_remove_armed.? != id) flow_remove_armed = null;
     const armed = flow_remove_armed != null;
     const empty = f.items.items.len == 0;
