@@ -114,6 +114,16 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
      - Older files: their tracks' `items`, `next`, `paragraph` and `indent` are read under those names (the format's new `file_names`: fields read by an older name, never written) and turned into flows on loading (`upgradeFlows`).
      - Checked: all tests, including new ones for joining, unjoining, copying, removing and upgrading, and the old field names in the format. Keyboard and HP-15C SVGs are byte-identical. An older file with a thread, written by the previous build, opens as one flow named after its first track. Typing, new paragraphs and undo work in the GUI.
      - Nothing in the GUI shows flows yet (step 2), so a removed panel's text is kept but out of sight.
+   - **Step 2 built 2026-11-18:**
+     - **Actions:** `addFlow`, `renameFlow`, `assignTrack` (into a flow at a position, or moved within its own), `detachTrack` (the flow keeps its content, unplaced if it was the track's only one; the track gets a new empty flow), `removeFlow` (its content goes; its tracks get empty flows). A flow's tracks all run one way. New flows' names are unique ("Left 2").
+     - **Browser:** a Flows section lists every flow, unplaced ones marked "· unplaced". Each opens to its tracks in order, and clicking one selects the track.
+     - **Flow properties:** name (Enter renames), Track 1, 2 … with where each is, how many words (and tiles) it holds, and Remove flow, which takes a second click when the flow holds anything.
+     - **Flows properties:** how many flows, how many unplaced, and New flow.
+     - **Track properties:** a Flow picker (choosing one moves the track to the end of that flow), "track k of n", Show the flow, Join a track after this…, and Take out of its flow.
+     - **Canvas:** links between a flow's tracks are drawn as before; zoom to context on a flow frames its tracks.
+     - Messages that said "thread" now say "flow".
+     - **Checked:** tests (assign, move within, detach, add, rename, remove, one direction, unique names); sample SVGs identical. In the GUI, on an older file: the Flows section, a flow's properties, moving a track to another flow by the picker (the canvas link moved with it), taking the last track out (the text became an unplaced flow and left the canvas), and undo.
+     - **Not yet:** dragging a flow onto a track in the Browser (the picker does it); placing an unplaced flow by clicking a track on the canvas.
 
 ## Gaps against the project's stated goals
 

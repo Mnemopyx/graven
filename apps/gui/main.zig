@@ -197,6 +197,9 @@ const Context = union(enum) {
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
+    /// The document's flows, and one of them.
+    flows,
+    flow: layout.model.ObjectId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -228,6 +231,8 @@ const Context = union(enum) {
             .grid => "Grid",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
+            .flows => "Flows",
+            .flow => "Flow",
         };
     }
 };
@@ -2585,6 +2590,8 @@ fn contextValid(c: Context) bool {
         .sketch_def => |i| i < m.sketches.items.len,
         .grid => |g| g.panel < np and g.index < m.panels.items[g.panel].grids.items.len,
         .prototype => |id| m.protoIndex(id) != null,
+        .flows => true,
+        .flow => |id| m.flowIndex(id) != null,
     };
 }
 
@@ -4090,6 +4097,29 @@ fn treeContent() void {
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
     };
+    // The flows: each with its tracks in order; one with none is unplaced.
+    if (state.model.flows.items.len > 0) if (treeNode(.flows, "Flows", 1, true, false)) {
+        for (state.model.flows.items) |f| {
+            var lb: [96]u8 = undefined;
+            const label = if (f.tracks.items.len == 0) std.fmt.bufPrint(&lb, "{s} · unplaced", .{f.name}) catch f.name else f.name;
+            if (!treeNodeSalted(.{ .flow = f.id }, label, 2, f.tracks.items.len > 0, false, 0)) continue;
+            for (f.tracks.items) |tid| if (state.model.trackById(tid)) |t| {
+                var tb: [160]u8 = undefined;
+                const name = trackPlaceLabel(&tb, t);
+                // Salted: the same track also has a row on its panel.
+                _ = treeNodeSalted(.{ .region = .{ .panel = t.panel, .region = t.region } }, name, 3, false, false, 0x5f10);
+            };
+        }
+    };
+}
+
+/// A track's name with where it is: its panel's name, unless it lies on
+/// the canvas or a frame itself.
+fn trackPlaceLabel(buf: []u8, t: layout.model.TrackRef) []const u8 {
+    const p = state.model.panels.items[t.panel];
+    const name = p.regions.items[t.region].name;
+    if (p.unbounded) return name;
+    return std.fmt.bufPrint(buf, "{s} (on {s})", .{ name, p.name }) catch name;
 }
 
 /// The worksheet's branch: its panels, their labels, regions, rows and
@@ -4194,10 +4224,16 @@ fn panelChildren(pi: usize, d: usize) void {
 /// highlighted when it is the context and in italic when the app chose it.
 /// Returns whether it is open.
 fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, default: bool) bool {
+    return treeNodeSalted(ctx, text, depth, has_children, default, 0);
+}
+
+/// A tree row; `salt` tells apart two rows for one context (a track under
+/// its panel and under its flow).
+fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bool, default: bool, salt: u64) bool {
     const key = ctx.key();
-    const id: usize = @truncate(key);
+    const id: usize = @truncate(key ^ salt);
     const open = state.expanded.get(key) orelse switch (ctx) {
-        .file, .worksheet, .panel, .region, .prototypes => true,
+        .file, .worksheet, .panel, .region, .prototypes, .flows => true,
         else => false,
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });
@@ -4263,7 +4299,9 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
         // Every instance bound to the grid.
         .grid => |g| g.panel == pi and t.grid != null and if (state.model.gridInstanceOf(t.id)) |at| at.grid == g.index else false,
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes => false,
+        // A flow's tiles: those in its tracks.
+        .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows => false,
     };
 }
 
@@ -4278,6 +4316,15 @@ fn contextExtents() geom.Box {
             if (!b.isEmpty()) return withNameRoom(b);
         },
         .image => |im| if (imageAt(im.space, im.index)) |image| return image.box(),
+        // A flow: its tracks in the shown space.
+        .flow => |id| if (state.model.flowIndex(id)) |fi| {
+            var fb: geom.Box = .empty;
+            for (state.model.flows.items[fi].tracks.items) |tid| if (state.model.trackById(tid)) |t| {
+                if (state.model.spaceOf(t.panel) != shown_space) continue;
+                for (trackOutline(t.panel, t.region)) |q| fb = fb.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+            };
+            if (!fb.isEmpty()) return fb;
+        },
         else => {},
     }
     var b: geom.Box = .empty;
@@ -8592,6 +8639,8 @@ fn lowerKind() []const u8 {
         .grid => "grid",
         .prototypes => "tile prototypes",
         .prototype => "tiles of the prototype",
+        .flows => "flows",
+        .flow => "the flow's tracks",
     };
 }
 
@@ -8864,7 +8913,7 @@ fn properties() !void {
             propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
-            propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its thread's flow" else "" }, 8);
+            propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
@@ -8912,6 +8961,8 @@ fn properties() !void {
             try prototypeProperties(id);
             prototypeSketch(id);
         },
+        .flows => flowsProperties(),
+        .flow => |id| flowProperties(id),
     }
 }
 
@@ -9748,7 +9799,7 @@ fn statusContent() void {
     const lack = if (lacking > 0) std.fmt.bufPrint(&lack_buf, " · {d} lacking bold/italic", .{lacking}) catch "" else "";
     const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} text pieces · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}{s}", .{
         state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, lack, overflow, state.intrusions.len, layer_flags,
-        if (catching_up) " · reflowing threads…" else "",
+        if (catching_up) " · reflowing flows…" else "",
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
 
@@ -11905,23 +11956,130 @@ fn featureHit(at: geom.Point) ?FeatureHit {
     return best;
 }
 
-/// A track's thread: what it continues and goes on into, and buttons to
-/// join a track after it or take it out of its thread.
+/// A track's flow: which it is (chosen from the document's), where the
+/// track comes in it, what it continues and goes on into, and buttons to
+/// join a track after it or take it out of its flow.
 fn threadProperties(pi: usize, ri: usize) void {
     const m = &state.model;
     const before = m.threadBefore(pi, ri);
     const after = m.threadAfter(pi, ri);
     var buf: [160]u8 = undefined;
+    if (m.trackFlow(pi, ri)) |cur| {
+        const a = dvui.currentWindow().arena();
+        const names = a.alloc([]const u8, m.flows.items.len) catch return;
+        var choice: usize = 0;
+        for (m.flows.items, names, 0..) |f, *n, k| {
+            n.* = if (f.tracks.items.len == 0) (std.fmt.allocPrint(a, "{s} · unplaced", .{f.name}) catch f.name) else f.name;
+            if (f.id == cur.id) choice = k;
+        }
+        const was = choice;
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+            defer row.deinit();
+            propName("Flow");
+            if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 29 })) if (choice != was) {
+                const to = m.flows.items[choice].id;
+                if (act(.assignTrack, .{ pi, ri, to, null })) {
+                    state.status = "The track now runs the flow chosen, after its other tracks. ";
+                } else |err| state.status = if (err == error.BadJoin) "That flow's tracks run the other way. " else "The track was not moved to that flow. ";
+            };
+        }
+        if (m.trackFlow(pi, ri)) |f| {
+            const k = for (f.tracks.items, 0..) |t, i| {
+                if (t == m.panels.items[pi].regions.items[ri].id) break i;
+            } else 0;
+            propText("In it", "track {d} of {d}", .{ k + 1, f.tracks.items.len }, 32);
+            if (dvui.button(@src(), "Show the flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) state.context = .{ .flow = f.id };
+        }
+    }
     if (before) |b| propText("Continues", "{s}", .{trackLabel(&buf, b, pi)}, 30);
     if (after) |n| propText("Goes on into", "{s}", .{trackLabel(&buf, n, pi)}, 31);
     if (dvui.button(@src(), "Join a track after this…", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
         join_from = .{ .panel = pi, .region = ri };
         state.tool = .join;
     }
-    if (before != null or after != null) if (dvui.button(@src(), "Take out of its thread", .{}, .{ .expand = .horizontal })) {
-        act(.unjoinTrack, .{ pi, ri }) catch {};
-        state.status = "Taken out: the flow stays whole on the thread. ";
+    const f = m.trackFlow(pi, ri);
+    const detachable = f != null and (f.?.tracks.items.len > 1 or f.?.items.items.len > 0);
+    if (detachable) if (dvui.button(@src(), "Take out of its flow", .{}, .{ .expand = .horizontal })) {
+        const alone = f.?.tracks.items.len == 1;
+        if (act(.detachTrack, .{ pi, ri })) {
+            state.status = if (alone) "Taken out: its text is kept in the flow, now unplaced (under Flows in the Browser). " else "Taken out: the flow keeps all its text, on its other tracks. ";
+        } else |_| state.status = "The track was not taken out. ";
     };
+}
+
+/// The document's flows: how many, how many unplaced, and a new one.
+fn flowsProperties() void {
+    var unplaced: usize = 0;
+    for (state.model.flows.items) |f| {
+        if (f.tracks.items.len == 0) unplaced += 1;
+    }
+    propText("Flows", "{d}", .{state.model.flows.items.len}, 1);
+    propText("Unplaced", "{d}", .{unplaced}, 2);
+    if (dvui.button(@src(), "New flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        var nb: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&nb, "Flow {d}", .{state.model.flows.items.len + 1}) catch "Flow";
+        if (act(.addFlow, .{name})) |id| {
+            state.context = .{ .flow = id };
+        } else |_| state.status = "The flow was not made. ";
+    }
+}
+
+/// Removing a flow with content takes a second click: the flow armed.
+var flow_remove_armed: ?layout.model.ObjectId = null;
+
+/// A flow: its name, its tracks in order (or unplaced), what it holds,
+/// and its removal.
+fn flowProperties(id: layout.model.ObjectId) void {
+    const m = &state.model;
+    const fi = m.flowIndex(id) orelse return;
+    const f = m.flows.items[fi];
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        propName("Name");
+        var te = dvui.textEntry(@src(), .{ .text_initial = f.name }, .{ .expand = .horizontal, .id_extra = @intFromEnum(id) });
+        defer te.deinit();
+        if (te.enter_pressed) {
+            const name = std.mem.trim(u8, te.textGet(), " ");
+            if (name.len > 0 and !std.mem.eql(u8, name, f.name)) act(.renameFlow, .{ id, name }) catch {};
+        }
+    }
+    if (f.tracks.items.len == 0) {
+        propText("Tracks", "{s}", .{"none: unplaced"}, 2);
+    } else for (f.tracks.items, 0..) |tid, k| {
+        var nb: [24]u8 = undefined;
+        var tb: [160]u8 = undefined;
+        const label = std.fmt.bufPrint(&nb, "Track {d}", .{k + 1}) catch "Track";
+        const where = if (m.trackById(tid)) |t| trackPlaceLabel(&tb, t) else "missing";
+        propText(label, "{s}", .{where}, 10 + k);
+    }
+    // What it holds.
+    var runs: usize = 0;
+    var tiles: usize = 0;
+    var words: usize = 0;
+    for (f.items.items) |item| switch (item.what) {
+        .run => |r| {
+            runs += 1;
+            var it = std.mem.tokenizeAny(u8, r.content, " \t\n");
+            while (it.next()) |_| words += 1;
+        },
+        .tile => tiles += 1,
+        else => {},
+    };
+    if (tiles > 0) propText("Holds", "{d} words, {d} tiles", .{ words, tiles }, 3) else propText("Holds", "{d} words", .{words}, 3);
+    if (flow_remove_armed != null and flow_remove_armed.? != id) flow_remove_armed = null;
+    const armed = flow_remove_armed != null;
+    const empty = f.items.items.len == 0;
+    if (dvui.button(@src(), if (armed) "Remove it and all it holds: click again" else "Remove flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        if (empty or armed) {
+            flow_remove_armed = null;
+            if (act(.removeFlow, .{id})) {
+                state.context = .flows;
+                state.status = "Flow removed; its tracks have empty flows of their own. ";
+            } else |_| state.status = "The flow was not removed. ";
+        } else flow_remove_armed = id;
+    }
 }
 
 /// A track's name, with its panel's when that is not panel `here`.
@@ -11954,7 +12112,7 @@ fn joinClick(at: geom.Point) void {
         return;
     };
     act(.threadTracks, .{ from.panel, from.region, to.panel, to.region }) catch {
-        state.status = "Not joined: a thread joins tracks running the same way, onto one that starts its own thread, without looping. ";
+        state.status = "Not joined: a flow joins tracks running the same way, and the track joined must start its own flow. ";
         return;
     };
     state.status = "Joined: the flow goes on into it. ";

@@ -3517,17 +3517,7 @@ pub const Model = struct {
         for (p.art.items) |pa| m.forget(pa.id);
         // Its tracks leave their flows; a flow left with none keeps its
         // text, unplaced, and lets go of its tiles.
-        var tiles: std.ArrayList(TileId) = .empty;
-        for (m.flows.items) |f| {
-            const left = for (f.tracks.items) |id| {
-                if (m.trackById(id) != null) break true;
-            } else false;
-            if (!left) for (f.items.items) |item| if (item.tileOf()) |id| tiles.append(m.a(), id) catch {};
-        }
         m.tidyFlows();
-        for (tiles.items) |id| if (!m.placedElsewhere(id)) {
-            m.tile(id).removed = true;
-        };
         for (p.grids.items) |g| for (g.instances.items) |inst| {
             m.tile(inst.tile).removed = true;
         };
@@ -3738,13 +3728,24 @@ pub const Model = struct {
         return &m.flowOf(panel, region).items;
     }
 
-    /// A new flow named `name` running through track `track` (or none),
-    /// empty. Returns its index.
+    /// A new flow named `name` (or, when a flow has that name, `name` 2,
+    /// 3 …) running through track `track` (or none), empty. Returns its
+    /// index.
     fn newFlow(m: *Model, name: []const u8, track: ObjectId) Error!usize {
-        var f: Flow = .{ .id = m.newId(), .name = try m.a().dupe(u8, name) };
+        var nb: [160]u8 = undefined;
+        var unique = name;
+        var n: usize = 2;
+        while (m.flowNamed(unique)) : (n += 1) unique = std.fmt.bufPrint(&nb, "{s} {d}", .{ name, n }) catch break;
+        var f: Flow = .{ .id = m.newId(), .name = try m.a().dupe(u8, unique) };
         if (track != .none) try f.tracks.append(m.a(), track);
         try m.flows.append(m.a(), f);
         return m.flows.items.len - 1;
+    }
+
+    /// Whether a flow is named `name`.
+    pub fn flowNamed(m: *const Model, name: []const u8) bool {
+        for (m.flows.items) |f| if (std.mem.eql(u8, f.name, name)) return true;
+        return false;
     }
 
     /// Flows after tracks have gone: each loses the tracks no longer
@@ -3768,8 +3769,11 @@ pub const Model = struct {
             var j: usize = 0;
             var text = false;
             while (j < f.items.items.len) {
-                if (f.items.items[j].tileOf()) |_| {
+                if (f.items.items[j].tileOf()) |tid| {
                     _ = f.items.orderedRemove(j);
+                    if (!m.tileInFlows(tid)) if (m.tileIndex(tid) != null) {
+                        m.tile(tid).removed = true;
+                    };
                 } else {
                     if (f.items.items[j].what == .run) text = true;
                     j += 1;
@@ -3783,6 +3787,78 @@ pub const Model = struct {
     fn tileInFlows(m: *const Model, id: TileId) bool {
         for (m.flows.items) |f| for (f.items.items) |item| if (item.tileOf() == id) return true;
         return false;
+    }
+
+    /// A new flow named `name`, empty and unplaced. Returns its ID.
+    pub fn addFlow(m: *Model, name: []const u8) Error!ObjectId {
+        const fi = try m.newFlow(name, .none);
+        m.revision += 1;
+        return m.flows.items[fi].id;
+    }
+
+    /// Renames flow `id`.
+    pub fn renameFlow(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        const fi = m.flowIndex(id) orelse return error.NoSuchObject;
+        m.flows.items[fi].name = try m.a().dupe(u8, name);
+        m.revision += 1;
+    }
+
+    /// Assigns track `region` of `panel` to flow `id`, at `position` among
+    /// its tracks (null: after the last); to its own flow, it moves within
+    /// it. The flow it leaves keeps its content, going on from its next
+    /// track; left with none, it keeps its text unplaced, or goes when it
+    /// held none. A flow's tracks all run the same way.
+    pub fn assignTrack(m: *Model, panel: usize, region: usize, id: ObjectId, position: ?usize) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+        const to = m.flowIndex(id) orelse return error.NoSuchObject;
+        const r = m.panels.items[panel].regions.items[region];
+        for (m.flows.items[to].tracks.items) |tid| if (tid != r.id) if (m.trackById(tid)) |t| {
+            if (m.trackPtr(t).major != r.major) return error.BadJoin;
+        };
+        // Out of the flow it is in.
+        if (m.trackFlowIndex(panel, region)) |from| {
+            const k = m.flowPosition(panel, region).?;
+            _ = m.flows.items[from].tracks.orderedRemove(k);
+        }
+        const list = &m.flows.items[to].tracks;
+        const at = @min(position orelse list.items.len, list.items.len);
+        try list.insert(m.a(), at, r.id);
+        m.panels.items[panel].regions.items[region].flow = id;
+        m.tidyFlows();
+        m.revision += 1;
+    }
+
+    /// Takes track `region` of `panel` out of its flow, which keeps its
+    /// content (unplaced, if this was its only track); the track gets a
+    /// new flow of its own, empty. Not for a track alone in an empty flow.
+    pub fn detachTrack(m: *Model, panel: usize, region: usize) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+        const f = m.trackFlow(panel, region) orelse return error.BadJoin;
+        if (f.tracks.items.len <= 1 and f.items.items.len == 0) return error.BadJoin;
+        const fi = m.trackFlowIndex(panel, region).?;
+        _ = m.flows.items[fi].tracks.orderedRemove(m.flowPosition(panel, region).?);
+        const r = &m.panels.items[panel].regions.items[region];
+        const ni = try m.newFlow(r.name, r.id);
+        m.flows.items[ni].indent = m.flows.items[fi].indent;
+        m.panels.items[panel].regions.items[region].flow = m.flows.items[ni].id;
+        m.revision += 1;
+    }
+
+    /// Removes flow `id` and its content (its tiles too, unless in another
+    /// flow); each of its tracks gets a new flow of its own, empty.
+    pub fn removeFlow(m: *Model, id: ObjectId) Error!void {
+        const fi = m.flowIndex(id) orelse return error.NoSuchObject;
+        const gone = m.flows.orderedRemove(fi);
+        for (gone.items.items) |item| if (item.tileOf()) |tid| {
+            if (!m.tileInFlows(tid) and m.tileIndex(tid) != null) m.tile(tid).removed = true;
+        };
+        for (gone.tracks.items) |tid| if (m.trackById(tid)) |t| {
+            const r = m.trackPtr(t);
+            const ni = try m.newFlow(r.name, r.id);
+            m.flows.items[ni].indent = gone.indent;
+            m.trackPtr(t).flow = m.flows.items[ni].id;
+        };
+        m.revision += 1;
     }
 
     /// Reads an older document's threads into flows: each thread (a
@@ -5536,6 +5612,9 @@ test "flows: a track drawn has its own; joining makes one flow, unjoining gives 
     const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
     try std.testing.expectEqual(2, m.flows.items.len);
     try std.testing.expectEqualStrings("A", m.trackFlow(p, a).?.name);
+    // A second flow named alike is told apart.
+    try std.testing.expectEqualStrings("A 2", m.flows.items[m.flowIndex(try m.addFlow("A")).?].name);
+    try m.removeFlow(m.flows.items[2].id);
     _ = try m.insertText(p, a, .{ .index = 0 }, "first", body);
     _ = try m.insertText(p, b, .{ .index = 0 }, "second", body);
     try m.joinTracks(p, a, b);
@@ -5617,4 +5696,56 @@ test "flows: an older document's threads are read into flows" {
     // Again: nothing changes.
     try m.upgradeFlows();
     try std.testing.expectEqual(2, m.flows.items.len);
+}
+
+test "flows: tracks assigned, moved within, detached; flows added, renamed, removed" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 300, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 100, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    _ = try m.insertText(p, a, .{ .index = 0 }, "story", body);
+    const story = m.trackFlow(p, a).?.id;
+    try m.renameFlow(story, "Story");
+    // B and C into A's flow: their own empty flows go.
+    try m.assignTrack(p, b, story, null);
+    try m.assignTrack(p, c, story, null);
+    try std.testing.expectEqual(1, m.flows.items.len);
+    try std.testing.expectEqual(c, m.threadAfter(p, b).?.region);
+    // C moved to the front: the content starts there now.
+    try m.assignTrack(p, c, story, 0);
+    try std.testing.expectEqual(c, m.threadHead(p, a).region);
+    try std.testing.expectEqual(1, m.ownItems(p, c).len);
+    try std.testing.expectEqual(0, m.ownItems(p, a).len);
+    // An unplaced flow, and a track given to it: Story keeps its content.
+    const notes = try m.addFlow("Notes");
+    try std.testing.expectEqual(0, m.flows.items[m.flowIndex(notes).?].tracks.items.len);
+    try m.assignTrack(p, a, notes, null);
+    try std.testing.expectEqualStrings("Notes", m.trackFlow(p, a).?.name);
+    try std.testing.expectEqualStrings("Story", m.trackFlow(p, c).?.name);
+    // Detaching every Story track leaves it unplaced, its text kept.
+    try m.detachTrack(p, c);
+    try m.detachTrack(p, b);
+    const si = m.flowIndex(story).?;
+    try std.testing.expectEqual(0, m.flows.items[si].tracks.items.len);
+    try std.testing.expectEqual(1, m.flows.items[si].items.items.len);
+    // A track alone in an empty flow has nothing to detach from.
+    try std.testing.expectError(error.BadJoin, m.detachTrack(p, b));
+    // Removing Notes gives A an empty flow of its own; Story removed, gone.
+    try m.removeFlow(notes);
+    try std.testing.expect(m.trackFlow(p, a).?.id != notes);
+    try m.removeFlow(story);
+    try std.testing.expect(m.flowIndex(story) == null);
+}
+
+test "flows: a flow's tracks run one way" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 300, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const col = try m.addTracks(p, .{ .name = "Col", .origin = .{ .x = 50, .y = 90 }, .major = .column, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    try std.testing.expectError(error.BadJoin, m.assignTrack(p, col, m.trackFlow(p, a).?.id, null));
 }
