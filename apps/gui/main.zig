@@ -10698,7 +10698,7 @@ fn properties() !void {
         },
         .region => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
-            propText("Name", "{s}", .{region.name}, 1);
+            if (textProp("Name", region.name, 1)) |name| actM(mergeKey(.{ "track name", r.panel, r.region }), .renameRegion, .{ r.panel, r.region, name }) catch {};
             // Typed exactly: where it starts (panel mm) and its extent in
             // its pitch (u), along its tracks and across them.
             if (numberProp("Origin across, mm", region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
@@ -10716,6 +10716,23 @@ fn properties() !void {
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
             propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
+            if (region.style == null) {
+                // Its keys named in flow order: the prefix, then 1, 2 …
+                const S = struct {
+                    var prefix: [16]u8 = .{'K'} ++ @as([15]u8, @splat(0));
+                    var len: usize = 1;
+                };
+                if (textProp("Key name prefix", S.prefix[0..S.len], 24)) |v| {
+                    S.len = @min(v.len, S.prefix.len);
+                    @memcpy(S.prefix[0..S.len], v[0..S.len]);
+                }
+                var lb: [64]u8 = undefined;
+                if (dvui.button(@src(), std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ S.prefix[0..S.len], S.prefix[0..S.len] }) catch "Name keys in order", .{}, .{ .expand = .horizontal, .id_extra = 25 })) {
+                    if (act(.nameKeysInOrder, .{ r.panel, r.region, S.prefix[0..S.len] })) |n| {
+                        state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
+                    } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
+                }
+            }
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
@@ -10788,6 +10805,10 @@ fn tileProperties(id: TileId) !void {
         propText("Position", "({d:.2}, {d:.2}) mm in panel", .{ pt.body.x0, pt.body.y0 }, 4);
         propText("Row", "{d}", .{pt.row + 1}, 5);
     }
+    if (on_grid == null) if (flowPosOf(id)) |at| {
+        const gap = state.model.flowItems(at.panel, at.region)[at.index].gap;
+        if (numberProp("Gap before, u", gap, 0, 1000, 8)) |v| actM(mergeKey(.{ "tile gap", id }), .setItemGap, .{ at.panel, at.region, at.index, v }) catch {};
+    };
 
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 6 });
@@ -10830,6 +10851,18 @@ fn tileProperties(id: TileId) !void {
             };
         }
     }
+}
+
+/// Where tile `id` is in a flow: the flow's first track and its index.
+fn flowPosOf(id: TileId) ?struct { panel: usize, region: usize, index: usize } {
+    for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |_, ri| {
+        const head = state.model.threadHead(pi, ri);
+        if (head.panel != pi or head.region != ri) continue;
+        for (state.model.flowItems(pi, ri), 0..) |item, k| if (item.tileOf()) |t| {
+            if (t == id) return .{ .panel = pi, .region = ri, .index = k };
+        };
+    };
+    return null;
 }
 
 /// A tile prototype: what its tiles share, and the parts of it that can be
@@ -13412,7 +13445,9 @@ fn trackPalette() void {
         insertAtCursor(.hard_break, 0);
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
     }
-    if (inTextTrack() and flowButton(.paragraph, 4)) {
+    // A new paragraph anywhere: in a track of keys, a paragraph style's
+    // space before is a row gap.
+    if (flowButton(.paragraph, 4)) {
         insertAtCursor(.paragraph, 0);
         if (canvas_id) |id| dvui.focusWidget(id, null, null);
     }
@@ -13450,7 +13485,7 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
             // Letters type text now: these two have no key.
             .run => "",
             .hard_break => if (inTextTrack()) "Shift+Enter" else "Enter",
-            .paragraph => "Enter",
+            .paragraph => if (inTextTrack()) "Enter" else "",
             .next_prototype => "Tab",
             .join => "",
         }, .{}, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .w = 8 } });
