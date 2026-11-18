@@ -24,7 +24,7 @@ test "the text sample: a track with text, an equation, and text" {
     const c = try m.startCanvas(.mm);
     const st = try m.addStyle("Label", .{ .cap_height = 3 });
     const r = try build(&m, c, st, .{ .x = 0, .y = 0 });
-    const items = m.panels.items[c].regions.items[r].items.items;
+    const items = m.flowItems(c, r);
     try std.testing.expectEqual(3, items.len);
     try std.testing.expect(items[1].what.run.equation);
 }

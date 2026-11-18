@@ -105,6 +105,15 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
    - **Import** goes at a position in a flow, or into a new flow.
    - **The source is a URI:** relative to the document when under its folder, else absolute; with a fragment, a hash and the time of import. `file:` first.
    - **Order:** the object and its conversion; Browser and assignment; import; an editor for unplaced flows.
+   - **Step 1 built 2026-11-18** (`model.Flow`, `Model.flows`, `TileRegion.flow`):
+     - A flow holds the content, the first paragraph's style, the indent and its ordered tracks. A track drawn makes its own flow, named after it.
+     - Threads are now the order of a flow's tracks (`threadBefore`, `threadAfter`, `threadHead`, `thread`).
+     - Joining merges two flows, the second's content after as a new paragraph. Unjoining gives the track a new empty flow; the old flow keeps all of its content.
+     - A copied panel gets copies of its flows. A removed panel's tracks leave their flows. A flow left with no tracks keeps its text unplaced (tiles let go), or goes if it held no text.
+     - Callers keep (panel, track) arguments. `flowItems` gives a track's flow content; `ownItems` gives it only on the flow's first track, as a thread's head held it.
+     - Older files: their tracks' `items`, `next`, `paragraph` and `indent` are read under those names (the format's new `file_names`: fields read by an older name, never written) and turned into flows on loading (`upgradeFlows`).
+     - Checked: all tests, including new ones for joining, unjoining, copying, removing and upgrading, and the old field names in the format. Keyboard and HP-15C SVGs are byte-identical. An older file with a thread, written by the previous build, opens as one flow named after its first track. Typing, new paragraphs and undo work in the GUI.
+     - Nothing in the GUI shows flows yet (step 2), so a removed panel's text is kept but out of sight.
 
 ## Gaps against the project's stated goals
 

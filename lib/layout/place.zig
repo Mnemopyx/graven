@@ -970,7 +970,7 @@ fn columnStep(labels: *Labels, style: StyleId, c: Cut) f64 {
 /// tile's face, one line (a row) or one character (a column) thick, with
 /// the tile's content. With them, the tile each is for and its index
 /// among its prototype's tracks.
-fn tileRegions(a: Allocator, m: *const Model, labels: *Labels, tiles: []const PlacedTile, out: *std.ArrayList(model.TileRegion), owner: *std.ArrayList(TileId), which: *std.ArrayList(usize)) Allocator.Error!void {
+fn tileRegions(a: Allocator, m: *const Model, labels: *Labels, tiles: []const PlacedTile, out: *std.ArrayList(model.TileRegion), contents: *std.ArrayList([]const model.Item), owner: *std.ArrayList(TileId), which: *std.ArrayList(usize)) Allocator.Error!void {
     for (tiles) |pt| {
         // A hole shows nothing of its prototype's text.
         if (pt.spacer or pt.grid == .hole) continue;
@@ -995,8 +995,8 @@ fn tileRegions(a: Allocator, m: *const Model, labels: *Labels, tiles: []const Pl
                 .major = tt.major,
                 .style = tt.style,
                 .alignment = tt.alignment,
-                .items = f.items,
             });
+            try contents.append(a, f.items.items);
             try owner.append(a, pt.id);
             try which.append(a, k);
         }
@@ -1201,6 +1201,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     // segments, items, flows) is not the panel's, and its issues are the
     // tile's.
     var synth: std.ArrayList(model.TileRegion) = .empty;
+    var synth_items: std.ArrayList([]const model.Item) = .empty;
     var synth_owner: std.ArrayList(TileId) = .empty;
     var synth_which: std.ArrayList(usize) = .empty;
     var junk_tracks: std.ArrayList(PlacedTrack) = .empty;
@@ -1211,7 +1212,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     var junk_issues: std.ArrayList(Issue) = .empty;
     for (0..2) |pass| {
     const own = pass == 0;
-    if (!own) try tileRegions(a, m, labels, tiles.items, &synth, &synth_owner, &synth_which);
+    if (!own) try tileRegions(a, m, labels, tiles.items, &synth, &synth_items, &synth_owner, &synth_which);
     const regs: []const model.TileRegion = if (own) m.panels.items[panel].regions.items else synth.items;
     for (regs, 0..) |region, ri| {
         const out_tracks = if (own) &tracks else &junk_tracks;
@@ -1245,9 +1246,13 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         // The flow is the thread's first track's; where it enters this
         // leg is the start, or what the panel before handed on.
         const flow_r = if (own) &m.panels.items[head.panel].regions.items[head.region] else &regs[ri];
+        // Its content and first paragraph's style: the flow's (a tile's
+        // face track: the tile's content there).
+        const flow_items: []const model.Item = if (own) m.flowItems(head.panel, head.region) else synth_items.items[ri];
+        const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph else null) else null;
         const fri = head.region;
         const fpi = head.panel;
-        const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_r.paragraph, .first_line = true, .soft = false } else for (entries) |e| {
+        const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_para, .first_line = true, .soft = false } else for (entries) |e| {
             if (e.track == region.id) break e;
         } else null;
         // Rows run right and stack down; columns run down and set to the
@@ -1267,7 +1272,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         var item_of: std.ArrayList(usize) = .empty;
         var src_off: std.ArrayList(u32) = .empty;
         var src_len: std.ArrayList(u32) = .empty;
-        for (flow_r.items.items, 0..) |item, mi| {
+        for (flow_items, 0..) |item, mi| {
             const whole = struct {
                 fn add(al: Allocator, ps: *std.ArrayList(model.Item), cs: *std.ArrayList(?Cut), io: *std.ArrayList(usize), so: *std.ArrayList(u32), sl: *std.ArrayList(u32), it: model.Item, index: usize) Allocator.Error!void {
                     try ps.append(al, it);
@@ -1761,8 +1766,8 @@ pub fn sameHandoffs(x: []const Handoff, y: []const Handoff) bool {
 fn threadPanels(gpa: Allocator, m: *const Model) Allocator.Error![]usize {
     var list: std.ArrayList(usize) = .empty;
     errdefer list.deinit(gpa);
-    for (m.panels.items, 0..) |p, pi| for (p.regions.items) |r| {
-        const n = m.trackById(r.next) orelse continue;
+    for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |_, ri| {
+        const n = m.threadAfter(pi, ri) orelse continue;
         if (n.panel == pi) continue;
         for ([_]usize{ pi, n.panel }) |x| if (std.mem.indexOfScalar(usize, list.items, x) == null) try list.append(gpa, x);
     };
@@ -1928,7 +1933,7 @@ test "a run being typed is stored as typed, flagged, and still drawn" {
     defer labels.deinit();
     var s = try solve(gpa, &m, p, &labels);
     defer s.deinit();
-    try testing.expectEqualStrings("$H^", m.panels.items[p].regions.items[r].items.items[0].what.run.content);
+    try testing.expectEqualStrings("$H^", m.flowItems(p, r)[0].what.run.content);
     try testing.expectEqual(1, s.labels.len);
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.markup_error, s.issues[0].kind);

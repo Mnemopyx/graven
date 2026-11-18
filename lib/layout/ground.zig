@@ -74,9 +74,8 @@ pub const TrackGround = struct {
         g.keepouts = keep.items;
         g.path = .{ .regions = regions, .thread = leg.items, .avoid = avoid.items, .more = more };
         // The flow's first paragraph, when the flow starts here.
-        const flow = &m.panels.items[head.panel].regions.items[head.region];
         if (head.panel == panel and head.region == track) {
-            if (flow.paragraph) |id| if (m.paraStyle(id)) |ps| {
+            if (m.ownParagraph(head.panel, head.region)) |id| if (m.paraStyle(id)) |ps| {
                 g.paragraph = ps.*;
             };
         }

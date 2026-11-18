@@ -195,7 +195,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
     // "Caladea" (no size) and "Carlito 12 pt": two styles, two fonts.
     try testing.expectEqual(2, rep.styles_made);
     try testing.expectEqual(2, rep.fonts_made.items.len);
-    const items = m.panels.items[p].regions.items[r].items.items;
+    const items = m.flowItems(p, r);
     // Run, break, run; separator, run; separator, run.
     try testing.expectEqual(7, items.len);
     try testing.expectEqualStrings("\\textnormal{Some \\textbf{bold} text, red.}", items[0].what.run.content);
@@ -210,7 +210,7 @@ test "an RTF document comes in as paragraphs, styles and runs, undone as one ste
 
     // One undo takes it all back.
     _ = try h.undo(&m);
-    try testing.expectEqual(0, m.panels.items[p].regions.items[r].items.items.len);
+    try testing.expectEqual(0, m.flowItems(p, r).len);
     try testing.expectEqual(0, m.paragraph_styles.items.len);
     try testing.expectEqual(1, m.styles.items.len);
 }

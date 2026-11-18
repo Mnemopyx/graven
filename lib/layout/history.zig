@@ -1371,7 +1371,7 @@ test "a thread of tracks is kept in the file, and its join is a step undo takes 
     var o = try openFile(gpa, bytes);
     defer o.model.deinit();
     defer o.history.deinit();
-    try testing.expectEqual(o.model.panels.items[p].regions.items[b].id, o.model.panels.items[p].regions.items[a].next);
+    try testing.expectEqual(b, o.model.threadAfter(p, a).?.region);
     try testing.expect(try o.history.undo(&o.model));
-    try testing.expectEqual(model.ObjectId.none, o.model.panels.items[p].regions.items[a].next);
+    try testing.expect(o.model.threadAfter(p, a) == null);
 }

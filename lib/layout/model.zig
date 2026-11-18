@@ -479,6 +479,30 @@ pub const Major = enum { row, column };
 /// A track by its panel and its index there.
 pub const TrackRef = struct { panel: usize, region: usize };
 
+/// A flow: a continuous body of content that belongs together (an
+/// article, a chapter, a row of keys), poured through the tracks it is
+/// assigned to, in order, on any panel. It may be assigned to none
+/// (unplaced): its content is kept and shown nowhere. A track belongs to
+/// one flow; a track drawn makes a flow of its own.
+pub const Flow = struct {
+    id: ObjectId = .none,
+    name: []const u8 = "",
+    /// The tracks it runs through, in order.
+    tracks: std.ArrayList(ObjectId) = .empty,
+    /// The paragraph style of its first paragraph (each later one takes
+    /// its separator's); null for none: segments set by their track's
+    /// `alignment`.
+    paragraph: ?ParaId = null,
+    /// The length of the blank put in after each hard break as it is
+    /// entered, so a new paragraph starts indented, u; 0 for none. The
+    /// blank is an ordinary item: it can be resized or removed.
+    indent: f64 = 0,
+    /// Its content, in order. A tile thicker than its segment (a 2 u tall
+    /// key) reaches into the segments after it, closing the stretch it
+    /// covers there; their content flows around it.
+    items: std.ArrayList(Item) = .empty,
+};
+
 /// A region holding a track: one flow of items (tiles, blanks, runs of
 /// text or equations, hard breaks) poured in order through its segments,
 /// rows or columns placed from the region's top-left corner.
@@ -516,21 +540,18 @@ pub const TileRegion = struct {
     /// centre, or back from its end. (Its origin places the segment; this
     /// only arranges what is in it.)
     alignment: Align = .start,
-    /// The length of the blank put in after each hard break as it is
-    /// entered, so a new paragraph starts indented, u; 0 for none. The blank
-    /// is an ordinary item: it can be resized or removed.
-    indent: f64 = 0,
-    /// The paragraph style of the flow's first paragraph (each later one
-    /// takes its separator's); null for none: segments set by `alignment`.
-    paragraph: ?ParaId = null,
-    /// The track its flow goes on into once this one is full (`.none`:
-    /// none). Tracks joined so make a thread: one flow, stored on the
-    /// thread's first track, runs through each in order.
-    next: ObjectId = .none,
-    /// The flow, in order. A tile thicker than its segment (a 2 u tall
-    /// key) reaches into the segments after it, closing the stretch it
-    /// covers there; their content flows around it.
-    items: std.ArrayList(Item) = .empty,
+    /// The flow it is assigned to (see `Flow`): the content it holds.
+    flow: ObjectId = .none,
+    /// Older documents only (read into flows on loading, `upgradeFlows`):
+    /// the new-paragraph indent, the first paragraph's style, the track
+    /// the flow went on into, and the flow, held by a thread's first track.
+    old_indent: f64 = 0,
+    old_paragraph: ?ParaId = null,
+    old_next: ObjectId = .none,
+    old_items: std.ArrayList(Item) = .empty,
+
+    /// The older fields' names in files (read, never written).
+    pub const file_names = .{ .old_indent = "indent", .old_paragraph = "paragraph", .old_next = "next", .old_items = "items" };
 
     /// Where an unshaped track's segments attach to its path, u: their
     /// middle. Every segment is bound to the path by its centre.
@@ -1461,6 +1482,8 @@ pub const Model = struct {
     styles: std.ArrayList(TextStyle) = .empty,
     /// Named paragraph settings, which paragraphs of flows take.
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
+    /// The flows: content and the tracks it runs through (see `Flow`).
+    flows: std.ArrayList(Flow) = .empty,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
@@ -2064,15 +2087,24 @@ pub const Model = struct {
         var c = r;
         c.id = m.newId();
         c.name = try m.a().dupe(u8, r.name);
-        // A copy starts a thread of its own (copies of a whole panel are
+        // A copy has a flow of its own, with a copy of what the track's
+        // flow holds when the track starts it (copies of a whole panel are
         // rejoined by `copyPanel`).
-        c.next = .none;
+        const src = m.trackById(r.id);
+        const own: []const Item = if (src) |t| m.ownItems(t.panel, t.region) else &.{};
+        const src_flow: ?Flow = if (src) |t| (if (m.trackFlow(t.panel, t.region)) |f| f.* else null) else null;
+        const fi = try m.newFlow(r.name, c.id);
+        c.flow = m.flows.items[fi].id;
+        if (src_flow) |f| {
+            m.flows.items[fi].indent = f.indent;
+            if (own.len > 0 or m.firstOfFlow(src.?.panel, src.?.region)) m.flows.items[fi].paragraph = f.paragraph;
+        }
         c.segments = .empty;
         try c.segments.appendSlice(m.a(), r.segments.items);
         c.path = .empty;
         for (r.path.items) |cp| try c.path.append(m.a(), .{ .id = m.newId(), .along = cp.along, .across = cp.across });
-        c.items = .empty;
-        for (r.items.items) |item| {
+        var items: std.ArrayList(Item) = .empty;
+        for (own) |item| {
             var it = item;
             switch (item.what) {
                 .tile => |tid| {
@@ -2086,8 +2118,9 @@ pub const Model = struct {
                 .run => |run| it.what.run.content = try m.a().dupe(u8, run.content),
                 .hard_break, .paragraph => {},
             }
-            try c.items.append(m.a(), it);
+            try items.append(m.a(), it);
         }
+        m.flows.items[fi].items = items;
         return c;
     }
 
@@ -2101,10 +2134,25 @@ pub const Model = struct {
         c.regions = .empty;
         c.art = .empty;
         for (p.regions.items) |r| try c.regions.append(m.a(), try m.copyRegion(r));
-        // Its threads, among the copies.
-        for (p.regions.items, 0..) |r, k| if (m.regionIndex(pi, r.next)) |n| {
-            c.regions.items[k].next = c.regions.items[n].id;
-        };
+        // Its flows, among the copies: the copies of a flow's tracks on
+        // the panel run through the flow of the first of them, in order.
+        for (p.regions.items, 0..) |r, k| {
+            const f = m.trackFlow(pi, k) orelse continue;
+            // Only from the first of the flow's tracks on this panel.
+            const first = for (f.tracks.items) |id| {
+                if (m.regionIndex(pi, id) != null) break id;
+            } else continue;
+            if (first != r.id) continue;
+            const into = m.flowIndex(c.regions.items[k].flow).?;
+            for (f.tracks.items) |id| {
+                if (id == r.id) continue;
+                const n = m.regionIndex(pi, id) orelse continue;
+                const gone = c.regions.items[n].flow;
+                try m.flows.items[into].tracks.append(m.a(), c.regions.items[n].id);
+                c.regions.items[n].flow = m.flows.items[into].id;
+                if (m.flowIndex(gone)) |gi| _ = m.flows.orderedRemove(gi);
+            }
+        }
         for (p.art.items) |pa| {
             var ca = pa;
             ca.id = m.newId();
@@ -3467,9 +3515,18 @@ pub const Model = struct {
         m.forget(p.id);
         for (p.regions.items) |r| m.forget(r.id);
         for (p.art.items) |pa| m.forget(pa.id);
-        for (p.regions.items) |region| for (region.items.items) |item| {
-            const id = item.tileOf() orelse continue;
-            if (!m.placedElsewhere(id)) m.tile(id).removed = true;
+        // Its tracks leave their flows; a flow left with none keeps its
+        // text, unplaced, and lets go of its tiles.
+        var tiles: std.ArrayList(TileId) = .empty;
+        for (m.flows.items) |f| {
+            const left = for (f.tracks.items) |id| {
+                if (m.trackById(id) != null) break true;
+            } else false;
+            if (!left) for (f.items.items) |item| if (item.tileOf()) |id| tiles.append(m.a(), id) catch {};
+        }
+        m.tidyFlows();
+        for (tiles.items) |id| if (!m.placedElsewhere(id)) {
+            m.tile(id).removed = true;
         };
         for (p.grids.items) |g| for (g.instances.items) |inst| {
             m.tile(inst.tile).removed = true;
@@ -3483,10 +3540,7 @@ pub const Model = struct {
     }
 
     fn placedElsewhere(m: *const Model, id: TileId) bool {
-        for (m.panels.items) |p| for (p.regions.items) |region| for (region.items.items) |item| {
-            if (item.tileOf() == id) return true;
-        };
-        return false;
+        return m.tileInFlows(id);
     }
 
     /// How much of a panel stays on the sheet however it is moved, mm on
@@ -3548,7 +3602,13 @@ pub const Model = struct {
         r.name = try m.a().dupe(u8, region.name);
         r.segments = .empty;
         r.path = .empty;
-        r.items = .empty;
+        r.old_items = .empty;
+        r.old_next = .none;
+        // A flow of its own.
+        const fi = try m.newFlow(r.name, r.id);
+        r.flow = m.flows.items[fi].id;
+        r.old_paragraph = null;
+        r.old_indent = 0;
         const regions = &m.panels.items[panel].regions;
         try regions.append(m.a(), r);
         m.revision += 1;
@@ -3612,8 +3672,165 @@ pub const Model = struct {
         }
     }
 
+    // Flows ------------------------------------------------------------
+
+    /// The index of flow `id`, if it is one.
+    pub fn flowIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.flows.items, 0..) |f, i| if (f.id == id) return i;
+        return null;
+    }
+
+    /// The index of the flow track `region` of `panel` is assigned to.
+    pub fn trackFlowIndex(m: *const Model, panel: usize, region: usize) ?usize {
+        return m.flowIndex(m.panels.items[panel].regions.items[region].flow);
+    }
+
+    /// The flow track `region` of `panel` is assigned to.
+    pub fn trackFlow(m: *const Model, panel: usize, region: usize) ?*const Flow {
+        return &m.flows.items[m.trackFlowIndex(panel, region) orelse return null];
+    }
+
+    /// Whether track `region` of `panel` is the first of its flow's: the
+    /// one its content starts in (as a thread's first track held it).
+    pub fn firstOfFlow(m: *const Model, panel: usize, region: usize) bool {
+        const f = m.trackFlow(panel, region) orelse return true;
+        return f.tracks.items.len == 0 or f.tracks.items[0] == m.panels.items[panel].regions.items[region].id;
+    }
+
+    /// The content of track `region`'s flow, where that track starts it:
+    /// on the flow's first track, all of it; on the others, nothing. (So
+    /// a pass over every track meets each flow's content once.)
+    pub fn ownItems(m: *const Model, panel: usize, region: usize) []const Item {
+        if (!m.firstOfFlow(panel, region)) return &.{};
+        const f = m.trackFlow(panel, region) orelse return &.{};
+        return f.items.items;
+    }
+
+    /// The content of the flow track `region` of `panel` is assigned to,
+    /// whichever of its tracks it is.
+    pub fn flowItems(m: *const Model, panel: usize, region: usize) []const Item {
+        const f = m.trackFlow(panel, region) orelse return &.{};
+        return f.items.items;
+    }
+
+    /// The first paragraph's style of track `region`'s flow, where the
+    /// track starts it (else null, as `ownItems`).
+    pub fn ownParagraph(m: *const Model, panel: usize, region: usize) ?ParaId {
+        if (!m.firstOfFlow(panel, region)) return null;
+        const f = m.trackFlow(panel, region) orelse return null;
+        return f.paragraph;
+    }
+
+    /// The new-paragraph indent of track `region`'s flow, u.
+    pub fn trackIndent(m: *const Model, panel: usize, region: usize) f64 {
+        const f = m.trackFlow(panel, region) orelse return 0;
+        return f.indent;
+    }
+
+    /// The flow track `region` of `panel` is assigned to, to change. Every
+    /// track has one (`addRegion`, `copyRegion`, `upgradeFlows`).
+    fn flowOf(m: *Model, panel: usize, region: usize) *Flow {
+        return &m.flows.items[m.trackFlowIndex(panel, region).?];
+    }
+
     fn flow(m: *Model, panel: usize, region: usize) *std.ArrayList(Item) {
-        return &m.panels.items[panel].regions.items[region].items;
+        return &m.flowOf(panel, region).items;
+    }
+
+    /// A new flow named `name` running through track `track` (or none),
+    /// empty. Returns its index.
+    fn newFlow(m: *Model, name: []const u8, track: ObjectId) Error!usize {
+        var f: Flow = .{ .id = m.newId(), .name = try m.a().dupe(u8, name) };
+        if (track != .none) try f.tracks.append(m.a(), track);
+        try m.flows.append(m.a(), f);
+        return m.flows.items.len - 1;
+    }
+
+    /// Flows after tracks have gone: each loses the tracks no longer
+    /// there; one left with none keeps its text, unplaced, and lets go of
+    /// its tiles (removed, unless placed in another flow); one left with
+    /// nothing at all goes.
+    fn tidyFlows(m: *Model) void {
+        for (m.flows.items) |*f| {
+            var k: usize = 0;
+            while (k < f.tracks.items.len) {
+                if (m.trackById(f.tracks.items[k]) == null) _ = f.tracks.orderedRemove(k) else k += 1;
+            }
+        }
+        var i: usize = 0;
+        while (i < m.flows.items.len) {
+            const f = &m.flows.items[i];
+            if (f.tracks.items.len > 0) {
+                i += 1;
+                continue;
+            }
+            var j: usize = 0;
+            var text = false;
+            while (j < f.items.items.len) {
+                if (f.items.items[j].tileOf()) |_| {
+                    _ = f.items.orderedRemove(j);
+                } else {
+                    if (f.items.items[j].what == .run) text = true;
+                    j += 1;
+                }
+            }
+            if (!text) _ = m.flows.orderedRemove(i) else i += 1;
+        }
+    }
+
+    /// Whether tile `id` is in any flow's content.
+    fn tileInFlows(m: *const Model, id: TileId) bool {
+        for (m.flows.items) |f| for (f.items.items) |item| if (item.tileOf() == id) return true;
+        return false;
+    }
+
+    /// Reads an older document's threads into flows: each thread (a
+    /// first track and the tracks its `old_next` leads on to) becomes one
+    /// flow, named after its first track, holding what that track held.
+    /// Any track still without a flow gets one of its own. Called on
+    /// loading; does nothing to a document already in flows.
+    pub fn upgradeFlows(m: *Model) Allocator.Error!void {
+        const starts = struct {
+            fn isTarget(mm: *const Model, id: ObjectId) bool {
+                for (mm.panels.items) |p| for (p.regions.items) |r| if (r.old_next == id and r.flow == .none) return true;
+                return false;
+            }
+        };
+        // Threads first, from the tracks nothing leads into.
+        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
+            if (r.flow != .none and m.flowIndex(r.flow) != null) continue;
+            if (starts.isTarget(m, r.id)) continue;
+            try m.flowFromThread(pi, ri);
+        };
+        // A loop of tracks has no first: each of what is left starts one.
+        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
+            if (r.flow != .none and m.flowIndex(r.flow) != null) continue;
+            try m.flowFromThread(pi, ri);
+        };
+    }
+
+    fn flowFromThread(m: *Model, panel: usize, region: usize) Allocator.Error!void {
+        const r = &m.panels.items[panel].regions.items[region];
+        const fi = m.newFlow(r.name, .none) catch return error.OutOfMemory;
+        const f = &m.flows.items[fi];
+        f.items = r.old_items;
+        f.paragraph = r.old_paragraph;
+        f.indent = r.old_indent;
+        var at: ?TrackRef = .{ .panel = panel, .region = region };
+        var steps: usize = 0;
+        while (at) |t| : (steps += 1) {
+            const tr = &m.panels.items[t.panel].regions.items[t.region];
+            if (steps > 4096 or (tr.flow != .none and m.flowIndex(tr.flow) != null)) break;
+            try m.flows.items[fi].tracks.append(m.a(), tr.id);
+            tr.flow = m.flows.items[fi].id;
+            const next = tr.old_next;
+            tr.old_items = .empty;
+            tr.old_next = .none;
+            tr.old_paragraph = null;
+            tr.old_indent = 0;
+            at = m.trackById(next);
+        }
     }
 
     /// Inserts item `item` at position `index` of a track's flow (0
@@ -3707,7 +3924,7 @@ pub const Model = struct {
     /// long follows it. Returns how many items went in (1, or 2).
     pub fn insertBreak(m: *Model, panel: usize, region: usize, index: usize) Error!usize {
         try m.place(panel, region, index, .{ .what = .hard_break });
-        const indent = m.panels.items[panel].regions.items[region].indent;
+        const indent = m.trackIndent(panel, region);
         if (!(indent > 0)) return 1;
         _ = try m.insertBlank(panel, region, index + 1, indent);
         return 2;
@@ -3835,7 +4052,7 @@ pub const Model = struct {
     /// Where the paragraph holding item `index` of a track takes its
     /// style from: the separator before it, or (null) the track.
     pub fn paragraphStart(m: *const Model, panel: usize, region: usize, index: usize) ?usize {
-        const items = m.panels.items[panel].regions.items[region].items.items;
+        const items = m.flowItems(panel, region);
         var k = @min(index, items.len);
         while (k > 0) {
             k -= 1;
@@ -3846,19 +4063,19 @@ pub const Model = struct {
 
     /// The paragraph style of the paragraph holding item `index`.
     pub fn paragraphStyleAt(m: *const Model, panel: usize, region: usize, index: usize) ?ParaId {
-        const r = m.panels.items[panel].regions.items[region];
-        const k = m.paragraphStart(panel, region, index) orelse return r.paragraph;
-        return r.items.items[k].what.paragraph;
+        const f = m.trackFlow(panel, region) orelse return null;
+        const k = m.paragraphStart(panel, region, index) orelse return f.paragraph;
+        return f.items.items[k].what.paragraph;
     }
 
     /// Sets the paragraph style of the paragraph holding item `index`
     /// (null: none), at its separator or, for the first, on the track.
     pub fn setParagraphAt(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
         if (style) |id| if (m.paraIndex(id) == null) return error.NoSuchStyle;
-        const r = &m.panels.items[panel].regions.items[region];
+        const f = m.flowOf(panel, region);
         if (m.paragraphStart(panel, region, index)) |k| {
-            r.items.items[k].what = .{ .paragraph = style };
-        } else r.paragraph = style;
+            f.items.items[k].what = .{ .paragraph = style };
+        } else f.paragraph = style;
         m.revision += 1;
     }
 
@@ -3885,40 +4102,57 @@ pub const Model = struct {
         return null;
     }
 
-    /// The track whose flow goes on into track `region` of `panel`, on
-    /// whichever panel, if any.
-    pub fn threadBefore(m: *const Model, panel: usize, region: usize) ?TrackRef {
+    /// Where track `region` of `panel` comes in its flow's list, if it is
+    /// in it.
+    fn flowPosition(m: *const Model, panel: usize, region: usize) ?usize {
+        const f = m.trackFlow(panel, region) orelse return null;
         const id = m.panels.items[panel].regions.items[region].id;
-        if (id == .none) return null;
-        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, k| {
-            if (r.next == id and !(pi == panel and k == region)) return .{ .panel = pi, .region = k };
-        };
+        for (f.tracks.items, 0..) |t, k| if (t == id) return k;
         return null;
     }
 
-    /// The first track of the thread `region` is in (itself when none goes
-    /// on into it): the one that holds the thread's flow.
-    pub fn threadHead(m: *const Model, panel: usize, region: usize) TrackRef {
-        var at: TrackRef = .{ .panel = panel, .region = region };
-        var steps: usize = 0;
-        while (m.threadBefore(at.panel, at.region)) |b| : (steps += 1) {
-            if ((b.panel == panel and b.region == region) or steps > 4096) break;
-            at = b;
+    /// The track before track `region` of `panel` in its flow (whose
+    /// content goes on into it), on whichever panel, if any.
+    pub fn threadBefore(m: *const Model, panel: usize, region: usize) ?TrackRef {
+        const f = m.trackFlow(panel, region) orelse return null;
+        var k = m.flowPosition(panel, region) orelse return null;
+        while (k > 0) {
+            k -= 1;
+            if (m.trackById(f.tracks.items[k])) |t| return t;
         }
-        return at;
+        return null;
     }
 
-    /// The tracks of the thread starting at `head`, in order, into `buf`
-    /// (stopping at a track already listed).
+    /// The track after track `region` of `panel` in its flow (its content
+    /// goes on into it once this one is full), if any.
+    pub fn threadAfter(m: *const Model, panel: usize, region: usize) ?TrackRef {
+        const f = m.trackFlow(panel, region) orelse return null;
+        const k = m.flowPosition(panel, region) orelse return null;
+        for (f.tracks.items[k + 1 ..]) |id| if (m.trackById(id)) |t| return t;
+        return null;
+    }
+
+    /// The first track of track `region`'s flow (itself when it is the
+    /// first, or in none).
+    pub fn threadHead(m: *const Model, panel: usize, region: usize) TrackRef {
+        const f = m.trackFlow(panel, region) orelse return .{ .panel = panel, .region = region };
+        for (f.tracks.items) |id| if (m.trackById(id)) |t| return t;
+        return .{ .panel = panel, .region = region };
+    }
+
+    /// The tracks of the flow track `head` is in, in order, into `buf`.
     pub fn thread(m: *const Model, head: TrackRef, buf: []TrackRef) []TrackRef {
+        const f = m.trackFlow(head.panel, head.region) orelse {
+            if (buf.len == 0) return buf[0..0];
+            buf[0] = head;
+            return buf[0..1];
+        };
         var n: usize = 0;
-        var at: ?TrackRef = head;
-        while (at) |k| {
+        for (f.tracks.items) |id| {
             if (n >= buf.len) break;
-            for (buf[0..n]) |x| if (x.panel == k.panel and x.region == k.region) return buf[0..n];
-            buf[n] = k;
+            const t = m.trackById(id) orelse continue;
+            buf[n] = t;
             n += 1;
-            at = m.trackById(m.panels.items[k.panel].regions.items[k.region].next);
         }
         return buf[0..n];
     }
@@ -3946,21 +4180,24 @@ pub const Model = struct {
         const t: TrackRef = .{ .panel = to_panel, .region = to };
         if (m.trackPtr(f).major != m.trackPtr(t).major) return error.BadJoin;
         if (m.threadBefore(to_panel, to) != null) return error.BadJoin;
-        const head = m.threadHead(from_panel, from);
-        if (head.panel == to_panel and head.region == to) return error.BadJoin;
-        var buf: [256]TrackRef = undefined;
-        const joining = m.thread(t, &buf);
-        const tail = joining[joining.len - 1];
-        m.trackPtr(tail).next = m.trackPtr(f).next;
-        m.trackPtr(f).next = m.trackPtr(t).id;
-        // One flow: what `to` held goes on after the thread's.
-        const hr = m.trackPtr(head);
-        const tr = m.trackPtr(t);
-        if (tr.items.items.len > 0) {
-            if (hr.items.items.len > 0) try hr.items.append(m.a(), .{ .what = .{ .paragraph = tr.paragraph } });
-            try hr.items.appendSlice(m.a(), tr.items.items);
-            tr.items.clearRetainingCapacity();
+        const fi = m.trackFlowIndex(from_panel, from) orelse return error.BadJoin;
+        const gi = m.trackFlowIndex(to_panel, to) orelse return error.BadJoin;
+        if (fi == gi) return error.BadJoin;
+        // `to`'s flow's tracks go in after `from`, its content after the
+        // flow's, as a new paragraph; its flow goes.
+        const at = (m.flowPosition(from_panel, from) orelse return error.BadJoin) + 1;
+        const g = m.flows.items[gi];
+        const into = &m.flows.items[fi];
+        try into.tracks.insertSlice(m.a(), at, g.tracks.items);
+        if (g.items.items.len > 0) {
+            if (into.items.items.len > 0) try into.items.append(m.a(), .{ .what = .{ .paragraph = g.paragraph } });
+            try into.items.appendSlice(m.a(), g.items.items);
         }
+        const fid = into.id;
+        for (g.tracks.items) |id| if (m.trackById(id)) |tr| {
+            m.trackPtr(tr).flow = fid;
+        };
+        _ = m.flows.orderedRemove(gi);
         m.revision += 1;
     }
 
@@ -3969,20 +4206,19 @@ pub const Model = struct {
     /// when `region` held it); what no longer fits overflows the last.
     pub fn unjoinTrack(m: *Model, panel: usize, region: usize) Error!void {
         if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
-        const self: TrackRef = .{ .panel = panel, .region = region };
         const before = m.threadBefore(panel, region);
-        const after = m.trackById(m.trackPtr(self).next);
+        const after = m.threadAfter(panel, region);
         if (before == null and after == null) return error.BadJoin;
-        if (before) |b| m.trackPtr(b).next = m.trackPtr(self).next;
-        if (before == null) if (after) |n| {
-            // It held the flow: the next track does now.
-            const r = m.trackPtr(self);
-            const nr = m.trackPtr(n);
-            try nr.items.appendSlice(m.a(), r.items.items);
-            r.items.clearRetainingCapacity();
-            nr.paragraph = r.paragraph;
-        };
-        m.trackPtr(self).next = .none;
+        // Its flow keeps the content (starting in the next track, when it
+        // started in this one); the track gets a flow of its own, empty.
+        const fi = m.trackFlowIndex(panel, region).?;
+        const k = m.flowPosition(panel, region).?;
+        _ = m.flows.items[fi].tracks.orderedRemove(k);
+        const indent = m.flows.items[fi].indent;
+        const r = &m.panels.items[panel].regions.items[region];
+        const ni = try m.newFlow(r.name, r.id);
+        m.flows.items[ni].indent = indent;
+        m.panels.items[panel].regions.items[region].flow = m.flows.items[ni].id;
         m.revision += 1;
     }
 
@@ -3993,8 +4229,8 @@ pub const Model = struct {
         if (!(indent >= 0) or !(gap >= 0)) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
         r.alignment = alignment;
-        r.indent = indent;
         r.gap = gap;
+        m.flowOf(panel, region).indent = indent;
         m.revision += 1;
     }
 
@@ -4527,13 +4763,13 @@ pub const Model = struct {
 
     /// Takes `id` out of every track it is in, keeping the tile itself.
     pub fn unplace(m: *Model, id: TileId) void {
-        for (m.panels.items) |*panel| for (panel.regions.items) |*region| {
+        for (m.flows.items) |*f| {
             var i: usize = 0;
-            while (i < region.items.items.len) {
-                const here = region.items.items[i].tileOf();
-                if (here != null and here.? == id) _ = region.items.orderedRemove(i) else i += 1;
+            while (i < f.items.items.len) {
+                const here = f.items.items[i].tileOf();
+                if (here != null and here.? == id) _ = f.items.orderedRemove(i) else i += 1;
             }
-        };
+        }
         m.revision += 1;
     }
 
@@ -4729,7 +4965,7 @@ test "tracks are added empty; a removed tile leaves them" {
     // that is straight until it is given control points.
     try std.testing.expectEqual(0, region.segments.items.len);
     try std.testing.expectEqual(0, region.path.items.len);
-    try std.testing.expectEqual(0, region.items.items.len);
+    try std.testing.expectEqual(0, m.flowItems(p, r).len);
     try std.testing.expectEqual(0, m.tiles.items.len);
 
     // Columns: as thick as the smallest width, as long as asked.
@@ -4743,7 +4979,7 @@ test "tracks are added empty; a removed tile leaves them" {
     const t1 = m.findTile("T1").?;
     m.removeTile(t1);
     try std.testing.expectEqual(null, m.findTile("T1"));
-    try std.testing.expectEqual(3, m.panels.items[p].regions.items[r].items.items.len);
+    try std.testing.expectEqual(3, m.flowItems(p, r).len);
 }
 
 test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
@@ -4757,7 +4993,7 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     // T1 T2; insert a 1.5 u tile between them, and a blank before it.
     const t = try m.insertTile(p, r, 1, key, 1.5);
     const b = try m.insertBlank(p, r, 1, 0.25);
-    const items = m.panels.items[p].regions.items[r].items.items;
+    const items = m.flowItems(p, r);
     try std.testing.expectEqual(4, items.len);
     // A blank is a tile of the built-in Blank prototype.
     try std.testing.expectEqual(b, items[1].tileOf().?);
@@ -4771,7 +5007,7 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     // Removing the blank, then the tile.
     try m.removeAt(p, r, 1);
     try m.removeAt(p, r, 1);
-    const left = m.panels.items[p].regions.items[r].items.items;
+    const left = m.flowItems(p, r);
     try std.testing.expectEqual(2, left.len);
     try std.testing.expectEqual(null, m.findTile("T3"));
     try std.testing.expectError(error.NoSuchItem, m.removeAt(p, r, 5));
@@ -4782,12 +5018,12 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     // goes between any two items.
     try m.insertRun(p, r, 1, .{ .content = "x = \\frac{1}{2}" });
     _ = try m.insertBreak(p, r, 2);
-    const mixed = m.panels.items[p].regions.items[r].items.items;
+    const mixed = m.flowItems(p, r);
     try std.testing.expectEqual(5, mixed.len);
     try std.testing.expectEqualStrings("x = \\frac{1}{2}", mixed[1].what.run.content);
     try std.testing.expect(mixed[2].what == .hard_break);
     try m.setRunContent(p, r, 1, "word");
-    try std.testing.expectEqualStrings("word", m.panels.items[p].regions.items[r].items.items[1].what.run.content);
+    try std.testing.expectEqualStrings("word", m.flowItems(p, r)[1].what.run.content);
     try std.testing.expectError(error.NoSuchItem, m.setRunContent(p, r, 0, "x"));
 }
 
@@ -5085,7 +5321,7 @@ test "a flow is edited in place: typed into, deleted across items, broken and jo
     const p = try m.addPanel("page", 100, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
     const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
-    const items = &m.panels.items[p].regions.items[r].items;
+    const items = &m.flowOf(p, r).items;
     // Typing into an empty flow makes a run; more goes on its end.
     var at = try m.insertText(p, r, .{ .index = 0 }, "Hello", body);
     try std.testing.expectEqual(FlowPos{ .index = 1 }, at);
@@ -5123,7 +5359,7 @@ test "an equation is its own item: put in a run of text, kept apart from it" {
     const p = try m.addPanel("page", 100, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
     const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
-    const items = &m.panels.items[p].regions.items[r].items;
+    const items = &m.flowOf(p, r).items;
     _ = try m.insertText(p, r, .{ .index = 0 }, "area is ", body);
     // Inside the text: the run splits either side of the new equation.
     const eq = try m.insertEquation(p, r, .{ .index = 0, .offset = 4 }, body);
@@ -5289,4 +5525,96 @@ test "ready-made shape sketches are fully constrained, sized by their parameters
         if (kind != .circle) try std.testing.expectApproxEqAbs(@as(f64, 8), bx.height(), 1e-6);
         try std.testing.expectApproxEqAbs(@as(f64, 0), (bx.x0 + bx.x1) / 2, 1e-6);
     }
+}
+
+test "flows: a track drawn has its own; joining makes one flow, unjoining gives the track a new one" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    try std.testing.expectEqual(2, m.flows.items.len);
+    try std.testing.expectEqualStrings("A", m.trackFlow(p, a).?.name);
+    _ = try m.insertText(p, a, .{ .index = 0 }, "first", body);
+    _ = try m.insertText(p, b, .{ .index = 0 }, "second", body);
+    try m.joinTracks(p, a, b);
+    // One flow through both, A's content then B's as a new paragraph.
+    try std.testing.expectEqual(1, m.flows.items.len);
+    try std.testing.expectEqual(m.trackFlow(p, a), m.trackFlow(p, b));
+    try std.testing.expectEqual(3, m.flowItems(p, b).len);
+    try std.testing.expectEqual(3, m.ownItems(p, a).len);
+    try std.testing.expectEqual(0, m.ownItems(p, b).len);
+    try std.testing.expectEqual(b, m.threadAfter(p, a).?.region);
+    try std.testing.expectEqual(a, m.threadHead(p, b).region);
+    // A out: the flow keeps everything and starts in B; A has a new one.
+    try m.unjoinTrack(p, a);
+    try std.testing.expectEqual(2, m.flows.items.len);
+    try std.testing.expectEqual(3, m.ownItems(p, b).len);
+    try std.testing.expectEqual(0, m.flowItems(p, a).len);
+    try std.testing.expect(m.threadAfter(p, b) == null);
+}
+
+test "flows: a panel's copy gets copies of its flows; a panel removed leaves its text unplaced" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const q = try m.addPanel("other", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    _ = try m.insertText(p, a, .{ .index = 0 }, "words", body);
+    try m.joinTracks(p, a, b);
+    const c = try m.copyPanel(p);
+    // The copy's two tracks run through one new flow holding a copy.
+    try std.testing.expectEqual(2, m.flows.items.len);
+    try std.testing.expect(m.trackFlow(c, a) != m.trackFlow(p, a));
+    try std.testing.expectEqual(m.trackFlow(c, a), m.trackFlow(c, b));
+    try std.testing.expectEqualStrings("words", m.flowItems(c, a)[0].what.run.content);
+    // A flow on two panels: removing one leaves it on the other.
+    const k = try m.addTracks(q, .{ .name = "K", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    try m.threadTracks(p, b, q, k);
+    m.removePanel(c);
+    m.removePanel(p);
+    // q is now panel 0: the flow runs through K alone, its text kept; the
+    // copy's flow, its tracks gone, keeps its text unplaced.
+    try std.testing.expectEqual(2, m.flows.items.len);
+    try std.testing.expectEqualStrings("words", m.ownItems(0, k)[0].what.run.content);
+    // Its last track gone, that text stays too, unplaced.
+    m.removePanel(0);
+    try std.testing.expectEqual(2, m.flows.items.len);
+    for (m.flows.items) |f| {
+        try std.testing.expectEqual(0, f.tracks.items.len);
+        try std.testing.expectEqual(1, f.items.items.len);
+    }
+}
+
+test "flows: an older document's threads are read into flows" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 100, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    // As an older file has them: no flows; A held the thread A → B, C its own.
+    const rs = m.panels.items[p].regions.items;
+    var items: std.ArrayList(Item) = .empty;
+    try items.append(m.a(), .{ .what = .{ .run = .{ .content = "old text", .style = body } } });
+    rs[a].old_items = items;
+    rs[a].old_next = rs[b].id;
+    rs[a].old_indent = 1.5;
+    m.flows.clearRetainingCapacity();
+    for (rs) |*r| r.flow = .none;
+    try m.upgradeFlows();
+    try std.testing.expectEqual(2, m.flows.items.len);
+    try std.testing.expectEqual(m.trackFlow(p, a), m.trackFlow(p, b));
+    try std.testing.expect(m.trackFlow(p, c) != m.trackFlow(p, a));
+    try std.testing.expectEqualStrings("A", m.trackFlow(p, a).?.name);
+    try std.testing.expectEqualStrings("old text", m.ownItems(p, a)[0].what.run.content);
+    try std.testing.expectEqual(1.5, m.trackIndent(p, b));
+    try std.testing.expectEqual(0, rs[a].old_items.items.len);
+    // Again: nothing changes.
+    try m.upgradeFlows();
+    try std.testing.expectEqual(2, m.flows.items.len);
 }

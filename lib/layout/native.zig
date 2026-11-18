@@ -126,11 +126,11 @@ const Writer = struct {
                 if (comptime isList(T)) return w.value(@TypeOf(v.items), v.items);
                 var n: u32 = 0;
                 inline for (s.field_names) |fname| {
-                    if (comptime !skipped(T, fname)) n += 1;
+                    if (comptime !skipped(T, fname) and !readOnly(T, fname)) n += 1;
                 }
                 try w.int(u32, n);
                 inline for (s.field_names, s.field_types) |fname, ftype| {
-                    if (comptime skipped(T, fname)) continue;
+                    if (comptime skipped(T, fname) or readOnly(T, fname)) continue;
                     try w.int(u32, comptime nameHash(fname));
                     const at = try w.beginLength();
                     try w.value(ftype, @field(v, fname));
@@ -147,6 +147,18 @@ const Writer = struct {
 fn skipped(comptime T: type, comptime field: []const u8) bool {
     if (T == model.Model) return std.mem.eql(u8, field, "arena") or std.mem.eql(u8, field, "revision");
     return false;
+}
+
+/// The name a field has in files: its own, or, for a field kept only to
+/// read older documents, the name it had then (the type's `file_names`,
+/// field name to file name). Such a field is read, never written.
+fn fileName(comptime T: type, comptime field: []const u8) []const u8 {
+    if (@hasDecl(T, "file_names") and @hasField(@TypeOf(T.file_names), field)) return @field(T.file_names, field);
+    return field;
+}
+
+fn readOnly(comptime T: type, comptime field: []const u8) bool {
+    return @hasDecl(T, "file_names") and @hasField(@TypeOf(T.file_names), field);
 }
 
 fn isList(comptime T: type) bool {
@@ -294,7 +306,7 @@ const Reader = struct {
                     if (end > r.in.len) return error.Truncated;
                     inline for (s.field_names, s.field_types) |fname, ftype| {
                         if (comptime skipped(T, fname)) continue;
-                        if (h == comptime nameHash(fname)) {
+                        if (h == comptime nameHash(fileName(T, fname))) {
                             @field(out, fname) = try r.value(ftype);
                             if (r.i != end) return error.BadFile;
                         }
@@ -389,6 +401,8 @@ pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
     m = read;
     m.arena = arena;
     m.revision = 0;
+    // An older document's threads, read into flows.
+    try m.upgradeFlows();
     return m;
 }
 
@@ -416,7 +430,7 @@ pub fn dump(w: *std.Io.Writer, comptime T: type, v: T) std.Io.Writer.Error!void 
     if (comptime @typeInfo(T) == .@"struct" and !isList(T) and !scalar(T)) {
         var first = true;
         inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |fname, ftype| {
-            if (comptime skipped(T, fname)) continue;
+            if (comptime skipped(T, fname) or readOnly(T, fname)) continue;
             if (!first) try w.writeByte('\n');
             first = false;
             try w.writeAll(fname);
@@ -552,8 +566,8 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqualSlices(u8, bytes, again);
     // And it is the same document.
     try testing.expectEqual(.inch, back.units);
-    try testing.expectEqualStrings("V = \\frac{1}{2}", back.panels.items[c].regions.items[r].items.items[1].what.run.content);
-    try testing.expect(back.panels.items[c].regions.items[r].items.items[1].what.run.equation);
+    try testing.expectEqualStrings("V = \\frac{1}{2}", back.flowItems(c, r)[1].what.run.content);
+    try testing.expect(back.flowItems(c, r)[1].what.run.equation);
     try testing.expectEqualStrings("Libertinus Math", back.textStyle(style).face("math").?.family);
     try testing.expectEqual(1.2, back.textStyle(style).rules.items[0].value.number);
     try testing.expectEqual(0.1 + 0.2, back.panels.items[p].h);
@@ -623,4 +637,25 @@ test "a model dumps as text, a field a line" {
     try testing.expect(std.mem.indexOf(u8, text, "content: \"Hello \\\"you\\\"\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "units: mm") != null);
     try testing.expect(std.mem.indexOf(u8, text, "arena") == null);
+}
+
+test "a track's fields from before flows are read by their old names, and not written" {
+    const gpa = testing.allocator;
+    // A track as an older file wrote it: its flow on itself.
+    const Old = struct { name: []const u8, pitch: f64, indent: f64, next: model.ObjectId, items: []const model.Item };
+    const item: model.Item = .{ .what = .{ .run = .{ .content = "kept" } } };
+    const bytes = try encodeValue(gpa, Old, .{ .name = "T", .pitch = 6, .indent = 2, .next = @enumFromInt(7), .items = &.{item} });
+    defer gpa.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try decodeValue(arena.allocator(), model.TileRegion, bytes);
+    try testing.expectEqual(2, r.old_indent);
+    try testing.expectEqual(@as(model.ObjectId, @enumFromInt(7)), r.old_next);
+    try testing.expectEqualStrings("kept", r.old_items.items[0].what.run.content);
+    // Written now, a track has none of them.
+    const again = try encodeValue(gpa, model.TileRegion, r);
+    defer gpa.free(again);
+    const back = try decodeValue(arena.allocator(), model.TileRegion, again);
+    try testing.expectEqual(0, back.old_items.items.len);
+    try testing.expectEqual(model.ObjectId.none, back.old_next);
 }

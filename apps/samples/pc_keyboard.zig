@@ -257,7 +257,7 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
                 var nb: [48]u8 = undefined;
                 const name = try std.fmt.bufPrint(&nb, "Row gap {d} u", .{row.gap});
                 const ps = try m.addParagraphStyle(.{ .name = name, .space_before = row.gap * pitch });
-                try m.insertParagraph(p, r, m.panels.items[p].regions.items[r].items.items.len, ps);
+                try m.insertParagraph(p, r, m.flowItems(p, r).len, ps);
             } else try m.place(p, r, null, .{ .what = .hard_break });
         }
         for (row.entries) |e| {

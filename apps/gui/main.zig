@@ -3358,7 +3358,7 @@ const ExprTarget = union(enum) {
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
             .tile_track => |tt| state.model.tileTrackText(dvui.currentWindow().arena(), tt.tile, tt.track) catch "",
-            .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.content,
+            .run => |r| state.model.flowItems(r.panel, r.region)[r.item].what.run.content,
         };
     }
 
@@ -3373,7 +3373,7 @@ const ExprTarget = union(enum) {
     fn isMath(t: ExprTarget) bool {
         return switch (t) {
             .tile_track => false,
-            .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.equation,
+            .run => |r| state.model.flowItems(r.panel, r.region)[r.item].what.run.equation,
         };
     }
 
@@ -8864,7 +8864,7 @@ fn properties() !void {
             propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
-            propText("Items", "{d}{s}", .{ state.model.panels.items[head.panel].regions.items[head.region].items.items.len, if (!is_head) " in its thread's flow" else "" }, 8);
+            propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its thread's flow" else "" }, 8);
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
             };
@@ -9169,7 +9169,7 @@ fn protoUnit(p: layout.model.TilePrototype) f64 {
 fn trackFlowProperties(pi: usize, ri: usize) !void {
     const region = state.model.panels.items[pi].regions.items[ri];
     var alignment = region.alignment;
-    var indent = region.indent;
+    var indent = state.model.trackIndent(pi, ri);
     var gap = region.gap;
     var changed = false;
     {
@@ -9333,7 +9333,7 @@ fn valueEditor(p: glyphic.Param, v: *glyphic.Value, default: bool, n: usize) boo
 /// The text style the expression line's target is set in.
 fn exprStyle(target: ExprTarget) ?layout.model.StyleId {
     return switch (target) {
-        .run => |r| state.model.panels.items[r.panel].regions.items[r.region].items.items[r.item].what.run.style,
+        .run => |r| state.model.flowItems(r.panel, r.region)[r.item].what.run.style,
         .tile_track => |tt| for (state.model.prototypeOf(tt.tile).tracks) |t| {
             if (t.id == tt.track) break t.style;
         } else null,
@@ -9873,7 +9873,6 @@ fn contextRegion() ?struct { panel: usize, region: usize } {
 /// goes before: the first in that segment whose middle lies beyond it, else
 /// the segment's hard break (the end of its line), else past its last item.
 fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
-    const r = state.model.panels.items[pi].regions.items[region];
     var after: ?usize = null;
     for (flowItems(pi, region)) |it| {
         if (it.segment != seg) continue;
@@ -9881,7 +9880,7 @@ fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
         if ((it.span[0] + it.span[1]) / 2 > along) return it.index;
         after = it.index + 1;
     }
-    return after orelse r.items.items.len;
+    return after orelse state.model.flowItems(pi, region).len;
 }
 
 /// How many rows or columns a track's flow reached in the last solve.
@@ -9935,9 +9934,10 @@ fn modelItem(pi: usize, it: layout.place.PlacedItem) ?layout.model.Item {
     _ = pi;
     // The flow is its thread's first track's, on whichever panel.
     if (it.flow_panel >= state.model.panels.items.len) return null;
-    const regions = state.model.panels.items[it.flow_panel].regions.items;
-    if (it.region >= regions.len or it.index >= regions[it.region].items.items.len) return null;
-    return regions[it.region].items.items[it.index];
+    if (it.region >= state.model.panels.items[it.flow_panel].regions.items.len) return null;
+    const items = state.model.flowItems(it.flow_panel, it.region);
+    if (it.index >= items.len) return null;
+    return items[it.index];
 }
 
 fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
@@ -9996,7 +9996,7 @@ fn flowStops(fp: usize, fr: usize) []Stop {
     const a = dvui.currentWindow().arena();
     var list: std.ArrayList(Stop) = .empty;
     if (fp >= state.model.panels.items.len or fr >= state.model.panels.items[fp].regions.items.len) return &.{};
-    const items = state.model.panels.items[fp].regions.items[fr].items.items;
+    const items = state.model.flowItems(fp, fr);
     var last: ?Stop = null;
     for (state.placed.items, 0..) |pl, pi| {
         for (pl.items) |it| {
@@ -10090,7 +10090,7 @@ fn stopAt(stops: []const Stop, index: usize, offset: u32) ?usize {
 /// The character at a stop, for telling words apart: none (null) before an
 /// item that is not text.
 fn stopChar(fp: usize, fr: usize, st: Stop) ?u8 {
-    const items = state.model.panels.items[fp].regions.items[fr].items.items;
+    const items = state.model.flowItems(fp, fr);
     if (st.index >= items.len or items[st.index].what != .run) return null;
     const content = items[st.index].what.run.content;
     return if (st.offset < content.len) content[st.offset] else null;
@@ -10234,7 +10234,7 @@ fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
 /// after it.
 fn runAtCursor() ?struct { panel: usize, region: usize, item: usize } {
     const c = track_cursor orelse return null;
-    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const items = state.model.flowItems(c.panel, c.region);
     if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
     if (c.index > 0 and c.index <= items.len and items[c.index - 1].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index - 1 };
     if (c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
@@ -10272,13 +10272,13 @@ fn validateCursor() void {
         track_cursor = null;
         return;
     }
-    const r = state.model.panels.items[c.panel].regions.items[c.region];
-    track_cursor.?.index = @min(c.index, r.items.items.len);
+    const r_items = state.model.flowItems(c.panel, c.region);
+    track_cursor.?.index = @min(c.index, r_items.len);
     // Within a run, only while there is a run there and the offset is in it.
     const tc = &track_cursor.?;
     if (tc.offset > 0) {
-        const in_run = tc.index < r.items.items.len and r.items.items[tc.index].what == .run;
-        if (!in_run) tc.offset = 0 else if (tc.offset >= r.items.items[tc.index].what.run.content.len) {
+        const in_run = tc.index < r_items.len and r_items[tc.index].what == .run;
+        if (!in_run) tc.offset = 0 else if (tc.offset >= r_items[tc.index].what.run.content.len) {
             tc.index += 1;
             tc.offset = 0;
         }
@@ -10310,7 +10310,7 @@ fn flowAction(inv: keymap.Invocation) bool {
         return true;
     }
     const region = state.model.panels.items[c.panel].regions.items[c.region];
-    const len = region.items.items.len;
+    const len = state.model.flowItems(c.panel, c.region).len;
     switch (inv.action) {
         kact("canvas.flow.copy") => copyFlowSelection(false),
         kact("canvas.flow.cut") => copyFlowSelection(true),
@@ -10436,7 +10436,7 @@ fn copyFlowSelection(cut: bool) void {
 /// else at the end of the run before, else the item before.
 fn charBeforeCursor(c: TrackCursor) ?layout.model.FlowPos {
     const a = dvui.currentWindow().arena();
-    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const items = state.model.flowItems(c.panel, c.region);
     if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) {
         const at = layout.edit.charBefore(a, items[c.index].what.run.content, c.offset, items[c.index].what.run.equation) catch null;
         return .{ .index = c.index, .offset = at orelse 0 };
@@ -10453,7 +10453,7 @@ fn charBeforeCursor(c: TrackCursor) ?layout.model.FlowPos {
 /// Where the character at the cursor ends.
 fn charAfterCursor(c: TrackCursor, len: usize) ?layout.model.FlowPos {
     if (c.index >= len) return null;
-    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const items = state.model.flowItems(c.panel, c.region);
     if (items[c.index].what == .run) {
         const content = items[c.index].what.run.content;
         const end = (layout.edit.charAfter(dvui.currentWindow().arena(), content, c.offset, items[c.index].what.run.equation) catch null) orelse @as(u32, @intCast(content.len));
@@ -10511,7 +10511,7 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: 
 /// a group breaks as one.
 fn toggleBindAtCursor() void {
     const c = track_cursor orelse return;
-    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const items = state.model.flowItems(c.panel, c.region);
     if (c.index == 0 or c.index >= items.len) {
         state.status = "Put the cursor between two items to join or part them. ";
         return;
@@ -10547,7 +10547,7 @@ var equation_edit: ?struct { panel: usize, region: usize, item: usize, shown: bo
 fn equationEdited() ?@TypeOf(equation_edit.?) {
     const e = equation_edit orelse return null;
     if (e.panel >= state.model.panels.items.len or e.region >= state.model.panels.items[e.panel].regions.items.len) return null;
-    const items = state.model.panels.items[e.panel].regions.items[e.region].items.items;
+    const items = state.model.flowItems(e.panel, e.region);
     if (e.item >= items.len or items[e.item].what != .run or !items[e.item].what.run.equation) return null;
     return e;
 }
@@ -10556,7 +10556,7 @@ fn equationEdited() ?@TypeOf(equation_edit.?) {
 /// just before it, else the one just after it; with the cursor's offset in
 /// its markup.
 fn equationAtCursor(c: TrackCursor) ?struct { item: usize, offset: u32 } {
-    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const items = state.model.flowItems(c.panel, c.region);
     const isEq = struct {
         fn f(its: []const layout.model.Item, i: usize) bool {
             return i < its.len and its[i].what == .run and its[i].what.run.equation;
@@ -10578,7 +10578,7 @@ fn leaveEquation(to_flow: bool) void {
     equation_edit = null;
     typing_seq += 1;
     state.status = "";
-    const content = state.model.panels.items[e.panel].regions.items[e.region].items.items[e.item].what.run.content;
+    const content = state.model.flowItems(e.panel, e.region)[e.item].what.run.content;
     // Empty: nothing typed (an equation of empty slots stays).
     if (content.len == 0) {
         const pos = act(.deleteRange, .{ e.panel, e.region, layout.model.FlowPos{ .index = e.item }, layout.model.FlowPos{ .index = e.item + 1 } }) catch return;
@@ -10601,7 +10601,7 @@ fn leaveEquation(to_flow: bool) void {
 fn tabEquation(back: bool) void {
     const c = track_cursor orelse return;
     const eq = equationAtCursor(c) orelse return;
-    const content = state.model.panels.items[c.panel].regions.items[c.region].items.items[eq.item].what.run.content;
+    const content = state.model.flowItems(c.panel, c.region)[eq.item].what.run.content;
     const anchors = layout.edit.slots(dvui.currentWindow().arena(), content) catch return;
     if (anchors.len == 0) {
         state.status = "This equation has no slots to go round. ";
@@ -10669,7 +10669,7 @@ fn eqContent(q: CanvasEq) ?[]const u8 {
     switch (q.target) {
         .run => |r| {
             if (r.panel >= state.model.panels.items.len or r.region >= state.model.panels.items[r.panel].regions.items.len) return null;
-            const items = state.model.panels.items[r.panel].regions.items[r.region].items.items;
+            const items = state.model.flowItems(r.panel, r.region);
             if (r.item >= items.len or items[r.item].what != .run or items[r.item].what.run.equation != q.math) return null;
             return items[r.item].what.run.content;
         },
@@ -10747,7 +10747,7 @@ fn eqPlaces(a: std.mem.Allocator, src: []const u8, math: bool) []u32 {
 /// just after (past its closing $, or at the start of the item after a run
 /// ending in math), with the caret's place in that run's source.
 fn inlineMathAt(c: TrackCursor) ?struct { item: usize, offset: u32 } {
-    const items = state.model.panels.items[c.panel].regions.items[c.region].items.items;
+    const items = state.model.flowItems(c.panel, c.region);
     const isText = struct {
         fn f(its: []const layout.model.Item, i: usize) bool {
             return i < its.len and its[i].what == .run and !its[i].what.run.equation;
@@ -11294,7 +11294,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         _ = item;
         const r = state.model.panels.items[it.flow_panel].regions.items[it.region];
         // Bound by hand, or a letter tile to its word.
-        if (nx.index != it.index + 1 or !state.model.bound(r.items.items, it.index)) continue;
+        if (nx.index != it.index + 1 or !state.model.bound(state.model.flowItems(it.flow_panel, it.region), it.index)) continue;
         const band = for (placed.tracks) |t| {
             if (t.region == it.region and t.flow_panel == it.flow_panel and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
@@ -11910,7 +11910,7 @@ fn featureHit(at: geom.Point) ?FeatureHit {
 fn threadProperties(pi: usize, ri: usize) void {
     const m = &state.model;
     const before = m.threadBefore(pi, ri);
-    const after = m.trackById(m.panels.items[pi].regions.items[ri].next);
+    const after = m.threadAfter(pi, ri);
     var buf: [160]u8 = undefined;
     if (before) |b| propText("Continues", "{s}", .{trackLabel(&buf, b, pi)}, 30);
     if (after) |n| propText("Goes on into", "{s}", .{trackLabel(&buf, n, pi)}, 31);
@@ -11967,7 +11967,7 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
     const px = dvui.windowNaturalScale();
     const ink: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.7) };
     for (m.panels.items[pi].regions.items, 0..) |r, ri| {
-        const nt = m.trackById(r.next) orelse continue;
+        const nt = m.threadAfter(pi, ri) orelse continue;
         // On another panel: drawn when both are in the shown space.
         if (m.panels.items[nt.panel].space != m.panels.items[pi].space) continue;
         // Leaving: its last segment the flow reached, else its first.
