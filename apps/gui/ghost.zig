@@ -85,6 +85,9 @@ pub const Pane = struct {
     /// The mode the user chose, while a narrow window has made it
     /// auto-hide; given back when the window widens.
     forced: ?Mode = null,
+    /// The mode it had before the active view's kind hid it (a sheet view
+    /// wants no tools); given back when a view that wants it is active.
+    view_hidden: ?Mode = null,
 
     /// Whether it takes events within its bounds.
     pub fn interactive(p: *const Pane) bool {
@@ -105,7 +108,7 @@ pub const Pane = struct {
 
     /// The mode to keep in the settings: the user's own.
     pub fn chosen(p: *const Pane) Mode {
-        return p.forced orelse p.mode;
+        return p.view_hidden orelse p.forced orelse p.mode;
     }
 
     /// `r`, where the pane is drawn in place, moved out past its edge by as
@@ -605,8 +608,10 @@ pub fn apply(panes: []const *Pane, p: *Pane, r: TabResult) void {
         },
         .mode => |m| {
             p.hot.clicked();
-            // The user's choice stands, narrow window or not.
+            // The user's choice stands, narrow window or not, whatever
+            // the view.
             p.forced = null;
+            p.view_hidden = null;
             if (p.mode != .auto and m == .auto) p.reveal = if (p.mode == .ghost) 1 else 0;
             p.mode = m;
             if (m != .ghost) deactivate(p);

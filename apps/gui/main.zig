@@ -1782,6 +1782,7 @@ fn frame() !dvui.App.Result {
         defer rest.deinit();
         body_px = rest.data().borderRectScale().r;
         narrowPanes();
+        panesForView();
         const size = rest.data().contentRect();
         const t: f32 = tab_size;
         const status_h: f32 = if (bottom_pane.mode == .docked) statusHeight() else 0;
@@ -2924,6 +2925,7 @@ fn applyLayout(l: layouts.Layout) void {
     for (all_panes, l.panes) |p, set| {
         p.mode = std.meta.stringToEnum(ghost_pane.Mode, @tagName(set.mode)).?;
         p.forced = null;
+        p.view_hidden = null;
         p.active = false;
         p.hot = .{};
         if (set.size > 0) p.size = set.size;
@@ -3303,8 +3305,9 @@ fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
 fn rightColumn() !void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = props_pane.size }, .max_size_content = .width(props_pane.size), .expand = .vertical, .border = .{ .x = 1 } });
     defer col.deinit();
-    const th = toolsHeight(col.data().contentRect().h);
-    {
+    // A view that hides the tools leaves the column to the properties.
+    const th = if (tools_pane.mode == .hidden and tools_pane.view_hidden != null) 0 else toolsHeight(col.data().contentRect().h);
+    if (th > 0) {
         var top = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .h = th }, .max_size_content = .height(th), .expand = .horizontal, .background = tools_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&tools_pane) } });
         defer top.deinit();
         if (tools_pane.mode == .docked) {
@@ -3313,7 +3316,7 @@ fn rightColumn() !void {
             toolsContent();
         }
     }
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = split_grip } });
+    if (th > 0) _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = split_grip } });
     var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = props_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
     defer rest.deinit();
     if (props_pane.mode == .docked) {
@@ -3488,6 +3491,8 @@ const ExprTarget = union(enum) {
 };
 
 fn exprTarget() ?ExprTarget {
+    // In a sheet view: the selected cell, through its key's slot.
+    if (activeKind() == .sheet) return sheetCellTarget();
     if (canvas_eq) |q| if (eqContent(q) != null) return q.target;
     if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
     return switch (state.context) {
@@ -4261,6 +4266,7 @@ fn sheetProperties(id: layout.model.ObjectId) void {
     if (rows.items.len > 0) propText("Not found", "{d} row{s} name no key", .{ rows.items.len, if (rows.items.len == 1) "" else "s" }, 4);
     if (cols.items.len > 0) propText("Unused", "{d} column{s} match no slot", .{ cols.items.len, if (cols.items.len == 1) "" else "s" }, 5);
     propText("", "Its keys' legends come from it; editing one on its key edits its cell.", .{}, 6);
+    if (dvui.button(@src(), "Open it beside the canvas", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
     if (dvui.button(@src(), "Remove sheet", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         if (act(.removeSheet, .{id})) {
             state.context = .sheets;
@@ -4428,6 +4434,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
             if (ctx == .panel) if (ctx.panel < state.model.panels.items.len and state.model.panels.items[ctx.panel].unbounded) {
                 showSpaceView(state.model.spaceOf(ctx.panel));
             };
+            if (ctx == .sheet) showSheetView(ctx.sheet);
         } else tree_click = .{ .key = key, .ms = now };
         state.context = ctx;
         // The keyboard goes to the canvas, where keys act on the context
@@ -4763,11 +4770,20 @@ const ViewSlot = struct {
     px: ?dvui.Rect.Physical = null,
 };
 
-/// Each view's canvas state while it is not the active one.
+/// Each canvas view's state while the canvas's state is another's.
 var view_slots: [docviews.max_views]ViewSlot = @splat(.{});
+
+/// The canvas view whose state the canvas's is: the active view when it
+/// is a canvas, else the last canvas view active (a sheet beside it shows
+/// its edits there); none when no canvas view is open.
+var canvas_owner: u8 = 0;
 
 /// A press in an inactive view, taken at the end of the frame.
 var view_to_activate: ?u8 = null;
+
+fn activeKind() docviews.Kind {
+    return vl.views[vl.active].kind;
+}
 
 /// Exchanges the canvas's state with view `i`'s slot (twice: as it was).
 fn swapView(i: u8) void {
@@ -4781,27 +4797,35 @@ fn swapView(i: u8) void {
     std.mem.swap(?dvui.Rect.Physical, &canvas_px, &sl.px);
 }
 
-/// Makes view `to` the active one: the canvas's state becomes its, and the
-/// one active before keeps its own in its slot.
-fn activateView(to: u8) void {
-    const from = vl.active;
-    if (to == from) {
-        vl.select(to);
-        return;
+/// Makes canvas view `to` the owner of the canvas's state; the one before
+/// keeps its own in its slot.
+fn takeCanvas(to: u8) void {
+    const from = canvas_owner;
+    if (to == from) return;
+    if (from == docviews.none or !vl.open[from]) {
+        // Nothing to keep: the canvas's state is the new owner's.
+        swapView(to);
+        if (view_slots[to].flat) |*f| f.arena.deinit();
+        view_slots[to] = .{};
+    } else {
+        swapView(to);
+        if (view_slots[from].flat) |*f| f.arena.deinit();
+        view_slots[from] = view_slots[to];
+        view_slots[to] = .{};
     }
-    swapView(to);
-    // Slot `to` now holds what was active: it is `from`'s.
-    if (view_slots[from].flat) |*f| f.arena.deinit();
-    view_slots[from] = view_slots[to];
-    view_slots[to] = .{};
-    vl.select(to);
+    canvas_owner = to;
     if (shown_space >= @max(1, state.model.spaces.items.len)) shown_space = 0;
 }
 
-/// A new view's state: a copy of where the active view looks.
-fn seedSlot(i: u8, space: usize) void {
-    if (view_slots[i].flat) |*f| f.arena.deinit();
-    view_slots[i] = .{ .view = state.view, .space = space };
+/// Makes view `to` the active one (a canvas view takes the canvas's
+/// state too).
+fn activateView(to: u8) void {
+    if (vl.views[to].kind == .canvas) takeCanvas(to);
+    vl.select(to);
+    // Keys go to the view now active.
+    if (vl.views[to].kind == .canvas) {
+        if (canvas_id) |cid| dvui.focusWidget(cid, null, null);
+    }
 }
 
 /// The views back to one canvas view, as a document starts.
@@ -4811,6 +4835,7 @@ fn resetViews() void {
         sl.* = .{};
     }
     vl = docviews.Layout.init(.{});
+    canvas_owner = 0;
     view_to_activate = null;
 }
 
@@ -4825,14 +4850,18 @@ fn targetSpace(target: u32) usize {
     return 0;
 }
 
-/// The layout with where each view looks now, for writing.
+/// The space canvas view `i` shows.
+fn viewSpace(i: u8) usize {
+    return if (i == canvas_owner) shown_space else view_slots[i].space;
+}
+
+/// The layout with where each canvas view looks now, for writing.
 fn syncViews() void {
     for (0..docviews.max_views) |k| {
         const i: u8 = @intCast(k);
-        if (!vl.open[i]) continue;
-        const v: View = if (i == vl.active) state.view else view_slots[i].view;
-        const space = if (i == vl.active) shown_space else view_slots[i].space;
-        vl.views[i] = .{ .kind = .canvas, .target = spaceTarget(space), .cx = v.cx, .cy = v.cy, .ppm = v.ppm };
+        if (!vl.open[i] or vl.views[i].kind != .canvas) continue;
+        const v: View = if (i == canvas_owner) state.view else view_slots[i].view;
+        vl.views[i] = .{ .kind = .canvas, .target = spaceTarget(viewSpace(i)), .cx = v.cx, .cy = v.cy, .ppm = v.ppm };
     }
 }
 
@@ -4846,7 +4875,8 @@ fn encodeViews() []const u8 {
     return views_bytes;
 }
 
-/// The layout a file kept, if it is sound: each view where it looked.
+/// The layout a file kept, if it is sound: each view where it looked. A
+/// sheet view whose sheet is gone shows the canvas instead.
 fn loadViews(bytes: []const u8) void {
     resetViews();
     if (bytes.len == 0) return;
@@ -4855,21 +4885,37 @@ fn loadViews(bytes: []const u8) void {
     const got = layout.native.decodeValue(arena.allocator(), docviews.Layout, bytes) catch return;
     if (!got.valid()) return;
     vl = got;
+    canvas_owner = docviews.none;
+    // The canvas's state goes to the active view if it is a canvas, else
+    // the first canvas view.
+    var owner: u8 = docviews.none;
     for (0..docviews.max_views) |k| {
         const i: u8 = @intCast(k);
         if (!vl.open[i]) continue;
+        if (vl.views[i].kind == .sheet and state.model.sheetIndex(@enumFromInt(vl.views[i].target)) == null) vl.views[i] = .{};
+        if (vl.views[i].kind == .canvas and (owner == docviews.none or i == vl.active)) owner = i;
+    }
+    for (0..docviews.max_views) |k| {
+        const i: u8 = @intCast(k);
+        if (!vl.open[i] or vl.views[i].kind != .canvas) continue;
         const v = vl.views[i];
         const look: View = if (v.ppm > 0) .{ .cx = v.cx, .cy = v.cy, .ppm = v.ppm } else .{ .fit = canvas_view };
-        if (i == vl.active) {
+        if (i == owner) {
             state.view = look;
             shown_space = targetSpace(v.target);
         } else view_slots[i] = .{ .view = look, .space = targetSpace(v.target) };
     }
+    canvas_owner = owner;
 }
 
-/// A view's tab label: its space's name (numbered when two show it).
+/// A view's tab label: its space's or sheet's name (numbered when two
+/// show one).
 fn viewLabel(buf: []u8, i: u8) []const u8 {
-    const space = if (i == vl.active) shown_space else view_slots[i].space;
+    if (vl.views[i].kind == .sheet) {
+        const si = state.model.sheetIndex(@enumFromInt(vl.views[i].target)) orelse return "Sheet";
+        return state.model.sheets.items[si].name;
+    }
+    const space = viewSpace(i);
     var name: []const u8 = "Canvas";
     if (space < state.model.spaces.items.len) name = if (space == 0) "Canvas" else state.model.spaces.items[space].name;
     if (state.model.spaces.items.len == 0) name = "Worksheet";
@@ -4878,14 +4924,28 @@ fn viewLabel(buf: []u8, i: u8) []const u8 {
     var alike: usize = 0;
     for (0..docviews.max_views) |k| {
         const j: u8 = @intCast(k);
-        if (!vl.open[j]) continue;
-        const sp = if (j == vl.active) shown_space else view_slots[j].space;
-        if (sp != space) continue;
+        if (!vl.open[j] or vl.views[j].kind != .canvas) continue;
+        if (viewSpace(j) != space) continue;
         alike += 1;
         if (j == i) nth = alike;
     }
     if (alike <= 1) return name;
     return std.fmt.bufPrint(buf, "{s} ({d})", .{ name, nth }) catch name;
+}
+
+/// The panes the active view's kind wants: a sheet view no tools.
+fn panesForView() void {
+    const want_tools = activeKind() != .sheet;
+    if (!want_tools) {
+        if (tools_pane.view_hidden == null and tools_pane.mode != .hidden) {
+            tools_pane.view_hidden = tools_pane.mode;
+            tools_pane.mode = .hidden;
+            ghost_pane.deactivate(&tools_pane);
+        }
+    } else if (tools_pane.view_hidden) |m| {
+        tools_pane.mode = m;
+        tools_pane.view_hidden = null;
+    }
 }
 
 /// The central region: the views as laid out, or the one maximized.
@@ -4969,49 +5029,73 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             };
         }
     }
-    if (vl.open[shown]) canvasView(shown);
+    if (!vl.open[shown]) return;
+    switch (vl.views[shown].kind) {
+        .canvas => canvasView(shown),
+        .sheet => sheetView(shown),
+    }
 }
 
-/// Draws view `v`: the active one as the canvas always was; another with
-/// its own state swapped in for the drawing.
+/// Draws canvas view `v`: the owner of the canvas's state as the canvas
+/// always was (taking input when it is active); another with its own
+/// state swapped in for the drawing.
 fn canvasView(v: u8) void {
-    if (v == vl.active) return canvas(true, v);
+    if (v == canvas_owner) return canvas(v == vl.active, v);
     swapView(v);
     if (shown_space >= @max(1, state.model.spaces.items.len)) shown_space = 0;
     canvas(false, v);
     swapView(v);
 }
 
-/// A new view beside the active one (`dir`), looking where it looks.
+/// A new canvas view beside the active view (`dir`), looking where the
+/// canvas looks.
 fn splitView(dir: docviews.Dir) void {
     const from = vl.active;
     const look = state.view;
     const space = shown_space;
-    const nv = vl.split(from, dir, .{ .target = spaceTarget(space) }) orelse {
+    const kind = vl.views[from].kind;
+    const target = vl.views[from].target;
+    // A sheet's: another view of the sheet; a canvas's: of its space.
+    const nv = vl.split(from, dir, if (kind == .sheet) .{ .kind = .sheet, .target = target } else .{ .target = spaceTarget(space) }) orelse {
         state.status = "No more views fit. ";
         return;
     };
-    // The split made it active in the layout; the canvas state still is
-    // `from`'s: seed the new one, then switch as a click would.
     vl.active = from;
-    view_slots[nv] = .{ .view = look, .space = space };
-    view_slots[nv].view.fit = null;
+    if (kind == .canvas) {
+        view_slots[nv] = .{ .view = look, .space = space };
+        view_slots[nv].view.fit = null;
+    }
+    activateView(nv);
+}
+
+/// Opens `view` beside the active view, side by side, and makes it
+/// active; or, when one already shows it, makes that one active.
+fn openBeside(view: docviews.View) void {
+    var buf: [docviews.max_views]u8 = undefined;
+    const have = vl.viewsOf(view.kind, view.target, &buf);
+    if (have.len > 0) {
+        activateView(have[0]);
+        return;
+    }
+    const from = vl.active;
+    const nv = vl.split(from, .across, view) orelse {
+        state.status = "No more views fit. ";
+        return;
+    };
+    vl.active = from;
     activateView(nv);
 }
 
 fn closeView(v: u8) void {
-    const was_active = v == vl.active;
-    if (!was_active) {
-        if (view_slots[v].flat) |*f| f.arena.deinit();
-        view_slots[v] = .{};
-        _ = vl.close(v);
-        return;
+    var open_n: usize = 0;
+    for (vl.open) |o| {
+        if (o) open_n += 1;
     }
-    // The active one: the view taking its place becomes active first.
+    if (open_n <= 1) return;
+    // The view taking its place where it was, else any other.
     var next: ?u8 = null;
     if (vl.leafOf(v)) |leaf| {
-        const n = vl.nodes[leaf];
-        for (n.tabList()) |t| if (t != v) {
+        for (vl.nodes[leaf].tabList()) |t| if (t != v) {
             next = t;
             break;
         };
@@ -5024,11 +5108,25 @@ fn closeView(v: u8) void {
         }
     };
     const to = next orelse return;
-    activateView(to);
+    if (v == canvas_owner) {
+        // Its state goes to another canvas view, if there is one.
+        var heir: u8 = docviews.none;
+        if (vl.views[to].kind == .canvas) {
+            heir = to;
+        } else for (0..docviews.max_views) |k| {
+            const j: u8 = @intCast(k);
+            if (vl.open[j] and j != v and vl.views[j].kind == .canvas) {
+                heir = j;
+                break;
+            }
+        }
+        if (heir != docviews.none) takeCanvas(heir) else canvas_owner = docviews.none;
+    }
     if (view_slots[v].flat) |*f| f.arena.deinit();
     view_slots[v] = .{};
+    const was_active = v == vl.active;
     _ = vl.close(v);
-    vl.select(to);
+    if (was_active) activateView(to);
 }
 
 /// Shows space `space` in a view filling the region: one already showing
@@ -5037,9 +5135,8 @@ fn showSpaceView(space: usize) void {
     const target = spaceTarget(space);
     for (0..docviews.max_views) |k| {
         const j: u8 = @intCast(k);
-        if (!vl.open[j]) continue;
-        const sp = if (j == vl.active) shown_space else view_slots[j].space;
-        if (sp == space) {
+        if (!vl.open[j] or vl.views[j].kind != .canvas) continue;
+        if (viewSpace(j) == space) {
             activateView(j);
             vl.toggleMaximize(j);
             return;
@@ -5055,6 +5152,322 @@ fn showSpaceView(space: usize) void {
     activateView(nv);
     vl.toggleMaximize(nv);
 }
+
+/// As `showSpaceView`, for sheet `id`.
+fn showSheetView(id: layout.model.ObjectId) void {
+    var buf: [docviews.max_views]u8 = undefined;
+    const have = vl.viewsOf(.sheet, @intFromEnum(id), &buf);
+    if (have.len > 0) {
+        activateView(have[0]);
+        vl.toggleMaximize(have[0]);
+        return;
+    }
+    const nv = vl.addTab(vl.active, .{ .kind = .sheet, .target = @intFromEnum(id) }) orelse {
+        state.status = "No more views fit. ";
+        return;
+    };
+    activateView(nv);
+    vl.toggleMaximize(nv);
+}
+
+// The sheet view -----------------------------------------------------------
+//
+// A legend sheet as a table: the name column, then a column per slot, a
+// row per key. The selected cell is edited where it is: each change goes
+// to the sheet as it is typed (one undo step a cell), so a canvas view
+// beside it shows the keys change; the name column renames its key when
+// the edit is done (Enter or leaving it). Arrows up and down, Tab and
+// Shift+Tab, and Enter move between cells (mode `sheet`). The selected
+// row's key is the context, so canvas views show it; a key chosen on the
+// canvas selects its row. Rows naming no key and columns no key has are
+// marked.
+
+/// The cell selected, in which sheet.
+var sheet_sel: struct { sheet: layout.model.ObjectId = .none, row: usize = 0, col: usize = 1 } = .{};
+/// The context last seen, so a key chosen elsewhere selects its row once.
+var sheet_seen_ctx: u64 = 0;
+/// A name being typed, kept until done.
+var sheet_name_edit: ?struct { sheet: layout.model.ObjectId, row: usize, text: [128]u8 = undefined, len: usize = 0 } = null;
+
+const sheet_name_w: f32 = 90;
+const sheet_col_w: f32 = 150;
+
+/// The key of row `row` of sheet `si`, in its scope.
+fn sheetRowKey(si: usize, row: usize) ?TileId {
+    const sh = state.model.sheets.items[si];
+    if (row >= sh.rows.items.len) return null;
+    return state.model.keyInScope(dvui.currentWindow().arena(), sh.scope, sh.rows.items[row].key) catch null;
+}
+
+/// The tile and slot the selected cell drives (its key, or a legend
+/// beside it with that slot), for the expression line.
+fn sheetCellTarget() ?ExprTarget {
+    if (activeKind() != .sheet) return null;
+    const si = state.model.sheetIndex(sheet_sel.sheet) orelse return null;
+    const sh = state.model.sheets.items[si];
+    if (sheet_sel.col == 0 or sheet_sel.col > sh.columns.items.len) return null;
+    const key = sheetRowKey(si, sheet_sel.row) orelse return null;
+    const slot = sh.columns.items[sheet_sel.col - 1];
+    var near: std.ArrayList(TileId) = .empty;
+    state.model.companions(dvui.currentWindow().arena(), key, &near) catch return null;
+    for (near.items) |t| if (state.model.tileTrackNamed(t, slot)) |track| return .{ .tile_track = .{ .tile = t, .track = track } };
+    return null;
+}
+
+/// Moves the selected cell: 0 up, 1 down, 2 right (on to the next row),
+/// 3 left (back to the row before).
+fn sheetMove(dir: i32) void {
+    const si = state.model.sheetIndex(sheet_sel.sheet) orelse return;
+    const sh = state.model.sheets.items[si];
+    const rows = sh.rows.items.len;
+    const cols = sh.columns.items.len + 1;
+    if (rows == 0) return;
+    commitSheetName();
+    switch (dir) {
+        0 => if (sheet_sel.row > 0) {
+            sheet_sel.row -= 1;
+        },
+        1 => if (sheet_sel.row + 1 < rows) {
+            sheet_sel.row += 1;
+        },
+        2 => if (sheet_sel.col + 1 < cols) {
+            sheet_sel.col += 1;
+        } else if (sheet_sel.row + 1 < rows) {
+            sheet_sel.row += 1;
+            sheet_sel.col = 0;
+        },
+        else => if (sheet_sel.col > 0) {
+            sheet_sel.col -= 1;
+        } else if (sheet_sel.row > 0) {
+            sheet_sel.row -= 1;
+            sheet_sel.col = cols - 1;
+        },
+    }
+    sheetSelectKey(si);
+}
+
+/// The selected row's key as the context, so canvas views show it.
+fn sheetSelectKey(si: usize) void {
+    if (sheetRowKey(si, sheet_sel.row)) |key| {
+        state.context = .{ .tile = key };
+        sheet_seen_ctx = state.context.key();
+    }
+}
+
+/// A name typed into the name column, given to the row and its key.
+fn commitSheetName() void {
+    const ne = sheet_name_edit orelse return;
+    sheet_name_edit = null;
+    const si = state.model.sheetIndex(ne.sheet) orelse return;
+    const text = std.mem.trim(u8, ne.text[0..ne.len], " ");
+    if (ne.row >= state.model.sheets.items[si].rows.items.len or text.len == 0) return;
+    if (std.mem.eql(u8, state.model.sheets.items[si].rows.items[ne.row].key, text)) return;
+    act(.setSheetCell, .{ ne.sheet, ne.row, 0, text }) catch |err| {
+        state.status = if (err == error.DuplicateDesignator) "That name is another key's: the row keeps its own. " else "The row was not renamed. ";
+    };
+}
+
+fn sheetView(v: u8) void {
+    const id: layout.model.ObjectId = @enumFromInt(vl.views[v].target);
+    const si = state.model.sheetIndex(id) orelse return;
+    const active = v == vl.active;
+    if (sheet_sel.sheet != id) sheet_sel = .{ .sheet = id };
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper }, .id_extra = v });
+    defer box.deinit();
+    // A press activates it (cells take their own clicks too).
+    if (!active) for (dvui.events()) |*e| {
+        if (!dvui.eventMatchSimple(e, box.data())) continue;
+        if (e.evt == .mouse and e.evt.mouse.action == .press) view_to_activate = v;
+    };
+    const m = &state.model;
+    const sh = m.sheets.items[si];
+    const a = dvui.currentWindow().arena();
+    // A key chosen elsewhere (on the canvas): its row.
+    if (state.context.key() != sheet_seen_ctx) {
+        sheet_seen_ctx = state.context.key();
+        if (state.context == .tile) {
+            const t = state.context.tile;
+            for (sh.rows.items, 0..) |_, r| {
+                const key = sheetRowKey(si, r) orelse continue;
+                var near: std.ArrayList(TileId) = .empty;
+                m.companions(a, key, &near) catch continue;
+                if (std.mem.indexOfScalar(TileId, near.items, t) != null) {
+                    commitSheetName();
+                    sheet_sel.row = r;
+                    break;
+                }
+            }
+        }
+    }
+    // Its keys: the moves between cells.
+    if (active) for (dvui.events()) |*e| {
+        const inv = keymap.match1(e, kmode("sheet")) orelse continue;
+        if (inv.action == kact("sheet.move")) {
+            e.handle(@src(), box.data());
+            sheetMove(inv.arg);
+            dvui.refresh(null, @src(), box.data().id);
+        }
+    };
+    var bad_rows: std.ArrayList(usize) = .empty;
+    var bad_cols: std.ArrayList(usize) = .empty;
+    m.sheetProblems(a, id, &bad_rows, &bad_cols) catch {};
+    const head_font = dvui.Font.theme(.body).larger(-1).withWeight(.bold);
+    const cell_font = dvui.Font.theme(.body);
+    // The header.
+    {
+        var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.5) } });
+        defer hdr.deinit();
+        dvui.labelNoFmt(@src(), "name", .{}, .{ .min_size_content = .{ .w = sheet_name_w }, .max_size_content = .width(sheet_name_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 } });
+        for (sh.columns.items, 0..) |c, ci| {
+            const unused = std.mem.indexOfScalar(usize, bad_cols.items, ci) != null;
+            dvui.labelNoFmt(@src(), c, .{}, .{ .min_size_content = .{ .w = sheet_col_w }, .max_size_content = .width(sheet_col_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 }, .color_text = if (unused) .{ .color = colors.overflow } else null, .border = .{ .x = 1 }, .color_border = .{ .color = colors.edge.opacity(0.3) }, .id_extra = ci });
+        }
+    }
+    var scroll = dvui.scrollArea(@src(), .{ .horizontal = .auto }, .{ .expand = .both, .background = false });
+    defer scroll.deinit();
+    for (sh.rows.items, 0..) |row, r| {
+        const sel_row = r == sheet_sel.row;
+        const missing = std.mem.indexOfScalar(usize, bad_rows.items, r) != null;
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = r, .background = true, .color_fill = .{ .color = if (sel_row) colors.paper.lerp(dvui.themeGet().focus, if (active) 0.08 else 0.2) else colors.paper }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.15) } });
+        defer line.deinit();
+        for (0..sh.columns.items.len + 1) |c| {
+            const w = if (c == 0) sheet_name_w else sheet_col_w;
+            const text = if (c == 0) row.key else if (c - 1 < row.cells.items.len) row.cells.items[c - 1] else "";
+            const selected = active and sel_row and c == sheet_sel.col;
+            if (selected) {
+                // Edited where it is.
+                var te = dvui.textEntry(@src(), .{ .text_initial = if (c == 0 and sheet_name_edit != null) sheet_name_edit.?.text[0..sheet_name_edit.?.len] else text }, .{ .min_size_content = .{ .w = w - 8 }, .max_size_content = .width(w - 8), .font = cell_font, .id_extra = (r << 8) + c, .margin = .all(1) });
+                defer te.deinit();
+                if (dvui.focusedWidgetId() != te.data().id and !ghostPaneFocus()) dvui.focusWidget(te.data().id, null, null);
+                const now = te.textGet();
+                if (c == 0) {
+                    if (!std.mem.eql(u8, now, row.key) or sheet_name_edit != null) {
+                        var ne = sheet_name_edit orelse @TypeOf(sheet_name_edit.?){ .sheet = id, .row = r };
+                        ne.len = @min(now.len, ne.text.len);
+                        @memcpy(ne.text[0..ne.len], now[0..ne.len]);
+                        sheet_name_edit = ne;
+                    }
+                    if (te.enter_pressed) commitSheetName();
+                } else if (!std.mem.eql(u8, now, text)) {
+                    _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), r, c }), .setSheetCell, .{ id, r, c, now }) catch {};
+                }
+            } else {
+                const ink: ?dvui.Color = if (c == 0 and missing) colors.overflow else null;
+                if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
+                    .min_size_content = .{ .w = w },
+                    .max_size_content = .width(w),
+                    .font = if (c == 0) cell_font.withStyle(.italic) else cell_font,
+                    .padding = .{ .x = 6, .y = 4, .h = 4 },
+                    .color_text = if (ink) |k| .{ .color = k } else null,
+                    // The row's highlight shows through; the name column
+                    // a shade apart.
+                    .background = true,
+                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else colors.paper.opacity(0) },
+                    .border = .{ .x = if (c == 0) 0 else 1 },
+                    .color_border = .{ .color = colors.edge.opacity(0.15) },
+                    .id_extra = (r << 8) + c,
+                })) {
+                    commitSheetName();
+                    sheet_sel = .{ .sheet = id, .row = r, .col = c };
+                    sheetSelectKey(si);
+                    view_to_activate = v;
+                }
+            }
+        }
+    }
+}
+
+/// Whether a pane's field has the keyboard (the sheet then leaves it).
+fn ghostPaneFocus() bool {
+    for (all_panes) |p| if (p.hasFocus()) return true;
+    if (expr_entry_id) |id| if (dvui.focusedWidgetId() == id) return true;
+    return false;
+}
+
+/// The properties while a sheet view is active: the sheet, the selected
+/// cell's row and key, and the naming helpers.
+fn sheetViewProperties() void {
+    const id = sheet_sel.sheet;
+    const m = &state.model;
+    const si = m.sheetIndex(id) orelse return;
+    const sh = m.sheets.items[si];
+    heading("{s}", .{sh.name}, 9700);
+    if (sheet_sel.row < sh.rows.items.len) {
+        const row = sh.rows.items[sheet_sel.row];
+        propText("Row", "{d} of {d}", .{ sheet_sel.row + 1, sh.rows.items.len }, 9701);
+        if (sheetRowKey(si, sheet_sel.row)) |key| {
+            const t = m.tileConst(key);
+            propText("Key", "{s} ({s})", .{ t.designator, m.prototypeOf(key).name }, 9702);
+        } else propText("Key", "none named {s} here", .{row.key}, 9702);
+        if (sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
+            const slot = sh.columns.items[sheet_sel.col - 1];
+            propText("Slot", "{s}{s}", .{ slot, if (sheetCellTarget() == null) " (not on this key)" else "" }, 9703);
+        }
+    }
+    if (dvui.button(@src(), "Name keys by grid position (R1C1…)", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) nameSheetKeys(si, .position);
+    if (dvui.button(@src(), "Name keys by their first legend", .{}, .{ .expand = .horizontal })) nameSheetKeys(si, .legend);
+    if (dvui.button(@src(), "Add a row", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+        var nb: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&nb, "Row {d}", .{sh.rows.items.len + 1}) catch "Row";
+        act(.addSheetRow, .{ id, sheet_sel.row + 1, name }) catch {};
+    }
+    if (sh.rows.items.len > 0) if (dvui.button(@src(), "Remove this row", .{}, .{ .expand = .horizontal })) {
+        act(.removeSheetRow, .{ id, sheet_sel.row }) catch {};
+        if (sheet_sel.row > 0 and sheet_sel.row >= m.sheets.items[si].rows.items.len) sheet_sel.row -= 1;
+    };
+}
+
+/// Names every key of sheet `si`: by its grid place (R1C1, from row 1,
+/// column 1), or by its first legend where that is a plain word (letters
+/// and digits); a name taken gets a number. One undo step.
+fn nameSheetKeys(si: usize, how: enum { position, legend }) void {
+    const m = &state.model;
+    const id = m.sheets.items[si].id;
+    import_count += 1;
+    const key = mergeKey(.{ "name keys", import_count });
+    var named: usize = 0;
+    for (0..m.sheets.items[si].rows.items.len) |r| {
+        const tile = sheetRowKey(si, r) orelse continue;
+        var nb: [64]u8 = undefined;
+        var want: []const u8 = "";
+        switch (how) {
+            .position => {
+                const at = m.gridInstanceOf(tile) orelse continue;
+                const inst = m.panels.items[at.panel].grids.items[at.grid].instances.items[at.index];
+                want = std.fmt.bufPrint(&nb, "R{d}C{d}", .{ inst.row + 1, inst.col + 1 }) catch continue;
+            },
+            .legend => {
+                const row = m.sheets.items[si].rows.items[r];
+                for (row.cells.items) |cell| {
+                    const t = std.mem.trim(u8, cell, " ");
+                    if (t.len == 0) continue;
+                    const plain = for (t) |ch| {
+                        if (!std.ascii.isAlphanumeric(ch)) break false;
+                    } else true;
+                    if (plain) want = t;
+                    break;
+                }
+                if (want.len == 0) continue;
+            },
+        }
+        // Taken by another key: numbered.
+        var tries: usize = 1;
+        var name = want;
+        var nb2: [72]u8 = undefined;
+        while (m.findTile(name)) |other| : (tries += 1) {
+            if (other == tile) break;
+            name = std.fmt.bufPrint(&nb2, "{s}-{d}", .{ want, tries + 1 }) catch break;
+        }
+        if (std.mem.eql(u8, m.sheets.items[si].rows.items[r].key, name)) continue;
+        _ = actM(key, .setSheetCell, .{ id, r, 0, name }) catch continue;
+        named += 1;
+    }
+    var sb: [64]u8 = undefined;
+    state.status = std.fmt.bufPrint(&status_name_buf, "{d} key{s} named. ", .{ named, if (named == 1) "" else "s" }) catch "Keys named. ";
+    _ = &sb;
+}
+
+var status_name_buf: [64]u8 = undefined;
 
 /// The canvas: the worksheet at true proportions, with every panel on it.
 /// Wheel zooms about the pointer and dragging pans. With the select tool a
@@ -6436,7 +6849,9 @@ fn gridProperties(pi: usize, gi: usize) !void {
         const name = std.fmt.bufPrint(&nb, "Legends of {s}", .{state.model.panels.items[pi].name}) catch "Legends";
         if (act(.makeSheet, .{ name, g.id })) |id| {
             state.context = .{ .sheet = id };
-            state.status = "Sheet made: the keys' legends now come from it. ";
+            // Beside the canvas, to see its edits.
+            openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+            state.status = "Sheet made, open beside the canvas: the keys' legends now come from it. ";
         } else |_| state.status = "The sheet was not made. ";
     };
     if (state.model.findGrid(g.link)) |src| {
@@ -7810,6 +8225,8 @@ fn updateModeStack() void {
     push(&st, &n, kmode("global"));
     if (canvas_prompt) {
         push(&st, &n, kmode("start"));
+    } else if (activeKind() == .sheet) {
+        push(&st, &n, kmode("sheet"));
     } else if (sketch_edit != null) {
         push(&st, &n, kmode("sketch"));
         push(&st, &n, kmode("view"));
@@ -9344,6 +9761,7 @@ fn propFont(name: []const u8, n: usize) !void {
 }
 
 fn properties() !void {
+    if (activeKind() == .sheet) return sheetViewProperties();
     if (sketch_edit != null) return sketchModeProperties();
     if (pickedConstraintProperties()) return;
     if (panel_edit != null) {

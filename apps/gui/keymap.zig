@@ -44,6 +44,9 @@ pub const modes = [_]M{
     .{ .name = "expression-line", .kind = .sub, .parent = "canvas", .takes_text = true, .allows = &.{"expression-line.tab"} },
     .{ .name = "expression-line.completion", .kind = .sub, .parent = "expression-line", .allows = &.{"expression-line.completion"} },
     .{ .name = "expression-line.run", .kind = .sub, .parent = "expression-line", .allows = &.{"expression-line.run"} },
+    // A legend sheet's view: its cell edited where it is (typed text),
+    // and moving between cells.
+    .{ .name = "sheet", .kind = .major, .parent = "global", .takes_text = true, .allows = &.{"sheet"} },
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
@@ -61,6 +64,8 @@ pub const action_defs = [_]A{
     .{ .name = "views.close" },
     .{ .name = "views.maximize" },
     .{ .name = "views.next", .repeat = true, .param = .int },
+    // To the cell above (0), below (1), after (2) or before (3).
+    .{ .name = "sheet.move", .repeat = true, .param = .int },
     // The pane layouts (layouts.zig): the next one, the panes as they are
     // saved as a new one, this machine's changes to the one in use dropped.
     .{ .name = "panes.layout-next" },
@@ -251,6 +256,11 @@ fn flowMoves() [20]B {
 pub const binds = [_]B{
     .{ .mode = "global", .chord = "primary+n", .action = "file.new" },
     .{ .mode = "global", .chord = "primary+tab", .action = "views.next", .arg = 0 },
+    .{ .mode = "sheet", .chord = "up", .action = "sheet.move", .arg = 0 },
+    .{ .mode = "sheet", .chord = "down", .action = "sheet.move", .arg = 1 },
+    .{ .mode = "sheet", .chord = "enter", .action = "sheet.move", .arg = 1 },
+    .{ .mode = "sheet", .chord = "tab", .action = "sheet.move", .arg = 2 },
+    .{ .mode = "sheet", .chord = "shift+tab", .action = "sheet.move", .arg = 3 },
     .{ .mode = "global", .chord = "primary+shift+tab", .action = "views.next", .arg = 1 },
     .{ .mode = "global", .chord = "primary+o", .action = "file.open" },
     .{ .mode = "global", .chord = "primary+s", .action = "file.save" },

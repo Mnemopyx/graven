@@ -167,6 +167,23 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
       - **Saved with the file:** each written segment carries the layout (`Segment.views`, read by name, absent in older files). Opening takes the last intact segment's, with each view where it looked.
       - **Checked:** tests (splits, tabs, closing and collapsing, maximizing, validity, the layout in segments); keyboard SVG identical. In the GUI on the HP-15C sample: two views side by side at 34 % and 150 %, a click activating the other, saved, reopened as left, a tab double-clicked to fill the window.
       - **Not yet:** dragging tabs between splits; single-key view commands (only Ctrl+Tab); the sheet view (next); two views cost two draws (not measured).
+    - **Step 2 built 2026-11-18: the sheet view** (also legend sheets' step 2; main.zig "The sheet view"):
+      - **The table:** a name column and a column per slot, a row per key. The selected cell is edited where it is, and each change reaches the sheet as typed (one undo step a cell), so a canvas view beside it shows the key change live. The name column renames its key when done (Enter or leaving it). It scrolls both ways.
+      - **Keys** (mode `sheet`): Up and Down, Enter (down), Tab and Shift+Tab (on across rows).
+      - **Linked selection:** the selected row's key becomes the context, so canvas views show it; a key chosen on a canvas selects its row.
+      - **Problems:** rows naming no key show their name in the warning colour; columns matching no slot their header.
+      - **The expression bar** edits the selected cell through its key's slot, so its completions work.
+      - **Properties:** the sheet; the row, its key and prototype, the slot; Name keys by grid position (R1C1…) or by their first legend where it is a plain word (taken names numbered, one undo step); Add a row, Remove this row.
+      - **Opening:** making a sheet opens it beside the canvas; a sheet's properties have Open it beside the canvas; a double-click on a sheet in the Browser fills the window with its view.
+      - **Which view holds the canvas state:** the canvas's state follows the last active canvas view (`canvas_owner`), not the active view, so a sheet can be active while its canvas keeps its place.
+      - **Panes by view kind:** a sheet view hides the Tools pane (`Pane.view_hidden` keeps its own mode, not saved over), and the docked column gives its room to Properties.
+      - **Checked:** tests; keyboard SVG identical. In the GUI on the HP-15C: the sheet made beside the canvas; K1 and K2 cells edited, moving by Down and Tab; K14's top typed as KOS with the canvas's COS key turning to KOS as it was typed; COS clicked on the canvas selecting row K14.
+      - **Not yet:**
+        - characters outside the interface font (Δ, arrows, √ written as characters) show as boxes in cells, though the keys render them;
+        - cells show markup source, not the rendered legend;
+        - no column add or remove in the GUI;
+        - no copy and paste of ranges;
+        - no Tools for sheets.
     - **Panes follow the active view** (decided 2026-11-18, the owner): ghost panes stay around the whole window. Each view kind says which panes it wants and what they hold (canvas: all; sheet: no Tools for now, the cell's row in Properties, the cell in the expression bar; flow editor: no Tools). An unwanted pane is hidden with its tab and hot edge, and returns as it was. To be built with the sheet view.
 
 ## Gaps against the project's stated goals
