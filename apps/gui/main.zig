@@ -1876,7 +1876,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, export_sheet };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -2255,6 +2255,47 @@ fn importText(path: []const u8) void {
     state.status = import_status_buf[0 .. n + 1];
 }
 
+/// The sheet to export: the one shown, else the one chosen.
+fn sheetToExport() ?layout.model.ObjectId {
+    if (activeKind() == .sheet) {
+        const id: layout.model.ObjectId = @enumFromInt(vl.views[vl.active].target);
+        if (state.model.sheetIndex(id) != null) return id;
+    }
+    if (state.context == .sheet) if (state.model.sheetIndex(state.context.sheet) != null) return state.context.sheet;
+    return null;
+}
+
+var sheet_export_name: [512]u8 = undefined;
+
+/// The file a sheet is exported to at first: its name, `.csv`, beside the
+/// document when it has a file.
+fn sheetExportName() []const u8 {
+    const id = sheetToExport() orelse return "";
+    const name = state.model.sheets.items[state.model.sheetIndex(id).?].name;
+    const dir: []const u8 = if (file_path) |fp| (std.fs.path.dirname(fp) orelse "") else "";
+    return (if (dir.len > 0)
+        std.fmt.bufPrint(&sheet_export_name, "{s}/{s}.csv", .{ dir, name })
+    else
+        std.fmt.bufPrint(&sheet_export_name, "{s}.csv", .{name})) catch "legends.csv";
+}
+
+/// Writes the sheet to export as CSV at `path`.
+fn exportSheet(path: []const u8) void {
+    const id = sheetToExport() orelse return;
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const csv = layout.import.sheetToCsv(arena.allocator(), &state.model, id) catch {
+        state.status = "The sheet could not be written out. ";
+        return;
+    };
+    std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = csv }) catch {
+        state.status = "That file could not be written. ";
+        return;
+    };
+    const sh = state.model.sheets.items[state.model.sheetIndex(id).?];
+    state.status = std.fmt.bufPrint(&import_status_buf, "Exported {d} row{s} and {d} column{s} to {s}. ", .{ sh.rows.items.len, if (sh.rows.items.len == 1) "" else "s", sh.columns.items.len + 1, if (sh.columns.items.len == 0) "" else "s", std.fs.path.basename(path) }) catch "Exported. ";
+}
+
 /// Where a legend table goes: into the sheet shown or chosen; else a new
 /// sheet over the grid, track or panel chosen.
 fn sheetImportTarget() ?layout.import.SheetTarget {
@@ -2515,6 +2556,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .save_as => "Save the document as",
         .import_text => importTitle(),
         .import_sheet => sheetImportTitle(),
+        .export_sheet => "Export the legend sheet as CSV",
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -2532,7 +2574,11 @@ fn filePrompt(kind: FilePromptKind) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         defer row.deinit();
         propName("File");
-        const initial = if (kind == .save_as) (file_path orelse "untitled" ++ doc_ext) else "";
+        const initial = switch (kind) {
+            .save_as => file_path orelse "untitled" ++ doc_ext,
+            .export_sheet => sheetExportName(),
+            else => "",
+        };
         var te = dvui.textEntry(@src(), .{ .text_initial = initial }, .{ .expand = .horizontal, .id_extra = @intFromEnum(kind) });
         defer te.deinit();
         if (file_prompt_new) {
@@ -2552,6 +2598,7 @@ fn filePrompt(kind: FilePromptKind) void {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet => "Import",
+            .export_sheet => "Export",
         }, .{}, .{})) go = true;
     }
     if (cancel) {
@@ -2567,6 +2614,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .open => openDocument(path),
         .import_text => importText(path),
         .import_sheet => importSheet(path),
+        .export_sheet => exportSheet(path),
         .save_as => {
             // A name without an extension takes Graven's.
             const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
@@ -4128,6 +4176,15 @@ fn menu() ?dvui.App.Result {
             file_prompt = .import_text;
             file_prompt_new = true;
         };
+        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Export legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            if (sheetToExport() == null) {
+                state.status = "Show or choose a legend sheet first: it is what is exported. ";
+            } else {
+                file_prompt = .export_sheet;
+                file_prompt_new = true;
+            }
+        };
         if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetImportTarget() == null) {
@@ -5303,6 +5360,12 @@ fn showSheetView(id: layout.model.ObjectId) void {
 var sheet_sel: struct { sheet: layout.model.ObjectId = .none, row: usize = 0, col: usize = 1 } = .{};
 /// The context last seen, so a key chosen elsewhere selects its row once.
 var sheet_seen_ctx: u64 = 0;
+/// The cell whose editor last took the keyboard (sheet, row, column), so
+/// it takes it only once; cleared when the sheet stops being active.
+var sheet_focus_for: u64 = 0;
+/// The selected cell's editor, as last drawn: the sheet's keys act while
+/// it has the keyboard.
+var sheet_editor_id: ?dvui.Id = null;
 /// A name being typed, kept until done.
 var sheet_name_edit: ?struct { sheet: layout.model.ObjectId, row: usize, text: [128]u8 = undefined, len: usize = 0 } = null;
 
@@ -5388,6 +5451,7 @@ fn sheetView(v: u8) void {
     const id: layout.model.ObjectId = @enumFromInt(vl.views[v].target);
     const si = state.model.sheetIndex(id) orelse return;
     const active = v == vl.active;
+    if (!active) sheet_focus_for = 0;
     if (sheet_sel.sheet != id) sheet_sel = .{ .sheet = id };
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper }, .id_extra = v });
     defer box.deinit();
@@ -5416,8 +5480,10 @@ fn sheetView(v: u8) void {
             }
         }
     }
-    // Its keys: the moves between cells.
-    if (active) for (dvui.events()) |*e| {
+    // Its keys: the moves between cells, while its cell has the keyboard
+    // (not a dialog's field, a menu or a pane's).
+    const editing = if (sheet_editor_id) |eid| dvui.focusedWidgetId() == eid else false;
+    if (active and editing) for (dvui.events()) |*e| {
         const inv = keymap.match1(e, kmode("sheet")) orelse continue;
         if (inv.action == kact("sheet.move")) {
             e.handle(@src(), box.data());
@@ -5455,7 +5521,15 @@ fn sheetView(v: u8) void {
                 // Edited where it is.
                 var te = dvui.textEntry(@src(), .{ .text_initial = if (c == 0 and sheet_name_edit != null) sheet_name_edit.?.text[0..sheet_name_edit.?.len] else text }, .{ .min_size_content = .{ .w = w - 8 }, .max_size_content = .width(w - 8), .font = cell_font, .id_extra = (r << 8) + c, .margin = .all(1) });
                 defer te.deinit();
-                if (dvui.focusedWidgetId() != te.data().id and !ghostPaneFocus()) dvui.focusWidget(te.data().id, null, null);
+                sheet_editor_id = te.data().id;
+                // The keyboard, once: when the cell is newly selected or
+                // the sheet becomes active (not every frame, which would
+                // take it from a menu or a field elsewhere).
+                const here = (@as(u64, r) << 16) | c | (@as(u64, @intFromEnum(id)) << 32);
+                if (sheet_focus_for != here) {
+                    sheet_focus_for = here;
+                    dvui.focusWidget(te.data().id, null, null);
+                }
                 const now = te.textGet();
                 if (c == 0) {
                     if (!std.mem.eql(u8, now, row.key) or sheet_name_edit != null) {
@@ -5492,13 +5566,6 @@ fn sheetView(v: u8) void {
             }
         }
     }
-}
-
-/// Whether a pane's field has the keyboard (the sheet then leaves it).
-fn ghostPaneFocus() bool {
-    for (all_panes) |p| if (p.hasFocus()) return true;
-    if (expr_entry_id) |id| if (dvui.focusedWidgetId() == id) return true;
-    return false;
 }
 
 /// The properties while a sheet view is active: the sheet, the selected

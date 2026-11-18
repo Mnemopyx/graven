@@ -213,7 +213,13 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
       - **Undo and source:** one undo step; the source (URI, SHA-256, time) recorded on the sheet (`addSheetSource`).
       - **The status line** reports rows matched and added, columns added, cells set, and whether rows or columns match nothing (marked in the sheet).
       - **Checked:** tests (quoting, separators, merging by name, new columns and rows, repeats, one undo step, a new sheet); in the GUI, a CSV over the HP-15C keys made a sheet beside the canvas, with the quoted "10,X" whole and the unknown row and column marked.
-      - **Not yet:** updating from the source when it changes; exporting a sheet as CSV.
+      - **Not yet:** updating from the source when it changes.
+    - **CSV export of legend sheets** (2026-11-18; `import.sheetToCsv`; File › Export legend sheet (CSV)…):
+      - **What it writes:** the sheet shown or chosen, with the header `name` and its slot columns, then a row per key with its name and cells as stored.
+      - **Format:** RFC 4180, quoting fields with a comma, quote, line break or edge spaces, quotes doubled; CRLF; UTF-8 without a byte-order mark.
+      - **Where:** the file offered is the sheet's name with `.csv`, beside the document when it has a file.
+      - **Checked:** a round-trip test (export then `parseTable`: the same table); in the GUI, the HP-15C sheet exported after an edit, read back by Python's `csv` with its Δ and ⇄ intact.
+      - **Fixed on the way:** the selected cell's editor took the keyboard every frame, which closed any menu as it opened, and its cell keys acted under a dialog (Enter moved the cell instead of confirming). Now it takes the keyboard once per selection, and the cell keys act only while it has it.
     - **Panes follow the active view** (decided 2026-11-18, the owner): ghost panes stay around the whole window. Each view kind says which panes it wants and what they hold (canvas: all; sheet: no Tools for now, the cell's row in Properties, the cell in the expression bar; flow editor: no Tools). An unwanted pane is hidden with its tab and hot edge, and returns as it was. To be built with the sheet view.
 
 ## Gaps against the project's stated goals

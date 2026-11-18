@@ -413,6 +413,44 @@ pub fn sheetFromTable(gpa: Allocator, h: *history.History, m: *Model, key: u64, 
     return rep;
 }
 
+
+/// Sheet `id` as CSV (RFC 4180): a header (`name`, then its columns), then
+/// a row per key, its name and its cells as they are. A field holding the
+/// separator, a quote, a line break or leading or trailing spaces is
+/// quoted, its quotes doubled. Lines end in CR LF; UTF-8, no byte-order
+/// mark. `parseTable` reads it back as it was. In `a`.
+pub fn sheetToCsv(a: Allocator, m: *const Model, id: model.ObjectId) Allocator.Error![]u8 {
+    const si = m.sheetIndex(id) orelse return a.dupe(u8, "");
+    const sh = m.sheets.items[si];
+    var out: std.ArrayList(u8) = .empty;
+    try csvField(a, &out, "name");
+    for (sh.columns.items) |c| {
+        try out.append(a, ',');
+        try csvField(a, &out, c);
+    }
+    try out.appendSlice(a, "\r\n");
+    for (sh.rows.items) |row| {
+        try csvField(a, &out, row.key);
+        for (0..sh.columns.items.len) |k| {
+            try out.append(a, ',');
+            try csvField(a, &out, if (k < row.cells.items.len) row.cells.items[k] else "");
+        }
+        try out.appendSlice(a, "\r\n");
+    }
+    return out.toOwnedSlice(a);
+}
+
+fn csvField(a: Allocator, out: *std.ArrayList(u8), f: []const u8) Allocator.Error!void {
+    const quote = std.mem.indexOfAny(u8, f, ",\"\r\n") != null or (f.len > 0 and (f[0] == ' ' or f[f.len - 1] == ' '));
+    if (!quote) return out.appendSlice(a, f);
+    try out.append(a, '"');
+    for (f) |c| {
+        if (c == '"') try out.append(a, '"');
+        try out.append(a, c);
+    }
+    try out.append(a, '"');
+}
+
 const testing = std.testing;
 
 test "an RTF document comes in as paragraphs, styles and runs, undone as one step" {
@@ -598,4 +636,36 @@ test "a table makes a new sheet over a keypad" {
     const text = try m.tileTrackText(gpa, k, m.tileTrackNamed(k, "top").?);
     defer gpa.free(text);
     try testing.expectEqualStrings("ENTER", text);
+}
+
+
+test "a sheet as CSV reads back as it was" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.addPanel("Keys", 60, 30);
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{ .{ .name = "top" }, .{ .name = "g" } } });
+    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 1, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    _ = try m.addInstance(p, g, st, 0, 0);
+    const id = try m.addSheet("Legends", m.panels.items[p].grids.items[g].id, &.{ "top", "g" });
+    try m.addSheetRow(id, null, "K1");
+    try m.addSheetRow(id, null, "R2C3");
+    try m.setSheetCell(id, 0, 1, "$x^2$, \"squared\"");
+    try m.setSheetCell(id, 0, 2, "ON\nOFF");
+    try m.setSheetCell(id, 1, 1, " padded ");
+    try m.setSheetCell(id, 1, 2, "√x ⇄ Δ");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const csv = try sheetToCsv(a, &m, id);
+    try testing.expect(std.mem.startsWith(u8, csv, "name,top,g\r\nK1,\"$x^2$, \"\"squared\"\"\",\"ON\nOFF\"\r\n"));
+    const t = try parseTable(a, csv);
+    try testing.expectEqual(3, t.rows.len);
+    const sh = m.sheets.items[0];
+    for (sh.rows.items, t.rows[1..]) |row, got| {
+        try testing.expectEqualStrings(row.key, got[0]);
+        for (row.cells.items, got[1..]) |cell, f| try testing.expectEqualStrings(cell, f);
+    }
 }
