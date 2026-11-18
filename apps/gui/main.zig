@@ -10641,8 +10641,18 @@ fn properties() !void {
         } else {
             const panel = state.model.panels.items[pi];
             propValue("Name", panel.default_name, "{s}", .{panel.name}, 1);
-            propText("Origin", "({d:.2}, {d:.2}) mm", .{ panel.origin.x, panel.origin.y }, 2);
-            propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
+            // Typed exactly: where it sits (bottom left, mm) and, for a
+            // rectangle, how big it is.
+            if (numberProp("Origin across, mm", panel.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "panel at", pi }), .movePanel, .{ pi, geom.Point{ .x = v, .y = panel.origin.y } }) catch {
+                state.status = "The panel cannot go there. ";
+            };
+            if (numberProp("Origin up, mm", panel.origin.y, -100000, 100000, 11)) |v| actM(mergeKey(.{ "panel at", pi }), .movePanel, .{ pi, geom.Point{ .x = panel.origin.x, .y = v } }) catch {
+                state.status = "The panel cannot go there. ";
+            };
+            if (panel.edge == null and panel.sketch == .none) {
+                if (numberProp("Width, mm", panel.w, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "panel size", pi }), .setPanelSize, .{ pi, v, panel.h }) catch {};
+                if (numberProp("Height, mm", panel.h, 0.01, 100000, 12)) |v| actM(mergeKey(.{ "panel size", pi }), .setPanelSize, .{ pi, panel.w, v }) catch {};
+            } else propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
             if (panel.sketch != .none) sketchPanelProperties(pi) else propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
             if (state.model.spaces.items.len > 0) if (layerChoice(state.model.spaceOf(pi), panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
@@ -10676,12 +10686,18 @@ fn properties() !void {
         .region => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
             propText("Name", "{s}", .{region.name}, 1);
-            propText("Origin", "({d:.2}, {d:.2}) mm", .{ region.origin.x, region.origin.y }, 2);
-            // Sized to a text style, the unit is one line pitch: shown in mm.
-            if (region.style != null)
-                propText("Size", "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 3)
-            else
-                propText("Size", "{d} × {d} u", .{ region.w, region.h }, 3);
+            // Typed exactly: where it starts (panel mm) and its extent in
+            // its pitch (u), along its tracks and across them.
+            if (numberProp("Origin across, mm", region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
+            if (numberProp("Origin up, mm", region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
+            {
+                const rows = region.major == .row;
+                const along = if (rows) region.w else region.h;
+                const across = if (rows) region.h else region.w;
+                if (numberProp("Length, u", along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
+                if (numberProp(if (rows) "Depth, rows" else "Depth, columns", across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
+                if (region.style != null) propText("Size", "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
+            }
             propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
             propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);

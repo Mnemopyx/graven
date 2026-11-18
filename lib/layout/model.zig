@@ -2302,6 +2302,19 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Sets a rectangular panel's size, mm (its origin, bottom left, stays
+    /// put). A panel whose outline is drawn (an edge or a sketch) is sized
+    /// by that, so it refuses.
+    pub fn setPanelSize(m: *Model, panel: usize, w: f64, h: f64) Error!void {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        if (!(w > 0) or !(h > 0)) return error.BadSize;
+        const p = &m.panels.items[panel];
+        if (p.unbounded or p.edge != null or p.sketch != .none) return error.BadSize;
+        p.w = w;
+        p.h = h;
+        m.revision += 1;
+    }
+
     /// Whether a panel complies: its outline on the sheet, and its ink area
     /// inside the sheet's ink area (its outline may reach into the sheet's
     /// margins).
@@ -5020,6 +5033,30 @@ pub const Model = struct {
 
     /// Sets the length of a track's segments, u, as Fit to tiles does with
     /// the length its longest paragraph needs (see `place.Placed`).
+    /// Moves a track region to `origin` (the point it holds, panel mm).
+    pub fn moveRegion(m: *Model, panel: usize, region: usize, origin: geom.Point) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+        // Its bends are along and across it: they move with it.
+        m.panels.items[panel].regions.items[region].origin = origin;
+        m.revision += 1;
+    }
+
+    /// Sets a track region's extent, in its pitch: `along` its tracks and
+    /// `across` them (how many tracks deep, fractions allowed).
+    pub fn setRegionSize(m: *Model, panel: usize, region: usize, along: f64, across: f64) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+        if (!(along > 0) or !(across > 0)) return error.BadSize;
+        const r = &m.panels.items[panel].regions.items[region];
+        if (r.major == .row) {
+            r.w = along;
+            r.h = across;
+        } else {
+            r.w = across;
+            r.h = along;
+        }
+        m.revision += 1;
+    }
+
     pub fn setSegmentLength(m: *Model, panel: usize, region: usize, length: f64) Error!void {
         if (!(length > 0)) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
@@ -6337,4 +6374,21 @@ test "a sheet's problems: rows naming no key, columns no key has" {
     const t = try slotText(&m, fx.a, "top");
     defer std.testing.allocator.free(t);
     try std.testing.expectEqualStrings("", t);
+}
+
+test "a panel sized and a track moved and sized by typing, each undoable" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("P", 100, 50);
+    try m.setPanelSize(p, 448.63, 143.83);
+    try std.testing.expectEqual(448.63, m.panels.items[p].w);
+    try std.testing.expectError(error.BadSize, m.setPanelSize(p, 0, 10));
+    const st = try m.addStyle("s", .{});
+    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 3, .y = 4 }, .style = st, .count = 2, .length = 10, .pitch = 5 });
+    try m.moveRegion(p, r, .{ .x = 10, .y = 133.83 });
+    try m.setRegionSize(p, r, 22.5, 6.5);
+    const reg = m.panels.items[p].regions.items[r];
+    try std.testing.expectEqual(10, reg.origin.x);
+    try std.testing.expectEqual(22.5, reg.w);
+    try std.testing.expectEqual(6.5, reg.h);
 }
