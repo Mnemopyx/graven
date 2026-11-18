@@ -5816,8 +5816,14 @@ fn sheetView(v: u8) void {
                         sheet_name_edit = ne;
                     }
                     if (te.enter_pressed) commitSheetName();
+                } else if (te.text_changed) {
+                    // Typed here: the cell takes it.
+                    if (!std.mem.eql(u8, now, text)) _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), r, c }), .setSheetCell, .{ id, r, c, now }) catch {};
                 } else if (!std.mem.eql(u8, now, text)) {
-                    _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), r, c }), .setSheetCell, .{ id, r, c, now }) catch {};
+                    // The cell changed elsewhere (an import, an undo, its
+                    // key's legend typed on the canvas): the editor shows
+                    // it, rather than writing its old text back over it.
+                    te.textSet(text, false);
                 }
             } else {
                 const ink: ?dvui.Color = if (c == 0 and missing) colors.overflow else null;
