@@ -11544,6 +11544,59 @@ fn styleProperties(sid: layout.model.StyleId) !void {
 fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
     var p = paint;
     var changed = false;
+    // The kind of fill: none, one colour, or a gradient between two; a
+    // change keeps the colours it has.
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 10 });
+        defer row.deinit();
+        propName("Fill kind");
+        const kinds = [_][]const u8{ "none", "one colour", "a gradient" };
+        var choice: usize = @intFromEnum(std.meta.activeTag(p.fill));
+        if (dvui.dropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(p.fill))) {
+            const first: layout.art.Color = switch (p.fill) {
+                .none => .hex("#ffffff"),
+                .solid => |c| c,
+                .linear => |l| l.start,
+            };
+            const last: layout.art.Color = switch (p.fill) {
+                .linear => |l| l.end,
+                else => first,
+            };
+            p.fill = switch (choice) {
+                0 => .none,
+                1 => .{ .solid = first },
+                else => .{ .linear = .{ .from = .{ .x = 0.5, .y = 1 }, .to = .{ .x = 0.5, .y = 0 }, .start = first, .end = last } },
+            };
+            changed = true;
+        }
+    }
+    if (p.fill == .linear) {
+        // Its direction across the shape's box (0 to 1 each way, y up).
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 11 });
+        defer row.deinit();
+        propName("Gradient runs");
+        const Dir = struct { name: []const u8, from: [2]f64, to: [2]f64 };
+        const dirs = [_]Dir{
+            .{ .name = "top to bottom (back to front)", .from = .{ 0.5, 1 }, .to = .{ 0.5, 0 } },
+            .{ .name = "bottom to top", .from = .{ 0.5, 0 }, .to = .{ 0.5, 1 } },
+            .{ .name = "left to right", .from = .{ 0, 0.5 }, .to = .{ 1, 0.5 } },
+            .{ .name = "right to left", .from = .{ 1, 0.5 }, .to = .{ 0, 0.5 } },
+        };
+        var names: [dirs.len + 1][]const u8 = undefined;
+        for (dirs, 0..) |d, k| names[k] = d.name;
+        names[dirs.len] = "as drawn";
+        const l = p.fill.linear;
+        var choice: usize = dirs.len;
+        for (dirs, 0..) |d, k| {
+            if (l.from.x == d.from[0] and l.from.y == d.from[1] and l.to.x == d.to[0] and l.to.y == d.to[1]) choice = k;
+        }
+        const shown = choice;
+        if (dvui.dropdown(@src(), names[0 .. dirs.len + @intFromBool(shown == dirs.len)], .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != shown and choice < dirs.len) {
+            p.fill.linear.from = .{ .x = dirs[choice].from[0], .y = dirs[choice].from[1] };
+            p.fill.linear.to = .{ .x = dirs[choice].to[0], .y = dirs[choice].to[1] };
+            changed = true;
+        }
+    }
     switch (p.fill) {
         .none => propText("Fill", "none", .{}, n),
         .solid => |c| if (colourEntry("Fill", c, false, n)) |v| {
