@@ -12255,7 +12255,15 @@ fn selectionMovable() bool {
 // pointer (a locked point, a point being dragged with the pointer hidden)
 // scintillates, to draw the eye.
 
-const EngageKind = enum { corner, edge_mid, edge, centre };
+/// What an engagement point does: the origin and the centre move the
+/// container (the origin is its grab point: a track's top-left mark); a
+/// corner resizes two edges, an edge's midpoint or the edge itself one.
+const EngageKind = enum { origin, centre, corner, edge_mid, edge };
+
+/// Whether a press there moves the whole (else it resizes).
+fn engageMoves(k: EngageKind) bool {
+    return k == .origin or k == .centre;
+}
 
 const EngageHit = struct {
     id: layout.model.ObjectId,
@@ -12321,6 +12329,17 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
         const mx = (b.x0 + b.x1) / 2;
         const my = (b.y0 + b.y1) / 2;
         const group = state.model.group(id) != null;
+        // Its origin, on the canvas: where it is held from, its grab point.
+        const origin: ?geom.Point = if (group) null else if (constrain.originOf(&state.model, id)) |o| blk: {
+            const pr = constrain.parentOf(&state.model, id) orelse break :blk null;
+            const off = constrain.frameOffset(&state.model, pr);
+            break :blk geom.Point{ .x = o.x + off.x, .y = o.y + off.y };
+        } else null;
+        if (origin) |o| {
+            const q = state.view.toPx(area, o);
+            const d = @sqrt((q.x - pp.x) * (q.x - pp.x) + (q.y - pp.y) * (q.y - pp.y));
+            if (d <= point_r) points.append(a, .{ .id = id, .kind = .origin, .edges = .{}, .at = o, .d = d }) catch {};
+        }
         const cands = [_]struct { at: geom.Point, kind: EngageKind, edges: Edges }{
             .{ .at = .{ .x = mx, .y = my }, .kind = .centre, .edges = .{} },
             .{ .at = .{ .x = b.x0, .y = b.y0 }, .kind = .corner, .edges = .{ .left = true, .bottom = true } },
@@ -12353,9 +12372,12 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
             if (d <= edge_r) edges.append(a, .{ .id = id, .kind = .edge, .edges = sd.e, .at = sd.p, .d = d }) catch {};
         }
     }
+    // Nearest first; at one place (a track's origin is its top-left
+    // corner), moving before resizing.
     const by_d = struct {
         fn lt(_: void, x: EngageHit, y: EngageHit) bool {
-            return x.d < y.d;
+            if (@abs(x.d - y.d) > 0.5) return x.d < y.d;
+            return @intFromEnum(x.kind) < @intFromEnum(y.kind);
         }
     }.lt;
     std.mem.sort(EngageHit, points.items, {}, by_d);
@@ -12389,7 +12411,7 @@ fn engageTarget() ?EngageHit {
 fn engageFree(h: EngageHit) bool {
     if (state.model.group(h.id) != null) return true;
     const f = freedomOf(h.id);
-    if (h.kind == .centre) return f.x or f.y;
+    if (engageMoves(h.kind)) return f.x or f.y;
     if (h.edges.left and !f.left) return false;
     if (h.edges.right and !f.right) return false;
     if (h.edges.bottom and !f.bottom) return false;
@@ -12414,10 +12436,11 @@ var engage_text_buf: [160]u8 = undefined;
 fn engageText(h: EngageHit) []const u8 {
     const name = objectName(h.id);
     if (!engageFree(h)) {
-        return std.fmt.bufPrint(&engage_text_buf, "{s}: {s} held by a constraint", .{ name, if (h.kind == .centre) "position" else edgesName(h.edges) }) catch "";
+        return std.fmt.bufPrint(&engage_text_buf, "{s}: {s} held by a constraint", .{ name, if (engageMoves(h.kind)) "position" else edgesName(h.edges) }) catch "";
     }
     return switch (h.kind) {
         .centre => std.fmt.bufPrint(&engage_text_buf, "Move {s}", .{name}) catch "",
+        .origin => std.fmt.bufPrint(&engage_text_buf, "Move {s} by its origin", .{name}) catch "",
         else => std.fmt.bufPrint(&engage_text_buf, "Resize {s}: {s}", .{ name, edgesName(h.edges) }) catch "",
     };
 }
@@ -12486,7 +12509,7 @@ fn engageMotion(at: geom.Point) void {
     const q: geom.Point = .{ .x = p.x - d.offset.x, .y = p.y - d.offset.y };
     const h0: geom.Point = .{ .x = d.hit.at.x - d.offset.x, .y = d.hit.at.y - d.offset.y };
     var b = d.box;
-    if (d.hit.kind == .centre) {
+    if (engageMoves(d.hit.kind)) {
         const mx = q.x - h0.x;
         const my = q.y - h0.y;
         b = .{ .x0 = b.x0 + mx, .x1 = b.x1 + mx, .y0 = b.y0 + my, .y1 = b.y1 + my };
