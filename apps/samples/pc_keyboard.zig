@@ -12,7 +12,8 @@ const StyleId = layout.model.StyleId;
 
 pub const pitch = 19.05;
 
-/// A legend: one line, or a shifted symbol over its base symbol.
+/// A legend: one symbol, or a shifted symbol and its base symbol (each in
+/// a slot of its own), or words.
 const Legend = union(enum) {
     one: []const u8,
     pair: [2][]const u8,
@@ -178,7 +179,7 @@ pub fn escape(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
 }
 
 pub const Styles = struct {
-    /// Single symbols and shifted pairs.
+    /// Symbols: single ones, and both of a shifted pair.
     main: StyleId,
     /// Words, set smaller and wrapped.
     small: StyleId,
@@ -186,14 +187,17 @@ pub const Styles = struct {
 
 /// The one tile prototype: keycap proportions for a cylindrical profile, an
 /// 18.1 mm body and a top surface about 12.7 mm wide, offset toward the back,
-/// with two tracks over the same part of its face: `top` for symbols and
-/// shifted pairs, `words`, smaller, for words.
+/// with three slots, overlapping: `top` for a symbol or a pair's shifted
+/// one (the whole face, so a second line has room), `bottom` for a pair's
+/// base symbol (the lower half), `words`, smaller, for words (the whole
+/// face, wrapping).
 /// Keys grow from 1u × 1u to the standard widths, and to 2u tall for the
 /// keypad + and Enter. Its art is one 1u keycap, shaded darker toward the
 /// front where a cylindrical cap slopes away, stretched to every key.
 fn keyPrototype(a: std.mem.Allocator, styles: Styles) !layout.model.TilePrototype {
     const body_inset: layout.model.Sides = .all((pitch - 18.1) / 2.0);
     const face_inset: layout.model.Sides = .{ .left = 2.7, .right = 2.7, .top = 1.6, .bottom = 3.6 };
+    const face_h = 18.1 - face_inset.top - face_inset.bottom;
     const art = layout.art;
     const back_to_front = struct {
         fn f(start: art.Color, end: art.Color) art.Fill {
@@ -214,11 +218,11 @@ fn keyPrototype(a: std.mem.Allocator, styles: Styles) !layout.model.TilePrototyp
             .edge = .hex("#9a978f"),
             .face = back_to_front(.hex("#faf9f6"), .hex("#efede8")),
         }),
-        // Symbols and shifted pairs in `top`; words, smaller, in `words`,
-        // over the same part of the face. Allocated: built from the
+        // One legend a slot; slots may overlap. Allocated: built from the
         // styles at run time, a literal array would not outlive this call.
         .tracks = try a.dupe(layout.model.TileTrack, &.{
             .{ .name = "top", .style = styles.main, .place = .{ .inset = .all(0.8) } },
+            .{ .name = "bottom", .style = styles.main, .place = .{ .inset = .{ .left = 0.8, .right = 0.8, .bottom = 0.8, .top = face_h / 2 } } },
             .{ .name = "words", .style = styles.small, .place = .{ .inset = .all(0.8) } },
         }),
         .widths = &.{ 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25 },
@@ -264,18 +268,18 @@ pub fn build(gpa: std.mem.Allocator, m: *Model, styles: Styles) !usize {
             n += 1;
             const name = try std.fmt.bufPrint(&name_buf, "K{d}", .{n});
             const t = try m.addTile(.{ .designator = name, .w = e.w, .h = e.h, .prototype = key });
-            markup.clearRetainingCapacity();
-            const w = &markup.writer;
-            // A shifted pair: two lines, the shifted symbol on top.
-            switch (e.legend) {
-                .one, .words => |s| try escape(w, s),
-                .pair => |pr| {
-                    try escape(w, pr[0]);
-                    try w.writeByte('\n');
-                    try escape(w, pr[1]);
-                },
-            }
-            try m.setTrackText(t, if (e.legend == .words) "words" else "top", markup.written());
+            // Each legend in its slot: a pair's shifted symbol in `top`,
+            // its base symbol in `bottom`.
+            const slots: [2]struct { []const u8, []const u8 } = switch (e.legend) {
+                .one => |s| .{ .{ "top", s }, .{ "", "" } },
+                .words => |s| .{ .{ "words", s }, .{ "", "" } },
+                .pair => |pr| .{ .{ "top", pr[0] }, .{ "bottom", pr[1] } },
+            };
+            for (slots) |sl| if (sl[0].len > 0) {
+                markup.clearRetainingCapacity();
+                try escape(&markup.writer, sl[1]);
+                try m.setTrackText(t, sl[0], markup.written());
+            };
             try m.place(p, r, null, .{ .gap = e.gap, .what = .{ .tile = t } });
         }
     }
@@ -352,4 +356,26 @@ test "the keyboard saved and read back lays out and exports exactly the same" {
     const svg_b = try layout.output.panelSvg(gpa, &b, &.{}, .{});
     defer gpa.free(svg_b);
     try std.testing.expectEqualStrings(svg_a, svg_b);
+}
+
+test "the keyboard as a legend sheet over its track: a row a key, a column a slot" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const s = try m.addStyle("main", .{ .cap_height = 2.6 });
+    const p = try build(gpa, &m, .{ .main = s, .small = s });
+    const id = try m.makeSheet("Keyboard legends", m.panels.items[p].regions.items[0].id);
+    const sh = m.sheets.items[m.sheetIndex(id).?];
+    try std.testing.expectEqual(@as(usize, 104), sh.rows.items.len);
+    try std.testing.expectEqual(@as(usize, 3), sh.columns.items.len);
+    try std.testing.expectEqualStrings("top", sh.columns.items[0]);
+    try std.testing.expectEqualStrings("bottom", sh.columns.items[1]);
+    try std.testing.expectEqualStrings("words", sh.columns.items[2]);
+    // K17 is ~ over `: one symbol a slot, no two-line text.
+    const k = for (sh.rows.items) |r| {
+        if (std.mem.eql(u8, r.key, "K17")) break r;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("\\~", k.cells.items[0]);
+    try std.testing.expectEqualStrings("`", k.cells.items[1]);
+    try std.testing.expectEqualStrings("", k.cells.items[2]);
 }
