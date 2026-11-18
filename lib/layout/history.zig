@@ -51,7 +51,7 @@ pub const actions = [_][:0]const u8{
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
-    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile",
+    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource",
 };
 
 fn Fn(comptime name: []const u8) type {

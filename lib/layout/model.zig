@@ -3440,6 +3440,13 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Records that sheet `id` was filled from `src`.
+    pub fn addSheetSource(m: *Model, id: ObjectId, src: FlowSource) Error!void {
+        const sh = try m.sheetById(id);
+        try sh.sources.append(m.a(), .{ .uri = try m.a().dupe(u8, src.uri), .sha256 = try m.a().dupe(u8, src.sha256), .imported = src.imported });
+        m.revision += 1;
+    }
+
     /// Renames tile `id` (its designator), which must stay unique.
     pub fn renameTile(m: *Model, id: TileId, designator: []const u8) Error!void {
         if (m.tileIndex(id) == null) return error.NoSuchTile;

@@ -1876,7 +1876,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -2255,6 +2255,83 @@ fn importText(path: []const u8) void {
     state.status = import_status_buf[0 .. n + 1];
 }
 
+/// Where a legend table goes: into the sheet shown or chosen; else a new
+/// sheet over the grid, track or panel chosen.
+fn sheetImportTarget() ?layout.import.SheetTarget {
+    const m = &state.model;
+    if (activeKind() == .sheet) {
+        const id: layout.model.ObjectId = @enumFromInt(vl.views[vl.active].target);
+        if (m.sheetIndex(id) != null) return .{ .into = id };
+    }
+    return switch (state.context) {
+        .sheet => |id| if (m.sheetIndex(id) != null) .{ .into = id } else null,
+        .grid => |g| .{ .new = .{ .name = "Legends", .scope = m.panels.items[g.panel].grids.items[g.index].id } },
+        .region => |r| .{ .new = .{ .name = "Legends", .scope = m.panels.items[r.panel].regions.items[r.region].id } },
+        .panel => |pi| if (!m.panels.items[pi].unbounded) .{ .new = .{ .name = "Legends", .scope = m.panels.items[pi].id } } else null,
+        else => null,
+    };
+}
+
+var sheet_import_title: [160]u8 = undefined;
+
+fn sheetImportTitle() []const u8 {
+    const t = sheetImportTarget() orelse return "Import a legend sheet (CSV)";
+    return switch (t) {
+        .into => |id| std.fmt.bufPrint(&sheet_import_title, "Import a table (CSV) into {s}", .{state.model.sheets.items[state.model.sheetIndex(id).?].name}) catch "Import a table into the sheet",
+        .new => "Import a table (CSV) as a new legend sheet",
+    };
+}
+
+/// Reads the table at `path` (CSV, or tab- or semicolon-separated) into a
+/// legend sheet (see `sheetImportTarget`), recording where it came from,
+/// as one undoable step; a new sheet opens beside the canvas.
+fn importSheet(path: []const u8) void {
+    var target = sheetImportTarget() orelse return;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(16 << 20)) catch {
+        state.status = "That file could not be read. ";
+        return;
+    };
+    defer state.gpa.free(bytes);
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const table = layout.import.parseTable(aa, bytes) catch return;
+    if (table.rows.len < 2) {
+        state.status = "That table has no rows under its header. ";
+        return;
+    }
+    // A new sheet is named after the file.
+    if (target == .new) {
+        const stem = std.fs.path.stem(path);
+        if (stem.len > 0) target.new.name = stem;
+    }
+    import_count += 1;
+    const key = mergeKey(.{ "sheet import", import_count });
+    const rep = layout.import.sheetFromTable(state.gpa, &hist, &state.model, key, target, table) catch {
+        state.status = "The table could not be imported. ";
+        return;
+    };
+    {
+        const abs = std.fs.path.resolve(aa, &.{path}) catch path;
+        const doc_dir: ?[]const u8 = if (file_path) |fp| std.fs.path.dirname(std.fs.path.resolve(aa, &.{fp}) catch fp) else null;
+        const uri = layout.import.sourceUri(aa, abs, doc_dir) catch "";
+        const hash = layout.import.sha256Hex(bytes);
+        if (uri.len > 0) _ = hist.doMerged(&state.model, key, .addSheetSource, .{ rep.sheet, .{ .uri = uri, .sha256 = &hash, .imported = nowSeconds() } }) catch {};
+    }
+    if (target == .new) openBeside(.{ .kind = .sheet, .target = @intFromEnum(rep.sheet) });
+    var probs_rows: std.ArrayList(usize) = .empty;
+    var probs_cols: std.ArrayList(usize) = .empty;
+    state.model.sheetProblems(aa, rep.sheet, &probs_rows, &probs_cols) catch {};
+    const msg = std.fmt.bufPrint(&import_status_buf, "Imported: {d} row{s} matched, {d} added, {d} column{s} added, {d} cell{s} set.{s}{s}{s} ", .{
+        rep.rows_matched,                                  if (rep.rows_matched == 1) "" else "s",
+        rep.rows_added,                                    rep.columns_added,
+        if (rep.columns_added == 1) "" else "s",           rep.cells_set,
+        if (rep.cells_set == 1) "" else "s",               if (rep.repeated > 0) " A name came twice: the later row stands." else "",
+        if (probs_rows.items.len > 0) " Some rows name no key here (marked)." else "", if (probs_cols.items.len > 0) " Some columns match no slot (marked)." else "",
+    }) catch "Imported. ";
+    state.status = msg;
+}
+
 /// Opens the document at `path`, replacing the one open; when it holds
 /// unsaved steps, asks first whether to keep them.
 fn openDocument(path: []const u8) void {
@@ -2437,6 +2514,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .open => "Open a document",
         .save_as => "Save the document as",
         .import_text => importTitle(),
+        .import_sheet => sheetImportTitle(),
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -2473,7 +2551,7 @@ fn filePrompt(kind: FilePromptKind) void {
         if (dvui.button(@src(), switch (kind) {
             .open => "Open",
             .save_as => "Save",
-            .import_text => "Import",
+            .import_text, .import_sheet => "Import",
         }, .{}, .{})) go = true;
     }
     if (cancel) {
@@ -2488,6 +2566,7 @@ fn filePrompt(kind: FilePromptKind) void {
     switch (kind) {
         .open => openDocument(path),
         .import_text => importText(path),
+        .import_sheet => importSheet(path),
         .save_as => {
             // A name without an extension takes Graven's.
             const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
@@ -4048,6 +4127,15 @@ fn menu() ?dvui.App.Result {
             m.close();
             file_prompt = .import_text;
             file_prompt_new = true;
+        };
+        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            if (sheetImportTarget() == null) {
+                state.status = "Choose a sheet, or a grid, track or panel of keys, first: the table goes into it. ";
+            } else {
+                file_prompt = .import_sheet;
+                file_prompt_new = true;
+            }
         };
         if (dvui.menuItemLabel(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();

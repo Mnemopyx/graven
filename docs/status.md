@@ -205,6 +205,15 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
         - no column add or remove in the GUI;
         - no copy and paste of ranges;
         - no Tools for sheets.
+    - **CSV import into legend sheets** (2026-11-18, legend sheets' step 3; `import.parseTable`, `import.sheetFromTable`):
+      - **Reading:** RFC 4180 CSV (quoted fields with separators, doubled quotes and line breaks); tab- or semicolon-separated when the header line has more of those than commas; BOM dropped, Latin-1 if not UTF-8, blank lines skipped.
+      - **The table:** the header names the slots (its first field, the key column's, is not used); each row is a key by name and its cells, as markup.
+      - **Into the sheet shown or chosen:** rows match by name and their cells in the table's columns are set; missing columns are added, missing rows appended, and what the table doesn't name is kept. A name given twice: the later row stands.
+      - **Else a new sheet** over the grid, track or panel chosen, named after the file, opened beside the canvas.
+      - **Undo and source:** one undo step; the source (URI, SHA-256, time) recorded on the sheet (`addSheetSource`).
+      - **The status line** reports rows matched and added, columns added, cells set, and whether rows or columns match nothing (marked in the sheet).
+      - **Checked:** tests (quoting, separators, merging by name, new columns and rows, repeats, one undo step, a new sheet); in the GUI, a CSV over the HP-15C keys made a sheet beside the canvas, with the quoted "10,X" whole and the unknown row and column marked.
+      - **Not yet:** updating from the source when it changes; exporting a sheet as CSV.
     - **Panes follow the active view** (decided 2026-11-18, the owner): ghost panes stay around the whole window. Each view kind says which panes it wants and what they hold (canvas: all; sheet: no Tools for now, the cell's row in Properties, the cell in the expression bar; flow editor: no Tools). An unwanted pane is hidden with its tab and hot edge, and returns as it was. To be built with the sheet view.
 
 ## Gaps against the project's stated goals

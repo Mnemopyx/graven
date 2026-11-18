@@ -249,6 +249,170 @@ pub fn sha256Hex(bytes: []const u8) [64]u8 {
     return std.fmt.bytesToHex(d, .lower);
 }
 
+
+// Tables (legend sheets) ------------------------------------------------------
+
+/// A table read from CSV: its rows, each its fields, in `a`.
+pub const Table = struct {
+    rows: []const []const []const u8,
+};
+
+/// The table in `bytes`: comma-separated (RFC 4180: a field in double
+/// quotes may hold the separator, line breaks and doubled quotes), or
+/// tab- or semicolon-separated when the first line holds more of those
+/// than commas outside quotes. A byte-order mark is dropped; text that is
+/// not UTF-8 is read as Latin-1. Blank lines are skipped. In `a`.
+pub fn parseTable(a: Allocator, bytes: []const u8) Allocator.Error!Table {
+    var text = bytes;
+    if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) text = text[3..];
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        var out: std.ArrayList(u8) = .empty;
+        for (text) |c| {
+            var b: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(c, &b) catch unreachable;
+            try out.appendSlice(a, b[0..n]);
+        }
+        text = out.items;
+    }
+    // The separator: the first line's commonest outside quotes.
+    var counts: [3]usize = .{ 0, 0, 0 };
+    {
+        var quoted = false;
+        for (text) |c| {
+            if (c == '"') quoted = !quoted;
+            if (quoted) continue;
+            if (c == '\n' or c == '\r') break;
+            switch (c) {
+                ',' => counts[0] += 1,
+                '\t' => counts[1] += 1,
+                ';' => counts[2] += 1,
+                else => {},
+            }
+        }
+    }
+    const sep: u8 = if (counts[1] > counts[0] and counts[1] >= counts[2]) '\t' else if (counts[2] > counts[0]) ';' else ',';
+    var rows: std.ArrayList([]const []const u8) = .empty;
+    var fields: std.ArrayList([]const u8) = .empty;
+    var field: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    var quoted = false;
+    var was_quoted = false;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (quoted) {
+            if (c == '"') {
+                if (i + 1 < text.len and text[i + 1] == '"') {
+                    try field.append(a, '"');
+                    i += 1;
+                } else quoted = false;
+            } else try field.append(a, c);
+            continue;
+        }
+        if (c == '"' and field.items.len == 0 and !was_quoted) {
+            quoted = true;
+            was_quoted = true;
+        } else if (c == sep) {
+            try fields.append(a, try field.toOwnedSlice(a));
+            was_quoted = false;
+        } else if (c == '\n' or c == '\r') {
+            if (c == '\r' and i + 1 < text.len and text[i + 1] == '\n') i += 1;
+            try fields.append(a, try field.toOwnedSlice(a));
+            was_quoted = false;
+            if (!blank(fields.items)) try rows.append(a, try fields.toOwnedSlice(a)) else fields.clearRetainingCapacity();
+        } else try field.append(a, c);
+    }
+    if (field.items.len > 0 or fields.items.len > 0) {
+        try fields.append(a, try field.toOwnedSlice(a));
+        if (!blank(fields.items)) try rows.append(a, try fields.toOwnedSlice(a));
+    }
+    return .{ .rows = rows.items };
+}
+
+fn blank(fields: []const []const u8) bool {
+    for (fields) |f| if (std.mem.trim(u8, f, " ").len > 0) return false;
+    return true;
+}
+
+/// What a table's import did to a sheet.
+pub const SheetReport = struct {
+    sheet: model.ObjectId = .none,
+    rows_matched: usize = 0,
+    rows_added: usize = 0,
+    columns_added: usize = 0,
+    cells_set: usize = 0,
+    /// Rows whose name appeared again further down (the later one stands).
+    repeated: usize = 0,
+};
+
+/// Where a table goes: into sheet `id`, or a new sheet named `name` over
+/// scope `scope` (a grid's, a track's or a panel's ID).
+pub const SheetTarget = union(enum) {
+    into: model.ObjectId,
+    new: struct { name: []const u8, scope: model.ObjectId },
+};
+
+/// Fills a legend sheet from `table`: its first row the header (its first
+/// field naming the key column, which is not used; the others slots), each
+/// further row a key by its name and its cells. Into an existing sheet, a
+/// row matches by name and its cells in the table's columns are set; a
+/// column it lacks is added, a row it lacks appended; what the table does
+/// not name is kept. Cells are markup as written. All as one step
+/// (`key`).
+pub fn sheetFromTable(gpa: Allocator, h: *history.History, m: *Model, key: u64, target: SheetTarget, table: Table) !SheetReport {
+    var rep: SheetReport = .{};
+    if (table.rows.len == 0) return error.EmptyTable;
+    const header = table.rows[0];
+    const id = switch (target) {
+        .into => |id| id,
+        .new => |n| try h.doMerged(m, key, .addSheet, .{ n.name, n.scope, &[_][]const u8{} }),
+    };
+    rep.sheet = id;
+    if (m.sheetIndex(id) == null) return error.NoSuchObject;
+    // Each table column's sheet column (from 1), added where missing.
+    var cols = try gpa.alloc(?usize, header.len);
+    defer gpa.free(cols);
+    for (header, 0..) |hname, k| {
+        cols[k] = null;
+        if (k == 0) continue;
+        const name = std.mem.trim(u8, hname, " ");
+        if (name.len == 0) continue;
+        const sh = &m.sheets.items[m.sheetIndex(id).?];
+        cols[k] = for (sh.columns.items, 0..) |c, ci| {
+            if (std.mem.eql(u8, c, name)) break ci + 1;
+        } else blk: {
+            _ = try h.doMerged(m, key, .addSheetColumn, .{ id, null, name });
+            rep.columns_added += 1;
+            break :blk m.sheets.items[m.sheetIndex(id).?].columns.items.len;
+        };
+    }
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(gpa);
+    for (table.rows[1..]) |row| {
+        if (row.len == 0) continue;
+        const name = std.mem.trim(u8, row[0], " ");
+        if (name.len == 0) continue;
+        if ((try seen.getOrPut(gpa, name)).found_existing) rep.repeated += 1;
+        const sh = &m.sheets.items[m.sheetIndex(id).?];
+        const r = for (sh.rows.items, 0..) |sr, ri| {
+            if (std.mem.eql(u8, sr.key, name)) break ri;
+        } else blk: {
+            _ = try h.doMerged(m, key, .addSheetRow, .{ id, null, name });
+            rep.rows_added += 1;
+            break :blk m.sheets.items[m.sheetIndex(id).?].rows.items.len - 1;
+        };
+        for (row[1..], 1..) |cell, k| {
+            if (k >= cols.len) break;
+            const c = cols[k] orelse continue;
+            const now = m.sheets.items[m.sheetIndex(id).?].rows.items[r];
+            if (c - 1 < now.cells.items.len and std.mem.eql(u8, now.cells.items[c - 1], cell)) continue;
+            _ = try h.doMerged(m, key, .setSheetCell, .{ id, r, c, cell });
+            rep.cells_set += 1;
+        }
+    }
+    rep.rows_matched = seen.count() - rep.rows_added;
+    return rep;
+}
+
 const testing = std.testing;
 
 test "an RTF document comes in as paragraphs, styles and runs, undone as one step" {
@@ -356,4 +520,82 @@ test "plain text into a new, unplaced flow: escaped, one undo step, its source k
     try testing.expect(fl.items.items[1].what.paragraph == null);
     _ = try h.undo(&m);
     try testing.expectEqual(0, m.flows.items.len);
+}
+
+
+test "a table: quoted fields with separators, quotes and line breaks; tabs and semicolons found" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try parseTable(a, "\xEF\xBB\xBFname,top,g\r\nK1,\"$x^2$, squared\",\"say \"\"hi\"\"\"\n\nK2,\"two\nlines\",\n");
+    try testing.expectEqual(3, t.rows.len);
+    try testing.expectEqualStrings("$x^2$, squared", t.rows[1][1]);
+    try testing.expectEqualStrings("say \"hi\"", t.rows[1][2]);
+    try testing.expectEqualStrings("two\nlines", t.rows[2][1]);
+    try testing.expectEqualStrings("", t.rows[2][2]);
+    const tabs = try parseTable(a, "name\ttop\nK1\ta,b\n");
+    try testing.expectEqualStrings("a,b", tabs.rows[1][1]);
+    const semi = try parseTable(a, "name;top;g\nK1;x;y\n");
+    try testing.expectEqual(3, semi.rows[1].len);
+}
+
+test "a table fills a sheet: rows by name, new columns and rows, one undo step" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.addPanel("Keys", 60, 30);
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{ .{ .name = "top" }, .{ .name = "g" } } });
+    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    const k1 = try m.addInstance(p, g, st, 0, 0);
+    _ = try m.addInstance(p, g, st, 1, 0);
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const scope = m.panels.items[p].grids.items[g].id;
+    const sheet = try h.do(&m, .makeSheet, .{ "Legends", scope });
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const names = m.sheets.items[0].rows.items;
+    const csv = try std.fmt.allocPrint(arena.allocator(), "key,top,blue\n{s},$\\sqrt{{x}}$,ABS\nK99,new,\n{s},again,\n", .{ names[0].key, names[0].key });
+    const t = try parseTable(arena.allocator(), csv);
+    const rep = try sheetFromTable(gpa, &h, &m, 9, .{ .into = sheet }, t);
+    try testing.expectEqual(1, rep.rows_matched);
+    try testing.expectEqual(1, rep.rows_added);
+    try testing.expectEqual(1, rep.columns_added);
+    try testing.expectEqual(1, rep.repeated);
+    // The later row for the first key stands; the key shows it.
+    const text = try m.tileTrackText(gpa, k1, m.tileTrackNamed(k1, "top").?);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("again", text);
+    try testing.expectEqual(3, m.sheets.items[0].columns.items.len);
+    // One undo: the sheet as made.
+    _ = try h.undo(&m);
+    try testing.expectEqual(2, m.sheets.items[0].columns.items.len);
+    try testing.expectEqual(2, m.sheets.items[0].rows.items.len);
+}
+
+test "a table makes a new sheet over a keypad" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.addPanel("Keys", 60, 30);
+    const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
+    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 1, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    const k = try m.addInstance(p, g, st, 0, 0);
+    try m.renameTile(k, "ENTER");
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const t = try parseTable(arena.allocator(), "name,top\nENTER,ENTER\n");
+    const rep = try sheetFromTable(gpa, &h, &m, 3, .{ .new = .{ .name = "From CSV", .scope = m.panels.items[p].grids.items[g].id } }, t);
+    try testing.expectEqual(1, rep.rows_added);
+    const text = try m.tileTrackText(gpa, k, m.tileTrackNamed(k, "top").?);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("ENTER", text);
 }
