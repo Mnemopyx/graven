@@ -4818,7 +4818,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });
     defer row.deinit();
     if (has_children) {
-        if (dvui.buttonIcon(@src(), if (open) "Close" else "Open", if (open) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{}, .{}, .{
+        if (tbuttonIcon(@src(), if (open) "Close" else "Open", if (open) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{}, .{}, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .padding = .all(1),
             .margin = .all(1),
@@ -5443,7 +5443,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
                 } else tab_click = .{ .view = v, .ms = now };
                 if (v != vl.active) view_to_activate = v else vl.select(v);
             }
-            if (many) if (dvui.buttonIcon(@src(), "Close view", dvui.entypo.cross, .{}, .{}, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(2), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k })) {
+            if (many) if (tbuttonIcon(@src(), "Close view", dvui.entypo.cross, .{}, .{}, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(2), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k })) {
                 closeView(v);
             };
         }
@@ -7223,9 +7223,9 @@ fn panelFab(pi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
             defer row.deinit();
             dvui.label(@src(), "{d}. {s}", .{ li + 1, l.name }, .{ .font = dvui.Font.theme(.heading), .gravity_y = 0.5 });
-            if (li + 1 < layers.len and dvui.buttonIcon(@src(), "Later", dvui.entypo.arrow_down, .{}, .{}, .{ .gravity_x = 1, .id_extra = 1 })) move = .{ .from = li, .up = false };
-            if (li > 0 and dvui.buttonIcon(@src(), "Earlier", dvui.entypo.arrow_up, .{}, .{}, .{ .gravity_x = 1, .id_extra = 2 })) move = .{ .from = li, .up = true };
-            if (dvui.buttonIcon(@src(), "Remove layer", dvui.entypo.cross, .{}, .{}, .{ .gravity_x = 1, .id_extra = 3 })) remove = li;
+            if (li + 1 < layers.len and tbuttonIcon(@src(), "Later", dvui.entypo.arrow_down, .{}, .{}, .{ .gravity_x = 1, .id_extra = 1 })) move = .{ .from = li, .up = false };
+            if (li > 0 and tbuttonIcon(@src(), "Earlier", dvui.entypo.arrow_up, .{}, .{}, .{ .gravity_x = 1, .id_extra = 2 })) move = .{ .from = li, .up = true };
+            if (tbuttonIcon(@src(), "Remove layer", dvui.entypo.cross, .{}, .{}, .{ .gravity_x = 1, .id_extra = 3 })) remove = li;
         }
         if (textProp("Name", l.name, n + 1)) |v| {
             l.name = v;
@@ -10340,12 +10340,12 @@ fn toolBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4) });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
-    if (dvui.buttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
+    if (tbuttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
     {
         const on = state.tool == .constrain;
         var cwd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Constrain", dvui.entypo.ruler, .{}, .{}, .{
+        if (tbuttonIcon(@src(), "Constrain", dvui.entypo.ruler, .{}, .{}, .{
             .data_out = &cwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         })) {
@@ -10359,19 +10359,19 @@ fn toolBar() void {
     switch (state.context) {
         .prototypes => {
             var pwd: dvui.WidgetData = undefined;
-            if (dvui.buttonIcon(@src(), "Add prototype", dvui.entypo.squared_plus, .{}, .{}, .{ .data_out = &pwd })) addPrototype() catch {
+            if (tbuttonIcon(@src(), "Add prototype", dvui.entypo.squared_plus, .{}, .{}, .{ .data_out = &pwd })) addPrototype() catch {
                 state.status = "The prototype was not added. ";
             };
             dvui.tooltip(@src(), .{ .active_rect = pwd.borderRectScale().r }, "Add a tile prototype", .{}, .{});
         },
         .prototype => |id| {
             var dwd: dvui.WidgetData = undefined;
-            if (dvui.buttonIcon(@src(), "Duplicate prototype", dvui.entypo.copy, .{}, .{}, .{ .data_out = &dwd })) duplicatePrototype(id) catch {
+            if (tbuttonIcon(@src(), "Duplicate prototype", dvui.entypo.copy, .{}, .{}, .{ .data_out = &dwd })) duplicatePrototype(id) catch {
                 state.status = "The prototype was not duplicated. ";
             };
             dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "Duplicate: a copy to make a variant of", .{}, .{});
             var rwd: dvui.WidgetData = undefined;
-            if (dvui.buttonIcon(@src(), "Delete prototype", dvui.entypo.trash, .{}, .{}, .{ .data_out = &rwd })) {
+            if (tbuttonIcon(@src(), "Delete prototype", dvui.entypo.trash, .{}, .{}, .{ .data_out = &rwd })) {
                 if (act(.removePrototype, .{id})) {
                     state.context = .prototypes;
                 } else |err| state.status = if (err == error.PrototypeInUse) "Tiles are still made from this prototype: switch them first. " else "The prototype was not deleted. ";
@@ -10385,7 +10385,7 @@ fn toolBar() void {
     if (state.context == .panel and state.model.panels.items[state.context.panel].unbounded) {
         const on = state.tool == .new_sketch;
         var swd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "New sketch", dvui.entypo.pencil, .{}, .{}, .{
+        if (tbuttonIcon(@src(), "New sketch", dvui.entypo.pencil, .{}, .{}, .{
             .data_out = &swd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         })) {
@@ -10398,7 +10398,7 @@ fn toolBar() void {
     if (state.context == .panel) {
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Add shape", dvui.entypo.circle, .{}, .{}, .{
+        if (tbuttonIcon(@src(), "Add shape", dvui.entypo.circle, .{}, .{}, .{
             .data_out = &awd,
             .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         })) {
@@ -10415,7 +10415,7 @@ fn toolBar() void {
         }, 0..) |mode, mi| {
             const mode_on = state.tool == .add_tracks and tracks_tool.major == mode[0];
             var twd: dvui.WidgetData = undefined;
-            if (dvui.buttonIcon(@src(), mode[1], mode[2], .{}, .{}, .{
+            if (tbuttonIcon(@src(), mode[1], mode[2], .{}, .{}, .{
                 .id_extra = mi,
                 .data_out = &twd,
                 .color_fill = if (mode_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
@@ -10436,7 +10436,7 @@ fn toolBar() void {
         // Fit to tiles: the tracks shrink to what has been put in them.
         const r = state.context.region;
         var fwd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Fit to tiles", dvui.entypo.crop, .{}, .{}, .{ .data_out = &fwd })) {
+        if (tbuttonIcon(@src(), "Fit to tiles", dvui.entypo.crop, .{}, .{}, .{ .data_out = &fwd })) {
             state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
         }
         dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
@@ -10448,7 +10448,7 @@ fn toolBar() void {
     if (on_canvas or state.context == .selection or state.context == .group) {
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Select area", dvui.entypo.select_arrows, .{}, .{}, .{
+        if (tbuttonIcon(@src(), "Select area", dvui.entypo.select_arrows, .{}, .{}, .{
             .data_out = &swd,
             .color_fill = if (sel_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         })) {
@@ -10461,7 +10461,7 @@ fn toolBar() void {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
         var awd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Add panel", dvui.entypo.squared_plus, .{}, .{}, .{
+        if (tbuttonIcon(@src(), "Add panel", dvui.entypo.squared_plus, .{}, .{}, .{
             .data_out = &awd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         })) {
@@ -10593,6 +10593,13 @@ fn tbutton(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.B
     var o = opts;
     if (o.tag == null) o.tag = tagFor(label);
     return dvui.button(src, label, init_opts, o);
+}
+
+/// `dvui.buttonIcon`, tagged "icon/<name>" unless it has a tag.
+fn tbuttonIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, init_opts: dvui.ButtonWidget.InitOptions, icon_opts: dvui.IconRenderOptions, opts: dvui.Options) bool {
+    var o = opts;
+    if (o.tag == null) o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "icon/{s}", .{name}) catch "icon");
+    return dvui.buttonIcon(src, name, tvg, init_opts, icon_opts, o);
 }
 
 /// `dvui.menuItemLabel`, tagged "menu/<label>" (without its mark).
@@ -10786,11 +10793,11 @@ fn propFont(name: []const u8, n: usize) !void {
     defer lifo.free(names);
     for (state.fonts, 0..) |f, i| names[i] = f.name;
     if (tdropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120), .font = styled(.theme(.body), !state.font_set) })) state.font_set = true;
-    if (dvui.buttonIcon(@src(), "Previous font", dvui.entypo.chevron_left, .{}, .{}, .{})) {
+    if (tbuttonIcon(@src(), "Previous font", dvui.entypo.chevron_left, .{}, .{}, .{})) {
         state.font_choice = (state.font_choice + state.fonts.len - 1) % state.fonts.len;
         state.font_set = true;
     }
-    if (dvui.buttonIcon(@src(), "Next font", dvui.entypo.chevron_right, .{}, .{}, .{})) {
+    if (tbuttonIcon(@src(), "Next font", dvui.entypo.chevron_right, .{}, .{}, .{})) {
         state.font_choice = (state.font_choice + 1) % state.fonts.len;
         state.font_set = true;
     }
@@ -10830,7 +10837,7 @@ fn properties() !void {
             if (state.model.spaceOf(pi) == 0) try canvasProperties(pi) else try frameProperties(state.model.spaceOf(pi));
         } else {
             const panel = state.model.panels.items[pi];
-            propValue("Name", panel.default_name, "{s}", .{panel.name}, 1);
+            if (textProp("Name", panel.name, 1)) |name| actM(mergeKey(.{ "panel name", pi }), .renamePanel, .{ pi, name }) catch {};
             // Typed exactly: where it sits (bottom left, mm) and, for a
             // rectangle, how big it is.
             if (numberProp("Origin across, mm", panel.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "panel at", pi }), .movePanel, .{ pi, geom.Point{ .x = v, .y = panel.origin.y } }) catch {
@@ -17731,7 +17738,7 @@ fn sketchModeProperties() void {
                 _ = skEdit(.{ .reference = .{ .c = @intCast(ci), .on = c.driving } });
             }
         }
-        if (dvui.buttonIcon(@src(), "Remove constraint", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
+        if (tbuttonIcon(@src(), "Remove constraint", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
             _ = skEdit(.{ .unconstrain = @intCast(ci) });
             sk_sel.clearRetainingCapacity();
             break;
@@ -17797,7 +17804,7 @@ fn sketchParameters(it: SkPlace) void {
             sk_param_text[line.len] = 0;
             sk_param_reset = true;
         }
-        if (dvui.buttonIcon(@src(), "Remove parameter", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
+        if (tbuttonIcon(@src(), "Remove parameter", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
             _ = skEdit(.{ .unparam = p.name });
             break;
         }

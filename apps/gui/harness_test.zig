@@ -70,8 +70,13 @@ pub const Run = struct {
     /// The widget tagged `tag`, once it is laid out (a new one takes its
     /// size a frame or two after it first appears).
     fn rectOf(r: *Run, tag: []const u8) !dvui.Rect.Physical {
-        for (0..20) |_| {
-            if (dvui.tagGet(tag)) |d| if (d.visible and d.rect.w > 0 and d.rect.h > 0) return d.rect;
+        // Laid out, and where it was a frame ago: settled.
+        var last: ?dvui.Rect.Physical = null;
+        for (0..30) |_| {
+            if (dvui.tagGet(tag)) |d| if (d.visible and d.rect.w > 0 and d.rect.h > 0) {
+                if (last) |l| if (std.meta.eql(l, d.rect)) return d.rect;
+                last = d.rect;
+            };
             try r.frames(1);
         }
         const d = dvui.tagGet(tag) orelse {
@@ -102,7 +107,9 @@ pub const Run = struct {
         const cw = dvui.currentWindow();
         _ = try cw.addEventMouseMotion(.{ .pt = p });
         try r.frames(1);
-        try dvui.testing.click(.left);
+        _ = try cw.addEventMouseButton(.left, .press);
+        try r.frames(1);
+        _ = try cw.addEventMouseButton(.left, .release);
         try r.frames(2);
     }
 
@@ -178,4 +185,71 @@ test "a text style made and set in the Browser and its properties" {
     try std.testing.expectApproxEqAbs(2.6, st.cap_height, 1e-9);
     try std.testing.expectEqualStrings("Inter", st.face("text").?.family);
     try std.testing.expectEqualStrings("Medium", st.face("text").?.style);
+}
+
+// The PC keyboard, made in the GUI ------------------------------------------
+
+/// A style made in the Browser: its name, cap height and text face.
+fn makeStyle(r: *Run, name: []const u8, cap: []const u8) !void {
+    try r.click("tree/untitled/Text styles");
+    try r.click("Text styles/Add a style");
+    try r.set("Text style/Name", name);
+    try r.set("Text style/Cap height, mm", cap);
+    try r.set("Faces/Text face family", "Inter");
+    try r.set("Faces/Text face style", "Medium");
+}
+
+/// The keyboard's key prototype: 19.05 mm u, its insets, its sizes, three
+/// slots (one legend each), keycap art shaded back to front.
+fn makeKeyPrototype(r: *Run) !void {
+    try r.click("tree/untitled/Tile prototypes");
+    try r.click("icon/Add prototype");
+    try r.set("Tile prototype/Name", "key");
+    try r.set("Tile prototype/Unit, mm per u", "19.05");
+    inline for (.{ "left", "right", "top", "bottom" }) |side| try r.set("Tile prototype/Body inset " ++ side ++ ", mm", "0.475");
+    try r.set("Tile prototype/Face inset left, mm", "2.7");
+    try r.set("Tile prototype/Face inset right, mm", "2.7");
+    try r.set("Tile prototype/Face inset top, mm", "1.6");
+    try r.set("Tile prototype/Face inset bottom, mm", "3.6");
+    try r.set("Tile prototype/Widths, u", "1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25");
+    try r.set("Tile prototype/Heights, u", "1, 2");
+    // Slots, one legend each, overlapping: top (the whole face), bottom
+    // (its lower half), words (the whole face, smaller).
+    try r.choose("Track top/Style", "legend");
+    try r.click("Track top/Add track");
+    try r.set("Track track 2/Name", "bottom");
+    try r.choose("Track bottom/Style", "legend");
+    try r.choose("Track bottom/Set from", "start");
+    try r.set("Track bottom/Inset top, mm", "6.45");
+    try r.click("Track bottom/Add track");
+    try r.set("Track track 3/Name", "words");
+    try r.choose("Track words/Style", "legend words");
+    try r.choose("Track words/Set from", "start");
+    // Keycap art drawn from the insets now set, shaded back to front.
+    try r.click("Layer face/Remove art");
+    try r.click("Art/Add keycap art");
+
+    try r.choose("Layer body/Fill kind", "a gradient");
+    try r.set("Layer body/Gradient from", "#e9e7e1");
+    try r.set("Layer body/Gradient to", "#cfccc3");
+    try r.choose("Layer face/Fill kind", "a gradient");
+    try r.set("Layer face/Gradient from", "#faf9f6");
+    try r.set("Layer face/Gradient to", "#efede8");
+}
+
+test "the PC keyboard, made in the GUI" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try makeStyle(&r, "legend", "2.6");
+    try makeStyle(&r, "legend words", "1.6");
+    try makeKeyPrototype(&r);
+    const m = api.model();
+    const p = m.prototypes.items[m.prototypes.items.len - 1];
+    try std.testing.expectEqualStrings("key", p.name);
+    try std.testing.expectEqual(3, p.tracks.len);
+    try std.testing.expectEqualStrings("words", p.tracks[2].name);
+    try std.testing.expectEqual(6.45, p.tracks[1].place.inset.top);
+    try std.testing.expect(p.art.?.layers[0].paint.fill == .linear);
+    try std.testing.expectEqual(8, p.widths.len);
 }

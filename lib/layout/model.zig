@@ -2310,6 +2310,15 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Renames panel `panel`.
+    pub fn renamePanel(m: *Model, panel: usize, name: []const u8) Error!void {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        if (name.len == 0) return error.BadValue;
+        m.panels.items[panel].name = try m.a().dupe(u8, name);
+        if (@hasField(Panel, "default_name")) m.panels.items[panel].default_name = false;
+        m.revision += 1;
+    }
+
     /// Sets a rectangular panel's size, mm (its origin, bottom left, stays
     /// put). A panel whose outline is drawn (an edge or a sketch) is sized
     /// by that, so it refuses.
