@@ -17,6 +17,7 @@ const dvui = @import("dvui");
 const gui = @import("main.zig");
 
 const api = gui.testing_api;
+const layout = @import("graven_layout");
 
 const scratch = "/tmp/graven-gui-test";
 
@@ -90,6 +91,18 @@ pub const Run = struct {
             return error.WidgetNotVisible;
         }
         return d.rect;
+    }
+
+    /// The tag that starts with `prefix` (a node whose label goes on), once
+    /// it is there.
+    pub fn tagStarting(r: *Run, prefix: []const u8) ![]const u8 {
+        for (0..20) |_| {
+            var it = dvui.currentWindow().tags.map.iterator();
+            while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, prefix)) return e.key_ptr.*;
+            try r.frames(1);
+        }
+        std.debug.print("no tag starting \"{s}\"\n", .{prefix});
+        return error.TagNotFound;
     }
 
     /// Clicks the middle of the widget tagged `tag`.
@@ -362,6 +375,51 @@ fn makeKeyboard(r: *Run) !void {
             try r.click(try std.fmt.bufPrint(&tb, "palette/key {d} u", .{k.w}));
         }
     }
+
+    // The second paragraph (the cursor is in it, at the end): a style of
+    // its own, half a unit (27 pt) before it.
+    try r.click("Paragraph/New paragraph style");
+    try r.set("Paragraph/Name", "Row gap 0.5 u");
+    try r.set("Paragraph/Space before, pt", "27");
+
+    // Named in order, K1 to K104, from the track's properties.
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
+    try r.click("Region/Name keys in order: K1, K2 …");
+
+    // Gaps and heights, key by key: the key clicked on the canvas (the
+    // panel chosen first, so a click picks a key rather than placing the
+    // cursor), then its properties.
+    // Each row opened in the Browser, then each key that needs it chosen
+    // there (its node is its name, then its legend).
+    const keys_node = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys";
+    for (1..rows.len + 1) |ri| {
+        var tb: [128]u8 = undefined;
+        try r.click(try std.fmt.bufPrint(&tb, "{s}/Row {d}#open", .{ keys_node, ri }));
+    }
+    var n: usize = 0;
+    for (rows) |row| for (row) |k| {
+        n += 1;
+        if (k.gap == 0 and k.h == 1) continue;
+        var tb: [128]u8 = undefined;
+        try r.click(try r.tagStarting(try std.fmt.bufPrint(&tb, "{s}/K{d} ", .{ keys_node, n })));
+        var vb: [16]u8 = undefined;
+        if (k.gap != 0) try r.set("Tile/Gap before, u", try std.fmt.bufPrint(&vb, "{d}", .{k.gap}));
+        if (k.h != 1) try r.choose("Tile/Height", try std.fmt.bufPrint(&vb, "{d} u", .{k.h}));
+    };
+
+    // The legends: a table, one row a key, imported over the track.
+    const csv = try legendsCsv(std.heap.c_allocator);
+    defer std.heap.c_allocator.free(csv);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/keyboard-legends.csv", .data = csv });
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
+    try r.click("menu/File");
+    try r.click("menu/Import legend sheet (CSV)…");
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText(scratch ++ "/keyboard-legends.csv");
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(3);
 }
 
 test "the PC keyboard, made in the GUI" {
@@ -374,4 +432,51 @@ test "the PC keyboard, made in the GUI" {
         if (!t.removed) tiles += 1;
     }
     try std.testing.expectEqual(104, tiles);
+    try std.testing.expectEqual(1, m.sheets.items.len);
+    try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
+}
+
+/// Panel `name` of `m` as SVG, every legend in `face`.
+fn panelSvg(a: std.mem.Allocator, m: *layout.Model, name: []const u8, face: *layout.Face) ![]u8 {
+    const pi = for (m.panels.items, 0..) |p, i| {
+        if (std.mem.eql(u8, p.name, name)) break i;
+    } else return error.NoSuchPanel;
+    const faces = [_]*layout.Face{face};
+    var labels: layout.Labels = .init(a, &faces);
+    defer labels.deinit();
+    var placed = try layout.solve(a, m, pi, &labels);
+    defer placed.deinit();
+    return layout.output.panelSvg(a, &placed, &faces, .{});
+}
+
+/// Whether the panels `names` of the document made in the GUI (`m`) come
+/// out as the example file's do, byte for byte, set in one face (the
+/// repository's Inter Medium). A difference is written beside the scratch
+/// config for a look.
+fn sameAsExample(m: *layout.Model, path: []const u8, names: []const []const u8) !void {
+    const a = std.heap.c_allocator;
+    const io = std.testing.io;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20));
+    defer a.free(bytes);
+    var opened = try layout.history.openFile(a, bytes);
+    defer {
+        opened.model.deinit();
+        opened.history.deinit();
+    }
+    const font = try std.Io.Dir.cwd().readFileAlloc(io, "examples/fonts/Inter-Medium.otf", a, .limited(64 << 20));
+    defer a.free(font);
+    const face = try layout.Face.init(a, font, 0);
+    defer face.deinit();
+    for (names) |name| {
+        const made = try panelSvg(a, m, name, face);
+        defer a.free(made);
+        const want = try panelSvg(a, &opened.model, name, face);
+        defer a.free(want);
+        if (std.mem.eql(u8, made, want)) continue;
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = scratch ++ "/made.svg", .data = made });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = scratch ++ "/example.svg", .data = want });
+        const at = std.mem.indexOfDiff(u8, made, want).?;
+        std.debug.print("{s}: differs from {s} at byte {d} (of {d} and {d}): {s}/made.svg, example.svg\n", .{ name, path, at, made.len, want.len, scratch });
+        return error.NotTheSame;
+    }
 }

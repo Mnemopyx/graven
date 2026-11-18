@@ -11307,7 +11307,7 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
             try act(.setParagraphAt, .{ pi, ri, at, if (choice == 0) null else m.paragraph_styles.items[choice - 1].id });
         }
-        if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_y = 0.5 } })) {
+        if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_y = 0.5, .tag = tagFor("New paragraph style") } })) {
             var buf: [32]u8 = undefined;
             var base: layout.model.ParagraphStyle = if (current) |id| (if (m.paraStyle(id)) |ps| ps.* else .{ .name = "" }) else .{ .name = "" };
             base.name = m.nextParagraphStyleName(&buf);
