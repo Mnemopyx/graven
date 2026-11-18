@@ -118,6 +118,19 @@ pub const Constraint = struct {
     a: ConstraintEnd,
     b: ConstraintEnd,
     value: f64 = 0,
+    /// Where its dimension is drawn, relative to the constrained object
+    /// (end `a`), so it moves with it.
+    place: ConstraintPlace = .{},
+};
+
+/// Where a constraint's dimension is drawn: its line `across` mm from the
+/// middle of the constrained object (perpendicular to what it measures:
+/// up for a horizontal dimension, right for a vertical one), and its value
+/// at `along` of the way from the reference to the constrained feature (½:
+/// the middle). Placement only: it changes nothing the constraint holds.
+pub const ConstraintPlace = struct {
+    across: f64 = 0,
+    along: f64 = 0.5,
 };
 
 /// A paragraph style's index in `Model.paragraph_styles`.
@@ -3726,6 +3739,14 @@ pub const Model = struct {
         if (!std.math.isFinite(value)) return error.BadConstraint;
         const i = m.constraintIndex(id) orelse return error.NoSuchObject;
         m.constraints.items[i].value = value;
+        m.revision += 1;
+    }
+
+    /// Places constraint `id`'s dimension (where it is drawn only).
+    pub fn setConstraintPlace(m: *Model, id: ObjectId, at: ConstraintPlace) Error!void {
+        if (!std.math.isFinite(at.across) or !std.math.isFinite(at.along)) return error.BadConstraint;
+        const i = m.constraintIndex(id) orelse return error.NoSuchObject;
+        m.constraints.items[i].place = .{ .across = at.across, .along = std.math.clamp(at.along, -1, 2) };
         m.revision += 1;
     }
 

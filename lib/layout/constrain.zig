@@ -944,3 +944,29 @@ test "objects move and resize only where their constraints leave them free" {
     _ = try h.do(&m, .placeObjects, .{ &[_]ObjectId{pid}, &[_]geom.Box{.{ .x0 = 20, .x1 = 120, .y0 = 0, .y1 = 80 }} });
     try testing.expectApproxEqAbs(@as(f64, 170), boxOf(&m, qid).?.x0, 1e-9);
 }
+
+test "a dimension's place is kept, undone, and written with the file" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    const c = try m.startCanvas(.mm);
+    _ = try m.addArt(c, .{ .name = "A", .at = .{ .x = 10, .y = 20 }, .shapes = &.{} });
+    _ = try m.addArt(c, .{ .name = "B", .at = .{ .x = 30, .y = 20 }, .shapes = &.{} });
+    try h.reset(&m);
+    const a_id = m.panels.items[c].art.items[0].id;
+    const b_id = m.panels.items[c].art.items[1].id;
+    const k = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b_id, .feature = .origin_x }, .b = .{ .object = a_id, .feature = .origin_x }, .value = 20 }});
+    try h.do(&m, .setConstraintPlace, .{ k, .{ .across = 7.5, .along = 0.8 } });
+    try testing.expectEqual(7.5, m.constraints.items[0].place.across);
+    // Placing it moves nothing.
+    try testing.expectApproxEqAbs(@as(f64, 30), artAt(&m, c, 1).x, 1e-9);
+    const bytes = try native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try native.decode(gpa, bytes);
+    defer back.deinit();
+    try testing.expectEqual(0.8, back.constraints.items[0].place.along);
+    _ = try h.undo(&m);
+    try testing.expectEqual(0, m.constraints.items[0].place.across);
+}

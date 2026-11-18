@@ -7458,6 +7458,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (e.evt == .key) {
             // Keys reach the canvas only while it has focus.
             const del = if (keymap.match1(e, kmode("canvas"))) |inv| inv.action == kact("canvas.object.delete") else false;
+            if (del and picked_constraint != null) {
+                act(.removeConstraint, .{picked_constraint.?}) catch {};
+                picked_constraint = null;
+                e.handle(@src(), box.data());
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
             if (del and path_selected != null and pathRegion() != null) {
                 act(.removeControlPoint, .{path_selected.?}) catch {};
                 path_selected = null;
@@ -7651,7 +7658,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (engage_drag != null) {
+                if (dim_drag != null) {
+                    e.handle(@src(), box.data());
+                    dimMotion(state.view.toMm(area, me.p));
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (engage_drag != null) {
                     e.handle(@src(), box.data());
                     engageMotion(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
@@ -7701,7 +7712,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
-                if (engage_drag != null) {
+                if (dim_drag != null) {
+                    _ = dimRelease();
+                } else if (engage_drag != null) {
                     // A press on an engagement point that did not drag is
                     // a click.
                     if (!engageRelease()) clickAt(state.view.toMm(area, me.p), me.p);
@@ -7804,6 +7817,7 @@ fn parentObject(id: layout.model.ObjectId) ?layout.model.ObjectId {
 /// selects the container picked, or (clicked again in the same place) the
 /// one it sits in.
 fn clickAt(at: geom.Point, p: dvui.Point.Physical) void {
+    picked_constraint = null;
     const ns = dvui.windowNaturalScale();
     const again = if (last_click) |lc| @abs(lc.px.x - p.x) <= 4 * ns and @abs(lc.px.y - p.y) <= 4 * ns else false;
     pick(at);
@@ -8675,6 +8689,7 @@ fn propFont(name: []const u8, n: usize) !void {
 
 fn properties() !void {
     if (sketch_edit != null) return sketchModeProperties();
+    if (pickedConstraintProperties()) return;
     if (panel_edit != null) {
         panelEditHeader();
         if (panel_edit == null) return;
@@ -12259,7 +12274,12 @@ fn selectionMovable() bool {
 /// What an engagement point does: the origin and the centre move the
 /// container (the origin is its grab point: a track's top-left mark); a
 /// corner resizes two edges, an edge's midpoint or the edge itself one.
-const EngageKind = enum { origin, centre, corner, edge_mid, edge };
+const EngageKind = enum { origin, centre, corner, edge_mid, edge, dim_value, dim_line };
+
+/// Whether a hit is a constraint's dimension (its `id` the constraint's).
+fn isDimKind(k: EngageKind) bool {
+    return k == .dim_value or k == .dim_line;
+}
 
 /// Whether a press there moves the whole (else it resizes).
 fn engageMoves(k: EngageKind) bool {
@@ -12375,6 +12395,18 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
     }
     // Nearest first; at one place (a track's origin is its top-left
     // corner), moving before resizing.
+    // Constraint dimensions: the value (a point) and the line.
+    for (state.model.constraints.items) |c| {
+        const g = dimGeom(c) orelse continue;
+        const lq = state.view.toPx(area, g.label);
+        const dl = @sqrt((lq.x - pp.x) * (lq.x - pp.x) + (lq.y - pp.y) * (lq.y - pp.y));
+        if (dl <= point_r + 4 * ns) {
+            points.append(a, .{ .id = c.id, .kind = .dim_value, .edges = .{}, .at = g.label, .d = dl }) catch {};
+            continue;
+        }
+        const dd = segDistPx(pp, state.view.toPx(area, g.p0), state.view.toPx(area, g.p1));
+        if (dd <= edge_r) edges.append(a, .{ .id = c.id, .kind = .dim_line, .edges = .{}, .at = at, .d = dd }) catch {};
+    }
     const by_d = struct {
         fn lt(_: void, x: EngageHit, y: EngageHit) bool {
             if (@abs(x.d - y.d) > 0.5) return x.d < y.d;
@@ -12411,7 +12443,7 @@ fn engageTarget() ?EngageHit {
 /// the axes; for a resize, the edges. As in sketches, a point goes as far
 /// as its constraints let it: along a free axis though the other is held.
 fn engageFreedom(h: EngageHit) struct { x: bool, y: bool, edges: Edges } {
-    if (state.model.group(h.id) != null) return .{ .x = true, .y = true, .edges = h.edges };
+    if (isDimKind(h.kind) or state.model.group(h.id) != null) return .{ .x = true, .y = true, .edges = h.edges };
     const f = freedomOf(h.id);
     return .{
         .x = f.x,
@@ -12427,6 +12459,7 @@ fn anyEdge(e: Edges) bool {
 /// Whether hit `h` can do anything at all: move along one axis, or move
 /// one of its edges.
 fn engageFree(h: EngageHit) bool {
+    if (isDimKind(h.kind)) return true;
     const fr = engageFreedom(h);
     return if (engageMoves(h.kind)) fr.x or fr.y else anyEdge(fr.edges);
 }
@@ -12434,6 +12467,7 @@ fn engageFree(h: EngageHit) bool {
 /// Whether hit `h` is held in part: a corner with one edge held, a move
 /// along one axis only.
 fn engagePartly(h: EngageHit) bool {
+    if (isDimKind(h.kind)) return false;
     const fr = engageFreedom(h);
     if (engageMoves(h.kind)) return fr.x != fr.y;
     return !std.meta.eql(fr.edges, h.edges) and anyEdge(fr.edges);
@@ -12454,6 +12488,13 @@ var engage_text_buf: [160]u8 = undefined;
 
 /// The annunciator's words for hit `h`.
 fn engageText(h: EngageHit) []const u8 {
+    if (isDimKind(h.kind)) {
+        const c = constraintById(h.id) orelse return "";
+        var b1: [120]u8 = undefined;
+        var lb: [32]u8 = undefined;
+        var b2: [120]u8 = undefined;
+        return std.fmt.bufPrint(&engage_text_buf, "{s}: {s} from {s} · drag {s} to place it, click to pick it", .{ lengthText(&lb, @abs(c.value)), endText(&b1, c.a, null), endText(&b2, c.b, c.a.object), if (h.kind == .dim_value) "the value" else "the line" }) catch "";
+    }
     const name = objectName(h.id);
     if (!engageFree(h)) {
         return std.fmt.bufPrint(&engage_text_buf, "{s}: {s} held by a constraint", .{ name, if (engageMoves(h.kind)) "position" else edgesName(h.edges) }) catch "";
@@ -12512,6 +12553,10 @@ var canvas_px: ?dvui.Rect.Physical = null;
 /// constraint takes the press and says so).
 fn engagePress(at: geom.Point) bool {
     const h = engageTarget() orelse return false;
+    if (isDimKind(h.kind)) {
+        dimPress(h, at);
+        return true;
+    }
     if (!engageFree(h)) {
         state.status = engageText(h);
         return true;
@@ -12606,7 +12651,21 @@ fn drawEngagement(area: dvui.Rect.Physical) void {
         annunciate(area, q, engageText(d.hit));
         return;
     }
+    if (dim_drag) |d| {
+        if (d.moved) if (constraintById(d.id)) |c| if (dimGeom(c)) |g| annunciate(area, (struct {
+            fn below(q: dvui.Point.Physical) dvui.Point.Physical {
+                return .{ .x = q.x, .y = q.y + 30 * dvui.windowNaturalScale() };
+            }
+        }).below(state.view.toPx(area, g.label)), engageText(.{ .id = d.id, .kind = d.kind, .edges = .{}, .at = g.label, .d = 0 }));
+        return;
+    }
     const h = engageTarget() orelse return;
+    if (isDimKind(h.kind)) {
+        // The dimension draws itself highlighted (drawConstraintMarks).
+        const mp = dvui.currentWindow().mouse_pt;
+        annunciate(area, .{ .x = mp.x, .y = mp.y + 30 * dvui.windowNaturalScale() }, engageText(h));
+        return;
+    }
     const free = engageFree(h);
     const colour = if (free) colors.select else colors.overflow;
     const q = state.view.toPx(area, h.at);
@@ -13010,6 +13069,150 @@ fn constrainPromptWindow() void {
 
 /// The constraints of the shown space as dimension glyphs, the features
 /// under the pointer and picked, and the context object's origin.
+
+// Constraint dimensions ------------------------------------------------------
+//
+// An offset constraint is drawn as a dimension: a line from the
+// reference's feature to the constrained one, its ends ticked, its value
+// beside it. Where it is drawn is the constraint's own (`place`, in the
+// model, so it is kept, undone and saved): the line `across` mm from the
+// middle of the constrained object, the value `along` of its way. Both
+// can be dragged (the line sideways; the value along the line and, with
+// it, the line); a click selects the constraint, Delete removes it.
+
+/// A dimension as drawn: its ends (canvas mm, reference first), where its
+/// value sits, whether it is vertical (it measures up and down), whether
+/// its features coincide (an alignment, drawn as a double bar).
+const DimGeom = struct { p0: geom.Point, p1: geom.Point, label: geom.Point, v: bool, aligned: bool };
+
+fn dimGeom(c: layout.model.Constraint) ?DimGeom {
+    if (c.kind != .offset) return null;
+    const m = &state.model;
+    const parent = constrain.parentOf(m, c.a.object) orelse return null;
+    if (constrain.spaceOf(m, parent) != shown_space) return null;
+    const off = constrain.frameOffset(m, parent);
+    const v = c.a.feature.vertical();
+    const abox = offsetBox(constrain.boxOf(m, c.a.object) orelse return null, off);
+    const pa = (constrain.featureAt(m, parent, c.a) orelse return null) + if (v) off.y else off.x;
+    const pb = (constrain.featureAt(m, parent, c.b) orelse return null) + if (v) off.y else off.x;
+    // Across the middle of the constrained object, moved as placed.
+    const across = (if (v) (abox.x0 + abox.x1) / 2 else (abox.y0 + abox.y1) / 2) + c.place.across;
+    const p0: geom.Point = if (v) .{ .x = across, .y = pb } else .{ .x = pb, .y = across };
+    const p1: geom.Point = if (v) .{ .x = across, .y = pa } else .{ .x = pa, .y = across };
+    const t = c.place.along;
+    const label: geom.Point = .{ .x = p0.x + (p1.x - p0.x) * t, .y = p0.y + (p1.y - p0.y) * t };
+    return .{ .p0 = p0, .p1 = p1, .label = label, .v = v, .aligned = @abs(pa - pb) * state.view.ppm < 2 };
+}
+
+/// The constraint picked by a click on its dimension, while it is.
+var picked_constraint: ?layout.model.ObjectId = null;
+
+/// A drag of a dimension: which, the part taken, its place at the start,
+/// where the pointer was and the dimension's length then (canvas mm).
+var dim_drag: ?struct {
+    id: layout.model.ObjectId,
+    kind: EngageKind,
+    place: layout.model.ConstraintPlace,
+    pointer0: geom.Point,
+    g: DimGeom,
+    moved: bool = false,
+    key: u64,
+} = null;
+
+fn constraintById(id: layout.model.ObjectId) ?layout.model.Constraint {
+    for (state.model.constraints.items) |c| if (c.id == id) return c;
+    return null;
+}
+
+/// Distance from `q` to segment `a`–`b`, device pixels.
+fn segDistPx(q: dvui.Point.Physical, a: dvui.Point.Physical, b: dvui.Point.Physical) f32 {
+    const vx = b.x - a.x;
+    const vy = b.y - a.y;
+    const len2 = vx * vx + vy * vy;
+    const t = if (len2 > 0) std.math.clamp(((q.x - a.x) * vx + (q.y - a.y) * vy) / len2, 0, 1) else 0;
+    const dx = a.x + t * vx - q.x;
+    const dy = a.y + t * vy - q.y;
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// Starts a drag of dimension hit `h`.
+fn dimPress(h: EngageHit, at: geom.Point) void {
+    const c = constraintById(h.id) orelse return;
+    const g = dimGeom(c) orelse return;
+    drag_count += 1;
+    dim_drag = .{ .id = h.id, .kind = h.kind, .place = c.place, .pointer0 = at, .g = g, .key = mergeKey(.{ "dim", drag_count }) };
+}
+
+/// The dimension follows the pointer: the line sideways; the value along
+/// the line, and the line with it.
+fn dimMotion(at: geom.Point) void {
+    const d = &(dim_drag orelse return);
+    const dx = at.x - d.pointer0.x;
+    const dy = at.y - d.pointer0.y;
+    if (!d.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 3) return;
+    d.moved = true;
+    var place = d.place;
+    // Sideways: up for a horizontal dimension, right for a vertical one.
+    place.across += if (d.g.v) dx else dy;
+    if (d.kind == .dim_value) {
+        const len = if (d.g.v) d.g.p1.y - d.g.p0.y else d.g.p1.x - d.g.p0.x;
+        if (@abs(len) > 1e-9) place.along += (if (d.g.v) dy else dx) / len;
+    }
+    _ = actM(d.key, .setConstraintPlace, .{ d.id, place }) catch {};
+}
+
+/// The drag ends; one that did not move picks the constraint. Whether
+/// there was one.
+fn dimRelease() bool {
+    const d = dim_drag orelse return false;
+    dim_drag = null;
+    if (!d.moved) {
+        picked_constraint = d.id;
+        selection.clearRetainingCapacity();
+        track_cursor = null;
+        state.status = "Constraint picked: drag its line or value to place it; Delete removes it. ";
+    }
+    return true;
+}
+
+/// The picked constraint, in the properties: what it holds, its value,
+/// its place reset, its removal.
+fn pickedConstraintProperties() bool {
+    const id = picked_constraint orelse return false;
+    const c = constraintById(id) orelse {
+        picked_constraint = null;
+        return false;
+    };
+    heading("Constraint", .{}, 9580);
+    var b1: [120]u8 = undefined;
+    var b2: [120]u8 = undefined;
+    var b3: [260]u8 = undefined;
+    const what = if (c.kind == .equal_size)
+        std.fmt.bufPrint(&b3, "{s} size − {s}", .{ endText(&b1, c.a, null), endText(&b2, c.b, c.a.object) }) catch ""
+    else
+        std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, null), endText(&b2, c.b, c.a.object) }) catch "";
+    dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .font = dvui.Font.theme(.body).larger(-1), .id_extra = 9581 });
+    const k = docUnits().perMm();
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        propName("Value");
+        var v = @round(c.value * k * 1000) / 1000;
+        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = -100000, .max = 100000 }, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 });
+        if (r.changed and r.value == .Valid) _ = actM(mergeKey(.{ "constraint value", c.id }), .setConstraintValue, .{ c.id, v / k }) catch {};
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Place it as at first", .{}, .{})) act(.setConstraintPlace, .{ c.id, .{} }) catch {};
+        if (dvui.button(@src(), "Remove", .{}, .{})) {
+            act(.removeConstraint, .{c.id}) catch {};
+            picked_constraint = null;
+        }
+    }
+    return true;
+}
+
 fn drawConstraintMarks(area: dvui.Rect.Physical) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
@@ -13018,23 +13221,18 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
         const parent = constrain.parentOf(m, c.a.object) orelse continue;
         if (constrain.spaceOf(m, parent) != shown_space) continue;
         const off = constrain.frameOffset(m, parent);
-        const colour = if (constraintIssue(c.id) != null) colors.overflow else colors.guide;
+        const hot = (picked_constraint != null and picked_constraint.? == c.id) or (if (engageTarget()) |h| isDimKind(h.kind) and h.id == c.id else false) or (dim_drag != null and dim_drag.?.id == c.id);
+        const colour = if (constraintIssue(c.id) != null) colors.overflow else if (hot) colors.select else colors.guide;
         const ink: dvui.ColorOrGradient = .{ .color = colour };
         const v = c.a.feature.vertical();
-        const abox = offsetBox(constrain.boxOf(m, c.a.object) orelse continue, off);
+        _ = off;
         switch (c.kind) {
             .offset => {
-                const pa = (constrain.featureAt(m, parent, c.a) orelse continue) + if (v) off.y else off.x;
-                const pb = (constrain.featureAt(m, parent, c.b) orelse continue) + if (v) off.y else off.x;
-                // The dimension crosses the middle of the constrained
-                // object, from the reference to it.
-                const across = if (v) (abox.x0 + abox.x1) / 2 else (abox.y0 + abox.y1) / 2;
-                const p0: geom.Point = if (v) .{ .x = across, .y = pb } else .{ .x = pb, .y = across };
-                const p1: geom.Point = if (v) .{ .x = across, .y = pa } else .{ .x = pa, .y = across };
-                const q0 = state.view.toPx(area, p0);
-                const q1 = state.view.toPx(area, p1);
+                const g = dimGeom(c) orelse continue;
+                const q0 = state.view.toPx(area, g.p0);
+                const q1 = state.view.toPx(area, g.p1);
                 const t: f32 = 4 * px;
-                if (@abs(pa - pb) * state.view.ppm < 2) {
+                if (g.aligned) {
                     // Aligned: a small double bar across the shared line.
                     for ([_]f32{ -2, 2 }) |d| {
                         const pts: [2]dvui.Point.Physical = if (v) .{ .{ .x = q0.x + d * px, .y = q0.y - t }, .{ .x = q0.x + d * px, .y = q0.y + t } } else .{ .{ .x = q0.x - t, .y = q0.y + d * px }, .{ .x = q0.x + t, .y = q0.y + d * px } };
@@ -13042,21 +13240,23 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
                     }
                     continue;
                 }
-                dvui.Path.stroke(.{ .points = &.{ q0, q1 } }, .{ .thickness = px, .color = ink });
+                dvui.Path.stroke(.{ .points = &.{ q0, q1 } }, .{ .thickness = if (hot) 2 * px else px, .color = ink });
                 for ([_]dvui.Point.Physical{ q0, q1 }) |q| {
                     const pts: [2]dvui.Point.Physical = if (v) .{ .{ .x = q.x - t, .y = q.y }, .{ .x = q.x + t, .y = q.y } } else .{ .{ .x = q.x, .y = q.y - t }, .{ .x = q.x, .y = q.y + t } };
                     dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = 1.5 * px, .color = ink });
                 }
                 var buf: [32]u8 = undefined;
                 const text = std.fmt.bufPrint(&buf, "{d}", .{@round(@abs(c.value) * docUnits().perMm() * 100) / 100}) catch "";
-                const mid: dvui.Point.Physical = .{ .x = (q0.x + q1.x) / 2 + 3 * px, .y = (q0.y + q1.y) / 2 };
+                const lq = state.view.toPx(area, g.label);
+                const mid: dvui.Point.Physical = .{ .x = lq.x + 3 * px, .y = lq.y };
                 dvui.labelNoFmt(@src(), text, .{}, .{ .rect = annotationRect(area, mid, font, 80), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = ci });
             },
             .equal_size => {
                 // "=" on each object's extent.
+                const eoff = constrain.frameOffset(m, parent);
                 for ([_]layout.model.ObjectId{ c.a.object, c.b.object }, 0..) |id, k| {
                     if (id == .none) continue;
-                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, off);
+                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, eoff);
                     const at: geom.Point = if (v) .{ .x = b.x1, .y = (b.y0 + b.y1) / 2 } else .{ .x = (b.x0 + b.x1) / 2, .y = b.y1 };
                     const q = state.view.toPx(area, at);
                     dvui.labelNoFmt(@src(), "=", .{}, .{ .rect = annotationRect(area, .{ .x = q.x + 2 * px, .y = q.y }, font, 20), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = ci * 2 + k + 100000 });
