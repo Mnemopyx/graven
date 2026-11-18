@@ -1886,7 +1886,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet, export_sheet };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, export_sheet, export_3mf };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -2289,6 +2289,55 @@ fn sheetExportName() []const u8 {
         std.fmt.bufPrint(&sheet_export_name, "{s}.csv", .{name})) catch "legends.csv";
 }
 
+var threemf_name: [600]u8 = undefined;
+
+/// The panel's name as a .3mf file beside the document.
+fn threeMfName() []const u8 {
+    const pi = exportPanel() orelse return "";
+    const name = state.model.panels.items[pi].name;
+    const dir: []const u8 = if (file_path) |fp| (std.fs.path.dirname(fp) orelse "") else "";
+    return (if (dir.len > 0)
+        std.fmt.bufPrint(&threemf_name, "{s}/{s}.3mf", .{ dir, name })
+    else
+        std.fmt.bufPrint(&threemf_name, "{s}.3mf", .{name})) catch "panel.3mf";
+}
+
+/// Writes the chosen panel as a 3MF at `path`: its fabrication layers
+/// planned over its layout, one object a colour, as built (as the CLI's
+/// `graven 3mf` does).
+fn exportThreeMf(path: []const u8) void {
+    const pi = exportPanel() orelse return;
+    const labels = if (state.labels) |*l| l else return;
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const entries = layout.place.handoffs(state.gpa, &state.model, labels, thread_entries) catch {
+        state.status = "The 3MF could not be made. ";
+        return;
+    };
+    defer state.gpa.free(entries);
+    var placed = layout.place.solveWith(state.gpa, &state.model, pi, labels, entries) catch {
+        state.status = "The 3MF could not be made. ";
+        return;
+    };
+    defer placed.deinit();
+    const zip = blk: {
+        const plan = layout.fab.plan(a, &state.model, pi, &placed, faceTable()) catch break :blk null;
+        const slabs = layout.fab.slabs(a, plan.steps) catch break :blk null;
+        const parts = layout.threemf.parts(a, slabs, layout.threemf.default_tolerance, .colours) catch break :blk null;
+        const ps = layout.threemf.orient(a, parts, .bottom) catch break :blk null;
+        break :blk layout.threemf.package(a, state.model.panels.items[pi].name, ps) catch null;
+    } orelse {
+        state.status = "The 3MF could not be made. ";
+        return;
+    };
+    std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = zip }) catch {
+        state.status = "That file could not be written. ";
+        return;
+    };
+    state.status = std.fmt.bufPrint(&import_status_buf, "Exported {s} as 3MF ({d} KB). ", .{ std.fs.path.basename(path), zip.len / 1024 }) catch "Exported. ";
+}
+
 /// Writes the sheet to export as CSV at `path`.
 fn exportSheet(path: []const u8) void {
     const id = sheetToExport() orelse return;
@@ -2567,6 +2616,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .import_text => importTitle(),
         .import_sheet => sheetImportTitle(),
         .export_sheet => "Export the legend sheet as CSV",
+        .export_3mf => "Export the panel as 3MF (its fabrication layers)",
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -2587,6 +2637,7 @@ fn filePrompt(kind: FilePromptKind) void {
         const initial = switch (kind) {
             .save_as => file_path orelse "untitled" ++ doc_ext,
             .export_sheet => sheetExportName(),
+            .export_3mf => threeMfName(),
             else => "",
         };
         var te = dvui.textEntry(@src(), .{ .text_initial = initial }, .{ .expand = .horizontal, .id_extra = @intFromEnum(kind) });
@@ -2608,7 +2659,7 @@ fn filePrompt(kind: FilePromptKind) void {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet => "Import",
-            .export_sheet => "Export",
+            .export_sheet, .export_3mf => "Export",
         }, .{}, .{})) go = true;
     }
     if (cancel) {
@@ -2625,6 +2676,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .import_text => importText(path),
         .import_sheet => importSheet(path),
         .export_sheet => exportSheet(path),
+        .export_3mf => exportThreeMf(path),
         .save_as => {
             // A name without an extension takes Graven's.
             const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
@@ -4207,6 +4259,17 @@ fn menu() ?dvui.App.Result {
                 file_prompt = .export_sheet;
                 file_prompt_new = true;
             }
+        };
+        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Export panel as 3MF…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            if (exportPanel()) |pi| {
+                if (state.model.panels.items[pi].fab.layers.len == 0) {
+                    state.status = "This panel has no fabrication layers yet (its properties, Fabrication): there is nothing to make. ";
+                } else {
+                    file_prompt = .export_3mf;
+                    file_prompt_new = true;
+                }
+            } else state.status = "Choose a panel first: it is what is exported. ";
         };
         if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
@@ -6952,6 +7015,208 @@ fn numberProp(name: []const u8, value: f64, min: f64, max: f64, n: usize) ?f64 {
     const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = min, .max = max }, .{ .expand = .horizontal, .id_extra = n });
     if (r.changed and r.value == .Valid and v != value) return v;
     return null;
+}
+
+/// A panel's fabrication: the base's thickness and the process's layer
+/// height and limits, then its layers in order, each made from part of
+/// the panel (its outline, holes, grid parts or a slot's text) by adding,
+/// cutting away or inlaying, from a surface of the base, up or down, to a
+/// depth or through. Every change is one step (merged while typing).
+fn panelFab(pi: usize) !void {
+    const Fab = layout.model.Fab;
+    const FabLayer = layout.model.FabLayer;
+    const fab: Fab = state.model.panels.items[pi].fab;
+    const ar = dvui.currentWindow().arena();
+    var next = fab;
+    var layers = try ar.dupe(FabLayer, fab.layers);
+    var changed = false;
+    // A structural change (a layer added, removed or moved) is a step of
+    // its own; typing in a field merges with the field's last change.
+    var key: u64 = 0;
+    heading("Fabrication", .{}, 400);
+    inline for (.{
+        .{ "Thickness, mm", "thickness", 0.01, 1000.0 },
+        .{ "Layer height, mm", "layer_height", 0.001, 10.0 },
+        .{ "Thinnest stroke, mm", "min_stroke", 0.0, 100.0 },
+        .{ "Narrowest gap, mm", "min_gap", 0.0, 100.0 },
+        .{ "Smallest cap height, mm", "min_cap", 0.0, 100.0 },
+    }, 0..) |f, k| {
+        if (numberProp(f[0], @field(fab, f[1]), f[2], f[3], 401 + k)) |v| {
+            @field(next, f[1]) = v;
+            changed = true;
+            key = mergeKey(.{ "fab", pi, f[1] });
+        }
+    }
+    // The slots text may come from: every prototype's track names.
+    var slots: std.ArrayList([]const u8) = .empty;
+    try slots.append(ar, "every label");
+    for (state.model.prototypes.items) |pr| for (pr.tracks) |tt| {
+        for (slots.items[1..]) |sn| {
+            if (std.mem.eql(u8, sn, tt.name)) break;
+        } else try slots.append(ar, tt.name);
+    };
+    var remove: ?usize = null;
+    var move: ?struct { from: usize, up: bool } = null;
+    for (layers, 0..) |*l, li| {
+        const n = 420 + li * 40;
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
+            defer row.deinit();
+            dvui.label(@src(), "{d}. {s}", .{ li + 1, l.name }, .{ .font = dvui.Font.theme(.heading), .gravity_y = 0.5 });
+            if (li + 1 < layers.len and dvui.buttonIcon(@src(), "Later", dvui.entypo.arrow_down, .{}, .{}, .{ .gravity_x = 1, .id_extra = 1 })) move = .{ .from = li, .up = false };
+            if (li > 0 and dvui.buttonIcon(@src(), "Earlier", dvui.entypo.arrow_up, .{}, .{}, .{ .gravity_x = 1, .id_extra = 2 })) move = .{ .from = li, .up = true };
+            if (dvui.buttonIcon(@src(), "Remove layer", dvui.entypo.cross, .{}, .{}, .{ .gravity_x = 1, .id_extra = 3 })) remove = li;
+        }
+        if (textProp("Name", l.name, n + 1)) |v| {
+            l.name = v;
+            changed = true;
+            key = mergeKey(.{ "fab", pi, li, "name" });
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 2 });
+            defer row.deinit();
+            propName("From");
+            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text" };
+            var choice: usize = @intFromEnum(std.meta.activeTag(l.source));
+            if (dvui.dropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.source))) {
+                l.source = switch (choice) {
+                    0 => .edge,
+                    1 => .cutouts,
+                    2 => .parts,
+                    else => .{ .text = "" },
+                };
+                changed = true;
+            }
+        }
+        if (l.source == .text) {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
+            defer row.deinit();
+            propName("Slot");
+            var choice: usize = 0;
+            for (slots.items[1..], 1..) |sn, k| {
+                if (std.mem.eql(u8, sn, l.source.text)) choice = k;
+            }
+            // A slot no prototype has now (renamed or gone) is listed as it is.
+            if (l.source.text.len > 0 and choice == 0) {
+                try slots.append(ar, l.source.text);
+                choice = slots.items.len - 1;
+            }
+            if (dvui.dropdown(@src(), slots.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+                l.source = .{ .text = if (choice == 0) "" else slots.items[choice] };
+                changed = true;
+            }
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 4 });
+            defer row.deinit();
+            propName("Makes");
+            const ops = [_][]const u8{ "solid, added", "a cut, away", "an inlay, cut and filled" };
+            var choice: usize = @intFromEnum(std.meta.activeTag(l.op));
+            if (dvui.dropdown(@src(), &ops, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.op))) {
+                const colour: layout.model.FabColour = switch (l.op) {
+                    .add, .inlay => |c| c,
+                    .subtract => .{ .name = "white", .color = .hex("#f2f2f2") },
+                };
+                l.op = switch (choice) {
+                    0 => .{ .add = colour },
+                    1 => .subtract,
+                    else => .{ .inlay = colour },
+                };
+                changed = true;
+            }
+        }
+        switch (l.op) {
+            .add, .inlay => |c| {
+                var col = c;
+                var col_changed = false;
+                if (textProp("Colour name", c.name, n + 5)) |v| {
+                    col.name = v;
+                    col_changed = true;
+                }
+                if (colourEntry("Colour", c.color, false, n + 6)) |v| {
+                    col.color = v.?;
+                    col_changed = true;
+                }
+                if (col_changed) {
+                    l.op = if (l.op == .add) .{ .add = col } else .{ .inlay = col };
+                    changed = true;
+                    key = mergeKey(.{ "fab", pi, li, "colour" });
+                }
+            },
+            .subtract => {},
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 7 });
+            defer row.deinit();
+            propName("Starts at");
+            const surfaces = [_][]const u8{ "the base's bottom", "the base's top" };
+            var choice: usize = @intFromEnum(l.surface);
+            if (dvui.dropdown(@src(), &surfaces, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(l.surface)) {
+                l.surface = @enumFromInt(choice);
+                changed = true;
+            }
+        }
+        if (numberProp("Offset, mm", l.offset, -1000, 1000, n + 8)) |v| {
+            l.offset = v;
+            changed = true;
+            key = mergeKey(.{ "fab", pi, li, "offset" });
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 9 });
+            defer row.deinit();
+            propName("Goes");
+            const dirs = [_][]const u8{ "up", "down" };
+            var choice: usize = @intFromEnum(l.dir);
+            if (dvui.dropdown(@src(), &dirs, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(l.dir)) {
+                l.dir = @enumFromInt(choice);
+                changed = true;
+            }
+        }
+        {
+            var through = l.depth == null;
+            if (dvui.checkbox(@src(), &through, "Through the whole part", .{ .id_extra = n + 10 })) {
+                l.depth = if (through) null else @min(fab.thickness, 0.6);
+                changed = true;
+            }
+        }
+        if (l.depth) |d| if (numberProp("Depth, mm", d, 0.001, 1000, n + 11)) |v| {
+            l.depth = v;
+            changed = true;
+            key = mergeKey(.{ "fab", pi, li, "depth" });
+        };
+    }
+    if (remove) |li| {
+        std.mem.copyForwards(FabLayer, layers[li .. layers.len - 1], layers[li + 1 ..]);
+        layers = layers[0 .. layers.len - 1];
+        changed = true;
+        key = 0;
+    }
+    if (move) |mv| {
+        const to = if (mv.up) mv.from - 1 else mv.from + 1;
+        std.mem.swap(FabLayer, &layers[mv.from], &layers[to]);
+        changed = true;
+        key = 0;
+    }
+    if (dvui.button(@src(), "Add layer", .{}, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } })) {
+        // The first: the base itself, solid from the bottom up. After it:
+        // every label inlaid, 0.6 mm from the top down.
+        const l: FabLayer = if (layers.len == 0)
+            .{ .name = "Base", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = fab.thickness, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }
+        else
+            .{ .name = try std.fmt.allocPrint(ar, "Layer {d}", .{layers.len + 1}), .source = .{ .text = "" }, .surface = .base_top, .dir = .down, .depth = 0.6, .op = .{ .inlay = .{ .name = "white", .color = .hex("#f2f2f2") } } };
+        const grown = try ar.alloc(FabLayer, layers.len + 1);
+        @memcpy(grown[0..layers.len], layers);
+        grown[layers.len] = l;
+        layers = grown;
+        changed = true;
+        key = 0;
+    }
+    if (!changed) return;
+    next.layers = layers;
+    const done = if (key != 0) actM(key, .setPanelFab, .{ pi, next }) else act(.setPanelFab, .{ pi, next });
+    done catch {
+        state.status = "That is not a size fabrication can use. ";
+    };
 }
 
 /// A panel's grids, each opened by its name, and Add grid.
@@ -10315,6 +10580,7 @@ fn properties() !void {
             try propFont("Legend font", 5);
             if (panel_edit == null and dvui.button(@src(), "Edit panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) enterPanelEdit(pi);
             try panelGrids(pi);
+            try panelFab(pi);
             if (state.model.has_sheet) return;
             if (dvui.button(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
                 const id = act(.releasePanel, .{pi}) catch {
