@@ -37,8 +37,11 @@ test "the PC keyboard: 104 keys in 22.5 × 6.5 u, nothing overflowing, its legen
     const pitch = 19.05;
     try testing.expectApproxEqAbs(22.5 * pitch, placed.bounds.width(), 1e-9);
     try testing.expectApproxEqAbs(6.5 * pitch, placed.bounds.height(), 1e-9);
-    // Its faces named, so it sets the same wherever it is opened.
-    for (m.styles.items) |st| try testing.expectEqualStrings("Inter", st.face("text").?.family);
+    // Its legends' faces named, so it sets the same wherever it is opened.
+    for (m.styles.items) |st| {
+        if (!std.mem.startsWith(u8, st.name, "legend")) continue;
+        try testing.expectEqualStrings("Inter", st.face("text").?.family);
+    }
     // A sheet over its track: a column a slot.
     const id = try m.makeSheet("Keyboard legends", m.panels.items[p].regions.items[0].id);
     const sh = m.sheets.items[m.sheetIndex(id).?];

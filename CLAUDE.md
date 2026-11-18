@@ -38,6 +38,7 @@ $Z build                      # CLI tools into zig-out/bin
 $Z build gui-build            # the GUI (graven-gui)
 $Z build gui-build -Doptimize=ReleaseFast --prefix /tmp/rel   # for timing
 $Z build fab -Docct-prebuilt  # graven-fab, with the OCCT bridge (prebuilt release archive)
+$Z build gui-test             # the GUI driven headless (apps/gui/harness_test.zig): both examples made in it, compared with their files
 ```
 
 Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2, and on 2026-11-18, when a shifted pair's base symbol moved into a slot of its own.)
@@ -70,6 +71,8 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 | `GRAVEN_DRAWN_SPARK=1` | a point standing in for the pointer is drawn on the canvas (25 frames a second), not made the animated cursor |
 
 `graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.
+
+Better than screen points: `zig build gui-test` runs Graven's own frames under DVUI's testing backend (`apps/gui/harness_test.zig`) and drives widgets by tag: a property row is `<section heading>/<field>`, a button `<section heading>/<label>`, a menu item `menu/<label>`, an icon button `icon/<name>`, a Browser node `tree/<its path>` (`#open` its chevron), a content palette button `palette/<kind>`; a repeat in one frame is numbered `#2`. Dropdowns are chosen by `testing_api.choose` (main.zig). `dumpTags` / `dumpTagsWith` list what a frame has. The window is 1600 × 4000 (no scrolling) and the panes docked by a scratch config in `/tmp/graven-gui-test`. A new widget is clicked only once it has stood still a frame.
 
 ## Git
 

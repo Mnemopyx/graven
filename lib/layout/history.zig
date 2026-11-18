@@ -1452,3 +1452,36 @@ test "the app's views go with each segment, and the last intact one's come back"
     defer o.history.deinit();
     try testing.expectEqualStrings("second", o.views);
 }
+
+test "the actions added for making the examples in the GUI save and reopen" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const p = try h.do(&m, .placePanel, .{.{ .name = "Panel 1", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 }});
+    try h.do(&m, .renamePanel, .{ p, "Plate" });
+    try h.do(&m, .setPanelSize, .{ p, 128, 62 });
+    const st = try h.do(&m, .addStyle, .{ "s", model.StyleSize{} });
+    try h.do(&m, .setLinePitch, .{ st, @as(?f64, 1.5) });
+    const key = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "key", .unit = 19.05 }});
+    const r = try h.do(&m, .addTracks, .{ p, Model.Tracks{ .name = "Tracks 1", .origin = .{ .x = 5, .y = 25 }, .prototype = key, .count = 1, .length = 4, .pitch = 19.05 } });
+    try h.do(&m, .renameRegion, .{ p, r, "keys" });
+    try h.do(&m, .moveRegion, .{ p, r, .{ .x = 10, .y = 20 } });
+    try h.do(&m, .setRegionSize, .{ p, r, 4, 1 });
+    _ = try h.do(&m, .insertTile, .{ p, r, 0, key, 1 });
+    _ = try h.do(&m, .insertTile, .{ p, r, 1, key, 1 });
+    try h.do(&m, .setItemGap, .{ p, r, 1, 0.25 });
+    _ = try h.do(&m, .nameKeysInOrder, .{ p, r, "K" });
+    try h.do(&m, .setPanelFab, .{ p, model.Fab{ .thickness = 2, .layers = &.{.{ .name = "Base", .source = .edge, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }} } });
+    const bytes = try fileBytes(&h, gpa, test_writer, 1);
+    defer gpa.free(bytes);
+    var o = try openFile(gpa, bytes);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    try testing.expect(!o.damaged);
+    try testing.expectEqualStrings("Plate", o.model.panels.items[p].name);
+    try testing.expectEqualStrings("K2", o.model.tileConst(o.model.flowItems(p, r)[1].tileOf().?).designator);
+}

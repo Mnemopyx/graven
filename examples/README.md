@@ -18,4 +18,4 @@ zig build run -- export examples/hp15c.graven hp15c.3mf      # the same, as 3MF 
 zig build gui -- examples/hp15c.graven                        # or GRAVEN_SAMPLE=hp15c, as an untitled copy
 ```
 
-For now the two documents are written from the samples' code (`graven example keyboard|hp15c <out>`); they are to be made in Graven itself and the code removed.
+Both documents were made in Graven's GUI, step by step as a person would (`zig build gui-test` makes them again and checks that their SVG and 3MF are the same as these files', byte for byte), then compacted (`graven compact`). Each carries its legend sheet (`legends` as a CSV: File › Export legend sheet).

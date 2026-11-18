@@ -107,6 +107,12 @@ pub const testing_api = struct {
         const b = onSheet(f.panel, f.tile.body);
         return toScreen(.{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 });
     }
+    pub fn promptOpen() bool {
+        return filePromptOpen() or contention != null or leave_prompt != null or recovery != null;
+    }
+    pub fn panelEditing() bool {
+        return panel_edit != null;
+    }
     pub fn toolName() []const u8 {
         return @tagName(state.tool);
     }
@@ -1324,6 +1330,8 @@ fn deinit(_: *dvui.Window) void {
     // Started again (the GUI's tests start Graven several times in one
     // process): a fresh start screen, one view, nothing chosen.
     canvas_prompt = true;
+    if (file_path) |f| state.gpa.free(f);
+    file_path = null;
     resetViews();
     selection.clearRetainingCapacity();
     track_cursor = null;
@@ -4388,7 +4396,7 @@ fn windowButtons(buttons: []const desktop.Button) ?dvui.App.Result {
 /// disagree; `faint` when there is nothing for it to do. Whether it was
 /// chosen (and the action run).
 fn menuAction(label: []const u8, comptime mode_name: []const u8, a: keymap.ActionId, arg: i32, faint: bool, id: usize) bool {
-    var mi = dvui.menuItem(@src(), .{}, .{ .expand = .horizontal, .id_extra = id });
+    var mi = dvui.menuItem(@src(), .{}, .{ .expand = .horizontal, .id_extra = id, .tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu/{s}", .{std.mem.trim(u8, std.mem.trimStart(u8, label, "• "), " ")}) catch "menu") });
     defer mi.deinit();
     const chosen = mi.activeRect() != null;
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });

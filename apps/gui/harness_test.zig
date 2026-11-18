@@ -339,8 +339,10 @@ fn screen(p: struct { f64, f64 }) !dvui.Point.Physical {
 fn makeKeyboard(r: *Run) !void {
     try r.key(.m, .none);
     try makeStyle(r, "legend", "2.6");
+    try checkSaveable("a style");
     try makeStyle(r, "legend words", "1.6");
     try makeKeyPrototype(r);
+    try checkSaveable("the prototype");
 
     // The panel: drawn out, then typed exactly.
     try r.click("tree/untitled/Canvas, mm");
@@ -354,6 +356,7 @@ fn makeKeyboard(r: *Run) !void {
     try r.set("Panel/Height, mm", "143.825");
     inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| try r.set("Margins/" ++ side ++ ", mm", "5");
 
+    try checkSaveable("the panel");
     // The track: rows of keys, drawn out on the panel, then typed exactly.
     try r.click("icon/Add rows");
     try r.choose("Add rows/Size to", "Tile: key");
@@ -383,6 +386,7 @@ fn makeKeyboard(r: *Run) !void {
     try r.set("Paragraph/Name", "Row gap 0.5 u");
     try r.set("Paragraph/Space before, pt", "27");
 
+    try checkSaveable("the keys");
     // Named in order, K1 to K104, from the track's properties.
     try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
     try r.click("Region/Name keys in order: K1, K2 …");
@@ -408,6 +412,7 @@ fn makeKeyboard(r: *Run) !void {
         if (k.h != 1) try r.choose("Tile/Height", try std.fmt.bufPrint(&vb, "{d} u", .{k.h}));
     };
 
+    try checkSaveable("gaps and heights");
     // The legends: a table, one row a key, imported over the track.
     const csv = try legendsCsv(std.heap.c_allocator);
     defer std.heap.c_allocator.free(csv);
@@ -435,6 +440,40 @@ test "the PC keyboard, made in the GUI" {
     try std.testing.expectEqual(104, tiles);
     try std.testing.expectEqual(1, m.sheets.items.len);
     try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
+    // Saved as made: the example document's source.
+    try saveAs(&r, scratch ++ "/pc-keyboard.graven");
+}
+
+/// Whether the GUI's history so far saves and reopens whole (a step of
+/// it that does not read back makes a damaged file).
+fn checkSaveable(label: []const u8) !void {
+    const a = std.heap.c_allocator;
+    const who: layout.history.Writer = .{ .id = @splat(1), .device = "test", .tool = "test" };
+    const bytes = try layout.history.fileBytes(api.history(), a, who, 1);
+    defer a.free(bytes);
+    var o = try layout.history.openFile(a, bytes);
+    defer {
+        o.model.deinit();
+        o.history.deinit();
+    }
+    if (o.damaged) {
+        std.debug.print("after {s}: the saved history does not read back\n", .{label});
+        return error.NotSaveable;
+    }
+}
+
+/// File › Save As… to `path`, as a person saves.
+fn saveAs(r: *Run, path: []const u8) !void {
+    std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    try r.click("menu/File");
+    try r.click("menu/Save As…");
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText(path);
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(3);
+    _ = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{});
 }
 
 /// Panel `name` of `m` as 3MF (its fabrication layers), every legend in
@@ -758,4 +797,5 @@ test "the HP-15C, made in the GUI" {
     try make15c(&r);
     const m = api.model();
     try sameAsExample(m, "examples/hp15c.graven", &.{ "HP-15C plate", "HP-15C keys" });
+    try saveAs(&r, scratch ++ "/hp15c.graven");
 }
