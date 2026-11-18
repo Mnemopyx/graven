@@ -3570,19 +3570,31 @@ fn overlays() !void {
         defer o.end();
         try bottomContent();
     }
-    // A key palette across the top of the canvas, between the panes: the
-    // insert palette while there is a flow cursor, the move palette for a
-    // selected track.
+    // The content palette, at the top centre of the window, as wide as
+    // what it offers: the insert palette while there is a flow cursor
+    // (keys for a track of tiles; the flow's breaks and runs), the move
+    // palette for a selected track.
     const moving_track = track_cursor == null and state.context == .row;
     if (track_cursor != null or moving_track) {
-        const left: f32 = if (tree_pane.mode == .ghost) tree_pane.size + g else g;
-        const right: f32 = if (!rightDocked() and tools_pane.mode == .ghost) props_pane.size + g else g;
-        var r: dvui.Rect = .{ .x = c.x + left, .y = c.y + g, .w = @max(200, c.w - left - right), .h = if (moving_track) move_palette_height else palette_height };
+        // Sized to its content again when what it offers changes.
+        const what: u64 = if (moving_track) 1 else if (paletteFor(track_cursor.?.panel, track_cursor.?.region)) |pal| (@as(u64, @backingInt(pal.prototype)) << 8) | (@as(u64, pal.tile_count) << 2) | @as(u64, @intFromBool(inTextTrack())) << 1 else 2;
+        const S = struct {
+            var rect: dvui.Rect = .{ .w = 400, .h = 64 };
+            var shown: u64 = 0;
+        };
+        const win = dvui.windowRect();
+        S.rect.x = @max(c.x, @min(win.w / 2 - S.rect.w / 2, c.x + c.w - S.rect.w));
+        // Below the ruler, clear of the measures.
+        S.rect.y = c.y + g + ruler_size;
         // Lighter than the panes: the tracks being filled show through.
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(4).override(.{
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &S.rect, .resize = .none }, overlayOptions(4).override(.{
             .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(palette_alpha) },
         }));
         defer fw.deinit();
+        if (what != S.shown) {
+            fw.autoSize();
+            S.shown = what;
+        }
         if (moving_track) movePalette() else trackPalette();
     }
     if (export_prompt) exportPrompt();
@@ -11264,14 +11276,10 @@ var flow_anchor: ?struct { index: usize, offset: u32 } = null;
 var canvas_id: ?dvui.Id = null;
 var palette_ids: [24]dvui.Id = undefined;
 var palette_id_count: usize = 0;
-/// Taller with the tile and blank rows (see `tile_palette_shown`).
-const palette_height: f32 = if (tile_palette_shown) 212 else 64;
-const move_palette_height = 124;
 /// How opaque the palette and its buttons are over the canvas.
 const palette_alpha = 0.6;
 const palette_button_alpha = 0.45;
 
-const tile_keys = "1234567890";
 
 /// The prototype the insert palette's tile row inserts, once switched with
 /// Tab; null for the track's own.
@@ -11290,7 +11298,6 @@ fn cyclePalettePrototype(back: bool) void {
     }
     palette_prototype = protos[at].id;
 }
-const blank_keys = "QWERTYUIOP";
 
 /// The palette's choices for a region: tile lengths along its tracks (the
 /// prototype's allowed sizes, or its steps from the smallest) and blank
@@ -11762,11 +11769,13 @@ fn cursorKeysReach() bool {
 }
 
 /// Acts on a key for the flow cursor; whether it was one.
-/// The keyboard tile palette and its keys (digits for tiles, Q to P for
-/// blanks, Tab for the next prototype): hidden for now, while flow editing
-/// is worked on for text and equations; they come back with the Unicode
-/// character palettes.
-const tile_palette_shown = false;
+/// The content palette's rows of tiles and blanks, in a track of tiles
+/// (not one of text, where letters type): shown since 2026-11-18, by
+/// buttons only (digits and letters type text in a flow, so the keys they
+/// had are gone; Tab still switches the prototype).
+fn tileRowsShown() bool {
+    return !inTextTrack();
+}
 
 /// An action of mode `canvas.flow`, at the flow cursor; whether it was
 /// done.
@@ -12839,26 +12848,25 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
 fn trackPalette() void {
     palette_id_count = 0;
     if (track_cursor == null) return;
-    const palette = if (tile_palette_shown) paletteFor(track_cursor.?.panel, track_cursor.?.region) else null;
+    const palette = if (tileRowsShown()) paletteFor(track_cursor.?.panel, track_cursor.?.region) else null;
     if (palette) |pal| {
         const name = state.model.proto(pal.prototype).name;
         dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
     } else dvui.labelNoFmt(@src(), "Insert text or equations, and breaks, at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
     if (palette) |pal| inline for (.{ .tile, .blank }) |kind| {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @backingInt(@as(enum { tile, blank }, kind)) });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = @backingInt(@as(enum { tile, blank }, kind)) });
         defer row.deinit();
-        const keys = if (kind == .tile) tile_keys else blank_keys;
         const n = if (kind == .tile) pal.tile_count else pal.blanks.len;
         for (0..n) |i| {
             const size = if (kind == .tile) pal.tiles[i] else pal.blanks[i];
-            if (paletteButton(kind == .tile, keys[i], size, i)) {
+            if (paletteButton(kind == .tile, size, i)) {
                 insertAtCursor(if (kind == .tile) .tile else .blank, size);
                 if (canvas_id) |id| dvui.focusWidget(id, null, null);
             }
         }
     };
     // The flow's other items: a run of text or an equation, and a hard break.
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{});
     defer row.deinit();
     if (flowButton(.run, 0)) insertAtCursor(.run, 0);
     if (flowButton(.join, 3)) {
@@ -12989,13 +12997,13 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
 }
 
 /// One palette button: the tile or blank drawn to scale, its key, its size.
-fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
+fn paletteButton(tile: bool, size: f64, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .id_extra = i,
         .margin = .all(2),
         .padding = .all(4),
-        .min_size_content = .{ .w = 44, .h = 56 },
+        .min_size_content = .{ .w = 44, .h = 40 },
         .corners = .all(4),
         .color_fill = .{ .color = dvui.themeGet().color(.control, .fill).opacity(palette_button_alpha) },
     });
@@ -13021,8 +13029,6 @@ fn paletteButton(tile: bool, key: u8, size: f64, i: usize) bool {
             .color_fill = if (tile) .{ .color = colors.face } else null,
             .color_border = .{ .color = if (tile) colors.edge else colors.edge.opacity(0.5) },
         }).deinit();
-        var kb: [1]u8 = .{key};
-        dvui.labelNoFmt(@src(), &kb, .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.mono).withWeight(.bold), .padding = .{ .y = 2 } });
         var sb: [16]u8 = undefined;
         dvui.labelNoFmt(@src(), std.fmt.bufPrint(&sb, "{d} u", .{size}) catch "", .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-3), .padding = .{} });
     }
