@@ -2574,6 +2574,18 @@ fn historyKeys(wd: *dvui.WidgetData) void {
 fn runAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
         kact("panes.toggle-auto") => toggleAutoPanes(),
+        kact("view.scrolling") => {
+            scroll_mode = switch (inv.arg) {
+                1 => .zoom,
+                2 => .pan,
+                else => .auto,
+            };
+            state.status = switch (scroll_mode) {
+                .auto => "Scrolling: a trackpad pans, a mouse wheel zooms; Ctrl and scrolling zooms. ",
+                .zoom => "Scrolling zooms; Shift and scrolling pans across. ",
+                .pan => "Scrolling pans; Ctrl and scrolling zooms. ",
+            };
+        },
         kact("views.split-across"), kact("views.split-down"), kact("views.close"), kact("views.maximize"), kact("views.next") => {
             if (canvas_prompt) return false;
             switch (inv.action) {
@@ -2704,6 +2716,7 @@ const Prefs = struct {
     show_construction: bool,
     grid: bg_grid.Mode,
     snap_grid: bool,
+    scroll: ScrollMode,
     display: display.Correction,
     px_per_mm: ?f32,
     hot_edges: bool,
@@ -2726,7 +2739,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .scroll = scroll_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -2754,6 +2767,10 @@ fn loadPrefs() void {
     };
     if (ps.get("view.snap_grid")) |v| if (v == .boolean) {
         snap_grid = v.boolean;
+    };
+    // How scrolling acts: the machine's, as its pointing devices are.
+    if (ps.get("view.scrolling")) |v| if (v == .string) if (std.meta.stringToEnum(ScrollMode, v.string)) |m| {
+        scroll_mode = m;
     };
     {
         var dc: display.Correction = .{};
@@ -2885,6 +2902,7 @@ fn savePrefsIfChanged() void {
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
     ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
     ps.put("view.snap_grid", .{ .boolean = now.snap_grid }, .shared);
+    ps.put("view.scrolling", .{ .string = @tagName(now.scroll) }, .local);
     // The screen's correction belongs to this machine.
     ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
     ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
@@ -4106,6 +4124,10 @@ fn menu() ?dvui.App.Result {
             }
         }
         if (menuAction(if (snap_grid) "•  Snap to grid" else "    Snap to grid", "view", kact("view.snap-grid"), 0, false, 9)) m.close();
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 93 });
+        if (menuAction(if (scroll_mode == .auto) "•  Scrolling: trackpad pans, wheel zooms" else "    Scrolling: trackpad pans, wheel zooms", "view", kact("view.scrolling"), 0, false, 30)) m.close();
+        if (menuAction(if (scroll_mode == .zoom) "•  Scrolling zooms" else "    Scrolling zooms", "view", kact("view.scrolling"), 1, false, 31)) m.close();
+        if (menuAction(if (scroll_mode == .pan) "•  Scrolling pans" else "    Scrolling pans", "view", kact("view.scrolling"), 2, false, 32)) m.close();
         if (dvui.menuItemLabel(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
             display_window = true;
             m.close();
@@ -7192,15 +7214,6 @@ fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical
             pe_hover = peGridAt(at);
             dvui.refresh(null, @src(), box.data().id);
         },
-        .wheel_y => |dy| {
-            e.handle(@src(), box.data());
-            const z = @exp(@log(1.003) * @as(f64, dy));
-            state.view.ppm *= z;
-            state.view.fit = null;
-            state.view.cx = at.x - (at.x - state.view.cx) / z;
-            state.view.cy = at.y - (at.y - state.view.cy) / z;
-            dvui.refresh(null, @src(), box.data().id);
-        },
         .press => if (area.contains(me.p)) {
             e.handle(@src(), box.data());
             dvui.captureMouse(box.data(), e.num);
@@ -8336,7 +8349,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             if (inv.action == kact("view.pan-hold")) {
                 if (cursorKeysReach()) {
                     space_pan = true;
+                    pan_axis = null;
                     dvui.cursorSet(.hand);
+                    e.handle(@src(), box.data());
+                    continue;
+                }
+            } else if (inv.action == kact("view.zoom-hold")) {
+                if (cursorKeysReach()) {
+                    zoom_hold = .{ .out = inv.arg == 1 };
                     e.handle(@src(), box.data());
                     continue;
                 }
@@ -8350,6 +8370,21 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             e.handle(@src(), box.data());
             continue;
         }
+        if (zoom_hold != null and keymap.released(e, kmode("view")) == kact("view.zoom-hold")) {
+            // Tapped, no drag: a step about the pointer.
+            const zh = zoom_hold.?;
+            zoom_hold = null;
+            if (!zh.used) {
+                const pct = zoomPercent();
+                const to = display.nextZoom(pct, !zh.out);
+                if (pct > 0) zoomAbout(area, dvui.currentWindow().mouse_pt, to / pct);
+            }
+            e.handle(@src(), box.data());
+            dvui.refresh(null, @src(), box.data().id);
+            continue;
+        }
+        // Scrolling, pinching and Z-drags, whatever mode the canvas is in.
+        if (viewNavEvent(e, box, area)) continue;
         // Sketch mode takes the canvas's events.
         if (sketch_edit != null) {
             sketchEvent(e, box, area);
@@ -8654,17 +8689,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     dvui.cursorSet(.arrow_all);
                 }
             },
-            .wheel_y => |dy| {
-                e.handle(@src(), box.data());
-                const at = state.view.toMm(area, me.p);
-                const z = @exp(@log(1.003) * @as(f64, dy));
-                state.view.ppm *= z;
-                state.view.fit = null;
-                // Keep the point under the pointer fixed.
-                state.view.cx = at.x - (at.x - state.view.cx) / z;
-                state.view.cy = at.y - (at.y - state.view.cy) / z;
-                dvui.refresh(null, @src(), box.data().id);
-            },
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
@@ -8760,8 +8784,18 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     const from = state.press_at;
                     if (from == null or space_pan or state.tool != .select) {
                         state.view.fit = null;
-                        state.view.cx -= d.x / state.view.ppm;
-                        state.view.cy += d.y / state.view.ppm;
+                        // Shift: along the axis the drag first went.
+                        var dx = d.x;
+                        var dy = d.y;
+                        if (me.mod.shift()) {
+                            if (pan_axis == null and (@abs(dx) > 0 or @abs(dy) > 0)) pan_axis = if (@abs(dx) >= @abs(dy)) .x else .y;
+                            if (pan_axis) |ax| switch (ax) {
+                                .x => dy = 0,
+                                .y => dx = 0,
+                            };
+                        } else pan_axis = null;
+                        state.view.cx -= dx / state.view.ppm;
+                        state.view.cy += dy / state.view.ppm;
                     } else if (grabbedPanel() != null or (dragTakes(from.?) != null and isPanelId(dragTakes(from.?).?))) {
                         if (grabbedPanel() == null) clickAt(from.?, me.p);
                         if (grabbedPanel()) |pi| state.moving = .{ .panel = pi, .start = from.?, .at = state.view.toMm(area, me.p) };
@@ -8847,6 +8881,107 @@ var last_click: ?struct { px: dvui.Point.Physical, depth: usize } = null;
 
 /// Space is held: a drag pans.
 var space_pan = false;
+
+// View navigation -------------------------------------------------------------
+//
+// Scrolling, pinching, and Z held for a zoom drag, the same on the canvas,
+// in a sketch and in panel editing. Scrolling pans or zooms (View ›
+// Scrolling): automatically, a trackpad's smooth scrolling pans and a
+// mouse wheel's notches zoom (DVUI's guess from the scroll amounts, made
+// at each scroll); Ctrl (or Cmd) and scrolling always zooms; with a wheel,
+// Shift and scrolling pans across. A pinch zooms. Held keys stand in for
+// mouse buttons a trackpad makes awkward: Space and a drag pans (Shift:
+// along one axis), Z and a drag zooms; Z tapped zooms in a step at the
+// pointer, Shift+Z out.
+
+pub const ScrollMode = enum { auto, zoom, pan };
+var scroll_mode: ScrollMode = .auto;
+
+/// Z held: zooming out when tapped, and whether a drag has used it.
+var zoom_hold: ?struct { out: bool = false, used: bool = false } = null;
+/// A Z-drag: where it zooms about.
+var zoom_drag: ?dvui.Point.Physical = null;
+/// A Shift+Space pan's axis, once the drag has chosen it.
+var pan_axis: ?enum { x, y } = null;
+
+fn scrollPans() bool {
+    return switch (scroll_mode) {
+        .pan => true,
+        .zoom => false,
+        .auto => dvui.currentWindow().mouse_type == .trackpad,
+    };
+}
+
+/// Zooms by `z` keeping point `p` (device pixels in `area`) where it is.
+fn zoomAbout(area: dvui.Rect.Physical, p: dvui.Point.Physical, z: f64) void {
+    if (!(z > 0) or !std.math.isFinite(z)) return;
+    const at = state.view.toMm(area, p);
+    state.view.ppm *= z;
+    state.view.fit = null;
+    state.view.cx = at.x - (at.x - state.view.cx) / z;
+    state.view.cy = at.y - (at.y - state.view.cy) / z;
+}
+
+/// Whether event `e` was scrolling, a pinch or a Z-drag, done.
+fn viewNavEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) bool {
+    if (e.evt != .mouse) return false;
+    const me = e.evt.mouse;
+    const ppm = state.view.ppm;
+    if (!(ppm > 0)) return false;
+    switch (me.action) {
+        .wheel_y => |dy| {
+            if (!dvui.eventMatchSimple(e, box.data())) return false;
+            e.handle(@src(), box.data());
+            if (primaryMod(me.mod) or (!scrollPans() and !me.mod.shift())) {
+                zoomAbout(area, me.p, @exp(@log(1.003) * @as(f64, dy)));
+            } else if (!scrollPans()) {
+                // A wheel with Shift: across.
+                state.view.cx -= dy / ppm;
+                state.view.fit = null;
+            } else {
+                state.view.cy += dy / ppm;
+                state.view.fit = null;
+            }
+        },
+        .wheel_x => |dx| {
+            if (!dvui.eventMatchSimple(e, box.data())) return false;
+            e.handle(@src(), box.data());
+            state.view.cx -= dx / ppm;
+            state.view.fit = null;
+        },
+        .pinch_begin, .pinch_end => {
+            if (!dvui.eventMatchSimple(e, box.data())) return false;
+            e.handle(@src(), box.data());
+        },
+        .pinch_update => |scale| {
+            if (!dvui.eventMatchSimple(e, box.data())) return false;
+            e.handle(@src(), box.data());
+            zoomAbout(area, me.p, scale);
+        },
+        .press => {
+            if (zoom_hold == null or !me.button.pointer() or !area.contains(me.p)) return false;
+            e.handle(@src(), box.data());
+            dvui.captureMouse(box.data(), e.num);
+            zoom_drag = me.p;
+            zoom_hold.?.used = true;
+        },
+        .motion => |d| {
+            const anchor = zoom_drag orelse return false;
+            e.handle(@src(), box.data());
+            // Up zooms in: doubling every 120 px.
+            zoomAbout(area, anchor, std.math.pow(f64, 2, -d.y / (120 * dvui.windowNaturalScale())));
+        },
+        .release => {
+            if (zoom_drag == null) return false;
+            e.handle(@src(), box.data());
+            zoom_drag = null;
+            dvui.captureMouse(null, e.num);
+        },
+        else => return false,
+    }
+    dvui.refresh(null, @src(), box.data().id);
+    return true;
+}
 
 /// A drag on empty canvas drawing out an area to select (in `state.drag`).
 var band_drag = false;
@@ -15676,15 +15811,6 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             }
             dvui.cursorSet(if (sk_tool != .none) .crosshair else .arrow);
             if (moved) dvui.refresh(null, @src(), box.data().id);
-        },
-        .wheel_y => |dy| {
-            e.handle(@src(), box.data());
-            const z = @exp(@log(1.003) * @as(f64, dy));
-            state.view.ppm *= z;
-            state.view.fit = null;
-            state.view.cx = at_space.x - (at_space.x - state.view.cx) / z;
-            state.view.cy = at_space.y - (at_space.y - state.view.cy) / z;
-            dvui.refresh(null, @src(), box.data().id);
         },
         .press => if (area.contains(me.p)) {
             e.handle(@src(), box.data());

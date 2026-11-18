@@ -86,6 +86,11 @@ pub const action_defs = [_]A{
     .{ .name = "view.zoom-to", .param = .int },
     // Held: a drag pans, whatever is under it (a while-held mode).
     .{ .name = "view.pan-hold" },
+    // Held: a drag zooms (up in, down out) about where it starts; tapped
+    // alone, a zoom step in (arg 0) or out (1) about the pointer.
+    .{ .name = "view.zoom-hold", .param = .int },
+    // How scrolling acts on the canvas: arg 0 automatic, 1 zooms, 2 pans.
+    .{ .name = "view.scrolling", .param = .int },
     // What is being edited, legible, with as much around it as shows so.
     .{ .name = "view.frame-edit" },
     .{ .name = "view.zoom-in", .repeat = true },
@@ -281,6 +286,8 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "primary+minus", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "primary+kp_subtract", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "space", .action = "view.pan-hold" },
+    .{ .mode = "view", .chord = "z", .action = "view.zoom-hold", .arg = 0 },
+    .{ .mode = "view", .chord = "shift+z", .action = "view.zoom-hold", .arg = 1 },
     .{ .mode = "view", .chord = "primary+nine", .action = "view.frame-edit" },
     .{ .mode = "view", .chord = "nine", .action = "view.frame-edit" },
     .{ .mode = "view", .chord = "zero", .action = "view.zoom-fit" },
