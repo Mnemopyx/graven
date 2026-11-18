@@ -18,8 +18,6 @@ const gui = @import("main.zig");
 
 const api = gui.testing_api;
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-
 const scratch = "/tmp/graven-gui-test";
 
 /// The panes docked, so clicks reach them (a ghost pane lets them through
@@ -38,6 +36,8 @@ const config =
     \\
 ;
 
+var threaded: std.Io.Threaded = undefined;
+
 /// Graven started under the testing backend.
 pub const Run = struct {
     t: dvui.testing,
@@ -47,10 +47,10 @@ pub const Run = struct {
         std.Io.Dir.cwd().createDirPath(io, scratch ++ "/config") catch {};
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = scratch ++ "/config/local.toml", .data = config });
         std.Io.Dir.cwd().deleteFile(io, scratch ++ "/config/shared.toml") catch {};
-        _ = setenv("GRAVEN_CONFIG_DIR", scratch ++ "/config", 1);
-        _ = setenv("GRAVEN_FONTS_INDEX", scratch ++ "/fonts-index.json", 1);
-        _ = setenv("GRAVEN_MOTD_URL", "none", 1);
-        const t = try dvui.testing.init(.{ .allocator = std.heap.c_allocator, .window_size = .{ .w = 1600, .h = 4000 } });
+        // Graven's background work (the font index, the desktop) has its
+        // own threads: an Io and allocator of the run's, not the test's.
+        threaded = .init(std.heap.c_allocator, .{});
+        const t = try dvui.testing.init(.{ .io = threaded.io(), .allocator = std.heap.c_allocator, .window_size = .{ .w = 1600, .h = 4000 } });
         try gui.dvui_app.initFn.?(t.window);
         var r: Run = .{ .t = t };
         try r.frames(3);
@@ -161,6 +161,12 @@ pub fn dumpTags(prefix: []const u8) void {
     while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, prefix)) std.debug.print("  {s}\n", .{e.key_ptr.*});
 }
 
+/// Prints this frame's tags that hold `part`.
+pub fn dumpTagsWith(part: []const u8) void {
+    var it = dvui.currentWindow().tags.map.iterator();
+    while (it.next()) |e| if (std.mem.indexOf(u8, e.key_ptr.*, part) != null) std.debug.print("  {s}\n", .{e.key_ptr.*});
+}
+
 test "the start screen's M makes a new canvas in millimetres" {
     var r = try Run.start();
     defer r.stop();
@@ -237,19 +243,135 @@ fn makeKeyPrototype(r: *Run) !void {
     try r.set("Layer face/Gradient to", "#efede8");
 }
 
+/// The keyboard's keys, row by row: width and height in u, the gap before
+/// in u, and the legends (a symbol or a pair's shifted one; a pair's base
+/// symbol; words), as typed.
+const Key = struct { w: f64 = 1, h: f64 = 1, gap: f64 = 0, top: []const u8 = "", bottom: []const u8 = "", words: []const u8 = "" };
+
+fn one(t: []const u8) Key {
+    return .{ .top = t };
+}
+fn pair(t: []const u8, b: []const u8) Key {
+    return .{ .top = t, .bottom = b };
+}
+fn words(t: []const u8, w: f64) Key {
+    return .{ .words = t, .w = w };
+}
+fn gap(k: Key, g: f64) Key {
+    var c = k;
+    c.gap = g;
+    return c;
+}
+
+const rows = [_][]const Key{
+    &.{ words("Esc", 1), gap(one("F1"), 1), one("F2"), one("F3"), one("F4"), gap(one("F5"), 0.5), one("F6"), one("F7"), one("F8"), gap(one("F9"), 0.5), one("F10"), one("F11"), one("F12"), gap(words("Print Screen", 1), 0.25), words("Scroll Lock", 1), words("Pause", 1) },
+    &.{ pair("~", "`"), pair("!", "1"), pair("@", "2"), pair("#", "3"), pair("$", "4"), pair("%", "5"), pair("^", "6"), pair("&", "7"), pair("*", "8"), pair("(", "9"), pair(")", "0"), pair("_", "-"), pair("+", "="), words("Backspace", 2), gap(words("Insert", 1), 0.25), words("Home", 1), words("Page Up", 1), gap(words("Num Lock", 1), 0.25), one("/"), one("*"), one("-") },
+    &.{ words("Tab", 1.5), one("Q"), one("W"), one("E"), one("R"), one("T"), one("Y"), one("U"), one("I"), one("O"), one("P"), pair("{", "["), pair("}", "]"), .{ .top = "|", .bottom = "\\", .w = 1.5 }, gap(words("Delete", 1), 0.25), words("End", 1), words("Page Down", 1), gap(one("7"), 0.25), one("8"), one("9"), .{ .top = "+", .h = 2 } },
+    &.{ words("Caps Lock", 1.75), one("A"), one("S"), one("D"), one("F"), one("G"), one("H"), one("J"), one("K"), one("L"), pair(":", ";"), pair("\"", "'"), words("Enter", 2.25), gap(one("4"), 3.5), one("5"), one("6") },
+    &.{ words("Shift", 2.25), one("Z"), one("X"), one("C"), one("V"), one("B"), one("N"), one("M"), pair("<", ","), pair(">", "."), pair("?", "/"), words("Shift", 2.75), gap(one("↑"), 1.25), gap(one("1"), 1.25), one("2"), one("3"), .{ .words = "Enter", .h = 2 } },
+    &.{ words("Ctrl", 1.25), words("Super", 1.25), words("Alt", 1.25), .{ .w = 6.25 }, words("Alt", 1.25), words("Super", 1.25), words("Menu", 1.25), words("Ctrl", 1.25), gap(one("←"), 0.25), one("↓"), one("→"), gap(.{ .top = "0", .w = 2 }, 0.25), one(".") },
+};
+
+/// A legend as markup: Graven's special characters escaped.
+fn markup(w: *std.Io.Writer, text: []const u8) !void {
+    for (text) |c| switch (c) {
+        '{', '}', '_', '^', '&', '%', '#', '$', '~' => try w.print("\\{c}", .{c}),
+        '\\' => try w.writeAll("\\textbackslash{}"),
+        else => try w.writeByte(c),
+    };
+}
+
+/// A CSV field, quoted when it holds a comma, a quote or a line break.
+fn csvField(w: *std.Io.Writer, text: []const u8) !void {
+    var buf: [64]u8 = undefined;
+    var fw: std.Io.Writer = .fixed(&buf);
+    try markup(&fw, text);
+    const f = fw.buffered();
+    if (std.mem.indexOfAny(u8, f, ",\"\n") == null) return w.writeAll(f);
+    try w.writeByte('"');
+    for (f) |c| {
+        if (c == '"') try w.writeByte('"');
+        try w.writeByte(c);
+    }
+    try w.writeByte('"');
+}
+
+/// The keyboard's legend table: a row a key (K1 …), a column a slot.
+fn legendsCsv(a: std.mem.Allocator) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(a);
+    const w = &out.writer;
+    try w.writeAll("name,top,bottom,words\r\n");
+    var n: usize = 0;
+    for (rows) |row| for (row) |k| {
+        n += 1;
+        try w.print("K{d},", .{n});
+        try csvField(w, k.top);
+        try w.writeByte(',');
+        try csvField(w, k.bottom);
+        try w.writeByte(',');
+        try csvField(w, k.words);
+        try w.writeAll("\r\n");
+    };
+    return out.toOwnedSlice();
+}
+
+fn screen(p: struct { f64, f64 }) !dvui.Point.Physical {
+    return api.toScreen(.{ .x = p[0], .y = p[1] }) orelse error.NoCanvas;
+}
+
+/// The keyboard as a person makes it in the GUI: styles, the key
+/// prototype, a panel, a track, 104 keys from the content palette, their
+/// names, gaps and heights, and their legends from a CSV table.
+fn makeKeyboard(r: *Run) !void {
+    try r.key(.m, .none);
+    try makeStyle(r, "legend", "2.6");
+    try makeStyle(r, "legend words", "1.6");
+    try makeKeyPrototype(r);
+
+    // The panel: drawn out, then typed exactly.
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("icon/Add panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    try r.set("Panel/Name", "PC keyboard (ANSI 104)");
+    try r.set("Panel/Origin across, mm", "0");
+    try r.set("Panel/Origin up, mm", "0");
+    try r.set("Panel/Width, mm", "448.625");
+    try r.set("Panel/Height, mm", "143.825");
+    inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| try r.set("Margins/" ++ side ++ ", mm", "5");
+
+    // The track: rows of keys, drawn out on the panel, then typed exactly.
+    try r.click("icon/Add rows");
+    try r.choose("Add rows/Size to", "Tile: key");
+    try r.drag(try screen(.{ 20, 120 }), try screen(.{ 200, 60 }));
+    try r.set("Region/Name", "keys");
+    try r.set("Region/Origin across, mm", "10");
+    try r.set("Region/Origin up, mm", "133.825");
+    try r.set("Region/Length, u", "22.5");
+    try r.set("Region/Depth, rows", "6.5");
+
+    // The keys, from the content palette at the cursor: a row's keys, then
+    // a line break; the second row starts a paragraph whose style puts
+    // half a unit before it.
+    for (rows, 0..) |row, ri| {
+        if (ri == 1) {
+            try r.click("palette/paragraph");
+        } else if (ri > 1) try r.click("palette/hard_break");
+        for (row) |k| {
+            var tb: [32]u8 = undefined;
+            try r.click(try std.fmt.bufPrint(&tb, "palette/key {d} u", .{k.w}));
+        }
+    }
+}
+
 test "the PC keyboard, made in the GUI" {
     var r = try Run.start();
     defer r.stop();
-    try r.key(.m, .none);
-    try makeStyle(&r, "legend", "2.6");
-    try makeStyle(&r, "legend words", "1.6");
-    try makeKeyPrototype(&r);
+    try makeKeyboard(&r);
     const m = api.model();
-    const p = m.prototypes.items[m.prototypes.items.len - 1];
-    try std.testing.expectEqualStrings("key", p.name);
-    try std.testing.expectEqual(3, p.tracks.len);
-    try std.testing.expectEqualStrings("words", p.tracks[2].name);
-    try std.testing.expectEqual(6.45, p.tracks[1].place.inset.top);
-    try std.testing.expect(p.art.?.layers[0].paint.fill == .linear);
-    try std.testing.expectEqual(8, p.widths.len);
+    var tiles: usize = 0;
+    for (m.tiles.items) |t| {
+        if (!t.removed) tiles += 1;
+    }
+    try std.testing.expectEqual(104, tiles);
 }

@@ -99,6 +99,23 @@ pub const testing_api = struct {
     pub fn describePanes() void {
         for (all_panes) |p| std.debug.print("pane {s}: {s}, size {d}, rect {any}\n", .{ p.id, @tagName(p.mode), p.size, p.rect_px });
     }
+    /// The middle of the key named `designator` on the screen, as placed
+    /// now (its body's centre).
+    pub fn tileCenter(designator: []const u8) ?dvui.Point.Physical {
+        const id = state.model.findTile(designator) orelse return null;
+        const f = findTile(id) orelse return null;
+        const b = onSheet(f.panel, f.tile.body);
+        return toScreen(.{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 });
+    }
+    pub fn toolName() []const u8 {
+        return @tagName(state.tool);
+    }
+    pub fn canvasRect() ?dvui.Rect.Physical {
+        return canvas_px;
+    }
+    pub fn contextName() []const u8 {
+        return @tagName(state.context);
+    }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
         state.view.cy = cy;

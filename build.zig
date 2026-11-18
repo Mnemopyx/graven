@@ -258,6 +258,10 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(t);
         // From the repository's root: the examples and their fonts.
         run.setCwd(b.path("."));
+        // A scratch config and font index; no message of the day.
+        run.setEnvironmentVariable("GRAVEN_CONFIG_DIR", "/tmp/graven-gui-test/config");
+        run.setEnvironmentVariable("GRAVEN_FONTS_INDEX", "/tmp/graven-gui-test/fonts-index.json");
+        run.setEnvironmentVariable("GRAVEN_MOTD_URL", "none");
         gui_test_step.dependOn(&run.step);
     }
 
