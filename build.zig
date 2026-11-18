@@ -123,6 +123,32 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The local font source (installed fonts and the index cache), shared
+    // by graven-fonts and Graven.
+    const fonts_local = b.createModule(.{
+        .root_source_file = b.path("apps/fonts/local.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "graven_fontsearch", .module = fontsearch },
+            .{ .name = "graven_font", .module = font },
+        },
+    });
+
+    // A document's font folders (beside it, and the shared one), loaded as
+    // a catalog: the GUI and the CLI find fonts the same way.
+    const fonts_folders = b.createModule(.{
+        .root_source_file = b.path("apps/fonts/folders.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "graven_layout", .module = layout },
+            .{ .name = "graven_fontsearch", .module = fontsearch },
+        },
+    });
+
     // Applications. Samples build models through the libraries' actions.
     const samples = b.createModule(.{
         .root_source_file = b.path("apps/samples/root.zig"),
@@ -144,6 +170,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_samples", .module = samples },
                 .{ .name = "graven_fontsearch", .module = fontsearch },
                 .{ .name = "graven_glyphic", .module = glyphic },
+                .{ .name = "graven_fonts_folders", .module = fonts_folders },
+                .{ .name = "graven_fonts_local", .module = fonts_local },
             },
         }),
     });
@@ -152,18 +180,6 @@ pub fn build(b: *std.Build) void {
     run_cli.addPassthruArgs();
     b.step("run", "Run the graven CLI").dependOn(&run_cli.step);
 
-    // The local font source (installed fonts and the index cache), shared
-    // by graven-fonts and Graven.
-    const fonts_local = b.createModule(.{
-        .root_source_file = b.path("apps/fonts/local.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "graven_fontsearch", .module = fontsearch },
-            .{ .name = "graven_font", .module = font },
-        },
-    });
 
     // The font tool: graven-fonts index | search | show | families | install | remove | convert.
     const fonts_tool = b.addExecutable(.{
@@ -205,6 +221,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_config", .module = config },
                     .{ .name = "graven_fontsearch", .module = fontsearch },
                     .{ .name = "graven_fonts_local", .module = fonts_local },
+                    .{ .name = "graven_fonts_folders", .module = fonts_folders },
                     .{ .name = "graven_richtext", .module = richtext },
                     .{ .name = "graven_glyphic", .module = glyphic },
                 },
@@ -220,7 +237,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, layout, samples, config, fontsearch, richtext, sketch, fonts_local, glyphic }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, layout, samples, config, fontsearch, richtext, sketch, fonts_local, fonts_folders, glyphic }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).
@@ -252,6 +269,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("apps/gui/views.zig"),
         .target = target,
         .optimize = optimize,
+    }) })).step);
+    // The example documents, read as files.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("examples/examples_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "graven_layout", .module = layout }},
     }) })).step);
     // Digraphs: the table, the user's pairs, typing one.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{

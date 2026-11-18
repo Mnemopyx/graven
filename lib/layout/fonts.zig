@@ -30,6 +30,23 @@ pub const Catalog = struct {
     load: *const fn (ctx: *anyopaque, index: usize) ?*font.Face,
 };
 
+/// Two catalogs as one: `first`'s fonts, then `second`'s, so a font both
+/// have is taken from `first` (`find` takes the first match). The names
+/// and the pair are allocated from `al`, which must outlive the result.
+pub fn join(al: Allocator, first: Catalog, second: Catalog) Allocator.Error!Catalog {
+    const names = try al.alloc(FontName, first.names.len + second.names.len);
+    @memcpy(names[0..first.names.len], first.names);
+    @memcpy(names[first.names.len..], second.names);
+    const pair = try al.create([2]Catalog);
+    pair.* = .{ first, second };
+    return .{ .names = names, .ctx = pair, .load = struct {
+        fn load(ctx: *anyopaque, i: usize) ?*font.Face {
+            const p: *[2]Catalog = @ptrCast(@alignCast(ctx));
+            return if (i < p[0].names.len) p[0].load(p[0].ctx, i) else p[1].load(p[1].ctx, i - p[0].names.len);
+        }
+    }.load };
+}
+
 /// Styles tried, in order, when a family has the font asked for but not in
 /// the style asked for.
 const plain_styles = [_][]const u8{ "Regular", "Book", "Roman", "Normal", "Medium" };
@@ -348,4 +365,21 @@ test "a package sets a style's faces and rules; styles take it as their base" {
     try testing.expectEqual(null, m.textStyle(key).face("text"));
     try testing.expectEqual(&stix_two, package("stix-two").?);
     try testing.expectError(error.StyleLoop, m.setStyleBase(base, key));
+}
+
+test "two catalogs joined: the first's font is taken where both have it" {
+    const S = struct {
+        fn none(_: *anyopaque, _: usize) ?*font.Face {
+            return null;
+        }
+    };
+    var dummy: u8 = 0;
+    const a: Catalog = .{ .names = &.{.{ .family = "Inter", .style = "Medium" }}, .ctx = &dummy, .load = S.none };
+    const b: Catalog = .{ .names = &.{ .{ .family = "Caladea", .style = "Bold" }, .{ .family = "Inter", .style = "Medium" } }, .ctx = &dummy, .load = S.none };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const j = try join(arena.allocator(), a, b);
+    try std.testing.expectEqual(@as(usize, 3), j.names.len);
+    try std.testing.expectEqual(@as(usize, 0), find(j.names, .{ .family = "Inter", .style = "Medium" }).?.index);
+    try std.testing.expectEqual(@as(usize, 1), find(j.names, .{ .family = "Caladea", .style = "Bold" }).?.index);
 }

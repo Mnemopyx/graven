@@ -1,15 +1,21 @@
 # Examples
 
-Inputs for trying Graven from the repository root.
+Documents and inputs for trying Graven from the repository root.
 
 | Path | What |
 | --- | --- |
-| `fonts/Inter-Medium.otf` | Inter Medium, the default legend font for the PC keyboard sample. SIL Open Font License 1.1: see `fonts/OFL.txt` |
+| `pc-keyboard.graven` | A PC keyboard (ANSI, 104 keys) in one track of tiles: each key's legends one a slot (`top`, `bottom`, `words`), set in Inter Medium |
+| `hp15c.graven` | A rough HP-15C keypad: a plate with key holes and gold legends, and the keys, on a grid and a grid that follows it; legends in the Libertinus math package; fabrication layers for 3MF |
+| `fonts/Inter-Medium.otf` | Inter Medium, the keyboard's legend font. SIL Open Font License 1.1: see `fonts/OFL.txt` |
+| `examples_test.zig` | Checks that each document opens and lays out as it should (part of `zig build test`) |
+
+A document's fonts are found first in a `fonts` folder beside it (here, `examples/fonts`), then in `$GRAVEN_FONTS` or `fonts/` in the working folder (the math packages' fonts: `python3 scripts/fetch-fonts.py`), then among the installed fonts. The GUI and the CLI look in the same places.
 
 ```sh
-zig build run -- keyboard examples/fonts/Inter-Medium.otf kb.svg
-zig build run -- label examples/fonts/Inter-Medium.otf - 3 'CAPS LOCK' caps.svg
-zig build gui      # opens with an installed Inter Medium, else this example font
+zig build run -- export examples/pc-keyboard.graven kb.svg
+zig build run -- export examples/hp15c.graven hp15c.svg      # hp15c-HP-15C plate.svg, hp15c-HP-15C keys.svg
+zig build run -- export examples/hp15c.graven hp15c.3mf      # the same, as 3MF for multi-colour printing
+zig build gui -- examples/hp15c.graven                        # or GRAVEN_SAMPLE=hp15c, as an untitled copy
 ```
 
-The keyboard layout itself is not a file yet: it is built in code by `apps/samples/pc_keyboard.zig` until the native file format exists.
+For now the two documents are written from the samples' code (`graven example keyboard|hp15c <out>`); they are to be made in Graven itself and the code removed.

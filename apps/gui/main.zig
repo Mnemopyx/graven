@@ -21,6 +21,7 @@ const settings_file = @import("settings.zig");
 const history = layout.history;
 const locale = @import("locale.zig");
 const fontwin = @import("fontwin.zig");
+const folders = @import("graven_fonts_folders");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
 const motd = @import("motd.zig");
@@ -1241,6 +1242,9 @@ fn deinit(_: *dvui.Window) void {
     recent_files.deinit(state.gpa);
     hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
+    doc_fonts.deinit(state.gpa);
+    if (doc_fonts_for) |h| state.gpa.free(h);
+    if (fonts_from) |f| state.gpa.free(f);
     dg_table.deinit(state.gpa);
     clearPlaced();
     state.placed.deinit(state.gpa);
@@ -1506,15 +1510,23 @@ fn resolveFonts(labels: *layout.Labels) void {
         fontwin.releaseRetired();
         return;
     }
-    if (resolved != null and resolved_rev == state.model.revision and resolved_gen == fontwin.generation) {
+    const doc_changed = syncDocFonts();
+    if (!doc_changed and resolved != null and resolved_rev == state.model.revision and resolved_gen == fontwin.generation) {
         fontwin.releaseRetired();
         return;
     }
     _ = fontwin.indexRecords(state.gpa, false);
     var names_arena: std.heap.ArenaAllocator = .init(state.gpa);
     defer names_arena.deinit();
-    const cat = fontwin.catalog(names_arena.allocator()) orelse return;
+    // The document's font folders first, then the installed fonts: as the
+    // CLI finds them (folders.zig).
+    const installed = fontwin.catalog(names_arena.allocator());
+    const cat = if (doc_fonts.faces.items.len > 0)
+        (if (installed) |i| layout.fonts.join(names_arena.allocator(), doc_fonts.catalog(), i) catch return else doc_fonts.catalog())
+    else
+        installed orelse return;
     const next = layout.fonts.resolve(state.gpa, &state.model, cat, state.faces[0]) catch return;
+    if (doc_changed) state.placed_rev = std.math.maxInt(u64);
     if (resolved) |*old| old.deinit();
     facesChanged();
     resolved = next;
@@ -1540,6 +1552,40 @@ fn resolveFonts(labels: *layout.Labels) void {
 }
 var font_status_buf: [160]u8 = undefined;
 var font_status_hash: u64 = 0;
+
+/// The document's font folders' fonts (a fonts folder beside it, then
+/// $GRAVEN_FONTS or fonts/), loaded for the folder they are for.
+var doc_fonts: folders.Folders = .init(std.heap.page_allocator);
+var doc_fonts_for: ?[]u8 = null;
+var doc_fonts_loaded = false;
+/// Where an example opened as untitled came from: its fonts are beside it.
+var fonts_from: ?[]u8 = null;
+
+/// Loads the document's folders' fonts when the document's place changed;
+/// whether it did.
+fn syncDocFonts() bool {
+    const want: ?[]const u8 = fonts_from orelse file_path;
+    const same = if (want) |w| (if (doc_fonts_for) |h| std.mem.eql(u8, std.fs.path.dirname(w) orelse ".", h) else false) else doc_fonts_for == null;
+    if (doc_fonts_loaded and same) return false;
+    // Faces resolved from the old ones are dropped with them: resolve
+    // again before anything draws.
+    if (resolved) |*r| {
+        if (state.labels) |*l| l.resolved = null;
+        r.deinit();
+        resolved = null;
+        facesChanged();
+    }
+    doc_fonts.deinit(state.gpa);
+    doc_fonts = .init(state.gpa);
+    if (doc_fonts_for) |h| state.gpa.free(h);
+    doc_fonts_for = if (want) |w| state.gpa.dupe(u8, std.fs.path.dirname(w) orelse ".") catch null else null;
+    doc_fonts_loaded = true;
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const dirs = folders.dirsFor(arena.allocator(), want) catch return true;
+    for (dirs) |d| doc_fonts.addDir(state.gpa, dvui.io, d) catch {};
+    return true;
+}
 
 /// Each font-window change that takes two actions is undone as one.
 var font_step: u64 = 0;
@@ -1745,7 +1791,9 @@ fn frame() !dvui.App.Result {
         if (std.c.getenv("GRAVEN_SAMPLE")) |v| {
             const which = std.mem.span(v);
             if (canvas_prompt) createCanvas(.mm);
-            if (std.mem.eql(u8, which, "hp15c")) loadHp15c() catch {} else if (std.mem.eql(u8, which, "keyboard")) loadSample() catch {} else if (std.mem.eql(u8, which, "text")) loadText() catch {};
+            // The two keyboards are example files (examples/, from the
+            // repository's root), opened as untitled copies.
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) loadText() catch {};
         }
         // GRAVEN_VIEW=cx,cy,ppm: the view's centre (mm) and zoom (px/mm).
         if (std.c.getenv("GRAVEN_VIEW")) |v| {
@@ -1901,6 +1949,9 @@ var quit_now = false;
 const doc_ext = ".graven";
 
 fn setFilePath(path: ?[]const u8) void {
+    // A document's fonts are found beside it from now on.
+    if (fonts_from) |f| state.gpa.free(f);
+    fonts_from = null;
     // Copied before the old one is freed: `path` may be it.
     const next = if (path) |p| state.gpa.dupe(u8, p) catch null else null;
     if (file_path) |old| state.gpa.free(old);
@@ -2461,6 +2512,34 @@ fn openDocument(path: []const u8) void {
     }
     install(&opened, path);
     state.status = if (opened.damaged) "Opened. The end of the file was damaged: the last changes in it are lost. " else "Opened. ";
+}
+
+/// Opens the document at `path` as an untitled copy (Save asks where):
+/// an example stays as it is. Its fonts are still looked for beside it.
+fn openExample(path: []const u8) void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, state.gpa, .limited(1 << 30)) catch {
+        state.status = "The example is not there: Graven looks for it in examples/, from where it was started. ";
+        return;
+    };
+    defer state.gpa.free(bytes);
+    var opened = history.openFile(state.gpa, bytes) catch {
+        state.status = "The example could not be opened. ";
+        return;
+    };
+    // Not a recovery: an example has no unsaved steps worth keeping.
+    opened.discardUnsaved() catch {};
+    install(&opened, path);
+    setFilePath(null);
+    fonts_from = state.gpa.dupe(u8, path) catch null;
+    hist.markSaved();
+    // Shown whole: its panels fill the view.
+    var all: ?geom.Box = null;
+    for (state.model.panels.items) |pn| {
+        if (pn.unbounded) continue;
+        all = if (all) |b| b.join(pn.box()) else pn.box();
+    }
+    if (all) |b| state.view.fit = b;
+    state.status = "Opened the example as a new, untitled document. ";
 }
 
 /// Makes `opened` the document open, from `path`.

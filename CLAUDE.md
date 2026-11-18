@@ -43,11 +43,13 @@ $Z build fab -Docct-prebuilt  # graven-fab, with the OCCT bridge (prebuilt relea
 Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2, and on 2026-11-18, when a shifted pair's base symbol moved into a slot of its own.)
 
 ```sh
-./zig-out/bin/graven keyboard /usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf kb.svg
+./zig-out/bin/graven export --font /usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf examples/pc-keyboard.graven kb.svg
 cmp kb.svg kb_before.svg   # keep a copy from before the change
 ```
 
-Samples to look at: `graven hp15c libertinus plate.svg keys.svg` (or `stix-two`), `graven 3mf hp15c libertinus plate.3mf keys.3mf`, `graven msdf <font> <text> <texels per cap> out.pgm`, `graven v2 fonts/Geist-SemiBold.ttf fonts/LibertinusMath-Regular.otf v2.svg` (engine v2: the Leibniz series on a row, broken rows and a dial). An SVG becomes a PNG to look at with Playwright's Chromium (load it in a page sized to its viewBox and screenshot).
+(`graven keyboard <font> <out.svg>` gives the same bytes while the samples' code remains.)
+
+Samples to look at: the example documents in `examples/` (`graven export examples/hp15c.graven hp15c.svg`, or `.3mf`; a document's fonts come from a `fonts` folder beside it, then `$GRAVEN_FONTS` or `fonts/`, then installed ones), `graven msdf <font> <text> <texels per cap> out.pgm`, `graven v2 fonts/Geist-SemiBold.ttf fonts/LibertinusMath-Regular.otf v2.svg` (engine v2: the Leibniz series on a row, broken rows and a dial). An SVG becomes a PNG to look at with Playwright's Chromium (load it in a page sized to its viewBox and screenshot).
 
 ## The GUI without a person at it
 
@@ -55,7 +57,7 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 
 | Switch | Effect |
 |---|---|
-| `GRAVEN_SAMPLE=hp15c`, `keyboard` or `text` | opens on a new canvas with that sample (`text`: a track with text and an equation, the cursor in it) |
+| `GRAVEN_SAMPLE=hp15c`, `keyboard` or `text` | opens that example (`examples/hp15c.graven`, `examples/pc-keyboard.graven`, from the repository root) as an untitled copy; `text`: a track with text and an equation on a new canvas, the cursor in it |
 | `GRAVEN_VIEW=cx,cy,ppm` | view centre (mm) and zoom (px/mm) |
 | `GRAVEN_EXACT_TEXT=1` | text from outlines instead of the glyph atlas |
 | `GRAVEN_TEXT_GAMMA`, `GRAVEN_TEXT_DARKEN` | display gamma (2.2), stem darkening (0) |
@@ -83,4 +85,4 @@ Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), scr
 - `lib/glyphic`: the legend engine (v2; v1's `lib/engine` was deleted 2026-11-16): expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
 - `lib/layout`: the document model (text styles are stored glyphic contexts; content is in flows, `Model.flows`, each running through its tracks in order), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig` into `render.zig`'s geometry; `edit.zig` edits a run's source in place), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), output.
 - `lib/sketch`: parametric sketches and their solver.
-- `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes; `layouts.zig` the named pane layouts and the panes' official names; `views.zig` the document's views, tabbed in splits; `cursor.zig` the scintillating spark's frames, for the animated cursor; `digraphs.zig` Ctrl+K digraphs (table `digraph_data.zig` from `scripts/digraphs.py`; the user's in the config's `[digraphs]`); `actions.zig` the action/mode/keymap registry and `keymap.zig` Graven's actions, modes and default keys: a key is matched there, never by code inline). `apps/samples`: PC keyboard, HP-15C. `apps/fab`, `bridge/occt`: STEP through OCCT.
+- `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes; `layouts.zig` the named pane layouts and the panes' official names; `views.zig` the document's views, tabbed in splits; `cursor.zig` the scintillating spark's frames, for the animated cursor; `digraphs.zig` Ctrl+K digraphs (table `digraph_data.zig` from `scripts/digraphs.py`; the user's in the config's `[digraphs]`); `actions.zig` the action/mode/keymap registry and `keymap.zig` Graven's actions, modes and default keys: a key is matched there, never by code inline). `apps/samples`: PC keyboard, HP-15C (the example documents' source until they are made in Graven: `graven example`). `apps/fonts/folders.zig`: a document's font folders, loaded as a catalog, shared by the GUI and the CLI. `examples/`: the example documents and their tests. `apps/fab`, `bridge/occt`: STEP through OCCT.
