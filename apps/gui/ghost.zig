@@ -723,6 +723,7 @@ fn blendMode(as_silhouette: bool) dvui.backend.c.SDL_BlendMode {
 /// `content` (covering `r`) as one colour, keeping its shape and alpha.
 /// Must be called while rendering immediately.
 fn silhouette(content: dvui.Texture, r: dvui.Rect.Physical, color: dvui.Color) ?dvui.Texture {
+    if (dvui.backend.kind != .sdl3) return null;
     const t = dvui.textureCreateTarget(.{ .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) }) catch return null;
     const prev = dvui.renderTarget(.{ .texture = t, .offset = r.topLeft() });
     r.fill(.{}, .{ .color = .{ .color = color.opacity(1) } });

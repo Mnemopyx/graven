@@ -72,6 +72,46 @@ fn start() dvui.App.StartOptions {
 }
 
 pub const main = dvui.App.main;
+
+/// For the GUI's tests (harness_test.zig), which run Graven's frames under
+/// DVUI's testing backend and drive its widgets by tag: the model and
+/// history as they stand.
+pub const testing_api = struct {
+    pub fn model() *Model {
+        return &state.model;
+    }
+    /// The dropdown in the row tagged `tag` takes entry `label` next frame.
+    pub fn choose(tag: []const u8, label: []const u8) void {
+        test_choice = .{ .tag = tag, .label = label };
+    }
+    /// Whether a choice asked for is still waiting (its row not drawn, or
+    /// no such entry).
+    pub fn choicePending() bool {
+        return test_choice != null;
+    }
+    /// Canvas point `p` (mm) on the screen (physical pixels), while the
+    /// canvas is shown.
+    pub fn toScreen(p: geom.Point) ?dvui.Point.Physical {
+        const area = canvas_px orelse return null;
+        return state.view.toPx(area, p);
+    }
+    /// Each pane's mode and where it was drawn, for a test's report.
+    pub fn describePanes() void {
+        for (all_panes) |p| std.debug.print("pane {s}: {s}, size {d}, rect {any}\n", .{ p.id, @tagName(p.mode), p.size, p.rect_px });
+    }
+    pub fn setView(cx: f64, cy: f64, ppm: f64) void {
+        state.view.cx = cx;
+        state.view.cy = cy;
+        state.view.ppm = ppm;
+        state.view.fit = null;
+    }
+    pub fn history() *layout.history.History {
+        return &hist;
+    }
+    pub fn statusText() []const u8 {
+        return state.status;
+    }
+};
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{ .logFn = dvui.App.logFn };
 
@@ -730,12 +770,12 @@ fn displayWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Screen size…", .{}, .{})) {
+        if (tbutton(@src(), "Screen size…", .{}, .{})) {
             display_window = false;
             openSizeWindow();
         }
-        if (dvui.button(@src(), "Reset", .{}, .{})) dc = .{};
-        if (dvui.button(@src(), "Close", .{}, .{})) close = true;
+        if (tbutton(@src(), "Reset", .{}, .{})) dc = .{};
+        if (tbutton(@src(), "Close", .{}, .{})) close = true;
     }
     if (!std.meta.eql(dc, before)) {
         display.set(dc);
@@ -914,12 +954,12 @@ fn sizeWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Use estimate", .{}, .{})) {
+        if (tbutton(@src(), "Use estimate", .{}, .{})) {
             display.setPxPerMm(null);
             size_window = false;
         }
-        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), "Save", .{}, .{ .style = .highlight })) do_save = true;
+        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (tbutton(@src(), "Save", .{}, .{ .style = .highlight })) do_save = true;
     }
     if (do_save) {
         display.setPxPerMm(display.fromCardWidth(card_px));
@@ -1151,8 +1191,8 @@ fn exportPrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), "Export", .{}, .{})) go = true;
+        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (tbutton(@src(), "Export", .{}, .{})) go = true;
     }
     if (cancel) {
         export_prompt = false;
@@ -1245,12 +1285,24 @@ fn deinit(_: *dvui.Window) void {
     motd.deinit();
     for (recent_files.items) |f| state.gpa.free(f);
     recent_files.deinit(state.gpa);
+    recent_files = .empty;
     hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
+    prefs_store = null;
     doc_fonts.deinit(state.gpa);
+    doc_fonts = .init(state.gpa);
+    doc_fonts_loaded = false;
     if (doc_fonts_for) |h| state.gpa.free(h);
+    doc_fonts_for = null;
     if (fonts_from) |f| state.gpa.free(f);
+    fonts_from = null;
+    // Started again (the GUI's tests start Graven several times in one
+    // process): a fresh start screen.
+    canvas_prompt = true;
     dg_table.deinit(state.gpa);
+    dg_table = .{};
+    tags_given.deinit(state.gpa);
+    tags_given = .empty;
     clearPlaced();
     state.placed.deinit(state.gpa);
     if (state.labels) |*l| l.deinit();
@@ -2597,14 +2649,14 @@ fn recoveryPrompt() void {
     if (rec.opened.damaged) dvui.labelNoFmt(@src(), "The end of the file was damaged: the last of them are lost.", .{}, .{});
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    if (dvui.button(@src(), "Cancel", .{}, .{})) {
+    if (tbutton(@src(), "Cancel", .{}, .{})) {
         rec.opened.model.deinit();
         rec.opened.history.deinit();
         state.gpa.free(rec.path);
         recovery = null;
         return;
     }
-    if (dvui.button(@src(), "Discard them", .{}, .{})) {
+    if (tbutton(@src(), "Discard them", .{}, .{})) {
         var bb: [std.fs.max_path_bytes]u8 = undefined;
         const copy = backup(rec.path, &bb);
         rec.opened.discardUnsaved() catch {
@@ -2615,7 +2667,7 @@ fn recoveryPrompt() void {
         state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Opened as last saved. The file as it was is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Opened as last saved. " else "Opened as last saved. A backup copy could not be made. ";
         return;
     }
-    if (dvui.button(@src(), "Keep them", .{}, .{})) {
+    if (tbutton(@src(), "Keep them", .{}, .{})) {
         finishRecovery(rec, .autosave);
         state.status = "Opened with the changes kept; they are not saved yet. ";
     }
@@ -2645,14 +2697,14 @@ fn contentionPrompt(kind: history.WriteKind) void {
         contention = null;
         return;
     };
-    if (dvui.button(@src(), "Not now", .{}, .{})) {
+    if (tbutton(@src(), "Not now", .{}, .{})) {
         contention = null;
         after_save = null;
         autosave_paused = true;
         state.status = "Not written: the file was changed elsewhere. Autosave waits until you save. ";
         return;
     }
-    if (dvui.button(@src(), "Load theirs", .{}, .{})) {
+    if (tbutton(@src(), "Load theirs", .{}, .{})) {
         contention = null;
         after_save = null;
         // Mine first, as a copy beside it.
@@ -2667,12 +2719,12 @@ fn contentionPrompt(kind: history.WriteKind) void {
         if (recovery == null) state.status = std.fmt.bufPrint(&status_buf, "Opened theirs. Your version is saved as {s}. ", .{kept_name}) catch "Opened theirs. ";
         return;
     }
-    if (dvui.button(@src(), "Save mine as…", .{}, .{})) {
+    if (tbutton(@src(), "Save mine as…", .{}, .{})) {
         contention = null;
         saveAs();
         return;
     }
-    if (dvui.button(@src(), "Overwrite with mine", .{}, .{})) {
+    if (tbutton(@src(), "Overwrite with mine", .{}, .{})) {
         contention = null;
         var bb: [std.fs.max_path_bytes]u8 = undefined;
         const copy = backup(path, &bb);
@@ -2738,8 +2790,8 @@ fn filePrompt(kind: FilePromptKind) void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), switch (kind) {
+        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (tbutton(@src(), switch (kind) {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet => "Import",
@@ -2789,13 +2841,13 @@ fn leavePrompt(p: Pending) void {
     dvui.label(@src(), "Save them before {s}?", .{doing}, .{ .margin = .{ .y = 6 } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    if (dvui.button(@src(), "Cancel", .{}, .{})) leave_prompt = null;
-    if (dvui.button(@src(), "Don't save", .{}, .{})) {
+    if (tbutton(@src(), "Cancel", .{}, .{})) leave_prompt = null;
+    if (tbutton(@src(), "Don't save", .{}, .{})) {
         leave_prompt = null;
         discardAutosaved();
         proceed(p);
     }
-    if (dvui.button(@src(), "Save", .{}, .{})) {
+    if (tbutton(@src(), "Save", .{}, .{})) {
         leave_prompt = null;
         after_save = p;
         save();
@@ -3124,6 +3176,7 @@ var measurement_source: locale.Source = .default;
 
 /// The system's preferred languages, as SDL reports them.
 fn systemLanguages(gpa: std.mem.Allocator) []const locale.Locale {
+    if (dvui.backend.kind != .sdl3) return &.{};
     const c = dvui.backend.c;
     var n_locales: c_int = 0;
     const list = c.SDL_GetPreferredLocales(&n_locales) orelse return &.{};
@@ -3371,8 +3424,8 @@ fn layoutPrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), "Save", .{}, .{ .style = .highlight })) go = true;
+        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (tbutton(@src(), "Save", .{}, .{ .style = .highlight })) go = true;
     }
     if (cancel) {
         layout_prompt = false;
@@ -4323,7 +4376,7 @@ fn menu() ?dvui.App.Result {
     var m = dvui.menu(@src(), .horizontal, .{ .gravity_y = 0.5 });
     frameHole(m.data().borderRectScale().r);
     defer m.deinit();
-    if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{})) |r| {
+    if (tmenu(@src(), "File", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
         if (menuAction("New canvas…", "global", kact("file.new"), 0, false, 1)) m.close();
@@ -4332,12 +4385,12 @@ fn menu() ?dvui.App.Result {
             if (menuAction("Save", "global", kact("file.save"), 0, false, 3)) m.close();
             if (menuAction("Save As…", "global", kact("file.save-as"), 0, false, 4)) m.close();
         }
-        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenu(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             file_prompt = .import_text;
             file_prompt_new = true;
         };
-        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Export legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenu(@src(), "Export legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetToExport() == null) {
                 state.status = "Show or choose a legend sheet first: it is what is exported. ";
@@ -4346,7 +4399,7 @@ fn menu() ?dvui.App.Result {
                 file_prompt_new = true;
             }
         };
-        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Export panel as 3MF…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenu(@src(), "Export panel as 3MF…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (exportPanel()) |pi| {
                 if (state.model.panels.items[pi].fab.layers.len == 0) {
@@ -4357,7 +4410,7 @@ fn menu() ?dvui.App.Result {
                 }
             } else state.status = "Choose a panel first: it is what is exported. ";
         };
-        if (!canvas_prompt) if (dvui.menuItemLabel(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenu(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetImportTarget() == null) {
                 state.status = "Choose a sheet, or a grid, track or panel of keys, first: the table goes into it. ";
@@ -4366,38 +4419,38 @@ fn menu() ?dvui.App.Result {
                 file_prompt_new = true;
             }
         };
-        if (dvui.menuItemLabel(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (!canvas_prompt and openCanvas()) {
                 image_prompt = true;
                 image_prompt_new = true;
             }
         }
-        if (dvui.menuItemLabel(@src(), "Export SVG…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), "Export SVG…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             exportSvg();
         }
         const others = state.model.panels.items.len - state.model.spaces.items.len;
         if (others == 0 and !canvas_prompt) {
-            if (dvui.menuItemLabel(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
+            if (tmenu(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
                 loadSample() catch |err| {
                     state.status = if (err == error.OffSheet) "The sample keyboard does not fit on this sheet. " else "The sample did not load. ";
                 };
                 m.close();
             }
         }
-        if (openCanvas() and !canvas_prompt and dvui.menuItemLabel(@src(), "Add sample: HP-15C keypad", .{}, .{ .expand = .horizontal }) != null) {
+        if (openCanvas() and !canvas_prompt and tmenu(@src(), "Add sample: HP-15C keypad", .{}, .{ .expand = .horizontal }) != null) {
             loadHp15c() catch {
                 state.status = "The sample did not load. ";
             };
             m.close();
         }
-        if (dvui.menuItemLabel(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) {
             leave(.quit);
             m.close();
         }
     }
-    if (dvui.menuItemLabel(@src(), "Edit", .{ .submenu = true }, .{})) |r| {
+    if (tmenu(@src(), "Edit", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
         if (menuAction("Undo", "global", kact("edit.undo"), 0, !hist.canUndo(), 1)) m.close();
@@ -4405,15 +4458,15 @@ fn menu() ?dvui.App.Result {
             m.close();
         }
     }
-    if (dvui.menuItemLabel(@src(), "Text", .{ .submenu = true }, .{})) |r| {
+    if (tmenu(@src(), "Text", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (dvui.menuItemLabel(@src(), "Fonts…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), "Fonts…", .{}, .{ .expand = .horizontal }) != null) {
             fontwin.open = true;
             m.close();
         }
     }
-    if (dvui.menuItemLabel(@src(), "View", .{ .submenu = true }, .{})) |r| {
+    if (tmenu(@src(), "View", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
         if (menuAction("    Zoom to context", "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
@@ -4442,7 +4495,7 @@ fn menu() ?dvui.App.Result {
         for ([_]bg_grid.Mode{ .lines, .dots, .none }, [_][]const u8{ "Grid: lines", "Grid: dots", "Grid: none" }, 0..) |gm, label, gi| {
             var lb: [48]u8 = undefined;
             const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (grid_mode == gm) "•  " else "    ", label }) catch label;
-            if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = gi }) != null) {
+            if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = gi }) != null) {
                 grid_mode = gm;
                 m.close();
             }
@@ -4452,28 +4505,28 @@ fn menu() ?dvui.App.Result {
         if (menuAction(if (scroll_mode == .auto) "•  Scrolling: trackpad pans, wheel zooms" else "    Scrolling: trackpad pans, wheel zooms", "view", kact("view.scrolling"), 0, false, 30)) m.close();
         if (menuAction(if (scroll_mode == .zoom) "•  Scrolling zooms" else "    Scrolling zooms", "view", kact("view.scrolling"), 1, false, 31)) m.close();
         if (menuAction(if (scroll_mode == .pan) "•  Scrolling pans" else "    Scrolling pans", "view", kact("view.scrolling"), 2, false, 32)) m.close();
-        if (dvui.menuItemLabel(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
             display_window = true;
             m.close();
         }
-        if (dvui.menuItemLabel(@src(), "    Calibrate screen size…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), "    Calibrate screen size…", .{}, .{ .expand = .horizontal }) != null) {
             openSizeWindow();
             m.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
-        if (dvui.menuItemLabel(@src(), if (show_construction) "•  Show text construction" else "    Show text construction", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), if (show_construction) "•  Show text construction" else "    Show text construction", .{}, .{ .expand = .horizontal }) != null) {
             show_construction = !show_construction;
             m.close();
         }
         // Pane layouts: which is in use, and saving or resetting it.
-        if (dvui.menuItemLabel(@src(), "    Pane layout", .{ .submenu = true }, .{ .expand = .horizontal })) |lr| {
+        if (tmenu(@src(), "    Pane layout", .{ .submenu = true }, .{ .expand = .horizontal })) |lr| {
             var lm = dvui.floatingMenu(@src(), .{ .from = lr }, .{});
             defer lm.deinit();
             for (layoutNames(), 0..) |n, li| {
                 var lb: [64]u8 = undefined;
                 const on = std.mem.eql(u8, n, layout_name);
                 const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (on) "•  " else "    ", n }) catch n;
-                if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = li }) != null) {
+                if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = li }) != null) {
                     useLayout(n);
                     m.close();
                 }
@@ -4490,7 +4543,7 @@ fn menu() ?dvui.App.Result {
                 var buf: [64]u8 = undefined;
                 const on = pane.mode == mode;
                 const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane.name, mode_name }) catch pane.name;
-                if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 4 + mi }) != null) {
+                if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 4 + mi }) != null) {
                     applyTab(pane, .{ .mode = mode });
                     m.close();
                 }
@@ -4501,25 +4554,25 @@ fn menu() ?dvui.App.Result {
         for ([_]ghost_pane.Style{ .uniform, .matched, .tinted, .outlined, .haloed }, [_][]const u8{ "one alpha", "matched contrast", "tinted", "outlined", "tinted, outlined and inlined" }, 0..) |st, name, si| {
             var buf: [64]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "{s}Ghost style: {s}", .{ if (ghost_pane.style == st) "•  " else "    ", name }) catch name;
-            if (dvui.menuItemLabel(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 20 + si }) != null) {
+            if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 20 + si }) != null) {
                 ghost_pane.style = st;
                 m.close();
             }
         }
-        if (dvui.menuItemLabel(@src(), if (ghost_pane.deep_active) "•  Active and docked panes: deep background" else "    Active and docked panes: deep background", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), if (ghost_pane.deep_active) "•  Active and docked panes: deep background" else "    Active and docked panes: deep background", .{}, .{ .expand = .horizontal }) != null) {
             ghost_pane.deep_active = !ghost_pane.deep_active;
             m.close();
         }
-        if (dvui.menuItemLabel(@src(), if (ghost_pane.vivid) "•  Pane colour: vivid" else "    Pane colour: vivid", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), if (ghost_pane.vivid) "•  Pane colour: vivid" else "    Pane colour: vivid", .{}, .{ .expand = .horizontal }) != null) {
             ghost_pane.vivid = !ghost_pane.vivid;
             m.close();
         }
-        if (dvui.menuItemLabel(@src(), if (ghost_pane.halo.light_inside) "•  Halo: light line inside, dark keyline outside (try)" else "    Halo: light line inside, dark keyline outside (try)", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), if (ghost_pane.halo.light_inside) "•  Halo: light line inside, dark keyline outside (try)" else "    Halo: light line inside, dark keyline outside (try)", .{}, .{ .expand = .horizontal }) != null) {
             ghost_pane.halo.light_inside = !ghost_pane.halo.light_inside;
             m.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 10 });
-        if (dvui.menuItemLabel(@src(), if (hot_edges) "•  Hot edges: hold on a tab to open its pane" else "    Hot edges: hold on a tab to open its pane", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenu(@src(), if (hot_edges) "•  Hot edges: hold on a tab to open its pane" else "    Hot edges: hold on a tab to open its pane", .{}, .{ .expand = .horizontal }) != null) {
             hot_edges = !hot_edges;
             m.close();
         }
@@ -4616,8 +4669,8 @@ fn sheetProperties(id: layout.model.ObjectId) void {
     if (rows.items.len > 0) propText("Not found", "{d} row{s} name no key", .{ rows.items.len, if (rows.items.len == 1) "" else "s" }, 4);
     if (cols.items.len > 0) propText("Unused", "{d} column{s} match no slot", .{ cols.items.len, if (cols.items.len == 1) "" else "s" }, 5);
     propText("", "Its keys' legends come from it; editing one on its key edits its cell.", .{}, 6);
-    if (dvui.button(@src(), "Open it beside the canvas", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
-    if (dvui.button(@src(), "Remove sheet", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Open it beside the canvas", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+    if (tbutton(@src(), "Remove sheet", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         if (act(.removeSheet, .{id})) {
             state.context = .sheets;
             state.status = "Sheet removed: its keys keep their legends, now their own. ";
@@ -4741,8 +4794,22 @@ fn treeNode(ctx: Context, text: []const u8, depth: usize, has_children: bool, de
 
 /// A tree row; `salt` tells apart two rows for one context (a track under
 /// its panel and under its flow).
+/// The Browser's path to the node being drawn, by depth, for its tag.
+var tree_path: [12][]const u8 = @splat("");
+
+fn treePathTag(depth: usize, text: []const u8, suffix: []const u8) []const u8 {
+    const d = @min(depth, tree_path.len - 1);
+    tree_path[d] = text;
+    var w: std.Io.Writer.Allocating = .init(dvui.currentWindow().arena());
+    w.writer.writeAll("tree") catch {};
+    for (tree_path[0 .. d + 1]) |part| w.writer.print("/{s}", .{part}) catch {};
+    w.writer.writeAll(suffix) catch {};
+    return w.written();
+}
+
 fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bool, default: bool, salt: u64) bool {
     const key = ctx.key();
+    const node_tag = treePathTag(depth, text, "");
     const id: usize = @truncate(key ^ salt);
     const open = state.expanded.get(key) orelse switch (ctx) {
         .file, .worksheet, .panel, .region, .prototypes, .flows => true,
@@ -4758,6 +4825,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
             .gravity_y = 0.5,
             .background = false,
             .border = .all(0),
+            .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}#open", .{node_tag}) catch null,
         })) {
             state.expanded.put(state.gpa, key, !open) catch {};
         }
@@ -4770,6 +4838,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
         else => false,
     };
     if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
+        .tag = node_tag,
         .color_text = if (flagged) .{ .color = colors.overflow } else null,
         .expand = .horizontal,
         .background = selected,
@@ -5764,14 +5833,14 @@ fn sheetViewProperties() void {
             propText("Slot", "{s}{s}", .{ slot, if (sheetCellTarget() == null) " (not on this key)" else "" }, 9703);
         }
     }
-    if (dvui.button(@src(), "Name keys by grid position (R1C1…)", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) nameSheetKeys(si, .position);
-    if (dvui.button(@src(), "Name keys by their first legend", .{}, .{ .expand = .horizontal })) nameSheetKeys(si, .legend);
-    if (dvui.button(@src(), "Add a row", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Name keys by grid position (R1C1…)", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) nameSheetKeys(si, .position);
+    if (tbutton(@src(), "Name keys by their first legend", .{}, .{ .expand = .horizontal })) nameSheetKeys(si, .legend);
+    if (tbutton(@src(), "Add a row", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         var nb: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&nb, "Row {d}", .{sh.rows.items.len + 1}) catch "Row";
         act(.addSheetRow, .{ id, sheet_sel.row + 1, name }) catch {};
     }
-    if (sh.rows.items.len > 0) if (dvui.button(@src(), "Remove this row", .{}, .{ .expand = .horizontal })) {
+    if (sh.rows.items.len > 0) if (tbutton(@src(), "Remove this row", .{}, .{ .expand = .horizontal })) {
         act(.removeSheetRow, .{ id, sheet_sel.row }) catch {};
         if (sheet_sel.row > 0 and sheet_sel.row >= m.sheets.items[si].rows.items.len) sheet_sel.row -= 1;
     };
@@ -6025,7 +6094,7 @@ fn frameProperties(space: usize) !void {
         if (p.space == spaceId(space) and !p.unbounded) panels += 1;
     }
     propText("Panels", "{d}", .{panels}, 4);
-    if (dvui.button(@src(), "Fit frame to its contents", .{}, .{ .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Fit frame to its contents", .{}, .{ .margin = .{ .y = 8 } })) {
         const e = spaceExtents();
         if (e.isEmpty()) {
             state.status = "The frame holds nothing to fit. ";
@@ -6045,7 +6114,7 @@ fn groupProperties(id: layout.model.ObjectId) !void {
     propText("Members", "{d}", .{g.members.items.len}, 2);
     if (state.model.parentGroup(id)) |p| if (state.model.group(p)) |pg| propText("In group", "{s}", .{pg.name}, 3);
     propText("Moves", "{s}", .{"arrow keys, 1 mm, all together"}, 4);
-    if (dvui.button(@src(), "Ungroup", .{}, .{ .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Ungroup", .{}, .{ .margin = .{ .y = 8 } })) {
         const parent = state.model.parentGroup(id);
         const space = state.model.spaceOfId(id) orelse shown_space;
         act(.ungroup, .{id}) catch return;
@@ -6066,14 +6135,14 @@ fn selectionProperties() !void {
         if (parent != .space) break false;
     } else true;
     if (!in_space) return;
-    if (dvui.button(@src(), "Group", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) groupSelection();
-    if (dvui.button(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, false);
-    if (dvui.button(@src(), "Copy to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, true);
+    if (tbutton(@src(), "Group", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) groupSelection();
+    if (tbutton(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, false);
+    if (tbutton(@src(), "Copy to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, true);
     for (state.model.spaces.items, 0..) |sp, si| {
         if (si == shown_space) continue;
         var buf: [96]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "Move to {s}", .{if (si == 0) "the canvas" else sp.name}) catch "Move";
-        if (dvui.button(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = si })) transferSelection(si, false);
+        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = si })) transferSelection(si, false);
     }
 }
 
@@ -6277,7 +6346,7 @@ fn canvasProperties(pi: usize) !void {
         propName("Units");
         const names = [_][]const u8{ "Millimetres", "Inches", "Mils" };
         var choice: usize = @intFromEnum(state.model.units);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) actV(.setCanvasUnits, .{@enumFromInt(choice)});
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) actV(.setCanvasUnits, .{@enumFromInt(choice)});
     }
     propText("Tracks", "{d}", .{panel.regions.items.len}, 3);
     propText("Line art", "{d}", .{panel.art.items.len}, 4);
@@ -6424,7 +6493,7 @@ fn artProperties(pi: usize, index: usize) !void {
         // (What flows: the tracks' tiles and runs, unless tiles stay under
         // it below.)
         var choice: usize = @intFromEnum(wrap);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
             wrap = @enumFromInt(choice);
             changed = true;
         }
@@ -6442,7 +6511,7 @@ fn artProperties(pi: usize, index: usize) !void {
         defer row.deinit();
         propName("Tiles");
         var on = pa.wrap_tracks;
-        if (dvui.checkbox(@src(), &on, "Move out from under it", .{ .id_extra = 6 })) try act(.setArtWrapsTracks, .{pi, index, on});
+        if (tcheckbox(@src(), &on, "Move out from under it", .{ .id_extra = 6 })) try act(.setArtWrapsTracks, .{pi, index, on});
     }
     try shapeProperties(pi, index);
 }
@@ -6470,14 +6539,14 @@ fn shapeProperties(pi: usize, index: usize) !void {
         defer row.deinit();
         propName("Cutout");
         var on = pa.cutout;
-        if (dvui.checkbox(@src(), &on, "Cut through the panel", .{ .id_extra = 12 })) try act(.setArtCutout, .{pi, index, on});
+        if (tcheckbox(@src(), &on, "Cut through the panel", .{ .id_extra = 12 })) try act(.setArtCutout, .{pi, index, on});
     }
     if (!state.model.panels.items[pi].unbounded) return;
     if (pa.closedPath() == null) {
         propText("Panel", "{s}", .{"only a single closed path makes one"}, 13);
         return;
     }
-    if (dvui.button(@src(), "Make panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Make panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         const np = act(.makePanel, .{pi, index}) catch {
             state.status = "A panel could not be made from it. ";
             return;
@@ -7149,6 +7218,7 @@ fn panelFab(pi: usize) !void {
     var move: ?struct { from: usize, up: bool } = null;
     for (layers, 0..) |*l, li| {
         const n = 420 + li * 40;
+        setTagScope("Layer {d}", .{li + 1});
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
             defer row.deinit();
@@ -7168,7 +7238,7 @@ fn panelFab(pi: usize) !void {
             propName("From");
             const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text" };
             var choice: usize = @intFromEnum(std.meta.activeTag(l.source));
-            if (dvui.dropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.source))) {
+            if (tdropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.source))) {
                 l.source = switch (choice) {
                     0 => .edge,
                     1 => .cutouts,
@@ -7191,7 +7261,7 @@ fn panelFab(pi: usize) !void {
                 try slots.append(ar, l.source.text);
                 choice = slots.items.len - 1;
             }
-            if (dvui.dropdown(@src(), slots.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+            if (tdropdown(@src(), slots.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
                 l.source = .{ .text = if (choice == 0) "" else slots.items[choice] };
                 changed = true;
             }
@@ -7202,7 +7272,7 @@ fn panelFab(pi: usize) !void {
             propName("Makes");
             const ops = [_][]const u8{ "solid, added", "a cut, away", "an inlay, cut and filled" };
             var choice: usize = @intFromEnum(std.meta.activeTag(l.op));
-            if (dvui.dropdown(@src(), &ops, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.op))) {
+            if (tdropdown(@src(), &ops, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.op))) {
                 const colour: layout.model.FabColour = switch (l.op) {
                     .add, .inlay => |c| c,
                     .subtract => .{ .name = "white", .color = .hex("#f2f2f2") },
@@ -7241,7 +7311,7 @@ fn panelFab(pi: usize) !void {
             propName("Starts at");
             const surfaces = [_][]const u8{ "the base's bottom", "the base's top" };
             var choice: usize = @intFromEnum(l.surface);
-            if (dvui.dropdown(@src(), &surfaces, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(l.surface)) {
+            if (tdropdown(@src(), &surfaces, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(l.surface)) {
                 l.surface = @enumFromInt(choice);
                 changed = true;
             }
@@ -7257,14 +7327,14 @@ fn panelFab(pi: usize) !void {
             propName("Goes");
             const dirs = [_][]const u8{ "up", "down" };
             var choice: usize = @intFromEnum(l.dir);
-            if (dvui.dropdown(@src(), &dirs, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(l.dir)) {
+            if (tdropdown(@src(), &dirs, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(l.dir)) {
                 l.dir = @enumFromInt(choice);
                 changed = true;
             }
         }
         {
             var through = l.depth == null;
-            if (dvui.checkbox(@src(), &through, "Through the whole part", .{ .id_extra = n + 10 })) {
+            if (tcheckbox(@src(), &through, "Through the whole part", .{ .id_extra = n + 10 })) {
                 l.depth = if (through) null else @min(fab.thickness, 0.6);
                 changed = true;
             }
@@ -7275,6 +7345,7 @@ fn panelFab(pi: usize) !void {
             key = mergeKey(.{ "fab", pi, li, "depth" });
         };
     }
+    setTagScope("{s}", .{"Fabrication"});
     if (remove) |li| {
         std.mem.copyForwards(FabLayer, layers[li .. layers.len - 1], layers[li + 1 ..]);
         layers = layers[0 .. layers.len - 1];
@@ -7287,7 +7358,7 @@ fn panelFab(pi: usize) !void {
         changed = true;
         key = 0;
     }
-    if (dvui.button(@src(), "Add layer", .{}, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } })) {
+    if (tbutton(@src(), "Add layer", .{}, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } })) {
         // The first: the base itself, solid from the bottom up. After it:
         // every label inlaid, 0.6 mm from the top down.
         const l: FabLayer = if (layers.len == 0)
@@ -7314,9 +7385,9 @@ fn panelGrids(pi: usize) !void {
     const panel = state.model.panels.items[pi];
     heading("Grids", .{}, 300);
     for (panel.grids.items, 0..) |g, gi| {
-        if (dvui.button(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 301 + gi })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+        if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 301 + gi })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
     }
-    if (dvui.button(@src(), "Add grid", .{}, .{ .expand = .horizontal, .id_extra = 299 })) {
+    if (tbutton(@src(), "Add grid", .{}, .{ .expand = .horizontal, .id_extra = 299 })) {
         // Points 13 mm apart filling the ink area, from its top-left.
         const step: f64 = 13.0;
         const inner_w = panel.w - panel.margins.left - panel.margins.right;
@@ -7364,7 +7435,7 @@ fn stampShape(pi: usize, gi: usize, si: usize, st: layout.model.Stamp, n: usize)
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
         defer row.deinit();
         propName("Shape");
-        if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) {
+        if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) {
             var next = st;
             next.sketch = if (choice == 0) .none else if (choice <= ready.len)
                 state.model.sketches.items[try act(.addShapeSketch, .{kinds[choice - 1]})].id
@@ -7406,7 +7477,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
     propText("On", "{s}", .{state.model.panels.items[pi].name}, 2);
     // Its keys' legends as a sheet (theirs and those beside them).
-    if (g.instances.items.len > 0) if (dvui.button(@src(), "Make a legend sheet", .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
+    if (g.instances.items.len > 0) if (tbutton(@src(), "Make a legend sheet", .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
         var nb: [96]u8 = undefined;
         const name = std.fmt.bufPrint(&nb, "Legends of {s}", .{state.model.panels.items[pi].name}) catch "Legends";
         if (act(.makeSheet, .{ name, g.id })) |id| {
@@ -7419,7 +7490,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
     if (state.model.findGrid(g.link)) |src| {
         const sg = state.model.panels.items[src.panel].grids.items[src.index];
         propText("Follows", "{s} on {s}", .{ sg.name, state.model.panels.items[src.panel].name }, 3);
-        if (dvui.button(@src(), "Show the grid it follows", .{}, .{ .expand = .horizontal, .id_extra = 4 })) state.context = .{ .grid = .{ .panel = src.panel, .index = src.index } };
+        if (tbutton(@src(), "Show the grid it follows", .{}, .{ .expand = .horizontal, .id_extra = 4 })) state.context = .{ .grid = .{ .panel = src.panel, .index = src.index } };
         propText("", "Changing its shape here stops it following.", .{}, 5);
     } else {
         var followers: usize = 0;
@@ -7460,7 +7531,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
         propName("Points removed");
         const names = [_][]const u8{ "remove what is on them", "leave it in place" };
         var choice: usize = if (grid_dropped == .remove) 0 else 1;
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 17 })) grid_dropped = if (choice == 0) .remove else .leave;
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 17 })) grid_dropped = if (choice == 0) .remove else .leave;
     }
     if (changed) actM(mergeKey(.{ "grid", pi, gi }), .setGridShape, .{ pi, gi, sh, grid_dropped }) catch {
         state.status = "That shape cannot be used. ";
@@ -7490,7 +7561,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
             propName("Made as");
             const roles = [_][]const u8{ "part", "hole (cut through)", "legend (labels only)" };
             var choice: usize = @intFromEnum(st.role);
-            if (dvui.dropdown(@src(), &roles, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 2 })) {
+            if (tdropdown(@src(), &roles, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 2 })) {
                 next.role = @enumFromInt(choice);
                 st_changed = true;
             }
@@ -7500,7 +7571,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
             defer row.deinit();
             propName("Prototype");
             var choice: usize = protoPos(st.prototype);
-            if (dvui.dropdown(@src(), proto_names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 3 })) {
+            if (tdropdown(@src(), proto_names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 3 })) {
                 next.prototype = state.model.prototypes.items[choice].id;
                 st_changed = true;
             }
@@ -7528,13 +7599,13 @@ fn gridProperties(pi: usize, gi: usize) !void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 8 });
             defer row.deinit();
-            if (dvui.button(@src(), "Fill empty points", .{}, .{ .id_extra = n + 8 })) {
+            if (tbutton(@src(), "Fill empty points", .{}, .{ .id_extra = n + 8 })) {
                 const made = act(.fillGrid, .{ pi, gi, si }) catch 0;
                 var buf: [64]u8 = undefined;
                 state.status = std.fmt.bufPrint(&buf, "{d} placed. ", .{made}) catch "";
                 state.status = dvui.currentWindow().arena().dupe(u8, state.status) catch "";
             }
-            if (dvui.button(@src(), "Remove stamp", .{}, .{ .id_extra = n + 9 })) {
+            if (tbutton(@src(), "Remove stamp", .{}, .{ .id_extra = n + 9 })) {
                 try act(.removeStamp, .{ pi, gi, si });
                 return;
             }
@@ -7545,7 +7616,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 91 });
         defer row.deinit();
         inline for (.{ .{ "Parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "Holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "Legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
-            if (dvui.button(@src(), kind[0], .{}, .{ .id_extra = 92 + k })) {
+            if (tbutton(@src(), kind[0], .{}, .{ .id_extra = 92 + k })) {
                 const proto_id = if (state.model.prototypes.items.len == 0) try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) else state.model.prototypes.items[0].id;
                 const step_x = sh.stepX();
                 const step_y = sh.stepY();
@@ -7572,7 +7643,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
             propName("Follow it on");
             var choice: usize = others.items.len;
             others.append(arena, "choose a part…") catch {};
-            if (dvui.dropdown(@src(), others.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 96 }) and choice < which.items.len) {
+            if (tdropdown(@src(), others.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 96 }) and choice < which.items.len) {
                 const qi = which.items[choice];
                 const ngi = try act(.addLinkedGrid, .{ qi, g.origin, g.id });
                 state.context = .{ .grid = .{ .panel = qi, .index = ngi } };
@@ -7580,7 +7651,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
             }
         }
     }
-    if (dvui.button(@src(), "Remove grid", .{}, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Remove grid", .{}, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } })) {
         try act(.removeGrid, .{ pi, gi });
         state.context = .{ .panel = pi };
     }
@@ -7592,11 +7663,11 @@ fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
     const g = state.model.panels.items[pi].grids.items[gi];
     const inst = g.instances.items[ii];
     const sh = state.model.gridShape(pi, gi);
-    if (dvui.button(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 40 })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+    if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 40 })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
     if (state.model.stampIndex(pi, gi, inst.stamp)) |si| propText("Stamp", "{s}", .{g.stamps.items[si].name}, 41);
     if (inst.loose) |c| {
         propText("Point", "none: left at ({d:.2}, {d:.2}) mm", .{ c.x, c.y }, 42);
-        if (dvui.button(@src(), "Bind to the nearest point", .{}, .{ .expand = .horizontal, .id_extra = 43 })) {
+        if (tbutton(@src(), "Bind to the nearest point", .{}, .{ .expand = .horizontal, .id_extra = 43 })) {
             const o = state.model.gridPoint(pi, gi, 0, 0);
             const col = @min(@as(f64, @floatFromInt(sh.cols - inst.cols)), @max(0, @round((c.x - o.x) / sh.stepX())));
             const row = @min(@as(f64, @floatFromInt(sh.rows - inst.rows)), @max(0, @round((o.y - c.y) / sh.stepY())));
@@ -7614,7 +7685,7 @@ fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
         };
     }
     if (state.model.instanceBox(pi, gi, ii)) |b| propText("Box", "{d:.2} × {d:.2} mm", .{ b.width(), b.height() }, 46);
-    if (dvui.button(@src(), "Remove from the grid", .{}, .{ .expand = .horizontal, .id_extra = 47 })) {
+    if (tbutton(@src(), "Remove from the grid", .{}, .{ .expand = .horizontal, .id_extra = 47 })) {
         try act(.removeInstance, .{ pi, gi, ii });
         state.context = .{ .grid = .{ .panel = pi, .index = gi } };
     }
@@ -7841,7 +7912,7 @@ fn panelEditHeader() void {
         defer row.deinit();
         propName("Grid");
         var choice: usize = @min(p.grid, names.items.len - 1);
-        if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7002 })) {
+        if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7002 })) {
             p.grid = choice;
             p.stamp = 0;
         }
@@ -7857,14 +7928,14 @@ fn panelEditHeader() void {
             defer row.deinit();
             propName("Places");
             var choice: usize = @min(p.stamp, names.items.len - 1);
-            if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7004 })) p.stamp = choice;
+            if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7004 })) p.stamp = choice;
         }
-        if (dvui.button(@src(), "Grid settings", .{}, .{ .expand = .horizontal, .id_extra = 7005 })) state.context = .{ .grid = .{ .panel = p.panel, .index = p.grid } };
+        if (tbutton(@src(), "Grid settings", .{}, .{ .expand = .horizontal, .id_extra = 7005 })) state.context = .{ .grid = .{ .panel = p.panel, .index = p.grid } };
     }
     inline for (.{ "Click a point: place or pick.", "Drag across points: span them.", "Delete removes the picked one." }, 0..) |line, k| {
         dvui.labelNoFmt(@src(), line, .{}, .{ .id_extra = 7010 + k, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     }
-    if (dvui.button(@src(), "Leave panel editing", .{}, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } })) leavePanelEdit();
+    if (tbutton(@src(), "Leave panel editing", .{}, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } })) leavePanelEdit();
 }
 
 // Layers and images ---------------------------------------------------------
@@ -7949,7 +8020,7 @@ fn drawImages(area: dvui.Rect.Physical, space: usize, layer: layout.model.Object
             r.stroke(.square, .{ .thickness = px, .color = .{ .color = colors.overflow } });
             continue;
         };
-        _ = dvui.backend.c.SDL_SetTextureBlendMode(@ptrCast(@alignCast(tex.ptr)), sdlBlend(blend));
+        if (dvui.backend.kind == .sdl3) _ = dvui.backend.c.SDL_SetTextureBlendMode(@ptrCast(@alignCast(tex.ptr)), sdlBlend(blend));
         // The layer's opacity in the image's own colour: drawing may be
         // replayed after the current alpha is back to 1.
         const a = dvui.currentWindow().alpha;
@@ -8012,7 +8083,7 @@ fn layersList(space: usize) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = li });
         defer row.deinit();
         var vis = l.visible;
-        if (dvui.checkbox(@src(), &vis, null, .{ .id_extra = li })) {
+        if (tcheckbox(@src(), &vis, null, .{ .id_extra = li })) {
             var nl = l;
             nl.visible = vis;
             act(.setLayer, .{space, li, nl}) catch {};
@@ -8024,12 +8095,12 @@ fn layersList(space: usize) void {
         var buf: [96]u8 = undefined;
         const active = l.id == newObjectLayer();
         const text = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ l.name, if (l.locked) " (locked)" else "", if (active) " · new objects" else "", if (flagged) " · flagged" else "" }) catch l.name;
-        if (dvui.button(@src(), text, .{}, .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null })) {
+        if (tbutton(@src(), text, .{}, .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null })) {
             state.context = .{ .layer = .{ .space = space, .index = li } };
             active_layer = l.id;
         }
     }
-    if (dvui.button(@src(), "Add layer", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) {
+    if (tbutton(@src(), "Add layer", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) {
         var buf: [32]u8 = undefined;
         const li = act(.addLayer, .{space, state.model.nextLayerName(space, &buf)}) catch return;
         state.context = .{ .layer = .{ .space = space, .index = li } };
@@ -8050,13 +8121,13 @@ fn layerProperties(space: usize, li: usize) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3 });
         defer row.deinit();
         propName("Shown");
-        if (dvui.checkbox(@src(), &l.visible, "Visible", .{ .id_extra = 3 })) changed = true;
+        if (tcheckbox(@src(), &l.visible, "Visible", .{ .id_extra = 3 })) changed = true;
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4 });
         defer row.deinit();
         propName("Lock");
-        if (dvui.checkbox(@src(), &l.locked, "Locked: nothing on it can be picked", .{ .id_extra = 4 })) changed = true;
+        if (tcheckbox(@src(), &l.locked, "Locked: nothing on it can be picked", .{ .id_extra = 4 })) changed = true;
     }
     var buf: [32]u8 = undefined;
     if (sizesProp("Opacity, %", std.fmt.bufPrint(&buf, "{d}", .{@round(l.opacity * 100)}) catch "", 5)) |list| if (list.len == 1) {
@@ -8069,7 +8140,7 @@ fn layerProperties(space: usize, li: usize) !void {
         propName("Blend");
         const names = [_][]const u8{ "Normal", "Multiply", "Screen" };
         var choice: usize = @intFromEnum(l.blend);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
             l.blend = @enumFromInt(choice);
             changed = true;
         }
@@ -8080,7 +8151,7 @@ fn layerProperties(space: usize, li: usize) !void {
         propName("Output");
         const names = [_][]const u8{ "None (guide)", "Print", "Engrave", "Cut", "Mill" };
         var choice: usize = @intFromEnum(l.output);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7 })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7 })) {
             l.output = @enumFromInt(choice);
             changed = true;
         }
@@ -8091,9 +8162,9 @@ fn layerProperties(space: usize, li: usize) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Move up", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, true}) catch li } };
-        if (dvui.button(@src(), "Move down", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, false}) catch li } };
-        if (dvui.button(@src(), "Remove", .{}, .{})) {
+        if (tbutton(@src(), "Move up", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, true}) catch li } };
+        if (tbutton(@src(), "Move down", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, false}) catch li } };
+        if (tbutton(@src(), "Remove", .{}, .{})) {
             act(.removeLayer, .{space, li}) catch {
                 state.status = "Only an empty layer, other than the space's first, can be removed. ";
                 return;
@@ -8114,7 +8185,7 @@ fn layerChoice(space: usize, current: layout.model.ObjectId, n: usize) ?layout.m
     const n_layers = @min(sp.layers.items.len, names_buf.len);
     for (0..n_layers) |i| names_buf[i] = sp.layers.items[i].name;
     var choice: usize = sp.layerIndex(current) orelse 0;
-    if (dvui.dropdown(@src(), names_buf[0..n_layers], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) return sp.layers.items[choice].id;
+    if (tdropdown(@src(), names_buf[0..n_layers], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) return sp.layers.items[choice].id;
     return null;
 }
 
@@ -8136,7 +8207,7 @@ fn imageProperties(space: usize, index: usize) !void {
     propText("Resolution", "{d:.0} dpi at this size", .{im.dpi()}, 7);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 8);
     if (state.model.spaces.items[space].layerIndex(im.layer)) |li| layerFlags(space, li, 9);
-    if (dvui.button(@src(), "Remove image", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Remove image", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         actV(.removeImage, .{space, index});
         state.context = .{ .panel = state.model.rootOf(space) };
     }
@@ -8208,8 +8279,8 @@ fn imagePrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), "Place", .{}, .{})) go = true;
+        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (tbutton(@src(), "Place", .{}, .{})) go = true;
     }
     if (cancel) {
         image_prompt = false;
@@ -8406,12 +8477,12 @@ fn viewProperties(host: usize, index: usize) !void {
     propText("Reads as", "{s}", .{scaleText(sv.scale)}, 6);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 7);
     propText("Edits", "{s}", .{"in its source: it shows them at once"}, 8);
-    if (dvui.button(@src(), "Show its source", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Show its source", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         shown_space = src_i;
         state.context = .{ .panel = state.model.rootOf(src_i) };
         state.view.fit = contentExtents();
     }
-    if (dvui.button(@src(), "Remove view", .{}, .{ .expand = .horizontal })) {
+    if (tbutton(@src(), "Remove view", .{}, .{ .expand = .horizontal })) {
         actV(.removeView, .{host, index});
         state.context = .{ .panel = state.model.rootOf(host) };
     }
@@ -8429,7 +8500,7 @@ fn placeViewButtons(space: usize) void {
         }
         var buf: [96]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "Place a view in {s}", .{if (host == 0) "the canvas" else sp.name}) catch "Place a view";
-        if (dvui.button(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = host })) placeView(space, host);
+        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = host })) placeView(space, host);
     }
 }
 
@@ -8693,6 +8764,7 @@ var snap_grid: bool = true;
 var snap_guide: struct { x: ?f64 = null, y: ?f64 = null } = .{};
 
 fn altHeld() bool {
+    if (dvui.backend.kind != .sdl3) return false;
     const c = dvui.backend.c;
     return (c.SDL_GetModState() & c.SDL_KMOD_ALT) != 0;
 }
@@ -10009,6 +10081,7 @@ fn propertiesBody() !void {
     defer scroll.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
     defer body.deinit();
+    setTagScope("{s}", .{"properties"});
     if (state.tool == .add_tracks) try tracksToolOptions();
     try properties();
 }
@@ -10046,7 +10119,7 @@ fn tracksToolOptions() !void {
             .prototype => |pid| protoPos(pid),
             .style => |sid| protos.len + (if (sid) |x| state.model.styleIndex(x) orelse 0 else 0),
         };
-        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
             tracks_tool.size_to = if (choice < protos.len)
                 .{ .prototype = protos[choice].id }
             else if (styles.len == 0) .{ .style = null } else .{ .style = styles[choice - protos.len].id };
@@ -10058,7 +10131,7 @@ fn tracksToolOptions() !void {
         propName("Tracks");
         const names = [_][]const u8{ "Rows (row-major)", "Columns (column-major)" };
         var choice: usize = @backingInt(tracks_tool.major);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
     }
     var buf: [96]u8 = undefined;
     switch (tracks_tool.size_to) {
@@ -10256,7 +10329,7 @@ fn toolPalette() void {
     propName("Shape");
     const names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "Ellipse", "Slot", "Polygon" };
     var choice: usize = @intFromEnum(shape_kind);
-    if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+    if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
         shape_kind = @enumFromInt(choice);
         polygon_pts.clearRetainingCapacity();
         state.drag = null;
@@ -10432,8 +10505,110 @@ fn lowerKind() []const u8 {
 /// so each has its own widget id.
 const label_width = 104;
 
+// Tags ------------------------------------------------------------------------
+//
+// Widgets are tagged so the GUI's tests (harness_test.zig) find them by name,
+// not by place: a property row is "<section heading>/<field name>", a button
+// "<section heading>/<label>", a menu item "menu/<label>", a Browser node
+// "tree/<its path>", a content palette button "palette/<kind>". Tags cost a
+// map entry each a frame.
+
+var tag_scope_buf: [96]u8 = undefined;
+var tag_scope: []const u8 = "";
+
+fn setTagScope(comptime fmt: []const u8, args: anytype) void {
+    tag_scope = std.fmt.bufPrint(&tag_scope_buf, fmt, args) catch "";
+}
+
+/// The tags given this frame, so a repeat is numbered ("…#2") rather than
+/// a duplicate (which DVUI outlines in red).
+var tags_given: std.StringHashMapUnmanaged(u16) = .empty;
+var tags_frame: i128 = -1;
+
+/// `base`, or `base#n` when this frame already has it.
+fn uniqueTag(base: []const u8) []const u8 {
+    const now = dvui.frameTimeNS();
+    if (now != tags_frame) {
+        tags_given.clearRetainingCapacity();
+        tags_frame = now;
+    }
+    const e = tags_given.getOrPut(state.gpa, base) catch return base;
+    if (!e.found_existing) {
+        // The key must outlive the frame's arena entry only for this frame.
+        e.value_ptr.* = 1;
+        return base;
+    }
+    e.value_ptr.* += 1;
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}#{d}", .{ base, e.value_ptr.* }) catch base;
+}
+
+/// "<scope>/<name>", for this frame.
+fn tagFor(name: []const u8) []const u8 {
+    const clean = std.mem.trim(u8, name, " ");
+    return uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}/{s}", .{ tag_scope, clean }) catch clean);
+}
+
+/// Tags the widget being laid out around this point (a property's row)
+/// as `name` in the current scope.
+fn tagParent(name: []const u8) void {
+    if (std.mem.trim(u8, name, " ").len == 0) return;
+    const wd = dvui.parentGet().data();
+    const t = tagFor(name);
+    last_row_tag = t;
+    dvui.tag(t, .{ .id = wd.id, .rect = wd.rectScale().r, .visible = wd.visible() });
+}
+
+/// The last property row tagged: a dropdown in it answers to its tag.
+var last_row_tag: []const u8 = "";
+
+/// A choice the GUI's tests ask for: the dropdown in the row tagged `tag`
+/// takes the entry `label` as if it had been picked from its list.
+var test_choice: ?struct { tag: []const u8, label: []const u8 } = null;
+
+/// `dvui.dropdown`, which the tests can make choose (`test_choice`).
+fn tdropdown(src: std.builtin.SourceLocation, entries: []const []const u8, choice: dvui.DropdownChoice(usize), init_opts: dvui.DropdownInitOptions, opts: dvui.Options) bool {
+    const picked = dvui.dropdown(src, entries, choice, init_opts, opts);
+    if (test_choice) |want| if (choice == .choice and std.mem.eql(u8, want.tag, last_row_tag)) {
+        for (entries, 0..) |e, i| if (std.mem.eql(u8, e, want.label)) {
+            test_choice = null;
+            if (choice.choice.* == i) return false;
+            choice.choice.* = i;
+            return true;
+        };
+    };
+    return picked;
+}
+
+/// `dvui.checkbox`, tagged by its label in the current scope.
+fn tcheckbox(src: std.builtin.SourceLocation, target: *bool, label: ?[]const u8, opts: dvui.Options) bool {
+    var o = opts;
+    if (o.tag == null) if (label) |l| {
+        o.tag = tagFor(l);
+    };
+    return dvui.checkbox(src, target, label, o);
+}
+
+/// `dvui.button`, tagged by its label in the current scope.
+fn tbutton(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.ButtonWidget.InitOptions, opts: dvui.Options) bool {
+    var o = opts;
+    if (o.tag == null) o.tag = tagFor(label);
+    return dvui.button(src, label, init_opts, o);
+}
+
+/// `dvui.menuItemLabel`, tagged "menu/<label>" (without its mark).
+fn tmenu(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
+    var o = opts;
+    if (o.tag == null) {
+        var name = std.mem.trim(u8, label, " ");
+        if (std.mem.startsWith(u8, name, "•")) name = std.mem.trim(u8, name["•".len..], " ");
+        o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu/{s}", .{name}) catch "menu");
+    }
+    return dvui.menuItemLabel(src, label, init_opts, o);
+}
+
 fn heading(comptime fmt: []const u8, args: anytype, n: usize) void {
     dvui.label(@src(), fmt, args, .{ .font = .theme(.heading), .id_extra = n, .padding = .{ .y = 8, .h = 4 } });
+    setTagScope(fmt, args);
 }
 
 /// UI style rule: a value the app chose, and the user has not, is italic.
@@ -10449,12 +10624,14 @@ fn propText(name: []const u8, comptime fmt: []const u8, args: anytype, n: usize)
 fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: anytype, n: usize) void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    tagParent(name);
     dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     dvui.label(@src(), fmt, args, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
 }
 
 /// The left-hand name of a property row.
 fn propName(name: []const u8) void {
+    tagParent(name);
     dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
 }
 
@@ -10485,7 +10662,7 @@ fn worksheetProperties() !void {
         for (papers, 0..) |p, i| names[i] = p.name;
         names[papers.len] = "Custom";
         var choice: usize = sheet.paper orelse papers.len;
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
             try act(.setSheet, .{if (choice < papers.len) .standard(choice, sheet.orientation) else .custom(sheet.w, sheet.h)});
             zoomToContext();
         }
@@ -10496,7 +10673,7 @@ fn worksheetProperties() !void {
         propName("Orientation");
         const names = [_][]const u8{ "Landscape", "Portrait" };
         var choice: usize = @backingInt(sheet.orientation);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_size) })) {
             const o: layout.model.Orientation = @fromBackingInt(@intCast(choice));
             if (o != sheet.orientation) {
                 try act(.setSheet, .{if (sheet.paper) |p| .standard(p, o) else .custom(sheet.h, sheet.w)});
@@ -10510,7 +10687,7 @@ fn worksheetProperties() !void {
         propName("Units");
         const names = [_][]const u8{ "Millimetres", "Inches" };
         var choice: usize = @backingInt(sheet.units);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_units) })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_units) })) {
             actV(.setUnits, .{@fromBackingInt(@intCast(choice))});
         }
     }
@@ -10520,7 +10697,7 @@ fn worksheetProperties() !void {
         propName("Ruler origin");
         const names = [_][]const u8{ "Bottom left", "Top left", "Bottom right", "Top right" };
         var choice: usize = @backingInt(sheet.ruler_origin);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_ruler_origin) })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .font = styled(.theme(.body), sheet.default_ruler_origin) })) {
             actV(.setRulerOrigin, .{@fromBackingInt(@intCast(choice))});
         }
     }
@@ -10608,7 +10785,7 @@ fn propFont(name: []const u8, n: usize) !void {
     const names = try lifo.alloc([]const u8, state.fonts.len);
     defer lifo.free(names);
     for (state.fonts, 0..) |f, i| names[i] = f.name;
-    if (dvui.dropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120), .font = styled(.theme(.body), !state.font_set) })) state.font_set = true;
+    if (tdropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120), .font = styled(.theme(.body), !state.font_set) })) state.font_set = true;
     if (dvui.buttonIcon(@src(), "Previous font", dvui.entypo.chevron_left, .{}, .{}, .{})) {
         state.font_choice = (state.font_choice + state.fonts.len - 1) % state.fonts.len;
         state.font_set = true;
@@ -10680,11 +10857,11 @@ fn properties() !void {
                 if (i.ink_outside > 0) propText("Issue", "ink area {d:.2} mm in margin", .{i.ink_outside}, 21);
             }
             try propFont("Legend font", 5);
-            if (panel_edit == null and dvui.button(@src(), "Edit panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) enterPanelEdit(pi);
+            if (panel_edit == null and tbutton(@src(), "Edit panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) enterPanelEdit(pi);
             try panelGrids(pi);
             try panelFab(pi);
             if (state.model.has_sheet) return;
-            if (dvui.button(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+            if (tbutton(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
                 const id = act(.releasePanel, .{pi}) catch {
                     state.status = "The panel could not be released. ";
                     return;
@@ -10727,7 +10904,7 @@ fn properties() !void {
                     @memcpy(S.prefix[0..S.len], v[0..S.len]);
                 }
                 var lb: [64]u8 = undefined;
-                if (dvui.button(@src(), std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ S.prefix[0..S.len], S.prefix[0..S.len] }) catch "Name keys in order", .{}, .{ .expand = .horizontal, .id_extra = 25 })) {
+                if (tbutton(@src(), std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ S.prefix[0..S.len], S.prefix[0..S.len] }) catch "Name keys in order", .{}, .{ .expand = .horizontal, .id_extra = 25 })) {
                     if (act(.nameKeysInOrder, .{ r.panel, r.region, S.prefix[0..S.len] })) |n| {
                         state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
                     } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
@@ -10819,7 +10996,7 @@ fn tileProperties(id: TileId) !void {
         defer lifo.free(names);
         for (state.model.prototypes.items, names) |p, *nm| nm.* = p.name;
         var choice: usize = protoPos(t.prototype);
-        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and state.model.prototypes.items[choice].id != t.prototype) {
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and state.model.prototypes.items[choice].id != t.prototype) {
             try act(.setTilePrototype, .{ id, state.model.prototypes.items[choice].id });
         }
     }
@@ -10883,8 +11060,8 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3 });
         defer row.deinit();
         propName("Grows");
-        if (dvui.checkbox(@src(), &next_proto.expand.horizontal, "Wider", .{ .id_extra = 3 })) proto_changed = true;
-        if (dvui.checkbox(@src(), &next_proto.expand.vertical, "Taller", .{ .id_extra = 4 })) proto_changed = true;
+        if (tcheckbox(@src(), &next_proto.expand.horizontal, "Wider", .{ .id_extra = 3 })) proto_changed = true;
+        if (tcheckbox(@src(), &next_proto.expand.vertical, "Taller", .{ .id_extra = 4 })) proto_changed = true;
     }
     {
         // How its tiles flow: a spacer (a blank, not in output), and
@@ -10893,9 +11070,9 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7 });
         defer row.deinit();
         propName("In the flow");
-        if (dvui.checkbox(@src(), &next_proto.spacer, "Spacer", .{ .id_extra = 5 })) proto_changed = true;
+        if (tcheckbox(@src(), &next_proto.spacer, "Spacer", .{ .id_extra = 5 })) proto_changed = true;
         var drop = next_proto.at_soft_break == .drop;
-        if (dvui.checkbox(@src(), &drop, "Dropped at a wrap", .{ .id_extra = 6 })) {
+        if (tcheckbox(@src(), &drop, "Dropped at a wrap", .{ .id_extra = 6 })) {
             next_proto.at_soft_break = if (drop) .drop else .keep;
             proto_changed = true;
         }
@@ -10906,7 +11083,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8 });
         defer row.deinit();
         propName("As a letter");
-        if (dvui.checkbox(@src(), &next_proto.letter, "Binds to its word", .{ .id_extra = 8 })) proto_changed = true;
+        if (tcheckbox(@src(), &next_proto.letter, "Binds to its word", .{ .id_extra = 8 })) proto_changed = true;
     }
     {
         var bbuf: [32]u8 = undefined;
@@ -10969,7 +11146,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             propName("Runs");
             const names = [_][]const u8{ "in rows", "down columns" };
             var choice: usize = if (tt.major == .row) 0 else 1;
-            if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 1 })) {
+            if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 1 })) {
                 next.major = if (choice == 0) .row else .column;
                 changed = true;
             }
@@ -10980,7 +11157,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
             propName("Set from");
             const names = [_][]const u8{ "start", "centre", "end" };
             var choice: usize = @intFromEnum(tt.alignment);
-            if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 2 })) {
+            if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n + 2 })) {
                 next.alignment = @enumFromInt(choice);
                 changed = true;
             }
@@ -10998,12 +11175,12 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         if (changed) actM(mergeKey(.{ "proto track", id, tt.id }), .setPrototypeTrack, .{ id, tt.id, next }) catch {
             state.status = "That track cannot be set so. ";
         };
-        if (dvui.button(@src(), "Remove track", .{}, .{ .id_extra = n + 9, .gravity_x = 1 })) {
+        if (tbutton(@src(), "Remove track", .{}, .{ .id_extra = n + 9, .gravity_x = 1 })) {
             try act(.removePrototypeTrack, .{ id, tt.id });
             return;
         }
     }
-    if (dvui.button(@src(), "Add track", .{}, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Add track", .{}, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } })) {
         var name_buf: [32]u8 = undefined;
         var k: usize = p.tracks.len + 1;
         const name = while (true) : (k += 1) {
@@ -11021,7 +11198,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     heading("Art", .{}, 600);
     const art = p.art orelse {
         propText("Look", "plain, from the insets", .{}, 601);
-        if (dvui.button(@src(), "Add keycap art", .{}, .{ .id_extra = 602, .gravity_x = 1 })) {
+        if (tbutton(@src(), "Add keycap art", .{}, .{ .id_extra = 602, .gravity_x = 1 })) {
             try act(.setPrototypeArt, .{id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p))});
         }
         return;
@@ -11034,10 +11211,10 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_x = 1, .id_extra = 690, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (!isKeycap(p.art) and dvui.button(@src(), "Redraw from insets", .{}, .{ .id_extra = 691 })) {
+        if (!isKeycap(p.art) and tbutton(@src(), "Redraw from insets", .{}, .{ .id_extra = 691 })) {
             try act(.setPrototypeArt, .{id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p))});
         }
-        if (dvui.button(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try act(.setPrototypeArt, .{id, null});
+        if (tbutton(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try act(.setPrototypeArt, .{id, null});
     }
 }
 
@@ -11068,7 +11245,7 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
         propName("Content");
         const names = [_][]const u8{ "From the start", "Centred", "Back from the end" };
         var choice: usize = @intFromEnum(alignment);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 20 })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 20 })) {
             alignment = @enumFromInt(choice);
             changed = true;
         }
@@ -11103,7 +11280,7 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         names[0] = "None (the track's alignment)";
         for (m.paragraph_styles.items, names[1..]) |ps, *n| n.* = ps.name;
         var choice: usize = if (current) |id| (if (m.paraIndex(id)) |x| x + 1 else 0) else 0;
-        if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
             try act(.setParagraphAt, .{ pi, ri, at, if (choice == 0) null else m.paragraph_styles.items[choice - 1].id });
         }
         if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_y = 0.5 } })) {
@@ -11129,7 +11306,7 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         propName("Lines");
         const names = [_][]const u8{ "From the start", "Centred", "Back from the end", "Justified" };
         var choice: usize = @intFromEnum(ps.alignment);
-        if (dvui.dropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 904 })) {
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 904 })) {
             ps.alignment = @enumFromInt(choice);
             changed = true;
         }
@@ -11203,14 +11380,14 @@ fn valueEditor(p: glyphic.Param, v: *glyphic.Value, default: bool, n: usize) boo
         },
         .choice => {
             var c: usize = v.choice;
-            if (dvui.dropdown(@src(), d.choices, .{ .choice = &c }, .{}, .{ .expand = .horizontal, .id_extra = n, .font = styled(.theme(.body), default) }) and c != v.choice) {
+            if (tdropdown(@src(), d.choices, .{ .choice = &c }, .{}, .{ .expand = .horizontal, .id_extra = n, .font = styled(.theme(.body), default) }) and c != v.choice) {
                 v.* = .{ .choice = @intCast(c) };
                 return true;
             }
         },
         .flag => {
             var f = v.flag;
-            if (dvui.checkbox(@src(), &f, null, .{ .id_extra = n })) {
+            if (tcheckbox(@src(), &f, null, .{ .id_extra = n })) {
                 v.* = .{ .flag = f };
                 return true;
             }
@@ -11295,14 +11472,14 @@ fn styleRules(sid: layout.model.StyleId) !void {
         defer row.deinit();
         const key = mergeKey(.{ "style rule", sid, k });
         var kind_choice: usize = if (r.kind) |kd| @as(usize, @intFromEnum(kd)) + 1 else 0;
-        if (dvui.dropdown(@src(), &kind_names, .{ .choice = &kind_choice }, .{}, .{ .id_extra = 4700 + k, .min_size_content = .{ .w = 90 } })) {
+        if (tdropdown(@src(), &kind_names, .{ .choice = &kind_choice }, .{}, .{ .id_extra = 4700 + k, .min_size_content = .{ .w = 90 } })) {
             const kind: ?glyphic.Kind = if (kind_choice == 0) null else @enumFromInt(kind_choice - 1);
             _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, null }) catch {};
             _ = actM(key, .setStyleRule, .{ sid, kind, r.param, @as(?glyphic.Value, r.value) }) catch {};
             return;
         }
         var param_choice: usize = @intFromEnum(r.param);
-        if (dvui.dropdown(@src(), param_names, .{ .choice = &param_choice }, .{}, .{ .id_extra = 4800 + k, .min_size_content = .{ .w = 110 } })) {
+        if (tdropdown(@src(), param_names, .{ .choice = &param_choice }, .{}, .{ .id_extra = 4800 + k, .min_size_content = .{ .w = 110 } })) {
             const p: glyphic.Param = @enumFromInt(param_choice);
             _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, null }) catch {};
             _ = actM(key, .setStyleRule, .{ sid, r.kind, p, @as(?glyphic.Value, glyphic.param.def(p).default) }) catch {};
@@ -11317,7 +11494,7 @@ fn styleRules(sid: layout.model.StyleId) !void {
             return;
         }
     }
-    if (dvui.button(@src(), "Add a rule", .{}, .{ .id_extra = 5100, .margin = .{ .y = 4 } })) {
+    if (tbutton(@src(), "Add a rule", .{}, .{ .id_extra = 5100, .margin = .{ .y = 4 } })) {
         // The first parameter it does not set for every object yet.
         const p = for (std.enums.values(glyphic.Param)) |q| {
             const used = for (st.rules.items) |r| {
@@ -11470,7 +11647,7 @@ fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: 
     for (styles, 0..) |s, i| names[first + i] = std.fmt.bufPrint(&bufs[first + i], "{s}", .{s.name}) catch "?";
     var choice: usize = if (own) |s| first + (state.model.styleIndex(s) orelse 0) else 0;
     const before = choice;
-    if (!dvui.dropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
+    if (!tdropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
     if (choice < first) return @as(?layout.model.StyleId, null);
     return @as(?layout.model.StyleId, styles[choice - first].id);
 }
@@ -11479,7 +11656,7 @@ fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: 
 /// one from a math font package (its faces and rules), to base others on.
 fn stylesProperties() !void {
     propText("Text styles", "{d}", .{state.model.styles.items.len}, 1);
-    if (dvui.button(@src(), "Add a style", .{}, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } })) {
+    if (tbutton(@src(), "Add a style", .{}, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } })) {
         var buf: [32]u8 = undefined;
         var k: usize = state.model.styles.items.len + 1;
         const name = while (true) : (k += 1) {
@@ -11491,7 +11668,7 @@ fn stylesProperties() !void {
     heading("From a math package", .{}, 10);
     for (layout.fonts.packages, 0..) |pkg, i| {
         var lb: [64]u8 = undefined;
-        if (dvui.button(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+        if (tbutton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
             const name = if (styleNamed(pkg.name) == null) pkg.name else std.fmt.bufPrint(&lb, "{s} {d}", .{ pkg.name, state.model.styles.items.len + 1 }) catch pkg.name;
             // One step: the style and the package's faces and rules on it.
             const key = mergeKey(.{ "package style", pkg.name, state.model.styles.items.len });
@@ -11529,7 +11706,7 @@ fn styleProperties(sid: layout.model.StyleId) !void {
             try ids.append(ar, o.id);
         };
         var choice: usize = std.mem.indexOfScalar(layout.model.StyleId, ids.items, st.base) orelse 0;
-        if (dvui.dropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and ids.items[choice] != st.base) {
+        if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and ids.items[choice] != st.base) {
             act(.setStyleBase, .{ sid, ids.items[choice] }) catch {
                 state.status = "That would base the style on itself. ";
             };
@@ -11567,7 +11744,7 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         if (std.mem.eql(u8, f.role, "text")) continue;
         propText(f.role, "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
-    if (dvui.button(@src(), "Fonts… (every face, and searching the installed fonts)", .{}, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } })) fontwin.open = true;
+    if (tbutton(@src(), "Fonts… (every face, and searching the installed fonts)", .{}, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } })) fontwin.open = true;
     try styleRules(sid);
 }
 
@@ -11585,7 +11762,7 @@ fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
         propName("Fill kind");
         const kinds = [_][]const u8{ "none", "one colour", "a gradient" };
         var choice: usize = @intFromEnum(std.meta.activeTag(p.fill));
-        if (dvui.dropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(p.fill))) {
+        if (tdropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(p.fill))) {
             const first: layout.art.Color = switch (p.fill) {
                 .none => .hex("#ffffff"),
                 .solid => |c| c,
@@ -11624,7 +11801,7 @@ fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
             if (l.from.x == d.from[0] and l.from.y == d.from[1] and l.to.x == d.to[0] and l.to.y == d.to[1]) choice = k;
         }
         const shown = choice;
-        if (dvui.dropdown(@src(), names[0 .. dirs.len + @intFromBool(shown == dirs.len)], .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != shown and choice < dirs.len) {
+        if (tdropdown(@src(), names[0 .. dirs.len + @intFromBool(shown == dirs.len)], .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != shown and choice < dirs.len) {
             p.fill.linear.from = .{ .x = dirs[choice].from[0], .y = dirs[choice].from[1] };
             p.fill.linear.to = .{ .x = dirs[choice].to[0], .y = dirs[choice].to[1] };
             changed = true;
@@ -11735,7 +11912,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
     defer row.deinit();
     propName(name);
     var picked = choice.?;
-    if (dvui.dropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
+    if (tdropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
         if (horizontal) try act(.setTileSize, .{id, sizes[picked], t.h}) else try act(.setTileSize, .{id, t.w, sizes[picked]});
     }
 }
@@ -11781,7 +11958,7 @@ fn statusContent() void {
         const pct = zoomPercent();
         const zt = std.fmt.bufPrint(&zb, "{d:.0} %{s}", .{ pct, if (display.measuredPxPerMm() == null) "*" else "" }) catch "";
         var zwd: dvui.WidgetData = undefined;
-        if (dvui.button(@src(), zt, .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd })) actualSize();
+        if (tbutton(@src(), zt, .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd })) actualSize();
         dvui.tooltip(@src(), .{ .active_rect = zwd.borderRectScale().r }, "{s}", .{if (display.measuredPxPerMm() == null) "Zoom against actual size, estimated (View › Calibrate screen size…). Click: actual size." else "Zoom against actual size. Click: actual size."}, .{});
     }
 
@@ -13465,6 +13642,7 @@ fn inTextTrack() bool {
 fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
+        .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s}", .{@tagName(kind)}) catch null,
         .id_extra = i,
         .margin = .all(2),
         .padding = .{ .x = 8, .w = 8, .y = 3, .h = 3 },
@@ -13566,6 +13744,7 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
 fn paletteButton(tile: bool, size: f64, i: usize) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
+        .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s} {d} u", .{ if (tile) "key" else "blank", size }) catch null,
         .id_extra = i,
         .margin = .all(2),
         .padding = .all(4),
@@ -13969,7 +14148,7 @@ fn threadProperties(pi: usize, ri: usize) void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
             defer row.deinit();
             propName("Flow");
-            if (dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 29 })) if (choice != was) {
+            if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 29 })) if (choice != was) {
                 const to = m.flows.items[choice].id;
                 if (act(.assignTrack, .{ pi, ri, to, null })) {
                     state.status = "The track now runs the flow chosen, after its other tracks. ";
@@ -13981,18 +14160,18 @@ fn threadProperties(pi: usize, ri: usize) void {
                 if (t == m.panels.items[pi].regions.items[ri].id) break i;
             } else 0;
             propText("In it", "track {d} of {d}", .{ k + 1, f.tracks.items.len }, 32);
-            if (dvui.button(@src(), "Show the flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) state.context = .{ .flow = f.id };
+            if (tbutton(@src(), "Show the flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) state.context = .{ .flow = f.id };
         }
     }
     if (before) |b| propText("Continues", "{s}", .{trackLabel(&buf, b, pi)}, 30);
     if (after) |n| propText("Goes on into", "{s}", .{trackLabel(&buf, n, pi)}, 31);
-    if (dvui.button(@src(), "Join a track after this…", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
+    if (tbutton(@src(), "Join a track after this…", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
         join_from = .{ .panel = pi, .region = ri };
         state.tool = .join;
     }
     const f = m.trackFlow(pi, ri);
     const detachable = f != null and (f.?.tracks.items.len > 1 or f.?.items.items.len > 0);
-    if (detachable) if (dvui.button(@src(), "Take out of its flow", .{}, .{ .expand = .horizontal })) {
+    if (detachable) if (tbutton(@src(), "Take out of its flow", .{}, .{ .expand = .horizontal })) {
         const alone = f.?.tracks.items.len == 1;
         if (act(.detachTrack, .{ pi, ri })) {
             state.status = if (alone) "Taken out: its text is kept in the flow, now unplaced (under Flows in the Browser). " else "Taken out: the flow keeps all its text, on its other tracks. ";
@@ -14008,7 +14187,7 @@ fn flowsProperties() void {
     }
     propText("Flows", "{d}", .{state.model.flows.items.len}, 1);
     propText("Unplaced", "{d}", .{unplaced}, 2);
-    if (dvui.button(@src(), "New flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "New flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         var nb: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&nb, "Flow {d}", .{state.model.flows.items.len + 1}) catch "Flow";
         if (act(.addFlow, .{name})) |id| {
@@ -14068,7 +14247,7 @@ fn flowProperties(id: layout.model.ObjectId) void {
     if (flow_remove_armed != null and flow_remove_armed.? != id) flow_remove_armed = null;
     const armed = flow_remove_armed != null;
     const empty = f.items.items.len == 0;
-    if (dvui.button(@src(), if (armed) "Remove it and all it holds: click again" else "Remove flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), if (armed) "Remove it and all it holds: click again" else "Remove flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         if (empty or armed) {
             flow_remove_armed = null;
             if (act(.removeFlow, .{id})) {
@@ -14194,6 +14373,7 @@ var drag_count: u64 = 0;
 /// was; SDL keeps the live state.
 fn primaryMod(mod: dvui.enums.Mod) bool {
     if (mod.control() or mod.command()) return true;
+    if (dvui.backend.kind != .sdl3) return false;
     const c = dvui.backend.c;
     const live = c.SDL_GetModState();
     return (live & (c.SDL_KMOD_CTRL | c.SDL_KMOD_GUI)) != 0;
@@ -15299,7 +15479,7 @@ fn constrainPromptWindow() void {
         propName("Relation");
         const names = [_][]const u8{ "Distance between them", "Size difference" };
         var choice: usize = if (pr.equal) 1 else 0;
-        if (dvui.dropdown(@src(), names[0..if (two_objects) 2 else 1], .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+        if (tdropdown(@src(), names[0..if (two_objects) 2 else 1], .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
             pr.equal = choice == 1;
             const k = docUnits().perMm();
             const measured = constrain.measure(&state.model, .{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b }) orelse 0;
@@ -15323,8 +15503,8 @@ fn constrainPromptWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (dvui.button(@src(), "Apply", .{}, .{})) go = true;
+        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
+        if (tbutton(@src(), "Apply", .{}, .{})) go = true;
     }
     if (cancel) {
         constrain_prompt = null;
@@ -15539,8 +15719,8 @@ fn pickedConstraintProperties() bool {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Place it as at first", .{}, .{})) act(.setConstraintPlace, .{ c.id, .{} }) catch {};
-        if (dvui.button(@src(), "Remove", .{}, .{})) {
+        if (tbutton(@src(), "Place it as at first", .{}, .{})) act(.setConstraintPlace, .{ c.id, .{} }) catch {};
+        if (tbutton(@src(), "Remove", .{}, .{})) {
             act(.removeConstraint, .{c.id}) catch {};
             picked_constraint = null;
         }
@@ -15694,7 +15874,7 @@ fn originPicker(id: layout.model.ObjectId) void {
         defer line.deinit();
         for (xs, 0..) |x, xi| {
             const on = holds.x == x and holds.y == y;
-            if (dvui.button(@src(), "", .{}, .{
+            if (tbutton(@src(), "", .{}, .{
                 .id_extra = yi * 3 + xi,
                 .min_size_content = .{ .w = 10, .h = 10 },
                 .margin = .all(1),
@@ -17293,8 +17473,8 @@ fn skSummary(area: dvui.Rect.Physical) void {
     dvui.labelNoFmt(@src(), "Enter accepts and leaves · Esc goes back to sketching", .{}, .{ .margin = .{ .y = 8 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
-    if (dvui.button(@src(), "Accept and leave", .{}, .{})) leaveSketch();
-    if (dvui.button(@src(), "Back to sketching", .{}, .{})) sk_summary = false;
+    if (tbutton(@src(), "Accept and leave", .{}, .{})) leaveSketch();
+    if (tbutton(@src(), "Back to sketching", .{}, .{})) sk_summary = false;
 }
 
 // Palette and properties ----------------------------------------------------------
@@ -17309,15 +17489,15 @@ fn sketchPalette() void {
         var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
         defer flex.deinit();
         below = flex.data().borderRectScale().r;
-        if (dvui.button(@src(), "Select", .{}, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null })) {
+        if (tbutton(@src(), "Select", .{}, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null })) {
             sk_tool = .none;
             sk_nclicks = 0;
         }
-        if (dvui.button(@src(), "Construction", .{}, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null })) skSetConstruction(!sk_construction);
+        if (tbutton(@src(), "Construction", .{}, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null })) skSetConstruction(!sk_construction);
         const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle" };
         for (names, 0..) |name, g| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == g else false;
-            if (dvui.button(@src(), name, .{}, .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null })) {
+            if (tbutton(@src(), name, .{}, .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null })) {
                 const want = sk_geo_last[g];
                 skChooseTool(if (skToolAllowed(want)) want else sk_geo_tools[g][0]);
             }
@@ -17364,7 +17544,7 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
                 continue;
             }
             const on = sk_tool == t;
-            if (dvui.button(@src(), name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) skChooseTool(t);
+            if (tbutton(@src(), name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) skChooseTool(t);
         }
     }
     const faint = dvui.themeGet().color(.control, .text).opacity(0.65);
@@ -17492,7 +17672,7 @@ fn sketchConstrainButtons() void {
         const fits = skConstraintsFor(k.k, &buf) > 0;
         const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
         if (fits) {
-            if (dvui.button(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad })) skConstrain(k.k, canvasArea());
+            if (tbutton(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad })) skConstrain(k.k, canvasArea());
         } else {
             dvui.labelNoFmt(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.35) } });
         }
@@ -17516,7 +17696,7 @@ fn sketchModeProperties() void {
     }
     heading("{s}", .{"Constrain the selection"}, 8199);
     sketchConstrainButtons();
-    if (dvui.button(@src(), "Finish sketch…  Enter", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
+    if (tbutton(@src(), "Finish sketch…  Enter", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
         sk_nclicks = 0;
         sk_summary = true;
     }
@@ -17547,7 +17727,7 @@ fn sketchModeProperties() void {
         }
         // A dimension drives, or (in parentheses) only reports.
         if (c.isDimension()) {
-            if (dvui.button(@src(), if (c.driving) "drive" else "ref", .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } })) {
+            if (tbutton(@src(), if (c.driving) "drive" else "ref", .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } })) {
                 _ = skEdit(.{ .reference = .{ .c = @intCast(ci), .on = c.driving } });
             }
         }
@@ -17586,7 +17766,7 @@ fn sketchPhysicalWhen(it: SkPlace) void {
     var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = sk_pw_text[0..63] }, .placeholder = "parameter (empty: never)" }, .{ .expand = .horizontal, .font = .theme(.mono) });
     const enter = te.enter_pressed;
     te.deinit();
-    if (dvui.button(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
+    if (tbutton(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
         const name = std.mem.trim(u8, std.mem.sliceTo(&sk_pw_text, 0), " ");
         if (name.len > 0 and !skl.expr.validName(name)) {
             state.status = "Not a parameter name. ";
@@ -17632,7 +17812,7 @@ fn sketchParameters(it: SkPlace) void {
     }
     enter = te.enter_pressed;
     te.deinit();
-    if (dvui.button(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
+    if (tbutton(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
         const line = std.mem.sliceTo(&sk_param_text, 0);
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
             state.status = "Write a parameter as name = expression. ";
@@ -17662,9 +17842,9 @@ fn sketchProperties(space: usize, index: usize) void {
     if (it.sketch.analyse(state.gpa, arena.allocator())) |x| {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
-    if (dvui.button(@src(), "Edit sketch", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) enterSketch(.{ .space = space, .index = index });
+    if (tbutton(@src(), "Edit sketch", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) enterSketch(.{ .space = space, .index = index });
     // An enclosed sketch may be made a panel (or part) here.
-    if (dvui.button(@src(), "Make panel", .{}, .{ .expand = .horizontal })) {
+    if (tbutton(@src(), "Make panel", .{}, .{ .expand = .horizontal })) {
         if (act(.makeSketchPanel, .{ space, index })) |pi| {
             state.context = .{ .panel = pi };
             state.status = "A panel, made from the sketch's outlines: it follows the sketch. ";
@@ -17696,13 +17876,13 @@ fn sketchDefProperties(index: usize) void {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
     // A view of it at the middle of what is shown.
-    if (dvui.button(@src(), "Place a view here", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), "Place a view here", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         const at: geom.Point = .{ .x = @round(state.view.cx), .y = @round(state.view.cy) };
         if (act(.addSketchView, .{ shown_space, index, at })) |vi| {
             state.context = .{ .sketch = .{ .space = shown_space, .index = vi } };
         } else |_| state.status = "The view was not placed. ";
     }
-    if (dvui.button(@src(), "Delete sketch", .{}, .{ .expand = .horizontal })) {
+    if (tbutton(@src(), "Delete sketch", .{}, .{ .expand = .horizontal })) {
         if (act(.removeSketch, .{index})) {
             state.context = .sketches;
         } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
@@ -17715,8 +17895,8 @@ fn sketchPanelProperties(pi: usize) void {
     const si = state.model.sketchIndex(pn.sketch) orelse return;
     propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
     var islands = pn.islands;
-    if (dvui.checkbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
-    if (dvui.button(@src(), "Edit its sketch", .{}, .{ .expand = .horizontal, .id_extra = 72 })) {
+    if (tcheckbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
+    if (tbutton(@src(), "Edit its sketch", .{}, .{ .expand = .horizontal, .id_extra = 72 })) {
         enterSketchAt(si, state.model.spaceOf(pi), pn.sketch_at);
         state.context = .{ .panel = pi };
     }
@@ -17762,12 +17942,12 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8406 });
             defer row.deinit();
-            if (from_ref) |fr| if (dvui.button(@src(), "Apply again", .{}, .{})) {
+            if (from_ref) |fr| if (tbutton(@src(), "Apply again", .{}, .{})) {
                 act(.applySketch, .{ id, fr, ps.width_param, ps.height_param, ps.offset }) catch |err| {
                     state.status = applyError(err);
                 };
             };
-            if (dvui.button(@src(), "Remove", .{}, .{})) actV(.removePrototypeSketch, .{id});
+            if (tbutton(@src(), "Remove", .{}, .{})) actV(.removePrototypeSketch, .{id});
         }
     }
     // Apply a sketch: which one, its size parameters, the offset.
@@ -17784,7 +17964,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8411 });
         defer row.deinit();
         propName("Sketch");
-        _ = dvui.dropdown(@src(), names, .{ .choice = &proto_sk_choice }, .{}, .{ .expand = .horizontal });
+        _ = tdropdown(@src(), names, .{ .choice = &proto_sk_choice }, .{}, .{ .expand = .horizontal });
     }
     const chosen = proto_sk_choice;
     const sk = &state.model.sketches.items[chosen].sketch;
@@ -17800,7 +17980,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = row_def[2] });
         defer row.deinit();
         propName(row_def[0]);
-        _ = dvui.dropdown(@src(), pnames, .{ .choice = row_def[1] }, .{}, .{ .expand = .horizontal });
+        _ = tdropdown(@src(), pnames, .{ .choice = row_def[1] }, .{}, .{ .expand = .horizontal });
     }
     for ([_][]const u8{ "Offset across, mm", "Offset up, mm" }, 0..) |label, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8415 + k * 10 });
@@ -17808,7 +17988,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         propName(label);
         _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_sk_off[k], .min = -1000, .max = 1000 }, .{ .expand = .horizontal });
     }
-    if (dvui.button(@src(), "Apply sketch to this prototype", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
+    if (tbutton(@src(), "Apply sketch to this prototype", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
         const off: geom.Point = .{ .x = proto_sk_off[0], .y = proto_sk_off[1] };
         if (act(.applySketch, .{ id, chosen, pnames[proto_sk_w], pnames[proto_sk_h], off })) {
             state.status = "Applied: the prototype has its own copy of the sketch. ";
@@ -17892,7 +18072,7 @@ fn tileSketchParams(id: TileId) void {
         var on = for (t.params.items) |p| {
             if (std.mem.eql(u8, p.name, name)) break p.value != 0;
         } else ((ps.sketch.paramValue(name) catch 0) != 0);
-        if (dvui.checkbox(@src(), &on, name, .{ .id_extra = i })) {
+        if (tcheckbox(@src(), &on, name, .{ .id_extra = i })) {
             actV(.setTileParam, .{ id, name, @as(?f64, if (on) 1 else 0) });
         }
     }

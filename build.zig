@@ -234,6 +234,32 @@ pub fn build(b: *std.Build) void {
         gui_step.dependOn(&run_gui.step);
         b.step("gui-build", "Build the GUI editor without running it").dependOn(&install_gui.step);
     }
+    // The GUI driven without a screen: Graven's frames under DVUI's testing
+    // backend, its widgets found by tag (apps/gui/harness_test.zig).
+    const gui_test_step = b.step("gui-test", "Drive the GUI headless: the examples made in it");
+    if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .testing })) |dvui_dep| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/gui/harness_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "dvui", .module = dvui_dep.module("dvui_testing") },
+                .{ .name = "graven_layout", .module = layout },
+                .{ .name = "graven_samples", .module = samples },
+                .{ .name = "graven_config", .module = config },
+                .{ .name = "graven_fontsearch", .module = fontsearch },
+                .{ .name = "graven_fonts_local", .module = fonts_local },
+                .{ .name = "graven_fonts_folders", .module = fonts_folders },
+                .{ .name = "graven_richtext", .module = richtext },
+                .{ .name = "graven_glyphic", .module = glyphic },
+            },
+        }) });
+        const run = b.addRunArtifact(t);
+        // From the repository's root: the examples and their fonts.
+        run.setCwd(b.path("."));
+        gui_test_step.dependOn(&run.step);
+    }
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
