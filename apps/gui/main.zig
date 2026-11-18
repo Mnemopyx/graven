@@ -446,6 +446,12 @@ fn init(win: *dvui.Window) !void {
     initWindowFrame(win);
     // Match the desktop now, then follow its changes.
     main_window = win;
+    // Text fields and cells in a font with legends' characters (Greek,
+    // arrows, mathematical operators): Graven Sans, built in
+    // (uifont/README.md).
+    if (win.addFont("Graven Sans", @embedFile("uifont/GravenSans.ttf"), null)) {
+        ghost_pane.field_family = "Graven Sans";
+    } else |_| {}
     const settings = desktop.read(gpa, dvui.io);
     applyDesktop(win, settings);
     desktop.watch(dvui.io, settings, wakeGui);
@@ -1698,6 +1704,7 @@ fn frameAverage() struct { ms: f64, n: usize } {
 }
 
 fn frame() !dvui.App.Result {
+    ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
     defer {
         const end: std.Io.Timestamp = .now(dvui.io, .awake);
@@ -5334,7 +5341,7 @@ fn sheetView(v: u8) void {
     var bad_cols: std.ArrayList(usize) = .empty;
     m.sheetProblems(a, id, &bad_rows, &bad_cols) catch {};
     const head_font = dvui.Font.theme(.body).larger(-1).withWeight(.bold);
-    const cell_font = dvui.Font.theme(.body);
+    const cell_font = ghost_pane.fieldFont();
     // The header.
     {
         var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.5) } });
@@ -5378,7 +5385,7 @@ fn sheetView(v: u8) void {
                 if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
                     .min_size_content = .{ .w = w },
                     .max_size_content = .width(w),
-                    .font = if (c == 0) cell_font.withStyle(.italic) else cell_font,
+                    .font = cell_font,
                     .padding = .{ .x = 6, .y = 4, .h = 4 },
                     .color_text = if (ink) |k| .{ .color = k } else null,
                     // The row's highlight shows through; the name column

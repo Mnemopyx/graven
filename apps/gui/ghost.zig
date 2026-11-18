@@ -450,10 +450,28 @@ pub fn fill(p: *const Pane) dvui.Color {
     return t.window.fill.?.opacity(p.look.active_fill);
 }
 
+/// The family text fields and table cells are set in (one with legends'
+/// characters, which the interface's font lacks), or "" for the theme's.
+pub var field_family: []const u8 = "";
+
+/// Text fields' font, following the theme in use: its body size, in
+/// `field_family`.
+pub fn fieldFont() dvui.Font {
+    const f = dvui.Font.theme(.body);
+    return if (field_family.len > 0) f.withFamily(field_family) else f;
+}
+
+/// Every text field drawn from now takes `fieldFont`, at the theme's size.
+pub fn fieldsFollowTheme() void {
+    if (field_family.len == 0) return;
+    dvui.TextEntryWidget.defaults.font = fieldFont();
+}
+
 /// Sets the pane's theme for content drawn until `themePop`.
 pub fn themePush(p: *const Pane) dvui.Theme {
     const prev = dvui.themeGet();
     dvui.themeSet(scaled(theme(p.look, paneBase(p, prev)), p.text_scale));
+    fieldsFollowTheme();
     return prev;
 }
 
@@ -470,6 +488,7 @@ pub fn scaled(t: dvui.Theme, k: f32) dvui.Theme {
 
 pub fn themePop(prev: dvui.Theme) void {
     dvui.themeSet(prev);
+    fieldsFollowTheme();
 }
 
 /// A ghost pane open for its content; `end` closes it.
