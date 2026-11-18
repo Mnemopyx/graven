@@ -167,6 +167,7 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
       - **Saved with the file:** each written segment carries the layout (`Segment.views`, read by name, absent in older files). Opening takes the last intact segment's, with each view where it looked.
       - **Checked:** tests (splits, tabs, closing and collapsing, maximizing, validity, the layout in segments); keyboard SVG identical. In the GUI on the HP-15C sample: two views side by side at 34 % and 150 %, a click activating the other, saved, reopened as left, a tab double-clicked to fill the window.
       - **Not yet:** dragging tabs between splits; single-key view commands (only Ctrl+Tab); the sheet view (next); two views cost two draws (not measured).
+    - **Panes follow the active view** (decided 2026-11-18, the owner): ghost panes stay around the whole window. Each view kind says which panes it wants and what they hold (canvas: all; sheet: no Tools for now, the cell's row in Properties, the cell in the expression bar; flow editor: no Tools). An unwanted pane is hidden with its tab and hot edge, and returns as it was. To be built with the sheet view.
 
 ## Gaps against the project's stated goals
 
