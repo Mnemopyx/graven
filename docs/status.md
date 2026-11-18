@@ -98,6 +98,13 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
 5. Compose-key and digraph Unicode entry.
 6. The tile palette returning together with the Unicode character palettes.
 7. Dictionary hyphenation.
+8. **Flows as objects, and text import** (decided 2026-11-18; blueprint "Flows as objects, and text import"):
+   - **A flow is a document object** (name, content, first paragraph style, indent, and an ordered list of tracks on any panel); it may be unplaced. A track is shape only and belongs to at most one flow.
+   - **Older files:** chains of joined tracks become flows.
+   - **Scope:** text tracks only. Keycap and legend content will come from a mapping of text lines to tile, grid and slot positions (to be designed).
+   - **Import** goes at a position in a flow, or into a new flow.
+   - **The source is a URI:** relative to the document when under its folder, else absolute; with a fragment, a hash and the time of import. `file:` first.
+   - **Order:** the object and its conversion; Browser and assignment; import; an editor for unplaced flows.
 
 ## Gaps against the project's stated goals
 
