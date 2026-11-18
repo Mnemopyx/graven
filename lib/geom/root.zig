@@ -14,6 +14,8 @@ pub const earcut = @import("earcut.zig");
 pub const grow = @import("grow.zig");
 /// Multi-channel signed distance fields: glyphs drawn at any size, grown.
 pub const msdf = @import("msdf.zig");
+/// A stroke font: text as polylines, turned and sized freely (annotations).
+pub const strokefont = @import("strokefont.zig");
 
 pub const Point = struct {
     x: f64,
@@ -521,4 +523,5 @@ test {
     _ = earcut;
     _ = grow;
     _ = msdf;
+    _ = strokefont;
 }

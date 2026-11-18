@@ -12400,7 +12400,8 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
         const g = dimGeom(c) orelse continue;
         const lq = state.view.toPx(area, g.label);
         const dl = @sqrt((lq.x - pp.x) * (lq.x - pp.x) + (lq.y - pp.y) * (lq.y - pp.y));
-        if (dl <= point_r + 4 * ns) {
+        var tb: [32]u8 = undefined;
+        if (strokefont.hit(dimText(&tb, c), dimTextPlace(area, g), .{ .x = pp.x, .y = pp.y }, 4 * ns)) {
             points.append(a, .{ .id = c.id, .kind = .dim_value, .edges = .{}, .at = g.label, .d = dl }) catch {};
             continue;
         }
@@ -13070,6 +13071,49 @@ fn constrainPromptWindow() void {
 /// The constraints of the shown space as dimension glyphs, the features
 /// under the pointer and picked, and the context object's origin.
 
+// Stroke text ----------------------------------------------------------------
+//
+// Dimension values and constraint marks are drawn in the stroke font
+// (geom.strokefont): polylines, turned to any angle, drawn each frame.
+
+const strokefont = geom.strokefont;
+
+/// The cap height of dimension text, logical pixels.
+const dim_cap: f32 = 9;
+
+const StrokeInk = struct {
+    colour: dvui.Color,
+    thick: f32,
+
+    fn emit(k: StrokeInk, pts: []const geom.Point) void {
+        var buf: [strokefont.max_points]dvui.Point.Physical = undefined;
+        for (pts, 0..) |q, i| buf[i] = .{ .x = @floatCast(q.x), .y = @floatCast(q.y) };
+        dvui.Path.stroke(.{ .points = buf[0..pts.len] }, .{ .thickness = k.thick, .color = .{ .color = k.colour } });
+    }
+};
+
+/// Draws `text` as placed by `p` (device pixels, y down).
+fn strokeText(text: []const u8, p: strokefont.Place, colour: dvui.Color) void {
+    strokefont.strokes(text, p, StrokeInk{ .colour = colour, .thick = dvui.windowNaturalScale() }, StrokeInk.emit);
+}
+
+/// Text along the screen line from `a` to `b`, upright (it never reads
+/// upside down), its middle at `t` of the way, standing clear of the line.
+fn alongPlace(a: dvui.Point.Physical, b: dvui.Point.Physical, t: f32) strokefont.Place {
+    var angle = std.math.atan2(b.y - a.y, b.x - a.x);
+    // Upright: turned no more than a quarter either way (a vertical line
+    // reads upward, as drawings do).
+    if (@cos(angle) < -1e-3 or (@abs(@cos(angle)) <= 1e-3 and @sin(angle) > 0)) angle += std.math.pi;
+    return .{
+        .at = .{ .x = a.x + (b.x - a.x) * t, .y = a.y + (b.y - a.y) * t },
+        .size = dim_cap * dvui.windowNaturalScale(),
+        .angle = angle,
+        .y_down = true,
+        .align_x = 0.5,
+        .align_y = -0.45,
+    };
+}
+
 // Constraint dimensions ------------------------------------------------------
 //
 // An offset constraint is drawn as a dimension: a line from the
@@ -13118,6 +13162,24 @@ var dim_drag: ?struct {
     moved: bool = false,
     key: u64,
 } = null;
+
+/// A dimension's value as drawn, in the document's units.
+fn dimText(buf: []u8, c: layout.model.Constraint) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}", .{@round(@abs(c.value) * docUnits().perMm() * 100) / 100}) catch "";
+}
+
+/// Where a dimension's value is drawn: along its line, upright, at its
+/// place along it (device pixels).
+fn dimTextPlace(area: dvui.Rect.Physical, g: DimGeom) strokefont.Place {
+    const q0 = state.view.toPx(area, g.p0);
+    const q1 = state.view.toPx(area, g.p1);
+    var p = alongPlace(q0, q1, 0.5);
+    const lq = state.view.toPx(area, g.label);
+    p.at = .{ .x = lq.x, .y = lq.y };
+    // A dimension too short to have a direction on screen: level.
+    if (@abs(q1.x - q0.x) + @abs(q1.y - q0.y) < 1) p.angle = if (g.v) -std.math.pi / 2.0 else 0;
+    return p;
+}
 
 fn constraintById(id: layout.model.ObjectId) ?layout.model.Constraint {
     for (state.model.constraints.items) |c| if (c.id == id) return c;
@@ -13216,8 +13278,7 @@ fn pickedConstraintProperties() bool {
 fn drawConstraintMarks(area: dvui.Rect.Physical) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
-    const font = dvui.Font.theme(.body).larger(-2);
-    for (m.constraints.items, 0..) |c, ci| {
+    for (m.constraints.items) |c| {
         const parent = constrain.parentOf(m, c.a.object) orelse continue;
         if (constrain.spaceOf(m, parent) != shown_space) continue;
         const off = constrain.frameOffset(m, parent);
@@ -13246,20 +13307,17 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
                     dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = 1.5 * px, .color = ink });
                 }
                 var buf: [32]u8 = undefined;
-                const text = std.fmt.bufPrint(&buf, "{d}", .{@round(@abs(c.value) * docUnits().perMm() * 100) / 100}) catch "";
-                const lq = state.view.toPx(area, g.label);
-                const mid: dvui.Point.Physical = .{ .x = lq.x + 3 * px, .y = lq.y };
-                dvui.labelNoFmt(@src(), text, .{}, .{ .rect = annotationRect(area, mid, font, 80), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = ci });
+                strokeText(dimText(&buf, c), dimTextPlace(area, g), colour);
             },
             .equal_size => {
                 // "=" on each object's extent.
                 const eoff = constrain.frameOffset(m, parent);
-                for ([_]layout.model.ObjectId{ c.a.object, c.b.object }, 0..) |id, k| {
+                for ([_]layout.model.ObjectId{ c.a.object, c.b.object }) |id| {
                     if (id == .none) continue;
                     const b = offsetBox(constrain.boxOf(m, id) orelse continue, eoff);
                     const at: geom.Point = if (v) .{ .x = b.x1, .y = (b.y0 + b.y1) / 2 } else .{ .x = (b.x0 + b.x1) / 2, .y = b.y1 };
                     const q = state.view.toPx(area, at);
-                    dvui.labelNoFmt(@src(), "=", .{}, .{ .rect = annotationRect(area, .{ .x = q.x + 2 * px, .y = q.y }, font, 20), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = ci * 2 + k + 100000 });
+                    strokeText("=", .{ .at = .{ .x = q.x + 3 * px, .y = q.y + 2 * px }, .size = dim_cap * px, .y_down = true, .align_y = 1 }, colour);
                 }
             },
         }
@@ -14251,6 +14309,34 @@ fn skMid(a: geom.Point, b: geom.Point) geom.Point {
 }
 
 /// A constraint's anchor in the sketch's frame.
+/// A radius's leader: the centre of circle or arc `g` and the point of the
+/// curve it passes through (a circle's at 45°, an arc's middle).
+fn skRadiusLeader(s: *const skl.Sketch, g: skl.GeomId) ?struct { centre: geom.Point, on: geom.Point } {
+    if (g >= s.geometry.items.len) return null;
+    switch (s.geometry.items[g].kind) {
+        .circle => |ci| {
+            const cc = skVal(s, ci.c);
+            const r = s.vars.items[ci.r];
+            return .{ .centre = cc, .on = .{ .x = cc.x + r * 0.7071, .y = cc.y + r * 0.7071 } };
+        },
+        .arc => |ar| {
+            const cc = skVal(s, ar.c);
+            return .{ .centre = cc, .on = skArcMid(cc, skVal(s, ar.a), skVal(s, ar.b)) };
+        },
+        else => return null,
+    }
+}
+
+/// The middle of the arc about `c` from `a` to `b` (anticlockwise).
+fn skArcMid(c: geom.Point, a: geom.Point, b: geom.Point) geom.Point {
+    const r = skDist(c, a);
+    const t0 = std.math.atan2(a.y - c.y, a.x - c.x);
+    var sweep = std.math.atan2(b.y - c.y, b.x - c.x) - t0;
+    if (sweep <= 0) sweep += 2 * std.math.pi;
+    const t = t0 + sweep / 2;
+    return .{ .x = c.x + r * @cos(t), .y = c.y + r * @sin(t) };
+}
+
 fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
     const curveMid = struct {
         fn f(sk_: *const skl.Sketch, g: skl.GeomId) ?geom.Point {
@@ -14262,7 +14348,7 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
                     const cc = skVal(sk_, ci.c);
                     break :blk .{ .x = cc.x + sk_.vars.items[ci.r] * 0.7071, .y = cc.y + sk_.vars.items[ci.r] * 0.7071 };
                 },
-                .arc => |ar| skVal(sk_, ar.a),
+                .arc => |ar| skArcMid(skVal(sk_, ar.c), skVal(sk_, ar.a), skVal(sk_, ar.b)),
                 .ray => |ry| skVal(sk_, ry.o),
                 .line => |ln| blk: {
                     const th = sk_.vars.items[ln.theta];
@@ -14683,7 +14769,6 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
         }
     }
     // Constraint glyphs and values.
-    const font = dvui.Font.theme(.body).larger(-2);
     for (s.constraints.items, 0..) |c, ci| {
         const anchor = skAnchor(s, c) orelse continue;
         const q = skPx(area, it, anchor);
@@ -14730,7 +14815,9 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 break :blk std.fmt.bufPrint(&tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
             },
         };
-        // A distance draws its line.
+        // A distance draws its line, its value along it; a radius a leader
+        // from the centre through the curve, its value turned along it;
+        // the rest their mark beside their anchor.
         switch (c.kind) {
             inline .distance, .distance_x, .distance_y => |d| {
                 const pa = s.point(d.a) catch continue;
@@ -14740,12 +14827,43 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                     .distance_y => .{ .x = pa.x, .y = pb.y },
                     else => pb,
                 };
-                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, pa), skPx(area, it, end) } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
+                const qa = skPx(area, it, pa);
+                const qe = skPx(area, it, end);
+                dvui.Path.stroke(.{ .points = &.{ qa, qe } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
+                if (@abs(qe.x - qa.x) + @abs(qe.y - qa.y) >= 1) {
+                    strokeText(text, alongPlace(qa, qe, 0.5), colour);
+                    continue;
+                }
+            },
+            .radius => |r| if (skRadiusLeader(s, r.g)) |ld| {
+                const qc = skPx(area, it, ld.centre);
+                const qr = skPx(area, it, ld.on);
+                const len = @sqrt((qr.x - qc.x) * (qr.x - qc.x) + (qr.y - qc.y) * (qr.y - qc.y));
+                if (len >= 1) {
+                    // Out past the curve far enough for the value.
+                    const ux = (qr.x - qc.x) / len;
+                    const uy = (qr.y - qc.y) / len;
+                    const w: f32 = @floatCast(strokefont.width(text) * dim_cap * px);
+                    const out = 6 * px + w + 4 * px;
+                    const qo: dvui.Point.Physical = .{ .x = qr.x + ux * out, .y = qr.y + uy * out };
+                    dvui.Path.stroke(.{ .points = &.{ qc, qo } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
+                    // An arrowhead on the curve, pointing out.
+                    const h = 7 * px;
+                    const ah = 2.5 * px;
+                    dvui.Path.stroke(.{ .points = &.{
+                        .{ .x = qr.x - ux * h - uy * ah, .y = qr.y - uy * h + ux * ah },
+                        qr,
+                        .{ .x = qr.x - ux * h + uy * ah, .y = qr.y - uy * h - ux * ah },
+                    } }, .{ .thickness = px, .color = .{ .color = colour } });
+                    // The value over the leader's part beyond the curve.
+                    const beyond: dvui.Point.Physical = .{ .x = qr.x + ux * 6 * px, .y = qr.y + uy * 6 * px };
+                    strokeText(text, alongPlace(beyond, qo, 0.5), colour);
+                    continue;
+                }
             },
             else => {},
         }
-        const corner: dvui.Point.Physical = .{ .x = q.x + 6 * px, .y = q.y - 2 * px };
-        dvui.labelNoFmt(@src(), text, .{}, .{ .rect = annotationRect(area, corner, font, 90), .padding = .{ .x = 0, .w = 0, .y = annotation_pad, .h = annotation_pad }, .color_text = .{ .color = colour }, .font = font, .id_extra = 70000 + ci });
+        strokeText(text, .{ .at = .{ .x = q.x + 6 * px, .y = q.y }, .size = dim_cap * px, .y_down = true, .align_y = 1 }, colour);
     }
     // The pointer's point of interest: a ring; locked, a ring and a cross.
     if (skTarget()) |t| {
