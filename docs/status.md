@@ -137,6 +137,13 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
      - **Checked:** tests (plain text reading, URIs, hashing, import into an unplaced flow escaped and undone as one step, the RTF test on flows); sample SVGs identical. In the GUI: a plain-text file into a new flow, which was then given a track with the Flow picker; and into a flow chosen in the Browser, its source recorded relative to the saved document.
      - **Not yet:** updating from a changed source; `https:` sources; fragments (free-form, nothing reads them yet); Markdown read as anything but plain text.
 
+9. **Legend sheets** (decided 2026-11-18; blueprint "Legend sheets: keys' slot content from a spreadsheet"):
+   - **The idea:** a FreeCAD-like sheet per keypad. Rows are keys; the first column is the key's name (one value with the tile's designator); the other columns are slots, matched by name.
+   - **The sheet drives the keys' slot content,** and editing a legend in place on a key edits its cell.
+   - **Cells hold markup.** Problems are flagged in their cells. Keys outside every sheet keep their own content, and making a sheet gathers a keypad's present content.
+   - **Later:** numeric columns and expression cells; CSV or TSV import with its source.
+   - **Order:** the model; a sheet pane; import; numbers and expressions.
+
 ## Gaps against the project's stated goals
 
 The README sets the goals: HP-15C keypad legends first, aircraft panels last, SVG and STEP output, and checked production output.

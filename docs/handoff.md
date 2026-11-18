@@ -65,3 +65,5 @@ Flows as objects (decided 2026-11-18; blueprint "Flows as objects, and text impo
 - **Step 3:** import into a flow, or into a new flow, recording the source's URI, hash and time.
 
 Next is step 4, an editor for unplaced flows. Later: updating a flow from a changed source. The keycap legend mapping (text lines to tile, grid and slot positions) is still to be designed.
+
+Legend sheets (decided 2026-11-18; blueprint "Legend sheets: keys' slot content from a spreadsheet"; status, agreed item 9). Nothing is built yet. Step 1 is the model: the sheet object, its binding, slot content resolved from it, on-canvas slot edits writing cells, making a sheet from a keypad, undo and the file format.
