@@ -38,6 +38,7 @@ $Z build                      # CLI tools into zig-out/bin
 $Z build gui-build            # the GUI (graven-gui)
 $Z build gui-build -Doptimize=ReleaseFast --prefix /tmp/rel   # for timing
 $Z build fab -Docct-prebuilt  # graven-fab, with the OCCT bridge (prebuilt release archive)
+$Z build gui-build -Docct-prebuilt   # the GUI with OCCT: manufacturing views in 3D (without it, they say so)
 $Z build gui-test             # the GUI driven headless (apps/gui/harness_test.zig): both examples made in it, compared with their files
 ```
 

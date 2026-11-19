@@ -1366,6 +1366,13 @@ fn deinit(_: *dvui.Window) void {
     check_shown = .initFill(true);
     clearPlanChecks();
     op_hidden.clearAndFree(state.gpa);
+    meshJobWait();
+    if (mesh_arena) |*ar| ar.deinit();
+    mesh_arena = null;
+    mesh = .{};
+    mesh_plan = .none;
+    mesh_rev = std.math.maxInt(u64);
+    cams = @splat(.{});
     tags_given.deinit(state.gpa);
     tags_given = .empty;
     clearPlaced();
@@ -8392,6 +8399,16 @@ fn planEditor(id: ObjectId) void {
         propText("Exported", "{s}", .{"this plan"}, 102);
     } else if (tbutton(@src(), "Export this plan (make it active)", .{}, .{ .expand = .horizontal, .id_extra = 102 })) act(.setActivePlan, .{id}) catch {};
 
+    // How the plan's view shows it, when one is active.
+    if (activeKind() == .manufacture and vl.views[vl.active].target == @intFromEnum(id)) {
+        const cam = &cams[vl.active];
+        const names = [_][]const u8{ "From above", if (occt3d.available) "3D, through OCCT" else "3D, through OCCT (not in this build)" };
+        if (choiceRow("Shown as", &names, if (cam.on) 1 else 0, 103)) |k| {
+            cam.on = k == 1;
+            cam.set = false;
+            if (cam.on and !occt3d.available) state.status = "This build has no OCCT: build the GUI with -Docct-prebuilt for 3D views. ";
+        }
+    }
     planChecksSection(id);
 
     // Parts, each with its material.
@@ -8826,6 +8843,287 @@ fn drawPlanChecks(area: dvui.Rect.Physical, id: ObjectId) void {
     }
 }
 
+// The manufacturing view in 3D, through OCCT -------------------------------------
+//
+// A plan's parts built as solids and meshed by OCCT (bridge/occt/view3d.zig;
+// a stub, saying so, when the GUI is built without OCCT), drawn here:
+// triangles back to front, shaded by their facing. A drag orbits, Shift and
+// a drag pans, the wheel zooms.
+
+const occt3d = @import("graven_occt3d");
+
+const Cam3d = struct {
+    on: bool = false,
+    set: bool = false,
+    yaw: f64 = -0.5,
+    pitch: f64 = 0.85,
+    ppm: f64 = 1,
+    target: [3]f64 = .{ 0, 0, 0 },
+};
+var cams: [docviews.max_views]Cam3d = @splat(.{});
+
+var mesh_arena: ?std.heap.ArenaAllocator = null;
+var mesh: occt3d.Mesh = .{};
+var mesh_plan: ObjectId = .none;
+var mesh_rev: u64 = std.math.maxInt(u64);
+var mesh_gen: u64 = 0;
+var mesh_ms: f64 = 0;
+var mesh_failed: ?[]const u8 = null;
+
+/// Part `pi`'s fabrication steps as plan `plan` makes them: only the
+/// stackup layers its operations work on, each added one in the colour the
+/// plan gives it, else the part's material's, else its own.
+fn planSteps(a: std.mem.Allocator, plan: manufacture.Plan, pi: usize) ![]const layout.fab.Step {
+    const m = &state.model;
+    const pn = m.panels.items[pi];
+    const part = plan.part(pn.id) orelse return &.{};
+    const mat_colour: ?layout.model.FabColour = if (m.materialIndex(part.material)) |mi| (if (m.materials.items[mi].material.finishes.len > 0) m.materials.items[mi].material.finishes[0] else null) else null;
+    const fp = try layout.fab.plan(a, m, pi, &state.placed.items[pi], faceTable());
+    var out: std.ArrayList(layout.fab.Step) = .empty;
+    for (fp.steps) |st| {
+        const name = pn.fab.layers[st.layer].name;
+        var made = false;
+        var given: ?layout.model.FabColour = null;
+        for (plan.operations) |op| for (op.targets) |t| {
+            if (t.panel != pn.id or !std.mem.eql(u8, t.layer, name)) continue;
+            made = true;
+            if (t.colour) |c| given = c;
+        };
+        if (!made) continue;
+        var s2 = st;
+        switch (st.op) {
+            .add => |own| s2.op = .{ .add = given orelse mat_colour orelse own },
+            .subtract => {},
+        }
+        try out.append(a, s2);
+    }
+    return out.items;
+}
+
+/// A 3D build in the background: the slabs made here, OCCT's sweeping and
+/// meshing in a worker (they take seconds), the result taken up when done.
+const MeshJob = struct {
+    arena: std.heap.ArenaAllocator,
+    plan: ObjectId,
+    rev: u64,
+    gen: u64,
+    parts: []const struct { slabs: []const layout.fab.Slab, offset: [2]f64 },
+    result: occt3d.Mesh = .{},
+    failed: ?[]const u8 = null,
+    ms: f64 = 0,
+    done: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn run(job: *MeshJob) void {
+        const a = job.arena.allocator();
+        var clock = Clock.start();
+        for (job.parts) |pt| {
+            occt3d.meshSlabs(std.heap.c_allocator, a, pt.slabs, pt.offset, 0.02, &job.result) catch {
+                job.failed = a.dupe(u8, occt3d.lastError()) catch "OCCT failed";
+                break;
+            };
+        }
+        job.ms = clock.lap();
+        job.done.store(true, .release);
+    }
+};
+var mesh_job: ?*MeshJob = null;
+
+const Clock = struct {
+    last: i128,
+    fn now() i128 {
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
+        return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    }
+    fn start() Clock {
+        return .{ .last = now() };
+    }
+    fn lap(cl: *Clock) f64 {
+        const t = now();
+        defer cl.last = t;
+        return @as(f64, @floatFromInt(t - cl.last)) / 1e6;
+    }
+};
+
+/// Takes up a finished build, if there is one.
+fn meshJobCollect() void {
+    const job = mesh_job orelse return;
+    if (!job.done.load(.acquire)) return;
+    if (job.thread) |t| t.join();
+    if (mesh_arena) |*ar| ar.deinit();
+    mesh_arena = job.arena;
+    mesh = job.result;
+    mesh_failed = job.failed;
+    mesh_ms = job.ms;
+    mesh_plan = job.plan;
+    mesh_rev = job.rev;
+    mesh_gen = job.gen;
+    state.gpa.destroy(job);
+    mesh_job = null;
+}
+
+/// Waits for a build under way (at shutdown).
+fn meshJobWait() void {
+    const job = mesh_job orelse return;
+    if (job.thread) |t| t.join();
+    job.arena.deinit();
+    state.gpa.destroy(job);
+    mesh_job = null;
+}
+
+/// Plan `plan`'s parts meshed through OCCT, when built: built again, in
+/// the background, when the document changes. Null while building (see
+/// `mesh_job`) or when it failed (`mesh_failed`).
+fn planMesh(plan: manufacture.Plan) ?occt3d.Mesh {
+    const m = &state.model;
+    meshJobCollect();
+    const current = mesh_plan == plan.id and mesh_rev == m.revision and mesh_gen == doc_generation;
+    if (current) return if (mesh_failed == null) mesh else null;
+    if (!occt3d.available) {
+        mesh_failed = occt3d.lastError();
+        mesh_plan = plan.id;
+        mesh_rev = m.revision;
+        mesh_gen = doc_generation;
+        return null;
+    }
+    // One build at a time: a newer one starts when it is done.
+    if (mesh_job != null) {
+        dvui.refresh(null, @src(), null);
+        return null;
+    }
+    if (state.placed_rev != m.revision) return null;
+    const job = state.gpa.create(MeshJob) catch return null;
+    job.* = .{ .arena = .init(std.heap.c_allocator), .plan = plan.id, .rev = m.revision, .gen = doc_generation, .parts = &.{} };
+    const a = job.arena.allocator();
+    var clock = Clock.start();
+    var parts: std.ArrayList(@typeInfo(@TypeOf(job.parts)).pointer.child) = .empty;
+    for (plan.parts) |pt| {
+        const pi = m.panelIndex(pt.panel) orelse continue;
+        if (pi >= state.placed.items.len) continue;
+        const steps = planSteps(a, plan, pi) catch continue;
+        const slabs = layout.fab.slabs(a, steps) catch continue;
+        const o = panelOrigin(pi);
+        parts.append(a, .{ .slabs = slabs, .offset = .{ o.x, o.y } }) catch continue;
+    }
+    job.parts = parts.items;
+    _ = clock.lap();
+    job.thread = std.Thread.spawn(.{}, MeshJob.run, .{job}) catch {
+        job.run();
+        mesh_job = job;
+        meshJobCollect();
+        return if (mesh_failed == null) mesh else null;
+    };
+    mesh_job = job;
+    dvui.refresh(null, @src(), null);
+    return null;
+}
+
+fn vsub(p: [3]f64, q: [3]f64) [3]f64 {
+    return .{ p[0] - q[0], p[1] - q[1], p[2] - q[2] };
+}
+fn vdot(p: [3]f64, q: [3]f64) f64 {
+    return p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+}
+fn vcross(p: [3]f64, q: [3]f64) [3]f64 {
+    return .{ p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0] };
+}
+fn vunit(p: [3]f64) [3]f64 {
+    const l = @sqrt(vdot(p, p));
+    return if (l > 0) .{ p[0] / l, p[1] / l, p[2] / l } else p;
+}
+fn v64(p: [3]f32) [3]f64 {
+    return .{ p[0], p[1], p[2] };
+}
+
+/// The camera's axes: right, up and forward (into the scene). Pitch 0
+/// looks straight down; yaw turns about the vertical.
+fn camAxes(c: Cam3d) [3][3]f64 {
+    const cy = @cos(c.yaw);
+    const sy = @sin(c.yaw);
+    const cp = @cos(c.pitch);
+    const sp = @sin(c.pitch);
+    return .{ .{ cy, sy, 0 }, .{ -sy * cp, cy * cp, sp }, .{ -sy * sp, cy * sp, -cp } };
+}
+
+/// The mesh drawn as camera `c` sees it, within `area`: triangles facing
+/// it, in an order exact for prisms seen from above (see below), each
+/// shaded by how it faces a light over the viewer's left shoulder.
+fn drawMesh(area: dvui.Rect.Physical, c: Cam3d, ms: occt3d.Mesh) void {
+    const ar = dvui.currentWindow().arena();
+    const ax = camAxes(c);
+    const light = vunit(.{ -ax[2][0] * 0.7 + ax[1][0] * 0.5 - ax[0][0] * 0.3, -ax[2][1] * 0.7 + ax[1][1] * 0.5 - ax[0][1] * 0.3, -ax[2][2] * 0.7 + ax[1][2] * 0.5 - ax[0][2] * 0.3 });
+    const cx = area.x + area.w / 2;
+    const cy = area.y + area.h / 2;
+    // The parts are prisms (flat tops, upright walls) seen from above, so
+    // an exact order: up through the heights, at each one the walls
+    // reaching up to it (farthest first), then the tops at it. A top hides
+    // what is below it in its footprint and nothing below covers it.
+    const Item = struct { t: u32, level: f32, top: bool, depth: f32 };
+    var items: std.ArrayList(Item) = .empty;
+    for (ms.tris, 0..) |t, k| {
+        const p0 = v64(ms.pos[t[0]]);
+        const p1 = v64(ms.pos[t[1]]);
+        const p2 = v64(ms.pos[t[2]]);
+        const n = vcross(vsub(p1, p0), vsub(p2, p0));
+        if (vdot(n, ax[2]) >= 0) continue;
+        const mid: [3]f64 = .{ (p0[0] + p1[0] + p2[0]) / 3, (p0[1] + p1[1] + p2[1]) / 3, (p0[2] + p1[2] + p2[2]) / 3 };
+        const nz = @abs(vunit(n)[2]);
+        const top = nz > 0.99;
+        const level = if (top) mid[2] else @max(p0[2], @max(p1[2], p2[2]));
+        items.append(ar, .{ .t = @intCast(k), .level = @floatCast(@round(level * 1e4) / 1e4), .top = top, .depth = @floatCast(vdot(vsub(mid, c.target), ax[2])) }) catch return;
+    }
+    std.mem.sort(Item, items.items, {}, struct {
+        fn far(_: void, x: Item, y: Item) bool {
+            if (x.level != y.level) return x.level < y.level;
+            if (x.top != y.top) return !x.top;
+            return x.depth > y.depth;
+        }
+    }.far);
+    const batch = 6000;
+    var from: usize = 0;
+    while (from < items.items.len) : (from += batch) {
+        const part = items.items[from..@min(from + batch, items.items.len)];
+        var b = dvui.Triangles.Builder.init(ar, 3 * part.len, 3 * part.len) catch |e| {
+            std.debug.print("3D view: no room for triangles: {s}\n", .{@errorName(e)});
+            return;
+        };
+        for (part, 0..) |it, k| {
+            const t = ms.tris[it.t];
+            const p0 = v64(ms.pos[t[0]]);
+            const n = vunit(vcross(vsub(v64(ms.pos[t[1]]), p0), vsub(v64(ms.pos[t[2]]), p0)));
+            const shade: f32 = @floatCast(0.45 + 0.55 * @max(0, vdot(n, light)));
+            const col = ms.colour[it.t].color;
+            const base = display.fix(dvui.Color{ .r = col.r, .g = col.g, .b = col.b });
+            const lit: dvui.Color = .{ .r = @intFromFloat(@as(f32, @floatFromInt(base.r)) * shade), .g = @intFromFloat(@as(f32, @floatFromInt(base.g)) * shade), .b = @intFromFloat(@as(f32, @floatFromInt(base.b)) * shade) };
+            var v: [3]dvui.Point.Physical = undefined;
+            for (t, &v) |vi, *o| {
+                const q = vsub(v64(ms.pos[vi]), c.target);
+                o.* = .{ .x = @floatCast(cx + vdot(q, ax[0]) * c.ppm), .y = @floatCast(cy - vdot(q, ax[1]) * c.ppm) };
+                b.appendVertex(.{ .pos = o.*, .col = .fromColor(lit) });
+            }
+            const i: dvui.Vertex.Index = @intCast(3 * k);
+            b.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
+        }
+        dvui.renderTriangles(b.build_unowned(), null) catch |e| std.debug.print("3D view: not drawn: {s}\n", .{@errorName(e)});
+    }
+}
+
+/// Camera `c` fitted to the mesh within `area`.
+fn fitCam(c: *Cam3d, area: dvui.Rect.Physical, ms: occt3d.Mesh) void {
+    var lo: [3]f64 = .{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) };
+    var hi: [3]f64 = .{ -std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) };
+    for (ms.pos) |p| for (0..3) |k| {
+        lo[k] = @min(lo[k], p[k]);
+        hi[k] = @max(hi[k], p[k]);
+    };
+    if (!(hi[0] >= lo[0])) return;
+    c.target = .{ (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2 };
+    const span = @max(hi[0] - lo[0], hi[1] - lo[1]);
+    c.ppm = 0.85 * @min(area.w, area.h) / @max(span, 1);
+    c.set = true;
+}
+
 /// Manufacturing view `v`: its plan's parts where they sit on the canvas,
 /// each operation a layer (shown or hidden in the plan's properties): what
 /// it adds in the colour the plan gives (else the part's material's), what
@@ -8853,9 +9151,52 @@ fn manufactureView(v: u8) void {
         look.cy = (b.y0 + b.y1) / 2;
         look.ppm = 0.9 * @min(area.w / @max(b.width(), 1), area.h / @max(b.height(), 1));
     }
+    const cam = &cams[v];
     for (dvui.events()) |*e| {
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
+        if (cam.on) {
+            // 3D: a drag orbits, with Shift pans; the wheel zooms.
+            switch (me.action) {
+                .press => if (dvui.eventMatchSimple(e, box.data())) {
+                    e.handle(@src(), box.data());
+                    if (!active) view_to_activate = v;
+                    dvui.captureMouse(box.data(), e.num);
+                    mfg_drag = me.p;
+                },
+                .release => if (dvui.captured(box.data().id)) {
+                    e.handle(@src(), box.data());
+                    dvui.captureMouse(null, e.num);
+                },
+                .motion => if (dvui.captured(box.data().id)) {
+                    e.handle(@src(), box.data());
+                    const dx: f64 = me.p.x - mfg_drag.x;
+                    const dy: f64 = me.p.y - mfg_drag.y;
+                    if (me.mod.shift()) {
+                        const ax = camAxes(cam.*);
+                        for (0..3) |k| cam.target[k] += (-dx * ax[0][k] + dy * ax[1][k]) / cam.ppm;
+                    } else {
+                        cam.yaw -= dx * 0.008;
+                        cam.pitch = std.math.clamp(cam.pitch - dy * 0.008, 0, 1.55);
+                    }
+                    mfg_drag = me.p;
+                    dvui.refresh(null, @src(), null);
+                },
+                .wheel_y => |dy| if (dvui.eventMatchSimple(e, box.data())) {
+                    e.handle(@src(), box.data());
+                    // About the pointer: what is under it stays there.
+                    const z = @exp(@log(1.003) * @as(f64, dy));
+                    const ox: f64 = me.p.x - (area.x + area.w / 2);
+                    const oy: f64 = me.p.y - (area.y + area.h / 2);
+                    const k = (1 - 1 / z) / cam.ppm;
+                    const ax = camAxes(cam.*);
+                    for (0..3) |q| cam.target[q] += ox * k * ax[0][q] - oy * k * ax[1][q];
+                    cam.ppm *= z;
+                },
+                else => {},
+            }
+            continue;
+        }
         switch (me.action) {
             .press => if (dvui.eventMatchSimple(e, box.data())) {
                 e.handle(@src(), box.data());
@@ -8892,6 +9233,24 @@ fn manufactureView(v: u8) void {
     // the view.
     const prev_clip = dvui.clip(area);
     defer dvui.clipSet(prev_clip);
+    if (cam.on) {
+        // The parts first: a widget made before them would clip them to
+        // itself.
+        const got = planMesh(plan);
+        if (got) |ms| {
+            if (!cam.set) fitCam(cam, area, ms);
+            drawMesh(area, cam.*, ms);
+        }
+        var cap3 = dvui.textLayout(@src(), .{}, .{ .background = true, .color_fill = .{ .color = backdrop.opacity(0.85) }, .gravity_x = 0, .gravity_y = 0, .margin = .all(8), .padding = .all(4), .id_extra = v + 100 });
+        var cb3: [200]u8 = undefined;
+        if (got) |ms| {
+            cap3.addText(std.fmt.bufPrint(&cb3, "{s} in 3D, through OCCT ({d} triangles, {d:.0} ms). Drag: turn; Shift-drag: move; wheel: zoom.", .{ plan.name, ms.tris.len, mesh_ms }) catch "", .{ .color_text = .{ .color = colors.guide } });
+        } else if (mesh_job != null) {
+            cap3.addText(std.fmt.bufPrint(&cb3, "{s}: building it through OCCT…", .{plan.name}) catch "", .{ .color_text = .{ .color = colors.guide } });
+        } else cap3.addText(std.fmt.bufPrint(&cb3, "{s}: no 3D view: {s}.", .{ plan.name, mesh_failed orelse "the panels are still being laid out" }) catch "", .{ .color_text = .{ .color = colors.overflow } });
+        cap3.deinit();
+        return;
+    }
     const saved = state.view;
     state.view = look;
     defer state.view = saved;

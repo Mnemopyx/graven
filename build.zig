@@ -188,6 +188,18 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(fonts_tool);
 
+    // OCCT, optional, from either
+    //   -Docct=<prefix>   an OCCT 8.0.1 install built with scripts/build-occt.sh
+    //   -Docct-prebuilt   the release archive of one (scripts/package-occt.sh),
+    //                     fetched as a package named in build.zig.zon
+    // With it: graven-fab, the bridge test, and the GUI's 3D views.
+    const occt_prefix = b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)");
+    const occt_prebuilt = b.option(bool, "occt-prebuilt", "Fetch the prebuilt OCCT release archive (enables the OCCT bridge)") orelse false;
+    const occt: ?Occt = if (occt_prefix) |prefix| .{ .prefix = prefix } else if (occt_prebuilt) blk: {
+        const name = occtPackageName(b, target) orelse break :blk null;
+        break :blk if (b.lazyDependency(name, .{})) |dep| .{ .dep = dep } else null;
+    } else null;
+
     // GUI editor: zig build gui (fetches DVUI and SDL3 on first use).
     const gui_step = b.step("gui", "Build and run the GUI editor");
     if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui_dep| {
@@ -217,6 +229,14 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        // Its 3D views: through OCCT when the build has it, else a stub
+        // that says so.
+        gui.root_module.addImport("graven_occt3d", if (occt) |o| occtView3d(b, target, optimize, o, gui.root_module, layout) else b.createModule(.{
+            .root_source_file = b.path("apps/gui/occt3d_stub.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "graven_layout", .module = layout }},
+        }));
         const install_gui = b.addInstallArtifact(gui, .{});
         const run_gui = b.addRunArtifact(gui);
         run_gui.step.dependOn(&install_gui.step);
@@ -242,6 +262,12 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_fonts_folders", .module = fonts_folders },
                 .{ .name = "graven_richtext", .module = richtext },
                 .{ .name = "graven_glyphic", .module = glyphic },
+                .{ .name = "graven_occt3d", .module = b.createModule(.{
+                    .root_source_file = b.path("apps/gui/occt3d_stub.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "graven_layout", .module = layout }},
+                }) },
             },
         }) });
         const run = b.addRunArtifact(t);
@@ -328,20 +354,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }) })).step);
 
-    // Optional OCCT bridge, from either
-    //   -Docct=<prefix>   an OCCT 8.0.1 install built with scripts/build-occt.sh
-    //   -Docct-prebuilt   the release archive of one (scripts/package-occt.sh),
-    //                     fetched as a package named in build.zig.zon
-    // then: zig build occt-test ...
-    const occt_prefix = b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)");
+    // The OCCT bridge (options read above): zig build occt-test, fab.
     const fab_mods: FabModules = .{ .layout = layout, .folders = fonts_folders };
-    const occt_prebuilt = b.option(bool, "occt-prebuilt", "Fetch the prebuilt OCCT release archive (enables the OCCT bridge)") orelse false;
-    if (occt_prefix) |prefix| {
-        addOcctBridge(b, target, optimize, .{ .prefix = prefix }, fab_mods);
-    } else if (occt_prebuilt) {
-        const name = occtPackageName(b, target) orelse return;
-        if (b.lazyDependency(name, .{})) |dep| addOcctBridge(b, target, optimize, .{ .dep = dep }, fab_mods);
-    }
+    if (occt) |o| addOcctBridge(b, target, optimize, o, fab_mods);
 }
 
 /// The OCCT build to link: an install prefix, or the fetched release archive.
@@ -448,6 +463,36 @@ fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const fab_exe = b.addExecutable(.{ .name = "graven-fab", .root_module = fab_mod });
     const install_fab = b.addInstallArtifact(fab_exe, .{});
     b.step("fab", "Build graven-fab (parts as solids, through OCCT)").dependOn(&install_fab.step);
+}
+
+/// The GUI's 3D module through OCCT (bridge/occt/view3d.zig), with `gui`
+/// (its root module) linking the shim and OCCT.
+fn occtView3d(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt, gui: *std.Build.Module, layout: *std.Build.Module) *std.Build.Module {
+    const shim = b.addTranslateC(.{
+        .root_source_file = b.path("bridge/occt/occt_shim.h"),
+        .target = target,
+        .optimize = optimize,
+    }).createModule();
+    linkOcct(b, gui, occt);
+    return b.createModule(.{
+        .root_source_file = b.path("bridge/occt/view3d.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "occt_shim", .module = shim },
+            .{ .name = "graven_layout", .module = layout },
+        },
+    });
+}
+
+/// `mod` linking the OCCT shim and OCCT's toolkits (C++).
+fn linkOcct(b: *std.Build, mod: *std.Build.Module, occt: Occt) void {
+    mod.link_libc = true;
+    mod.link_libcpp = true;
+    mod.addIncludePath(b.path("bridge/occt"));
+    mod.addIncludePath(occt.path(b, "include/opencascade"));
+    mod.addCSourceFile(.{ .file = b.path("bridge/occt/occt_shim.cpp"), .flags = &.{"-std=c++17"} });
+    for (occt_toolkits) |tk| mod.addObjectFile(occt.path(b, b.fmt("lib/lib{s}.a", .{tk})));
 }
 
 /// A module rooted at `root` that links the OCCT shim and OCCT itself.

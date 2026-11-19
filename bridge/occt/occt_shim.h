@@ -75,6 +75,21 @@ int os_solid_props(const os_solid *s, double *volume, int *valid);
 
 void os_solid_free(os_solid *s);
 
+/* A solid's surface as triangles, for drawing: OCCT's mesher
+   (BRepMesh) within `deflection` (mm) and `angle` (radians) of the exact
+   surface. Each face's triangles wound with its outward side
+   counter-clockwise. `xyz` holds 3 floats a vertex, `idx` 3 a triangle;
+   free with os_mesh_free. */
+typedef struct {
+    float *xyz;
+    size_t n_verts;
+    unsigned *idx;
+    size_t n_tris;
+} os_mesh;
+
+int os_solid_mesh(const os_solid *s, double deflection, double angle, os_mesh *out);
+void os_mesh_free(os_mesh *m);
+
 /* Adds a solid to the document as one named, coloured part (a copy: the
    solid can be freed afterwards). */
 int os_doc_add_solid(os_doc *doc, const char *name, const double rgb[3], const os_solid *s);

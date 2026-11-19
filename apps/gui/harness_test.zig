@@ -974,6 +974,10 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     try r.click("Manufacturing plan/Open in a manufacturing view");
     try r.frames(2);
     try std.testing.expectEqual(.manufacture, api.activeView().kind);
+    // Shown in 3D: this build (the harness's) has no OCCT, and says so.
+    try r.choose("Plan/Shown as", "3D, through OCCT (not in this build)");
+    try r.frames(2);
+    try std.testing.expect(std.mem.indexOf(u8, api.statusText(), "no OCCT") != null);
     // Plan 1 stays the one exported.
     try std.testing.expectEqual(m.plans.items[0].id, m.active_plan);
     try saveAs(&r, scratch ++ "/hp15c-plans.graven");

@@ -1,6 +1,11 @@
 #include "occt_shim.h"
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TopLoc_Location.hxx>
+#include <cstdlib>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -404,4 +409,64 @@ extern "C" int os_doc_add_solid(os_doc *doc, const char *name, const double rgb[
         colors->SetColor(label, c, XCAFDoc_ColorSurf);
         return OS_OK;
     });
+}
+
+extern "C" int os_solid_mesh(const os_solid *s, double deflection, double angle, os_mesh *out) {
+    out->xyz = nullptr;
+    out->idx = nullptr;
+    out->n_verts = 0;
+    out->n_tris = 0;
+    return guarded([&]() -> int {
+        silence_occt();
+        TopoDS_Shape shape = s->shape;
+        BRepMesh_IncrementalMesh mesher(shape, deflection, Standard_False, angle, Standard_True);
+        if (!mesher.IsDone()) return fail("meshing failed");
+        std::vector<float> xyz;
+        std::vector<unsigned> idx;
+        for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+            const TopoDS_Face &face = TopoDS::Face(ex.Current());
+            TopLoc_Location loc;
+            Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+            if (tri.IsNull()) continue;
+            const gp_Trsf tr = loc.Transformation();
+            const unsigned base = (unsigned)(xyz.size() / 3);
+            for (int i = 1; i <= tri->NbNodes(); ++i) {
+                gp_Pnt p = tri->Node(i).Transformed(tr);
+                xyz.push_back((float)p.X());
+                xyz.push_back((float)p.Y());
+                xyz.push_back((float)p.Z());
+            }
+            const bool reversed = face.Orientation() == TopAbs_REVERSED;
+            for (int i = 1; i <= tri->NbTriangles(); ++i) {
+                int a, b, c;
+                tri->Triangle(i).Get(a, b, c);
+                if (reversed) std::swap(b, c);
+                idx.push_back(base + (unsigned)(a - 1));
+                idx.push_back(base + (unsigned)(b - 1));
+                idx.push_back(base + (unsigned)(c - 1));
+            }
+        }
+        out->n_verts = xyz.size() / 3;
+        out->n_tris = idx.size() / 3;
+        out->xyz = (float *)std::malloc(sizeof(float) * (xyz.empty() ? 1 : xyz.size()));
+        out->idx = (unsigned *)std::malloc(sizeof(unsigned) * (idx.empty() ? 1 : idx.size()));
+        if (!out->xyz || !out->idx) {
+            std::free(out->xyz);
+            std::free(out->idx);
+            out->xyz = nullptr;
+            out->idx = nullptr;
+            return fail("out of memory");
+        }
+        std::copy(xyz.begin(), xyz.end(), out->xyz);
+        std::copy(idx.begin(), idx.end(), out->idx);
+        return OS_OK;
+    });
+}
+
+extern "C" void os_mesh_free(os_mesh *m) {
+    if (!m) return;
+    std::free(m->xyz);
+    std::free(m->idx);
+    m->xyz = nullptr;
+    m->idx = nullptr;
 }

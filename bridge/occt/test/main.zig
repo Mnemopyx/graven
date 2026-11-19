@@ -104,7 +104,34 @@ fn addFace(doc: *c.os_doc, name: [*:0]const u8, rgb: [3]f64, contours: []const c
     if (@abs(area - expected) > 1e-7) return error.AreaMismatch;
 }
 
+/// A 10 x 10 x 2 block meshed: two triangles a face, each wound with its
+/// outside counter-clockwise (its normal pointing out of the block).
+fn meshed() !void {
+    const sq = [_]c.os_segment{ line(0, 0, 10, 0), line(10, 0, 10, 10), line(10, 10, 0, 10), line(0, 10, 0, 0) };
+    const block = try extrude(&.{contour(&sq)}, 0, 2);
+    defer c.os_solid_free(block);
+    var m: c.os_mesh = undefined;
+    try check(c.os_solid_mesh(block, 0.01, 0.3, &m));
+    defer c.os_mesh_free(&m);
+    if (m.n_tris != 12) return error.WrongTriangleCount;
+    for (0..m.n_tris) |t| {
+        var p: [3][3]f64 = undefined;
+        for (0..3) |k| {
+            const v = m.idx[3 * t + k];
+            p[k] = .{ m.xyz[3 * v], m.xyz[3 * v + 1], m.xyz[3 * v + 2] };
+        }
+        const e1 = [3]f64{ p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2] };
+        const e2 = [3]f64{ p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2] };
+        const n = [3]f64{ e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+        // Outward: away from the block's middle (5, 5, 1).
+        const mid = [3]f64{ (p[0][0] + p[1][0] + p[2][0]) / 3 - 5, (p[0][1] + p[1][1] + p[2][1]) / 3 - 5, (p[0][2] + p[1][2] + p[2][2]) / 3 - 1 };
+        if (n[0] * mid[0] + n[1] * mid[1] + n[2] * mid[2] <= 0) return error.InwardTriangle;
+    }
+    std.debug.print("block meshed: {d} triangles, all facing out\n", .{m.n_tris});
+}
+
 pub fn main() !void {
+    try meshed();
     var doc: ?*c.os_doc = null;
     try check(c.os_doc_new(&doc));
     defer c.os_doc_free(doc);
