@@ -12128,6 +12128,31 @@ fn processProperties(id: layout.model.ObjectId) void {
             }
             next.params = .{ .fdm = fdm };
         },
+        inline .laser_cut, .laser_engrave, .waterjet => |x, tag| {
+            heading("{s}", .{p.kind().label()}, 10);
+            var nx = x;
+            const fields = switch (tag) {
+                .laser_cut => .{ .{ "Kerf, mm", "kerf" }, .{ "Spot, mm", "spot" }, .{ "Thickest sheet, mm", "max_thickness" } },
+                .laser_engrave => .{ .{ "Spot, mm", "spot" }, .{ "Depth a pass, mm", "depth_per_pass" } },
+                .waterjet => .{ .{ "Kerf, mm", "kerf" }, .{ "Thickest plate, mm", "max_thickness" } },
+                else => unreachable,
+            };
+            inline for (fields, 0..) |fld, k| {
+                if (numberProp(fld[0], @field(x, fld[1]), 0.001, 1000, 11 + k)) |v| {
+                    @field(nx, fld[1]) = v;
+                    changed = true;
+                    key = mergeKey(.{ "process", id, fld[1] });
+                }
+            }
+            inline for (.{ "across", "deep" }, 0..) |axis, k| {
+                if (numberProp("Bed " ++ axis ++ ", mm", x.bed[k], 1, 10000, 17 + k)) |v| {
+                    nx.bed[k] = v;
+                    changed = true;
+                    key = mergeKey(.{ "process", id, "bed", k });
+                }
+            }
+            next.params = @unionInit(layout.model.process.Params, @tagName(tag), nx);
+        },
     }
     heading("Limits", .{}, 30);
     const own = p.stroke != null or p.gap != null or p.cap != null;

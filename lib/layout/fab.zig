@@ -54,10 +54,17 @@ pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const pl
         const pieces = try source(a, m, panel, placed, faces, l.source);
         if (pieces.len == 0) continue;
         const z = extent(fab, l, lo - 1, hi + 1);
+        // The active plan's colour for it, where it gives one; else the
+        // layer's own (a document without plans).
+        const planned = m.planColour(panel, l.name);
         switch (l.op) {
-            .add => |c| try steps.append(a, .{ .layer = li, .pieces = pieces, .z0 = z[0], .z1 = z[1], .op = .{ .add = c } }),
+            .add => |own| {
+                const c = planned orelse own;
+                try steps.append(a, .{ .layer = li, .pieces = pieces, .z0 = z[0], .z1 = z[1], .op = .{ .add = c } });
+            },
             .subtract => try steps.append(a, .{ .layer = li, .pieces = pieces, .z0 = z[0], .z1 = z[1], .op = .subtract }),
-            .inlay => |c| {
+            .inlay => |own| {
+                const c = planned orelse own;
                 try steps.append(a, .{ .layer = li, .pieces = pieces, .z0 = z[0], .z1 = z[1], .op = .subtract });
                 try steps.append(a, .{ .layer = li, .pieces = pieces, .z0 = z[0], .z1 = z[1], .op = .{ .add = c } });
             },

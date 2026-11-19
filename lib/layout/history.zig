@@ -51,7 +51,7 @@ pub const actions = [_][:0]const u8{
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
-    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess",
+    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess", "addMaterial", "setMaterial", "removeMaterial", "addPlan", "setPlan", "removePlan", "setActivePlan",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -1484,4 +1484,46 @@ test "the actions added for making the examples in the GUI save and reopen" {
     try testing.expect(!o.damaged);
     try testing.expectEqualStrings("Plate", o.model.panels.items[p].name);
     try testing.expectEqualStrings("K2", o.model.tileConst(o.model.flowItems(p, r)[1].tileOf().?).designator);
+}
+
+test "materials, plans and the active plan: saved with their steps, reopened, undone" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const p = try h.do(&m, .placePanel, .{.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 }});
+    const pid = m.panels.items[p].id;
+    try h.do(&m, .setPanelFab, .{ p, model.Fab{ .thickness = 2, .layers = &.{ .{ .name = "Plate", .source = .edge, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }, .{ .name = "Legends", .source = .{ .text = "" }, .depth = 0.1, .op = .subtract } } } });
+    const mat = try h.do(&m, .addMaterial, .{model.manufacture.libraryMaterial("Aluminium 5052, black anodised").?});
+    const jet = try h.do(&m, .addProcess, .{model.process.builtin("Generic waterjet").?});
+    const eng = try h.do(&m, .addProcess, .{model.process.builtin("Generic laser engraver").?});
+    const plan = try h.do(&m, .addPlan, .{model.manufacture.Plan{
+        .name = "Production",
+        .parts = &.{.{ .panel = pid, .material = mat }},
+        .operations = &.{
+            .{ .name = "Engrave", .process = eng, .targets = &.{.{ .panel = pid, .layer = "Legends", .colour = .{ .name = "bare aluminium", .color = .hex("#c8ccd0") } }} },
+            .{ .name = "Cut", .process = jet, .targets = &.{.{ .panel = pid, .layer = "Plate" }} },
+        },
+    }});
+    const second = try h.do(&m, .addPlan, .{model.manufacture.Plan{ .name = "Prototype" }});
+    try h.do(&m, .setActivePlan, .{second});
+    const bytes = try fileBytes(&h, gpa, test_writer, 1);
+    defer gpa.free(bytes);
+    var o = try openFile(gpa, bytes);
+    defer o.model.deinit();
+    defer o.history.deinit();
+    try testing.expect(!o.damaged);
+    try testing.expectEqual(2, o.model.plans.items.len);
+    try testing.expectEqual(second, o.model.active_plan);
+    const back = o.model.plans.items[o.model.planIndex(plan).?];
+    try testing.expectEqualStrings("Engrave", back.operations[0].name);
+    try testing.expectEqualStrings("bare aluminium", back.operations[0].targets[0].colour.?.name);
+    // Undone: the first plan active again, then the second gone.
+    _ = try o.history.undo(&o.model);
+    try testing.expectEqual(plan, o.model.active_plan);
+    _ = try o.history.undo(&o.model);
+    try testing.expectEqual(1, o.model.plans.items.len);
 }

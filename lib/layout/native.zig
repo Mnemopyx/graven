@@ -407,6 +407,10 @@ pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},
     };
+    m.upgradePlans() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {},
+    };
     return m;
 }
 

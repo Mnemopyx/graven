@@ -144,3 +144,132 @@ test "the keyboard saved and read back lays out and exports exactly the same" {
     defer gpa.free(svg_b);
     try testing.expectEqualStrings(svg_a, svg_b);
 }
+
+// Manufacturing plans -----------------------------------------------------------
+
+const manufacture = layout.model.manufacture;
+
+test "the HP-15C opens with its fabrication as a plan: both panels, of PLA, one print in the layers' colours, nothing to warn of" {
+    var o = try open(@embedFile("hp15c.graven"));
+    defer close(&o);
+    const m = &o.model;
+    try testing.expectEqual(1, m.plans.items.len);
+    const plan = m.activePlan().?.*;
+    try testing.expectEqual(2, plan.parts.len);
+    try testing.expectEqual(1, plan.operations.len);
+    try testing.expectEqual(6, plan.operations[0].targets.len);
+    const mat = m.materials.items[m.materialIndex(plan.parts[0].material).?].material;
+    try testing.expectEqualStrings("PLA", mat.name);
+    const plate = try panelNamed(m, "HP-15C plate");
+    try testing.expectEqualStrings("gold", m.planColour(plate, "Gold legends").?.name);
+    try testing.expectEqual(@as(?manufacture.Finish, null), m.planColour(plate, "Key holes"));
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(0, (try manufacture.warnings(arena.allocator(), m, plan)).len);
+}
+
+test "a plan's colour is what the part is made in; one the process cannot give is flagged; undone" {
+    var o = try open(@embedFile("hp15c.graven"));
+    defer close(&o);
+    const m = &o.model;
+    const h = &o.history;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plate = try panelNamed(m, "HP-15C plate");
+    const plan = m.activePlan().?.*;
+    // The plate printed in PLA's grey instead of black (its own layer
+    // needs no glyphs, so no faces are loaded here).
+    var next = plan;
+    const ops = try a.dupe(manufacture.Operation, plan.operations);
+    const ts = try a.dupe(manufacture.Target, ops[0].targets);
+    for (ts) |*t| if (std.mem.eql(u8, t.layer, "Plate")) {
+        t.colour = .{ .name = "grey", .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } };
+    };
+    ops[0].targets = ts;
+    next.operations = ops;
+    try h.do(m, .setPlan, .{ plan.id, next });
+    var labels: layout.Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    var placed = try layout.solve(testing.allocator, m, plate, &labels);
+    defer placed.deinit();
+    const steps = (try layout.fab.plan(a, m, plate, &placed, &.{})).steps;
+    var grey = false;
+    for (steps) |st| switch (st.op) {
+        .add => |c| if (std.mem.eql(u8, c.name, "grey")) {
+            grey = true;
+        },
+        .subtract => {},
+    };
+    try testing.expect(grey);
+    try testing.expectEqual(0, (try manufacture.warnings(a, m, m.activePlan().?.*)).len);
+    // Purple: not a filament this material comes in.
+    for (ts) |*t| if (std.mem.eql(u8, t.layer, "Plate")) {
+        t.colour = .{ .name = "purple", .color = .{ .r = 0x80, .g = 0x20, .b = 0x80 } };
+    };
+    try h.do(m, .setPlan, .{ plan.id, next });
+    const w = try manufacture.warnings(a, m, m.activePlan().?.*);
+    try testing.expectEqual(1, w.len);
+    try testing.expectEqual(.colour_unavailable, w[0].kind);
+    // Undone twice: black again.
+    _ = try h.undo(m);
+    _ = try h.undo(m);
+    try testing.expectEqualStrings("black", m.planColour(plate, "Plate").?.name);
+}
+
+test "an aluminium plate waterjet cut, then engraved: unsuited and doubtful orders flagged, never refused" {
+    var o = try open(@embedFile("hp15c.graven"));
+    defer close(&o);
+    const m = &o.model;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plate_id = m.panels.items[try panelNamed(m, "HP-15C plate")].id;
+    const alu = try m.addMaterial(manufacture.libraryMaterial("Aluminium 5052, black anodised").?);
+    const jet = try m.addProcess(layout.model.process.builtin("Generic waterjet").?);
+    const laser = try m.addProcess(layout.model.process.builtin("Generic CO2 laser cutter").?);
+    const engraver = try m.addProcess(layout.model.process.builtin("Generic laser engraver").?);
+    const bare: manufacture.Finish = .{ .name = "bare aluminium", .color = .{ .r = 0xc8, .g = 0xcc, .b = 0xd0 } };
+    const id = try m.addPlan(.{
+        .name = "Production",
+        .parts = &.{.{ .panel = plate_id, .material = alu }},
+        .operations = &.{
+            .{ .name = "Cut", .process = jet, .targets = &.{ .{ .panel = plate_id, .layer = "Plate" }, .{ .panel = plate_id, .layer = "Key holes" } } },
+            .{ .name = "Engrave", .process = engraver, .targets = &.{.{ .panel = plate_id, .layer = "Gold legends", .colour = bare }} },
+            .{ .name = "Trim", .process = laser, .targets = &.{.{ .panel = plate_id, .layer = "Plate" }} },
+        },
+    });
+    const pl = m.plans.items[m.planIndex(id).?];
+    const w = try manufacture.warnings(a, m, pl);
+    var after_cut = false;
+    var unsuited = false;
+    for (w) |x| switch (x.kind) {
+        .mark_after_cut => after_cut = true,
+        .unsuited => unsuited = x.operation.? == 2,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(after_cut and unsuited);
+    // The first plan stays the active one; a process or material in use
+    // cannot be removed.
+    try testing.expect(m.active_plan != id);
+    try testing.expectError(error.ProcessInUse, m.removeProcess(jet));
+    try testing.expectError(error.MaterialInUse, m.removeMaterial(alu));
+    try m.removePlan(id);
+    try m.removeProcess(jet);
+    try m.removeMaterial(alu);
+}
+
+test "plans and materials are saved and read back as they were, not upgraded again" {
+    const gpa = testing.allocator;
+    var o = try open(@embedFile("hp15c.graven"));
+    defer close(&o);
+    const m = &o.model;
+    const bytes = try layout.native.encode(gpa, m);
+    defer gpa.free(bytes);
+    var back = try layout.native.decode(gpa, bytes);
+    defer back.deinit();
+    try testing.expectEqual(1, back.plans.items.len);
+    try testing.expectEqual(1, back.materials.items.len);
+    try testing.expectEqual(m.active_plan, back.active_plan);
+    try testing.expectEqualStrings(m.plans.items[0].operations[0].targets[2].layer, back.plans.items[0].operations[0].targets[2].layer);
+}

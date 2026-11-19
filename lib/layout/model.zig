@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const geom = @import("graven_geom");
 const art_ = @import("art.zig");
 pub const process = @import("process.zig");
+pub const manufacture = @import("manufacture.zig");
 pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
 const edit_ = @import("edit.zig");
@@ -1537,12 +1538,18 @@ pub const Model = struct {
     sheets: std.ArrayList(LegendSheet) = .empty,
     /// The process profiles its panels are made with (see `process`).
     processes: std.ArrayList(Process) = .empty,
+    /// The materials its plans make parts of (see `manufacture`).
+    materials: std.ArrayList(manufacture.DocMaterial) = .empty,
+    /// How its products are made: manufacturing plans, each over one or
+    /// more panels (see `manufacture`); the active one is exported.
+    plans: std.ArrayList(manufacture.Plan) = .empty,
+    active_plan: ObjectId = .none,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -3212,10 +3219,12 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Removes process profile `id`; refused while a panel is made with it.
+    /// Removes process profile `id`; refused while a panel is made with it
+    /// or a plan's operation uses it.
     pub fn removeProcess(m: *Model, id: ObjectId) Error!void {
         const i = m.processIndex(id) orelse return error.NoSuchObject;
         for (m.panels.items) |p| if (p.fab.process == id) return error.ProcessInUse;
+        for (m.plans.items) |pl| for (pl.operations) |op| if (op.process == id) return error.ProcessInUse;
         _ = m.processes.orderedRemove(i);
         m.revision += 1;
     }
@@ -3258,6 +3267,201 @@ pub const Model = struct {
                 break :blk id;
             };
         }
+    }
+
+    // Materials and manufacturing plans ---------------------------------
+
+    pub fn profileById(m: *const Model, id: ObjectId) ?*const process.Profile {
+        const i = m.processIndex(id) orelse return null;
+        return &m.processes.items[i].profile;
+    }
+
+    pub fn materialIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.materials.items, 0..) |x, i| if (x.id == id) return i;
+        return null;
+    }
+
+    pub fn planIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.plans.items, 0..) |x, i| if (x.id == id) return i;
+        return null;
+    }
+
+    /// The plan exported, if any.
+    pub fn activePlan(m: *const Model) ?*const manufacture.Plan {
+        const i = m.planIndex(m.active_plan) orelse return null;
+        return &m.plans.items[i];
+    }
+
+    fn dupeFinish(m: *Model, f: manufacture.Finish) Allocator.Error!manufacture.Finish {
+        return .{ .name = try m.a().dupe(u8, f.name), .color = f.color };
+    }
+
+    fn dupeMaterial(m: *Model, x: manufacture.Material) Allocator.Error!manufacture.Material {
+        var c = x;
+        c.name = try m.a().dupe(u8, x.name);
+        const fs = try m.a().alloc(manufacture.Finish, x.finishes.len);
+        for (x.finishes, fs) |f, *d| d.* = try m.dupeFinish(f);
+        c.finishes = fs;
+        if (x.core) |f| c.core = try m.dupeFinish(f);
+        c.thicknesses = try m.a().dupe(f64, x.thicknesses);
+        return c;
+    }
+
+    fn dupePlan(m: *Model, x: manufacture.Plan) Allocator.Error!manufacture.Plan {
+        var c = x;
+        c.name = try m.a().dupe(u8, x.name);
+        c.parts = try m.a().dupe(manufacture.Part, x.parts);
+        const ops = try m.a().alloc(manufacture.Operation, x.operations.len);
+        for (x.operations, ops) |op, *d| {
+            d.* = op;
+            d.name = try m.a().dupe(u8, op.name);
+            const ts = try m.a().alloc(manufacture.Target, op.targets.len);
+            for (op.targets, ts) |t, *dt| {
+                dt.* = t;
+                dt.layer = try m.a().dupe(u8, t.layer);
+                if (t.colour) |f| dt.colour = try m.dupeFinish(f);
+            }
+            d.targets = ts;
+        }
+        c.operations = ops;
+        return c;
+    }
+
+    /// Adds a material (a copy); returns its ID.
+    pub fn addMaterial(m: *Model, x: manufacture.Material) Error!ObjectId {
+        if (!x.valid()) return error.BadValue;
+        const id = m.newId();
+        try m.materials.append(m.a(), .{ .id = id, .material = try m.dupeMaterial(x) });
+        m.revision += 1;
+        return id;
+    }
+
+    pub fn setMaterial(m: *Model, id: ObjectId, x: manufacture.Material) Error!void {
+        const i = m.materialIndex(id) orelse return error.NoSuchObject;
+        if (!x.valid()) return error.BadValue;
+        m.materials.items[i].material = try m.dupeMaterial(x);
+        m.revision += 1;
+    }
+
+    /// Removes material `id`; refused while a plan's part is made of it.
+    pub fn removeMaterial(m: *Model, id: ObjectId) Error!void {
+        const i = m.materialIndex(id) orelse return error.NoSuchObject;
+        for (m.plans.items) |pl| for (pl.parts) |pt| if (pt.material == id) return error.MaterialInUse;
+        _ = m.materials.orderedRemove(i);
+        m.revision += 1;
+    }
+
+    /// Adds a plan (a copy), active when it is the first; returns its ID.
+    /// What it names need not exist: `manufacture.warnings` says so.
+    pub fn addPlan(m: *Model, x: manufacture.Plan) Error!ObjectId {
+        if (x.name.len == 0) return error.BadValue;
+        for (x.operations) |op| if (op.passes == 0) return error.BadValue;
+        const id = m.newId();
+        var c = try m.dupePlan(x);
+        c.id = id;
+        try m.plans.append(m.a(), c);
+        if (m.active_plan == .none) m.active_plan = id;
+        m.revision += 1;
+        return id;
+    }
+
+    /// Replaces plan `id` with `x` (its parts, operations, name).
+    pub fn setPlan(m: *Model, id: ObjectId, x: manufacture.Plan) Error!void {
+        const i = m.planIndex(id) orelse return error.NoSuchObject;
+        if (x.name.len == 0) return error.BadValue;
+        for (x.operations) |op| if (op.passes == 0) return error.BadValue;
+        var c = try m.dupePlan(x);
+        c.id = id;
+        m.plans.items[i] = c;
+        m.revision += 1;
+    }
+
+    /// Removes plan `id`; the next one, if any, becomes active if it was.
+    pub fn removePlan(m: *Model, id: ObjectId) Error!void {
+        const i = m.planIndex(id) orelse return error.NoSuchObject;
+        _ = m.plans.orderedRemove(i);
+        if (m.active_plan == id) m.active_plan = if (m.plans.items.len > 0) m.plans.items[0].id else .none;
+        m.revision += 1;
+    }
+
+    pub fn setActivePlan(m: *Model, id: ObjectId) Error!void {
+        if (id != .none and m.planIndex(id) == null) return error.NoSuchObject;
+        m.active_plan = id;
+        m.revision += 1;
+    }
+
+    /// The colour the active plan gives stackup layer `layer` of panel
+    /// `panel`, if it gives one: the last operation's that does.
+    pub fn planColour(m: *const Model, panel: usize, layer: []const u8) ?manufacture.Finish {
+        const pl = m.activePlan() orelse return null;
+        const pid = m.panels.items[panel].id;
+        var found: ?manufacture.Finish = null;
+        for (pl.operations) |op| for (op.targets) |t| {
+            if (t.panel == pid and std.mem.eql(u8, t.layer, layer)) if (t.colour) |c| {
+                found = c;
+            };
+        };
+        return found;
+    }
+
+    /// An older document's fabrication, as a plan: its panels with
+    /// fabrication layers and a process profile become one plan's parts,
+    /// of PLA (with the layers' colours among its finishes); for each
+    /// profile, one operation making every layer of its panels, each in
+    /// the colour the layer named. Called on loading; does nothing to a
+    /// document with plans.
+    pub fn upgradePlans(m: *Model) Error!void {
+        if (m.plans.items.len > 0) return;
+        var any = false;
+        for (m.panels.items) |p| {
+            if (p.fab.layers.len > 0 and p.fab.process != .none) any = true;
+        }
+        if (!any) return;
+        const al = m.a();
+        // The material: PLA, with every colour the layers named.
+        var mat = manufacture.libraryMaterial("PLA").?;
+        var finishes: std.ArrayList(manufacture.Finish) = .empty;
+        try finishes.appendSlice(al, mat.finishes);
+        for (m.panels.items) |p| for (p.fab.layers) |l| {
+            const c: ?manufacture.Finish = switch (l.op) {
+                .add, .inlay => |col| col,
+                .subtract => null,
+            };
+            const col = c orelse continue;
+            for (finishes.items) |f| {
+                if (std.mem.eql(u8, f.name, col.name)) break;
+            } else try finishes.append(al, col);
+        };
+        mat.finishes = finishes.items;
+        const mid = m.newId();
+        try m.materials.append(al, .{ .id = mid, .material = try m.dupeMaterial(mat) });
+        var parts: std.ArrayList(manufacture.Part) = .empty;
+        var ops: std.ArrayList(manufacture.Operation) = .empty;
+        for (m.panels.items) |p| {
+            if (p.fab.layers.len == 0 or p.fab.process == .none) continue;
+            if (p.id == .none) continue;
+            try parts.append(al, .{ .panel = p.id, .material = mid });
+            const op = for (ops.items) |*o| {
+                if (o.process == p.fab.process) break o;
+            } else blk: {
+                const prof = m.profileById(p.fab.process).?;
+                try ops.append(al, .{ .name = try std.fmt.allocPrint(al, "Print ({s})", .{prof.name}), .process = p.fab.process });
+                break :blk &ops.items[ops.items.len - 1];
+            };
+            var ts: std.ArrayList(manufacture.Target) = .empty;
+            try ts.appendSlice(al, op.targets);
+            for (p.fab.layers) |l| try ts.append(al, .{ .panel = p.id, .layer = l.name, .colour = switch (l.op) {
+                .add, .inlay => |col| col,
+                .subtract => null,
+            } });
+            op.targets = ts.items;
+        }
+        const pid = m.newId();
+        try m.plans.append(al, try m.dupePlan(.{ .id = pid, .name = "Plan 1", .parts = parts.items, .operations = ops.items }));
+        m.plans.items[m.plans.items.len - 1].id = pid;
+        m.active_plan = pid;
     }
 
     // Legend sheets ------------------------------------------------------

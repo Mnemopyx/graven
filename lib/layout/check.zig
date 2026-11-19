@@ -398,6 +398,8 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
             }
             report.paths = paths.items;
         },
+        // Cutting and engraving: no simulation yet.
+        else => {},
     }
 
     report.findings = out.items;
