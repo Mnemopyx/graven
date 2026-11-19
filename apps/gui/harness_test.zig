@@ -163,6 +163,16 @@ pub const Run = struct {
         }
     }
 
+    /// Clicks at `p` with Ctrl held.
+    pub fn ctrlClickAt(r: *Run, p: dvui.Point.Physical) !void {
+        const cw = dvui.currentWindow();
+        _ = try cw.addEventKey(.{ .code = .left_control, .mod = .lcontrol, .action = .down });
+        try r.frames(1);
+        try r.clickAt(p);
+        _ = try cw.addEventKey(.{ .code = .left_control, .mod = .none, .action = .up });
+        try r.frames(1);
+    }
+
     pub fn key(r: *Run, code: dvui.enums.Key, mod: dvui.enums.Mod) !void {
         try dvui.testing.pressKey(code, mod);
         try r.frames(2);
@@ -798,4 +808,55 @@ test "the HP-15C, made in the GUI" {
     const m = api.model();
     try sameAsExample(m, "examples/hp15c.graven", &.{ "HP-15C plate", "HP-15C keys" });
     try saveAs(&r, scratch ++ "/hp15c.graven");
+}
+
+// Known bugs, kept fixed --------------------------------------------------------
+
+/// Opens an example from the File menu (an untitled copy).
+fn openExample(r: *Run, label: []const u8) !void {
+    var b: [64]u8 = undefined;
+    try r.click("menu/File");
+    try r.click(try std.fmt.bufPrint(&b, "menu/Open example: {s}", .{label}));
+    try r.frames(5);
+}
+
+test "a click on a key makes the key the context, its properties shown" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    try r.clickAt(api.tileCenter("K2").?);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    // Likewise with its panel chosen in the Browser first.
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)");
+    try r.clickAt(api.tileCenter("K3").?);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    _ = try r.rectOf("Tile/Gap before, u");
+    // And after the flow cursor has been in its track, then the track and
+    // the panel chosen in the Browser (as when keys are filled in).
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
+    try r.clickAt(try screen(.{ 400, 120 }));
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)");
+    try r.clickAt(api.tileCenter("K4").?);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+}
+
+test "after Tab hunts a Ctrl-click selection, the keyboard stays with the canvas" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    // Ctrl-click near a key's edge: the nearest container is selected.
+    const p = api.gridPoint(api.panelNamed("HP-15C keys").?, 0, 0, 0).?;
+    try r.ctrlClickAt(.{ .x = p.x + 30, .y = p.y });
+    try std.testing.expect(api.selectionCount() > 0);
+    try std.testing.expect(api.canvasHasKeyboard());
+    for (0..3) |_| {
+        try r.key(.tab, .none);
+        try std.testing.expect(api.canvasHasKeyboard());
+    }
+    // Esc still reaches the selection.
+    try r.key(.escape, .none);
+    try std.testing.expectEqual(0, api.selectionCount());
 }

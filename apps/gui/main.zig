@@ -110,6 +110,12 @@ pub const testing_api = struct {
     pub fn promptOpen() bool {
         return filePromptOpen() or contention != null or leave_prompt != null or recovery != null;
     }
+    pub fn canvasHasKeyboard() bool {
+        return if (canvas_id) |id| dvui.focusedWidgetId() == id else false;
+    }
+    pub fn selectionCount() usize {
+        return selection.items.len;
+    }
     pub fn panelEditing() bool {
         return panel_edit != null;
     }
@@ -543,6 +549,7 @@ fn init(win: *dvui.Window) !void {
         const fonts = try gpa.alloc(Font, installed.len + 1);
         fonts[0] = .{ .name = "Inter Medium (examples)", .path = example_font, .family = "Inter", .style = "Medium" };
         @memcpy(fonts[1..], installed);
+        gpa.free(installed);
         state.fonts = fonts;
     } else |_| {
         state.fonts = installed;
@@ -1294,6 +1301,11 @@ fn deinit(_: *dvui.Window) void {
     hist.deinit();
     if (prefs_store) |*ps| ps.deinit();
     prefs_store = null;
+    freeFonts(state.gpa);
+    // The resolved faces point into the font window's: dropped first.
+    if (resolved) |*r| r.deinit();
+    resolved = null;
+    fontwin.deinit();
     doc_fonts.deinit(state.gpa);
     doc_fonts = .init(state.gpa);
     doc_fonts_loaded = false;
@@ -1358,9 +1370,23 @@ fn defaultFont(fonts: []const Font) usize {
 /// as ~/.local/share/fonts), sorted by name. Each face of a collection is
 /// listed; a variable font is listed once, at its default instance, under
 /// that instance's style (fontconfig also lists the font itself, unstyled).
+/// fc-list's output, which the listed fonts' strings point into.
+var fonts_text: []u8 = &.{};
+
+/// Frees the font list (`state.fonts`) and what it points into.
+fn freeFonts(gpa: std.mem.Allocator) void {
+    for (state.fonts) |f| if (!std.mem.eql(u8, f.path, example_font)) gpa.free(f.name);
+    gpa.free(state.fonts);
+    state.fonts = &.{};
+    gpa.free(fonts_text);
+    fonts_text = &.{};
+}
+
 fn listFonts(gpa: std.mem.Allocator) ![]Font {
     const r = try std.process.run(gpa, dvui.io, .{ .argv = &.{ "fc-list", "--format", "%{family[0]}\t%{style[0]}\t%{index}\t%{file}\n" } });
     defer gpa.free(r.stderr);
+    // The fonts' paths, families and styles point into it: kept until exit.
+    fonts_text = r.stdout;
     var list: std.ArrayList(Font) = .empty;
     var lines = std.mem.splitScalar(u8, r.stdout, '\n');
     while (lines.next()) |line| {
@@ -14519,7 +14545,12 @@ var status_hunt_buf: [128]u8 = undefined;
 /// selection, the arrows move it. Whether it was done.
 fn selectionAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
-        kact("canvas.selection.hunt") => return huntNext(inv.arg == 1),
+        kact("canvas.selection.hunt") => {
+            // Taken even with nothing to hunt to: left to the toolkit, Tab
+            // would take the keyboard from the canvas to the next widget.
+            if (!huntNext(inv.arg == 1)) state.status = "Nothing else is near the last Ctrl-click for Tab to take. ";
+            return true;
+        },
         kact("canvas.selection.clear") => {
             selection.clearRetainingCapacity();
             hunt_clear();

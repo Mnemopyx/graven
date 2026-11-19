@@ -123,6 +123,19 @@ pub fn indexRecords(allocator: Allocator, rescan: bool) []fs.Record {
     return records;
 }
 
+/// Everything the window holds: the faces loaded, retired or not, and the
+/// index (records, file infos). At exit, or before starting again.
+pub fn deinit() void {
+    if (index_arena == null) return;
+    dropFaces();
+    releaseRetired();
+    retired.deinit(gpa);
+    retired = .empty;
+    if (index_arena) |*a| a.deinit();
+    index_arena = null;
+    records = &.{};
+}
+
 fn dropFaces() void {
     var it = faces.valueIterator();
     while (it.next()) |f| retired.append(gpa, f.*) catch f.*.deinit();
