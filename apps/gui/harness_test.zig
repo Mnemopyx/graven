@@ -950,6 +950,30 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     }
     // The engraving's mark: the bare metal under the anodising.
     try std.testing.expectEqualStrings("bare aluminium", pl.operations[0].targets[0].colour.?.name);
+    // Checked, operation by operation, each against its own process: the
+    // engraving's passes in the bare metal, the waterjet's kerf round the
+    // plate and inside its 39 holes.
+    try r.click("Checks/Check this plan");
+    try r.frames(2);
+    const oc = api.planChecks(id);
+    try std.testing.expectEqual(@as(usize, 2), oc.len);
+    for (oc) |c| switch (c.op) {
+        0 => {
+            try std.testing.expect(c.report.paths.len > 0);
+            try std.testing.expectEqualStrings("bare aluminium", c.report.paths[0].colour.name);
+            try std.testing.expectEqualStrings("Generic laser engraver", c.report.profile.?.name);
+        },
+        1 => {
+            try std.testing.expectEqual(@as(usize, 40), c.report.paths.len);
+            try std.testing.expectEqual(0.9, c.report.paths[0].width);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    _ = try r.rectOf("Checks/Findings");
+    try r.click("tree/untitled/Manufacturing plans/Plan 2");
+    try r.click("Manufacturing plan/Open in a manufacturing view");
+    try r.frames(2);
+    try std.testing.expectEqual(.manufacture, api.activeView().kind);
     // Plan 1 stays the one exported.
     try std.testing.expectEqual(m.plans.items[0].id, m.active_plan);
     try saveAs(&r, scratch ++ "/hp15c-plans.graven");

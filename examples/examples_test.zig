@@ -273,3 +273,40 @@ test "plans and materials are saved and read back as they were, not upgraded aga
     try testing.expectEqual(m.active_plan, back.active_plan);
     try testing.expectEqualStrings(m.plans.items[0].operations[0].targets[2].layer, back.plans.items[0].operations[0].targets[2].layer);
 }
+
+test "an operation checked on its own: the plate waterjet cut, its outline and holes only, a kerf path round each" {
+    var o = try open(@embedFile("hp15c.graven"));
+    defer close(&o);
+    const m = &o.model;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plate = try panelNamed(m, "HP-15C plate");
+    const id = m.panels.items[plate].id;
+    var labels: layout.Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    var placed = try layout.solve(testing.allocator, m, plate, &labels);
+    defer placed.deinit();
+    const jet = layout.model.process.builtin("Generic waterjet").?;
+    const r = try layout.check.runWith(a, m, plate, &placed, &.{}, null, .{
+        .profile = jet,
+        .targets = &.{ .{ .panel = id, .layer = "Plate" }, .{ .panel = id, .layer = "Key holes" } },
+    });
+    // One cut round the plate, one inside each of its 39 holes, a kerf wide.
+    try testing.expectEqual(40, r.paths.len);
+    for (r.paths) |p| {
+        try testing.expectEqual(0.9, p.width);
+        try testing.expectEqualStrings("kerf", p.colour.name);
+    }
+    // The plate's outline cut outside it: its path's box is half a kerf
+    // bigger all round.
+    var widest: f64 = 0;
+    for (r.paths) |p| {
+        var b = layout.geom.Box.empty;
+        for (p.points) |q| b = b.addPoint(q);
+        widest = @max(widest, b.width());
+    }
+    try testing.expectApproxEqAbs(128 + 0.9, widest, 0.01);
+    // Only cutting: no depths judged, no colours counted.
+    for (r.findings) |f| try testing.expect(f.kind != .depth and f.kind != .colours);
+}

@@ -41,6 +41,7 @@ const model = @import("model.zig");
 const place = @import("place.zig");
 const fab = @import("fab.zig");
 const process = @import("process.zig");
+const manufacture = @import("manufacture.zig");
 
 const Allocator = std.mem.Allocator;
 const Outline = geom.Outline;
@@ -198,14 +199,42 @@ const Feature = struct {
     colour: ?[]const u8,
     /// For a mark, the body it is in (its index among the features).
     body: ?usize = null,
+    /// Its stackup layer (its index in the panel's fabrication).
+    layer: usize = 0,
+};
+
+/// What a run checks: against which profile, and, for an operation of a
+/// manufacturing plan, only the stackup layers it makes (its targets on
+/// this panel), each in the colour it gives.
+pub const Scope = struct {
+    profile: process.Profile,
+    targets: ?[]const manufacture.Target = null,
 };
 
 /// The checks of panel `panel` as `placed` lays it out (`faces`: the
 /// faces its labels were set in), with `cache` (null: one for this run).
 /// Allocated from `a` (an arena suits).
 pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face, cache: ?*Cache) !Report {
+    const profile = (m.processOf(panel) orelse return .{ .profile = null, .findings = &.{}, .worst = .initFill(.pass) }).*;
+    return runWith(a, m, panel, placed, faces, cache, .{ .profile = profile });
+}
+
+/// Whether `scope` takes stackup layer `name` of panel `panel`, and the
+/// colour it gives there.
+fn inScope(m: *const model.Model, scope: Scope, panel: usize, name: []const u8) struct { yes: bool, colour: ?model.FabColour = null } {
+    const ts = scope.targets orelse return .{ .yes = true };
+    const id = m.panels.items[panel].id;
+    for (ts) |t| if (t.panel == id and std.mem.eql(u8, t.layer, name)) return .{ .yes = true, .colour = t.colour };
+    return .{ .yes = false };
+}
+
+/// As `run`, within `scope`: an operation's checks against its own
+/// process, on the layers it makes, and its simulation (FDM's walls; a
+/// cutter's kerf path, outside a part's edge and inside its holes; an
+/// engraver's passes, a spot apart, until the mark is filled).
+pub fn runWith(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face, cache: ?*Cache, scope: Scope) !Report {
     var report: Report = .{ .profile = null, .findings = &.{}, .worst = .initFill(.pass) };
-    const profile = (m.processOf(panel) orelse return report).*;
+    const profile = scope.profile;
     report.profile = profile;
     const lim = profile.limits();
     const pf = m.panels.items[panel].fab;
@@ -221,6 +250,12 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
     var i: usize = 0;
     while (i < plan.steps.len) : (i += 1) {
         const st = plan.steps[i];
+        if (!inScope(m, scope, panel, pf.layers[st.layer].name).yes) {
+            // Not this operation's: an inlay's two steps passed together.
+            const next = if (i + 1 < plan.steps.len) plan.steps[i + 1] else null;
+            if (st.op == .subtract and next != null and next.?.layer == st.layer) i += 1;
+            continue;
+        }
         var role: Role = .body;
         var colour: ?[]const u8 = null;
         switch (st.op) {
@@ -242,7 +277,7 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
         }
         for (st.pieces) |pc| {
             const fc = (try pieceOf(a, c, pc)) orelse continue;
-            try feats.append(a, .{ .face = fc, .role = role, .z = .{ st.z0, st.z1 }, .colour = colour });
+            try feats.append(a, .{ .face = fc, .role = role, .z = .{ st.z0, st.z1 }, .colour = colour, .layer = st.layer });
         }
     }
 
@@ -257,7 +292,7 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
     };
     report.colours = colours.items.len;
     if (!whole.isEmpty()) report.extent = .{ whole.width(), whole.height(), z1 - z0 };
-    if (colours.items.len > lim.colours) try out.append(a, .{ .kind = .colours, .verdict = .fail, .box = whole, .value = @floatFromInt(colours.items.len) });
+    if (profile.class() == .additive and colours.items.len > lim.colours) try out.append(a, .{ .kind = .colours, .verdict = .fail, .box = whole, .value = @floatFromInt(colours.items.len) });
     if (!whole.isEmpty()) {
         const e = report.extent;
         const b = lim.build;
@@ -267,6 +302,7 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
 
     // Depths in whole layers.
     if (lim.layer) |lh| for (pf.layers, 0..) |l, li| {
+        if (!inScope(m, scope, panel, l.name).yes) continue;
         const d = l.depth orelse continue;
         const n = d / lh;
         const whole_layers = @round(n);
@@ -277,7 +313,7 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
     // Cap heights of the legends the layers take.
     for (placed.labels, 0..) |pl, li| {
         const taken = for (pf.layers) |l| switch (l.source) {
-            .text => |track| if (fab.takes(m, track, pl)) break true,
+            .text => |track| if (inScope(m, scope, panel, l.name).yes and fab.takes(m, track, pl)) break true,
             else => {},
         } else false;
         if (!taken) continue;
@@ -376,30 +412,47 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
         };
     }
 
-    // The walls a slicer would lay (FDM).
-    switch (profile.params) {
-        .fdm => |fdm| {
-            var paths: std.ArrayList(Path) = .empty;
-            const grey: model.FabColour = .{ .name = "", .color = .{ .r = 128, .g = 128, .b = 128 } };
-            for (feats.items) |ft| {
-                const colour = colourOf(plan, ft) orelse if (ft.body) |bi| colourOf(plan, feats.items[bi]) orelse grey else grey;
-                const key = judgedKey(ft.face.shape, ft.role, .{ .pass = fdm.line_width, .fail = 0 }, .{ .pass = 0, .fail = 0 });
-                const rel = c.walls.get(key) orelse blk: {
-                    const ca = c.arena.allocator();
-                    const loops = try walls(a, ca, ft.face, ft.role, fdm.line_width);
-                    try c.walls.put(ca, key, loops);
-                    break :blk loops;
-                };
-                for (rel) |l| {
-                    const pts = try a.alloc(Point, l.len);
-                    for (l, pts) |q, *r| r.* = .{ .x = q.x + ft.face.box.x0, .y = q.y + ft.face.box.y0 };
-                    try paths.append(a, .{ .points = pts, .width = fdm.line_width, .colour = colour, .z = ft.z });
-                }
+    // The process simulated: what it lays or cuts, path by path.
+    const sim: struct { w: f64, kind: process.Kind } = switch (profile.params) {
+        .fdm => |f| .{ .w = f.line_width, .kind = .fdm },
+        .laser_cut => |l| .{ .w = l.kerf, .kind = .laser_cut },
+        .waterjet => |w| .{ .w = w.kerf, .kind = .waterjet },
+        .laser_engrave => |l| .{ .w = l.spot, .kind = .laser_engrave },
+    };
+    {
+        var paths: std.ArrayList(Path) = .empty;
+        const grey: model.FabColour = .{ .name = "", .color = .{ .r = 128, .g = 128, .b = 128 } };
+        const kerf: model.FabColour = .{ .name = "kerf", .color = .{ .r = 0xff, .g = 0x6a, .b = 0x00 } };
+        for (feats.items) |ft| {
+            const given = inScope(m, scope, panel, pf.layers[ft.layer].name).colour;
+            const colour = if (sim.kind.cuts()) kerf else given orelse colourOf(plan, ft) orelse if (ft.body) |bi| colourOf(plan, feats.items[bi]) orelse grey else grey;
+            // How the process goes round it: a slicer's walls (two in a
+            // part, inlays filled, two round a hole); a cut once, outside
+            // a part, inside a hole; an engraving's passes until filled.
+            const outward, const most: usize = switch (sim.kind) {
+                .fdm => .{ ft.role == .void, if (ft.role == .inlay) 64 else 2 },
+                .laser_cut, .waterjet => .{ ft.role == .body, 1 },
+                .laser_engrave => .{ false, if (ft.role == .body) 3 else 64 },
+            };
+            var h: std.hash.Wyhash = .init(3);
+            h.update(std.mem.asBytes(&ft.face.shape));
+            h.update(std.mem.asBytes(&outward));
+            h.update(std.mem.asBytes(&most));
+            h.update(std.mem.asBytes(&sim.w));
+            const key = h.final();
+            const rel = c.walls.get(key) orelse blk: {
+                const ca = c.arena.allocator();
+                const loops = try walls(a, ca, ft.face, outward, most, sim.w);
+                try c.walls.put(ca, key, loops);
+                break :blk loops;
+            };
+            for (rel) |l| {
+                const pts = try a.alloc(Point, l.len);
+                for (l, pts) |q, *r| r.* = .{ .x = q.x + ft.face.box.x0, .y = q.y + ft.face.box.y0 };
+                try paths.append(a, .{ .points = pts, .width = sim.w, .colour = colour, .z = ft.z });
             }
-            report.paths = paths.items;
-        },
-        // Cutting and engraving: no simulation yet.
-        else => {},
+        }
+        report.paths = paths.items;
     }
 
     report.findings = out.items;
@@ -418,17 +471,15 @@ fn colourOf(plan: fab.Plan, ft: Feature) ?model.FabColour {
     return null;
 }
 
-/// Wall centrelines, as a slicer's perimeters: inward from a part's edge
-/// (two walls) or an inlay's (walls until it is filled), outward round a
-/// cut (two walls, in the part's material). Relative to the face's box
-/// corner, in `ca`.
-fn walls(a: Allocator, ca: Allocator, fc: Face, role: Role, w: f64) ![]const Poly {
+/// Path centrelines `w` wide round a face, at most `most` of them, a path
+/// apart: inward from its edge (walls, passes), or outward (round a hole,
+/// or a cut outside a part). Relative to the face's box corner, in `ca`.
+fn walls(a: Allocator, ca: Allocator, fc: Face, outward: bool, most: usize, w: f64) ![]const Poly {
     const o = try outlineOf(a, fc.polys);
     var out: std.ArrayList(Poly) = .empty;
-    const most: usize = if (role == .inlay) 64 else 2;
     for (0..most) |k| {
         const r = w / 2 + @as(f64, @floatFromInt(k)) * w;
-        const ring = if (role == .void) try geom.grow.grow(a, o, r, tolerance) else try erode(a, o, r);
+        const ring = if (outward) try geom.grow.grow(a, o, r, tolerance) else try erode(a, o, r);
         if (ring.contours.len == 0) break;
         for (ring.contours) |cn| {
             const pts = try geom.grow.flatten(a, cn, tolerance);

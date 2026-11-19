@@ -96,6 +96,10 @@ pub const testing_api = struct {
     pub fn checksOutOfDate() bool {
         return checksStale();
     }
+    /// A plan's last checks: per operation and part.
+    pub fn planChecks(id: layout.model.ObjectId) []const OpChecked {
+        return if (planChecksFor(id)) plan_checks else &.{};
+    }
     /// The active view's kind, and what it shows.
     pub fn activeView() docviews.View {
         return vl.views[vl.active];
@@ -1360,6 +1364,8 @@ fn deinit(_: *dvui.Window) void {
     dg_table = .{};
     clearChecks();
     check_shown = .initFill(true);
+    clearPlanChecks();
+    op_hidden.clearAndFree(state.gpa);
     tags_given.deinit(state.gpa);
     tags_given = .empty;
     clearPlaced();
@@ -3040,7 +3046,10 @@ fn runAction(inv: keymap.Invocation) bool {
         },
         kact("fab.check") => {
             if (canvas_prompt) return false;
-            runChecks(checkTarget());
+            // In a manufacturing view: its plan's operations.
+            if (activeKind() == .manufacture) {
+                runPlanChecks(@enumFromInt(vl.views[vl.active].target));
+            } else runChecks(checkTarget());
             return true;
         },
         kact("view.snap-grid") => {
@@ -8383,6 +8392,8 @@ fn planEditor(id: ObjectId) void {
         propText("Exported", "{s}", .{"this plan"}, 102);
     } else if (tbutton(@src(), "Export this plan (make it active)", .{}, .{ .expand = .horizontal, .id_extra = 102 })) act(.setActivePlan, .{id}) catch {};
 
+    planChecksSection(id);
+
     // Parts, each with its material.
     heading("Parts", .{}, 110);
     for (p.parts, 0..) |pt, k| {
@@ -8494,6 +8505,7 @@ fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void
         @constCast(n.operations)[k].passes = @intFromFloat(@round(v));
         actM(mergeKey(.{ "operation passes", id, k }), .setPlan, .{ id, n }) catch {};
     }
+    if (opCheckCounts(id, k)) |cc| propText("Checked", "{d} failing, {d} marginal · {d} paths", .{ cc.fails, cc.marginal, cc.paths }, n0 + 7);
     const prof = m.profileById(op.process);
     // Each part's stackup layers: made by it or not, and in what colour.
     var j: usize = 0;
@@ -8663,6 +8675,157 @@ fn finishColor(f: layout.model.FabColour) dvui.Color {
     return display.fix(dvui.Color{ .r = f.color.r, .g = f.color.g, .b = f.color.b });
 }
 
+/// A plan's checks, last run (by hand: C in its view, or Check this plan):
+/// each operation's, per part it works on, against its own process, with
+/// its simulation; drawn in the plan's view under the operation's layer.
+const OpChecked = struct {
+    op: usize,
+    panel: usize,
+    report: layout.check.Report,
+    areas: []const ?geom.fill.Region,
+};
+var plan_checks_arena: ?std.heap.ArenaAllocator = null;
+var plan_checks: []const OpChecked = &.{};
+var plan_checks_plan: ObjectId = .none;
+var plan_checks_rev: u64 = 0;
+var plan_checks_gen: u64 = 0;
+var plan_findings_shown = true;
+var plan_simulation_shown = true;
+
+fn planChecksFor(id: ObjectId) bool {
+    return plan_checks_plan == id and plan_checks_gen == doc_generation and plan_checks_arena != null;
+}
+
+fn clearPlanChecks() void {
+    if (plan_checks_arena) |*ar| ar.deinit();
+    plan_checks_arena = null;
+    plan_checks = &.{};
+    plan_checks_plan = .none;
+}
+
+/// Checks plan `id`: every operation, on each part it works on.
+fn runPlanChecks(id: ObjectId) void {
+    const m = &state.model;
+    const pi = m.planIndex(id) orelse return;
+    const plan = m.plans.items[pi];
+    if (state.placed_rev != m.revision) {
+        state.status = "The panels are still being laid out: check again in a moment. ";
+        return;
+    }
+    if (check_cache != null and check_cache_gen != doc_generation) {
+        check_cache.?.deinit();
+        check_cache = null;
+    }
+    if (check_cache == null) {
+        check_cache = .init(state.gpa);
+        check_cache_gen = doc_generation;
+    }
+    clearPlanChecks();
+    plan_checks_arena = .init(state.gpa);
+    const a = plan_checks_arena.?.allocator();
+    var list: std.ArrayList(OpChecked) = .empty;
+    const t0 = std.Io.Clock.awake.now(dvui.io);
+    var fails: usize = 0;
+    var marginal: usize = 0;
+    for (plan.operations, 0..) |op, k| {
+        const prof = m.profileById(op.process) orelse continue;
+        for (plan.parts) |pt| {
+            const panel = m.panelIndex(pt.panel) orelse continue;
+            if (panel >= state.placed.items.len) continue;
+            const any = for (op.targets) |t| {
+                if (t.panel == pt.panel) break true;
+            } else false;
+            if (!any) continue;
+            const report = layout.check.runWith(a, m, panel, &state.placed.items[panel], faceTable(), &check_cache.?, .{ .profile = prof.*, .targets = op.targets }) catch continue;
+            const areas = a.alloc(?geom.fill.Region, report.findings.len) catch return;
+            for (report.findings, areas) |f, *r| {
+                r.* = null;
+                switch (f.verdict) {
+                    .fail => fails += 1,
+                    .marginal => marginal += 1,
+                    .pass => {},
+                }
+                const o = f.area orelse continue;
+                var loops: std.ArrayList([]const geom.Point) = .empty;
+                for (o.contours) |cn| {
+                    const pts = geom.grow.flatten(a, cn, layout.check.tolerance) catch continue;
+                    loops.append(a, pts) catch continue;
+                }
+                r.* = geom.fill.nonzero(a, loops.items, layout.check.tolerance * 1e-3) catch null;
+            }
+            list.append(a, .{ .op = k, .panel = panel, .report = report, .areas = areas }) catch return;
+        }
+    }
+    plan_checks = list.items;
+    plan_checks_plan = id;
+    plan_checks_rev = m.revision;
+    plan_checks_gen = doc_generation;
+    const ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(dvui.io)).nanoseconds)) / 1e6;
+    state.status = std.fmt.bufPrint(&check_status_buf, "Checked {s}'s {d} operation{s} in {d:.0} ms: {d} failing, {d} marginal. ", .{ plan.name, plan.operations.len, if (plan.operations.len == 1) "" else "s", ms, fails, marginal }) catch "Checked. ";
+    dvui.refresh(null, @src(), null);
+}
+
+/// Operation `k`'s last results, summed over its parts.
+fn opCheckCounts(id: ObjectId, k: usize) ?struct { fails: usize, marginal: usize, paths: usize } {
+    if (!planChecksFor(id)) return null;
+    var fails: usize = 0;
+    var marginal: usize = 0;
+    var paths: usize = 0;
+    var any = false;
+    for (plan_checks) |oc| if (oc.op == k) {
+        any = true;
+        fails += oc.report.count(.stroke, .fail) + oc.report.count(.gap, .fail) + oc.report.count(.cap, .fail) + oc.report.count(.depth, .fail) + oc.report.count(.colours, .fail) + oc.report.count(.size, .fail);
+        marginal += oc.report.count(.stroke, .marginal) + oc.report.count(.gap, .marginal) + oc.report.count(.cap, .marginal) + oc.report.count(.depth, .marginal);
+        paths += oc.report.paths.len;
+    };
+    return if (any) .{ .fails = fails, .marginal = marginal, .paths = paths } else null;
+}
+
+/// The plan's checks in its editor: run, and the two result layers shown
+/// or hidden.
+fn planChecksSection(id: ObjectId) void {
+    const stale = planChecksFor(id) and plan_checks_rev != state.model.revision;
+    heading("{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
+    if (tbutton(@src(), "Check this plan", .{}, .{ .expand = .horizontal, .id_extra = 141 })) runPlanChecks(id);
+    if (!planChecksFor(id)) return;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 142 });
+        defer row.deinit();
+        _ = tcheckbox(@src(), &plan_findings_shown, "Findings", .{ .id_extra = 143 });
+        _ = tcheckbox(@src(), &plan_simulation_shown, "Simulation", .{ .id_extra = 144 });
+    }
+    if (tbutton(@src(), "Clear results", .{}, .{ .expand = .horizontal, .id_extra = 145 })) clearPlanChecks();
+}
+
+/// A plan's check results over its view: per operation shown, its
+/// simulated paths, then its findings.
+fn drawPlanChecks(area: dvui.Rect.Physical, id: ObjectId) void {
+    if (!planChecksFor(id)) return;
+    const px = dvui.windowNaturalScale();
+    const marginal = display.fix(dvui.Color{ .r = 0xe0, .g = 0x00, .b = 0xd0 });
+    const failing = display.fix(dvui.Color{ .r = 0xe0, .g = 0x20, .b = 0x1b });
+    const lifo = dvui.currentWindow().lifo();
+    for (plan_checks) |oc| {
+        if (!opShown(id, oc.op) or oc.panel >= state.model.panels.items.len) continue;
+        const at = panelOrigin(oc.panel);
+        if (plan_simulation_shown) for (oc.report.paths) |path| {
+            if (path.points.len < 2) continue;
+            const pts = lifo.alloc(dvui.Point.Physical, path.points.len) catch continue;
+            defer lifo.free(pts);
+            for (path.points, pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+            const c = path.colour.color;
+            const w: f32 = @max(px, @as(f32, @floatCast(path.width * 0.8 * state.view.ppm)) * px);
+            dvui.Path.stroke(.{ .points = pts }, .{ .thickness = w, .color = .{ .color = display.fix(dvui.Color{ .r = c.r, .g = c.g, .b = c.b }).opacity(0.75) }, .closed = true });
+        };
+        if (plan_findings_shown) for (oc.report.findings, oc.areas) |f, region| {
+            const colour = if (f.verdict == .fail) failing else marginal;
+            if (region) |r| {
+                fillRegion(area, r, at, .{ .flat = colour.opacity(0.8) });
+            } else state.view.rect(area, onSheet(oc.panel, f.box)).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = colour } });
+        };
+    }
+}
+
 /// Manufacturing view `v`: its plan's parts where they sit on the canvas,
 /// each operation a layer (shown or hidden in the plan's properties): what
 /// it adds in the colour the plan gives (else the part's material's), what
@@ -8760,6 +8923,7 @@ fn manufactureView(v: u8) void {
         };
         state.view.rect(area, panelBox(pt.panel)).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.panel_edge.opacity(0.6) } });
     }
+    drawPlanChecks(area, id);
     // What it is: the plan, and that a 3D view is to come.
     var cap = dvui.textLayout(@src(), .{}, .{ .background = true, .color_fill = .{ .color = backdrop.opacity(0.85) }, .gravity_x = 0, .gravity_y = 0, .margin = .all(8), .padding = .all(4), .id_extra = v });
     var cb: [160]u8 = undefined;
