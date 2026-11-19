@@ -184,11 +184,7 @@ fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const plac
             if (largest(t.shapes)) |sh| try out.append(a, sh.outline);
         },
         .text => |track| for (placed.labels) |l| {
-            if (track.len > 0) {
-                const tile = l.tile orelse continue;
-                const proto = m.proto(m.tileConst(tile).prototype);
-                if (l.slot >= proto.tracks.len or !std.mem.eql(u8, proto.tracks[l.slot].name, track)) continue;
-            }
+            if (!takes(m, track, l)) continue;
             const glyphs = try l.render.outlines(a, faces);
             for (glyphs) |g| {
                 if (g.contours.len == 0) continue;
@@ -197,6 +193,15 @@ fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const plac
         },
     }
     return out.items;
+}
+
+/// Whether a text layer naming `track` (every label when empty) takes
+/// label `l`: a tile's text in a track of that name.
+pub fn takes(m: *const model.Model, track: []const u8, l: place.PlacedLabel) bool {
+    if (track.len == 0) return true;
+    const tile = l.tile orelse return false;
+    const proto = m.proto(m.tileConst(tile).prototype);
+    return l.slot < proto.tracks.len and std.mem.eql(u8, proto.tracks[l.slot].name, track);
 }
 
 /// The shape with the largest box: a part's outline.

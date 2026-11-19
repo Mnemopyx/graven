@@ -38,6 +38,9 @@ const usage =
     \\         gives one part per colour, bands one per colour and height band; --bed
     \\         bottom (the default) stands each part on its lowest face, top on its top.
     \\         The examples: graven export examples/hp15c.graven hp15c.3mf
+    \\       graven check [--font f] [--panel name] [--svg out.svg] <document>
+    \\         Checks each panel made with a process profile against its limits (stroke,
+    \\         gap, cap height, depths, colours, size): pass, marginal or fail, and where.
     \\       graven dump [--log] <document>
     \\         Prints a document's model as text (for reading, or as git's text converter);
     \\         --log adds its history: the file's segments and every logged step.
@@ -53,12 +56,15 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 6 and std.mem.eql(u8, args[1], "svg")) {
         return svg(init, args[2], args[3], args[4], args[5]);
     }
-    if (args.len >= 4 and std.mem.eql(u8, args[1], "export")) {
-        var opts: ExportOptions = .{};
+    if (args.len >= 3 and (std.mem.eql(u8, args[1], "export") or std.mem.eql(u8, args[1], "check"))) {
+        const checking = std.mem.eql(u8, args[1], "check");
+        var opts: ExportOptions = .{ .check = checking };
         var k: usize = 2;
         while (k + 1 < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 2) {
             if (std.mem.eql(u8, args[k], "--font")) {
                 opts.font = args[k + 1];
+            } else if (checking and std.mem.eql(u8, args[k], "--svg")) {
+                opts.svg = args[k + 1];
             } else if (std.mem.eql(u8, args[k], "--panel")) {
                 opts.panel = args[k + 1];
             } else if (std.mem.eql(u8, args[k], "--parts")) {
@@ -67,7 +73,8 @@ pub fn main(init: std.process.Init) !void {
                 opts.threemf.bed = std.meta.stringToEnum(layout.threemf.Bed, args[k + 1]) orelse break;
             } else break;
         }
-        if (args.len - k == 2) return exportDocument(init, args[k], args[k + 1], opts);
+        if (!checking and args.len - k == 2) return exportDocument(init, args[k], args[k + 1], opts);
+        if (checking and args.len - k == 1) return exportDocument(init, args[k], "", opts);
     }
     if ((args.len == 5 or args.len == 6) and std.mem.eql(u8, args[1], "v2")) {
         return v2(init, args[2], args[3], args[4], if (args.len == 6) args[5] else null);
@@ -584,6 +591,10 @@ const ExportOptions = struct {
     font: ?[]const u8 = null,
     panel: ?[]const u8 = null,
     threemf: ThreeMfOptions = .{},
+    /// graven check: the panels checked, nothing written; with `svg`, each
+    /// panel drawn with its findings over it.
+    check: bool = false,
+    svg: ?[]const u8 = null,
 };
 
 /// graven export: each panel of a document (or the one named) as SVG or
@@ -591,6 +602,86 @@ const ExportOptions = struct {
 /// `<stem>-<panel name><ext>`. Fonts as the GUI finds them: the document's
 /// folders first (folders.zig), then the installed ones; or, with --font,
 /// every style in that one font.
+/// A panel's checks, printed: each check's verdict, then every finding.
+fn printChecks(init: std.process.Init, m: *const layout.Model, pi: usize, placed: *const layout.place.Placed, faces: []const *layout.Face, svg_path: ?[]const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const name = m.panels.items[pi].name;
+    const t0 = std.Io.Clock.awake.now(init.io);
+    var cache: layout.check.Cache = .init(init.gpa);
+    defer cache.deinit();
+    const r = try layout.check.run(a, m, pi, placed, faces, &cache);
+    const t1 = std.Io.Clock.awake.now(init.io);
+    const ms = @as(f64, @floatFromInt(t0.durationTo(t1).nanoseconds)) / 1e6;
+    // Again, with what the first run measured: as the GUI runs it after an
+    // edit.
+    var again_arena: std.heap.ArenaAllocator = .init(init.gpa);
+    defer again_arena.deinit();
+    _ = try layout.check.run(again_arena.allocator(), m, pi, placed, faces, &cache);
+    const warm = @as(f64, @floatFromInt(t1.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds)) / 1e6;
+    std.debug.print("  again, with its shapes measured: {d:.1} ms\n", .{warm});
+    const pr = r.profile orelse {
+        std.debug.print("{s}: no process profile chosen: nothing to check against\n", .{name});
+        return;
+    };
+    std.debug.print("{s}: {s}, {s} ({d:.0} ms)\n", .{ name, pr.name, @tagName(r.overall()), ms });
+    std.debug.print("  part {d:.2} x {d:.2} x {d:.2} mm, {d} colour(s); {d} faces, {d} alike, {d} unmeasured\n", .{ r.extent[0], r.extent[1], r.extent[2], r.colours, r.faces, r.cached, r.unmeasured });
+    for (std.enums.values(layout.check.Kind)) |k| {
+        std.debug.print("  {s}: {s}", .{ k.label(), @tagName(r.worst.get(k)) });
+        const mg = r.count(k, .marginal);
+        const fl = r.count(k, .fail);
+        if (mg + fl > 0) std.debug.print(" ({d} marginal, {d} failing)", .{ mg, fl });
+        std.debug.print("\n", .{});
+    }
+    if (svg_path) |path| {
+        // The panel, and over it each finding's area: marginal amber,
+        // failing red; a box round one with no area.
+        const base = try layout.output.panelSvg(a, placed, faces, .{});
+        const g = std.mem.indexOf(u8, base, "<g transform=\"").?;
+        const g_end = std.mem.indexOfScalarPos(u8, base, g, '>').? + 1;
+        const end = std.mem.lastIndexOf(u8, base, "</svg>").?;
+        var w: std.Io.Writer.Allocating = .init(a);
+        try w.writer.writeAll(base[0..end]);
+        try w.writer.writeAll(base[g..g_end]);
+        for (r.findings) |f| {
+            const colour = if (f.verdict == .fail) "#e0201b" else "#e000d0";
+            if (f.area) |o| {
+                try w.writer.print("<path fill=\"{s}\" fill-opacity=\"0.85\" d=\"", .{colour});
+                for (o.contours) |cn| {
+                    for (cn.segments, 0..) |sg, k| {
+                        const p0 = sg.start();
+                        if (k == 0) try w.writer.print("M{d:.4} {d:.4}", .{ p0.x, p0.y });
+                        const p1 = sg.end();
+                        try w.writer.print("L{d:.4} {d:.4}", .{ p1.x, p1.y });
+                    }
+                    try w.writer.writeAll("Z");
+                }
+                try w.writer.writeAll("\"/>\n");
+            } else try w.writer.print("<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" fill=\"none\" stroke=\"{s}\" stroke-width=\"0.1\"/>\n", .{ f.box.x0, f.box.y0, f.box.width(), f.box.height(), colour });
+        }
+        try w.writer.writeAll("</g>\n</svg>\n");
+        const safe = try a.dupe(u8, name);
+        for (safe) |*ch| if (ch.* == '/' or ch.* == ' ') {
+            ch.* = '-';
+        };
+        const ext = std.fs.path.extension(path);
+        const out = try std.fmt.allocPrint(a, "{s}-{s}{s}", .{ path[0 .. path.len - ext.len], safe, ext });
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out, .data = w.written() });
+        std.debug.print("  drawn: {s}\n", .{out});
+    }
+    for (r.findings) |f| {
+        std.debug.print("    {s} {s} at ({d:.2}, {d:.2})-({d:.2}, {d:.2})", .{ f.kind.label(), @tagName(f.verdict), f.box.x0, f.box.y0, f.box.x1, f.box.y1 });
+        switch (f.kind) {
+            .stroke, .gap => std.debug.print(" z {d:.2}-{d:.2}{s}{s}", .{ f.z[0], f.z[1], if (f.colour != null) " " else "", f.colour orelse "" }),
+            .cap, .depth => std.debug.print(" {d:.3} mm", .{f.value}),
+            .colours => std.debug.print(" {d}", .{f.value}),
+            .size => std.debug.print(" {d:.1} x {d:.1} x {d:.1}", .{ f.extent[0], f.extent[1], f.extent[2] }),
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
 fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []const u8, opts: ExportOptions) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -599,7 +690,7 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
     const arena = arena_state.allocator();
     const ext = std.fs.path.extension(out_path);
     const as_3mf = std.ascii.eqlIgnoreCase(ext, ".3mf");
-    if (!as_3mf and !std.ascii.eqlIgnoreCase(ext, ".svg")) {
+    if (!opts.check and !as_3mf and !std.ascii.eqlIgnoreCase(ext, ".svg")) {
         std.debug.print("{s}: the output must end in .svg or .3mf\n", .{out_path});
         std.process.exit(2);
     }
@@ -675,6 +766,10 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
         };
         var placed = try layout.solve(gpa, m, pi, &labels);
         defer placed.deinit();
+        if (opts.check) {
+            try printChecks(init, m, pi, &placed, faces, opts.svg);
+            continue;
+        }
         var issues: usize = 0;
         for (placed.issues) |i| if (i.kind == .row_overflow or i.kind == .missing_glyph) {
             issues += 1;

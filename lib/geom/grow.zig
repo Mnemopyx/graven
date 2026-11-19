@@ -61,7 +61,7 @@ pub fn grow(a: Allocator, o: Outline, d: f64, tol: f64) Allocator.Error!Outline 
 }
 
 /// A contour as points within `tol` of it, the closing point not repeated.
-fn flatten(a: Allocator, c: Contour, tol: f64) Allocator.Error![]Point {
+pub fn flatten(a: Allocator, c: Contour, tol: f64) Allocator.Error![]Point {
     var pts: std.ArrayList(Point) = .empty;
     for (c.segments) |seg| {
         const ps = seg.points();
@@ -221,4 +221,25 @@ test "straight runs and hairline turns the wrong way make no arc" {
     for (0..6) |i| segs[i] = .{ .line = .{ pts[i], pts[(i + 1) % 6] } };
     const g = try grow(a, .{ .contours = &.{.{ .segments = &segs }} }, 1, 1e-4);
     try testing.expectApproxEqAbs(140 + std.math.pi, regionArea(g), 1e-2);
+}
+
+test "a thin S grows back whole: offsets crossing near a curve's top still join" {
+    // An S from the HP-15C's legends, eroded by 0.11 mm (its outer wall's
+    // centreline at a 0.22 mm bead), grown back by 0.11. The offsets of
+    // its two sides cross close under vertices at the tops of its curves,
+    // where the edges are nearly horizontal: before crossings were made
+    // shared vertices (fill.zig), the boundary there failed to join, and
+    // the growth came back as three loops, chunks of the S missing.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var pts: std.ArrayList(Point) = .empty;
+    var it = std.mem.tokenizeAny(u8, @embedFile("grow_test_s.txt"), " \n");
+    while (it.next()) |xs| try pts.append(a, .{ .x = try std.fmt.parseFloat(f64, xs), .y = try std.fmt.parseFloat(f64, it.next().?) });
+    const segs = try a.alloc(Segment, pts.items.len);
+    for (pts.items, 0..) |p, i| segs[i] = .{ .line = .{ p, pts.items[(i + 1) % pts.items.len] } };
+    const g = try grow(a, .{ .contours = &.{.{ .segments = segs }} }, 0.11, 0.005);
+    try testing.expectEqual(@as(usize, 1), g.contours.len);
+    // The S's own area was 1.5527 mm²; opened, it loses only its corners.
+    try testing.expectApproxEqAbs(1.540, regionArea(g), 0.002);
 }

@@ -162,12 +162,65 @@ fn decompose(a: Allocator, s: Allocator, polygons: []const []const Point, eps: f
     }
     if (edges.items.len == 0) return .{ .levels = &.{}, .slabs = &.{}, .pieces = &.{}, .triangles = &.{}, .breaks = &.{} };
 
-    // Levels: every vertex, and every crossing strictly inside two edges.
+    // Every crossing strictly inside two edges becomes a vertex of both,
+    // the one point shared, so the edges meet there exactly however
+    // levels are merged later. (Merged as a level of its own, a crossing
+    // near a vertex's height left the two edges a hair apart there, which
+    // near-horizontal edges, as at the top of a curve's offset, widen to
+    // far more than `eps`: their pieces no longer met.) Found by a sweep
+    // up: each edge against those starting before it ends.
+    {
+        const by_bottom = try s.alloc(u32, edges.items.len);
+        for (by_bottom, 0..) |*o, i| o.* = @intCast(i);
+        std.mem.sort(u32, by_bottom, edges.items, struct {
+            fn lt(es: []const Edge, x: u32, y: u32) bool {
+                return es[x].ymin() < es[y].ymin();
+            }
+        }.lt);
+        const splits = try s.alloc(std.ArrayList(Point), edges.items.len);
+        for (splits) |*l| l.* = .empty;
+        var any = false;
+        for (by_bottom, 0..) |ei, i| {
+            const e = edges.items[ei];
+            const top = e.ymax();
+            for (by_bottom[i + 1 ..]) |fi| {
+                const f = edges.items[fi];
+                if (f.ymin() >= top) break;
+                if (crossing(e, f)) |pt| {
+                    try splits[ei].append(s, pt);
+                    try splits[fi].append(s, pt);
+                    any = true;
+                }
+            }
+        }
+        if (any) {
+            var split: std.ArrayList(Edge) = .empty;
+            for (edges.items, splits) |e, *l| {
+                if (l.items.len == 0) {
+                    try split.append(s, e);
+                    continue;
+                }
+                // Along the edge, from a to b.
+                const up = e.b.y > e.a.y;
+                std.mem.sort(Point, l.items, up, struct {
+                    fn lt(u: bool, x: Point, y: Point) bool {
+                        return if (u) x.y < y.y else x.y > y.y;
+                    }
+                }.lt);
+                var from = e.a;
+                for (l.items) |pt| {
+                    if (pt.y != from.y) try split.append(s, .{ .a = from, .b = pt, .dir = e.dir });
+                    from = pt;
+                }
+                if (e.b.y != from.y) try split.append(s, .{ .a = from, .b = e.b, .dir = e.dir });
+            }
+            edges = split;
+        }
+    }
+
+    // Levels: every vertex's height.
     var ys: std.ArrayList(f64) = .empty;
     for (edges.items) |e| try ys.appendSlice(s, &.{ e.a.y, e.b.y });
-    for (edges.items, 0..) |e, i| for (edges.items[i + 1 ..]) |f| {
-        if (crossingY(e, f)) |y| try ys.append(s, y);
-    };
     std.mem.sort(f64, ys.items, {}, std.sort.asc(f64));
     var levels: std.ArrayList(f64) = .empty;
     for (ys.items) |y| {
@@ -190,22 +243,41 @@ fn decompose(a: Allocator, s: Allocator, polygons: []const []const Point, eps: f
     const slabs = try s.alloc([]const Span, lv.len -| 1);
     var pieces: std.ArrayList(Piece) = .empty;
     var triangles: std.ArrayList([3]Point) = .empty;
-    const Cut = struct { x: f64, xb: f64, xt: f64, dir: i32 };
+    // Ties in x keep the edges' order (`at`), as a stable sort of all the
+    // edges would.
+    const Cut = struct { x: f64, xb: f64, xt: f64, dir: i32, at: u32 };
     var cuts: std.ArrayList(Cut) = .empty;
+    // The edges spanning each slab: those started, less those ended, kept
+    // as the sweep goes up.
+    const by_lo = try s.alloc(u32, edges.items.len);
+    for (by_lo, 0..) |*o, i| o.* = @intCast(i);
+    std.mem.sort(u32, by_lo, edges.items, struct {
+        fn lt(es: []const Edge, x: u32, y: u32) bool {
+            return es[x].lo < es[y].lo;
+        }
+    }.lt);
+    var active: std.ArrayList(u32) = .empty;
+    var next: usize = 0;
     for (slabs, 0..) |*slab, k| {
         const y0 = lv[k];
         const y1 = lv[k + 1];
+        while (next < by_lo.len and edges.items[by_lo[next]].lo <= k) : (next += 1) try active.append(s, by_lo[next]);
+        var kept: usize = 0;
+        for (active.items) |ei| if (edges.items[ei].hi > k) {
+            active.items[kept] = ei;
+            kept += 1;
+        };
+        active.shrinkRetainingCapacity(kept);
         cuts.clearRetainingCapacity();
-        for (edges.items) |e| {
-            if (e.lo <= k and e.hi > k) {
-                const xb = e.xAt(y0);
-                const xt = e.xAt(y1);
-                try cuts.append(s, .{ .x = (xb + xt) / 2, .xb = xb, .xt = xt, .dir = e.dir });
-            }
+        for (active.items) |ei| {
+            const e = edges.items[ei];
+            const xb = e.xAt(y0);
+            const xt = e.xAt(y1);
+            try cuts.append(s, .{ .x = (xb + xt) / 2, .xb = xb, .xt = xt, .dir = e.dir, .at = ei });
         }
         std.mem.sort(Cut, cuts.items, {}, struct {
             fn less(_: void, p: Cut, q: Cut) bool {
-                return p.x < q.x;
+                return p.x < q.x or (p.x == q.x and p.at < q.at);
             }
         }.less);
         var spans: std.ArrayList(Span) = .empty;
@@ -288,6 +360,13 @@ fn covers(spans: anytype, x: f64, side: enum { top, bottom }) bool {
         if (x > lo and x < hi) return true;
     }
     return false;
+}
+
+/// The point where two edges cross strictly inside both, if they do.
+fn crossing(e: Edge, f: Edge) ?Point {
+    const y = crossingY(e, f) orelse return null;
+    // On e, at that height: the shared vertex both are split at.
+    return .{ .x = e.xAt(y), .y = y };
 }
 
 /// The height where two edges cross strictly inside both, if they do.
