@@ -17,7 +17,7 @@ What the app opens on, before there is a document: none of the canvas's interfac
 
 - **Title bar:** drawn by the app (`GRAVEN_NATIVE_FRAME` gives the system's). It shows the file name, a • when unsaved, and the context (Canvas, mm); on the start screen, Graven — Start.
 - **Menus:** four, in the title bar.
-  - **File:** New canvas… (Ctrl+N), Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import text…, Place image…, Export SVG…, Add sample: PC keyboard, Add sample: HP-15C keypad, Quit.
+  - **File:** New canvas… (Ctrl+N), Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import text…, Place image…, Export SVG…, Open example: PC keyboard, Open example: HP-15C keypad (each opened as an untitled copy, from examples/ where Graven was started; unsaved work asked about first), Quit.
   - **Edit:** Undo (Ctrl+Z), Redo (Ctrl+Shift+Z).
   - **Text:** Fonts…
   - **View:** Zoom to context; Show text construction; pane appearance options (ghost style, deep background, vivid colour, halo, hot edges).

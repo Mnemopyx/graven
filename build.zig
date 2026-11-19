@@ -149,15 +149,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Applications. Samples build models through the libraries' actions.
-    const samples = b.createModule(.{
-        .root_source_file = b.path("apps/samples/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "graven_layout", .module = layout },
-        },
-    });
+    // Applications.
     const cli = b.addExecutable(.{
         .name = "graven",
         .root_module = b.createModule(.{
@@ -167,7 +159,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "graven_richtext", .module = richtext },
                 .{ .name = "graven_layout", .module = layout },
-                .{ .name = "graven_samples", .module = samples },
                 .{ .name = "graven_fontsearch", .module = fontsearch },
                 .{ .name = "graven_glyphic", .module = glyphic },
                 .{ .name = "graven_fonts_folders", .module = fonts_folders },
@@ -217,8 +208,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "dvui", .module = dvui_dep.module("dvui_sdl3") },
                     .{ .name = "graven_layout", .module = layout },
-                    .{ .name = "graven_samples", .module = samples },
-                    .{ .name = "graven_config", .module = config },
+                        .{ .name = "graven_config", .module = config },
                     .{ .name = "graven_fontsearch", .module = fontsearch },
                     .{ .name = "graven_fonts_local", .module = fonts_local },
                     .{ .name = "graven_fonts_folders", .module = fonts_folders },
@@ -246,7 +236,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "dvui", .module = dvui_dep.module("dvui_testing") },
                 .{ .name = "graven_layout", .module = layout },
-                .{ .name = "graven_samples", .module = samples },
                 .{ .name = "graven_config", .module = config },
                 .{ .name = "graven_fontsearch", .module = fontsearch },
                 .{ .name = "graven_fonts_local", .module = fonts_local },
@@ -267,7 +256,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, layout, samples, config, fontsearch, richtext, sketch, fonts_local, fonts_folders, glyphic }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, layout, config, fontsearch, richtext, sketch, fonts_local, fonts_folders, glyphic }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).
@@ -299,6 +288,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("apps/gui/views.zig"),
         .target = target,
         .optimize = optimize,
+    }) })).step);
+    // The GUI's text sample.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/gui/text_sample.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "graven_layout", .module = layout }},
     }) })).step);
     // The example documents, read as files.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -338,7 +334,7 @@ pub fn build(b: *std.Build) void {
     //                     fetched as a package named in build.zig.zon
     // then: zig build occt-test ...
     const occt_prefix = b.option([]const u8, "occt", "OCCT install prefix (enables the OCCT bridge)");
-    const fab_mods: FabModules = .{ .layout = layout, .samples = samples };
+    const fab_mods: FabModules = .{ .layout = layout, .folders = fonts_folders };
     const occt_prebuilt = b.option(bool, "occt-prebuilt", "Fetch the prebuilt OCCT release archive (enables the OCCT bridge)") orelse false;
     if (occt_prefix) |prefix| {
         addOcctBridge(b, target, optimize, .{ .prefix = prefix }, fab_mods);
@@ -405,7 +401,7 @@ const occt_toolkits = [_][]const u8{
 };
 
 /// The Graven modules graven-fab uses.
-const FabModules = struct { layout: *std.Build.Module, samples: *std.Build.Module };
+const FabModules = struct { layout: *std.Build.Module, folders: *std.Build.Module };
 
 fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, occt: Occt, mods: FabModules) void {
     // A build is tied to the zig that made it: its C++ is Zig's libc++.
@@ -448,7 +444,7 @@ fn addOcctBridge(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const fab_mod = occtModule(b, target, optimize, occt, b.path("apps/fab/main.zig"), shim);
     fab_mod.addImport("occt_fab", fab);
     fab_mod.addImport("graven_layout", mods.layout);
-    fab_mod.addImport("graven_samples", mods.samples);
+    fab_mod.addImport("graven_fonts_folders", mods.folders);
     const fab_exe = b.addExecutable(.{ .name = "graven-fab", .root_module = fab_mod });
     const install_fab = b.addInstallArtifact(fab_exe, .{});
     b.step("fab", "Build graven-fab (parts as solids, through OCCT)").dependOn(&install_fab.step);

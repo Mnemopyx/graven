@@ -53,9 +53,9 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 - `graven-fonts` and the editor's Fonts window index, search and compare installed fonts and set them as text styles' faces.
 
 **Manufacture.**
-- **Colour 3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font|package> <plate.3mf> <keys.3mf>`); `graven-fab` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
+- **Colour 3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven export [--parts colours|bands] [--bed bottom|top] <document> <out.3mf>`, or File › Export panel as 3MF); `graven-fab <document> <out.step>` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
 
-**Samples.** The PC keyboard (its output is the regression check) and a rough HP-15C keypad (`graven hp15c libertinus plate.svg keys.svg`).
+**Examples.** Two documents made in the GUI, in `examples/`: a PC keyboard (its output is the regression check) and a rough HP-15C keypad (`graven export examples/hp15c.graven hp15c.svg`, or `.3mf`). `zig build gui-test` makes both again in the GUI, driven headless, and checks them against these files.
 
 **Not yet built.**
 - **Design-rule checks and per-process output:** not started beyond a layer-height flag.
@@ -74,8 +74,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 | `lib/glyphic` | The legend engine: legends as objects with typed parameters resolved through style contexts; LaTeX and Typst entry; layout, ground and setting |
 | `apps/gui` | GUI editor on DVUI over SDL3 |
 | `docs` | Project notes: [status.md](docs/status.md), what exists today and what is still to come |
-| `examples` | Inputs for trying Graven: an OFL-licensed legend font (see `examples/README.md`) |
-| `apps/samples` | Sample models built through the library actions (PC keyboard, HP-15C keypad) |
+| `examples` | Example documents (PC keyboard, HP-15C keypad), made in the GUI, with their tests and an OFL-licensed legend font (see `examples/README.md`) |
 | `lib/testdata` | Test fonts with known glyph areas, made by `tools/make-test-fonts.py` |
 | `apps/cli` | `graven` command-line tool |
 | `bridge/occt` | Optional OCCT bridge: a C shim over OCCT that writes STEP with XDE names and colours |

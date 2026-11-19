@@ -89,3 +89,51 @@ test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legen
         for (placed.issues) |i| try testing.expect(i.kind != .row_overflow);
     }
 }
+
+test "a key sized outside the key prototype's rules is flagged, not refused" {
+    var o = try open(@embedFile("pc-keyboard.graven"));
+    defer close(&o);
+    const m = &o.model;
+    const p = try panelNamed(m, "PC keyboard (ANSI 104)");
+    var labels: layout.Labels = .init(testing.allocator, &.{});
+    defer labels.deinit();
+    // K38 is Tab, 1.5 u wide.
+    const tab = m.findTile("K38").?;
+    for ([_]struct { w: f64, flagged: bool }{ .{ .w = 1.3, .flagged = true }, .{ .w = 1.25, .flagged = false } }) |c| {
+        try m.setTileSize(tab, c.w, 1);
+        var placed = try layout.solve(testing.allocator, m, p, &labels);
+        defer placed.deinit();
+        var flagged = false;
+        for (placed.issues) |i| if (i.kind == .tile_size) {
+            try testing.expectEqual(tab, i.tile.?);
+            flagged = true;
+        };
+        try testing.expectEqual(c.flagged, flagged);
+    }
+}
+
+test "the keyboard saved and read back lays out and exports exactly the same" {
+    const gpa = testing.allocator;
+    var o = try open(@embedFile("pc-keyboard.graven"));
+    defer close(&o);
+    const m = &o.model;
+    const p = try panelNamed(m, "PC keyboard (ANSI 104)");
+    const bytes = try layout.native.encode(gpa, m);
+    defer gpa.free(bytes);
+    var back = try layout.native.decode(gpa, bytes);
+    defer back.deinit();
+    var labels: layout.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var a = try layout.solve(gpa, m, p, &labels);
+    defer a.deinit();
+    var labels2: layout.Labels = .init(gpa, &.{});
+    defer labels2.deinit();
+    var b = try layout.solve(gpa, &back, p, &labels2);
+    defer b.deinit();
+    try testing.expectEqual(a.tiles.len, b.tiles.len);
+    const svg_a = try layout.output.panelSvg(gpa, &a, &.{}, .{});
+    defer gpa.free(svg_a);
+    const svg_b = try layout.output.panelSvg(gpa, &b, &.{}, .{});
+    defer gpa.free(svg_b);
+    try testing.expectEqualStrings(svg_a, svg_b);
+}

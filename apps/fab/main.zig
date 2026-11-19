@@ -3,51 +3,102 @@
 
 const std = @import("std");
 const layout = @import("graven_layout");
-const samples = @import("graven_samples");
+const folders = @import("graven_fonts_folders");
 const c = @import("occt_shim");
 const fab = @import("occt_fab");
 
 const usage =
-    \\usage: graven-fab [--check] hp15c <font> <plate.step> <keys.step>
-    \\         The rough HP-15C keypad's plate and keys as colour-FDM solids: each part's
-    \\         stack of layer operations built into one solid per colour, none overlapping,
-    \\         written as STEP (one named, coloured solid per filament) with a report.
+    \\usage: graven-fab [--check] [--font <file>] [--panel <name>] <document> <out.step>
+    \\         A document's panels (or the one named) as colour-FDM solids: each panel's
+    \\         fabrication layers built into one solid per colour, none overlapping,
+    \\         written as STEP (one named, coloured solid per filament) with a report;
+    \\         with several panels, each to <out>-<panel name>.step.
+    \\         Fonts as the GUI finds them: a fonts folder beside the document, then
+    \\         $GRAVEN_FONTS or fonts/; --font sets every style in that one font file.
     \\         --check also runs OCCT's checker and measures the solids' volumes (slower).
+    \\         The example: graven-fab examples/hp15c.graven hp15c.step
     \\
 ;
 
 var check_solids = false;
 
 pub fn main(init: std.process.Init) !void {
-    var args: []const [:0]const u8 = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len > 1 and std.mem.eql(u8, args[1], "--check")) {
-        check_solids = true;
-        args = args[1..];
+    const args: []const [:0]const u8 = try init.minimal.args.toSlice(init.arena.allocator());
+    var font: ?[]const u8 = null;
+    var panel: ?[]const u8 = null;
+    var k: usize = 1;
+    while (k < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 1) {
+        if (std.mem.eql(u8, args[k], "--check")) {
+            check_solids = true;
+        } else if (std.mem.eql(u8, args[k], "--font") and k + 1 < args.len) {
+            k += 1;
+            font = args[k];
+        } else if (std.mem.eql(u8, args[k], "--panel") and k + 1 < args.len) {
+            k += 1;
+            panel = args[k];
+        } else break;
     }
-    if (args.len == 5 and std.mem.eql(u8, args[1], "hp15c")) return hp15c(init, args[2], args[3], args[4]);
+    if (args.len - k == 2) return document(init, args[k], args[k + 1], font, panel);
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
 }
 
-fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8) !void {
+fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, font: ?[]const u8, only: ?[]const u8) !void {
     const gpa = init.gpa;
     const io = init.io;
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, font_path, gpa, .limited(64 << 20));
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, doc_path, gpa, .limited(1 << 30)) catch |err| {
+        std.debug.print("{s}: cannot be read ({s})\n", .{ doc_path, @errorName(err) });
+        std.process.exit(1);
+    };
     defer gpa.free(bytes);
-    const face = try layout.Face.init(gpa, bytes, 0);
-    defer face.deinit();
-    const faces = [_]*layout.Face{face};
+    var opened = layout.history.openFile(gpa, bytes) catch |err| {
+        std.debug.print("{s}: not a Graven document ({s})\n", .{ doc_path, @errorName(err) });
+        std.process.exit(1);
+    };
+    defer {
+        opened.model.deinit();
+        opened.history.deinit();
+    }
+    const m = &opened.model;
 
-    var m: layout.Model = .init(gpa);
-    defer m.deinit();
-    _ = try m.startCanvas(.mm);
-    const b = try samples.hp15c.build(&m, try samples.hp15c.addStyles(&m, .none), 0, .{ .x = 0, .y = 0 });
-
-    var labels: layout.Labels = .init(gpa, &faces);
+    // The fonts: one file for every style, or the document's folders.
+    var fonts: folders.Folders = .init(gpa);
+    defer fonts.deinit(gpa);
+    if (font) |f| {
+        try fonts.addFile(gpa, io, f);
+        for (m.styles.items) |st| for (st.faces.items) |sf| try m.setStyleFace(st.id, sf.role, fonts.names.items[0]);
+    } else for (try folders.dirsFor(arena, doc_path)) |d| try fonts.addDir(gpa, io, d);
+    if (fonts.faces.items.len == 0) {
+        std.debug.print("no fonts: none beside the document or in fonts/ (scripts/fetch-fonts.py), and no --font\n", .{});
+        std.process.exit(1);
+    }
+    var res = try layout.fonts.resolve(gpa, m, fonts.catalog(), fonts.faces.items[0]);
+    defer res.deinit();
+    for (res.substitutions.items) |sub| std.debug.print("{s} {s}: not found{s}\n", .{ sub.wanted.family, sub.wanted.style, if (sub.got != null) ", another style used" else ", left out" });
+    const faces = res.faces.items;
+    var labels: layout.Labels = .init(gpa, faces);
     defer labels.deinit();
+    try labels.syncResolved(&res);
+
+    var chosen: std.ArrayList(usize) = .empty;
+    for (m.panels.items, 0..) |p, pi| {
+        if (p.unbounded or p.fab.layers.len == 0) continue;
+        if (only) |want| if (!std.mem.eql(u8, p.name, want)) continue;
+        try chosen.append(arena, pi);
+    }
+    if (chosen.items.len == 0) {
+        std.debug.print("{s}: no panel with fabrication layers{s}{s}\n", .{ doc_path, if (only != null) " named " else "", only orelse "" });
+        std.process.exit(1);
+    }
+    const ext = std.fs.path.extension(out_path);
+    const stem = out_path[0 .. out_path.len - ext.len];
     var failed = false;
-    for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
-        if (!try onePart(gpa, &m, part.p, part.path, &labels, &faces)) failed = true;
+    for (chosen.items) |pi| {
+        const path = if (chosen.items.len == 1) out_path else try std.fmt.allocPrint(arena, "{s}-{s}{s}", .{ stem, m.panels.items[pi].name, if (ext.len > 0) ext else ".step" });
+        if (!try onePart(gpa, m, pi, path, &labels, faces)) failed = true;
     }
     if (failed) std.process.exit(1);
 }

@@ -6,7 +6,6 @@ const builtin = @import("builtin");
 const layout = @import("graven_layout");
 const fontsearch = @import("graven_fontsearch");
 const richtext = @import("graven_richtext");
-const samples = @import("graven_samples");
 const glyphic = @import("graven_glyphic");
 const folders = @import("graven_fonts_folders");
 const local_fonts = @import("graven_fonts_local");
@@ -27,24 +26,6 @@ const usage =
     \\         Sets a legend with engine v2; with an italic font, math's variables are italic.
     \\         --width breaks it into lines that wide; --centre centres each line.
     \\         --bold and --bold-italic give the family's bolds, for \\textbf and \\mathbf.
-    \\       graven keyboard <font> <out.svg>
-    \\         Lays out the sample PC keyboard in one font and writes it as SVG.
-    \\       graven hp15c <font|package> <plate.svg> <keys.svg> [fallback font ...]
-    \\         Lays out the rough HP-15C keypad: the plate with its holes and gold legends,
-    \\         and the keys, each written as SVG. Fallback fonts set what the font lacks.
-    \\         A math font package (stix-two, libertinus) instead of a font sets the legends in its
-    \\         faces, from $GRAVEN_FONTS or fonts/ (fill it with scripts/fetch-fonts.py).
-    \\       graven 3mf [--parts colours|bands] [--bed bottom|top] hp15c <font> <plate.3mf> <keys.3mf> [fallback font ...]
-    \\         The HP-15C keypad's plate and keys for multi-colour 3D printing, each part's
-    \\         stack of layer operations as closed meshes, parts of one object, colours as
-    \\         materials, written as 3MF. --parts colours (the default) gives one part per
-    \\         colour; bands, one per colour and height band. --bed bottom (the default)
-    \\         stands each part on its lowest face; top turns it over onto its top face.
-    \\       graven v2 hp15c <folder>
-    \\         Engine v2 against v1: the HP-15C keypad (libertinus) as v1 sets it, and with every
-    \\         legend parsed from its markup and set by v2 in the same place (column tracks
-    \\         too): v1-plate.svg,
-    \\         v1-keys.svg, v2-plate.svg, v2-keys.svg in <folder>.
     \\       graven v2 <text font> <math font> <out.svg> [italic font]
     \\         Engine v2: sets the Leibniz series (built as objects) on three grounds: one
     \\         long row in display style, narrow rows it must break across, and a dial.
@@ -53,10 +34,10 @@ const usage =
     \\         fabrication layers; with several panels, each to <out>-<panel name>.<ext>.
     \\         Fonts are found as the GUI finds them: a fonts folder beside the document,
     \\         then $GRAVEN_FONTS or fonts/, then the installed fonts. --font sets every
-    \\         style in that one font file instead.
-    \\       graven example keyboard|hp15c <out.graven>
-    \\         Writes a sample, as its code builds it, as a document (the example files'
-    \\         source until they are made in Graven).
+    \\         style in that one font file instead. For 3MF, --parts colours (the default)
+    \\         gives one part per colour, bands one per colour and height band; --bed
+    \\         bottom (the default) stands each part on its lowest face, top on its top.
+    \\         The examples: graven export examples/hp15c.graven hp15c.3mf
     \\       graven dump [--log] <document>
     \\         Prints a document's model as text (for reading, or as git's text converter);
     \\         --log adds its history: the file's segments and every logged step.
@@ -71,24 +52,6 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 6 and std.mem.eql(u8, args[1], "msdf")) return msdfSheet(init, args[2], args[3], args[4], args[5]);
     if (args.len == 6 and std.mem.eql(u8, args[1], "svg")) {
         return svg(init, args[2], args[3], args[4], args[5]);
-    }
-    if (args.len == 4 and std.mem.eql(u8, args[1], "keyboard")) {
-        return keyboard(init, args[2], args[3]);
-    }
-    if (args.len >= 5 and std.mem.eql(u8, args[1], "hp15c")) {
-        return hp15c(init, args[2], args[3], args[4], args[5..]);
-    }
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "3mf")) {
-        var opts: ThreeMfOptions = .{};
-        var k: usize = 2;
-        while (k + 1 < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 2) {
-            if (std.mem.eql(u8, args[k], "--parts")) {
-                opts.grouping = std.meta.stringToEnum(layout.threemf.Grouping, args[k + 1]) orelse break;
-            } else if (std.mem.eql(u8, args[k], "--bed")) {
-                opts.bed = std.meta.stringToEnum(layout.threemf.Bed, args[k + 1]) orelse break;
-            } else break;
-        }
-        if (args.len - k >= 4 and std.mem.eql(u8, args[k], "hp15c")) return hp15c3mf(init, args[k + 1], args[k + 2], args[k + 3], args[k + 4 ..], opts);
     }
     if (args.len >= 4 and std.mem.eql(u8, args[1], "export")) {
         var opts: ExportOptions = .{};
@@ -106,7 +69,6 @@ pub fn main(init: std.process.Init) !void {
         }
         if (args.len - k == 2) return exportDocument(init, args[k], args[k + 1], opts);
     }
-    if (args.len == 4 and std.mem.eql(u8, args[1], "example")) return writeExample(init, args[2], args[3]);
     if ((args.len == 5 or args.len == 6) and std.mem.eql(u8, args[1], "v2")) {
         return v2(init, args[2], args[3], args[4], if (args.len == 6) args[5] else null);
     }
@@ -331,211 +293,10 @@ fn exactCoverage(a: std.mem.Allocator, o: layout.geom.Outline, n: u32, m: layout
     return out;
 }
 
-fn keyboard(init: std.process.Init, font_path: []const u8, out_path: []const u8) !void {
-    const gpa = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
-    const bytes = try cwd.readFileAlloc(io, font_path, gpa, .limited(64 << 20));
-    defer gpa.free(bytes);
-    const face = try layout.Face.init(gpa, bytes, 0);
-    defer face.deinit();
-    const faces = [_]*layout.Face{face};
-
-    var m: layout.Model = .init(gpa);
-    defer m.deinit();
-    const main_style = try m.addStyle("legend", .{ .cap_height = 2.6 });
-    const small = try m.addStyle("legend words", .{ .cap_height = 1.6 });
-    const p = try samples.pc_keyboard.build(gpa, &m, .{ .main = main_style, .small = small });
-
-    var labels: layout.Labels = .init(gpa, &faces);
-    defer labels.deinit();
-    const t0: std.Io.Timestamp = .now(io, .awake);
-    var placed = try layout.solve(gpa, &m, p, &labels);
-    defer placed.deinit();
-    const ms = @as(f64, @floatFromInt(t0.untilNow(io, .awake).toNanoseconds())) / 1e6;
-    for (placed.issues) |i| {
-        const name = if (i.tile) |t| m.tileConst(t).designator else "-";
-        std.debug.print("{s}: {s}\n", .{ name, @tagName(i.kind) });
-    }
-    const doc = try layout.output.panelSvg(gpa, &placed, &faces, .{});
-    defer gpa.free(doc);
-    try cwd.writeFile(io, .{ .sub_path = out_path, .data = doc });
-    std.debug.print("{s}: {d} tiles, {d} labels ({d} renders) in {d:.1} ms\n", .{ out_path, placed.tiles.len, placed.labels.len, labels.cache.count(), ms });
-}
-
-/// The legends' fonts: font files (the first the text face, the rest
-/// fallbacks), or a math font package by name (see layout.fonts.Package),
-/// its faces found by name in the fonts directory ($GRAVEN_FONTS, else
-/// fonts/; scripts/fetch-fonts.py fills it). Either way the fonts are a
-/// catalog, the legends' base style names them, and resolving gives the
-/// faces.
-const LegendFonts = struct {
-    package: ?*const layout.fonts.Package = null,
-    dir: folders.Folders,
-    resolved: ?layout.fonts.Resolved = null,
-
-    fn init(gpa: std.mem.Allocator, io: std.Io, font: []const u8, fallbacks: []const [:0]const u8) !LegendFonts {
-        if (layout.fonts.package(font)) |pkg| {
-            const set = if (std.c.getenv("GRAVEN_FONTS")) |v| std.mem.span(v) else "";
-            const dir = if (set.len > 0) set else "fonts";
-            var d: folders.Folders = .init(gpa);
-            try d.addDir(gpa, io, dir);
-            return .{ .package = pkg, .dir = d };
-        }
-        const paths = try gpa.alloc([]const u8, fallbacks.len + 1);
-        defer gpa.free(paths);
-        paths[0] = font;
-        for (fallbacks, paths[1..]) |fb, *p| p.* = fb;
-        var d: folders.Folders = .init(gpa);
-        errdefer d.deinit(gpa);
-        for (paths) |path| try d.addFile(gpa, io, path);
-        return .{ .dir = d };
-    }
-
-    /// The legends' base style: the package's, or the files' (the first as
-    /// the text face, the rest as fallbacks).
-    fn base(f: *const LegendFonts, m: *layout.Model) !layout.model.StyleId {
-        if (f.package) |pkg| return layout.fonts.addPackage(m, pkg, "Legends");
-        const id = try m.addStyle("Legends", .{});
-        var buf: [32]u8 = undefined;
-        for (f.dir.names.items, 0..) |n, k| {
-            const role = if (k == 0) "text" else try std.fmt.bufPrint(&buf, "fallback{d}", .{k});
-            try m.setStyleFace(id, role, n);
-        }
-        return id;
-    }
-
-    /// Resolves the styles' fonts against these.
-    fn resolve(f: *LegendFonts, gpa: std.mem.Allocator, m: *const layout.Model) !void {
-        if (f.dir.faces.items.len == 0) {
-            std.debug.print("no fonts in the fonts directory: run scripts/fetch-fonts.py\n", .{});
-            return error.NoFonts;
-        }
-        f.resolved = try layout.fonts.resolve(gpa, m, f.dir.catalog(), f.dir.faces.items[0]);
-        for (f.resolved.?.substitutions.items) |sub| {
-            if (sub.got) |got| {
-                std.debug.print("{s} {s}: not found, {s} {s} used\n", .{ sub.wanted.family, sub.wanted.style, got.family, got.style });
-            } else std.debug.print("{s} {s}: not found (run scripts/fetch-fonts.py)\n", .{ sub.wanted.family, sub.wanted.style });
-        }
-    }
-
-    fn faces(f: *const LegendFonts) []const *layout.Face {
-        return f.resolved.?.faces.items;
-    }
-
-    fn sync(f: *LegendFonts, labels: *layout.Labels) !void {
-        if (f.resolved) |*r| try labels.syncResolved(r);
-    }
-
-    fn deinit(f: *LegendFonts, gpa: std.mem.Allocator) void {
-        if (f.resolved) |*r| r.deinit();
-        f.dir.deinit(gpa);
-    }
-};
-
-
-fn hp15c(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8, fallbacks: []const [:0]const u8) !void {
-    const gpa = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
-    var fonts = try LegendFonts.init(gpa, io, font_path, fallbacks);
-    defer fonts.deinit(gpa);
-
-    var m: layout.Model = .init(gpa);
-    defer m.deinit();
-    _ = try m.startCanvas(.mm);
-    const styles = try samples.hp15c.addStyles(&m, try fonts.base(&m));
-    const b = try samples.hp15c.build(&m, styles, 0, .{ .x = 0, .y = 0 });
-    try fonts.resolve(gpa, &m);
-    const faces = fonts.faces();
-
-    var labels: layout.Labels = .init(gpa, faces);
-    defer labels.deinit();
-    try fonts.sync(&labels);
-    for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
-        var placed = try layout.solve(gpa, &m, part.p, &labels);
-        defer placed.deinit();
-        for (placed.issues) |i| {
-            const name = if (i.tile) |t| m.tileConst(t).designator else "-";
-            std.debug.print("{s}: {s}\n", .{ name, @tagName(i.kind) });
-        }
-        const doc = try layout.output.panelSvg(gpa, &placed, faces, .{});
-        defer gpa.free(doc);
-        try cwd.writeFile(io, .{ .sub_path = part.path, .data = doc });
-        std.debug.print("{s}: {d} tiles, {d} labels\n", .{ part.path, placed.tiles.len, placed.labels.len });
-    }
-}
-
 const ThreeMfOptions = struct {
     grouping: layout.threemf.Grouping = .colours,
     bed: layout.threemf.Bed = .bottom,
 };
-
-fn hp15c3mf(init: std.process.Init, font_path: []const u8, plate_path: []const u8, keys_path: []const u8, fallbacks: []const [:0]const u8, opts: ThreeMfOptions) !void {
-    const gpa = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
-    var fonts = try LegendFonts.init(gpa, io, font_path, fallbacks);
-    defer fonts.deinit(gpa);
-
-    var m: layout.Model = .init(gpa);
-    defer m.deinit();
-    _ = try m.startCanvas(.mm);
-    const styles = try samples.hp15c.addStyles(&m, try fonts.base(&m));
-    const b = try samples.hp15c.build(&m, styles, 0, .{ .x = 0, .y = 0 });
-    try fonts.resolve(gpa, &m);
-    const faces = fonts.faces();
-
-    var labels: layout.Labels = .init(gpa, faces);
-    defer labels.deinit();
-    try fonts.sync(&labels);
-    var sound = true;
-    for ([_]struct { p: usize, path: []const u8 }{ .{ .p = b.plate, .path = plate_path }, .{ .p = b.keys, .path = keys_path } }) |part| {
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const t0 = monoNow();
-        var placed = try layout.solve(gpa, &m, part.p, &labels);
-        defer placed.deinit();
-        const p = try layout.fab.plan(a, &m, part.p, &placed, faces);
-        const slabs = try layout.fab.slabs(a, p.steps);
-        const t1 = monoNow();
-        const ps = try layout.threemf.orient(a, try layout.threemf.parts(a, slabs, layout.threemf.default_tolerance, opts.grouping), opts.bed);
-        const t2 = monoNow();
-        const zip = try layout.threemf.package(a, m.panels.items[part.p].name, ps);
-        try cwd.writeFile(io, .{ .sub_path = part.path, .data = zip });
-        const t3 = monoNow();
-        const stack = m.panels.items[part.p].fab;
-        std.debug.print("{s}: layout and 2D regions {d:.0} ms, meshes {d:.0} ms, 3MF {d:.0} ms\n", .{ m.panels.items[part.p].name, msBetween(t0, t1), msBetween(t1, t2), msBetween(t2, t3) });
-        for (p.off_layers) |li| std.debug.print("  flag: {s}: depth not a whole number of {d} mm layers\n", .{ stack.layers[li].name, stack.layer_height });
-        // Per colour: the meshes' volume against the regions' exact one.
-        var tris: usize = 0;
-        var names: std.ArrayList([]const u8) = .empty;
-        for (ps) |pt| {
-            tris += pt.mesh.triangles.len;
-            if (!try layout.threemf.closed(a, pt.mesh)) {
-                std.debug.print("  NOT CLOSED: {s}\n", .{pt.name});
-                sound = false;
-            }
-            for (names.items) |n| {
-                if (std.mem.eql(u8, n, pt.colour)) break;
-            } else try names.append(a, pt.colour);
-        }
-        for (names.items) |n| {
-            var mv: f64 = 0;
-            var ev: f64 = 0;
-            for (ps) |pt| if (std.mem.eql(u8, pt.colour, n)) {
-                mv += layout.threemf.volume(pt.mesh);
-            };
-            for (slabs) |sl| for (sl.regions) |reg| if (std.mem.eql(u8, reg.colour.name, n)) {
-                ev += reg.outline.signedArea() * (sl.z1 - sl.z0);
-            };
-            std.debug.print("  {s}: {d:.3} mm³ meshed, {d:.3} mm³ exact\n", .{ n, mv, ev });
-        }
-        std.debug.print("  {d} parts, {d} triangles, {d} KB: wrote {s}\n", .{ ps.len, tris, zip.len / 1024, part.path });
-    }
-    if (!sound) std.process.exit(1);
-}
 
 fn monoNow() i128 {
     var ts: std.posix.timespec = undefined;
@@ -928,46 +689,4 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
         std.debug.print("{s}: {s}, {d} tiles, {d} bytes{s}\n", .{ path, name, placed.tiles.len, data.len, if (issues > 0) " (with overflows or missing glyphs)" else "" });
     }
-}
-
-/// graven example keyboard|hp15c: writes a sample, built by its code, as a
-/// document (no history): the example files' source until they are made
-/// and kept in Graven itself. Faces named: Inter Medium (examples/fonts)
-/// for the keyboard; the Libertinus package for the HP-15C.
-fn writeExample(init: std.process.Init, which: []const u8, out_path: []const u8) !void {
-    const gpa = init.gpa;
-    const io = init.io;
-    var m: layout.Model = .init(gpa);
-    defer m.deinit();
-    _ = try m.startCanvas(.mm);
-    if (std.mem.eql(u8, which, "keyboard")) {
-        var inter: folders.Folders = .init(gpa);
-        defer inter.deinit(gpa);
-        try inter.addFile(gpa, io, "examples/fonts/Inter-Medium.otf");
-        const name = inter.names.items[0];
-        const main_style = try m.addStyle("legend", .{ .cap_height = 2.6 });
-        const small = try m.addStyle("legend words", .{ .cap_height = 1.6 });
-        try m.setStyleFace(main_style, "text", name);
-        try m.setStyleFace(small, "text", name);
-        const pi = try samples.pc_keyboard.build(gpa, &m, .{ .main = main_style, .small = small });
-        try m.movePanel(pi, .{ .x = 0, .y = 0 });
-    } else if (std.mem.eql(u8, which, "hp15c")) {
-        const base = try layout.fonts.addPackage(&m, &layout.fonts.libertinus, "Libertinus");
-        const styles = try samples.hp15c.addStyles(&m, base);
-        _ = try samples.hp15c.build(&m, styles, 0, .{ .x = 0, .y = 0 });
-    } else {
-        std.debug.print("example: keyboard or hp15c, not {s}\n", .{which});
-        std.process.exit(2);
-    }
-    var h: layout.history.History = .init(gpa);
-    defer h.deinit();
-    try h.reset(&m);
-    var random: [16]u8 = undefined;
-    io.random(&random);
-    var host: [std.posix.HOST_NAME_MAX]u8 = undefined;
-    const who: layout.history.Writer = .{ .id = layout.history.writerId(random), .device = deviceName(&host), .tool = layout.history.tool_version };
-    const bytes = try layout.history.fileBytes(&h, gpa, who, std.Io.Clock.real.now(io).toSeconds());
-    defer gpa.free(bytes);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = bytes });
-    std.debug.print("{s}: {d} bytes\n", .{ out_path, bytes.len });
 }

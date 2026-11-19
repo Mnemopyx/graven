@@ -14,7 +14,7 @@ const builtin = @import("builtin");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const glyphic = @import("graven_glyphic");
-const samples = @import("graven_samples");
+const text_sample = @import("text_sample.zig");
 const desktop = @import("desktop.zig");
 const ghost_pane = @import("ghost.zig");
 const settings_file = @import("settings.zig");
@@ -1260,32 +1260,6 @@ fn exportPrompt() void {
     state.status = "Exported. ";
 }
 
-/// Adds the sample PC keyboard as a new panel and makes it the context.
-fn loadSample() !void {
-    // Built by the sample's own calls, then logged as one step: a snapshot.
-    const main_style = try state.model.addStyle("legend", .{ .cap_height = 2.6 });
-    const small = try state.model.addStyle("legend words", .{ .cap_height = 1.6 });
-    const pi = try samples.pc_keyboard.build(state.gpa, &state.model, .{ .main = main_style, .small = small });
-    // Top-left of the sheet, 20 mm in; on a canvas, at its origin.
-    const panel = state.model.panels.items[pi];
-    try state.model.movePanel(pi, if (openCanvas()) .{ .x = 0, .y = 0 } else .{ .x = 20, .y = state.model.sheet.h - 20 - panel.h });
-    try hist.snapshot(&state.model);
-    state.context = .{ .panel = pi };
-    state.view.fit = state.model.panels.items[pi].box();
-}
-
-/// Adds the rough HP-15C keypad (a plate and its keys) to the shown space,
-/// right of what it holds, and opens the plate's grid.
-fn loadHp15c() !void {
-    const styles = try samples.hp15c.addStyles(&state.model, try layout.fonts.addPackage(&state.model, &layout.fonts.libertinus, "Libertinus"));
-    const held = spaceExtents();
-    const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 0 } else .{ .x = held.x1 + 20, .y = held.y0 };
-    const b = try samples.hp15c.build(&state.model, styles, shown_space, at);
-    try hist.snapshot(&state.model);
-    state.context = .{ .grid = .{ .panel = b.plate, .index = 0 } };
-    state.view.fit = state.model.panels.items[b.plate].box().join(state.model.panels.items[b.keys].box());
-}
-
 /// Adds the text sample (a track of text with an equation in it) to the
 /// shown space's canvas, right of what it holds, with the cursor in it.
 fn loadText() !void {
@@ -1293,7 +1267,7 @@ fn loadText() !void {
     const pi = state.model.panelIndex(space.root) orelse return;
     const held = spaceExtents();
     const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 30 } else .{ .x = held.x1 + 20, .y = held.y1 };
-    const r = try samples.text.build(&state.model, pi, try labelStyle(), at);
+    const r = try text_sample.build(&state.model, pi, try labelStyle(), at);
     try hist.snapshot(&state.model);
     state.context = .{ .region = .{ .panel = pi, .region = r } };
     track_cursor = .{ .panel = pi, .region = r, .index = 1, .offset = 0 };
@@ -2037,7 +2011,13 @@ var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
 
 /// What waits on the unsaved-changes question, or on a save.
-const Pending = enum { new_canvas, open, quit };
+const Pending = union(enum) {
+    new_canvas,
+    open,
+    quit,
+    /// An example document, opened as an untitled copy.
+    example: []const u8,
+};
 var leave_prompt: ?Pending = null;
 var after_save: ?Pending = null;
 var quit_now = false;
@@ -2093,6 +2073,7 @@ fn proceed(p: Pending) void {
             file_prompt_new = true;
         },
         .quit => quit_now = true,
+        .example => |path| openExample(path),
     }
 }
 
@@ -2877,6 +2858,7 @@ fn leavePrompt(p: Pending) void {
         .new_canvas => "starting a new canvas",
         .open => "opening another document",
         .quit => "quitting",
+        .example => "opening the example",
     };
     dvui.label(@src(), "Save them before {s}?", .{doing}, .{ .margin = .{ .y = 6 } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
@@ -4470,20 +4452,13 @@ fn menu() ?dvui.App.Result {
             m.close();
             exportSvg();
         }
-        const others = state.model.panels.items.len - state.model.spaces.items.len;
-        if (others == 0 and !canvas_prompt) {
-            if (tmenu(@src(), "Add sample: PC keyboard", .{}, .{ .expand = .horizontal }) != null) {
-                loadSample() catch |err| {
-                    state.status = if (err == error.OffSheet) "The sample keyboard does not fit on this sheet. " else "The sample did not load. ";
-                };
+        // The example documents (examples/, from where Graven was started),
+        // each opened as an untitled copy.
+        inline for (.{ .{ "Open example: PC keyboard", "examples/pc-keyboard.graven" }, .{ "Open example: HP-15C keypad", "examples/hp15c.graven" } }, 0..) |ex, k| {
+            if (tmenu(@src(), ex[0], .{}, .{ .expand = .horizontal, .id_extra = k }) != null) {
+                leave(.{ .example = ex[1] });
                 m.close();
             }
-        }
-        if (openCanvas() and !canvas_prompt and tmenu(@src(), "Add sample: HP-15C keypad", .{}, .{ .expand = .horizontal }) != null) {
-            loadHp15c() catch {
-                state.status = "The sample did not load. ";
-            };
-            m.close();
         }
         if (tmenu(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) {
             leave(.quit);
