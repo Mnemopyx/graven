@@ -449,6 +449,8 @@ test "the PC keyboard, made in the GUI" {
     }
     try std.testing.expectEqual(104, tiles);
     try std.testing.expectEqual(1, m.sheets.items.len);
+    // No style left over that nothing uses.
+    for (m.styles.items) |st| try std.testing.expect(!std.mem.eql(u8, st.name, "Label"));
     try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
     // Saved as made: the example document's source.
     try saveAs(&r, scratch ++ "/pc-keyboard.graven");

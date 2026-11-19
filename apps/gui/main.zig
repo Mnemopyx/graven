@@ -10227,7 +10227,10 @@ fn ensurePrototype() !void {
         .unit = 19.05,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
-        .tracks = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
+        // In the document's first style; the default Label style only when
+        // it has none (made for it, it would stay behind unused once the
+        // slot is given the style meant).
+        .tracks = &.{.{ .name = "top", .style = if (state.model.styles.items.len > 0) state.model.styles.items[0].id else try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, 19.05);
     _ = try act(.addPrototype, .{p});
@@ -11615,7 +11618,8 @@ fn addPrototype() !void {
         .unit = 19.05,
         .body_inset = .all(0.5),
         .face_inset = .all(2),
-        .tracks = &.{.{ .name = "top", .style = try labelStyle(), .place = .{ .inset = .all(0.8) } }},
+        // In the document's first style, as `ensurePrototype` makes one.
+        .tracks = &.{.{ .name = "top", .style = if (state.model.styles.items.len > 0) state.model.styles.items[0].id else try labelStyle(), .place = .{ .inset = .all(0.8) } }},
     };
     p.art = try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p));
     const id = try act(.addPrototype, .{p});
