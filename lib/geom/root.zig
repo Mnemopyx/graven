@@ -12,6 +12,7 @@ pub const boolean = @import("boolean.zig");
 pub const earcut = @import("earcut.zig");
 /// Outlines grown outward: a heavier weight.
 pub const grow = @import("grow.zig");
+pub const simplify = @import("simplify.zig");
 /// Multi-channel signed distance fields: glyphs drawn at any size, grown.
 pub const msdf = @import("msdf.zig");
 /// A stroke font: text as polylines, turned and sized freely (annotations).
@@ -522,6 +523,7 @@ test {
     _ = boolean;
     _ = earcut;
     _ = grow;
+    _ = simplify;
     _ = msdf;
     _ = strokefont;
 }

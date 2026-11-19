@@ -21,6 +21,9 @@ pub const Mesh = struct {
     pos: []const [3]f32 = &.{},
     tris: []const [3]u32 = &.{},
     colour: []const layout.model.FabColour = &.{},
+    /// Faces OCCT would not sweep (simplified too far: a stroke's sides
+    /// crossing), left out.
+    skipped: usize = 0,
 };
 
 /// `slabs` as OCCT solids, meshed within `deflection` mm, moved by
@@ -45,7 +48,7 @@ pub fn meshSlabs(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, o
             try colour.append(a, p.colour);
         }
     }
-    into.* = .{ .pos = pos.items, .tris = tris.items, .colour = colour.items };
+    into.* = .{ .pos = pos.items, .tris = tris.items, .colour = colour.items, .skipped = into.skipped + built.skipped.len };
 }
 
 /// The bridge's last error, for messages.

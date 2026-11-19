@@ -9009,7 +9009,16 @@ fn planMesh(plan: manufacture.Plan) ?occt3d.Mesh {
         const pi = m.panelIndex(pt.panel) orelse continue;
         if (pi >= state.placed.items.len) continue;
         const steps = planSteps(a, plan, pi) catch continue;
-        const slabs = layout.fab.slabs(a, steps) catch continue;
+        const exact = layout.fab.slabs(a, steps) catch continue;
+        // For viewing: each region simplified to the plan's tolerance,
+        // shared edges alike (geom.simplify); OCCT then sweeps and meshes
+        // far fewer edges.
+        const slabs = a.alloc(layout.fab.Slab, exact.len) catch continue;
+        for (exact, slabs) |sl, *d| {
+            const regs = a.alloc(layout.fab.Region, sl.regions.len) catch continue;
+            for (sl.regions, regs) |r, *dr| dr.* = .{ .colour = r.colour, .outline = geom.simplify.outline(a, r.outline, plan.tolerance) catch r.outline };
+            d.* = .{ .z0 = sl.z0, .z1 = sl.z1, .regions = regs };
+        }
         const o = panelOrigin(pi);
         parts.append(a, .{ .slabs = slabs, .offset = .{ o.x, o.y } }) catch continue;
     }
@@ -9251,7 +9260,7 @@ fn manufactureView(v: u8) void {
         var cap3 = dvui.textLayout(@src(), .{}, .{ .background = true, .color_fill = .{ .color = backdrop.opacity(0.85) }, .gravity_x = 0, .gravity_y = 0, .margin = .all(8), .padding = .all(4), .id_extra = v + 100 });
         var cb3: [200]u8 = undefined;
         if (got) |ms| {
-            cap3.addText(std.fmt.bufPrint(&cb3, "{s} in 3D, through OCCT ({d} triangles, {d:.0} ms). Drag: turn; Shift-drag: move; wheel: zoom.", .{ plan.name, ms.tris.len, mesh_ms }) catch "", .{ .color_text = .{ .color = colors.guide } });
+            cap3.addText(std.fmt.bufPrint(&cb3, "{s}, 3D (OCCT, {d} mm): {d} triangles, {d:.0} ms{s}. Drag turns, Shift-drag moves, wheel zooms.", .{ plan.name, plan.tolerance, ms.tris.len, mesh_ms, if (ms.skipped > 0) "; faces too thin for it left out" else "" }) catch "", .{ .color_text = .{ .color = colors.guide } });
         } else if (mesh_job != null) {
             cap3.addText(std.fmt.bufPrint(&cb3, "{s}: building it through OCCT…", .{plan.name}) catch "", .{ .color_text = .{ .color = colors.guide } });
         } else cap3.addText(std.fmt.bufPrint(&cb3, "{s}: no 3D view: {s}.", .{ plan.name, mesh_failed orelse "the panels are still being laid out" }) catch "", .{ .color_text = .{ .color = colors.overflow } });
