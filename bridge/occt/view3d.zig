@@ -36,7 +36,7 @@ pub fn meshSlabs(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, o
     try colour.appendSlice(a, into.colour);
     for (built.parts) |p| {
         var m: c.os_mesh = undefined;
-        if (c.os_solid_mesh(p.solid, deflection, 0.3, &m) != c.OS_OK) return error.Occt;
+        if (c.os_solid_mesh(p.solid, deflection, 0.6, &m) != c.OS_OK) return error.Occt;
         defer c.os_mesh_free(&m);
         const base: u32 = @intCast(pos.items.len);
         for (0..m.n_verts) |i| try pos.append(a, .{ m.xyz[3 * i] + @as(f32, @floatCast(offset[0])), m.xyz[3 * i + 1] + @as(f32, @floatCast(offset[1])), m.xyz[3 * i + 2] });

@@ -22,7 +22,7 @@ pub const Mesh = struct {
 };
 
 /// Curves are flattened to within this of the exact outline, mm.
-pub const default_tolerance = 0.005;
+pub const default_tolerance = 0.05;
 
 /// A region swept from `z0` up to `z1` as a closed mesh, outward-facing:
 /// each face (an outer contour, counter-clockwise, with the holes inside

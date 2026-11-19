@@ -220,6 +220,11 @@ pub const Operation = struct {
 pub const Plan = struct {
     id: ObjectId = .none,
     name: []const u8,
+    /// The most curves may stray when made into straight pieces (meshes,
+    /// toolpaths, drawing), mm: the owner's default 0.05, finer for fine
+    /// work. Checks take a tenth of the process's narrowest band where
+    /// that is finer still.
+    tolerance: f64 = 0.05,
     parts: []const Part = &.{},
     /// In the order they are done.
     operations: []const Operation = &.{},

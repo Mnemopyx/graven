@@ -2528,7 +2528,7 @@ fn exportThreeMf(path: []const u8) void {
     const zip = blk: {
         const plan = layout.fab.plan(a, &state.model, pi, &placed, faceTable()) catch break :blk null;
         const slabs = layout.fab.slabs(a, plan.steps) catch break :blk null;
-        const parts = layout.threemf.parts(a, slabs, layout.threemf.default_tolerance, .colours) catch break :blk null;
+        const parts = layout.threemf.parts(a, slabs, state.model.exportTolerance(), .colours) catch break :blk null;
         const ps = layout.threemf.orient(a, parts, .bottom) catch break :blk null;
         break :blk layout.threemf.package(a, state.model.panels.items[pi].name, ps) catch null;
     } orelse {
@@ -8409,6 +8409,11 @@ fn planEditor(id: ObjectId) void {
             if (cam.on and !occt3d.available) state.status = "This build has no OCCT: build the GUI with -Docct-prebuilt for 3D views. ";
         }
     }
+    if (numberProp("Max error, mm", p.tolerance, 0.001, 1, 104)) |v| {
+        var n = planCopy(p);
+        n.tolerance = v;
+        actM(mergeKey(.{ "plan tolerance", id }), .setPlan, .{ id, n }) catch {};
+    }
     planChecksSection(id);
 
     // Parts, each with its material.
@@ -8670,7 +8675,7 @@ fn mfgGeometry(plan: manufacture.Plan) []const MfgPart {
             const l = m.panels.items[pi].fab.layers[st.layer];
             var loops: std.ArrayList([]const geom.Point) = .empty;
             for (st.pieces) |pc| for (pc.contours) |cn| {
-                const pts = geom.grow.flatten(a, cn, 0.01) catch continue;
+                const pts = geom.grow.flatten(a, cn, plan.tolerance) catch continue;
                 if (pts.len >= 3) loops.append(a, pts) catch continue;
             };
             const region = geom.fill.nonzero(a, loops.items, 1e-5) catch continue;
@@ -8753,7 +8758,7 @@ fn runPlanChecks(id: ObjectId) void {
                 if (t.panel == pt.panel) break true;
             } else false;
             if (!any) continue;
-            const report = layout.check.runWith(a, m, panel, &state.placed.items[panel], faceTable(), &check_cache.?, .{ .profile = prof.*, .targets = op.targets }) catch continue;
+            const report = layout.check.runWith(a, m, panel, &state.placed.items[panel], faceTable(), &check_cache.?, .{ .profile = prof.*, .targets = op.targets, .tolerance = plan.tolerance }) catch continue;
             const areas = a.alloc(?geom.fill.Region, report.findings.len) catch return;
             for (report.findings, areas) |f, *r| {
                 r.* = null;
@@ -8765,10 +8770,10 @@ fn runPlanChecks(id: ObjectId) void {
                 const o = f.area orelse continue;
                 var loops: std.ArrayList([]const geom.Point) = .empty;
                 for (o.contours) |cn| {
-                    const pts = geom.grow.flatten(a, cn, layout.check.tolerance) catch continue;
+                    const pts = geom.grow.flatten(a, cn, report.tolerance) catch continue;
                     loops.append(a, pts) catch continue;
                 }
-                r.* = geom.fill.nonzero(a, loops.items, layout.check.tolerance * 1e-3) catch null;
+                r.* = geom.fill.nonzero(a, loops.items, report.tolerance * 1e-3) catch null;
             }
             list.append(a, .{ .op = k, .panel = panel, .report = report, .areas = areas }) catch return;
         }
@@ -8907,6 +8912,8 @@ const MeshJob = struct {
     plan: ObjectId,
     rev: u64,
     gen: u64,
+    /// The plan's tolerance: OCCT's mesh deflection.
+    tolerance: f64,
     parts: []const struct { slabs: []const layout.fab.Slab, offset: [2]f64 },
     result: occt3d.Mesh = .{},
     failed: ?[]const u8 = null,
@@ -8918,7 +8925,7 @@ const MeshJob = struct {
         const a = job.arena.allocator();
         var clock = Clock.start();
         for (job.parts) |pt| {
-            occt3d.meshSlabs(std.heap.c_allocator, a, pt.slabs, pt.offset, 0.02, &job.result) catch {
+            occt3d.meshSlabs(std.heap.c_allocator, a, pt.slabs, pt.offset, job.tolerance, &job.result) catch {
                 job.failed = a.dupe(u8, occt3d.lastError()) catch "OCCT failed";
                 break;
             };
@@ -8994,7 +9001,7 @@ fn planMesh(plan: manufacture.Plan) ?occt3d.Mesh {
     }
     if (state.placed_rev != m.revision) return null;
     const job = state.gpa.create(MeshJob) catch return null;
-    job.* = .{ .arena = .init(std.heap.c_allocator), .plan = plan.id, .rev = m.revision, .gen = doc_generation, .parts = &.{} };
+    job.* = .{ .arena = .init(std.heap.c_allocator), .plan = plan.id, .rev = m.revision, .gen = doc_generation, .tolerance = plan.tolerance, .parts = &.{} };
     const a = job.arena.allocator();
     var clock = Clock.start();
     var parts: std.ArrayList(@typeInfo(@TypeOf(job.parts)).pointer.child) = .empty;
@@ -9404,10 +9411,10 @@ fn runChecks(only: ?usize) void {
             const o = f.area orelse continue;
             var loops: std.ArrayList([]const geom.Point) = .empty;
             for (o.contours) |cn| {
-                const pts = geom.grow.flatten(a, cn, layout.check.tolerance) catch continue;
+                const pts = geom.grow.flatten(a, cn, report.tolerance) catch continue;
                 loops.append(a, pts) catch continue;
             }
-            r.* = geom.fill.nonzero(a, loops.items, layout.check.tolerance * 1e-3) catch null;
+            r.* = geom.fill.nonzero(a, loops.items, report.tolerance * 1e-3) catch null;
         }
         list.append(a, .{ .panel = pi, .report = report, .areas = areas }) catch return;
     }

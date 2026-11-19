@@ -506,7 +506,7 @@ fn panel3mf(a: std.mem.Allocator, m: *layout.Model, name: []const u8, face: *lay
     const ar = arena.allocator();
     const plan = try layout.fab.plan(ar, m, pi, &placed, &faces);
     const slabs = try layout.fab.slabs(ar, plan.steps);
-    const parts = try layout.threemf.orient(ar, try layout.threemf.parts(ar, slabs, layout.threemf.default_tolerance, .colours), .bottom);
+    const parts = try layout.threemf.orient(ar, try layout.threemf.parts(ar, slabs, m.exportTolerance(), .colours), .bottom);
     return try a.dupe(u8, try layout.threemf.package(ar, name, parts));
 }
 

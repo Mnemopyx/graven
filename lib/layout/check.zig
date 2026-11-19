@@ -121,6 +121,8 @@ pub const Report = struct {
     cached: usize = 0,
     /// Measures that could not be made (a boolean that did not join).
     unmeasured: usize = 0,
+    /// The flattening tolerance it measured to, mm.
+    tolerance: f64 = 0,
 
     pub fn count(r: Report, kind: Kind, verdict: Verdict) usize {
         var n: usize = 0;
@@ -142,9 +144,11 @@ fn worse(a: Verdict, b: Verdict) Verdict {
     return if (@intFromEnum(b) > @intFromEnum(a)) b else a;
 }
 
-/// Flattening tolerance, mm: a tenth of the narrowest half-bead (0.1 mm
-/// beads, with a 0.2 mm nozzle).
-pub const tolerance = 0.005;
+/// Flattening tolerance, mm, for the run under way (set by `runWith`): the
+/// scope's (a plan's, 0.05 mm by default), or a tenth of the process's
+/// narrowest band where that is finer, so a check never measures coarser
+/// than what it judges. The reports say what it was.
+pub var tolerance: f64 = 0.005;
 
 /// A face's own results, by shape: kept between runs by whoever runs the
 /// checks (the GUI, for a session), or made for one run.
@@ -209,6 +213,8 @@ const Feature = struct {
 pub const Scope = struct {
     profile: process.Profile,
     targets: ?[]const manufacture.Target = null,
+    /// The most curves may stray, mm (a plan's tolerance).
+    tolerance: f64 = 0.05,
 };
 
 /// The checks of panel `panel` as `placed` lays it out (`faces`: the
@@ -236,6 +242,15 @@ pub fn runWith(a: Allocator, m: *const model.Model, panel: usize, placed: *const
     var report: Report = .{ .profile = null, .findings = &.{}, .worst = .initFill(.pass) };
     const profile = scope.profile;
     report.profile = profile;
+    {
+        const l = profile.limits();
+        var t = scope.tolerance;
+        for ([_]f64{ l.stroke.fail, l.gap.fail, l.stroke.pass, l.gap.pass }) |b| if (b > 0) {
+            t = @min(t, b / 10);
+        };
+        tolerance = t;
+        report.tolerance = t;
+    }
     const lim = profile.limits();
     const pf = m.panels.items[panel].fab;
     var out: std.ArrayList(Finding) = .empty;
@@ -811,6 +826,7 @@ fn squareFace(a: Allocator, x0: f64, y0: f64, x1: f64, y1: f64) !Face {
 }
 
 test "erosion: a 2 mm square eroded by 0.5 is a 1 mm square; a 0.4 mm bar vanishes" {
+    tolerance = 0.005;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -821,6 +837,7 @@ test "erosion: a 2 mm square eroded by 0.5 is a 1 mm square; a 0.4 mm bar vanish
 }
 
 test "a thin bar loses its stroke, a wide one does not; a narrow slot closes" {
+    tolerance = 0.005;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -848,6 +865,7 @@ test "a thin bar loses its stroke, a wide one does not; a narrow slot closes" {
 }
 
 test "polygon distance: two squares 0.1 mm apart; far ones at the limit" {
+    tolerance = 0.005;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

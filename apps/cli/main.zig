@@ -784,7 +784,7 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
             const p = try layout.fab.plan(arena, m, pi, &placed, faces);
             if (m.panels.items[pi].fab.layers.len == 0) std.debug.print("{s}: no fabrication layers: an empty 3MF\n", .{name});
             const slabs = try layout.fab.slabs(arena, p.steps);
-            const ps = try layout.threemf.orient(arena, try layout.threemf.parts(arena, slabs, layout.threemf.default_tolerance, opts.threemf.grouping), opts.threemf.bed);
+            const ps = try layout.threemf.orient(arena, try layout.threemf.parts(arena, slabs, m.exportTolerance(), opts.threemf.grouping), opts.threemf.bed);
             break :blk try layout.threemf.package(arena, name, ps);
         } else try layout.output.panelSvg(arena, &placed, faces, .{});
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });

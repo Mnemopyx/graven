@@ -3288,6 +3288,12 @@ pub const Model = struct {
         return null;
     }
 
+    /// The most curves may stray when output is made of them: the active
+    /// plan's tolerance, else the library default (0.05 mm).
+    pub fn exportTolerance(m: *const Model) f64 {
+        return if (m.activePlan()) |p| p.tolerance else @import("threemf.zig").default_tolerance;
+    }
+
     /// The plan exported, if any.
     pub fn activePlan(m: *const Model) ?*const manufacture.Plan {
         const i = m.planIndex(m.active_plan) orelse return null;
@@ -3356,7 +3362,7 @@ pub const Model = struct {
     /// Adds a plan (a copy), active when it is the first; returns its ID.
     /// What it names need not exist: `manufacture.warnings` says so.
     pub fn addPlan(m: *Model, x: manufacture.Plan) Error!ObjectId {
-        if (x.name.len == 0) return error.BadValue;
+        if (x.name.len == 0 or !(x.tolerance > 0 and x.tolerance <= 1)) return error.BadValue;
         for (x.operations) |op| if (op.passes == 0) return error.BadValue;
         const id = m.newId();
         var c = try m.dupePlan(x);
@@ -3370,7 +3376,7 @@ pub const Model = struct {
     /// Replaces plan `id` with `x` (its parts, operations, name).
     pub fn setPlan(m: *Model, id: ObjectId, x: manufacture.Plan) Error!void {
         const i = m.planIndex(id) orelse return error.NoSuchObject;
-        if (x.name.len == 0) return error.BadValue;
+        if (x.name.len == 0 or !(x.tolerance > 0 and x.tolerance <= 1)) return error.BadValue;
         for (x.operations) |op| if (op.passes == 0) return error.BadValue;
         var c = try m.dupePlan(x);
         c.id = id;
