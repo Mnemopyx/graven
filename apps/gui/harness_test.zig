@@ -900,6 +900,61 @@ test "the checks run when asked (C), as result layers; a panel checked alone; cl
     try std.testing.expectEqual(@as(usize, 0), api.checkedPanels().len);
 }
 
+// Manufacturing plans ---------------------------------------------------------------
+
+test "a manufacturing plan made in the GUI: parts of materials, operations in order, warnings, its view" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    const m = api.model();
+    // The example's fabrication, upgraded: Plan 1, opened in its view.
+    try r.click("tree/untitled/Manufacturing plans#open");
+    try r.click("tree/untitled/Manufacturing plans/Plan 1");
+    try r.click("Manufacturing plan/Open in a manufacturing view");
+    try r.frames(2);
+    try std.testing.expectEqual(.manufacture, api.activeView().kind);
+    try std.testing.expectEqual(@intFromEnum(m.plans.items[0].id), api.activeView().target);
+    // A second plan: the plate black anodised aluminium, waterjet cut and
+    // engraved.
+    try r.click("tree/untitled/Manufacturing plans");
+    try r.click("Manufacturing plans/Add a plan");
+    try std.testing.expectEqual(@as(usize, 2), m.plans.items.len);
+    const id = m.plans.items[1].id;
+    try r.choose("Parts/HP-15C plate", "Aluminium 5052, black anodised (library)");
+    try r.choose("Parts/HP-15C keys", "PLA");
+    try r.click("Operations/Add an operation");
+    try r.choose("1. Operation 1/Process", "Generic waterjet (built in)");
+    try r.click("1. Operation 1/HP-15C plate · Plate");
+    try r.click("1. Operation 1/HP-15C plate · Key holes");
+    try r.click("Operations/Add an operation");
+    try r.choose("2. Operation 2/Process", "Generic laser engraver (built in)");
+    try r.click("2. Operation 2/HP-15C plate · Gold legends");
+    var pl = m.plans.items[m.planIndex(id).?];
+    try std.testing.expectEqual(@as(usize, 2), pl.operations.len);
+    try std.testing.expectEqual(@as(usize, 2), pl.operations[0].targets.len);
+    // Engraving after the cut is flagged; the keys' layers are unmade.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var after_cut = false;
+    for (try layout.model.manufacture.warnings(arena.allocator(), m, pl)) |w| {
+        if (w.kind == .mark_after_cut) after_cut = true;
+    }
+    try std.testing.expect(after_cut);
+    // Engraved first: no longer flagged.
+    try r.click("2. Operation 2/Earlier");
+    pl = m.plans.items[m.planIndex(id).?];
+    try std.testing.expectEqualStrings("Operation 2", pl.operations[0].name);
+    for (try layout.model.manufacture.warnings(arena.allocator(), m, pl)) |w| {
+        try std.testing.expect(w.kind != .mark_after_cut);
+    }
+    // The engraving's mark: the bare metal under the anodising.
+    try std.testing.expectEqualStrings("bare aluminium", pl.operations[0].targets[0].colour.?.name);
+    // Plan 1 stays the one exported.
+    try std.testing.expectEqual(m.plans.items[0].id, m.active_plan);
+    try saveAs(&r, scratch ++ "/hp15c-plans.graven");
+}
+
 // Known bugs, kept fixed --------------------------------------------------------
 
 /// Opens an example from the File menu (an untitled copy).

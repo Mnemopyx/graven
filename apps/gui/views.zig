@@ -13,13 +13,19 @@ const std = @import("std");
 pub const max_views = 16;
 pub const max_nodes = 2 * max_views - 1;
 
-pub const Kind = enum { canvas, sheet };
+pub const Kind = enum {
+    canvas,
+    sheet,
+    /// A manufacturing plan: its parts as made, its operations as layers.
+    manufacture,
+};
 
 /// A view: what it shows, and where it looks (a canvas's centre, mm, and
 /// zoom, px/mm; 0 until it has been shown).
 pub const View = struct {
     kind: Kind = .canvas,
-    /// A canvas: its space's ID; a sheet: the sheet's.
+    /// A canvas: its space's ID; a sheet: the sheet's; a manufacturing
+    /// view: its plan's.
     target: u32 = 0,
     cx: f64 = 0,
     cy: f64 = 0,

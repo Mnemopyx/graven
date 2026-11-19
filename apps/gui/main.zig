@@ -96,6 +96,10 @@ pub const testing_api = struct {
     pub fn checksOutOfDate() bool {
         return checksStale();
     }
+    /// The active view's kind, and what it shows.
+    pub fn activeView() docviews.View {
+        return vl.views[vl.active];
+    }
     /// The dropdown in the row tagged `tag` takes entry `label` next frame.
     pub fn choose(tag: []const u8, label: []const u8) void {
         test_choice = .{ .tag = tag, .label = label };
@@ -305,6 +309,11 @@ const Context = union(enum) {
     /// The document's process profiles, and one of them.
     processes,
     process: layout.model.ObjectId,
+    /// Its manufacturing plans and materials, and one of each.
+    plans,
+    plan: layout.model.ObjectId,
+    materials,
+    material: layout.model.ObjectId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -344,6 +353,10 @@ const Context = union(enum) {
             .style => "Text style",
             .processes => "Processes",
             .process => "Process profile",
+            .plans => "Manufacturing plans",
+            .plan => "Manufacturing plan",
+            .materials => "Materials",
+            .material => "Material",
         };
     }
 };
@@ -3110,6 +3123,9 @@ fn contextValid(c: Context) bool {
         .style => |id| m.styleIndex(id) != null,
         .processes => true,
         .process => |id| m.processIndex(id) != null,
+        .plans, .materials => true,
+        .plan => |id| m.planIndex(id) != null,
+        .material => |id| m.materialIndex(id) != null,
     };
 }
 
@@ -4685,6 +4701,13 @@ fn treeContent() void {
     if (treeNode(.processes, "Processes", 1, state.model.processes.items.len > 0, false)) {
         for (state.model.processes.items) |pr| _ = treeNode(.{ .process = pr.id }, pr.profile.name, 2, false, false);
     }
+    // Always listed: how the document's products are made.
+    if (treeNode(.plans, "Manufacturing plans", 1, state.model.plans.items.len > 0, false)) {
+        for (state.model.plans.items) |pl| _ = treeNode(.{ .plan = pl.id }, pl.name, 2, false, false);
+    }
+    if (treeNode(.materials, "Materials", 1, state.model.materials.items.len > 0, false)) {
+        for (state.model.materials.items) |mt| _ = treeNode(.{ .material = mt.id }, mt.material.name, 2, false, false);
+    }
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
     };
@@ -4976,7 +4999,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material => false,
     };
 }
 
@@ -5391,6 +5414,7 @@ fn loadViews(bytes: []const u8) void {
         const i: u8 = @intCast(k);
         if (!vl.open[i]) continue;
         if (vl.views[i].kind == .sheet and state.model.sheetIndex(@enumFromInt(vl.views[i].target)) == null) vl.views[i] = .{};
+        if (vl.views[i].kind == .manufacture and state.model.planIndex(@enumFromInt(vl.views[i].target)) == null) vl.views[i] = .{};
         if (vl.views[i].kind == .canvas and (owner == docviews.none or i == vl.active)) owner = i;
     }
     for (0..docviews.max_views) |k| {
@@ -5409,6 +5433,10 @@ fn loadViews(bytes: []const u8) void {
 /// A view's tab label: its space's or sheet's name (numbered when two
 /// show one).
 fn viewLabel(buf: []u8, i: u8) []const u8 {
+    if (vl.views[i].kind == .manufacture) {
+        const pi = state.model.planIndex(@enumFromInt(vl.views[i].target)) orelse return "Plan";
+        return std.fmt.bufPrint(buf, "Making: {s}", .{state.model.plans.items[pi].name}) catch "Plan";
+    }
     if (vl.views[i].kind == .sheet) {
         const si = state.model.sheetIndex(@enumFromInt(vl.views[i].target)) orelse return "Sheet";
         return state.model.sheets.items[si].name;
@@ -5433,7 +5461,7 @@ fn viewLabel(buf: []u8, i: u8) []const u8 {
 
 /// The panes the active view's kind wants: a sheet view no tools.
 fn panesForView() void {
-    const want_tools = activeKind() != .sheet;
+    const want_tools = activeKind() == .canvas;
     if (!want_tools) {
         if (tools_pane.view_hidden == null and tools_pane.mode != .hidden) {
             tools_pane.view_hidden = tools_pane.mode;
@@ -5531,6 +5559,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
     switch (vl.views[shown].kind) {
         .canvas => canvasView(shown),
         .sheet => sheetView(shown),
+        .manufacture => manufactureView(shown),
     }
 }
 
@@ -8154,6 +8183,590 @@ fn layerFlags(space: usize, li: usize, n: usize) void {
         tl.deinit();
     }
 }
+
+// Manufacturing plans and the manufacturing view ---------------------------------
+//
+// A plan (layout's manufacture.zig) says what a product's parts are made of
+// and the operations that make them. Its properties are the plan's editor:
+// its parts, each with a material; its operations in order, each a process
+// over stackup layers of the parts, with the colour it gives on each (from
+// what that process can give on that material); the warnings. A
+// manufacturing view shows the parts as the plan makes them, from above,
+// each operation a layer shown or hidden; a 3D view through OCCT is to
+// follow (blueprint "Manufacturing visualization through OCCT").
+
+const manufacture = layout.model.manufacture;
+const ObjectId = layout.model.ObjectId;
+
+/// Operations hidden in manufacturing views, by plan and index; for the
+/// session.
+var op_hidden: std.AutoHashMapUnmanaged(u64, void) = .empty;
+
+fn opKey(plan: ObjectId, i: usize) u64 {
+    return mergeKey(.{ "operation shown", plan, i });
+}
+
+fn opShown(plan: ObjectId, i: usize) bool {
+    return !op_hidden.contains(opKey(plan, i));
+}
+
+/// The plans: how many, the active one, a new one.
+fn plansProperties() void {
+    const m = &state.model;
+    propText("Plans", "{d}", .{m.plans.items.len}, 1);
+    if (m.activePlan()) |p| propText("Exported", "{s}", .{p.name}, 2);
+    if (tbutton(@src(), "Add a plan", .{}, .{ .expand = .horizontal, .id_extra = 3, .margin = .{ .y = 6 } })) {
+        // Over every panel with fabrication layers, of no material yet.
+        const ar = dvui.currentWindow().arena();
+        var parts: std.ArrayList(manufacture.Part) = .empty;
+        for (m.panels.items) |pn| if (pn.fab.layers.len > 0 and pn.id != .none) {
+            parts.append(ar, .{ .panel = pn.id }) catch return;
+        };
+        const name = std.fmt.allocPrint(ar, "Plan {d}", .{m.plans.items.len + 1}) catch "Plan";
+        const id = act(.addPlan, .{manufacture.Plan{ .name = name, .parts = parts.items }}) catch return;
+        state.context = .{ .plan = id };
+    }
+}
+
+/// A plan in the Browser: opened in a manufacturing view, and edited.
+fn planProperties(id: ObjectId) void {
+    if (tbutton(@src(), "Open in a manufacturing view", .{}, .{ .expand = .horizontal, .id_extra = 90 })) showManufactureView(id);
+    planEditor(id);
+}
+
+/// Opens (or shows) a manufacturing view of plan `id`, as a tab.
+fn showManufactureView(id: ObjectId) void {
+    var buf: [docviews.max_views]u8 = undefined;
+    const have = vl.viewsOf(.manufacture, @intFromEnum(id), &buf);
+    if (have.len > 0) {
+        activateView(have[0]);
+        return;
+    }
+    const nv = vl.addTab(vl.active, .{ .kind = .manufacture, .target = @intFromEnum(id) }) orelse {
+        state.status = "No more views fit. ";
+        return;
+    };
+    activateView(nv);
+}
+
+/// A copy of plan `p` whose lists can be changed (the frame's arena).
+fn planCopy(p: manufacture.Plan) manufacture.Plan {
+    const ar = dvui.currentWindow().arena();
+    var c = p;
+    c.parts = ar.dupe(manufacture.Part, p.parts) catch p.parts;
+    const ops = ar.alloc(manufacture.Operation, p.operations.len) catch return c;
+    for (p.operations, ops) |op, *d| {
+        d.* = op;
+        d.targets = ar.dupe(manufacture.Target, op.targets) catch op.targets;
+    }
+    c.operations = ops;
+    return c;
+}
+
+/// A dropdown row: `label`, then `names`; the entry chosen when it
+/// changes.
+fn choiceRow(label: []const u8, names: []const []const u8, current: usize, n: usize) ?usize {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(label);
+    var choice = current;
+    if (!tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == current) return null;
+    return choice;
+}
+
+fn panelNameOf(id: ObjectId) []const u8 {
+    const pi = state.model.panelIndex(id) orelse return "(a panel no longer there)";
+    return state.model.panels.items[pi].name;
+}
+
+/// A material choice: none, the document's, then the library's it has not
+/// (chosen, one is added to the document). Returns the material's ID, or
+/// null when unchanged.
+fn materialChoice(label: []const u8, current: ObjectId, key: u64, n: usize) ?ObjectId {
+    const m = &state.model;
+    const ar = dvui.currentWindow().arena();
+    var names: std.ArrayList([]const u8) = .empty;
+    var ids: std.ArrayList(?ObjectId) = .empty;
+    var lib: std.ArrayList(?usize) = .empty;
+    names.append(ar, "none") catch return null;
+    ids.append(ar, .none) catch return null;
+    lib.append(ar, null) catch return null;
+    for (m.materials.items) |mt| {
+        names.append(ar, mt.material.name) catch return null;
+        ids.append(ar, mt.id) catch return null;
+        lib.append(ar, null) catch return null;
+    }
+    for (manufacture.library, 0..) |lm, k| {
+        const have = for (m.materials.items) |mt| {
+            if (std.mem.eql(u8, mt.material.name, lm.name)) break true;
+        } else false;
+        if (have) continue;
+        names.append(ar, std.fmt.allocPrint(ar, "{s} (library)", .{lm.name}) catch return null) catch return null;
+        ids.append(ar, null) catch return null;
+        lib.append(ar, k) catch return null;
+    }
+    var cur: usize = 0;
+    for (ids.items, 0..) |x, k| if (x != null and x.? == current) {
+        cur = k;
+    };
+    const chosen = choiceRow(label, names.items, cur, n) orelse return null;
+    if (lib.items[chosen]) |k| return actM(key, .addMaterial, .{manufacture.library[k]}) catch null;
+    return ids.items[chosen].?;
+}
+
+/// A process choice, as `materialChoice`, from the document's profiles and
+/// the built-ins.
+fn processChoiceRow(current: ObjectId, key: u64, n: usize) ?ObjectId {
+    const m = &state.model;
+    const prc = layout.model.process;
+    const ar = dvui.currentWindow().arena();
+    var names: std.ArrayList([]const u8) = .empty;
+    var ids: std.ArrayList(?ObjectId) = .empty;
+    var adds: std.ArrayList(?usize) = .empty;
+    names.append(ar, "none") catch return null;
+    ids.append(ar, .none) catch return null;
+    adds.append(ar, null) catch return null;
+    for (m.processes.items) |pr| {
+        names.append(ar, pr.profile.name) catch return null;
+        ids.append(ar, pr.id) catch return null;
+        adds.append(ar, null) catch return null;
+    }
+    for (prc.builtins, 0..) |b, k| {
+        const have = for (m.processes.items) |pr| {
+            if (std.mem.eql(u8, pr.profile.name, b.name)) break true;
+        } else false;
+        if (have) continue;
+        names.append(ar, std.fmt.allocPrint(ar, "{s} (built in)", .{b.name}) catch return null) catch return null;
+        ids.append(ar, null) catch return null;
+        adds.append(ar, k) catch return null;
+    }
+    var cur: usize = 0;
+    for (ids.items, 0..) |x, k| if (x != null and x.? == current) {
+        cur = k;
+    };
+    const chosen = choiceRow("Process", names.items, cur, n) orelse return null;
+    if (adds.items[chosen]) |k| return actM(key, .addProcess, .{prc.builtins[k]}) catch null;
+    return ids.items[chosen].?;
+}
+
+/// What a warning says.
+fn warningText(buf: []u8, w: manufacture.Warning) []const u8 {
+    const panel = panelNameOf(w.panel);
+    const op = (w.operation orelse 0) + 1;
+    return switch (w.kind) {
+        .no_material => std.fmt.bufPrint(buf, "{s} has no material.", .{panel}),
+        .unsuited => std.fmt.bufPrint(buf, "Operation {d} on {s}: {s}.", .{ op, panel, if (w.why.len > 0) w.why else "its process does not suit the material" }),
+        .colour_unavailable => std.fmt.bufPrint(buf, "Operation {d}: {s} cannot be given that colour on {s}'s material.", .{ op, w.layer, panel }),
+        .mark_after_cut => std.fmt.bufPrint(buf, "Operation {d} marks {s} after it was cut free: it may have moved (mark first).", .{ op, panel }),
+        .no_such_target => std.fmt.bufPrint(buf, "Operation {d} names {s}{s}{s}, which is not one of the plan's parts' layers.", .{ op, panel, if (w.layer.len > 0) " · " else "", w.layer }),
+        .unmade_layer => std.fmt.bufPrint(buf, "{s} · {s}: no operation makes it.", .{ panel, w.layer }),
+        .too_thick => std.fmt.bufPrint(buf, "Operation {d}: {s} is thicker than its process cuts.", .{ op, panel }),
+        .no_process => std.fmt.bufPrint(buf, "Operation {d} has no process.", .{op}),
+    } catch "";
+}
+
+/// Plan `id`'s editor: its name and whether it is the one exported; its
+/// parts and their materials; its operations, each with its process,
+/// passes, the layers it makes and their colours; the warnings.
+fn planEditor(id: ObjectId) void {
+    const m = &state.model;
+    const pi = m.planIndex(id) orelse return;
+    const p = m.plans.items[pi];
+    const ar = dvui.currentWindow().arena();
+    heading("Plan", .{}, 100);
+    if (textProp("Name", p.name, 101)) |v| {
+        var n = planCopy(p);
+        n.name = v;
+        actM(mergeKey(.{ "plan name", id }), .setPlan, .{ id, n }) catch {};
+    }
+    if (m.active_plan == id) {
+        propText("Exported", "{s}", .{"this plan"}, 102);
+    } else if (tbutton(@src(), "Export this plan (make it active)", .{}, .{ .expand = .horizontal, .id_extra = 102 })) act(.setActivePlan, .{id}) catch {};
+
+    // Parts, each with its material.
+    heading("Parts", .{}, 110);
+    for (p.parts, 0..) |pt, k| {
+        const key = mergeKey(.{ "part material", id, k, m.materials.items.len });
+        if (materialChoice(panelNameOf(pt.panel), pt.material, key, 111 + k)) |mid| {
+            const n = planCopy(p);
+            @constCast(n.parts)[k].material = mid;
+            actM(key, .setPlan, .{ id, n }) catch {};
+        }
+    }
+    {
+        var names: std.ArrayList([]const u8) = .empty;
+        var pids: std.ArrayList(ObjectId) = .empty;
+        names.append(ar, "choose a panel") catch return;
+        pids.append(ar, .none) catch return;
+        for (m.panels.items) |pn| {
+            if (pn.unbounded or pn.id == .none or p.part(pn.id) != null) continue;
+            names.append(ar, pn.name) catch return;
+            pids.append(ar, pn.id) catch return;
+        }
+        if (names.items.len > 1) if (choiceRow("Add a part", names.items, 0, 180)) |k| {
+            var n = planCopy(p);
+            var parts: std.ArrayList(manufacture.Part) = .empty;
+            parts.appendSlice(ar, n.parts) catch return;
+            parts.append(ar, .{ .panel = pids.items[k] }) catch return;
+            n.parts = parts.items;
+            act(.setPlan, .{ id, n }) catch {};
+        };
+    }
+
+    // Operations, in order (a new one goes last).
+    heading("Operations", .{}, 189);
+    if (tbutton(@src(), "Add an operation", .{}, .{ .expand = .horizontal, .id_extra = 190 })) {
+        var n = planCopy(p);
+        var ops: std.ArrayList(manufacture.Operation) = .empty;
+        ops.appendSlice(ar, n.operations) catch return;
+        ops.append(ar, .{ .name = std.fmt.allocPrint(ar, "Operation {d}", .{p.operations.len + 1}) catch "Operation", .process = .none }) catch return;
+        n.operations = ops.items;
+        act(.setPlan, .{ id, n }) catch {};
+    }
+    for (0..p.operations.len) |k| operationEditor(id, p, k, 200 + 100 * k) catch {};
+
+    // What is worth a second look.
+    const ws = manufacture.warnings(ar, m, p) catch &.{};
+    heading("{s}", .{if (ws.len == 0) "No warnings" else "Warnings"}, 95);
+    for (ws, 0..) |w, k| {
+        var buf: [256]u8 = undefined;
+        var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = 96 + 1000 * k, .expand = .horizontal, .background = false, .margin = .{ .y = 2 } });
+        tl.addText(warningText(&buf, w), .{ .color_text = .{ .color = colors.overflow } });
+        tl.deinit();
+    }
+    if (tbutton(@src(), "Remove this plan", .{}, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 10 } })) {
+        act(.removePlan, .{id}) catch {};
+        state.context = .plans;
+    }
+}
+
+/// Operation `k` of plan `p`: shown in the view, moved, removed; its name,
+/// process and passes; the stackup layers it makes, each with a colour.
+fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void {
+    const m = &state.model;
+    const ar = dvui.currentWindow().arena();
+    const op = p.operations[k];
+    heading("{d}. {s}", .{ k + 1, op.name }, n0);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n0 });
+        defer row.deinit();
+        var shown = opShown(id, k);
+        if (tcheckbox(@src(), &shown, "Shown", .{ .id_extra = n0 })) {
+            if (shown) _ = op_hidden.remove(opKey(id, k)) else op_hidden.put(state.gpa, opKey(id, k), {}) catch {};
+        }
+        if (k > 0 and tbutton(@src(), "Earlier", .{}, .{ .id_extra = n0 + 1 })) {
+            const n = planCopy(p);
+            const ops = @constCast(n.operations);
+            std.mem.swap(manufacture.Operation, &ops[k], &ops[k - 1]);
+            act(.setPlan, .{ id, n }) catch {};
+            return;
+        }
+        if (k + 1 < p.operations.len and tbutton(@src(), "Later", .{}, .{ .id_extra = n0 + 2 })) {
+            const n = planCopy(p);
+            const ops = @constCast(n.operations);
+            std.mem.swap(manufacture.Operation, &ops[k], &ops[k + 1]);
+            act(.setPlan, .{ id, n }) catch {};
+            return;
+        }
+        if (tbutton(@src(), "Remove", .{}, .{ .id_extra = n0 + 3 })) {
+            var n = planCopy(p);
+            var ops: std.ArrayList(manufacture.Operation) = .empty;
+            try ops.appendSlice(ar, n.operations[0..k]);
+            try ops.appendSlice(ar, n.operations[k + 1 ..]);
+            n.operations = ops.items;
+            act(.setPlan, .{ id, n }) catch {};
+            return;
+        }
+    }
+    if (textProp("Name", op.name, n0 + 4)) |v| {
+        const n = planCopy(p);
+        @constCast(n.operations)[k].name = v;
+        actM(mergeKey(.{ "operation name", id, k }), .setPlan, .{ id, n }) catch {};
+    }
+    const pkey = mergeKey(.{ "operation process", id, k, m.processes.items.len });
+    if (processChoiceRow(op.process, pkey, n0 + 5)) |pid| {
+        const n = planCopy(p);
+        @constCast(n.operations)[k].process = pid;
+        actM(pkey, .setPlan, .{ id, n }) catch {};
+    }
+    if (numberProp("Passes", @floatFromInt(op.passes), 1, 100, n0 + 6)) |v| {
+        const n = planCopy(p);
+        @constCast(n.operations)[k].passes = @intFromFloat(@round(v));
+        actM(mergeKey(.{ "operation passes", id, k }), .setPlan, .{ id, n }) catch {};
+    }
+    const prof = m.profileById(op.process);
+    // Each part's stackup layers: made by it or not, and in what colour.
+    var j: usize = 0;
+    for (p.parts) |pt| {
+        const pidx = m.panelIndex(pt.panel) orelse continue;
+        const pn = m.panels.items[pidx];
+        const mat: ?manufacture.Material = if (m.materialIndex(pt.material)) |mi| m.materials.items[mi].material else null;
+        const palette: []const manufacture.Finish = if (prof != null and mat != null) try manufacture.results(ar, prof.?.kind(), mat.?) else &.{};
+        for (pn.fab.layers) |l| {
+            defer j += 1;
+            const ti: ?usize = for (op.targets, 0..) |t, x| {
+                if (t.panel == pt.panel and std.mem.eql(u8, t.layer, l.name)) break x;
+            } else null;
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n0 + 10 + j });
+            defer row.deinit();
+            var on = ti != null;
+            const label = try std.fmt.allocPrint(ar, "{s} · {s}", .{ pn.name, l.name });
+            if (tcheckbox(@src(), &on, label, .{ .id_extra = n0 + 10 + j })) {
+                const n = planCopy(p);
+                var ts: std.ArrayList(manufacture.Target) = .empty;
+                for (op.targets) |t| if (!(t.panel == pt.panel and std.mem.eql(u8, t.layer, l.name))) try ts.append(ar, t);
+                if (on) {
+                    // Its own colour, where the process can give it.
+                    const own: ?manufacture.Finish = switch (l.op) {
+                        .add, .inlay => |c| c,
+                        .subtract => null,
+                    };
+                    // Its own colour where the process gives it; else the
+                    // first the process gives (a laser's mark), if any.
+                    const same = if (own) |c| for (palette) |f| {
+                        if (std.mem.eql(u8, f.name, c.name)) break f;
+                    } else null else null;
+                    const first: ?manufacture.Finish = if (palette.len > 0 and l.op != .subtract) palette[0] else null;
+                    const keep = same orelse first;
+                    try ts.append(ar, .{ .panel = pt.panel, .layer = l.name, .colour = keep });
+                }
+                @constCast(n.operations)[k].targets = ts.items;
+                act(.setPlan, .{ id, n }) catch {};
+                return;
+            }
+            const x = ti orelse continue;
+            // Its colour: none, or one the process gives on this material.
+            const cur = op.targets[x].colour;
+            var names: std.ArrayList([]const u8) = .empty;
+            try names.append(ar, "no colour of its own");
+            for (palette) |f| try names.append(ar, f.name);
+            var at: usize = 0;
+            if (cur) |c| {
+                for (palette, 1..) |f, q| if (std.mem.eql(u8, f.name, c.name)) {
+                    at = q;
+                };
+                if (at == 0) {
+                    try names.append(ar, try std.fmt.allocPrint(ar, "{s} (not available)", .{c.name}));
+                    at = names.items.len - 1;
+                }
+            }
+            var choice = at;
+            if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n0 + 10 + j }) and choice != at and choice <= palette.len) {
+                const n = planCopy(p);
+                const ts = @constCast(@constCast(n.operations)[k].targets);
+                ts[x].colour = if (choice == 0) null else palette[choice - 1];
+                act(.setPlan, .{ id, n }) catch {};
+            }
+        }
+    }
+}
+
+/// The materials: how many, and new ones from the library.
+fn materialsProperties() void {
+    propText("Materials", "{d}", .{state.model.materials.items.len}, 1);
+    heading("Add from the library", .{}, 10);
+    for (manufacture.library, 0..) |lm, i| {
+        if (tbutton(@src(), lm.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+            state.context = .{ .material = act(.addMaterial, .{lm}) catch continue };
+        }
+    }
+}
+
+/// A material: its name; what it is, how it comes, its surface and
+/// colours; the plans' parts made of it; its removal while unused.
+fn materialProperties(id: ObjectId) void {
+    const m = &state.model;
+    const i = m.materialIndex(id) orelse return;
+    const x = m.materials.items[i].material;
+    if (textProp("Name", x.name, 1)) |v| {
+        var n = x;
+        n.name = v;
+        actM(mergeKey(.{ "material name", id }), .setMaterial, .{ id, n }) catch {};
+    }
+    propText("Kind", "{s}", .{x.kind.label()}, 2);
+    propText("Comes as", "{s}", .{x.form.label()}, 3);
+    propText("Surface", "{s}", .{x.surface.label()}, 4);
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    for (x.finishes, 0..) |f, k| w.print("{s}{s}", .{ if (k > 0) ", " else "", f.name }) catch break;
+    propText("Colours", "{s}", .{w.buffered()}, 5);
+    if (x.core) |c| propText("Under it", "{s}", .{c.name}, 6);
+    if (x.thicknesses.len > 0) {
+        var tb: [128]u8 = undefined;
+        var tw: std.Io.Writer = .fixed(&tb);
+        for (x.thicknesses, 0..) |t, k| tw.print("{s}{d}", .{ if (k > 0) ", " else "", t }) catch break;
+        propText("Thicknesses, mm", "{s}", .{tw.buffered()}, 7);
+    }
+    heading("Used by", .{}, 20);
+    var used: usize = 0;
+    for (m.plans.items, 0..) |pl, k| for (pl.parts) |pt| if (pt.material == id) {
+        var lb: [160]u8 = undefined;
+        const text = std.fmt.bufPrint(&lb, "{s}: {s}", .{ pl.name, panelNameOf(pt.panel) }) catch pl.name;
+        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used })) state.context = .{ .plan = pl.id };
+        used += 1;
+    };
+    if (used == 0) {
+        propText("Parts", "none", .{}, 19);
+        if (tbutton(@src(), "Remove this material", .{}, .{ .expand = .horizontal, .id_extra = 18, .margin = .{ .y = 8 } })) {
+            act(.removeMaterial, .{id}) catch {};
+            state.context = .materials;
+        }
+    }
+}
+
+/// A plan's parts as made, from above, for drawing: per part, each stackup
+/// layer's geometry resolved; rebuilt when the document changes.
+const MfgLayer = struct { name: []const u8, cut: bool, own: ?layout.model.FabColour, region: geom.fill.Region };
+const MfgPart = struct { panel: usize, layers: []const MfgLayer };
+var mfg_arena: ?std.heap.ArenaAllocator = null;
+var mfg_parts: []const MfgPart = &.{};
+var mfg_rev: u64 = std.math.maxInt(u64);
+var mfg_gen: u64 = 0;
+var mfg_plan: ObjectId = .none;
+
+fn mfgGeometry(plan: manufacture.Plan) []const MfgPart {
+    const m = &state.model;
+    if (mfg_rev == m.revision and mfg_gen == doc_generation and mfg_plan == plan.id) return mfg_parts;
+    if (state.placed_rev != m.revision) return mfg_parts;
+    if (mfg_arena) |*ar| ar.deinit();
+    mfg_arena = .init(state.gpa);
+    const a = mfg_arena.?.allocator();
+    var parts: std.ArrayList(MfgPart) = .empty;
+    for (plan.parts) |pt| {
+        const pi = m.panelIndex(pt.panel) orelse continue;
+        if (pi >= state.placed.items.len) continue;
+        const fp = layout.fab.plan(a, m, pi, &state.placed.items[pi], faceTable()) catch continue;
+        var layers: std.ArrayList(MfgLayer) = .empty;
+        for (fp.steps) |st| {
+            const l = m.panels.items[pi].fab.layers[st.layer];
+            var loops: std.ArrayList([]const geom.Point) = .empty;
+            for (st.pieces) |pc| for (pc.contours) |cn| {
+                const pts = geom.grow.flatten(a, cn, 0.01) catch continue;
+                if (pts.len >= 3) loops.append(a, pts) catch continue;
+            };
+            const region = geom.fill.nonzero(a, loops.items, 1e-5) catch continue;
+            layers.append(a, .{ .name = l.name, .cut = st.op == .subtract, .own = switch (l.op) {
+                .add, .inlay => |c| c,
+                .subtract => null,
+            }, .region = region }) catch continue;
+        }
+        parts.append(a, .{ .panel = pi, .layers = layers.items }) catch continue;
+    }
+    mfg_parts = parts.items;
+    mfg_rev = m.revision;
+    mfg_gen = doc_generation;
+    mfg_plan = plan.id;
+    return mfg_parts;
+}
+
+fn finishColor(f: layout.model.FabColour) dvui.Color {
+    return display.fix(dvui.Color{ .r = f.color.r, .g = f.color.g, .b = f.color.b });
+}
+
+/// Manufacturing view `v`: its plan's parts where they sit on the canvas,
+/// each operation a layer (shown or hidden in the plan's properties): what
+/// it adds in the colour the plan gives (else the part's material's), what
+/// it cuts away showing the backdrop, its edge drawn. Cutting is drawn
+/// first, as the stock it shapes; the rest in the plan's order.
+/// The wheel zooms, a drag pans; it opens fitted to the parts.
+fn manufactureView(v: u8) void {
+    const m = &state.model;
+    const id: ObjectId = @enumFromInt(vl.views[v].target);
+    const pidx = m.planIndex(id) orelse return;
+    const plan = m.plans.items[pidx];
+    const active = v == vl.active;
+    const backdrop = colors.desk;
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = backdrop }, .id_extra = v });
+    defer box.deinit();
+    const area = box.data().contentRectScale().r;
+    const parts = mfgGeometry(plan);
+    // Where it looks: kept in the view; fitted when not yet set.
+    var look: View = .{ .cx = vl.views[v].cx, .cy = vl.views[v].cy, .ppm = vl.views[v].ppm };
+    if (!(look.ppm > 0)) {
+        var b = geom.Box.empty;
+        for (parts) |pt| b = b.join(panelBox(pt.panel));
+        if (b.isEmpty()) b = .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 100 };
+        look.cx = (b.x0 + b.x1) / 2;
+        look.cy = (b.y0 + b.y1) / 2;
+        look.ppm = 0.9 * @min(area.w / @max(b.width(), 1), area.h / @max(b.height(), 1));
+    }
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        switch (me.action) {
+            .press => if (dvui.eventMatchSimple(e, box.data())) {
+                e.handle(@src(), box.data());
+                if (!active) view_to_activate = v;
+                dvui.captureMouse(box.data(), e.num);
+                mfg_drag = me.p;
+            },
+            .release => if (dvui.captured(box.data().id)) {
+                e.handle(@src(), box.data());
+                dvui.captureMouse(null, e.num);
+            },
+            .motion => if (dvui.captured(box.data().id)) {
+                e.handle(@src(), box.data());
+                look.cx -= (me.p.x - mfg_drag.x) / look.ppm;
+                look.cy += (me.p.y - mfg_drag.y) / look.ppm;
+                mfg_drag = me.p;
+                dvui.refresh(null, @src(), null);
+            },
+            .wheel_y => |dy| if (dvui.eventMatchSimple(e, box.data())) {
+                e.handle(@src(), box.data());
+                const z = @exp(@log(1.003) * @as(f64, dy));
+                const at = look.toMm(area, me.p);
+                look.ppm *= z;
+                look.cx = at.x - (at.x - look.cx) / z;
+                look.cy = at.y - (at.y - look.cy) / z;
+            },
+            else => {},
+        }
+    }
+    vl.views[v].cx = look.cx;
+    vl.views[v].cy = look.cy;
+    vl.views[v].ppm = look.ppm;
+    // Drawn with the canvas's own drawing, its look swapped in, within
+    // the view.
+    const prev_clip = dvui.clip(area);
+    defer dvui.clipSet(prev_clip);
+    const saved = state.view;
+    state.view = look;
+    defer state.view = saved;
+    const px = dvui.windowNaturalScale();
+    for (parts) |pt| {
+        const at = panelOrigin(pt.panel);
+        const part = plan.part(m.panels.items[pt.panel].id) orelse continue;
+        const mat: ?manufacture.Material = if (m.materialIndex(part.material)) |mi| m.materials.items[mi].material else null;
+        const mat_colour: ?layout.model.FabColour = if (mat) |x| (if (x.finishes.len > 0) x.finishes[0] else null) else null;
+        // Cutting first, whenever it comes: it shapes the stock without
+        // changing its surface; then the rest in the plan's order.
+        for ([_]bool{ true, false }) |cutting| for (plan.operations, 0..) |op, k| {
+            if (!opShown(plan.id, k)) continue;
+            const cuts = if (m.profileById(op.process)) |pr| pr.kind().cuts() else false;
+            if (cuts != cutting) continue;
+            for (op.targets) |t| {
+                if (t.panel != m.panels.items[pt.panel].id) continue;
+                for (pt.layers) |l| {
+                    if (!std.mem.eql(u8, l.name, t.layer)) continue;
+                    if (l.cut) {
+                        fillRegion(area, l.region, at, .{ .flat = backdrop });
+                        for (l.region.loops) |loop| strokeLoop(area, loop, at, px, colors.guide);
+                    } else {
+                        const c = t.colour orelse mat_colour orelse l.own orelse continue;
+                        fillRegion(area, l.region, at, .{ .flat = finishColor(c) });
+                    }
+                }
+            }
+        };
+        state.view.rect(area, panelBox(pt.panel)).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.panel_edge.opacity(0.6) } });
+    }
+    // What it is: the plan, and that a 3D view is to come.
+    var cap = dvui.textLayout(@src(), .{}, .{ .background = true, .color_fill = .{ .color = backdrop.opacity(0.85) }, .gravity_x = 0, .gravity_y = 0, .margin = .all(8), .padding = .all(4), .id_extra = v });
+    var cb: [160]u8 = undefined;
+    cap.addText(std.fmt.bufPrint(&cb, "{s}: from above, operations in order (the plan's properties show or hide each)", .{plan.name}) catch "", .{ .color_text = .{ .color = colors.guide } });
+    cap.deinit();
+}
+var mfg_drag: dvui.Point.Physical = .{};
 
 // Fabrication checks (DRC) and the process's simulation --------------------------
 //
@@ -10860,6 +11473,10 @@ fn lowerKind() []const u8 {
         .style => "text style",
         .processes => "process profiles",
         .process => "process profile",
+        .plans => "manufacturing plans",
+        .plan => "manufacturing plan",
+        .materials => "materials",
+        .material => "material",
     };
 }
 
@@ -11167,6 +11784,12 @@ fn propFont(name: []const u8, n: usize) !void {
 
 fn properties() !void {
     if (activeKind() == .sheet) return sheetViewProperties();
+    // A manufacturing view: its plan, unless the plans or materials are
+    // what was chosen in the Browser.
+    if (activeKind() == .manufacture) switch (state.context) {
+        .plans, .plan, .materials, .material => {},
+        else => return planEditor(@enumFromInt(vl.views[vl.active].target)),
+    };
     if (sketch_edit != null) return sketchModeProperties();
     if (pickedConstraintProperties()) return;
     if (panel_edit != null) {
@@ -11333,6 +11956,10 @@ fn properties() !void {
         .style => |sid| try styleProperties(sid),
         .processes => processesProperties(),
         .process => |id| processProperties(id),
+        .plans => plansProperties(),
+        .plan => |id| planProperties(id),
+        .materials => materialsProperties(),
+        .material => |id| materialProperties(id),
         .sheet => |id| sheetProperties(id),
     }
 }
