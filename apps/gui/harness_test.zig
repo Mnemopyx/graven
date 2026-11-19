@@ -859,6 +859,47 @@ test "a process profile added from the built-ins, edited, its limits overridden 
     try std.testing.expectEqual(@as(usize, 2), m.processes.items.len);
 }
 
+// Fabrication checks ---------------------------------------------------------------
+
+test "the checks run when asked (C), as result layers; a panel checked alone; cleared" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    // Nothing is checked until asked.
+    try std.testing.expectEqual(@as(usize, 0), api.checkedPanels().len);
+    // A click on empty canvas below the panels gives it the keyboard.
+    try r.clickAt(api.toScreen(.{ .x = 60, .y = -15 }).?);
+    try r.key(.c, .none);
+    try r.frames(2);
+    const checked = api.checkedPanels();
+    try std.testing.expectEqual(@as(usize, 2), checked.len);
+    const keys = api.panelNamed("HP-15C keys").?;
+    const rep = api.checkReport(keys).?;
+    // At the 0.2 mm profile, the small legends' strokes are marginal and
+    // their superscripts fail; the simulation lays walls.
+    try std.testing.expect(rep.count(.stroke, .marginal) > 0);
+    try std.testing.expect(rep.count(.stroke, .fail) > 0);
+    try std.testing.expect(rep.paths.len > 0);
+    try std.testing.expectEqual(layout.check.Verdict.pass, rep.worst.get(.size));
+    // The result layers, in the canvas's Layers.
+    try r.click("tree/untitled/Canvas, mm");
+    _ = try r.rectOf("Results/Check again");
+    // Out of date once the document changes.
+    try std.testing.expect(!api.checksOutOfDate());
+    try r.click("tree/untitled/Canvas, mm/HP-15C plate");
+    try r.set("Fabrication/Thickness, mm", "2.2");
+    try std.testing.expect(api.checksOutOfDate());
+    // One panel, from its Fabrication.
+    try r.click("Fabrication/Check this panel");
+    try r.frames(2);
+    try std.testing.expectEqual(@as(usize, 1), api.checkedPanels().len);
+    try std.testing.expect(!api.checksOutOfDate());
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("Results/Clear results");
+    try std.testing.expectEqual(@as(usize, 0), api.checkedPanels().len);
+}
+
 // Known bugs, kept fixed --------------------------------------------------------
 
 /// Opens an example from the File menu (an untitled copy).

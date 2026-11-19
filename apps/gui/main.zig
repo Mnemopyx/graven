@@ -80,6 +80,22 @@ pub const testing_api = struct {
     pub fn model() *Model {
         return &state.model;
     }
+    /// The fabrication checks last run: the panels checked (none when
+    /// cleared or for another document), and whether out of date.
+    pub fn checkedPanels() []const usize {
+        if (!checksCurrent()) return &.{};
+        const out = dvui.currentWindow().arena().alloc(usize, checks.len) catch return &.{};
+        for (checks, out) |ck, *o| o.* = ck.panel;
+        return out;
+    }
+    pub fn checkReport(panel: usize) ?layout.check.Report {
+        if (!checksCurrent()) return null;
+        for (checks) |ck| if (ck.panel == panel) return ck.report;
+        return null;
+    }
+    pub fn checksOutOfDate() bool {
+        return checksStale();
+    }
     /// The dropdown in the row tagged `tag` takes entry `label` next frame.
     pub fn choose(tag: []const u8, label: []const u8) void {
         test_choice = .{ .tag = tag, .label = label };
@@ -1329,6 +1345,8 @@ fn deinit(_: *dvui.Window) void {
     panel_edit = null;
     dg_table.deinit(state.gpa);
     dg_table = .{};
+    clearChecks();
+    check_shown = .initFill(true);
     tags_given.deinit(state.gpa);
     tags_given = .empty;
     clearPlaced();
@@ -3007,6 +3025,11 @@ fn runAction(inv: keymap.Invocation) bool {
                 else => redo(),
             }
         },
+        kact("fab.check") => {
+            if (canvas_prompt) return false;
+            runChecks(checkTarget());
+            return true;
+        },
         kact("view.snap-grid") => {
             snap_grid = !snap_grid;
             state.status = if (snap_grid) "Drags snap to the grid (Alt held lets go). " else "Drags no longer snap to the grid. ";
@@ -4464,6 +4487,10 @@ fn menu() ?dvui.App.Result {
                     file_prompt_new = true;
                 }
             } else state.status = "Choose a panel first: it is what is exported. ";
+        };
+        if (!canvas_prompt) if (menuAction("Check fabrication", "view", kact("fab.check"), 0, false, 40)) {
+            m.close();
+            runChecks(checkTarget());
         };
         if (!canvas_prompt) if (tmenu(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
@@ -6034,6 +6061,7 @@ fn canvas(active: bool, view: u8) void {
 
     if (open) drawFrameBound(area);
     if (open) drawSpace(area, shown_space, 0) else drawSpacePanels(area, null, null);
+    drawChecks(area, if (open) shown_space else null);
     if (open) drawSketches(area);
     // What only the active view shows: modes and the pointer's marks.
     if (!active) {
@@ -7252,6 +7280,7 @@ fn panelFab(pi: usize) !void {
     var key: u64 = 0;
     heading("Fabrication", .{}, 400);
     panelProcessChoice(pi);
+    panelChecks(pi);
     inline for (.{
         .{ "Thickness, mm", "thickness", 0.01, 1000.0 },
     }, 0..) |f, k| {
@@ -8126,9 +8155,282 @@ fn layerFlags(space: usize, li: usize, n: usize) void {
     }
 }
 
+// Fabrication checks (DRC) and the process's simulation --------------------------
+//
+// Run only when asked (C, View or File menu, or Check this panel in a
+// panel's Fabrication), never as the document changes: the results stand
+// as of their run, marked out of date once it has changed. They show as
+// result layers above the document's own, each shown or hidden: stroke
+// findings, gap findings, the rest (cap height, depths, colours, size),
+// and the process simulated (FDM: the walls a slicer would lay). Kept for
+// the session, not saved, not undone.
+
+const CheckLayer = enum {
+    strokes,
+    gaps,
+    other,
+    simulation,
+
+    fn label(l: CheckLayer) []const u8 {
+        return switch (l) {
+            .strokes => "Check: strokes",
+            .gaps => "Check: gaps",
+            .other => "Check: cap height, depths, colours, size",
+            .simulation => "Simulation: FDM walls",
+        };
+    }
+};
+
+const Checked = struct {
+    panel: usize,
+    report: layout.check.Report,
+    /// Each finding's area, triangulated for drawing (null: none).
+    areas: []const ?geom.fill.Region,
+};
+
+var checks_arena: ?std.heap.ArenaAllocator = null;
+var checks: []const Checked = &.{};
+/// The revision and document they were run on.
+var checks_rev: u64 = 0;
+var checks_gen: u64 = 0;
+var checks_ms: f64 = 0;
+/// Shapes measured, kept for the session: a check again is quick.
+var check_cache: ?layout.check.Cache = null;
+var check_cache_gen: u64 = 0;
+var check_shown: std.EnumArray(CheckLayer, bool) = .initFill(true);
+
+fn checksCurrent() bool {
+    return checks.len > 0 and checks_gen == doc_generation;
+}
+
+fn checksStale() bool {
+    return checksCurrent() and checks_rev != state.model.revision;
+}
+
+/// Drops the results (another document, or shutdown).
+fn clearChecks() void {
+    if (checks_arena) |*ar| ar.deinit();
+    checks_arena = null;
+    checks = &.{};
+    if (check_cache) |*c| c.deinit();
+    check_cache = null;
+}
+
+/// What C checks: the context's panel when it has something to check (a
+/// process profile and fabrication layers), else every panel that has.
+fn checkTarget() ?usize {
+    const pi = switch (state.context) {
+        .panel => |p| p,
+        else => return null,
+    };
+    if (pi >= state.model.panels.items.len) return null;
+    const p = state.model.panels.items[pi];
+    if (p.unbounded or state.model.processOf(pi) == null or p.fab.layers.len == 0) return null;
+    return pi;
+}
+
+/// Runs the checks on panel `only`, else on every panel with a process
+/// profile and fabrication layers.
+fn runChecks(only: ?usize) void {
+    if (state.placed_rev != state.model.revision) {
+        state.status = "The panels are still being laid out: check again in a moment. ";
+        return;
+    }
+    if (check_cache != null and check_cache_gen != doc_generation) {
+        check_cache.?.deinit();
+        check_cache = null;
+    }
+    if (check_cache == null) {
+        check_cache = .init(state.gpa);
+        check_cache_gen = doc_generation;
+    }
+    if (checks_arena) |*ar| ar.deinit();
+    checks_arena = .init(state.gpa);
+    const a = checks_arena.?.allocator();
+    checks = &.{};
+    var list: std.ArrayList(Checked) = .empty;
+    const t0 = std.Io.Clock.awake.now(dvui.io);
+    var skipped: usize = 0;
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (only) |o| if (o != pi) continue;
+        if (p.unbounded or pi >= state.placed.items.len) continue;
+        if (state.model.processOf(pi) == null or p.fab.layers.len == 0) {
+            skipped += 1;
+            continue;
+        }
+        const report = layout.check.run(a, &state.model, pi, &state.placed.items[pi], faceTable(), &check_cache.?) catch {
+            state.status = "The checks could not be run. ";
+            return;
+        };
+        const areas = a.alloc(?geom.fill.Region, report.findings.len) catch return;
+        for (report.findings, areas) |f, *r| {
+            r.* = null;
+            const o = f.area orelse continue;
+            var loops: std.ArrayList([]const geom.Point) = .empty;
+            for (o.contours) |cn| {
+                const pts = geom.grow.flatten(a, cn, layout.check.tolerance) catch continue;
+                loops.append(a, pts) catch continue;
+            }
+            r.* = geom.fill.nonzero(a, loops.items, layout.check.tolerance * 1e-3) catch null;
+        }
+        list.append(a, .{ .panel = pi, .report = report, .areas = areas }) catch return;
+    }
+    checks = list.items;
+    checks_rev = state.model.revision;
+    checks_gen = doc_generation;
+    checks_ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(dvui.io)).nanoseconds)) / 1e6;
+    if (checks.len == 0) {
+        state.status = if (only != null)
+            "This panel has no process profile or no fabrication layers (its Fabrication): nothing to check. "
+        else
+            "No panel has a process profile and fabrication layers (a panel's Fabrication): nothing to check. ";
+        return;
+    }
+    var fails: usize = 0;
+    var marginal: usize = 0;
+    for (checks) |ck| for (ck.report.findings) |f| switch (f.verdict) {
+        .fail => fails += 1,
+        .marginal => marginal += 1,
+        .pass => {},
+    };
+    state.status = std.fmt.bufPrint(&check_status_buf, "Checked {d} panel{s} in {d:.0} ms: {d} failing, {d} marginal. The results are layers (Layers). ", .{ checks.len, if (checks.len == 1) "" else "s", checks_ms, fails, marginal }) catch "Checked. ";
+    dvui.refresh(null, @src(), null);
+}
+var check_status_buf: [160]u8 = undefined;
+
+/// The result layers over the panels of `space` (null: the shown ones).
+fn drawChecks(area: dvui.Rect.Physical, space: ?usize) void {
+    if (!checksCurrent()) return;
+    const px = dvui.windowNaturalScale();
+    const marginal = display.fix(dvui.Color{ .r = 0xe0, .g = 0x00, .b = 0xd0 });
+    const failing = display.fix(dvui.Color{ .r = 0xe0, .g = 0x20, .b = 0x1b });
+    for (checks) |ck| {
+        const pi = ck.panel;
+        if (pi >= state.model.panels.items.len) continue;
+        if (space) |sp| {
+            if (state.model.spaceOf(pi) != sp) continue;
+        } else if (!shownPanel(pi)) continue;
+        const at = panelOrigin(pi);
+        if (check_shown.get(.simulation)) {
+            const lifo = dvui.currentWindow().lifo();
+            for (ck.report.paths) |path| {
+                if (path.points.len < 2) continue;
+                const pts = lifo.alloc(dvui.Point.Physical, path.points.len) catch continue;
+                defer lifo.free(pts);
+                for (path.points, pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+                const c = path.colour.color;
+                // A bead a little narrower than laid, so neighbours part.
+                const w: f32 = @max(px, @as(f32, @floatCast(path.width * 0.8 * state.view.ppm)) * px);
+                dvui.Path.stroke(.{ .points = pts }, .{ .thickness = w, .color = .{ .color = display.fix(dvui.Color{ .r = c.r, .g = c.g, .b = c.b }).opacity(0.75) }, .closed = true });
+            }
+        }
+        for (ck.report.findings, ck.areas) |f, region| {
+            const layer: CheckLayer = switch (f.kind) {
+                .stroke => .strokes,
+                .gap => .gaps,
+                else => .other,
+            };
+            if (!check_shown.get(layer)) continue;
+            const colour = if (f.verdict == .fail) failing else marginal;
+            if (region) |r| {
+                fillRegion(area, r, at, .{ .flat = colour.opacity(0.8) });
+            } else {
+                state.view.rect(area, onSheet(pi, f.box)).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = colour } });
+            }
+        }
+    }
+}
+
+/// How many findings of `layer` the results hold (for `space`), and how
+/// many fail.
+fn checkCounts(space: usize, layer: CheckLayer) struct { n: usize, fails: usize } {
+    var n: usize = 0;
+    var fails: usize = 0;
+    for (checks) |ck| {
+        if (ck.panel >= state.model.panels.items.len or state.model.spaceOf(ck.panel) != space) continue;
+        if (layer == .simulation) {
+            n += ck.report.paths.len;
+            continue;
+        }
+        for (ck.report.findings) |f| {
+            const l: CheckLayer = switch (f.kind) {
+                .stroke => .strokes,
+                .gap => .gaps,
+                else => .other,
+            };
+            if (l != layer) continue;
+            n += 1;
+            if (f.verdict == .fail) fails += 1;
+        }
+    }
+    return .{ .n = n, .fails = fails };
+}
+
+/// The result layers in a space's Layers: each shown or hidden, with what
+/// it holds; Check again, Clear.
+fn checkLayersList(space: usize) void {
+    if (!checksCurrent()) return;
+    const any = for (checks) |ck| {
+        if (ck.panel < state.model.panels.items.len and state.model.spaceOf(ck.panel) == space) break true;
+    } else false;
+    if (!any) return;
+    heading("{s}", .{if (checksStale()) "Results (out of date)" else "Results"}, 690);
+    for (std.enums.values(CheckLayer), 0..) |l, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 600 + k });
+        defer row.deinit();
+        var vis = check_shown.get(l);
+        if (tcheckbox(@src(), &vis, null, .{ .id_extra = 600 + k })) check_shown.set(l, vis);
+        const c = checkCounts(space, l);
+        var buf: [128]u8 = undefined;
+        const text = if (l == .simulation)
+            std.fmt.bufPrint(&buf, "{s} · {d} paths", .{ l.label(), c.n }) catch l.label()
+        else if (c.n == 0)
+            std.fmt.bufPrint(&buf, "{s} · pass", .{l.label()}) catch l.label()
+        else
+            std.fmt.bufPrint(&buf, "{s} · {d} failing, {d} marginal", .{ l.label(), c.fails, c.n - c.fails }) catch l.label();
+        dvui.labelNoFmt(@src(), text, .{}, .{ .id_extra = 600 + k, .expand = .horizontal, .gravity_y = 0.5 });
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 610 });
+        defer row.deinit();
+        if (tbutton(@src(), "Check again", .{}, .{ .expand = .horizontal, .id_extra = 611 })) {
+            const only: ?usize = if (checks.len == 1) checks[0].panel else null;
+            runChecks(only);
+        }
+        if (tbutton(@src(), "Clear results", .{}, .{ .expand = .horizontal, .id_extra = 612 })) {
+            if (checks_arena) |*ar| ar.deinit();
+            checks_arena = null;
+            checks = &.{};
+        }
+    }
+}
+
+/// A panel's checks in its Fabrication: Check this panel, and its last
+/// results, check by check.
+fn panelChecks(pi: usize) void {
+    if (tbutton(@src(), "Check this panel", .{}, .{ .expand = .horizontal, .id_extra = 420, .margin = .{ .y = 6 } })) runChecks(pi);
+    if (!checksCurrent()) return;
+    const ck = for (checks) |c| {
+        if (c.panel == pi) break c;
+    } else return;
+    const r = ck.report;
+    const pr = r.profile orelse return;
+    var buf: [128]u8 = undefined;
+    propValue("Checked", checksStale(), "{s}{s}", .{ pr.name, if (checksStale()) " (out of date)" else "" }, 421);
+    for (std.enums.values(layout.check.Kind), 0..) |k, i| {
+        const fl = r.count(k, .fail);
+        const mg = r.count(k, .marginal);
+        const v = r.worst.get(k);
+        const text = if (fl + mg == 0) "pass" else std.fmt.bufPrint(&buf, "{s}: {d} failing, {d} marginal", .{ @tagName(v), fl, mg }) catch @tagName(v);
+        propText(k.label(), "{s}", .{text}, 422 + i);
+    }
+    propText("Part", "{d:.1} × {d:.1} × {d:.1} mm, {d} colour{s}", .{ r.extent[0], r.extent[1], r.extent[2], r.colours, if (r.colours == 1) "" else "s" }, 430);
+}
+
 /// A space's layers, top first, for its properties: each one shown or
 /// hidden, locked or not, and opened by its name; then Add layer.
 fn layersList(space: usize) void {
+    checkLayersList(space);
     heading("{s}", .{"Layers"}, 700);
     const sp = state.model.spaces.items[space];
     const n = sp.layers.items.len;

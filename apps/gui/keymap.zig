@@ -29,7 +29,7 @@ pub const modes = [_]M{
     .{ .name = "dialog.calibrate-size", .kind = .dialog, .lifetime = .until_left, .parent = "global", .extends = "dialog", .allows = &.{"dialog.calibrate-size"} },
     // The view of the canvas, a sketch or a panel being edited: zoom.
     // Layered on those major modes; its unchorded keys give way to typing.
-    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{"view"} },
+    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{ "view", "fab" } },
     // No document yet.
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
@@ -102,6 +102,10 @@ pub const action_defs = [_]A{
     .{ .name = "view.zoom-out", .repeat = true },
     // Drags snap to the grid, or not.
     .{ .name = "view.snap-grid" },
+    // The fabrication checks (DRC) and the process's simulation, run on
+    // the context's panel, else every panel with a process profile; shown
+    // as result layers. Only ever run when asked.
+    .{ .name = "fab.check" },
 
     .{ .name = "dialog.confirm" },
     .{ .name = "dialog.cancel" },
@@ -310,6 +314,7 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "kp_subtract", .action = "view.zoom-out" },
     // Inkscape's key for snapping.
     .{ .mode = "view", .chord = "char:%", .action = "view.snap-grid" },
+    .{ .mode = "view", .chord = "c", .action = "fab.check" },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
     // Vim's digraph key (RFC 1345's mnemonics), where text is typed.

@@ -94,10 +94,22 @@ pub const Finding = struct {
     extent: [3]f64 = .{ 0, 0, 0 },
 };
 
+/// One simulated path: a bead's centreline, closed, laid this wide in this
+/// colour (FDM: a wall, mm in the panel frame).
+pub const Path = struct {
+    points: []const Point,
+    width: f64,
+    colour: model.FabColour,
+    z: [2]f64,
+};
+
 pub const Report = struct {
     /// Null when the panel names no process: nothing to check against.
     profile: ?process.Profile,
     findings: []const Finding,
+    /// The process simulated, where Graven can (FDM: its walls): what a
+    /// slicer would lay, to compare with the design.
+    paths: []const Path = &.{},
     /// Each check's worst verdict.
     worst: std.EnumArray(Kind, Verdict),
     /// What the part measures: its colours and extent.
@@ -140,6 +152,8 @@ pub const Cache = struct {
     map: std.AutoHashMapUnmanaged(u64, []const Lost) = .empty,
     /// Pieces resolved, by shape: loops relative to the box corner.
     shapes: std.AutoHashMapUnmanaged(u64, []const Poly) = .empty,
+    /// Walls laid, by shape and role: centrelines relative to the corner.
+    walls: std.AutoHashMapUnmanaged(u64, []const Poly) = .empty,
 
     pub fn init(gpa: Allocator) Cache {
         return .{ .arena = .init(gpa) };
@@ -362,9 +376,67 @@ pub fn run(a: Allocator, m: *const model.Model, panel: usize, placed: *const pla
         };
     }
 
+    // The walls a slicer would lay (FDM).
+    switch (profile.params) {
+        .fdm => |fdm| {
+            var paths: std.ArrayList(Path) = .empty;
+            const grey: model.FabColour = .{ .name = "", .color = .{ .r = 128, .g = 128, .b = 128 } };
+            for (feats.items) |ft| {
+                const colour = colourOf(plan, ft) orelse if (ft.body) |bi| colourOf(plan, feats.items[bi]) orelse grey else grey;
+                const key = judgedKey(ft.face.shape, ft.role, .{ .pass = fdm.line_width, .fail = 0 }, .{ .pass = 0, .fail = 0 });
+                const rel = c.walls.get(key) orelse blk: {
+                    const ca = c.arena.allocator();
+                    const loops = try walls(a, ca, ft.face, ft.role, fdm.line_width);
+                    try c.walls.put(ca, key, loops);
+                    break :blk loops;
+                };
+                for (rel) |l| {
+                    const pts = try a.alloc(Point, l.len);
+                    for (l, pts) |q, *r| r.* = .{ .x = q.x + ft.face.box.x0, .y = q.y + ft.face.box.y0 };
+                    try paths.append(a, .{ .points = pts, .width = fdm.line_width, .colour = colour, .z = ft.z });
+                }
+            }
+            report.paths = paths.items;
+        },
+    }
+
     report.findings = out.items;
     for (out.items) |fd| report.worst.set(fd.kind, worse(report.worst.get(fd.kind), fd.verdict));
     return report;
+}
+
+/// The colour a feature's material is, from its step in the plan: null
+/// for a cut.
+fn colourOf(plan: fab.Plan, ft: Feature) ?model.FabColour {
+    const name = ft.colour orelse return null;
+    for (plan.steps) |st| switch (st.op) {
+        .add => |col| if (std.mem.eql(u8, col.name, name)) return col,
+        .subtract => {},
+    };
+    return null;
+}
+
+/// Wall centrelines, as a slicer's perimeters: inward from a part's edge
+/// (two walls) or an inlay's (walls until it is filled), outward round a
+/// cut (two walls, in the part's material). Relative to the face's box
+/// corner, in `ca`.
+fn walls(a: Allocator, ca: Allocator, fc: Face, role: Role, w: f64) ![]const Poly {
+    const o = try outlineOf(a, fc.polys);
+    var out: std.ArrayList(Poly) = .empty;
+    const most: usize = if (role == .inlay) 64 else 2;
+    for (0..most) |k| {
+        const r = w / 2 + @as(f64, @floatFromInt(k)) * w;
+        const ring = if (role == .void) try geom.grow.grow(a, o, r, tolerance) else try erode(a, o, r);
+        if (ring.contours.len == 0) break;
+        for (ring.contours) |cn| {
+            const pts = try geom.grow.flatten(a, cn, tolerance);
+            if (pts.len < 2) continue;
+            const rel = try ca.alloc(Point, pts.len);
+            for (pts, rel) |q, *d| d.* = .{ .x = q.x - fc.box.x0, .y = q.y - fc.box.y0 };
+            try out.append(ca, rel);
+        }
+    }
+    return out.items;
 }
 
 /// A finding for a lost or closing area `pts`.

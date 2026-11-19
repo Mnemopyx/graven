@@ -626,6 +626,7 @@ fn printChecks(init: std.process.Init, m: *const layout.Model, pi: usize, placed
         return;
     };
     std.debug.print("{s}: {s}, {s} ({d:.0} ms)\n", .{ name, pr.name, @tagName(r.overall()), ms });
+    std.debug.print("  {d} simulated paths\n", .{r.paths.len});
     std.debug.print("  part {d:.2} x {d:.2} x {d:.2} mm, {d} colour(s); {d} faces, {d} alike, {d} unmeasured\n", .{ r.extent[0], r.extent[1], r.extent[2], r.colours, r.faces, r.cached, r.unmeasured });
     for (std.enums.values(layout.check.Kind)) |k| {
         std.debug.print("  {s}: {s}", .{ k.label(), @tagName(r.worst.get(k)) });
@@ -644,6 +645,11 @@ fn printChecks(init: std.process.Init, m: *const layout.Model, pi: usize, placed
         var w: std.Io.Writer.Allocating = .init(a);
         try w.writer.writeAll(base[0..end]);
         try w.writer.writeAll(base[g..g_end]);
+        for (r.paths) |pth| {
+            try w.writer.print("<path fill=\"none\" stroke=\"#{x:0>2}{x:0>2}{x:0>2}\" stroke-opacity=\"0.55\" stroke-width=\"{d:.3}\" stroke-linejoin=\"round\" d=\"", .{ pth.colour.color.r, pth.colour.color.g, pth.colour.color.b, pth.width });
+            for (pth.points, 0..) |q, k| try w.writer.print("{s}{d:.4} {d:.4}", .{ if (k == 0) "M" else "L", q.x, q.y });
+            try w.writer.writeAll("Z\"/>\n");
+        }
         for (r.findings) |f| {
             const colour = if (f.verdict == .fail) "#e0201b" else "#e000d0";
             if (f.area) |o| {
