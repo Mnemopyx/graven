@@ -289,19 +289,20 @@ test "a column's pieces run down the page, up to the right" {
     try testing.expect(piece.stacked);
 }
 
-test "a panel's process limits are kept through a save (for the manufacture stage)" {
+test "a panel's process profile is kept through a save (for the manufacture stage)" {
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("board", 100, 60);
-    try m.setPanelFab(p, .{ .min_stroke = 0.3, .min_gap = 0.5, .min_cap = 1.5 });
-    try testing.expectError(error.BadSize, m.setPanelFab(p, .{ .min_gap = -1 }));
+    const fine = try m.addProcess(model.process.builtin("Generic FDM, 0.2 mm nozzle").?);
+    try m.setPanelProcess(p, fine);
+    try testing.expectError(error.NoSuchObject, m.setPanelProcess(p, @enumFromInt(9999)));
+    try testing.expectError(error.ProcessInUse, m.removeProcess(fine));
     const bytes = try native.encode(gpa, &m);
     defer gpa.free(bytes);
     var back = try native.decode(gpa, bytes);
     defer back.deinit();
-    const f = back.panels.items[p].fab;
-    try near(0.3, f.min_stroke);
-    try near(0.5, f.min_gap);
-    try near(1.5, f.min_cap);
+    const pr = back.processOf(p).?;
+    try testing.expectEqualStrings("Generic FDM, 0.2 mm nozzle", pr.name);
+    try near(0.22, pr.limits().stroke.pass);
 }

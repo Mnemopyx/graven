@@ -403,6 +403,10 @@ pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
     m.revision = 0;
     // An older document's threads, read into flows.
     try m.upgradeFlows();
+    m.upgradeProcesses() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {},
+    };
     return m;
 }
 

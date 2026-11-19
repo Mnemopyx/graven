@@ -46,10 +46,11 @@ pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const pl
     var steps: std.ArrayList(Step) = .empty;
     var off: std.ArrayList(usize) = .empty;
     for (fab.layers, 0..) |l, li| {
-        if (l.depth) |d| {
-            const n = d / fab.layer_height;
+        // Depths in whole layers, where its process lays layers.
+        if (l.depth) |d| if (m.processOf(panel)) |pr| if (pr.limits().layer) |lh| {
+            const n = d / lh;
             if (@abs(n - @round(n)) > 1e-6) try off.append(a, li);
-        }
+        };
         const pieces = try source(a, m, panel, placed, faces, l.source);
         if (pieces.len == 0) continue;
         const z = extent(fab, l, lo - 1, hi + 1);
@@ -234,7 +235,10 @@ test "a plate's stack: base, holes through, an inlaid legend; heights from its s
     const t = try m.placeInstance(plate, g, 1, 0, 0, 1, 1);
     try m.setTrackText(t, "f", "HOD");
     const gold: model.FabColour = .{ .name = "gold", .color = .hex("#d4a017") };
-    try m.setPanelFab(plate, .{ .thickness = 2, .layers = &.{
+    // Made by FDM at 0.2 mm layers: a depth not a whole number of them is
+    // flagged.
+    const fdm = try m.addProcess(model.process.builtin("Generic FDM, 0.4 mm nozzle").?);
+    try m.setPanelFab(plate, .{ .thickness = 2, .process = fdm, .layers = &.{
         .{ .name = "Base", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = 2, .op = .{ .add = .{ .name = "black", .color = .hex("#202020") } } },
         .{ .name = "Holes", .source = .cutouts, .op = .subtract },
         .{ .name = "Legends", .source = .{ .text = "f" }, .depth = 0.5, .op = .{ .inlay = gold } },

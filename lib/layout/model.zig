@@ -22,6 +22,7 @@ const glyphic = @import("graven_glyphic");
 const Allocator = std.mem.Allocator;
 const geom = @import("graven_geom");
 const art_ = @import("art.zig");
+pub const process = @import("process.zig");
 pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
 const edit_ = @import("edit.zig");
@@ -1139,17 +1140,26 @@ pub const Fab = struct {
     /// The base's thickness, mm: the base's top is this far above its
     /// bottom (z = 0).
     thickness: f64 = 2,
-    /// The process's layer height, mm: depths should be whole multiples.
-    layer_height: f64 = 0.2,
     layers: []const FabLayer = &.{},
-    /// What the process can make, mm: the thinnest stroke it holds, the
-    /// narrowest gap it keeps open, the smallest cap height that stays
-    /// legible. Defaults for colour FDM with a 0.4 mm nozzle. Read by the
-    /// manufacture stage, which checks a design against them and reports
-    /// what does not fit; layout does not limit by them.
-    min_stroke: f64 = 0.4,
-    min_gap: f64 = 0.4,
-    min_cap: f64 = 1.0,
+    /// The process profile it is made with (one of `Model.processes`),
+    /// which the manufacture stage checks the design against; none until
+    /// one is chosen. Layout does not limit by it.
+    process: ObjectId = .none,
+    /// Older documents' process settings, kept on the panel until
+    /// 2026-11-19: read, turned into a profile (`upgradeProcesses`), never
+    /// written.
+    old_layer_height: f64 = 0.2,
+    old_min_stroke: f64 = 0.4,
+    old_min_gap: f64 = 0.4,
+    old_min_cap: f64 = 1.0,
+
+    pub const file_names = .{ .old_layer_height = "layer_height", .old_min_stroke = "min_stroke", .old_min_gap = "min_gap", .old_min_cap = "min_cap" };
+};
+
+/// A process profile the document keeps: its ID, and the profile.
+pub const Process = struct {
+    id: ObjectId = .none,
+    profile: process.Profile,
 };
 
 pub const FabLayer = struct {
@@ -1525,12 +1535,14 @@ pub const Model = struct {
     flows: std.ArrayList(Flow) = .empty,
     /// Legend sheets: keypads' slot content as tables (see `LegendSheet`).
     sheets: std.ArrayList(LegendSheet) = .empty,
+    /// The process profiles its panels are made with (see `process`).
+    processes: std.ArrayList(Process) = .empty,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -3162,6 +3174,92 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    // Process profiles ---------------------------------------------------
+
+    pub fn processIndex(m: *const Model, id: ObjectId) ?usize {
+        if (id == .none) return null;
+        for (m.processes.items, 0..) |p, i| if (p.id == id) return i;
+        return null;
+    }
+
+    /// The profile panel `panel` is made with, if it has one.
+    pub fn processOf(m: *const Model, panel: usize) ?*const process.Profile {
+        const i = m.processIndex(m.panels.items[panel].fab.process) orelse return null;
+        return &m.processes.items[i].profile;
+    }
+
+    fn dupeProfile(m: *Model, p: process.Profile) Allocator.Error!process.Profile {
+        var c = p;
+        c.name = try m.a().dupe(u8, p.name);
+        return c;
+    }
+
+    /// Adds a process profile (a copy); returns its ID.
+    pub fn addProcess(m: *Model, p: process.Profile) Error!ObjectId {
+        if (!p.valid() or p.name.len == 0) return error.BadValue;
+        const id = m.newId();
+        try m.processes.append(m.a(), .{ .id = id, .profile = try m.dupeProfile(p) });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Changes process profile `id` to `p` (every panel made with it
+    /// follows).
+    pub fn setProcess(m: *Model, id: ObjectId, p: process.Profile) Error!void {
+        const i = m.processIndex(id) orelse return error.NoSuchObject;
+        if (!p.valid() or p.name.len == 0) return error.BadValue;
+        m.processes.items[i].profile = try m.dupeProfile(p);
+        m.revision += 1;
+    }
+
+    /// Removes process profile `id`; refused while a panel is made with it.
+    pub fn removeProcess(m: *Model, id: ObjectId) Error!void {
+        const i = m.processIndex(id) orelse return error.NoSuchObject;
+        for (m.panels.items) |p| if (p.fab.process == id) return error.ProcessInUse;
+        _ = m.processes.orderedRemove(i);
+        m.revision += 1;
+    }
+
+    /// Makes panel `panel` with process profile `id` (none: no process).
+    pub fn setPanelProcess(m: *Model, panel: usize, id: ObjectId) Error!void {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        if (id != .none and m.processIndex(id) == null) return error.NoSuchObject;
+        m.panels.items[panel].fab.process = id;
+        m.revision += 1;
+    }
+
+    /// Turns an older document's per-panel process settings into profiles:
+    /// each panel with fabrication layers and no profile is given one, the
+    /// built-in 0.4 mm FDM profile where its settings were the defaults (as
+    /// they all were), else a profile of its own settings, one for each
+    /// different set. Called on loading; does nothing to a newer document.
+    pub fn upgradeProcesses(m: *Model) Error!void {
+        for (m.panels.items) |*p| {
+            if (p.fab.layers.len == 0 or p.fab.process != .none) continue;
+            const f = p.fab;
+            const defaults = f.old_layer_height == 0.2 and f.old_min_stroke == 0.4 and f.old_min_gap == 0.4 and f.old_min_cap == 1.0;
+            var want: process.Profile = process.builtin("Generic FDM, 0.4 mm nozzle").?;
+            var name_buf: [96]u8 = undefined;
+            if (!defaults) {
+                want.name = std.fmt.bufPrint(&name_buf, "FDM, {d} mm layers (from an older file)", .{f.old_layer_height}) catch "FDM (from an older file)";
+                want.params.fdm.layer_height = f.old_layer_height;
+                want.params.fdm.first_layer = f.old_layer_height;
+                want.stroke = .{ .pass = f.old_min_stroke, .fail = @min(f.old_min_stroke, want.limits().stroke.fail) };
+                want.gap = .{ .pass = f.old_min_gap, .fail = @min(f.old_min_gap, want.limits().gap.fail) };
+                want.cap = .{ .pass = f.old_min_cap, .fail = @min(f.old_min_cap, want.limits().cap.fail) };
+            }
+            // One profile for each different set.
+            const found = for (m.processes.items) |q| {
+                if (std.mem.eql(u8, q.profile.name, want.name) and std.meta.eql(q.profile.params, want.params)) break q.id;
+            } else null;
+            p.fab.process = found orelse blk: {
+                const id = m.newId();
+                try m.processes.append(m.a(), .{ .id = id, .profile = try m.dupeProfile(want) });
+                break :blk id;
+            };
+        }
+    }
+
     // Legend sheets ------------------------------------------------------
 
     pub fn sheetIndex(m: *const Model, id: ObjectId) ?usize {
@@ -3547,8 +3645,8 @@ pub const Model = struct {
     /// Sets how panel `panel` is made (see `Fab`); a copy is kept.
     pub fn setPanelFab(m: *Model, panel: usize, fab: Fab) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
-        if (!(fab.thickness > 0) or !(fab.layer_height > 0)) return error.BadSize;
-        if (!(fab.min_stroke >= 0) or !(fab.min_gap >= 0) or !(fab.min_cap >= 0)) return error.BadSize;
+        if (!(fab.thickness > 0)) return error.BadSize;
+        if (fab.process != .none and m.processIndex(fab.process) == null) return error.NoSuchObject;
         const layers = try m.a().alloc(FabLayer, fab.layers.len);
         for (fab.layers, layers) |l, *o| {
             if (l.depth) |d| if (!(d > 0)) return error.BadSize;
@@ -3564,7 +3662,7 @@ pub const Model = struct {
                 .subtract => .subtract,
             };
         }
-        m.panels.items[panel].fab = .{ .thickness = fab.thickness, .layer_height = fab.layer_height, .layers = layers, .min_stroke = fab.min_stroke, .min_gap = fab.min_gap, .min_cap = fab.min_cap };
+        m.panels.items[panel].fab = .{ .thickness = fab.thickness, .layers = layers, .process = fab.process };
         m.revision += 1;
     }
 
@@ -6470,4 +6568,26 @@ test "a track renamed, its keys named in order, a gap set before one" {
     _ = other;
     try std.testing.expectError(error.DuplicateDesignator, m.nameKeysInOrder(p, r, "Q"));
     try std.testing.expectEqualStrings("K1", m.tileConst(m.flowItems(p, r)[0].tileOf().?).designator);
+}
+
+test "an older file's per-panel process settings become profiles: the 0.4 mm built-in, or their own" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const base: FabLayer = .{ .name = "Base", .source = .edge, .op = .{ .add = .{ .name = "black", .color = .hex("#000000") } } };
+    var ids: [3]usize = undefined;
+    for (&ids, 0..) |*pi, k| {
+        pi.* = try m.addPanel("P", 50, 30);
+        try m.setPanelFab(pi.*, .{ .layers = &.{base} });
+        // As an older file reads: its settings on the panel, no profile.
+        if (k > 0) m.panels.items[pi.*].fab.old_layer_height = 0.1;
+    }
+    try m.upgradeProcesses();
+    try std.testing.expectEqualStrings("Generic FDM, 0.4 mm nozzle", m.processOf(ids[0]).?.name);
+    // The two alike share one profile of their own settings.
+    try std.testing.expectEqual(m.panels.items[ids[1]].fab.process, m.panels.items[ids[2]].fab.process);
+    try std.testing.expectEqual(@as(?f64, 0.1), m.processOf(ids[1]).?.limits().layer);
+    try std.testing.expectEqual(@as(usize, 2), m.processes.items.len);
+    // Done again, nothing changes.
+    try m.upgradeProcesses();
+    try std.testing.expectEqual(@as(usize, 2), m.processes.items.len);
 }

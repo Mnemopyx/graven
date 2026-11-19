@@ -119,7 +119,8 @@ fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const
 
     const name = m.panels.items[panel].name;
     std.debug.print("{s}: {d} layers, {d} steps\n", .{ name, stack.layers.len, p.steps.len });
-    for (p.off_layers) |li| std.debug.print("  flag: {s}: depth not a whole number of {d} mm layers\n", .{ names[li], stack.layer_height });
+    const layer_h: f64 = if (m.processOf(panel)) |pr| pr.limits().layer orelse 0 else 0;
+    for (p.off_layers) |li| std.debug.print("  flag: {s}: depth not a whole number of {d} mm layers\n", .{ names[li], layer_h });
     const slabs = try layout.fab.slabs(a, p.steps);
     std.debug.print("  2D: {d} slabs in {d:.0} ms\n", .{ slabs.len, clock.lap() });
     const r = fab.build(gpa, a, slabs, .{ .trace = true, .check = check_solids }) catch |err| {

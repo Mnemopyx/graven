@@ -7240,12 +7240,9 @@ fn panelFab(pi: usize) !void {
     // its own; typing in a field merges with the field's last change.
     var key: u64 = 0;
     heading("Fabrication", .{}, 400);
+    propValue("Process", fab.process == .none, "{s}", .{if (state.model.processOf(pi)) |pr| pr.name else "none chosen"}, 399);
     inline for (.{
         .{ "Thickness, mm", "thickness", 0.01, 1000.0 },
-        .{ "Layer height, mm", "layer_height", 0.001, 10.0 },
-        .{ "Thinnest stroke, mm", "min_stroke", 0.0, 100.0 },
-        .{ "Narrowest gap, mm", "min_gap", 0.0, 100.0 },
-        .{ "Smallest cap height, mm", "min_cap", 0.0, 100.0 },
     }, 0..) |f, k| {
         if (numberProp(f[0], @field(fab, f[1]), f[2], f[3], 401 + k)) |v| {
             @field(next, f[1]) = v;
