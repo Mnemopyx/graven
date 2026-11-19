@@ -286,6 +286,9 @@ const Context = union(enum) {
     /// The document's text styles, and one of them.
     styles,
     style: layout.model.StyleId,
+    /// The document's process profiles, and one of them.
+    processes,
+    process: layout.model.ObjectId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -323,6 +326,8 @@ const Context = union(enum) {
             .sheet => "Legend sheet",
             .styles => "Text styles",
             .style => "Text style",
+            .processes => "Processes",
+            .process => "Process profile",
         };
     }
 };
@@ -3080,6 +3085,8 @@ fn contextValid(c: Context) bool {
         .sheet => |id| m.sheetIndex(id) != null,
         .styles => true,
         .style => |id| m.styleIndex(id) != null,
+        .processes => true,
+        .process => |id| m.processIndex(id) != null,
     };
 }
 
@@ -4647,6 +4654,10 @@ fn treeContent() void {
     if (treeNode(.styles, "Text styles", 1, state.model.styles.items.len > 0, false)) {
         for (state.model.styles.items) |st| _ = treeNode(.{ .style = st.id }, st.name, 2, false, false);
     }
+    // Always listed: how panels are made is chosen here.
+    if (treeNode(.processes, "Processes", 1, state.model.processes.items.len > 0, false)) {
+        for (state.model.processes.items) |pr| _ = treeNode(.{ .process = pr.id }, pr.profile.name, 2, false, false);
+    }
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
     };
@@ -4938,7 +4949,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process => false,
     };
 }
 
@@ -7240,7 +7251,7 @@ fn panelFab(pi: usize) !void {
     // its own; typing in a field merges with the field's last change.
     var key: u64 = 0;
     heading("Fabrication", .{}, 400);
-    propValue("Process", fab.process == .none, "{s}", .{if (state.model.processOf(pi)) |pr| pr.name else "none chosen"}, 399);
+    panelProcessChoice(pi);
     inline for (.{
         .{ "Thickness, mm", "thickness", 0.01, 1000.0 },
     }, 0..) |f, k| {
@@ -10545,6 +10556,8 @@ fn lowerKind() []const u8 {
         .sheet => "the sheet's keys",
         .styles => "text styles",
         .style => "text style",
+        .processes => "process profiles",
+        .process => "process profile",
     };
 }
 
@@ -11016,6 +11029,8 @@ fn properties() !void {
         .sheets => propText("Legend sheets", "{d}", .{state.model.sheets.items.len}, 1),
         .styles => try stylesProperties(),
         .style => |sid| try styleProperties(sid),
+        .processes => processesProperties(),
+        .process => |id| processProperties(id),
         .sheet => |id| sheetProperties(id),
     }
 }
@@ -11714,6 +11729,185 @@ fn styleChoice(own: ?layout.model.StyleId, inherited: ?layout.model.StyleId, n: 
     if (!tdropdown(@src(), names[0 .. first + styles.len], .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == before) return null;
     if (choice < first) return @as(?layout.model.StyleId, null);
     return @as(?layout.model.StyleId, styles[choice - first].id);
+}
+
+// Process profiles --------------------------------------------------------------
+//
+// How panels are made (see layout's process.zig): the document's profiles in
+// the Browser, each with its class, its process's parameters and its limits
+// (from the parameters, or overridden), and a panel's choice of one in its
+// Fabrication.
+
+const process = layout.model.process;
+
+/// The document's profiles: how many, and new ones from the built-ins.
+fn processesProperties() void {
+    propText("Profiles", "{d}", .{state.model.processes.items.len}, 1);
+    heading("Add a profile", .{}, 10);
+    for (process.builtins, 0..) |b, i| {
+        if (tbutton(@src(), b.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+            var nb: [160]u8 = undefined;
+            var named = b;
+            named.name = uniqueProcessName(&nb, b.name);
+            state.context = .{ .process = act(.addProcess, .{named}) catch continue };
+        }
+    }
+}
+
+/// `name` with a number after it when the document has a profile so named.
+fn uniqueProcessName(buf: []u8, name: []const u8) []const u8 {
+    var n: usize = 1;
+    var candidate = name;
+    while (for (state.model.processes.items) |pr| {
+        if (std.mem.eql(u8, pr.profile.name, candidate)) break true;
+    } else false) : (n += 1) candidate = std.fmt.bufPrint(buf, "{s} ({d})", .{ name, n + 1 }) catch return name;
+    return candidate;
+}
+
+/// A band's two ends, typed: an override once either is changed.
+fn bandProps(what: []const u8, own: ?process.Band, derived: process.Band, n: usize) ??process.Band {
+    var b = own orelse derived;
+    var changed = false;
+    var lb: [64]u8 = undefined;
+    if (numberProp(std.fmt.bufPrint(&lb, "{s} passes at, mm", .{what}) catch what, b.pass, 0, 1000, n)) |v| {
+        b.pass = v;
+        changed = true;
+    }
+    if (numberProp(std.fmt.bufPrint(&lb, "{s} fails below, mm", .{what}) catch what, b.fail, 0, 1000, n + 1)) |v| {
+        b.fail = v;
+        changed = true;
+    }
+    return if (changed) @as(?process.Band, b) else null;
+}
+
+/// A profile: its name, class and process, the process's parameters, its
+/// limits (each from the parameters unless overridden), the panels made
+/// with it, and its removal.
+fn processProperties(id: layout.model.ObjectId) void {
+    const i = state.model.processIndex(id) orelse return;
+    const p = state.model.processes.items[i].profile;
+    var next = p;
+    var changed = false;
+    var key: u64 = mergeKey(.{ "process", id });
+    if (textProp("Name", p.name, 1)) |v| {
+        next.name = v;
+        changed = true;
+        key = mergeKey(.{ "process name", id });
+    }
+    propText("Class", "{s}", .{p.class().label()}, 2);
+    propText("Process", "{s}", .{p.kind().label()}, 3);
+    switch (p.params) {
+        .fdm => |f| {
+            heading("FDM", .{}, 10);
+            var fdm = f;
+            inline for (.{
+                .{ "Nozzle, mm", "nozzle", 0.05, 5.0 },
+                .{ "Line width, mm", "line_width", 0.05, 5.0 },
+                .{ "Layer height, mm", "layer_height", 0.01, 2.0 },
+                .{ "First layer, mm", "first_layer", 0.01, 2.0 },
+            }, 0..) |fld, k| {
+                if (numberProp(fld[0], @field(f, fld[1]), fld[2], fld[3], 11 + k)) |v| {
+                    @field(fdm, fld[1]) = v;
+                    changed = true;
+                    key = mergeKey(.{ "process", id, fld[1] });
+                }
+            }
+            if (numberProp("Filament slots", @floatFromInt(f.slots), 1, 64, 16)) |v| {
+                fdm.slots = @intFromFloat(@round(v));
+                changed = true;
+                key = mergeKey(.{ "process", id, "slots" });
+            }
+            inline for (.{ "across", "deep", "high" }, 0..) |axis, k| {
+                if (numberProp("Build volume " ++ axis ++ ", mm", f.build[k], 1, 10000, 17 + k)) |v| {
+                    fdm.build[k] = v;
+                    changed = true;
+                    key = mergeKey(.{ "process", id, "build", k });
+                }
+            }
+            next.params = .{ .fdm = fdm };
+        },
+    }
+    heading("Limits", .{}, 30);
+    const own = p.stroke != null or p.gap != null or p.cap != null;
+    propValue("Set by", !own, "{s}", .{if (own) "this profile, in part" else "the process's settings"}, 31);
+    const d = process.derived(p.params);
+    inline for (.{ .{ "Stroke", "stroke" }, .{ "Gap", "gap" }, .{ "Cap height", "cap" } }, 0..) |lim, k| {
+        if (bandProps(lim[0], @field(p, lim[1]), @field(d, lim[1]), 32 + 2 * k)) |b| {
+            @field(next, lim[1]) = b;
+            changed = true;
+            key = mergeKey(.{ "process", id, lim[1] });
+        }
+    }
+    const l = p.limits();
+    if (l.layer) |lh| propText("Depths", "whole layers of {d} mm, {d} at least", .{ lh, l.min_layers }, 40);
+    propText("Colours", "{d} at most in a part", .{l.colours}, 41);
+    if (own and tbutton(@src(), "Use the limits its settings give", .{}, .{ .expand = .horizontal, .id_extra = 42 })) {
+        next.stroke = null;
+        next.gap = null;
+        next.cap = null;
+        changed = true;
+        key = 0;
+    }
+    if (changed) {
+        const done = if (key != 0) actM(key, .setProcess, .{ id, next }) else act(.setProcess, .{ id, next });
+        done catch {
+            state.status = "Those settings cannot be made with (a size not above 0, or a limit failing above where it passes). ";
+        };
+    }
+    heading("Used by", .{}, 50);
+    var used: usize = 0;
+    for (state.model.panels.items, 0..) |pn, pi| if (pn.fab.process == id) {
+        if (tbutton(@src(), pn.name, .{}, .{ .expand = .horizontal, .id_extra = 51 + pi })) state.context = .{ .panel = pi };
+        used += 1;
+    };
+    if (used == 0) {
+        propText("Panels", "none", .{}, 49);
+        if (tbutton(@src(), "Remove this profile", .{}, .{ .expand = .horizontal, .id_extra = 48, .margin = .{ .y = 8 } })) {
+            act(.removeProcess, .{id}) catch {};
+            state.context = .processes;
+        }
+    }
+}
+
+/// A panel's process: the document's profiles, then the built-ins it has
+/// not yet (chosen, one is added to the document and used, one step).
+fn panelProcessChoice(pi: usize) void {
+    const ar = dvui.currentWindow().arena();
+    var names: std.ArrayList([]const u8) = .empty;
+    var ids: std.ArrayList(?layout.model.ObjectId) = .empty;
+    var adds: std.ArrayList(?usize) = .empty;
+    names.append(ar, "none") catch return;
+    ids.append(ar, .none) catch return;
+    adds.append(ar, null) catch return;
+    for (state.model.processes.items) |pr| {
+        names.append(ar, pr.profile.name) catch return;
+        ids.append(ar, pr.id) catch return;
+        adds.append(ar, null) catch return;
+    }
+    for (process.builtins, 0..) |b, k| {
+        const have = for (state.model.processes.items) |pr| {
+            if (std.mem.eql(u8, pr.profile.name, b.name)) break true;
+        } else false;
+        if (have) continue;
+        names.append(ar, std.fmt.allocPrint(ar, "{s} (built in)", .{b.name}) catch return) catch return;
+        ids.append(ar, null) catch return;
+        adds.append(ar, k) catch return;
+    }
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 398 });
+    defer row.deinit();
+    propName("Process");
+    const current = state.model.panels.items[pi].fab.process;
+    var choice: usize = 0;
+    for (ids.items, 0..) |x, k| {
+        if (x != null and x.? == current) choice = k;
+    }
+    const before = choice;
+    if (!tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) or choice == before) return;
+    if (adds.items[choice]) |k| {
+        const key = mergeKey(.{ "panel process", pi, k, state.model.processes.items.len });
+        const id = actM(key, .addProcess, .{process.builtins[k]}) catch return;
+        actM(key, .setPanelProcess, .{ pi, id }) catch {};
+    } else act(.setPanelProcess, .{ pi, ids.items[choice].? }) catch {};
 }
 
 /// The document's text styles: how many, and new ones: a plain style, or

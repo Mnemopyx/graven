@@ -75,6 +75,13 @@ test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legen
     try testing.expectEqual(3, m.panels.items[plate].fab.layers.len);
     try testing.expectEqual(3, m.panels.items[keys].fab.layers.len);
     try testing.expectEqualStrings("f", m.panels.items[plate].fab.layers[2].source.text);
+    // Both made with the one 0.2 mm FDM profile the file keeps.
+    try testing.expectEqual(1, m.processes.items.len);
+    for ([_]usize{ plate, keys }) |p| {
+        const pr = m.processOf(p).?;
+        try testing.expectEqualStrings("Generic FDM, 0.2 mm nozzle", pr.name);
+        try testing.expectEqual(0.2, pr.params.fdm.nozzle);
+    }
     // Its legends as a sheet: a row a key, white, blue and gold.
     const id = try m.makeSheet("Legends", kg.id);
     const sh = m.sheets.items[m.sheetIndex(id).?];

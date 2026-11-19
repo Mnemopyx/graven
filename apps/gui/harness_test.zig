@@ -18,6 +18,7 @@ const gui = @import("main.zig");
 
 const api = gui.testing_api;
 const layout = @import("graven_layout");
+const process = layout.model.process;
 
 const scratch = "/tmp/graven-gui-test";
 
@@ -739,7 +740,9 @@ fn make15c(r: *Run) !void {
 
     // Fabrication: the plate black with its holes cut through and its gold
     // legends inlaid; the keys black with white and blue legends inlaid.
+    // Made with a 0.2 mm nozzle: 0.4 mm cannot hold its legends.
     try r.click("tree/untitled/Canvas, mm/HP-15C plate");
+    try r.choose("Fabrication/Process", "Generic FDM, 0.2 mm nozzle (built in)");
     try r.set("Fabrication/Thickness, mm", "2");
     try r.click("Fabrication/Add layer");
     try r.set("Layer 1/Name", "Plate");
@@ -754,6 +757,7 @@ fn make15c(r: *Run) !void {
     try r.set("Layer 3/Colour name", "gold");
     try r.set("Layer 3/Colour", "#c9a227");
     try r.click("tree/untitled/Canvas, mm/HP-15C keys");
+    try r.choose("Fabrication/Process", "Generic FDM, 0.2 mm nozzle");
     try r.set("Fabrication/Thickness, mm", "5");
     try r.click("Fabrication/Add layer");
     try r.set("Layer 1/Name", "Keys");
@@ -809,7 +813,50 @@ test "the HP-15C, made in the GUI" {
     try make15c(&r);
     const m = api.model();
     try sameAsExample(m, "examples/hp15c.graven", &.{ "HP-15C plate", "HP-15C keys" });
+    // Both panels made with the one 0.2 mm profile, kept in the document.
+    try std.testing.expectEqual(@as(usize, 1), m.processes.items.len);
+    for ([_][]const u8{ "HP-15C plate", "HP-15C keys" }) |name| {
+        const pr = m.processOf(api.panelNamed(name).?).?;
+        try std.testing.expectEqual(0.2, pr.params.fdm.nozzle);
+        try std.testing.expectEqual(@as(?f64, 0.1), pr.limits().layer);
+    }
     try saveAs(&r, scratch ++ "/hp15c.graven");
+}
+
+test "a process profile added from the built-ins, edited, its limits overridden and given back" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Processes");
+    try r.click("Add a profile/Generic FDM, 0.4 mm nozzle");
+    const m = api.model();
+    try std.testing.expectEqual(@as(usize, 1), m.processes.items.len);
+    const id = m.processes.items[0].id;
+    try r.set("Process profile/Name", "Fine");
+    try r.set("FDM/Nozzle, mm", "0.25");
+    try r.set("FDM/Line width, mm", "0.27");
+    var p = m.processes.items[m.processIndex(id).?].profile;
+    try std.testing.expectEqualStrings("Fine", p.name);
+    try std.testing.expectEqual(0.27, p.limits().stroke.pass);
+    try std.testing.expectEqual(@as(?process.Band, null), p.stroke);
+    try r.set("Limits/Stroke passes at, mm", "0.3");
+    p = m.processes.items[m.processIndex(id).?].profile;
+    try std.testing.expectEqual(0.3, p.stroke.?.pass);
+    try std.testing.expectEqual(0.125, p.stroke.?.fail);
+    try r.click("Limits/Use the limits its settings give");
+    p = m.processes.items[m.processIndex(id).?].profile;
+    try std.testing.expectEqual(@as(?process.Band, null), p.stroke);
+    // A second from the same built-in is numbered.
+    try r.click("tree/untitled/Processes");
+    try r.click("Add a profile/Generic FDM, 0.4 mm nozzle");
+    try r.click("tree/untitled/Processes");
+    try r.click("Add a profile/Generic FDM, 0.4 mm nozzle");
+    try std.testing.expectEqualStrings("Generic FDM, 0.4 mm nozzle (2)", m.processes.items[2].profile.name);
+    // Unused, it can go.
+    try r.click("tree/untitled/Processes#open");
+    try r.click("tree/untitled/Processes/Fine");
+    try r.click("Used by/Remove this profile");
+    try std.testing.expectEqual(@as(usize, 2), m.processes.items.len);
 }
 
 // Known bugs, kept fixed --------------------------------------------------------

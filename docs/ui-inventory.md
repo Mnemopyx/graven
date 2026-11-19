@@ -52,7 +52,8 @@ Four panes on the window's edges, each with a tab and three modes: **ghost** (se
 - **File › Export legend sheet (CSV)…:** the sheet shown or chosen, as CSV, offered as its name `.csv` beside the document.
 - **File › Import legend sheet (CSV)…:** into the sheet shown or chosen (rows matched by name), or a new sheet over the grid, track or panel chosen, opened beside the canvas.
 - **Legend sheets:** Make a legend sheet on a grid's properties; Legend sheets in the Browser; a sheet's summary (columns, rows, problems, Remove), its keys highlighted. Cells cannot be edited there yet; an edit on a key goes to its cell.
-- **Fabrication** (since 2026-11-18): the end of a panel's properties: thickness, layer height, process limits; its layers in order (from, makes, colour, start, direction, depth), moved, removed, added. File › Export panel as 3MF… writes them.
+- **Fabrication** (since 2026-11-18): the end of a panel's properties: its Process (since 2026-11-19: a dropdown of none, the document's profiles, then the built-ins it lacks, marked "(built in)"; one of those chosen is added and used in one step), thickness; its layers in order (from, makes, colour, start, direction, depth), moved, removed, added. File › Export panel as 3MF… writes them.
+- **Processes** (since 2026-11-19): a Browser node always listed, the document's process profiles under it. Its properties: how many, and Add a profile, a button per built-in (a name already taken gets a number). A profile's: Name; Class and Process (read-only); its process's settings (FDM: nozzle, line width, layer height, first layer, filament slots, build volume); Limits: Set by (the process's settings, or this profile in part), each band's two ends typed (stroke, gap, cap height: passes at, fails below; typing one makes it the profile's own), depths and colours read-only, Use the limits its settings give; Used by (the panels, as buttons), and Remove this profile while none uses it.
 - **Content palette** (since 2026-11-18): with the flow cursor in a track, a strip at the top centre of the window, below the ruler: in a track of tiles, the key sizes to scale and blanks; then text or equation, join or part, next kind of tile (Tab), line break, new paragraph. A click inserts at the cursor. No keys on its buttons (letters and digits type).
 - **Digraphs** (since 2026-11-18): Ctrl+K and two characters, wherever text is typed (canvas text and fields alike), type the character they stand for (`->` →, `e'` é, `SH` ⇧). A hint by the caret or field lists the pairs the first character starts; Esc cancels, Backspace steps back. Users add or remove pairs in the config's `[digraphs]`.
 - **Text display:** glyphs come from a distance-field atlas (`glyphs.zig`): crisp on the pixel grid, gamma 2.2. Show text construction draws outlines and construction instead.
@@ -127,6 +128,8 @@ These are observations to start the discussion from, not decisions.
 
 - The start screen's choices are not reachable by Tab or arrows yet, only by pointer and their single keys; and Mils, which the old new-canvas prompt offered, is no longer offered for a new canvas.
 - The start screen's menus (Edit, Text, View) offer commands that need a document.
+- A property row's label column is only as wide as the default; a longer label ("Build volume across, mm", "Origin across, mm") pushes its field right, so fields in one section start at different places.
+- Read-only rows are of two kinds: plain text, and the italic, dimmed "derived" value (Limits' Set by); which one is used is not consistent.
 
 ## Things to decide in the UI discussion
 
