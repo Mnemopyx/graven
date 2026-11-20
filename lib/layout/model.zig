@@ -442,9 +442,6 @@ pub const Item = struct {
 pub const Segment = struct {
     along: f64 = 0,
     across: f64 = 0,
-    /// Older documents only: an origin moved by hand, read now as a
-    /// control point of the path.
-    moved: bool = false,
 };
 
 /// A control point of a track's path: where the path passes, u from the
@@ -557,7 +554,22 @@ pub const TileRegion = struct {
     h: f64,
     /// mm per u.
     pitch: f64,
-    major: Major = .row,
+    /// A region (a reserved space that makes tracks as its content needs
+    /// them: a column of rows or a row of columns) or a single track (one
+    /// line, placed in advance: a keyboard's row).
+    kind: Kind = .region,
+    /// The direction its tracks' baselines run, degrees in the panel frame
+    /// (0: to the right, -90: down), and how content stands on them: its
+    /// rotation from the path's normal, degrees (0: on the baseline, as
+    /// text is; 90 on a baseline running down: upright). Horizontal and
+    /// vertical are not settings: they are these. A region stacks its
+    /// tracks on one side of their direction: a column of rows to the
+    /// right (down the panel), a row of columns to the left (across it).
+    /// Placement takes the two axis cases (see `oriented`) for now; other
+    /// angles are kept and flagged (`unsupported_direction`).
+    direction: f64 = 0,
+    rotation: f64 = 0,
+    stack: Side = .right,
     /// Its object origin on its soft area; by default the top-left corner,
     /// where `origin` is.
     holds: OriginPoint = .{ .y = .high },
@@ -572,9 +584,6 @@ pub const TileRegion = struct {
     /// past it are flagged. Control points stay when content no longer
     /// reaches them, so the path keeps its shape.
     path: std.ArrayList(ControlPoint) = .empty,
-    /// Older documents only: segment origins as they were stored, those
-    /// marked `moved` read as control points.
-    segments: std.ArrayList(Segment) = .empty,
     /// Space between segments the path continues to, u.
     gap: f64 = 0,
     /// How each segment's content is set in it: from its start, about its
@@ -583,16 +592,41 @@ pub const TileRegion = struct {
     alignment: Align = .start,
     /// The flow it is assigned to (see `Flow`): the content it holds.
     flow: ObjectId = .none,
-    /// Older documents only (read into flows on loading, `upgradeFlows`):
-    /// the new-paragraph indent, the first paragraph's style, the track
-    /// the flow went on into, and the flow, held by a thread's first track.
-    old_indent: f64 = 0,
-    old_paragraph: ?ParaId = null,
-    old_next: ObjectId = .none,
-    old_items: std.ArrayList(Item) = .empty,
+    /// Older documents' orientation (read, never written): rows or
+    /// columns, turned into a direction on loading (`upgradeOrientation`).
+    old_major: Major = .row,
 
     /// The older fields' names in files (read, never written).
-    pub const file_names = .{ .old_indent = "indent", .old_paragraph = "paragraph", .old_next = "next", .old_items = "items" };
+    pub const file_names = .{ .old_major = "major" };
+
+    pub const Kind = enum { region, track };
+    pub const Side = enum { right, left };
+
+    /// The orientation that rows (`.row`: running right, stacking down,
+    /// content on the baseline) or columns (`.column`: running down,
+    /// stacking right, content upright) have.
+    pub fn oriented(m: Major) struct { direction: f64, rotation: f64, stack: Side } {
+        return switch (m) {
+            .row => .{ .direction = 0, .rotation = 0, .stack = .right },
+            .column => .{ .direction = -90, .rotation = 90, .stack = .left },
+        };
+    }
+
+    /// Rows or columns: the axis case its orientation is nearest (columns
+    /// when its baselines run down, else rows).
+    pub fn major(r: TileRegion) Major {
+        const d = @mod(r.direction + 360, 360);
+        return if (@abs(d - 270) < 45) .column else .row;
+    }
+
+    /// Whether placement can set it as it is: one of the two axis cases
+    /// exactly.
+    pub fn supported(r: TileRegion) bool {
+        const o = oriented(r.major());
+        const d = @mod(r.direction - o.direction + 360, 360);
+        const q = @mod(r.rotation - o.rotation + 360, 360);
+        return (d < 1e-9 or d > 360 - 1e-9) and (q < 1e-9 or q > 360 - 1e-9) and (r.kind == .track or r.stack == o.stack);
+    }
 
     /// Where an unshaped track's segments attach to its path, u: their
     /// middle. Every segment is bound to the path by its centre.
@@ -600,19 +634,13 @@ pub const TileRegion = struct {
         return r.segmentLength() / 2;
     }
 
-    /// The path's points, sorted across, into `buf`: its control points
-    /// (or an older document's moved origins, which were segment starts), and
+    /// The path's points, sorted across, into `buf`: its control points, and
     /// a start down the middle (see `middle`) unless a point is there or
     /// before.
     pub fn pathPoints(r: TileRegion, buf: []ControlPoint) []ControlPoint {
         var n: usize = 0;
-        if (r.path.items.len > 0) {
-            for (r.path.items) |cp| if (n < buf.len) {
-                buf[n] = cp;
-                n += 1;
-            };
-        } else for (r.segments.items, 0..) |sg, k| if (k > 0 and sg.moved and n < buf.len) {
-            buf[n] = .{ .along = sg.along + r.middle(), .across = sg.across };
+        for (r.path.items) |cp| if (n < buf.len) {
+            buf[n] = cp;
             n += 1;
         };
         var has_start = false;
@@ -652,7 +680,7 @@ pub const TileRegion = struct {
 
     /// A segment's length, u.
     pub fn segmentLength(r: TileRegion) f64 {
-        return if (r.major == .row) r.w else r.h;
+        return if (r.major() == .row) r.w else r.h;
     }
 
 
@@ -665,7 +693,7 @@ pub const TileRegion = struct {
         const across = s.across * r.pitch;
         const length = r.segmentLength() * r.pitch;
         const shift = (s.along - r.middle()) * r.pitch;
-        return if (r.major == .row)
+        return if (r.major() == .row)
             .{ .x0 = r.origin.x + shift, .x1 = r.origin.x + shift + length, .y1 = r.origin.y - across, .y0 = r.origin.y - across - r.pitch }
         else
             .{ .x0 = r.origin.x + across, .x1 = r.origin.x + across + r.pitch, .y1 = r.origin.y - shift, .y0 = r.origin.y - shift - length };
@@ -674,7 +702,8 @@ pub const TileRegion = struct {
     /// How far across its reserved space reaches, u: as many segments as
     /// it was drawn out for.
     pub fn crossLength(r: TileRegion) f64 {
-        return if (r.major == .row) r.h else r.w;
+        if (r.kind == .track) return 1;
+        return if (r.major() == .row) r.h else r.w;
     }
 
     /// Where the track's boundary is along at `across`, u from its origin:
@@ -703,7 +732,7 @@ pub const TileRegion = struct {
             hi = @max(hi, e[1]);
         }
         var b = r.softArea();
-        if (r.major == .row) {
+        if (r.major() == .row) {
             b.x0 = r.origin.x + lo * r.pitch;
             b.x1 = r.origin.x + hi * r.pitch;
         } else {
@@ -2167,8 +2196,6 @@ pub const Model = struct {
             m.flows.items[fi].indent = f.indent;
             if (own.len > 0 or m.firstOfFlow(src.?.panel, src.?.region)) m.flows.items[fi].paragraph = f.paragraph;
         }
-        c.segments = .empty;
-        try c.segments.appendSlice(m.a(), r.segments.items);
         c.path = .empty;
         for (r.path.items) |cp| try c.path.append(m.a(), .{ .id = m.newId(), .along = cp.along, .across = cp.across });
         var items: std.ArrayList(Item) = .empty;
@@ -4338,15 +4365,14 @@ pub const Model = struct {
         var r = region;
         r.id = m.newId();
         r.name = try m.a().dupe(u8, region.name);
-        r.segments = .empty;
         r.path = .empty;
-        r.old_items = .empty;
-        r.old_next = .none;
+        // A track is one line: one thickness across.
+        if (r.kind == .track) {
+            if (r.major() == .row) r.h = 1 else r.w = 1;
+        }
         // A flow of its own.
         const fi = try m.newFlow(r.name, r.id);
         r.flow = m.flows.items[fi].id;
-        r.old_paragraph = null;
-        r.old_indent = 0;
         const regions = &m.panels.items[panel].regions;
         try regions.append(m.a(), r);
         m.revision += 1;
@@ -4357,7 +4383,10 @@ pub const Model = struct {
         name: []const u8,
         /// The region's top-left corner in the panel frame, mm.
         origin: geom.Point,
+        /// Rows (a column of rows, or a row track) or columns.
         major: Major = .row,
+        /// A region that makes its tracks as needed, or one track.
+        kind: TileRegion.Kind = .region,
         /// What sizes the segments: a tile prototype (as thick as its
         /// smallest tile, as long as one at least), or a text style (one
         /// line thick at `pitch`, its line pitch). One of the two.
@@ -4392,7 +4421,10 @@ pub const Model = struct {
             .w = if (t.major == .row) t.length else thickness,
             .h = if (t.major == .row) thickness else t.length,
             .pitch = t.pitch,
-            .major = t.major,
+            .direction = TileRegion.oriented(t.major).direction,
+            .rotation = TileRegion.oriented(t.major).rotation,
+            .stack = TileRegion.oriented(t.major).stack,
+            .kind = t.kind,
             .prototype = t.prototype,
             .style = t.style,
         });
@@ -4467,7 +4499,7 @@ pub const Model = struct {
     }
 
     /// The flow track `region` of `panel` is assigned to, to change. Every
-    /// track has one (`addRegion`, `copyRegion`, `upgradeFlows`).
+    /// track has one (`addRegion`, `copyRegion`).
     fn flowOf(m: *Model, panel: usize, region: usize) *Flow {
         return &m.flows.items[m.trackFlowIndex(panel, region).?];
     }
@@ -4561,7 +4593,7 @@ pub const Model = struct {
         const to = m.flowIndex(id) orelse return error.NoSuchObject;
         const r = m.panels.items[panel].regions.items[region];
         for (m.flows.items[to].tracks.items) |tid| if (tid != r.id) if (m.trackById(tid)) |t| {
-            if (m.trackPtr(t).major != r.major) return error.BadJoin;
+            if (m.trackPtr(t).major() != r.major()) return error.BadJoin;
         };
         // Out of the flow it is in.
         if (m.trackFlowIndex(panel, region)) |from| {
@@ -4645,7 +4677,7 @@ pub const Model = struct {
         // A blank as long as the indent, running the flow's way.
         var major: Major = .row;
         for (f.tracks.items) |tid| if (m.trackById(tid)) |t| {
-            major = m.trackPtr(t).major;
+            major = m.trackPtr(t).major();
             break;
         };
         const blank = try m.blankPrototype();
@@ -4686,52 +4718,19 @@ pub const Model = struct {
         return null;
     }
 
-    /// Reads an older document's threads into flows: each thread (a
-    /// first track and the tracks its `old_next` leads on to) becomes one
-    /// flow, named after its first track, holding what that track held.
-    /// Any track still without a flow gets one of its own. Called on
-    /// loading; does nothing to a document already in flows.
-    pub fn upgradeFlows(m: *Model) Allocator.Error!void {
-        const starts = struct {
-            fn isTarget(mm: *const Model, id: ObjectId) bool {
-                for (mm.panels.items) |p| for (p.regions.items) |r| if (r.old_next == id and r.flow == .none) return true;
-                return false;
+    /// An older document's rows or columns, as directions (see
+    /// `TileRegion.oriented`). Called on loading; a newer document's
+    /// tracks keep theirs.
+    pub fn upgradeOrientation(m: *Model) void {
+        for (m.panels.items) |*p| for (p.regions.items) |*r| {
+            if (r.old_major == .column and r.direction == 0 and r.rotation == 0) {
+                const o = TileRegion.oriented(.column);
+                r.direction = o.direction;
+                r.rotation = o.rotation;
+                r.stack = o.stack;
             }
+            r.old_major = .row;
         };
-        // Threads first, from the tracks nothing leads into.
-        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
-            if (r.flow != .none and m.flowIndex(r.flow) != null) continue;
-            if (starts.isTarget(m, r.id)) continue;
-            try m.flowFromThread(pi, ri);
-        };
-        // A loop of tracks has no first: each of what is left starts one.
-        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
-            if (r.flow != .none and m.flowIndex(r.flow) != null) continue;
-            try m.flowFromThread(pi, ri);
-        };
-    }
-
-    fn flowFromThread(m: *Model, panel: usize, region: usize) Allocator.Error!void {
-        const r = &m.panels.items[panel].regions.items[region];
-        const fi = m.newFlow(r.name, .none) catch return error.OutOfMemory;
-        const f = &m.flows.items[fi];
-        f.items = r.old_items;
-        f.paragraph = r.old_paragraph;
-        f.indent = r.old_indent;
-        var at: ?TrackRef = .{ .panel = panel, .region = region };
-        var steps: usize = 0;
-        while (at) |t| : (steps += 1) {
-            const tr = &m.panels.items[t.panel].regions.items[t.region];
-            if (steps > 4096 or (tr.flow != .none and m.flowIndex(tr.flow) != null)) break;
-            try m.flows.items[fi].tracks.append(m.a(), tr.id);
-            tr.flow = m.flows.items[fi].id;
-            const next = tr.old_next;
-            tr.old_items = .empty;
-            tr.old_next = .none;
-            tr.old_paragraph = null;
-            tr.old_indent = 0;
-            at = m.trackById(next);
-        }
     }
 
     /// Inserts item `item` at position `index` of a track's flow (0
@@ -4753,7 +4752,7 @@ pub const Model = struct {
     pub fn insertTile(m: *Model, panel: usize, region: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
         if (m.protoIndex(prototype) == null) return error.NoSuchPrototype;
         if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
-        const major = m.panels.items[panel].regions.items[region].major;
+        const major = m.panels.items[panel].regions.items[region].major();
         const across = m.proto(prototype).smallest(major, .across);
         var buf: [64]u8 = undefined;
         const id = try m.addTile(.{
@@ -4808,7 +4807,7 @@ pub const Model = struct {
         if (!(length > 0)) return error.BadSize;
         if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
         const blank = try m.blankPrototype();
-        const major = m.panels.items[panel].regions.items[region].major;
+        const major = m.panels.items[panel].regions.items[region].major();
         var buf: [64]u8 = undefined;
         const id = try m.addTile(.{
             .designator = m.nextDesignator(&buf, "B"),
@@ -5121,7 +5120,7 @@ pub const Model = struct {
         if (from >= m.panels.items[from_panel].regions.items.len or to >= m.panels.items[to_panel].regions.items.len) return error.NoSuchRow;
         const f: TrackRef = .{ .panel = from_panel, .region = from };
         const t: TrackRef = .{ .panel = to_panel, .region = to };
-        if (m.trackPtr(f).major != m.trackPtr(t).major) return error.BadJoin;
+        if (m.trackPtr(f).major() != m.trackPtr(t).major()) return error.BadJoin;
         if (m.threadBefore(to_panel, to) != null) return error.BadJoin;
         const fi = m.trackFlowIndex(from_panel, from) orelse return error.BadJoin;
         const gi = m.trackFlowIndex(to_panel, to) orelse return error.BadJoin;
@@ -5414,7 +5413,7 @@ pub const Model = struct {
         if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
         if (!(along > 0) or !(across > 0)) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
-        if (r.major == .row) {
+        if (r.major() == .row) {
             r.w = along;
             r.h = across;
         } else {
@@ -5427,7 +5426,7 @@ pub const Model = struct {
     pub fn setSegmentLength(m: *Model, panel: usize, region: usize, length: f64) Error!void {
         if (!(length > 0)) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
-        if (r.major == .row) r.w = length else r.h = length;
+        if (r.major() == .row) r.w = length else r.h = length;
         m.revision += 1;
     }
 
@@ -5453,7 +5452,6 @@ pub const Model = struct {
     pub fn addControlPoint(m: *Model, panel: usize, region: usize, along: f64, across: f64) Error!ObjectId {
         if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
-        try m.adoptLegacyPath(r);
         const id = m.newId();
         try r.path.append(m.a(), .{ .id = id, .along = along, .across = across });
         m.revision += 1;
@@ -5466,7 +5464,6 @@ pub const Model = struct {
     pub fn bendPath(m: *Model, panel: usize, region: usize, at_across: f64, along: f64, across: f64) Error!ObjectId {
         if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
         const r = &m.panels.items[panel].regions.items[region];
-        try m.adoptLegacyPath(r);
         for (r.path.items) |*cp| if (@abs(cp.across - at_across) < 1e-6) {
             cp.along = along;
             cp.across = across;
@@ -5496,16 +5493,6 @@ pub const Model = struct {
             return;
         };
         return error.NoSuchObject;
-    }
-
-    /// An older document's moved origins, made control points (once), so
-    /// a change to the path keeps them.
-    fn adoptLegacyPath(m: *Model, r: *TileRegion) Error!void {
-        if (r.path.items.len > 0) return;
-        for (r.segments.items, 0..) |sg, k| if (k > 0 and sg.moved) {
-            try r.path.append(m.a(), .{ .id = m.newId(), .along = sg.along + r.middle(), .across = sg.across });
-        };
-        r.segments.clearRetainingCapacity();
     }
 
     /// Removes tile `id`: it leaves every track it is in, which reflows.
@@ -5930,7 +5917,6 @@ test "tracks are added empty; a removed tile leaves them" {
     try std.testing.expectEqual(2, region.h);
     // No segments stored: they come as the flow needs them, along a path
     // that is straight until it is given control points.
-    try std.testing.expectEqual(0, region.segments.items.len);
     try std.testing.expectEqual(0, region.path.items.len);
     try std.testing.expectEqual(0, m.flowItems(p, r).len);
     try std.testing.expectEqual(0, m.tiles.items.len);
@@ -6557,36 +6543,6 @@ test "flows: a panel's copy gets copies of its flows; a panel removed leaves its
         try std.testing.expectEqual(0, f.tracks.items.len);
         try std.testing.expectEqual(1, f.items.items.len);
     }
-}
-
-test "flows: an older document's threads are read into flows" {
-    var m: Model = .init(std.testing.allocator);
-    defer m.deinit();
-    const p = try m.addPanel("page", 200, 100);
-    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 100, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    // As an older file has them: no flows; A held the thread A → B, C its own.
-    const rs = m.panels.items[p].regions.items;
-    var items: std.ArrayList(Item) = .empty;
-    try items.append(m.a(), .{ .what = .{ .run = .{ .content = "old text", .style = body } } });
-    rs[a].old_items = items;
-    rs[a].old_next = rs[b].id;
-    rs[a].old_indent = 1.5;
-    m.flows.clearRetainingCapacity();
-    for (rs) |*r| r.flow = .none;
-    try m.upgradeFlows();
-    try std.testing.expectEqual(2, m.flows.items.len);
-    try std.testing.expectEqual(m.trackFlow(p, a), m.trackFlow(p, b));
-    try std.testing.expect(m.trackFlow(p, c) != m.trackFlow(p, a));
-    try std.testing.expectEqualStrings("A", m.trackFlow(p, a).?.name);
-    try std.testing.expectEqualStrings("old text", m.ownItems(p, a)[0].what.run.content);
-    try std.testing.expectEqual(1.5, m.trackIndent(p, b));
-    try std.testing.expectEqual(0, rs[a].old_items.items.len);
-    // Again: nothing changes.
-    try m.upgradeFlows();
-    try std.testing.expectEqual(2, m.flows.items.len);
 }
 
 test "flows: tracks assigned, moved within, detached; flows added, renamed, removed" {

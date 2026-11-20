@@ -310,3 +310,77 @@ test "an operation checked on its own: the plate waterjet cut, its outline and h
     // Only cutting: no depths judged, no colours counted.
     for (r.findings) |f| try testing.expect(f.kind != .depth and f.kind != .colours);
 }
+
+test "the keyboard as six tracks, one a row, threaded in its flow, lays out and exports exactly the same" {
+    const gpa = testing.allocator;
+    var o = try open(@embedFile("pc-keyboard.graven"));
+    defer close(&o);
+    const m = &o.model;
+    const p = try panelNamed(m, "PC keyboard (ANSI 104)");
+    var labels: layout.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var a = try layout.solve(gpa, m, p, &labels);
+    defer a.deinit();
+    const svg_a = try layout.output.panelSvg(gpa, &a, &.{}, .{});
+    defer gpa.free(svg_a);
+
+    // Six tracks where its rows were, each one row thick, the first
+    // holding the flow and the rest threaded after it.
+    var six = try open(@embedFile("pc-keyboard.graven"));
+    defer close(&six);
+    const s = &six.model;
+    const keys = s.panels.items[p].regions.items[0];
+    const flow = keys.flow;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    try testing.expectEqual(6, a.tracks.len);
+    for (a.tracks, 0..) |t, k| {
+        var r = keys;
+        r.kind = .track;
+        r.name = if (k == 0) "Row 1" else try std.fmt.allocPrint(arena.allocator(), "Row {d}", .{k + 1});
+        r.origin = .{ .x = t.box.x0, .y = t.box.y1 };
+        r.h = 1;
+        if (k == 0) {
+            // The region the rows were made in is the first track.
+            s.panels.items[p].regions.items[0] = r;
+            continue;
+        }
+        const ri = try s.addRegion(p, r);
+        try s.assignTrack(p, ri, flow, null);
+    }
+    const regions = s.panels.items[p].regions.items;
+    try testing.expectEqual(6, regions.len);
+    for (regions) |r| try testing.expectEqual(layout.model.TileRegion.Kind.track, r.kind);
+    var labels2: layout.Labels = .init(gpa, &.{});
+    defer labels2.deinit();
+    var b = try layout.solve(gpa, s, p, &labels2);
+    defer b.deinit();
+    try testing.expectEqual(a.tiles.len, b.tiles.len);
+    // A row a track: each segment in a track of its own.
+    try testing.expectEqual(6, b.tracks.len);
+    for (b.tracks, 0..) |t, k| {
+        try testing.expectEqual(k, t.member);
+        try testing.expectEqual(0, t.local);
+    }
+    for (b.issues) |i| try testing.expect(i.kind != .row_overflow and i.kind != .tile_size and i.kind != .unsupported_direction and i.kind != .past_soft_area);
+    const svg_b = try layout.output.panelSvg(gpa, &b, &.{}, .{});
+    defer gpa.free(svg_b);
+    try testing.expectEqualStrings(svg_a, svg_b);
+}
+
+test "a track at an angle placement cannot set yet is flagged, and placed as the nearest axis" {
+    const gpa = testing.allocator;
+    var o = try open(@embedFile("pc-keyboard.graven"));
+    defer close(&o);
+    const m = &o.model;
+    const p = try panelNamed(m, "PC keyboard (ANSI 104)");
+    m.panels.items[p].regions.items[0].direction = -15;
+    var labels: layout.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var placed = try layout.solve(gpa, m, p, &labels);
+    defer placed.deinit();
+    try testing.expectEqual(104, placed.tiles.len);
+    var flagged = false;
+    for (placed.issues) |i| flagged = flagged or i.kind == .unsupported_direction;
+    try testing.expect(flagged);
+}

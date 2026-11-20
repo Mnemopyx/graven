@@ -4875,7 +4875,7 @@ fn panelChildren(pi: usize, d: usize) void {
             for (here) |pt| {
                 const rowi = pt.track;
                 const flow_ri = pt.region;
-                const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major), pt.local + 1 }) catch "Row";
+                const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major()), pt.local + 1 }) catch "Row";
                 // What the flow put in this segment, from the last solve.
                 const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
                 const filled = for (placed_items) |it| {
@@ -12412,7 +12412,7 @@ fn properties() !void {
             if (numberProp("Origin across, mm", region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
             if (numberProp("Origin up, mm", region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
             {
-                const rows = region.major == .row;
+                const rows = region.major() == .row;
                 const along = if (rows) region.w else region.h;
                 const across = if (rows) region.h else region.w;
                 if (numberProp("Length, u", along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
@@ -12420,7 +12420,7 @@ fn properties() !void {
                 if (region.style != null) propText("Size", "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
             propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
-            propText(if (region.major == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
+            propText(if (region.major() == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
             propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
@@ -12459,7 +12459,7 @@ fn properties() !void {
             // A track that no longer exists shows nothing.
             if (on >= state.model.panels.items.len or member >= state.model.panels.items[on].regions.items.len) return;
             const region = state.model.panels.items[on].regions.items[member];
-            propText(trackWord(region.major), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(on, member).len, region.name }, 1);
+            propText(trackWord(region.major()), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(on, member).len, region.name }, 1);
             var where_buf: [96]u8 = undefined;
             propText("Placed", "{s}", .{trackWhere(&where_buf, r.panel, r.region, r.row)}, 2);
             var held: usize = 0;
@@ -12793,7 +12793,7 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
         indent = if (list.len == 1) list[0] else 0;
         changed = true;
     };
-    if (sizesProp(if (region.major == .row) "Row gap, u" else "Column gap, u", if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
+    if (sizesProp(if (region.major() == .row) "Row gap, u" else "Column gap, u", if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
         gap = if (list.len == 1) list[0] else 0;
         changed = true;
     };
@@ -13810,14 +13810,14 @@ fn paletteFor(panel: usize, region: usize) ?InsertPalette {
     const id = if (palette_prototype) |pp| (if (state.model.protoIndex(pp) != null and !state.model.proto(pp).spacer) pp else own) else own;
     const p = state.model.proto(id).*;
     var out: InsertPalette = .{ .prototype = id };
-    const sizes = if (r.major == .row) p.widths else p.heights;
-    const grows = if (r.major == .row) p.expand.horizontal else p.expand.vertical;
-    const step_ = p.step(r.major, .along);
+    const sizes = if (r.major() == .row) p.widths else p.heights;
+    const grows = if (r.major() == .row) p.expand.horizontal else p.expand.vertical;
+    const step_ = p.step(r.major(), .along);
     if (grows and sizes.len > 0) {
         out.tile_count = @min(10, sizes.len);
         @memcpy(out.tiles[0..out.tile_count], sizes[0..out.tile_count]);
     } else if (grows) {
-        const smallest = p.smallest(r.major, .along);
+        const smallest = p.smallest(r.major(), .along);
         out.tile_count = 10;
         for (&out.tiles, 0..) |*t, k| t.* = smallest + @as(f64, @floatFromInt(k)) * step_;
     } else {
@@ -15236,7 +15236,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
     const ghost = colors.guide.opacity(0.55);
     for (placed.wraps) |w| {
         const r = state.model.panels.items[w.flow_panel].regions.items[w.region];
-        if (r.major != .row) continue;
+        if (r.major() != .row) continue;
         const band = for (placed.tracks) |t| {
             if (t.region == w.region and t.flow_panel == w.flow_panel and t.track == w.segment) break onSheet(pi, t.box);
         } else continue;
@@ -15273,8 +15273,8 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         const a_mid = (it.span[0] + it.span[1]) / 2;
         const b_mid = (nx.span[0] + nx.span[1]) / 2;
         const inset = r.pitch * 0.08;
-        const p0: geom.Point = if (r.major == .row) .{ .x = band.x0 + a_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - a_mid };
-        const p1: geom.Point = if (r.major == .row) .{ .x = band.x0 + b_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - b_mid };
+        const p0: geom.Point = if (r.major() == .row) .{ .x = band.x0 + a_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - a_mid };
+        const p1: geom.Point = if (r.major() == .row) .{ .x = band.x0 + b_mid, .y = band.y0 + inset } else .{ .x = band.x1 - inset, .y = band.y1 - b_mid };
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 2 * px, .color = .{ .color = colors.select.opacity(0.7) } });
     }
     for (placed.items) |it| {
@@ -15284,7 +15284,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         const band = for (placed.tracks) |t| {
             if (t.region == it.region and t.flow_panel == it.flow_panel and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
-        const rows = r.major == .row;
+        const rows = r.major() == .row;
         if (what == .run) {
             const box: geom.Box = if (rows)
                 .{ .x0 = band.x0 + it.span[0], .x1 = band.x0 + it.span[1], .y0 = band.y0 + r.pitch * 0.2, .y1 = band.y1 - r.pitch * 0.2 }
@@ -15546,7 +15546,7 @@ fn moveStep(panel: usize, region: usize) f64 {
     const r = state.model.panels.items[panel].regions.items[region];
     if (state.model.prototypes.items.len == 0) return 0.25;
     const p = state.model.proto(r.prototype orelse state.model.prototypes.items[0].id).*;
-    return @min(p.step(r.major, .along), p.step(r.major, .across));
+    return @min(p.step(r.major(), .along), p.step(r.major(), .across));
 }
 
 const Arrow = enum { up, left, down, right };
@@ -15557,7 +15557,7 @@ fn moveTrackArrow(arrow: Arrow) void {
         .row => |r| r,
         else => return,
     };
-    const major = state.model.panels.items[t.panel].regions.items[t.region].major;
+    const major = state.model.panels.items[t.panel].regions.items[t.region].major();
     const s = moveStep(t.panel, t.region);
     // Rows run right and stack down; columns run down and set right.
     var along: f64 = 0;
@@ -15622,7 +15622,7 @@ fn movePalette() void {
     };
     const region = state.model.panels.items[t.panel].regions.items[t.region];
     const s = moveStep(t.panel, t.region);
-    const word = trackWord(region.major);
+    const word = trackWord(region.major());
     var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer body.deinit();
     {
@@ -15659,7 +15659,7 @@ fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
     // Along, from where an unshaped track's segment sits (its middle on
     // the track's middle).
     const along = o.along - member.middle();
-    const rows = member.major == .row;
+    const rows = member.major() == .row;
     const across_word = if (rows) (if (across < 0) "up" else "down") else (if (across < 0) "left" else "right");
     const along_word = if (rows) (if (along < 0) "left" else "right") else (if (along < 0) "up" else "down");
     return std.fmt.bufPrint(buf, "{d} u {s} · {d} u {s}", .{ @abs(across), across_word, @abs(along), along_word }) catch "";
@@ -16065,7 +16065,7 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
         if (nt.panel < state.placed.items.len) for (state.placed.items[nt.panel].tracks) |t| if (t.member == nt.region and t.local == 0) {
             to_box = t.box;
         };
-        const rows = r.major == .row;
+        const rows = r.major() == .row;
         const p0: geom.Point = if (rows) .{ .x = from_box.x1, .y = (from_box.y0 + from_box.y1) / 2 } else .{ .x = (from_box.x0 + from_box.x1) / 2, .y = from_box.y0 };
         const p1: geom.Point = if (rows) .{ .x = to_box.x0, .y = (to_box.y0 + to_box.y1) / 2 } else .{ .x = (to_box.x0 + to_box.x1) / 2, .y = to_box.y1 };
         const a = state.view.toPx(area, onSheetPoint(pi, p0));
@@ -17674,7 +17674,7 @@ fn pathRegion() ?struct { panel: usize, region: usize } {
 fn pathToMm(pi: usize, ri: usize, along: f64, across: f64) geom.Point {
     const o = panelOrigin(pi);
     const r = state.model.panels.items[pi].regions.items[ri];
-    return if (r.major == .row)
+    return if (r.major() == .row)
         .{ .x = o.x + r.origin.x + along * r.pitch, .y = o.y + r.origin.y - (across + 0.5) * r.pitch }
     else
         .{ .x = o.x + r.origin.x + (across + 0.5) * r.pitch, .y = o.y + r.origin.y - along * r.pitch };
@@ -17683,7 +17683,7 @@ fn pathToMm(pi: usize, ri: usize, along: f64, across: f64) geom.Point {
 fn pathFromMm(pi: usize, ri: usize, p: geom.Point) struct { along: f64, across: f64 } {
     const o = panelOrigin(pi);
     const r = state.model.panels.items[pi].regions.items[ri];
-    return if (r.major == .row)
+    return if (r.major() == .row)
         .{ .along = (p.x - o.x - r.origin.x) / r.pitch, .across = (o.y + r.origin.y - p.y) / r.pitch - 0.5 }
     else
         .{ .along = (o.y + r.origin.y - p.y) / r.pitch, .across = (p.x - o.x - r.origin.x) / r.pitch - 0.5 };
@@ -17694,7 +17694,7 @@ fn pathFromMm(pi: usize, ri: usize, p: geom.Point) struct { along: f64, across: 
 fn pathReach(pi: usize, ri: usize) f64 {
     const r = state.model.panels.items[pi].regions.items[ri];
     var reach = r.h;
-    if (r.major == .column) reach = r.w;
+    if (r.major() == .column) reach = r.w;
     for (r.path.items) |cp| reach = @max(reach, cp.across + 1);
     if (segmentOrigin(pi, ri, segmentCount(pi, ri) -| 1)) |o| reach = @max(reach, o.across + 1);
     return reach;

@@ -140,7 +140,7 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
 /// a row, half a row in (as the editor draws the path).
 pub fn controlPointAt(r: model.TileRegion, k: usize) geom.Point {
     const cp = r.path.items[k];
-    return if (r.major == .row)
+    return if (r.major() == .row)
         .{ .x = r.origin.x + cp.along * r.pitch, .y = r.origin.y - (cp.across + 0.5) * r.pitch }
     else
         .{ .x = r.origin.x + (cp.across + 0.5) * r.pitch, .y = r.origin.y - cp.along * r.pitch };
@@ -178,7 +178,7 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
             const r = &p.regions.items[loc.index];
             const cp = &r.path.items[loc.sub];
             // Back from the panel frame to u along and across.
-            if (r.major == .row) {
+            if (r.major() == .row) {
                 if (vertical) cp.across = @max(0, (r.origin.y - o) / r.pitch - 0.5) else cp.along = (o - r.origin.x) / r.pitch;
             } else {
                 if (vertical) cp.along = (r.origin.y - o) / r.pitch else cp.across = @max(0, (o - r.origin.x) / r.pitch - 0.5);
@@ -332,7 +332,7 @@ fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
         // the row (as the flow sets them), from its top.
         .region => {
             const r = m.panels.items[loc.holder].regions.items[loc.index];
-            if (r.major != .row) return null;
+            if (r.major() != .row) return null;
             const sid = r.style orelse return null;
             if (m.styleIndex(sid) == null) return null;
             const cap = m.textStyle(sid).cap_height;

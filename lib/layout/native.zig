@@ -401,8 +401,8 @@ pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
     m = read;
     m.arena = arena;
     m.revision = 0;
-    // An older document's threads, read into flows.
-    try m.upgradeFlows();
+    // An older document's rows or columns, as directions.
+    m.upgradeOrientation();
     m.upgradeProcesses() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},
@@ -647,23 +647,16 @@ test "a model dumps as text, a field a line" {
     try testing.expect(std.mem.indexOf(u8, text, "arena") == null);
 }
 
-test "a track's fields from before flows are read by their old names, and not written" {
+test "an older track's \"major\" is read as its old orientation, and not written" {
     const gpa = testing.allocator;
-    // A track as an older file wrote it: its flow on itself.
-    const Old = struct { name: []const u8, pitch: f64, indent: f64, next: model.ObjectId, items: []const model.Item };
-    const item: model.Item = .{ .what = .{ .run = .{ .content = "kept" } } };
-    const bytes = try encodeValue(gpa, Old, .{ .name = "T", .pitch = 6, .indent = 2, .next = @enumFromInt(7), .items = &.{item} });
+    const Old = struct { name: []const u8, pitch: f64, major: model.Major };
+    const bytes = try encodeValue(gpa, Old, .{ .name = "T", .pitch = 6, .major = .column });
     defer gpa.free(bytes);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const r = try decodeValue(arena.allocator(), model.TileRegion, bytes);
-    try testing.expectEqual(2, r.old_indent);
-    try testing.expectEqual(@as(model.ObjectId, @enumFromInt(7)), r.old_next);
-    try testing.expectEqualStrings("kept", r.old_items.items[0].what.run.content);
-    // Written now, a track has none of them.
+    try testing.expectEqual(model.Major.column, r.old_major);
     const again = try encodeValue(gpa, model.TileRegion, r);
     defer gpa.free(again);
-    const back = try decodeValue(arena.allocator(), model.TileRegion, again);
-    try testing.expectEqual(0, back.old_items.items.len);
-    try testing.expectEqual(model.ObjectId.none, back.old_next);
+    try testing.expect(std.mem.indexOf(u8, again, "major") == null);
 }

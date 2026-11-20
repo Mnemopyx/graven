@@ -117,6 +117,10 @@ pub const Issue = struct {
         /// A tile's prototype sketch cannot be solved for its size (or is
         /// not fully constrained there); the tile is drawn plain.
         tile_sketch,
+        /// A track's direction or its content's rotation is not one of the
+        /// axis cases placement sets yet (rows, columns): it is placed as
+        /// the nearest of them.
+        unsupported_direction,
     },
     tile: ?TileId = null,
     slot: ?usize = null,
@@ -992,7 +996,9 @@ fn tileRegions(a: Allocator, m: *const Model, labels: *Labels, tiles: []const Pl
                 .w = if (tt.major == .row) along else across,
                 .h = if (tt.major == .row) across else along,
                 .pitch = pitch,
-                .major = tt.major,
+                .direction = model.TileRegion.oriented(tt.major).direction,
+                .rotation = model.TileRegion.oriented(tt.major).rotation,
+                .stack = model.TileRegion.oriented(tt.major).stack,
                 .style = tt.style,
                 .alignment = tt.alignment,
             });
@@ -1258,7 +1264,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         // Rows run right and stack down; columns run down and set to the
         // right. An item's size along is its width in a row and its height
         // in a column.
-        const rows = region.major == .row;
+        const rows = region.major() == .row;
         const length = region.segmentLength() * region.pitch;
         const tol = 1e-9;
         // The flow as the pass sees it. A run in a row is set once on one
@@ -1678,7 +1684,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
             const member = thread[path.member.items[t]];
             const soft = path.regionOf(t).softArea();
-            try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major, .box = b, .origin = o });
+            try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major(), .box = b, .origin = o });
             local += 1;
             all = all.join(b);
             // Along, the path and the segment length are the boundary: a
@@ -1690,6 +1696,8 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         // The canvas has no outline to keep to.
         const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
         if (past > 1e-9 and !m.panels.items[panel].unbounded) try out_issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+        for (thread) |member| if (!regs[member].supported())
+            try out_issues.append(a, .{ .kind = .unsupported_direction, .region = member });
     }
     }
     // A tile track's problems are its tile's.

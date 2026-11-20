@@ -38,6 +38,7 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
   - rows or columns along a path with control points, where segments step by pitch and are bound to the path at their centre;
   - the path and segment length define the track's boundary;
   - threaded tracks, where one flow runs through joined tracks, including across panels.
+  - two kinds (2026-11-20): regions, which add rows or columns as content needs them, and tracks, one line each, laid out in advance; orientation as a baseline direction and a content rotation, rows and columns its axis cases.
 - **Flows:**
   - tiles, blanks, text and equations in one stream;
   - hard breaks and paragraphs with paragraph styles (spacing, alignment, indents);
@@ -300,6 +301,15 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
       - **Fixed on the way:** the selected cell's editor took the keyboard every frame, which closed any menu as it opened, and its cell keys acted under a dialog (Enter moved the cell instead of confirming). Now it takes the keyboard once per selection, and the cell keys act only while it has it.
     - **Panes follow the active view** (decided 2026-11-18, the owner): ghost panes stay around the whole window. Each view kind says which panes it wants and what they hold (canvas: all; sheet: no Tools for now, the cell's row in Properties, the cell in the expression bar; flow editor: no Tools). An unwanted pane is hidden with its tab and hot edge, and returns as it was. To be built with the sheet view.
 - **Manufacturing plans and views** (decided 2026-11-19; blueprint "Manufacturing plans and views"): a plan makes a product of one or more panels; each part has a material; operations in free order (flagged where doubtful), each a process profile over geometry chosen by role, with its settings and colour from what the process can produce on that material. Design colour on solid geometry becomes an intent hint. Steps: the model (built the same day, below); the Manufacturing view; checks and simulation per operation; output per plan; the advisor later.
+
+- **Tracks and regions, redesigned** (decided 2026-11-20; blueprint "Tracks and regions"): two objects. A **region** is the reserved space content flows into; in the UI it is a column of rows or a row of columns, and it adds its segments as content needs them (a paragraph's height varies with its style, so nothing is filled in advance). A **track** is one line laid out in advance: its own baseline path, length and position, holding its own flow or continuing the flow of the track before. Horizontal and vertical are not options: a track's baseline has a direction, and its content a rotation relative to the path's normal (rows: 0° and 0°; columns: −90° and 90°, upright). The PC keyboard becomes six tracks, one a row, in one flow. Older files' "major" (rows or columns) is read and turned into a direction. Backward compatibility may break.
+  - Steps: 1 the model and placement (built 2026-11-20, below); 2 the GUI (draw a track or a region, Add rows…, properties for direction and rotation, flow own or continued, the Browser); 3 the keyboard example remade as six tracks; 4 curved baselines from sketches.
+  - **Step 1 built 2026-11-20:**
+    - `TileRegion` has `kind` (`region` or `track`), `direction` and `rotation` (degrees), and `stack` (the side a region adds its tracks on: right for rows, left for columns). `major()` (rows or columns) is derived from the direction; `oriented(major)` gives the axis cases; `supported()` says whether placement can set it.
+    - A track is one thickness across: `addRegion` sets it, and placement moves the flow to the next track of the flow at the end of each one (as it already moved between regions).
+    - An orientation that is not an axis case is kept, flagged (`unsupported_direction`) and placed as the nearest axis.
+    - Gone: the old track-content fields (`indent`, `paragraph`, `next`, `items`, read by flows' upgrade since 2026-11-18) and the explicit `segments`; files that old no longer open their content. `major` is read as `old_major` and converted on loading (`upgradeOrientation`).
+    - **Checked:** all tests, including a new example test splitting the keyboard's region into six tracks threaded in its flow: one segment a track, and an SVG byte-identical to the one-region keyboard's; an angled region flagged. Keyboard and HP-15C SVGs byte-identical; the GUI harness passes.
 
 ## Gaps against the project's stated goals
 

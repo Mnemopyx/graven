@@ -115,7 +115,7 @@ pub const TrackGround = struct {
         try g.path.ensure(a, n);
         const region = g.path.regionOf(n);
         const band = g.path.boxes.items[n];
-        const rows = region.major == .row;
+        const rows = region.major() == .row;
         const length = place.segLength(&g.path, rows, n);
         // What art closes, and what the paragraph's indents leave.
         var closed: std.ArrayList([2]f64) = .empty;
