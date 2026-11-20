@@ -2626,10 +2626,12 @@ fn importSheet(path: []const u8) void {
         state.status = "That table has no rows under its header. ";
         return;
     }
-    // A new sheet is named after the file.
+    // A new sheet is named after the file, as an identifier
+    // (keyboard-legends.csv: keyboardLegends), numbered if taken.
+    var sheet_name_buf: [100]u8 = undefined;
     if (target == .new) {
         const stem = std.fs.path.stem(path);
-        if (stem.len > 0) target.new.name = stem;
+        target.new.name = state.model.freshOrSame(&sheet_name_buf, .sheets, stem, "Legends");
     }
     import_count += 1;
     const key = mergeKey(.{ "sheet import", import_count });
@@ -6011,7 +6013,7 @@ fn sheetViewProperties() void {
     if (tbutton(@src(), "Name keys by their first legend", .{}, .{ .expand = .horizontal })) nameSheetKeys(si, .legend);
     if (tbutton(@src(), "Add a row", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         var nb: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&nb, "Row {d}", .{sh.rows.items.len + 1}) catch "Row";
+        const name = m.freshName(&nb, .keys, "Row");
         act(.addSheetRow, .{ id, sheet_sel.row + 1, name }) catch {};
     }
     if (sh.rows.items.len > 0) if (tbutton(@src(), "Remove this row", .{}, .{ .expand = .horizontal })) {
@@ -6021,8 +6023,9 @@ fn sheetViewProperties() void {
 }
 
 /// Names every key of sheet `si`: by its grid place (R1C1, from row 1,
-/// column 1), or by its first legend where that is a plain word (letters
-/// and digits); a name taken gets a number. One undo step.
+/// column 1), or by its first legend where that is an identifier (a
+/// letter, then letters and digits); a name taken gets a number (Enter1).
+/// One undo step.
 fn nameSheetKeys(si: usize, how: enum { position, legend }) void {
     const m = &state.model;
     const id = m.sheets.items[si].id;
@@ -6044,23 +6047,15 @@ fn nameSheetKeys(si: usize, how: enum { position, legend }) void {
                 for (row.cells.items) |cell| {
                     const t = std.mem.trim(u8, cell, " ");
                     if (t.len == 0) continue;
-                    const plain = for (t) |ch| {
-                        if (!std.ascii.isAlphanumeric(ch)) break false;
-                    } else true;
-                    if (plain) want = t;
+                    if (layout.names.isIdentifier(t)) want = t;
                     break;
                 }
                 if (want.len == 0) continue;
             },
         }
         // Taken by another key: numbered.
-        var tries: usize = 1;
-        var name = want;
         var nb2: [72]u8 = undefined;
-        while (m.findTile(name)) |other| : (tries += 1) {
-            if (other == tile) break;
-            name = std.fmt.bufPrint(&nb2, "{s}-{d}", .{ want, tries + 1 }) catch break;
-        }
+        const name = if (m.findTile(want)) |other| (if (other == tile) want else m.freshName(&nb2, .keys, want)) else want;
         if (std.mem.eql(u8, m.sheets.items[si].rows.items[r].key, name)) continue;
         _ = actM(key, .setSheetCell, .{ id, r, 0, name }) catch continue;
         named += 1;
@@ -6327,7 +6322,8 @@ fn groupSelection() void {
     var nb: [32]u8 = undefined;
     var n: usize = 1;
     for (state.model.spaces.items) |sp| n += sp.groups.items.len;
-    const name = std.fmt.bufPrint(&nb, "Group {d}", .{n}) catch "Group";
+    _ = &n;
+    const name = state.model.freshName(&nb, .{ .space = state.model.spaces.items[shown_space].id }, "Group");
     const g = act(.makeGroup, .{selection.items, name}) catch {
         state.status = "They could not be grouped. ";
         return;
@@ -6574,7 +6570,8 @@ fn addArtFromDrag(b: geom.Box) void {
 fn addPrimitive(pi: usize, prim: layout.art.Primitive, at: geom.Point) void {
     const o = state.model.panels.items[pi].origin;
     var name_buf: [48]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ prim.label(), state.model.panels.items[pi].art.items.len + 1 }) catch "Shape";
+    var ib: [48]u8 = undefined;
+    const name = state.model.freshName(&name_buf, .{ .panel = pi }, layout.names.identifier(&ib, prim.label(), "Shape"));
     const shapes = layout.art.primitive(dvui.currentWindow().arena(), name, prim, .{
         .edge = .{ .r = 0x2b, .g = 0x2b, .b = 0x2b },
         .edge_width = 0.25,
@@ -7529,12 +7526,13 @@ fn panelFab(pi: usize) !void {
         key = 0;
     }
     if (tbutton(@src(), "Add layer", .{}, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } })) {
+        var fab_name_buf: [32]u8 = undefined;
         // The first: the base itself, solid from the bottom up. After it:
         // every label inlaid, 0.6 mm from the top down.
         const l: FabLayer = if (layers.len == 0)
             .{ .name = "Base", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = fab.thickness, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }
         else
-            .{ .name = try std.fmt.allocPrint(ar, "Layer {d}", .{layers.len + 1}), .source = .{ .text = "" }, .surface = .base_top, .dir = .down, .depth = 0.6, .op = .{ .inlay = .{ .name = "white", .color = .hex("#f2f2f2") } } };
+            .{ .name = try ar.dupe(u8, state.model.freshName(&fab_name_buf, .{ .fab = pi }, "Layer")), .source = .{ .text = "" }, .surface = .base_top, .dir = .down, .depth = 0.6, .op = .{ .inlay = .{ .name = "white", .color = .hex("#f2f2f2") } } };
         const grown = try ar.alloc(FabLayer, layers.len + 1);
         @memcpy(grown[0..layers.len], layers);
         grown[layers.len] = l;
@@ -7649,7 +7647,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
     // Its keys' legends as a sheet (theirs and those beside them).
     if (g.instances.items.len > 0) if (tbutton(@src(), "Make a legend sheet", .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
         var nb: [96]u8 = undefined;
-        const name = std.fmt.bufPrint(&nb, "Legends of {s}", .{state.model.panels.items[pi].name}) catch "Legends";
+        const name = state.model.freshName(&nb, .sheets, "Legends");
         if (act(.makeSheet, .{ name, g.id })) |id| {
             state.context = .{ .sheet = id };
             // Beside the canvas, to see its edits.
@@ -8279,7 +8277,8 @@ fn plansProperties() void {
         for (m.panels.items) |pn| if (pn.fab.layers.len > 0 and pn.id != .none) {
             parts.append(ar, .{ .panel = pn.id }) catch return;
         };
-        const name = std.fmt.allocPrint(ar, "Plan {d}", .{m.plans.items.len + 1}) catch "Plan";
+        var pb: [32]u8 = undefined;
+        const name = m.freshName(&pb, .plans, "Plan");
         const id = act(.addPlan, .{manufacture.Plan{ .name = name, .parts = parts.items }}) catch return;
         state.context = .{ .plan = id };
     }
@@ -8493,7 +8492,9 @@ fn planEditor(id: ObjectId) void {
         var n = planCopy(p);
         var ops: std.ArrayList(manufacture.Operation) = .empty;
         ops.appendSlice(ar, n.operations) catch return;
-        ops.append(ar, .{ .name = std.fmt.allocPrint(ar, "Operation {d}", .{p.operations.len + 1}) catch "Operation", .process = .none }) catch return;
+        var ob: [32]u8 = undefined;
+        const op_name = ar.dupe(u8, state.model.freshName(&ob, .{ .plan = id }, "Operation")) catch return;
+        ops.append(ar, .{ .name = op_name, .process = .none }) catch return;
         n.operations = ops.items;
         act(.setPlan, .{ id, n }) catch {};
     }
@@ -11577,7 +11578,7 @@ fn pick(at: geom.Point) void {
 fn addPanelFromDrag(b: geom.Box) void {
     if (b.width() < 1 or b.height() < 1) return;
     var buf: [32]u8 = undefined;
-    const name = state.model.nextPanelName(&buf, "Panel");
+    const name = state.model.nextPanelName(&buf, state.model.spaces.items[shown_space].id, "Panel");
     const pi = act(.placePanel, .{.{
         .name = name,
         .default_name = true,
@@ -11872,7 +11873,8 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     // Tracks may run past the panel: flagged, to be fitted or the panel
     // resized once their tiles show what is needed.
     var name_buf: [32]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ if (tracks_tool.kind == .track) "Track" else "Tracks", panel.regions.items.len + 1 }) catch "Tracks";
+    // Generated names are identifiers, numbered within the panel.
+    const name = state.model.freshName(&name_buf, .{ .panel = plan.panel }, if (tracks_tool.kind == .track) "Track" else if (plan.major == .row) "Rows" else "Columns");
     const r = act(.addTracks, .{plan.panel, .{
         .name = name,
         .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
@@ -12825,14 +12827,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     }
     if (tbutton(@src(), "Add track", .{}, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } })) {
         var name_buf: [32]u8 = undefined;
-        var k: usize = p.tracks.len + 1;
-        const name = while (true) : (k += 1) {
-            const candidate = std.fmt.bufPrint(&name_buf, "track {d}", .{k}) catch "track";
-            const taken = for (p.tracks) |tt| {
-                if (std.mem.eql(u8, tt.name, candidate)) break true;
-            } else false;
-            if (!taken) break candidate;
-        };
+        const name = state.model.freshName(&name_buf, .{ .prototype = id }, "track");
         const style: layout.model.StyleId = if (p.tracks.len > 0) p.tracks[0].style else .none;
         _ = try act(.addPrototypeTrack, .{ id, layout.model.TileTrack{ .name = name, .style = style, .alignment = .centre, .place = .{ .inset = .all(0.8) } } });
         return;
@@ -13193,7 +13188,7 @@ fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
 /// A new plain prototype with one track and keycap art, made the context.
 fn addPrototype() !void {
     var name_buf: [32]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "Prototype {d}", .{state.model.prototypes.items.len + 1}) catch "Prototype";
+    const name = state.model.freshName(&name_buf, .prototypes, "Prototype");
     var p: layout.model.TilePrototype = .{
         .name = name,
         .unit = 19.05,
@@ -13209,7 +13204,10 @@ fn addPrototype() !void {
 
 fn duplicatePrototype(id: layout.model.PrototypeId) !void {
     var name_buf: [64]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "{s} copy", .{state.model.proto(id).name}) catch "copy";
+    var ib: [96]u8 = undefined;
+    var cb: [100]u8 = undefined;
+    const stem = std.fmt.bufPrint(&cb, "{s}Copy", .{layout.names.identifier(&ib, state.model.proto(id).name, "Prototype")}) catch "PrototypeCopy";
+    const name = state.model.freshOrSame(&name_buf, .prototypes, stem, "PrototypeCopy");
     state.context = .{ .prototype = try act(.duplicatePrototype, .{id, name}) };
 }
 
@@ -13511,11 +13509,7 @@ fn stylesProperties() !void {
     propText("Text styles", "{d}", .{state.model.styles.items.len}, 1);
     if (tbutton(@src(), "Add a style", .{}, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } })) {
         var buf: [32]u8 = undefined;
-        var k: usize = state.model.styles.items.len + 1;
-        const name = while (true) : (k += 1) {
-            const candidate = std.fmt.bufPrint(&buf, "Style {d}", .{k}) catch "Style";
-            if (styleNamed(candidate) == null) break candidate;
-        };
+        const name = state.model.freshName(&buf, .styles, "Style");
         state.context = .{ .style = try act(.addStyle, .{ name, layout.model.StyleSize{ .cap_height = 3 } }) };
     }
     heading("From a math package", .{}, 10);
@@ -16057,7 +16051,7 @@ fn flowsProperties() void {
     propText("Unplaced", "{d}", .{unplaced}, 2);
     if (tbutton(@src(), "New flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
         var nb: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&nb, "Flow {d}", .{state.model.flows.items.len + 1}) catch "Flow";
+        const name = state.model.freshName(&nb, .flows, "Flow");
         if (act(.addFlow, .{name})) |id| {
             state.context = .{ .flow = id };
         } else |_| state.status = "The flow was not made. ";
@@ -18104,9 +18098,8 @@ fn leaveSketch() void {
 
 /// A new sketch in the shown space, its origin at `at`, then edited.
 fn newSketchAt(at: geom.Point) void {
-    const n: usize = state.model.sketches.items.len + 1;
     var buf: [32]u8 = undefined;
-    const name = std.fmt.bufPrint(&buf, "Sketch {d}", .{n}) catch "Sketch";
+    const name = state.model.freshName(&buf, .sketches, "Sketch");
     const p: geom.Point = .{ .x = @round(at.x * 2) / 2, .y = @round(at.y * 2) / 2 };
     const idx = act(.addSketch, .{ shown_space, name, p }) catch {
         state.status = "The sketch was not started. ";

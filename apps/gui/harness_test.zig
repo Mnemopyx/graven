@@ -252,12 +252,12 @@ fn makeKeyPrototype(r: *Run) !void {
     // (its lower half), words (the whole face, smaller).
     try r.choose("Track top/Style", "legend");
     try r.click("Track top/Add track");
-    try r.set("Track track 2/Name", "bottom");
+    try r.set("Track track1/Name", "bottom");
     try r.choose("Track bottom/Style", "legend");
     try r.choose("Track bottom/Set from", "start");
     try r.set("Track bottom/Inset top, mm", "6.45");
     try r.click("Track bottom/Add track");
-    try r.set("Track track 3/Name", "words");
+    try r.set("Track track1/Name", "words");
     try r.choose("Track words/Style", "legend words");
     try r.choose("Track words/Set from", "start");
     // Keycap art drawn from the insets now set, shaded back to front.
@@ -363,7 +363,7 @@ fn makeKeyboard(r: *Run) !void {
     try r.click("tree/untitled/Canvas, mm");
     try r.click("icon/Add panel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
-    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    try r.click("tree/untitled/Canvas, mm/Panel1");
     try r.set("Panel/Name", "PC keyboard (ANSI 104)");
     try r.set("Panel/Origin across, mm", "0");
     try r.set("Panel/Origin up, mm", "0");
@@ -618,10 +618,13 @@ fn setTrack(r: *Run, track: []const u8, style: []const u8, from: []const u8, ins
     }
 }
 
+/// A slot added after slot `after`, then named: it comes as track1 (the
+/// lowest generated name free; the one before was renamed).
 fn addTrack(r: *Run, after: []const u8, number: usize, name: []const u8) !void {
+    _ = number;
     var b: [96]u8 = undefined;
     try r.click(try std.fmt.bufPrint(&b, "Track {s}/Add track", .{after}));
-    try r.set(try std.fmt.bufPrint(&b, "Track track {d}/Name", .{number}), name);
+    try r.set("Track track1/Name", name);
 }
 
 /// The HP-15C's keys, row by row: their white, blue and gold legends.
@@ -685,8 +688,8 @@ fn make15c(r: *Run) !void {
     try setTrack(r, "f", "15C f", "centre", .{ "0", "0", "0", "0" });
 
     // The plate and the keys, side by side, 15 mm apart.
-    try make15cPanel(r, "Panel 1", "HP-15C plate", .{ 10, 10 }, "0");
-    try make15cPanel(r, "Panel 2", "HP-15C keys", .{ 60, 80 }, "143");
+    try make15cPanel(r, "Panel1", "HP-15C plate", .{ 10, 10 }, "0");
+    try make15cPanel(r, "Panel1", "HP-15C keys", .{ 60, 80 }, "143");
 
     // The plate's grid: 10 × 4 points, 11.43 mm across, 12.7 mm down;
     // its holes (rounded rectangles, r 1 mm) and its gold legends.
@@ -713,7 +716,7 @@ fn make15c(r: *Run) !void {
     // The keys' grid follows the plate's; on it, the keys themselves.
     try r.choose("Add a stamp/Follow it on", "HP-15C keys");
     try r.click("tree/untitled/Canvas, mm/HP-15C keys");
-    try r.click("Grids/Grid 1");
+    try r.click("Grids/Grid1");
     try r.click("Add a stamp/Parts");
     try r.choose("Stamp: Parts/Prototype", "15C key");
     try r.set("Stamp: Parts/Width, mm", "8");
@@ -781,9 +784,9 @@ fn make15c(r: *Run) !void {
 
     // The legends: a sheet over the keys' grid, its keys named by their
     // place, a table imported into it.
-    try r.click("Grids/Grid 1");
+    try r.click("Grids/Grid1");
     try r.click("Grid/Make a legend sheet");
-    try r.click("Legends of HP-15C keys/Name keys by grid position (R1C1…)");
+    try r.click("Legends1/Name keys by grid position (R1C1…)");
     var out: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
     defer out.deinit();
     const w = &out.writer;
@@ -918,7 +921,7 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     const m = api.model();
     // The example's fabrication, upgraded: Plan 1, opened in its view.
     try r.click("tree/untitled/Manufacturing plans#open");
-    try r.click("tree/untitled/Manufacturing plans/Plan 1");
+    try r.click("tree/untitled/Manufacturing plans/Plan1");
     try r.click("Manufacturing plan/Open in a manufacturing view");
     try r.frames(2);
     try std.testing.expectEqual(.manufacture, api.activeView().kind);
@@ -932,12 +935,12 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     try r.choose("Parts/HP-15C plate", "Aluminium 5052, black anodised (library)");
     try r.choose("Parts/HP-15C keys", "PLA");
     try r.click("Operations/Add an operation");
-    try r.choose("1. Operation 1/Process", "Generic waterjet (built in)");
-    try r.click("1. Operation 1/HP-15C plate · Plate");
-    try r.click("1. Operation 1/HP-15C plate · Key holes");
+    try r.choose("1. Operation1/Process", "Generic waterjet (built in)");
+    try r.click("1. Operation1/HP-15C plate · Plate");
+    try r.click("1. Operation1/HP-15C plate · Key holes");
     try r.click("Operations/Add an operation");
-    try r.choose("2. Operation 2/Process", "Generic laser engraver (built in)");
-    try r.click("2. Operation 2/HP-15C plate · Gold legends");
+    try r.choose("2. Operation2/Process", "Generic laser engraver (built in)");
+    try r.click("2. Operation2/HP-15C plate · Gold legends");
     var pl = m.plans.items[m.planIndex(id).?];
     try std.testing.expectEqual(@as(usize, 2), pl.operations.len);
     try std.testing.expectEqual(@as(usize, 2), pl.operations[0].targets.len);
@@ -950,9 +953,9 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     }
     try std.testing.expect(after_cut);
     // Engraved first: no longer flagged.
-    try r.click("2. Operation 2/Earlier");
+    try r.click("2. Operation2/Earlier");
     pl = m.plans.items[m.planIndex(id).?];
-    try std.testing.expectEqualStrings("Operation 2", pl.operations[0].name);
+    try std.testing.expectEqualStrings("Operation2", pl.operations[0].name);
     for (try layout.model.manufacture.warnings(arena.allocator(), m, pl)) |w| {
         try std.testing.expect(w.kind != .mark_after_cut);
     }
@@ -978,7 +981,7 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
         else => return error.TestUnexpectedResult,
     };
     _ = try r.rectOf("Checks/Findings");
-    try r.click("tree/untitled/Manufacturing plans/Plan 2");
+    try r.click("tree/untitled/Manufacturing plans/Plan2");
     try r.click("Manufacturing plan/Open in a manufacturing view");
     try r.frames(2);
     try std.testing.expectEqual(.manufacture, api.activeView().kind);
@@ -1049,7 +1052,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     try r.click("tree/untitled/Canvas, mm");
     try r.click("icon/Add panel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 160, 90 }));
-    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    try r.click("tree/untitled/Canvas, mm/Panel1");
     // Two rows of keys in a region: three, a line break, two.
     try r.click("icon/Add rows");
     try r.drag(try screen(.{ 15, 85 }), try screen(.{ 120, 45 }));
@@ -1065,26 +1068,26 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     defer a.free(font);
     const face = try layout.Face.init(a, font, 0);
     defer face.deinit();
-    const before = try panelSvg(a, api.model(), "Panel 1", face);
+    const before = try panelSvg(a, api.model(), "Panel1", face);
     defer a.free(before);
 
-    const panel = "tree/untitled/Canvas, mm/Panel 1";
-    try r.click(panel ++ "/Tracks 1");
+    const panel = "tree/untitled/Canvas, mm/Panel1";
+    try r.click(panel ++ "/Rows1");
     try r.click("Region/Make tracks of its 2 rows");
     try r.frames(3);
     const m = api.model();
     const pi = for (m.panels.items, 0..) |p, k| {
-        if (std.mem.eql(u8, p.name, "Panel 1")) break k;
+        if (std.mem.eql(u8, p.name, "Panel1")) break k;
     } else return error.TestUnexpectedResult;
     const regions = m.panels.items[pi].regions.items;
     try std.testing.expectEqual(2, regions.len);
     for (regions) |t| try std.testing.expectEqual(layout.model.TileRegion.Kind.track, t.kind);
     try std.testing.expectEqual(m.trackFlow(pi, 0).?.id, m.trackFlow(pi, 1).?.id);
-    const after = try panelSvg(a, m, "Panel 1", face);
+    const after = try panelSvg(a, m, "Panel1", face);
     defer a.free(after);
     try std.testing.expectEqualStrings(before, after);
     // The second track removed (its keys with it), and put back by undo.
-    try r.click(panel ++ "/Tracks 1 2");
+    try r.click(panel ++ "/Rows2");
     _ = try r.rectOf("Track/Direction, °");
     try r.click("Track/Remove track");
     try r.frames(3);
@@ -1092,7 +1095,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     try r.key(.z, .lcontrol);
     try r.frames(3);
     try std.testing.expectEqual(2, api.model().panels.items[pi].regions.items.len);
-    const again = try panelSvg(a, api.model(), "Panel 1", face);
+    const again = try panelSvg(a, api.model(), "Panel1", face);
     defer a.free(again);
     try std.testing.expectEqualStrings(before, again);
 }
@@ -1119,11 +1122,11 @@ test "a field changes nothing while typed; leaving it or Enter accepts, one undo
     try r.click("tree/untitled/Canvas, mm");
     try r.click("icon/Add panel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
-    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    try r.click("tree/untitled/Canvas, mm/Panel1");
     const steps = api.undoSteps();
     try typeInto(&r, "Panel/Name", "Front");
     // Typed, not yet accepted: the model is as it was.
-    try std.testing.expect(panelNamed("Panel 1") != null);
+    try std.testing.expect(panelNamed("Panel1") != null);
     try std.testing.expectEqual(steps, api.undoSteps());
     api.leaveField();
     try r.frames(3);
@@ -1147,8 +1150,8 @@ test "a field given what it cannot take, or left by Esc, goes back to how it was
     try r.click("tree/untitled/Canvas, mm");
     try r.click("icon/Add panel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
-    try r.click("tree/untitled/Canvas, mm/Panel 1");
-    const pi = panelNamed("Panel 1").?;
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    const pi = panelNamed("Panel1").?;
     const w = api.model().panels.items[pi].w;
     // Not a number: refused, the width as it was.
     try typeInto(&r, "Panel/Width, mm", "wide");
@@ -1168,7 +1171,7 @@ test "a field given what it cannot take, or left by Esc, goes back to how it was
     try dvui.testing.pressKey(.backspace, .none);
     api.leaveField();
     try r.frames(3);
-    try std.testing.expect(panelNamed("Panel 1") != null);
+    try std.testing.expect(panelNamed("Panel1") != null);
 }
 
 test "a click elsewhere accepts the field first, then does what it was for" {
@@ -1178,7 +1181,7 @@ test "a click elsewhere accepts the field first, then does what it was for" {
     try r.click("tree/untitled/Canvas, mm");
     try r.click("icon/Add panel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
-    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    try r.click("tree/untitled/Canvas, mm/Panel1");
     try typeInto(&r, "Panel/Name", "Front");
     // A click on another node of the Browser: the name is taken, and the
     // node chosen.

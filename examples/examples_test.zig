@@ -334,8 +334,8 @@ test "the keyboard as six tracks, one a row, threaded in its flow, lays out and 
     var origins: [6]layout.geom.Point = undefined;
     for (a.tracks, &origins) |t, *q| q.* = .{ .x = t.box.x0, .y = t.box.y1 };
     try testing.expectEqual(6, try six.history.do(s, .splitIntoTracks, .{ p, 0, &origins }));
-    try testing.expectEqualStrings("keys 1", s.panels.items[p].regions.items[0].name);
-    try testing.expectEqualStrings("keys 6", s.panels.items[p].regions.items[5].name);
+    try testing.expectEqualStrings("keys1", s.panels.items[p].regions.items[0].name);
+    try testing.expectEqualStrings("keys6", s.panels.items[p].regions.items[5].name);
     const regions = s.panels.items[p].regions.items;
     try testing.expectEqual(6, regions.len);
     for (regions) |r| try testing.expectEqual(layout.model.TileRegion.Kind.track, r.kind);

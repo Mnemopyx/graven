@@ -16,6 +16,7 @@
 //! and scripts make the same edits.
 
 const std = @import("std");
+const names = @import("names.zig");
 
 const glyphic = @import("graven_glyphic");
 
@@ -1834,15 +1835,102 @@ pub const Model = struct {
         return space < m.spaces.items.len and m.panels.items[panel].space == m.spaces.items[space].id;
     }
 
-    /// The first "<prefix> N" not yet used as a space name.
-    pub fn nextFrameName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
-        var n: usize = m.spaces.items.len;
-        while (true) : (n += 1) {
-            const name = std.fmt.bufPrint(buf, "{s} {d}", .{ prefix, n }) catch return prefix;
-            for (m.spaces.items) |sp| {
-                if (std.mem.eql(u8, sp.name, name)) break;
-            } else return name;
+    /// Where a name must be unique (see `names`): the objects of one
+    /// container share one namespace, whatever their kind.
+    pub const Container = union(enum) {
+        /// The document's canvas and frames.
+        spaces,
+        /// A space's panels, layers, groups, views, images and sketch
+        /// views (`.none`: a worksheet's panels).
+        space: ObjectId,
+        /// A panel's tracks and regions, grids and line art.
+        panel: usize,
+        /// A panel's fabrication layers.
+        fab: usize,
+        styles,
+        paragraph_styles,
+        prototypes,
+        flows,
+        sheets,
+        sketches,
+        processes,
+        materials,
+        plans,
+        /// A prototype's slots.
+        prototype: PrototypeId,
+        /// A plan's operations.
+        plan: ObjectId,
+        /// Keys' designators (the document's, for now).
+        keys,
+    };
+
+    /// Whether an object in container `c` is named `name`.
+    pub fn nameTaken(m: *const Model, c: Container, name: []const u8) bool {
+        const eq = std.mem.eql;
+        switch (c) {
+            .spaces => for (m.spaces.items) |sp| if (eq(u8, sp.name, name)) return true,
+            .space => |sid| {
+                for (m.panels.items) |p| if (p.space == sid and !p.unbounded and eq(u8, p.name, name)) return true;
+                if (m.spaceIndex(sid)) |si| {
+                    const sp = m.spaces.items[si];
+                    for (sp.layers.items) |l| if (eq(u8, l.name, name)) return true;
+                    for (sp.groups.items) |g| if (eq(u8, g.name, name)) return true;
+                    for (sp.images.items) |im| if (eq(u8, im.name, name)) return true;
+                }
+            },
+            .panel => |pi| if (pi < m.panels.items.len) {
+                const p = m.panels.items[pi];
+                for (p.regions.items) |r| if (eq(u8, r.name, name)) return true;
+                for (p.grids.items) |g| if (eq(u8, g.name, name)) return true;
+                for (p.art.items) |a_| if (eq(u8, a_.name, name)) return true;
+            },
+            .fab => |pi| if (pi < m.panels.items.len) {
+                for (m.panels.items[pi].fab.layers) |l| if (eq(u8, l.name, name)) return true;
+            },
+            .styles => for (m.styles.items) |st| if (eq(u8, st.name, name)) return true,
+            .paragraph_styles => for (m.paragraph_styles.items) |ps| if (eq(u8, ps.name, name)) return true,
+            .prototypes => for (m.prototypes.items) |pr| if (eq(u8, pr.name, name)) return true,
+            .flows => for (m.flows.items) |f| if (eq(u8, f.name, name)) return true,
+            .sheets => for (m.sheets.items) |sh| if (eq(u8, sh.name, name)) return true,
+            .sketches => for (m.sketches.items) |sk| if (eq(u8, sk.name, name)) return true,
+            .processes => for (m.processes.items) |pr| if (eq(u8, pr.profile.name, name)) return true,
+            .materials => for (m.materials.items) |mt| if (eq(u8, mt.material.name, name)) return true,
+            .plans => for (m.plans.items) |pl| if (eq(u8, pl.name, name)) return true,
+            .prototype => |id| if (m.protoIndex(id)) |k| {
+                for (m.prototypes.items[k].tracks) |tt| if (eq(u8, tt.name, name)) return true;
+            },
+            .plan => |id| for (m.plans.items) |pl| if (pl.id == id) {
+                for (pl.operations) |op| if (eq(u8, op.name, name)) return true;
+            },
+            .keys => return m.findTile(name) != null,
         }
+        return false;
+    }
+
+    const Taken = struct {
+        m: *const Model,
+        c: Container,
+        fn f(t: Taken, name: []const u8) bool {
+            return t.m.nameTaken(t.c, name);
+        }
+    };
+
+    /// A name Graven makes up in container `c`: `prefix` (an identifier)
+    /// and the lowest number free there, into `buf` (Track1, Track2 …).
+    pub fn freshName(m: *const Model, buf: []u8, c: Container, prefix: []const u8) []const u8 {
+        return names.fresh(buf, prefix, Taken{ .m = m, .c = c }, Taken.f);
+    }
+
+    /// `name` made an identifier, itself when free in `c`, else numbered.
+    pub fn freshOrSame(m: *const Model, buf: []u8, c: Container, name: []const u8, fallback: []const u8) []const u8 {
+        var ib: [96]u8 = undefined;
+        const id = names.identifier(&ib, name, fallback);
+        return names.freshOrSame(buf, id, Taken{ .m = m, .c = c }, Taken.f);
+    }
+
+    /// The first "<prefix>N" not yet used as a space name (Frame1).
+    pub fn nextFrameName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
+        return m.freshName(buf, .spaces, prefix);
     }
 
     /// Where object `id` is now, if it exists (groups are not objects in
@@ -2436,7 +2524,7 @@ pub const Model = struct {
 
     fn addBaseLayer(m: *Model, space: usize) Error!void {
         const id = m.newId();
-        try m.spaces.items[space].layers.append(m.a(), .{ .id = id, .name = "Layer 1" });
+        try m.spaces.items[space].layers.append(m.a(), .{ .id = id, .name = "Layer1" });
         m.spaces.items[space].base_layer = id;
     }
 
@@ -2449,15 +2537,9 @@ pub const Model = struct {
         return list.items.len - 1;
     }
 
-    /// The first "Layer N" not yet used in space `space`.
+    /// The first "LayerN" not yet used in space `space`.
     pub fn nextLayerName(m: *const Model, space: usize, buf: []u8) []const u8 {
-        var n: usize = m.spaces.items[space].layers.items.len + 1;
-        while (true) : (n += 1) {
-            const name = std.fmt.bufPrint(buf, "Layer {d}", .{n}) catch return "Layer";
-            for (m.spaces.items[space].layers.items) |l| {
-                if (std.mem.eql(u8, l.name, name)) break;
-            } else return name;
-        }
+        return m.freshName(buf, .{ .space = m.spaces.items[space].id }, "Layer");
     }
 
     /// Changes a layer's settings (not its ID).
@@ -2650,7 +2732,7 @@ pub const Model = struct {
         const v = (try m.sketchView(space, view)).*;
         const si = m.sketchIndex(v.sketch) orelse return error.NoSuchItem;
         var name_buf: [64]u8 = undefined;
-        const name = m.nextPanelName(&name_buf, "Panel");
+        const name = m.nextPanelName(&name_buf, m.spaces.items[space].id, "Panel");
         var p: Panel = .{
             .id = m.newId(),
             .name = try m.a().dupe(u8, name),
@@ -2776,7 +2858,7 @@ pub const Model = struct {
         if (shape.cols == 0 or shape.rows == 0 or !(shape.pitch_x > 0 and shape.pitch_y > 0) or !(shape.stretch_x > 0 and shape.stretch_y > 0)) return error.BadSize;
         const p = &m.panels.items[panel];
         var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "Grid {d}", .{p.grids.items.len + 1}) catch "Grid";
+        const name = m.freshName(&name_buf, .{ .panel = panel }, "Grid");
         try p.grids.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .default_name = true, .origin = origin, .shape = shape });
         m.revision += 1;
         return p.grids.items.len - 1;
@@ -2924,11 +3006,7 @@ pub const Model = struct {
 
     /// The first free designator `prefix` followed by a number.
     fn freeDesignator(m: *Model, prefix: []const u8, buf: []u8) []const u8 {
-        var n: usize = 1;
-        while (true) : (n += 1) {
-            const d = std.fmt.bufPrint(buf, "{s}{d}", .{ prefix, n }) catch return prefix;
-            if (m.findTile(d) == null) return d;
-        }
+        return m.freshName(buf, .keys, prefix);
     }
 
     /// The instance of stamp `stamp` on point (`col`, `row`) of grid `gi`,
@@ -3492,7 +3570,7 @@ pub const Model = struct {
             op.targets = ts.items;
         }
         const pid = m.newId();
-        try m.plans.append(al, try m.dupePlan(.{ .id = pid, .name = "Plan 1", .parts = parts.items, .operations = ops.items }));
+        try m.plans.append(al, try m.dupePlan(.{ .id = pid, .name = "Plan1", .parts = parts.items, .operations = ops.items }));
         m.plans.items[m.plans.items.len - 1].id = pid;
         m.active_plan = pid;
     }
@@ -3868,7 +3946,7 @@ pub const Model = struct {
         const name: []const u8 = switch (kind) {
             .circle => "Circle",
             .rectangle => "Rectangle",
-            .rounded_rectangle => "Rounded rectangle",
+            .rounded_rectangle => "RoundedRectangle",
             .slot => "Slot",
         };
         var sk = try sketch_.Sketch.init(m.a());
@@ -4138,7 +4216,7 @@ pub const Model = struct {
             }
         };
         var name_buf: [64]u8 = undefined;
-        const name = m.nextPanelName(&name_buf, "Panel");
+        const name = m.nextPanelName(&name_buf, rp.space, "Panel");
         const origin: geom.Point = .{ .x = rp.origin.x + b.x0, .y = rp.origin.y + b.y0 };
         // From the space panel's frame to the new panel's.
         const d: geom.Point = .{ .x = rp.origin.x - origin.x, .y = rp.origin.y - origin.y };
@@ -4345,19 +4423,10 @@ pub const Model = struct {
         return within(b, m.sheet.box());
     }
 
-    /// The first "<prefix> N" not yet used as a panel name.
-    pub fn nextPanelName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
-        // Spaces' own panels are not counted.
-        var n: usize = 1;
-        for (m.panels.items) |p| {
-            if (!p.unbounded) n += 1;
-        }
-        while (true) : (n += 1) {
-            const name = std.fmt.bufPrint(buf, "{s} {d}", .{ prefix, n }) catch return prefix;
-            for (m.panels.items) |p| {
-                if (std.mem.eql(u8, p.name, name)) break;
-            } else return name;
-        }
+    /// The first "<prefix>N" not yet used by a panel or other object of
+    /// space `space` (Panel1).
+    pub fn nextPanelName(m: *const Model, buf: []u8, space: ObjectId, prefix: []const u8) []const u8 {
+        return m.freshName(buf, .{ .space = space }, prefix);
     }
 
     pub fn addRegion(m: *Model, panel: usize, region: TileRegion) Error!usize {
@@ -4471,9 +4540,10 @@ pub const Model = struct {
 
     /// Makes region `region` of `panel` into tracks, one a row (or
     /// column), each one thick at its origin in `origins` (panel mm, top
-    /// left, as `TileRegion.origin`): the region becomes the first, named
-    /// "<name> 1", and the rest follow it in its flow, so its content runs
-    /// on through them as it did. Its path's control points go (a track's
+    /// left, as `TileRegion.origin`): the region becomes the first, and the
+    /// rest follow it in its flow, so its content runs
+    /// on through them as it did (named after it, numbered within the panel:
+    /// keys1, keys2 …). Its path's control points go (a track's
     /// path is its own); its length stays. Returns how many tracks.
     pub fn splitIntoTracks(m: *Model, panel: usize, region: usize, origins: []const geom.Point) Error!usize {
         if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
@@ -4484,8 +4554,13 @@ pub const Model = struct {
         const into = r0.flow;
         var pos = m.flowPosition(panel, region) orelse return error.BadJoin;
         var name_buf: [160]u8 = undefined;
+        var ib: [96]u8 = undefined;
+        // Its own name gives way, and numbers follow its stem (Rows1 →
+        // Rows1, Rows2 …; keys → keys1, keys2 …).
+        const stem = std.mem.trimEnd(u8, names.identifier(&ib, base, "Track"), "0123456789");
+        m.panels.items[panel].regions.items[region].name = "";
         for (origins, 0..) |o, k| {
-            const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ base, k + 1 }) catch base;
+            const name = m.freshName(&name_buf, .{ .panel = panel }, stem);
             if (k == 0) {
                 const r = &m.panels.items[panel].regions.items[region];
                 r.kind = .track;
@@ -4513,11 +4588,7 @@ pub const Model = struct {
 
     /// The lowest-numbered designator `prefix`1, `prefix`2 … not taken.
     fn nextDesignator(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
-        var n: usize = 1;
-        while (true) : (n += 1) {
-            const candidate = std.fmt.bufPrint(buf, "{s}{d}", .{ prefix, n }) catch return prefix;
-            if (m.findTile(candidate) == null) return candidate;
-        }
+        return m.freshName(buf, .keys, prefix);
     }
 
     // Flows ------------------------------------------------------------
@@ -4591,9 +4662,9 @@ pub const Model = struct {
     /// index.
     fn newFlow(m: *Model, name: []const u8, track: ObjectId) Error!usize {
         var nb: [160]u8 = undefined;
-        var unique = name;
-        var n: usize = 2;
-        while (m.flowNamed(unique)) : (n += 1) unique = std.fmt.bufPrint(&nb, "{s} {d}", .{ name, n }) catch break;
+        var ib: [96]u8 = undefined;
+        const id = names.identifier(&ib, name, "Flow");
+        const unique = if (!m.nameTaken(.flows, id)) id else m.freshName(&nb, .flows, "Flow");
         var f: Flow = .{ .id = m.newId(), .name = try m.a().dupe(u8, unique) };
         if (track != .none) try f.tracks.append(m.a(), track);
         try m.flows.append(m.a(), f);
@@ -5010,13 +5081,7 @@ pub const Model = struct {
 
     /// The first "Paragraph N" no paragraph style uses yet.
     pub fn nextParagraphStyleName(m: *const Model, buf: []u8) []const u8 {
-        var n: usize = m.paragraph_styles.items.len + 1;
-        while (true) : (n += 1) {
-            const name = std.fmt.bufPrint(buf, "Paragraph {d}", .{n}) catch return "Paragraph";
-            for (m.paragraph_styles.items) |p| {
-                if (std.mem.eql(u8, p.name, name)) break;
-            } else return name;
-        }
+        return m.freshName(buf, .paragraph_styles, "Paragraph");
     }
 
     /// Inserts a paragraph separator at position `index` of a track: the
@@ -6294,7 +6359,7 @@ test "layers: a background image under a panel, and blending on an engrave layer
     // A background layer, moved under the base layer, half opaque.
     var buf: [32]u8 = undefined;
     const bg = try m.addLayer(0, m.nextLayerName(0, &buf));
-    try std.testing.expectEqualStrings("Layer 2", m.spaces.items[0].layers.items[bg].name);
+    try std.testing.expectEqualStrings("Layer2", m.spaces.items[0].layers.items[bg].name);
     const at = try m.moveLayer(0, bg, false);
     try std.testing.expectEqual(0, at);
     var l = m.spaces.items[0].layers.items[0];
@@ -6558,6 +6623,27 @@ test "ready-made shape sketches are fully constrained, sized by their parameters
     }
 }
 
+test "generated names: identifiers, numbered within their container" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const q = try m.addPanel("other", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    var buf: [32]u8 = undefined;
+    // Within a panel: tracks, grids and art share one namespace.
+    try std.testing.expectEqualStrings("Track1", m.freshName(&buf, .{ .panel = p }, "Track"));
+    _ = try m.addTracks(p, .{ .name = "Track1", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try std.testing.expectEqualStrings("Track2", m.freshName(&buf, .{ .panel = p }, "Track"));
+    // Another panel is another container.
+    try std.testing.expectEqualStrings("Track1", m.freshName(&buf, .{ .panel = q }, "Track"));
+    _ = try m.addGrid(p, .{ .x = 0, .y = 0 }, .{ .cols = 2, .rows = 2, .pitch_x = 10, .pitch_y = 10 });
+    try std.testing.expectEqualStrings("Grid1", m.panels.items[p].grids.items[0].name);
+    // A typed name made an identifier when it must be one: kept when free.
+    try std.testing.expectEqualStrings("RoundedRectangle", m.freshOrSame(&buf, .{ .panel = p }, "Rounded rectangle", "Shape"));
+    try std.testing.expectEqualStrings("Track11", m.freshOrSame(&buf, .{ .panel = p }, "Track1", "Shape"));
+    try std.testing.expectEqualStrings("Paragraph1", m.nextParagraphStyleName(&buf));
+}
+
 test "flows: a track drawn has its own; joining makes one flow, unjoining gives the track a new one" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
@@ -6567,8 +6653,9 @@ test "flows: a track drawn has its own; joining makes one flow, unjoining gives 
     const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
     try std.testing.expectEqual(2, m.flows.items.len);
     try std.testing.expectEqualStrings("A", m.trackFlow(p, a).?.name);
-    // A second flow named alike is told apart.
-    try std.testing.expectEqualStrings("A 2", m.flows.items[m.flowIndex(try m.addFlow("A")).?].name);
+    // A second flow named alike gets a generated name (an identifier,
+    // numbered among the flows).
+    try std.testing.expectEqualStrings("Flow1", m.flows.items[m.flowIndex(try m.addFlow("A")).?].name);
     try m.removeFlow(m.flows.items[2].id);
     _ = try m.insertText(p, a, .{ .index = 0 }, "first", body);
     _ = try m.insertText(p, b, .{ .index = 0 }, "second", body);
