@@ -42,7 +42,7 @@ $Z build gui-build -Docct-prebuilt   # the GUI with OCCT: manufacturing views in
 $Z build gui-test             # the GUI driven headless (apps/gui/harness_test.zig): both examples made in it, compared with their files
 ```
 
-Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2, and on 2026-11-18, when a shifted pair's base symbol moved into a slot of its own.)
+Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2; on 2026-11-18, when a shifted pair's base symbol moved into a slot of its own; and on 2026-11-20, when the keyboard became six tracks laid out in advance: the same geometry to 3e-14 mm, its row positions now typed rather than summed.)
 
 ```sh
 ./zig-out/bin/graven export --font /usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf examples/pc-keyboard.graven kb.svg

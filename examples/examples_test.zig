@@ -311,39 +311,28 @@ test "an operation checked on its own: the plate waterjet cut, its outline and h
     for (r.findings) |f| try testing.expect(f.kind != .depth and f.kind != .colours);
 }
 
-test "the keyboard as six tracks, one a row, threaded in its flow, lays out and exports exactly the same" {
+test "the keyboard is six tracks, one a row, laid out in advance and threaded in one flow" {
     const gpa = testing.allocator;
     var o = try open(@embedFile("pc-keyboard.graven"));
     defer close(&o);
     const m = &o.model;
     const p = try panelNamed(m, "PC keyboard (ANSI 104)");
+    const regions = m.panels.items[p].regions.items;
+    try testing.expectEqual(6, regions.len);
+    for (regions, 1..) |r, k| {
+        var nb: [8]u8 = undefined;
+        try testing.expectEqual(layout.model.TileRegion.Kind.track, r.kind);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "Row{d}", .{k}), r.name);
+        try testing.expectEqual(r.flow, regions[0].flow);
+    }
+    try testing.expectEqualStrings("keys", m.trackFlow(p, 0).?.name);
+    // Its keys by name, within their flow.
+    try testing.expect(m.resolve("keys.K104") != null);
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    var a = try layout.solve(gpa, m, p, &labels);
-    defer a.deinit();
-    const svg_a = try layout.output.panelSvg(gpa, &a, &.{}, .{});
-    defer gpa.free(svg_a);
-
-    // Six tracks where its rows were, each one row thick, the first
-    // holding the flow and the rest following it: the region split, as
-    // the GUI's "Make tracks of its rows" does, through the history.
-    var six = try open(@embedFile("pc-keyboard.graven"));
-    defer close(&six);
-    const s = &six.model;
-    try testing.expectEqual(6, a.tracks.len);
-    var origins: [6]layout.geom.Point = undefined;
-    for (a.tracks, &origins) |t, *q| q.* = .{ .x = t.box.x0, .y = t.box.y1 };
-    try testing.expectEqual(6, try six.history.do(s, .splitIntoTracks, .{ p, 0, &origins }));
-    try testing.expectEqualStrings("keys1", s.panels.items[p].regions.items[0].name);
-    try testing.expectEqualStrings("keys6", s.panels.items[p].regions.items[5].name);
-    const regions = s.panels.items[p].regions.items;
-    try testing.expectEqual(6, regions.len);
-    for (regions) |r| try testing.expectEqual(layout.model.TileRegion.Kind.track, r.kind);
-    var labels2: layout.Labels = .init(gpa, &.{});
-    defer labels2.deinit();
-    var b = try layout.solve(gpa, s, p, &labels2);
+    var b = try layout.solve(gpa, m, p, &labels);
     defer b.deinit();
-    try testing.expectEqual(a.tiles.len, b.tiles.len);
+    try testing.expectEqual(104, b.tiles.len);
     // A row a track: each segment in a track of its own.
     try testing.expectEqual(6, b.tracks.len);
     for (b.tracks, 0..) |t, k| {
@@ -351,14 +340,6 @@ test "the keyboard as six tracks, one a row, threaded in its flow, lays out and 
         try testing.expectEqual(0, t.local);
     }
     for (b.issues) |i| try testing.expect(i.kind != .row_overflow and i.kind != .tile_size and i.kind != .unsupported_direction and i.kind != .past_soft_area);
-    const svg_b = try layout.output.panelSvg(gpa, &b, &.{}, .{});
-    defer gpa.free(svg_b);
-    try testing.expectEqualStrings(svg_a, svg_b);
-    // One flow still, and one undo puts the region back.
-    try testing.expectEqual(m.flows.items.len, s.flows.items.len);
-    try testing.expect(try six.history.undo(s));
-    try testing.expectEqual(1, s.panels.items[p].regions.items.len);
-    try testing.expectEqual(layout.model.TileRegion.Kind.region, s.panels.items[p].regions.items[0].kind);
 }
 
 test "a track at an angle placement cannot set yet is flagged, and placed as the nearest axis" {

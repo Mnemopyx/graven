@@ -527,9 +527,14 @@ test "the PC keyboard, made in the GUI" {
     try std.testing.expectEqual(1, m.sheets.items.len);
     // No style left over that nothing uses.
     for (m.styles.items) |st| try std.testing.expect(!std.mem.eql(u8, st.name, "Label"));
-    try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
+    // The legend sheet's view, opened beside the canvas by the import,
+    // closed: the example opens on its canvas.
+    try std.testing.expectEqual(.sheet, api.activeView().kind);
+    try r.run("views.close");
+    try std.testing.expectEqual(.canvas, api.activeView().kind);
     // Saved as made: the example document's source.
     try saveAs(&r, scratch ++ "/pc-keyboard.graven");
+    try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
 }
 
 /// Whether the GUI's history so far saves and reopens whole (a step of
@@ -1085,9 +1090,9 @@ test "a click on a key makes the key the context, its properties shown" {
     _ = try r.rectOf("tile.gapBeforeU");
     // And after the flow cursor has been in its track, then the track and
     // the panel chosen in the Browser (as when keys are filled in).
-    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
-    try r.clickAt(try screen(.{ 400, 120 }));
-    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/Row2");
+    try r.clickAt(try screen(.{ 400, 100 }));
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/Row2");
     try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)");
     try r.clickAt(api.tileCenter("K4").?);
     try std.testing.expectEqualStrings("tile", api.contextName());
