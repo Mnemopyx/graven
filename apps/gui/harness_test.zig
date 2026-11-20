@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
+const glyphic = @import("graven_glyphic");
 const gui = @import("main.zig");
 
 const api = gui.testing_api;
@@ -1338,4 +1339,38 @@ test "every button in the registry is an action with a handler" {
     const missing = api.unhandledButtons(&buf);
     for (missing) |m| std.debug.print("no handler: {s}\n", .{m});
     try std.testing.expectEqual(0, missing.len);
+}
+
+test "a slot edited on the canvas outlines its objects; a click chooses one, measured; the expression's section comes first, on a tile as in a run" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    // The √x key's top slot, edited on the canvas.
+    try r.clickAt(api.tileCenter("R1C1").?);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    try r.key(.backslash, .lcontrol);
+    try r.frames(2);
+    var buf: [16]dvui.Rect.Physical = undefined;
+    // Its objects: x, and the radical round it (its field left out).
+    const boxes = api.eqBoxes(&buf);
+    try std.testing.expectEqual(2, boxes.len);
+    const x = boxes[0];
+    const radical = boxes[1];
+    try std.testing.expect(radical.w > x.w and radical.x < x.x);
+    // The expression's section first, naming what is edited.
+    _ = try r.rectOf("expression.editing");
+    try std.testing.expect((try r.rectOf("expression.editing")).y < (try r.rectOf("tile.designator")).y);
+    // A click on the radical's sign (left of x) chooses the radical, by
+    // its head; on x, x.
+    try r.clickAt(.{ .x = radical.x + 0.1 * (x.x - radical.x), .y = radical.y + radical.h * 0.6 });
+    try r.frames(2);
+    try std.testing.expectEqual(glyphic.Kind.radical, api.eqChosenKind().?);
+    try std.testing.expect(api.eqMeasured());
+    _ = try r.rectOf("expression.gap-before");
+    _ = try r.rectOf("expression.baseline");
+    try r.clickAt(.{ .x = x.x + x.w / 2, .y = x.y + x.h / 2 });
+    try r.frames(2);
+    try std.testing.expectEqual(glyphic.Kind.variable, api.eqChosenKind().?);
+    try std.testing.expect(api.eqMeasured());
 }

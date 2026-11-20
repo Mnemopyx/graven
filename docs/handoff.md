@@ -86,5 +86,5 @@ Manufacturing plans and views (discussed 2026-11-19; blueprint "Manufacturing pl
 
 ## Layout objects' outlines and nudging (2026-11-20)
 
-Step 1 of 3 built: glyphic records every object's box (`layout.ObjectBox`, `Set.boxes`, `render.Render.boxes`) and has `space_before`. Next, step 2: draw the boxes and the baseline while a slot is edited on the canvas (`drawCanvasEq` in main.zig is where the head box is drawn now), the chosen object strong, its gaps and baseline offset in the status bar, a click choosing a box; and make the options for an expression the same on a tile and in a canvas run (the owner noticed they differ). Step 3: Tab through every object, arrows ← → for `space_before`, ↑ ↓ for `shift_y`, 0 to clear, 0.02 cap a press. See status.md.
+Step 1 of 3 built: glyphic records every object's box (`layout.ObjectBox`, `Set.boxes`, `render.Render.boxes`) and has `space_before`. Step 2 built the same day: the outlines, baseline, the chosen object and its neighbours (`drawCanvasEq`, `eqChoice`, `eqBoxOf`), its measures in the properties (`eq_measure`), a click choosing (`eqBoxPress`), and the expression's section first for a tile's slot and a run alike. Step 3: Tab through every object, arrows ← → for `space_before`, ↑ ↓ for `shift_y`, 0 to clear, 0.02 cap a press. See status.md.
 

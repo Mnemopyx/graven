@@ -136,6 +136,36 @@ pub const testing_api = struct {
         const b = onSheet(f.panel, f.tile.body);
         return toScreen(.{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 });
     }
+    /// While an expression is edited on the canvas: its objects' boxes
+    /// (not fields'), in drawing order (parts before what holds them), as
+    /// screen rectangles; and the one chosen's kind.
+    pub fn eqBoxes(out: []dvui.Rect.Physical) []dvui.Rect.Physical {
+        var n: usize = 0;
+        for (state.placed.items, 0..) |placed, pi| {
+            const o = panelOrigin(pi);
+            for (placed.labels) |l| {
+                _ = eqPiece(pi, l) orelse continue;
+                for (l.render.boxes) |b| {
+                    if (b.kind == .field or n >= out.len) continue;
+                    const bb = boxBounds(b);
+                    const p0 = toScreen(.{ .x = bb.x0 + l.origin.x + o.x, .y = bb.y1 + l.origin.y + o.y }) orelse continue;
+                    const p1 = toScreen(.{ .x = bb.x1 + l.origin.x + o.x, .y = bb.y0 + l.origin.y + o.y }) orelse continue;
+                    out[n] = .{ .x = @min(p0.x, p1.x), .y = @min(p0.y, p1.y), .w = @abs(p1.x - p0.x), .h = @abs(p1.y - p0.y) };
+                    n += 1;
+                }
+            }
+        }
+        return out[0..n];
+    }
+    pub fn eqChosenKind() ?glyphic.Kind {
+        const c = eqChoice(dvui.currentWindow().arena()) orelse return null;
+        return c.kind;
+    }
+    pub fn eqMeasured() bool {
+        const q = canvas_eq orelse return false;
+        const m = eq_measure orelse return false;
+        return m.of.offset == q.offset and std.meta.eql(m.of.head, q.head);
+    }
     pub fn promptOpen() bool {
         return filePromptOpen() or contention != null or leave_prompt != null or recovery != null;
     }
@@ -11087,6 +11117,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
+                } else if (state.tool == .select and me.button.pointer() and canvas_eq != null and eqBoxPress(state.view.toMm(area, me.p))) {
+                    // Editing an expression: a click on one of its
+                    // objects chooses it.
+                    state.press_consumed = true;
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (state.tool == .select and me.button.pointer() and (me.mod.shift() or primaryMod(me.mod))) {
                     // Shift-click (or Ctrl-click): the container there in
                     // or out of the selection.
@@ -14230,6 +14265,10 @@ fn properties() !void {
         .panel => |pi| state.model.panels.items[pi].unbounded and state.model.spaceOf(pi) != 0,
         else => false,
     };
+    // An expression edited on the canvas, a tile's slot or a run of a
+    // flow: its section first, the same either way; what holds it after.
+    const expr_first = canvas_eq != null and exprTarget() != null;
+    if (expr_first) try expressionProperties();
     // Its id is the context's kind, whatever the heading reads (a region
     // reads Track when it is one).
     headingAs(if (frame_root) "frame" else if (on_canvas) "canvas" else @tagName(state.context), "{s}", .{if (frame_root) "Frame" else if (on_canvas) "Canvas" else state.context.kindName()}, 0);
@@ -14340,7 +14379,7 @@ fn properties() !void {
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
             threadProperties(r.panel, r.region);
-            try expressionProperties();
+            if (!expr_first) try expressionProperties();
         },
         .row => |r| {
             const pt = placedTrack(r.panel, r.region, r.row);
@@ -14361,7 +14400,7 @@ fn properties() !void {
         .tile => |id| {
             try tileProperties(id);
             tileSketchParams(id);
-            try expressionProperties();
+            if (!expr_first) try expressionProperties();
         },
         .art => |l| try artProperties(l.panel, l.index),
         .group => |g| try groupProperties(g),
@@ -14829,7 +14868,21 @@ fn expressionProperties() !void {
     var spans: glyphic.entry.Spans = .{};
     try glyphic.latex.parse(&e, &spans, src, if (target.isMath()) .math else .legend);
     heading("Expression object", .{}, 4000);
-    if (glyphic.entry.objectAt(&e, spans, at)) |id| {
+    if (canvas_eq) |q| if (q.target.key() == target.key()) {
+        // What is edited, named the same way for a tile's slot and a run.
+        var wb: [160]u8 = undefined;
+        propText("Editing", "{s}", .{eqTargetName(&wb, q)}, 3990);
+        // The chosen object's place among its neighbours, as drawn.
+        if (eq_measure) |m| if (m.of.offset == q.offset and std.meta.eql(m.of.head, q.head)) {
+            const cap = if (m.cap > 0) m.cap else 1;
+            if (m.gap_before) |g| propText("Gap before", "{d:.3} mm ({d:.3} cap)", .{ g, g / cap }, 3991) else propText("Gap before", "{s}", .{"first in its row"}, 3991);
+            if (m.gap_after) |g| propText("Gap after", "{d:.3} mm ({d:.3} cap)", .{ g, g / cap }, 3992) else propText("Gap after", "{s}", .{"last in its row"}, 3992);
+            propText("Baseline", "{d:.3} mm above the slot's", .{m.raised}, 3993);
+            propText("Box", "{d:.3} wide, {d:.3} up, {d:.3} down, mm", .{ m.width, m.height, m.depth }, 3994);
+        };
+    };
+    const head_id: ?glyphic.Id = if (canvas_eq) |q| (if (q.target.key() == target.key()) (if (q.head) |h| headAt(&.{ .e = e, .spans = spans }, h) else null) else null) else null;
+    if (head_id orelse glyphic.entry.objectAt(&e, spans, at)) |id| {
         const n = e.node(id);
         propText("At the cursor", "{s} {s}", .{ @tagName(n.kind), n.text }, 4001);
         if (glyphic.entry.isText(&e, id)) {
@@ -16900,26 +16953,28 @@ fn eqAction(inv: keymap.Invocation) bool {
     }
 }
 
-/// The equation's caret in placed label `l` of panel `pi`: a bar, or on a
-/// head, a box round what the head draws. Drawn at worksheet offset `o`.
-fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel, o: geom.Point) void {
-    const q = canvas_eq orelse return;
-    if (pi >= state.placed.items.len) return;
-    // The piece's run, and where that run starts in the source edited: 0
-    // for a run of a flow; for a tile's track, past the runs and breaks
-    // before it.
-    const piece: struct { from: u32, len: u32, base: u32 } = switch (q.target) {
+/// Which part of what is edited placed label `l` of panel `pi` draws: its
+/// run's source bytes [`from`, `from + len`) (len 0: all of it), counted
+/// from `base` in what is edited (0 for a run of a flow; for a tile's
+/// track, past the runs and breaks before it). Null when it draws
+/// something else.
+const EqPiece = struct { from: u32, len: u32, base: u32 };
+
+fn eqPiece(pi: usize, l: layout.place.PlacedLabel) ?EqPiece {
+    const q = canvas_eq orelse return null;
+    if (pi >= state.placed.items.len) return null;
+    return switch (q.target) {
         .run => |t| blk: {
-            const run = l.run orelse return;
-            if (run.panel != t.panel or run.region != t.region or run.item != t.item) return;
+            const run = l.run orelse return null;
+            if (run.panel != t.panel or run.region != t.region or run.item != t.item) return null;
             break :blk .{ .from = run.from, .len = run.len, .base = 0 };
         },
         .tile_track => |tt| blk: {
-            const tr = l.tile_run orelse return;
-            if (l.tile == null or l.tile.? != tt.tile) return;
-            const k = state.model.tileTrackIndex(tt.tile, tt.track) orelse return;
-            if (l.slot != k) return;
-            const f = state.model.tileFlow(tt.tile, tt.track) orelse return;
+            const tr = l.tile_run orelse return null;
+            if (l.tile == null or l.tile.? != tt.tile) return null;
+            const k = state.model.tileTrackIndex(tt.tile, tt.track) orelse return null;
+            if (l.slot != k) return null;
+            const f = state.model.tileFlow(tt.tile, tt.track) orelse return null;
             var base: u32 = 0;
             for (f.items.items[0..@min(tr.item, f.items.items.len)]) |it| base += switch (it.what) {
                 .run => |r| @intCast(r.content.len),
@@ -16929,34 +16984,213 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
             break :blk .{ .from = tr.from, .len = tr.len, .base = base };
         },
     };
+}
+
+/// The object chosen while an expression is edited on the canvas (the
+/// head's structure, else the object at the caret), with its neighbours
+/// in its row: source spans in what is edited, and its own nudges.
+const EqChoice = struct {
+    const Span = struct { start: u32, end: u32 };
+    object: Span,
+    prev: ?Span,
+    next: ?Span,
+    kind: glyphic.Kind,
+    text: []const u8,
+    /// Its own space_before and shift_y, cap heights.
+    space_before: f32,
+    shift_y: f32,
+};
+
+fn eqChoice(a: std.mem.Allocator) ?EqChoice {
+    const q = canvas_eq orelse return null;
+    const src = eqContent(q) orelse return null;
+    const p = eqParse(a, src, q.math) orelse return null;
+    const id = (if (q.head) |h| headAt(&p, h) else null) orelse glyphic.entry.objectAt(&p.e, p.spans, q.offset) orelse return null;
+    const span = struct {
+        fn of(pp: *const EqParse, x: glyphic.Id) ?EqChoice.Span {
+            const sp = pp.spans.get(x);
+            if (sp.start == glyphic.entry.Span.none.start) return null;
+            return .{ .start = @intCast(sp.start), .end = @intCast(sp.end) };
+        }
+    };
+    const n = p.e.node(id);
+    var prev: ?EqChoice.Span = null;
+    var next: ?EqChoice.Span = null;
+    if (n.parent != .none) {
+        const items = p.e.node(n.parent).items.items;
+        if (std.mem.indexOfScalar(glyphic.Id, items, id)) |k| {
+            if (k > 0) prev = span.of(&p, items[k - 1]);
+            if (k + 1 < items.len) next = span.of(&p, items[k + 1]);
+        }
+    }
+    const num = struct {
+        fn f(e: *const glyphic.Expr, i: glyphic.Id, prm: glyphic.Param) f32 {
+            return if (e.override(i, prm)) |v| v.number else 0;
+        }
+    };
+    return .{
+        .object = span.of(&p, id) orelse return null,
+        .prev = prev,
+        .next = next,
+        .kind = n.kind,
+        .text = n.text,
+        .space_before = num.f(&p.e, id, .space_before),
+        .shift_y = num.f(&p.e, id, .shift_y),
+    };
+}
+
+/// The box in render `r` drawing source span `sp` of what is edited (a
+/// piece at `base`): a leaf's or a structure's, not a field's.
+fn eqBoxOf(r: *const layout.render.Render, sp: ?EqChoice.Span, base: u32) ?layout.render.ObjectBox {
+    const s = sp orelse return null;
+    if (s.start < base) return null;
+    for (r.boxes) |b| if (b.kind != .field and b.start == s.start - base and b.end == s.end - base) return b;
+    return null;
+}
+
+/// What an expression edited on the canvas is, for the properties: a
+/// tile's slot ("K12, slot top") or a run of a flow ("equation 3 in Row1").
+fn eqTargetName(buf: []u8, q: CanvasEq) []const u8 {
+    return switch (q.target) {
+        .tile_track => |tt| blk: {
+            const t = state.model.tileConst(tt.tile);
+            const slot = for (state.model.prototypeOf(tt.tile).tracks) |tr| {
+                if (tr.id == tt.track) break tr.name;
+            } else "?";
+            break :blk std.fmt.bufPrint(buf, "{s}, slot {s}", .{ if (t.designator.len > 0) t.designator else "a tile", slot }) catch "a tile's slot";
+        },
+        .run => |r| std.fmt.bufPrint(buf, "{s} {d} in {s}", .{ if (q.math) "equation" else "text run", r.item + 1, state.model.panels.items[r.panel].regions.items[r.region].name }) catch "a run",
+    };
+}
+
+/// What the chosen object measures, as last drawn: its gaps to its
+/// neighbours along the baseline and its baseline's height above the
+/// slot's, mm; its cap height, for the nudges in cap heights.
+const EqMeasure = struct { of: struct { offset: u32, head: ?u32 }, gap_before: ?f64, gap_after: ?f64, raised: f64, cap: f64, width: f64, height: f64, depth: f64 };
+var eq_measure: ?EqMeasure = null;
+
+fn boxBounds(b: layout.render.ObjectBox) geom.Box {
+    var out: geom.Box = .empty;
+    for (b.corners) |c| out = out.addPoint(c);
+    return out;
+}
+
+fn strokeQuad(area: dvui.Rect.Physical, c: [4]geom.Point, at: geom.Point, colour: dvui.Color, width: f32) void {
+    var pts: [4]dvui.Point.Physical = undefined;
+    for (c, &pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+    dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = width, .color = .{ .color = colour }, .closed = true });
+}
+
+/// The equation in placed label `l` of panel `pi`, while it is edited:
+/// every layout object's box, the slot's baseline, the chosen object
+/// strong (its neighbours a little stronger than the rest), then the
+/// caret: a bar, or on a head nothing more (its box is the choice).
+/// Drawn at worksheet offset `o`.
+fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel, o: geom.Point) void {
+    const q = canvas_eq orelse return;
+    const piece = eqPiece(pi, l) orelse return;
+    const px = dvui.windowNaturalScale();
+    const at: geom.Point = .{ .x = l.origin.x + o.x, .y = l.origin.y + o.y };
+    const a = dvui.currentWindow().arena();
+    const r = l.render;
+
+    // The slot's baseline, across what this piece draws.
+    if (r.boxes.len > 0) {
+        var x0: f64 = r.design.x0;
+        var x1: f64 = r.design.x1;
+        for (r.boxes) |b| {
+            x0 = @min(x0, b.baseline[0].x);
+            x1 = @max(x1, b.baseline[1].x);
+        }
+        const p0 = state.view.toPx(area, .{ .x = at.x + x0, .y = at.y });
+        const p1 = state.view.toPx(area, .{ .x = at.x + x1, .y = at.y });
+        dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = px, .color = .{ .color = construction.baseline.opacity(0.7) } });
+    }
+    // Every object's box: fields faintest, then leaves and structures.
+    for (r.boxes) |b| {
+        const alpha: f32 = if (b.kind == .field) 0.18 else 0.35;
+        strokeQuad(area, b.corners, at, colors.select.opacity(alpha), px);
+    }
+    const choice = eqChoice(a);
+    if (choice) |c| {
+        const mine = eqBoxOf(r, c.object, piece.base);
+        const before = eqBoxOf(r, c.prev, piece.base);
+        const after = eqBoxOf(r, c.next, piece.base);
+        if (before) |b| strokeQuad(area, b.corners, at, colors.select.opacity(0.6), 1.5 * px);
+        if (after) |b| strokeQuad(area, b.corners, at, colors.select.opacity(0.6), 1.5 * px);
+        if (mine) |b| {
+            strokeQuad(area, b.corners, at, colors.select, 2 * px);
+            // Its own baseline, where it stands.
+            const p0 = state.view.toPx(area, .{ .x = at.x + b.baseline[0].x, .y = at.y + b.baseline[0].y });
+            const p1 = state.view.toPx(area, .{ .x = at.x + b.baseline[1].x, .y = at.y + b.baseline[1].y });
+            dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2 * px, .color = .{ .color = construction.baseline } });
+            const bb = boxBounds(b);
+            const cap: f64 = if (b.element < r.elements.len) r.elements[b.element].cap_height else 1;
+            const m: EqMeasure = .{
+                .of = .{ .offset = q.offset, .head = q.head },
+                .gap_before = if (before) |p| bb.x0 - boxBounds(p).x1 else null,
+                .gap_after = if (after) |n| boxBounds(n).x0 - bb.x1 else null,
+                .raised = b.baseline[0].y,
+                .cap = cap,
+                .width = b.baseline[1].x - b.baseline[0].x,
+                .height = bb.y1 - b.baseline[0].y,
+                .depth = b.baseline[0].y - bb.y0,
+            };
+            const changed = if (eq_measure) |was| !std.meta.eql(was, m) else true;
+            eq_measure = m;
+            if (changed) dvui.refresh(null, @src(), null);
+        }
+    }
+    if (q.head != null) return;
     if (q.offset < piece.base) return;
     const local = q.offset - piece.base;
     if (piece.len > 0 and (local < piece.from or local > piece.from + piece.len)) return;
-    const px = dvui.windowNaturalScale();
-    const at: geom.Point = .{ .x = l.origin.x + o.x, .y = l.origin.y + o.y };
-    if (q.head) |head| {
-        if (head < piece.base) return;
-        const h = head - piece.base;
-        var box: geom.Box = .empty;
-        const a = dvui.currentWindow().arena();
-        for (l.render.items) |it| switch (it) {
-            .glyph => |g| if (g.source == h and g.face < faceTable().len) {
-                box = box.join(layout.render.glyphInk(a, faceTable()[g.face], g) catch continue);
-            },
-            .path => |pth| if (pth.source == h) {
-                box = box.join(pth.outline.bounds());
-            },
-        };
-        if (box.isEmpty()) return;
-        const m = 0.25;
-        marchingBox(area, .{ .x0 = at.x + box.x0 - m, .y0 = at.y + box.y0 - m, .x1 = at.x + box.x1 + m, .y1 = at.y + box.y1 + m }, colors.select, 1.5 * px);
-        return;
-    }
-    const c = l.render.caret(local) orelse return;
+    const c = r.caret(local) orelse return;
     const p0 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y0 });
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     markCaret(p0, p1);
     dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2.5 * px, .color = .{ .color = colors.select.opacity(pulse()) } });
+}
+
+/// A press at worksheet point `p` while an expression is edited on the
+/// canvas: the innermost object box there (not a field's) chosen, a
+/// structure with a head by its head, anything else with the caret at its
+/// start. Whether one was there.
+fn eqBoxPress(p: geom.Point) bool {
+    if (canvas_eq == null) return false;
+    var best: ?struct { b: layout.render.ObjectBox, base: u32 } = null;
+    for (state.placed.items, 0..) |placed, pi| {
+        const o = panelOrigin(pi);
+        for (placed.labels) |l| {
+            const piece = eqPiece(pi, l) orelse continue;
+            const local: geom.Point = .{ .x = p.x - l.origin.x - o.x, .y = p.y - l.origin.y - o.y };
+            for (l.render.boxes) |b| {
+                if (b.kind == .field or !insideQuad(b.corners, local)) continue;
+                if (best == null or b.nest > best.?.b.nest) best = .{ .b = b, .base = piece.base };
+            }
+        }
+    }
+    const hit = best orelse return false;
+    const from = hit.b.start + hit.base;
+    const a = dvui.currentWindow().arena();
+    const q = canvas_eq.?;
+    const head: ?u32 = if (eqContent(q)) |src| if (eqParse(a, src, q.math)) |pp| (if (headAt(&pp, from) != null) from else null) else null else null;
+    canvas_eq_seq += 1;
+    eqMove(from, head);
+    return true;
+}
+
+/// Whether `p` is inside the quadrilateral `c` (convex, either winding).
+fn insideQuad(c: [4]geom.Point, p: geom.Point) bool {
+    var sign: f64 = 0;
+    for (0..4) |i| {
+        const a = c[i];
+        const b = c[(i + 1) % 4];
+        const cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        if (cross == 0) continue;
+        if (sign == 0) sign = cross else if ((cross > 0) != (sign > 0)) return false;
+    }
+    return true;
 }
 
 /// The cursor: a bar across its row or column between items.
