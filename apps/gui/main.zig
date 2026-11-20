@@ -154,6 +154,80 @@ pub const testing_api = struct {
     pub fn contextName() []const u8 {
         return @tagName(state.context);
     }
+    // Scripting by name (decided 2026-11-20): objects by name path, UI
+    // elements by id (see "Element ids"), through the paths a person's
+    // input takes. Each takes effect in the next frame.
+
+    /// Makes the object at name path `path` the context, as choosing it in
+    /// the Browser does. False when nothing has that name.
+    pub fn select(path: []const u8) bool {
+        const ref = state.model.resolve(path) orelse return false;
+        const ctx = contextOfRef(ref) orelse return false;
+        track_cursor = null;
+        state.context = ctx;
+        dvui.refresh(null, @src(), null);
+        return true;
+    }
+    /// Puts the flow cursor at item `index` of the flow of the track (or
+    /// the flow) at `path`, the track made the context. False when the
+    /// path names neither, or the flow is shorter.
+    pub fn cursor(path: []const u8, index: usize) bool {
+        const ref = state.model.resolve(path) orelse return false;
+        const t: layout.model.TrackRef = switch (ref) {
+            .region => |r| .{ .panel = r.panel, .region = r.region },
+            .flow => |id| blk: {
+                const fi = state.model.flowIndex(id) orelse return false;
+                const f = state.model.flows.items[fi];
+                if (f.tracks.items.len == 0) return false;
+                const tr = state.model.trackById(f.tracks.items[0]) orelse return false;
+                break :blk tr;
+            },
+            else => return false,
+        };
+        const head = state.model.threadHead(t.panel, t.region);
+        if (index > state.model.flowItems(head.panel, head.region).len) return false;
+        state.context = .{ .region = .{ .panel = t.panel, .region = t.region } };
+        track_cursor = .{ .panel = head.panel, .region = head.region, .index = index };
+        dvui.refresh(null, @src(), null);
+        return true;
+    }
+    /// Gives the field with id `id` the text `text`, as if typed there and
+    /// accepted.
+    pub fn setField(id: []const u8, text: []const u8) void {
+        accepted.setScripted(id, text);
+        dvui.refresh(null, @src(), null);
+    }
+    /// Whether a field is still to take a script's text (it was not drawn).
+    pub fn fieldPending() bool {
+        return accepted.script != null;
+    }
+    /// Whether the field given a script's text last refused it.
+    pub fn fieldRefused() bool {
+        return accepted.script_refused;
+    }
+    /// Presses the button, menu item, tool or checkbox with id `id`.
+    pub fn press(id: []const u8) void {
+        const n = @min(id.len, scripted_press_buf.len);
+        @memcpy(scripted_press_buf[0..n], id[0..n]);
+        scripted_press = scripted_press_buf[0..n];
+        dvui.refresh(null, @src(), null);
+    }
+    /// Whether a press asked for is still waiting (nothing with its id was
+    /// drawn).
+    pub fn pressPending() bool {
+        return scripted_press != null;
+    }
+    /// Runs the app's action named `name` (file.save, edit.undo, view.…)
+    /// with `arg`, as its menu item or key does. False when no such action
+    /// or it cannot be done now.
+    pub fn run(name: []const u8, arg: i32) bool {
+        for (0..keymap.R.action_count) |k| {
+            const a: keymap.ActionId = @intCast(k);
+            if (std.mem.eql(u8, keymap.R.actionName(a), name)) return runAction(.{ .action = a, .arg = arg });
+        }
+        return false;
+    }
+
     /// The keyboard leaves whatever field has it, at the next frame's
     /// start, as a click elsewhere or Tab would take it away.
     pub fn leaveField() void {
@@ -2995,6 +3069,38 @@ fn actV(comptime tag: history.Tag, args: history.Args(@tagName(tag))) void {
     };
 }
 
+/// The Browser's context for an object reached by name.
+fn contextOfRef(ref: layout.model.Model.Ref) ?Context {
+    return switch (ref) {
+        .space => |si| .{ .panel = state.model.rootOf(si) },
+        .panel => |pi| .{ .panel = pi },
+        .region => |r| .{ .region = .{ .panel = r.panel, .region = r.region } },
+        .grid => |g| .{ .grid = .{ .panel = g.panel, .index = g.index } },
+        .art => |a| .{ .art = .{ .panel = a.panel, .index = a.index } },
+        .tile => |t| .{ .tile = t },
+        .collection => |c| switch (c) {
+            .styles => .styles,
+            .prototypes => .prototypes,
+            .flows => .flows,
+            .sheets => .sheets,
+            .sketches => .sketches,
+            .processes => .processes,
+            .materials => .materials,
+            .plans => .plans,
+            .paragraph_styles => null,
+        },
+        .style => |id| .{ .style = id },
+        .prototype => |id| .{ .prototype = id },
+        .flow => |id| .{ .flow = id },
+        .sheet => |id| .{ .sheet = id },
+        .sketch => |i| .{ .sketch_def = i },
+        .process => |id| .{ .process = id },
+        .material => |id| .{ .material = id },
+        .plan => |id| .{ .plan = id },
+        .paragraph_style => null,
+    };
+}
+
 /// Asked for by the tests: the keyboard leaves its field this frame.
 var leave_field = false;
 
@@ -4499,9 +4605,11 @@ fn windowButtons(buttons: []const desktop.Button) ?dvui.App.Result {
 /// disagree; `faint` when there is nothing for it to do. Whether it was
 /// chosen (and the action run).
 fn menuAction(label: []const u8, comptime mode_name: []const u8, a: keymap.ActionId, arg: i32, faint: bool, id: usize) bool {
-    var mi = dvui.menuItem(@src(), .{}, .{ .expand = .horizontal, .id_extra = id, .tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu/{s}", .{std.mem.trim(u8, std.mem.trimStart(u8, label, "• "), " ")}) catch "menu") });
+    // Its id is its action's name: menu.file.save.
+    const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu.{s}", .{keymap.R.actionName(a)}) catch "menu");
+    var mi = dvui.menuItem(@src(), .{}, .{ .expand = .horizontal, .id_extra = id, .tag = tag });
     defer mi.deinit();
-    const chosen = mi.activeRect() != null;
+    const chosen = mi.activeRect() != null or pressedByScript(tag);
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
     const ink = dvui.themeGet().color(.window, .text);
@@ -5996,7 +6104,7 @@ fn sheetViewProperties() void {
     const m = &state.model;
     const si = m.sheetIndex(id) orelse return;
     const sh = m.sheets.items[si];
-    heading("{s}", .{sh.name}, 9700);
+    headingAs("sheet", "{s}", .{sh.name}, 9700);
     if (sheet_sel.row < sh.rows.items.len) {
         const row = sh.rows.items[sheet_sel.row];
         propText("Row", "{d} of {d}", .{ sheet_sel.row + 1, sh.rows.items.len }, 9701);
@@ -7385,7 +7493,7 @@ fn panelFab(pi: usize) !void {
     var move: ?struct { from: usize, up: bool } = null;
     for (layers, 0..) |*l, li| {
         const n = 420 + li * 40;
-        setTagScope("Layer {d}", .{li + 1});
+        setTagScope("fabLayer.{d}", .{li + 1});
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
             defer row.deinit();
@@ -7512,7 +7620,7 @@ fn panelFab(pi: usize) !void {
             key = mergeKey(.{ "fab", pi, li, "depth" });
         };
     }
-    setTagScope("{s}", .{"Fabrication"});
+    setTagScope("{s}", .{"fabrication"});
     if (remove) |li| {
         std.mem.copyForwards(FabLayer, layers[li .. layers.len - 1], layers[li + 1 ..]);
         layers = layers[0 .. layers.len - 1];
@@ -7715,7 +7823,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
     const stamps = state.model.panels.items[pi].grids.items[gi].stamps.items;
     for (stamps, 0..) |st, si| {
         const n = 100 + si * 20;
-        heading("Stamp: {s}", .{st.name}, n);
+        headingAs(scopeId("stamp", st.name), "Stamp: {s}", .{st.name}, n);
         var next = st;
         var st_changed = false;
         var used: usize = 0;
@@ -8069,7 +8177,7 @@ fn panelEditHeader() void {
         return;
     }
     const panel = state.model.panels.items[p.panel];
-    heading("Editing {s}", .{panel.name}, 7000);
+    headingAs("editing", "Editing {s}", .{panel.name}, 7000);
     const arena = dvui.currentWindow().arena();
     if (panel.grids.items.len == 0) {
         propText("Grids", "none yet: add one below", .{}, 7001);
@@ -8502,7 +8610,7 @@ fn planEditor(id: ObjectId) void {
 
     // What is worth a second look.
     const ws = manufacture.warnings(ar, m, p) catch &.{};
-    heading("{s}", .{if (ws.len == 0) "No warnings" else "Warnings"}, 95);
+    headingAs("warnings", "{s}", .{if (ws.len == 0) "No warnings" else "Warnings"}, 95);
     for (ws, 0..) |w, k| {
         var buf: [256]u8 = undefined;
         var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = 96 + 1000 * k, .expand = .horizontal, .background = false, .margin = .{ .y = 2 } });
@@ -8521,7 +8629,7 @@ fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void
     const m = &state.model;
     const ar = dvui.currentWindow().arena();
     const op = p.operations[k];
-    heading("{d}. {s}", .{ k + 1, op.name }, n0);
+    headingAs(scopeIdN("operation", k + 1), "{d}. {s}", .{ k + 1, op.name }, n0);
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n0 });
         defer row.deinit();
@@ -8849,7 +8957,7 @@ fn opCheckCounts(id: ObjectId, k: usize) ?struct { fails: usize, marginal: usize
 /// or hidden.
 fn planChecksSection(id: ObjectId) void {
     const stale = planChecksFor(id) and plan_checks_rev != state.model.revision;
-    heading("{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
+    headingAs("checks", "{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
     if (tbutton(@src(), "Check this plan", .{}, .{ .expand = .horizontal, .id_extra = 141 })) runPlanChecks(id);
     if (!planChecksFor(id)) return;
     {
@@ -9568,7 +9676,7 @@ fn checkLayersList(space: usize) void {
         if (ck.panel < state.model.panels.items.len and state.model.spaceOf(ck.panel) == space) break true;
     } else false;
     if (!any) return;
-    heading("{s}", .{if (checksStale()) "Results (out of date)" else "Results"}, 690);
+    headingAs("results", "{s}", .{if (checksStale()) "Results (out of date)" else "Results"}, 690);
     for (std.enums.values(CheckLayer), 0..) |l, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 600 + k });
         defer row.deinit();
@@ -11645,7 +11753,7 @@ fn propertiesBody() !void {
 /// The Add tracks tool's choices, above the context's properties while it
 /// is active.
 fn tracksToolOptions() !void {
-    heading("{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
+    headingAs("addTracks", "{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
     const protos = state.model.prototypes.items;
     const styles = state.model.styles.items;
     // Keep the choice valid as prototypes and styles come and go.
@@ -12100,19 +12208,66 @@ fn lowerKind() []const u8 {
 /// so each has its own widget id.
 const label_width = 104;
 
-// Tags ------------------------------------------------------------------------
+// Element ids ------------------------------------------------------------------
 //
-// Widgets are tagged so the GUI's tests (harness_test.zig) find them by name,
-// not by place: a property row is "<section heading>/<field name>", a button
-// "<section heading>/<label>", a menu item "menu/<label>", a Browser node
-// "tree/<its path>", a content palette button "palette/<kind>". Tags cost a
-// map entry each a frame.
+// UI elements have ids (decided 2026-11-20), so tests and scripts act on them
+// by name, not by place or wording: "<section>.<key>". A section is a
+// properties heading's id, given where its text varies (the context's kind,
+// "region", whether it reads Region or Track; a slot "slot.top"; an
+// operation "operation.2"), else its text as a lower-camel identifier
+// (Fabrication: "fabrication"). A key is given where a label varies
+// ("makeTracks"), else the label as one ("Origin across, mm":
+// "originAcrossMm"). Menu items are "menu.<label>", tools "tool.<name>",
+// Browser nodes "tree/<its path>", content palette buttons "palette/<kind>".
+// A repeat in one frame is numbered "#2". Scripts set a field, press a
+// button or choose an entry by id (`testing_api`), through the same paths a
+// person's input takes. Tags cost a map entry each a frame.
 
 var tag_scope_buf: [96]u8 = undefined;
 var tag_scope: []const u8 = "";
 
 fn setTagScope(comptime fmt: []const u8, args: anytype) void {
     tag_scope = std.fmt.bufPrint(&tag_scope_buf, fmt, args) catch "";
+}
+
+/// `text` as a lower-camel identifier, in the frame's arena ("Origin
+/// across, mm": originAcrossMm).
+fn lowerCamel(text: []const u8) []const u8 {
+    var buf: [128]u8 = undefined;
+    const id = layout.names.identifier(&buf, text, "x");
+    const out = dvui.currentWindow().arena().dupe(u8, id) catch return "x";
+    // A leading capital, or a leading acronym, lowered (FDM: fdm;
+    // PCKeyboard: pcKeyboard).
+    var k: usize = 0;
+    while (k < out.len and std.ascii.isUpper(out[k])) : (k += 1) {}
+    const upto = if (k > 1 and k < out.len and std.ascii.isLower(out[k])) k - 1 else @max(k, 1);
+    for (out[0..@min(upto, out.len)]) |*c| c.* = std.ascii.toLower(c.*);
+    return out;
+}
+
+/// A section whose id is its heading's text as an identifier.
+fn setTagScopeText(text: []const u8) void {
+    const id = lowerCamel(text);
+    tag_scope = std.fmt.bufPrint(&tag_scope_buf, "{s}", .{id}) catch "";
+}
+
+/// The id of key `key` in the current section, for an element whose label
+/// varies: pass it as the element's `.tag`.
+fn elementTag(key: []const u8) []const u8 {
+    return uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{s}", .{ tag_scope, key }) catch key);
+}
+
+/// A button, menu item or checkbox a script presses (by id), next drawn.
+var scripted_press: ?[]const u8 = null;
+var scripted_press_buf: [128]u8 = undefined;
+
+fn pressedByScript(tag: ?[]const u8) bool {
+    const want = scripted_press orelse return false;
+    const t = tag orelse return false;
+    if (!std.mem.eql(u8, want, t)) return false;
+    scripted_press = null;
+    dvui.refresh(null, @src(), null);
+    return true;
 }
 
 /// The tags given this frame, so a repeat is numbered ("…#2") rather than
@@ -12137,10 +12292,9 @@ fn uniqueTag(base: []const u8) []const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}#{d}", .{ base, e.value_ptr.* }) catch base;
 }
 
-/// "<scope>/<name>", for this frame.
+/// "<section>.<label as an identifier>", for this frame.
 fn tagFor(name: []const u8) []const u8 {
-    const clean = std.mem.trim(u8, name, " ");
-    return uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}/{s}", .{ tag_scope, clean }) catch clean);
+    return elementTag(lowerCamel(std.mem.trim(u8, name, " ")));
 }
 
 /// Tags the widget being laid out around this point (a property's row)
@@ -12150,6 +12304,7 @@ fn tagParent(name: []const u8) void {
     const wd = dvui.parentGet().data();
     const t = tagFor(name);
     last_row_tag = t;
+    accepted.current_id = t;
     dvui.tag(t, .{ .id = wd.id, .rect = wd.rectScale().r, .visible = wd.visible() });
 }
 
@@ -12180,21 +12335,26 @@ fn tcheckbox(src: std.builtin.SourceLocation, target: *bool, label: ?[]const u8,
     if (o.tag == null) if (label) |l| {
         o.tag = tagFor(l);
     };
-    return dvui.checkbox(src, target, label, o);
+    const clicked = dvui.checkbox(src, target, label, o);
+    if (!clicked and pressedByScript(o.tag)) {
+        target.* = !target.*;
+        return true;
+    }
+    return clicked;
 }
 
 /// `dvui.button`, tagged by its label in the current scope.
 fn tbutton(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.ButtonWidget.InitOptions, opts: dvui.Options) bool {
     var o = opts;
     if (o.tag == null) o.tag = tagFor(label);
-    return dvui.button(src, label, init_opts, o);
+    return dvui.button(src, label, init_opts, o) or pressedByScript(o.tag);
 }
 
 /// `dvui.buttonIcon`, tagged "icon/<name>" unless it has a tag.
 fn tbuttonIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, init_opts: dvui.ButtonWidget.InitOptions, icon_opts: dvui.IconRenderOptions, opts: dvui.Options) bool {
     var o = opts;
-    if (o.tag == null) o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "icon/{s}", .{name}) catch "icon");
-    return dvui.buttonIcon(src, name, tvg, init_opts, icon_opts, o);
+    if (o.tag == null) o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "tool.{s}", .{lowerCamel(name)}) catch "tool");
+    return dvui.buttonIcon(src, name, tvg, init_opts, icon_opts, o) or pressedByScript(o.tag);
 }
 
 /// `dvui.menuItemLabel`, tagged "menu/<label>" (without its mark).
@@ -12203,14 +12363,36 @@ fn tmenu(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.Men
     if (o.tag == null) {
         var name = std.mem.trim(u8, label, " ");
         if (std.mem.startsWith(u8, name, "•")) name = std.mem.trim(u8, name["•".len..], " ");
-        o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu/{s}", .{name}) catch "menu");
+        o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu.{s}", .{lowerCamel(name)}) catch "menu");
     }
-    return dvui.menuItemLabel(src, label, init_opts, o);
+    const r = dvui.menuItemLabel(src, label, init_opts, o);
+    if (r == null and pressedByScript(o.tag)) return dvui.Rect.Natural{};
+    return r;
 }
 
+/// A properties section's heading: its id is its text as an identifier
+/// (see `headingAs` where the text varies).
 fn heading(comptime fmt: []const u8, args: anytype, n: usize) void {
     dvui.label(@src(), fmt, args, .{ .font = .theme(.heading), .id_extra = n, .padding = .{ .y = 8, .h = 4 } });
-    setTagScope(fmt, args);
+    var buf: [160]u8 = undefined;
+    setTagScopeText(std.fmt.bufPrint(&buf, fmt, args) catch "");
+}
+
+/// "<kind>.<name as an identifier>", for a section about a named thing.
+fn scopeId(kind: []const u8, name: []const u8) []const u8 {
+    var buf: [96]u8 = undefined;
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{s}", .{ kind, layout.names.identifier(&buf, name, "x") }) catch kind;
+}
+
+/// "<kind>.<n>", for a numbered section.
+fn scopeIdN(kind: []const u8, n: usize) []const u8 {
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{d}", .{ kind, n }) catch kind;
+}
+
+/// A section heading with an id of its own, whatever its text says.
+fn headingAs(id: []const u8, comptime fmt: []const u8, args: anytype, n: usize) void {
+    dvui.label(@src(), fmt, args, .{ .font = .theme(.heading), .id_extra = n, .padding = .{ .y = 8, .h = 4 } });
+    tag_scope = std.fmt.bufPrint(&tag_scope_buf, "{s}", .{id}) catch "";
 }
 
 /// UI style rule: a value the app chose, and the user has not, is italic.
@@ -12425,7 +12607,9 @@ fn properties() !void {
         .panel => |pi| state.model.panels.items[pi].unbounded and state.model.spaceOf(pi) != 0,
         else => false,
     };
-    heading("{s}", .{if (frame_root) "Frame" else if (on_canvas) "Canvas" else state.context.kindName()}, 0);
+    // Its id is the context's kind, whatever the heading reads (a region
+    // reads Track when it is one).
+    headingAs(if (frame_root) "frame" else if (on_canvas) "canvas" else @tagName(state.context), "{s}", .{if (frame_root) "Frame" else if (on_canvas) "Canvas" else state.context.kindName()}, 0);
     switch (state.context) {
         .file => {
             // The file's name is its path, set by saving; it is not a property.
@@ -12523,7 +12707,7 @@ fn properties() !void {
                     @memcpy(S.prefix[0..S.len], v[0..S.len]);
                 }
                 var lb: [64]u8 = undefined;
-                if (tbutton(@src(), std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ S.prefix[0..S.len], S.prefix[0..S.len] }) catch "Name keys in order", .{}, .{ .expand = .horizontal, .id_extra = 25 })) {
+                if (tbutton(@src(), std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ S.prefix[0..S.len], S.prefix[0..S.len] }) catch "Name keys in order", .{}, .{ .expand = .horizontal, .id_extra = 25, .tag = elementTag("nameKeysInOrder") })) {
                     if (act(.nameKeysInOrder, .{ r.panel, r.region, S.prefix[0..S.len] })) |n| {
                         state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
                     } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
@@ -12540,7 +12724,7 @@ fn properties() !void {
                 const placed_rows = tracksIn(r.panel, r.region);
                 var lb: [48]u8 = undefined;
                 const label = std.fmt.bufPrint(&lb, "Make tracks of its {d} {s}", .{ placed_rows.len, if (region.major() == .row) "rows" else "columns" }) catch "Make tracks";
-                if (placed_rows.len > 0 and tbutton(@src(), label, .{}, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } })) {
+                if (placed_rows.len > 0 and tbutton(@src(), label, .{}, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 }, .tag = elementTag("makeTracks") })) {
                     const a = dvui.currentWindow().arena();
                     if (a.alloc(geom.Point, placed_rows.len)) |origins| {
                         for (placed_rows, origins) |t, *o| o.* = .{ .x = t.box.x0, .y = t.box.y1 };
@@ -12551,7 +12735,7 @@ fn properties() !void {
                     } else |_| {}
                 }
             }
-            if (tbutton(@src(), if (is_track) "Remove track" else "Remove region", .{}, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } })) {
+            if (tbutton(@src(), if (is_track) "Remove track" else "Remove region", .{}, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 }, .tag = elementTag("remove") })) {
                 removeRegionOf(r.panel, r.region);
                 return;
             }
@@ -12649,7 +12833,7 @@ fn tileProperties(id: TileId) !void {
 
     for (state.model.prototypeOf(id).tracks, 0..) |tt, k| {
         const n = 3000 + k * 10;
-        heading("Track {s}", .{tt.name}, n);
+        headingAs(scopeId("slot", tt.name), "Track {s}", .{tt.name}, n);
         const arena = dvui.currentWindow().arena();
         const text = state.model.tileTrackText(arena, id, tt.id) catch "";
         var te = dvui.textEntry(@src(), .{ .text_initial = text, .multiline = true }, .{
@@ -12778,7 +12962,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
 
     for (p.tracks, 0..) |tt, k| {
         const n = 800 + k * 20;
-        heading("Track {s}", .{tt.name}, n);
+        headingAs(scopeId("slot", tt.name), "Track {s}", .{tt.name}, n);
         var next = tt;
         var changed = false;
         if (textProp("Name", tt.name, n * 8 + 7)) |name| {
@@ -12843,7 +13027,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     };
     for (art.layers, 0..) |layer, li| {
         const n = 700 + li * 20;
-        heading("Layer {s}", .{layer.name}, n);
+        headingAs(scopeId("artLayer", layer.name), "Layer {s}", .{layer.name}, n);
         if (paintEditor(layer.paint, n + 1)) |paint| try act(.setLayerPaint, .{id, li, paint});
     }
     {
@@ -13090,7 +13274,7 @@ const param_names = @typeInfo(glyphic.Param).@"enum".field_names;
 /// edited, removed, added.
 fn styleRuleProperties(sid: layout.model.StyleId) !void {
     const st = state.model.textStyle(sid).*;
-    heading("Text style {s}", .{st.name}, 4500);
+    headingAs("textStyle", "Text style {s}", .{st.name}, 4500);
     try styleSizeProps(sid, false);
     if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
     if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
@@ -13515,7 +13699,7 @@ fn stylesProperties() !void {
     heading("From a math package", .{}, 10);
     for (layout.fonts.packages, 0..) |pkg, i| {
         var lb: [64]u8 = undefined;
-        if (tbutton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+        if (tbutton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i , .tag = elementTag(scopeId("addPackageStyle", pkg.name))})) {
             const name = if (styleNamed(pkg.name) == null) pkg.name else std.fmt.bufPrint(&lb, "{s} {d}", .{ pkg.name, state.model.styles.items.len + 1 }) catch pkg.name;
             // One step: the style and the package's faces and rules on it.
             const key = mergeKey(.{ "package style", pkg.name, state.model.styles.items.len });
@@ -15502,9 +15686,10 @@ fn inTextTrack() bool {
 /// A palette button for an item that is not a tile: its key, a picture and
 /// what it puts in.
 fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i: usize) bool {
+    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s}", .{@tagName(kind)}) catch null;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
-        .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s}", .{@tagName(kind)}) catch null,
+        .tag = tag,
         .id_extra = i,
         .margin = .all(2),
         .padding = .{ .x = 8, .w = 8, .y = 3, .h = 3 },
@@ -15513,7 +15698,7 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
     });
     bw.processEvents();
     bw.drawBackground();
-    const clicked = bw.clicked();
+    const clicked = bw.clicked() or pressedByScript(tag);
     if (palette_id_count < palette_ids.len) {
         palette_ids[palette_id_count] = bw.data().id;
         palette_id_count += 1;
@@ -15604,9 +15789,10 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
 
 /// One palette button: the tile or blank drawn to scale, its key, its size.
 fn paletteButton(tile: bool, size: f64, i: usize) bool {
+    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s} {d} u", .{ if (tile) "key" else "blank", size }) catch null;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
-        .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s} {d} u", .{ if (tile) "key" else "blank", size }) catch null,
+        .tag = tag,
         .id_extra = i,
         .margin = .all(2),
         .padding = .all(4),
@@ -15616,7 +15802,7 @@ fn paletteButton(tile: bool, size: f64, i: usize) bool {
     });
     bw.processEvents();
     bw.drawBackground();
-    const clicked = bw.clicked();
+    const clicked = bw.clicked() or pressedByScript(tag);
     if (palette_id_count < palette_ids.len) {
         palette_ids[palette_id_count] = bw.data().id;
         palette_id_count += 1;
@@ -15778,8 +15964,10 @@ fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
 
 /// One arrow key of the move palette: its arrow, drawn as a keycap.
 fn arrowButton(arrow: Arrow, i: usize) bool {
+    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "move.{s}", .{@tagName(arrow)}) catch null;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
+        .tag = tag,
         .id_extra = i,
         .margin = .all(2),
         .padding = .all(6),
@@ -15790,7 +15978,7 @@ fn arrowButton(arrow: Arrow, i: usize) bool {
     });
     bw.processEvents();
     bw.drawBackground();
-    const clicked = bw.clicked();
+    const clicked = bw.clicked() or pressedByScript(tag);
     if (palette_id_count < palette_ids.len) {
         palette_ids[palette_id_count] = bw.data().id;
         palette_id_count += 1;
@@ -16104,7 +16292,7 @@ fn flowProperties(id: layout.model.ObjectId) void {
     if (flow_remove_armed != null and flow_remove_armed.? != id) flow_remove_armed = null;
     const armed = flow_remove_armed != null;
     const empty = f.items.items.len == 0;
-    if (tbutton(@src(), if (armed) "Remove it and all it holds: click again" else "Remove flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
+    if (tbutton(@src(), if (armed) "Remove it and all it holds: click again" else "Remove flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } , .tag = elementTag("removeFlow")})) {
         if (empty or armed) {
             flow_remove_armed = null;
             if (act(.removeFlow, .{id})) {

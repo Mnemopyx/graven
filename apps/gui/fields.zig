@@ -19,6 +19,29 @@ const dvui = @import("dvui");
 /// app starts a new undo step for it.
 pub var on_accept: ?*const fn () void = null;
 
+/// The id of the field about to be drawn (the app sets it with the
+/// field's row; see main.zig, "Element ids").
+pub var current_id: []const u8 = "";
+
+/// Text a script gives the field with id `id`, as if typed and accepted
+/// there; taken (or refused, as typing would be) when that field is next
+/// drawn.
+pub var script: ?struct { id: []const u8, text: []const u8 } = null;
+var script_buf: [512]u8 = undefined;
+var script_id_buf: [160]u8 = undefined;
+/// Whether the last scripted text was refused by its field.
+pub var script_refused = false;
+
+/// Asks for `text` to be given to the field with id `id`.
+pub fn setScripted(id: []const u8, text: []const u8) void {
+    const n = @min(text.len, script_buf.len);
+    @memcpy(script_buf[0..n], text[0..n]);
+    const k = @min(id.len, script_id_buf.len);
+    @memcpy(script_id_buf[0..k], id[0..k]);
+    script = .{ .id = script_id_buf[0..k], .text = script_buf[0..n] };
+    script_refused = false;
+}
+
 /// The field being edited, as last drawn.
 var editing: ?struct {
     id: dvui.Id,
@@ -27,6 +50,9 @@ var editing: ?struct {
     /// Its text differs from where the edit began.
     dirty: bool,
 } = null;
+
+/// The field that took a script's text last.
+var last_offered: ?dvui.Id = null;
 
 /// Button events held back a frame, in order.
 const Held = struct { button: dvui.enums.Button, action: dvui.Event.Mouse.Action };
@@ -93,6 +119,20 @@ pub fn beginFrame() void {
 /// caller to take or `reject`.
 pub fn accept(te: *dvui.TextEntryWidget, value: []const u8) ?[]const u8 {
     const id = te.data().id;
+    // A script's text, as if typed and accepted here.
+    if (script) |sc| if (std.mem.eql(u8, sc.id, current_id)) {
+        script = null;
+        dvui.dataSet(null, id, "editing", false);
+        dvui.dataSetSlice(null, id, "orig", value);
+        te.textSet(sc.text, false);
+        dvui.refresh(null, @src(), null);
+        if (std.mem.eql(u8, sc.text, value)) return null;
+        const out = dvui.currentWindow().arena().dupe(u8, sc.text) catch return null;
+        if (on_accept) |f| f();
+        // Refused, the field goes back (`reject`) and says so.
+        last_offered = id;
+        return out;
+    };
     const focused = dvui.focusedWidgetId() == id;
     const was = dvui.dataGet(null, id, "editing", bool) orelse false;
     if (focused and !was) {
@@ -147,6 +187,9 @@ pub fn accept(te: *dvui.TextEntryWidget, value: []const u8) ?[]const u8 {
 /// by itself).
 pub fn reject(te: *dvui.TextEntryWidget) void {
     const id = te.data().id;
+    if (last_offered) |lo| if (lo == id) {
+        script_refused = true;
+    };
     if (dvui.dataGetSlice(null, id, "orig", []u8)) |orig| te.textSet(orig, false);
 }
 

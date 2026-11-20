@@ -106,6 +106,10 @@ The canvas has sub-modes entered from the properties pane, each with its own way
 
 The owner prefers single keys with no modifiers for commands. Today nearly every command needs a modifier or a pointer.
 
+## Element ids (since 2026-11-20)
+
+Every property row, button, dropdown, checkbox, tool, menu item and palette button has an id, "<section>.<key>" (main.zig, "Element ids"); objects are reached by name path (`Model.resolve`). The GUI tests and scripts act through them (`testing_api`).
+
 ## Inconsistencies seen so far
 
 These are observations to start the discussion from, not decisions.

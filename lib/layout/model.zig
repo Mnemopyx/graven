@@ -1928,6 +1928,130 @@ pub const Model = struct {
         return names.freshOrSame(buf, id, Taken{ .m = m, .c = c }, Taken.f);
     }
 
+    /// What a name path reaches (see `resolve`).
+    pub const Ref = union(enum) {
+        space: usize,
+        panel: usize,
+        region: struct { panel: usize, region: usize },
+        grid: struct { panel: usize, index: usize },
+        art: struct { panel: usize, index: usize },
+        tile: TileId,
+        /// A document collection itself (Styles, Flows …).
+        collection: Collection,
+        style: ObjectId,
+        paragraph_style: ObjectId,
+        prototype: PrototypeId,
+        flow: ObjectId,
+        sheet: ObjectId,
+        sketch: usize,
+        process: ObjectId,
+        material: ObjectId,
+        plan: ObjectId,
+    };
+
+    pub const Collection = enum { styles, paragraph_styles, prototypes, flows, sheets, sketches, processes, materials, plans };
+
+    /// The collections' names in paths.
+    pub const collection_names = [_]struct { []const u8, Collection }{
+        .{ "Styles", .styles },          .{ "ParagraphStyles", .paragraph_styles }, .{ "Prototypes", .prototypes },
+        .{ "Flows", .flows },            .{ "Sheets", .sheets },                    .{ "Sketches", .sketches },
+        .{ "Processes", .processes },    .{ "Materials", .materials },              .{ "Plans", .plans },
+    };
+
+    /// The object a name path reaches: names joined by "." (a name that is
+    /// not an identifier in double quotes), each found among the objects of
+    /// the one before (see `Container`). It starts at a space (Canvas,
+    /// Frame1), a panel (in any space, the canvas's first), a collection
+    /// (Styles, Flows, Plans …), or a member of one by its name alone (a
+    /// flow, a style …). Then: a panel's tracks, regions, grids and art; a
+    /// track's or a flow's keys (by designator: keys are named within
+    /// their flow); a collection's members. Null when nothing has the name.
+    pub fn resolve(m: *const Model, path: []const u8) ?Ref {
+        var parts: [16][]const u8 = undefined;
+        const n = splitPath(path, &parts) orelse return null;
+        if (n == 0) return null;
+        var at: Ref = m.resolveFirst(parts[0]) orelse return null;
+        for (parts[1..n]) |name| at = m.resolveIn(at, name) orelse return null;
+        return at;
+    }
+
+    fn splitPath(path: []const u8, out: *[16][]const u8) ?usize {
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < path.len) {
+            if (n == out.len) return null;
+            if (path[i] == '"') {
+                const end = std.mem.indexOfScalarPos(u8, path, i + 1, '"') orelse return null;
+                out[n] = path[i + 1 .. end];
+                i = end + 1;
+            } else {
+                const end = std.mem.indexOfScalarPos(u8, path, i, '.') orelse path.len;
+                out[n] = path[i..end];
+                i = end;
+            }
+            n += 1;
+            if (i < path.len) {
+                if (path[i] != '.') return null;
+                i += 1;
+            }
+        }
+        return n;
+    }
+
+    fn resolveFirst(m: *const Model, name: []const u8) ?Ref {
+        const eq = std.mem.eql;
+        for (m.spaces.items, 0..) |sp, i| if (eq(u8, sp.name, name)) return .{ .space = i };
+        for (m.panels.items, 0..) |p, i| if (!p.unbounded and eq(u8, p.name, name)) return .{ .panel = i };
+        for (collection_names) |c| if (eq(u8, c[0], name)) return .{ .collection = c[1] };
+        for (collection_names) |c| if (m.resolveIn(.{ .collection = c[1] }, name)) |r| return r;
+        return null;
+    }
+
+    fn resolveIn(m: *const Model, at: Ref, name: []const u8) ?Ref {
+        const eq = std.mem.eql;
+        switch (at) {
+            .space => |si| {
+                const sid = m.spaces.items[si].id;
+                for (m.panels.items, 0..) |p, i| if (p.space == sid and !p.unbounded and eq(u8, p.name, name)) return .{ .panel = i };
+                return null;
+            },
+            .panel => |pi| {
+                const p = m.panels.items[pi];
+                for (p.regions.items, 0..) |r, i| if (eq(u8, r.name, name)) return .{ .region = .{ .panel = pi, .region = i } };
+                for (p.grids.items, 0..) |g, i| if (eq(u8, g.name, name)) return .{ .grid = .{ .panel = pi, .index = i } };
+                for (p.art.items, 0..) |a_, i| if (eq(u8, a_.name, name)) return .{ .art = .{ .panel = pi, .index = i } };
+                return null;
+            },
+            .region => |r| return m.keyInFlow(m.flowItems(r.panel, r.region), name),
+            .flow => |id| {
+                const fi = m.flowIndex(id) orelse return null;
+                return m.keyInFlow(m.flows.items[fi].items.items, name);
+            },
+            .collection => |c| switch (c) {
+                .styles => for (m.styles.items) |st| if (eq(u8, st.name, name)) return .{ .style = st.id },
+                .paragraph_styles => for (m.paragraph_styles.items) |ps| if (eq(u8, ps.name, name)) return .{ .paragraph_style = ps.id },
+                .prototypes => for (m.prototypes.items) |pr| if (eq(u8, pr.name, name)) return .{ .prototype = pr.id },
+                .flows => for (m.flows.items) |f| if (eq(u8, f.name, name)) return .{ .flow = f.id },
+                .sheets => for (m.sheets.items) |sh| if (eq(u8, sh.name, name)) return .{ .sheet = sh.id },
+                .sketches => for (m.sketches.items, 0..) |sk, i| if (eq(u8, sk.name, name)) return .{ .sketch = i },
+                .processes => for (m.processes.items) |pr| if (eq(u8, pr.profile.name, name)) return .{ .process = pr.id },
+                .materials => for (m.materials.items) |mt| if (eq(u8, mt.material.name, name)) return .{ .material = mt.id },
+                .plans => for (m.plans.items) |pl| if (eq(u8, pl.name, name)) return .{ .plan = pl.id },
+            },
+            else => return null,
+        }
+        return null;
+    }
+
+    fn keyInFlow(m: *const Model, items: []const Item, name: []const u8) ?Ref {
+        for (items) |item| if (item.tileOf()) |t| {
+            if (m.tileIndex(t) == null) continue;
+            const tl = m.tileConst(t);
+            if (!tl.removed and std.mem.eql(u8, tl.designator, name)) return .{ .tile = t };
+        };
+        return null;
+    }
+
     /// The first "<prefix>N" not yet used as a space name (Frame1).
     pub fn nextFrameName(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
         return m.freshName(buf, .spaces, prefix);
@@ -6642,6 +6766,33 @@ test "generated names: identifiers, numbered within their container" {
     try std.testing.expectEqualStrings("RoundedRectangle", m.freshOrSame(&buf, .{ .panel = p }, "Rounded rectangle", "Shape"));
     try std.testing.expectEqualStrings("Track11", m.freshOrSame(&buf, .{ .panel = p }, "Track1", "Shape"));
     try std.testing.expectEqualStrings("Paragraph1", m.nextParagraphStyleName(&buf));
+}
+
+test "name paths: a panel's track, a flow's key, a collection's member, quoted names" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("PC keyboard", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const r = try m.addTracks(p, .{ .name = "Row1", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try std.testing.expectEqual(Model.Ref{ .region = .{ .panel = p, .region = r } }, m.resolve("\"PC keyboard\".Row1").?);
+    try std.testing.expectEqual(Model.Ref{ .style = body }, m.resolve("Styles.Body").?);
+    // A member of a collection by its name alone.
+    try std.testing.expectEqual(Model.Ref{ .style = body }, m.resolve("Body").?);
+    try std.testing.expectEqual(Model.Ref{ .collection = .flows }, m.resolve("Flows").?);
+    // Alone, Row1 is the flow that took the track's name; the track is the
+    // panel's.
+    try std.testing.expectEqual(Model.Ref{ .flow = m.trackFlow(p, r).?.id }, m.resolve("Row1").?);
+    try std.testing.expect(m.resolve("Nowhere") == null);
+    try std.testing.expect(m.resolve("\"PC keyboard\".Row2") == null);
+    try std.testing.expect(m.resolve("\"unclosed") == null);
+    // Keys within their flow, from the flow or a track of it.
+    const proto = try m.addPrototype(.{ .name = "Key" });
+    const t = try m.addTile(.{ .designator = "K1", .prototype = proto });
+    try m.flow(p, r).append(m.a(), .{ .what = .{ .tile = t } });
+    const flow_name = m.trackFlow(p, r).?.name;
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqual(Model.Ref{ .tile = t }, m.resolve(std.fmt.bufPrint(&buf, "{s}.K1", .{flow_name}) catch unreachable).?);
+    try std.testing.expectEqual(Model.Ref{ .tile = t }, m.resolve("\"PC keyboard\".Row1.K1").?);
 }
 
 test "flows: a track drawn has its own; joining makes one flow, unjoining gives the track a new one" {

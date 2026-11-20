@@ -158,6 +158,66 @@ pub const Run = struct {
         try r.frames(3);
     }
 
+    // By name (decided 2026-11-20): objects by name path, UI elements by
+    // id ("<section>.<key>", main.zig "Element ids"), each through the
+    // path a person's input takes, without pointing.
+
+    /// Makes the object at name path `path` the context.
+    pub fn select(r: *Run, path: []const u8) !void {
+        if (!api.select(path)) {
+            std.debug.print("no object at \"{s}\"\n", .{path});
+            return error.NoSuchObject;
+        }
+        try r.frames(2);
+    }
+
+    /// The flow cursor at item `index` of the flow of the track at `path`.
+    pub fn cursor(r: *Run, path: []const u8, index: usize) !void {
+        if (!api.cursor(path, index)) {
+            std.debug.print("no track or flow at \"{s}\" (or not {d} items)\n", .{ path, index });
+            return error.NoSuchObject;
+        }
+        try r.frames(2);
+    }
+
+    /// The field with id `id` given `text`, as typed and accepted.
+    pub fn field(r: *Run, id: []const u8, text: []const u8) !void {
+        api.setField(id, text);
+        for (0..10) |_| {
+            try r.frames(1);
+            if (!api.fieldPending()) break;
+        } else {
+            std.debug.print("no field \"{s}\"; ", .{id});
+            dumpSection(id);
+            return error.NoSuchElement;
+        }
+        if (api.fieldRefused()) {
+            std.debug.print("field \"{s}\" refused \"{s}\"\n", .{ id, text });
+            return error.Refused;
+        }
+        try r.frames(2);
+    }
+
+    /// The button, menu item, tool or checkbox with id `id` pressed.
+    pub fn press(r: *Run, id: []const u8) !void {
+        api.press(id);
+        for (0..10) |_| {
+            try r.frames(1);
+            if (!api.pressPending()) break;
+        } else {
+            std.debug.print("nothing to press with id \"{s}\"; ", .{id});
+            dumpSection(id);
+            return error.NoSuchElement;
+        }
+        try r.frames(2);
+    }
+
+    /// The app's action named `name` run, as its menu item does.
+    pub fn run(r: *Run, name: []const u8) !void {
+        if (!api.run(name, 0)) return error.NoSuchAction;
+        try r.frames(3);
+    }
+
     /// The dropdown in the row tagged `tag` takes entry `label`.
     pub fn choose(r: *Run, tag: []const u8, label: []const u8) !void {
         api.choose(tag, label);
@@ -185,6 +245,13 @@ pub const Run = struct {
 };
 
 /// Prints this frame's tags that start with `prefix` (for writing tests).
+/// The ids in the section of `id` (before its last "."), for a report.
+fn dumpSection(id: []const u8) void {
+    const dot = std.mem.lastIndexOfScalar(u8, id, '.') orelse id.len;
+    std.debug.print("ids in \"{s}\":\n", .{id[0..dot]});
+    dumpTags(id[0..dot]);
+}
+
 pub fn dumpTags(prefix: []const u8) void {
     var it = dvui.currentWindow().tags.map.iterator();
     while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, prefix)) std.debug.print("  {s}\n", .{e.key_ptr.*});
@@ -207,14 +274,14 @@ test "a text style made and set in the Browser and its properties" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try r.click("tree/untitled/Text styles");
-    try r.click("Text styles/Add a style");
+    try r.select("Styles");
+    try r.press("styles.addAStyle");
     const m = api.model();
     const sid = m.styles.items[m.styles.items.len - 1].id;
-    try r.set("Text style/Name", "legend");
-    try r.set("Text style/Cap height, mm", "2.6");
-    try r.set("Faces/Text face family", "Inter");
-    try r.set("Faces/Text face style", "Medium");
+    try r.field("style.name", "legend");
+    try r.field("style.capHeightMm", "2.6");
+    try r.field("faces.textFaceFamily", "Inter");
+    try r.field("faces.textFaceStyle", "Medium");
     const st = m.textStyle(sid);
     try std.testing.expectEqualStrings("legend", st.name);
     try std.testing.expectApproxEqAbs(2.6, st.cap_height, 1e-9);
@@ -226,50 +293,50 @@ test "a text style made and set in the Browser and its properties" {
 
 /// A style made in the Browser: its name, cap height and text face.
 fn makeStyle(r: *Run, name: []const u8, cap: []const u8) !void {
-    try r.click("tree/untitled/Text styles");
-    try r.click("Text styles/Add a style");
-    try r.set("Text style/Name", name);
-    try r.set("Text style/Cap height, mm", cap);
-    try r.set("Faces/Text face family", "Inter");
-    try r.set("Faces/Text face style", "Medium");
+    try r.select("Styles");
+    try r.press("styles.addAStyle");
+    try r.field("style.name", name);
+    try r.field("style.capHeightMm", cap);
+    try r.field("faces.textFaceFamily", "Inter");
+    try r.field("faces.textFaceStyle", "Medium");
 }
 
 /// The keyboard's key prototype: 19.05 mm u, its insets, its sizes, three
 /// slots (one legend each), keycap art shaded back to front.
 fn makeKeyPrototype(r: *Run) !void {
-    try r.click("tree/untitled/Tile prototypes");
-    try r.click("icon/Add prototype");
-    try r.set("Tile prototype/Name", "key");
-    try r.set("Tile prototype/Unit, mm per u", "19.05");
-    inline for (.{ "left", "right", "top", "bottom" }) |side| try r.set("Tile prototype/Body inset " ++ side ++ ", mm", "0.475");
-    try r.set("Tile prototype/Face inset left, mm", "2.7");
-    try r.set("Tile prototype/Face inset right, mm", "2.7");
-    try r.set("Tile prototype/Face inset top, mm", "1.6");
-    try r.set("Tile prototype/Face inset bottom, mm", "3.6");
-    try r.set("Tile prototype/Widths, u", "1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25");
-    try r.set("Tile prototype/Heights, u", "1, 2");
+    try r.select("Prototypes");
+    try r.press("tool.addPrototype");
+    try r.field("prototype.name", "key");
+    try r.field("prototype.unitMmPerU", "19.05");
+    inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| try r.field("prototype.bodyInset" ++ side ++ "Mm", "0.475");
+    try r.field("prototype.faceInsetLeftMm", "2.7");
+    try r.field("prototype.faceInsetRightMm", "2.7");
+    try r.field("prototype.faceInsetTopMm", "1.6");
+    try r.field("prototype.faceInsetBottomMm", "3.6");
+    try r.field("prototype.widthsU", "1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25");
+    try r.field("prototype.heightsU", "1, 2");
     // Slots, one legend each, overlapping: top (the whole face), bottom
     // (its lower half), words (the whole face, smaller).
-    try r.choose("Track top/Style", "legend");
-    try r.click("Track top/Add track");
-    try r.set("Track track1/Name", "bottom");
-    try r.choose("Track bottom/Style", "legend");
-    try r.choose("Track bottom/Set from", "start");
-    try r.set("Track bottom/Inset top, mm", "6.45");
-    try r.click("Track bottom/Add track");
-    try r.set("Track track1/Name", "words");
-    try r.choose("Track words/Style", "legend words");
-    try r.choose("Track words/Set from", "start");
+    try r.choose("slot.top.style", "legend");
+    try r.press("slot.top.addTrack");
+    try r.field("slot.track1.name", "bottom");
+    try r.choose("slot.bottom.style", "legend");
+    try r.choose("slot.bottom.setFrom", "start");
+    try r.field("slot.bottom.insetTopMm", "6.45");
+    try r.press("slot.bottom.addTrack");
+    try r.field("slot.track1.name", "words");
+    try r.choose("slot.words.style", "legend words");
+    try r.choose("slot.words.setFrom", "start");
     // Keycap art drawn from the insets now set, shaded back to front.
-    try r.click("Layer face/Remove art");
-    try r.click("Art/Add keycap art");
+    try r.press("artLayer.face.removeArt");
+    try r.press("art.addKeycapArt");
 
-    try r.choose("Layer body/Fill kind", "a gradient");
-    try r.set("Layer body/Gradient from", "#e9e7e1");
-    try r.set("Layer body/Gradient to", "#cfccc3");
-    try r.choose("Layer face/Fill kind", "a gradient");
-    try r.set("Layer face/Gradient from", "#faf9f6");
-    try r.set("Layer face/Gradient to", "#efede8");
+    try r.choose("artLayer.body.fillKind", "a gradient");
+    try r.field("artLayer.body.gradientFrom", "#e9e7e1");
+    try r.field("artLayer.body.gradientTo", "#cfccc3");
+    try r.choose("artLayer.face.fillKind", "a gradient");
+    try r.field("artLayer.face.gradientFrom", "#faf9f6");
+    try r.field("artLayer.face.gradientTo", "#efede8");
 }
 
 /// The keyboard's keys, row by row: width and height in u, the gap before
@@ -360,16 +427,16 @@ fn makeKeyboard(r: *Run) !void {
     try checkSaveable("the prototype");
 
     // The panel: drawn out, then typed exactly.
-    try r.click("tree/untitled/Canvas, mm");
-    try r.click("icon/Add panel");
+    try r.select("Canvas");
+    try r.press("tool.addPanel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
-    try r.click("tree/untitled/Canvas, mm/Panel1");
-    try r.set("Panel/Name", "PC keyboard (ANSI 104)");
-    try r.set("Panel/Origin across, mm", "0");
-    try r.set("Panel/Origin up, mm", "0");
-    try r.set("Panel/Width, mm", "448.625");
-    try r.set("Panel/Height, mm", "143.825");
-    inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| try r.set("Margins/" ++ side ++ ", mm", "5");
+    try r.select("Panel1");
+    try r.field("panel.name", "PC keyboard (ANSI 104)");
+    try r.field("panel.originAcrossMm", "0");
+    try r.field("panel.originUpMm", "0");
+    try r.field("panel.widthMm", "448.625");
+    try r.field("panel.heightMm", "143.825");
+    inline for (.{ "left", "right", "top", "bottom" }) |side| try r.field("margins." ++ side ++ "Mm", "5");
 
     try checkSaveable("the panel");
     // Six tracks, one a row, laid out in advance: each drawn out on the
@@ -378,31 +445,30 @@ fn makeKeyboard(r: *Run) !void {
     const tops = [_][]const u8{ "133.825", "105.25", "86.2", "67.15", "48.1", "29.05" };
     for (tops, 1..) |top, k| {
         var nb: [16]u8 = undefined;
-        const name = try std.fmt.bufPrint(&nb, "Row {d}", .{k});
-        try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)");
-        try r.click("icon/Add track");
-        if (k == 1) try r.choose("Add a track/Size to", "Tile: key");
+        const name = try std.fmt.bufPrint(&nb, "Row{d}", .{k});
+        try r.select("\"PC keyboard (ANSI 104)\"");
+        try r.press("tool.addTrack");
+        if (k == 1) try r.choose("addTracks.sizeTo", "Tile: key");
         try r.drag(try screen(.{ 20, 120 }), try screen(.{ 200, 121 }));
-        try r.set("Track/Name", name);
-        try r.set("Track/Origin across, mm", "10");
-        try r.set("Track/Origin up, mm", top);
-        try r.set("Track/Length, u", "22.5");
+        try r.field("region.name", name);
+        try r.field("region.originAcrossMm", "10");
+        try r.field("region.originUpMm", top);
+        try r.field("region.lengthU", "22.5");
         if (k == 1) {
             // Its flow, named for what it holds.
-            try r.click("Paragraph/Show the flow");
-            try r.set("Flow/Name", "keys");
-        } else try r.choose("Paragraph/Flow", "keys");
+            try r.press("paragraph.showTheFlow");
+            try r.field("flow.name", "keys");
+        } else try r.choose("paragraph.flow", "keys");
     }
     try checkSaveable("the tracks");
 
     // The keys, from the content palette at the cursor, put at the start
     // of the first track: a row's keys, then a line break, which goes on
     // in the next track.
-    const panel_node = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)";
-    try r.click(panel_node ++ "/Row 1");
-    try r.clickAt(try screen(.{ 60, 124 }));
+    const panel_path = "\"PC keyboard (ANSI 104)\"";
+    try r.cursor(panel_path ++ ".Row1", 0);
     for (rows, 0..) |row, ri| {
-        if (ri > 0) try r.click("palette/hard_break");
+        if (ri > 0) try r.press("palette/hard_break");
         for (row) |k| {
             var tb: [32]u8 = undefined;
             try r.click(try std.fmt.bufPrint(&tb, "palette/key {d} u", .{k.w}));
@@ -412,8 +478,8 @@ fn makeKeyboard(r: *Run) !void {
     try checkSaveable("the keys");
     // Named in order, K1 to K104, from the first track's properties (its
     // flow's keys, through all six).
-    try r.click(panel_node ++ "/Row 1");
-    try r.click("Track/Name keys in order: K1, K2 …");
+    try r.select(panel_path ++ ".Row1");
+    try r.press("region.nameKeysInOrder");
 
     // Gaps and heights, key by key: the key clicked on the canvas (the
     // panel chosen first, so a click picks a key rather than placing the
@@ -425,10 +491,11 @@ fn makeKeyboard(r: *Run) !void {
         n += 1;
         if (k.gap == 0 and k.h == 1) continue;
         var tb: [128]u8 = undefined;
-        try r.click(try r.tagStarting(try std.fmt.bufPrint(&tb, "{s}/Row {d}/K{d} ", .{ panel_node, ri, n })));
+        _ = ri;
+        try r.select(try std.fmt.bufPrint(&tb, "keys.K{d}", .{n}));
         var vb: [16]u8 = undefined;
-        if (k.gap != 0) try r.set("Tile/Gap before, u", try std.fmt.bufPrint(&vb, "{d}", .{k.gap}));
-        if (k.h != 1) try r.choose("Tile/Height", try std.fmt.bufPrint(&vb, "{d} u", .{k.h}));
+        if (k.gap != 0) try r.field("tile.gapBeforeU", try std.fmt.bufPrint(&vb, "{d}", .{k.gap}));
+        if (k.h != 1) try r.choose("tile.height", try std.fmt.bufPrint(&vb, "{d} u", .{k.h}));
     };
 
     try checkSaveable("gaps and heights");
@@ -436,9 +503,9 @@ fn makeKeyboard(r: *Run) !void {
     const csv = try legendsCsv(std.heap.c_allocator);
     defer std.heap.c_allocator.free(csv);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/keyboard-legends.csv", .data = csv });
-    try r.click(panel_node ++ "/Row 1");
-    try r.click("menu/File");
-    try r.click("menu/Import legend sheet (CSV)…");
+    try r.select(panel_path ++ ".Row1");
+    try r.click("menu.file");
+    try r.click("menu.importLegendSheetCSV");
     try dvui.testing.pressKey(.a, .lcontrol);
     try r.frames(1);
     try dvui.testing.writeText(scratch ++ "/keyboard-legends.csv");
@@ -486,8 +553,8 @@ fn checkSaveable(label: []const u8) !void {
 /// File › Save As… to `path`, as a person saves.
 fn saveAs(r: *Run, path: []const u8) !void {
     std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
-    try r.click("menu/File");
-    try r.click("menu/Save As…");
+    try r.click("menu.file");
+    try r.click("menu.file.save-as");
     try dvui.testing.pressKey(.a, .lcontrol);
     try r.frames(1);
     try dvui.testing.writeText(path);
@@ -580,41 +647,41 @@ fn sameAsExample(m: *layout.Model, path: []const u8, names: []const []const u8) 
 /// A legend style on the Libertinus style: its cap height, 1.5 cap
 /// heights between lines, superscripts raised and subscripts dropped.
 fn make15cStyle(r: *Run, name: []const u8, cap: []const u8) !void {
-    try r.click("tree/untitled/Text styles");
-    try r.click("Text styles/Add a style");
-    try r.set("Text style/Name", name);
-    try r.choose("Text style/Based on", "Libertinus");
-    try r.set("Text style/Cap height, mm", cap);
-    try r.set("Text style/Line pitch, cap heights", "1.5");
-    try r.click("Faces/Add a rule");
-    try r.choose("Faces/rule 1 parameter", "sup_raise");
-    try r.set("Faces/rule 1 value", "0.5");
-    try r.click("Faces/Add a rule");
-    try r.choose("Faces/rule 2 parameter", "sub_drop");
-    try r.set("Faces/rule 2 value", "0.24");
+    try r.select("Styles");
+    try r.press("styles.addAStyle");
+    try r.field("style.name", name);
+    try r.choose("style.basedOn", "Libertinus");
+    try r.field("style.capHeightMm", cap);
+    try r.field("style.linePitchCapHeights", "1.5");
+    try r.press("faces.addARule");
+    try r.choose("faces.rule1Parameter", "sup_raise");
+    try r.field("faces.rule1Value", "0.5");
+    try r.press("faces.addARule");
+    try r.choose("faces.rule2Parameter", "sub_drop");
+    try r.field("faces.rule2Value", "0.24");
 }
 
 /// A plain prototype: its tracks' size from the grid it is placed on (no
 /// unit), no body inset, the face inset given, no art.
 fn makePlainPrototype(r: *Run, name: []const u8, face: []const u8) !void {
-    try r.click("tree/untitled/Tile prototypes");
-    try r.click("icon/Add prototype");
-    try r.set("Tile prototype/Name", name);
-    try r.set("Tile prototype/Unit, mm per u", "");
-    inline for (.{ "left", "right", "top", "bottom" }) |side| {
-        try r.set("Tile prototype/Body inset " ++ side ++ ", mm", "0");
-        try r.set("Tile prototype/Face inset " ++ side ++ ", mm", face);
+    try r.select("Prototypes");
+    try r.press("tool.addPrototype");
+    try r.field("prototype.name", name);
+    try r.field("prototype.unitMmPerU", "");
+    inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| {
+        try r.field("prototype.bodyInset" ++ side ++ "Mm", "0");
+        try r.field("prototype.faceInset" ++ side ++ "Mm", face);
     }
-    try r.click("Layer face/Remove art");
+    try r.press("artLayer.face.removeArt");
 }
 
 /// A track's style, alignment and insets (left, right, top, bottom).
 fn setTrack(r: *Run, track: []const u8, style: []const u8, from: []const u8, insets: [4][]const u8) !void {
     var b: [96]u8 = undefined;
-    try r.choose(try std.fmt.bufPrint(&b, "Track {s}/Style", .{track}), style);
-    try r.choose(try std.fmt.bufPrint(&b, "Track {s}/Set from", .{track}), from);
-    for (insets, [_][]const u8{ "left", "right", "top", "bottom" }) |v, side| {
-        try r.set(try std.fmt.bufPrint(&b, "Track {s}/Inset {s}, mm", .{ track, side }), v);
+    try r.choose(try std.fmt.bufPrint(&b, "slot.{s}.style", .{track}), style);
+    try r.choose(try std.fmt.bufPrint(&b, "slot.{s}.setFrom", .{track}), from);
+    for (insets, [_][]const u8{ "Left", "Right", "Top", "Bottom" }) |v, side| {
+        try r.field(try std.fmt.bufPrint(&b, "slot.{s}.inset{s}Mm", .{ track, side }), v);
     }
 }
 
@@ -623,8 +690,8 @@ fn setTrack(r: *Run, track: []const u8, style: []const u8, from: []const u8, ins
 fn addTrack(r: *Run, after: []const u8, number: usize, name: []const u8) !void {
     _ = number;
     var b: [96]u8 = undefined;
-    try r.click(try std.fmt.bufPrint(&b, "Track {s}/Add track", .{after}));
-    try r.set("Track track1/Name", name);
+    try r.press(try std.fmt.bufPrint(&b, "slot.{s}.addTrack", .{after}));
+    try r.field("slot.track1.name", name);
 }
 
 /// The HP-15C's keys, row by row: their white, blue and gold legends.
@@ -640,24 +707,23 @@ const keys15 = [4][10]Key15{
 /// A panel drawn out on the canvas at `at` (mm), then typed exactly: its
 /// name, origin, 128 × 62 mm and 3 mm margins.
 fn make15cPanel(r: *Run, default: []const u8, name: []const u8, at: [2]f64, origin_x: []const u8) !void {
-    try r.click("tree/untitled/Canvas, mm");
-    try r.click("icon/Add panel");
+    try r.select("Canvas");
+    try r.press("tool.addPanel");
     try r.drag(try screen(.{ at[0], at[1] }), try screen(.{ at[0] + 30, at[1] + 20 }));
-    var b: [96]u8 = undefined;
-    try r.click(try std.fmt.bufPrint(&b, "tree/untitled/Canvas, mm/{s}", .{default}));
-    try r.set("Panel/Name", name);
-    try r.set("Panel/Origin across, mm", origin_x);
-    try r.set("Panel/Origin up, mm", "0");
-    try r.set("Panel/Width, mm", "128");
-    try r.set("Panel/Height, mm", "62");
-    inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| try r.set("Margins/" ++ side ++ ", mm", "3");
+    try r.select(default);
+    try r.field("panel.name", name);
+    try r.field("panel.originAcrossMm", origin_x);
+    try r.field("panel.originUpMm", "0");
+    try r.field("panel.widthMm", "128");
+    try r.field("panel.heightMm", "62");
+    inline for (.{ "left", "right", "top", "bottom" }) |side| try r.field("margins." ++ side ++ "Mm", "3");
 }
 
 /// Places the stamp chosen by `places` at a grid point by a click on it,
 /// or across two points by a drag.
 fn place(r: *Run, editing: []const u8, places: []const u8, pi: usize, c: u32, row: u32, span_down: bool) !void {
-    var b: [96]u8 = undefined;
-    try r.choose(try std.fmt.bufPrint(&b, "Editing {s}/Places", .{editing}), places);
+    _ = editing;
+    try r.choose("editing.places", places);
     const at = api.gridPoint(pi, 0, c, row) orelse return error.NoGrid;
     if (span_down) {
         try r.drag(at, api.gridPoint(pi, 0, c, row + 1) orelse return error.NoGrid);
@@ -666,8 +732,8 @@ fn place(r: *Run, editing: []const u8, places: []const u8, pi: usize, c: u32, ro
 
 fn make15c(r: *Run) !void {
     try r.key(.m, .none);
-    try r.click("tree/untitled/Text styles");
-    try r.click("From a math package/Add a Libertinus style");
+    try r.select("Styles");
+    try r.press("fromAMathPackage.addPackageStyle.Libertinus");
     try make15cStyle(r, "15C key", "1.9");
     try make15cStyle(r, "15C g", "1.25");
     try make15cStyle(r, "15C f", "1.4");
@@ -679,12 +745,12 @@ fn make15c(r: *Run) !void {
 
     try makePlainPrototype(r, "15C ENTER key", "0.4");
     try setTrack(r, "top", "15C key", "centre", .{ "2.175", "2.175", "1", "2.65" });
-    try r.choose("Track top/Runs", "down columns");
+    try r.choose("slot.top.runs", "down columns");
     try addTrack(r, "top", 2, "g");
     try setTrack(r, "g", "15C g", "centre", .{ "0", "0", "17.2", "0" });
 
     try makePlainPrototype(r, "15C gold legend", "0");
-    try r.set("Track top/Name", "f");
+    try r.field("slot.top.name", "f");
     try setTrack(r, "f", "15C f", "centre", .{ "0", "0", "0", "0" });
 
     // The plate and the keys, side by side, 15 mm apart.
@@ -693,41 +759,41 @@ fn make15c(r: *Run) !void {
 
     // The plate's grid: 10 × 4 points, 11.43 mm across, 12.7 mm down;
     // its holes (rounded rectangles, r 1 mm) and its gold legends.
-    try r.click("tree/untitled/Canvas, mm/HP-15C plate");
-    try r.click("Grids/Add grid");
-    try r.set("Points/Columns", "10");
-    try r.set("Points/Rows", "4");
-    try r.set("Points/Spacing across, mm", "11.43");
-    try r.set("Points/Spacing down, mm", "12.7");
-    try r.set("Points/First point across, mm", "12.565");
-    try r.set("Points/First point up, mm", "50");
-    try r.click("Add a stamp/Holes");
-    try r.choose("Stamp: Holes/Prototype", "15C key");
-    try r.set("Stamp: Holes/Width, mm", "8.5");
-    try r.set("Stamp: Holes/Height, mm", "7.7");
-    try r.choose("Stamp: Holes/Shape", "Rounded rectangle");
-    try r.set("Stamp: Holes/r, mm", "1");
-    try r.click("Add a stamp/Legends");
-    try r.choose("Stamp: Legends/Prototype", "15C gold legend");
-    try r.set("Stamp: Legends/Width, mm", "11");
-    try r.set("Stamp: Legends/Height, mm", "2.4");
-    try r.set("Stamp: Legends/Offset up, mm", "5.15");
+    try r.select("\"HP-15C plate\"");
+    try r.press("grids.addGrid");
+    try r.field("points.columns", "10");
+    try r.field("points.rows", "4");
+    try r.field("points.spacingAcrossMm", "11.43");
+    try r.field("points.spacingDownMm", "12.7");
+    try r.field("points.firstPointAcrossMm", "12.565");
+    try r.field("points.firstPointUpMm", "50");
+    try r.press("addAStamp.holes");
+    try r.choose("stamp.Holes.prototype", "15C key");
+    try r.field("stamp.Holes.widthMm", "8.5");
+    try r.field("stamp.Holes.heightMm", "7.7");
+    try r.choose("stamp.Holes.shape", "Rounded rectangle");
+    try r.field("stamp.Holes.rMm", "1");
+    try r.press("addAStamp.legends");
+    try r.choose("stamp.Legends.prototype", "15C gold legend");
+    try r.field("stamp.Legends.widthMm", "11");
+    try r.field("stamp.Legends.heightMm", "2.4");
+    try r.field("stamp.Legends.offsetUpMm", "5.15");
 
     // The keys' grid follows the plate's; on it, the keys themselves.
-    try r.choose("Add a stamp/Follow it on", "HP-15C keys");
-    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
-    try r.click("Grids/Grid1");
-    try r.click("Add a stamp/Parts");
-    try r.choose("Stamp: Parts/Prototype", "15C key");
-    try r.set("Stamp: Parts/Width, mm", "8");
-    try r.set("Stamp: Parts/Height, mm", "7.2");
+    try r.choose("addAStamp.followItOn", "HP-15C keys");
+    try r.select("\"HP-15C keys\"");
+    try r.press("grids.grid1");
+    try r.press("addAStamp.parts");
+    try r.choose("stamp.Parts.prototype", "15C key");
+    try r.field("stamp.Parts.widthMm", "8");
+    try r.field("stamp.Parts.heightMm", "7.2");
 
     // Placed point by point in panel editing, as the code placed them:
     // row by row, a hole then its gold legend; ENTER over two rows.
     const plate = api.panelNamed("HP-15C plate").?;
     const keys = api.panelNamed("HP-15C keys").?;
-    try r.click("tree/untitled/Canvas, mm/HP-15C plate");
-    try r.click("Margins/Edit panel");
+    try r.select("\"HP-15C plate\"");
+    try r.press("margins.editPanel");
     for (keys15, 0..) |row, ri| for (row, 0..) |k, ci| {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
@@ -735,9 +801,9 @@ fn make15c(r: *Run) !void {
         try place(r, "HP-15C plate", "Holes", plate, c, rw, c == 5 and rw == 2);
         if (k.f.len > 0) try place(r, "HP-15C plate", "Legends", plate, c, rw, false);
     };
-    try r.click("Editing HP-15C plate/Leave panel editing");
-    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
-    try r.click("Margins/Edit panel");
+    try r.press("editing.leavePanelEditing");
+    try r.select("\"HP-15C keys\"");
+    try r.press("margins.editPanel");
     for (keys15, 0..) |row, ri| for (row, 0..) |_, ci| {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
@@ -746,47 +812,47 @@ fn make15c(r: *Run) !void {
     };
     // ENTER picked (a click on it) and given its own prototype.
     try r.clickAt(api.gridPoint(keys, 0, 5, 2).?);
-    try r.choose("Tile/Prototype", "15C ENTER key");
-    try r.click("Editing HP-15C keys/Leave panel editing");
+    try r.choose("tile.prototype", "15C ENTER key");
+    try r.press("editing.leavePanelEditing");
 
     // Fabrication: the plate black with its holes cut through and its gold
     // legends inlaid; the keys black with white and blue legends inlaid.
     // Made with a 0.2 mm nozzle: 0.4 mm cannot hold its legends.
-    try r.click("tree/untitled/Canvas, mm/HP-15C plate");
-    try r.choose("Fabrication/Process", "Generic FDM, 0.2 mm nozzle (built in)");
-    try r.set("Fabrication/Thickness, mm", "2");
-    try r.click("Fabrication/Add layer");
-    try r.set("Layer 1/Name", "Plate");
-    try r.click("Fabrication/Add layer");
-    try r.set("Layer 2/Name", "Key holes");
-    try r.choose("Layer 2/From", "holes and cutouts");
-    try r.choose("Layer 2/Makes", "a cut, away");
-    try r.click("Layer 2/Through the whole part");
-    try r.click("Fabrication/Add layer");
-    try r.set("Layer 3/Name", "Gold legends");
-    try r.choose("Layer 3/Slot", "f");
-    try r.set("Layer 3/Colour name", "gold");
-    try r.set("Layer 3/Colour", "#c9a227");
-    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
-    try r.choose("Fabrication/Process", "Generic FDM, 0.2 mm nozzle");
-    try r.set("Fabrication/Thickness, mm", "5");
-    try r.click("Fabrication/Add layer");
-    try r.set("Layer 1/Name", "Keys");
-    try r.choose("Layer 1/From", "grid parts");
-    try r.click("Fabrication/Add layer");
-    try r.set("Layer 2/Name", "White legends");
-    try r.choose("Layer 2/Slot", "top");
-    try r.click("Fabrication/Add layer");
-    try r.set("Layer 3/Name", "Blue legends");
-    try r.choose("Layer 3/Slot", "g");
-    try r.set("Layer 3/Colour name", "blue");
-    try r.set("Layer 3/Colour", "#3a7bd5");
+    try r.select("\"HP-15C plate\"");
+    try r.choose("fabrication.process", "Generic FDM, 0.2 mm nozzle (built in)");
+    try r.field("fabrication.thicknessMm", "2");
+    try r.press("fabrication.addLayer");
+    try r.field("fabLayer.1.name", "Plate");
+    try r.press("fabrication.addLayer");
+    try r.field("fabLayer.2.name", "Key holes");
+    try r.choose("fabLayer.2.from", "holes and cutouts");
+    try r.choose("fabLayer.2.makes", "a cut, away");
+    try r.press("fabLayer.2.throughTheWholePart");
+    try r.press("fabrication.addLayer");
+    try r.field("fabLayer.3.name", "Gold legends");
+    try r.choose("fabLayer.3.slot", "f");
+    try r.field("fabLayer.3.colourName", "gold");
+    try r.field("fabLayer.3.colour", "#c9a227");
+    try r.select("\"HP-15C keys\"");
+    try r.choose("fabrication.process", "Generic FDM, 0.2 mm nozzle");
+    try r.field("fabrication.thicknessMm", "5");
+    try r.press("fabrication.addLayer");
+    try r.field("fabLayer.1.name", "Keys");
+    try r.choose("fabLayer.1.from", "grid parts");
+    try r.press("fabrication.addLayer");
+    try r.field("fabLayer.2.name", "White legends");
+    try r.choose("fabLayer.2.slot", "top");
+    try r.press("fabrication.addLayer");
+    try r.field("fabLayer.3.name", "Blue legends");
+    try r.choose("fabLayer.3.slot", "g");
+    try r.field("fabLayer.3.colourName", "blue");
+    try r.field("fabLayer.3.colour", "#3a7bd5");
 
     // The legends: a sheet over the keys' grid, its keys named by their
     // place, a table imported into it.
-    try r.click("Grids/Grid1");
-    try r.click("Grid/Make a legend sheet");
-    try r.click("Legends1/Name keys by grid position (R1C1…)");
+    try r.press("grids.grid1");
+    try r.press("grid.makeALegendSheet");
+    try r.press("sheet.nameKeysByGridPositionR1C1");
     var out: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
     defer out.deinit();
     const w = &out.writer;
@@ -808,8 +874,8 @@ fn make15c(r: *Run) !void {
         try w.writeAll("\r\n");
     };
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/hp15c-legends.csv", .data = out.written() });
-    try r.click("menu/File");
-    try r.click("menu/Import legend sheet (CSV)…");
+    try r.click("menu.file");
+    try r.click("menu.importLegendSheetCSV");
     try dvui.testing.pressKey(.a, .lcontrol);
     try r.frames(1);
     try dvui.testing.writeText(scratch ++ "/hp15c-legends.csv");
@@ -838,35 +904,35 @@ test "a process profile added from the built-ins, edited, its limits overridden 
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try r.click("tree/untitled/Processes");
-    try r.click("Add a profile/Generic FDM, 0.4 mm nozzle");
+    try r.select("Processes");
+    try r.press("addAProfile.genericFDM04MmNozzle");
     const m = api.model();
     try std.testing.expectEqual(@as(usize, 1), m.processes.items.len);
     const id = m.processes.items[0].id;
-    try r.set("Process profile/Name", "Fine");
-    try r.set("FDM/Nozzle, mm", "0.25");
-    try r.set("FDM/Line width, mm", "0.27");
+    try r.field("process.name", "Fine");
+    try r.field("fdm.nozzleMm", "0.25");
+    try r.field("fdm.lineWidthMm", "0.27");
     var p = m.processes.items[m.processIndex(id).?].profile;
     try std.testing.expectEqualStrings("Fine", p.name);
     try std.testing.expectEqual(0.27, p.limits().stroke.pass);
     try std.testing.expectEqual(@as(?process.Band, null), p.stroke);
-    try r.set("Limits/Stroke passes at, mm", "0.3");
+    try r.field("limits.strokePassesAtMm", "0.3");
     p = m.processes.items[m.processIndex(id).?].profile;
     try std.testing.expectEqual(0.3, p.stroke.?.pass);
     try std.testing.expectEqual(0.125, p.stroke.?.fail);
-    try r.click("Limits/Use the limits its settings give");
+    try r.press("limits.useTheLimitsItsSettingsGive");
     p = m.processes.items[m.processIndex(id).?].profile;
     try std.testing.expectEqual(@as(?process.Band, null), p.stroke);
     // A second from the same built-in is numbered.
-    try r.click("tree/untitled/Processes");
-    try r.click("Add a profile/Generic FDM, 0.4 mm nozzle");
-    try r.click("tree/untitled/Processes");
-    try r.click("Add a profile/Generic FDM, 0.4 mm nozzle");
+    try r.select("Processes");
+    try r.press("addAProfile.genericFDM04MmNozzle");
+    try r.select("Processes");
+    try r.press("addAProfile.genericFDM04MmNozzle");
     try std.testing.expectEqualStrings("Generic FDM, 0.4 mm nozzle (2)", m.processes.items[2].profile.name);
     // Unused, it can go.
-    try r.click("tree/untitled/Processes#open");
-    try r.click("tree/untitled/Processes/Fine");
-    try r.click("Used by/Remove this profile");
+    
+    try r.select("Processes.Fine");
+    try r.press("usedBy.removeThisProfile");
     try std.testing.expectEqual(@as(usize, 2), m.processes.items.len);
 }
 
@@ -894,20 +960,20 @@ test "the checks run when asked (C), as result layers; a panel checked alone; cl
     try std.testing.expect(rep.paths.len > 0);
     try std.testing.expectEqual(layout.check.Verdict.pass, rep.worst.get(.size));
     // The result layers, in the canvas's Layers.
-    try r.click("tree/untitled/Canvas, mm");
-    _ = try r.rectOf("Results/Check again");
+    try r.select("Canvas");
+    _ = try r.rectOf("results.checkAgain");
     // Out of date once the document changes.
     try std.testing.expect(!api.checksOutOfDate());
-    try r.click("tree/untitled/Canvas, mm/HP-15C plate");
-    try r.set("Fabrication/Thickness, mm", "2.2");
+    try r.select("\"HP-15C plate\"");
+    try r.field("fabrication.thicknessMm", "2.2");
     try std.testing.expect(api.checksOutOfDate());
     // One panel, from its Fabrication.
-    try r.click("Fabrication/Check this panel");
+    try r.press("fabrication.checkThisPanel");
     try r.frames(2);
     try std.testing.expectEqual(@as(usize, 1), api.checkedPanels().len);
     try std.testing.expect(!api.checksOutOfDate());
-    try r.click("tree/untitled/Canvas, mm");
-    try r.click("Results/Clear results");
+    try r.select("Canvas");
+    try r.press("results.clearResults");
     try std.testing.expectEqual(@as(usize, 0), api.checkedPanels().len);
 }
 
@@ -920,27 +986,27 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     try openExample(&r, "HP-15C keypad");
     const m = api.model();
     // The example's fabrication, upgraded: Plan 1, opened in its view.
-    try r.click("tree/untitled/Manufacturing plans#open");
-    try r.click("tree/untitled/Manufacturing plans/Plan1");
-    try r.click("Manufacturing plan/Open in a manufacturing view");
+    
+    try r.select("Plans.Plan1");
+    try r.press("plan.openInAManufacturingView");
     try r.frames(2);
     try std.testing.expectEqual(.manufacture, api.activeView().kind);
     try std.testing.expectEqual(@intFromEnum(m.plans.items[0].id), api.activeView().target);
     // A second plan: the plate black anodised aluminium, waterjet cut and
     // engraved.
-    try r.click("tree/untitled/Manufacturing plans");
-    try r.click("Manufacturing plans/Add a plan");
+    try r.select("Plans");
+    try r.press("plans.addAPlan");
     try std.testing.expectEqual(@as(usize, 2), m.plans.items.len);
     const id = m.plans.items[1].id;
-    try r.choose("Parts/HP-15C plate", "Aluminium 5052, black anodised (library)");
-    try r.choose("Parts/HP-15C keys", "PLA");
-    try r.click("Operations/Add an operation");
-    try r.choose("1. Operation1/Process", "Generic waterjet (built in)");
-    try r.click("1. Operation1/HP-15C plate · Plate");
-    try r.click("1. Operation1/HP-15C plate · Key holes");
-    try r.click("Operations/Add an operation");
-    try r.choose("2. Operation2/Process", "Generic laser engraver (built in)");
-    try r.click("2. Operation2/HP-15C plate · Gold legends");
+    try r.choose("parts.hp15CPlate", "Aluminium 5052, black anodised (library)");
+    try r.choose("parts.hp15CKeys", "PLA");
+    try r.press("operations.addAnOperation");
+    try r.choose("operation.1.process", "Generic waterjet (built in)");
+    try r.press("operation.1.hp15CPlatePlate");
+    try r.press("operation.1.hp15CPlateKeyHoles");
+    try r.press("operations.addAnOperation");
+    try r.choose("operation.2.process", "Generic laser engraver (built in)");
+    try r.press("operation.2.hp15CPlateGoldLegends");
     var pl = m.plans.items[m.planIndex(id).?];
     try std.testing.expectEqual(@as(usize, 2), pl.operations.len);
     try std.testing.expectEqual(@as(usize, 2), pl.operations[0].targets.len);
@@ -953,7 +1019,7 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     }
     try std.testing.expect(after_cut);
     // Engraved first: no longer flagged.
-    try r.click("2. Operation2/Earlier");
+    try r.press("operation.2.earlier");
     pl = m.plans.items[m.planIndex(id).?];
     try std.testing.expectEqualStrings("Operation2", pl.operations[0].name);
     for (try layout.model.manufacture.warnings(arena.allocator(), m, pl)) |w| {
@@ -964,7 +1030,7 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     // Checked, operation by operation, each against its own process: the
     // engraving's passes in the bare metal, the waterjet's kerf round the
     // plate and inside its 39 holes.
-    try r.click("Checks/Check this plan");
+    try r.press("checks.checkThisPlan");
     try r.frames(2);
     const oc = api.planChecks(id);
     try std.testing.expectEqual(@as(usize, 2), oc.len);
@@ -980,13 +1046,13 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
         },
         else => return error.TestUnexpectedResult,
     };
-    _ = try r.rectOf("Checks/Findings");
-    try r.click("tree/untitled/Manufacturing plans/Plan2");
-    try r.click("Manufacturing plan/Open in a manufacturing view");
+    _ = try r.rectOf("checks.findings");
+    try r.select("Plans.Plan2");
+    try r.press("plan.openInAManufacturingView");
     try r.frames(2);
     try std.testing.expectEqual(.manufacture, api.activeView().kind);
     // Shown in 3D: this build (the harness's) has no OCCT, and says so.
-    try r.choose("Plan/Shown as", "3D, through OCCT (not in this build)");
+    try r.choose("plan.shownAs", "3D, through OCCT (not in this build)");
     try r.frames(2);
     try std.testing.expect(std.mem.indexOf(u8, api.statusText(), "no OCCT") != null);
     // Plan 1 stays the one exported.
@@ -999,8 +1065,9 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
 /// Opens an example from the File menu (an untitled copy).
 fn openExample(r: *Run, label: []const u8) !void {
     var b: [64]u8 = undefined;
-    try r.click("menu/File");
-    try r.click(try std.fmt.bufPrint(&b, "menu/Open example: {s}", .{label}));
+    try r.click("menu.file");
+    var ib: [64]u8 = undefined;
+    try r.click(try std.fmt.bufPrint(&b, "menu.openExample{s}", .{layout.names.identifier(&ib, label, "x")}));
     try r.frames(5);
 }
 
@@ -1015,7 +1082,7 @@ test "a click on a key makes the key the context, its properties shown" {
     try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)");
     try r.clickAt(api.tileCenter("K3").?);
     try std.testing.expectEqualStrings("tile", api.contextName());
-    _ = try r.rectOf("Tile/Gap before, u");
+    _ = try r.rectOf("tile.gapBeforeU");
     // And after the flow cursor has been in its track, then the track and
     // the panel chosen in the Browser (as when keys are filled in).
     try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
@@ -1049,18 +1116,18 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try r.click("tree/untitled/Canvas, mm");
-    try r.click("icon/Add panel");
+    try r.select("Canvas");
+    try r.press("tool.addPanel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 160, 90 }));
-    try r.click("tree/untitled/Canvas, mm/Panel1");
+    try r.select("Panel1");
     // Two rows of keys in a region: three, a line break, two.
-    try r.click("icon/Add rows");
+    try r.press("tool.addRows");
     try r.drag(try screen(.{ 15, 85 }), try screen(.{ 120, 45 }));
-    try r.set("Region/Length, u", "5");
-    try r.set("Region/Depth, rows", "2");
+    try r.field("region.lengthU", "5");
+    try r.field("region.depthRows", "2");
     for (0..5) |k| {
-        if (k == 3) try r.click("palette/hard_break");
-        try r.click("palette/key 1 u");
+        if (k == 3) try r.press("palette/hard_break");
+        try r.press("palette/key 1 u");
     }
     try r.frames(3);
     const a = std.heap.c_allocator;
@@ -1071,9 +1138,8 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     const before = try panelSvg(a, api.model(), "Panel1", face);
     defer a.free(before);
 
-    const panel = "tree/untitled/Canvas, mm/Panel1";
-    try r.click(panel ++ "/Rows1");
-    try r.click("Region/Make tracks of its 2 rows");
+    try r.select("Panel1.Rows1");
+    try r.press("region.makeTracks");
     try r.frames(3);
     const m = api.model();
     const pi = for (m.panels.items, 0..) |p, k| {
@@ -1087,9 +1153,9 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     defer a.free(after);
     try std.testing.expectEqualStrings(before, after);
     // The second track removed (its keys with it), and put back by undo.
-    try r.click(panel ++ "/Rows2");
-    _ = try r.rectOf("Track/Direction, °");
-    try r.click("Track/Remove track");
+    try r.select("Panel1.Rows2");
+    _ = try r.rectOf("region.direction");
+    try r.press("region.remove");
     try r.frames(3);
     try std.testing.expectEqual(1, api.model().panels.items[pi].regions.items.len);
     try r.key(.z, .lcontrol);
@@ -1120,11 +1186,11 @@ test "a field changes nothing while typed; leaving it or Enter accepts, one undo
     defer r.stop();
     try r.key(.m, .none);
     try r.click("tree/untitled/Canvas, mm");
-    try r.click("icon/Add panel");
+    try r.click("tool.addPanel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
     try r.click("tree/untitled/Canvas, mm/Panel1");
     const steps = api.undoSteps();
-    try typeInto(&r, "Panel/Name", "Front");
+    try typeInto(&r, "panel.name", "Front");
     // Typed, not yet accepted: the model is as it was.
     try std.testing.expect(panelNamed("Panel1") != null);
     try std.testing.expectEqual(steps, api.undoSteps());
@@ -1133,7 +1199,7 @@ test "a field changes nothing while typed; leaving it or Enter accepts, one undo
     try std.testing.expect(panelNamed("Front") != null);
     try std.testing.expectEqual(steps + 1, api.undoSteps());
     // Enter accepts too, as a step of its own.
-    try typeInto(&r, "Panel/Name", "Back");
+    try typeInto(&r, "panel.name", "Back");
     try r.key(.enter, .none);
     try r.frames(3);
     try std.testing.expect(panelNamed("Back") != null);
@@ -1148,18 +1214,18 @@ test "a field given what it cannot take, or left by Esc, goes back to how it was
     defer r.stop();
     try r.key(.m, .none);
     try r.click("tree/untitled/Canvas, mm");
-    try r.click("icon/Add panel");
+    try r.click("tool.addPanel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
     try r.click("tree/untitled/Canvas, mm/Panel1");
     const pi = panelNamed("Panel1").?;
     const w = api.model().panels.items[pi].w;
     // Not a number: refused, the width as it was.
-    try typeInto(&r, "Panel/Width, mm", "wide");
+    try typeInto(&r, "panel.widthMm", "wide");
     api.leaveField();
     try r.frames(3);
     try std.testing.expectEqual(w, api.model().panels.items[pi].w);
     // Esc: back, nothing changed.
-    try typeInto(&r, "Panel/Width, mm", "120");
+    try typeInto(&r, "panel.widthMm", "120");
     try r.key(.escape, .none);
     try r.frames(3);
     // Left after Esc: still nothing to take.
@@ -1167,7 +1233,7 @@ test "a field given what it cannot take, or left by Esc, goes back to how it was
     try r.frames(3);
     try std.testing.expectEqual(w, api.model().panels.items[pi].w);
     // An empty name is not a name.
-    try typeInto(&r, "Panel/Name", "");
+    try typeInto(&r, "panel.name", "");
     try dvui.testing.pressKey(.backspace, .none);
     api.leaveField();
     try r.frames(3);
@@ -1179,10 +1245,10 @@ test "a click elsewhere accepts the field first, then does what it was for" {
     defer r.stop();
     try r.key(.m, .none);
     try r.click("tree/untitled/Canvas, mm");
-    try r.click("icon/Add panel");
+    try r.click("tool.addPanel");
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
     try r.click("tree/untitled/Canvas, mm/Panel1");
-    try typeInto(&r, "Panel/Name", "Front");
+    try typeInto(&r, "panel.name", "Front");
     // A click on another node of the Browser: the name is taken, and the
     // node chosen.
     try r.click("tree/untitled/Text styles");
