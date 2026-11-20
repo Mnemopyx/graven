@@ -1,6 +1,6 @@
 # Graven: notes for working sessions
 
-Graven composes control-panel and keycap legends from Unicode glyphs and emits exact vector geometry for manufacture (SVG, 3MF, STEP). Text and symbols are treated as graphics whose legibility and look matter, not as typeset prose.
+Graven composes control-panel and keycap legends, and tabletop game pieces (boards, tiles, tokens, markers), from Unicode glyphs and emits exact vector geometry for manufacture (SVG, 3MF, STEP). Text and symbols are treated as graphics whose legibility and look matter, not as typeset prose.
 
 ## Where things are written down
 

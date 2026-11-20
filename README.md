@@ -1,11 +1,12 @@
 # Graven
 
-Graven composes control-panel and keycap legends from Unicode glyphs and emits exact planar vector geometry, ready for manufacture.
+Graven composes control-panel and keycap legends, and the faces of tabletop game pieces, from Unicode glyphs and emits exact planar vector geometry, ready for manufacture.
 
 Legends on a panel are recognised as pictures more than read, so Graven treats each label as an icon: spacing follows the ink, styles are inherited so many legends change at once, and production output passes design-rule checks (DRC) for the process that will make it.
 
 - **First application:** HP-15C keypad legends.
 - **Final goal:** aircraft control-panel legends, set and checked against specification.
+- **Applications:** keypads and keycaps; control panels; tabletop gaming: game boards, tiles, tokens and markers.
 - **Outputs:** SVG, and STEP (with colours and names) through an OCCT bridge.
 - **Processes, in order:** colour FDM 3D printing, PCB legends, dye sublimation.
 

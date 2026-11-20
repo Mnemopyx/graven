@@ -4,6 +4,8 @@ Taken on 13 November 2026, on branch `ui-dev`. This list comes from the commit h
 
 Graven has about 32,000 lines of Zig and 209 tests. It has 127 commits since 4 November 2026, and 81 of them are on `ui-dev` and not yet on `main`.
 
+**Applications** (the owner, 2026-11-20, adding tabletop gaming): keypads and keycaps; control panels; tabletop gaming: game boards, tiles, tokens and markers.
+
 ## What exists
 
 ### Legend engine (`lib/glyphic`, `lib/font`, `lib/geom`)
