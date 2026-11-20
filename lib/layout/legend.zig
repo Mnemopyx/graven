@@ -111,9 +111,10 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
     var ink: Box = .empty;
     var x: f64 = 0;
     var prev: ?glyphic.layout.Class = null;
+    var boxes: std.ArrayList(R.ObjectBox) = .empty;
     for (top, 0..) |c, k| {
         const laid = try lay.lay(c, cap);
-        if (prev) |p| x += lay.space(c, p, laid.class, false) * cap;
+        x += lay.gapBefore(c, prev, laid.class, false) * cap;
         prev = laid.class;
         xs[k] = x;
         first_item[k] = @intCast(items.items.len);
@@ -156,6 +157,19 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
                 if (it == .hole) try syntax.append(a, .{ .kind = .missing_argument, .offset = span.end });
             },
         };
+        for (laid.boxes.items) |b| {
+            const kind = e.node(b.object).kind;
+            const sp = spans.get(b.object);
+            try boxes.append(a, .{
+                .corners = .{ move.apply(b.corners[0]), move.apply(b.corners[1]), move.apply(b.corners[2]), move.apply(b.corners[3]) },
+                .baseline = .{ move.apply(b.baseline[0]), move.apply(b.baseline[1]) },
+                .element = @intCast(k),
+                .start = if (sp.start != glyphic.entry.Span.none.start) sp.start else span.start,
+                .end = if (sp.start != glyphic.entry.Span.none.start) sp.end else span.end,
+                .nest = b.nest,
+                .kind = if (kind == .row) .field else if (kind.isStructure()) .structure else .leaf,
+            });
+        }
         const el_ink: Box = if (laid.ink.isEmpty()) .empty else .{ .x0 = laid.ink.x0 + x, .y0 = laid.ink.y0, .x1 = laid.ink.x1 + x, .y1 = laid.ink.y1 };
         ink = ink.join(el_ink);
         try elements.append(a, .{
@@ -203,6 +217,7 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
         .ink = ink,
         .diagnostics = diagnostics.items,
         .elements = elements.items,
+        .boxes = boxes.items,
         .opportunities = opportunities.items,
         .syntax = syntax.items,
     };
@@ -234,6 +249,9 @@ test "a legend set by glyphic: words, the spaces between them, and its source" {
     // Glyphs carry their source bytes, so a long word may be cut.
     try testing.expectEqual(1, r.items[1].glyph.source);
     try testing.expectEqual(3, r.items[r.items.len - 2].glyph.source);
+    // A box per object: the three top objects.
+    try testing.expectEqual(3, r.boxes.len);
+    try testing.expectEqual(0, r.boxes[2].start - 3);
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const cuts = try r.forcedCuts(scratch.allocator());
@@ -291,3 +309,36 @@ test "inside a structure, glyphs carry their own objects' sources; a rule its fr
     // H, +, the rule (the fraction's start), its H, its D.
     try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 8, 11 }, sources[0..n]);
 }
+
+test "a legend's boxes: each object's, nested in its structure's, kept with their pieces" {
+    const gpa = testing.allocator;
+    const face = try Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*Face{face};
+    var g = glyphic.Engine.init(gpa);
+    defer g.deinit();
+    const st = (try contextOf(&g, &faces, .{ .name = "s", .cap_height = 3 }, &.{}, face, "s")).?;
+    var r = try render(gpa, &g, &faces, st, "HO $\\frac{D}{A}$", .legend);
+    defer r.deinit();
+    var leaves: usize = 0;
+    var structures: usize = 0;
+    var fields: usize = 0;
+    for (r.boxes) |b| switch (b.kind) {
+        .leaf => leaves += 1,
+        .structure => structures += 1,
+        .field => fields += 1,
+    };
+    // HO, the space, D and A; the fraction; its two fields.
+    try testing.expectEqual(4, leaves);
+    try testing.expectEqual(1, structures);
+    try testing.expectEqual(2, fields);
+    // The pieces after the space: the fraction's boxes only, from x 0.
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const second = try r.piece(scratch.allocator(), 0, null);
+    try testing.expectEqual(5, second.boxes.len);
+    var x0: f64 = std.math.inf(f64);
+    for (second.boxes) |b| x0 = @min(x0, b.corners[0].x);
+    try testing.expectApproxEqAbs(0, x0, 1e-9);
+}
+

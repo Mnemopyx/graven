@@ -54,6 +54,24 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) [4]Point {
     return .{ .{ .x = x0, .y = y0 }, .{ .x = x1, .y = y0 }, .{ .x = x1, .y = y1 }, .{ .x = x0, .y = y1 } };
 }
 
+/// An object's box as laid out: its advance by its height above its
+/// baseline and its depth below, the four corners (lower left, lower
+/// right, upper right, upper left) and its baseline's two ends, moved and
+/// turned as the object was. Recorded for every object, structures, their
+/// fields (rows) and leaves alike, so an editor can draw them.
+pub const ObjectBox = struct {
+    object: Id,
+    corners: [4]Point,
+    baseline: [2]Point,
+    /// How deep it is: 0 for the object laid out first (a top-level object
+    /// in a row set alone), 1 for its parts, and so on.
+    nest: u8,
+
+    pub fn moved(b: ObjectBox, m: Affine) ObjectBox {
+        return .{ .object = b.object, .corners = corners(b.corners, m), .baseline = .{ m.apply(b.baseline[0]), m.apply(b.baseline[1]) }, .nest = b.nest };
+    }
+};
+
 /// TeX's atom classes, for spacing between neighbours.
 pub const Class = enum { ord, op, bin, rel, open, close, punct, inner };
 
@@ -65,16 +83,20 @@ pub const Laid = struct {
     depth: f64 = 0,
     ink: Box = .empty,
     class: Class = .ord,
+    /// Every object's box within it, its own last (see `ObjectBox`).
+    boxes: std.ArrayList(ObjectBox) = .empty,
 
-    /// `other`'s items and ink added, moved by (`dx`, `dy`).
+    /// `other`'s items, boxes and ink added, moved by (`dx`, `dy`).
     fn put(l: *Laid, a: Allocator, other: Laid, dx: f64, dy: f64) Allocator.Error!void {
         const m = Affine.translate(dx, dy);
         for (other.items.items) |it| try l.items.append(a, it.moved(m));
+        for (other.boxes.items) |b| try l.boxes.append(a, b.moved(m));
         if (!other.ink.isEmpty()) l.ink = l.ink.join(.{ .x0 = other.ink.x0 + dx, .x1 = other.ink.x1 + dx, .y0 = other.ink.y0 + dy, .y1 = other.ink.y1 + dy });
     }
 
-    fn transform(l: *Laid, m: Affine) void {
+    pub fn transform(l: *Laid, m: Affine) void {
         for (l.items.items) |*it| it.* = it.moved(m);
+        for (l.boxes.items) |*b| b.* = b.moved(m);
         if (!l.ink.isEmpty()) l.ink = boundsOf(corners(rect(l.ink.x0, l.ink.y0, l.ink.x1, l.ink.y1), m));
     }
 };
@@ -95,6 +117,8 @@ pub const Layout = struct {
     editing: bool = false,
     /// Characters no face had.
     missing: std.ArrayList(Missing) = .empty,
+    /// How deep the object being laid out is (see `ObjectBox.nest`).
+    nest: u8 = 0,
 
     fn val(l: *const Layout, id: Id, p: param.Param) f64 {
         return l.r.get(id, p).number;
@@ -125,6 +149,9 @@ pub const Layout = struct {
         const ctx = l.r.context(id);
         const cap0 = cap0_in * l.val(id, .scale);
         const cap = cap0 * l.levelScale(id, ctx.script_level);
+        const nest = l.nest;
+        l.nest +|= 1;
+        defer l.nest = nest;
         var out: Laid = switch (node.kind) {
             .row => try l.layRow(id, cap0, cap),
             .number, .variable, .constant, .symbol, .operator, .relation, .punct, .word, .ellipsis, .space => try l.layText(id, node.text, cap, node.kind),
@@ -139,6 +166,8 @@ pub const Layout = struct {
             .group => try l.lay(e.slot(id, .body), cap0),
         };
         out.class = classOf(e, id);
+        // Its own box, before its shift and turn, which move it with its ink.
+        try out.boxes.append(l.a, .{ .object = id, .corners = rect(0, -out.depth, out.width, out.height), .baseline = .{ .{ .x = 0, .y = 0 }, .{ .x = out.width, .y = 0 } }, .nest = nest });
         // Moved by its own shift, then turned about its pivot.
         const sx = l.val(id, .shift_x) * cap;
         const sy = l.val(id, .shift_y) * cap;
@@ -184,7 +213,9 @@ pub const Layout = struct {
                 try out.append(l.a, .{ .laid = .{}, .space = true });
                 continue;
             }
-            try out.append(l.a, .{ .laid = try l.layText(id, ch, cap, node.kind) });
+            var one = try l.layText(id, ch, cap, node.kind);
+            try one.boxes.append(l.a, .{ .object = id, .corners = rect(0, -one.depth, one.width, one.height), .baseline = .{ .{ .x = 0, .y = 0 }, .{ .x = one.width, .y = 0 } }, .nest = l.nest });
+            try out.append(l.a, .{ .laid = one });
         }
         return out.items;
     }
@@ -298,7 +329,7 @@ pub const Layout = struct {
         var x: f64 = 0;
         for (items) |c| {
             const laid = try l.lay(c, cap0);
-            if (prev) |p| x += l.space(c, p, laid.class, script) * cap;
+            x += l.gapBefore(c, prev, laid.class, script) * cap;
             try out.put(l.a, laid, x, 0);
             x += laid.width;
             out.height = @max(out.height, laid.height);
@@ -307,6 +338,14 @@ pub const Layout = struct {
         }
         out.width = x;
         return out;
+    }
+
+    /// The gap before object `id` (of class `class`) in its row, in cap
+    /// heights: the space its kind and its neighbour's (`prev`, none at a
+    /// row's start) give, and its own `space_before`.
+    pub fn gapBefore(l: *const Layout, id: Id, prev: ?Class, class: Class, script: bool) f64 {
+        const s = if (prev) |p| l.space(id, p, class, script) else 0;
+        return s + l.val(id, .space_before);
     }
 
     /// The space between neighbours of classes `left` and `right`, in cap

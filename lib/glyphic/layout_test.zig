@@ -340,3 +340,90 @@ test "a soft hyphen breaks a word, the line ending with a hyphen" {
     };
     try testing.expect(hyphen);
 }
+
+fn boxOf(l: layout.Laid, id: Id) ?layout.ObjectBox {
+    for (l.boxes.items) |b| if (b.object == id) return b;
+    return null;
+}
+
+test "every object has its box: leaves, a structure, its fields; a shift moves the box with the ink" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const h = try f.word(f.e.root, .variable, "H");
+    const fr = try f.e.structure(.fraction, "", "");
+    try f.e.append(f.e.root, fr);
+    const o = try f.word(f.e.slot(fr, .num), .variable, "O");
+    const d = try f.word(f.e.slot(fr, .den), .variable, "D");
+    var r = f.resolver();
+    var row = try f.lay(&r, f.e.root);
+    // The row, H, the fraction, its two fields and their two leaves.
+    try testing.expectEqual(@as(usize, 7), row.boxes.items.len);
+    const top = boxOf(row, f.e.root).?;
+    try testing.expectEqual(@as(u8, 0), top.nest);
+    try near(row.width, top.corners[1].x);
+    try testing.expectEqual(@as(u8, 1), boxOf(row, h).?.nest);
+    try testing.expectEqual(@as(u8, 1), boxOf(row, fr).?.nest);
+    try testing.expectEqual(@as(u8, 2), boxOf(row, f.e.slot(fr, .num)).?.nest);
+    try testing.expectEqual(@as(u8, 3), boxOf(row, o).?.nest);
+    // O's box over D's: the numerator above the denominator.
+    try testing.expect(boxOf(row, o).?.baseline[0].y > boxOf(row, d).?.baseline[0].y);
+    // H's box: its advance by its height, on the baseline.
+    const hb = boxOf(row, h).?;
+    const hl = try f.lay(&r, h);
+    try near(0, hb.baseline[0].y);
+    try near(hl.width, hb.corners[1].x - hb.corners[0].x);
+    try near(hl.height, hb.corners[2].y);
+    // Raised by a fifth of a cap: the box goes up with the glyph.
+    try f.e.set(h, .shift_y, num(0.2));
+    r = f.resolver();
+    row = try f.lay(&r, f.e.root);
+    try near(0.6, boxOf(row, h).?.baseline[0].y);
+    try near(hl.height + 0.6, boxOf(row, h).?.corners[2].y);
+}
+
+test "space before: further from the object before, what follows moving with it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.word(f.e.root, .variable, "H");
+    const eq = try f.word(f.e.root, .relation, "=");
+    const o = try f.word(f.e.root, .variable, "O");
+    var r = f.resolver();
+    const plain = try f.lay(&r, f.e.root);
+    const eq_x = boxOf(plain, eq).?.corners[0].x;
+    const o_x = boxOf(plain, o).?.corners[0].x;
+    // The relation a tenth of a cap (0.3 mm) further from H: it and O move.
+    try f.e.set(eq, .space_before, num(0.1));
+    r = f.resolver();
+    const nudged = try f.lay(&r, f.e.root);
+    try near(eq_x + 0.3, boxOf(nudged, eq).?.corners[0].x);
+    try near(o_x + 0.3, boxOf(nudged, o).?.corners[0].x);
+    try near(plain.width + 0.3, nudged.width);
+    // Closer: negative.
+    try f.e.set(eq, .space_before, num(-0.1));
+    r = f.resolver();
+    try near(eq_x - 0.3, boxOf(try f.lay(&r, f.e.root), eq).?.corners[0].x);
+}
+
+test "set: a nudge on a line's first object moves the line, not its breaks; boxes come out on the path" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const first = try f.word(f.e.root, .variable, "HOD");
+    _ = try f.word(f.e.root, .relation, "=");
+    _ = try f.word(f.e.root, .variable, "AHO");
+    var rows: ground.Rows = .{ .a = testing.allocator, .origin = .{ .x = 10, .y = 50 }, .length = 12, .pitch = 6, .count = 3, .cap = 3 };
+    defer rows.deinit();
+    var r = f.resolver();
+    const plain = try setting.set(f.arena.allocator(), &r, rows.ground(), .{});
+    try f.e.set(first, .space_before, num(0.5));
+    r = f.resolver();
+    const s = try setting.set(f.arena.allocator(), &r, rows.ground(), .{});
+    // The same lines, the first 1.5 mm further along.
+    try testing.expectEqual(plain.lines.len, s.lines.len);
+    try testing.expectEqual(plain.lines[0].end, s.lines[0].end);
+    try near(plain.items[0].glyph.m.e + 1.5, s.items[0].glyph.m.e);
+    // A box per object (each top object and its own), on the baselines.
+    try testing.expectEqual(@as(usize, 3), s.boxes.len);
+    try near(50, s.boxes[0].baseline[0].y);
+    try near(10 + 1.5, s.boxes[0].baseline[0].x);
+    try near(44, s.boxes[2].baseline[0].y);
+}

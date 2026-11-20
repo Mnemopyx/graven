@@ -41,6 +41,8 @@ pub const Line = struct {
 pub const Set = struct {
     /// Every glyph and rule, in the ground's frame.
     items: []const Item,
+    /// Every object's box, in the ground's frame (see layout.ObjectBox).
+    boxes: []const layout.ObjectBox = &.{},
     lines: []const Line,
     /// Some line did not fit where it was put (no break left it room, or
     /// the ground ran out).
@@ -62,13 +64,17 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
     const cap = first.cap;
     if (first.stacked) return setStacked(a, r, &lay, g, cap);
 
-    // Each top object laid out alone, and the space before it.
+    // Each top object laid out alone, and the gap before it (its kinds'
+    // space and its own `space_before`); `lead`, its own alone, is where
+    // a line starting with it starts (the space is dropped there).
     const laid = try a.alloc(Laid, top.len);
     const before = try a.alloc(f64, top.len);
+    const lead_of = try a.alloc(f64, top.len);
     const script = r.context(e.root).script_level > 0;
-    for (top, laid, before, 0..) |id, *l, *b, k| {
+    for (top, laid, before, lead_of, 0..) |id, *l, *b, *ld, k| {
         l.* = try lay.lay(id, cap);
-        b.* = if (k == 0) 0 else lay.space(id, laid[k - 1].class, l.class, script) * cap;
+        b.* = lay.gapBefore(id, if (k == 0) null else laid[k - 1].class, l.class, script) * cap;
+        ld.* = lay.gapBefore(id, null, l.class, script) * cap;
     }
     const cands = try breaks.candidates(a, r);
 
@@ -79,6 +85,7 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
     var indent: f64 = 0;
 
     var items: std.ArrayList(Item) = .empty;
+    var boxes: std.ArrayList(layout.ObjectBox) = .empty;
     var lines: std.ArrayList(Line) = .empty;
     var overflow = false;
     var start: usize = 0;
@@ -148,11 +155,12 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
             .end => free,
         };
         try lines.append(a, .{ .piece = pi, .first = start, .end = en, .at = at + shift, .width = w });
-        // Onto the path.
-        var x = at + shift;
+        // Onto the path; the first object's own nudge moves the line.
+        var x = at + shift + lead_of[start];
         for (start..en) |k| {
             if (k > start) x += before[k];
             for (laid[k].items.items) |it| try items.append(a, onPath(piece, it, x));
+            for (laid[k].boxes.items) |b| try boxes.append(a, boxOnPath(piece, b, x));
             x += laid[k].width;
             if (k + 1 == en) if (candidateAt(cands, en)) |c| if (c.hyphen) {
                 const h = try lay.hyphen(top[k], cap);
@@ -172,7 +180,7 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
         // A space at the break is dropped: the next line starts after it.
         start = en + if (candidateAt(cands, en)) |c| c.skip else 0;
     }
-    return .{ .items = items.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
+    return .{ .items = items.items, .boxes = boxes.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
 }
 
 /// A column's setting: the top row's objects a step each down the
@@ -183,6 +191,7 @@ fn setStacked(a: Allocator, r: *const Resolver, lay: *layout.Layout, g: ground_m
     const e = r.e;
     const top = e.node(e.root).items.items;
     var items: std.ArrayList(Item) = .empty;
+    var boxes: std.ArrayList(layout.ObjectBox) = .empty;
     var lines: std.ArrayList(Line) = .empty;
     var overflow = false;
     var pi: usize = 0;
@@ -220,12 +229,13 @@ fn setStacked(a: Allocator, r: *const Resolver, lay: *layout.Layout, g: ground_m
                 const upright: Affine = .{ .a = f.up.x, .b = f.up.y, .c = -f.along.x, .d = -f.along.y, .e = f.point.x, .f = f.point.y };
                 const m = Affine.translate(-u.laid.width / 2, 0).then(upright);
                 for (u.laid.items.items) |it| try items.append(a, moveItem(it, m));
+                for (u.laid.boxes.items) |b| try boxes.append(a, b.moved(m));
             }
             s += step;
         }
     }
     try lines.append(a, .{ .piece = pi, .first = line_first, .end = top.len, .at = 0, .width = s });
-    return .{ .items = items.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
+    return .{ .items = items.items, .boxes = boxes.items, .lines = lines.items, .overflow = overflow, .missing = lay.missing.items };
 }
 
 fn moveItem(it: Item, m: Affine) Item {
@@ -279,6 +289,15 @@ fn onPath(piece: ground_mod.Piece, it: Item, x: f64) Item {
         .rule => |r| .{ .rule = .{ .corners = .{ m.apply(r.corners[0]), m.apply(r.corners[1]), m.apply(r.corners[2]), m.apply(r.corners[3]) }, .object = r.object } },
         .hole => |h| .{ .hole = .{ .corners = .{ m.apply(h.corners[0]), m.apply(h.corners[1]), m.apply(h.corners[2]), m.apply(h.corners[3]) }, .object = h.object } },
     };
+}
+
+/// A box set `x` mm along the piece: each corner (and baseline end) onto
+/// the path through the frame at the box's middle, so it stands there as a
+/// rule does.
+fn boxOnPath(piece: ground_mod.Piece, b: layout.ObjectBox, x: f64) layout.ObjectBox {
+    const anchor = (b.baseline[0].x + b.baseline[1].x) / 2;
+    const m = Affine.translate(-anchor, 0).then(frameAt(piece, x + anchor));
+    return .{ .object = b.object, .corners = .{ m.apply(b.corners[0]), m.apply(b.corners[1]), m.apply(b.corners[2]), m.apply(b.corners[3]) }, .baseline = .{ m.apply(b.baseline[0]), m.apply(b.baseline[1]) }, .nest = b.nest };
 }
 
 /// One exact outline per item (holes left out): a glyph's outline through

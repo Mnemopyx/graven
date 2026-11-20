@@ -83,3 +83,8 @@ Manufacturing plans and views (discussed 2026-11-19; blueprint "Manufacturing pl
 ## Platforms and Windows (2026-11-20)
 
 `lib/platform` holds what differs between systems; the apps use it rather than switching on the OS. Windows cross-builds from Linux (CLI and GUI); nothing has run on Windows yet. No CI on push (the owner's decision): automated builds are for releases only. Next: a release workflow (by hand or a release tag) that cross-builds, tests on Linux and `windows-latest`, and publishes; OCCT for Windows; light/dark detection off Linux. See status.md, "Platforms".
+
+## Layout objects' outlines and nudging (2026-11-20)
+
+Step 1 of 3 built: glyphic records every object's box (`layout.ObjectBox`, `Set.boxes`, `render.Render.boxes`) and has `space_before`. Next, step 2: draw the boxes and the baseline while a slot is edited on the canvas (`drawCanvasEq` in main.zig is where the head box is drawn now), the chosen object strong, its gaps and baseline offset in the status bar, a click choosing a box; and make the options for an expression the same on a tile and in a canvas run (the owner noticed they differ). Step 3: Tab through every object, arrows ← → for `space_before`, ↑ ↓ for `shift_y`, 0 to clear, 0.02 cap a press. See status.md.
+

@@ -109,6 +109,9 @@ pub const Param = enum {
     scale,
     shift_x,
     shift_y,
+    // Its gap to the object before it in its row, added to the spacing its
+    // kinds give; what follows moves with it.
+    space_before,
     weight,
     slant,
     shape,
@@ -167,6 +170,7 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .scale = el(number(.scale, 0.1, 10, 1, "Size, relative to what its place in the structure gives it.")),
     .shift_x = el(number(.cap, -4, 4, 0, "Moved right (negative: left).")),
     .shift_y = el(number(.cap, -4, 4, 0, "Moved up (negative: down).")),
+    .space_before = el(number(.cap, -4, 4, 0, "Further from the object before it (negative: closer); what follows moves with it. First on a line: the line moves.")),
     .weight = number(.cap, -0.1, 0.25, 0, "Strokes grown by this in all (half on each side); negative thins them."),
     .slant = number(.degrees, -30, 30, 0, "Leaned right by this angle (negative: left), on top of its face's own slant."),
     .shape = choice(Shape, .upright, "Upright or italic."),

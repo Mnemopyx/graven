@@ -116,6 +116,33 @@ pub const Element = struct {
     units: f64 = 0,
 };
 
+/// A layout object's box as set: its advance by its height and depth, so
+/// an editor can outline what the legend is made of. Every object has one:
+/// a top-level object (`nest` 0), the parts of a structure, their fields
+/// (`kind` .field) and the leaves in them.
+pub const ObjectBox = struct {
+    pub const Kind = enum {
+        /// Text, a number, a symbol, an operator: a leaf.
+        leaf,
+        /// A fraction, scripts, a radical, a fence, an accent, a large
+        /// operator, a group.
+        structure,
+        /// A structure's field: the row of objects in one of its slots.
+        field,
+    };
+    /// Lower left, lower right, upper right, upper left, label frame (mm).
+    corners: [4]geom.Point,
+    /// Its baseline's start and end.
+    baseline: [2]geom.Point,
+    /// The top-level element it is part of.
+    element: u32,
+    /// Its source bytes (its call included, for an object `\set` styles).
+    start: u32,
+    end: u32,
+    nest: u8,
+    kind: Kind,
+};
+
 /// Where a one-line render may break: a space between words, \allowbreak,
 /// or \- (whose break would need a hyphen drawn). What comes before it ends
 /// at `x0`; what comes after starts at `x1` (label frame, mm); items and
@@ -153,6 +180,8 @@ pub const Render = struct {
     ink: Box,
     diagnostics: []const Diagnostic,
     elements: []const Element = &.{},
+    /// Every layout object's box, children before what holds them.
+    boxes: []const ObjectBox = &.{},
     /// From a preview render: what the lenient parse found wrong. Empty for
     /// valid markup.
     syntax: []const Syntax = &.{},
@@ -371,6 +400,16 @@ pub const Render = struct {
             if (!to.ink.isEmpty()) to.ink = .{ .x0 = to.ink.x0 - x0, .y0 = to.ink.y0, .x1 = to.ink.x1 - x0, .y1 = to.ink.y1 };
             ink = ink.join(to.ink);
         }
+        // The boxes of its elements (a word cut by a forced break keeps
+        // its whole box in both pieces).
+        var boxes: std.ArrayList(ObjectBox) = .empty;
+        for (self.boxes) |b| if (b.element >= elem0 and b.element < elem1) {
+            var c = b;
+            for (&c.corners) |*p| p.x -= x0;
+            for (&c.baseline) |*p| p.x -= x0;
+            c.element -= elem0;
+            try boxes.append(a, c);
+        };
         var diagnostics: std.ArrayList(Diagnostic) = .empty;
         for (self.diagnostics) |d| if (d.offset >= src0 and d.offset < src1) try diagnostics.append(a, d);
         return .{
@@ -380,6 +419,7 @@ pub const Render = struct {
             .ink = ink,
             .diagnostics = diagnostics.items,
             .elements = elements,
+            .boxes = boxes.items,
             .syntax = if (after == null) self.syntax else &.{},
         };
     }
