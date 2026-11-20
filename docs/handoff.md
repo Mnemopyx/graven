@@ -82,4 +82,4 @@ Manufacturing plans and views (discussed 2026-11-19; blueprint "Manufacturing pl
 
 ## Platforms and Windows (2026-11-20)
 
-`lib/platform` holds what differs between systems; the apps use it rather than switching on the OS. Windows cross-builds from Linux (CLI and GUI); nothing has run on Windows yet. Next: a Windows cross-build step and a `windows-latest` test job in CI; OCCT for Windows; light/dark detection off Linux. See status.md, "Platforms".
+`lib/platform` holds what differs between systems; the apps use it rather than switching on the OS. Windows cross-builds from Linux (CLI and GUI); nothing has run on Windows yet. No CI on push (the owner's decision): automated builds are for releases only. Next: a release workflow (by hand or a release tag) that cross-builds, tests on Linux and `windows-latest`, and publishes; OCCT for Windows; light/dark detection off Linux. See status.md, "Platforms".
