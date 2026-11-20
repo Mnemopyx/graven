@@ -509,7 +509,10 @@ fn dump(init: std.process.Init, path: []const u8, with_log: bool) !void {
     try w.flush();
 }
 
-fn deviceName(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
+/// Room for a host name (Windows has no HOST_NAME_MAX; the name is not read there).
+const host_name_max = if (builtin.os.tag == .windows) 1 else std.posix.HOST_NAME_MAX;
+
+fn deviceName(buf: *[host_name_max]u8) []const u8 {
     if (builtin.os.tag == .windows) return "";
     return std.posix.gethostname(buf) catch "";
 }
@@ -527,7 +530,7 @@ fn compact(init: std.process.Init, path: []const u8) !void {
     try h.compact();
     var random: [16]u8 = undefined;
     io.random(&random);
-    var host: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    var host: [host_name_max]u8 = undefined;
     const who: layout.history.Writer = .{ .id = layout.history.writerId(random), .device = deviceName(&host), .tool = layout.history.tool_version };
     const now = std.Io.Clock.real.now(io).toSeconds();
     const bytes = try layout.history.fileBytes(h, gpa, who, now);

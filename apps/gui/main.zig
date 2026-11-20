@@ -873,7 +873,9 @@ fn noteRecent(path: []const u8) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const z = state.gpa.dupeSentinel(u8, path, 0) catch return;
     defer state.gpa.free(z);
-    const abs: []const u8 = if (std.c.realpath(z.ptr, &buf)) |r| std.mem.span(@as([*:0]u8, @ptrCast(r))) else path;
+    // Windows has no realpath: the path is kept as given there (to do:
+    // GetFullPathNameW).
+    const abs: []const u8 = if (builtin.os.tag == .windows) path else if (std.c.realpath(z.ptr, &buf)) |r| std.mem.span(@as([*:0]u8, @ptrCast(r))) else path;
     var k: usize = 0;
     while (k < recent_files.items.len) {
         if (std.mem.eql(u8, recent_files.items[k], abs)) {
