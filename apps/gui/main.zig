@@ -161,10 +161,17 @@ pub const testing_api = struct {
         const c = eqChoice(dvui.currentWindow().arena()) orelse return null;
         return c.kind;
     }
+    pub fn eqEditing() bool {
+        return canvas_eq != null;
+    }
+    pub fn eqPicking() bool {
+        const q = canvas_eq orelse return false;
+        return q.head != null;
+    }
     pub fn eqMeasured() bool {
         const q = canvas_eq orelse return false;
         const m = eq_measure orelse return false;
-        return m.of.offset == q.offset and std.meta.eql(m.of.head, q.head);
+        return m.of.offset == q.offset and std.meta.eql(m.of.head, q.head) and std.meta.eql(m.of.head_end, q.head_end);
     }
     pub fn promptOpen() bool {
         return filePromptOpen() or contention != null or leave_prompt != null or recovery != null;
@@ -837,6 +844,11 @@ fn docUnits() layout.model.Units {
 
 /// Starts over with an empty document and asks for the new canvas's units.
 fn newCanvas() void {
+    // Nothing of the last document's clicks or editing carries over: a
+    // first click in the new one picks, not "again, further out".
+    last_click = null;
+    hunt_clear();
+    canvas_eq = null;
     resetViews();
     setFilePath(null);
     clearPlaced();
@@ -4173,13 +4185,15 @@ fn exprTarget() ?ExprTarget {
 }
 
 /// The tile track the expression line edits, when the context is a tile
-/// whose prototype has it; else its first track.
+/// whose prototype has it; else its first track with text in it; else its
+/// first track.
 var expr_track: layout.model.ObjectId = .none;
 
 fn exprTrackOf(id: TileId) ?layout.model.ObjectId {
     const tracks = state.model.prototypeOf(id).tracks;
     if (tracks.len == 0) return null;
     for (tracks) |tt| if (tt.id == expr_track) return tt.id;
+    for (tracks) |tt| if (state.model.tileFlow(id, tt.id)) |f| if (f.items.items.len > 0) return tt.id;
     return tracks[0].id;
 }
 
@@ -14873,7 +14887,7 @@ fn expressionProperties() !void {
         var wb: [160]u8 = undefined;
         propText("Editing", "{s}", .{eqTargetName(&wb, q)}, 3990);
         // The chosen object's place among its neighbours, as drawn.
-        if (eq_measure) |m| if (m.of.offset == q.offset and std.meta.eql(m.of.head, q.head)) {
+        if (eq_measure) |m| if (m.of.offset == q.offset and std.meta.eql(m.of.head, q.head) and std.meta.eql(m.of.head_end, q.head_end)) {
             const cap = if (m.cap > 0) m.cap else 1;
             if (m.gap_before) |g| propText("Gap before", "{d:.3} mm ({d:.3} cap)", .{ g, g / cap }, 3991) else propText("Gap before", "{s}", .{"first in its row"}, 3991);
             if (m.gap_after) |g| propText("Gap after", "{d:.3} mm ({d:.3} cap)", .{ g, g / cap }, 3992) else propText("Gap after", "{s}", .{"last in its row"}, 3992);
@@ -14881,12 +14895,12 @@ fn expressionProperties() !void {
             propText("Box", "{d:.3} wide, {d:.3} up, {d:.3} down, mm", .{ m.width, m.height, m.depth }, 3994);
         };
     };
-    const head_id: ?glyphic.Id = if (canvas_eq) |q| (if (q.target.key() == target.key()) (if (q.head) |h| headAt(&.{ .e = e, .spans = spans }, h) else null) else null) else null;
+    const head_id: ?glyphic.Id = if (canvas_eq) |q| (if (q.target.key() == target.key()) pickAt(&.{ .e = e, .spans = spans }, q) else null) else null;
     if (head_id orelse glyphic.entry.objectAt(&e, spans, at)) |id| {
         const n = e.node(id);
         propText("At the cursor", "{s} {s}", .{ @tagName(n.kind), n.text }, 4001);
-        if (glyphic.entry.isText(&e, id)) {
-            propText("Overrides", "text takes its style's", .{}, 4002);
+        if (n.kind == .space or n.kind == .soft_hyphen) {
+            propText("Overrides", "a space takes its style's", .{}, 4002);
         } else for (element_params, 0..) |p, k| {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4010 + k });
             defer row.deinit();
@@ -16551,8 +16565,12 @@ const CanvasEq = struct {
     /// The caret: a byte offset in the source (a tile track's text: its
     /// runs, a newline for each break).
     offset: u32,
-    /// On a head: its structure's source start (the caret's offset).
+    /// An object chosen (a head reached by Tab, or any object chosen by
+    /// a click, ↑ or Tab among objects): its source start (the caret's
+    /// offset), and its end when known (a structure and its base can
+    /// start at the same byte: d² and d).
     head: ?u32 = null,
+    head_end: ?u32 = null,
 };
 
 var canvas_eq: ?CanvasEq = null;
@@ -16583,6 +16601,57 @@ fn eqParse(a: std.mem.Allocator, src: []const u8, math: bool) ?EqParse {
     return p;
 }
 
+/// Chooses the object whose source is [`start`, `end`).
+fn eqPick(from: u32, to: u32) void {
+    eqMove(from, from);
+    canvas_eq.?.head_end = to;
+}
+
+/// The object chosen in `q`, in parse `p`: by its span when its end is
+/// known, else the structure whose head starts there.
+fn pickAt(p: *const EqParse, q: CanvasEq) ?glyphic.Id {
+    const h = q.head orelse return null;
+    if (q.head_end) |end| {
+        for (p.e.nodes.items, 0..) |n, k| {
+            if (!n.live or n.kind == .row) continue;
+            const id: glyphic.Id = @enumFromInt(k);
+            if (id == p.e.root) continue;
+            const sp = p.spans.get(id);
+            if (sp.start == h and sp.end == end) return id;
+        }
+    }
+    return headAt(p, h);
+}
+
+/// The objects of parse `p` in source order, what holds others before
+/// them (d² before d), and empty fields (places to type): Tab's order
+/// among objects.
+const EqStop = struct { start: u32, end: u32, field: bool };
+
+fn eqStops(a: std.mem.Allocator, p: *const EqParse) []EqStop {
+    var out: std.ArrayList(EqStop) = .empty;
+    for (p.e.nodes.items, 0..) |n, k| {
+        if (!n.live) continue;
+        const id: glyphic.Id = @enumFromInt(k);
+        if (id == p.e.root or n.kind == .soft_hyphen) continue;
+        const sp = p.spans.get(id);
+        if (sp.start == glyphic.entry.Span.none.start) continue;
+        if (n.kind == .row) {
+            if (n.items.items.len > 0) continue;
+            out.append(a, .{ .start = @intCast(sp.start), .end = @intCast(sp.end), .field = true }) catch {};
+            continue;
+        }
+        out.append(a, .{ .start = @intCast(sp.start), .end = @intCast(sp.end), .field = false }) catch {};
+    }
+    std.mem.sort(EqStop, out.items, {}, struct {
+        fn lt(_: void, x: EqStop, y: EqStop) bool {
+            if (x.start != y.start) return x.start < y.start;
+            return x.end > y.end;
+        }
+    }.lt);
+    return out.items;
+}
+
 /// The structure whose head starts at byte `at`.
 fn headAt(p: *const EqParse, at: u32) ?glyphic.Id {
     for (p.e.nodes.items, 0..) |n, k| {
@@ -16609,6 +16678,7 @@ fn eqMove(offset: u32, head: ?u32) void {
     if (canvas_eq == null) return;
     canvas_eq.?.offset = offset;
     canvas_eq.?.head = head;
+    canvas_eq.?.head_end = null;
     expr_inspect = .{ .key = canvas_eq.?.target.key(), .offset = offset };
 }
 
@@ -16674,7 +16744,7 @@ fn enterEquation() void {
             canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
             canvas_eq_seq += 1;
             eqMove(at.offset, null);
-            state.status = "Inline math: type into it; Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
+            state.status = "Inline math: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
             return;
         }
     }
@@ -16691,7 +16761,7 @@ fn enterEquation() void {
     canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = item } }, .math = true, .offset = offset };
     canvas_eq_seq += 1;
     eqMove(offset, null);
-    state.status = "Equation: type into it; Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
+    state.status = "Equation: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
 }
 
 /// Ctrl+\ on a selected tile: its track's text (the expression line's
@@ -16706,7 +16776,7 @@ fn enterTileTrack(id: TileId) void {
     };
     canvas_eq_seq += 1;
     eqMove(@intCast(src.len), null);
-    state.status = "Tile text: type into it ($ starts math); Tab goes through its heads and fields; on a head, = - [ ] arrows 0 i u b style it; Esc leaves. ";
+    state.status = "Tile text: type into it ($ starts math); Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
 }
 
 /// Leaves the equation: one with nothing in it goes; the flow cursor goes
@@ -16778,6 +16848,9 @@ fn eqType(txt: []const u8) void {
     eqMove(at + @as(u32, @intCast(if (pair) 1 else txt.len)), null);
 }
 
+/// How far an arrow nudges the chosen object, cap heights.
+const nudge_step: f32 = 0.02;
+
 /// A head's key: a parameter changed, or a slot opened, hidden or shown.
 /// `dx`, `dy`: an arrow's nudge, cap heights.
 fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
@@ -16786,7 +16859,7 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
     const src = eqContent(q) orelse return;
     const a = dvui.currentWindow().arena();
     var p = eqParse(a, src, q.math) orelse return;
-    const id = headAt(&p, head) orelse {
+    const id = pickAt(&p, q) orelse {
         eqMove(q.offset, null);
         return;
     };
@@ -16844,15 +16917,22 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
             if (hidden) p.e.clear(id, prm) else p.e.set(id, prm, glyphic.param.of(glyphic.param.SlotShow.hidden)) catch {};
         },
         0 => {
-            if (dx != 0) p.e.set(id, .shift_x, glyphic.param.num(num.round(std.math.clamp(num.f(&p.e, id, .shift_x) + dx, -4, 4)))) catch {};
+            // Nudged: further from (or closer to) the object before it,
+            // what follows moving along; up or down from its baseline.
+            if (dx != 0) p.e.set(id, .space_before, glyphic.param.num(num.round(std.math.clamp(num.f(&p.e, id, .space_before) + dx, -4, 4)))) catch {};
             if (dy != 0) p.e.set(id, .shift_y, glyphic.param.num(num.round(std.math.clamp(num.f(&p.e, id, .shift_y) + dy, -4, 4)))) catch {};
+            // Back to nothing set: its own value cleared.
+            inline for (.{ glyphic.Param.space_before, glyphic.Param.shift_y }) |prm| if (p.e.override(id, prm)) |v| if (v.number == 0) p.e.clear(id, prm);
         },
         else => return,
     }
-    const next = glyphic.entry.rewriteCall(a, src, p.spans.get(id), &p.e, id) catch return;
+    const sp = p.spans.get(id);
+    const next = glyphic.entry.rewriteCall(a, src, sp, &p.e, id) catch return;
     eqStore(q, next);
-    // The structure starts where it did: its call, if any, begins there.
-    eqMove(head, head);
+    // It starts where it did (its call, if any, begins there); its end
+    // moved by what the call added or took.
+    const grown: i64 = @as(i64, @intCast(next.len)) - @as(i64, @intCast(src.len));
+    eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
 }
 
 /// A key while editing an equation on the canvas; whether it was one.
@@ -16886,11 +16966,59 @@ fn eqAction(inv: keymap.Invocation) bool {
         kact("canvas.equation.head.nudge") => {
             if (q.head == null) return false;
             switch (inv.dir()) {
-                .left => eqHeadKey(0, -0.05, 0),
-                .right => eqHeadKey(0, 0.05, 0),
-                .up => eqHeadKey(0, 0, 0.05),
-                .down => eqHeadKey(0, 0, -0.05),
+                .left => eqHeadKey(0, -nudge_step, 0),
+                .right => eqHeadKey(0, nudge_step, 0),
+                .up => eqHeadKey(0, 0, nudge_step),
+                .down => eqHeadKey(0, 0, -nudge_step),
             }
+            return true;
+        },
+        kact("canvas.equation.choose") => {
+            // The object at the caret chosen.
+            const p = eqParse(a, src, q.math) orelse return true;
+            const id = glyphic.entry.objectAt(&p.e, p.spans, q.offset) orelse return true;
+            const sp = p.spans.get(id);
+            canvas_eq_seq += 1;
+            eqPick(@intCast(sp.start), @intCast(sp.end));
+            return true;
+        },
+        kact("canvas.equation.head.next") => {
+            // The next (or previous) object; an empty field: the caret in it.
+            const p = eqParse(a, src, q.math) orelse return true;
+            const all = eqStops(a, &p);
+            if (all.len == 0) return true;
+            const cur: EqStop = .{ .start = q.head.?, .end = q.head_end orelse if (pickAt(&p, q)) |id| @intCast(p.spans.get(id).end) else q.head.?, .field = false };
+            const at: ?usize = for (all, 0..) |x, k| {
+                if (x.start == cur.start and x.end == cur.end and !x.field) break k;
+            } else null;
+            const to: EqStop = if (back) blk: {
+                const k = at orelse all.len;
+                break :blk if (k == 0) all[all.len - 1] else all[k - 1];
+            } else blk: {
+                const k = if (at) |i| i + 1 else 0;
+                break :blk if (k >= all.len) all[0] else all[k];
+            };
+            canvas_eq_seq += 1;
+            if (to.field) eqMove(to.start, null) else eqPick(to.start, to.end);
+            return true;
+        },
+        kact("canvas.equation.head.out") => {
+            // What holds it chosen: the structure its field belongs to.
+            const p = eqParse(a, src, q.math) orelse return true;
+            const id = pickAt(&p, q) orelse return true;
+            const h = p.e.holder(id) orelse return true;
+            const sp = p.spans.get(h.structure);
+            if (sp.start == glyphic.entry.Span.none.start) return true;
+            canvas_eq_seq += 1;
+            eqPick(@intCast(sp.start), @intCast(sp.end));
+            return true;
+        },
+        kact("canvas.equation.head.release") => {
+            // Back to typing: the caret after what was chosen.
+            const p = eqParse(a, src, q.math);
+            const end: u32 = if (p) |pp| (if (pickAt(&pp, q)) |id| @intCast(pp.spans.get(id).end) else q.offset) else q.offset;
+            canvas_eq_seq += 1;
+            eqMove(end, null);
             return true;
         },
         kact("canvas.equation.tab") => {
@@ -17005,7 +17133,7 @@ fn eqChoice(a: std.mem.Allocator) ?EqChoice {
     const q = canvas_eq orelse return null;
     const src = eqContent(q) orelse return null;
     const p = eqParse(a, src, q.math) orelse return null;
-    const id = (if (q.head) |h| headAt(&p, h) else null) orelse glyphic.entry.objectAt(&p.e, p.spans, q.offset) orelse return null;
+    const id = pickAt(&p, q) orelse glyphic.entry.objectAt(&p.e, p.spans, q.offset) orelse return null;
     const span = struct {
         fn of(pp: *const EqParse, x: glyphic.Id) ?EqChoice.Span {
             const sp = pp.spans.get(x);
@@ -17066,7 +17194,7 @@ fn eqTargetName(buf: []u8, q: CanvasEq) []const u8 {
 /// What the chosen object measures, as last drawn: its gaps to its
 /// neighbours along the baseline and its baseline's height above the
 /// slot's, mm; its cap height, for the nudges in cap heights.
-const EqMeasure = struct { of: struct { offset: u32, head: ?u32 }, gap_before: ?f64, gap_after: ?f64, raised: f64, cap: f64, width: f64, height: f64, depth: f64 };
+const EqMeasure = struct { of: struct { offset: u32, head: ?u32, head_end: ?u32 }, gap_before: ?f64, gap_after: ?f64, raised: f64, cap: f64, width: f64, height: f64, depth: f64 };
 var eq_measure: ?EqMeasure = null;
 
 fn boxBounds(b: layout.render.ObjectBox) geom.Box {
@@ -17127,7 +17255,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
             const bb = boxBounds(b);
             const cap: f64 = if (b.element < r.elements.len) r.elements[b.element].cap_height else 1;
             const m: EqMeasure = .{
-                .of = .{ .offset = q.offset, .head = q.head },
+                .of = .{ .offset = q.offset, .head = q.head, .head_end = q.head_end },
                 .gap_before = if (before) |p| bb.x0 - boxBounds(p).x1 else null,
                 .gap_after = if (after) |n| boxBounds(n).x0 - bb.x1 else null,
                 .raised = b.baseline[0].y,
@@ -17171,12 +17299,8 @@ fn eqBoxPress(p: geom.Point) bool {
         }
     }
     const hit = best orelse return false;
-    const from = hit.b.start + hit.base;
-    const a = dvui.currentWindow().arena();
-    const q = canvas_eq.?;
-    const head: ?u32 = if (eqContent(q)) |src| if (eqParse(a, src, q.math)) |pp| (if (headAt(&pp, from) != null) from else null) else null else null;
     canvas_eq_seq += 1;
-    eqMove(from, head);
+    eqPick(hit.b.start + hit.base, hit.b.end + hit.base);
     return true;
 }
 

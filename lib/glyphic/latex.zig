@@ -127,6 +127,36 @@ const Parser = struct {
                 if (!p.eof() and p.src[p.i] == '$') p.i += 1;
                 continue;
             }
+            // Graven's call form in text: overrides on the text the braces
+            // hold (one word: the word itself carries them).
+            if (p.startsWith("\\set(")) {
+                try text.flush(p.e, p.spans, p.e.root, p.i);
+                const start = p.i;
+                const g = try p.e.structure(.group, "", "");
+                try p.e.append(root, g);
+                p.tag(g, "\\set");
+                p.i = try entry.parseArgs(p.e, g, p.src, p.i + "\\set(".len);
+                if (!p.eof() and p.src[p.i] == ')') p.i += 1;
+                if (!p.eof() and p.src[p.i] == '{') {
+                    p.i += 1;
+                    var inner: entry.Text = .{ .variant = text.variant };
+                    defer inner.deinit(p.gpa());
+                    var level: usize = 1;
+                    while (!p.eof()) : (p.i += 1) {
+                        const ch = p.src[p.i];
+                        if (ch == '{') level += 1;
+                        if (ch == '}') {
+                            level -= 1;
+                            if (level == 0) break;
+                        }
+                        try inner.add(p.gpa(), p.src[p.i .. p.i + 1], p.i);
+                    }
+                    try inner.flush(p.e, p.spans, p.e.slot(g, .body), p.i);
+                    if (!p.eof()) p.i += 1;
+                }
+                try p.mark(try entry.unwrapCall(p.e, g), start);
+                continue;
+            }
             if (p.startsWith("\\-")) {
                 try text.add(p.gpa(), entry.soft_hyphen, p.i);
                 p.i += 2;

@@ -304,3 +304,36 @@ test "an object's overrides rewritten in place: wrapped, changed, unwrapped, the
     defer gpa.free(three);
     try testing.expectEqualStrings(src, three);
 }
+
+test "the call form in a legend's text: a word carries its overrides; rewritten in place, read back" {
+    var p = try parseLatex("HO \\set(space_before: 0.1, shift_y: -0.05){DA} AH", .legend);
+    defer p.deinit();
+    const items = p.e.node(p.e.root).items.items;
+    // HO, a space, DA (the call unwrapped onto it), a space, AH.
+    try testing.expectEqual(5, items.len);
+    const da = items[2];
+    try testing.expectEqual(ex.Kind.word, p.e.node(da).kind);
+    try testing.expectEqualStrings("DA", p.e.node(da).text);
+    try testing.expectEqual(@as(f32, 0.1), p.e.override(da, .space_before).?.number);
+    try testing.expectEqual(@as(f32, -0.05), p.e.override(da, .shift_y).?.number);
+    // Its span is the whole call.
+    try testing.expectEqual(3, p.spans.get(da).start);
+    try testing.expectEqual(3 + "\\set(space_before: 0.1, shift_y: -0.05){DA}".len, p.spans.get(da).end);
+    // A plain word given an override: the call written round it.
+    const ho = items[0];
+    try p.e.set(ho, .space_before, param.num(0.2));
+    const src = "HO \\set(space_before: 0.1, shift_y: -0.05){DA} AH";
+    const out = try entry.rewriteCall(testing.allocator, src, p.spans.get(ho), &p.e, ho);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\\set(space_before: 0.2){HO} \\set(space_before: 0.1, shift_y: -0.05){DA} AH", out);
+    var q = try parseLatex(out, .legend);
+    defer q.deinit();
+    try testing.expectEqual(@as(f32, 0.2), q.e.override(q.e.node(q.e.root).items.items[0], .space_before).?.number);
+    // Several words in one call: kept as a group carrying them.
+    var g = try parseLatex("\\set(shift_y: 0.1){HO DA}", .legend);
+    defer g.deinit();
+    const only = g.e.node(g.e.root).items.items;
+    try testing.expectEqual(1, only.len);
+    try testing.expectEqual(ex.Kind.group, g.e.node(only[0]).kind);
+    try testing.expectEqual(@as(f32, 0.1), g.e.override(only[0], .shift_y).?.number);
+}

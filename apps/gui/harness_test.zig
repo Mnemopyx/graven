@@ -1374,3 +1374,58 @@ test "a slot edited on the canvas outlines its objects; a click chooses one, mea
     try std.testing.expectEqual(glyphic.Kind.variable, api.eqChosenKind().?);
     try std.testing.expect(api.eqMeasured());
 }
+
+test "objects chosen and nudged on the canvas: Up chooses, Tab steps, arrows nudge from the neighbour and the baseline, o steps out, 0 clears, Esc types again" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    // The √x key's top slot: "$\sqrt{x}$".
+    try r.clickAt(api.tileCenter("R1C1").?);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    try r.key(.backslash, .lcontrol);
+    try r.frames(2);
+    // Tab among objects from a click on x: x chosen; o: out to the radical.
+    var buf: [16]dvui.Rect.Physical = undefined;
+    const x = api.eqBoxes(&buf)[0];
+    try r.clickAt(.{ .x = x.x + x.w / 2, .y = x.y + x.h / 2 });
+    try r.frames(2);
+    try std.testing.expectEqual(glyphic.Kind.variable, api.eqChosenKind().?);
+    try dvui.testing.writeText("o");
+    try r.frames(2);
+    try r.frames(2);
+    try std.testing.expectEqual(glyphic.Kind.radical, api.eqChosenKind().?);
+    // Three nudges right and two up: written into the source in the call
+    // form, the object still chosen; the measure follows.
+    for (0..3) |_| try r.key(.right, .none);
+    for (0..2) |_| try r.key(.up, .none);
+    try r.frames(2);
+    const tile = api.model().findTile("R1C1").?;
+    const track = api.model().prototypeOf(tile).tracks[0].id;
+    const text = try api.model().tileTrackText(std.testing.allocator, tile, track);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("$\\set(space_before: 0.06, shift_y: 0.04){\\sqrt{x}}$", text);
+    try std.testing.expectEqual(glyphic.Kind.radical, api.eqChosenKind().?);
+    try std.testing.expect(api.eqMeasured());
+    // Tab: the next object, x inside it.
+    try r.key(.tab, .none);
+    try r.frames(2);
+    try std.testing.expectEqual(glyphic.Kind.variable, api.eqChosenKind().?);
+    // Back on the radical, 0 clears it; the source as it was.
+    try dvui.testing.writeText("o");
+    try r.frames(2);
+    try dvui.testing.writeText("0");
+    try r.frames(2);
+    try r.frames(2);
+    const back = try api.model().tileTrackText(std.testing.allocator, tile, track);
+    defer std.testing.allocator.free(back);
+    try std.testing.expectEqualStrings("$\\sqrt{x}$", back);
+    // Esc: typing again, the caret after it; Up chooses what is there.
+    try r.key(.escape, .none);
+    try r.frames(2);
+    try std.testing.expect(!api.eqPicking());
+    try r.key(.left, .none);
+    try r.key(.up, .none);
+    try r.frames(2);
+    try std.testing.expect(api.eqPicking());
+}
