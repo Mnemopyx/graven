@@ -798,7 +798,7 @@ fn make15c(r: *Run) !void {
     const plate = api.panelNamed("HP-15C plate").?;
     const keys = api.panelNamed("HP-15C keys").?;
     try r.select("\"HP-15C plate\"");
-    try r.press("margins.editPanel");
+    try r.press("panel.editPanel");
     for (keys15, 0..) |row, ri| for (row, 0..) |k, ci| {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
@@ -808,7 +808,7 @@ fn make15c(r: *Run) !void {
     };
     try r.press("editing.leavePanelEditing");
     try r.select("\"HP-15C keys\"");
-    try r.press("margins.editPanel");
+    try r.press("panel.editPanel");
     for (keys15, 0..) |row, ri| for (row, 0..) |_, ci| {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
@@ -1260,4 +1260,22 @@ test "a click elsewhere accepts the field first, then does what it was for" {
     try r.frames(3);
     try std.testing.expect(panelNamed("Front") != null);
     try std.testing.expectEqualStrings("styles", api.contextName());
+}
+
+test "a button is a virtual key: its action runs from a press, and only a shown button can be pressed" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    const kb = "\"PC keyboard (ANSI 104)\"";
+    // Not shown with the panel as the context: a script cannot press it.
+    try r.select(kb);
+    try std.testing.expectError(error.NoSuchElement, r.press("region.remove"));
+    try std.testing.expect(api.model().resolve(kb ++ ".Row6") != null);
+    // Shown with the track: its press runs region.remove on that track.
+    try r.select(kb ++ ".Row6");
+    try r.press("region.remove");
+    try std.testing.expect(api.model().resolve(kb ++ ".Row6") == null);
+    try std.testing.expect(api.model().resolve(kb ++ ".Row5") != null);
+    try std.testing.expectEqualStrings("panel", api.contextName());
 }

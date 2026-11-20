@@ -1994,6 +1994,8 @@ fn frame() !dvui.App.Result {
         leave_field = false;
         dvui.focusWidget(null, null, null);
     }
+    // Buttons pressed last frame (or by a script): their actions.
+    dispatchButtons();
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
     defer {
@@ -11036,9 +11038,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         state.context = .worksheet;
                         dvui.refresh(null, @src(), box.data().id);
                     },
-                    .region => |r| {
+                    // The same action as its Remove button.
+                    .region => {
                         e.handle(@src(), box.data());
-                        removeRegionOf(r.panel, r.region);
+                        _ = runButtonAction(.{ .action = kact("region.remove"), .arg = 0 });
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .art => |l| {
@@ -12261,6 +12264,210 @@ fn elementTag(key: []const u8) []const u8 {
 var scripted_press: ?[]const u8 = null;
 var scripted_press_buf: [128]u8 = undefined;
 
+// Buttons as virtual keys (decided 2026-11-20): an action button's press is
+// an event, named by its id, that the keymap's button bindings
+// (`keymap.button_binds`) map to an action; the actions run at the next
+// frame's start, on the context the press was made in, through one
+// dispatch (`runButtonAction`), as a key's or a menu item's would.
+
+const ButtonEvent = struct {
+    id: [128]u8 = undefined,
+    id_len: usize = 0,
+    arg: i32 = 0,
+    context: Context,
+};
+var button_events: [16]ButtonEvent = undefined;
+var button_events_n: usize = 0;
+
+/// The action buttons drawn last frame and this one, by id, with their
+/// arguments: a script presses only what is shown.
+const DrawnButton = struct { id: []const u8, arg: i32 };
+var drawn_buttons: std.ArrayList(DrawnButton) = .empty;
+var drawn_buttons_prev: std.ArrayList(DrawnButton) = .empty;
+var drawn_frame: i128 = -1;
+
+fn pushButtonEvent(id: []const u8, arg: i32) void {
+    if (button_events_n == button_events.len) return;
+    var e: ButtonEvent = .{ .arg = arg, .context = state.context };
+    e.id_len = @min(id.len, e.id.len);
+    @memcpy(e.id[0..e.id_len], id[0..e.id_len]);
+    button_events[button_events_n] = e;
+    button_events_n += 1;
+    dvui.refresh(null, @src(), null);
+}
+
+/// A button that is a virtual key: drawn, a click is an event for its
+/// action (`keymap.button_binds`), run next frame. `id` is its full name,
+/// "<section>.<key>", whatever section was drawn before it; `arg` is the
+/// action's argument (which of several things it stands for).
+fn actionButton(src: std.builtin.SourceLocation, id: []const u8, label: []const u8, arg: i32, opts: dvui.Options) void {
+    var o = opts;
+    const tag = uniqueTag(id);
+    o.tag = tag;
+    if (keymap.buttonAction(tag) == null) dvui.log.err("button {s} has no binding", .{tag});
+    var bw: dvui.WidgetData = undefined;
+    o.data_out = &bw;
+    if (dvui.button(src, label, .{}, o)) pushButtonEvent(tag, arg);
+    // Its key, from the keymap, as a menu item shows its own.
+    if (keymap.buttonAction(tag)) |a| {
+        var kb: [48]u8 = undefined;
+        if (keymap.shortcut(&kb, kmode("canvas"), a, arg)) |sc| dvui.tooltip(src, .{ .active_rect = bw.borderRectScale().r }, "{s}", .{sc}, .{ .id_extra = o.id_extra orelse 0 });
+    }
+    const now = dvui.frameTimeNS();
+    if (now != drawn_frame) {
+        std.mem.swap(std.ArrayList(DrawnButton), &drawn_buttons, &drawn_buttons_prev);
+        drawn_buttons.clearRetainingCapacity();
+        drawn_frame = now;
+    }
+    const keep = state.gpa.dupe(u8, tag) catch return;
+    drawn_buttons.append(state.gpa, .{ .id = keep, .arg = arg }) catch {};
+}
+
+/// At the frame's start: a script's press of a shown action button joins
+/// the events; then each event runs its action.
+fn dispatchButtons() void {
+    if (scripted_press) |want| {
+        for ([_][]const DrawnButton{ drawn_buttons.items, drawn_buttons_prev.items }) |list| for (list) |b| {
+            if (!std.mem.eql(u8, b.id, want)) continue;
+            pushButtonEvent(b.id, b.arg);
+            scripted_press = null;
+            break;
+        };
+    }
+    const n = button_events_n;
+    button_events_n = 0;
+    for (button_events[0..n]) |e| {
+        const id = e.id[0..e.id_len];
+        const a = keymap.buttonAction(id) orelse continue;
+        state.context = e.context;
+        _ = runButtonAction(.{ .action = a, .arg = e.arg });
+    }
+}
+
+/// The actions buttons stand for, on the context. Whether it was one.
+fn runButtonAction(inv: keymap.Invocation) bool {
+    switch (inv.action) {
+        kact("region.make-tracks") => regionMakeTracks(),
+        kact("region.remove") => switch (state.context) {
+            .region => |r| removeRegionOf(r.panel, r.region),
+            else => return false,
+        },
+        kact("region.name-keys") => regionNameKeys(),
+        kact("track.show-flow") => switch (state.context) {
+            .region => |r| if (state.model.trackFlow(r.panel, r.region)) |f| {
+                state.context = .{ .flow = f.id };
+            },
+            else => return false,
+        },
+        kact("track.join-after") => switch (state.context) {
+            .region => |r| {
+                join_from = .{ .panel = r.panel, .region = r.region };
+                state.tool = .join;
+            },
+            else => return false,
+        },
+        kact("track.take-out") => trackTakeOut(),
+        kact("flows.new") => {
+            var nb: [32]u8 = undefined;
+            const name = state.model.freshName(&nb, .flows, "Flow");
+            if (act(.addFlow, .{name})) |id| {
+                state.context = .{ .flow = id };
+            } else |_| state.status = "The flow was not made. ";
+        },
+        kact("flow.remove") => flowRemove(),
+        kact("panel.edit") => switch (state.context) {
+            .panel => |pi| if (panel_edit == null) enterPanelEdit(pi),
+            else => return false,
+        },
+        kact("panel.release") => panelRelease(),
+        else => return runAction(inv),
+    }
+    return true;
+}
+
+/// The context region's rows (or columns) made tracks, where they lie.
+fn regionMakeTracks() void {
+    const r = switch (state.context) {
+        .region => |r| r,
+        else => return,
+    };
+    const placed_rows = tracksIn(r.panel, r.region);
+    if (placed_rows.len == 0) return;
+    const a = dvui.currentWindow().arena();
+    const origins = a.alloc(geom.Point, placed_rows.len) catch return;
+    for (placed_rows, origins) |t, *o| o.* = .{ .x = t.box.x0, .y = t.box.y1 };
+    if (act(.splitIntoTracks, .{ r.panel, r.region, origins })) |n| {
+        track_cursor = null;
+        state.status = std.fmt.bufPrint(&import_status_buf, "{d} tracks, its flow running through them. ", .{n}) catch "Made tracks. ";
+    } else |_| state.status = "The tracks were not made. ";
+}
+
+/// The prefix keys are named with, in flow order (K1, K2 …).
+var key_name_prefix: [16]u8 = .{'K'} ++ @as([15]u8, @splat(0));
+var key_name_prefix_len: usize = 1;
+
+/// The context track's flow's keys named in order.
+fn regionNameKeys() void {
+    const r = switch (state.context) {
+        .region => |r| r,
+        else => return,
+    };
+    const prefix = key_name_prefix[0..key_name_prefix_len];
+    if (act(.nameKeysInOrder, .{ r.panel, r.region, prefix })) |n| {
+        state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
+    } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
+}
+
+/// The context track taken out of its flow.
+fn trackTakeOut() void {
+    const r = switch (state.context) {
+        .region => |r| r,
+        else => return,
+    };
+    const f = state.model.trackFlow(r.panel, r.region) orelse return;
+    const alone = f.tracks.items.len == 1;
+    if (act(.detachTrack, .{ r.panel, r.region })) {
+        state.status = if (alone) "Taken out: its text is kept in the flow, now unplaced (under Flows in the Browser). " else "Taken out: the flow keeps all its text, on its other tracks. ";
+    } else |_| state.status = "The track was not taken out. ";
+}
+
+/// The context flow removed; one holding anything takes a second press.
+fn flowRemove() void {
+    const id = switch (state.context) {
+        .flow => |id| id,
+        else => return,
+    };
+    const fi = state.model.flowIndex(id) orelse return;
+    const empty = state.model.flows.items[fi].items.items.len == 0;
+    const armed = if (flow_remove_armed) |x| x == id else false;
+    if (!(empty or armed)) {
+        flow_remove_armed = id;
+        return;
+    }
+    flow_remove_armed = null;
+    if (act(.removeFlow, .{id})) {
+        state.context = .flows;
+        state.status = "Flow removed; its tracks have empty flows of their own. ";
+    } else |_| state.status = "The flow was not removed. ";
+}
+
+/// The context panel released: its outline and contents loose again.
+fn panelRelease() void {
+    const pi = switch (state.context) {
+        .panel => |pi| pi,
+        else => return,
+    };
+    const id = act(.releasePanel, .{pi}) catch {
+        state.status = "The panel could not be released. ";
+        return;
+    };
+    state.context = if (state.model.locate(id)) |loc| switch (loc) {
+        .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
+        else => .worksheet,
+    } else .worksheet;
+    state.status = "Released: its outline and contents are loose again. ";
+}
+
 fn pressedByScript(tag: ?[]const u8) bool {
     const want = scripted_press orelse return false;
     const t = tag orelse return false;
@@ -12653,21 +12860,11 @@ fn properties() !void {
                 if (i.ink_outside > 0) propText("Issue", "ink area {d:.2} mm in margin", .{i.ink_outside}, 21);
             }
             try propFont("Legend font", 5);
-            if (panel_edit == null and tbutton(@src(), "Edit panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) enterPanelEdit(pi);
+            if (panel_edit == null) actionButton(@src(), "panel.editPanel", "Edit panel", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
             try panelGrids(pi);
             try panelFab(pi);
             if (state.model.has_sheet) return;
-            if (tbutton(@src(), "Release panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-                const id = act(.releasePanel, .{pi}) catch {
-                    state.status = "The panel could not be released. ";
-                    return;
-                };
-                state.context = if (state.model.locate(id)) |loc| switch (loc) {
-                    .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
-                    else => .worksheet,
-                } else .worksheet;
-                state.status = "Released: its outline and contents are loose again. ";
-            }
+            actionButton(@src(), "panel.releasePanel", "Release panel", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         },
         .region => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
@@ -12698,20 +12895,13 @@ fn properties() !void {
             propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
             if (region.style == null) {
                 // Its keys named in flow order: the prefix, then 1, 2 …
-                const S = struct {
-                    var prefix: [16]u8 = .{'K'} ++ @as([15]u8, @splat(0));
-                    var len: usize = 1;
-                };
-                if (textProp("Key name prefix", S.prefix[0..S.len], 24)) |v| {
-                    S.len = @min(v.len, S.prefix.len);
-                    @memcpy(S.prefix[0..S.len], v[0..S.len]);
+                const prefix = key_name_prefix[0..key_name_prefix_len];
+                if (textProp("Key name prefix", prefix, 24)) |v| {
+                    key_name_prefix_len = @min(v.len, key_name_prefix.len);
+                    @memcpy(key_name_prefix[0..key_name_prefix_len], v[0..key_name_prefix_len]);
                 }
                 var lb: [64]u8 = undefined;
-                if (tbutton(@src(), std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ S.prefix[0..S.len], S.prefix[0..S.len] }) catch "Name keys in order", .{}, .{ .expand = .horizontal, .id_extra = 25, .tag = elementTag("nameKeysInOrder") })) {
-                    if (act(.nameKeysInOrder, .{ r.panel, r.region, S.prefix[0..S.len] })) |n| {
-                        state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
-                    } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
-                }
+                actionButton(@src(), "region.nameKeysInOrder", std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name keys in order", 0, .{ .expand = .horizontal, .id_extra = 25 });
             }
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
@@ -12724,21 +12914,9 @@ fn properties() !void {
                 const placed_rows = tracksIn(r.panel, r.region);
                 var lb: [48]u8 = undefined;
                 const label = std.fmt.bufPrint(&lb, "Make tracks of its {d} {s}", .{ placed_rows.len, if (region.major() == .row) "rows" else "columns" }) catch "Make tracks";
-                if (placed_rows.len > 0 and tbutton(@src(), label, .{}, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 }, .tag = elementTag("makeTracks") })) {
-                    const a = dvui.currentWindow().arena();
-                    if (a.alloc(geom.Point, placed_rows.len)) |origins| {
-                        for (placed_rows, origins) |t, *o| o.* = .{ .x = t.box.x0, .y = t.box.y1 };
-                        if (act(.splitIntoTracks, .{ r.panel, r.region, origins })) |n| {
-                            track_cursor = null;
-                            state.status = std.fmt.bufPrint(&import_status_buf, "{d} tracks, its flow running through them. ", .{n}) catch "Made tracks. ";
-                        } else |_| state.status = "The tracks were not made. ";
-                    } else |_| {}
-                }
+                if (placed_rows.len > 0) actionButton(@src(), "region.makeTracks", label, 0, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } });
             }
-            if (tbutton(@src(), if (is_track) "Remove track" else "Remove region", .{}, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 }, .tag = elementTag("remove") })) {
-                removeRegionOf(r.panel, r.region);
-                return;
-            }
+            actionButton(@src(), "region.remove", if (is_track) "Remove track" else "Remove region", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
@@ -16210,23 +16388,15 @@ fn threadProperties(pi: usize, ri: usize) void {
                 if (t == m.panels.items[pi].regions.items[ri].id) break i;
             } else 0;
             propText("In it", "track {d} of {d}", .{ k + 1, f.tracks.items.len }, 32);
-            if (tbutton(@src(), "Show the flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) state.context = .{ .flow = f.id };
+            actionButton(@src(), "paragraph.showTheFlow", "Show the flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         }
     }
     if (before) |b| propText("Continues", "{s}", .{trackLabel(&buf, b, pi)}, 30);
     if (after) |n| propText("Goes on into", "{s}", .{trackLabel(&buf, n, pi)}, 31);
-    if (tbutton(@src(), "Join a track after this…", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
-        join_from = .{ .panel = pi, .region = ri };
-        state.tool = .join;
-    }
+    actionButton(@src(), "paragraph.joinATrackAfterThis", "Join a track after this…", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     const f = m.trackFlow(pi, ri);
     const detachable = f != null and (f.?.tracks.items.len > 1 or f.?.items.items.len > 0);
-    if (detachable) if (tbutton(@src(), "Take out of its flow", .{}, .{ .expand = .horizontal })) {
-        const alone = f.?.tracks.items.len == 1;
-        if (act(.detachTrack, .{ pi, ri })) {
-            state.status = if (alone) "Taken out: its text is kept in the flow, now unplaced (under Flows in the Browser). " else "Taken out: the flow keeps all its text, on its other tracks. ";
-        } else |_| state.status = "The track was not taken out. ";
-    };
+    if (detachable) actionButton(@src(), "paragraph.takeOutOfItsFlow", "Take out of its flow", 0, .{ .expand = .horizontal });
 }
 
 /// The document's flows: how many, how many unplaced, and a new one.
@@ -16237,13 +16407,7 @@ fn flowsProperties() void {
     }
     propText("Flows", "{d}", .{state.model.flows.items.len}, 1);
     propText("Unplaced", "{d}", .{unplaced}, 2);
-    if (tbutton(@src(), "New flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        var nb: [32]u8 = undefined;
-        const name = state.model.freshName(&nb, .flows, "Flow");
-        if (act(.addFlow, .{name})) |id| {
-            state.context = .{ .flow = id };
-        } else |_| state.status = "The flow was not made. ";
-    }
+    actionButton(@src(), "flows.newFlow", "New flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Removing a flow with content takes a second click: the flow armed.
@@ -16291,16 +16455,7 @@ fn flowProperties(id: layout.model.ObjectId) void {
     }
     if (flow_remove_armed != null and flow_remove_armed.? != id) flow_remove_armed = null;
     const armed = flow_remove_armed != null;
-    const empty = f.items.items.len == 0;
-    if (tbutton(@src(), if (armed) "Remove it and all it holds: click again" else "Remove flow", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } , .tag = elementTag("removeFlow")})) {
-        if (empty or armed) {
-            flow_remove_armed = null;
-            if (act(.removeFlow, .{id})) {
-                state.context = .flows;
-                state.status = "Flow removed; its tracks have empty flows of their own. ";
-            } else |_| state.status = "The flow was not removed. ";
-        } else flow_remove_armed = id;
-    }
+    actionButton(@src(), "flow.removeFlow", if (armed) "Remove it and all it holds: press again" else "Remove flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// A track's name, with its panel's when that is not panel `here`.

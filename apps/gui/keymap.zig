@@ -60,6 +60,19 @@ pub const modes = [_]M{
 };
 
 pub const action_defs = [_]A{
+    // Done by the properties pane's buttons (virtual keys, see
+    // `button_binds`), on the context.
+    .{ .name = "region.make-tracks" },
+    .{ .name = "region.remove" },
+    .{ .name = "region.name-keys" },
+    .{ .name = "track.show-flow" },
+    .{ .name = "track.join-after" },
+    .{ .name = "track.take-out" },
+    .{ .name = "flows.new" },
+    .{ .name = "flow.remove" },
+    .{ .name = "panel.edit" },
+    .{ .name = "panel.release" },
+
     // Bring every auto-hide pane in, or let them all go (a hot corner's).
     .{ .name = "panes.toggle-auto" },
     // The document's views: a new one beside the active one, closing it,
@@ -652,4 +665,41 @@ fn upper(comptime s: []const u8) []const u8 {
         const final = out;
         return &final;
     }
+}
+
+// Buttons as virtual keys (decided 2026-11-20) -----------------------------
+//
+// A UI button is a virtual key: its press is an event named by the
+// button's id (main.zig, "Element ids"), and these bindings map it to an
+// action, as `binds` map chords. The button, its key (if one is bound), its
+// menu item and a script all run the same action, which works on the
+// context. A button's tooltip shows the action's key from the keymap.
+
+pub const ButtonBind = struct { button: []const u8, action: ActionId };
+
+pub const button_binds = [_]ButtonBind{
+    .{ .button = "region.makeTracks", .action = act("region.make-tracks") },
+    .{ .button = "region.remove", .action = act("region.remove") },
+    .{ .button = "region.nameKeysInOrder", .action = act("region.name-keys") },
+    .{ .button = "paragraph.showTheFlow", .action = act("track.show-flow") },
+    .{ .button = "paragraph.joinATrackAfterThis", .action = act("track.join-after") },
+    .{ .button = "paragraph.takeOutOfItsFlow", .action = act("track.take-out") },
+    .{ .button = "flows.newFlow", .action = act("flows.new") },
+    .{ .button = "flow.removeFlow", .action = act("flow.remove") },
+    .{ .button = "panel.editPanel", .action = act("panel.edit") },
+    .{ .button = "panel.releasePanel", .action = act("panel.release") },
+};
+
+comptime {
+    // One binding a button.
+    for (button_binds, 0..) |b, i| for (button_binds[0..i]) |c| {
+        if (std.mem.eql(u8, b.button, c.button)) @compileError("button bound twice: " ++ b.button);
+    };
+}
+
+/// The action button `id` is bound to (a repeat's "#n" aside).
+pub fn buttonAction(id: []const u8) ?ActionId {
+    const base = if (std.mem.indexOfScalar(u8, id, '#')) |k| id[0..k] else id;
+    for (button_binds) |b| if (std.mem.eql(u8, b.button, base)) return b.action;
+    return null;
 }
