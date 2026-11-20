@@ -6488,14 +6488,14 @@ fn selectionProperties() !void {
         if (parent != .space) break false;
     } else true;
     if (!in_space) return;
-    if (tbutton(@src(), "Group", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) groupSelection();
-    if (tbutton(@src(), "Move to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, false);
-    if (tbutton(@src(), "Copy to a new frame", .{}, .{ .expand = .horizontal })) transferSelection(null, true);
+    keyButton(@src(), "Group", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+    keyButton(@src(), "Move to a new frame", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "Copy to a new frame", 0, .{ .expand = .horizontal });
     for (state.model.spaces.items, 0..) |sp, si| {
         if (si == shown_space) continue;
         var buf: [96]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "Move to {s}", .{if (si == 0) "the canvas" else sp.name}) catch "Move";
-        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = si })) transferSelection(si, false);
+        keyButton(@src(), text, @intCast(si), .{ .expand = .horizontal, .id_extra = si });
     }
 }
 
@@ -7547,7 +7547,7 @@ fn panelFab(pi: usize) !void {
     const fab: Fab = state.model.panels.items[pi].fab;
     const ar = dvui.currentWindow().arena();
     var next = fab;
-    var layers = try ar.dupe(FabLayer, fab.layers);
+    const layers = try ar.dupe(FabLayer, fab.layers);
     var changed = false;
     // A structural change (a layer added, removed or moved) is a step of
     // its own; typing in a field merges with the field's last change.
@@ -7572,8 +7572,6 @@ fn panelFab(pi: usize) !void {
             if (std.mem.eql(u8, sn, tt.name)) break;
         } else try slots.append(ar, tt.name);
     };
-    var remove: ?usize = null;
-    var move: ?struct { from: usize, up: bool } = null;
     for (layers, 0..) |*l, li| {
         const n = 420 + li * 40;
         setTagScope("fabLayer.{d}", .{li + 1});
@@ -7582,9 +7580,9 @@ fn panelFab(pi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
             defer row.deinit();
             dvui.label(@src(), "{d}. {s}", .{ li + 1, l.name }, .{ .font = dvui.Font.theme(.heading), .gravity_y = 0.5 });
-            if (li + 1 < layers.len and tbuttonIcon(@src(), "Later", dvui.entypo.arrow_down, .{}, .{}, .{ .gravity_x = 1, .id_extra = 1 })) move = .{ .from = li, .up = false };
-            if (li > 0 and tbuttonIcon(@src(), "Earlier", dvui.entypo.arrow_up, .{}, .{}, .{ .gravity_x = 1, .id_extra = 2 })) move = .{ .from = li, .up = true };
-            if (tbuttonIcon(@src(), "Remove layer", dvui.entypo.cross, .{}, .{}, .{ .gravity_x = 1, .id_extra = 3 })) remove = li;
+            if (li + 1 < layers.len) keyIcon(@src(), "Later", dvui.entypo.arrow_down, @intCast(li), .{ .gravity_x = 1, .id_extra = 1 });
+            if (li > 0) keyIcon(@src(), "Earlier", dvui.entypo.arrow_up, @intCast(li), .{ .gravity_x = 1, .id_extra = 2 });
+            keyIcon(@src(), "Remove layer", dvui.entypo.cross, @intCast(li), .{ .gravity_x = 1, .id_extra = 3 });
         }
         if (textProp("Name", l.name, n + 1)) |v| {
             l.name = v;
@@ -7705,35 +7703,9 @@ fn panelFab(pi: usize) !void {
         };
     }
     setTagScope("{s}", .{"fabrication"});
-    if (remove) |li| {
-        std.mem.copyForwards(FabLayer, layers[li .. layers.len - 1], layers[li + 1 ..]);
-        layers = layers[0 .. layers.len - 1];
-        changed = true;
-        key = 0;
-    }
-    if (move) |mv| {
-        const to = if (mv.up) mv.from - 1 else mv.from + 1;
-        std.mem.swap(FabLayer, &layers[mv.from], &layers[to]);
-        changed = true;
-        key = 0;
-    }
     // After its layers, the fabrication's own.
     setGroup("{s}", .{base_group});
-    if (tbutton(@src(), "Add layer", .{}, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } })) {
-        var fab_name_buf: [32]u8 = undefined;
-        // The first: the base itself, solid from the bottom up. After it:
-        // every label inlaid, 0.6 mm from the top down.
-        const l: FabLayer = if (layers.len == 0)
-            .{ .name = "Base", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = fab.thickness, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }
-        else
-            .{ .name = try ar.dupe(u8, state.model.freshName(&fab_name_buf, .{ .fab = pi }, "Layer")), .source = .{ .text = "" }, .surface = .base_top, .dir = .down, .depth = 0.6, .op = .{ .inlay = .{ .name = "white", .color = .hex("#f2f2f2") } } };
-        const grown = try ar.alloc(FabLayer, layers.len + 1);
-        @memcpy(grown[0..layers.len], layers);
-        grown[layers.len] = l;
-        layers = grown;
-        changed = true;
-        key = 0;
-    }
+    keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } });
     if (!changed) return;
     next.layers = layers;
     const done = if (key != 0) actM(key, .setPanelFab, .{ pi, next }) else act(.setPanelFab, .{ pi, next });
@@ -7749,22 +7721,9 @@ fn panelGrids(pi: usize) !void {
     const panel = state.model.panels.items[pi];
     heading("Grids", .{}, 300);
     for (panel.grids.items, 0..) |g, gi| {
-        if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 301 + gi, .tag = listTag("panel.grids", g.name) })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+        keyButton(@src(), g.name, @intCast(gi), .{ .expand = .horizontal, .id_extra = 301 + gi, .tag = listTag("panel.grids", g.name) });
     }
-    if (tbutton(@src(), "Add grid", .{}, .{ .expand = .horizontal, .id_extra = 299 })) {
-        // Points 13 mm apart filling the ink area, from its top-left.
-        const step: f64 = 13.0;
-        const inner_w = panel.w - panel.margins.left - panel.margins.right;
-        const inner_h = panel.h - panel.margins.top - panel.margins.bottom;
-        const cols: u32 = @intFromFloat(@max(1, @floor(inner_w / step)));
-        const rows: u32 = @intFromFloat(@max(1, @floor(inner_h / step)));
-        const origin: geom.Point = .{ .x = panel.margins.left + step / 2, .y = panel.h - panel.margins.top - step / 2 };
-        const gi = act(.addGrid, .{ pi, origin, layout.model.GridShape{ .cols = cols, .rows = rows, .pitch_x = step, .pitch_y = step } }) catch {
-            state.status = "The grid could not be added. ";
-            return;
-        };
-        state.context = .{ .grid = .{ .panel = pi, .index = gi } };
-    }
+    keyButton(@src(), "Add grid", 0, .{ .expand = .horizontal, .id_extra = 299 });
 }
 
 /// A grid: its shape (counts, spacing, stretch), where it starts, what it
@@ -7843,20 +7802,11 @@ fn gridProperties(pi: usize, gi: usize) !void {
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
     propText("On", "{s}", .{state.model.panels.items[pi].name}, 2);
     // Its keys' legends as a sheet (theirs and those beside them).
-    if (g.instances.items.len > 0) if (tbutton(@src(), "Make a legend sheet", .{}, .{ .expand = .horizontal, .id_extra = 6 })) {
-        var nb: [96]u8 = undefined;
-        const name = state.model.freshName(&nb, .sheets, "Legends");
-        if (act(.makeSheet, .{ name, g.id })) |id| {
-            state.context = .{ .sheet = id };
-            // Beside the canvas, to see its edits.
-            openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
-            state.status = "Sheet made, open beside the canvas: the keys' legends now come from it. ";
-        } else |_| state.status = "The sheet was not made. ";
-    };
+    if (g.instances.items.len > 0) keyButton(@src(), "Make a legend sheet", 0, .{ .expand = .horizontal, .id_extra = 6 });
     if (state.model.findGrid(g.link)) |src| {
         const sg = state.model.panels.items[src.panel].grids.items[src.index];
         propText("Follows", "{s} on {s}", .{ sg.name, state.model.panels.items[src.panel].name }, 3);
-        if (tbutton(@src(), "Show the grid it follows", .{}, .{ .expand = .horizontal, .id_extra = 4 })) state.context = .{ .grid = .{ .panel = src.panel, .index = src.index } };
+        keyButton(@src(), "Show the grid it follows", 0, .{ .expand = .horizontal, .id_extra = 4 });
         propText("", "Changing its shape here stops it following.", .{}, 5);
     } else {
         var followers: usize = 0;
@@ -7965,16 +7915,8 @@ fn gridProperties(pi: usize, gi: usize) !void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 8 });
             defer row.deinit();
-            if (tbutton(@src(), "Fill empty points", .{}, .{ .id_extra = n + 8 })) {
-                const made = act(.fillGrid, .{ pi, gi, si }) catch 0;
-                var buf: [64]u8 = undefined;
-                state.status = std.fmt.bufPrint(&buf, "{d} placed. ", .{made}) catch "";
-                state.status = dvui.currentWindow().arena().dupe(u8, state.status) catch "";
-            }
-            if (tbutton(@src(), "Remove stamp", .{}, .{ .id_extra = n + 9 })) {
-                try act(.removeStamp, .{ pi, gi, si });
-                return;
-            }
+            keyButton(@src(), "Fill empty points", @intCast(si), .{ .id_extra = n + 8 });
+            keyButton(@src(), "Remove stamp", @intCast(si), .{ .id_extra = n + 9 });
         }
     }
     heading("Add a stamp", .{}, 90);
@@ -7983,14 +7925,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 91 });
         defer row.deinit();
         inline for (.{ .{ "Parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "Holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "Legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
-            if (tbutton(@src(), kind[0], .{}, .{ .id_extra = 92 + k })) {
-                const proto_id = if (state.model.prototypes.items.len == 0) try act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) else state.model.prototypes.items[0].id;
-                const step_x = sh.stepX();
-                const step_y = sh.stepY();
-                _ = act(.addStamp, .{ pi, gi, layout.model.Stamp{ .name = kind[0], .prototype = proto_id, .role = kind[1], .w = step_x * kind[2], .h = step_y * kind[3], .offset = .{ .x = 0, .y = step_y * kind[4] } } }) catch {
-                    state.status = "The stamp could not be added. ";
-                };
-            }
+            keyButton(@src(), kind[0], 0, .{ .id_extra = 92 + k });
         }
     }
     // A grid on another part following this one: the keys over a plate's
@@ -8018,10 +7953,9 @@ fn gridProperties(pi: usize, gi: usize) !void {
             }
         }
     }
-    if (tbutton(@src(), "Remove grid", .{}, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } })) {
-        try act(.removeGrid, .{ pi, gi });
-        state.context = .{ .panel = pi };
-    }
+    // The grid's own, after its stamps.
+    setGroup("{s}", .{base_group});
+    keyButton(@src(), "Remove grid", 0, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } });
 }
 
 /// A tile bound to a grid: its point, how many points it spans, and
@@ -8032,19 +7966,13 @@ fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
     const g = state.model.panels.items[pi].grids.items[gi];
     const inst = g.instances.items[ii];
     const sh = state.model.gridShape(pi, gi);
+    _ = sh;
     next_element = "instance.grid";
-    if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 40 })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+    keyButton(@src(), g.name, 0, .{ .expand = .horizontal, .id_extra = 40 });
     if (state.model.stampIndex(pi, gi, inst.stamp)) |si| propText("Stamp", "{s}", .{g.stamps.items[si].name}, 41);
     if (inst.loose) |c| {
         propText("Point", "none: left at ({d:.2}, {d:.2}) mm", .{ c.x, c.y }, 42);
-        if (tbutton(@src(), "Bind to the nearest point", .{}, .{ .expand = .horizontal, .id_extra = 43 })) {
-            const o = state.model.gridPoint(pi, gi, 0, 0);
-            const col = @min(@as(f64, @floatFromInt(sh.cols - inst.cols)), @max(0, @round((c.x - o.x) / sh.stepX())));
-            const row = @min(@as(f64, @floatFromInt(sh.rows - inst.rows)), @max(0, @round((o.y - c.y) / sh.stepY())));
-            act(.bindInstance, .{ pi, gi, ii, @as(u32, @intFromFloat(col)), @as(u32, @intFromFloat(row)) }) catch {
-                state.status = "It does not fit on the grid. ";
-            };
-        }
+        keyButton(@src(), "Bind to the nearest point", 0, .{ .expand = .horizontal, .id_extra = 43 });
     } else {
         propText("Point", "column {d}, row {d}", .{ inst.col + 1, inst.row + 1 }, 42);
         if (numberProp("Spans columns", @floatFromInt(inst.cols), 1, 200, 44)) |v| act(.setInstanceSpan, .{ pi, gi, ii, @as(u32, @intFromFloat(@round(v))), inst.rows }) catch {
@@ -8055,10 +7983,7 @@ fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
         };
     }
     if (state.model.instanceBox(pi, gi, ii)) |b| propText("Box", "{d:.2} × {d:.2} mm", .{ b.width(), b.height() }, 46);
-    if (tbutton(@src(), "Remove from the grid", .{}, .{ .expand = .horizontal, .id_extra = 47 })) {
-        try act(.removeInstance, .{ pi, gi, ii });
-        state.context = .{ .grid = .{ .panel = pi, .index = gi } };
-    }
+    keyButton(@src(), "Remove from the grid", 0, .{ .expand = .horizontal, .id_extra = 47 });
 }
 
 // Panel editing ---------------------------------------------------------------
@@ -8302,12 +8227,12 @@ fn panelEditHeader() void {
             var choice: usize = @min(p.stamp, names.items.len - 1);
             if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7004 })) p.stamp = choice;
         }
-        if (tbutton(@src(), "Grid settings", .{}, .{ .expand = .horizontal, .id_extra = 7005 })) state.context = .{ .grid = .{ .panel = p.panel, .index = p.grid } };
+        keyButton(@src(), "Grid settings", 0, .{ .expand = .horizontal, .id_extra = 7005 });
     }
     inline for (.{ "Click a point: place or pick.", "Drag across points: span them.", "Delete removes the picked one." }, 0..) |line, k| {
         dvui.labelNoFmt(@src(), line, .{}, .{ .id_extra = 7010 + k, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     }
-    if (tbutton(@src(), "Leave panel editing", .{}, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } })) leavePanelEdit();
+    keyButton(@src(), "Leave panel editing", 0, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } });
 }
 
 // Layers and images ---------------------------------------------------------
@@ -8647,7 +8572,7 @@ fn planEditor(id: ObjectId) void {
     }
     if (m.active_plan == id) {
         propText("Exported", "{s}", .{"this plan"}, 102);
-    } else if (tbutton(@src(), "Export this plan (make it active)", .{}, .{ .expand = .horizontal, .id_extra = 102 })) act(.setActivePlan, .{id}) catch {};
+    } else keyButton(@src(), "Export this plan (make it active)", 0, .{ .expand = .horizontal, .id_extra = 102 });
 
     // How the plan's view shows it, when one is active.
     if (activeKind() == .manufacture and vl.views[vl.active].target == @intFromEnum(id)) {
@@ -8699,16 +8624,7 @@ fn planEditor(id: ObjectId) void {
 
     // Operations, in order (a new one goes last).
     heading("Operations", .{}, 189);
-    if (tbutton(@src(), "Add an operation", .{}, .{ .expand = .horizontal, .id_extra = 190 })) {
-        var n = planCopy(p);
-        var ops: std.ArrayList(manufacture.Operation) = .empty;
-        ops.appendSlice(ar, n.operations) catch return;
-        var ob: [32]u8 = undefined;
-        const op_name = ar.dupe(u8, state.model.freshName(&ob, .{ .plan = id }, "Operation")) catch return;
-        ops.append(ar, .{ .name = op_name, .process = .none }) catch return;
-        n.operations = ops.items;
-        act(.setPlan, .{ id, n }) catch {};
-    }
+    keyButton(@src(), "Add an operation", 0, .{ .expand = .horizontal, .id_extra = 190 });
     for (0..p.operations.len) |k| operationEditor(id, p, k, 200 + 100 * k) catch {};
 
     // What is worth a second look.
@@ -8720,10 +8636,8 @@ fn planEditor(id: ObjectId) void {
         tl.addText(warningText(&buf, w), .{ .color_text = .{ .color = colors.overflow } });
         tl.deinit();
     }
-    if (tbutton(@src(), "Remove this plan", .{}, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 10 } })) {
-        act(.removePlan, .{id}) catch {};
-        state.context = .plans;
-    }
+    endSection();
+    keyButton(@src(), "Remove this plan", 0, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 10 } });
 }
 
 /// Operation `k` of plan `p`: shown in the view, moved, removed; its name,
@@ -8742,29 +8656,9 @@ fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void
         if (tcheckbox(@src(), &shown, "Shown", .{ .id_extra = n0 })) {
             if (shown) _ = op_hidden.remove(opKey(id, k)) else op_hidden.put(state.gpa, opKey(id, k), {}) catch {};
         }
-        if (k > 0 and tbutton(@src(), "Earlier", .{}, .{ .id_extra = n0 + 1 })) {
-            const n = planCopy(p);
-            const ops = @constCast(n.operations);
-            std.mem.swap(manufacture.Operation, &ops[k], &ops[k - 1]);
-            act(.setPlan, .{ id, n }) catch {};
-            return;
-        }
-        if (k + 1 < p.operations.len and tbutton(@src(), "Later", .{}, .{ .id_extra = n0 + 2 })) {
-            const n = planCopy(p);
-            const ops = @constCast(n.operations);
-            std.mem.swap(manufacture.Operation, &ops[k], &ops[k + 1]);
-            act(.setPlan, .{ id, n }) catch {};
-            return;
-        }
-        if (tbutton(@src(), "Remove", .{}, .{ .id_extra = n0 + 3 })) {
-            var n = planCopy(p);
-            var ops: std.ArrayList(manufacture.Operation) = .empty;
-            try ops.appendSlice(ar, n.operations[0..k]);
-            try ops.appendSlice(ar, n.operations[k + 1 ..]);
-            n.operations = ops.items;
-            act(.setPlan, .{ id, n }) catch {};
-            return;
-        }
+        if (k > 0) keyButton(@src(), "Earlier", @intCast(k), .{ .id_extra = n0 + 1 });
+        if (k + 1 < p.operations.len) keyButton(@src(), "Later", @intCast(k), .{ .id_extra = n0 + 2 });
+        keyButton(@src(), "Remove", @intCast(k), .{ .id_extra = n0 + 3 });
     }
     if (textProp("Name", op.name, n0 + 4)) |v| {
         const n = planCopy(p);
@@ -9941,15 +9835,9 @@ fn layerProperties(space: usize, li: usize) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (tbutton(@src(), "Move up", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, true}) catch li } };
-        if (tbutton(@src(), "Move down", .{}, .{})) state.context = .{ .layer = .{ .space = space, .index = act(.moveLayer, .{space, li, false}) catch li } };
-        if (tbutton(@src(), "Remove", .{}, .{})) {
-            act(.removeLayer, .{space, li}) catch {
-                state.status = "Only an empty layer, other than the space's first, can be removed. ";
-                return;
-            };
-            state.context = .{ .panel = state.model.rootOf(space) };
-        }
+        keyButton(@src(), "Move up", 0, .{});
+        keyButton(@src(), "Move down", 0, .{});
+        keyButton(@src(), "Remove", 0, .{});
     }
 }
 
@@ -12168,42 +12056,30 @@ fn toolBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4) });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
-    if (tbuttonIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, .{}, .{}, .{ .data_out = &wd })) zoomToContext();
+    keyIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
     {
         const on = state.tool == .constrain;
         var cwd: dvui.WidgetData = undefined;
-        if (tbuttonIcon(@src(), "Constrain", dvui.entypo.ruler, .{}, .{}, .{
+        keyIcon(@src(), "Constrain", dvui.entypo.ruler, 0, .{
             .data_out = &cwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.drag = null;
-            constrain_first = null;
-            state.tool = if (on) .select else .constrain;
-        }
+        });
         dvui.tooltip(@src(), .{ .active_rect = cwd.borderRectScale().r }, "Constrain: pick a feature of what is to move, then what it keeps to; set the distance or size", .{}, .{});
     }
 
     switch (state.context) {
         .prototypes => {
             var pwd: dvui.WidgetData = undefined;
-            if (tbuttonIcon(@src(), "Add prototype", dvui.entypo.squared_plus, .{}, .{}, .{ .data_out = &pwd })) addPrototype() catch {
-                state.status = "The prototype was not added. ";
-            };
+            keyIcon(@src(), "Add prototype", dvui.entypo.squared_plus, 0, .{ .data_out = &pwd });
             dvui.tooltip(@src(), .{ .active_rect = pwd.borderRectScale().r }, "Add a tile prototype", .{}, .{});
         },
-        .prototype => |id| {
+        .prototype => {
             var dwd: dvui.WidgetData = undefined;
-            if (tbuttonIcon(@src(), "Duplicate prototype", dvui.entypo.copy, .{}, .{}, .{ .data_out = &dwd })) duplicatePrototype(id) catch {
-                state.status = "The prototype was not duplicated. ";
-            };
+            keyIcon(@src(), "Duplicate prototype", dvui.entypo.copy, 0, .{ .data_out = &dwd });
             dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "Duplicate: a copy to make a variant of", .{}, .{});
             var rwd: dvui.WidgetData = undefined;
-            if (tbuttonIcon(@src(), "Delete prototype", dvui.entypo.trash, .{}, .{}, .{ .data_out = &rwd })) {
-                if (act(.removePrototype, .{id})) {
-                    state.context = .prototypes;
-                } else |err| state.status = if (err == error.PrototypeInUse) "Tiles are still made from this prototype: switch them first. " else "The prototype was not deleted. ";
-            }
+            keyIcon(@src(), "Delete prototype", dvui.entypo.trash, 0, .{ .data_out = &rwd });
             dvui.tooltip(@src(), .{ .active_rect = rwd.borderRectScale().r }, "Delete: only while no tile is made from it", .{}, .{});
         },
         else => {},
@@ -12213,26 +12089,20 @@ fn toolBar() void {
     if (state.context == .panel and state.model.panels.items[state.context.panel].unbounded) {
         const on = state.tool == .new_sketch;
         var swd: dvui.WidgetData = undefined;
-        if (tbuttonIcon(@src(), "New sketch", dvui.entypo.pencil, .{}, .{}, .{
+        keyIcon(@src(), "New sketch", dvui.entypo.pencil, 0, .{
             .data_out = &swd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.drag = null;
-            state.tool = if (on) .select else .new_sketch;
-        }
+        });
         dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "New sketch: click where its origin goes, then draw and constrain it", .{}, .{});
     }
 
     if (state.context == .panel) {
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
-        if (tbuttonIcon(@src(), "Add shape", dvui.entypo.circle, .{}, .{}, .{
+        keyIcon(@src(), "Add shape", dvui.entypo.circle, 0, .{
             .data_out = &awd,
             .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.drag = null;
-            state.tool = if (art_on) .select else .add_art;
-        }
+        });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add shape: drag out line art on the panel; tracks under it flow around its ink", .{}, .{});
 
         // Two track modes, one button each: rows (tiles flow left to right)
@@ -12246,31 +12116,18 @@ fn toolBar() void {
         }, 0..) |mode, mi| {
             const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[4] and (mode[4] == .track or tracks_tool.major == mode[0]);
             var twd: dvui.WidgetData = undefined;
-            if (tbuttonIcon(@src(), mode[1], mode[2], .{}, .{}, .{
+            keyIcon(@src(), mode[1], mode[2], 0, .{
                 .id_extra = mi,
                 .data_out = &twd,
                 .color_fill = if (mode_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-            })) {
-                state.drag = null;
-                if (mode_on) {
-                    state.tool = .select;
-                } else {
-                    state.tool = .add_tracks;
-                    tracks_tool.major = mode[0];
-                    tracks_tool.kind = mode[4];
-                    ensurePrototype() catch {};
-                }
-            }
+            });
             dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, mode[3], .{}, .{ .id_extra = mi });
         }
     }
     if (state.context == .region) {
         // Fit to tiles: the tracks shrink to what has been put in them.
-        const r = state.context.region;
         var fwd: dvui.WidgetData = undefined;
-        if (tbuttonIcon(@src(), "Fit to tiles", dvui.entypo.crop, .{}, .{}, .{ .data_out = &fwd })) {
-            state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
-        }
+        keyIcon(@src(), "Fit to tiles", dvui.entypo.crop, 0, .{ .data_out = &fwd });
         dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
     }
     const on_canvas = switch (state.context) {
@@ -12280,26 +12137,20 @@ fn toolBar() void {
     if (on_canvas or state.context == .selection or state.context == .group) {
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
-        if (tbuttonIcon(@src(), "Select area", dvui.entypo.select_arrows, .{}, .{}, .{
+        keyIcon(@src(), "Select area", dvui.entypo.select_arrows, 0, .{
             .data_out = &swd,
             .color_fill = if (sel_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.drag = null;
-            state.tool = if (sel_on) .select else .select_area;
-        }
+        });
         dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "Select area: drag around objects to pick them together, to move or copy into a frame", .{}, .{});
     }
     if (state.context == .worksheet or on_canvas) {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
         var awd: dvui.WidgetData = undefined;
-        if (tbuttonIcon(@src(), "Add panel", dvui.entypo.squared_plus, .{}, .{}, .{
+        keyIcon(@src(), "Add panel", dvui.entypo.squared_plus, 0, .{
             .data_out = &awd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
-        })) {
-            state.tool = if (on) .select else .add_panel;
-            state.drag = null;
-        }
+        });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add panel: drag out its outline on the sheet", .{}, .{});
     }
 }
@@ -12479,12 +12330,13 @@ fn buttonActionId(id: []const u8) ?keymap.ActionId {
 /// At the frame's start: a script's press of a shown action button joins
 /// the events; then each event runs its action.
 fn dispatchButtons() void {
-    if (scripted_press) |want| {
+    if (scripted_press) |want| found: {
+        // Once, though it may be in both frames' lists.
         for ([_][]const DrawnButton{ drawn_buttons.items, drawn_buttons_prev.items }) |list| for (list) |b| {
             if (!std.mem.eql(u8, b.id, want)) continue;
             pushButtonEvent(b.id, b.arg);
             scripted_press = null;
-            break;
+            break :found;
         };
     }
     const n = button_events_n;
@@ -12539,6 +12391,10 @@ fn runButtonAction(inv: keymap.Invocation) bool {
         },
         kact("panel.release") => panelRelease(),
         else => {
+            for (button_handlers) |h| if (h.action == inv.action) {
+                h.run(inv.arg);
+                return true;
+            };
             // A button's action without a handler here is delivered to the
             // button (false); the app's own actions run as their keys do.
             if (std.mem.indexOfScalar(u8, keymap.R.actionName(inv.action), '.')) |_| {
@@ -12889,6 +12745,587 @@ fn virtualKey(clicked: bool, tag: []const u8) bool {
     return pressedByScript(tag);
 }
 
+/// A button as a virtual key whose effect is a handler
+/// (`button_handlers`): drawn, a click is an event for its action, with
+/// `arg` (which of several things it stands for).
+fn keyButton(src: std.builtin.SourceLocation, label: []const u8, arg: i32, opts: dvui.Options) void {
+    var o = opts;
+    if (o.tag == null) {
+        next_kind = .button;
+        o.tag = tagFor(label);
+    }
+    const tag = o.tag.?;
+    recordDrawn(tag, arg);
+    if (dvui.button(src, label, .{}, o)) pushButtonEvent(tag, arg);
+}
+
+/// An icon button as a virtual key (see `keyButton`).
+fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, opts: dvui.Options) void {
+    var o = opts;
+    if (o.tag == null) {
+        next_kind = .button;
+        o.tag = if (elem_group.len > 0) tagFor(name) else uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "tool.{s}", .{lowerCamel(name)}) catch "tool");
+    }
+    const tag = o.tag.?;
+    recordDrawn(tag, arg);
+    if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
+}
+
+/// A button's effect, by its action (elements.zig: the button's id),
+/// working on the context it was pressed in and its argument.
+const ButtonHandler = struct { action: keymap.ActionId, run: *const fn (arg: i32) void };
+
+fn handler(comptime name: []const u8, f: *const fn (arg: i32) void) ButtonHandler {
+    return .{ .action = comptime kact(name), .run = f };
+}
+
+/// The buttons' effects (an unknown action fails the build).
+const button_handlers = [_]ButtonHandler{
+    // The tools.
+    handler("tool.zoom-to-context", struct {
+        fn f(_: i32) void {
+            zoomToContext();
+        }
+    }.f),
+    handler("tool.constrain", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            constrain_first = null;
+            state.tool = if (state.tool == .constrain) .select else .constrain;
+        }
+    }.f),
+    handler("tool.add-prototype", struct {
+        fn f(_: i32) void {
+            addPrototype() catch {
+                state.status = "The prototype was not added. ";
+            };
+        }
+    }.f),
+    handler("tool.duplicate-prototype", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .prototype => |id| id,
+                else => return,
+            };
+            duplicatePrototype(id) catch {
+                state.status = "The prototype was not duplicated. ";
+            };
+        }
+    }.f),
+    handler("tool.delete-prototype", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .prototype => |id| id,
+                else => return,
+            };
+            if (act(.removePrototype, .{id})) {
+                state.context = .prototypes;
+            } else |err| state.status = if (err == error.PrototypeInUse) "Tiles are still made from this prototype: switch them first. " else "The prototype was not deleted. ";
+        }
+    }.f),
+    handler("tool.new-sketch", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            state.tool = if (state.tool == .new_sketch) .select else .new_sketch;
+        }
+    }.f),
+    handler("tool.add-shape", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            state.tool = if (state.tool == .add_art) .select else .add_art;
+        }
+    }.f),
+    handler("tool.add-rows", struct {
+        fn f(_: i32) void {
+            tracksMode(.row, .region);
+        }
+    }.f),
+    handler("tool.add-columns", struct {
+        fn f(_: i32) void {
+            tracksMode(.column, .region);
+        }
+    }.f),
+    handler("tool.add-track", struct {
+        fn f(_: i32) void {
+            tracksMode(.row, .track);
+        }
+    }.f),
+    handler("tool.fit-to-tiles", struct {
+        fn f(_: i32) void {
+            const r = switch (state.context) {
+                .region => |r| r,
+                else => return,
+            };
+            state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
+        }
+    }.f),
+    handler("tool.select-area", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            state.tool = if (state.tool == .select_area) .select else .select_area;
+        }
+    }.f),
+    // A panel's fabrication: its layers moved, removed, added.
+    handler("panel.fab.layer.*.later", struct {
+        fn f(arg: i32) void {
+            fabEdit(struct {
+                fn e(l: *std.ArrayList(layout.model.FabLayer), _: usize, a: i32) bool {
+                    const i: usize = @intCast(a);
+                    if (i + 1 >= l.items.len) return false;
+                    std.mem.swap(layout.model.FabLayer, &l.items[i], &l.items[i + 1]);
+                    return true;
+                }
+            }.e, arg);
+        }
+    }.f),
+    handler("panel.fab.layer.*.earlier", struct {
+        fn f(arg: i32) void {
+            fabEdit(struct {
+                fn e(l: *std.ArrayList(layout.model.FabLayer), _: usize, a: i32) bool {
+                    const i: usize = @intCast(a);
+                    if (i == 0 or i >= l.items.len) return false;
+                    std.mem.swap(layout.model.FabLayer, &l.items[i], &l.items[i - 1]);
+                    return true;
+                }
+            }.e, arg);
+        }
+    }.f),
+    handler("panel.fab.layer.*.remove-layer", struct {
+        fn f(arg: i32) void {
+            fabEdit(struct {
+                fn e(l: *std.ArrayList(layout.model.FabLayer), _: usize, a: i32) bool {
+                    const i: usize = @intCast(a);
+                    if (i >= l.items.len) return false;
+                    _ = l.orderedRemove(i);
+                    return true;
+                }
+            }.e, arg);
+        }
+    }.f),
+    handler("panel.fab.add-layer", struct {
+        fn f(arg: i32) void {
+            fabEdit(struct {
+                fn e(l: *std.ArrayList(layout.model.FabLayer), pi: usize, _: i32) bool {
+                    const ar = dvui.currentWindow().arena();
+                    var nb: [32]u8 = undefined;
+                    // The first: the base itself, solid from the bottom up.
+                    // After it: every label inlaid, 0.6 mm from the top down.
+                    const layer: layout.model.FabLayer = if (l.items.len == 0)
+                        .{ .name = "Base", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = state.model.panels.items[pi].fab.thickness, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }
+                    else
+                        .{ .name = ar.dupe(u8, state.model.freshName(&nb, .{ .fab = pi }, "Layer")) catch return false, .source = .{ .text = "" }, .surface = .base_top, .dir = .down, .depth = 0.6, .op = .{ .inlay = .{ .name = "white", .color = .hex("#f2f2f2") } } };
+                    l.append(ar, layer) catch return false;
+                    return true;
+                }
+            }.e, arg);
+        }
+    }.f),
+    // A panel's grids.
+    handler("panel.grids.*", struct {
+        fn f(arg: i32) void {
+            const pi = contextPanel() orelse return;
+            state.context = .{ .grid = .{ .panel = pi, .index = @intCast(arg) } };
+        }
+    }.f),
+    handler("panel.grids.add-grid", struct {
+        fn f(_: i32) void {
+            const pi = contextPanel() orelse return;
+            const panel = state.model.panels.items[pi];
+            // Points 13 mm apart filling the ink area, from its top-left.
+            const step: f64 = 13.0;
+            const inner_w = panel.w - panel.margins.left - panel.margins.right;
+            const inner_h = panel.h - panel.margins.top - panel.margins.bottom;
+            const cols: u32 = @intFromFloat(@max(1, @floor(inner_w / step)));
+            const rows: u32 = @intFromFloat(@max(1, @floor(inner_h / step)));
+            const origin: geom.Point = .{ .x = panel.margins.left + step / 2, .y = panel.h - panel.margins.top - step / 2 };
+            const gi = act(.addGrid, .{ pi, origin, layout.model.GridShape{ .cols = cols, .rows = rows, .pitch_x = step, .pitch_y = step } }) catch {
+                state.status = "The grid could not be added. ";
+                return;
+            };
+            state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+        }
+    }.f),
+    // A grid.
+    handler("grid.make-a-legend-sheet", struct {
+        fn f(_: i32) void {
+            const g = contextGrid() orelse return;
+            var nb: [96]u8 = undefined;
+            const name = state.model.freshName(&nb, .sheets, "Legends");
+            if (act(.makeSheet, .{ name, state.model.panels.items[g.panel].grids.items[g.index].id })) |id| {
+                state.context = .{ .sheet = id };
+                // Beside the canvas, to see its edits.
+                openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+                state.status = "Sheet made, open beside the canvas: the keys' legends now come from it. ";
+            } else |_| state.status = "The sheet was not made. ";
+        }
+    }.f),
+    handler("grid.show-the-grid-it-follows", struct {
+        fn f(_: i32) void {
+            const g = contextGrid() orelse return;
+            const link = state.model.panels.items[g.panel].grids.items[g.index].link;
+            if (state.model.findGrid(link)) |src| state.context = .{ .grid = .{ .panel = src.panel, .index = src.index } };
+        }
+    }.f),
+    handler("grid.stamp.*.fill-empty-points", struct {
+        fn f(arg: i32) void {
+            const g = contextGrid() orelse return;
+            const made = act(.fillGrid, .{ g.panel, g.index, @as(usize, @intCast(arg)) }) catch 0;
+            var buf: [64]u8 = undefined;
+            state.status = dvui.currentWindow().arena().dupe(u8, std.fmt.bufPrint(&buf, "{d} placed. ", .{made}) catch "") catch "";
+        }
+    }.f),
+    handler("grid.stamp.*.remove-stamp", struct {
+        fn f(arg: i32) void {
+            const g = contextGrid() orelse return;
+            act(.removeStamp, .{ g.panel, g.index, @as(usize, @intCast(arg)) }) catch {};
+        }
+    }.f),
+    handler("grid.add-stamp.parts", struct {
+        fn f(_: i32) void {
+            addStampKind("Parts", .part, 0.75, 0.75, 0);
+        }
+    }.f),
+    handler("grid.add-stamp.holes", struct {
+        fn f(_: i32) void {
+            addStampKind("Holes", .hole, 0.85, 0.85, 0);
+        }
+    }.f),
+    handler("grid.add-stamp.legends", struct {
+        fn f(_: i32) void {
+            addStampKind("Legends", .legend, 0.8, 0.25, 0.6);
+        }
+    }.f),
+    handler("grid.remove-grid", struct {
+        fn f(_: i32) void {
+            const g = contextGrid() orelse return;
+            act(.removeGrid, .{ g.panel, g.index }) catch return;
+            state.context = .{ .panel = g.panel };
+        }
+    }.f),
+    // A tile on a grid.
+    handler("instance.grid", struct {
+        fn f(_: i32) void {
+            const at = contextInstance() orelse return;
+            state.context = .{ .grid = .{ .panel = at.panel, .index = at.grid } };
+        }
+    }.f),
+    handler("instance.bind-to-the-nearest-point", struct {
+        fn f(_: i32) void {
+            const at = contextInstance() orelse return;
+            const inst = state.model.panels.items[at.panel].grids.items[at.grid].instances.items[at.index];
+            const c = inst.loose orelse return;
+            const sh = state.model.gridShape(at.panel, at.grid);
+            const o = state.model.gridPoint(at.panel, at.grid, 0, 0);
+            const col = @min(@as(f64, @floatFromInt(sh.cols - inst.cols)), @max(0, @round((c.x - o.x) / sh.stepX())));
+            const row = @min(@as(f64, @floatFromInt(sh.rows - inst.rows)), @max(0, @round((o.y - c.y) / sh.stepY())));
+            act(.bindInstance, .{ at.panel, at.grid, at.index, @as(u32, @intFromFloat(col)), @as(u32, @intFromFloat(row)) }) catch {
+                state.status = "It does not fit on the grid. ";
+            };
+        }
+    }.f),
+    handler("instance.remove-from-the-grid", struct {
+        fn f(_: i32) void {
+            const at = contextInstance() orelse return;
+            act(.removeInstance, .{ at.panel, at.grid, at.index }) catch return;
+            state.context = .{ .grid = .{ .panel = at.panel, .index = at.grid } };
+        }
+    }.f),
+    // Panel editing.
+    handler("panel.editing.grid-settings", struct {
+        fn f(_: i32) void {
+            const p = panel_edit orelse return;
+            state.context = .{ .grid = .{ .panel = p.panel, .index = p.grid } };
+        }
+    }.f),
+    handler("panel.editing.leave-panel-editing", struct {
+        fn f(_: i32) void {
+            leavePanelEdit();
+        }
+    }.f),
+    // The selection.
+    handler("selection.group", struct {
+        fn f(_: i32) void {
+            groupSelection();
+        }
+    }.f),
+    handler("selection.move-to-a-new-frame", struct {
+        fn f(_: i32) void {
+            transferSelection(null, false);
+        }
+    }.f),
+    handler("selection.copy-to-a-new-frame", struct {
+        fn f(_: i32) void {
+            transferSelection(null, true);
+        }
+    }.f),
+    handler("selection.*", struct {
+        fn f(arg: i32) void {
+            transferSelection(@intCast(arg), false);
+        }
+    }.f),
+    // A plan and its operations.
+    handler("plan.export-this-plan-make-it-active", struct {
+        fn f(_: i32) void {
+            const c = contextPlan() orelse return;
+            act(.setActivePlan, .{c.id}) catch {};
+        }
+    }.f),
+    handler("plan.add-an-operation", struct {
+        fn f(_: i32) void {
+            var c = contextPlan() orelse return;
+            const ar = dvui.currentWindow().arena();
+            var ops: std.ArrayList(manufacture.Operation) = .empty;
+            ops.appendSlice(ar, c.plan.operations) catch return;
+            var ob: [32]u8 = undefined;
+            const op_name = ar.dupe(u8, state.model.freshName(&ob, .{ .plan = c.id }, "Operation")) catch return;
+            ops.append(ar, .{ .name = op_name, .process = .none }) catch return;
+            c.plan.operations = ops.items;
+            act(.setPlan, .{ c.id, c.plan }) catch {};
+        }
+    }.f),
+    handler("plan.remove-this-plan", struct {
+        fn f(_: i32) void {
+            const c = contextPlan() orelse return;
+            act(.removePlan, .{c.id}) catch {};
+            state.context = .plans;
+        }
+    }.f),
+    handler("plan.operation.*.earlier", struct {
+        fn f(arg: i32) void {
+            moveOperation(@intCast(arg), false);
+        }
+    }.f),
+    handler("plan.operation.*.later", struct {
+        fn f(arg: i32) void {
+            moveOperation(@intCast(arg), true);
+        }
+    }.f),
+    handler("plan.operation.*.remove", struct {
+        fn f(arg: i32) void {
+            var c = contextPlan() orelse return;
+            const k: usize = @intCast(arg);
+            if (k >= c.plan.operations.len) return;
+            const ar = dvui.currentWindow().arena();
+            var ops: std.ArrayList(manufacture.Operation) = .empty;
+            ops.appendSlice(ar, c.plan.operations[0..k]) catch return;
+            ops.appendSlice(ar, c.plan.operations[k + 1 ..]) catch return;
+            c.plan.operations = ops.items;
+            act(.setPlan, .{ c.id, c.plan }) catch {};
+        }
+    }.f),
+    // A layer of a space.
+    handler("layer.move-up", struct {
+        fn f(_: i32) void {
+            moveLayerOf(true);
+        }
+    }.f),
+    handler("layer.move-down", struct {
+        fn f(_: i32) void {
+            moveLayerOf(false);
+        }
+    }.f),
+    handler("layer.remove", struct {
+        fn f(_: i32) void {
+            const l = switch (state.context) {
+                .layer => |l| l,
+                else => return,
+            };
+            act(.removeLayer, .{ l.space, l.index }) catch {
+                state.status = "Only an empty layer, other than the space's first, can be removed. ";
+                return;
+            };
+            state.context = .{ .panel = state.model.rootOf(l.space) };
+        }
+    }.f),
+    // A tile prototype: its slots and art.
+    handler("prototype.slot.*.remove-track", struct {
+        fn f(arg: i32) void {
+            const id = switch (state.context) {
+                .prototype => |id| id,
+                else => return,
+            };
+            const tracks = state.model.proto(id).tracks;
+            const k: usize = @intCast(arg);
+            if (k >= tracks.len) return;
+            act(.removePrototypeTrack, .{ id, tracks[k].id }) catch {};
+        }
+    }.f),
+    handler("prototype.add-track", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .prototype => |id| id,
+                else => return,
+            };
+            const p = state.model.proto(id).*;
+            var name_buf: [32]u8 = undefined;
+            const name = state.model.freshName(&name_buf, .{ .prototype = id }, "track");
+            const style: layout.model.StyleId = if (p.tracks.len > 0) p.tracks[0].style else .none;
+            _ = act(.addPrototypeTrack, .{ id, layout.model.TileTrack{ .name = name, .style = style, .alignment = .centre, .place = .{ .inset = .all(0.8) } } }) catch {};
+        }
+    }.f),
+    handler("prototype.add-keycap-art", struct {
+        fn f(_: i32) void {
+            redrawPrototypeArt();
+        }
+    }.f),
+    handler("prototype.redraw-from-insets", struct {
+        fn f(_: i32) void {
+            redrawPrototypeArt();
+        }
+    }.f),
+    handler("prototype.remove-art", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .prototype => |id| id,
+                else => return,
+            };
+            act(.setPrototypeArt, .{ id, null }) catch {};
+        }
+    }.f),
+    // A process profile.
+    handler("process.use-the-limits-its-settings-give", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .process => |id| id,
+                else => return,
+            };
+            const i = state.model.processIndex(id) orelse return;
+            var next = state.model.processes.items[i].profile;
+            next.stroke = null;
+            next.gap = null;
+            next.cap = null;
+            act(.setProcess, .{ id, next }) catch {};
+        }
+    }.f),
+    handler("process.panel.*", struct {
+        fn f(arg: i32) void {
+            state.context = .{ .panel = @intCast(arg) };
+        }
+    }.f),
+    handler("process.remove-this-profile", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .process => |id| id,
+                else => return,
+            };
+            act(.removeProcess, .{id}) catch {};
+            state.context = .processes;
+        }
+    }.f),
+    handler("tool.add-panel", struct {
+        fn f(_: i32) void {
+            state.tool = if (state.tool == .add_panel) .select else .add_panel;
+            state.drag = null;
+        }
+    }.f),
+};
+
+/// The context panel (a grid's or an instance's too), if any.
+fn contextPanel() ?usize {
+    return switch (state.context) {
+        .panel => |pi| pi,
+        .grid => |g| g.panel,
+        .region => |r| r.panel,
+        else => null,
+    };
+}
+
+/// The context grid.
+fn contextGrid() ?struct { panel: usize, index: usize } {
+    return switch (state.context) {
+        .grid => |g| .{ .panel = g.panel, .index = g.index },
+        else => null,
+    };
+}
+
+/// The grid instance the context tile is.
+fn contextInstance() ?struct { panel: usize, grid: usize, index: usize } {
+    return switch (state.context) {
+        .tile => |id| if (state.model.gridInstanceOf(id)) |at| .{ .panel = at.panel, .grid = at.grid, .index = at.index } else null,
+        else => null,
+    };
+}
+
+/// The context panel's fabrication with its layers changed by `edit`, as
+/// one step.
+fn fabEdit(edit: *const fn (layers: *std.ArrayList(layout.model.FabLayer), pi: usize, arg: i32) bool, arg: i32) void {
+    const pi = contextPanel() orelse return;
+    const ar = dvui.currentWindow().arena();
+    var next = state.model.panels.items[pi].fab;
+    var layers: std.ArrayList(layout.model.FabLayer) = .empty;
+    layers.appendSlice(ar, next.layers) catch return;
+    if (!edit(&layers, pi, arg)) return;
+    next.layers = layers.items;
+    act(.setPanelFab, .{ pi, next }) catch {
+        state.status = "That is not a size fabrication can use. ";
+    };
+}
+
+/// A stamp of the context grid added: `kind` its name and role, sized in
+/// grid steps.
+fn addStampKind(name: []const u8, role: layout.model.GridRole, w: f64, h: f64, dy: f64) void {
+    const g = contextGrid() orelse return;
+    const sh = state.model.gridShape(g.panel, g.index);
+    const proto_id = if (state.model.prototypes.items.len == 0) (act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) catch return) else state.model.prototypes.items[0].id;
+    _ = act(.addStamp, .{ g.panel, g.index, layout.model.Stamp{ .name = name, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
+        state.status = "The stamp could not be added. ";
+    };
+}
+
+/// The context plan's id and a copy of it to change.
+fn contextPlan() ?struct { id: ObjectId, plan: manufacture.Plan } {
+    const id = switch (state.context) {
+        .plan => |id| id,
+        else => return null,
+    };
+    const i = state.model.planIndex(id) orelse return null;
+    return .{ .id = id, .plan = planCopy(state.model.plans.items[i]) };
+}
+
+/// An operation of the context plan moved by `by` (-1 earlier, +1 later).
+fn moveOperation(k: usize, later: bool) void {
+    const c = contextPlan() orelse return;
+    const ops = @constCast(c.plan.operations);
+    if (later and k + 1 >= ops.len) return;
+    if (!later and (k == 0 or k >= ops.len)) return;
+    std.mem.swap(manufacture.Operation, &ops[k], &ops[if (later) k + 1 else k - 1]);
+    act(.setPlan, .{ c.id, c.plan }) catch {};
+}
+
+/// The context prototype's art redrawn as a keycap from its insets.
+fn redrawPrototypeArt() void {
+    const id = switch (state.context) {
+        .prototype => |id| id,
+        else => return,
+    };
+    const p = state.model.proto(id).*;
+    const art = layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p)) catch return;
+    act(.setPrototypeArt, .{ id, art }) catch {};
+}
+
+/// The context layer moved up or down among its space's.
+fn moveLayerOf(up: bool) void {
+    const l = switch (state.context) {
+        .layer => |l| l,
+        else => return,
+    };
+    state.context = .{ .layer = .{ .space = l.space, .index = act(.moveLayer, .{ l.space, l.index, up }) catch l.index } };
+}
+
+/// The Add rows, Add columns or Add track tool, on or off.
+fn tracksMode(major: layout.model.Major, kind: layout.model.TileRegion.Kind) void {
+    state.drag = null;
+    const on = state.tool == .add_tracks and tracks_tool.kind == kind and (kind == .track or tracks_tool.major == major);
+    if (on) {
+        state.tool = .select;
+    } else {
+        state.tool = .add_tracks;
+        tracks_tool.major = major;
+        tracks_tool.kind = kind;
+        ensurePrototype() catch {};
+    }
+}
+
 /// The button an event is being delivered to this frame.
 var delivered: ?[]const u8 = null;
 var delivered_buf: [128]u8 = undefined;
@@ -12934,6 +13371,12 @@ fn scopeId(kind: []const u8, name: []const u8) []const u8 {
 /// "<kind>.<n>", for a numbered section.
 fn scopeIdN(kind: []const u8, n: usize) []const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{d}", .{ kind, n }) catch kind;
+}
+
+/// The section about one item of a loop (a slot, a layer) ends: elements
+/// after it are the function's own again.
+fn endSection() void {
+    if (elem_group.len > 0) setGroup("{s}", .{base_group});
 }
 
 /// A section heading whose elements are in logical group `id`, whatever
@@ -13537,25 +13980,15 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         if (changed) actM(mergeKey(.{ "proto track", id, tt.id }), .setPrototypeTrack, .{ id, tt.id, next }) catch {
             state.status = "That track cannot be set so. ";
         };
-        if (tbutton(@src(), "Remove track", .{}, .{ .id_extra = n + 9, .gravity_x = 1 })) {
-            try act(.removePrototypeTrack, .{ id, tt.id });
-            return;
-        }
+        keyButton(@src(), "Remove track", @intCast(k), .{ .id_extra = n + 9, .gravity_x = 1 });
     }
-    if (tbutton(@src(), "Add track", .{}, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } })) {
-        var name_buf: [32]u8 = undefined;
-        const name = state.model.freshName(&name_buf, .{ .prototype = id }, "track");
-        const style: layout.model.StyleId = if (p.tracks.len > 0) p.tracks[0].style else .none;
-        _ = try act(.addPrototypeTrack, .{ id, layout.model.TileTrack{ .name = name, .style = style, .alignment = .centre, .place = .{ .inset = .all(0.8) } } });
-        return;
-    }
+    endSection();
+    keyButton(@src(), "Add track", 0, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } });
 
     heading("Art", .{}, 600);
     const art = p.art orelse {
         propText("Look", "plain, from the insets", .{}, 601);
-        if (tbutton(@src(), "Add keycap art", .{}, .{ .id_extra = 602, .gravity_x = 1 })) {
-            try act(.setPrototypeArt, .{id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p))});
-        }
+        keyButton(@src(), "Add keycap art", 0, .{ .id_extra = 602, .gravity_x = 1 });
         return;
     };
     for (art.layers, 0..) |layer, li| {
@@ -13563,13 +13996,12 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         headingAs(scopeId("prototype.art-layer", layer.name), "Layer {s}", .{layer.name}, n);
         if (paintEditor(layer.paint, n + 1)) |paint| try act(.setLayerPaint, .{id, li, paint});
     }
+    endSection();
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_x = 1, .id_extra = 690, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (!isKeycap(p.art) and tbutton(@src(), "Redraw from insets", .{}, .{ .id_extra = 691 })) {
-            try act(.setPrototypeArt, .{id, try layout.art.redrawKeycap(dvui.currentWindow().arena(), p, protoUnit(p))});
-        }
-        if (tbutton(@src(), "Remove art", .{}, .{ .id_extra = 692 })) try act(.setPrototypeArt, .{id, null});
+        if (!isKeycap(p.art)) keyButton(@src(), "Redraw from insets", 0, .{ .id_extra = 691 });
+        keyButton(@src(), "Remove art", 0, .{ .id_extra = 692 });
     }
 }
 
@@ -14167,13 +14599,7 @@ fn processProperties(id: layout.model.ObjectId) void {
     const l = p.limits();
     if (l.layer) |lh| propText("Depths", "whole layers of {d} mm, {d} at least", .{ lh, l.min_layers }, 40);
     propText("Colours", "{d} at most in a part", .{l.colours}, 41);
-    if (own and tbutton(@src(), "Use the limits its settings give", .{}, .{ .expand = .horizontal, .id_extra = 42 })) {
-        next.stroke = null;
-        next.gap = null;
-        next.cap = null;
-        changed = true;
-        key = 0;
-    }
+    if (own) keyButton(@src(), "Use the limits its settings give", 0, .{ .expand = .horizontal, .id_extra = 42 });
     if (changed) {
         const done = if (key != 0) actM(key, .setProcess, .{ id, next }) else act(.setProcess, .{ id, next });
         done catch {
@@ -14183,15 +14609,12 @@ fn processProperties(id: layout.model.ObjectId) void {
     heading("Used by", .{}, 50);
     var used: usize = 0;
     for (state.model.panels.items, 0..) |pn, pi| if (pn.fab.process == id) {
-        if (tbutton(@src(), pn.name, .{}, .{ .expand = .horizontal, .id_extra = 51 + pi, .tag = listTag("process.panel", pn.name) })) state.context = .{ .panel = pi };
+        keyButton(@src(), pn.name, @intCast(pi), .{ .expand = .horizontal, .id_extra = 51 + pi, .tag = listTag("process.panel", pn.name) });
         used += 1;
     };
     if (used == 0) {
         propText("Panels", "none", .{}, 49);
-        if (tbutton(@src(), "Remove this profile", .{}, .{ .expand = .horizontal, .id_extra = 48, .margin = .{ .y = 8 } })) {
-            act(.removeProcess, .{id}) catch {};
-            state.context = .processes;
-        }
+        keyButton(@src(), "Remove this profile", 0, .{ .expand = .horizontal, .id_extra = 48, .margin = .{ .y = 8 } });
     }
 }
 

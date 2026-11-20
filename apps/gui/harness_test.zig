@@ -318,17 +318,17 @@ fn makeKeyPrototype(r: *Run) !void {
     // Slots, one legend each, overlapping: top (the whole face), bottom
     // (its lower half), words (the whole face, smaller).
     try r.choose("prototype.slot.top.style", "legend");
-    try r.press("prototype.slot.top.add-track");
+    try r.press("prototype.add-track");
     try r.field("prototype.slot.track1.name", "bottom");
     try r.choose("prototype.slot.bottom.style", "legend");
     try r.choose("prototype.slot.bottom.set-from", "start");
     try r.field("prototype.slot.bottom.inset-top", "6.45");
-    try r.press("prototype.slot.bottom.add-track");
+    try r.press("prototype.add-track");
     try r.field("prototype.slot.track1.name", "words");
     try r.choose("prototype.slot.words.style", "legend words");
     try r.choose("prototype.slot.words.set-from", "start");
     // Keycap art drawn from the insets now set, shaded back to front.
-    try r.press("prototype.art-layer.face.remove-art");
+    try r.press("prototype.remove-art");
     try r.press("prototype.add-keycap-art");
 
     try r.choose("prototype.art-layer.body.fill-kind", "a gradient");
@@ -677,7 +677,7 @@ fn makePlainPrototype(r: *Run, name: []const u8, face: []const u8) !void {
         try r.field("prototype.body-inset-" ++ side, "0");
         try r.field("prototype.face-inset-" ++ side, face);
     }
-    try r.press("prototype.art-layer.face.remove-art");
+    try r.press("prototype.remove-art");
 }
 
 /// A track's style, alignment and insets (left, right, top, bottom).
@@ -694,8 +694,8 @@ fn setTrack(r: *Run, track: []const u8, style: []const u8, from: []const u8, ins
 /// lowest generated name free; the one before was renamed).
 fn addTrack(r: *Run, after: []const u8, number: usize, name: []const u8) !void {
     _ = number;
-    var b: [96]u8 = undefined;
-    try r.press(try std.fmt.bufPrint(&b, "prototype.slot.{s}.add-track", .{after}));
+    _ = after;
+    try r.press("prototype.add-track");
     try r.field("prototype.slot.track1.name", name);
 }
 
