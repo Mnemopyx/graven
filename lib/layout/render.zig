@@ -90,6 +90,9 @@ pub const Diagnostic = struct {
         /// Content larger than its hard box: a word longer than its line,
         /// or a block wider or taller than the box. Nothing is shrunk.
         overflow,
+        /// Inline math fitted to its line (`fit`) still taller than the
+        /// line's band at the fit's floor.
+        fit_overflow,
     },
     /// Byte offset in the source of what is concerned.
     offset: u32,

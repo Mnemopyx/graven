@@ -72,7 +72,8 @@ pub fn set(a: Allocator, r: *const Resolver, g: ground_mod.Ground, opts: Options
     const lead_of = try a.alloc(f64, top.len);
     const script = r.context(e.root).script_level > 0;
     for (top, laid, before, lead_of, 0..) |id, *l, *b, *ld, k| {
-        l.* = try lay.lay(id, cap);
+        // Fitted to the line's band when its style asks (`fit`).
+        l.* = (try lay.fitted(id, cap)).laid;
         b.* = lay.gapBefore(id, if (k == 0) null else laid[k - 1].class, l.class, script) * cap;
         ld.* = lay.gapBefore(id, null, l.class, script) * cap;
     }

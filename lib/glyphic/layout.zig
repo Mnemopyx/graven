@@ -119,9 +119,19 @@ pub const Layout = struct {
     missing: std.ArrayList(Missing) = .empty,
     /// How deep the object being laid out is (see `ObjectBox.nest`).
     nest: u8 = 0,
+    /// Values the fitter forces while it sets an object again (see `fitted`).
+    forced: std.EnumArray(param.Param, ?param.Value) = .initFill(null),
 
     fn val(l: *const Layout, id: Id, p: param.Param) f64 {
-        return l.r.get(id, p).number;
+        return l.get(id, p).number;
+    }
+
+    /// Parameter `p` of object `id`: as the fitter forces it while it sets
+    /// an object again (unless the object sets it itself), else as its
+    /// styles and overrides resolve it.
+    pub fn get(l: *const Layout, id: Id, p: param.Param) param.Value {
+        if (l.forced.get(p)) |v| if (l.r.e.override(id, p) == null) return v;
+        return l.r.get(id, p);
     }
 
     fn levelScale(l: *const Layout, id: Id, level: u2) f64 {
@@ -178,7 +188,7 @@ pub const Layout = struct {
     }
 
     fn rotate(l: *Layout, id: Id, out: *Laid, deg: f64) void {
-        const pivot: Point = switch (param.as(param.Pivot, l.r.get(id, .rotate_pivot))) {
+        const pivot: Point = switch (param.as(param.Pivot, l.get(id, .rotate_pivot))) {
             .centre => .{ .x = out.width / 2, .y = (out.height - out.depth) / 2 },
             .ink_centre => if (out.ink.isEmpty()) .{ .x = out.width / 2, .y = 0 } else .{ .x = (out.ink.x0 + out.ink.x1) / 2, .y = (out.ink.y0 + out.ink.y1) / 2 },
             .start => .{ .x = 0, .y = (out.height - out.depth) / 2 },
@@ -189,7 +199,7 @@ pub const Layout = struct {
         const s = @sin(th);
         const turn = Affine.translate(-pivot.x, -pivot.y).then(.{ .a = c, .b = s, .c = -s, .d = c }).then(Affine.translate(pivot.x, pivot.y));
         out.transform(turn);
-        if (param.as(param.RotateSpace, l.r.get(id, .rotate_space)) == .box) {
+        if (param.as(param.RotateSpace, l.get(id, .rotate_space)) == .box) {
             // Its neighbours make room for its turned box.
             const b = boundsOf(corners(rect(0, -out.depth, out.width, out.height), turn));
             out.transform(Affine.translate(-b.x0, 0));
@@ -237,8 +247,8 @@ pub const Layout = struct {
         const a = l.a;
         var out: Laid = .{};
         const variant = l.r.e.node(id).variant;
-        const shape: param.Shape = if (variant.isItalic()) .italic else param.as(param.Shape, l.r.get(id, .shape));
-        const named = l.r.get(id, .face).name;
+        const shape: param.Shape = if (variant.isItalic()) .italic else param.as(param.Shape, l.get(id, .shape));
+        const named = l.get(id, .face).name;
         const fs = try l.r.faces(l.a, id);
         const grow = @max(0, l.val(id, .weight)) * cap / 2;
         const slant = l.val(id, .slant);
@@ -340,6 +350,92 @@ pub const Layout = struct {
         return out;
     }
 
+    /// What fitting did to an object.
+    pub const Fitted = struct {
+        laid: Laid,
+        /// The steps taken (0: it fitted as it was, or fitting is off):
+        /// 1 limits beside, 2 fractions slashed, 3 scripts tightened,
+        /// 4 delimiters natural, 5 scaled down.
+        steps: u8 = 0,
+        /// The scale it was set at (1 unless step 5).
+        scale: f64 = 1,
+        /// Still too tall at the floor.
+        overflow: bool = false,
+    };
+
+    /// The band fitted math stays in, around the baseline, mm: how far up
+    /// and down, for text of cap height `cap`.
+    pub fn band(l: *const Layout, id: Id, cap: f64) struct { above: f64, below: f64 } {
+        const margin = l.val(id, .fit_margin) * cap;
+        if (param.as(param.FitBand, l.get(id, .fit_band)) == .font) {
+            if (l.r.faces(l.a, id)) |fs| {
+                const f: ?*Face = fs.get("text") orelse (if (fs.members.len > 0) fs.members[0].face else null);
+                if (f) |face| {
+                    const k = cap / faces_mod.capUnits(face);
+                    const ext = face.extents();
+                    return .{ .above = ext.ascender * k + margin, .below = -ext.descender * k + margin };
+                }
+            } else |_| {}
+        }
+        return .{ .above = cap + margin, .below = margin };
+    }
+
+    /// Top-level object `id` laid out at cap height `cap0`, fitted to its
+    /// line's band when its style says so (`fit`): each step that is
+    /// allowed is taken in turn, only while it is still too tall.
+    pub fn fitted(l: *Layout, id: Id, cap0: f64) anyerror!Fitted {
+        var out: Fitted = .{ .laid = try l.lay(id, cap0) };
+        if (param.as(param.Fit, l.get(id, .fit)) == .off) return out;
+        const b = l.band(id, cap0);
+        const B = @TypeOf(b);
+        const fits = struct {
+            fn f(x: Laid, bb: B) bool {
+                return x.height <= bb.above + 1e-9 and x.depth <= bb.below + 1e-9;
+            }
+        };
+        if (fits.f(out.laid, b)) return out;
+        const saved = l.forced;
+        defer l.forced = saved;
+        // 1: inline style, limits beside, operators at text size.
+        if (l.get(id, .fit_limits).flag) {
+            l.forced.set(.math_style, param.of(param.MathStyle.text));
+            l.forced.set(.limits, param.of(param.Limits.side));
+            l.forced.set(.op_size, param.of(param.OpSize.text));
+            out = .{ .laid = try l.lay(id, cap0), .steps = 1 };
+            if (fits.f(out.laid, b)) return out;
+        }
+        // 2: fractions slashed.
+        if (param.as(param.FitFractions, l.get(id, .fit_fractions)) == .slashed) {
+            l.forced.set(.fraction_form, param.of(param.FractionForm.slashed));
+            out = .{ .laid = try l.lay(id, cap0), .steps = 2 };
+            if (fits.f(out.laid, b)) return out;
+        }
+        // 3: scripts closer to the baseline, and smaller.
+        if (l.get(id, .fit_scripts).flag) {
+            l.forced.set(.sup_raise, param.num(@floatCast(0.6 * l.val(id, .sup_raise))));
+            l.forced.set(.sub_drop, param.num(@floatCast(0.6 * l.val(id, .sub_drop))));
+            l.forced.set(.script_scale, param.num(@floatCast(@max(0.3, 0.85 * l.val(id, .script_scale)))));
+            l.forced.set(.scriptscript_scale, param.num(@floatCast(@max(0.3, 0.85 * l.val(id, .scriptscript_scale)))));
+            out = .{ .laid = try l.lay(id, cap0), .steps = 3 };
+            if (fits.f(out.laid, b)) return out;
+        }
+        // 4: delimiters at their natural size, radicals closer.
+        if (l.get(id, .fit_fences).flag) {
+            l.forced.set(.fence_size, param.of(param.FenceSize.natural));
+            l.forced.set(.radical_gap, param.num(@floatCast(0.5 * l.val(id, .radical_gap))));
+            out = .{ .laid = try l.lay(id, cap0), .steps = 4 };
+            if (fits.f(out.laid, b)) return out;
+        }
+        // 5: scaled down to fit, not below the floor.
+        const need = @min(
+            if (out.laid.height > b.above) b.above / out.laid.height else 1,
+            if (out.laid.depth > b.below) b.below / out.laid.depth else 1,
+        );
+        const s = @max(l.val(id, .fit_floor), @min(1, need));
+        const scaled = try l.lay(id, cap0 * s);
+        return .{ .laid = scaled, .steps = 5, .scale = s, .overflow = !fits.f(scaled, b) };
+    }
+
     /// The gap before object `id` (of class `class`) in its row, in cap
     /// heights: the space its kind and its neighbour's (`prev`, none at a
     /// row's start) give, and its own `space_before`.
@@ -369,7 +465,7 @@ pub const Layout = struct {
         const num = try l.lay(e.slot(id, .num), cap0);
         const den = try l.lay(e.slot(id, .den), cap0);
         var out: Laid = .{};
-        switch (param.as(param.FractionForm, l.r.get(id, .fraction_form))) {
+        switch (param.as(param.FractionForm, l.get(id, .fraction_form))) {
             .stacked => {
                 const ax = l.axis(id, cap);
                 const t = l.val(id, .rule_thickness) * cap;
@@ -437,7 +533,7 @@ pub const Layout = struct {
     fn layLargeOp(l: *Layout, id: Id, cap0: f64, cap: f64, style: cascade.TexStyle) !Laid {
         const e = l.r.e;
         const a = l.a;
-        const display = switch (param.as(param.OpSize, l.r.get(id, .op_size))) {
+        const display = switch (param.as(param.OpSize, l.get(id, .op_size))) {
             .auto => style == .display,
             .display => true,
             .text => false,
@@ -451,7 +547,7 @@ pub const Layout = struct {
             op.height = @max(0, op.ink.y1);
             op.depth = @max(0, -op.ink.y0);
         }
-        const stacked = switch (param.as(param.Limits, l.r.get(id, .limits))) {
+        const stacked = switch (param.as(param.Limits, l.get(id, .limits))) {
             .auto => display,
             .stacked => true,
             .side => false,
@@ -548,7 +644,7 @@ pub const Layout = struct {
         const ax = l.axis(id, cap);
         const half = @max(body.height - ax, ax + body.depth) + 0.1 * cap;
         const gap = l.val(id, .fence_gap) * cap;
-        const mode = param.as(param.FenceSize, l.r.get(id, .fence_size));
+        const mode = param.as(param.FenceSize, l.get(id, .fence_size));
         var out: Laid = .{};
         var x: f64 = 0;
         for ([_][]const u8{ node.text, node.close }, 0..) |d, k| {

@@ -427,3 +427,67 @@ test "set: a nudge on a line's first object moves the line, not its breaks; boxe
     try near(10 + 1.5, s.boxes[0].baseline[0].x);
     try near(44, s.boxes[2].baseline[0].y);
 }
+
+test "inline math fitted to its line: off it overflows the band; on, the steps it needs, never taller than the band" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    // A stacked fraction H over O, in display style: taller than a line.
+    const fr = try f.e.structure(.fraction, "", "");
+    try f.e.append(f.e.root, fr);
+    _ = try f.word(f.e.slot(fr, .num), .variable, "H");
+    _ = try f.word(f.e.slot(fr, .den), .variable, "O");
+    try f.g.apply(&f.e, f.e.root, f.display);
+    var r = f.resolver();
+    var l: layout.Layout = .{ .a = f.arena.allocator(), .r = &r };
+    const b = l.band(fr, 3);
+    // Off (the default): laid out as before, and too tall.
+    const off = try l.fitted(fr, 3);
+    try testing.expectEqual(@as(u8, 0), off.steps);
+    try testing.expect(off.laid.height > b.above or off.laid.depth > b.below);
+    // On: slashed, on the baseline, inside the band.
+    try f.g.set(f.display, .fit, of(param.Fit.@"inline"));
+    r = f.resolver();
+    l = .{ .a = f.arena.allocator(), .r = &r };
+    const on = try l.fitted(fr, 3);
+    try testing.expectEqual(@as(u8, 2), on.steps);
+    try testing.expect(!on.overflow);
+    try testing.expect(on.laid.height <= b.above + 1e-9 and on.laid.depth <= b.below + 1e-9);
+    try near(1, on.scale);
+    // The object's own setting wins over the fitter's: kept stacked, it
+    // is scaled down instead (to the floor at most).
+    try f.e.set(fr, .fraction_form, of(param.FractionForm.stacked));
+    r = f.resolver();
+    l = .{ .a = f.arena.allocator(), .r = &r };
+    const kept = try l.fitted(fr, 3);
+    try testing.expectEqual(@as(u8, 5), kept.steps);
+    try testing.expect(kept.scale < 1 and kept.scale >= 0.75 - 1e-9);
+    // Fitting off for this one object: as it was.
+    try f.e.set(fr, .fit, of(param.Fit.off));
+    r = f.resolver();
+    l = .{ .a = f.arena.allocator(), .r = &r };
+    try testing.expectEqual(@as(u8, 0), (try l.fitted(fr, 3)).steps);
+}
+
+test "a fitted object set on rows stays within its line" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.word(f.e.root, .variable, "H");
+    const fr = try f.e.structure(.fraction, "", "");
+    try f.e.append(f.e.root, fr);
+    _ = try f.word(f.e.slot(fr, .num), .variable, "HO");
+    _ = try f.word(f.e.slot(fr, .den), .variable, "D");
+    try f.g.apply(&f.e, f.e.root, f.display);
+    try f.g.set(f.display, .fit, of(param.Fit.@"inline"));
+    const r = f.resolver();
+    var rows: ground.Rows = .{ .a = testing.allocator, .origin = .{ .x = 0, .y = 50 }, .length = 40, .pitch = 6, .count = 2, .cap = 3 };
+    defer rows.deinit();
+    const s = try setting.set(f.arena.allocator(), &r, rows.ground(), .{});
+    var l: layout.Layout = .{ .a = f.arena.allocator(), .r = &r };
+    const b = l.band(fr, 3);
+    // Every glyph's origin on the line's baseline (slashed), none above
+    // the band.
+    for (s.items) |it| if (it == .glyph) {
+        try testing.expect(it.glyph.m.f <= 50 + b.above);
+        try testing.expect(it.glyph.m.f >= 50 - b.below - 1e-9);
+    };
+}

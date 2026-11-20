@@ -113,7 +113,11 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
     var prev: ?glyphic.layout.Class = null;
     var boxes: std.ArrayList(R.ObjectBox) = .empty;
     for (top, 0..) |c, k| {
-        const laid = try lay.lay(c, cap);
+        // Fitted to the line's band when its style asks (`fit`): inline
+        // math never makes the line taller.
+        const fit = try lay.fitted(c, cap);
+        const laid = fit.laid;
+        if (fit.overflow) try diagnostics.append(a, .{ .kind = .fit_overflow, .offset = spans.get(c).start });
         x += lay.gapBefore(c, prev, laid.class, false) * cap;
         prev = laid.class;
         xs[k] = x;

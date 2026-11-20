@@ -337,3 +337,13 @@ test "the call form in a legend's text: a word carries its overrides; rewritten 
     try testing.expectEqual(ex.Kind.group, g.e.node(only[0]).kind);
     try testing.expectEqual(@as(f32, 0.1), g.e.override(only[0], .shift_y).?.number);
 }
+
+test "fitting set on an expression in the call form: \\set(fit: inline), read and written back" {
+    var p = try parseLatex("\\set(fit: inline){\\frac{a}{b}}", .math);
+    defer p.deinit();
+    const fr = p.e.node(p.e.root).items.items[0];
+    try testing.expectEqual(param.Fit.@"inline", param.as(param.Fit, p.e.override(fr, .fit).?));
+    const out = try latexOut(&p.e, .math);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\\set(fit: inline){\\frac{a}{b}}", out);
+}

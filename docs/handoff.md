@@ -92,3 +92,7 @@ Step 1 of 3 built: glyphic records every object's box (`layout.ObjectBox`, `Set.
 
 Ctrl+< and Ctrl+> go a level out and in (`levelUp`, `levelDown`, `levelParent`, `levelFirstChild` in main.zig; actions `level.up`, `level.down`). Built and tested; physical key lookup and mapping (scancodes from the SDL backend, so the pair follows the < and > keys on any layout) is deferred until after the first release (owner, 2026-11-20); levels in sketch editing are deferred until after further sketch design discussion (owner, 2026-11-20): Ctrl+< and Ctrl+> do nothing while a sketch is edited.
 
+## Text styles view and line fitting (2026-11-20)
+
+Decided: a Text styles view (main-window tab per style), treatments as glyphic style configuration (by name or id, then local overrides), fitting of inline math as Typst's `math.inline`, and layout, font specification and vector rendering in glyphic (blueprint "Text styles as a first-class interface"). Step 1's first part, line fitting, is built (`Layout.fitted`, the `fit…` parameters; off by default). Next: face specifications and treatments in glyphic, monospace and the math alphabets, text-mode scripts (status.md, "Text styles as a first-class interface").
+

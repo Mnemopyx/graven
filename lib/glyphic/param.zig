@@ -79,6 +79,13 @@ pub const OpSize = enum { auto, text, display };
 pub const FractionForm = enum { stacked, slashed, diagonal };
 pub const FenceSize = enum { natural, grown, step };
 pub const MathStyle = enum { display, text };
+/// Whether inline math is fitted to its line.
+pub const Fit = enum { off, @"inline" };
+/// The band a fitted object stays in: the text face's ascender and
+/// descender, or the cap height (both widened by `fit_margin`).
+pub const FitBand = enum { font, caps };
+/// What fitting does to a fraction: keep it stacked, or slash it.
+pub const FitFractions = enum { keep, slashed };
 /// What a rotated object turns about.
 pub const Pivot = enum { centre, ink_centre, start, baseline_start };
 /// Whether a rotated object takes its rotated extent in its row.
@@ -96,6 +103,10 @@ fn names(comptime E: type) []const []const u8 {
 
 fn choice(comptime E: type, comptime default: E, comptime doc: []const u8) Def {
     return .{ .type = .choice, .choices = names(E), .default = .{ .choice = @intFromEnum(default) }, .doc = doc };
+}
+
+fn flag(default: bool, doc: []const u8) Def {
+    return .{ .type = .flag, .default = .{ .flag = default }, .doc = doc };
 }
 
 fn number(unit: Unit, min: f32, max: f32, default: f32, doc: []const u8) Def {
@@ -164,6 +175,17 @@ pub const Param = enum {
     accent_raise,
     // The expression as a whole.
     math_style,
+    // Fitting inline math to its line (as Typst's math.inline): a
+    // top-level object taller than the line's band is set more compactly,
+    // step by step, until it fits; the line's pitch never grows.
+    fit,
+    fit_band,
+    fit_margin,
+    fit_limits,
+    fit_fractions,
+    fit_scripts,
+    fit_fences,
+    fit_floor,
 };
 
 pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
@@ -213,6 +235,14 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .fence_gap = number(.cap, 0, 1, 0, "Gap inside each delimiter."),
     .accent_raise = number(.cap, -1, 1, 0, "An accent moved up from where it sits on its base."),
     .math_style = choice(MathStyle, .text, "The expression set in display style (large operators, stacked limits) or text style."),
+    .fit = el(choice(Fit, .off, "Inline math fitted to its line: set more compactly, step by step, so it stays in the line's band and the line pitch never grows.")),
+    .fit_band = choice(FitBand, .font, "The band fitted math stays in: the text face's ascender and descender, or the cap height."),
+    .fit_margin = number(.cap, 0, 1, 0, "How far fitted math may reach past the band, above and below."),
+    .fit_limits = flag(true, "Fitting first sets a large operator's limits beside it, at text size."),
+    .fit_fractions = choice(FitFractions, .slashed, "Fitting then keeps fractions stacked, or slashes them."),
+    .fit_scripts = flag(true, "Fitting then raises superscripts and drops subscripts less, and sets scripts smaller."),
+    .fit_fences = flag(true, "Fitting then sets delimiters at their natural size."),
+    .fit_floor = number(.scale, 0.3, 1, 0.75, "Fitting last scales the object down, never below this; past it the object overflows and is flagged."),
 });
 
 pub fn def(p: Param) Def {
