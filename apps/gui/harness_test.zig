@@ -144,13 +144,17 @@ pub const Run = struct {
     }
 
     /// Types `text` into the field of the property row tagged `tag`,
-    /// replacing what it held.
+    /// replacing what it held, and leaves the field (which accepts it).
     pub fn set(r: *Run, tag: []const u8, text: []const u8) !void {
         try r.clickIn(tag, 0.8, 0.5);
         try dvui.testing.pressKey(.a, .lcontrol);
         try r.frames(1);
         // Typing replaces the selection; nothing typed, it is deleted.
         if (text.len == 0) try dvui.testing.pressKey(.backspace, .none) else try dvui.testing.writeText(text);
+        try r.frames(1);
+        // Fields take what is typed when it is accepted: the keyboard
+        // leaves the field.
+        api.leaveField();
         try r.frames(3);
     }
 
@@ -1091,4 +1095,95 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     const again = try panelSvg(a, api.model(), "Panel 1", face);
     defer a.free(again);
     try std.testing.expectEqualStrings(before, again);
+}
+
+// Fields: nothing changes while typed; accepted on leaving or Enter -----------
+
+fn panelNamed(name: []const u8) ?usize {
+    for (api.model().panels.items, 0..) |p, k| if (std.mem.eql(u8, p.name, name)) return k;
+    return null;
+}
+
+fn typeInto(r: *Run, tag: []const u8, text: []const u8) !void {
+    try r.clickIn(tag, 0.8, 0.5);
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText(text);
+    try r.frames(2);
+}
+
+test "a field changes nothing while typed; leaving it or Enter accepts, one undo step each" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("icon/Add panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    const steps = api.undoSteps();
+    try typeInto(&r, "Panel/Name", "Front");
+    // Typed, not yet accepted: the model is as it was.
+    try std.testing.expect(panelNamed("Panel 1") != null);
+    try std.testing.expectEqual(steps, api.undoSteps());
+    api.leaveField();
+    try r.frames(3);
+    try std.testing.expect(panelNamed("Front") != null);
+    try std.testing.expectEqual(steps + 1, api.undoSteps());
+    // Enter accepts too, as a step of its own.
+    try typeInto(&r, "Panel/Name", "Back");
+    try r.key(.enter, .none);
+    try r.frames(3);
+    try std.testing.expect(panelNamed("Back") != null);
+    try std.testing.expectEqual(steps + 2, api.undoSteps());
+    try r.key(.z, .lcontrol);
+    try r.frames(3);
+    try std.testing.expect(panelNamed("Front") != null);
+}
+
+test "a field given what it cannot take, or left by Esc, goes back to how it was" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("icon/Add panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    const pi = panelNamed("Panel 1").?;
+    const w = api.model().panels.items[pi].w;
+    // Not a number: refused, the width as it was.
+    try typeInto(&r, "Panel/Width, mm", "wide");
+    api.leaveField();
+    try r.frames(3);
+    try std.testing.expectEqual(w, api.model().panels.items[pi].w);
+    // Esc: back, nothing changed.
+    try typeInto(&r, "Panel/Width, mm", "120");
+    try r.key(.escape, .none);
+    try r.frames(3);
+    // Left after Esc: still nothing to take.
+    api.leaveField();
+    try r.frames(3);
+    try std.testing.expectEqual(w, api.model().panels.items[pi].w);
+    // An empty name is not a name.
+    try typeInto(&r, "Panel/Name", "");
+    try dvui.testing.pressKey(.backspace, .none);
+    api.leaveField();
+    try r.frames(3);
+    try std.testing.expect(panelNamed("Panel 1") != null);
+}
+
+test "a click elsewhere accepts the field first, then does what it was for" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("icon/Add panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    try typeInto(&r, "Panel/Name", "Front");
+    // A click on another node of the Browser: the name is taken, and the
+    // node chosen.
+    try r.click("tree/untitled/Text styles");
+    try r.frames(3);
+    try std.testing.expect(panelNamed("Front") != null);
+    try std.testing.expectEqualStrings("styles", api.contextName());
 }

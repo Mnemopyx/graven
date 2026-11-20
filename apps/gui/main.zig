@@ -39,6 +39,8 @@ comptime {
 const bg_grid = @import("grid.zig");
 const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
+/// Fields that commit on accept (`fields.zig`).
+const accepted = @import("fields.zig");
 
 const geom = layout.geom;
 const Model = layout.Model;
@@ -151,6 +153,15 @@ pub const testing_api = struct {
     }
     pub fn contextName() []const u8 {
         return @tagName(state.context);
+    }
+    /// The keyboard leaves whatever field has it, at the next frame's
+    /// start, as a click elsewhere or Tab would take it away.
+    pub fn leaveField() void {
+        leave_field = true;
+    }
+    /// The undo history's length, in steps.
+    pub fn undoSteps() usize {
+        return hist.log.items.len;
     }
     /// Grid `gi` of panel `pi`'s point at `col`, `row` on the screen.
     pub fn gridPoint(pi: usize, gi: usize, col: u32, row: u32) ?dvui.Point.Physical {
@@ -1902,6 +1913,13 @@ fn frameAverage() struct { ms: f64, n: usize } {
 }
 
 fn frame() !dvui.App.Result {
+    // A press away from a field being edited ends the edit first.
+    accepted.on_accept = newFieldStep;
+    accepted.beginFrame();
+    if (leave_field) {
+        leave_field = false;
+        dvui.focusWidget(null, null, null);
+    }
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
     defer {
@@ -2973,6 +2991,15 @@ fn actV(comptime tag: history.Tag, args: history.Args(@tagName(tag))) void {
     hist.do(&state.model, tag, args) catch {
         state.status = "That change could not be recorded. ";
     };
+}
+
+/// Asked for by the tests: the keyboard leaves its field this frame.
+var leave_field = false;
+
+/// A field's accepted value is a step of its own, never merged into the
+/// step before (an earlier accept in the same field included).
+fn newFieldStep() void {
+    hist.merge_key = null;
 }
 
 /// An action that joins the step before when that had the same `key`: a
@@ -7318,10 +7345,7 @@ fn numberProp(name: []const u8, value: f64, min: f64, max: f64, n: usize) ?f64 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
     propName(name);
-    var v = value;
-    const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = min, .max = max }, .{ .expand = .horizontal, .id_extra = n });
-    if (r.changed and r.value == .Valid and v != value) return v;
-    return null;
+    return accepted.numberField(@src(), f64, value, min, max, .{ .expand = .horizontal, .id_extra = n });
 }
 
 /// A panel's fabrication: the base's thickness and the process's layer
@@ -12219,13 +12243,7 @@ fn worksheetProperties() !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer row.deinit();
         propName("Name");
-        var te = dvui.textEntry(@src(), .{ .text_initial = state.model.sheet.name }, .{ .expand = .horizontal, .font = styled(.theme(.body), state.model.sheet.default_name) });
-        const changed = te.text_changed;
-        const text = te.textGet();
-        te.deinit();
-        // A text entry reports a change on its first frame; only a
-        // different text is an edit.
-        if (changed and !std.mem.eql(u8, text, state.model.sheet.name)) try act(.nameWorksheet, .{text});
+        if (accepted.textField(@src(), state.model.sheet.name, .{ .expand = .horizontal, .font = styled(.theme(.body), state.model.sheet.default_name) }, .{}, accepted.nonEmpty)) |text| try act(.nameWorksheet, .{text});
     }
 
     const sheet = state.model.sheet;
@@ -12286,13 +12304,19 @@ fn worksheetProperties() !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer row.deinit();
             propName("Width, mm");
-            changed = dvui.textEntryNumber(@src(), f64, .{ .value = &w, .min = 1, .max = 10000 }, .{ .expand = .horizontal }).changed or changed;
+            if (accepted.numberField(@src(), f64, w, 1, 10000, .{ .expand = .horizontal })) |v| {
+                w = v;
+                changed = true;
+            }
         }
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer row.deinit();
             propName("Height, mm");
-            changed = dvui.textEntryNumber(@src(), f64, .{ .value = &h, .min = 1, .max = 10000 }, .{ .expand = .horizontal }).changed or changed;
+            if (accepted.numberField(@src(), f64, h, 1, 10000, .{ .expand = .horizontal })) |v| {
+                h = v;
+                changed = true;
+            }
         }
         if (changed) {
             try act(.setSheet, .{.custom(w, h)});
@@ -12311,11 +12335,13 @@ fn worksheetProperties() !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 61 + i });
         defer row.deinit();
         propName(side[0]);
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(m, side[1]), .min = 0, .max = 1000 }, .{
+        if (accepted.numberField(@src(), f64, @field(m, side[1]), 0, 1000, .{
             .expand = .horizontal,
             .font = styled(.theme(.body), sheet.default_margins),
-        });
-        changed = r.changed or changed;
+        })) |v| {
+            @field(m, side[1]) = v;
+            changed = true;
+        }
     }
     if (changed) act(.setMargins, .{m}) catch {};
     if (state.intrusions.len > 0) {
@@ -12336,12 +12362,14 @@ fn panelMargins(pi: usize) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 11 + i });
         defer row.deinit();
         propName(side[0]);
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(m, side[1]), .min = 0, .max = 1000 }, .{
+        if (accepted.numberField(@src(), f64, @field(m, side[1]), 0, 1000, .{
             .expand = .horizontal,
             .font = styled(.theme(.body), panel.default_margins),
             .id_extra = pi,
-        });
-        changed = r.changed or changed;
+        })) |v| {
+            @field(m, side[1]) = v;
+            changed = true;
+        }
     }
     if (changed) act(.setPanelMargins, .{pi, m}) catch {};
 }
@@ -12627,13 +12655,12 @@ fn tileProperties(id: TileId) !void {
             .min_size_content = .{ .h = 40 },
             .id_extra = @as(usize, @backingInt(id)) * 64 + k,
         });
-        if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), text)) te.textSet(text, false);
-        const changed = te.text_changed;
-        const now = te.textGet();
+        // Taken when the field is left (Enter is a line break here).
+        const offered = accepted.accept(te, text);
         const focused = te.data().id == dvui.focusedWidgetId();
         te.deinit();
         if (focused) expr_track = tt.id;
-        if (changed and !std.mem.eql(u8, now, text)) try actM(mergeKey(.{ "tile track", id, tt.id }), .setTileTrackText, .{ id, tt.id, now });
+        if (offered) |now| try act(.setTileTrackText, .{ id, tt.id, now });
         propText("Runs", "{s}, {s}", .{ if (tt.major == .row) "in rows" else "down columns, a character at a time", @tagName(tt.alignment) }, n + 1);
         if (found) |f| {
             for (state.placed.items[f.panel].issues, 0..) |i, q| if (i.tile == id and i.slot == k) {
@@ -12940,14 +12967,13 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 910 + k });
         defer row.deinit();
         propName(f.name);
-        var v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = f.min, .max = 1000 }, .{ .expand = .horizontal, .id_extra = 910 + k });
-        if (r.changed and r.value == .Valid) {
-            @field(ps, f.field) = v / pt_per_mm;
+        const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
+        if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k })) |nv| {
+            @field(ps, f.field) = nv / pt_per_mm;
             changed = true;
         }
     }
-    if (changed) _ = try actM(key, .setParagraphStyle, .{ id, ps });
+    if (changed) _ = try act(.setParagraphStyle, .{ id, ps });
 }
 
 // The expression and its style ---------------------------------------------
@@ -12987,9 +13013,7 @@ fn valueEditor(p: glyphic.Param, v: *glyphic.Value, default: bool, n: usize) boo
     const d = glyphic.param.def(p);
     switch (d.type) {
         .number => {
-            var x: f32 = v.number;
-            const r = dvui.textEntryNumber(@src(), f32, .{ .value = &x, .min = d.min, .max = d.max }, .{ .expand = .horizontal, .id_extra = n, .font = styled(.theme(.body), default) });
-            if (r.changed and r.value == .Valid and x != v.number) {
+            if (accepted.numberField(@src(), f32, v.number, d.min, d.max, .{ .expand = .horizontal, .id_extra = n, .font = styled(.theme(.body), default) })) |x| {
                 v.* = .{ .number = x };
                 return true;
             }
@@ -13146,10 +13170,9 @@ fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });
         defer row.deinit();
         propName("Size, pt");
-        var pt = @round(em_mm / layout.model.mm_per_pt * 100) / 100;
+        const pt0 = @round(em_mm / layout.model.mm_per_pt * 100) / 100;
         const opts: dvui.Options = .{ .expand = .horizontal, .font = styled(.theme(.body), default), .id_extra = 1 };
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &pt, .min = 0.5, .max = 2000 }, if (by_em) opts else opts.override(muted));
-        if (r.changed and r.value == .Valid) {
+        if (accepted.numberField(@src(), f64, pt0, 0.5, 2000, if (by_em) opts else opts.override(muted))) |pt| {
             act(.setEmSize, .{ sid, pt * layout.model.mm_per_pt }) catch {};
             if (state.label_style == sid) state.label_style_set = true;
         }
@@ -13158,10 +13181,9 @@ fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 2 });
         defer row.deinit();
         propName("Cap height, mm");
-        var c = @round(cap * 1000) / 1000;
+        const c0 = @round(cap * 1000) / 1000;
         const opts: dvui.Options = .{ .expand = .horizontal, .font = styled(.theme(.body), default), .id_extra = 2 };
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &c, .min = 0.1, .max = 200 }, if (by_em) opts.override(muted) else opts);
-        if (r.changed and r.value == .Valid) {
+        if (accepted.numberField(@src(), f64, c0, 0.1, 200, if (by_em) opts.override(muted) else opts)) |c| {
             act(.setCapHeight, .{ sid, c }) catch {};
             if (state.label_style == sid) state.label_style_set = true;
         }
@@ -13191,19 +13213,13 @@ fn duplicatePrototype(id: layout.model.PrototypeId) !void {
     state.context = .{ .prototype = try act(.duplicatePrototype, .{id, name}) };
 }
 
-/// An editable text property. Returns the new text when it changes; the
-/// model copies it.
+/// An editable text property. Returns the new text once accepted (Enter,
+/// or leaving the field), not empty; the model copies it.
 fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
     propName(name);
-    var te = dvui.textEntry(@src(), .{ .text_initial = value }, .{ .expand = .horizontal, .id_extra = n });
-    defer te.deinit();
-    if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), value)) te.textSet(value, false);
-    if (!te.text_changed) return null;
-    const text = std.mem.trim(u8, te.textGet(), " ");
-    if (text.len == 0 or std.mem.eql(u8, text, value)) return null;
-    return dvui.currentWindow().arena().dupe(u8, text) catch null;
+    return accepted.textField(@src(), value, .{ .expand = .horizontal, .id_extra = n }, .{}, accepted.nonEmpty);
 }
 
 /// A list of sizes typed as "1, 1.25, 2"; empty allows any. Returns the new
@@ -13216,13 +13232,18 @@ fn sizesProp(name: []const u8, shown: []const u8, n: usize) ?[]const f64 {
     const value = if (std.mem.eql(u8, shown, "any")) "" else std.mem.trimEnd(u8, shown, " u");
     var te = dvui.textEntry(@src(), .{ .text_initial = value }, .{ .expand = .horizontal, .id_extra = n });
     defer te.deinit();
-    if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), value)) te.textSet(value, false);
-    if (!te.text_changed) return null;
+    const typed = accepted.accept(te, value) orelse return null;
     var list: std.ArrayList(f64) = .empty;
-    var it = std.mem.tokenizeAny(u8, te.textGet(), ", ");
+    var it = std.mem.tokenizeAny(u8, typed, ", ");
     while (it.next()) |tok| {
-        const v = std.fmt.parseFloat(f64, tok) catch return null;
-        if (!(v > 0)) return null;
+        const v = std.fmt.parseFloat(f64, tok) catch {
+            accepted.reject(te);
+            return null;
+        };
+        if (!(v > 0)) {
+            accepted.reject(te);
+            return null;
+        }
         list.append(dvui.currentWindow().arena(), v) catch return null;
     }
     return list.items;
@@ -13238,8 +13259,10 @@ fn sidesEditor(name: []const u8, sides: layout.model.Sides, n: usize) ?layout.mo
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
         defer row.deinit();
         propName(std.fmt.bufPrint(&label_buf[i], "{s} {s}, mm", .{ name, side }) catch name);
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &@field(s, side), .min = 0, .max = 100 }, .{ .expand = .horizontal, .id_extra = n * 8 + i });
-        changed = r.changed or changed;
+        if (accepted.numberField(@src(), f64, @field(s, side), 0, 100, .{ .expand = .horizontal, .id_extra = n * 8 + i })) |v| {
+            @field(s, side) = v;
+            changed = true;
+        }
     }
     return if (changed) s else null;
 }
@@ -13552,14 +13575,13 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         const shown: []const u8 = if (st.line_pitch) |lp| std.fmt.bufPrint(&buf, "{d}", .{lp}) catch "" else "";
         var te = dvui.textEntry(@src(), .{ .text_initial = shown, .placeholder = "from its face" }, .{ .expand = .horizontal, .id_extra = 3 });
         defer te.deinit();
-        if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), shown)) te.textSet(shown, false);
-        if (te.text_changed) {
-            const typed = std.mem.trim(u8, te.textGet(), " ");
+        if (accepted.accept(te, shown)) |offered| {
+            const typed = std.mem.trim(u8, offered, " ");
             if (typed.len == 0) {
-                actM(mergeKey(.{ "line pitch", sid }), .setLinePitch, .{ sid, @as(?f64, null) }) catch {};
+                act(.setLinePitch, .{ sid, @as(?f64, null) }) catch {};
             } else if (std.fmt.parseFloat(f64, typed)) |v| {
-                if (v > 0) actM(mergeKey(.{ "line pitch", sid }), .setLinePitch, .{ sid, @as(?f64, v) }) catch {};
-            } else |_| {}
+                if (v > 0) act(.setLinePitch, .{ sid, @as(?f64, v) }) catch {} else accepted.reject(te);
+            } else |_| accepted.reject(te);
         }
     }
     heading("Faces", .{}, 20);
@@ -13662,8 +13684,10 @@ fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
         defer row.deinit();
         propName("Edge width, mm");
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &p.edge_width, .min = 0, .max = 5 }, .{ .expand = .horizontal, .id_extra = n + 3 });
-        changed = r.changed or changed;
+        if (accepted.numberField(@src(), f64, p.edge_width, 0, 5, .{ .expand = .horizontal, .id_extra = n + 3 })) |v| {
+            p.edge_width = v;
+            changed = true;
+        }
     }
     return if (changed) p else null;
 }
@@ -13687,11 +13711,17 @@ fn colourEntry(name: []const u8, colour: ?layout.art.Color, allow_none: bool, n:
     const text: []const u8 = if (colour) |c| c.format(&buf) else "";
     var te = dvui.textEntry(@src(), .{ .text_initial = text }, .{ .expand = .horizontal, .font = .theme(.mono), .id_extra = n });
     defer te.deinit();
-    if (te.data().id != dvui.focusedWidgetId() and !std.mem.eql(u8, te.textGet(), text)) te.textSet(text, false);
-    if (!te.text_changed) return null;
-    const typed = std.mem.trim(u8, te.textGet(), " ");
-    if (typed.len == 0) return if (allow_none and colour != null) @as(?layout.art.Color, null) else null;
-    const c = layout.art.Color.parse(typed) orelse return null;
+    const offered = accepted.accept(te, text) orelse return null;
+    const typed = std.mem.trim(u8, offered, " ");
+    if (typed.len == 0) {
+        if (allow_none and colour != null) return @as(?layout.art.Color, null);
+        accepted.reject(te);
+        return null;
+    }
+    const c = layout.art.Color.parse(typed) orelse {
+        accepted.reject(te);
+        return null;
+    };
     if (colour != null and std.meta.eql(c, colour.?)) return null;
     return @as(?layout.art.Color, c);
 }
@@ -13713,9 +13743,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
         defer row.deinit();
         propName(if (horizontal) "Width, u" else "Height, u");
-        var v = size;
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = 0.25, .max = 100 }, .{ .expand = .horizontal, .id_extra = n });
-        if (r.changed and v > 0) {
+        if (accepted.numberField(@src(), f64, size, 0.25, 100, .{ .expand = .horizontal, .id_extra = n })) |v| {
             if (horizontal) try act(.setTileSize, .{id, v, t.h}) else try act(.setTileSize, .{id, t.w, v});
         }
         return;
@@ -16049,12 +16077,7 @@ fn flowProperties(id: layout.model.ObjectId) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         propName("Name");
-        var te = dvui.textEntry(@src(), .{ .text_initial = f.name }, .{ .expand = .horizontal, .id_extra = @intFromEnum(id) });
-        defer te.deinit();
-        if (te.enter_pressed) {
-            const name = std.mem.trim(u8, te.textGet(), " ");
-            if (name.len > 0 and !std.mem.eql(u8, name, f.name)) act(.renameFlow, .{ id, name }) catch {};
-        }
+        if (accepted.textField(@src(), f.name, .{ .expand = .horizontal, .id_extra = @intFromEnum(id) }, .{}, accepted.nonEmpty)) |name| act(.renameFlow, .{ id, name }) catch {};
     }
     if (f.tracks.items.len == 0) {
         propText("Tracks", "{s}", .{"none: unplaced"}, 2);
@@ -17557,9 +17580,8 @@ fn pickedConstraintProperties() bool {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         propName("Value");
-        var v = @round(c.value * k * 1000) / 1000;
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = -100000, .max = 100000 }, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 });
-        if (r.changed and r.value == .Valid) _ = actM(mergeKey(.{ "constraint value", c.id }), .setConstraintValue, .{ c.id, v / k }) catch {};
+        const v0 = @round(c.value * k * 1000) / 1000;
+        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| _ = act(.setConstraintValue, .{ c.id, v / k }) catch {};
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
@@ -17673,9 +17695,8 @@ fn constraintProperties() void {
             std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
         const flagged = constraintIssue(c.id);
         dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged != null) .{ .color = colors.overflow } else null, .id_extra = ci });
-        var v = @round(c.value * k * 1000) / 1000;
-        const r = dvui.textEntryNumber(@src(), f64, .{ .value = &v, .min = -100000, .max = 100000 }, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci });
-        if (r.changed and r.value == .Valid) _ = actM(mergeKey(.{ "constraint value", c.id }), .setConstraintValue, .{ c.id, v / k }) catch {};
+        const v0 = @round(c.value * k * 1000) / 1000;
+        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| _ = act(.setConstraintValue, .{ c.id, v / k }) catch {};
     }
     if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     for (constraintIssues()) |i| {
