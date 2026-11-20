@@ -4995,13 +4995,8 @@ fn sheetProperties(id: layout.model.ObjectId) void {
     if (rows.items.len > 0) propText("Not found", "{d} row{s} name no key", .{ rows.items.len, if (rows.items.len == 1) "" else "s" }, 4);
     if (cols.items.len > 0) propText("Unused", "{d} column{s} match no slot", .{ cols.items.len, if (cols.items.len == 1) "" else "s" }, 5);
     propText("", "Its keys' legends come from it; editing one on its key edits its cell.", .{}, 6);
-    if (tbutton(@src(), "Open it beside the canvas", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
-    if (tbutton(@src(), "Remove sheet", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        if (act(.removeSheet, .{id})) {
-            state.context = .sheets;
-            state.status = "Sheet removed: its keys keep their legends, now their own. ";
-        } else |_| {}
-    }
+    keyButton(@src(), "Open it beside the canvas", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Remove sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// A track's name with where it is: its panel's name, unless it lies on
@@ -6186,17 +6181,10 @@ fn sheetViewProperties() void {
             propText("Slot", "{s}{s}", .{ slot, if (sheetCellTarget() == null) " (not on this key)" else "" }, 9703);
         }
     }
-    if (tbutton(@src(), "Name keys by grid position (R1C1…)", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) nameSheetKeys(si, .position);
-    if (tbutton(@src(), "Name keys by their first legend", .{}, .{ .expand = .horizontal })) nameSheetKeys(si, .legend);
-    if (tbutton(@src(), "Add a row", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        var nb: [32]u8 = undefined;
-        const name = m.freshName(&nb, .keys, "Row");
-        act(.addSheetRow, .{ id, sheet_sel.row + 1, name }) catch {};
-    }
-    if (sh.rows.items.len > 0) if (tbutton(@src(), "Remove this row", .{}, .{ .expand = .horizontal })) {
-        act(.removeSheetRow, .{ id, sheet_sel.row }) catch {};
-        if (sheet_sel.row > 0 and sheet_sel.row >= m.sheets.items[si].rows.items.len) sheet_sel.row -= 1;
-    };
+    keyButton(@src(), "Name keys by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Name keys by their first legend", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "Add a row", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    if (sh.rows.items.len > 0) keyButton(@src(), "Remove this row", 0, .{ .expand = .horizontal });
 }
 
 /// Names every key of sheet `si`: by its grid place (R1C1, from row 1,
@@ -6443,15 +6431,7 @@ fn frameProperties(space: usize) !void {
         if (p.space == spaceId(space) and !p.unbounded) panels += 1;
     }
     propText("Panels", "{d}", .{panels}, 4);
-    if (tbutton(@src(), "Fit frame to its contents", .{}, .{ .margin = .{ .y = 8 } })) {
-        const e = spaceExtents();
-        if (e.isEmpty()) {
-            state.status = "The frame holds nothing to fit. ";
-        } else {
-            const margin = 5.0;
-            act(.setFrameBound, .{space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin }}) catch {};
-        }
-    }
+    keyButton(@src(), "Fit frame to its contents", 0, .{ .margin = .{ .y = 8 } });
     layersList(space);
     placeViewButtons(space);
 }
@@ -6465,12 +6445,7 @@ fn groupProperties(id: layout.model.ObjectId) !void {
     propText("Members", "{d}", .{g.members.items.len}, 2);
     if (state.model.parentGroup(id)) |p| if (state.model.group(p)) |pg| propText("In group", "{s}", .{pg.name}, 3);
     propText("Moves", "{s}", .{"arrow keys, 1 mm, all together"}, 4);
-    if (tbutton(@src(), "Ungroup", .{}, .{ .margin = .{ .y = 8 } })) {
-        const parent = state.model.parentGroup(id);
-        const space = state.model.spaceOfId(id) orelse shown_space;
-        act(.ungroup, .{id}) catch return;
-        state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.rootOf(space) };
-    }
+    keyButton(@src(), "Ungroup", 0, .{ .margin = .{ .y = 8 } });
 }
 
 /// Objects picked with Select area: how many, and what can be done with
@@ -6907,17 +6882,7 @@ fn shapeProperties(pi: usize, index: usize) !void {
         propText("Panel", "{s}", .{"only a single closed path makes one"}, 13);
         return;
     }
-    if (tbutton(@src(), "Make panel", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        const np = act(.makePanel, .{pi, index}) catch {
-            state.status = "A panel could not be made from it. ";
-            return;
-        };
-        hist.join(&state.model, .setPanelLayer, .{ np, newObjectLayer() }) catch {};
-        state.context = .{ .panel = np };
-        state.expanded.put(state.gpa, Context.key(.{ .panel = np }), true) catch {};
-        if (canvas_id) |id| dvui.focusWidget(id, null, null);
-        state.status = "Made a panel: what it encloses moves with it. ";
-    }
+    keyButton(@src(), "Make panel", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Tiles and legends of panel `pi`, moved onto the worksheet.
@@ -8401,25 +8366,14 @@ fn plansProperties() void {
     const m = &state.model;
     propText("Plans", "{d}", .{m.plans.items.len}, 1);
     if (m.activePlan()) |p| propText("Exported", "{s}", .{p.name}, 2);
-    if (tbutton(@src(), "Add a plan", .{}, .{ .expand = .horizontal, .id_extra = 3, .margin = .{ .y = 6 } })) {
-        // Over every panel with fabrication layers, of no material yet.
-        const ar = dvui.currentWindow().arena();
-        var parts: std.ArrayList(manufacture.Part) = .empty;
-        for (m.panels.items) |pn| if (pn.fab.layers.len > 0 and pn.id != .none) {
-            parts.append(ar, .{ .panel = pn.id }) catch return;
-        };
-        var pb: [32]u8 = undefined;
-        const name = m.freshName(&pb, .plans, "Plan");
-        const id = act(.addPlan, .{manufacture.Plan{ .name = name, .parts = parts.items }}) catch return;
-        state.context = .{ .plan = id };
-    }
+    keyButton(@src(), "Add a plan", 0, .{ .expand = .horizontal, .id_extra = 3, .margin = .{ .y = 6 } });
 }
 
 /// A plan in the Browser: opened in a manufacturing view, and edited.
 fn planProperties(id: ObjectId) void {
     const saved_group = pushGroup("plan");
     defer popGroup(saved_group);
-    if (tbutton(@src(), "Open in a manufacturing view", .{}, .{ .expand = .horizontal, .id_extra = 90 })) showManufactureView(id);
+    keyButton(@src(), "Open in a manufacturing view", 0, .{ .expand = .horizontal, .id_extra = 90 });
     planEditor(id);
 }
 
@@ -8751,9 +8705,7 @@ fn materialsProperties() void {
     propText("Materials", "{d}", .{state.model.materials.items.len}, 1);
     heading("Add from the library", .{}, 10);
     for (manufacture.library, 0..) |lm, i| {
-        if (tbutton(@src(), lm.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("materials.library", lm.name) })) {
-            state.context = .{ .material = act(.addMaterial, .{lm}) catch continue };
-        }
+        keyButton(@src(), lm.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("materials.library", lm.name) });
     }
 }
 
@@ -8789,15 +8741,12 @@ fn materialProperties(id: ObjectId) void {
     for (m.plans.items, 0..) |pl, k| for (pl.parts) |pt| if (pt.material == id) {
         var lb: [160]u8 = undefined;
         const text = std.fmt.bufPrint(&lb, "{s}: {s}", .{ pl.name, panelNameOf(pt.panel) }) catch pl.name;
-        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used, .tag = listTag("material.plan", text) })) state.context = .{ .plan = pl.id };
+        keyButton(@src(), text, idArg(pl.id), .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used, .tag = listTag("material.plan", text) });
         used += 1;
     };
     if (used == 0) {
         propText("Parts", "none", .{}, 19);
-        if (tbutton(@src(), "Remove this material", .{}, .{ .expand = .horizontal, .id_extra = 18, .margin = .{ .y = 8 } })) {
-            act(.removeMaterial, .{id}) catch {};
-            state.context = .materials;
-        }
+        keyButton(@src(), "Remove this material", 0, .{ .expand = .horizontal, .id_extra = 18, .margin = .{ .y = 8 } });
     }
 }
 
@@ -8963,7 +8912,7 @@ fn planChecksSection(id: ObjectId) void {
     defer popGroup(saved_group);
     const stale = planChecksFor(id) and plan_checks_rev != state.model.revision;
     headingAs("plan.checks", "{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
-    if (tbutton(@src(), "Check this plan", .{}, .{ .expand = .horizontal, .id_extra = 141 })) runPlanChecks(id);
+    keyButton(@src(), "Check this plan", 0, .{ .expand = .horizontal, .id_extra = 141 });
     if (!planChecksFor(id)) return;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 142 });
@@ -8971,7 +8920,7 @@ fn planChecksSection(id: ObjectId) void {
         _ = tcheckbox(@src(), &plan_findings_shown, "Findings", .{ .id_extra = 143 });
         _ = tcheckbox(@src(), &plan_simulation_shown, "Simulation", .{ .id_extra = 144 });
     }
-    if (tbutton(@src(), "Clear results", .{}, .{ .expand = .horizontal, .id_extra = 145 })) clearPlanChecks();
+    keyButton(@src(), "Clear results", 0, .{ .expand = .horizontal, .id_extra = 145 });
 }
 
 /// A plan's check results over its view: per operation shown, its
@@ -9702,15 +9651,8 @@ fn checkLayersList(space: usize) void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 610 });
         defer row.deinit();
-        if (tbutton(@src(), "Check again", .{}, .{ .expand = .horizontal, .id_extra = 611 })) {
-            const only: ?usize = if (checks.len == 1) checks[0].panel else null;
-            runChecks(only);
-        }
-        if (tbutton(@src(), "Clear results", .{}, .{ .expand = .horizontal, .id_extra = 612 })) {
-            if (checks_arena) |*ar| ar.deinit();
-            checks_arena = null;
-            checks = &.{};
-        }
+        keyButton(@src(), "Check again", 0, .{ .expand = .horizontal, .id_extra = 611 });
+        keyButton(@src(), "Clear results", 0, .{ .expand = .horizontal, .id_extra = 612 });
     }
 }
 
@@ -9719,7 +9661,7 @@ fn checkLayersList(space: usize) void {
 fn panelChecks(pi: usize) void {
     const saved_group = pushGroup("panel.checks");
     defer popGroup(saved_group);
-    if (tbutton(@src(), "Check this panel", .{}, .{ .expand = .horizontal, .id_extra = 420, .margin = .{ .y = 6 } })) runChecks(pi);
+    keyButton(@src(), "Check this panel", 0, .{ .expand = .horizontal, .id_extra = 420, .margin = .{ .y = 6 } });
     if (!checksCurrent()) return;
     const ck = for (checks) |c| {
         if (c.panel == pi) break c;
@@ -9766,17 +9708,9 @@ fn layersList(space: usize) void {
         var buf: [96]u8 = undefined;
         const active = l.id == newObjectLayer();
         const text = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ l.name, if (l.locked) " (locked)" else "", if (active) " · new objects" else "", if (flagged) " · flagged" else "" }) catch l.name;
-        if (tbutton(@src(), text, .{}, .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null })) {
-            state.context = .{ .layer = .{ .space = space, .index = li } };
-            active_layer = l.id;
-        }
+        keyButton(@src(), text, @intCast(li), .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null });
     }
-    if (tbutton(@src(), "Add layer", .{}, .{ .expand = .horizontal, .margin = .{ .y = 4 } })) {
-        var buf: [32]u8 = undefined;
-        const li = act(.addLayer, .{space, state.model.nextLayerName(space, &buf)}) catch return;
-        state.context = .{ .layer = .{ .space = space, .index = li } };
-        active_layer = state.model.spaces.items[space].layers.items[li].id;
-    }
+    keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
 /// A layer's properties: shown, locked, opacity, blend, output, its place
@@ -9876,10 +9810,7 @@ fn imageProperties(space: usize, index: usize) !void {
     propText("Resolution", "{d:.0} dpi at this size", .{im.dpi()}, 7);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 8);
     if (state.model.spaces.items[space].layerIndex(im.layer)) |li| layerFlags(space, li, 9);
-    if (tbutton(@src(), "Remove image", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        actV(.removeImage, .{space, index});
-        state.context = .{ .panel = state.model.rootOf(space) };
-    }
+    keyButton(@src(), "Remove image", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Moves the selected image 1 mm the way an arrow points.
@@ -10150,15 +10081,8 @@ fn viewProperties(host: usize, index: usize) !void {
     propText("Reads as", "{s}", .{scaleText(sv.scale)}, 6);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 7);
     propText("Edits", "{s}", .{"in its source: it shows them at once"}, 8);
-    if (tbutton(@src(), "Show its source", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        shown_space = src_i;
-        state.context = .{ .panel = state.model.rootOf(src_i) };
-        state.view.fit = contentExtents();
-    }
-    if (tbutton(@src(), "Remove view", .{}, .{ .expand = .horizontal })) {
-        actV(.removeView, .{host, index});
-        state.context = .{ .panel = state.model.rootOf(host) };
-    }
+    keyButton(@src(), "Show its source", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Remove view", 0, .{ .expand = .horizontal });
 }
 
 /// Buttons placing a view of space `space` in each other space it may
@@ -10175,7 +10099,7 @@ fn placeViewButtons(space: usize) void {
         }
         var buf: [96]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "Place a view in {s}", .{if (host == 0) "the canvas" else sp.name}) catch "Place a view";
-        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = host })) placeView(space, host);
+        keyButton(@src(), text, @intCast(host), .{ .expand = .horizontal, .id_extra = host });
     }
 }
 
@@ -13212,6 +13136,333 @@ const button_handlers = [_]ButtonHandler{
             state.context = .processes;
         }
     }.f),
+    // A legend sheet, and its view's cell.
+    handler("sheet.open-it-beside-the-canvas", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .sheet => |id| id,
+                else => return,
+            };
+            openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+        }
+    }.f),
+    handler("sheet.remove-sheet", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .sheet => |id| id,
+                else => return,
+            };
+            if (act(.removeSheet, .{id})) {
+                state.context = .sheets;
+                state.status = "Sheet removed: its keys keep their legends, now their own. ";
+            } else |_| {}
+        }
+    }.f),
+    handler("sheet.cell.name-keys-by-grid-position-r1c1", struct {
+        fn f(_: i32) void {
+            const si = state.model.sheetIndex(sheet_sel.sheet) orelse return;
+            nameSheetKeys(si, .position);
+        }
+    }.f),
+    handler("sheet.cell.name-keys-by-their-first-legend", struct {
+        fn f(_: i32) void {
+            const si = state.model.sheetIndex(sheet_sel.sheet) orelse return;
+            nameSheetKeys(si, .legend);
+        }
+    }.f),
+    handler("sheet.cell.add-a-row", struct {
+        fn f(_: i32) void {
+            var nb: [32]u8 = undefined;
+            const name = state.model.freshName(&nb, .keys, "Row");
+            act(.addSheetRow, .{ sheet_sel.sheet, sheet_sel.row + 1, name }) catch {};
+        }
+    }.f),
+    handler("sheet.cell.remove-this-row", struct {
+        fn f(_: i32) void {
+            const si = state.model.sheetIndex(sheet_sel.sheet) orelse return;
+            act(.removeSheetRow, .{ sheet_sel.sheet, sheet_sel.row }) catch {};
+            if (sheet_sel.row > 0 and sheet_sel.row >= state.model.sheets.items[si].rows.items.len) sheet_sel.row -= 1;
+        }
+    }.f),
+    // Materials.
+    handler("materials.library.*", struct {
+        fn f(arg: i32) void {
+            const i: usize = @intCast(arg);
+            if (i >= manufacture.library.len) return;
+            state.context = .{ .material = act(.addMaterial, .{manufacture.library[i]}) catch return };
+        }
+    }.f),
+    handler("material.plan.*", struct {
+        fn f(arg: i32) void {
+            state.context = .{ .plan = argId(arg) };
+        }
+    }.f),
+    handler("material.remove-this-material", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .material => |id| id,
+                else => return,
+            };
+            act(.removeMaterial, .{id}) catch {};
+            state.context = .materials;
+        }
+    }.f),
+    // Checks.
+    handler("plan.checks.check-this-plan", struct {
+        fn f(_: i32) void {
+            const c = contextPlan() orelse return;
+            runPlanChecks(c.id);
+        }
+    }.f),
+    handler("plan.checks.clear-results", struct {
+        fn f(_: i32) void {
+            clearPlanChecks();
+        }
+    }.f),
+    handler("checks.results.check-again", struct {
+        fn f(_: i32) void {
+            const only: ?usize = if (checks.len == 1) checks[0].panel else null;
+            runChecks(only);
+        }
+    }.f),
+    handler("checks.results.clear-results", struct {
+        fn f(_: i32) void {
+            if (checks_arena) |*ar| ar.deinit();
+            checks_arena = null;
+            checks = &.{};
+        }
+    }.f),
+    // A space's layers.
+    handler("layers.*", struct {
+        fn f(arg: i32) void {
+            const space = contextSpace();
+            const li: usize = @intCast(arg);
+            if (li >= state.model.spaces.items[space].layers.items.len) return;
+            state.context = .{ .layer = .{ .space = space, .index = li } };
+            active_layer = state.model.spaces.items[space].layers.items[li].id;
+        }
+    }.f),
+    handler("layers.add-layer", struct {
+        fn f(_: i32) void {
+            const space = contextSpace();
+            var buf: [32]u8 = undefined;
+            const li = act(.addLayer, .{ space, state.model.nextLayerName(space, &buf) }) catch return;
+            state.context = .{ .layer = .{ .space = space, .index = li } };
+            active_layer = state.model.spaces.items[space].layers.items[li].id;
+        }
+    }.f),
+    // A view of another space.
+    handler("view.show-its-source", struct {
+        fn f(_: i32) void {
+            const v = switch (state.context) {
+                .view => |v| v,
+                else => return,
+            };
+            const sv = viewAt(v.space, v.index) orelse return;
+            const src_i = state.model.spaceIndex(sv.source) orelse return;
+            shown_space = src_i;
+            state.context = .{ .panel = state.model.rootOf(src_i) };
+            state.view.fit = contentExtents();
+        }
+    }.f),
+    handler("view.remove-view", struct {
+        fn f(_: i32) void {
+            const v = switch (state.context) {
+                .view => |v| v,
+                else => return,
+            };
+            actV(.removeView, .{ v.space, v.index });
+            state.context = .{ .panel = state.model.rootOf(v.space) };
+        }
+    }.f),
+    // The legend font.
+    handler("panel.previous-font", struct {
+        fn f(_: i32) void {
+            stepFont(false);
+        }
+    }.f),
+    handler("panel.next-font", struct {
+        fn f(_: i32) void {
+            stepFont(true);
+        }
+    }.f),
+    handler("canvas.previous-font", struct {
+        fn f(_: i32) void {
+            stepFont(false);
+        }
+    }.f),
+    handler("canvas.next-font", struct {
+        fn f(_: i32) void {
+            stepFont(true);
+        }
+    }.f),
+    // Styles.
+    handler("style.rules.add-a-rule", struct {
+        fn f(arg: i32) void {
+            const sid = argId(arg);
+            if (state.model.styleIndex(sid) == null) return;
+            const st = state.model.textStyle(sid).*;
+            // The first parameter it does not set for every object yet.
+            const p = for (std.enums.values(glyphic.Param)) |q| {
+                const used = for (st.rules.items) |r| {
+                    if (r.kind == null and r.param == q) break true;
+                } else false;
+                if (!used) break q;
+            } else return;
+            _ = act(.setStyleRule, .{ sid, null, p, @as(?glyphic.Value, glyphic.param.def(p).default) }) catch {};
+        }
+    }.f),
+    handler("styles.add-a-style", struct {
+        fn f(_: i32) void {
+            var buf: [32]u8 = undefined;
+            const name = state.model.freshName(&buf, .styles, "Style");
+            state.context = .{ .style = act(.addStyle, .{ name, layout.model.StyleSize{ .cap_height = 3 } }) catch return };
+        }
+    }.f),
+    handler("styles.package.*", struct {
+        fn f(arg: i32) void {
+            const i: usize = @intCast(arg);
+            if (i >= layout.fonts.packages.len) return;
+            const pkg = layout.fonts.packages[i];
+            var lb: [64]u8 = undefined;
+            const name = if (styleNamed(pkg.name) == null) pkg.name else std.fmt.bufPrint(&lb, "{s} {d}", .{ pkg.name, state.model.styles.items.len + 1 }) catch pkg.name;
+            // One step: the style and the package's faces and rules on it.
+            const key = mergeKey(.{ "package style", pkg.name, state.model.styles.items.len });
+            const id = actM(key, .addStyle, .{ name, layout.model.StyleSize{} }) catch return;
+            for (pkg.faces) |fc| _ = actM(key, .setStyleFace, .{ id, fc.role, @as(?layout.model.FontName, fc.font) }) catch {};
+            for (pkg.rules) |r| _ = actM(key, .setStyleRule, .{ id, r.kind, r.param, r.value }) catch {};
+            state.context = .{ .style = id };
+        }
+    }.f),
+    handler("style.fonts-every-face", struct {
+        fn f(_: i32) void {
+            fontwin.open = true;
+        }
+    }.f),
+    // A frame, a group, line art.
+    handler("frame.fit-frame-to-its-contents", struct {
+        fn f(_: i32) void {
+            const space = contextSpace();
+            const e = spaceExtents();
+            if (e.isEmpty()) {
+                state.status = "The frame holds nothing to fit. ";
+                return;
+            }
+            const margin = 5.0;
+            act(.setFrameBound, .{ space, .{ .x0 = e.x0 - margin, .y0 = e.y0 - margin, .x1 = e.x1 + margin, .y1 = e.y1 + margin } }) catch {};
+        }
+    }.f),
+    handler("group.ungroup", struct {
+        fn f(_: i32) void {
+            const id = switch (state.context) {
+                .group => |id| id,
+                else => return,
+            };
+            const parent = state.model.parentGroup(id);
+            const space = state.model.spaceOfId(id) orelse shown_space;
+            act(.ungroup, .{id}) catch return;
+            state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.rootOf(space) };
+        }
+    }.f),
+    handler("art.shape.make-panel", struct {
+        fn f(_: i32) void {
+            const a = switch (state.context) {
+                .art => |a| a,
+                else => return,
+            };
+            const np = act(.makePanel, .{ a.panel, a.index }) catch {
+                state.status = "A panel could not be made from it. ";
+                return;
+            };
+            hist.join(&state.model, .setPanelLayer, .{ np, newObjectLayer() }) catch {};
+            state.context = .{ .panel = np };
+            state.expanded.put(state.gpa, Context.key(.{ .panel = np }), true) catch {};
+            if (canvas_id) |id| dvui.focusWidget(id, null, null);
+            state.status = "Made a panel: what it encloses moves with it. ";
+        }
+    }.f),
+    // Plans, checks, images, views.
+    handler("plans.add-a-plan", struct {
+        fn f(_: i32) void {
+            const m = &state.model;
+            // Over every panel with fabrication layers, of no material yet.
+            const ar = dvui.currentWindow().arena();
+            var parts: std.ArrayList(manufacture.Part) = .empty;
+            for (m.panels.items) |pn| if (pn.fab.layers.len > 0 and pn.id != .none) {
+                parts.append(ar, .{ .panel = pn.id }) catch return;
+            };
+            var pb: [32]u8 = undefined;
+            const name = m.freshName(&pb, .plans, "Plan");
+            const id = act(.addPlan, .{manufacture.Plan{ .name = name, .parts = parts.items }}) catch return;
+            state.context = .{ .plan = id };
+        }
+    }.f),
+    handler("plan.open-in-a-manufacturing-view", struct {
+        fn f(_: i32) void {
+            const c = contextPlan() orelse return;
+            showManufactureView(c.id);
+        }
+    }.f),
+    handler("panel.checks.check-this-panel", struct {
+        fn f(_: i32) void {
+            runChecks(contextPanel() orelse return);
+        }
+    }.f),
+    handler("image.remove-image", struct {
+        fn f(_: i32) void {
+            const im = switch (state.context) {
+                .image => |im| im,
+                else => return,
+            };
+            actV(.removeImage, .{ im.space, im.index });
+            state.context = .{ .panel = state.model.rootOf(im.space) };
+        }
+    }.f),
+    handler("view.place-in.*", struct {
+        fn f(arg: i32) void {
+            placeView(contextSpace(), @intCast(arg));
+        }
+    }.f),
+    handler("processes.builtin.*", struct {
+        fn f(arg: i32) void {
+            const i: usize = @intCast(arg);
+            if (i >= layout.model.process.builtins.len) return;
+            var nb: [160]u8 = undefined;
+            var named = layout.model.process.builtins[i];
+            named.name = uniqueProcessName(&nb, named.name);
+            state.context = .{ .process = act(.addProcess, .{named}) catch return };
+        }
+    }.f),
+    handler("status.*", struct {
+        fn f(_: i32) void {
+            actualSize();
+        }
+    }.f),
+    // Constraints.
+    handler("constraint.place-it-as-at-first", struct {
+        fn f(_: i32) void {
+            const id = picked_constraint orelse return;
+            act(.setConstraintPlace, .{ id, .{} }) catch {};
+        }
+    }.f),
+    handler("constraint.remove", struct {
+        fn f(_: i32) void {
+            const id = picked_constraint orelse return;
+            act(.removeConstraint, .{id}) catch {};
+            picked_constraint = null;
+        }
+    }.f),
+    handler("constraints.origin-at.*", struct {
+        fn f(arg: i32) void {
+            const id = contextObject() orelse return;
+            const thirds = [_]layout.model.Third{ .low, .mid, .high };
+            const k: usize = @intCast(arg);
+            // Rows from the top (high), columns from the left (low).
+            const y = thirds[2 - k / 3];
+            const x = thirds[k % 3];
+            act(.setObjectOrigin, .{ id, layout.model.OriginPoint{ .x = x, .y = y } }) catch {};
+        }
+    }.f),
     handler("tool.add-panel", struct {
         fn f(_: i32) void {
             state.tool = if (state.tool == .add_panel) .select else .add_panel;
@@ -13310,6 +13561,30 @@ fn moveLayerOf(up: bool) void {
         else => return,
     };
     state.context = .{ .layer = .{ .space = l.space, .index = act(.moveLayer, .{ l.space, l.index, up }) catch l.index } };
+}
+
+/// The legend font stepped to the next or the one before.
+fn stepFont(next: bool) void {
+    if (state.fonts.len == 0) return;
+    state.font_choice = if (next) (state.font_choice + 1) % state.fonts.len else (state.font_choice + state.fonts.len - 1) % state.fonts.len;
+    state.font_set = true;
+}
+
+/// An object id as a button's argument, and back.
+fn idArg(id: ObjectId) i32 {
+    return @bitCast(@intFromEnum(id));
+}
+
+fn argId(arg: i32) ObjectId {
+    return @enumFromInt(@as(u32, @bitCast(arg)));
+}
+
+/// The space whose layers the context shows: a frame's, else the canvas.
+fn contextSpace() usize {
+    return switch (state.context) {
+        .panel => |pi| state.model.spaceOf(pi),
+        else => 0,
+    };
 }
 
 /// The Add rows, Add columns or Add track tool, on or off.
@@ -13572,14 +13847,8 @@ fn propFont(name: []const u8, n: usize) !void {
     defer lifo.free(names);
     for (state.fonts, 0..) |f, i| names[i] = f.name;
     if (tdropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120), .font = styled(.theme(.body), !state.font_set) })) state.font_set = true;
-    if (tbuttonIcon(@src(), "Previous font", dvui.entypo.chevron_left, .{}, .{}, .{})) {
-        state.font_choice = (state.font_choice + state.fonts.len - 1) % state.fonts.len;
-        state.font_set = true;
-    }
-    if (tbuttonIcon(@src(), "Next font", dvui.entypo.chevron_right, .{}, .{}, .{})) {
-        state.font_choice = (state.font_choice + 1) % state.fonts.len;
-        state.font_set = true;
-    }
+    keyIcon(@src(), "Previous font", dvui.entypo.chevron_left, 0, .{});
+    keyIcon(@src(), "Next font", dvui.entypo.chevron_right, 0, .{});
 }
 
 fn properties() !void {
@@ -14299,16 +14568,7 @@ fn styleRules(sid: layout.model.StyleId) !void {
             return;
         }
     }
-    if (tbutton(@src(), "Add a rule", .{}, .{ .id_extra = 5100, .margin = .{ .y = 4 } })) {
-        // The first parameter it does not set for every object yet.
-        const p = for (std.enums.values(glyphic.Param)) |q| {
-            const used = for (st.rules.items) |r| {
-                if (r.kind == null and r.param == q) break true;
-            } else false;
-            if (!used) break q;
-        } else return;
-        _ = act(.setStyleRule, .{ sid, null, p, @as(?glyphic.Value, glyphic.param.def(p).default) }) catch {};
-    }
+    keyButton(@src(), "Add a rule", idArg(sid), .{ .id_extra = 5100, .margin = .{ .y = 4 } });
 }
 
 /// A style's size, two ways: as a point size (its em, as other software
@@ -14476,12 +14736,7 @@ fn processesProperties() void {
     propText("Profiles", "{d}", .{state.model.processes.items.len}, 1);
     heading("Add a profile", .{}, 10);
     for (process.builtins, 0..) |b, i| {
-        if (tbutton(@src(), b.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("processes.builtin", b.name) })) {
-            var nb: [160]u8 = undefined;
-            var named = b;
-            named.name = uniqueProcessName(&nb, b.name);
-            state.context = .{ .process = act(.addProcess, .{named}) catch continue };
-        }
+        keyButton(@src(), b.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("processes.builtin", b.name) });
     }
 }
 
@@ -14665,23 +14920,11 @@ fn stylesProperties() !void {
     const saved_group = pushGroup("styles");
     defer popGroup(saved_group);
     propText("Text styles", "{d}", .{state.model.styles.items.len}, 1);
-    if (tbutton(@src(), "Add a style", .{}, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } })) {
-        var buf: [32]u8 = undefined;
-        const name = state.model.freshName(&buf, .styles, "Style");
-        state.context = .{ .style = try act(.addStyle, .{ name, layout.model.StyleSize{ .cap_height = 3 } }) };
-    }
+    keyButton(@src(), "Add a style", 0, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } });
     heading("From a math package", .{}, 10);
     for (layout.fonts.packages, 0..) |pkg, i| {
         var lb: [64]u8 = undefined;
-        if (tbutton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i , .tag = listTag("styles.package", pkg.name)})) {
-            const name = if (styleNamed(pkg.name) == null) pkg.name else std.fmt.bufPrint(&lb, "{s} {d}", .{ pkg.name, state.model.styles.items.len + 1 }) catch pkg.name;
-            // One step: the style and the package's faces and rules on it.
-            const key = mergeKey(.{ "package style", pkg.name, state.model.styles.items.len });
-            const id = actM(key, .addStyle, .{ name, layout.model.StyleSize{} }) catch continue;
-            for (pkg.faces) |f| _ = actM(key, .setStyleFace, .{ id, f.role, @as(?layout.model.FontName, f.font) }) catch {};
-            for (pkg.rules) |r| _ = actM(key, .setStyleRule, .{ id, r.kind, r.param, r.value }) catch {};
-            state.context = .{ .style = id };
-        }
+        keyButton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i , .tag = listTag("styles.package", pkg.name)});
     }
 }
 
@@ -14750,7 +14993,7 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         if (std.mem.eql(u8, f.role, "text")) continue;
         propText(faceItem("style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
-    if (tbutton(@src(), "Fonts… (every face, and searching the installed fonts)", .{}, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } })) fontwin.open = true;
+    keyButton(@src(), "Fonts… (every face, and searching the installed fonts)", 0, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } });
     try styleRules(sid);
 }
 
@@ -14972,7 +15215,7 @@ fn statusContent() void {
         const pct = zoomPercent();
         const zt = std.fmt.bufPrint(&zb, "{d:.0} %{s}", .{ pct, if (display.measuredPxPerMm() == null) "*" else "" }) catch "";
         var zwd: dvui.WidgetData = undefined;
-        if (tbutton(@src(), zt, .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd })) actualSize();
+        keyButton(@src(), zt, 0, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd });
         dvui.tooltip(@src(), .{ .active_rect = zwd.borderRectScale().r }, "{s}", .{if (display.measuredPxPerMm() == null) "Zoom against actual size, estimated (View › Calibrate screen size…). Click: actual size." else "Zoom against actual size. Click: actual size."}, .{});
     }
 
@@ -18736,11 +18979,8 @@ fn pickedConstraintProperties() bool {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
-        if (tbutton(@src(), "Place it as at first", .{}, .{})) act(.setConstraintPlace, .{ c.id, .{} }) catch {};
-        if (tbutton(@src(), "Remove", .{}, .{})) {
-            act(.removeConstraint, .{c.id}) catch {};
-            picked_constraint = null;
-        }
+        keyButton(@src(), "Place it as at first", 0, .{});
+        keyButton(@src(), "Remove", 0, .{});
     }
     return true;
 }
@@ -18893,7 +19133,7 @@ fn originPicker(id: layout.model.ObjectId) void {
         for (xs, 0..) |x, xi| {
             const on = holds.x == x and holds.y == y;
             var nb: [16]u8 = undefined;
-            if (tbutton(@src(), "", .{}, .{
+            keyButton(@src(), "", @intCast(yi * 3 + xi), .{
                 // Which point of it is its origin: constraints.origin-at.high-low …
                 .tag = listTag("constraints.origin-at", std.fmt.bufPrint(&nb, "{s} {s}", .{ @tagName(y), @tagName(x) }) catch "x"),
                 .id_extra = yi * 3 + xi,
@@ -18901,7 +19141,7 @@ fn originPicker(id: layout.model.ObjectId) void {
                 .margin = .all(1),
                 .padding = .all(3),
                 .color_fill = if (on) .{ .color = colors.guide } else null,
-            })) act(.setObjectOrigin, .{ id, layout.model.OriginPoint{ .x = x, .y = y } }) catch {};
+            });
         }
     }
 }
