@@ -10,6 +10,7 @@
 //! removed, the removal saying first what goes with the file.
 
 const std = @import("std");
+const glyphic = @import("graven_glyphic");
 const display = @import("display.zig");
 const keymap = @import("keymap.zig");
 const dvui = @import("dvui");
@@ -191,7 +192,10 @@ pub fn catalog(a: Allocator) ?layout.fonts.Catalog {
     if (records.len == 0) return null;
     const names = a.alloc(model.FontName, records.len) catch return null;
     for (records, names) |r, *n| n.* = .{ .family = r.family, .style = r.style };
-    return .{ .names = names, .ctx = undefined, .load = struct {
+    // What each face is, as measured, for glyphic's matching.
+    const described = a.alloc(glyphic.fontspec.Described, records.len) catch return null;
+    for (records, described) |r, *d| d.* = glyphic.fontspec.measured(r.family, r.style, r.weight, r.width, r.italic);
+    return .{ .names = names, .described = described, .ctx = undefined, .load = struct {
         fn load(_: *anyopaque, i: usize) ?*layout.Face {
             return faceOf(i);
         }

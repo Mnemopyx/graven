@@ -13,6 +13,7 @@ const std = @import("std");
 const font = @import("graven_font");
 const ex = @import("expr.zig");
 const param = @import("param.zig");
+const fontspec = @import("fontspec.zig");
 
 pub const Face = font.Face;
 const Kind = ex.Kind;
@@ -110,7 +111,49 @@ fn try1(f: *Face, name: []const u8, italic: bool, cp: u21) ?Choice {
     return .{ .face = f, .cp = cp, .slanted = italic and !is_italic_face };
 }
 
+/// How a treatment of a style is set, from its faces: the face, and how
+/// it is made (see `fontspec.Making`; `fallback`: in another treatment's
+/// face, as it is, which the render reports).
+pub const Resolution = struct {
+    face: ?*Face,
+    making: Making,
+
+    pub const Making = enum { face, unicode_math, synthesized, fallback, none };
+};
+
+/// Treatment `t` of face set `fs`, as `choose` sets it (a face the
+/// application found only as the nearest of its family is still `face`
+/// here: the application knows that, see `layout.fonts`).
+pub fn resolution(fs: FaceSet, t: fontspec.Treatment) Resolution {
+    const text = fs.get("text") orelse (if (fs.members.len > 0) fs.members[0].face else null);
+    return switch (t) {
+        .text => .{ .face = text, .making = if (text != null) .face else .none },
+        .math => if (fs.get("math")) |f| .{ .face = f, .making = .face } else .{ .face = text, .making = .fallback },
+        .mono => if (fs.get("mono")) |f| .{ .face = f, .making = .face } else .{ .face = text, .making = .fallback },
+        .bold => if (fs.get("bold")) |f| .{ .face = f, .making = .face } else .{ .face = text, .making = .fallback },
+        .italic => if (fs.get("italic")) |f| .{ .face = f, .making = .face } else if (fs.get("math")) |m| (if (m.glyph(mathItalic('a')) != null) .{ .face = m, .making = .unicode_math } else .{ .face = text, .making = .synthesized }) else .{ .face = text, .making = .synthesized },
+        .bold_italic => if (fs.get("bold_italic")) |f| .{ .face = f, .making = .face } else if (fs.get("bold")) |f| .{ .face = f, .making = .synthesized } else .{ .face = text, .making = .fallback },
+    };
+}
+
 /// A face's cap height, font units (measured from H; 0.7 em without one).
 pub fn capUnits(f: *Face) f64 {
     return (f.capHeight() catch null) orelse 0.7 * @as(f64, @floatFromInt(f.upem));
+}
+
+test "each treatment's face and how it is made" {
+    const testdata = @import("graven_testdata");
+    const text = try Face.init(std.testing.allocator, testdata.truetype, 0);
+    defer text.deinit();
+    const math = try Face.init(std.testing.allocator, testdata.cff, 0);
+    defer math.deinit();
+    const fs: FaceSet = .{ .members = &.{ .{ .name = "text", .face = text }, .{ .name = "bold", .face = math } } };
+    try std.testing.expectEqual(Resolution.Making.face, resolution(fs, .text).making);
+    try std.testing.expectEqual(math, resolution(fs, .bold).face.?);
+    // No italic face, no math face: the text face slanted.
+    try std.testing.expectEqual(Resolution.Making.synthesized, resolution(fs, .italic).making);
+    // Bold italic from the bold face slanted; no monospace: the text face.
+    try std.testing.expectEqual(Resolution.Making.synthesized, resolution(fs, .bold_italic).making);
+    try std.testing.expectEqual(math, resolution(fs, .bold_italic).face.?);
+    try std.testing.expectEqual(Resolution.Making.fallback, resolution(fs, .mono).making);
 }

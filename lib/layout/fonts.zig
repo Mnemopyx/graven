@@ -24,6 +24,9 @@ const StyleId = model.StyleId;
 /// The fonts an app can supply: their names, and a way to load each.
 pub const Catalog = struct {
     names: []const FontName,
+    /// What each face is (weight, slant, width) where the app measured it
+    /// (fontsearch does); else read from its style name.
+    described: ?[]const glyphic.fontspec.Described = null,
     ctx: *anyopaque,
     /// The face for `names[index]`, loaded (and kept by the app, which owns
     /// it), or null when it cannot be.
@@ -47,21 +50,33 @@ pub fn join(al: Allocator, first: Catalog, second: Catalog) Allocator.Error!Cata
     }.load };
 }
 
-/// Styles tried, in order, when a family has the font asked for but not in
-/// the style asked for.
-const plain_styles = [_][]const u8{ "Regular", "Book", "Roman", "Normal", "Medium" };
+/// The catalog entry for `want`, as glyphic matches faces (`fontspec`):
+/// the same family and style, else the family's face nearest in width,
+/// slant and weight, else none. What each face is comes from its name.
+pub fn find(names: []const FontName, want: FontName) ?Found {
+    return findDescribed(names, null, want);
+}
 
-/// The catalog entry for `want`: the same family and style, else another
-/// style of the family (a plain one first), else none.
-pub fn find(names: []const FontName, want: FontName) ?struct { index: usize, exact: bool } {
+/// A catalog entry found, and whether it is the face named.
+pub const Found = struct { index: usize, exact: bool };
+
+/// As `find`, with `described` giving what each face is where the app
+/// measured it.
+pub fn findDescribed(names: []const FontName, described: ?[]const glyphic.fontspec.Described, want: FontName) ?Found {
     for (names, 0..) |n, i| if (n.eql(want)) return .{ .index = i, .exact = true };
-    for (plain_styles) |style| {
-        for (names, 0..) |n, i| {
-            if (std.ascii.eqlIgnoreCase(n.family, want.family) and std.ascii.eqlIgnoreCase(n.style, style)) return .{ .index = i, .exact = false };
-        }
+    // Only the family's faces are described (a catalog may be large).
+    var buf: [512]glyphic.fontspec.Described = undefined;
+    var idx: [512]usize = undefined;
+    var n: usize = 0;
+    for (names, 0..) |nm, i| {
+        if (!std.ascii.eqlIgnoreCase(nm.family, want.family)) continue;
+        if (n == buf.len) break;
+        buf[n] = if (described) |d| d[i] else glyphic.fontspec.describe(nm.family, nm.style);
+        idx[n] = i;
+        n += 1;
     }
-    for (names, 0..) |n, i| if (std.ascii.eqlIgnoreCase(n.family, want.family)) return .{ .index = i, .exact = false };
-    return null;
+    const m = glyphic.fontspec.matchName(buf[0..n], want.family, want.style) orelse return null;
+    return .{ .index = idx[m.index], .exact = false };
 }
 
 /// A font a style asked for and did not get as named.
@@ -115,7 +130,7 @@ const Resolver = struct {
     /// The face for `want`, recording a substitution; null when the
     /// catalog has nothing of its family, or cannot load it.
     fn face(s: *Resolver, style: StyleId, want: FontName) Allocator.Error!?FaceId {
-        const hit = find(s.catalog.names, want) orelse {
+        const hit = findDescribed(s.catalog.names, s.catalog.described, want) orelse {
             try s.note(style, want, null);
             return null;
         };

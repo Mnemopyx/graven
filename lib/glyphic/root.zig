@@ -37,6 +37,7 @@ pub const stops = @import("stops.zig");
 pub const breaks = @import("breaks.zig");
 pub const ground = @import("ground.zig");
 pub const faces = @import("faces.zig");
+pub const fontspec = @import("fontspec.zig");
 pub const layout = @import("layout.zig");
 pub const setting = @import("setting.zig");
 pub const symbols = @import("symbols.zig");

@@ -11,6 +11,7 @@
 const std = @import("std");
 const platform = @import("graven_platform");
 const layout = @import("graven_layout");
+const glyphic = @import("graven_glyphic");
 const fontsearch = @import("graven_fontsearch");
 
 const Allocator = std.mem.Allocator;
@@ -34,6 +35,8 @@ pub const Folders = struct {
     faces: std.ArrayList(*layout.Face) = .empty,
     bytes: std.ArrayList([]u8) = .empty,
     names: std.ArrayList(layout.model.FontName) = .empty,
+    /// What each face is, as measured, for glyphic's matching.
+    described: std.ArrayList(glyphic.fontspec.Described) = .empty,
 
     pub fn init(gpa: Allocator) Folders {
         return .{ .arena = .init(gpa) };
@@ -80,10 +83,11 @@ pub const Folders = struct {
         try d.faces.append(a, face);
         try d.bytes.append(a, bytes);
         try d.names.append(a, .{ .family = r.family, .style = r.style });
+        try d.described.append(a, glyphic.fontspec.measured(r.family, r.style, r.weight, r.width, r.italic));
     }
 
     pub fn catalog(d: *Folders) layout.fonts.Catalog {
-        return .{ .names = d.names.items, .ctx = d, .load = struct {
+        return .{ .names = d.names.items, .described = d.described.items, .ctx = d, .load = struct {
             fn f(ctx: *anyopaque, index: usize) ?*layout.Face {
                 const self: *Folders = @ptrCast(@alignCast(ctx));
                 return self.faces.items[index];

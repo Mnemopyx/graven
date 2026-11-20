@@ -545,6 +545,7 @@ const InstalledFonts = struct {
     io: std.Io,
     records: []const local_fonts.Record = &.{},
     names: []layout.model.FontName = &.{},
+    described: []glyphic.fontspec.Described = &.{},
     faces: std.AutoHashMapUnmanaged(usize, *layout.Face) = .empty,
 
     fn load(f: *InstalledFonts) !void {
@@ -553,10 +554,12 @@ const InstalledFonts = struct {
         if (f.records.len == 0) f.records = local_fonts.build(f.io, f.gpa, a, null) catch &.{};
         f.names = try a.alloc(layout.model.FontName, f.records.len);
         for (f.records, f.names) |r, *n| n.* = .{ .family = r.family, .style = r.style };
+        f.described = try a.alloc(glyphic.fontspec.Described, f.records.len);
+        for (f.records, f.described) |r, *d| d.* = glyphic.fontspec.measured(r.family, r.style, r.weight, r.width, r.italic);
     }
 
     fn catalog(f: *InstalledFonts) layout.fonts.Catalog {
-        return .{ .names = f.names, .ctx = f, .load = struct {
+        return .{ .names = f.names, .described = f.described, .ctx = f, .load = struct {
             fn get(ctx: *anyopaque, i: usize) ?*layout.Face {
                 const self: *InstalledFonts = @ptrCast(@alignCast(ctx));
                 if (self.faces.get(i)) |face| return face;
