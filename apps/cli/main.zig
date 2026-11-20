@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const platform = @import("graven_platform");
 const layout = @import("graven_layout");
 const fontsearch = @import("graven_fontsearch");
 const richtext = @import("graven_richtext");
@@ -246,7 +247,7 @@ fn msdfSheet(init: std.process.Init, font_path: []const u8, text: []const u8, te
             const m: geom.Affine = .{ .a = px, .d = px, .e = b.x0 - grow - px, .f = b.y0 - grow - px };
             // GRAVEN_MSDF_EXACT set: the exact outline (grown by geom.grow),
             // supersampled 4 x 4, in place of the field, to compare.
-            const cov = if (std.c.getenv("GRAVEN_MSDF_EXACT") != null) try exactCoverage(a, o, n, m, grow) else try f.rasterize(a, n, n, m, px, grow);
+            const cov = if (platform.env("GRAVEN_MSDF_EXACT") != null) try exactCoverage(a, o, n, m, grow) else try f.rasterize(a, n, n, m, px, grow);
             const ox = si * cell + 2;
             const oy = (gi * 2 + grown) * cell + 2;
             for (0..n) |j| for (0..n) |i| {
@@ -306,9 +307,7 @@ const ThreeMfOptions = struct {
 };
 
 fn monoNow() i128 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    return platform.monotonicNs();
 }
 
 fn msBetween(a: i128, b: i128) f64 {
@@ -509,14 +508,6 @@ fn dump(init: std.process.Init, path: []const u8, with_log: bool) !void {
     try w.flush();
 }
 
-/// Room for a host name (Windows has no HOST_NAME_MAX; the name is not read there).
-const host_name_max = if (builtin.os.tag == .windows) 1 else std.posix.HOST_NAME_MAX;
-
-fn deviceName(buf: *[host_name_max]u8) []const u8 {
-    if (builtin.os.tag == .windows) return "";
-    return std.posix.gethostname(buf) catch "";
-}
-
 fn compact(init: std.process.Init, path: []const u8) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -530,8 +521,8 @@ fn compact(init: std.process.Init, path: []const u8) !void {
     try h.compact();
     var random: [16]u8 = undefined;
     io.random(&random);
-    var host: [host_name_max]u8 = undefined;
-    const who: layout.history.Writer = .{ .id = layout.history.writerId(random), .device = deviceName(&host), .tool = layout.history.tool_version };
+    var host: [platform.host_name_max]u8 = undefined;
+    const who: layout.history.Writer = .{ .id = layout.history.writerId(random), .device = platform.hostName(&host), .tool = layout.history.tool_version };
     const now = std.Io.Clock.real.now(io).toSeconds();
     const bytes = try layout.history.fileBytes(h, gpa, who, now);
     defer gpa.free(bytes);

@@ -9,6 +9,7 @@
 //! or joined before the installed fonts' (`fonts.join`).
 
 const std = @import("std");
+const platform = @import("graven_platform");
 const layout = @import("graven_layout");
 const fontsearch = @import("graven_fontsearch");
 
@@ -19,7 +20,7 @@ const Allocator = std.mem.Allocator;
 pub fn dirsFor(a: Allocator, doc_path: ?[]const u8) Allocator.Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (doc_path) |p| try out.append(a, try std.fs.path.join(a, &.{ std.fs.path.dirname(p) orelse ".", "fonts" }));
-    const set = if (std.c.getenv("GRAVEN_FONTS")) |v| std.mem.span(v) else "";
+    const set = platform.env("GRAVEN_FONTS") orelse "";
     const shared: []const u8 = if (set.len > 0) set else "fonts";
     for (out.items) |o| {
         if (std.mem.eql(u8, o, shared) or (std.mem.eql(u8, o, "./fonts") and std.mem.eql(u8, shared, "fonts"))) break;
@@ -101,7 +102,7 @@ test "a document's folders: beside it, then the shared one, once each" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    if (std.c.getenv("GRAVEN_FONTS") != null) return;
+    if (platform.env("GRAVEN_FONTS") != null) return;
     const dirs = try dirsFor(a, "examples/hp15c.graven");
     try std.testing.expectEqual(@as(usize, 2), dirs.len);
     try std.testing.expectEqualStrings("examples/fonts", dirs[0]);

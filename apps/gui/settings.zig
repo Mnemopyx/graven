@@ -128,7 +128,7 @@ pub fn resolveDir(gpa: std.mem.Allocator, name: []const u8, base: []const u8) ![
     const t = std.mem.trim(u8, name, " \t");
     if (t.len == 0) return error.Empty;
     if (t[0] == '~' and (t.len == 1 or t[1] == '/' or t[1] == '\\')) {
-        const home = env(if (builtin.os.tag == .windows) "USERPROFILE" else "HOME") orelse return error.NoHome;
+        const home = platform.home() orelse return error.NoHome;
         return std.fs.path.join(gpa, &.{ home, if (t.len > 2) t[2..] else "" });
     }
     if (std.fs.path.isAbsolute(t)) return gpa.dupe(u8, t);
@@ -191,44 +191,19 @@ fn writeIfChanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, doc: *co
     return null;
 }
 
-fn env(name: [*:0]const u8) ?[]const u8 {
-    const v = std.c.getenv(name) orelse return null;
-    const s = std.mem.span(v);
-    return if (s.len == 0) null else s;
-}
+const platform = @import("graven_platform");
+const env = platform.env;
 
 const Paths = struct { shared: []const u8, local: []const u8 };
 
-/// Where the two files are on this system.
+/// Where the two files are on this system: the shared one with the
+/// settings that follow the user, the local one with this machine's.
 pub fn filePaths(gpa: std.mem.Allocator) !Paths {
     if (env("GRAVEN_CONFIG_DIR")) |d| return both(gpa, d);
-    switch (builtin.os.tag) {
-        .windows => {
-            const roaming = env("APPDATA") orelse return error.NoHome;
-            const local = env("LOCALAPPDATA") orelse roaming;
-            return .{
-                .shared = try std.fs.path.join(gpa, &.{ roaming, "Graven", "shared.toml" }),
-                .local = try std.fs.path.join(gpa, &.{ local, "Graven", "local.toml" }),
-            };
-        },
-        .macos => {
-            const home = env("HOME") orelse return error.NoHome;
-            const d = try std.fs.path.join(gpa, &.{ home, "Library", "Application Support", "Graven" });
-            defer gpa.free(d);
-            return both(gpa, d);
-        },
-        else => {
-            if (env("XDG_CONFIG_HOME")) |x| {
-                const d = try std.fs.path.join(gpa, &.{ x, "graven" });
-                defer gpa.free(d);
-                return both(gpa, d);
-            }
-            const home = env("HOME") orelse return error.NoHome;
-            const d = try std.fs.path.join(gpa, &.{ home, ".config", "graven" });
-            defer gpa.free(d);
-            return both(gpa, d);
-        },
-    }
+    return .{
+        .shared = try platform.appFile(gpa, .config, "shared.toml"),
+        .local = try platform.appFile(gpa, .machine, "local.toml"),
+    };
 }
 
 fn both(gpa: std.mem.Allocator, dir: []const u8) !Paths {

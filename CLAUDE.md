@@ -32,6 +32,8 @@ Fonts for the math packages are not in git: `python3 scripts/fetch-fonts.py` put
 
 ## Building and checking
 
+Cross-builds from Linux: `$Z build -Dtarget=x86_64-windows-gnu` (CLI) and `$Z build gui-build -Dtarget=x86_64-windows-gnu` (GUI) make Windows executables that need only system DLLs; `-Dtarget=aarch64-macos` builds the CLI tools (the GUI needs Apple's SDK). Not yet run on Windows.
+
 ```sh
 $Z build test                 # all library tests; silent means pass (long after a cache loss: allow ~10 min)
 $Z build                      # CLI tools into zig-out/bin
@@ -87,4 +89,5 @@ Better than screen points: `zig build gui-test` runs Graven's own frames under D
 - `lib/glyphic`: the legend engine (v2; v1's `lib/engine` was deleted 2026-11-16): expression objects, parameters and style contexts, LaTeX/Typst entry, layout, ground and setting.
 - `lib/layout`: the document model (text styles are stored glyphic contexts; content is in flows, `Model.flows`, each running through its tracks in order), history and undo, placement (`place.zig`; legends set by glyphic in `legend.zig` into `render.zig`'s geometry; `edit.zig` edits a run's source in place), styles' fonts and math packages (`fonts.zig`), fabrication (`fab.zig`, `threemf.zig`), process profiles (`process.zig`), the checks and simulation (`check.zig`), materials and manufacturing plans (`manufacture.zig`), output.
 - `lib/sketch`: parametric sketches and their solver.
+- `lib/platform`: what differs between systems, chosen by the build target (`graven_platform`): constants (`is_windows`, `exe_suffix`, `host_name_max`, `key_names` …), `env`, `home`, `expandHome`, `hostName`, Graven's per-user folders (`appDir(.config | .machine | .data | .cache)`, `appFile`), font folders, `monotonicNs`, `absolutePath`. Code elsewhere uses these rather than switching on the OS or calling POSIX itself.
 - `apps/cli`: `graven`. `apps/gui`: the editor (`main.zig` is most of it; `glyphs.zig` the text display path; `ghost.zig` the panes; `layouts.zig` the named pane layouts and the panes' official names; `views.zig` the document's views, tabbed in splits; `cursor.zig` the scintillating spark's frames, for the animated cursor; `digraphs.zig` Ctrl+K digraphs (table `digraph_data.zig` from `scripts/digraphs.py`; the user's in the config's `[digraphs]`); `actions.zig` the action/mode/keymap registry and `keymap.zig` Graven's actions, modes and default keys: a key is matched there, never by code inline). `apps/gui/text_sample.zig`: the text sample behind `GRAVEN_SAMPLE=text`. `apps/fonts/folders.zig`: a document's font folders, loaded as a catalog, shared by the GUI and the CLI. `examples/`: the example documents (made in the GUI; `gui-test` makes them again and compares) and their tests. `apps/fab`, `bridge/occt`: STEP through OCCT (`graven-fab <document> <out.step>`).

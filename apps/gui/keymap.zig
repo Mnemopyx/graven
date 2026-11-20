@@ -13,6 +13,7 @@
 const std = @import("std");
 const elements = @import("elements.zig");
 const builtin = @import("builtin");
+const platform = @import("graven_platform");
 const dvui = @import("dvui");
 const actions = @import("actions.zig");
 
@@ -451,7 +452,7 @@ const all_action_defs = blk: {
     break :blk fixed;
 };
 
-pub const R = actions.Registry(dvui.enums.Key, builtin.os.tag == .macos, &modes, &all_action_defs, &binds);
+pub const R = actions.Registry(dvui.enums.Key, platform.is_macos, &modes, &all_action_defs, &binds);
 
 pub const ActionId = R.ActionId;
 pub const ModeId = R.ModeId;
@@ -614,11 +615,11 @@ pub fn shortcut(buf: []u8, m: ModeId, a: ActionId, arg: i32) ?[]const u8 {
     }
     const b = best orelse return null;
     var w: std.Io.Writer = .fixed(buf);
-    const cmd_name = if (builtin.os.tag == .macos) "Cmd+" else "Super+";
-    if (b.chord.mods.ctrl) w.writeAll("Ctrl+") catch return null;
-    if (b.chord.mods.cmd) w.writeAll(cmd_name) catch return null;
-    if (b.chord.mods.alt) w.writeAll(if (builtin.os.tag == .macos) "Option+" else "Alt+") catch return null;
-    if (b.chord.mods.shift) w.writeAll("Shift+") catch return null;
+    const kn = platform.key_names;
+    if (b.chord.mods.ctrl) w.writeAll(kn.ctrl ++ "+") catch return null;
+    if (b.chord.mods.cmd) w.writeAll(kn.cmd ++ "+") catch return null;
+    if (b.chord.mods.alt) w.writeAll(kn.alt ++ "+") catch return null;
+    if (b.chord.mods.shift) w.writeAll(kn.shift ++ "+") catch return null;
     switch (b.chord.what) {
         .char => |c| w.writeAll(c) catch return null,
         .code => |k| w.writeAll(keyName(k)) catch return null,

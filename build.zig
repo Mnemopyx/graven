@@ -116,6 +116,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // What differs between systems, chosen by the target: constants, the
+    // environment, home and host name, Graven's folders, font folders, a
+    // monotonic clock, absolute paths.
+    const platform = b.addModule("graven_platform", .{
+        .root_source_file = b.path("lib/platform/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // Configuration: TOML files, shared and local.
     const config = b.addModule("graven_config", .{
         .root_source_file = b.path("lib/config/root.zig"),
@@ -133,6 +143,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "graven_fontsearch", .module = fontsearch },
             .{ .name = "graven_font", .module = font },
+            .{ .name = "graven_platform", .module = platform },
         },
     });
 
@@ -146,6 +157,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "graven_layout", .module = layout },
             .{ .name = "graven_fontsearch", .module = fontsearch },
+            .{ .name = "graven_platform", .module = platform },
         },
     });
 
@@ -163,6 +175,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_glyphic", .module = glyphic },
                 .{ .name = "graven_fonts_folders", .module = fonts_folders },
                 .{ .name = "graven_fonts_local", .module = fonts_local },
+                .{ .name = "graven_platform", .module = platform },
             },
         }),
     });
@@ -183,6 +196,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "graven_fontsearch", .module = fontsearch },
                 .{ .name = "graven_font", .module = font },
+                .{ .name = "graven_platform", .module = platform },
             },
         }),
     });
@@ -226,6 +240,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_fonts_folders", .module = fonts_folders },
                     .{ .name = "graven_richtext", .module = richtext },
                     .{ .name = "graven_glyphic", .module = glyphic },
+                    .{ .name = "graven_platform", .module = platform },
                 },
             }),
         });
@@ -262,6 +277,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_fonts_folders", .module = fonts_folders },
                 .{ .name = "graven_richtext", .module = richtext },
                 .{ .name = "graven_glyphic", .module = glyphic },
+                .{ .name = "graven_platform", .module = platform },
                 .{ .name = "graven_occt3d", .module = b.createModule(.{
                     .root_source_file = b.path("apps/gui/occt3d_stub.zig"),
                     .target = target,
@@ -282,7 +298,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, layout, config, fontsearch, richtext, sketch, fonts_local, fonts_folders, glyphic }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, layout, config, fontsearch, richtext, sketch, fonts_local, fonts_folders, glyphic, platform }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).

@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const platform = @import("graven_platform");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
 const glyphic = @import("graven_glyphic");
@@ -870,12 +871,9 @@ fn loadRecent(ps: *const settings_file.Store) void {
 
 /// Puts `path` first in the recent files, and writes them out.
 fn noteRecent(path: []const u8) void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const z = state.gpa.dupeSentinel(u8, path, 0) catch return;
-    defer state.gpa.free(z);
-    // Windows has no realpath: the path is kept as given there (to do:
-    // GetFullPathNameW).
-    const abs: []const u8 = if (builtin.os.tag == .windows) path else if (std.c.realpath(z.ptr, &buf)) |r| std.mem.span(@as([*:0]u8, @ptrCast(r))) else path;
+    const full = platform.absolutePath(dvui.io, state.gpa, path);
+    defer if (full) |r| state.gpa.free(r);
+    const abs: []const u8 = full orelse path;
     var k: usize = 0;
     while (k < recent_files.items.len) {
         if (std.mem.eql(u8, recent_files.items[k], abs)) {
@@ -1588,7 +1586,7 @@ fn listFonts(gpa: std.mem.Allocator) ![]Font {
         } else false;
         // Named instances of a variable font carry the instance above bit 16.
         if (!known or index >> 16 != 0) continue;
-        const user = std.mem.indexOf(u8, path, "/.local/share/fonts/") != null or std.mem.indexOf(u8, path, "/.fonts/") != null;
+        const user = platform.isUserFontPath(path);
         const name = try std.fmt.allocPrint(gpa, "{s}{s}{s}{s}", .{ family, if (style.len > 0) " " else "", style, if (user) " (user)" else "" });
         const font: Font = .{ .name = name, .path = path, .index = index, .family = family, .style = style };
         // One entry per face of a file: a styled one replaces an unstyled.
@@ -1762,7 +1760,7 @@ fn glyphAtlas() *glyphs.Atlas {
         atlas = .init(state.gpa);
         // GRAVEN_FIELDS_INLINE set: fields made on the drawing thread (to
         // compare).
-        if (std.c.getenv("GRAVEN_FIELDS_INLINE") == null) atlas.?.startMaker(dvui.io, wakeGui);
+        if (platform.env("GRAVEN_FIELDS_INLINE") == null) atlas.?.startMaker(dvui.io, wakeGui);
     }
     return &atlas.?;
 }
@@ -2040,7 +2038,7 @@ var elements_log_opened = false;
 fn frame() !dvui.App.Result {
     if (!elements_log_opened) {
         elements_log_opened = true;
-        if (std.c.getenv("GRAVEN_ELEMENTS_LOG")) |path| elements_log = std.Io.Dir.cwd().createFile(dvui.io, std.mem.span(path), .{}) catch null;
+        if (platform.env("GRAVEN_ELEMENTS_LOG")) |path| elements_log = std.Io.Dir.cwd().createFile(dvui.io, path, .{}) catch null;
     }
     // Elements drawn outside any group (menus, the tools) are in none.
     elem_group = "";
@@ -2082,24 +2080,23 @@ fn frame() !dvui.App.Result {
         }
         // GRAVEN_SAMPLE=hp15c or keyboard: a new canvas with that sample, for
         // trying the app (and its tests) without the menus.
-        exact_text = std.c.getenv("GRAVEN_EXACT_TEXT") != null;
+        exact_text = platform.env("GRAVEN_EXACT_TEXT") != null;
         // GRAVEN_FONTS_WINDOW set: the Fonts window opens at start.
-        if (std.c.getenv("GRAVEN_FONTS_WINDOW") != null) fontwin.open = true;
-        frame_log = std.c.getenv("GRAVEN_FRAME_LOG") != null;
-        keymap.log = std.c.getenv("GRAVEN_KEY_LOG") != null;
-        if (std.c.getenv("GRAVEN_DUMP_OUTLINES")) |v| dump_path = std.mem.span(v);
-        if (std.c.getenv("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.gamma;
-        if (std.c.getenv("GRAVEN_TEXT_DARKEN")) |v| glyphs.darken = std.fmt.parseFloat(f64, std.mem.span(v)) catch glyphs.darken;
-        if (std.c.getenv("GRAVEN_SAMPLE")) |v| {
-            const which = std.mem.span(v);
+        if (platform.env("GRAVEN_FONTS_WINDOW") != null) fontwin.open = true;
+        frame_log = platform.env("GRAVEN_FRAME_LOG") != null;
+        keymap.log = platform.env("GRAVEN_KEY_LOG") != null;
+        if (platform.env("GRAVEN_DUMP_OUTLINES")) |v| dump_path = v;
+        if (platform.env("GRAVEN_TEXT_GAMMA")) |v| glyphs.gamma = std.fmt.parseFloat(f64, v) catch glyphs.gamma;
+        if (platform.env("GRAVEN_TEXT_DARKEN")) |v| glyphs.darken = std.fmt.parseFloat(f64, v) catch glyphs.darken;
+        if (platform.env("GRAVEN_SAMPLE")) |which| {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
             if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) loadText() catch {};
         }
         // GRAVEN_VIEW=cx,cy,ppm: the view's centre (mm) and zoom (px/mm).
-        if (std.c.getenv("GRAVEN_VIEW")) |v| {
-            var it = std.mem.splitScalar(u8, std.mem.span(v), ',');
+        if (platform.env("GRAVEN_VIEW")) |v| {
+            var it = std.mem.splitScalar(u8, v, ',');
             var vals: [3]f64 = .{ state.view.cx, state.view.cy, state.view.ppm };
             for (&vals) |*x| x.* = std.fmt.parseFloat(f64, it.next() orelse break) catch x.*;
             state.view.cx = vals[0];
@@ -2332,12 +2329,12 @@ fn saveAs() void {
 
 /// This run, as the writer of what it adds to files: a fresh random ID.
 var this_run: history.Writer = .{ .id = @splat(0) };
-var device_buf: [256]u8 = undefined;
+var device_buf: [platform.host_name_max]u8 = undefined;
 
 fn initWriter() void {
     var random: [16]u8 = undefined;
     dvui.io.random(&random);
-    const device: []const u8 = if (builtin.os.tag == .windows or builtin.os.tag == .wasi) "" else std.posix.gethostname(device_buf[0..std.posix.HOST_NAME_MAX]) catch "";
+    const device = platform.hostName(&device_buf);
     this_run = .{ .id = history.writerId(random), .device = device, .tool = history.tool_version };
 }
 
@@ -3386,7 +3383,7 @@ fn loadPrefs() void {
         if (ps.get("display.white")) |v| if (tomlFloat(v)) |f| {
             dc.white = f;
         };
-        if (std.c.getenv("GRAVEN_DISPLAY")) |e| if (display.Correction.parse(std.mem.span(e))) |c| {
+        if (platform.env("GRAVEN_DISPLAY")) |e| if (display.Correction.parse(e)) |c| {
             dc = c;
         };
         display.set(dc);
@@ -4476,7 +4473,7 @@ fn initWindowFrame(win: *dvui.Window) void {
     const c = dvui.backend.c;
     const window = win.backend.impl.window;
     _ = c.SDL_SetWindowTitle(window, "untitled — Graven");
-    if (std.c.getenv("GRAVEN_NATIVE_FRAME") != null) return;
+    if (platform.env("GRAVEN_NATIVE_FRAME") != null) return;
     _ = c.SDL_SetWindowBordered(window, false);
     _ = c.SDL_SetWindowHitTest(window, hitTest, null);
 }
@@ -4569,7 +4566,7 @@ fn titleBar() ?dvui.App.Result {
     const ws = win.backend.windowSize();
     frame_density = if (ws.w > 0) px.w / ws.w else 1;
 
-    const native_frame = dvui.backend.kind != .sdl3 or std.c.getenv("GRAVEN_NATIVE_FRAME") != null;
+    const native_frame = dvui.backend.kind != .sdl3 or platform.env("GRAVEN_NATIVE_FRAME") != null;
     // Window buttons on the left, when the desktop puts them there.
     if (!native_frame) if (windowButtons(desk.layout.leftSide())) |r| return r;
 
@@ -9006,9 +9003,7 @@ var mesh_job: ?*MeshJob = null;
 const Clock = struct {
     last: i128,
     fn now() i128 {
-        var ts: std.posix.timespec = undefined;
-        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-        return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+        return platform.monotonicNs();
     }
     fn start() Clock {
         return .{ .last = now() };
@@ -18802,7 +18797,7 @@ fn sparkColor(c: dvui.Color) spark.Color {
 /// could be (else the caller draws the spark).
 fn sparkCursor(q: dvui.Point.Physical, arrow: bool) bool {
     if (dvui.backend.kind != .sdl3) return false;
-    if (spark_drawn_only == null) spark_drawn_only = std.c.getenv("GRAVEN_DRAWN_SPARK") != null;
+    if (spark_drawn_only == null) spark_drawn_only = platform.env("GRAVEN_DRAWN_SPARK") != null;
     if (spark_drawn_only.?) return false;
     const c = dvui.backend.c;
     const win = dvui.currentWindow();

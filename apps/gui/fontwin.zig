@@ -1035,11 +1035,7 @@ fn addReport(ra: Allocator, comptime fmt: []const u8, args: anytype) void {
     install_report.append(gpa, std.fmt.allocPrint(ra, fmt, args) catch return) catch {};
 }
 
-fn expandHome(a: Allocator, path: []const u8) []const u8 {
-    if (!std.mem.startsWith(u8, path, "~/")) return path;
-    const home = std.mem.span(std.c.getenv("HOME") orelse return path);
-    return std.fs.path.join(a, &.{ home, path[2..] }) catch path;
-}
+const expandHome = @import("graven_platform").expandHome;
 
 /// Faces by width, weight and slope, as families list them.
 fn byShape(_: void, a: usize, b: usize) bool {

@@ -10,7 +10,7 @@
 //! folder, so the font folder holds only fonts.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const platform = @import("graven_platform");
 const fs = @import("graven_fontsearch");
 const font = @import("graven_font");
 
@@ -19,69 +19,33 @@ const Allocator = std.mem.Allocator;
 pub const Record = fs.Record;
 pub const Scope = fs.Scope;
 
-fn env(name: [*:0]const u8) ?[]const u8 {
-    const v = std.c.getenv(name) orelse return null;
-    const s = std.mem.span(v);
-    return if (s.len == 0) null else s;
-}
+const env = platform.env;
 
 /// A font folder and whose fonts it holds.
 pub const FontDir = struct { path: []const u8, scope: Scope };
 
 /// The folder user fonts are installed in: the OS's per-user font folder.
 pub fn userDir(a: Allocator) ![]const u8 {
-    const home = env("HOME");
-    return switch (builtin.os.tag) {
-        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Microsoft", "Windows", "Fonts" }),
-        .macos => std.fs.path.join(a, &.{ home orelse return error.NoHome, "Library", "Fonts" }),
-        else => if (env("XDG_DATA_HOME")) |x| std.fs.path.join(a, &.{ x, "fonts" }) else std.fs.path.join(a, &.{ home orelse return error.NoHome, ".local", "share", "fonts" }),
-    };
+    return platform.userFontDir(a);
 }
 
 /// The system's font folders, each with its scope; the user's own first.
 pub fn fontDirs(a: Allocator) ![]const FontDir {
-    var dirs: std.ArrayList(FontDir) = .empty;
-    if (userDir(a)) |u| try dirs.append(a, .{ .path = u, .scope = .user }) else |_| {}
-    const home = env("HOME");
-    switch (builtin.os.tag) {
-        .windows => try dirs.append(a, .{ .path = try std.fs.path.join(a, &.{ env("WINDIR") orelse "C:\\Windows", "Fonts" }), .scope = .system }),
-        .macos => {
-            try dirs.append(a, .{ .path = "/System/Library/Fonts", .scope = .system });
-            try dirs.append(a, .{ .path = "/Library/Fonts", .scope = .system });
-        },
-        else => {
-            // The older per-user folder, still read by fontconfig.
-            if (home) |h| try dirs.append(a, .{ .path = try std.fs.path.join(a, &.{ h, ".fonts" }), .scope = .user });
-            try dirs.append(a, .{ .path = "/usr/share/fonts", .scope = .system });
-            try dirs.append(a, .{ .path = "/usr/local/share/fonts", .scope = .system });
-        },
-    }
-    return dirs.items;
+    const dirs = try platform.fontDirs(a);
+    const out = try a.alloc(FontDir, dirs.len);
+    for (dirs, out) |d, *o| o.* = .{ .path = d.path, .scope = if (d.user) .user else .system };
+    return out;
 }
 
 /// Where the index is kept ($GRAVEN_FONTS_INDEX overrides it).
 pub fn indexPath(a: Allocator) ![]const u8 {
     if (env("GRAVEN_FONTS_INDEX")) |p| return p;
-    return switch (builtin.os.tag) {
-        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Graven", "fonts-index.json" }),
-        .macos => std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, "Library", "Caches", "Graven", "fonts-index.json" }),
-        else => if (env("XDG_CACHE_HOME")) |x|
-            std.fs.path.join(a, &.{ x, "graven", "fonts-index.json" })
-        else
-            std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, ".cache", "graven", "fonts-index.json" }),
-    };
+    return platform.appFile(a, .cache, "fonts-index.json");
 }
 
 /// Where Graven keeps the provenance of the fonts it installed.
 pub fn provenancePath(a: Allocator) ![]const u8 {
-    return switch (builtin.os.tag) {
-        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Graven", "installed-fonts.json" }),
-        .macos => std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, "Library", "Application Support", "Graven", "installed-fonts.json" }),
-        else => if (env("XDG_DATA_HOME")) |x|
-            std.fs.path.join(a, &.{ x, "graven", "installed-fonts.json" })
-        else
-            std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, ".local", "share", "graven", "installed-fonts.json" }),
-    };
+    return platform.appFile(a, .data, "installed-fonts.json");
 }
 
 pub fn isFontFile(name: []const u8) bool {

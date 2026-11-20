@@ -47,19 +47,11 @@ var fetching = false;
 var fetched: ?[]u8 = null;
 var thread: ?std.Thread = null;
 
-fn env(name: [*:0]const u8) ?[]const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
-}
+const platform = @import("graven_platform");
+const env = platform.env;
 
 fn cacheDir(a: Allocator) ![]u8 {
-    return switch (builtin.os.tag) {
-        .windows => std.fs.path.join(a, &.{ env("LOCALAPPDATA") orelse return error.NoHome, "Graven", "motd" }),
-        .macos => std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, "Library", "Caches", "Graven", "motd" }),
-        else => if (env("XDG_CACHE_HOME")) |x|
-            std.fs.path.join(a, &.{ x, "graven", "motd" })
-        else
-            std.fs.path.join(a, &.{ env("HOME") orelse return error.NoHome, ".cache", "graven", "motd" }),
-    };
+    return platform.appFile(a, .cache, "motd");
 }
 
 /// Shows the cached message for `version`, if there is one, and fetches a
