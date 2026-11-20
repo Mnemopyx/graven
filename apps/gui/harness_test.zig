@@ -4,7 +4,8 @@
 //!
 //! Tags (main.zig, "Tags"): a property row "<section heading>/<field>", a
 //! button "<section heading>/<label>", a menu item "menu/<label>", a
-//! Browser node "tree/<path>", a content palette button "palette/<kind>".
+//! Browser node "tree/<path>", a content palette button "palette.<kind>"
+//! (`palette.key.1-25u`).
 //! A dropdown is chosen through `testing_api.choose` (its entries carry no
 //! tags); everything else is clicked and typed.
 //!
@@ -205,6 +206,7 @@ pub const Run = struct {
             try r.frames(1);
             if (!api.pressPending()) break;
         } else {
+            api.cancelPress();
             std.debug.print("nothing to press with id \"{s}\"; ", .{id});
             dumpSection(id);
             return error.NoSuchElement;
@@ -411,6 +413,17 @@ fn legendsCsv(a: std.mem.Allocator) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// The content palette's key of size `w` u: palette.key.1-25u.
+fn paletteKey(buf: []u8, w: f64) ![]const u8 {
+    const t = try std.fmt.bufPrint(buf, "palette.key.{d}u", .{w});
+    for (t) |*c| if (c.* == '.') {
+        c.* = '-';
+    };
+    // The dots between the parts again.
+    @memcpy(t[0.."palette.key.".len], "palette.key.");
+    return t;
+}
+
 fn screen(p: struct { f64, f64 }) !dvui.Point.Physical {
     return api.toScreen(.{ .x = p[0], .y = p[1] }) orelse error.NoCanvas;
 }
@@ -468,10 +481,10 @@ fn makeKeyboard(r: *Run) !void {
     const panel_path = "\"PC keyboard (ANSI 104)\"";
     try r.cursor(panel_path ++ ".Row1", 0);
     for (rows, 0..) |row, ri| {
-        if (ri > 0) try r.press("palette/hard_break");
+        if (ri > 0) try r.press("palette.hard-break");
         for (row) |k| {
             var tb: [32]u8 = undefined;
-            try r.click(try std.fmt.bufPrint(&tb, "palette/key {d} u", .{k.w}));
+            try r.press(try paletteKey(&tb, k.w));
         }
     }
 
@@ -1131,8 +1144,8 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     try r.field("track.length", "5");
     try r.field("track.depth", "2");
     for (0..5) |k| {
-        if (k == 3) try r.press("palette/hard_break");
-        try r.press("palette/key 1 u");
+        if (k == 3) try r.press("palette.hard-break");
+        try r.press("palette.key.1u");
     }
     try r.frames(3);
     const a = std.heap.c_allocator;
@@ -1318,4 +1331,11 @@ test "the discovery path: a track's groups and elements, and which are shown now
 test {
     // The element registry's own tests (ids, the discovery walk).
     _ = @import("elements.zig");
+}
+
+test "every button in the registry is an action with a handler" {
+    var buf: [256][]const u8 = undefined;
+    const missing = api.unhandledButtons(&buf);
+    for (missing) |m| std.debug.print("no handler: {s}\n", .{m});
+    try std.testing.expectEqual(0, missing.len);
 }

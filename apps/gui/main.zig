@@ -240,6 +240,19 @@ pub const testing_api = struct {
         scripted_press = scripted_press_buf[0..n];
         dvui.refresh(null, @src(), null);
     }
+    /// The registry's button actions with no handler (none should be).
+    pub fn unhandledButtons(out: [][]const u8) [][]const u8 {
+        var n: usize = 0;
+        for (elements.button_actions) |name| if (!buttonHandled(name)) {
+            if (n < out.len) out[n] = name;
+            n += 1;
+        };
+        return out[0..@min(n, out.len)];
+    }
+    /// A press asked for and not taken, given up.
+    pub fn cancelPress() void {
+        scripted_press = null;
+    }
     /// Whether a press asked for is still waiting (nothing with its id was
     /// drawn).
     pub fn pressPending() bool {
@@ -965,12 +978,9 @@ fn displayWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
-        if (tbutton(@src(), "Screen size…", .{}, .{})) {
-            display_window = false;
-            openSizeWindow();
-        }
-        if (tbutton(@src(), "Reset", .{}, .{})) dc = .{};
-        if (tbutton(@src(), "Close", .{}, .{})) close = true;
+        keyButton(@src(), "Screen size…", 0, .{});
+        keyButton(@src(), "Reset", 0, .{});
+        keyButton(@src(), "Close", 0, .{});
     }
     if (!std.meta.eql(dc, before)) {
         display.set(dc);
@@ -1151,12 +1161,12 @@ fn sizeWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
-        if (tbutton(@src(), "Use estimate", .{}, .{})) {
-            display.setPxPerMm(null);
-            size_window = false;
-        }
-        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (tbutton(@src(), "Save", .{}, .{ .style = .highlight })) do_save = true;
+        keyButton(@src(), "Use estimate", 0, .{});
+        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), "Save", 0, .{ .style = .highlight });
+        // Its buttons as Enter and Esc: the answer pressed.
+        if (dialogAnswered(kact("dialog.confirm"))) do_save = true;
+        if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
     }
     if (do_save) {
         display.setPxPerMm(display.fromCardWidth(card_px));
@@ -1390,8 +1400,11 @@ fn exportPrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (tbutton(@src(), "Export", .{}, .{})) go = true;
+        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), "Export", 0, .{});
+        // Its buttons as Enter and Esc: the answer pressed.
+        if (dialogAnswered(kact("dialog.confirm"))) go = true;
+        if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
     }
     if (cancel) {
         export_prompt = false;
@@ -2890,28 +2903,9 @@ fn recoveryPrompt() void {
     if (rec.opened.damaged) dvui.labelNoFmt(@src(), "The end of the file was damaged: the last of them are lost.", .{}, .{});
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    if (tbutton(@src(), "Cancel", .{}, .{})) {
-        rec.opened.model.deinit();
-        rec.opened.history.deinit();
-        state.gpa.free(rec.path);
-        recovery = null;
-        return;
-    }
-    if (tbutton(@src(), "Discard them", .{}, .{})) {
-        var bb: [std.fs.max_path_bytes]u8 = undefined;
-        const copy = backup(rec.path, &bb);
-        rec.opened.discardUnsaved() catch {
-            state.status = "The saved document could not be rebuilt. ";
-            return;
-        };
-        finishRecovery(rec, .save);
-        state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Opened as last saved. The file as it was is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Opened as last saved. " else "Opened as last saved. A backup copy could not be made. ";
-        return;
-    }
-    if (tbutton(@src(), "Keep them", .{}, .{})) {
-        finishRecovery(rec, .autosave);
-        state.status = "Opened with the changes kept; they are not saved yet. ";
-    }
+    keyButton(@src(), "Cancel", 0, .{});
+    keyButton(@src(), "Discard them", 0, .{});
+    keyButton(@src(), "Keep them", 0, .{});
 }
 
 /// Installs the recovered document and writes its file afresh under this
@@ -2924,7 +2918,7 @@ fn finishRecovery(rec: anytype, kind: history.WriteKind) void {
 }
 
 /// Another run (or program) wrote to the file since this one did.
-fn contentionPrompt(kind: history.WriteKind) void {
+fn contentionPrompt() void {
     const saved_group = pushGroup("dialog.contention");
     defer popGroup(saved_group);
     var fw = promptWindow(@src(), 15, 640, 175) orelse return;
@@ -2936,45 +2930,14 @@ fn contentionPrompt(kind: history.WriteKind) void {
     dvui.labelNoFmt(@src(), "since this one did, so nothing was written. Your changes are still here.", .{}, .{});
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    const path = file_path orelse {
+    if (file_path == null) {
         contention = null;
         return;
-    };
-    if (tbutton(@src(), "Not now", .{}, .{})) {
-        contention = null;
-        after_save = null;
-        autosave_paused = true;
-        state.status = "Not written: the file was changed elsewhere. Autosave waits until you save. ";
-        return;
     }
-    if (tbutton(@src(), "Load theirs", .{}, .{})) {
-        contention = null;
-        after_save = null;
-        // Mine first, as a copy beside it.
-        var nb: [std.fs.max_path_bytes]u8 = undefined;
-        const mine = sideName(&nb, path, "mine");
-        const theirs = state.gpa.dupe(u8, path) catch return;
-        defer state.gpa.free(theirs);
-        if (!writeTo(mine, .save, true)) return;
-        var kept: [std.fs.max_path_bytes]u8 = undefined;
-        const kept_name = std.fmt.bufPrint(&kept, "{s}", .{std.fs.path.basename(mine)}) catch "";
-        openDocument(theirs);
-        if (recovery == null) state.status = std.fmt.bufPrint(&status_buf, "Opened theirs. Your version is saved as {s}. ", .{kept_name}) catch "Opened theirs. ";
-        return;
-    }
-    if (tbutton(@src(), "Save mine as…", .{}, .{})) {
-        contention = null;
-        saveAs();
-        return;
-    }
-    if (tbutton(@src(), "Overwrite with mine", .{}, .{})) {
-        contention = null;
-        var bb: [std.fs.max_path_bytes]u8 = undefined;
-        const copy = backup(path, &bb);
-        if (writeTo(path, if (kind == .save) .save else .autosave, true)) {
-            state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Written over it. Theirs is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Written over it. " else "Written over it. ";
-        }
-    }
+    keyButton(@src(), "Not now", 0, .{});
+    keyButton(@src(), "Load theirs", 0, .{});
+    keyButton(@src(), "Save mine as…", 0, .{});
+    keyButton(@src(), "Overwrite with mine", 0, .{});
 }
 
 /// The file prompt: a name to open or save as; Enter or the button does
@@ -3035,13 +2998,16 @@ fn filePrompt(kind: FilePromptKind) void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (tbutton(@src(), switch (kind) {
+        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), switch (kind) {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet => "Import",
             .export_sheet, .export_3mf => "Export",
-        }, .{}, .{})) go = true;
+        }, 0, .{});
+        // Its buttons as Enter and Esc: the answer pressed.
+        if (dialogAnswered(kact("dialog.confirm"))) go = true;
+        if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
     }
     if (cancel) {
         file_prompt = null;
@@ -3089,17 +3055,9 @@ fn leavePrompt(p: Pending) void {
     dvui.label(@src(), "Save them before {s}?", .{doing}, .{ .margin = .{ .y = 6 } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    if (tbutton(@src(), "Cancel", .{}, .{})) leave_prompt = null;
-    if (tbutton(@src(), "Don't save", .{}, .{})) {
-        leave_prompt = null;
-        discardAutosaved();
-        proceed(p);
-    }
-    if (tbutton(@src(), "Save", .{}, .{})) {
-        leave_prompt = null;
-        after_save = p;
-        save();
-    }
+    keyButton(@src(), "Cancel", 0, .{});
+    keyButton(@src(), "Don't save", 0, .{});
+    keyButton(@src(), "Save", 0, .{});
 }
 
 // Undo -------------------------------------------------------------------------
@@ -3738,8 +3696,11 @@ fn layoutPrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (tbutton(@src(), "Save", .{}, .{ .style = .highlight })) go = true;
+        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), "Save", 0, .{ .style = .highlight });
+        // Its buttons as Enter and Esc: the answer pressed.
+        if (dialogAnswered(kact("dialog.confirm"))) go = true;
+        if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
     }
     if (cancel) {
         layout_prompt = false;
@@ -4034,7 +3995,7 @@ fn startPrompts() void {
     if (file_prompt) |kind| filePrompt(kind);
     if (leave_prompt) |p| leavePrompt(p);
     if (recovery != null) recoveryPrompt();
-    if (contention) |k| contentionPrompt(k);
+    if (contention != null) contentionPrompt();
 }
 
 fn overlays() !void {
@@ -4109,7 +4070,7 @@ fn overlays() !void {
     if (constrain_prompt != null) constrainPromptWindow();
     if (leave_prompt) |p| leavePrompt(p);
     if (recovery != null) recoveryPrompt();
-    if (contention) |k| contentionPrompt(k);
+    if (contention != null) contentionPrompt();
 }
 
 /// The bottom area: the expression line, then the status line.
@@ -9881,8 +9842,11 @@ fn imagePrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (tbutton(@src(), "Place", .{}, .{})) go = true;
+        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), "Place", 0, .{});
+        // Its buttons as Enter and Esc: the answer pressed.
+        if (dialogAnswered(kact("dialog.confirm"))) go = true;
+        if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
     }
     if (cancel) {
         image_prompt = false;
@@ -12269,13 +12233,19 @@ fn dispatchButtons() void {
         const id = e.id[0..e.id_len];
         const a = buttonActionId(id) orelse continue;
         state.context = e.context;
-        if (!runButtonAction(.{ .action = a, .arg = e.arg })) {
-            // No handler of its own: the button runs it where it is drawn.
-            const n_ = @min(id.len, delivered_buf.len);
-            @memcpy(delivered_buf[0..n_], id[0..n_]);
-            delivered = delivered_buf[0..n_];
-        }
+        if (!runButtonAction(.{ .action = a, .arg = e.arg })) dvui.log.err("button {s} has no handler", .{id});
     }
+}
+
+/// The button actions `runButtonAction` handles in its own switch.
+const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-keys", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel" };
+
+/// Whether a button's action has a handler (every one should: a test
+/// checks).
+fn buttonHandled(name: []const u8) bool {
+    for (switch_handled) |n| if (std.mem.eql(u8, n, name)) return true;
+    for (button_handlers) |h| if (std.mem.eql(u8, keymap.R.actionName(h.action), name)) return true;
+    return false;
 }
 
 /// The actions buttons stand for, on the context. Whether it was one.
@@ -12314,13 +12284,14 @@ fn runButtonAction(inv: keymap.Invocation) bool {
             else => return false,
         },
         kact("panel.release") => panelRelease(),
+        kact("dialog.confirm"), kact("dialog.cancel") => dialog_answer = inv.action,
         else => {
             for (button_handlers) |h| if (h.action == inv.action) {
                 h.run(inv.arg);
                 return true;
             };
-            // A button's action without a handler here is delivered to the
-            // button (false); the app's own actions run as their keys do.
+            // A button's action without a handler (a test sees there is
+            // none) is not run; the app's own actions run as their keys do.
             if (std.mem.indexOfScalar(u8, keymap.R.actionName(inv.action), '.')) |_| {
                 for (elements.button_actions) |name| if (std.mem.eql(u8, name, keymap.R.actionName(inv.action))) return false;
             }
@@ -12652,20 +12623,17 @@ fn tbutton(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.B
 }
 
 /// A button as a virtual key: a click is an event for its action, run at
-/// the next frame's start; an action with no handler of its own is
-/// delivered back to the button where it is drawn (true there, once). A
-/// button the registry lacks acts at once (and is logged).
+/// the next frame's start by its handler. A button the registry lacks
+/// (interface chrome: a Browser node's chevron, a view tab's close) acts
+/// at once, where it is drawn.
 fn virtualKey(clicked: bool, tag: []const u8) bool {
     recordDrawn(tag, 0);
     if (clicked) {
         if (buttonActionId(tag) == null) return true;
         pushButtonEvent(tag, 0);
+        return false;
     }
-    if (delivered) |d| if (std.mem.eql(u8, d, tag)) {
-        delivered = null;
-        return true;
-    };
-    // A script's press of a button not yet in the registry.
+    // A script's press of a button not in the registry (interface chrome).
     return pressedByScript(tag);
 }
 
@@ -13463,6 +13431,333 @@ const button_handlers = [_]ButtonHandler{
             act(.setObjectOrigin, .{ id, layout.model.OriginPoint{ .x = x, .y = y } }) catch {};
         }
     }.f),
+    // The display and screen-size windows.
+    handler("dialog.display.screen-size", struct {
+        fn f(_: i32) void {
+            display_window = false;
+            openSizeWindow();
+        }
+    }.f),
+    handler("dialog.display.reset", struct {
+        fn f(_: i32) void {
+            display.set(.{});
+        }
+    }.f),
+    handler("dialog.display.close", struct {
+        fn f(_: i32) void {
+            display_window = false;
+        }
+    }.f),
+    handler("dialog.size.use-estimate", struct {
+        fn f(_: i32) void {
+            display.setPxPerMm(null);
+            size_window = false;
+        }
+    }.f),
+    // Unsaved changes found on opening.
+    handler("dialog.recovery.cancel", struct {
+        fn f(_: i32) void {
+            const rec = &(recovery orelse return);
+            rec.opened.model.deinit();
+            rec.opened.history.deinit();
+            state.gpa.free(rec.path);
+            recovery = null;
+        }
+    }.f),
+    handler("dialog.recovery.discard-them", struct {
+        fn f(_: i32) void {
+            const rec = &(recovery orelse return);
+            var bb: [std.fs.max_path_bytes]u8 = undefined;
+            const copy = backup(rec.path, &bb);
+            rec.opened.discardUnsaved() catch {
+                state.status = "The saved document could not be rebuilt. ";
+                return;
+            };
+            finishRecovery(rec, .save);
+            state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Opened as last saved. The file as it was is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Opened as last saved. " else "Opened as last saved. A backup copy could not be made. ";
+        }
+    }.f),
+    handler("dialog.recovery.keep-them", struct {
+        fn f(_: i32) void {
+            const rec = &(recovery orelse return);
+            finishRecovery(rec, .autosave);
+            state.status = "Opened with the changes kept; they are not saved yet. ";
+        }
+    }.f),
+    // The file changed elsewhere since this session wrote it.
+    handler("dialog.contention.not-now", struct {
+        fn f(_: i32) void {
+            contention = null;
+            after_save = null;
+            autosave_paused = true;
+            state.status = "Not written: the file was changed elsewhere. Autosave waits until you save. ";
+        }
+    }.f),
+    handler("dialog.contention.load-theirs", struct {
+        fn f(_: i32) void {
+            const path = file_path orelse return;
+            contention = null;
+            after_save = null;
+            // Mine first, as a copy beside it.
+            var nb: [std.fs.max_path_bytes]u8 = undefined;
+            const mine = sideName(&nb, path, "mine");
+            const theirs = state.gpa.dupe(u8, path) catch return;
+            defer state.gpa.free(theirs);
+            if (!writeTo(mine, .save, true)) return;
+            var kept: [std.fs.max_path_bytes]u8 = undefined;
+            const kept_name = std.fmt.bufPrint(&kept, "{s}", .{std.fs.path.basename(mine)}) catch "";
+            openDocument(theirs);
+            if (recovery == null) state.status = std.fmt.bufPrint(&status_buf, "Opened theirs. Your version is saved as {s}. ", .{kept_name}) catch "Opened theirs. ";
+        }
+    }.f),
+    handler("dialog.contention.save-mine-as", struct {
+        fn f(_: i32) void {
+            contention = null;
+            saveAs();
+        }
+    }.f),
+    handler("dialog.contention.overwrite-with-mine", struct {
+        fn f(_: i32) void {
+            const path = file_path orelse return;
+            const kind = contention orelse return;
+            contention = null;
+            var bb: [std.fs.max_path_bytes]u8 = undefined;
+            const copy = backup(path, &bb);
+            if (writeTo(path, if (kind == .save) .save else .autosave, true)) {
+                state.status = if (copy) |c| std.fmt.bufPrint(&status_buf, "Written over it. Theirs is kept as {s}. ", .{std.fs.path.basename(c)}) catch "Written over it. " else "Written over it. ";
+            }
+        }
+    }.f),
+    // Leaving a document with unsaved changes.
+    handler("dialog.leave.cancel", struct {
+        fn f(_: i32) void {
+            leave_prompt = null;
+        }
+    }.f),
+    handler("dialog.leave.don-t-save", struct {
+        fn f(_: i32) void {
+            const p = leave_prompt orelse return;
+            leave_prompt = null;
+            discardAutosaved();
+            proceed(p);
+        }
+    }.f),
+    handler("dialog.leave.save", struct {
+        fn f(_: i32) void {
+            const p = leave_prompt orelse return;
+            leave_prompt = null;
+            after_save = p;
+            save();
+        }
+    }.f),
+    // The sketch editor.
+    handler("sketch.summary.accept-and-leave", struct {
+        fn f(_: i32) void {
+            leaveSketch();
+        }
+    }.f),
+    handler("sketch.summary.back-to-sketching", struct {
+        fn f(_: i32) void {
+            sk_summary = false;
+        }
+    }.f),
+    handler("sketch.palette.select", struct {
+        fn f(_: i32) void {
+            sk_tool = .none;
+            sk_nclicks = 0;
+        }
+    }.f),
+    handler("sketch.palette.construction", struct {
+        fn f(_: i32) void {
+            skSetConstruction(!sk_construction);
+        }
+    }.f),
+    handler("sketch.palette.*", struct {
+        fn f(arg: i32) void {
+            const g: usize = @intCast(arg);
+            if (g >= sk_geo_tools.len) return;
+            const want = sk_geo_last[g];
+            skChooseTool(if (skToolAllowed(want)) want else sk_geo_tools[g][0]);
+        }
+    }.f),
+    handler("sketch.tool.*", struct {
+        fn f(arg: i32) void {
+            skChooseTool(@enumFromInt(@as(u8, @intCast(arg))));
+        }
+    }.f),
+    handler("sketch.constrain.*", struct {
+        fn f(arg: i32) void {
+            skConstrain(@enumFromInt(@as(u8, @intCast(arg))), canvasArea());
+        }
+    }.f),
+    handler("sketch-mode.finish-sketch-enter", struct {
+        fn f(_: i32) void {
+            sk_nclicks = 0;
+            sk_summary = true;
+        }
+    }.f),
+    handler("sketch-mode.*", struct {
+        fn f(arg: i32) void {
+            const it = skItem() orelse return;
+            const ci: usize = @intCast(arg);
+            if (ci >= it.sketch.constraints.items.len) return;
+            _ = skEdit(.{ .reference = .{ .c = @intCast(ci), .on = it.sketch.constraints.items[ci].driving } });
+        }
+    }.f),
+    handler("sketch-mode.remove-constraint", struct {
+        fn f(arg: i32) void {
+            _ = skEdit(.{ .unconstrain = @intCast(arg) });
+            sk_sel.clearRetainingCapacity();
+        }
+    }.f),
+    handler("sketch.physical.set", struct {
+        fn f(_: i32) void {
+            skSetPhysicalWhen();
+        }
+    }.f),
+    handler("sketch.parameters.remove-parameter", struct {
+        fn f(arg: i32) void {
+            const it = skItem() orelse return;
+            const k: usize = @intCast(arg);
+            if (k >= it.sketch.params.items.len) return;
+            _ = skEdit(.{ .unparam = it.sketch.params.items[k].name });
+        }
+    }.f),
+    handler("sketch.parameters.set", struct {
+        fn f(_: i32) void {
+            skSetParam();
+        }
+    }.f),
+    // A sketch's view, a sketch, a panel made from one.
+    handler("sketch-view.edit-sketch", struct {
+        fn f(_: i32) void {
+            const v = switch (state.context) {
+                .sketch => |v| v,
+                else => return,
+            };
+            enterSketch(.{ .space = v.space, .index = v.index });
+        }
+    }.f),
+    handler("sketch-view.make-panel", struct {
+        fn f(_: i32) void {
+            const v = switch (state.context) {
+                .sketch => |v| v,
+                else => return,
+            };
+            if (act(.makeSketchPanel, .{ v.space, v.index })) |pi| {
+                state.context = .{ .panel = pi };
+                state.status = "A panel, made from the sketch's outlines: it follows the sketch. ";
+            } else |err| state.status = switch (err) {
+                error.NotEnclosed => "Only an enclosed sketch makes a panel: one outermost closed outline. ",
+                else => "The panel was not made. ",
+            };
+        }
+    }.f),
+    handler("sketch.place-a-view-here", struct {
+        fn f(_: i32) void {
+            const index = switch (state.context) {
+                .sketch_def => |i| i,
+                else => return,
+            };
+            const at: geom.Point = .{ .x = @round(state.view.cx), .y = @round(state.view.cy) };
+            if (act(.addSketchView, .{ shown_space, index, at })) |vi| {
+                state.context = .{ .sketch = .{ .space = shown_space, .index = vi } };
+            } else |_| state.status = "The view was not placed. ";
+        }
+    }.f),
+    handler("sketch.delete-sketch", struct {
+        fn f(_: i32) void {
+            const index = switch (state.context) {
+                .sketch_def => |i| i,
+                else => return,
+            };
+            if (act(.removeSketch, .{index})) {
+                state.context = .sketches;
+            } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+        }
+    }.f),
+    handler("sketch-panel.edit-its-sketch", struct {
+        fn f(_: i32) void {
+            const pi = contextPanel() orelse return;
+            const pn = state.model.panels.items[pi];
+            const si = state.model.sketchIndex(pn.sketch) orelse return;
+            enterSketchAt(si, state.model.spaceOf(pi), pn.sketch_at);
+            state.context = .{ .panel = pi };
+        }
+    }.f),
+    // A prototype drawn from a sketch.
+    handler("prototype.sketch.apply-again", struct {
+        fn f(_: i32) void {
+            const id = contextPrototype() orelse return;
+            const ps = state.model.proto(id).sketch orelse return;
+            const fr = state.model.sketchIndex(ps.from) orelse return;
+            act(.applySketch, .{ id, fr, ps.width_param, ps.height_param, ps.offset }) catch |err| {
+                state.status = applyError(err);
+            };
+        }
+    }.f),
+    handler("prototype.sketch.remove", struct {
+        fn f(_: i32) void {
+            actV(.removePrototypeSketch, .{contextPrototype() orelse return});
+        }
+    }.f),
+    handler("prototype.sketch.apply-sketch-to-this-prototype", struct {
+        fn f(_: i32) void {
+            const id = contextPrototype() orelse return;
+            if (proto_sk_choice >= state.model.sketches.items.len) return;
+            const params = state.model.sketches.items[proto_sk_choice].sketch.params.items;
+            if (proto_sk_w >= params.len or proto_sk_h >= params.len) return;
+            const off: geom.Point = .{ .x = proto_sk_off[0], .y = proto_sk_off[1] };
+            if (act(.applySketch, .{ id, proto_sk_choice, params[proto_sk_w].name, params[proto_sk_h].name, off })) {
+                state.status = "Applied: the prototype has its own copy of the sketch. ";
+            } else |err| state.status = applyError(err);
+        }
+    }.f),
+    // The content palette at the flow cursor, and the move palette.
+    handler("palette.key.*", struct {
+        fn f(arg: i32) void {
+            paletteInsert(true, arg);
+        }
+    }.f),
+    handler("palette.blank.*", struct {
+        fn f(arg: i32) void {
+            paletteInsert(false, arg);
+        }
+    }.f),
+    handler("palette.run", struct {
+        fn f(_: i32) void {
+            insertAtCursor(.run, 0);
+        }
+    }.f),
+    handler("palette.join", struct {
+        fn f(_: i32) void {
+            toggleBindAtCursor();
+            focusCanvas();
+        }
+    }.f),
+    handler("palette.next-prototype", struct {
+        fn f(_: i32) void {
+            cyclePalettePrototype(false);
+            focusCanvas();
+        }
+    }.f),
+    handler("palette.hard-break", struct {
+        fn f(_: i32) void {
+            insertAtCursor(.hard_break, 0);
+            focusCanvas();
+        }
+    }.f),
+    handler("palette.paragraph", struct {
+        fn f(_: i32) void {
+            insertAtCursor(.paragraph, 0);
+            focusCanvas();
+        }
+    }.f),
+    handler("move.*", struct {
+        fn f(arg: i32) void {
+            moveTrackArrow(@enumFromInt(@as(u2, @intCast(arg))));
+        }
+    }.f),
     handler("tool.add-panel", struct {
         fn f(_: i32) void {
             state.tool = if (state.tool == .add_panel) .select else .add_panel;
@@ -13587,6 +13882,60 @@ fn contextSpace() usize {
     };
 }
 
+/// The parameter that turns the selected construction curve's output on
+/// set from its field (Enter there, or its Set button).
+fn skSetPhysicalWhen() void {
+    const g = sk_pw_for orelse return;
+    const name = std.mem.trim(u8, std.mem.sliceTo(&sk_pw_text, 0), " ");
+    if (name.len > 0 and !skl.expr.validName(name)) {
+        state.status = "Not a parameter name. ";
+        return;
+    }
+    _ = skEdit(.{ .physical_when = .{ .g = g, .param = name } });
+}
+
+/// A sketch parameter set from its field, "name = expression" (Enter
+/// there, or its Set button).
+fn skSetParam() void {
+    const line = std.mem.sliceTo(&sk_param_text, 0);
+    const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+        state.status = "Write a parameter as name = expression. ";
+        return;
+    };
+    const name = std.mem.trim(u8, line[0..eq], " ");
+    const text = std.mem.trim(u8, line[eq + 1 ..], " ");
+    if (!skl.expr.validName(name)) {
+        state.status = "A parameter's name is a letter or _, then letters, digits or _ (not a function's name). ";
+        return;
+    }
+    _ = skEdit(.{ .param = .{ .name = name, .expr = text } });
+    @memset(&sk_param_text, 0);
+}
+
+/// The context prototype.
+fn contextPrototype() ?layout.model.PrototypeId {
+    return switch (state.context) {
+        .prototype => |id| id,
+        else => null,
+    };
+}
+
+/// The keyboard back to the canvas (after a palette button).
+fn focusCanvas() void {
+    if (canvas_id) |id| dvui.focusWidget(id, null, null);
+}
+
+/// The palette's tile (or blank) `arg` inserted at the flow cursor.
+fn paletteInsert(tile: bool, arg: i32) void {
+    const c = track_cursor orelse return;
+    const pal = paletteFor(c.panel, c.region) orelse return;
+    const i: usize = @intCast(arg);
+    const sizes: []const f64 = if (tile) pal.tiles[0..pal.tile_count] else &pal.blanks;
+    if (i >= sizes.len) return;
+    insertAtCursor(if (tile) .tile else .blank, sizes[i]);
+    focusCanvas();
+}
+
 /// The Add rows, Add columns or Add track tool, on or off.
 fn tracksMode(major: layout.model.Major, kind: layout.model.TileRegion.Kind) void {
     state.drag = null;
@@ -13601,9 +13950,19 @@ fn tracksMode(major: layout.model.Major, kind: layout.model.TileRegion.Kind) voi
     }
 }
 
-/// The button an event is being delivered to this frame.
-var delivered: ?[]const u8 = null;
-var delivered_buf: [128]u8 = undefined;
+/// A dialog's Confirm or Cancel button pressed (dialog.confirm,
+/// dialog.cancel, as Enter and Esc ask): taken by the dialog drawn this
+/// frame, as it takes those keys.
+var dialog_answer: ?keymap.ActionId = null;
+
+/// Whether the dialog's answer is `a` (taken once).
+fn dialogAnswered(a: keymap.ActionId) bool {
+    if (dialog_answer) |d| if (d == a) {
+        dialog_answer = null;
+        return true;
+    };
+    return false;
+}
 
 /// `dvui.buttonIcon`, tagged "icon/<name>" unless it has a tag.
 fn tbuttonIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, init_opts: dvui.ButtonWidget.InitOptions, icon_opts: dvui.IconRenderOptions, opts: dvui.Options) bool {
@@ -16867,34 +17226,19 @@ fn trackPalette() void {
         const n = if (kind == .tile) pal.tile_count else pal.blanks.len;
         for (0..n) |i| {
             const size = if (kind == .tile) pal.tiles[i] else pal.blanks[i];
-            if (paletteButton(kind == .tile, size, i)) {
-                insertAtCursor(if (kind == .tile) .tile else .blank, size);
-                if (canvas_id) |id| dvui.focusWidget(id, null, null);
-            }
+            _ = paletteButton(kind == .tile, size, i);
         }
     };
     // The flow's other items: a run of text or an equation, and a hard break.
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{});
     defer row.deinit();
-    if (flowButton(.run, 0)) insertAtCursor(.run, 0);
-    if (flowButton(.join, 3)) {
-        toggleBindAtCursor();
-        if (canvas_id) |id| dvui.focusWidget(id, null, null);
-    }
-    if (palette != null and flowButton(.next_prototype, 2)) {
-        cyclePalettePrototype(false);
-        if (canvas_id) |id| dvui.focusWidget(id, null, null);
-    }
-    if (flowButton(.hard_break, 1)) {
-        insertAtCursor(.hard_break, 0);
-        if (canvas_id) |id| dvui.focusWidget(id, null, null);
-    }
+    _ = flowButton(.run, 0);
+    _ = flowButton(.join, 3);
+    if (palette != null) _ = flowButton(.next_prototype, 2);
+    _ = flowButton(.hard_break, 1);
     // A new paragraph anywhere: in a track of keys, a paragraph style's
     // space before is a row gap.
-    if (flowButton(.paragraph, 4)) {
-        insertAtCursor(.paragraph, 0);
-        if (canvas_id) |id| dvui.focusWidget(id, null, null);
-    }
+    _ = flowButton(.paragraph, 4);
 }
 
 /// Whether the flow cursor is in a track of text (sized to a style):
@@ -16907,7 +17251,14 @@ fn inTextTrack() bool {
 /// A palette button for an item that is not a tile: its key, a picture and
 /// what it puts in.
 fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i: usize) bool {
-    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s}", .{@tagName(kind)}) catch null;
+    palette_arg = 0;
+    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette.{s}", .{switch (kind) {
+        .run => "run",
+        .hard_break => "hard-break",
+        .paragraph => "paragraph",
+        .next_prototype => "next-prototype",
+        .join => "join",
+    }}) catch null;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .tag = tag,
@@ -16919,7 +17270,12 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
     });
     bw.processEvents();
     bw.drawBackground();
-    const clicked = bw.clicked() or pressedByScript(tag);
+    // A virtual key: a press is an event for its action (run next frame).
+    if (tag) |t| {
+        recordDrawn(t, palette_arg);
+        if (bw.clicked()) pushButtonEvent(t, palette_arg);
+    }
+    const clicked = false;
     if (palette_id_count < palette_ids.len) {
         palette_ids[palette_id_count] = bw.data().id;
         palette_id_count += 1;
@@ -17008,9 +17364,20 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
     return clicked;
 }
 
+/// The argument of the palette or move button being drawn (which size,
+/// which arrow).
+var palette_arg: i32 = 0;
+
 /// One palette button: the tile or blank drawn to scale, its key, its size.
 fn paletteButton(tile: bool, size: f64, i: usize) bool {
-    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette/{s} {d} u", .{ if (tile) "key" else "blank", size }) catch null;
+    palette_arg = @intCast(i);
+    // palette.key.1-25u: a size's place, its "." a "-".
+    var size_buf: [32]u8 = undefined;
+    const sz: []u8 = std.fmt.bufPrint(&size_buf, "{d}u", .{size}) catch size_buf[0..0];
+    for (sz) |*c| if (c.* == '.') {
+        c.* = '-';
+    };
+    const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "palette.{s}.{s}", .{ if (tile) "key" else "blank", sz }) catch null;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .tag = tag,
@@ -17023,7 +17390,12 @@ fn paletteButton(tile: bool, size: f64, i: usize) bool {
     });
     bw.processEvents();
     bw.drawBackground();
-    const clicked = bw.clicked() or pressedByScript(tag);
+    // A virtual key: a press is an event for its action (run next frame).
+    if (tag) |t| {
+        recordDrawn(t, palette_arg);
+        if (bw.clicked()) pushButtonEvent(t, palette_arg);
+    }
+    const clicked = false;
     if (palette_id_count < palette_ids.len) {
         palette_ids[palette_id_count] = bw.data().id;
         palette_id_count += 1;
@@ -17149,12 +17521,12 @@ fn movePalette() void {
         {
             var top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
             defer top.deinit();
-            if (arrowButton(.up, 0)) moveTrackArrow(.up);
+            _ = arrowButton(.up, 0);
         }
         var bottom = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
         defer bottom.deinit();
         for ([_]Arrow{ .left, .down, .right }, 1..) |a, i| {
-            if (arrowButton(a, i)) moveTrackArrow(a);
+            _ = arrowButton(a, i);
         }
     }
     var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5 });
@@ -17185,6 +17557,7 @@ fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
 
 /// One arrow key of the move palette: its arrow, drawn as a keycap.
 fn arrowButton(arrow: Arrow, i: usize) bool {
+    palette_arg = @intFromEnum(arrow);
     const tag: ?[]const u8 = std.fmt.allocPrint(dvui.currentWindow().arena(), "move.{s}", .{@tagName(arrow)}) catch null;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
@@ -17199,7 +17572,12 @@ fn arrowButton(arrow: Arrow, i: usize) bool {
     });
     bw.processEvents();
     bw.drawBackground();
-    const clicked = bw.clicked() or pressedByScript(tag);
+    // A virtual key: a press is an event for its action (run next frame).
+    if (tag) |t| {
+        recordDrawn(t, palette_arg);
+        if (bw.clicked()) pushButtonEvent(t, palette_arg);
+    }
+    const clicked = false;
     if (palette_id_count < palette_ids.len) {
         palette_ids[palette_id_count] = bw.data().id;
         palette_id_count += 1;
@@ -18762,8 +19140,11 @@ fn constrainPromptWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (tbutton(@src(), "Cancel", .{}, .{})) cancel = true;
-        if (tbutton(@src(), "Apply", .{}, .{})) go = true;
+        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), "Apply", 0, .{});
+        // Its buttons as Enter and Esc: the answer pressed.
+        if (dialogAnswered(kact("dialog.confirm"))) go = true;
+        if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
     }
     if (cancel) {
         constrain_prompt = null;
@@ -20735,8 +21116,8 @@ fn skSummary(area: dvui.Rect.Physical) void {
     dvui.labelNoFmt(@src(), "Enter accepts and leaves · Esc goes back to sketching", .{}, .{ .margin = .{ .y = 8 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
-    if (tbutton(@src(), "Accept and leave", .{}, .{})) leaveSketch();
-    if (tbutton(@src(), "Back to sketching", .{}, .{})) sk_summary = false;
+    keyButton(@src(), "Accept and leave", 0, .{});
+    keyButton(@src(), "Back to sketching", 0, .{});
 }
 
 // Palette and properties ----------------------------------------------------------
@@ -20753,18 +21134,12 @@ fn sketchPalette() void {
         var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
         defer flex.deinit();
         below = flex.data().borderRectScale().r;
-        if (tbutton(@src(), "Select", .{}, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null })) {
-            sk_tool = .none;
-            sk_nclicks = 0;
-        }
-        if (tbutton(@src(), "Construction", .{}, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null })) skSetConstruction(!sk_construction);
+        keyButton(@src(), "Select", 0, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null });
+        keyButton(@src(), "Construction", 0, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null });
         const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle" };
         for (names, 0..) |name, g| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == g else false;
-            if (tbutton(@src(), name, .{}, .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null })) {
-                const want = sk_geo_last[g];
-                skChooseTool(if (skToolAllowed(want)) want else sk_geo_tools[g][0]);
-            }
+            keyButton(@src(), name, @intCast(g), .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null });
         }
     }
     const g = skGeoOf(sk_tool) orelse return;
@@ -20810,7 +21185,7 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
                 continue;
             }
             const on = sk_tool == t;
-            if (tbutton(@src(), name, .{}, .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) skChooseTool(t);
+            keyButton(@src(), name, @intFromEnum(t), .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
         }
     }
     const faint = dvui.themeGet().color(.control, .text).opacity(0.65);
@@ -20942,7 +21317,7 @@ fn sketchConstrainButtons() void {
         const fits = skConstraintsFor(k.k, &buf) > 0;
         const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
         if (fits) {
-            if (tbutton(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad })) skConstrain(k.k, canvasArea());
+            keyButton(@src(), k.name, @intFromEnum(k.k), .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad });
         } else {
             dvui.labelNoFmt(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.35) } });
         }
@@ -20968,10 +21343,7 @@ fn sketchModeProperties() void {
     }
     heading("{s}", .{"Constrain the selection"}, 8199);
     sketchConstrainButtons();
-    if (tbutton(@src(), "Finish sketch…  Enter", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
-        sk_nclicks = 0;
-        sk_summary = true;
-    }
+    keyButton(@src(), "Finish sketch…  Enter", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     heading("{s}", .{"Constraints"}, 8200);
     const an = skAnalysis();
     for (it.sketch.constraints.items, 0..) |c, ci| {
@@ -20999,15 +21371,9 @@ fn sketchModeProperties() void {
         }
         // A dimension drives, or (in parentheses) only reports.
         if (c.isDimension()) {
-            if (tbutton(@src(), if (c.driving) "drive" else "ref", .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } })) {
-                _ = skEdit(.{ .reference = .{ .c = @intCast(ci), .on = c.driving } });
-            }
+            keyButton(@src(), if (c.driving) "drive" else "ref", @intCast(ci), .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } });
         }
-        if (tbuttonIcon(@src(), "Remove constraint", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
-            _ = skEdit(.{ .unconstrain = @intCast(ci) });
-            sk_sel.clearRetainingCapacity();
-            break;
-        }
+        keyIcon(@src(), "Remove constraint", dvui.entypo.cross, @intCast(ci), .{ .gravity_y = 0.5 });
     }
     sketchPhysicalWhen(it);
     sketchParameters(it);
@@ -21040,14 +21406,8 @@ fn sketchPhysicalWhen(it: SkPlace) void {
     var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = sk_pw_text[0..63] }, .placeholder = "parameter (empty: never)" }, .{ .expand = .horizontal, .font = .theme(.mono) });
     const enter = te.enter_pressed;
     te.deinit();
-    if (tbutton(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
-        const name = std.mem.trim(u8, std.mem.sliceTo(&sk_pw_text, 0), " ");
-        if (name.len > 0 and !skl.expr.validName(name)) {
-            state.status = "Not a parameter name. ";
-            return;
-        }
-        _ = skEdit(.{ .physical_when = .{ .g = g, .param = name } });
-    }
+    keyButton(@src(), "Set", 0, .{ .gravity_y = 0.5 });
+    if (enter) skSetPhysicalWhen();
 }
 
 /// What the parameter entry holds: "name = expression".
@@ -21073,10 +21433,7 @@ fn sketchParameters(it: SkPlace) void {
             sk_param_text[line.len] = 0;
             sk_param_reset = true;
         }
-        if (tbuttonIcon(@src(), "Remove parameter", dvui.entypo.cross, .{}, .{}, .{ .gravity_y = 0.5 })) {
-            _ = skEdit(.{ .unparam = p.name });
-            break;
-        }
+        keyIcon(@src(), "Remove parameter", dvui.entypo.cross, @intCast(pi), .{ .gravity_y = 0.5 });
     }
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9999 });
     defer row.deinit();
@@ -21088,21 +21445,8 @@ fn sketchParameters(it: SkPlace) void {
     }
     enter = te.enter_pressed;
     te.deinit();
-    if (tbutton(@src(), "Set", .{}, .{ .gravity_y = 0.5 }) or enter) {
-        const line = std.mem.sliceTo(&sk_param_text, 0);
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
-            state.status = "Write a parameter as name = expression. ";
-            return;
-        };
-        const name = std.mem.trim(u8, line[0..eq], " ");
-        const text = std.mem.trim(u8, line[eq + 1 ..], " ");
-        if (!skl.expr.validName(name)) {
-            state.status = "A parameter's name is a letter or _, then letters, digits or _ (not a function's name). ";
-            return;
-        }
-        _ = skEdit(.{ .param = .{ .name = name, .expr = text } });
-        @memset(&sk_param_text, 0);
-    }
+    keyButton(@src(), "Set", 0, .{ .gravity_y = 0.5 });
+    if (enter) skSetParam();
 }
 
 var sk_param_reset = false;
@@ -21120,17 +21464,9 @@ fn sketchProperties(space: usize, index: usize) void {
     if (it.sketch.analyse(state.gpa, arena.allocator())) |x| {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
-    if (tbutton(@src(), "Edit sketch", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) enterSketch(.{ .space = space, .index = index });
+    keyButton(@src(), "Edit sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     // An enclosed sketch may be made a panel (or part) here.
-    if (tbutton(@src(), "Make panel", .{}, .{ .expand = .horizontal })) {
-        if (act(.makeSketchPanel, .{ space, index })) |pi| {
-            state.context = .{ .panel = pi };
-            state.status = "A panel, made from the sketch's outlines: it follows the sketch. ";
-        } else |err| state.status = switch (err) {
-            error.NotEnclosed => "Only an enclosed sketch makes a panel: one outermost closed outline. ",
-            else => "The panel was not made. ",
-        };
-    }
+    keyButton(@src(), "Make panel", 0, .{ .expand = .horizontal });
 }
 
 /// A sketch of the document (from the tree): its views, and where to place
@@ -21156,17 +21492,8 @@ fn sketchDefProperties(index: usize) void {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
     // A view of it at the middle of what is shown.
-    if (tbutton(@src(), "Place a view here", .{}, .{ .expand = .horizontal, .margin = .{ .y = 8 } })) {
-        const at: geom.Point = .{ .x = @round(state.view.cx), .y = @round(state.view.cy) };
-        if (act(.addSketchView, .{ shown_space, index, at })) |vi| {
-            state.context = .{ .sketch = .{ .space = shown_space, .index = vi } };
-        } else |_| state.status = "The view was not placed. ";
-    }
-    if (tbutton(@src(), "Delete sketch", .{}, .{ .expand = .horizontal })) {
-        if (act(.removeSketch, .{index})) {
-            state.context = .sketches;
-        } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
-    }
+    keyButton(@src(), "Place a view here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Delete sketch", 0, .{ .expand = .horizontal });
 }
 
 /// A sketch panel's own properties: its sketch, and how it cuts.
@@ -21178,10 +21505,7 @@ fn sketchPanelProperties(pi: usize) void {
     propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
     var islands = pn.islands;
     if (tcheckbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
-    if (tbutton(@src(), "Edit its sketch", .{}, .{ .expand = .horizontal, .id_extra = 72 })) {
-        enterSketchAt(si, state.model.spaceOf(pi), pn.sketch_at);
-        state.context = .{ .panel = pi };
-    }
+    keyButton(@src(), "Edit its sketch", 0, .{ .expand = .horizontal, .id_extra = 72 });
 }
 
 // Tiles from sketches -------------------------------------------------------------
@@ -21226,12 +21550,8 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8406 });
             defer row.deinit();
-            if (from_ref) |fr| if (tbutton(@src(), "Apply again", .{}, .{})) {
-                act(.applySketch, .{ id, fr, ps.width_param, ps.height_param, ps.offset }) catch |err| {
-                    state.status = applyError(err);
-                };
-            };
-            if (tbutton(@src(), "Remove", .{}, .{})) actV(.removePrototypeSketch, .{id});
+            if (from_ref != null) keyButton(@src(), "Apply again", 0, .{});
+            keyButton(@src(), "Remove", 0, .{});
         }
     }
     // Apply a sketch: which one, its size parameters, the offset.
@@ -21272,12 +21592,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         propName(label);
         _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_sk_off[k], .min = -1000, .max = 1000 }, .{ .expand = .horizontal });
     }
-    if (tbutton(@src(), "Apply sketch to this prototype", .{}, .{ .expand = .horizontal, .margin = .{ .y = 6 } })) {
-        const off: geom.Point = .{ .x = proto_sk_off[0], .y = proto_sk_off[1] };
-        if (act(.applySketch, .{ id, chosen, pnames[proto_sk_w], pnames[proto_sk_h], off })) {
-            state.status = "Applied: the prototype has its own copy of the sketch. ";
-        } else |err| state.status = applyError(err);
-    }
+    keyButton(@src(), "Apply sketch to this prototype", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
 }
 
 fn applyError(err: anyerror) []const u8 {

@@ -108,7 +108,7 @@ The owner prefers single keys with no modifiers for commands. Today nearly every
 
 ## Element ids (since 2026-11-20)
 
-Every property row, button, dropdown, checkbox, tool and palette button has an id in a logical group (`apps/gui/elements.zig`, 505 entries): what it is about, not where it is drawn (`panel.fab.thickness`, `plan.operation.2.process`, `track.flow.show`, `dialog.export.…`). Every button is an action of the same name. Menu items are `menu.<action>`. `testing_api.discover(group)` walks the registry and says what is shown. Objects are reached by name path (`Model.resolve`).
+Every property row, button, dropdown, checkbox, tool and palette button has an id in a logical group (`apps/gui/elements.zig`, 505 entries): what it is about, not where it is drawn (`panel.fab.thickness`, `plan.operation.2.process`, `track.flow.show`, `dialog.export.…`). Every button is an action of the same name. Menu items are `menu.<action>`. `testing_api.discover(group)` walks the registry and says what is shown. Objects are reached by name path (`Model.resolve`). Every button is a virtual key: pressed, it queues its action, and a handler (`button_handlers` in main.zig) acts on the context it was pressed in; dialogs' Cancel and OK are `dialog.cancel` and `dialog.confirm` (as Esc and Enter); the content palette is `palette.key.1-25u` …, the move arrows `move.up` …. Chrome acting where drawn, outside the registry: a Browser node's chevron, a view tab's close.
 
 ## Inconsistencies seen so far
 
