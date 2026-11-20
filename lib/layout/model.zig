@@ -4433,6 +4433,84 @@ pub const Model = struct {
         return r;
     }
 
+    /// Removes track or region `region` of `panel`. Its flow goes on in
+    /// its other tracks; left with none, it keeps its text, unplaced, and
+    /// lets go of its tiles (as a removed panel's tracks do).
+    pub fn removeRegion(m: *Model, panel: usize, region: usize) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+        const r = m.panels.items[panel].regions.orderedRemove(region);
+        m.forget(r.id);
+        m.tidyFlows();
+        m.revision += 1;
+    }
+
+    /// Sets the way track or region `region`'s baselines run and how its
+    /// content stands on them, degrees (see `TileRegion.direction`). Turned
+    /// between rows and columns, its length stays its length: a track
+    /// stays one thick, a region keeps its depth, and a region stacks on
+    /// the side its new axis case does. A flow's tracks all run one way, so
+    /// that turn is refused for a track sharing its flow (`BadJoin`).
+    pub fn setOrientation(m: *Model, panel: usize, region: usize, direction: f64, rotation: f64) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+        if (!std.math.isFinite(direction) or !std.math.isFinite(rotation)) return error.BadSize;
+        const r = &m.panels.items[panel].regions.items[region];
+        const before = r.major();
+        var next = r.*;
+        next.direction = direction;
+        next.rotation = rotation;
+        const after = next.major();
+        if (after != before) {
+            if (m.trackFlow(panel, region)) |f| if (f.tracks.items.len > 1) return error.BadJoin;
+            std.mem.swap(f64, &r.w, &r.h);
+            if (r.kind == .region) r.stack = TileRegion.oriented(after).stack;
+        }
+        r.direction = direction;
+        r.rotation = rotation;
+        m.revision += 1;
+    }
+
+    /// Makes region `region` of `panel` into tracks, one a row (or
+    /// column), each one thick at its origin in `origins` (panel mm, top
+    /// left, as `TileRegion.origin`): the region becomes the first, named
+    /// "<name> 1", and the rest follow it in its flow, so its content runs
+    /// on through them as it did. Its path's control points go (a track's
+    /// path is its own); its length stays. Returns how many tracks.
+    pub fn splitIntoTracks(m: *Model, panel: usize, region: usize, origins: []const geom.Point) Error!usize {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+        if (origins.len == 0) return error.BadSize;
+        const r0 = m.panels.items[panel].regions.items[region];
+        if (r0.kind != .region) return error.BadJoin;
+        const base = try m.a().dupe(u8, r0.name);
+        const into = r0.flow;
+        var pos = m.flowPosition(panel, region) orelse return error.BadJoin;
+        var name_buf: [160]u8 = undefined;
+        for (origins, 0..) |o, k| {
+            const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ base, k + 1 }) catch base;
+            if (k == 0) {
+                const r = &m.panels.items[panel].regions.items[region];
+                r.kind = .track;
+                r.name = try m.a().dupe(u8, name);
+                r.origin = o;
+                if (r.major() == .row) r.h = 1 else r.w = 1;
+                r.path = .empty;
+                continue;
+            }
+            var t = m.panels.items[panel].regions.items[region];
+            t.name = name;
+            t.origin = o;
+            const ri = try m.addRegion(panel, t);
+            // Its own flow, made for it, gives way to the region's.
+            const own = m.panels.items[panel].regions.items[ri].flow;
+            pos += 1;
+            try m.assignTrack(panel, ri, into, pos);
+            if (m.flowIndex(own)) |fi| if (m.flows.items[fi].tracks.items.len == 0 and m.flows.items[fi].items.items.len == 0) {
+                _ = m.flows.orderedRemove(fi);
+            };
+        }
+        m.revision += 1;
+        return origins.len;
+    }
+
     /// The lowest-numbered designator `prefix`1, `prefix`2 … not taken.
     fn nextDesignator(m: *const Model, buf: []u8, prefix: []const u8) []const u8 {
         var n: usize = 1;
@@ -6509,6 +6587,50 @@ test "flows: a track drawn has its own; joining makes one flow, unjoining gives 
     try std.testing.expectEqual(3, m.ownItems(p, b).len);
     try std.testing.expectEqual(0, m.flowItems(p, a).len);
     try std.testing.expect(m.threadAfter(p, b) == null);
+}
+
+test "tracks: removed, the flow goes on in the rest; the last one's text kept unplaced" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 0, .y = 80 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try std.testing.expectEqual(1, m.panels.items[p].regions.items[a].h);
+    _ = try m.insertText(p, a, .{ .index = 0 }, "words", body);
+    const flow = m.trackFlow(p, a).?.id;
+    try m.assignTrack(p, b, flow, null);
+    try std.testing.expectEqual(1, m.flows.items.len);
+    try m.removeRegion(p, a);
+    // B, now first, holds the flow.
+    try std.testing.expectEqual(1, m.panels.items[p].regions.items.len);
+    try std.testing.expectEqual(1, m.flowItems(p, 0).len);
+    try m.removeRegion(p, 0);
+    try std.testing.expectEqual(1, m.flows.items.len);
+    try std.testing.expectEqual(0, m.flows.items[0].tracks.items.len);
+}
+
+test "tracks: turned to run down, a track keeps its length and stays one thick; not while it shares its flow" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("page", 200, 100);
+    const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
+    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try m.setOrientation(p, a, -90, 90);
+    const r = m.panels.items[p].regions.items[a];
+    try std.testing.expectEqual(Major.column, r.major());
+    try std.testing.expectEqual(1, r.w);
+    try std.testing.expectEqual(40, r.h);
+    try std.testing.expect(r.supported());
+    // At an angle: kept, not supported yet.
+    try m.setOrientation(p, a, -80, 90);
+    try std.testing.expect(!m.panels.items[p].regions.items[a].supported());
+    try m.setOrientation(p, a, 0, 0);
+    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 0, .y = 80 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try m.assignTrack(p, b, m.trackFlow(p, a).?.id, null);
+    try std.testing.expectError(error.BadJoin, m.setOrientation(p, a, -90, 90));
+    // Rotation alone is any track's own.
+    try m.setOrientation(p, a, 0, 180);
 }
 
 test "flows: a panel's copy gets copies of its flows; a panel removed leaves its text unplaced" {

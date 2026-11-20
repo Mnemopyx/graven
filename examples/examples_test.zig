@@ -325,29 +325,17 @@ test "the keyboard as six tracks, one a row, threaded in its flow, lays out and 
     defer gpa.free(svg_a);
 
     // Six tracks where its rows were, each one row thick, the first
-    // holding the flow and the rest threaded after it.
+    // holding the flow and the rest following it: the region split, as
+    // the GUI's "Make tracks of its rows" does, through the history.
     var six = try open(@embedFile("pc-keyboard.graven"));
     defer close(&six);
     const s = &six.model;
-    const keys = s.panels.items[p].regions.items[0];
-    const flow = keys.flow;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
     try testing.expectEqual(6, a.tracks.len);
-    for (a.tracks, 0..) |t, k| {
-        var r = keys;
-        r.kind = .track;
-        r.name = if (k == 0) "Row 1" else try std.fmt.allocPrint(arena.allocator(), "Row {d}", .{k + 1});
-        r.origin = .{ .x = t.box.x0, .y = t.box.y1 };
-        r.h = 1;
-        if (k == 0) {
-            // The region the rows were made in is the first track.
-            s.panels.items[p].regions.items[0] = r;
-            continue;
-        }
-        const ri = try s.addRegion(p, r);
-        try s.assignTrack(p, ri, flow, null);
-    }
+    var origins: [6]layout.geom.Point = undefined;
+    for (a.tracks, &origins) |t, *q| q.* = .{ .x = t.box.x0, .y = t.box.y1 };
+    try testing.expectEqual(6, try six.history.do(s, .splitIntoTracks, .{ p, 0, &origins }));
+    try testing.expectEqualStrings("keys 1", s.panels.items[p].regions.items[0].name);
+    try testing.expectEqualStrings("keys 6", s.panels.items[p].regions.items[5].name);
     const regions = s.panels.items[p].regions.items;
     try testing.expectEqual(6, regions.len);
     for (regions) |r| try testing.expectEqual(layout.model.TileRegion.Kind.track, r.kind);
@@ -366,6 +354,11 @@ test "the keyboard as six tracks, one a row, threaded in its flow, lays out and 
     const svg_b = try layout.output.panelSvg(gpa, &b, &.{}, .{});
     defer gpa.free(svg_b);
     try testing.expectEqualStrings(svg_a, svg_b);
+    // One flow still, and one undo puts the region back.
+    try testing.expectEqual(m.flows.items.len, s.flows.items.len);
+    try testing.expect(try six.history.undo(s));
+    try testing.expectEqual(1, s.panels.items[p].regions.items.len);
+    try testing.expectEqual(layout.model.TileRegion.Kind.region, s.panels.items[p].regions.items[0].kind);
 }
 
 test "a track at an angle placement cannot set yet is flagged, and placed as the nearest axis" {

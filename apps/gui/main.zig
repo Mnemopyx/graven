@@ -260,6 +260,9 @@ var polygon_panel: usize = 0;
 var tracks_tool: struct {
     size_to: SizeTo = .{ .prototype = .none },
     major: layout.model.Major = .row,
+    /// A region (rows or columns added as content needs them) or one
+    /// track laid out in advance, running the way it is drawn.
+    kind: layout.model.TileRegion.Kind = .region,
 } = .{};
 
 /// What new tracks are sized to: a tile prototype's smallest tile, or a
@@ -334,7 +337,8 @@ const Context = union(enum) {
             .file => "File",
             .worksheet => "Worksheet",
             .panel => "Panel",
-            .region => "Region",
+            // A track laid out in advance is a track, not a region.
+            .region => |r| if (r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len and state.model.panels.items[r.panel].regions.items[r.region].kind == .track) "Track" else "Region",
             .row => "Row",
             .tile => "Tile",
             .art => "Line art",
@@ -4871,17 +4875,20 @@ fn panelChildren(pi: usize, d: usize) void {
             // The rows lying in it; in a thread, numbered through the
             // thread's flow, and named by their place in this track.
             const here = tracksIn(pi, ri);
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, d, here.len > 0, false)) continue;
+            // A track is one line: its keys straight under it, no row.
+            const one = region.kind == .track;
+            const has = if (one) for (here) |pt| {
+                if (segmentFilled(pi, pt)) break true;
+            } else false else here.len > 0;
+            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, d, has, false)) continue;
             for (here) |pt| {
                 const rowi = pt.track;
                 const flow_ri = pt.region;
                 const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major()), pt.local + 1 }) catch "Row";
                 // What the flow put in this segment, from the last solve.
                 const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
-                const filled = for (placed_items) |it| {
-                    if (it.flow_panel == pt.flow_panel and it.region == flow_ri and it.segment == rowi and !isBreak(pi, it)) break true;
-                } else false;
-                if (!treeNode(.{ .row = .{ .panel = pt.flow_panel, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
+                const filled = segmentFilled(pi, pt);
+                if (!one) if (!treeNode(.{ .row = .{ .panel = pt.flow_panel, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
                 for (placed_items) |it| {
                     if (it.flow_panel != pt.flow_panel or it.region != flow_ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
@@ -4896,11 +4903,21 @@ fn panelChildren(pi: usize, d: usize) void {
                         ch.* = ' ';
                     };
                     const text = std.fmt.bufPrint(&name_buf, "{s}  {s}", .{ t.designator, legend }) catch t.designator;
-                    _ = treeNode(.{ .tile = id }, text, d + 2, false, false);
+                    _ = treeNode(.{ .tile = id }, text, if (one) d + 1 else d + 2, false, false);
                 }
             }
         }
     }
+}
+
+/// Whether placed segment `pt` (on panel `pi`) holds anything but breaks,
+/// from the last solve.
+fn segmentFilled(pi: usize, pt: layout.place.PlacedTrack) bool {
+    const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
+    for (placed_items) |it| {
+        if (it.flow_panel == pt.flow_panel and it.region == pt.region and it.segment == pt.track and !isBreak(pi, it)) return true;
+    }
+    return false;
 }
 
 /// One tree row: an open/close arrow when it has children, and its name,
@@ -10886,6 +10903,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         state.context = .worksheet;
                         dvui.refresh(null, @src(), box.data().id);
                     },
+                    .region => |r| {
+                        e.handle(@src(), box.data());
+                        removeRegionOf(r.panel, r.region);
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
                     .art => |l| {
                         e.handle(@src(), box.data());
                         actV(.removeArt, .{l.panel, l.index});
@@ -11598,7 +11620,7 @@ fn propertiesBody() !void {
 /// The Add tracks tool's choices, above the context's properties while it
 /// is active.
 fn tracksToolOptions() !void {
-    heading("{s}", .{if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
+    heading("{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
     const protos = state.model.prototypes.items;
     const styles = state.model.styles.items;
     // Keep the choice valid as prototypes and styles come and go.
@@ -11637,10 +11659,14 @@ fn tracksToolOptions() !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9002 });
         defer row.deinit();
-        propName("Tracks");
-        const names = [_][]const u8{ "Rows (row-major)", "Columns (column-major)" };
-        var choice: usize = @backingInt(tracks_tool.major);
-        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
+        propName(if (tracks_tool.kind == .track) "Runs" else "Tracks");
+        if (tracks_tool.kind == .track) {
+            dvui.labelNoFmt(@src(), "the way it is drawn: right or down", .{}, .{ .expand = .horizontal });
+        } else {
+            const names = [_][]const u8{ "Rows (column of rows)", "Columns (row of columns)" };
+            var choice: usize = @backingInt(tracks_tool.major);
+            if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
+        }
     }
     var buf: [96]u8 = undefined;
     switch (tracks_tool.size_to) {
@@ -11673,6 +11699,22 @@ fn styleLinePitch(style: ?layout.model.StyleId) ?f64 {
     const f = state.faces[0];
     const ext = f.extents();
     return (ext.ascender - ext.descender) * 3 / layout.legend.capUnits(f);
+}
+
+/// Sets a track's or region's orientation, saying why when it cannot be.
+fn setOrientationOf(pi: usize, ri: usize, direction: f64, rotation: f64) void {
+    actM(mergeKey(.{ "track orientation", pi, ri }), .setOrientation, .{ pi, ri, direction, rotation }) catch |err| {
+        state.status = if (err == error.BadJoin) "A flow's tracks all run one way: take this one out of its flow to turn it. " else "The orientation was not set. ";
+    };
+}
+
+/// Removes a track or region; its flow goes on in its other tracks (the
+/// last one's text kept, unplaced). Its panel becomes the context.
+fn removeRegionOf(pi: usize, ri: usize) void {
+    actV(.removeRegion, .{ pi, ri });
+    track_cursor = null;
+    path_selected = null;
+    state.context = .{ .panel = pi };
 }
 
 /// "Row" or "Column".
@@ -11717,7 +11759,11 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
         .panel => |pi| pi,
         else => return null,
     };
-    const major = tracks_tool.major;
+    // A track runs the way it is drawn; a region the way the tool says.
+    const major: layout.model.Major = if (tracks_tool.kind == .track)
+        (if (@abs(at.x - from.x) >= @abs(at.y - from.y)) .row else .column)
+    else
+        tracks_tool.major;
     // The unit (mm per u), and in it: the thickness of one track, the
     // shortest length and the step along.
     var pitch: f64 = undefined;
@@ -11746,7 +11792,7 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
     const d_along = @abs(if (major == .row) dx else dy) / pitch;
     const d_across = @abs(if (major == .row) dy else dx) / pitch;
     const length = @max(along_min, @round(d_along / step_) * step_);
-    const tracks: usize = @max(1, @as(usize, @intFromFloat(@round(d_across / across))));
+    const tracks: usize = if (tracks_tool.kind == .track) 1 else @max(1, @as(usize, @intFromFloat(@round(d_across / across))));
     const thickness = @as(f64, @floatFromInt(tracks)) * across;
     const w = (if (major == .row) length else thickness) * pitch;
     const h = (if (major == .row) thickness else length) * pitch;
@@ -11772,7 +11818,7 @@ fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
         dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, a_pt), state.view.toPx(area, b_pt) } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.6) } });
     }
     var buf: [64]u8 = undefined;
-    const word = if (plan.major == .row) "row" else "column";
+    const word = if (tracks_tool.kind == .track) (if (plan.major == .row) "track, right" else "track, down") else if (plan.major == .row) "row" else "column";
     const plural = if (n == 1) "" else "s";
     // Text tracks in mm: a unit of one line pitch means little to anyone.
     const text = if (tracks_tool.size_to == .style)
@@ -11802,11 +11848,12 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     // Tracks may run past the panel: flagged, to be fitted or the panel
     // resized once their tiles show what is needed.
     var name_buf: [32]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "Tracks {d}", .{panel.regions.items.len + 1}) catch "Tracks";
+    const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ if (tracks_tool.kind == .track) "Track" else "Tracks", panel.regions.items.len + 1 }) catch "Tracks";
     const r = act(.addTracks, .{plan.panel, .{
         .name = name,
         .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
         .major = plan.major,
+        .kind = tracks_tool.kind,
         .prototype = switch (tracks_tool.size_to) {
             .prototype => |pid| pid,
             .style => null,
@@ -11921,11 +11968,14 @@ fn toolBar() void {
 
         // Two track modes, one button each: rows (tiles flow left to right)
         // and columns (top to bottom).
+        // And a third: one track, laid out where it is drawn, running the
+        // way the drag goes.
         inline for (.{
-            .{ layout.model.Major.row, "Add rows", dvui.entypo.menu, "Add rows: tracks of tiles running left to right, drawn out on the panel" },
-            .{ layout.model.Major.column, "Add columns", dvui.entypo.bar_graph, "Add columns: tracks of tiles running top to bottom, drawn out on the panel" },
+            .{ layout.model.Major.row, "Add rows", dvui.entypo.menu, "Add rows: a column of rows, added as content needs them, drawn out on the panel", layout.model.TileRegion.Kind.region },
+            .{ layout.model.Major.column, "Add columns", dvui.entypo.bar_graph, "Add columns: a row of columns, added as content needs them, drawn out on the panel", layout.model.TileRegion.Kind.region },
+            .{ layout.model.Major.row, "Add track", dvui.entypo.flow_line, "Add track: one line where it is drawn, running right or down as dragged; its own flow, or continuing another's", layout.model.TileRegion.Kind.track },
         }, 0..) |mode, mi| {
-            const mode_on = state.tool == .add_tracks and tracks_tool.major == mode[0];
+            const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[4] and (mode[4] == .track or tracks_tool.major == mode[0]);
             var twd: dvui.WidgetData = undefined;
             if (tbuttonIcon(@src(), mode[1], mode[2], .{}, .{}, .{
                 .id_extra = mi,
@@ -11938,6 +11988,7 @@ fn toolBar() void {
                 } else {
                     state.tool = .add_tracks;
                     tracks_tool.major = mode[0];
+                    tracks_tool.kind = mode[4];
                     ensurePrototype() catch {};
                 }
             }
@@ -12411,16 +12462,23 @@ fn properties() !void {
             // its pitch (u), along its tracks and across them.
             if (numberProp("Origin across, mm", region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
             if (numberProp("Origin up, mm", region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
+            const is_track = region.kind == .track;
+            propText("Kind", "{s}", .{if (is_track) "one line, set in advance" else if (region.major() == .row) "column of rows, as needed" else "row of columns, as needed"}, 130);
+            // Which way its baselines run and how content stands on them:
+            // rows and columns are two settings of these.
+            if (numberProp("Direction, °", region.direction, -360, 360, 131)) |v| setOrientationOf(r.panel, r.region, v, region.rotation);
+            if (numberProp("Rotation, °", region.rotation, -360, 360, 132)) |v| setOrientationOf(r.panel, r.region, region.direction, v);
+            if (!region.supported()) propText("Issue", "{s}", .{"set as the nearest of rows or columns for now"}, 133);
             {
                 const rows = region.major() == .row;
                 const along = if (rows) region.w else region.h;
                 const across = if (rows) region.h else region.w;
                 if (numberProp("Length, u", along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
-                if (numberProp(if (rows) "Depth, rows" else "Depth, columns", across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
+                if (!is_track) if (numberProp(if (rows) "Depth, rows" else "Depth, columns", across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
                 if (region.style != null) propText("Size", "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
             propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
-            propText(if (region.major() == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
+            if (!is_track) propText(if (region.major() == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
             propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
@@ -12446,6 +12504,27 @@ fn properties() !void {
             };
             if (region.prototype) |pid| if (state.model.protoIndex(pid) != null) propText("Prototype", "{s}", .{state.model.proto(pid).name}, 6);
             if (region.style) |sid| if (state.model.styleIndex(sid) != null) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.textStyle(sid).name, region.pitch }, 9);
+            // A region's rows (or columns) as tracks of their own, where
+            // they are now, its flow running on through them.
+            if (!is_track) {
+                const placed_rows = tracksIn(r.panel, r.region);
+                var lb: [48]u8 = undefined;
+                const label = std.fmt.bufPrint(&lb, "Make tracks of its {d} {s}", .{ placed_rows.len, if (region.major() == .row) "rows" else "columns" }) catch "Make tracks";
+                if (placed_rows.len > 0 and tbutton(@src(), label, .{}, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } })) {
+                    const a = dvui.currentWindow().arena();
+                    if (a.alloc(geom.Point, placed_rows.len)) |origins| {
+                        for (placed_rows, origins) |t, *o| o.* = .{ .x = t.box.x0, .y = t.box.y1 };
+                        if (act(.splitIntoTracks, .{ r.panel, r.region, origins })) |n| {
+                            track_cursor = null;
+                            state.status = std.fmt.bufPrint(&import_status_buf, "{d} tracks, its flow running through them. ", .{n}) catch "Made tracks. ";
+                        } else |_| state.status = "The tracks were not made. ";
+                    } else |_| {}
+                }
+            }
+            if (tbutton(@src(), if (is_track) "Remove track" else "Remove region", .{}, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } })) {
+                removeRegionOf(r.panel, r.region);
+                return;
+            }
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
@@ -12793,7 +12872,7 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
         indent = if (list.len == 1) list[0] else 0;
         changed = true;
     };
-    if (sizesProp(if (region.major() == .row) "Row gap, u" else "Column gap, u", if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
+    if (region.kind != .track) if (sizesProp(if (region.major() == .row) "Row gap, u" else "Column gap, u", if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
         gap = if (list.len == 1) list[0] else 0;
         changed = true;
     };
@@ -13730,7 +13809,7 @@ fn statusContent() void {
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
-        .add_tracks => if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
+        .add_tracks => if (tracks_tool.kind == .track) "Add a track: drag it out, right or down, on the panel · Esc cancels" else if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
         .constrain => if (constrain_first == null) "Constrain: click an edge, centre line or origin line of what is to move · Esc cancels" else "Constrain: click what it keeps to (its own, a peer's, or the parent's) · Esc cancels",

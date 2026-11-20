@@ -1033,3 +1033,34 @@ test "after Tab hunts a Ctrl-click selection, the keyboard stays with the canvas
     try r.key(.escape, .none);
     try std.testing.expectEqual(0, api.selectionCount());
 }
+
+test "the keyboard's region made into six tracks, one a row: the same panel; a track removed and put back" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    const panel = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)";
+    try r.click(panel ++ "/keys");
+    try r.click("Region/Make tracks of its 6 rows");
+    try r.frames(3);
+    const m = api.model();
+    const kb = for (m.panels.items, 0..) |p, k| {
+        if (std.mem.eql(u8, p.name, "PC keyboard (ANSI 104)")) break k;
+    } else return error.TestUnexpectedResult;
+    const regions = m.panels.items[kb].regions.items;
+    try std.testing.expectEqual(6, regions.len);
+    for (regions) |t| try std.testing.expectEqual(layout.model.TileRegion.Kind.track, t.kind);
+    try std.testing.expectEqual(1, m.flows.items.len);
+    try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
+    // The last track removed: its keys gone with it, the panel otherwise
+    // as it was; undone, all back.
+    try r.click(panel ++ "/keys 6");
+    _ = try r.rectOf("Track/Direction, °");
+    try r.click("Track/Remove track");
+    try r.frames(3);
+    try std.testing.expectEqual(5, api.model().panels.items[kb].regions.items.len);
+    try r.key(.z, .lcontrol);
+    try r.frames(3);
+    try std.testing.expectEqual(6, api.model().panels.items[kb].regions.items.len);
+    try sameAsExample(api.model(), "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
+}

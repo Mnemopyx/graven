@@ -310,6 +310,13 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
     - An orientation that is not an axis case is kept, flagged (`unsupported_direction`) and placed as the nearest axis.
     - Gone: the old track-content fields (`indent`, `paragraph`, `next`, `items`, read by flows' upgrade since 2026-11-18) and the explicit `segments`; files that old no longer open their content. `major` is read as `old_major` and converted on loading (`upgradeOrientation`).
     - **Checked:** all tests, including a new example test splitting the keyboard's region into six tracks threaded in its flow: one segment a track, and an SVG byte-identical to the one-region keyboard's; an angled region flagged. Keyboard and HP-15C SVGs byte-identical; the GUI harness passes.
+  - **Step 2 built 2026-11-20 (the GUI):**
+    - **Actions:** `removeRegion` (a track or region goes; its flow goes on in its other tracks, the last one's text kept unplaced), `setOrientation` (direction and rotation; turned between rows and columns, its length stays, a track stays one thick; refused for a track sharing its flow, whose tracks run one way), `splitIntoTracks` (a region's rows as tracks at given origins, the region the first, "<name> 1" …, the rest following it in its flow).
+    - **Tools:** Add track, beside Add rows and Add columns: one line where it is drawn, running right or down the way the drag goes, one thick; named Track N.
+    - **Properties:** headed Track or Region. Kind; Direction, ° and Rotation, ° (an issue line when placement cannot set them yet); a track has no depth, row count or gap. A region: Make tracks of its N rows (from where its rows were last placed). Both: Remove track / Remove region, and Delete with it chosen. Own or continued flow: the Flow picker and Join a track after this…, as before.
+    - **Browser:** a track lists its keys directly, without a row level.
+    - **Checked:** model tests (removal, orientation, the split with undo, in the examples test); a GUI harness test: the keyboard example's region made into six tracks by its button, the panel's SVG and 3MF identical to the example's, a track removed and the removal undone. Under Xvfb: the six tracks and their links, a track's properties, a column track drawn with the tool (direction −90, rotation 90). Keyboard SVG unchanged; all tests pass.
+    - **Not yet:** turning a track by dragging; a region's soft area shown differently from a track's; the Browser's kind word beside the name.
 
 ## Gaps against the project's stated goals
 
