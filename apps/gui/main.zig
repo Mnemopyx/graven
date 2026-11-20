@@ -14017,6 +14017,16 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
         if (best) |st| return .{ .panel = head.panel, .region = head.region, .index = st.index, .offset = st.offset };
         return .{ .panel = head.panel, .region = head.region, .index = indexAt(head.panel, head.region, t.track, along) };
     }
+    // An empty flow has no segment placed yet: a click in one of its
+    // tracks starts it, at its beginning.
+    if (state.model.flowItems(head.panel, head.region).len == 0) {
+        const r = state.model.panels.items[cr.panel].regions.items[cr.region];
+        if (contains(onSheet(cr.panel, r.bounds()), at)) {
+            flow_anchor = null;
+            typing_seq += 1;
+            return .{ .panel = head.panel, .region = head.region, .index = 0 };
+        }
+    }
     return null;
 }
 

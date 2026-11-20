@@ -318,6 +318,12 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
     - **Checked:** model tests (removal, orientation, the split with undo, in the examples test); a GUI harness test: the keyboard example's region made into six tracks by its button, the panel's SVG and 3MF identical to the example's, a track removed and the removal undone. Under Xvfb: the six tracks and their links, a track's properties, a column track drawn with the tool (direction −90, rotation 90). Keyboard SVG unchanged; all tests pass.
     - **Not yet:** turning a track by dragging; a region's soft area shown differently from a track's; the Browser's kind word beside the name.
 
+- **Names, field edits and scriptable UI** (decided 2026-11-20; blueprint "Names, field edits and scriptable UI"):
+  - Generated names are identifiers, `[A-Za-z][A-Za-z0-9]*` (`Panel1`, `Track1`, `K1`), unique among the objects of one container (a container's objects share one namespace), addressed by `.` paths resolved from the context outward. Keys are named within their flow (`Keys.K12`). Typed names stay free for now (quoted in a path).
+  - Fields change nothing while typed: Enter or leaving the field accepts a complete, valid value (one undo step), else it reverts; Esc reverts.
+  - UI elements get stable ids independent of wording; buttons and menu items become named actions; dropdowns chosen by value; objects and the flow cursor reached by name. Screen-point clicks only for testing canvas interaction.
+  - Order: fields on accept; names in containers; element ids and name-based harness scripting; then tracks step 3.
+
 ## Gaps against the project's stated goals
 
 The README sets the goals: HP-15C keypad legends first, aircraft panels last, SVG and STEP output, and checked production output.

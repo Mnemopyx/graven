@@ -345,7 +345,7 @@ fn screen(p: struct { f64, f64 }) !dvui.Point.Physical {
 }
 
 /// The keyboard as a person makes it in the GUI: styles, the key
-/// prototype, a panel, a track, 104 keys from the content palette, their
+/// prototype, a panel, six tracks in one flow, 104 keys from the content palette, their
 /// names, gaps and heights, and their legends from a CSV table.
 fn makeKeyboard(r: *Run) !void {
     try r.key(.m, .none);
@@ -368,56 +368,60 @@ fn makeKeyboard(r: *Run) !void {
     inline for (.{ "Left", "Right", "Top", "Bottom" }) |side| try r.set("Margins/" ++ side ++ ", mm", "5");
 
     try checkSaveable("the panel");
-    // The track: rows of keys, drawn out on the panel, then typed exactly.
-    try r.click("icon/Add rows");
-    try r.choose("Add rows/Size to", "Tile: key");
-    try r.drag(try screen(.{ 20, 120 }), try screen(.{ 200, 60 }));
-    try r.set("Region/Name", "keys");
-    try r.set("Region/Origin across, mm", "10");
-    try r.set("Region/Origin up, mm", "133.825");
-    try r.set("Region/Length, u", "22.5");
-    try r.set("Region/Depth, rows", "6.5");
+    // Six tracks, one a row, laid out in advance: each drawn out on the
+    // panel, then typed exactly (the half unit after the function row is
+    // where the second sits); the rest continue the first's flow.
+    const tops = [_][]const u8{ "133.825", "105.25", "86.2", "67.15", "48.1", "29.05" };
+    for (tops, 1..) |top, k| {
+        var nb: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&nb, "Row {d}", .{k});
+        try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)");
+        try r.click("icon/Add track");
+        if (k == 1) try r.choose("Add a track/Size to", "Tile: key");
+        try r.drag(try screen(.{ 20, 120 }), try screen(.{ 200, 121 }));
+        try r.set("Track/Name", name);
+        try r.set("Track/Origin across, mm", "10");
+        try r.set("Track/Origin up, mm", top);
+        try r.set("Track/Length, u", "22.5");
+        if (k == 1) {
+            // Its flow, named for what it holds.
+            try r.click("Paragraph/Show the flow");
+            try r.set("Flow/Name", "keys");
+        } else try r.choose("Paragraph/Flow", "keys");
+    }
+    try checkSaveable("the tracks");
 
-    // The keys, from the content palette at the cursor: a row's keys, then
-    // a line break; the second row starts a paragraph whose style puts
-    // half a unit before it.
+    // The keys, from the content palette at the cursor, put at the start
+    // of the first track: a row's keys, then a line break, which goes on
+    // in the next track.
+    const panel_node = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)";
+    try r.click(panel_node ++ "/Row 1");
+    try r.clickAt(try screen(.{ 60, 124 }));
     for (rows, 0..) |row, ri| {
-        if (ri == 1) {
-            try r.click("palette/paragraph");
-        } else if (ri > 1) try r.click("palette/hard_break");
+        if (ri > 0) try r.click("palette/hard_break");
         for (row) |k| {
             var tb: [32]u8 = undefined;
             try r.click(try std.fmt.bufPrint(&tb, "palette/key {d} u", .{k.w}));
         }
     }
 
-    // The second paragraph (the cursor is in it, at the end): a style of
-    // its own, half a unit (27 pt) before it.
-    try r.click("Paragraph/New paragraph style");
-    try r.set("Paragraph/Name", "Row gap 0.5 u");
-    try r.set("Paragraph/Space before, pt", "27");
-
     try checkSaveable("the keys");
-    // Named in order, K1 to K104, from the track's properties.
-    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
-    try r.click("Region/Name keys in order: K1, K2 …");
+    // Named in order, K1 to K104, from the first track's properties (its
+    // flow's keys, through all six).
+    try r.click(panel_node ++ "/Row 1");
+    try r.click("Track/Name keys in order: K1, K2 …");
 
     // Gaps and heights, key by key: the key clicked on the canvas (the
     // panel chosen first, so a click picks a key rather than placing the
     // cursor), then its properties.
-    // Each row opened in the Browser, then each key that needs it chosen
-    // there (its node is its name, then its legend).
-    const keys_node = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys";
-    for (1..rows.len + 1) |ri| {
-        var tb: [128]u8 = undefined;
-        try r.click(try std.fmt.bufPrint(&tb, "{s}/Row {d}#open", .{ keys_node, ri }));
-    }
+    // Each key that needs it chosen in the Browser, under its track (its
+    // node is its name, then its legend).
     var n: usize = 0;
-    for (rows) |row| for (row) |k| {
+    for (rows, 1..) |row, ri| for (row) |k| {
         n += 1;
         if (k.gap == 0 and k.h == 1) continue;
         var tb: [128]u8 = undefined;
-        try r.click(try r.tagStarting(try std.fmt.bufPrint(&tb, "{s}/K{d} ", .{ keys_node, n })));
+        try r.click(try r.tagStarting(try std.fmt.bufPrint(&tb, "{s}/Row {d}/K{d} ", .{ panel_node, ri, n })));
         var vb: [16]u8 = undefined;
         if (k.gap != 0) try r.set("Tile/Gap before, u", try std.fmt.bufPrint(&vb, "{d}", .{k.gap}));
         if (k.h != 1) try r.choose("Tile/Height", try std.fmt.bufPrint(&vb, "{d} u", .{k.h}));
@@ -428,7 +432,7 @@ fn makeKeyboard(r: *Run) !void {
     const csv = try legendsCsv(std.heap.c_allocator);
     defer std.heap.c_allocator.free(csv);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/keyboard-legends.csv", .data = csv });
-    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/keys");
+    try r.click(panel_node ++ "/Row 1");
     try r.click("menu/File");
     try r.click("menu/Import legend sheet (CSV)…");
     try dvui.testing.pressKey(.a, .lcontrol);
@@ -1034,33 +1038,57 @@ test "after Tab hunts a Ctrl-click selection, the keyboard stays with the canvas
     try std.testing.expectEqual(0, api.selectionCount());
 }
 
-test "the keyboard's region made into six tracks, one a row: the same panel; a track removed and put back" {
+test "a region's rows made into tracks, one a row: the panel the same; a track removed and put back" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try openExample(&r, "PC keyboard");
-    const panel = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)";
-    try r.click(panel ++ "/keys");
-    try r.click("Region/Make tracks of its 6 rows");
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("icon/Add panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 160, 90 }));
+    try r.click("tree/untitled/Canvas, mm/Panel 1");
+    // Two rows of keys in a region: three, a line break, two.
+    try r.click("icon/Add rows");
+    try r.drag(try screen(.{ 15, 85 }), try screen(.{ 120, 45 }));
+    try r.set("Region/Length, u", "5");
+    try r.set("Region/Depth, rows", "2");
+    for (0..5) |k| {
+        if (k == 3) try r.click("palette/hard_break");
+        try r.click("palette/key 1 u");
+    }
+    try r.frames(3);
+    const a = std.heap.c_allocator;
+    const font = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "examples/fonts/Inter-Medium.otf", a, .limited(64 << 20));
+    defer a.free(font);
+    const face = try layout.Face.init(a, font, 0);
+    defer face.deinit();
+    const before = try panelSvg(a, api.model(), "Panel 1", face);
+    defer a.free(before);
+
+    const panel = "tree/untitled/Canvas, mm/Panel 1";
+    try r.click(panel ++ "/Tracks 1");
+    try r.click("Region/Make tracks of its 2 rows");
     try r.frames(3);
     const m = api.model();
-    const kb = for (m.panels.items, 0..) |p, k| {
-        if (std.mem.eql(u8, p.name, "PC keyboard (ANSI 104)")) break k;
+    const pi = for (m.panels.items, 0..) |p, k| {
+        if (std.mem.eql(u8, p.name, "Panel 1")) break k;
     } else return error.TestUnexpectedResult;
-    const regions = m.panels.items[kb].regions.items;
-    try std.testing.expectEqual(6, regions.len);
+    const regions = m.panels.items[pi].regions.items;
+    try std.testing.expectEqual(2, regions.len);
     for (regions) |t| try std.testing.expectEqual(layout.model.TileRegion.Kind.track, t.kind);
-    try std.testing.expectEqual(1, m.flows.items.len);
-    try sameAsExample(m, "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
-    // The last track removed: its keys gone with it, the panel otherwise
-    // as it was; undone, all back.
-    try r.click(panel ++ "/keys 6");
+    try std.testing.expectEqual(m.trackFlow(pi, 0).?.id, m.trackFlow(pi, 1).?.id);
+    const after = try panelSvg(a, m, "Panel 1", face);
+    defer a.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    // The second track removed (its keys with it), and put back by undo.
+    try r.click(panel ++ "/Tracks 1 2");
     _ = try r.rectOf("Track/Direction, °");
     try r.click("Track/Remove track");
     try r.frames(3);
-    try std.testing.expectEqual(5, api.model().panels.items[kb].regions.items.len);
+    try std.testing.expectEqual(1, api.model().panels.items[pi].regions.items.len);
     try r.key(.z, .lcontrol);
     try r.frames(3);
-    try std.testing.expectEqual(6, api.model().panels.items[kb].regions.items.len);
-    try sameAsExample(api.model(), "examples/pc-keyboard.graven", &.{"PC keyboard (ANSI 104)"});
+    try std.testing.expectEqual(2, api.model().panels.items[pi].regions.items.len);
+    const again = try panelSvg(a, api.model(), "Panel 1", face);
+    defer a.free(again);
+    try std.testing.expectEqualStrings(before, again);
 }
