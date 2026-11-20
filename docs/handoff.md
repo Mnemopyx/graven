@@ -90,5 +90,5 @@ Step 1 of 3 built: glyphic records every object's box (`layout.ObjectBox`, `Set.
 
 ## Levels (2026-11-20)
 
-Ctrl+< and Ctrl+> go a level out and in (`levelUp`, `levelDown`, `levelParent`, `levelFirstChild` in main.zig; actions `level.up`, `level.down`). Built and tested; physical key lookup and mapping (scancodes from the SDL backend, so the pair follows the < and > keys on any layout) is deferred until after the first release (owner, 2026-11-20); possible next: levels in sketch editing.
+Ctrl+< and Ctrl+> go a level out and in (`levelUp`, `levelDown`, `levelParent`, `levelFirstChild` in main.zig; actions `level.up`, `level.down`). Built and tested; physical key lookup and mapping (scancodes from the SDL backend, so the pair follows the < and > keys on any layout) is deferred until after the first release (owner, 2026-11-20); levels in sketch editing are deferred until after further sketch design discussion (owner, 2026-11-20): Ctrl+< and Ctrl+> do nothing while a sketch is edited.
 
