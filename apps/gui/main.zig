@@ -161,6 +161,27 @@ pub const testing_api = struct {
         const c = eqChoice(dvui.currentWindow().arena()) orelse return null;
         return c.kind;
     }
+    pub fn contextIsCanvas() bool {
+        return switch (state.context) {
+            .panel => |pi| pi < state.model.panels.items.len and state.model.panels.items[pi].unbounded,
+            else => false,
+        };
+    }
+    pub fn contextTile() ?[]const u8 {
+        return switch (state.context) {
+            .tile => |id| state.model.tileConst(id).designator,
+            else => null,
+        };
+    }
+    pub fn contextRegionName() ?[]const u8 {
+        return switch (state.context) {
+            .region => |r| state.model.panels.items[r.panel].regions.items[r.region].name,
+            else => null,
+        };
+    }
+    pub fn flowCursor() bool {
+        return track_cursor != null;
+    }
     pub fn eqEditing() bool {
         return canvas_eq != null;
     }
@@ -10783,6 +10804,16 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         }
         // Scrolling, pinching and Z-drags, whatever mode the canvas is in.
         if (viewNavEvent(e, box, area)) continue;
+        // Ctrl+< and Ctrl+>: a level out or in, whatever is being edited.
+        if (!canvas_prompt and sketch_edit == null and cursorKeysReach()) if (keymap.match1(e, kmode("canvas"))) |inv| {
+            if (inv.action == kact("level.up") or inv.action == kact("level.down")) {
+                e.handle(@src(), box.data());
+                const moved = if (inv.action == kact("level.up")) levelUp() else levelDown();
+                state.status = if (moved) levelStatus() else if (inv.action == kact("level.up")) "Nothing further out. " else "Nothing further in. ";
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
+        };
         // Sketch mode takes the canvas's events.
         if (sketch_edit != null) {
             sketchEvent(e, box, area);
@@ -11426,6 +11457,255 @@ fn parentObject(id: layout.model.ObjectId) ?layout.model.ObjectId {
     };
 }
 
+// Levels (decided 2026-11-20): Ctrl+< goes one level out, Ctrl+> one in
+// (the keys < and > are on, Shift or not: Ctrl+, and Ctrl+. on a US
+// layout). Out from in: an object chosen in an expression; the expression
+// typed in (a tile's slot, a run); a track's content (the flow cursor);
+// the container itself, a tile, a track, a grid, line art (its size and
+// place in the properties); the panel holding it; the canvas. In goes back
+// the way it came out, else to the first thing inside.
+
+/// What Ctrl+> goes back into: what each Ctrl+< came out of, the last on
+/// top. An entry that no longer fits where one is (something else was
+/// chosen since) empties the trail.
+const LevelBack = union(enum) {
+    context: Context,
+    cursor: TrackCursor,
+    eq: CanvasEq,
+};
+var level_trail: [16]LevelBack = undefined;
+var level_trail_n: usize = 0;
+var level_back: ?LevelBack = null;
+
+fn levelPush(b: LevelBack) void {
+    if (level_trail_n == level_trail.len) {
+        std.mem.copyForwards(LevelBack, level_trail[0 .. level_trail.len - 1], level_trail[1..]);
+        level_trail_n -= 1;
+    }
+    level_trail[level_trail_n] = b;
+    level_trail_n += 1;
+}
+
+/// The container holding context `c`'s, one level out; null at the top.
+fn levelParent(c: Context) ?Context {
+    return switch (c) {
+        .tile => |id| blk: {
+            if (state.model.gridInstanceOf(id)) |g| break :blk .{ .grid = .{ .panel = g.panel, .index = g.grid } };
+            const f = findTile(id) orelse break :blk null;
+            if (f.panel >= state.model.panels.items.len) break :blk null;
+            // The track it lies in: the segment of its flow that placed it,
+            // which may be a later track of the thread than the flow's first.
+            if (f.panel < state.placed.items.len) for (state.placed.items[f.panel].tracks) |tr| {
+                if (tr.region == f.tile.region and tr.track == f.tile.row and tr.panel == f.panel) break :blk .{ .region = .{ .panel = tr.panel, .region = tr.member } };
+            };
+            if (f.tile.region < state.model.panels.items[f.panel].regions.items.len) break :blk .{ .region = .{ .panel = f.panel, .region = f.tile.region } };
+            break :blk .{ .panel = f.panel };
+        },
+        .region => |r| .{ .panel = r.panel },
+        .row => |r| .{ .region = .{ .panel = r.panel, .region = r.region } },
+        .art => |l| .{ .panel = l.panel },
+        .grid => |g| .{ .panel = g.panel },
+        .panel => |pi| blk: {
+            if (pi >= state.model.panels.items.len or state.model.panels.items[pi].unbounded) break :blk null;
+            const root = state.model.rootOf(state.model.spaceOf(pi));
+            break :blk if (root == pi) null else .{ .panel = root };
+        },
+        .group, .selection, .image, .view, .sketch => blk: {
+            const sp: usize = switch (c) {
+                .image => |im| im.space,
+                .view => |v| v.space,
+                .sketch => |k| k.space,
+                else => shown_space,
+            };
+            break :blk .{ .panel = state.model.rootOf(sp) };
+        },
+        .worksheet => null,
+        else => null,
+    };
+}
+
+/// The first thing inside context `c`, one level in: a canvas's first
+/// panel, a panel's first track (else grid, else line art), a grid's first
+/// tile; null when there is none (a track goes in to its content, not
+/// here).
+fn levelFirstChild(c: Context) ?Context {
+    switch (c) {
+        .worksheet, .file => {
+            for (state.model.panels.items, 0..) |p, pi| if (!p.unbounded) return .{ .panel = pi };
+            return null;
+        },
+        .panel => |pi| {
+            if (pi >= state.model.panels.items.len) return null;
+            const p = state.model.panels.items[pi];
+            if (p.unbounded) {
+                const sp = state.model.spaceOf(pi);
+                for (state.model.panels.items, 0..) |q, qi| if (qi != pi and !q.unbounded and state.model.spaceOf(qi) == sp) return .{ .panel = qi };
+                // Tracks straight on the canvas.
+                if (p.regions.items.len > 0) return .{ .region = .{ .panel = pi, .region = 0 } };
+                if (p.art.items.len > 0) return .{ .art = .{ .panel = pi, .index = 0 } };
+                return null;
+            }
+            if (p.regions.items.len > 0) return .{ .region = .{ .panel = pi, .region = 0 } };
+            if (p.grids.items.len > 0) return .{ .grid = .{ .panel = pi, .index = 0 } };
+            if (p.art.items.len > 0) return .{ .art = .{ .panel = pi, .index = 0 } };
+            return null;
+        },
+        .grid => |g| {
+            if (g.panel >= state.model.panels.items.len or g.index >= state.model.panels.items[g.panel].grids.items.len) return null;
+            for (state.model.panels.items[g.panel].grids.items[g.index].instances.items) |inst| return .{ .tile = inst.tile };
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn levelSet(c: Context) void {
+    state.context = c;
+    selection.clearRetainingCapacity();
+    hunt_clear();
+    last_click = null;
+    dvui.refresh(null, @src(), null);
+}
+
+/// The status after a level change: where one is now.
+fn levelStatus() []const u8 {
+    if (canvas_eq) |q| return if (q.head != null) "An object chosen: arrows nudge it, Tab the next; Ctrl+< out, Ctrl+> in. " else "Its text: type into it; Ctrl+< out to its container, Ctrl+> in to an object. ";
+    if (track_cursor != null) return "The track's content: the flow cursor; Ctrl+< out to the track, Ctrl+> in to the item after the cursor. ";
+    return std.fmt.bufPrint(&status_hunt_buf, "{s}: its size and place in the properties; Ctrl+< out, Ctrl+> in. ", .{state.context.kindName()}) catch "";
+}
+
+/// Ctrl+<: one level out. Whether there was one.
+fn levelUp() bool {
+    if (panel_edit != null) {
+        leavePanelEdit();
+        return true;
+    }
+    if (canvas_eq) |q| {
+        if (q.head != null) {
+            // An object chosen: what holds it, else back to typing.
+            if (!eqOut()) eqRelease();
+            return true;
+        }
+        // Typing: out of the expression, to the tile (or the flow cursor).
+        levelPush(.{ .eq = q });
+        leaveCanvasEquation();
+        if (q.target == .tile_track) levelSet(.{ .tile = q.target.tile_track.tile });
+        return true;
+    }
+    if (track_cursor) |c| {
+        // In a track's content: the track itself.
+        levelPush(.{ .cursor = c });
+        track_cursor = null;
+        flow_anchor = null;
+        const ctx: Context = switch (state.context) {
+            .region, .row => state.context,
+            else => .{ .region = .{ .panel = c.panel, .region = c.region } },
+        };
+        levelSet(ctx);
+        return true;
+    }
+    const up = levelParent(state.context) orelse return false;
+    levelPush(.{ .context = state.context });
+    levelSet(up);
+    return true;
+}
+
+/// Ctrl+>: one level in. Whether there was one.
+fn levelDown() bool {
+    if (panel_edit != null) return false;
+    level_back = if (level_trail_n > 0) level_trail[level_trail_n - 1] else null;
+    const taken = levelDownInner();
+    // The trail's top used, or no longer fitting: off it (all of it when
+    // it did not fit: the way back is lost).
+    if (level_trail_n > 0) {
+        if (level_back == null) level_trail_n -= 1 else level_trail_n = 0;
+    }
+    level_back = null;
+    return taken;
+}
+
+fn levelDownInner() bool {
+    if (canvas_eq) |q| {
+        // Typing: the object at the caret chosen; chosen: its first part.
+        if (q.head == null) return eqChooseAtCaret();
+        return eqIn();
+    }
+    if (track_cursor) |c| {
+        // In a track's content: the item after the cursor, a tile chosen
+        // or a run's text edited; back where Ctrl+< left, if it left one.
+        if (level_back) |b| if (b == .eq) if (b.eq.target == .run) if (b.eq.target.run.panel == c.panel and b.eq.target.run.region == c.region and eqContent(b.eq) != null) {
+            canvas_eq = b.eq;
+            canvas_eq_seq += 1;
+            level_back = null;
+            return true;
+        };
+        const items = state.model.flowItems(c.panel, c.region);
+        if (c.index >= items.len) return false;
+        switch (items[c.index].what) {
+            .run => |r| {
+                flow_anchor = null;
+                canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = c.index } }, .math = r.equation, .offset = 0 };
+                canvas_eq_seq += 1;
+                eqMove(@min(c.offset, @as(u32, @intCast(r.content.len))), null);
+                return true;
+            },
+            else => {
+                const t = items[c.index].tileOf() orelse return false;
+                track_cursor = null;
+                levelSet(.{ .tile = t });
+                return true;
+            },
+        }
+    }
+    // Back the way Ctrl+< came out.
+    if (level_back) |b| switch (b) {
+        .context => |ctx| if (levelParent(ctx)) |par| if (std.meta.eql(par, state.context)) {
+            level_back = null;
+            levelSet(ctx);
+            return true;
+        },
+        .cursor => |c| switch (state.context) {
+            .region, .row => {
+                level_back = null;
+                track_cursor = c;
+                dvui.refresh(null, @src(), null);
+                return true;
+            },
+            else => {},
+        },
+        .eq => |q| if (q.target == .tile_track and state.context == .tile and state.context.tile == q.target.tile_track.tile and eqContent(q) != null) {
+            level_back = null;
+            canvas_eq = q;
+            canvas_eq_seq += 1;
+            return true;
+        },
+    };
+    switch (state.context) {
+        // A tile: its slot's text edited.
+        .tile => |id| {
+            enterTileTrack(id);
+            return canvas_eq != null;
+        },
+        // A track: its content, the flow cursor at its start.
+        .region, .row => {
+            const pr: struct { panel: usize, region: usize } = switch (state.context) {
+                .region => |r| .{ .panel = r.panel, .region = r.region },
+                .row => |r| .{ .panel = r.panel, .region = r.region },
+                else => unreachable,
+            };
+            const head = state.model.threadHead(pr.panel, pr.region);
+            state.context = .{ .region = .{ .panel = pr.panel, .region = pr.region } };
+            track_cursor = .{ .panel = head.panel, .region = head.region, .index = 0 };
+            dvui.refresh(null, @src(), null);
+            return true;
+        },
+        else => {},
+    }
+    const down = levelFirstChild(state.context) orelse return false;
+    levelSet(down);
+    return true;
+}
+
 /// A plain click at canvas point `at` (device point `p`): picks, and
 /// selects the container picked, or (clicked again in the same place) the
 /// one it sits in.
@@ -11441,7 +11721,13 @@ fn clickAt(at: geom.Point, p: dvui.Point.Physical) void {
     // A tile is no container: clicked again, its track is the first one out.
     const tile_track: ?layout.model.ObjectId = switch (state.context) {
         // A grid's tile sits in no track: its panel, then.
-        .tile => |tid| if (findTile(tid)) |f| (if (f.panel >= state.model.panels.items.len) null else if (f.tile.region < state.model.panels.items[f.panel].regions.items.len) state.model.panels.items[f.panel].regions.items[f.tile.region].id else state.model.panels.items[f.panel].id) else null,
+        // The track it lies in (as Ctrl+< finds it), else its panel.
+        .tile => if (levelParent(state.context)) |up| switch (up) {
+            .region => |r| state.model.panels.items[r.panel].regions.items[r.region].id,
+            .grid => |g| state.model.panels.items[g.panel].id,
+            .panel => |pi| state.model.panels.items[pi].id,
+            else => null,
+        } else null,
         else => null,
     };
     const inner = objectOfContext(state.context) orelse tile_track orelse {
@@ -16848,6 +17134,72 @@ fn eqType(txt: []const u8) void {
     eqMove(at + @as(u32, @intCast(if (pair) 1 else txt.len)), null);
 }
 
+/// While typing in an expression on the canvas: the object at the caret
+/// chosen (else its first object). Whether one was.
+fn eqChooseAtCaret() bool {
+    const q = canvas_eq orelse return false;
+    const src = eqContent(q) orelse return false;
+    const a = dvui.currentWindow().arena();
+    const p = eqParse(a, src, q.math) orelse return false;
+    if (glyphic.entry.objectAt(&p.e, p.spans, q.offset)) |id| {
+        const sp = p.spans.get(id);
+        canvas_eq_seq += 1;
+        eqPick(@intCast(sp.start), @intCast(sp.end));
+        return true;
+    }
+    for (eqStops(a, &p)) |x| if (!x.field) {
+        canvas_eq_seq += 1;
+        eqPick(x.start, x.end);
+        return true;
+    };
+    return false;
+}
+
+/// The chosen object's holder (the structure its field belongs to)
+/// chosen. Whether it has one.
+fn eqOut() bool {
+    const q = canvas_eq orelse return false;
+    const src = eqContent(q) orelse return false;
+    const a = dvui.currentWindow().arena();
+    const p = eqParse(a, src, q.math) orelse return false;
+    const id = pickAt(&p, q) orelse return false;
+    const h = p.e.holder(id) orelse return false;
+    const sp = p.spans.get(h.structure);
+    if (sp.start == glyphic.entry.Span.none.start) return false;
+    canvas_eq_seq += 1;
+    eqPick(@intCast(sp.start), @intCast(sp.end));
+    return true;
+}
+
+/// Back to typing: the caret after what was chosen.
+fn eqRelease() void {
+    const q = canvas_eq orelse return;
+    const a = dvui.currentWindow().arena();
+    const p = if (eqContent(q)) |src| eqParse(a, src, q.math) else null;
+    const end: u32 = if (p) |pp| (if (pickAt(&pp, q)) |id| @intCast(pp.spans.get(id).end) else q.offset) else q.offset;
+    canvas_eq_seq += 1;
+    eqMove(end, null);
+}
+
+/// The chosen object's first part chosen (the first object inside it).
+/// Whether it has one.
+fn eqIn() bool {
+    const q = canvas_eq orelse return false;
+    const src = eqContent(q) orelse return false;
+    const a = dvui.currentWindow().arena();
+    const p = eqParse(a, src, q.math) orelse return false;
+    const id = pickAt(&p, q) orelse return false;
+    const sp = p.spans.get(id);
+    for (eqStops(a, &p)) |x| {
+        if (x.field or x.start < sp.start or x.end > sp.end) continue;
+        if (x.start == sp.start and x.end == sp.end) continue;
+        canvas_eq_seq += 1;
+        eqPick(x.start, x.end);
+        return true;
+    }
+    return false;
+}
+
 /// How far an arrow nudges the chosen object, cap heights.
 const nudge_step: f32 = 0.02;
 
@@ -16974,12 +17326,7 @@ fn eqAction(inv: keymap.Invocation) bool {
             return true;
         },
         kact("canvas.equation.choose") => {
-            // The object at the caret chosen.
-            const p = eqParse(a, src, q.math) orelse return true;
-            const id = glyphic.entry.objectAt(&p.e, p.spans, q.offset) orelse return true;
-            const sp = p.spans.get(id);
-            canvas_eq_seq += 1;
-            eqPick(@intCast(sp.start), @intCast(sp.end));
+            _ = eqChooseAtCaret();
             return true;
         },
         kact("canvas.equation.head.next") => {
@@ -17003,22 +17350,11 @@ fn eqAction(inv: keymap.Invocation) bool {
             return true;
         },
         kact("canvas.equation.head.out") => {
-            // What holds it chosen: the structure its field belongs to.
-            const p = eqParse(a, src, q.math) orelse return true;
-            const id = pickAt(&p, q) orelse return true;
-            const h = p.e.holder(id) orelse return true;
-            const sp = p.spans.get(h.structure);
-            if (sp.start == glyphic.entry.Span.none.start) return true;
-            canvas_eq_seq += 1;
-            eqPick(@intCast(sp.start), @intCast(sp.end));
+            _ = eqOut();
             return true;
         },
         kact("canvas.equation.head.release") => {
-            // Back to typing: the caret after what was chosen.
-            const p = eqParse(a, src, q.math);
-            const end: u32 = if (p) |pp| (if (pickAt(&pp, q)) |id| @intCast(pp.spans.get(id).end) else q.offset) else q.offset;
-            canvas_eq_seq += 1;
-            eqMove(end, null);
+            eqRelease();
             return true;
         },
         kact("canvas.equation.tab") => {

@@ -96,6 +96,7 @@ The canvas has sub-modes entered from the properties pane, each with its own way
 | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S | New canvas, Open, Save, Save As |
 | Ctrl+Z, Ctrl+Shift+Z (Ctrl+Y) | Undo, Redo |
 | Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A | Copy, cut, paste, select all (in text) |
+| Ctrl+< / Ctrl+> | A level out / in (the keys < and > are on, Shift or not: Ctrl+, and Ctrl+. on a US layout): an object chosen in an expression, the expression typed in, a track's content (the flow cursor), the container (tile, track, grid, line art: its size and place), its panel, the canvas. In goes back the way out came, else to the first thing inside (a track: its content; the flow cursor: the item after it; a tile: its text; text: the object at the caret; an object: its first part). Panel editing: out leaves it |
 | Ctrl+\\ | Edit on the canvas: the equation or inline math at the cursor, or a selected tile's text (again to leave); then Up chooses the object at the caret, Tab steps through objects, o steps out, arrows nudge, Esc back to typing |
 | = - [ ] 0 i u b, arrows | On an equation's head: scale, turn, clear, index, upper and lower slots, nudge |
 | Ctrl-click | Select |

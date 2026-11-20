@@ -35,7 +35,7 @@ pub const modes = [_]M{
     // No document yet.
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
-    .{ .name = "canvas", .kind = .major, .parent = "global", .allows = &.{ "canvas.object", "canvas.tile", "canvas.tool" } },
+    .{ .name = "canvas", .kind = .major, .parent = "global", .allows = &.{ "canvas.object", "canvas.tile", "canvas.tool", "level" } },
     // Engagement points near the pointer (or one locked onto).
     .{ .name = "canvas.engage", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.engage"} },
     .{ .name = "canvas.selection", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.selection"} },
@@ -140,6 +140,8 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.object.nudge-far", .repeat = true, .param = .direction },
     .{ .name = "canvas.object.delete" },
     .{ .name = "canvas.tile.edit-text" },
+    .{ .name = "level.up" },
+    .{ .name = "level.down" },
     .{ .name = "canvas.tool.cancel" },
     .{ .name = "canvas.tool.finish" },
 
@@ -353,6 +355,11 @@ pub const binds = [_]B{
     arrows("canvas", "canvas.object.nudge") ++ shiftArrows("canvas", "canvas.object.nudge-far") ++ [_]B{
     .{ .mode = "canvas", .chord = "delete", .action = "canvas.object.delete" },
     .{ .mode = "canvas", .chord = "primary+backslash", .action = "canvas.tile.edit-text" },
+    // A level out and in: the keys < and > are on, Shift or not.
+    .{ .mode = "canvas", .chord = "primary+comma", .action = "level.up" },
+    .{ .mode = "canvas", .chord = "primary+shift+comma", .action = "level.up" },
+    .{ .mode = "canvas", .chord = "primary+period", .action = "level.down" },
+    .{ .mode = "canvas", .chord = "primary+shift+period", .action = "level.down" },
     .{ .mode = "canvas", .chord = "escape", .action = "canvas.tool.cancel" },
 } ++ enters("canvas", "canvas.tool.finish") ++ arrows("canvas.selection", "canvas.selection.nudge") ++ shiftArrows("canvas.selection", "canvas.selection.nudge-far") ++ [_]B{
     .{ .mode = "canvas.engage", .chord = "tab", .action = "canvas.engage.lock", .arg = 0 },

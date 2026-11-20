@@ -88,3 +88,7 @@ Manufacturing plans and views (discussed 2026-11-19; blueprint "Manufacturing pl
 
 Step 1 of 3 built: glyphic records every object's box (`layout.ObjectBox`, `Set.boxes`, `render.Render.boxes`) and has `space_before`. Step 2 built the same day: the outlines, baseline, the chosen object and its neighbours (`drawCanvasEq`, `eqChoice`, `eqBoxOf`), its measures in the properties (`eq_measure`), a click choosing (`eqBoxPress`), and the expression's section first for a tile's slot and a run alike. See status.md.
 
+## Levels (2026-11-20)
+
+Ctrl+< and Ctrl+> go a level out and in (`levelUp`, `levelDown`, `levelParent`, `levelFirstChild` in main.zig; actions `level.up`, `level.down`). Built and tested; possible next: scancodes from the SDL backend so the pair follows the < and > keys on any layout; levels in sketch editing.
+

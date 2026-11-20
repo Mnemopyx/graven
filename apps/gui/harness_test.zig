@@ -1429,3 +1429,51 @@ test "objects chosen and nudged on the canvas: Up chooses, Tab steps, arrows nud
     try r.frames(2);
     try std.testing.expect(api.eqPicking());
 }
+
+test "Ctrl+< and Ctrl+> go a level out and in: a key's text, the key, its track, its panel, the canvas, and back the same way" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    try r.clickAt(api.tileCenter("K30").?);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    // In: its text, then the word in it chosen.
+    try r.key(.period, .lcontrol);
+    try std.testing.expect(api.eqEditing());
+    try std.testing.expect(!api.eqPicking());
+    try r.key(.period, .lcontrol);
+    try std.testing.expect(api.eqPicking());
+    // Out, Shift or not: typing, the key, its track, its panel, the canvas.
+    try r.key(.comma, .lcontrol);
+    try std.testing.expect(api.eqEditing() and !api.eqPicking());
+    try r.key(.comma, .lcontrol);
+    try std.testing.expect(!api.eqEditing());
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    try r.key(.comma, @enumFromInt(@intFromEnum(dvui.enums.Mod.lcontrol) | @intFromEnum(dvui.enums.Mod.lshift)));
+    try std.testing.expectEqualStrings("region", api.contextName());
+    // The track it lies in (the keyboard's second row), not its flow's first.
+    try std.testing.expectEqualStrings("Row2", api.contextRegionName().?);
+    try r.key(.comma, .lcontrol);
+    try std.testing.expectEqualStrings("panel", api.contextName());
+    try r.key(.comma, .lcontrol);
+    try std.testing.expectEqualStrings("panel", api.contextName());
+    try std.testing.expect(api.contextIsCanvas());
+    // Back in the way it came: the panel, the track, the key, its text.
+    try r.key(.period, .lcontrol);
+    try std.testing.expect(!api.contextIsCanvas());
+    try r.key(.period, .lcontrol);
+    try std.testing.expectEqualStrings("region", api.contextName());
+    try r.key(.period, .lcontrol);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    try std.testing.expectEqualStrings("K30", api.contextTile().?);
+    try r.key(.period, .lcontrol);
+    try std.testing.expect(api.eqEditing());
+    // A track chosen afresh: in goes to its content, the flow cursor.
+    try r.key(.escape, .none);
+    try r.select("\"PC keyboard (ANSI 104)\".Row1");
+    try r.key(.period, .lcontrol);
+    try std.testing.expect(api.flowCursor());
+    // In again: the item after the cursor, the first key.
+    try r.key(.period, .lcontrol);
+    try std.testing.expectEqualStrings("K1", api.contextTile().?);
+}
