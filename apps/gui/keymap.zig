@@ -11,6 +11,7 @@
 //! printable keys of the modes around it.
 
 const std = @import("std");
+const elements = @import("elements.zig");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
 const actions = @import("actions.zig");
@@ -436,7 +437,21 @@ fn recents() [9]B {
     return out;
 }
 
-pub const R = actions.Registry(dvui.enums.Key, builtin.os.tag == .macos, &modes, &action_defs, &binds);
+/// The hand-written actions, then every button's (elements.zig) that is
+/// not among them: a button is a virtual key for its action.
+const all_action_defs = blk: {
+    @setEvalBranchQuota(10_000_000);
+    var out: []const A = &action_defs;
+    for (elements.button_actions) |name| {
+        for (action_defs) |d| {
+            if (std.mem.eql(u8, d.name, name)) break;
+        } else out = out ++ [_]A{.{ .name = name }};
+    }
+    const fixed = out[0..out.len].*;
+    break :blk fixed;
+};
+
+pub const R = actions.Registry(dvui.enums.Key, builtin.os.tag == .macos, &modes, &all_action_defs, &binds);
 
 pub const ActionId = R.ActionId;
 pub const ModeId = R.ModeId;

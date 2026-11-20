@@ -929,6 +929,8 @@ var display_window = false;
 /// interface gets (white), live, with a gauge to judge them by. Esc or
 /// Close closes it; Reset puts both back to 1.
 fn displayWindow() void {
+    const saved_group = pushGroup("dialog.display");
+    defer popGroup(saved_group);
     if (!display_window) return;
     const win = dvui.currentWindow();
     const ws = win.rect_pixels;
@@ -1055,6 +1057,8 @@ fn openSizeWindow() void {
 /// it covers a real card held against the screen. Save keeps the scale for
 /// this machine; Use estimate forgets it; Cancel or Esc leaves it as it was.
 fn sizeWindow() void {
+    const saved_group = pushGroup("dialog.size");
+    defer popGroup(saved_group);
     if (!size_window) return;
     const ns = dvui.windowNaturalScale();
     const card_w = card_px / ns;
@@ -1349,6 +1353,8 @@ fn exportPanel() ?usize {
 /// The export prompt: the file to write, then Export (or Enter); Esc or
 /// Cancel closes it.
 fn exportPrompt() void {
+    const saved_group = pushGroup("dialog.export");
+    defer popGroup(saved_group);
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
@@ -2014,7 +2020,16 @@ fn frameAverage() struct { ms: f64, n: usize } {
     return .{ .ms = @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(frame_count)) / 1e6, .n = frame_count };
 }
 
+var elements_log_opened = false;
+
 fn frame() !dvui.App.Result {
+    if (!elements_log_opened) {
+        elements_log_opened = true;
+        if (std.c.getenv("GRAVEN_ELEMENTS_LOG")) |path| elements_log = std.Io.Dir.cwd().createFile(dvui.io, std.mem.span(path), .{}) catch null;
+    }
+    // Elements drawn outside any group (menus, the tools) are in none.
+    elem_group = "";
+    base_group = "";
     // A press away from a field being edited ends the edit first.
     accepted.on_accept = newFieldStep;
     accepted.beginFrame();
@@ -2859,6 +2874,8 @@ fn promptWindow(src: std.builtin.SourceLocation, id: usize, w: f32, h: f32) ?*dv
 /// still open elsewhere) without saving them: keep them, or go back to
 /// the save.
 fn recoveryPrompt() void {
+    const saved_group = pushGroup("dialog.recovery");
+    defer popGroup(saved_group);
     const rec = &(recovery orelse return);
     const u = rec.opened.unsaved.?;
     var fw = promptWindow(@src(), 14, 600, 175) orelse return;
@@ -2908,6 +2925,8 @@ fn finishRecovery(rec: anytype, kind: history.WriteKind) void {
 
 /// Another run (or program) wrote to the file since this one did.
 fn contentionPrompt(kind: history.WriteKind) void {
+    const saved_group = pushGroup("dialog.contention");
+    defer popGroup(saved_group);
     var fw = promptWindow(@src(), 15, 640, 175) orelse return;
     defer fw.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
@@ -2961,6 +2980,8 @@ fn contentionPrompt(kind: history.WriteKind) void {
 /// The file prompt: a name to open or save as; Enter or the button does
 /// it, Esc or Cancel closes it.
 fn filePrompt(kind: FilePromptKind) void {
+    const saved_group = pushGroup("dialog.file");
+    defer popGroup(saved_group);
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
@@ -3047,6 +3068,8 @@ fn filePrompt(kind: FilePromptKind) void {
 
 /// Unsaved changes: Save (then go on), Don't save, or Cancel.
 fn leavePrompt(p: Pending) void {
+    const saved_group = pushGroup("dialog.leave");
+    defer popGroup(saved_group);
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
@@ -3096,6 +3119,16 @@ fn act(comptime tag: history.Tag, args: history.Args(@tagName(tag))) history.Err
 fn actV(comptime tag: history.Tag, args: history.Args(@tagName(tag))) void {
     hist.do(&state.model, tag, args) catch {
         state.status = "That change could not be recorded. ";
+    };
+}
+
+/// The logical group of a context's elements (elements.zig).
+fn contextGroup(c: Context) []const u8 {
+    return switch (c) {
+        .region => "track",
+        .sketch => "sketch-view",
+        .sketch_def => "sketch",
+        else => @tagName(c),
     };
 }
 
@@ -3663,6 +3696,8 @@ var layout_prompt = false;
 var layout_prompt_new = false;
 
 fn layoutPrompt() void {
+    const saved_group = pushGroup("dialog.layout");
+    defer popGroup(saved_group);
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 420;
@@ -4939,6 +4974,8 @@ fn sheetCovers(id: layout.model.ObjectId, t: layout.model.TileId) bool {
 /// A legend sheet, for now in brief (its pane comes next): its name, what
 /// it covers, its columns, its rows, what is wrong, and its removal.
 fn sheetProperties(id: layout.model.ObjectId) void {
+    const saved_group = pushGroup("sheet");
+    defer popGroup(saved_group);
     const m = &state.model;
     const si = m.sheetIndex(id) orelse return;
     const sh = m.sheets.items[si];
@@ -6130,11 +6167,13 @@ fn sheetView(v: u8) void {
 /// The properties while a sheet view is active: the sheet, the selected
 /// cell's row and key, and the naming helpers.
 fn sheetViewProperties() void {
+    const saved_group = pushGroup("sheet.cell");
+    defer popGroup(saved_group);
     const id = sheet_sel.sheet;
     const m = &state.model;
     const si = m.sheetIndex(id) orelse return;
     const sh = m.sheets.items[si];
-    headingAs("sheet", "{s}", .{sh.name}, 9700);
+    headingAs("sheet.cell", "{s}", .{sh.name}, 9700);
     if (sheet_sel.row < sh.rows.items.len) {
         const row = sh.rows.items[sheet_sel.row];
         propText("Row", "{d} of {d}", .{ sheet_sel.row + 1, sh.rows.items.len }, 9701);
@@ -6393,6 +6432,8 @@ fn labelStyleIn(key: ?u64) !layout.model.StyleId {
 /// A frame's properties: its name, its boundary (fitted to what it holds),
 /// and what it holds.
 fn frameProperties(space: usize) !void {
+    const saved_group = pushGroup("frame");
+    defer popGroup(saved_group);
     const sp = state.model.spaces.items[space];
     propText("Name", "{s}", .{sp.name}, 1);
     if (sp.bound) |b| propText("Boundary", "{d:.1} × {d:.1} mm", .{ b.width(), b.height() }, 2) else propText("Boundary", "{s}", .{"none yet"}, 2);
@@ -6417,6 +6458,8 @@ fn frameProperties(space: usize) !void {
 
 /// A group's properties: what it holds, and how to move or dissolve it.
 fn groupProperties(id: layout.model.ObjectId) !void {
+    const saved_group = pushGroup("group");
+    defer popGroup(saved_group);
     const g = state.model.group(id) orelse return;
     propText("Name", "{s}", .{g.name}, 1);
     propText("Members", "{d}", .{g.members.items.len}, 2);
@@ -6433,6 +6476,8 @@ fn groupProperties(id: layout.model.ObjectId) !void {
 /// Objects picked with Select area: how many, and what can be done with
 /// them: group them in place, or move or copy them to another space.
 fn selectionProperties() !void {
+    const saved_group = pushGroup("selection");
+    defer popGroup(saved_group);
     propText("Objects", "{d}", .{selection.items.len}, 1);
     if (selection.items.len == 0) return;
     if (selection.items.len == 1) propText("Object", "{s}", .{objectName(selection.items[0])}, 2);
@@ -6648,6 +6693,8 @@ fn drawPicked(area: dvui.Rect.Physical) void {
 /// The canvas's properties: its units (a conversion: nothing moves), and
 /// what it holds.
 fn canvasProperties(pi: usize) !void {
+    const saved_group = pushGroup("canvas");
+    defer popGroup(saved_group);
     const panel = state.model.panels.items[pi];
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });
@@ -6787,6 +6834,8 @@ fn moveArtKey(code: dvui.enums.Key) bool {
 
 /// Line art's properties: where it is, and how tracks under it flow.
 fn artProperties(pi: usize, index: usize) !void {
+    const saved_group = pushGroup("art");
+    defer popGroup(saved_group);
     const pa = state.model.panels.items[pi].art.items[index];
     propText("Name", "{s}", .{pa.name}, 1);
     const b = pa.box();
@@ -6830,6 +6879,8 @@ fn artProperties(pi: usize, index: usize) !void {
 /// radius, whether it is a cutout, and Make panel for a closed path lying
 /// loose in a space.
 fn shapeProperties(pi: usize, index: usize) !void {
+    const saved_group = pushGroup("art.shape");
+    defer popGroup(saved_group);
     const pa = state.model.panels.items[pi].art.items[index];
     propText("Shape", "{s}", .{pa.prim.label()}, 10);
     switch (pa.prim) {
@@ -7489,6 +7540,8 @@ fn numberProp(name: []const u8, value: f64, min: f64, max: f64, n: usize) ?f64 {
 /// cutting away or inlaying, from a surface of the base, up or down, to a
 /// depth or through. Every change is one step (merged while typing).
 fn panelFab(pi: usize) !void {
+    const saved_group = pushGroup("panel.fab");
+    defer popGroup(saved_group);
     const Fab = layout.model.Fab;
     const FabLayer = layout.model.FabLayer;
     const fab: Fab = state.model.panels.items[pi].fab;
@@ -7524,6 +7577,7 @@ fn panelFab(pi: usize) !void {
     for (layers, 0..) |*l, li| {
         const n = 420 + li * 40;
         setTagScope("fabLayer.{d}", .{li + 1});
+        setGroup("panel.fab.layer.{d}", .{li + 1});
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
             defer row.deinit();
@@ -7663,6 +7717,8 @@ fn panelFab(pi: usize) !void {
         changed = true;
         key = 0;
     }
+    // After its layers, the fabrication's own.
+    setGroup("{s}", .{base_group});
     if (tbutton(@src(), "Add layer", .{}, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } })) {
         var fab_name_buf: [32]u8 = undefined;
         // The first: the base itself, solid from the bottom up. After it:
@@ -7688,10 +7744,12 @@ fn panelFab(pi: usize) !void {
 
 /// A panel's grids, each opened by its name, and Add grid.
 fn panelGrids(pi: usize) !void {
+    const saved_group = pushGroup("panel.grids");
+    defer popGroup(saved_group);
     const panel = state.model.panels.items[pi];
     heading("Grids", .{}, 300);
     for (panel.grids.items, 0..) |g, gi| {
-        if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 301 + gi })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+        if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 301 + gi, .tag = listTag("panel.grids", g.name) })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
     }
     if (tbutton(@src(), "Add grid", .{}, .{ .expand = .horizontal, .id_extra = 299 })) {
         // Points 13 mm apart filling the ink area, from its top-left.
@@ -7778,6 +7836,8 @@ fn stampShape(pi: usize, gi: usize, si: usize, st: layout.model.Stamp, n: usize)
 }
 
 fn gridProperties(pi: usize, gi: usize) !void {
+    const saved_group = pushGroup("grid");
+    defer popGroup(saved_group);
     const g = state.model.panels.items[pi].grids.items[gi];
     var sh = state.model.gridShape(pi, gi);
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
@@ -7853,7 +7913,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
     const stamps = state.model.panels.items[pi].grids.items[gi].stamps.items;
     for (stamps, 0..) |st, si| {
         const n = 100 + si * 20;
-        headingAs(scopeId("stamp", st.name), "Stamp: {s}", .{st.name}, n);
+        headingAs(scopeId("grid.stamp", st.name), "Stamp: {s}", .{st.name}, n);
         var next = st;
         var st_changed = false;
         var used: usize = 0;
@@ -7918,6 +7978,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
         }
     }
     heading("Add a stamp", .{}, 90);
+    setGroup("grid.add-stamp", .{});
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 91 });
         defer row.deinit();
@@ -7966,9 +8027,12 @@ fn gridProperties(pi: usize, gi: usize) !void {
 /// A tile bound to a grid: its point, how many points it spans, and
 /// removing it; unbound, binding it again at the nearest point.
 fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
+    const saved_group = pushGroup("instance");
+    defer popGroup(saved_group);
     const g = state.model.panels.items[pi].grids.items[gi];
     const inst = g.instances.items[ii];
     const sh = state.model.gridShape(pi, gi);
+    next_element = "instance.grid";
     if (tbutton(@src(), g.name, .{}, .{ .expand = .horizontal, .id_extra = 40 })) state.context = .{ .grid = .{ .panel = pi, .index = gi } };
     if (state.model.stampIndex(pi, gi, inst.stamp)) |si| propText("Stamp", "{s}", .{g.stamps.items[si].name}, 41);
     if (inst.loose) |c| {
@@ -8200,6 +8264,8 @@ fn peRelease(from: GridAt, to: GridAt) void {
 /// The mode's own properties, above the context's: the grid and stamp to
 /// place, and leaving the mode.
 fn panelEditHeader() void {
+    const saved_group = pushGroup("panel.editing");
+    defer popGroup(saved_group);
     if (panel_edit == null) return;
     const p = &panel_edit.?;
     if (p.panel >= state.model.panels.items.len) {
@@ -8207,7 +8273,7 @@ fn panelEditHeader() void {
         return;
     }
     const panel = state.model.panels.items[p.panel];
-    headingAs("editing", "Editing {s}", .{panel.name}, 7000);
+    headingAs("panel.editing", "Editing {s}", .{panel.name}, 7000);
     const arena = dvui.currentWindow().arena();
     if (panel.grids.items.len == 0) {
         propText("Grids", "none yet: add one below", .{}, 7001);
@@ -8405,6 +8471,8 @@ fn opShown(plan: ObjectId, i: usize) bool {
 
 /// The plans: how many, the active one, a new one.
 fn plansProperties() void {
+    const saved_group = pushGroup("plans");
+    defer popGroup(saved_group);
     const m = &state.model;
     propText("Plans", "{d}", .{m.plans.items.len}, 1);
     if (m.activePlan()) |p| propText("Exported", "{s}", .{p.name}, 2);
@@ -8424,6 +8492,8 @@ fn plansProperties() void {
 
 /// A plan in the Browser: opened in a manufacturing view, and edited.
 fn planProperties(id: ObjectId) void {
+    const saved_group = pushGroup("plan");
+    defer popGroup(saved_group);
     if (tbutton(@src(), "Open in a manufacturing view", .{}, .{ .expand = .horizontal, .id_extra = 90 })) showManufactureView(id);
     planEditor(id);
 }
@@ -8563,6 +8633,8 @@ fn warningText(buf: []u8, w: manufacture.Warning) []const u8 {
 /// parts and their materials; its operations, each with its process,
 /// passes, the layers it makes and their colours; the warnings.
 fn planEditor(id: ObjectId) void {
+    const saved_group = pushGroup("plan");
+    defer popGroup(saved_group);
     const m = &state.model;
     const pi = m.planIndex(id) orelse return;
     const p = m.plans.items[pi];
@@ -8598,6 +8670,7 @@ fn planEditor(id: ObjectId) void {
     heading("Parts", .{}, 110);
     for (p.parts, 0..) |pt, k| {
         const key = mergeKey(.{ "part material", id, k, m.materials.items.len });
+        listItem("plan.part", panelNameOf(pt.panel));
         if (materialChoice(panelNameOf(pt.panel), pt.material, key, 111 + k)) |mid| {
             const n = planCopy(p);
             @constCast(n.parts)[k].material = mid;
@@ -8640,7 +8713,7 @@ fn planEditor(id: ObjectId) void {
 
     // What is worth a second look.
     const ws = manufacture.warnings(ar, m, p) catch &.{};
-    headingAs("warnings", "{s}", .{if (ws.len == 0) "No warnings" else "Warnings"}, 95);
+    headingAs("plan.warnings", "{s}", .{if (ws.len == 0) "No warnings" else "Warnings"}, 95);
     for (ws, 0..) |w, k| {
         var buf: [256]u8 = undefined;
         var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = 96 + 1000 * k, .expand = .horizontal, .background = false, .margin = .{ .y = 2 } });
@@ -8656,10 +8729,12 @@ fn planEditor(id: ObjectId) void {
 /// Operation `k` of plan `p`: shown in the view, moved, removed; its name,
 /// process and passes; the stackup layers it makes, each with a colour.
 fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void {
+    const saved_group = pushGroup("plan.operation");
+    defer popGroup(saved_group);
     const m = &state.model;
     const ar = dvui.currentWindow().arena();
     const op = p.operations[k];
-    headingAs(scopeIdN("operation", k + 1), "{d}. {s}", .{ k + 1, op.name }, n0);
+    headingAs(scopeIdN("plan.operation", k + 1), "{d}. {s}", .{ k + 1, op.name }, n0);
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n0 });
         defer row.deinit();
@@ -8777,10 +8852,12 @@ fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void
 
 /// The materials: how many, and new ones from the library.
 fn materialsProperties() void {
+    const saved_group = pushGroup("materials");
+    defer popGroup(saved_group);
     propText("Materials", "{d}", .{state.model.materials.items.len}, 1);
     heading("Add from the library", .{}, 10);
     for (manufacture.library, 0..) |lm, i| {
-        if (tbutton(@src(), lm.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+        if (tbutton(@src(), lm.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("materials.library", lm.name) })) {
             state.context = .{ .material = act(.addMaterial, .{lm}) catch continue };
         }
     }
@@ -8789,6 +8866,8 @@ fn materialsProperties() void {
 /// A material: its name; what it is, how it comes, its surface and
 /// colours; the plans' parts made of it; its removal while unused.
 fn materialProperties(id: ObjectId) void {
+    const saved_group = pushGroup("material");
+    defer popGroup(saved_group);
     const m = &state.model;
     const i = m.materialIndex(id) orelse return;
     const x = m.materials.items[i].material;
@@ -8816,7 +8895,7 @@ fn materialProperties(id: ObjectId) void {
     for (m.plans.items, 0..) |pl, k| for (pl.parts) |pt| if (pt.material == id) {
         var lb: [160]u8 = undefined;
         const text = std.fmt.bufPrint(&lb, "{s}: {s}", .{ pl.name, panelNameOf(pt.panel) }) catch pl.name;
-        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used })) state.context = .{ .plan = pl.id };
+        if (tbutton(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used, .tag = listTag("material.plan", text) })) state.context = .{ .plan = pl.id };
         used += 1;
     };
     if (used == 0) {
@@ -8986,8 +9065,10 @@ fn opCheckCounts(id: ObjectId, k: usize) ?struct { fails: usize, marginal: usize
 /// The plan's checks in its editor: run, and the two result layers shown
 /// or hidden.
 fn planChecksSection(id: ObjectId) void {
+    const saved_group = pushGroup("plan.checks");
+    defer popGroup(saved_group);
     const stale = planChecksFor(id) and plan_checks_rev != state.model.revision;
-    headingAs("checks", "{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
+    headingAs("plan.checks", "{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
     if (tbutton(@src(), "Check this plan", .{}, .{ .expand = .horizontal, .id_extra = 141 })) runPlanChecks(id);
     if (!planChecksFor(id)) return;
     {
@@ -9701,12 +9782,14 @@ fn checkCounts(space: usize, layer: CheckLayer) struct { n: usize, fails: usize 
 /// The result layers in a space's Layers: each shown or hidden, with what
 /// it holds; Check again, Clear.
 fn checkLayersList(space: usize) void {
+    const saved_group = pushGroup("checks");
+    defer popGroup(saved_group);
     if (!checksCurrent()) return;
     const any = for (checks) |ck| {
         if (ck.panel < state.model.panels.items.len and state.model.spaceOf(ck.panel) == space) break true;
     } else false;
     if (!any) return;
-    headingAs("results", "{s}", .{if (checksStale()) "Results (out of date)" else "Results"}, 690);
+    headingAs("checks.results", "{s}", .{if (checksStale()) "Results (out of date)" else "Results"}, 690);
     for (std.enums.values(CheckLayer), 0..) |l, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 600 + k });
         defer row.deinit();
@@ -9740,6 +9823,8 @@ fn checkLayersList(space: usize) void {
 /// A panel's checks in its Fabrication: Check this panel, and its last
 /// results, check by check.
 fn panelChecks(pi: usize) void {
+    const saved_group = pushGroup("panel.checks");
+    defer popGroup(saved_group);
     if (tbutton(@src(), "Check this panel", .{}, .{ .expand = .horizontal, .id_extra = 420, .margin = .{ .y = 6 } })) runChecks(pi);
     if (!checksCurrent()) return;
     const ck = for (checks) |c| {
@@ -9754,6 +9839,7 @@ fn panelChecks(pi: usize) void {
         const mg = r.count(k, .marginal);
         const v = r.worst.get(k);
         const text = if (fl + mg == 0) "pass" else std.fmt.bufPrint(&buf, "{s}: {d} failing, {d} marginal", .{ @tagName(v), fl, mg }) catch @tagName(v);
+        listItem("panel.checks.limit", k.label());
         propText(k.label(), "{s}", .{text}, 422 + i);
     }
     propText("Part", "{d:.1} × {d:.1} × {d:.1} mm, {d} colour{s}", .{ r.extent[0], r.extent[1], r.extent[2], r.colours, if (r.colours == 1) "" else "s" }, 430);
@@ -9762,6 +9848,8 @@ fn panelChecks(pi: usize) void {
 /// A space's layers, top first, for its properties: each one shown or
 /// hidden, locked or not, and opened by its name; then Add layer.
 fn layersList(space: usize) void {
+    const saved_group = pushGroup("layers");
+    defer popGroup(saved_group);
     checkLayersList(space);
     heading("{s}", .{"Layers"}, 700);
     const sp = state.model.spaces.items[space];
@@ -9800,6 +9888,8 @@ fn layersList(space: usize) void {
 /// A layer's properties: shown, locked, opacity, blend, output, its place
 /// in the stack, and its flags.
 fn layerProperties(space: usize, li: usize) !void {
+    const saved_group = pushGroup("layer");
+    defer popGroup(saved_group);
     const sp = state.model.spaces.items[space];
     if (li >= sp.layers.items.len) return;
     var l = sp.layers.items[li];
@@ -9881,6 +9971,8 @@ fn layerChoice(space: usize, current: layout.model.ObjectId, n: usize) ?layout.m
 /// An image's properties: its layer, place, physical size, pixels and
 /// effective resolution.
 fn imageProperties(space: usize, index: usize) !void {
+    const saved_group = pushGroup("image");
+    defer popGroup(saved_group);
     const im = imageAt(space, index) orelse return;
     propText("Name", "{s}", .{im.name}, 1);
     if (layerChoice(space, im.layer, 2)) |l| try act(.setImage, .{space, index, im.at, im.w, l});
@@ -9928,6 +10020,8 @@ var image_prompt_new = false;
 /// The Place image prompt: a PNG or JPEG file, placed in the shown space
 /// at 150 dpi on the active layer.
 fn imagePrompt() void {
+    const saved_group = pushGroup("dialog.image");
+    defer popGroup(saved_group);
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const w: f32 = 460;
@@ -10149,6 +10243,8 @@ fn viewUnder(at: geom.Point) ?Context {
 /// A view's properties: what it shows and at what scale, where it lies,
 /// and the way to its source.
 fn viewProperties(host: usize, index: usize) !void {
+    const saved_group = pushGroup("view");
+    defer popGroup(saved_group);
     const sv = viewAt(host, index) orelse return;
     propText("Name", "{s}", .{sv.name}, 1);
     const src_i = state.model.spaceIndex(sv.source) orelse return;
@@ -10180,6 +10276,8 @@ fn viewProperties(host: usize, index: usize) !void {
 /// Buttons placing a view of space `space` in each other space it may
 /// show in (one that would show itself is left out).
 fn placeViewButtons(space: usize) void {
+    const saved_group = pushGroup("view.place-in");
+    defer popGroup(saved_group);
     var any = false;
     for (state.model.spaces.items, 0..) |sp, host| {
         if (state.model.viewWouldCycle(host, space)) continue;
@@ -11784,7 +11882,9 @@ fn propertiesBody() !void {
 /// The Add tracks tool's choices, above the context's properties while it
 /// is active.
 fn tracksToolOptions() !void {
-    headingAs("addTracks", "{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
+    const saved_group = pushGroup("tool.add-tracks");
+    defer popGroup(saved_group);
+    headingAs("tool.add-tracks", "{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
     const protos = state.model.prototypes.items;
     const styles = state.model.styles.items;
     // Keep the choice valid as prototypes and styles come and go.
@@ -12043,6 +12143,8 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
 /// Tools for the current context, as icon buttons; with Add shape on,
 /// which shape it draws.
 fn toolPalette() void {
+    const saved_group = pushGroup("tool");
+    defer popGroup(saved_group);
     if (sketch_edit != null) return sketchPalette();
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
     defer col.deinit();
@@ -12061,6 +12163,8 @@ fn toolPalette() void {
 }
 
 fn toolBar() void {
+    const saved_group = pushGroup("tool");
+    defer popGroup(saved_group);
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4) });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
@@ -12339,18 +12443,37 @@ fn actionButton(src: std.builtin.SourceLocation, comptime id: []const u8, label:
     o.data_out = &bw;
     if (dvui.button(src, label orelse e.label, .{}, o)) pushButtonEvent(tag, arg);
     // Its key, from the keymap, as a menu item shows its own.
-    if (elements.action(tag)) |a| {
+    if (buttonActionId(tag)) |a| {
         var kb: [48]u8 = undefined;
         if (keymap.shortcut(&kb, kmode("canvas"), a, arg)) |sc| dvui.tooltip(src, .{ .active_rect = bw.borderRectScale().r }, "{s}", .{sc}, .{ .id_extra = o.id_extra orelse 0 });
     }
+    recordDrawn(tag, arg);
+}
+
+/// An action button drawn this frame, with its argument: a script may
+/// press it.
+fn recordDrawn(tag: []const u8, arg: i32) void {
     const now = dvui.frameTimeNS();
     if (now != drawn_frame) {
+        for (drawn_buttons_prev.items) |b| state.gpa.free(b.id);
+        drawn_buttons_prev.clearRetainingCapacity();
         std.mem.swap(std.ArrayList(DrawnButton), &drawn_buttons, &drawn_buttons_prev);
-        drawn_buttons.clearRetainingCapacity();
         drawn_frame = now;
     }
+    if (buttonActionId(tag) == null) return;
     const keep = state.gpa.dupe(u8, tag) catch return;
     drawn_buttons.append(state.gpa, .{ .id = keep, .arg = arg }) catch {};
+}
+
+/// The action button `id` stands for (elements.zig; the keymap has every
+/// button's).
+fn buttonActionId(id: []const u8) ?keymap.ActionId {
+    const name = elements.actionName(id) orelse return null;
+    for (0..keymap.R.action_count) |k| {
+        const a: keymap.ActionId = @intCast(k);
+        if (std.mem.eql(u8, keymap.R.actionName(a), name)) return a;
+    }
+    return null;
 }
 
 /// At the frame's start: a script's press of a shown action button joins
@@ -12368,9 +12491,14 @@ fn dispatchButtons() void {
     button_events_n = 0;
     for (button_events[0..n]) |e| {
         const id = e.id[0..e.id_len];
-        const a = elements.action(id) orelse continue;
+        const a = buttonActionId(id) orelse continue;
         state.context = e.context;
-        _ = runButtonAction(.{ .action = a, .arg = e.arg });
+        if (!runButtonAction(.{ .action = a, .arg = e.arg })) {
+            // No handler of its own: the button runs it where it is drawn.
+            const n_ = @min(id.len, delivered_buf.len);
+            @memcpy(delivered_buf[0..n_], id[0..n_]);
+            delivered = delivered_buf[0..n_];
+        }
     }
 }
 
@@ -12410,7 +12538,14 @@ fn runButtonAction(inv: keymap.Invocation) bool {
             else => return false,
         },
         kact("panel.release") => panelRelease(),
-        else => return runAction(inv),
+        else => {
+            // A button's action without a handler here is delivered to the
+            // button (false); the app's own actions run as their keys do.
+            if (std.mem.indexOfScalar(u8, keymap.R.actionName(inv.action), '.')) |_| {
+                for (elements.button_actions) |name| if (std.mem.eql(u8, name, keymap.R.actionName(inv.action))) return false;
+            }
+            return runAction(inv);
+        },
     }
     return true;
 }
@@ -12533,6 +12668,121 @@ fn uniqueTag(base: []const u8) []const u8 {
 /// its tag, whatever section it is in.
 var next_element: ?[]const u8 = null;
 
+/// The logical group the elements drawn now belong to (elements.zig): set
+/// by what they are about (the context's kind; a function drawing one
+/// aspect of it), never by the headings or panes around them.
+var group_buf: [160]u8 = undefined;
+var elem_group: []const u8 = "";
+/// The group of the function drawing now (`pushGroup`): a plain heading
+/// returns to it, so a section after a loop of named ones (a prototype's
+/// slots) is not taken for the last of them.
+var base_buf: [160]u8 = undefined;
+var base_group: []const u8 = "";
+
+const SavedGroup = struct { buf: [160]u8, len: usize, base: [160]u8, base_len: usize };
+
+/// Elements from here on are in group `name` (absolute), until `popGroup`.
+fn pushGroup(name: []const u8) SavedGroup {
+    var saved: SavedGroup = .{ .buf = undefined, .len = elem_group.len, .base = undefined, .base_len = base_group.len };
+    @memcpy(saved.buf[0..elem_group.len], elem_group);
+    @memcpy(saved.base[0..base_group.len], base_group);
+    setGroup("{s}", .{name});
+    setBase();
+    return saved;
+}
+
+fn popGroup(saved: SavedGroup) void {
+    @memcpy(group_buf[0..saved.len], saved.buf[0..saved.len]);
+    elem_group = group_buf[0..saved.len];
+    @memcpy(base_buf[0..saved.base_len], saved.base[0..saved.base_len]);
+    base_group = base_buf[0..saved.base_len];
+}
+
+/// The group now is the function's own.
+fn setBase() void {
+    @memcpy(base_buf[0..elem_group.len], elem_group);
+    base_group = base_buf[0..elem_group.len];
+}
+
+fn setGroup(comptime fmt: []const u8, args: anytype) void {
+    elem_group = std.fmt.bufPrint(&group_buf, fmt, args) catch "";
+}
+
+/// `text` as an id part: lower case, words joined by "-", what follows a
+/// comma (a unit) left out ("Origin across, mm": origin-across).
+fn kebab(text: []const u8) []const u8 {
+    const head = if (std.mem.indexOfScalar(u8, text, ',')) |k| text[0..k] else text;
+    var out: std.ArrayList(u8) = .empty;
+    const a = dvui.currentWindow().arena();
+    var dash = false;
+    for (head) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            if (dash and out.items.len > 0) out.append(a, '-') catch {};
+            dash = false;
+            out.append(a, std.ascii.toLower(c)) catch {};
+        } else dash = true;
+    }
+    if (out.items.len == 0 or !std.ascii.isLower(out.items[0])) out.insert(a, 0, 'x') catch {};
+    return out.items;
+}
+
+/// A name as an id part, all of it (a list item: "Generic FDM, 0.4 mm
+/// nozzle": generic-fdm-0-4-mm-nozzle), unlike a label's unit.
+fn nameKey(name: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const a = dvui.currentWindow().arena();
+    var dash = false;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            if (dash and out.items.len > 0) out.append(a, '-') catch {};
+            dash = false;
+            out.append(a, std.ascii.toLower(c)) catch {};
+        } else dash = true;
+    }
+    if (out.items.len == 0 or !std.ascii.isLower(out.items[0])) out.insert(a, 0, 'x') catch {};
+    return out.items;
+}
+
+/// The next element drawn is the item named `name` of list `list` (a
+/// group; the registry has `<list>.*`).
+fn listItem(list: []const u8, name: []const u8) void {
+    next_element = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{s}", .{ list, nameKey(name) }) catch null;
+}
+
+/// A face's row (its role), as an item of `list`; its label.
+fn faceItem(list: []const u8, role: []const u8) []const u8 {
+    listItem(list, role);
+    return role;
+}
+
+/// The id of item `name` of list `list`, for a button's `.tag`.
+fn listTag(list: []const u8, name: []const u8) []const u8 {
+    listItem(list, name);
+    const id = next_element orelse return list;
+    next_element = null;
+    checkElement(id, .button, name);
+    return uniqueTag(id);
+}
+
+/// The kind of the next element tagged, for the registry's check.
+var next_kind: elements.Kind = .field;
+
+/// GRAVEN_ELEMENTS_LOG: each element drawn that the registry lacks,
+/// appended there ("id kind label"), to fill the registry from.
+var elements_log: ?std.Io.File = null;
+
+/// Checks a grouped element's id against the registry; logs one it lacks.
+fn checkElement(id: []const u8, kind: elements.Kind, label: []const u8) void {
+    if (elements.find(id) != null) return;
+    dvui.log.err("element {s} ({s}) is not in the registry", .{ id, @tagName(kind) });
+    if (elements_log) |f| {
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s} {s} {s}\n", .{ id, @tagName(kind), label }) catch return;
+        var w = f.writerStreaming(dvui.io, &.{});
+        w.interface.writeAll(line) catch {};
+    }
+}
+
 /// The next row is element `id`, labelled `label` when it says more than
 /// the registry's ("Depth, columns").
 fn elementLabel(comptime id: []const u8, label: ?[]const u8) []const u8 {
@@ -12549,8 +12799,16 @@ fn asElement(comptime id: []const u8) []const u8 {
 /// "<section>.<label as an identifier>", for this frame; the element's id
 /// when one was named (`asElement`).
 fn tagFor(name: []const u8) []const u8 {
+    const kind = next_kind;
+    next_kind = .field;
     if (next_element) |id| {
         next_element = null;
+        checkElement(id, kind, std.mem.trim(u8, name, " "));
+        return uniqueTag(id);
+    }
+    if (elem_group.len > 0) {
+        const id = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{s}", .{ elem_group, kebab(std.mem.trim(u8, name, " ")) }) catch return name;
+        checkElement(id, kind, std.mem.trim(u8, name, " "));
         return uniqueTag(id);
     }
     return elementTag(lowerCamel(std.mem.trim(u8, name, " ")));
@@ -12592,6 +12850,7 @@ fn tdropdown(src: std.builtin.SourceLocation, entries: []const []const u8, choic
 fn tcheckbox(src: std.builtin.SourceLocation, target: *bool, label: ?[]const u8, opts: dvui.Options) bool {
     var o = opts;
     if (o.tag == null) if (label) |l| {
+        next_kind = .toggle;
         o.tag = tagFor(l);
     };
     const clicked = dvui.checkbox(src, target, label, o);
@@ -12605,15 +12864,43 @@ fn tcheckbox(src: std.builtin.SourceLocation, target: *bool, label: ?[]const u8,
 /// `dvui.button`, tagged by its label in the current scope.
 fn tbutton(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.ButtonWidget.InitOptions, opts: dvui.Options) bool {
     var o = opts;
-    if (o.tag == null) o.tag = tagFor(label);
-    return dvui.button(src, label, init_opts, o) or pressedByScript(o.tag);
+    if (o.tag == null) {
+        next_kind = .button;
+        o.tag = tagFor(label);
+    }
+    return virtualKey(dvui.button(src, label, init_opts, o), o.tag.?);
 }
+
+/// A button as a virtual key: a click is an event for its action, run at
+/// the next frame's start; an action with no handler of its own is
+/// delivered back to the button where it is drawn (true there, once). A
+/// button the registry lacks acts at once (and is logged).
+fn virtualKey(clicked: bool, tag: []const u8) bool {
+    recordDrawn(tag, 0);
+    if (clicked) {
+        if (buttonActionId(tag) == null) return true;
+        pushButtonEvent(tag, 0);
+    }
+    if (delivered) |d| if (std.mem.eql(u8, d, tag)) {
+        delivered = null;
+        return true;
+    };
+    // A script's press of a button not yet in the registry.
+    return pressedByScript(tag);
+}
+
+/// The button an event is being delivered to this frame.
+var delivered: ?[]const u8 = null;
+var delivered_buf: [128]u8 = undefined;
 
 /// `dvui.buttonIcon`, tagged "icon/<name>" unless it has a tag.
 fn tbuttonIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, init_opts: dvui.ButtonWidget.InitOptions, icon_opts: dvui.IconRenderOptions, opts: dvui.Options) bool {
     var o = opts;
-    if (o.tag == null) o.tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "tool.{s}", .{lowerCamel(name)}) catch "tool");
-    return dvui.buttonIcon(src, name, tvg, init_opts, icon_opts, o) or pressedByScript(o.tag);
+    if (o.tag == null) {
+        next_kind = .button;
+        o.tag = if (elem_group.len > 0) tagFor(name) else uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "tool.{s}", .{lowerCamel(name)}) catch "tool");
+    }
+    return virtualKey(dvui.buttonIcon(src, name, tvg, init_opts, icon_opts, o), o.tag.?);
 }
 
 /// `dvui.menuItemLabel`, tagged "menu/<label>" (without its mark).
@@ -12635,12 +12922,13 @@ fn heading(comptime fmt: []const u8, args: anytype, n: usize) void {
     dvui.label(@src(), fmt, args, .{ .font = .theme(.heading), .id_extra = n, .padding = .{ .y = 8, .h = 4 } });
     var buf: [160]u8 = undefined;
     setTagScopeText(std.fmt.bufPrint(&buf, fmt, args) catch "");
+    // A heading names nothing: its elements are the function's group's.
+    if (elem_group.len > 0) setGroup("{s}", .{base_group});
 }
 
-/// "<kind>.<name as an identifier>", for a section about a named thing.
+/// "<group>.<name as an id part>", for a section about a named thing.
 fn scopeId(kind: []const u8, name: []const u8) []const u8 {
-    var buf: [96]u8 = undefined;
-    return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{s}", .{ kind, layout.names.identifier(&buf, name, "x") }) catch kind;
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{s}", .{ kind, kebab(name) }) catch kind;
 }
 
 /// "<kind>.<n>", for a numbered section.
@@ -12648,10 +12936,12 @@ fn scopeIdN(kind: []const u8, n: usize) []const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.{d}", .{ kind, n }) catch kind;
 }
 
-/// A section heading with an id of its own, whatever its text says.
+/// A section heading whose elements are in logical group `id`, whatever
+/// its text says (`plan.operation.2`, `tile.slot.top`).
 fn headingAs(id: []const u8, comptime fmt: []const u8, args: anytype, n: usize) void {
     dvui.label(@src(), fmt, args, .{ .font = .theme(.heading), .id_extra = n, .padding = .{ .y = 8, .h = 4 } });
     tag_scope = std.fmt.bufPrint(&tag_scope_buf, "{s}", .{id}) catch "";
+    setGroup("{s}", .{id});
 }
 
 /// UI style rule: a value the app chose, and the user has not, is italic.
@@ -12667,6 +12957,7 @@ fn propText(name: []const u8, comptime fmt: []const u8, args: anytype, n: usize)
 fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: anytype, n: usize) void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    next_kind = .value;
     tagParent(name);
     dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     dvui.label(@src(), fmt, args, .{ .expand = .horizontal, .font = styled(.theme(.body), default) });
@@ -12682,6 +12973,8 @@ fn propName(name: []const u8) void {
 /// reference, separate from the file name), and its sheet as a
 /// standard paper and orientation or a custom size.
 fn worksheetProperties() !void {
+    const saved_group = pushGroup("worksheet");
+    defer popGroup(saved_group);
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer row.deinit();
@@ -12772,6 +13065,7 @@ fn worksheetProperties() !void {
     // Margins: ink keep-out bands. Panels may reach into them; their ink
     // may not.
     heading("Margins", .{}, 60);
+    setGroup("worksheet.margins", .{});
     var m = sheet.margins;
     var changed = false;
     inline for (.{ .{ "Left, mm", "left" }, .{ "Right, mm", "right" }, .{ "Top, mm", "top" }, .{ "Bottom, mm", "bottom" } }, 0..) |side, i| {
@@ -12797,6 +13091,8 @@ fn worksheetProperties() !void {
 
 /// A panel's margins: the ink keep-out bands inside its edges.
 fn panelMargins(pi: usize) !void {
+    const saved_group = pushGroup("panel.margins");
+    defer popGroup(saved_group);
     const panel = state.model.panels.items[pi];
     heading("Margins", .{}, 10);
     var m = panel.margins;
@@ -12869,6 +13165,9 @@ fn properties() !void {
     // Its id is the context's kind, whatever the heading reads (a region
     // reads Track when it is one).
     headingAs(if (frame_root) "frame" else if (on_canvas) "canvas" else @tagName(state.context), "{s}", .{if (frame_root) "Frame" else if (on_canvas) "Canvas" else state.context.kindName()}, 0);
+    // What the elements below are about: the context's kind.
+    setGroup("{s}", .{if (frame_root) "frame" else if (on_canvas) "canvas" else contextGroup(state.context)});
+    setBase();
     switch (state.context) {
         .file => {
             // The file's name is its path, set by saving; it is not a property.
@@ -13027,6 +13326,8 @@ fn properties() !void {
 }
 
 fn tileProperties(id: TileId) !void {
+    const saved_group = pushGroup("tile");
+    defer popGroup(saved_group);
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
     const on_grid = state.model.gridInstanceOf(id);
@@ -13063,7 +13364,7 @@ fn tileProperties(id: TileId) !void {
 
     for (state.model.prototypeOf(id).tracks, 0..) |tt, k| {
         const n = 3000 + k * 10;
-        headingAs(scopeId("slot", tt.name), "Track {s}", .{tt.name}, n);
+        headingAs(scopeId("tile.slot", tt.name), "Track {s}", .{tt.name}, n);
         const arena = dvui.currentWindow().arena();
         const text = state.model.tileTrackText(arena, id, tt.id) catch "";
         var te = dvui.textEntry(@src(), .{ .text_initial = text, .multiline = true }, .{
@@ -13106,6 +13407,8 @@ fn flowPosOf(id: TileId) ?struct { panel: usize, region: usize, index: usize } {
 /// outlines are left as drawn. Every tile made from it is outlined on the
 /// canvas.
 fn prototypeProperties(id: layout.model.PrototypeId) !void {
+    const saved_group = pushGroup("prototype");
+    defer popGroup(saved_group);
     const p = state.model.proto(id).*;
     // Whole-prototype changes go through one copy, set once at the end.
     var next_proto = p;
@@ -13192,7 +13495,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
 
     for (p.tracks, 0..) |tt, k| {
         const n = 800 + k * 20;
-        headingAs(scopeId("slot", tt.name), "Track {s}", .{tt.name}, n);
+        headingAs(scopeId("prototype.slot", tt.name), "Track {s}", .{tt.name}, n);
         var next = tt;
         var changed = false;
         if (textProp("Name", tt.name, n * 8 + 7)) |name| {
@@ -13257,7 +13560,7 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     };
     for (art.layers, 0..) |layer, li| {
         const n = 700 + li * 20;
-        headingAs(scopeId("artLayer", layer.name), "Layer {s}", .{layer.name}, n);
+        headingAs(scopeId("prototype.art-layer", layer.name), "Layer {s}", .{layer.name}, n);
         if (paintEditor(layer.paint, n + 1)) |paint| try act(.setLayerPaint, .{id, li, paint});
     }
     {
@@ -13319,6 +13622,8 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
 /// paragraph style it takes, and that style's settings, which every
 /// paragraph in it shares. Lengths in points, as type is measured.
 fn paragraphProperties(pi: usize, ri: usize) !void {
+    const saved_group = pushGroup("paragraph");
+    defer popGroup(saved_group);
     const m = &state.model;
     const at: usize = if (track_cursor) |c| (if (c.panel == pi and c.region == ri) c.index else 0) else 0;
     heading("Paragraph", .{}, 900);
@@ -13457,6 +13762,8 @@ fn exprStyle(target: ExprTarget) ?layout.model.StyleId {
 }
 
 fn expressionProperties() !void {
+    const saved_group = pushGroup("expression");
+    defer popGroup(saved_group);
     const target = exprTarget() orelse return;
     const a = dvui.currentWindow().arena();
     const src = target.content();
@@ -13474,6 +13781,7 @@ fn expressionProperties() !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4010 + k });
             defer row.deinit();
             var lb: [32]u8 = undefined;
+            listItem("expression.param", @tagName(p));
             propName(paramLabel(&lb, p));
             const own = e.override(id, p);
             var v = own orelse glyphic.param.def(p).default;
@@ -13503,17 +13811,21 @@ const param_names = @typeInfo(glyphic.Param).@"enum".field_names;
 /// window), and its rules, each a parameter for every object or one kind:
 /// edited, removed, added.
 fn styleRuleProperties(sid: layout.model.StyleId) !void {
+    const saved_group = pushGroup("expression.rule");
+    defer popGroup(saved_group);
     const st = state.model.textStyle(sid).*;
-    headingAs("textStyle", "Text style {s}", .{st.name}, 4500);
+    headingAs("expression.style", "Text style {s}", .{st.name}, 4500);
     try styleSizeProps(sid, false);
     if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
     if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
-    for (st.faces.items, 0..) |f, k| propText(f.role, "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
+    for (st.faces.items, 0..) |f, k| propText(faceItem("expression.style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
     try styleRules(sid);
 }
 
 /// A style's rules, each editable, and Add a rule.
 fn styleRules(sid: layout.model.StyleId) !void {
+    const saved_group = pushGroup("style.rules");
+    defer popGroup(saved_group);
     const st = state.model.textStyle(sid).*;
     propValue("Rules", st.rules.items.len == 0, "{s}", .{if (st.rules.items.len == 0) "none: its base's and glyphic's defaults" else ""}, 4590);
     for (st.rules.items, 0..) |r, k| {
@@ -13521,6 +13833,7 @@ fn styleRules(sid: layout.model.StyleId) !void {
         defer row.deinit();
         const key = mergeKey(.{ "style rule", sid, k });
         var tb: [32]u8 = undefined;
+        next_element = std.fmt.allocPrint(dvui.currentWindow().arena(), "style.rules.{d}.kind", .{k + 1}) catch null;
         tagParent(std.fmt.bufPrint(&tb, "rule {d} kind", .{k + 1}) catch "rule");
         var kind_choice: usize = if (r.kind) |kd| @as(usize, @intFromEnum(kd)) + 1 else 0;
         if (tdropdown(@src(), &kind_names, .{ .choice = &kind_choice }, .{}, .{ .id_extra = 4700 + k, .min_size_content = .{ .w = 90 } })) {
@@ -13529,6 +13842,7 @@ fn styleRules(sid: layout.model.StyleId) !void {
             _ = actM(key, .setStyleRule, .{ sid, kind, r.param, @as(?glyphic.Value, r.value) }) catch {};
             return;
         }
+        next_element = std.fmt.allocPrint(dvui.currentWindow().arena(), "style.rules.{d}.parameter", .{k + 1}) catch null;
         tagParent(std.fmt.bufPrint(&tb, "rule {d} parameter", .{k + 1}) catch "rule");
         var param_choice: usize = @intFromEnum(r.param);
         if (tdropdown(@src(), param_names, .{ .choice = &param_choice }, .{}, .{ .id_extra = 4800 + k, .min_size_content = .{ .w = 110 } })) {
@@ -13542,7 +13856,8 @@ fn styleRules(sid: layout.model.StyleId) !void {
             // Its own box, tagged, so the value is found apart from the row.
             var vb = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = 4950 + k, .gravity_y = 0.5 });
             defer vb.deinit();
-            tagParent(std.fmt.bufPrint(&tb, "rule {d} value", .{k + 1}) catch "rule");
+            next_element = std.fmt.allocPrint(dvui.currentWindow().arena(), "style.rules.{d}.value", .{k + 1}) catch null;
+        tagParent(std.fmt.bufPrint(&tb, "rule {d} value", .{k + 1}) catch "rule");
             if (valueEditor(r.param, &v, false, 4900 + k)) {
                 _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, @as(?glyphic.Value, v) }) catch {};
             }
@@ -13724,10 +14039,12 @@ const process = layout.model.process;
 
 /// The document's profiles: how many, and new ones from the built-ins.
 fn processesProperties() void {
+    const saved_group = pushGroup("processes");
+    defer popGroup(saved_group);
     propText("Profiles", "{d}", .{state.model.processes.items.len}, 1);
     heading("Add a profile", .{}, 10);
     for (process.builtins, 0..) |b, i| {
-        if (tbutton(@src(), b.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i })) {
+        if (tbutton(@src(), b.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("processes.builtin", b.name) })) {
             var nb: [160]u8 = undefined;
             var named = b;
             named.name = uniqueProcessName(&nb, b.name);
@@ -13766,6 +14083,8 @@ fn bandProps(what: []const u8, own: ?process.Band, derived: process.Band, n: usi
 /// limits (each from the parameters unless overridden), the panels made
 /// with it, and its removal.
 fn processProperties(id: layout.model.ObjectId) void {
+    const saved_group = pushGroup("process");
+    defer popGroup(saved_group);
     const i = state.model.processIndex(id) orelse return;
     const p = state.model.processes.items[i].profile;
     var next = p;
@@ -13864,7 +14183,7 @@ fn processProperties(id: layout.model.ObjectId) void {
     heading("Used by", .{}, 50);
     var used: usize = 0;
     for (state.model.panels.items, 0..) |pn, pi| if (pn.fab.process == id) {
-        if (tbutton(@src(), pn.name, .{}, .{ .expand = .horizontal, .id_extra = 51 + pi })) state.context = .{ .panel = pi };
+        if (tbutton(@src(), pn.name, .{}, .{ .expand = .horizontal, .id_extra = 51 + pi, .tag = listTag("process.panel", pn.name) })) state.context = .{ .panel = pi };
         used += 1;
     };
     if (used == 0) {
@@ -13920,6 +14239,8 @@ fn panelProcessChoice(pi: usize) void {
 /// The document's text styles: how many, and new ones: a plain style, or
 /// one from a math font package (its faces and rules), to base others on.
 fn stylesProperties() !void {
+    const saved_group = pushGroup("styles");
+    defer popGroup(saved_group);
     propText("Text styles", "{d}", .{state.model.styles.items.len}, 1);
     if (tbutton(@src(), "Add a style", .{}, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } })) {
         var buf: [32]u8 = undefined;
@@ -13929,7 +14250,7 @@ fn stylesProperties() !void {
     heading("From a math package", .{}, 10);
     for (layout.fonts.packages, 0..) |pkg, i| {
         var lb: [64]u8 = undefined;
-        if (tbutton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i , .tag = elementTag(scopeId("addPackageStyle", pkg.name))})) {
+        if (tbutton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, .{}, .{ .expand = .horizontal, .id_extra = 11 + i , .tag = listTag("styles.package", pkg.name)})) {
             const name = if (styleNamed(pkg.name) == null) pkg.name else std.fmt.bufPrint(&lb, "{s} {d}", .{ pkg.name, state.model.styles.items.len + 1 }) catch pkg.name;
             // One step: the style and the package's faces and rules on it.
             const key = mergeKey(.{ "package style", pkg.name, state.model.styles.items.len });
@@ -13950,6 +14271,8 @@ fn styleNamed(name: []const u8) ?layout.model.StyleId {
 /// its text face (by family and style, as the document names it), its
 /// other faces, and its rules.
 fn styleProperties(sid: layout.model.StyleId) !void {
+    const saved_group = pushGroup("style");
+    defer popGroup(saved_group);
     const si = state.model.styleIndex(sid) orelse return;
     const st = state.model.styles.items[si];
     if (textProp("Name", st.name, 1)) |name| actM(mergeKey(.{ "style name", sid }), .renameStyle, .{ sid, name }) catch {};
@@ -14002,7 +14325,7 @@ fn styleProperties(sid: layout.model.StyleId) !void {
     };
     for (st.faces.items, 0..) |f, k| {
         if (std.mem.eql(u8, f.role, "text")) continue;
-        propText(f.role, "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
+        propText(faceItem("style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
     if (tbutton(@src(), "Fonts… (every face, and searching the installed fonts)", .{}, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } })) fontwin.open = true;
     try styleRules(sid);
@@ -14187,6 +14510,8 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
 /// jumps as values come and go: the pointer position (a dash off the
 /// sheet), the counts, any tool hint or message, then the font and zoom.
 fn statusContent() void {
+    const saved_group = pushGroup("status");
+    defer popGroup(saved_group);
     var tiles: usize = 0;
     var labels: usize = 0;
     var missing: usize = 0;
@@ -16453,6 +16778,8 @@ fn threadProperties(pi: usize, ri: usize) void {
 
 /// The document's flows: how many, how many unplaced, and a new one.
 fn flowsProperties() void {
+    const saved_group = pushGroup("flows");
+    defer popGroup(saved_group);
     var unplaced: usize = 0;
     for (state.model.flows.items) |f| {
         if (f.tracks.items.len == 0) unplaced += 1;
@@ -16468,6 +16795,8 @@ var flow_remove_armed: ?layout.model.ObjectId = null;
 /// A flow: its name, its tracks in order (or unplaced), what it holds,
 /// and its removal.
 fn flowProperties(id: layout.model.ObjectId) void {
+    const saved_group = pushGroup("flow");
+    defer popGroup(saved_group);
     const m = &state.model;
     const fi = m.flowIndex(id) orelse return;
     const f = m.flows.items[fi];
@@ -16484,7 +16813,12 @@ fn flowProperties(id: layout.model.ObjectId) void {
         var tb: [160]u8 = undefined;
         const label = std.fmt.bufPrint(&nb, "Track {d}", .{k + 1}) catch "Track";
         const where = if (m.trackById(tid)) |t| trackPlaceLabel(&tb, t) else "missing";
+        // Its tracks in order: flow.track.1, flow.track.2 …
+        var gb: [32]u8 = undefined;
+        const saved = pushGroup("flow.track");
+        next_element = std.fmt.bufPrint(&gb, "flow.track.{d}", .{k + 1}) catch null;
         propText(label, "{s}", .{where}, 10 + k);
+        popGroup(saved);
     }
     // What it holds.
     var runs: usize = 0;
@@ -17704,6 +18038,8 @@ fn endText(buf: []u8, end: ConstraintEnd, self: ?layout.model.ObjectId) []const 
 
 /// The prompt after the second pick: the relation, and its value.
 fn constrainPromptWindow() void {
+    const saved_group = pushGroup("dialog.constrain");
+    defer popGroup(saved_group);
     const pr = &(constrain_prompt orelse return);
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
@@ -17950,6 +18286,8 @@ fn dimRelease() bool {
 /// The picked constraint, in the properties: what it holds, its value,
 /// its place reset, its removal.
 fn pickedConstraintProperties() bool {
+    const saved_group = pushGroup("constraint");
+    defer popGroup(saved_group);
     const id = picked_constraint orelse return false;
     const c = constraintById(id) orelse {
         picked_constraint = null;
@@ -18060,6 +18398,8 @@ fn strokeFeature(area: dvui.Rect.Physical, h: FeatureHit, colour: dvui.Color, wi
 
 /// The context object's origin and constraints, below its properties.
 fn constraintProperties() void {
+    const saved_group = pushGroup("constraints");
+    defer popGroup(saved_group);
     const id = contextObject() orelse return;
     const m = &state.model;
     heading("Constraints", .{}, 9600);
@@ -18129,7 +18469,10 @@ fn originPicker(id: layout.model.ObjectId) void {
         defer line.deinit();
         for (xs, 0..) |x, xi| {
             const on = holds.x == x and holds.y == y;
+            var nb: [16]u8 = undefined;
             if (tbutton(@src(), "", .{}, .{
+                // Which point of it is its origin: constraints.origin-at.high-low …
+                .tag = listTag("constraints.origin-at", std.fmt.bufPrint(&nb, "{s} {s}", .{ @tagName(y), @tagName(x) }) catch "x"),
                 .id_extra = yi * 3 + xi,
                 .min_size_content = .{ .w = 10, .h = 10 },
                 .margin = .all(1),
@@ -19700,6 +20043,8 @@ fn skDimEntry(area: dvui.Rect.Physical) void {
 
 /// The summary: what holds the sketch, before leaving it.
 fn skSummary(area: dvui.Rect.Physical) void {
+    const saved_group = pushGroup("sketch.summary");
+    defer popGroup(saved_group);
     const it = skItem() orelse return;
     const an = skAnalysis();
     const ns = dvui.windowNaturalScale();
@@ -19734,6 +20079,8 @@ fn skSummary(area: dvui.Rect.Physical) void {
 // Palette and properties ----------------------------------------------------------
 
 fn sketchPalette() void {
+    const saved_group = pushGroup("sketch.palette");
+    defer popGroup(saved_group);
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(4) });
     defer col.deinit();
     const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
@@ -19765,6 +20112,8 @@ fn sketchPalette() void {
 /// sub-options first (M goes to the next), then the step being placed,
 /// with typed values for it.
 fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
+    const saved_group = pushGroup("sketch.tool");
+    defer popGroup(saved_group);
     const ns = dvui.windowNaturalScale();
     const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
     const tools = sk_geo_tools[@intFromEnum(g)];
@@ -19846,6 +20195,8 @@ var sk_step_typed = [4]?f64{ null, null, null, null };
 var sk_step_of: struct { tool: SkTool, n: usize } = .{ .tool = .none, .n = 0 };
 
 fn skStepFields() void {
+    const saved_group = pushGroup("sketch.step");
+    defer popGroup(saved_group);
     const p = skClickPoint() orelse geom.Point{ .x = 0, .y = 0 };
     const n = sk_nclicks;
     const prev: ?geom.Point = if (n > 0) sk_clicks[n - 1] else null;
@@ -19902,6 +20253,8 @@ fn skStepFields() void {
 
 /// The constrain buttons: those that fit the selection, live.
 fn sketchConstrainButtons() void {
+    const saved_group = pushGroup("sketch.constrain");
+    defer popGroup(saved_group);
     const kinds = [_]struct { k: SkKind, name: []const u8 }{
         .{ .k = .coincident, .name = "Coincident C" },
         .{ .k = .horizontal, .name = "Horizontal H" },
@@ -19941,6 +20294,8 @@ fn canvasArea() dvui.Rect.Physical {
 
 /// The sketch being edited: its readout and its constraints.
 fn sketchModeProperties() void {
+    const saved_group = pushGroup("sketch-mode");
+    defer popGroup(saved_group);
     const it = skItem() orelse return;
     propText("Sketch", "{s}", .{it.name}, 1);
     if (skAnalysis()) |x| {
@@ -20001,6 +20356,8 @@ var sk_pw_for: ?skl.GeomId = null;
 /// For one selected construction geometry: the parameter that makes it
 /// output while not 0 (a tile switches it on).
 fn sketchPhysicalWhen(it: SkPlace) void {
+    const saved_group = pushGroup("sketch.physical");
+    defer popGroup(saved_group);
     if (sk_sel.items.len != 1) return;
     const g: skl.GeomId = switch (sk_sel.items[0]) {
         .curve => |c| c,
@@ -20036,6 +20393,8 @@ var sk_param_text: [128]u8 = @splat(0);
 /// The sketch's parameters: each with its expression and value; a line to
 /// add or change one ("name = expression"), Enter or Set to apply.
 fn sketchParameters(it: SkPlace) void {
+    const saved_group = pushGroup("sketch.parameters");
+    defer popGroup(saved_group);
     heading("{s}", .{"Parameters"}, 8300);
     for (it.sketch.params.items, 0..) |p, pi| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = pi });
@@ -20087,6 +20446,8 @@ var sk_param_reset = false;
 
 /// A sketch's properties, outside sketch mode.
 fn sketchProperties(space: usize, index: usize) void {
+    const saved_group = pushGroup("sketch-view");
+    defer popGroup(saved_group);
     const it = viewPlace(space, index) orelse return;
     propText("Sketch", "{s}", .{it.name}, 1);
     propText("Origin", "({d:.2}, {d:.2}) {s}", .{ it.at.x * docUnits().perMm(), it.at.y * docUnits().perMm(), docUnits().symbol() }, 2);
@@ -20112,6 +20473,8 @@ fn sketchProperties(space: usize, index: usize) void {
 /// A sketch of the document (from the tree): its views, and where to place
 /// one.
 fn sketchDefProperties(index: usize) void {
+    const saved_group = pushGroup("sketch");
+    defer popGroup(saved_group);
     const sk = state.model.sketchAt(index) catch return;
     propText("Name", "{s}", .{sk.name}, 1);
     var views: usize = 0;
@@ -20145,6 +20508,8 @@ fn sketchDefProperties(index: usize) void {
 
 /// A sketch panel's own properties: its sketch, and how it cuts.
 fn sketchPanelProperties(pi: usize) void {
+    const saved_group = pushGroup("sketch-panel");
+    defer popGroup(saved_group);
     const pn = state.model.panels.items[pi];
     const si = state.model.sketchIndex(pn.sketch) orelse return;
     propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
@@ -20175,6 +20540,8 @@ var proto_preview: [2]f64 = .{ 1, 1 };
 
 
 fn prototypeSketch(id: layout.model.PrototypeId) void {
+    const saved_group = pushGroup("prototype.sketch");
+    defer popGroup(saved_group);
     const proto = state.model.proto(id).*;
     heading("{s}", .{"Drawn from a sketch"}, 8400);
     if (proto.sketch) |ps| {
@@ -20307,6 +20674,8 @@ fn sketchPreview(id: layout.model.PrototypeId, ps: layout.model.PrototypeSketch)
 /// A tile's switches: each parameter its prototype's sketch uses to switch
 /// construction geometry on.
 fn tileSketchParams(id: TileId) void {
+    const saved_group = pushGroup("tile.sketch");
+    defer popGroup(saved_group);
     const t = state.model.tileConst(id);
     const ps = state.model.proto(t.prototype).sketch orelse return;
     var seen: [16][]const u8 = undefined;
