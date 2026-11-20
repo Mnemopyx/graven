@@ -41,6 +41,8 @@ const reflow = @import("reflow.zig");
 const glyphs = @import("glyphs.zig");
 /// Fields that commit on accept (`fields.zig`).
 const accepted = @import("fields.zig");
+/// The interface's elements, named in logical groups (`elements.zig`).
+const elements = @import("elements.zig");
 
 const geom = layout.geom;
 const Model = layout.Model;
@@ -190,6 +192,32 @@ pub const testing_api = struct {
         track_cursor = .{ .panel = head.panel, .region = head.region, .index = index };
         dvui.refresh(null, @src(), null);
         return true;
+    }
+    /// One step down the discovery path: the groups and elements directly
+    /// in group `group` ("" for the top), each with whether it is on
+    /// screen now and where (from the last frame drawn).
+    pub const Discovered = struct { child: elements.Child, shown: bool, rect: dvui.Rect.Physical = .{} };
+    pub fn discover(group: []const u8, out: []Discovered) []Discovered {
+        var buf: [128]elements.Child = undefined;
+        const kids = elements.children(group, &buf);
+        const n = @min(kids.len, out.len);
+        for (kids[0..n], out[0..n]) |c, *f| {
+            f.* = .{ .child = c, .shown = false };
+            if (c.group) {
+                // A group is shown when any element in it is.
+                var it = dvui.currentWindow().tags.map.iterator();
+                while (it.next()) |e| {
+                    if (!std.mem.startsWith(u8, e.key_ptr.*, c.id) or e.key_ptr.len <= c.id.len or e.key_ptr.*[c.id.len] != '.') continue;
+                    if (dvui.tagGet(e.key_ptr.*)) |d| if (d.visible) {
+                        f.shown = true;
+                    };
+                }
+            } else if (dvui.tagGet(c.id)) |d| {
+                f.shown = d.visible;
+                f.rect = d.rect;
+            }
+        }
+        return out[0..n];
     }
     /// Gives the field with id `id` the text `text`, as if typed there and
     /// accepted.
@@ -11041,7 +11069,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // The same action as its Remove button.
                     .region => {
                         e.handle(@src(), box.data());
-                        _ = runButtonAction(.{ .action = kact("region.remove"), .arg = 0 });
+                        _ = runButtonAction(.{ .action = kact("track.remove"), .arg = 0 });
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .art => |l| {
@@ -12265,8 +12293,8 @@ var scripted_press: ?[]const u8 = null;
 var scripted_press_buf: [128]u8 = undefined;
 
 // Buttons as virtual keys (decided 2026-11-20): an action button's press is
-// an event, named by its id, that the keymap's button bindings
-// (`keymap.button_binds`) map to an action; the actions run at the next
+// an event, named by its id, which is its action's name (elements.zig);
+// the actions run at the next
 // frame's start, on the context the press was made in, through one
 // dispatch (`runButtonAction`), as a key's or a menu item's would.
 
@@ -12297,19 +12325,21 @@ fn pushButtonEvent(id: []const u8, arg: i32) void {
 }
 
 /// A button that is a virtual key: drawn, a click is an event for its
-/// action (`keymap.button_binds`), run next frame. `id` is its full name,
-/// "<section>.<key>", whatever section was drawn before it; `arg` is the
-/// action's argument (which of several things it stands for).
-fn actionButton(src: std.builtin.SourceLocation, id: []const u8, label: []const u8, arg: i32, opts: dvui.Options) void {
+/// action, run next frame. `id` is the element's (elements.zig), its
+/// action's name; `label` says more than the registry's when given ("Make
+/// tracks of its 6 rows"); `arg` is the action's argument (which of
+/// several things it stands for).
+fn actionButton(src: std.builtin.SourceLocation, comptime id: []const u8, label: ?[]const u8, arg: i32, opts: dvui.Options) void {
+    const e = comptime elements.get(id);
+    comptime if (e.kind != .button) @compileError(id ++ " is not a button");
     var o = opts;
     const tag = uniqueTag(id);
     o.tag = tag;
-    if (keymap.buttonAction(tag) == null) dvui.log.err("button {s} has no binding", .{tag});
     var bw: dvui.WidgetData = undefined;
     o.data_out = &bw;
-    if (dvui.button(src, label, .{}, o)) pushButtonEvent(tag, arg);
+    if (dvui.button(src, label orelse e.label, .{}, o)) pushButtonEvent(tag, arg);
     // Its key, from the keymap, as a menu item shows its own.
-    if (keymap.buttonAction(tag)) |a| {
+    if (elements.action(tag)) |a| {
         var kb: [48]u8 = undefined;
         if (keymap.shortcut(&kb, kmode("canvas"), a, arg)) |sc| dvui.tooltip(src, .{ .active_rect = bw.borderRectScale().r }, "{s}", .{sc}, .{ .id_extra = o.id_extra orelse 0 });
     }
@@ -12338,7 +12368,7 @@ fn dispatchButtons() void {
     button_events_n = 0;
     for (button_events[0..n]) |e| {
         const id = e.id[0..e.id_len];
-        const a = keymap.buttonAction(id) orelse continue;
+        const a = elements.action(id) orelse continue;
         state.context = e.context;
         _ = runButtonAction(.{ .action = a, .arg = e.arg });
     }
@@ -12347,26 +12377,26 @@ fn dispatchButtons() void {
 /// The actions buttons stand for, on the context. Whether it was one.
 fn runButtonAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
-        kact("region.make-tracks") => regionMakeTracks(),
-        kact("region.remove") => switch (state.context) {
+        kact("track.make-tracks") => regionMakeTracks(),
+        kact("track.remove") => switch (state.context) {
             .region => |r| removeRegionOf(r.panel, r.region),
             else => return false,
         },
-        kact("region.name-keys") => regionNameKeys(),
-        kact("track.show-flow") => switch (state.context) {
+        kact("track.name-keys") => regionNameKeys(),
+        kact("track.flow.show") => switch (state.context) {
             .region => |r| if (state.model.trackFlow(r.panel, r.region)) |f| {
                 state.context = .{ .flow = f.id };
             },
             else => return false,
         },
-        kact("track.join-after") => switch (state.context) {
+        kact("track.flow.join-after") => switch (state.context) {
             .region => |r| {
                 join_from = .{ .panel = r.panel, .region = r.region };
                 state.tool = .join;
             },
             else => return false,
         },
-        kact("track.take-out") => trackTakeOut(),
+        kact("track.flow.take-out") => trackTakeOut(),
         kact("flows.new") => {
             var nb: [32]u8 = undefined;
             const name = state.model.freshName(&nb, .flows, "Flow");
@@ -12499,8 +12529,30 @@ fn uniqueTag(base: []const u8) []const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}#{d}", .{ base, e.value_ptr.* }) catch base;
 }
 
-/// "<section>.<label as an identifier>", for this frame.
+/// The element (elements.zig) the next row or button drawn is: its id is
+/// its tag, whatever section it is in.
+var next_element: ?[]const u8 = null;
+
+/// The next row is element `id`, labelled `label` when it says more than
+/// the registry's ("Depth, columns").
+fn elementLabel(comptime id: []const u8, label: ?[]const u8) []const u8 {
+    const l = asElement(id);
+    return label orelse l;
+}
+
+/// The next row or button is element `id`; its label, from the registry.
+fn asElement(comptime id: []const u8) []const u8 {
+    next_element = id;
+    return comptime elements.get(id).label;
+}
+
+/// "<section>.<label as an identifier>", for this frame; the element's id
+/// when one was named (`asElement`).
 fn tagFor(name: []const u8) []const u8 {
+    if (next_element) |id| {
+        next_element = null;
+        return uniqueTag(id);
+    }
     return elementTag(lowerCamel(std.mem.trim(u8, name, " ")));
 }
 
@@ -12860,63 +12912,63 @@ fn properties() !void {
                 if (i.ink_outside > 0) propText("Issue", "ink area {d:.2} mm in margin", .{i.ink_outside}, 21);
             }
             try propFont("Legend font", 5);
-            if (panel_edit == null) actionButton(@src(), "panel.editPanel", "Edit panel", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+            if (panel_edit == null) actionButton(@src(), "panel.edit", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
             try panelGrids(pi);
             try panelFab(pi);
             if (state.model.has_sheet) return;
-            actionButton(@src(), "panel.releasePanel", "Release panel", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+            actionButton(@src(), "panel.release", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         },
         .region => |r| {
             const region = state.model.panels.items[r.panel].regions.items[r.region];
-            if (textProp("Name", region.name, 1)) |name| actM(mergeKey(.{ "track name", r.panel, r.region }), .renameRegion, .{ r.panel, r.region, name }) catch {};
+            if (textProp(asElement("track.name"), region.name, 1)) |name| actM(mergeKey(.{ "track name", r.panel, r.region }), .renameRegion, .{ r.panel, r.region, name }) catch {};
             // Typed exactly: where it starts (panel mm) and its extent in
             // its pitch (u), along its tracks and across them.
-            if (numberProp("Origin across, mm", region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
-            if (numberProp("Origin up, mm", region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
+            if (numberProp(asElement("track.origin.across"), region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
+            if (numberProp(asElement("track.origin.up"), region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
             const is_track = region.kind == .track;
-            propText("Kind", "{s}", .{if (is_track) "one line, set in advance" else if (region.major() == .row) "column of rows, as needed" else "row of columns, as needed"}, 130);
+            propText(asElement("track.kind"), "{s}", .{if (is_track) "one line, set in advance" else if (region.major() == .row) "column of rows, as needed" else "row of columns, as needed"}, 130);
             // Which way its baselines run and how content stands on them:
             // rows and columns are two settings of these.
-            if (numberProp("Direction, °", region.direction, -360, 360, 131)) |v| setOrientationOf(r.panel, r.region, v, region.rotation);
-            if (numberProp("Rotation, °", region.rotation, -360, 360, 132)) |v| setOrientationOf(r.panel, r.region, region.direction, v);
-            if (!region.supported()) propText("Issue", "{s}", .{"set as the nearest of rows or columns for now"}, 133);
+            if (numberProp(asElement("track.direction"), region.direction, -360, 360, 131)) |v| setOrientationOf(r.panel, r.region, v, region.rotation);
+            if (numberProp(asElement("track.rotation"), region.rotation, -360, 360, 132)) |v| setOrientationOf(r.panel, r.region, region.direction, v);
+            if (!region.supported()) propText(asElement("track.orientation-issue"), "{s}", .{"set as the nearest of rows or columns for now"}, 133);
             {
                 const rows = region.major() == .row;
                 const along = if (rows) region.w else region.h;
                 const across = if (rows) region.h else region.w;
-                if (numberProp("Length, u", along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
-                if (!is_track) if (numberProp(if (rows) "Depth, rows" else "Depth, columns", across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
-                if (region.style != null) propText("Size", "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
+                if (numberProp(asElement("track.length"), along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
+                if (!is_track) if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
+                if (region.style != null) propText(asElement("track.size"), "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
-            propText("Pitch", "{d:.2} mm", .{region.pitch}, 4);
-            if (!is_track) propText(if (region.major() == .row) "Rows" else "Columns", "{d}", .{tracksIn(r.panel, r.region).len}, 5);
+            propText(asElement("track.pitch"), "{d:.2} mm", .{region.pitch}, 4);
+            if (!is_track) propText(elementLabel("track.rows", if (region.major() == .row) null else "Columns"), "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
-            propText("Items", "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
+            propText(asElement("track.items"), "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
             if (region.style == null) {
                 // Its keys named in flow order: the prefix, then 1, 2 …
                 const prefix = key_name_prefix[0..key_name_prefix_len];
-                if (textProp("Key name prefix", prefix, 24)) |v| {
+                if (textProp(asElement("track.key-prefix"), prefix, 24)) |v| {
                     key_name_prefix_len = @min(v.len, key_name_prefix.len);
                     @memcpy(key_name_prefix[0..key_name_prefix_len], v[0..key_name_prefix_len]);
                 }
                 var lb: [64]u8 = undefined;
-                actionButton(@src(), "region.nameKeysInOrder", std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name keys in order", 0, .{ .expand = .horizontal, .id_extra = 25 });
+                actionButton(@src(), "track.name-keys", std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name keys in order", 0, .{ .expand = .horizontal, .id_extra = 25 });
             }
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
-                if (i.kind == .region_outside and i.region == r.region) propText("Issue", "{d:.2} mm past the panel", .{i.amount}, 7);
+                if (i.kind == .region_outside and i.region == r.region) propText(asElement("track.outside-issue"), "{d:.2} mm past the panel", .{i.amount}, 7);
             };
-            if (region.prototype) |pid| if (state.model.protoIndex(pid) != null) propText("Prototype", "{s}", .{state.model.proto(pid).name}, 6);
-            if (region.style) |sid| if (state.model.styleIndex(sid) != null) propText("Sized to", "{s}, one line ({d:.2} mm)", .{ state.model.textStyle(sid).name, region.pitch }, 9);
+            if (region.prototype) |pid| if (state.model.protoIndex(pid) != null) propText(asElement("track.prototype"), "{s}", .{state.model.proto(pid).name}, 6);
+            if (region.style) |sid| if (state.model.styleIndex(sid) != null) propText(asElement("track.style"), "{s}, one line ({d:.2} mm)", .{ state.model.textStyle(sid).name, region.pitch }, 9);
             // A region's rows (or columns) as tracks of their own, where
             // they are now, its flow running on through them.
             if (!is_track) {
                 const placed_rows = tracksIn(r.panel, r.region);
                 var lb: [48]u8 = undefined;
                 const label = std.fmt.bufPrint(&lb, "Make tracks of its {d} {s}", .{ placed_rows.len, if (region.major() == .row) "rows" else "columns" }) catch "Make tracks";
-                if (placed_rows.len > 0) actionButton(@src(), "region.makeTracks", label, 0, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } });
+                if (placed_rows.len > 0) actionButton(@src(), "track.make-tracks", label, 0, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } });
             }
-            actionButton(@src(), "region.remove", if (is_track) "Remove track" else "Remove region", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
+            actionButton(@src(), "track.remove", if (is_track) "Remove track" else "Remove region", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
@@ -13242,7 +13294,7 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 20 });
         defer row.deinit();
-        propName("Content");
+        propName(asElement("track.content"));
         const names = [_][]const u8{ "From the start", "Centred", "Back from the end" };
         var choice: usize = @intFromEnum(alignment);
         if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 20 })) {
@@ -13252,11 +13304,11 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
     }
     var buf: [32]u8 = undefined;
     // Empty is none; one length each.
-    if (sizesProp("Indent, u", if (indent > 0) std.fmt.bufPrint(&buf, "{d}", .{indent}) catch "" else "any", 21)) |list| if (list.len <= 1) {
+    if (sizesProp(asElement("track.indent"), if (indent > 0) std.fmt.bufPrint(&buf, "{d}", .{indent}) catch "" else "any", 21)) |list| if (list.len <= 1) {
         indent = if (list.len == 1) list[0] else 0;
         changed = true;
     };
-    if (region.kind != .track) if (sizesProp(if (region.major() == .row) "Row gap, u" else "Column gap, u", if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
+    if (region.kind != .track) if (sizesProp(elementLabel("track.gap", if (region.major() == .row) null else "Column gap, u"), if (gap > 0) std.fmt.bufPrint(&buf, "{d}", .{gap}) catch "" else "any", 22)) |list| if (list.len <= 1) {
         gap = if (list.len == 1) list[0] else 0;
         changed = true;
     };
@@ -16375,7 +16427,7 @@ fn threadProperties(pi: usize, ri: usize) void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
             defer row.deinit();
-            propName("Flow");
+            propName(asElement("track.flow.choice"));
             if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 29 })) if (choice != was) {
                 const to = m.flows.items[choice].id;
                 if (act(.assignTrack, .{ pi, ri, to, null })) {
@@ -16387,16 +16439,16 @@ fn threadProperties(pi: usize, ri: usize) void {
             const k = for (f.tracks.items, 0..) |t, i| {
                 if (t == m.panels.items[pi].regions.items[ri].id) break i;
             } else 0;
-            propText("In it", "track {d} of {d}", .{ k + 1, f.tracks.items.len }, 32);
-            actionButton(@src(), "paragraph.showTheFlow", "Show the flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+            propText(asElement("track.flow.position"), "track {d} of {d}", .{ k + 1, f.tracks.items.len }, 32);
+            actionButton(@src(), "track.flow.show", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         }
     }
-    if (before) |b| propText("Continues", "{s}", .{trackLabel(&buf, b, pi)}, 30);
-    if (after) |n| propText("Goes on into", "{s}", .{trackLabel(&buf, n, pi)}, 31);
-    actionButton(@src(), "paragraph.joinATrackAfterThis", "Join a track after this…", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+    if (before) |b| propText(asElement("track.flow.before"), "{s}", .{trackLabel(&buf, b, pi)}, 30);
+    if (after) |n| propText(asElement("track.flow.after"), "{s}", .{trackLabel(&buf, n, pi)}, 31);
+    actionButton(@src(), "track.flow.join-after", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     const f = m.trackFlow(pi, ri);
     const detachable = f != null and (f.?.tracks.items.len > 1 or f.?.items.items.len > 0);
-    if (detachable) actionButton(@src(), "paragraph.takeOutOfItsFlow", "Take out of its flow", 0, .{ .expand = .horizontal });
+    if (detachable) actionButton(@src(), "track.flow.take-out", null, 0, .{ .expand = .horizontal });
 }
 
 /// The document's flows: how many, how many unplaced, and a new one.
@@ -16407,7 +16459,7 @@ fn flowsProperties() void {
     }
     propText("Flows", "{d}", .{state.model.flows.items.len}, 1);
     propText("Unplaced", "{d}", .{unplaced}, 2);
-    actionButton(@src(), "flows.newFlow", "New flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    actionButton(@src(), "flows.new", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Removing a flow with content takes a second click: the flow armed.
@@ -16455,7 +16507,7 @@ fn flowProperties(id: layout.model.ObjectId) void {
     }
     if (flow_remove_armed != null and flow_remove_armed.? != id) flow_remove_armed = null;
     const armed = flow_remove_armed != null;
-    actionButton(@src(), "flow.removeFlow", if (armed) "Remove it and all it holds: press again" else "Remove flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    actionButton(@src(), "flow.remove", if (armed) "Remove it and all it holds: press again" else "Remove flow", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// A track's name, with its panel's when that is not panel `here`.

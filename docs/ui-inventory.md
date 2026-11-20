@@ -108,7 +108,7 @@ The owner prefers single keys with no modifiers for commands. Today nearly every
 
 ## Element ids (since 2026-11-20)
 
-Every property row, button, dropdown, checkbox, tool, menu item and palette button has an id, "<section>.<key>" (main.zig, "Element ids"); objects are reached by name path (`Model.resolve`). The GUI tests and scripts act through them (`testing_api`).
+Every property row, button, dropdown, checkbox, tool, menu item and palette button has an id. Converted groups take theirs from the registry (`apps/gui/elements.zig`: logical groups, `track.origin.across`, `track.flow.show`; a button's id is its action's name); the rest are still "<section>.<key>" from the heading drawn before them (main.zig, "Element ids"), to be converted group by group. `testing_api.discover(group)` walks the registry and says what is shown. Objects are reached by name path (`Model.resolve`).
 
 ## Inconsistencies seen so far
 

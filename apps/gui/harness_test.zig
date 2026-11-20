@@ -450,15 +450,15 @@ fn makeKeyboard(r: *Run) !void {
         try r.press("tool.addTrack");
         if (k == 1) try r.choose("addTracks.sizeTo", "Tile: key");
         try r.drag(try screen(.{ 20, 120 }), try screen(.{ 200, 121 }));
-        try r.field("region.name", name);
-        try r.field("region.originAcrossMm", "10");
-        try r.field("region.originUpMm", top);
-        try r.field("region.lengthU", "22.5");
+        try r.field("track.name", name);
+        try r.field("track.origin.across", "10");
+        try r.field("track.origin.up", top);
+        try r.field("track.length", "22.5");
         if (k == 1) {
             // Its flow, named for what it holds.
-            try r.press("paragraph.showTheFlow");
+            try r.press("track.flow.show");
             try r.field("flow.name", "keys");
-        } else try r.choose("paragraph.flow", "keys");
+        } else try r.choose("track.flow.choice", "keys");
     }
     try checkSaveable("the tracks");
 
@@ -479,7 +479,7 @@ fn makeKeyboard(r: *Run) !void {
     // Named in order, K1 to K104, from the first track's properties (its
     // flow's keys, through all six).
     try r.select(panel_path ++ ".Row1");
-    try r.press("region.nameKeysInOrder");
+    try r.press("track.name-keys");
 
     // Gaps and heights, key by key: the key clicked on the canvas (the
     // panel chosen first, so a click picks a key rather than placing the
@@ -798,7 +798,7 @@ fn make15c(r: *Run) !void {
     const plate = api.panelNamed("HP-15C plate").?;
     const keys = api.panelNamed("HP-15C keys").?;
     try r.select("\"HP-15C plate\"");
-    try r.press("panel.editPanel");
+    try r.press("panel.edit");
     for (keys15, 0..) |row, ri| for (row, 0..) |k, ci| {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
@@ -808,7 +808,7 @@ fn make15c(r: *Run) !void {
     };
     try r.press("editing.leavePanelEditing");
     try r.select("\"HP-15C keys\"");
-    try r.press("panel.editPanel");
+    try r.press("panel.edit");
     for (keys15, 0..) |row, ri| for (row, 0..) |_, ci| {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
@@ -1128,8 +1128,8 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     // Two rows of keys in a region: three, a line break, two.
     try r.press("tool.addRows");
     try r.drag(try screen(.{ 15, 85 }), try screen(.{ 120, 45 }));
-    try r.field("region.lengthU", "5");
-    try r.field("region.depthRows", "2");
+    try r.field("track.length", "5");
+    try r.field("track.depth", "2");
     for (0..5) |k| {
         if (k == 3) try r.press("palette/hard_break");
         try r.press("palette/key 1 u");
@@ -1144,7 +1144,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     defer a.free(before);
 
     try r.select("Panel1.Rows1");
-    try r.press("region.makeTracks");
+    try r.press("track.make-tracks");
     try r.frames(3);
     const m = api.model();
     const pi = for (m.panels.items, 0..) |p, k| {
@@ -1159,8 +1159,8 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     try std.testing.expectEqualStrings(before, after);
     // The second track removed (its keys with it), and put back by undo.
     try r.select("Panel1.Rows2");
-    _ = try r.rectOf("region.direction");
-    try r.press("region.remove");
+    _ = try r.rectOf("track.direction");
+    try r.press("track.remove");
     try r.frames(3);
     try std.testing.expectEqual(1, api.model().panels.items[pi].regions.items.len);
     try r.key(.z, .lcontrol);
@@ -1270,12 +1270,52 @@ test "a button is a virtual key: its action runs from a press, and only a shown 
     const kb = "\"PC keyboard (ANSI 104)\"";
     // Not shown with the panel as the context: a script cannot press it.
     try r.select(kb);
-    try std.testing.expectError(error.NoSuchElement, r.press("region.remove"));
+    try std.testing.expectError(error.NoSuchElement, r.press("track.remove"));
     try std.testing.expect(api.model().resolve(kb ++ ".Row6") != null);
     // Shown with the track: its press runs region.remove on that track.
     try r.select(kb ++ ".Row6");
-    try r.press("region.remove");
+    try r.press("track.remove");
     try std.testing.expect(api.model().resolve(kb ++ ".Row6") == null);
     try std.testing.expect(api.model().resolve(kb ++ ".Row5") != null);
     try std.testing.expectEqualStrings("panel", api.contextName());
+}
+
+test "the discovery path: a track's groups and elements, and which are shown now" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    try r.select("\"PC keyboard (ANSI 104)\".Row1");
+    try r.frames(2);
+    var buf: [64]api.Discovered = undefined;
+    // The track's group holds its origin's group and its fields, buttons
+    // and values, by logical name.
+    const track = api.discover("track", &buf);
+    var origin_shown = false;
+    var make_tracks: ?api.Discovered = null;
+    for (track) |d| {
+        if (d.child.group and std.mem.eql(u8, d.child.name, "origin")) origin_shown = d.shown;
+        if (std.mem.eql(u8, d.child.name, "make-tracks")) make_tracks = d;
+    }
+    try std.testing.expect(origin_shown);
+    // A track has no rows to make tracks of: listed, not shown.
+    try std.testing.expect(make_tracks != null and !make_tracks.?.shown);
+    const origin = api.discover("track.origin", &buf);
+    try std.testing.expectEqual(2, origin.len);
+    for (origin) |d| {
+        try std.testing.expect(d.shown);
+        try std.testing.expect(d.rect.w > 0);
+    }
+    // Shown where it is shown, named where it belongs: the flow's
+    // buttons are the track's, whatever section they are drawn in.
+    for (api.discover("track.flow", &buf)) |d| if (std.mem.eql(u8, d.child.name, "show")) try std.testing.expect(d.shown);
+    // And acted on by its name.
+    try r.field("track.origin.up", "134");
+    const row1 = api.model().resolve("\"PC keyboard (ANSI 104)\".Row1").?.region;
+    try std.testing.expectEqual(134, api.model().panels.items[row1.panel].regions.items[row1.region].origin.y);
+}
+
+test {
+    // The element registry's own tests (ids, the discovery walk).
+    _ = @import("elements.zig");
 }
