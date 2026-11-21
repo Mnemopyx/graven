@@ -163,7 +163,7 @@ pub const testing_api = struct {
     }
     /// The Tools pane's tab shown.
     pub fn toolsTabName() []const u8 {
-        return @tagName(if (tools_tab.applies()) tools_tab else .tools);
+        return if (tools_tab.applies()) @tagName(tools_tab) else "none";
     }
     /// Whether view `v`'s tab is a preview.
     pub fn isPreview(v: u8) bool {
@@ -2355,6 +2355,7 @@ fn frame() !dvui.App.Result {
     if (titleBar()) |r| return r;
 
     // No document yet: the start screen, none of the canvas's interface.
+    if (!canvas_prompt) ribbon();
     if (canvas_prompt) {
         startScreen();
         startPrompts();
@@ -5938,18 +5939,20 @@ fn viewNode(n: u8) void {
                     const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
                     divider_held = n;
                     divider_ratio = vl.nodes[n].ratio;
+                    // A press soon after a click (not a drag): a double-click.
                     if (divider_press.node == n and now - divider_press.ms < 400) {
                         vl.evenOut(n);
                         divider_press = .{};
                         divider_menu = null;
                         divider_twice = true;
-                    } else {
-                        divider_press = .{ .node = n, .ms = now };
-                        divider_twice = false;
-                    }
+                    } else divider_twice = false;
                 },
                 .release => if (divider_held == n) {
-                    if (!divider_twice and vl.nodes[n].ratio == divider_ratio) openDividerMenu(n);
+                    const clicked = vl.nodes[n].ratio == divider_ratio;
+                    if (!divider_twice and clicked) {
+                        openDividerMenu(n);
+                        divider_press = .{ .node = n, .ms = std.Io.Clock.awake.now(dvui.io).toMilliseconds() };
+                    } else divider_press = .{};
                     divider_twice = false;
                     divider_held = null;
                 },
@@ -11448,7 +11451,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (viewNavEvent(e, box, area)) continue;
         // Ctrl+< and Ctrl+>: a level out or in, whatever is being edited.
         if (!canvas_prompt and sketch_edit == null and cursorKeysReach()) if (keymap.match1(e, kmode("canvas"))) |inv| {
-            if (inv.action == kact("tool.select-boundaries") or inv.action == kact("tool.construction-line")) {
+            // The ribbon's tools, each by its key.
+            if (std.mem.startsWith(u8, keymap.R.actionName(inv.action), "tool.")) {
                 e.handle(@src(), box.data());
                 _ = runAction(inv);
                 dvui.refresh(null, @src(), box.data().id);
@@ -12665,10 +12669,9 @@ fn toolsContent() void {
     const shown = toolsPaneTabs();
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
-    switch (shown) {
-        .tools => toolPalette(),
+    if (shown) |t| switch (t) {
         .layers => layersPalette(),
-    }
+    };
 }
 
 // The Tools pane's tabs ------------------------------------------------------
@@ -12680,21 +12683,18 @@ fn toolsContent() void {
 // the first that does.
 
 const ToolsTab = enum {
-    /// Drawing and layout: the tools.
-    tools,
-    /// The active view's layers.
+    /// The active view's layers. (The tools are in the ribbon since
+    /// 2026-11-21; Layers moves to the ribbon's drop panel next.)
     layers,
 
     fn icon(t: ToolsTab) icons.Icon {
         return switch (t) {
-            .tools => .toolbox,
             .layers => .stack,
         };
     }
 
     fn tip(t: ToolsTab) []const u8 {
         return switch (t) {
-            .tools => "Tools: drawing and layout",
             .layers => "Layers: show or hide each; drag to reorder the stack",
         };
     }
@@ -12702,25 +12702,24 @@ const ToolsTab = enum {
     /// Whether it applies to the active view.
     fn applies(t: ToolsTab) bool {
         return switch (t) {
-            .tools => true,
             .layers => activeKind() == .canvas and state.model.spaces.items.len > 0,
         };
     }
 };
 
 /// The Tools pane's tab chosen.
-var tools_tab: ToolsTab = .tools;
+var tools_tab: ToolsTab = .layers;
 
-/// The tabs down the pane's inner edge; the one shown.
-fn toolsPaneTabs() ToolsTab {
-    const shown: ToolsTab = if (tools_tab.applies()) tools_tab else .tools;
+/// The tabs down the pane's inner edge; the one shown, if any applies.
+fn toolsPaneTabs() ?ToolsTab {
+    const shown: ?ToolsTab = if (tools_tab.applies()) tools_tab else null;
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .vertical, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).lighten(-4) }, .padding = .{ .y = 4, .h = 4 }, .border = .{ .w = 1 }, .color_border = .{ .color = dvui.themeGet().color(.window, .border).opacity(0.5) } });
     defer col.deinit();
     inline for (comptime std.enums.values(ToolsTab)) |t| if (t.applies()) {
         const id = "tools-pane." ++ @tagName(t);
         const tag = uniqueTag(id);
         recordDrawn(tag, 0);
-        const on = t == shown;
+        const on = shown != null and t == shown.?;
         if (icons.button(@src(), comptime t.icon(), t.tip(), .{ .size = 18, .id_extra = @intFromEnum(t), .tone = if (on) dvui.themeGet().focus.opacity(0.6) else null, .opts = .{
             .tag = tag,
             .margin = .{ .x = 2, .w = 2, .y = 1, .h = 1 },
@@ -13151,11 +13150,11 @@ fn toolPalette() void {
     const saved_group = pushGroup("tool");
     defer popGroup(saved_group);
     if (sketch_edit != null) return sketchPalette();
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_y = 0.5 });
     defer col.deinit();
     toolBar();
     if (state.tool != .add_art) return;
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 8, .w = 8, .h = 4 } });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = 260 }, .padding = .{ .x = 8, .w = 8 }, .gravity_y = 0.5 });
     defer row.deinit();
     propName("Shape");
     const names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "Ellipse", "Slot", "Polygon" };
@@ -13170,7 +13169,7 @@ fn toolPalette() void {
 fn toolBar() void {
     const saved_group = pushGroup("tool");
     defer popGroup(saved_group);
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(4) });
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
     keyIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
@@ -13202,8 +13201,16 @@ fn toolBar() void {
         else => {},
     }
 
+    const on_canvas = switch (state.context) {
+        .panel => |pi| state.model.panels.items[pi].unbounded,
+        else => false,
+    };
+    // In the ribbon every tool shows, faint where it does not apply to
+    // the context yet; elsewhere only those that apply.
     // On a canvas or in a frame: start a sketch where the next click lands.
-    if (state.context == .panel and state.model.panels.items[state.context.panel].unbounded) {
+    if (showTool(on_canvas)) {
+        const prev_a = faintUnless(on_canvas);
+        defer dvui.alphaSet(prev_a);
         const on = state.tool == .new_sketch;
         var swd: dvui.WidgetData = undefined;
         keyIcon(@src(), "New sketch", dvui.entypo.pencil, 0, .{
@@ -13213,7 +13220,9 @@ fn toolBar() void {
         dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "New sketch: click where its origin goes, then draw and constrain it", .{}, .{});
     }
 
-    if (state.context == .panel) {
+    if (showTool(state.context == .panel)) {
+        const prev_a = faintUnless(state.context == .panel);
+        defer dvui.alphaSet(prev_a);
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Add shape", dvui.entypo.circle, 0, .{
@@ -13241,16 +13250,14 @@ fn toolBar() void {
             dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, mode[3], .{}, .{ .id_extra = mi });
         }
     }
-    if (state.context == .region) {
+    if (showTool(state.context == .region)) {
+        const prev_a = faintUnless(state.context == .region);
+        defer dvui.alphaSet(prev_a);
         // Fit to tiles: the tracks shrink to what has been put in them.
         var fwd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Fit to tiles", dvui.entypo.crop, 0, .{ .data_out = &fwd });
         dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
     }
-    const on_canvas = switch (state.context) {
-        .panel => |pi| state.model.panels.items[pi].unbounded,
-        else => false,
-    };
     {
         // Select boundaries: a mode, kept until toggled.
         const on = boundary_mode;
@@ -13271,7 +13278,9 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = gwd.borderRectScale().r }, "Construction line: an infinite guide line, from two points (a drag, or two clicks)", .{}, .{});
     }
-    if (on_canvas or state.context == .selection or state.context == .group) {
+    if (showTool(on_canvas or state.context == .selection or state.context == .group)) {
+        const prev_a = faintUnless(on_canvas or state.context == .selection or state.context == .group);
+        defer dvui.alphaSet(prev_a);
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Select area", dvui.entypo.select_arrows, 0, .{
@@ -13280,7 +13289,9 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "Select area: drag around objects to pick them together, to move or copy into a frame", .{}, .{});
     }
-    if (state.context == .worksheet or on_canvas) {
+    if (showTool(state.context == .worksheet or on_canvas)) {
+        const prev_a = faintUnless(state.context == .worksheet or on_canvas);
+        defer dvui.alphaSet(prev_a);
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
         var awd: dvui.WidgetData = undefined;
@@ -13290,6 +13301,16 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add panel: drag out its outline on the sheet", .{}, .{});
     }
+}
+
+/// Whether a tool that `applies` (or not) is shown: always in the ribbon.
+fn showTool(applies: bool) bool {
+    return applies or in_ribbon;
+}
+
+/// Faint while drawn, unless it applies; the alpha before, to restore.
+fn faintUnless(applies: bool) f32 {
+    return dvui.alpha(if (applies) 1 else 0.4);
 }
 
 fn lowerKind() []const u8 {
@@ -13910,8 +13931,67 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     }
     const tag = o.tag.?;
     recordDrawn(tag, arg);
+    var wd: dvui.WidgetData = undefined;
+    const out = o.data_out;
+    o.data_out = &wd;
+    // In the ribbon: room after the button for its key's badge.
+    var kb: [48]u8 = undefined;
+    const badge = if (in_ribbon) badgeText(&kb, tag, arg) else null;
+    if (in_ribbon) o.margin = .{ .x = 1, .y = 1, .h = 1, .w = if (badge) |b| badgeFont(false).textSize(b).w + 3 else 3 };
     if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
+    if (out) |d| d.* = wd;
+    if (badge) |b| keyBadge(wd.borderRectScale().r, b);
 }
+
+/// While the ribbon is drawn: its buttons carry key badges.
+var in_ribbon = false;
+
+/// The key that runs button `tag`'s action (in canvas mode, else
+/// globally), short: Shift as ⇧. Null when it has no key.
+fn badgeText(buf: *[48]u8, tag: []const u8, arg: i32) ?[]const u8 {
+    const a = buttonActionId(tag) orelse return null;
+    var kb: [48]u8 = undefined;
+    const sc = keymap.shortcut(&kb, kmode("canvas"), a, arg) orelse return null;
+    const n = std.mem.replace(u8, sc, "Shift+", "⇧", buf);
+    _ = n;
+    const len = sc.len - std.mem.count(u8, sc, "Shift+") * ("Shift+".len - "⇧".len);
+    return buf[0..len];
+}
+
+fn badgeFont(held: bool) dvui.Font {
+    return dvui.Font.theme(.body).withSize(if (held) 10 else 8.5);
+}
+
+/// Key text `text` as a small badge at the lower right of button `r`, in
+/// the room left after it: faint, full strength while Alt is held.
+fn keyBadge(r: dvui.Rect.Physical, text: []const u8) void {
+    const s = dvui.windowNaturalScale();
+    const held = dvui.currentWindow().modifiers.alt();
+    const font = badgeFont(held);
+    const size = font.textSize(text);
+    const pad = 1.5 * s;
+    const box: dvui.Rect.Physical = .{ .x = r.x + r.w - 3 * s, .y = r.y + r.h - size.h * s + 1 * s, .w = size.w * s + 2 * pad, .h = size.h * s };
+    const prev_clip = dvui.clipGet();
+    dvui.clipSet(dvui.windowRectPixels());
+    defer dvui.clipSet(prev_clip);
+    const ink = dvui.themeGet().color(.window, .text);
+    box.fill(.all(2 * s), .{ .color = .{ .color = if (held) ghost_pane.oklch(0.28, 0.08, ghost_pane.pane_hue, 1) else colors.titlebar.lighten(-6) } });
+    dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = box, .s = s }, .p = .{ .x = box.x + pad, .y = box.y }, .color = if (held) dvui.Color.white else ink.opacity(0.6) }) catch {};
+}
+
+/// The ribbon: under the menu bar, the window's width, the active view's
+/// tools (a canvas view's today), each with its key.
+fn ribbon() void {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbon_h }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
+    defer bar.deinit();
+    if (activeKind() != .canvas) return;
+    in_ribbon = true;
+    defer in_ribbon = false;
+    toolPalette();
+}
+
+/// The ribbon's height, logical.
+const ribbon_h: f32 = 34;
 
 /// A button's effect, by its action (elements.zig: the button's id),
 /// working on the context it was pressed in and its argument.
@@ -14538,11 +14618,6 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     // The Tools pane's tabs, and the Layers palette (the active view's
     // space; its argument a layer's index, bottom first).
-    handler("tools-pane.tools", struct {
-        fn f(_: i32) void {
-            tools_tab = .tools;
-        }
-    }.f),
     handler("tools-pane.layers", struct {
         fn f(_: i32) void {
             tools_tab = .layers;

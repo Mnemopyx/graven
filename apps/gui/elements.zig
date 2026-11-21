@@ -604,7 +604,6 @@ pub const all = [_]Element{
     .{ .id = "guide.angle", .kind = .field, .label = "Angle, °" },
     .{ .id = "guide.held", .kind = .choice, .label = "Held" },
     .{ .id = "guide.remove", .kind = .button, .label = "Remove" },
-    .{ .id = "tools-pane.tools", .kind = .button, .label = "Tools: drawing and layout" },
     .{ .id = "tools-pane.layers", .kind = .button, .label = "Layers: shown or hidden, their order" },
     .{ .id = "layers-palette.*.choose", .kind = .button, .label = "Choose this layer: new objects go on it" },
     .{ .id = "layers-palette.*.shown", .kind = .button, .label = "Show or hide this layer" },

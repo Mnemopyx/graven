@@ -129,6 +129,21 @@ pub const Run = struct {
         try r.frames(2);
     }
 
+    /// A double-click at `p`: both clicks well within the 400 ms a
+    /// double-click allows, however slow the frames.
+    pub fn doubleClickAt(r: *Run, p: dvui.Point.Physical) !void {
+        const cw = dvui.currentWindow();
+        _ = try cw.addEventMouseMotion(.{ .pt = p });
+        try r.frames(1);
+        for (0..2) |_| {
+            _ = try cw.addEventMouseButton(.left, .press);
+            try r.frames(1);
+            _ = try cw.addEventMouseButton(.left, .release);
+            try r.frames(1);
+        }
+        try r.frames(1);
+    }
+
     /// Drags with the left button from `a` to `b`, in steps.
     pub fn drag(r: *Run, a: dvui.Point.Physical, b: dvui.Point.Physical) !void {
         const cw = dvui.currentWindow();
@@ -1769,16 +1784,14 @@ test "tabs: a split's grip shows its options: swap sides, even out, stacked; a d
     try std.testing.expect(api.activeSplit().?.ratio > 0.51);
     const g2 = try r.rectOf("views.divider");
     const at: dvui.Point.Physical = .{ .x = g2.x - 40, .y = g2.y + g2.h / 2 };
-    try r.clickAt(at);
-    try r.clickAt(at);
+    try r.doubleClickAt(at);
     try std.testing.expectApproxEqAbs(0.5, api.activeSplit().?.ratio, 1e-6);
 }
 
-test "the Tools pane's tabs: Layers shows the view's layers, top first; an eye hides one; a drag by its grip moves it in the stack, one undo step" {
+test "the Tools pane's Layers shows the view's layers, top first; an eye hides one; a drag by its grip moves it in the stack, one undo step" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try std.testing.expectEqualStrings("tools", api.toolsTabName());
     try r.press("tools-pane.layers");
     try r.frames(2);
     try std.testing.expectEqualStrings("layers", api.toolsTabName());
@@ -1837,4 +1850,24 @@ test "the Tools pane's Layers holds the view's own layers too: the grid hidden b
     try std.testing.expectEqual(std.math.maxInt(u16), api.viewLayer("grid").?.below);
     // The document's layer is where it was.
     try std.testing.expectEqualStrings("Layer1", api.shownLayers()[0].name);
+}
+
+test "the ribbon: the canvas tools there, each with its key: P, R, Shift+R, T, S, A pick their tools" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    _ = try r.rectOf("tool.add-rows");
+    // The canvas takes the keys once clicked in.
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.key(.p, .none);
+    try std.testing.expectEqualStrings("add_panel", api.toolName());
+    try r.key(.escape, .none);
+    try r.key(.r, .none);
+    try std.testing.expectEqualStrings("add_tracks", api.toolName());
+    try r.key(.escape, .none);
+    try r.key(.a, .none);
+    try std.testing.expectEqualStrings("select_area", api.toolName());
+    try r.key(.escape, .none);
+    try r.press("tool.construction-line");
+    try std.testing.expectEqualStrings("construction", api.toolName());
 }
