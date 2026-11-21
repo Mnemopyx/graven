@@ -153,3 +153,6 @@ These are observations to start the discussion from, not decisions.
 - Panes and windows: what belongs in a pane, what in a window, what on the canvas.
 - Words: a glossary the UI and the docs share.
 - How the text layers (text, arrangement, glyphic; see the blueprint's Engine v2 section) show up in the UI.
+
+- **Outlines of layout regions** (2026-11-21, the owner: dashes did not look good): tracks and regions, a selected key's slots, tiles without a body (the plate's legend places), the sketch frame and picked objects are outlined with thin solid lines in their usual colours (`guideBox`, `guideOutline`), not dashed. Construction geometry inside a sketch stays dashed (a drafting convention).
+

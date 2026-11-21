@@ -6971,7 +6971,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         state.view.rect(area, onSheet(pi, t.box)).stroke(.square, .{ .thickness = if (outside) 1.5 * px else px, .color = .{ .color = colour } });
     }
     // Every track's full extent, which its rows or columns expand into,
-    // as a dashed outline (a segment's length centred on its path, as far
+    // as a thin outline (a segment's length centred on its path, as far
     // across as the space it was drawn out for): faint, and stronger for
     // the context's track.
     const soft_region: ?usize = switch (state.context) {
@@ -6981,7 +6981,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     };
     for (0..state.model.panels.items[pi].regions.items.len) |ri| {
         const on = soft_region != null and soft_region.? == ri;
-        dashedOutline(area, trackOutline(pi, ri), colors.guide.opacity(if (on) 0.6 else 0.3), px);
+        guideOutline(area, trackOutline(pi, ri), colors.guide.opacity(if (on) 0.6 else 0.3), px);
     }
     drawThreads(area, pi, placed);
     drawGrids(area, pi);
@@ -7000,7 +7000,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
                     for (pieces) |piece| for (piece.lines) |line| strokeLoop(area, line, o, 1.5 * px, if (in_context) colors.select else colors.panel_edge);
                 }
             } else {
-                dashedBox(area, onSheet(pi, t.pitch_box), if (in_context) colors.select else colors.guide.opacity(0.35), px);
+                guideBox(area, onSheet(pi, t.pitch_box), if (in_context) colors.select else colors.guide.opacity(0.35), px);
             }
             if (sel) marchingBox(area, onSheet(pi, t.pitch_box), colors.select, 1.5 * px);
             continue;
@@ -8104,7 +8104,7 @@ fn drawPanelEdit(area: dvui.Rect.Physical) void {
     const p = state.model.gridPoint(t.panel, t.grid, @as(f64, @floatFromInt(c0)) + @as(f64, @floatFromInt(cols - 1)) / 2, @as(f64, @floatFromInt(r0)) + @as(f64, @floatFromInt(rows - 1)) / 2);
     const cx = p.x + st.offset.x;
     const cy = p.y + st.offset.y;
-    dashedBox(area, onSheet(t.panel, .{ .x0 = cx - w / 2, .x1 = cx + w / 2, .y0 = cy - h / 2, .y1 = cy + h / 2 }), colors.select, 1.5 * px);
+    guideBox(area, onSheet(t.panel, .{ .x0 = cx - w / 2, .x1 = cx + w / 2, .y0 = cy - h / 2, .y1 = cy + h / 2 }), colors.select, 1.5 * px);
 }
 
 fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
@@ -10081,7 +10081,7 @@ fn drawViews(area: dvui.Rect.Physical, host: usize, depth: usize, layer: layout.
         if (sel) {
             marchingBox(area, hb, colors.select, 2 * px);
         } else {
-            dashedBox(area, hb, colors.guide.opacity(0.8), px);
+            guideBox(area, hb, colors.guide.opacity(0.8), px);
         }
         if (depth > 0) continue;
         // Its name above its corner, with the scale.
@@ -17988,9 +17988,9 @@ fn animate() void {
     if (dvui.timerDoneOrNone(id)) dvui.timer(id, 40_000);
 }
 
-fn dashedBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32) void {
+fn guideBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32) void {
     const corners = [_]geom.Point{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 }, .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x0, .y = b.y0 } };
-    dashedOutline(area, &corners, colour, px);
+    guideOutline(area, &corners, colour, px);
 }
 
 /// Track `ri`'s boundary in panel `pi`, sheet mm: down one edge and back up
@@ -18013,7 +18013,7 @@ fn trackOutline(pi: usize, ri: usize) []const geom.Point {
     return pts.items;
 }
 
-/// The selected tile's tracks: their boxes on its face, dashed; the one
+/// The selected tile's tracks: their boxes on its face, outlined; the one
 /// the expression line edits stronger.
 fn drawTileTracks(area: dvui.Rect.Physical, pi: usize, t: layout.place.PlacedTile) void {
     const px = dvui.windowNaturalScale();
@@ -18022,32 +18022,19 @@ fn drawTileTracks(area: dvui.Rect.Physical, pi: usize, t: layout.place.PlacedTil
         const b = tt.place.inset.inset(t.face);
         if (!(b.width() > 0 and b.height() > 0)) continue;
         const strong = edited != null and edited.? == tt.id;
-        dashedBox(area, onSheet(pi, b), if (strong) colors.select.opacity(0.8) else colors.guide.opacity(0.6), px);
+        guideBox(area, onSheet(pi, b), if (strong) colors.select.opacity(0.8) else colors.guide.opacity(0.6), px);
     }
 }
 
-/// A closed outline through `pts` (sheet mm), dashed.
-fn dashedOutline(area: dvui.Rect.Physical, pts: []const geom.Point, colour: dvui.Color, px: f32) void {
-    const dash = 2.0;
-    // Where in the dash-gap pattern each piece starts, so short pieces of
-    // a curve dash evenly.
-    var phase: f64 = 0;
-    for (0..pts.len) |i| {
-        const a = pts[i];
-        const z = pts[(i + 1) % pts.len];
-        const len = @sqrt((z.x - a.x) * (z.x - a.x) + (z.y - a.y) * (z.y - a.y));
-        if (len <= 0) continue;
-        var d: f64 = -phase;
-        while (d < len) : (d += 2 * dash) {
-            const s0 = @max(0, d);
-            const e = @min(len, d + dash);
-            if (e <= s0) continue;
-            const p0: geom.Point = .{ .x = a.x + (z.x - a.x) * s0 / len, .y = a.y + (z.y - a.y) * s0 / len };
-            const p1: geom.Point = .{ .x = a.x + (z.x - a.x) * e / len, .y = a.y + (z.y - a.y) * e / len };
-            dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = px, .color = .{ .color = colour } });
-        }
-        phase = @mod(phase + len, 2 * dash);
-    }
+/// A closed outline through `pts` (sheet mm): one solid line, thin
+/// (decided 2026-11-21: layout regions' outlines solid, not dashed).
+fn guideOutline(area: dvui.Rect.Physical, pts: []const geom.Point, colour: dvui.Color, px: f32) void {
+    if (pts.len < 2) return;
+    const lifo = dvui.currentWindow().lifo();
+    const q = lifo.alloc(dvui.Point.Physical, pts.len) catch return;
+    defer lifo.free(q);
+    for (pts, q) |p, *o| o.* = state.view.toPx(area, p);
+    dvui.Path.stroke(.{ .points = q }, .{ .thickness = px, .color = .{ .color = colour }, .closed = true });
 }
 
 /// What the flow holds that output leaves out, drawn faintly while editing:
@@ -21688,7 +21675,7 @@ fn drawSketches(area: dvui.Rect.Physical) void {
             .sketch => |sc| sc.space == ref.space and sc.index == ref.index,
             else => false,
         };
-        if (picked) dashedBox(area, b, colors.select, px);
+        if (picked) guideBox(area, b, colors.select, px);
     }
 }
 
@@ -21792,7 +21779,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
     // The origin and axes, faintly.
     for (s.geometry.items[0..3]) |g| skDrawGeometry(area, it, g, colors.guide.opacity(0.4), px, true);
     // The box.
-    if (sketchBox(it)) |b| dashedBox(area, b, colors.guide.opacity(0.6), px);
+    if (sketchBox(it)) |b| guideBox(area, b, colors.guide.opacity(0.6), px);
     for (s.geometry.items, 0..) |g, gi| {
         if (g.removed or g.reference) continue;
         const id: skl.GeomId = @intCast(gi);

@@ -480,3 +480,5 @@ The owner's direction: a Text styles view (a main-window tab per style) mapping 
 - **Checked:** a GUI test (a key's outline hovered and pressed: the key; its g slot's text hovered and pressed at its end and its start: LOG edited to ALOGZ; the top slot pressed while g is edited: that one edited); the canvas-editing tests now choose objects by their outlines; by eye under Xvfb on the HP-15C (the key's outline, LOG highlighted, LOXG typed between O and G); 67/67 GUI tests; the keyboard SVG unchanged.
 - **Not yet:** pointing at line art, grids, images and views (they pick as before); a track's text content highlighted on hover (the flow cursor's place); the outline zone's width a preference.
 
+- **Layout outlines solid** (2026-11-21, at the owner's word): every dashed region outline (tracks and regions, a key's slots, bodiless tiles' pitch boxes, the sketch frame, a picked sketch object, the moving-track ghost) is now one thin solid anti-aliased line (`guideOutline`, `guideBox`); sketch construction lines keep their dashes. Checked by eye on the HP-15C plate and the text sample; 67/67 GUI tests.
+
