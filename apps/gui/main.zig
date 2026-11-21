@@ -154,6 +154,13 @@ pub const testing_api = struct {
         if (shown_space >= state.model.spaces.items.len) return &.{};
         return state.model.spaces.items[shown_space].layers.items;
     }
+    /// Whether the view's own layer named `name` (`grid`, `axes`,
+    /// `guides` …) is shown, and how many document layers lie below it
+    /// (`maxInt(u16)`: above them all).
+    pub fn viewLayer(name: []const u8) ?struct { shown: bool, below: u16 } {
+        const v = std.meta.stringToEnum(ViewLayer, name) orelse return null;
+        return .{ .shown = v.shown(), .below = view_below.get(v) };
+    }
     /// The Tools pane's tab shown.
     pub fn toolsTabName() []const u8 {
         return @tagName(if (tools_tab.applies()) tools_tab else .tools);
@@ -6812,8 +6819,6 @@ fn canvas(active: bool, view: u8) void {
         // An open canvas: drafting surface everywhere, and its axes
         // through the origin.
         area.fill(.square, .{ .color = .{ .color = colors.paper } });
-        drawGrid(area);
-        drawAxes(area);
     } else {
         // Work happens on the worksheet: the view's centre stays on the sheet.
         state.view.cx = std.math.clamp(state.view.cx, 0, sheet.w);
@@ -6830,9 +6835,14 @@ fn canvas(active: bool, view: u8) void {
     const tol = 0.2 / state.view.ppm;
     if (state.flat.tol == 0 or tol < state.flat.tol / 2 or tol > state.flat.tol * 2) state.flat.reset(tol);
 
+    // An open canvas: the document's layers and the view's own (grid,
+    // axes, check results, construction lines) in their stacking order;
+    // then a frame's bound, over them.
+    if (open) drawStack(area, shown_space, active) else {
+        drawSpacePanels(area, null, null);
+        drawChecks(area, null, null);
+    }
     if (open) drawFrameBound(area);
-    if (open) drawSpace(area, shown_space, 0) else drawSpacePanels(area, null, null);
-    drawChecks(area, if (open) shown_space else null);
     if (open) drawSketches(area);
     // What only the active view shows: modes and the pointer's marks.
     if (!active) {
@@ -6855,7 +6865,6 @@ fn canvas(active: bool, view: u8) void {
     drawTrackPath(area);
     drawConstraintMarks(area);
     drawPointerMark();
-    drawGuides(area);
     drawConstructionPreview(area);
     drawHover(area);
     drawEngagement(area);
@@ -8772,14 +8781,143 @@ fn imageAt(space: usize, index: usize) ?layout.model.Image {
 /// views and panels on that layer.
 fn drawSpace(area: dvui.Rect.Physical, space: usize, depth: usize) void {
     if (space >= state.model.spaces.items.len) return;
-    for (state.model.spaces.items[space].layers.items) |l| {
-        if (!l.visible) continue;
-        const prev = dvui.alpha(@floatCast(l.opacity));
-        defer dvui.alphaSet(prev);
-        drawImages(area, space, l.id, l.blend);
-        drawViews(area, space, depth, l.id);
-        drawSpacePanels(area, space, l.id);
+    for (0..state.model.spaces.items[space].layers.items.len) |li| drawSpaceLayer(area, space, depth, li);
+}
+
+/// Layer `li` of space `space`, at its opacity (nothing when hidden).
+fn drawSpaceLayer(area: dvui.Rect.Physical, space: usize, depth: usize, li: usize) void {
+    const l = state.model.spaces.items[space].layers.items[li];
+    if (!l.visible) return;
+    const prev = dvui.alpha(@floatCast(l.opacity));
+    defer dvui.alphaSet(prev);
+    drawImages(area, space, l.id, l.blend);
+    drawViews(area, space, depth, l.id);
+    drawSpacePanels(area, space, l.id);
+}
+
+// The view's own layers --------------------------------------------------------
+//
+// What the canvas draws besides the document's layers is in the same stack:
+// the grid (usually rearmost), the axes, the check results, the
+// construction lines. Each can be shown or hidden and moved among the
+// document's layers in the Layers palette. They are the view's, not the
+// document's: kept for the session, not saved with the file.
+
+const ViewLayer = enum {
+    grid,
+    axes,
+    check_strokes,
+    check_gaps,
+    check_other,
+    simulation,
+    guides,
+
+    fn label(v: ViewLayer) []const u8 {
+        return switch (v) {
+            .grid => "Grid",
+            .axes => "Axes",
+            .guides => "Construction lines",
+            else => v.check().?.label(),
+        };
     }
+
+    fn check(v: ViewLayer) ?CheckLayer {
+        return switch (v) {
+            .check_strokes => .strokes,
+            .check_gaps => .gaps,
+            .check_other => .other,
+            .simulation => .simulation,
+            else => null,
+        };
+    }
+
+    /// Whether it has anything to show now (check results only once run).
+    fn present(v: ViewLayer) bool {
+        return if (v.check() != null) checksCurrent() else true;
+    }
+
+    fn shown(v: ViewLayer) bool {
+        return switch (v) {
+            .grid => grid_mode != .none,
+            .axes => show_axes,
+            .guides => show_guides,
+            else => check_shown.get(v.check().?),
+        };
+    }
+
+    fn toggle(v: ViewLayer) void {
+        switch (v) {
+            .grid => if (grid_mode == .none) {
+                grid_mode = grid_shown_as;
+            } else {
+                grid_shown_as = grid_mode;
+                grid_mode = .none;
+            },
+            .axes => show_axes = !show_axes,
+            .guides => show_guides = !show_guides,
+            else => check_shown.set(v.check().?, !check_shown.get(v.check().?)),
+        }
+    }
+};
+
+/// How many of the document's layers each view layer lies above: 0, below
+/// them all; `top`, above them all.
+const view_top: u16 = std.math.maxInt(u16);
+var view_below: std.EnumArray(ViewLayer, u16) = .init(.{
+    .grid = 0,
+    .axes = 0,
+    .check_strokes = view_top,
+    .check_gaps = view_top,
+    .check_other = view_top,
+    .simulation = view_top,
+    .guides = view_top,
+});
+var show_axes = true;
+var show_guides = true;
+/// The grid's look when shown again.
+var grid_shown_as: bg_grid.Mode = .lines;
+
+/// Space `space`'s layers and the view's own, bottom first.
+fn drawStack(area: dvui.Rect.Physical, space: usize, active: bool) void {
+    if (space >= state.model.spaces.items.len) return;
+    const n = state.model.spaces.items[space].layers.items.len;
+    for (0..n + 1) |i| {
+        inline for (comptime std.enums.values(ViewLayer)) |v| if (@min(view_below.get(v), n) == i) drawViewLayer(area, space, v, active);
+        if (i < n) drawSpaceLayer(area, space, 0, i);
+    }
+}
+
+fn drawViewLayer(area: dvui.Rect.Physical, space: usize, v: ViewLayer, active: bool) void {
+    if (!v.shown()) return;
+    switch (v) {
+        .grid => drawGrid(area),
+        .axes => drawAxes(area),
+        // Construction lines: the view being worked in.
+        .guides => if (active) drawGuides(area),
+        else => drawChecks(area, space, v.check().?),
+    }
+}
+
+/// One entry of the Layers palette's stack: a document layer (its index,
+/// bottom first) or one of the view's own.
+const StackEntry = union(enum) { doc: usize, view: ViewLayer };
+
+/// Space `space`'s stack as the palette shows it, bottom first (view
+/// layers with nothing to show left out).
+fn stackEntries(space: usize, out: []StackEntry) []StackEntry {
+    const n = state.model.spaces.items[space].layers.items.len;
+    var k: usize = 0;
+    for (0..n + 1) |i| {
+        for (std.enums.values(ViewLayer)) |v| if (@min(view_below.get(v), n) == i and v.present() and k < out.len) {
+            out[k] = .{ .view = v };
+            k += 1;
+        };
+        if (i < n and k < out.len) {
+            out[k] = .{ .doc = i };
+            k += 1;
+        }
+    }
+    return out[0..k];
 }
 
 /// The SDL blend mode for a layer's blend, on premultiplied colour.
@@ -10076,7 +10214,7 @@ fn runChecks(only: ?usize) void {
 var check_status_buf: [160]u8 = undefined;
 
 /// The result layers over the panels of `space` (null: the shown ones).
-fn drawChecks(area: dvui.Rect.Physical, space: ?usize) void {
+fn drawChecks(area: dvui.Rect.Physical, space: ?usize, only: ?CheckLayer) void {
     if (!checksCurrent()) return;
     const px = dvui.windowNaturalScale();
     const marginal = display.fix(dvui.Color{ .r = 0xe0, .g = 0x00, .b = 0xd0 });
@@ -10088,7 +10226,7 @@ fn drawChecks(area: dvui.Rect.Physical, space: ?usize) void {
             if (state.model.spaceOf(pi) != sp) continue;
         } else if (!shownPanel(pi)) continue;
         const at = panelOrigin(pi);
-        if (check_shown.get(.simulation)) {
+        if (check_shown.get(.simulation) and (only == null or only.? == .simulation)) {
             const lifo = dvui.currentWindow().lifo();
             for (ck.report.paths) |path| {
                 if (path.points.len < 2) continue;
@@ -10108,6 +10246,7 @@ fn drawChecks(area: dvui.Rect.Physical, space: ?usize) void {
                 else => .other,
             };
             if (!check_shown.get(layer)) continue;
+            if (only) |o| if (o != layer) continue;
             const colour = if (f.verdict == .fail) failing else marginal;
             if (region) |r| {
                 fillRegion(area, r, at, .{ .flat = colour.opacity(0.8) });
@@ -12608,7 +12747,9 @@ fn layersPalette() void {
     if (shown_space >= state.model.spaces.items.len) return;
     const space = shown_space;
     const sp = state.model.spaces.items[space];
-    const n = sp.layers.items.len;
+    var ebuf: [64]StackEntry = undefined;
+    const entries = stackEntries(space, &ebuf);
+    const m = entries.len;
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(6) });
     defer col.deinit();
     dvui.labelNoFmt(@src(), "Layers, top first", .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) }, .margin = .{ .x = 2, .h = 4 } });
@@ -12619,70 +12760,115 @@ fn layersPalette() void {
         defer reorder.deinit();
         var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
         defer list.deinit();
-        for (0..n) |k| {
-            // Shown top first: row k is layer n-1-k.
-            const li = n - 1 - k;
-            const l = sp.layers.items[li];
-            var item = reorder.reorderable(@src(), .{}, .{ .id_extra = @intCast(@intFromEnum(l.id)), .expand = .horizontal });
+        for (0..m) |k| {
+            // Shown top first: row k is entry m-1-k.
+            const e = entries[m - 1 - k];
+            const id_extra: usize = switch (e) {
+                .doc => |li| @intCast(@intFromEnum(sp.layers.items[li].id)),
+                .view => |v| 0x7000_0000 + @as(usize, @intFromEnum(v)),
+            };
+            var item = reorder.reorderable(@src(), .{}, .{ .id_extra = id_extra, .expand = .horizontal });
             defer item.deinit();
             if (item.removed()) {
                 removed = k;
             } else if (item.insertBefore()) {
                 before = k;
             }
-            const chosen = l.id == newObjectLayer();
+            const name, const visible, const chosen, const arg: i32 = switch (e) {
+                .doc => |li| .{ sp.layers.items[li].name, sp.layers.items[li].visible, sp.layers.items[li].id == newObjectLayer(), @intCast(li) },
+                .view => |v| .{ v.label(), v.shown(), false, -1 - @as(i32, @intFromEnum(v)) },
+            };
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = if (chosen) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) }, .corners = .all(3), .margin = .{ .y = 1, .h = 1 } });
             defer row.deinit();
+            listItem("layers-palette", name);
+            const base = next_element orelse "layers-palette";
+            next_element = null;
             // The eye: shown or hidden.
             {
-                listItem("layers-palette", l.name);
-                const base = next_element orelse "layers-palette";
-                next_element = null;
                 const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.shown", .{base}) catch base);
                 checkElement(tag, .button, "Show or hide this layer");
-                recordDrawn(tag, @intCast(li));
-                const eye_opts: icons.ButtonOptions = .{ .size = 16, .id_extra = li, .opts = .{ .tag = tag, .padding = .all(3), .gravity_y = 0.5 } };
-                const pressed = if (l.visible) icons.button(@src(), .eye, "Shown: click to hide", eye_opts) else icons.button(@src(), .eye_slash, "Hidden: click to show", eye_opts);
-                if (pressed) pushButtonEvent(tag, @intCast(li));
+                recordDrawn(tag, arg);
+                const eye_opts: icons.ButtonOptions = .{ .size = 16, .id_extra = id_extra, .opts = .{ .tag = tag, .padding = .all(3), .gravity_y = 0.5 } };
+                const pressed = if (visible) icons.button(@src(), .eye, "Shown: click to hide", eye_opts) else icons.button(@src(), .eye_slash, "Hidden: click to show", eye_opts);
+                if (pressed) pushButtonEvent(tag, arg);
             }
-            // Its name: chooses it.
-            {
-                listItem("layers-palette", l.name);
-                const base = next_element orelse "layers-palette";
-                next_element = null;
-                const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.choose", .{base}) catch base);
-                checkElement(tag, .button, l.name);
-                recordDrawn(tag, @intCast(li));
-                var bw: dvui.ButtonWidget = undefined;
-                bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = li, .tag = tag, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .margin = .all(0), .background = false, .gravity_y = 0.5 });
-                bw.processEvents();
-                var buf: [96]u8 = undefined;
-                const text = std.fmt.bufPrint(&buf, "{s}{s}", .{ l.name, if (l.locked) " (locked)" else "" }) catch l.name;
-                dvui.labelNoFmt(@src(), text, .{}, .{ .padding = .all(0), .margin = .all(0), .color_text = if (l.visible) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.5) } });
-                if (bw.clicked()) pushButtonEvent(tag, @intCast(li));
-                bw.deinit();
+            // Its name: a document layer's chooses it; the view's own are
+            // set in italic, and are not chosen.
+            const dim: ?dvui.ColorOrGradient = if (visible) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.5) };
+            switch (e) {
+                .doc => |li| {
+                    const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.choose", .{base}) catch base);
+                    checkElement(tag, .button, name);
+                    recordDrawn(tag, arg);
+                    var bw: dvui.ButtonWidget = undefined;
+                    bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = id_extra, .tag = tag, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .margin = .all(0), .background = false, .gravity_y = 0.5 });
+                    bw.processEvents();
+                    var buf: [96]u8 = undefined;
+                    const text = std.fmt.bufPrint(&buf, "{s}{s}", .{ name, if (sp.layers.items[li].locked) " (locked)" else "" }) catch name;
+                    dvui.labelNoFmt(@src(), text, .{}, .{ .padding = .all(0), .margin = .all(0), .color_text = dim });
+                    if (bw.clicked()) pushButtonEvent(tag, arg);
+                    bw.deinit();
+                },
+                .view => dvui.labelNoFmt(@src(), name, .{}, .{ .expand = .horizontal, .id_extra = id_extra, .gravity_y = 0.5, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .font = dvui.Font.theme(.body).withStyle(.italic), .color_text = dim }),
             }
             // The grip: drag to another place.
             _ = dvui.ReorderWidget.draggable(@src(), .{ .reorderable = item }, .{ .expand = .vertical, .gravity_x = 1, .gravity_y = 0.5, .min_size_content = .{ .w = 14, .h = 18 } });
         }
-        if (reorder.finalSlot()) before = n;
+        if (reorder.finalSlot()) before = m;
     }
-    if (removed) |r| if (before) |b| moveLayerInStack(space, n, r, b);
+    if (removed) |r| if (before) |b| moveInStack(space, entries, r, b);
     keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("layers-palette.add-layer") });
 }
 
-/// The layer shown at row `r` (top first) of a stack of `n`, dropped
-/// before row `b` (`n`: at the bottom): moved there, one undo step.
-fn moveLayerInStack(space: usize, n: usize, r: usize, b: usize) void {
+/// The entry shown at row `r` (top first) of `entries`, dropped before row
+/// `b` (`entries.len`: at the bottom): the stack in its new order. A
+/// document layer moves among the document's (one undo step); the view's
+/// own layers keep their places among them, counted afresh.
+fn moveInStack(space: usize, entries: []const StackEntry, r: usize, b: usize) void {
+    const m = entries.len;
     const to_row = if (b > r) b - 1 else b;
     if (to_row == r) return;
-    var li = n - 1 - r;
-    const to = n - 1 - to_row;
+    // The new order, bottom first.
+    var order: [64]StackEntry = undefined;
+    var k: usize = 0;
+    const from = m - 1 - r;
+    const to = m - 1 - to_row;
+    for (entries, 0..) |e, i| if (i != from) {
+        order[k] = e;
+        k += 1;
+    };
+    std.mem.copyBackwards(StackEntry, order[to + 1 .. m], order[to .. m - 1]);
+    order[to] = entries[from];
+    // A document layer: its new index among the document's.
+    switch (entries[from]) {
+        .doc => |li| {
+            var new_li: usize = 0;
+            for (order[0..to]) |e| if (e == .doc) {
+                new_li += 1;
+            };
+            moveLayerTo(space, li, new_li);
+        },
+        .view => {},
+    }
+    // Each view layer: how many document layers now lie below it.
+    var docs: u16 = 0;
+    const n = state.model.spaces.items[space].layers.items.len;
+    for (order[0..m]) |e| switch (e) {
+        .doc => docs += 1,
+        .view => |v| view_below.set(v, if (docs >= n) view_top else docs),
+    };
+}
+
+/// Document layer `li` of space `space` moved to index `to` (bottom
+/// first), one undo step.
+fn moveLayerTo(space: usize, li_from: usize, to: usize) void {
+    if (li_from == to) return;
+    var li = li_from;
     const key = mergeKey(.{ "layer-drag", space, hist.log.items.len });
     while (li != to) {
         li = actM(key, .moveLayer, .{ space, li, to > li }) catch return;
     }
-    if (state.context == .layer and state.context.layer.space == space) state.context = .{ .layer = .{ .space = space, .index = to } };
+    if (state.context == .layer and state.context.layer.space == space and state.context.layer.index == li_from) state.context = .{ .layer = .{ .space = space, .index = to } };
 }
 
 /// The context's properties (and the active tool's choices), in whatever
@@ -14364,6 +14550,12 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     handler("layers-palette.*.shown", struct {
         fn f(arg: i32) void {
+            // The view's own: -1 - its number.
+            if (arg < 0) {
+                const k: usize = @intCast(-1 - arg);
+                if (k < std.enums.values(ViewLayer).len) std.enums.values(ViewLayer)[k].toggle();
+                return;
+            }
             if (shown_space >= state.model.spaces.items.len) return;
             const li: usize = @intCast(arg);
             const list = state.model.spaces.items[shown_space].layers.items;
@@ -18832,7 +19024,7 @@ fn shiftHeld() bool {
 const GuideHit = struct { index: usize, seg: [2]geom.Point };
 
 fn guideNear(area: dvui.Rect.Physical, p: geom.Point) ?GuideHit {
-    if (shown_space >= state.model.spaces.items.len) return null;
+    if (shown_space >= state.model.spaces.items.len or !show_guides) return null;
     const clip = guideClipBox(area, shown_space);
     var best: ?GuideHit = null;
     var best_d = edgeMm();

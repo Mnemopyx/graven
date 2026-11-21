@@ -1813,3 +1813,28 @@ test "the Tools pane's tabs: Layers shows the view's layers, top first; an eye h
     ls = api.shownLayers();
     try std.testing.expectEqualStrings("Layer3", ls[2].name);
 }
+
+test "the Tools pane's Layers holds the view's own layers too: the grid hidden by its eye and shown again, then dragged from the back over the document's layer" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("tools-pane.layers");
+    try r.frames(2);
+    try std.testing.expectEqual(0, api.viewLayer("grid").?.below);
+    try std.testing.expect(api.viewLayer("grid").?.shown);
+    try r.press("layers-palette.grid.shown");
+    try r.frames(2);
+    try std.testing.expect(!api.viewLayer("grid").?.shown);
+    try r.press("layers-palette.grid.shown");
+    try r.frames(2);
+    try std.testing.expect(api.viewLayer("grid").?.shown);
+    // The grid, last in the list, dragged by its grip above Layer1.
+    const doc = try r.rectOf("layers-palette.layer1.choose");
+    const eye = try r.rectOf("layers-palette.grid.shown");
+    const grip_x = doc.x + doc.w + 8;
+    try r.drag(.{ .x = grip_x, .y = eye.y + eye.h / 2 }, .{ .x = grip_x, .y = doc.y + doc.h * 0.2 });
+    try r.frames(3);
+    try std.testing.expectEqual(std.math.maxInt(u16), api.viewLayer("grid").?.below);
+    // The document's layer is where it was.
+    try std.testing.expectEqualStrings("Layer1", api.shownLayers()[0].name);
+}
