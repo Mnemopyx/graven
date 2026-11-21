@@ -28,6 +28,11 @@ What the app opens on, before there is a document: none of the canvas's interfac
 - **Document space** (vector content: canvases, frames, manufacturing views' parts) pans and zooms; it has no scroll bars. Rulers show where the view is.
 - **Interface content** (DVUI widgets, text set by FreeType: panes, properties, the Browser, legend sheets, pop-ups, dialogs) scrolls, with scroll bars where it overflows.
 
+## Tab bar (2026-11-21)
+
+- The tab bar runs the window's full width: the edges' strips (and their hot edges) and docked panes start below it. The first tab stays where it was, at the views' left edge.
+- A window's shown tab is drawn as a file folder's tab joined to its view: top corners filleted, sides leaning out, then concave fillets turning into the view's top edge, filled with the colour the view's top has (the ruler's, for a canvas). The active window's is outlined in the focus colour; other tabs are plain labels.
+
 ## Splits
 
 - Each split's divider drags to resize. Its grip (⋮ in the tab strips' row when side by side, ⋯ at the middle when stacked) or a click on the divider shows its options: Swap sides, Even out, Stacked or Side by side. A double-click on the divider evens it out.

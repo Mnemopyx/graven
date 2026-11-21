@@ -4073,7 +4073,19 @@ fn sideStrip(p: *ghost_pane.Pane, h: f32, id: usize) void {
         .color_fill = .{ .color = colors.titlebar },
     });
     defer strip.deinit();
-    applyTab(p, ghost_pane.tab(p, .{ .x = 0, .y = 0, .w = tab_size, .h = h }, id));
+    barEnd(strip.data());
+    applyTab(p, ghost_pane.tab(p, .{ .x = 0, .y = tab_strip_h, .w = tab_size, .h = @max(0, h - tab_strip_h) }, id));
+}
+
+/// The tab bar runs the window's width: what lies beside the views (the
+/// edges' strips, docked panes) starts below it, the bar's colour and its
+/// bottom line drawn across their tops.
+fn barEnd(wd: *dvui.WidgetData) void {
+    const r = wd.borderRectScale();
+    const s = r.s;
+    const bar: dvui.Rect.Physical = .{ .x = r.r.x, .y = r.r.y, .w = r.r.w, .h = tab_strip_h * s };
+    bar.fill(.{}, .{ .color = .{ .color = colors.titlebar } });
+    (dvui.Rect.Physical{ .x = r.r.x, .y = r.r.y + (tab_strip_h - 1) * s, .w = r.r.w, .h = s }).fill(.{}, .{ .color = .{ .color = colors.edge.opacity(0.4) } });
 }
 
 /// Whether the right edge's column is laid out beside the canvas: either of
@@ -4099,10 +4111,12 @@ fn rightStrip(h: f32) void {
         .color_fill = .{ .color = colors.titlebar },
     });
     defer strip.deinit();
-    const th = toolsHeight(h);
-    applyTab(&tools_pane, ghost_pane.tab(&tools_pane, .{ .x = 0, .y = 0, .w = tab_size, .h = th }, 2));
-    splitGrip(strip.data(), th);
-    applyTab(&props_pane, ghost_pane.tab(&props_pane, .{ .x = 0, .y = th + split_grip, .w = tab_size, .h = @max(0, h - th - split_grip) }, 4));
+    barEnd(strip.data());
+    const bh: f32 = tab_strip_h;
+    const th = toolsHeight(h - bh);
+    applyTab(&tools_pane, ghost_pane.tab(&tools_pane, .{ .x = 0, .y = bh, .w = tab_size, .h = th }, 2));
+    splitGrip(strip.data(), bh + th);
+    applyTab(&props_pane, ghost_pane.tab(&props_pane, .{ .x = 0, .y = bh + th + split_grip, .w = tab_size, .h = @max(0, h - bh - th - split_grip) }, 4));
 }
 
 /// The grip between the right edge's tabs: dragged, it moves where the
@@ -4156,8 +4170,10 @@ fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
 fn rightColumn() !void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = props_pane.size }, .max_size_content = .width(props_pane.size), .expand = .vertical, .border = .{ .x = 1 } });
     defer col.deinit();
+    barEnd(col.data());
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = tab_strip_h } });
     // A view that hides the tools leaves the column to the properties.
-    const th = if (tools_pane.mode == .hidden and tools_pane.view_hidden != null) 0 else toolsHeight(col.data().contentRect().h);
+    const th = if (tools_pane.mode == .hidden and tools_pane.view_hidden != null) 0 else toolsHeight(col.data().contentRect().h - tab_strip_h);
     if (th > 0) {
         var top = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .h = th }, .max_size_content = .height(th), .expand = .horizontal, .background = tools_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&tools_pane) } });
         defer top.deinit();
@@ -5083,6 +5099,8 @@ fn menu() ?dvui.App.Result {
 fn treePane() void {
     var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_pane.size }, .max_size_content = .width(tree_pane.size), .expand = .vertical, .border = .{ .w = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tree_pane) } });
     defer pane.deinit();
+    barEnd(pane.data());
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = tab_strip_h } });
     treeContent();
 }
 
@@ -6116,6 +6134,86 @@ fn argSplit(arg: i32) ?u8 {
 /// knows it before the strips are drawn.
 const tab_strip_h: f32 = 30;
 
+/// Room each side of a tab for a folder tab's flare, logical.
+const folder_flare: f32 = 10;
+
+/// Draws a window's shown tab as a file folder's tab joined to its view:
+/// its top corners filleted, its sides leaning out as they come down, then
+/// concave fillets turning them into the view's top edge (a filleted S
+/// each side), filled with the colour the view's top has, so the tab and
+/// the view read as one. `tab`: the tab's box; `strip`: the tab strip
+/// (its bottom is the view's top). The active window's outlined in the
+/// focus colour. Drawn before the tab's label, over the strip's line.
+fn folderTab(tab: dvui.Rect.Physical, strip: dvui.Rect.Physical, kind: docviews.Kind, active: bool) void {
+    const s = dvui.windowNaturalScale();
+    const base = strip.y + strip.h;
+    const top = strip.y + 3 * s;
+    const rt = 5 * s; // top fillets
+    const rb = 6 * s; // the flares' fillets
+    const lean = 3 * s; // how far each side leans out
+    const left = tab.x;
+    const right = tab.x + tab.w;
+    const fill = if (kind == .canvas) colors.ruler else dvui.themeGet().color(.content, .fill);
+    const line = if (active) dvui.themeGet().focus else colors.edge.opacity(0.4);
+    const n_arc = 8;
+    // The outline, left to right: the left flare's fillet, the leaning side,
+    // the top's fillets, the right side, the right flare.
+    var pts: [4 * (n_arc + 1)]dvui.Point.Physical = undefined;
+    var n: usize = 0;
+    const arc = struct {
+        fn add(out: []dvui.Point.Physical, at: *usize, c: dvui.Point.Physical, r: f32, a0: f32, a1: f32) void {
+            for (0..n_arc + 1) |i| {
+                const t = a0 + (a1 - a0) * @as(f32, @floatFromInt(i)) / n_arc;
+                out[at.*] = .{ .x = c.x + r * @cos(t), .y = c.y + r * @sin(t) };
+                at.* += 1;
+            }
+        }
+    }.add;
+    const pi: f32 = std.math.pi;
+    // Angles with y downward: 0 right, pi/2 down.
+    arc(&pts, &n, .{ .x = left - lean - rb, .y = base - rb }, rb, pi / 2, 0);
+    arc(&pts, &n, .{ .x = left + rt, .y = top + rt }, rt, pi, 1.5 * pi);
+    arc(&pts, &n, .{ .x = right - rt, .y = top + rt }, rt, 1.5 * pi, 2 * pi);
+    arc(&pts, &n, .{ .x = right + lean + rb, .y = base - rb }, rb, pi, pi / 2);
+    // Drawn over its neighbours' room (the first tab's flare reaches past
+    // the views' left edge, over the bar beside it).
+    const prev_clip = dvui.clipGet();
+    dvui.clipSet(dvui.windowRectPixels());
+    defer dvui.clipSet(prev_clip);
+    const lifo = dvui.currentWindow().lifo();
+    const col: dvui.Color.PMA = .fromColor(fill);
+    const Index = dvui.Vertex.Index;
+    // The body (top fillets and sides, down to the base): convex, a fan;
+    // each flare: a fan from its corner on the base.
+    {
+        const body = pts[n_arc .. 3 * (n_arc + 1) + 1];
+        var b = dvui.Triangles.Builder.init(lifo, body.len + 2, 3 * body.len) catch return;
+        defer b.deinit(lifo);
+        const c: dvui.Point.Physical = .{ .x = (left + right) / 2, .y = (top + base) / 2 };
+        b.appendVertex(.{ .pos = c, .col = col });
+        for (body) |p| b.appendVertex(.{ .pos = p, .col = col });
+        for (0..body.len - 1) |i| {
+            const a: Index = @intCast(i + 1);
+            b.appendTriangles(&ccw(c, body[i], body[i + 1], 0, a, a + 1));
+        }
+        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    }
+    inline for (.{ 0, 3 * (n_arc + 1) }, .{ left - lean, right + lean }) |from, cx| {
+        const flare = pts[from .. from + n_arc + 1];
+        var b = dvui.Triangles.Builder.init(lifo, flare.len + 1, 3 * flare.len) catch return;
+        defer b.deinit(lifo);
+        const c: dvui.Point.Physical = .{ .x = cx, .y = base };
+        b.appendVertex(.{ .pos = c, .col = col });
+        for (flare) |p| b.appendVertex(.{ .pos = p, .col = col });
+        for (0..flare.len - 1) |i| {
+            const a: Index = @intCast(i + 1);
+            b.appendTriangles(&ccw(c, flare[i], flare[i + 1], 0, a, a + 1));
+        }
+        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    }
+    dvui.Path.stroke(.{ .points = pts[0..n] }, .{ .thickness = if (active) 1.4 * s else 1 * s, .color = .{ .color = line } });
+}
+
 /// When and which tab was last clicked, for double-clicks.
 var tab_click: struct { view: u8 = docviews.none, ms: i64 = 0 } = .{};
 
@@ -6134,6 +6232,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             }
             break :blk c > 1;
         };
+        const at_left = strip.data().rect.x <= 0.5 and @abs(strip.data().borderRectScale().r.x / dvui.windowNaturalScale() - region_rect.x) < 1;
         for (n.tabList(), 0..) |v, k| {
             var lb: [96]u8 = undefined;
             const label = viewLabel(&lb, v);
@@ -6141,13 +6240,14 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             const is_active = v == vl.active;
             var tab = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .id_extra = k,
-                .background = current,
-                .color_fill = .{ .color = if (is_active) dvui.themeGet().focus.opacity(0.25) else colors.paper },
-                .border = .{ .x = if (k == 0) 0 else 1 },
-                .color_border = .{ .color = colors.edge.opacity(0.3) },
+                // The first tab at the views' left edge keeps its place,
+                // its flare reaching over the bar beside; elsewhere, room.
+                .margin = .{ .x = if (k == 0 and at_left) 0 else folder_flare, .w = folder_flare },
                 .padding = .{ .x = 6, .w = 2, .y = 1, .h = 1 },
             });
             defer tab.deinit();
+            // The window's tab shown is a folder's tab, joined to its view.
+            if (current) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[v].kind, is_active);
             // Room for descenders: no margin, a little padding below.
             const tab_font = dvui.Font.theme(.body).larger(-1);
             if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 2, .h = 4 }, .id_extra = k })) {
