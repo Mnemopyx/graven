@@ -194,6 +194,37 @@ pub const testing_api = struct {
         const m = eq_measure orelse return false;
         return m.of.offset == q.offset and std.meta.eql(m.of.head, q.head) and std.meta.eql(m.of.head_end, q.head_end);
     }
+    /// A point just inside tile `designator`'s outline (its left edge's
+    /// middle): pointing there selects the tile, not its content.
+    pub fn tileEdge(designator: []const u8) ?dvui.Point.Physical {
+        const id = state.model.findTile(designator) orelse return null;
+        const f = findTile(id) orelse return null;
+        const b = onSheet(f.panel, f.tile.body);
+        return toScreen(.{ .x = b.x0 + 0.3 * edgeMm(), .y = (b.y0 + b.y1) / 2 });
+    }
+    /// The screen box of tile `designator`'s slot `slot`'s text.
+    pub fn slotRect(designator: []const u8, slot: []const u8) ?dvui.Rect.Physical {
+        const id = state.model.findTile(designator) orelse return null;
+        const tracks = state.model.prototypeOf(id).tracks;
+        const k = for (tracks, 0..) |t, i| {
+            if (std.mem.eql(u8, t.name, slot)) break i;
+        } else return null;
+        for (state.placed.items, 0..) |placed, pi| for (placed.labels) |l| {
+            if (l.tile == null or l.tile.? != id or l.slot != k) continue;
+            const b = labelBox(pi, l);
+            const p0 = toScreen(.{ .x = b.x0, .y = b.y1 }) orelse return null;
+            const p1 = toScreen(.{ .x = b.x1, .y = b.y0 }) orelse return null;
+            return .{ .x = @min(p0.x, p1.x), .y = @min(p0.y, p1.y), .w = @abs(p1.x - p0.x), .h = @abs(p1.y - p0.y) };
+        };
+        return null;
+    }
+    pub fn hoverKind() ?[]const u8 {
+        return if (hover_target) |t| @tagName(t) else null;
+    }
+    pub fn eqText() ?[]const u8 {
+        const q = canvas_eq orelse return null;
+        return eqContent(q);
+    }
     pub fn promptOpen() bool {
         return filePromptOpen() or contention != null or leave_prompt != null or recovery != null;
     }
@@ -344,6 +375,14 @@ pub const testing_api = struct {
     pub fn panelNamed(name: []const u8) ?usize {
         for (state.model.panels.items, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) return i;
         return null;
+    }
+    /// The view centred on tile `designator`, at `ppm` px/mm.
+    pub fn centreOnTile(designator: []const u8, ppm: f64) void {
+        const id = state.model.findTile(designator) orelse return;
+        const f = findTile(id) orelse return;
+        const b = onSheet(f.panel, f.tile.body);
+        setView((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, ppm);
+        dvui.refresh(null, @src(), null);
     }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
@@ -870,6 +909,8 @@ fn newCanvas() void {
     last_click = null;
     hunt_clear();
     canvas_eq = null;
+    // Ids may repeat in another document: no slot is remembered.
+    expr_track = .none;
     resetViews();
     setFilePath(null);
     clearPlaced();
@@ -6358,6 +6399,7 @@ fn canvas(active: bool, view: u8) void {
     drawTrackPath(area);
     drawConstraintMarks(area);
     drawPointerMark();
+    drawHover(area);
     drawEngagement(area);
     drawSnapGuides(area);
 
@@ -11162,10 +11204,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
-                } else if (state.tool == .select and me.button.pointer() and canvas_eq != null and eqBoxPress(state.view.toMm(area, me.p))) {
-                    // Editing an expression: a click on one of its
-                    // objects chooses it.
+                } else if (state.tool == .select and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and hoverPress(state.view.toMm(area, me.p))) {
+                    // Pointing: a container by its outline, content from
+                    // inside (see "Pointing").
                     state.press_consumed = true;
+                    last_click = null;
                     dvui.refresh(null, @src(), box.data().id);
                 } else if (state.tool == .select and me.button.pointer() and (me.mod.shift() or primaryMod(me.mod))) {
                     // Shift-click (or Ctrl-click): the container there in
@@ -17616,6 +17659,221 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
     dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2.5 * px, .color = .{ .color = colors.select.opacity(pulse()) } });
 }
 
+// Pointing (decided 2026-11-20): near a container's outline the
+// pointer highlights the container, and a press selects it; inside, away
+// from the outline, it highlights the content, and a press goes into it:
+// an editable text at the nearest place between its glyphs. Inside an
+// expression being edited, the same for its objects: near an object's
+// box, the object (chosen); inside it, the caret.
+
+/// How near an outline counts as on it, in screen pixels.
+const edge_px: f64 = 5;
+
+/// What the pointer is over.
+const HoverTarget = union(enum) {
+    /// Near a container's outline: the container.
+    tile: struct { id: TileId, box: geom.Box },
+    track: struct { panel: usize, region: usize, box: geom.Box },
+    panel: struct { panel: usize, box: geom.Box },
+    /// Inside a tile, a slot's text: its label, and where in its source.
+    slot: struct { tile: TileId, panel: usize, label: usize, box: geom.Box, offset: u32 },
+    /// In an expression being edited: near an object's box (chosen by a
+    /// press), or inside text (the caret put there).
+    eq_object: struct { start: u32, end: u32, corners: [4]geom.Point, at: geom.Point },
+    eq_caret: struct { offset: u32 },
+};
+
+/// The edge tolerance in mm at the view's zoom.
+fn edgeMm() f64 {
+    return edge_px / @max(state.view.ppm, 1e-6);
+}
+
+/// How far `p` is from box `b`'s outline (inside or out), mm.
+fn outlineDistance(b: geom.Box, p: geom.Point) f64 {
+    const inside = p.x >= b.x0 and p.x <= b.x1 and p.y >= b.y0 and p.y <= b.y1;
+    if (inside) return @min(@min(p.x - b.x0, b.x1 - p.x), @min(p.y - b.y0, b.y1 - p.y));
+    const dx = @max(@max(b.x0 - p.x, 0), p.x - b.x1);
+    const dy = @max(@max(b.y0 - p.y, 0), p.y - b.y1);
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// A label's box on the worksheet (its design box, the ink's where wider).
+fn labelBox(pi: usize, l: layout.place.PlacedLabel) geom.Box {
+    const o = panelOrigin(pi);
+    const d = l.render.design.join(l.render.ink);
+    return .{ .x0 = d.x0 + l.origin.x + o.x, .y0 = d.y0 + l.origin.y + o.y, .x1 = d.x1 + l.origin.x + o.x, .y1 = d.y1 + l.origin.y + o.y };
+}
+
+/// The source offset in label `l` of panel `pi` (counted from `base` in
+/// what it is part of) whose caret is nearest worksheet point `p`.
+fn nearestCaret(pi: usize, l: layout.place.PlacedLabel, p: geom.Point, src_len: u32) u32 {
+    const o = panelOrigin(pi);
+    const local: geom.Point = .{ .x = p.x - l.origin.x - o.x, .y = p.y - l.origin.y - o.y };
+    var best: u32 = 0;
+    var best_d: f64 = std.math.inf(f64);
+    var off: u32 = 0;
+    while (off <= src_len) : (off += 1) {
+        const c = l.render.caret(off) orelse continue;
+        const dy = if (local.y < c.y0) c.y0 - local.y else if (local.y > c.y1) local.y - c.y1 else 0;
+        const d = @abs(c.x - local.x) + 4 * dy;
+        if (d < best_d) {
+            best_d = d;
+            best = off;
+        }
+    }
+    return best;
+}
+
+/// The end of the source label `l` draws (its elements' last byte).
+fn renderEnd(l: layout.place.PlacedLabel) u32 {
+    var end: u32 = 0;
+    for (l.render.elements) |e| end = @max(end, e.end);
+    return end;
+}
+
+/// What the pointer at worksheet point `p` is over (see "Pointing").
+fn hoverTargetAt(p: geom.Point) ?HoverTarget {
+    const tol = edgeMm();
+    // In an expression being edited: its objects first.
+    if (canvas_eq) |q| {
+        var best: ?struct { b: layout.render.ObjectBox, base: u32, pi: usize, l: layout.place.PlacedLabel } = null;
+        for (state.placed.items, 0..) |placed, pi| for (placed.labels) |l| {
+            const piece = eqPiece(pi, l) orelse continue;
+            const o = panelOrigin(pi);
+            const local: geom.Point = .{ .x = p.x - l.origin.x - o.x, .y = p.y - l.origin.y - o.y };
+            for (l.render.boxes) |b| {
+                if (b.kind == .field) continue;
+                const bb = boxBounds(b);
+                const grown: geom.Box = .{ .x0 = bb.x0 - tol, .y0 = bb.y0 - tol, .x1 = bb.x1 + tol, .y1 = bb.y1 + tol };
+                if (!contains(grown, local)) continue;
+                if (best == null or b.nest > best.?.b.nest) best = .{ .b = b, .base = piece.base, .pi = pi, .l = l };
+            }
+        };
+        if (best) |h| {
+            const o = panelOrigin(h.pi);
+            const local: geom.Point = .{ .x = p.x - h.l.origin.x - o.x, .y = p.y - h.l.origin.y - o.y };
+            if (outlineDistance(boxBounds(h.b), local) <= tol)
+                return .{ .eq_object = .{ .start = h.b.start + h.base, .end = h.b.end + h.base, .corners = h.b.corners, .at = .{ .x = h.l.origin.x + o.x, .y = h.l.origin.y + o.y } } };
+            _ = q;
+            return .{ .eq_caret = .{ .offset = h.base + nearestCaret(h.pi, h.l, p, renderEnd(h.l)) } };
+        }
+    }
+    // A tile: near its outline, the tile; inside, the slot nearest.
+    for (state.placed.items, 0..) |placed, pi| {
+        if (!shownPanel(pi)) continue;
+        for (placed.tiles) |t| {
+            if (t.spacer) continue;
+            const body = onSheet(pi, t.body);
+            const grown: geom.Box = .{ .x0 = body.x0 - tol, .y0 = body.y0 - tol, .x1 = body.x1 + tol, .y1 = body.y1 + tol };
+            if (!contains(grown, p)) continue;
+            if (outlineDistance(body, p) <= tol) return .{ .tile = .{ .id = t.id, .box = body } };
+            var best: ?struct { k: usize, d: f64, box: geom.Box } = null;
+            for (placed.labels, 0..) |l, k| {
+                if (l.tile == null or l.tile.? != t.id) continue;
+                const lb = labelBox(pi, l);
+                const d = outlineDistance(lb, p) * @as(f64, if (contains(lb, p)) -1 else 1);
+                if (best == null or d < best.?.d) best = .{ .k = k, .d = d, .box = lb };
+            }
+            const hit = best orelse return .{ .tile = .{ .id = t.id, .box = body } };
+            const l = placed.labels[hit.k];
+            return .{ .slot = .{ .tile = t.id, .panel = pi, .label = hit.k, .box = hit.box, .offset = nearestCaret(pi, l, p, renderEnd(l)) } };
+        }
+    }
+    // A track's outline, then a panel's.
+    for (state.placed.items, 0..) |placed, pi| {
+        if (!shownPanel(pi)) continue;
+        for (placed.tracks) |t| {
+            const b = onSheet(pi, t.box);
+            if (outlineDistance(b, p) <= tol) return .{ .track = .{ .panel = t.panel, .region = t.member, .box = b } };
+        }
+    }
+    for (state.model.panels.items, 0..) |panel, pi| {
+        if (!shownPanel(pi) or panel.unbounded) continue;
+        const b = panel.box();
+        if (outlineDistance(b, p) <= tol) return .{ .panel = .{ .panel = pi, .box = b } };
+    }
+    return null;
+}
+
+/// The hover target as last found (for drawing), and what was found for.
+var hover_target: ?HoverTarget = null;
+
+/// Draws what the pointer is over: a container's outline, a slot's text,
+/// an object's box; and sets the pointer's shape.
+fn drawHover(area: dvui.Rect.Physical) void {
+    hover_target = null;
+    if (state.tool != .select or state.drag != null or panel_edit != null or sketch_edit != null or canvas_prompt or engagingPoint()) return;
+    const m = state.mouse orelse return;
+    const t = hoverTargetAt(m) orelse return;
+    hover_target = t;
+    const px = dvui.windowNaturalScale();
+    const hover = colors.select.opacity(0.75);
+    switch (t) {
+        .tile => |x| state.view.rect(area, x.box).stroke(.square, .{ .thickness = 2.5 * px, .color = .{ .color = hover } }),
+        .track => |x| state.view.rect(area, x.box).stroke(.square, .{ .thickness = 2.5 * px, .color = .{ .color = hover } }),
+        .panel => |x| state.view.rect(area, x.box).stroke(.square, .{ .thickness = 2.5 * px, .color = .{ .color = hover } }),
+        .slot => |x| {
+            state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
+            state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
+            dvui.cursorSet(.ibeam);
+        },
+        .eq_object => |x| strokeQuad(area, x.corners, x.at, hover, 2.5 * px),
+        .eq_caret => dvui.cursorSet(.ibeam),
+    }
+}
+
+/// A plain press at worksheet point `p`: what the pointer is over, taken
+/// (a container selected, a slot's text edited there, an object chosen,
+/// the caret put). Whether it took the press.
+fn hoverPress(p: geom.Point) bool {
+    const t = hoverTargetAt(p) orelse return false;
+    switch (t) {
+        .tile => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .tile = x.id });
+        },
+        .track => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .region = .{ .panel = x.panel, .region = x.region } });
+        },
+        .panel => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .panel = x.panel });
+        },
+        .slot => |x| {
+            // The slot's text edited, the caret where pressed.
+            const l = state.placed.items[x.panel].labels[x.label];
+            const k = l.slot;
+            const tracks = state.model.prototypeOf(x.tile).tracks;
+            if (k >= tracks.len) return false;
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .tile = x.tile });
+            expr_track = tracks[k].id;
+            enterTileTrack(x.tile);
+            if (canvas_eq == null) return true;
+            // The caret: the press's place in this piece, past what comes
+            // before the piece in the slot's text.
+            const base: u32 = if (eqPiece(x.panel, l)) |pc| pc.base else 0;
+            canvas_eq_seq += 1;
+            eqMove(base + x.offset, null);
+        },
+        .eq_object => |x| {
+            canvas_eq_seq += 1;
+            eqPick(x.start, x.end);
+        },
+        .eq_caret => |x| {
+            canvas_eq_seq += 1;
+            eqMove(x.offset, null);
+        },
+    }
+    dvui.refresh(null, @src(), null);
+    return true;
+}
+
 /// A press at worksheet point `p` while an expression is edited on the
 /// canvas: the innermost object box there (not a field's) chosen, a
 /// structure with a head by its head, anything else with the caret at its
@@ -19105,6 +19363,12 @@ var engage_drag: ?struct {
 
 /// Whether engaging is on: the select tool, the canvas itself (no sketch,
 /// panel editing or equation on the canvas).
+/// Whether an engagement point or edge of the selection is under the
+/// pointer (or locked): moving and sizing come before pointing.
+fn engagingPoint() bool {
+    return engaging() and (engage_n > 0 or engage_lock != null);
+}
+
 fn engaging() bool {
     return state.tool == .select and sketch_edit == null and panel_edit == null and canvas_eq == null and !canvas_prompt;
 }

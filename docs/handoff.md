@@ -96,3 +96,7 @@ Ctrl+< and Ctrl+> go a level out and in (`levelUp`, `levelDown`, `levelParent`, 
 
 Decided: a Text styles view (main-window tab per style), treatments as glyphic style configuration (by name or id, then local overrides), fitting of inline math as Typst's `math.inline`, and layout, font specification and vector rendering in glyphic (blueprint "Text styles as a first-class interface"). Step 1's first part, line fitting, is built (`Layout.fitted`, the `fit…` parameters; off by default). Face specifications in glyphic are built too (`fontspec.zig`: specs, descriptions from measured values or names, CSS matching, treatments; `faces.resolution`). Next: monospace and the math alphabets, text-mode scripts (status.md, "Text styles as a first-class interface").
 
+## Pointing (2026-11-20)
+
+Near a container's outline: the container; inside: its content, a slot's text taking the caret where pressed; inside an expression being edited, its objects the same way ("Pointing" in main.zig; status.md). Built for keys, tracks, panels and expression objects; next where wanted: line art, grids, images and views, and hover over a track's text.
+

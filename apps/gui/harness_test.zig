@@ -243,6 +243,10 @@ pub const Run = struct {
 
     pub fn key(r: *Run, code: dvui.enums.Key, mod: dvui.enums.Mod) !void {
         try dvui.testing.pressKey(code, mod);
+        // The modifiers let go after the chord, as a hand does: a click
+        // after Ctrl+\ is a plain click (dvui keeps the last key's
+        // modifiers for mouse events).
+        dvui.currentWindow().modifiers = .none;
         try r.frames(2);
     }
 };
@@ -1346,9 +1350,14 @@ test "a slot edited on the canvas outlines its objects; a click chooses one, mea
     defer r.stop();
     try r.key(.m, .none);
     try openExample(&r, "HP-15C keypad");
-    // The √x key's top slot, edited on the canvas.
-    try r.clickAt(api.tileCenter("R1C1").?);
+    // Close in on the √x key, mid-canvas.
+    api.centreOnTile("R1C1", 30);
+    try r.frames(2);
+    // The √x key's top slot, edited on the canvas (the key selected by
+    // its outline first).
+    try r.clickAt(api.tileEdge("R1C1").?);
     try std.testing.expectEqualStrings("tile", api.contextName());
+    try std.testing.expect(!api.eqEditing());
     try r.key(.backslash, .lcontrol);
     try r.frames(2);
     var buf: [16]dvui.Rect.Physical = undefined;
@@ -1361,15 +1370,15 @@ test "a slot edited on the canvas outlines its objects; a click chooses one, mea
     // The expression's section first, naming what is edited.
     _ = try r.rectOf("expression.editing");
     try std.testing.expect((try r.rectOf("expression.editing")).y < (try r.rectOf("tile.designator")).y);
-    // A click on the radical's sign (left of x) chooses the radical, by
-    // its head; on x, x.
-    try r.clickAt(.{ .x = radical.x + 0.1 * (x.x - radical.x), .y = radical.y + radical.h * 0.6 });
+    // A click by an object's outline chooses it: the radical's left edge
+    // the radical; x's, x.
+    try r.clickAt(.{ .x = radical.x + 1, .y = radical.y + radical.h * 0.6 });
     try r.frames(2);
     try std.testing.expectEqual(glyphic.Kind.radical, api.eqChosenKind().?);
     try std.testing.expect(api.eqMeasured());
     _ = try r.rectOf("expression.gap-before");
     _ = try r.rectOf("expression.baseline");
-    try r.clickAt(.{ .x = x.x + x.w / 2, .y = x.y + x.h / 2 });
+    try r.clickAt(.{ .x = x.x + x.w - 1, .y = x.y + x.h / 2 });
     try r.frames(2);
     try std.testing.expectEqual(glyphic.Kind.variable, api.eqChosenKind().?);
     try std.testing.expect(api.eqMeasured());
@@ -1380,15 +1389,18 @@ test "objects chosen and nudged on the canvas: Up chooses, Tab steps, arrows nud
     defer r.stop();
     try r.key(.m, .none);
     try openExample(&r, "HP-15C keypad");
-    // The √x key's top slot: "$\sqrt{x}$".
-    try r.clickAt(api.tileCenter("R1C1").?);
+    api.centreOnTile("R1C1", 30);
+    try r.frames(2);
+    // The √x key's top slot: "$\sqrt{x}$" (the key selected by its outline).
+    try r.clickAt(api.tileEdge("R1C1").?);
     try std.testing.expectEqualStrings("tile", api.contextName());
     try r.key(.backslash, .lcontrol);
     try r.frames(2);
-    // Tab among objects from a click on x: x chosen; o: out to the radical.
+    // Tab among objects from a click by x's outline: x chosen; o: out to
+    // the radical.
     var buf: [16]dvui.Rect.Physical = undefined;
     const x = api.eqBoxes(&buf)[0];
-    try r.clickAt(.{ .x = x.x + x.w / 2, .y = x.y + x.h / 2 });
+    try r.clickAt(.{ .x = x.x + x.w - 1, .y = x.y + x.h / 2 });
     try r.frames(2);
     try std.testing.expectEqual(glyphic.Kind.variable, api.eqChosenKind().?);
     try dvui.testing.writeText("o");
@@ -1435,7 +1447,9 @@ test "Ctrl+< and Ctrl+> go a level out and in: a key's text, the key, its track,
     defer r.stop();
     try r.key(.m, .none);
     try openExample(&r, "PC keyboard");
-    try r.clickAt(api.tileCenter("K30").?);
+    api.centreOnTile("K30", 10);
+    try r.frames(2);
+    try r.clickAt(api.tileEdge("K30").?);
     try std.testing.expectEqualStrings("tile", api.contextName());
     // In: its text, then the word in it chosen.
     try r.key(.period, .lcontrol);
@@ -1476,4 +1490,49 @@ test "Ctrl+< and Ctrl+> go a level out and in: a key's text, the key, its track,
     // In again: the item after the cursor, the first key.
     try r.key(.period, .lcontrol);
     try std.testing.expectEqualStrings("K1", api.contextTile().?);
+}
+
+test "pointing: by a key's outline the key, inside it a slot's text, the caret where pressed" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    const cw = dvui.currentWindow();
+    api.centreOnTile("R1C3", 30);
+    try r.frames(2);
+    // Near the outline: the key is highlighted, and a press selects it.
+    const edge = api.tileEdge("R1C3").?;
+    _ = try cw.addEventMouseMotion(.{ .pt = edge });
+    try r.frames(2);
+    try std.testing.expectEqualStrings("tile", api.hoverKind().?);
+    try r.clickAt(edge);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    try std.testing.expect(!api.eqEditing());
+    // Inside, on the g slot's text (LOG) at its end: that slot edited,
+    // the caret after the last letter.
+    const g = api.slotRect("R1C3", "g").?;
+    const end: dvui.Point.Physical = .{ .x = g.x + g.w - 1, .y = g.y + g.h / 2 };
+    _ = try cw.addEventMouseMotion(.{ .pt = end });
+    try r.frames(2);
+    try std.testing.expectEqualStrings("slot", api.hoverKind().?);
+    try r.clickAt(end);
+    try std.testing.expect(api.eqEditing());
+    try dvui.testing.writeText("Z");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("LOGZ", api.eqText().?);
+    // Out of it (Esc), then at its start: the caret before the first
+    // letter. (Pressed while editing, the very edge of a word is the
+    // word's outline: it would choose the word.)
+    try r.key(.escape, .none);
+    // (Centred, the text grew both ways: its box found again.)
+    const g2 = api.slotRect("R1C3", "g").?;
+    try r.clickAt(.{ .x = g2.x + 1, .y = g2.y + g2.h / 2 });
+    try dvui.testing.writeText("A");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("ALOGZ", api.eqText().?);
+    // The key's other slot, pressed while this one is edited: that one.
+    const top = api.slotRect("R1C3", "top").?;
+    try r.clickAt(.{ .x = top.x + top.w / 2, .y = top.y + top.h / 2 });
+    try std.testing.expect(api.eqEditing());
+    try std.testing.expect(std.mem.indexOf(u8, api.eqText().?, "10") != null);
 }
