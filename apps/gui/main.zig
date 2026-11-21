@@ -122,6 +122,29 @@ pub const testing_api = struct {
         const leaf = vl.leafOf(vl.active) orelse return 0;
         return vl.nodes[leaf].tab_count;
     }
+    /// Another legend sheet over the first one's keys, named `name`.
+    pub fn makeSheetLikeFirst(name: []const u8) bool {
+        if (state.model.sheets.items.len == 0) return false;
+        _ = act(.makeSheet, .{ name, state.model.sheets.items[0].scope }) catch return false;
+        return true;
+    }
+    /// Sheet `i` opened as from the Browser (a double-click on it).
+    pub fn openSheetFromBrowser(i: usize) void {
+        showSheetView(state.model.sheets.items[i].id);
+    }
+    /// How many views show sheet `i`.
+    pub fn sheetViews(i: usize) usize {
+        var buf: [docviews.max_views]u8 = undefined;
+        return vl.viewsOf(.sheet, @intFromEnum(state.model.sheets.items[i].id), &buf).len;
+    }
+    /// Whether view `v`'s tab is a preview.
+    pub fn isPreview(v: u8) bool {
+        return view_preview[v];
+    }
+    /// The active view's index.
+    pub fn activeIndex() u8 {
+        return vl.active;
+    }
     /// Whether a window's + pop-up is open.
     pub fn addingView() bool {
         return tab_add_leaf != null;
@@ -5742,6 +5765,62 @@ fn resetViews() void {
     vl = docviews.Layout.init(.{});
     canvas_owner = 0;
     view_to_activate = null;
+    view_preview = @splat(false);
+}
+
+/// Preview tabs: a tab opened from the Browser or elsewhere is a preview
+/// (its label italic) until it is worked in (a change to the document
+/// while it is the active view) or double-clicked; the next context opened
+/// in its window takes its place. At most one a window.
+var view_preview: [docviews.max_views]bool = @splat(false);
+/// The history's step count when last looked at, to see work done.
+var preview_steps: usize = 0;
+
+/// The preview tab of window `leaf`, if it has one.
+fn previewIn(leaf: u8) ?u8 {
+    for (vl.nodes[leaf].tabList()) |t| if (view_preview[t]) return t;
+    return null;
+}
+
+/// Work in the active view makes it permanent.
+fn keepWorkedPreview() void {
+    const n = hist.stepCount();
+    if (n != preview_steps) {
+        preview_steps = n;
+        if (vl.active < docviews.max_views) view_preview[vl.active] = false;
+    }
+}
+
+/// Shows `view` (a canvas's: of space `space`) in window `leaf`: its tab
+/// there if it has one, else a new tab, made active. `preview`: the new
+/// tab is a preview, in the place of the window's preview if it has one;
+/// otherwise permanent (and a tab already there becomes permanent too).
+fn openInWindow(leaf: u8, view: docviews.View, space: usize, preview: bool) ?u8 {
+    for (vl.nodes[leaf].tabList()) |t| {
+        if (vl.views[t].kind != view.kind) continue;
+        if (if (view.kind == .canvas) viewSpace(t) == space else vl.views[t].target == view.target) {
+            if (!preview) view_preview[t] = false;
+            activateView(t);
+            return t;
+        }
+    }
+    const old = if (preview) previewIn(leaf) else null;
+    const from = vl.active;
+    const nv = vl.addTab(vl.currentOf(leaf), view) orelse {
+        state.status = "No more views fit. ";
+        return null;
+    };
+    vl.active = from;
+    if (view.kind == .canvas) view_slots[nv] = .{ .view = .{ .fit = if (space == 0) canvas_view else null }, .space = space };
+    view_preview[nv] = preview;
+    // What was done to open it is not work in it.
+    preview_steps = hist.stepCount();
+    activateView(nv);
+    if (old) |o| {
+        vl.placeTab(nv, o);
+        closeView(o);
+    }
+    return nv;
 }
 
 /// A space's ID as a view's target, and back.
@@ -5860,6 +5939,7 @@ fn panesForView() void {
 
 /// The central region: the views as laid out, or the one maximized.
 fn viewArea() void {
+    keepWorkedPreview();
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
     defer box.deinit();
     {
@@ -5927,10 +6007,12 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             });
             defer tab.deinit();
             // Room for descenders: no margin, a little padding below.
-            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 2, .h = 4 }, .id_extra = k })) {
+            const tab_font = dvui.Font.theme(.body).larger(-1);
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 2, .h = 4 }, .id_extra = k })) {
                 const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
                 if (tab_click.view == v and now - tab_click.ms < 400) {
-                    vl.toggleMaximize(v);
+                    // A preview's: kept; a kept tab's: the region filled.
+                    if (view_preview[v]) view_preview[v] = false else vl.toggleMaximize(v);
                     tab_click = .{};
                 } else tab_click = .{ .view = v, .ms = now };
                 if (v != vl.active) view_to_activate = v else vl.select(v);
@@ -6030,15 +6112,7 @@ fn tabShowing(leaf: u8, c: ViewContext) ?u8 {
 
 /// Shows context `c` in window `leaf`: its tab there, else a new one.
 fn addToWindow(leaf: u8, c: ViewContext) void {
-    if (tabShowing(leaf, c)) |t| return activateView(t);
-    const from = vl.active;
-    const nv = vl.addTab(vl.currentOf(leaf), c.view) orelse {
-        state.status = "No more views fit. ";
-        return;
-    };
-    vl.active = from;
-    if (c.view.kind == .canvas) view_slots[nv] = .{ .view = .{ .fit = if (c.space == 0) canvas_view else null }, .space = c.space };
-    activateView(nv);
+    _ = openInWindow(leaf, c.view, c.space, false);
 }
 
 fn tabAddClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
@@ -6130,12 +6204,24 @@ fn openBeside(view: docviews.View) void {
         activateView(have[0]);
         return;
     }
+    // Another window's preview gives way to it; else a new window.
+    const here = vl.leafOf(vl.active);
+    for (vl.nodes, 0..) |nd, k| {
+        const leaf: u8 = @intCast(k);
+        if (!nd.used or nd.split or leaf == here) continue;
+        if (previewIn(leaf) != null) {
+            _ = openInWindow(leaf, view, 0, true);
+            return;
+        }
+    }
     const from = vl.active;
     const nv = vl.split(from, .across, view) orelse {
         state.status = "No more views fit. ";
         return;
     };
     vl.active = from;
+    view_preview[nv] = true;
+    preview_steps = hist.stepCount();
     activateView(nv);
 }
 
@@ -6177,6 +6263,7 @@ fn closeView(v: u8) void {
     }
     if (view_slots[v].flat) |*f| f.arena.deinit();
     view_slots[v] = .{};
+    view_preview[v] = false;
     const was_active = v == vl.active;
     _ = vl.close(v);
     if (was_active) activateView(to);
@@ -6195,14 +6282,8 @@ fn showSpaceView(space: usize) void {
             return;
         }
     }
-    const from = vl.active;
-    const nv = vl.addTab(from, .{ .target = target }) orelse {
-        state.status = "No more views fit. ";
-        return;
-    };
-    vl.active = from;
-    view_slots[nv] = .{ .view = .{ .fit = if (space == 0) canvas_view else null }, .space = space };
-    activateView(nv);
+    const leaf = vl.leafOf(vl.active) orelse return;
+    const nv = openInWindow(leaf, .{ .target = target }, space, true) orelse return;
     vl.toggleMaximize(nv);
 }
 
@@ -6215,11 +6296,8 @@ fn showSheetView(id: layout.model.ObjectId) void {
         vl.toggleMaximize(have[0]);
         return;
     }
-    const nv = vl.addTab(vl.active, .{ .kind = .sheet, .target = @intFromEnum(id) }) orelse {
-        state.status = "No more views fit. ";
-        return;
-    };
-    activateView(nv);
+    const leaf = vl.leafOf(vl.active) orelse return;
+    const nv = openInWindow(leaf, .{ .kind = .sheet, .target = @intFromEnum(id) }, 0, true) orelse return;
     vl.toggleMaximize(nv);
 }
 
@@ -8682,11 +8760,8 @@ fn showManufactureView(id: ObjectId) void {
         activateView(have[0]);
         return;
     }
-    const nv = vl.addTab(vl.active, .{ .kind = .manufacture, .target = @intFromEnum(id) }) orelse {
-        state.status = "No more views fit. ";
-        return;
-    };
-    activateView(nv);
+    const leaf = vl.leafOf(vl.active) orelse return;
+    _ = openInWindow(leaf, .{ .kind = .manufacture, .target = @intFromEnum(id) }, 0, true);
 }
 
 /// A copy of plan `p` whose lists can be changed (the frame's arena).

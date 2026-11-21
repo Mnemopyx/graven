@@ -1698,3 +1698,42 @@ test "a window's tabs: + adds a context from its pop-up (by a click, or by typin
     try r.frames(2);
     try std.testing.expectEqual(1, api.windowCount());
 }
+
+test "preview tabs: a context opened from the Browser takes the window's preview tab; work in it or a double-click keeps it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    try std.testing.expect(api.makeSheetLikeFirst("Second legends"));
+    try r.frames(2);
+    // The first sheet, opened: a preview tab beside the canvas.
+    api.openSheetFromBrowser(0);
+    try r.frames(2);
+    try std.testing.expectEqual(.sheet, api.activeView().kind);
+    try std.testing.expect(api.isPreview(api.activeIndex()));
+    try std.testing.expectEqual(2, api.activeTabs());
+    // The second, opened: in the preview's place, the first gone.
+    api.openSheetFromBrowser(1);
+    try r.frames(2);
+    try std.testing.expectEqual(2, api.activeTabs());
+    try std.testing.expectEqual(0, api.sheetViews(0));
+    try std.testing.expectEqual(1, api.sheetViews(1));
+    try std.testing.expect(api.isPreview(api.activeIndex()));
+    // Work in it: kept. The first opened again is a new preview beside it.
+    const second = api.activeIndex();
+    try r.press("sheet.cell.add-a-row");
+    try r.frames(2);
+    try std.testing.expect(!api.isPreview(second));
+    api.openSheetFromBrowser(0);
+    try r.frames(2);
+    try std.testing.expectEqual(3, api.activeTabs());
+    try std.testing.expect(api.isPreview(api.activeIndex()));
+    try std.testing.expectEqual(1, api.sheetViews(1));
+    // From the + pop-up: chosen, so kept, not a preview.
+    try r.run("views.close");
+    try r.run("views.add");
+    try r.frames(2);
+    try r.press("views.contexts.keyboardlegends");
+    try r.frames(2);
+    try std.testing.expect(!api.isPreview(api.activeIndex()));
+}

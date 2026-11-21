@@ -106,5 +106,5 @@ Step 1 built (the model object, the tool with both gestures, drawing clipped to 
 
 ## Windows and tabs (2026-11-21)
 
-Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 built: + with its filterable pop-up (Ctrl+T), × taking a tab off its window (Ctrl+W), the split button (Alt: stacked; Ctrl+Shift+\\). Next, step 2: preview tabs; then step 3: the divider's grip with Swap, Even out and the direction, and the scrolling policy (status.md, "Windows and tabs").
+Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 built: + with its filterable pop-up (Ctrl+T), × taking a tab off its window (Ctrl+W), the split button (Alt: stacked; Ctrl+Shift+\\). Step 2 built: preview tabs (italic; the next context opened in the window takes their place; kept by work in them or a double-click). Next, step 3: the divider's grip with Swap, Even out and the direction, and the scrolling policy (status.md, "Windows and tabs").
 

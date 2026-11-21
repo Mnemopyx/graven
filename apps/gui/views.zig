@@ -228,6 +228,24 @@ pub const Layout = struct {
         return true;
     }
 
+    /// Moves view `v` to where view `at` is among the same window's tabs
+    /// (`at` moving one along); nothing when they are in different windows.
+    pub fn placeTab(l: *Layout, v: u8, at: u8) void {
+        const leaf = l.leafOf(v) orelse return;
+        if (l.leafOf(at) != leaf or v == at) return;
+        const n = &l.nodes[leaf];
+        const from = std.mem.indexOfScalar(u8, n.tabList(), v).?;
+        const to = std.mem.indexOfScalar(u8, n.tabList(), at).?;
+        const cur = n.tabs[n.current];
+        if (from > to) {
+            std.mem.copyBackwards(u8, n.tabs[to + 1 .. from + 1], n.tabs[to..from]);
+        } else {
+            std.mem.copyForwards(u8, n.tabs[from..to], n.tabs[from + 1 .. to + 1]);
+        }
+        n.tabs[to] = v;
+        n.current = @intCast(std.mem.indexOfScalar(u8, n.tabList(), cur).?);
+    }
+
     /// Fills the region with view `v` alone, or, when it already does,
     /// shows the splits again.
     pub fn toggleMaximize(l: *Layout, v: u8) void {
@@ -317,4 +335,17 @@ test "a layout read back is checked before use" {
     bad = l;
     bad.active = 9;
     try testing.expect(!bad.valid());
+}
+
+test "a tab moved to another's place" {
+    var l = Layout.init(.{});
+    const b = l.addTab(0, .{ .kind = .sheet, .target = 1 }).?;
+    const c = l.addTab(0, .{ .kind = .sheet, .target = 2 }).?;
+    const leaf = l.leafOf(0).?;
+    l.placeTab(c, 0);
+    try std.testing.expectEqualSlices(u8, &.{ c, 0, b }, l.nodes[leaf].tabList());
+    try std.testing.expectEqual(c, l.currentOf(leaf));
+    l.placeTab(c, b);
+    try std.testing.expectEqualSlices(u8, &.{ 0, b, c }, l.nodes[leaf].tabList());
+    try std.testing.expectEqual(c, l.currentOf(leaf));
 }
