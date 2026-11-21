@@ -40,6 +40,9 @@ pub const Icon = enum {
     clock_counter_clockwise,
     megaphone,
     monitor,
+    plus,
+    square_split_horizontal,
+    square_split_vertical,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {
@@ -108,6 +111,8 @@ pub const ButtonOptions = struct {
     id_extra: usize = 0,
     /// The button's look otherwise (margins, gravity).
     opts: dvui.Options = .{},
+    /// Where it was drawn, natural pixels (for a pop-up hung from it).
+    rect_out: ?*dvui.Rect.Natural = null,
 };
 
 /// An icon button, its tooltip saying what it does (also its accessible
@@ -136,6 +141,7 @@ pub fn button(src: std.builtin.SourceLocation, comptime i: Icon, tip: []const u8
     const clicked = bw.clicked();
     bw.drawFocus();
     const rect = bw.data().borderRectScale().r;
+    if (bo.rect_out) |ro| ro.* = rect.toNatural();
     bw.deinit();
     // Its own ID: many icon buttons share one parent, and this source line.
     const tip_id = (@as(usize, src.line) *% 1_000_003) +% (@as(usize, src.column) *% 7919) +% bo.id_extra;

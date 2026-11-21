@@ -1633,3 +1633,68 @@ test "a click puts the caret anywhere inside an expression's braces: between a w
     try r.frames(2);
     try std.testing.expectEqualStrings("$\\mathrm{SxIN}^{-12}$", api.eqText().?);
 }
+
+test "a window's tabs: + adds a context from its pop-up (by a click, or by typing and Enter), × takes a tab off, the split button splits" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    try std.testing.expectEqual(1, api.windowCount());
+    try std.testing.expectEqual(1, api.activeTabs());
+    // +: the pop-up; the legend sheet chosen in it, a tab in this window.
+    try r.press("views.add");
+    try r.frames(2);
+    try std.testing.expect(api.addingView());
+    const name = api.model().sheets.items[0].name;
+    var kb: [96]u8 = undefined;
+    var n: usize = 0;
+    var dash = false;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            if (dash and n > 0) {
+                kb[n] = '-';
+                n += 1;
+            }
+            dash = false;
+            kb[n] = std.ascii.toLower(c);
+            n += 1;
+        } else dash = true;
+    }
+    var ib: [128]u8 = undefined;
+    try r.press(try std.fmt.bufPrint(&ib, "views.contexts.{s}", .{kb[0..n]}));
+    try r.frames(2);
+    try std.testing.expect(!api.addingView());
+    try std.testing.expectEqual(.sheet, api.activeView().kind);
+    try std.testing.expectEqual(1, api.windowCount());
+    try std.testing.expectEqual(2, api.activeTabs());
+    // ×: off the tabs, the canvas shown again.
+    try r.run("views.close");
+    try std.testing.expectEqual(.canvas, api.activeView().kind);
+    try std.testing.expectEqual(1, api.activeTabs());
+    // By its key, then typing part of the sheet's name and Enter.
+    try r.key(.t, .lcontrol);
+    try r.frames(2);
+    try std.testing.expect(api.addingView());
+    try dvui.testing.writeText(name[0..@min(name.len, 4)]);
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(2);
+    try std.testing.expect(!api.addingView());
+    try std.testing.expectEqual(.sheet, api.activeView().kind);
+    try std.testing.expectEqual(2, api.activeTabs());
+    // Choosing a context already in the window selects its tab.
+    try r.run("views.add");
+    try r.frames(2);
+    try r.press("views.contexts.canvas");
+    try r.frames(2);
+    try std.testing.expectEqual(.canvas, api.activeView().kind);
+    try std.testing.expectEqual(2, api.activeTabs());
+    // The split button: two windows; the last tab of one off, one again.
+    try r.press("views.split-across");
+    try r.frames(2);
+    try std.testing.expectEqual(2, api.windowCount());
+    try std.testing.expectEqual(1, api.activeTabs());
+    try r.key(.w, .lcontrol);
+    try r.frames(2);
+    try std.testing.expectEqual(1, api.windowCount());
+}

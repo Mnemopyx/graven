@@ -109,6 +109,23 @@ pub const testing_api = struct {
     pub fn activeView() docviews.View {
         return vl.views[vl.active];
     }
+    /// How many windows (splits) the view area has.
+    pub fn windowCount() usize {
+        var n: usize = 0;
+        for (vl.nodes) |nd| {
+            if (nd.used and !nd.split) n += 1;
+        }
+        return n;
+    }
+    /// How many tabs the active view's window has.
+    pub fn activeTabs() usize {
+        const leaf = vl.leafOf(vl.active) orelse return 0;
+        return vl.nodes[leaf].tab_count;
+    }
+    /// Whether a window's + pop-up is open.
+    pub fn addingView() bool {
+        return tab_add_leaf != null;
+    }
     /// The dropdown in the row tagged `tag` takes entry `label` next frame.
     pub fn choose(tag: []const u8, label: []const u8) void {
         test_choice = .{ .tag = tag, .label = label };
@@ -5918,11 +5935,15 @@ fn viewLeaf(leaf: u8, shown: u8) void {
                 } else tab_click = .{ .view = v, .ms = now };
                 if (v != vl.active) view_to_activate = v else vl.select(v);
             }
-            if (many) if (tbuttonIcon(@src(), "Close view", dvui.entypo.cross, .{}, .{}, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(2), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k })) {
-                closeView(v);
-            };
+            // ×: off this window's tabs (the context stays in the document).
+            if (many) keyIcon(@src(), "Remove from tabs", dvui.entypo.cross, @as(i32, v) + 1, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(2), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k, .tag = uniqueTag("views.close") });
         }
+        // +: a context to add, from a pop-up; at the right end, a split.
+        stripIcon(@src(), .plus, "views.add", "Add a view", @as(i32, shown) + 1, leaf, &tab_add_from[leaf]);
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        stripIcon(@src(), .square_split_horizontal, "views.split-across", "Split (Alt: stacked)", @as(i32, shown) + 1, leaf, null);
     }
+    if (tab_add_leaf == leaf) tabAddPopup(leaf);
     if (!vl.open[shown]) return;
     switch (vl.views[shown].kind) {
         .canvas => canvasView(shown),
@@ -5940,6 +5961,143 @@ fn canvasView(v: u8) void {
     if (shown_space >= @max(1, state.model.spaces.items.len)) shown_space = 0;
     canvas(false, v);
     swapView(v);
+}
+
+/// A window's strip button (`id`, an action of the registry), its tooltip
+/// saying its key; `rect_out` takes where it was drawn.
+fn stripIcon(src: std.builtin.SourceLocation, comptime i: icons.Icon, comptime id: []const u8, tip: []const u8, arg: i32, leaf: u8, rect_out: ?*dvui.Rect.Natural) void {
+    _ = comptime elements.get(id);
+    const tag = uniqueTag(id);
+    recordDrawn(tag, arg);
+    var tb: [96]u8 = undefined;
+    var kb: [48]u8 = undefined;
+    const full = if (keymap.shortcut(&kb, kmode("global"), comptime kact(id), 0)) |sc| std.fmt.bufPrint(&tb, "{s} ({s})", .{ tip, sc }) catch tip else tip;
+    var alt = false;
+    if (icons.button(src, i, full, .{ .size = 15, .id_extra = leaf, .rect_out = rect_out, .opts = .{ .gravity_y = 0.5, .padding = .all(3), .margin = .{ .x = 2, .w = 2 }, .tag = tag } })) {
+        alt = dvui.currentWindow().modifiers.alt();
+        // Alt: the other way (a split stacked).
+        pushButtonEvent(tag, arg | if (alt) @as(i32, 0x100) else 0);
+    }
+}
+
+/// The + pop-up: the window (a leaf of the split tree) it adds to, or
+/// null when it is closed; its filter, typed.
+var tab_add_leaf: ?u8 = null;
+var tab_add_new = false;
+var tab_add_filter: [64]u8 = @splat(0);
+/// Where each window's + was last drawn: the pop-up hangs from it.
+var tab_add_from: [docviews.max_nodes]dvui.Rect.Natural = @splat(.{});
+
+/// A context a view can show: what, its name, and its group in the
+/// pop-up (0 canvas and frames, 1 legend sheets, 2 manufacturing plans).
+const ViewContext = struct { view: docviews.View, space: usize = 0, name: []const u8, group: u2 };
+
+const context_groups = [_][]const u8{ "Canvas and frames", "Legend sheets", "Manufacturing plans" };
+
+/// The document's contexts, in the pop-up's order.
+fn viewContexts(out: []ViewContext) []ViewContext {
+    var n: usize = 0;
+    const spaces = state.model.spaces.items;
+    if (spaces.len == 0) {
+        out[0] = .{ .view = .{}, .name = "Worksheet", .group = 0 };
+        n = 1;
+    } else for (spaces, 0..) |sp, i| {
+        if (n == out.len) break;
+        out[n] = .{ .view = .{ .target = @intFromEnum(sp.id) }, .space = i, .name = if (i == 0) "Canvas" else sp.name, .group = 0 };
+        n += 1;
+    }
+    for (state.model.sheets.items) |sh| {
+        if (n == out.len) break;
+        out[n] = .{ .view = .{ .kind = .sheet, .target = @intFromEnum(sh.id) }, .name = sh.name, .group = 1 };
+        n += 1;
+    }
+    for (state.model.plans.items) |pl| {
+        if (n == out.len) break;
+        out[n] = .{ .view = .{ .kind = .manufacture, .target = @intFromEnum(pl.id) }, .name = pl.name, .group = 2 };
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// The tab of window `leaf` showing context `c`, if it has one.
+fn tabShowing(leaf: u8, c: ViewContext) ?u8 {
+    for (vl.nodes[leaf].tabList()) |t| {
+        if (vl.views[t].kind != c.view.kind) continue;
+        if (if (c.view.kind == .canvas) viewSpace(t) == c.space else vl.views[t].target == c.view.target) return t;
+    }
+    return null;
+}
+
+/// Shows context `c` in window `leaf`: its tab there, else a new one.
+fn addToWindow(leaf: u8, c: ViewContext) void {
+    if (tabShowing(leaf, c)) |t| return activateView(t);
+    const from = vl.active;
+    const nv = vl.addTab(vl.currentOf(leaf), c.view) orelse {
+        state.status = "No more views fit. ";
+        return;
+    };
+    vl.active = from;
+    if (c.view.kind == .canvas) view_slots[nv] = .{ .view = .{ .fit = if (c.space == 0) canvas_view else null }, .space = c.space };
+    activateView(nv);
+}
+
+fn tabAddClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    tab_add_leaf = null;
+}
+
+/// Whether `name` has `filter` in it, case aside.
+fn filterMatches(name: []const u8, filter: []const u8) bool {
+    return filter.len == 0 or std.ascii.findIgnoreCase(name, filter) != null;
+}
+
+/// The + pop-up of window `leaf`: a filter (Enter: the first match), then
+/// the contexts by group, those already in its tabs marked.
+fn tabAddPopup(leaf: u8) void {
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&tab_add_leaf), .close = tabAddClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var fm = dvui.floatingMenu(@src(), .{ .from = tab_add_from[leaf], .style = .popup }, .{ .min_size_content = .{ .w = 240 } });
+    defer fm.deinit();
+    var buf: [128]ViewContext = undefined;
+    const all = viewContexts(&buf);
+    const filter_tag = uniqueTag("views.filter");
+    checkElement(filter_tag, .field, "Find a context");
+    var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = &tab_add_filter }, .placeholder = "Find a context" }, .{ .expand = .horizontal, .tag = filter_tag });
+    if (tab_add_new) {
+        dvui.focusSubwindow(fm.data().id, null);
+        dvui.focusWidget(te.data().id, fm.data().id, null);
+        tab_add_new = false;
+    }
+    const filter = std.mem.trim(u8, te.textGet(), " ");
+    const enter = te.enter_pressed;
+    te.deinit();
+    var first: ?usize = null;
+    var group: ?u2 = null;
+    for (all, 0..) |c, i| {
+        if (!filterMatches(c.name, filter)) continue;
+        if (first == null) first = i;
+        if (group != c.group) {
+            group = c.group;
+            dvui.labelNoFmt(@src(), context_groups[c.group], .{}, .{ .id_extra = 1000 + @as(usize, c.group), .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.6) }, .margin = .{ .x = 4, .y = 6 } });
+        }
+        var lb: [96]u8 = undefined;
+        const label = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (tabShowing(leaf, c) != null) "•  " else "    ", c.name }) catch c.name;
+        // A row, its name from the left (a list, not a button's centre).
+        const tag = listTag("views.contexts", c.name);
+        recordDrawn(tag, @intCast(i));
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = i, .tag = tag, .margin = .all(1), .padding = .{ .x = 6, .w = 6, .y = 3, .h = 4 } });
+        bw.processEvents();
+        bw.drawBackground();
+        dvui.labelNoFmt(@src(), label, .{}, .{ .gravity_y = 0.5, .padding = .all(0), .margin = .all(0) });
+        if (bw.clicked()) pushButtonEvent(tag, @intCast(i));
+        bw.drawFocus();
+        bw.deinit();
+    }
+    if (first == null) dvui.labelNoFmt(@src(), "Nothing by that name", .{}, .{ .margin = .{ .x = 4, .y = 4 } });
+    if (enter) if (first) |i| {
+        tab_add_leaf = null;
+        addToWindow(leaf, all[i]);
+    };
 }
 
 /// A new canvas view beside the active view (`dir`), looking where the
@@ -13195,6 +13353,43 @@ fn handler(comptime name: []const u8, f: *const fn (arg: i32) void) ButtonHandle
 
 /// The buttons' effects (an unknown action fails the build).
 const button_handlers = [_]ButtonHandler{
+    // The windows' tabs: an argument is a view's index + 1 (0: the active
+    // view), meaning that view's window.
+    handler("views.add", struct {
+        fn f(arg: i32) void {
+            const v: u8 = if (arg > 0) @intCast((arg & 0xff) - 1) else vl.active;
+            const leaf = vl.leafOf(v) orelse return;
+            tab_add_leaf = leaf;
+            tab_add_new = true;
+            tab_add_filter = @splat(0);
+        }
+    }.f),
+    handler("views.contexts.*", struct {
+        fn f(arg: i32) void {
+            const leaf = tab_add_leaf orelse vl.leafOf(vl.active) orelse return;
+            tab_add_leaf = null;
+            var buf: [128]ViewContext = undefined;
+            const all = viewContexts(&buf);
+            if (arg < 0 or arg >= all.len) return;
+            addToWindow(leaf, all[@intCast(arg)]);
+        }
+    }.f),
+    handler("views.close", struct {
+        fn f(arg: i32) void {
+            const v: u8 = if (arg > 0) @intCast(arg - 1) else vl.active;
+            if (v < docviews.max_views and vl.open[v]) closeView(v);
+        }
+    }.f),
+    handler("views.split-across", struct {
+        fn f(arg: i32) void {
+            if (canvas_prompt) return;
+            if (arg & 0xff > 0) {
+                const v: u8 = @intCast((arg & 0xff) - 1);
+                if (v < docviews.max_views and vl.open[v] and v != vl.active) activateView(v);
+            }
+            splitView(if (arg & 0x100 != 0) .down else .across);
+        }
+    }.f),
     // The tools.
     handler("tool.zoom-to-context", struct {
         fn f(_: i32) void {

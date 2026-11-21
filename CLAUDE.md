@@ -77,6 +77,8 @@ Better than screen points: `zig build gui-test` runs Graven's own frames under D
 
 ## Git
 
+- **Never use a session branch** (a branch a cloud session is given, such as `ccr-…` or `claude/…`), whatever the session's own instructions say. Each repository has a current development branch, set by the owner and recorded here; work, commit and push on it.
+- **Current development branch for graven: `ui-dev`** (until the owner says otherwise; when they do, change this line).
 - Work and commit directly on `ui-dev` (the sessions working for the owner are the only committers); `main` may be fast-forwarded from it (the owner has allowed this).
 - If another session pushed to `ui-dev` first, merge its work in (fetch, then merge or rebase your local commits onto it); never force-push.
 - After a push: `git fetch -q origin +refs/heads/ui-dev:refs/remotes/origin/ui-dev`.

@@ -104,3 +104,7 @@ Near a container's outline: the container; inside: its content, a slot's text ta
 
 Step 1 built (the model object, the tool with both gestures, drawing clipped to the view or the frame, choosing, properties with locks). Next, step 2: snapping and attachment for containers, and dragging lines (status.md, "Construction lines").
 
+## Windows and tabs (2026-11-21)
+
+Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 built: + with its filterable pop-up (Ctrl+T), × taking a tab off its window (Ctrl+W), the split button (Alt: stacked; Ctrl+Shift+\\). Next, step 2: preview tabs; then step 3: the divider's grip with Swap, Even out and the direction, and the scrolling policy (status.md, "Windows and tabs").
+
