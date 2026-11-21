@@ -228,6 +228,31 @@ pub const Layout = struct {
         return true;
     }
 
+    /// The split holding view `v`'s window, if it is in one.
+    pub fn splitOf(l: *const Layout, v: u8) ?u8 {
+        const leaf = l.leafOf(v) orelse return null;
+        const p = l.nodes[leaf].parent;
+        return if (p != none and l.nodes[p].split) p else null;
+    }
+
+    /// Split `n`'s parts change places, each keeping its size.
+    pub fn swap(l: *Layout, n: u8) void {
+        if (!l.nodes[n].split) return;
+        const nd = &l.nodes[n];
+        std.mem.swap(u8, &nd.first, &nd.second);
+        nd.ratio = 1 - nd.ratio;
+    }
+
+    /// Split `n`'s parts the same size.
+    pub fn evenOut(l: *Layout, n: u8) void {
+        if (l.nodes[n].split) l.nodes[n].ratio = 0.5;
+    }
+
+    /// Split `n` side by side becomes stacked, and back.
+    pub fn turn(l: *Layout, n: u8) void {
+        if (l.nodes[n].split) l.nodes[n].dir = if (l.nodes[n].dir == .across) .down else .across;
+    }
+
     /// Moves view `v` to where view `at` is among the same window's tabs
     /// (`at` moving one along); nothing when they are in different windows.
     pub fn placeTab(l: *Layout, v: u8, at: u8) void {
@@ -348,4 +373,22 @@ test "a tab moved to another's place" {
     l.placeTab(c, b);
     try std.testing.expectEqualSlices(u8, &.{ 0, b, c }, l.nodes[leaf].tabList());
     try std.testing.expectEqual(c, l.currentOf(leaf));
+}
+
+test "a split's parts swapped, evened out, turned" {
+    var l = Layout.init(.{});
+    const b = l.split(0, .across, .{ .kind = .sheet, .target = 1 }).?;
+    const n = l.splitOf(b).?;
+    try std.testing.expectEqual(n, l.splitOf(0).?);
+    l.nodes[n].ratio = 0.3;
+    const first = l.nodes[n].first;
+    l.swap(n);
+    try std.testing.expectEqual(first, l.nodes[n].second);
+    try std.testing.expectApproxEqAbs(0.7, l.nodes[n].ratio, 1e-6);
+    try std.testing.expect(l.valid());
+    l.evenOut(n);
+    try std.testing.expectEqual(0.5, l.nodes[n].ratio);
+    l.turn(n);
+    try std.testing.expectEqual(.down, l.nodes[n].dir);
+    try std.testing.expect(l.splitOf(0) != null and Layout.init(.{}).splitOf(0) == null);
 }

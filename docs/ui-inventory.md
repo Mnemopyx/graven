@@ -23,6 +23,15 @@ What the app opens on, before there is a document: none of the canvas's interfac
   - **View:** Zoom to context; Show text construction; pane appearance options (ghost style, deep background, vivid colour, halo, hot edges).
 - **Theme:** follows the desktop's.
 
+## Scrolling (decided 2026-11-21)
+
+- **Document space** (vector content: canvases, frames, manufacturing views' parts) pans and zooms; it has no scroll bars. Rulers show where the view is.
+- **Interface content** (DVUI widgets, text set by FreeType: panes, properties, the Browser, legend sheets, pop-ups, dialogs) scrolls, with scroll bars where it overflows.
+
+## Splits
+
+- Each split's divider drags to resize. Its grip (⋮ in the tab strips' row when side by side, ⋯ at the middle when stacked) or a click on the divider shows its options: Swap sides, Even out, Stacked or Side by side. A double-click on the divider evens it out.
+
 ## Panes (`ghost.zig`)
 
 Four panes on the window's edges, each with a tab and three modes: **ghost** (see-through over the canvas), **docked** (beside it), **hidden**. Each has its own hue. With hot edges, holding the pointer on a tab opens its pane.

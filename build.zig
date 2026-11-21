@@ -263,8 +263,11 @@ pub fn build(b: *std.Build) void {
     // The GUI driven without a screen: Graven's frames under DVUI's testing
     // backend, its widgets found by tag (apps/gui/harness_test.zig).
     const gui_test_step = b.step("gui-test", "Drive the GUI headless: the examples made in it");
+    // Only the GUI tests whose names hold this text (`-Dgui-filter=tabs`):
+    // a change to the interface runs the tests about it.
+    const gui_filter = b.option([]const u8, "gui-filter", "Run only the GUI tests whose names contain this");
     if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .testing })) |dvui_dep| {
-        const t = b.addTest(.{ .root_module = b.createModule(.{
+        const t = b.addTest(.{ .filters = if (gui_filter) |f| b.dupeStrings(&.{f}) else &.{}, .root_module = b.createModule(.{
             .root_source_file = b.path("apps/gui/harness_test.zig"),
             .target = target,
             .optimize = optimize,

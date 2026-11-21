@@ -137,6 +137,18 @@ pub const testing_api = struct {
         var buf: [docviews.max_views]u8 = undefined;
         return vl.viewsOf(.sheet, @intFromEnum(state.model.sheets.items[i].id), &buf).len;
     }
+    /// The split holding the active view's window: its direction (0 side
+    /// by side, 1 stacked), share, and whether the active view's window is
+    /// its first part; null when there is no split.
+    pub fn activeSplit() ?struct { dir: u1, ratio: f32, first: bool } {
+        const n = vl.splitOf(vl.active) orelse return null;
+        const nd = vl.nodes[n];
+        return .{ .dir = @intFromBool(nd.dir == .down), .ratio = nd.ratio, .first = nd.first == vl.leafOf(vl.active).? };
+    }
+    /// Whether a split's options are shown.
+    pub fn dividerMenuOpen() bool {
+        return divider_menu != null;
+    }
     /// Whether view `v`'s tab is a preview.
     pub fn isPreview(v: u8) bool {
         return view_preview[v];
@@ -5966,8 +5978,138 @@ fn viewNode(n: u8) void {
         .handle_size = 5,
     }, .{ .expand = .both, .id_extra = n });
     defer paned.deinit();
+    // A press on the divider twice in a row: its parts evened out.
+    // The divider pressed (dvui's paned takes the press, its handle 5
+    // wide); let go without moving: the split's options (the grip lies
+    // over the divider); pressed twice in a row: its parts evened out.
+    {
+        const rs = paned.data().contentRectScale();
+        const across = node.dir == .across;
+        const len = if (across) rs.r.w else rs.r.h;
+        const line = (if (across) rs.r.x else rs.r.y) + (len - 5 * rs.s) * vl.nodes[n].ratio + 5 * rs.s;
+        for (dvui.events()) |*e| {
+            if (e.evt != .mouse or !e.evt.mouse.button.pointer()) continue;
+            const m = e.evt.mouse;
+            switch (m.action) {
+                .press => {
+                    const along = if (across) m.p.x else m.p.y;
+                    if (!e.handled or !rs.r.contains(m.p) or @abs(along - line) > 2.5 * rs.s + 0.5) continue;
+                    const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
+                    divider_held = n;
+                    divider_ratio = vl.nodes[n].ratio;
+                    if (divider_press.node == n and now - divider_press.ms < 400) {
+                        vl.evenOut(n);
+                        divider_press = .{};
+                        divider_menu = null;
+                        divider_twice = true;
+                    } else {
+                        divider_press = .{ .node = n, .ms = now };
+                        divider_twice = false;
+                    }
+                },
+                .release => if (divider_held == n) {
+                    if (!divider_twice and vl.nodes[n].ratio == divider_ratio) openDividerMenu(n);
+                    divider_twice = false;
+                    divider_held = null;
+                },
+                else => {},
+            }
+        }
+    }
     if (paned.showFirst()) viewNode(node.first);
     if (paned.showSecond()) viewNode(node.second);
+    dividerGrip(n, paned.data().contentRect());
+}
+
+/// The divider a press holds (being dragged), and the last press on one,
+/// for double-clicks.
+var divider_held: ?u8 = null;
+var divider_press: struct { node: u8 = docviews.none, ms: i64 = 0 } = .{};
+/// The divider's share when pressed (unchanged at release: a click), and
+/// whether the press was a double-click's second.
+var divider_ratio: f32 = 0;
+var divider_twice = false;
+/// The split whose options are shown (the grip's pop-up), and where.
+var divider_menu: ?u8 = null;
+var divider_from: [docviews.max_nodes]dvui.Rect.Natural = @splat(.{});
+
+/// Split `n`'s grip, on its divider: within the tab strips when side by
+/// side, at the middle when stacked. A click shows the split's options;
+/// the divider itself drags.
+fn dividerGrip(n: u8, area: dvui.Rect) void {
+    const nd = vl.nodes[n];
+    // Where the divider takes a press (dvui's paned, handle 5: its gap
+    // shared out by the ratio, then a little on).
+    const at = (if (nd.dir == .across) area.w else area.h) - 5;
+    const line = at * nd.ratio + 4;
+    const r: dvui.Rect = if (nd.dir == .across)
+        .{ .x = line - 8, .y = 3, .w = 16, .h = tab_strip_h - 7 }
+    else
+        .{ .x = area.w / 2 - 14, .y = line - 7, .w = 28, .h = 14 };
+    const tag = uniqueTag("views.divider");
+    recordDrawn(tag, @as(i32, n) + 1);
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{ .rect = r, .id_extra = n, .tag = tag, .background = true, .padding = .all(0), .margin = .all(0), .color_fill = .{ .color = colors.titlebar }, .border = .all(1), .color_border = .{ .color = colors.edge.opacity(0.5) } });
+    bw.processEvents();
+    bw.drawBackground();
+    dvui.icon(@src(), "Split options", if (nd.dir == .across) dvui.entypo.dots_three_vertical else dvui.entypo.dots_three_horizontal, .{ .fill_color = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.7) } }, .{ .expand = .both, .gravity_x = 0.5, .gravity_y = 0.5, .padding = .all(2) });
+    if (bw.clicked()) pushButtonEvent(tag, @as(i32, n) + 1);
+    const rs = bw.data().borderRectScale().r;
+    divider_from[n] = rs.toNatural();
+    dvui.tooltip(@src(), .{ .active_rect = rs }, "Split: click for options; drag the divider to resize; double-click it to even out", .{}, .{ .id_extra = n });
+    bw.deinit();
+    // From the frame after it was asked for: the click that asked would
+    // close it (a press outside a pop-up).
+    if (divider_menu == n and divider_menu_frame != dvui.frameTimeNS()) dividerMenu(n);
+}
+
+/// Shows split `n`'s options (taking the keys: Esc closes them).
+fn openDividerMenu(n: ?u8) void {
+    divider_menu = n;
+    divider_menu_new = n != null;
+    divider_menu_frame = dvui.frameTimeNS();
+    dvui.refresh(null, @src(), null);
+}
+var divider_menu_new = false;
+var divider_menu_frame: i128 = 0;
+
+fn dividerMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    divider_menu = null;
+}
+
+/// Split `n`'s options: swap its sides, even it out, turn it.
+fn dividerMenu(n: u8) void {
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&divider_menu), .close = dividerMenuClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var fm = dvui.floatingMenu(@src(), .{ .from = divider_from[n], .style = .popup }, .{ .id_extra = n });
+    defer fm.deinit();
+    if (divider_menu_new) {
+        dvui.focusSubwindow(fm.data().id, null);
+        divider_menu_new = false;
+    }
+    const turn_label = if (vl.nodes[n].dir == .across) "Stacked" else "Side by side";
+    inline for (.{ "views.swap", "views.even-out", "views.turn" }, 0..) |id, i| {
+        const tag = uniqueTag(id);
+        recordDrawn(tag, @as(i32, n) + 1);
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = i, .tag = tag, .margin = .all(1), .padding = .{ .x = 8, .w = 8, .y = 3, .h = 4 } });
+        bw.processEvents();
+        bw.drawBackground();
+        dvui.labelNoFmt(@src(), if (i == 2) turn_label else comptime elements.get(id).label, .{}, .{ .padding = .all(0), .margin = .all(0) });
+        if (bw.clicked()) pushButtonEvent(tag, @as(i32, n) + 1);
+        bw.drawFocus();
+        bw.deinit();
+    }
+}
+
+/// The split a button's argument means: split `arg - 1`; 0, the one
+/// holding the active view's window.
+fn argSplit(arg: i32) ?u8 {
+    if (arg > 0) {
+        const n: u8 = @intCast(arg - 1);
+        return if (n < docviews.max_nodes and vl.nodes[n].split) n else null;
+    }
+    return vl.splitOf(vl.active);
 }
 
 /// A tab strip's height, logical: fixed, so what lies over the views
@@ -13437,6 +13579,29 @@ const button_handlers = [_]ButtonHandler{
             tab_add_leaf = leaf;
             tab_add_new = true;
             tab_add_filter = @splat(0);
+        }
+    }.f),
+    handler("views.divider", struct {
+        fn f(arg: i32) void {
+            openDividerMenu(argSplit(arg));
+        }
+    }.f),
+    handler("views.swap", struct {
+        fn f(arg: i32) void {
+            divider_menu = null;
+            vl.swap(argSplit(arg) orelse return);
+        }
+    }.f),
+    handler("views.even-out", struct {
+        fn f(arg: i32) void {
+            divider_menu = null;
+            vl.evenOut(argSplit(arg) orelse return);
+        }
+    }.f),
+    handler("views.turn", struct {
+        fn f(arg: i32) void {
+            divider_menu = null;
+            vl.turn(argSplit(arg) orelse return);
         }
     }.f),
     handler("views.contexts.*", struct {

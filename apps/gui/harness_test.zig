@@ -1737,3 +1737,39 @@ test "preview tabs: a context opened from the Browser takes the window's preview
     try r.frames(2);
     try std.testing.expect(!api.isPreview(api.activeIndex()));
 }
+
+test "tabs: a split's grip shows its options: swap sides, even out, stacked; a double-click on the divider evens it out" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("views.split-across");
+    try r.frames(2);
+    var sp = api.activeSplit().?;
+    try std.testing.expect(!sp.first);
+    try std.testing.expectEqual(0, sp.dir);
+    // The grip: its options; Swap sides puts the active view first.
+    try r.press("views.divider");
+    try r.frames(2);
+    try std.testing.expect(api.dividerMenuOpen());
+    try r.press("views.swap");
+    try r.frames(2);
+    try std.testing.expect(!api.dividerMenuOpen());
+    try std.testing.expect(api.activeSplit().?.first);
+    // Stacked.
+    try r.press("views.divider");
+    try r.frames(2);
+    try r.press("views.turn");
+    try r.frames(2);
+    sp = api.activeSplit().?;
+    try std.testing.expectEqual(1, sp.dir);
+    // Dragged off the middle, then the divider double-clicked: even again.
+    const g = try r.rectOf("views.divider");
+    const mid: dvui.Point.Physical = .{ .x = g.x - 40, .y = g.y + g.h / 2 };
+    try r.drag(mid, .{ .x = mid.x, .y = mid.y + 200 });
+    try std.testing.expect(api.activeSplit().?.ratio > 0.51);
+    const g2 = try r.rectOf("views.divider");
+    const at: dvui.Point.Physical = .{ .x = g2.x - 40, .y = g2.y + g2.h / 2 };
+    try r.clickAt(at);
+    try r.clickAt(at);
+    try std.testing.expectApproxEqAbs(0.5, api.activeSplit().?.ratio, 1e-6);
+}

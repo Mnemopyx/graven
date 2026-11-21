@@ -42,7 +42,10 @@ $Z build gui-build -Doptimize=ReleaseFast --prefix /tmp/rel   # for timing
 $Z build fab -Docct-prebuilt  # graven-fab, with the OCCT bridge (prebuilt release archive)
 $Z build gui-build -Docct-prebuilt   # the GUI with OCCT: manufacturing views in 3D (without it, they say so)
 $Z build gui-test             # the GUI driven headless (apps/gui/harness_test.zig): both examples made in it, compared with their files
+$Z build gui-test -Dgui-filter=tabs   # only the GUI tests whose names hold "tabs"
 ```
+
+Test what a change can affect, not everything. Interface work (widgets, panes, views, tabs, windows) stays apart from the document and its geometry, so it runs its own GUI tests (`-Dgui-filter`) and the views tests, not the example and SVG regressions.
 
 Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2; on 2026-11-18, when a shifted pair's base symbol moved into a slot of its own; and on 2026-11-20, when the keyboard became six tracks laid out in advance: the same geometry to 3e-14 mm, its row positions now typed rather than summed.)
 
