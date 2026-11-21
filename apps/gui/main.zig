@@ -149,6 +149,15 @@ pub const testing_api = struct {
     pub fn dividerMenuOpen() bool {
         return divider_menu != null;
     }
+    /// The shown space's layers, bottom first.
+    pub fn shownLayers() []const layout.model.Layer {
+        if (shown_space >= state.model.spaces.items.len) return &.{};
+        return state.model.spaces.items[shown_space].layers.items;
+    }
+    /// The Tools pane's tab shown.
+    pub fn toolsTabName() []const u8 {
+        return @tagName(if (tools_tab.applies()) tools_tab else .tools);
+    }
     /// Whether view `v`'s tab is a preview.
     pub fn isPreview(v: u8) bool {
         return view_preview[v];
@@ -2403,7 +2412,7 @@ var tree_pane: ghost_pane.Pane = .{ .id = "browser", .name = "Browser", .edge = 
 var tools_pane: ghost_pane.Pane = .{ .id = "tools", .name = "Tools", .edge = .right, .size = default_properties_width, .look = .{} };
 var props_pane: ghost_pane.Pane = .{ .id = "properties", .name = "Properties", .edge = .right, .size = default_properties_width, .look = .{} };
 /// The tool palette's height, logical pixels.
-var tools_height: f32 = 120;
+var tools_height: f32 = 260;
 const split_grip = 8;
 /// The grip between the right edge's panes is being dragged.
 var split_dragging = false;
@@ -12512,9 +12521,168 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
 /// The tool palette, in whatever holds it.
 fn toolsContent() void {
     if (canvas_prompt) return;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer row.deinit();
+    const shown = toolsPaneTabs();
     var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
-    toolPalette();
+    switch (shown) {
+        .tools => toolPalette(),
+        .layers => layersPalette(),
+    }
+}
+
+// The Tools pane's tabs ------------------------------------------------------
+//
+// The Tools pane holds the palettes that apply to what the active view is
+// doing, one a tab: an icon each, with its tooltip, stacked down the pane's
+// inner edge (toward the views). A tab that does not apply to the active
+// view is not shown; the one chosen, when it does not apply, gives way to
+// the first that does.
+
+const ToolsTab = enum {
+    /// Drawing and layout: the tools.
+    tools,
+    /// The active view's layers.
+    layers,
+
+    fn icon(t: ToolsTab) icons.Icon {
+        return switch (t) {
+            .tools => .toolbox,
+            .layers => .stack,
+        };
+    }
+
+    fn tip(t: ToolsTab) []const u8 {
+        return switch (t) {
+            .tools => "Tools: drawing and layout",
+            .layers => "Layers: show or hide each; drag to reorder the stack",
+        };
+    }
+
+    /// Whether it applies to the active view.
+    fn applies(t: ToolsTab) bool {
+        return switch (t) {
+            .tools => true,
+            .layers => activeKind() == .canvas and state.model.spaces.items.len > 0,
+        };
+    }
+};
+
+/// The Tools pane's tab chosen.
+var tools_tab: ToolsTab = .tools;
+
+/// The tabs down the pane's inner edge; the one shown.
+fn toolsPaneTabs() ToolsTab {
+    const shown: ToolsTab = if (tools_tab.applies()) tools_tab else .tools;
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .vertical, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).lighten(-4) }, .padding = .{ .y = 4, .h = 4 }, .border = .{ .w = 1 }, .color_border = .{ .color = dvui.themeGet().color(.window, .border).opacity(0.5) } });
+    defer col.deinit();
+    inline for (comptime std.enums.values(ToolsTab)) |t| if (t.applies()) {
+        const id = "tools-pane." ++ @tagName(t);
+        const tag = uniqueTag(id);
+        recordDrawn(tag, 0);
+        const on = t == shown;
+        if (icons.button(@src(), comptime t.icon(), t.tip(), .{ .size = 18, .id_extra = @intFromEnum(t), .tone = if (on) dvui.themeGet().focus.opacity(0.6) else null, .opts = .{
+            .tag = tag,
+            .margin = .{ .x = 2, .w = 2, .y = 1, .h = 1 },
+            .padding = .all(5),
+            .background = on,
+            .color_fill = .{ .color = dvui.themeGet().color(.control, .fill) },
+            .corners = .all(3),
+        } })) pushButtonEvent(tag, 0);
+    };
+    return shown;
+}
+
+// The Layers palette ---------------------------------------------------------
+//
+// The active view's space's layers, top of the stack first: each shown or
+// hidden by its eye, chosen by its name (new objects go on the layer
+// chosen), and dragged by its grip to another place in the stack (the
+// compositing order: what is higher is drawn over what is lower). A drag
+// is one undo step.
+
+fn layersPalette() void {
+    const saved_group = pushGroup("layers-palette");
+    defer popGroup(saved_group);
+    if (shown_space >= state.model.spaces.items.len) return;
+    const space = shown_space;
+    const sp = state.model.spaces.items[space];
+    const n = sp.layers.items.len;
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(6) });
+    defer col.deinit();
+    dvui.labelNoFmt(@src(), "Layers, top first", .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) }, .margin = .{ .x = 2, .h = 4 } });
+    var removed: ?usize = null;
+    var before: ?usize = null;
+    {
+        var reorder = dvui.reorder(@src(), .{}, .{ .expand = .horizontal });
+        defer reorder.deinit();
+        var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+        defer list.deinit();
+        for (0..n) |k| {
+            // Shown top first: row k is layer n-1-k.
+            const li = n - 1 - k;
+            const l = sp.layers.items[li];
+            var item = reorder.reorderable(@src(), .{}, .{ .id_extra = @intCast(@intFromEnum(l.id)), .expand = .horizontal });
+            defer item.deinit();
+            if (item.removed()) {
+                removed = k;
+            } else if (item.insertBefore()) {
+                before = k;
+            }
+            const chosen = l.id == newObjectLayer();
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = if (chosen) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) }, .corners = .all(3), .margin = .{ .y = 1, .h = 1 } });
+            defer row.deinit();
+            // The eye: shown or hidden.
+            {
+                listItem("layers-palette", l.name);
+                const base = next_element orelse "layers-palette";
+                next_element = null;
+                const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.shown", .{base}) catch base);
+                checkElement(tag, .button, "Show or hide this layer");
+                recordDrawn(tag, @intCast(li));
+                const eye_opts: icons.ButtonOptions = .{ .size = 16, .id_extra = li, .opts = .{ .tag = tag, .padding = .all(3), .gravity_y = 0.5 } };
+                const pressed = if (l.visible) icons.button(@src(), .eye, "Shown: click to hide", eye_opts) else icons.button(@src(), .eye_slash, "Hidden: click to show", eye_opts);
+                if (pressed) pushButtonEvent(tag, @intCast(li));
+            }
+            // Its name: chooses it.
+            {
+                listItem("layers-palette", l.name);
+                const base = next_element orelse "layers-palette";
+                next_element = null;
+                const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.choose", .{base}) catch base);
+                checkElement(tag, .button, l.name);
+                recordDrawn(tag, @intCast(li));
+                var bw: dvui.ButtonWidget = undefined;
+                bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = li, .tag = tag, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .margin = .all(0), .background = false, .gravity_y = 0.5 });
+                bw.processEvents();
+                var buf: [96]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "{s}{s}", .{ l.name, if (l.locked) " (locked)" else "" }) catch l.name;
+                dvui.labelNoFmt(@src(), text, .{}, .{ .padding = .all(0), .margin = .all(0), .color_text = if (l.visible) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.5) } });
+                if (bw.clicked()) pushButtonEvent(tag, @intCast(li));
+                bw.deinit();
+            }
+            // The grip: drag to another place.
+            _ = dvui.ReorderWidget.draggable(@src(), .{ .reorderable = item }, .{ .expand = .vertical, .gravity_x = 1, .gravity_y = 0.5, .min_size_content = .{ .w = 14, .h = 18 } });
+        }
+        if (reorder.finalSlot()) before = n;
+    }
+    if (removed) |r| if (before) |b| moveLayerInStack(space, n, r, b);
+    keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("layers-palette.add-layer") });
+}
+
+/// The layer shown at row `r` (top first) of a stack of `n`, dropped
+/// before row `b` (`n`: at the bottom): moved there, one undo step.
+fn moveLayerInStack(space: usize, n: usize, r: usize, b: usize) void {
+    const to_row = if (b > r) b - 1 else b;
+    if (to_row == r) return;
+    var li = n - 1 - r;
+    const to = n - 1 - to_row;
+    const key = mergeKey(.{ "layer-drag", space, hist.log.items.len });
+    while (li != to) {
+        li = actM(key, .moveLayer, .{ space, li, to > li }) catch return;
+    }
+    if (state.context == .layer and state.context.layer.space == space) state.context = .{ .layer = .{ .space = space, .index = to } };
 }
 
 /// The context's properties (and the active tool's choices), in whatever
@@ -14180,6 +14348,48 @@ const button_handlers = [_]ButtonHandler{
             if (checks_arena) |*ar| ar.deinit();
             checks_arena = null;
             checks = &.{};
+        }
+    }.f),
+    // The Tools pane's tabs, and the Layers palette (the active view's
+    // space; its argument a layer's index, bottom first).
+    handler("tools-pane.tools", struct {
+        fn f(_: i32) void {
+            tools_tab = .tools;
+        }
+    }.f),
+    handler("tools-pane.layers", struct {
+        fn f(_: i32) void {
+            tools_tab = .layers;
+        }
+    }.f),
+    handler("layers-palette.*.shown", struct {
+        fn f(arg: i32) void {
+            if (shown_space >= state.model.spaces.items.len) return;
+            const li: usize = @intCast(arg);
+            const list = state.model.spaces.items[shown_space].layers.items;
+            if (li >= list.len) return;
+            var l = list[li];
+            l.visible = !l.visible;
+            act(.setLayer, .{ shown_space, li, l }) catch {};
+        }
+    }.f),
+    handler("layers-palette.*.choose", struct {
+        fn f(arg: i32) void {
+            if (shown_space >= state.model.spaces.items.len) return;
+            const li: usize = @intCast(arg);
+            const list = state.model.spaces.items[shown_space].layers.items;
+            if (li >= list.len) return;
+            state.context = .{ .layer = .{ .space = shown_space, .index = li } };
+            active_layer = list[li].id;
+        }
+    }.f),
+    handler("layers-palette.add-layer", struct {
+        fn f(_: i32) void {
+            if (shown_space >= state.model.spaces.items.len) return;
+            var buf: [32]u8 = undefined;
+            const li = act(.addLayer, .{ shown_space, state.model.nextLayerName(shown_space, &buf) }) catch return;
+            state.context = .{ .layer = .{ .space = shown_space, .index = li } };
+            active_layer = state.model.spaces.items[shown_space].layers.items[li].id;
         }
     }.f),
     // A space's layers.

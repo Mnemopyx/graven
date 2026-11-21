@@ -72,7 +72,7 @@ pub const PaneSet = struct {
 pub const Layout = struct {
     panes: [pane_count]PaneSet,
     /// The tools pane's height in the right column.
-    tools_height: f32 = 120,
+    tools_height: f32 = 260,
 
     pub fn pane(l: *const Layout, id: PaneId) PaneSet {
         return l.panes[@intFromEnum(id)];
@@ -103,14 +103,14 @@ pub const builtins = [_]Builtin{
         .{ .mode = .auto, .size = 290, .text_scale = 0.9 },
         .{ .mode = .auto, .size = 290, .text_scale = 0.9 },
         .{ .mode = .pinned, .text_scale = 0.9 },
-    }, .tools_height = 110 } },
+    }, .tools_height = 200 } },
     // Larger text and controls throughout, the panes widened to match.
     .{ .name = "large-text", .layout = .{ .panes = .{
         .{ .mode = .auto, .size = 300, .text_scale = 1.25 },
         .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
         .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
         .{ .mode = .pinned, .text_scale = 1.25 },
-    }, .tools_height = 150 } },
+    }, .tools_height = 300 } },
 };
 
 pub fn builtin(name: []const u8) ?Layout {

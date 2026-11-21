@@ -43,6 +43,10 @@ pub const Icon = enum {
     plus,
     square_split_horizontal,
     square_split_vertical,
+    toolbox,
+    eye,
+    eye_slash,
+    dots_six_vertical,
 
     /// The SVG, as Phosphor ships it ("push-pin-duotone.svg").
     fn svg(comptime i: Icon) []const u8 {

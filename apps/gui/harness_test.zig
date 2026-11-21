@@ -1773,3 +1773,43 @@ test "tabs: a split's grip shows its options: swap sides, even out, stacked; a d
     try r.clickAt(at);
     try std.testing.expectApproxEqAbs(0.5, api.activeSplit().?.ratio, 1e-6);
 }
+
+test "the Tools pane's tabs: Layers shows the view's layers, top first; an eye hides one; a drag by its grip moves it in the stack, one undo step" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try std.testing.expectEqualStrings("tools", api.toolsTabName());
+    try r.press("tools-pane.layers");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("layers", api.toolsTabName());
+    // Two more layers: Layer1 at the bottom, Layer3 on top.
+    try r.press("layers-palette.add-layer");
+    try r.frames(2);
+    try r.press("layers-palette.add-layer");
+    try r.frames(2);
+    var ls = api.shownLayers();
+    try std.testing.expectEqual(3, ls.len);
+    try std.testing.expectEqualStrings("Layer3", ls[2].name);
+    // Its eye hides Layer2.
+    try r.press("layers-palette.layer2.shown");
+    try r.frames(2);
+    ls = api.shownLayers();
+    try std.testing.expect(!ls[1].visible);
+    try std.testing.expect(ls[2].visible);
+    // Layer3, shown first, dragged by its grip (at its row's right end)
+    // below Layer1: to the bottom of the stack.
+    const top = try r.rectOf("layers-palette.layer3.choose");
+    const bottom = try r.rectOf("layers-palette.layer1.choose");
+    const grip_x = top.x + top.w + 8;
+    try r.drag(.{ .x = grip_x, .y = top.y + top.h / 2 }, .{ .x = grip_x, .y = bottom.y + bottom.h * 1.2 });
+    try r.frames(3);
+    ls = api.shownLayers();
+    try std.testing.expectEqualStrings("Layer3", ls[0].name);
+    try std.testing.expectEqualStrings("Layer1", ls[1].name);
+    try std.testing.expectEqualStrings("Layer2", ls[2].name);
+    // One undo step: undone at once.
+    try r.run("edit.undo");
+    try r.frames(2);
+    ls = api.shownLayers();
+    try std.testing.expectEqualStrings("Layer3", ls[2].name);
+}
