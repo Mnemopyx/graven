@@ -2361,7 +2361,7 @@ fn frame() !dvui.App.Result {
         const status_h: f32 = if (bottom_pane.mode == .docked) statusHeight() else 0;
         const body_h = @max(0, size.h - status_h - t);
         // A side pane stops above a ghost bottom bar, so they never overlap.
-        const side_h = @max(0, body_h - if (bottom_pane.mode == .ghost) @as(f32, statusHeight()) else 0);
+        const side_h = body_h;
         {
             var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .rect = .{ .x = 0, .y = 0, .w = size.w, .h = body_h } });
             defer body.deinit();
@@ -2400,7 +2400,7 @@ fn frame() !dvui.App.Result {
     if (quit_now) return .close;
     // Ghosts answer the pointer on their tabs when hot edges are on;
     // auto-hide panes always. Then the slides, and the hot corners.
-    ghost_pane.hotEdges(&all_panes, root.data().id, hot_edges);
+    ghost_pane.hotEdges(&all_panes, root.data().id);
     ghost_pane.slide(&all_panes, root.data().id);
     hotCorners(root.data().id);
     sparkFrameEnd();
@@ -2415,12 +2415,12 @@ fn frame() !dvui.App.Result {
 // pane's mode (ghost over the canvas, docked beside it, or hidden), and
 // whose body makes a ghost pane active or ghost again.
 
-var tree_pane: ghost_pane.Pane = .{ .id = "browser", .name = "Browser", .edge = .left, .size = default_tree_width, .look = .{ .hue = 165 } };
+var tree_pane: ghost_pane.Pane = .{ .id = "browser", .name = "Browser", .edge = .left, .size = default_tree_width, .look = .{} };
 /// The right edge holds two panes, one above the other: the tool palette
 /// and the properties. They meet at `tools_height` below the top, which
 /// the grip between their tabs moves.
-var tools_pane: ghost_pane.Pane = .{ .id = "tools", .name = "Tools", .edge = .right, .size = default_properties_width, .look = .{ .hue = 330 } };
-var props_pane: ghost_pane.Pane = .{ .id = "properties", .name = "Properties", .edge = .right, .size = default_properties_width, .look = .{ .hue = 230 } };
+var tools_pane: ghost_pane.Pane = .{ .id = "tools", .name = "Tools", .edge = .right, .size = default_properties_width, .look = .{} };
+var props_pane: ghost_pane.Pane = .{ .id = "properties", .name = "Properties", .edge = .right, .size = default_properties_width, .look = .{} };
 /// The tool palette's height, logical pixels.
 var tools_height: f32 = 120;
 const split_grip = 8;
@@ -2428,7 +2428,7 @@ const split_grip = 8;
 var split_dragging = false;
 const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
-var bottom_pane: ghost_pane.Pane = .{ .id = "expression-bar", .name = "Expression bar", .edge = .bottom, .size = default_status_height, .mode = .docked, .look = .{ .hue = 300 } };
+var bottom_pane: ghost_pane.Pane = .{ .id = "expression-bar", .name = "Expression bar", .edge = .bottom, .size = default_status_height, .mode = .docked, .look = .{} };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
 
 // Files ------------------------------------------------------------------------
@@ -3541,7 +3541,6 @@ const Prefs = struct {
     scroll: ScrollMode,
     display: display.Correction,
     px_per_mm: ?f32,
-    hot_edges: bool,
     /// The pane layout in use: its name and how the panes are now.
     layout_name: [40]u8,
     layout_name_len: usize,
@@ -3561,7 +3560,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .scroll = scroll_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .scroll = scroll_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -3614,9 +3613,6 @@ fn loadPrefs() void {
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
     };
-    if (ps.get("panes.hot_edges")) |v| if (v == .boolean) {
-        hot_edges = v.boolean;
-    };
     if (ps.get("panes.auto_hide_below")) |v| if (tomlFloat(v)) |f| {
         auto_hide_below = @max(0, f);
     };
@@ -3638,7 +3634,7 @@ fn loadPrefs() void {
     // From before layouts: the panes' modes and the split, carried over
     // into the layout (written back as this machine's overrides).
     if (ps.get("panes.layout") == null) {
-        for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (std.meta.stringToEnum(ghost_pane.Mode, v.string)) |m| {
+        for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (modeByName(v.string)) |m| {
             p.mode = m;
         };
         if (ps.get("panes.tools_height")) |v| if (tomlFloat(v)) |f| {
@@ -3736,7 +3732,6 @@ fn savePrefsIfChanged() void {
     ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
     // Measured, else the estimate (written as 0: not measured).
     ps.put("display.px_per_mm", .{ .float = if (now.px_per_mm) |v| roundTo(v, 10000) else 0 }, .local);
-    ps.put("panes.hot_edges", .{ .boolean = now.hot_edges }, .shared);
     // The layout in use is this machine's; what has been changed by hand
     // goes in as this machine's overrides of it.
     ps.put("panes.layout", .{ .string = layout_name }, .local);
@@ -3745,7 +3740,6 @@ fn savePrefsIfChanged() void {
 }
 
 /// Hot edges: holding the pointer on a ghost pane's tab activates it.
-var hot_edges = false;
 
 // Pane layouts ----------------------------------------------------------------
 //
@@ -3952,7 +3946,7 @@ fn narrowPanes() void {
     for (all_panes) |p| {
         if (p.edge != .left and p.edge != .right) continue;
         if (narrow) {
-            if (p.mode == .ghost or p.mode == .docked) {
+            if (p.mode == .docked) {
                 p.forced = p.mode;
                 p.mode = .auto;
                 ghost_pane.deactivate(p);
@@ -4207,9 +4201,9 @@ fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
 /// fitting a view keeps its subject clear of them.
 fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
     return .{
-        .left = if (tree_pane.mode == .ghost) tree_pane.size + overlay_gap else 0,
-        .right = if (!rightDocked() and (props_pane.mode == .ghost or tools_pane.mode == .ghost)) props_pane.size + overlay_gap else 0,
-        .bottom = if (bottom_pane.mode == .ghost) statusHeight() + overlay_gap else 0,
+        .left = 0,
+        .right = 0,
+        .bottom = 0,
     };
 }
 
@@ -4225,7 +4219,13 @@ fn overlayOptions(id: usize) dvui.Options {
     };
 }
 
-/// The ghost panes over the canvas, attached to its edges, then the key
+/// A pane mode by name; "ghost" (gone) is auto-hide.
+fn modeByName(name: []const u8) ?ghost_pane.Mode {
+    const m = layouts.Mode.parse(name) orelse return null;
+    return std.meta.stringToEnum(ghost_pane.Mode, @tagName(m));
+}
+
+/// The panes over the canvas, attached to its edges, then the key
 /// palette and any prompt.
 /// The prompts the start screen can show: opening a file (and what it
 /// asks), recovered work, a file changed elsewhere.
@@ -4246,7 +4246,7 @@ fn overlays() !void {
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const g: f32 = overlay_gap;
-    const bottom: f32 = if (bottom_pane.mode == .ghost) statusHeight() else 0;
+    const bottom: f32 = 0;
     if (tree_pane.drawn()) {
         var o = ghost_pane.begin(&tree_pane, tree_pane.slid(.{ .x = c.x, .y = c.y, .w = tree_pane.size, .h = @max(60, c.h - bottom) }), 1);
         defer o.end();
@@ -5050,45 +5050,16 @@ fn menu() ?dvui.App.Result {
             if (menuAction("    Save layout as…", "global", kact("panes.layout-save-as"), 0, false, 21)) m.close();
             if (menuAction("    Reset this layout", "global", kact("panes.layout-reset"), 0, false, 22)) m.close();
         }
-        // Pane modes, as the tabs' icons set them, and hot edges.
-        for (all_panes, 0..) |pane, pi| {
-            _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = pi });
-            for ([_]ghost_pane.Mode{ .ghost, .auto, .docked, .hidden }, [_][]const u8{ "ghost", "auto-hide", "docked", "hidden" }, 0..) |mode, mode_name, mi| {
-                var buf: [64]u8 = undefined;
-                const on = pane.mode == mode;
-                const text = std.fmt.bufPrint(&buf, "{s}{s}: {s}", .{ if (on) "•  " else "    ", pane.name, mode_name }) catch pane.name;
-                if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = pi * 4 + mi }) != null) {
-                    applyTab(pane, .{ .mode = mode });
-                    m.close();
-                }
-            }
-        }
+        // Each pane docked or auto-hide, as its tab's pin sets it.
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 9 });
-        // An experiment: how a ghost pane's content is drawn.
-        for ([_]ghost_pane.Style{ .uniform, .matched, .tinted, .outlined, .haloed }, [_][]const u8{ "one alpha", "matched contrast", "tinted", "outlined", "tinted, outlined and inlined" }, 0..) |st, name, si| {
+        for (all_panes, 0..) |pane, pi| {
             var buf: [64]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{s}Ghost style: {s}", .{ if (ghost_pane.style == st) "•  " else "    ", name }) catch name;
-            if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 20 + si }) != null) {
-                ghost_pane.style = st;
+            const on = pane.mode == .docked;
+            const text = std.fmt.bufPrint(&buf, "{s}{s}: docked", .{ if (on) "•  " else "    ", pane.name }) catch pane.name;
+            if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 40 + pi }) != null) {
+                applyTab(pane, .{ .mode = if (on) .auto else .docked });
                 m.close();
             }
-        }
-        if (tmenu(@src(), if (ghost_pane.deep_active) "•  Active and docked panes: deep background" else "    Active and docked panes: deep background", .{}, .{ .expand = .horizontal }) != null) {
-            ghost_pane.deep_active = !ghost_pane.deep_active;
-            m.close();
-        }
-        if (tmenu(@src(), if (ghost_pane.vivid) "•  Pane colour: vivid" else "    Pane colour: vivid", .{}, .{ .expand = .horizontal }) != null) {
-            ghost_pane.vivid = !ghost_pane.vivid;
-            m.close();
-        }
-        if (tmenu(@src(), if (ghost_pane.halo.light_inside) "•  Halo: light line inside, dark keyline outside (try)" else "    Halo: light line inside, dark keyline outside (try)", .{}, .{ .expand = .horizontal }) != null) {
-            ghost_pane.halo.light_inside = !ghost_pane.halo.light_inside;
-            m.close();
-        }
-        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 10 });
-        if (tmenu(@src(), if (hot_edges) "•  Hot edges: hold on a tab to open its pane" else "    Hot edges: hold on a tab to open its pane", .{}, .{ .expand = .horizontal }) != null) {
-            hot_edges = !hot_edges;
-            m.close();
         }
     }
     return null;

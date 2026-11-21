@@ -9,7 +9,7 @@
 //!     layout = "compact"              # the one in use (local.toml)
 //!
 //!     [panes.layouts.compact.browser]
-//!     mode = "auto"                   # ghost, auto, docked, hidden
+//!     mode = "auto"                   # auto, docked, hidden
 //!     size = 220                      # its width, logical pixels
 //!     text_scale = 0.9                # its text and controls
 //!
@@ -44,7 +44,17 @@ pub const PaneId = enum {
 pub const pane_count = @typeInfo(PaneId).@"enum".field_names.len;
 
 /// As ghost.zig's `Mode`, by name.
-pub const Mode = enum { ghost, auto, docked, hidden };
+pub const Mode = enum {
+    auto,
+    docked,
+    hidden,
+
+    /// A mode by name; "ghost" (gone since 2026-11-21) is auto-hide.
+    pub fn parse(name: []const u8) ?Mode {
+        if (std.mem.eql(u8, name, "ghost")) return .auto;
+        return std.meta.stringToEnum(Mode, name);
+    }
+};
 
 pub const PaneSet = struct {
     mode: Mode,
@@ -75,11 +85,11 @@ pub const height_max: f32 = 900;
 pub const Builtin = struct { name: []const u8, layout: Layout };
 
 pub const builtins = [_]Builtin{
-    // As Graven has always opened: ghosts over the canvas, the bar docked.
+    // As Graven opens: the side panes auto-hide, the bar docked.
     .{ .name = "standard", .layout = .{ .panes = .{
-        .{ .mode = .ghost, .size = 240 },
-        .{ .mode = .ghost, .size = 320 },
-        .{ .mode = .ghost, .size = 320 },
+        .{ .mode = .auto, .size = 240 },
+        .{ .mode = .auto, .size = 320 },
+        .{ .mode = .auto, .size = 320 },
         .{ .mode = .docked },
     } } },
     // For a small window: the side panes out of the way until wanted,
@@ -92,9 +102,9 @@ pub const builtins = [_]Builtin{
     }, .tools_height = 110 } },
     // Larger text and controls throughout, the panes widened to match.
     .{ .name = "large-text", .layout = .{ .panes = .{
-        .{ .mode = .ghost, .size = 300, .text_scale = 1.25 },
-        .{ .mode = .ghost, .size = 400, .text_scale = 1.25 },
-        .{ .mode = .ghost, .size = 400, .text_scale = 1.25 },
+        .{ .mode = .auto, .size = 300, .text_scale = 1.25 },
+        .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
+        .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
         .{ .mode = .docked, .text_scale = 1.25 },
     }, .tools_height = 150 } },
 };
@@ -156,7 +166,7 @@ pub fn read(cfg: anytype, name: []const u8) Layout {
     var kb: [160]u8 = undefined;
     for (std.enums.values(PaneId)) |pid| {
         const set = &l.panes[@intFromEnum(pid)];
-        if (cfg.get(key(&kb, name, pid, "mode"))) |v| if (v == .string) if (std.meta.stringToEnum(Mode, v.string)) |m| {
+        if (cfg.get(key(&kb, name, pid, "mode"))) |v| if (v == .string) if (Mode.parse(v.string)) |m| {
             set.mode = m;
         };
         if (pid != .@"expression-bar") if (cfg.get(key(&kb, name, pid, "size"))) |v| if (number(v)) |f| {
@@ -212,7 +222,7 @@ test "a built-in layout as it is, with nothing in the config" {
     try testing.expectEqual(Mode.auto, l.pane(.browser).mode);
     try testing.expectEqual(0.9, l.pane(.properties).text_scale);
     // An unknown name starts from standard.
-    try testing.expectEqual(Mode.ghost, read(f, "mine").pane(.browser).mode);
+    try testing.expectEqual(Mode.auto, read(f, "mine").pane(.browser).mode);
 }
 
 test "config keys set over the built-in, in range, the column one width" {
@@ -227,7 +237,9 @@ test "config keys set over the built-in, in range, the column one width" {
     try testing.expectEqual(280.5, l.pane(.tools).size);
     try testing.expectEqual(scale_min, l.pane(.tools).text_scale);
     try testing.expectEqual(200, l.tools_height);
-    try testing.expectEqual(Mode.ghost, l.pane(.properties).mode);
+    try testing.expectEqual(Mode.auto, l.pane(.properties).mode);
+    // Ghost, gone, reads as auto-hide.
+    try testing.expectEqual(Mode.auto, Mode.parse("ghost").?);
 }
 
 test "names: the built-ins, then each in the config once" {

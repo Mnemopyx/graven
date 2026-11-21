@@ -24,8 +24,8 @@ const process = layout.model.process;
 
 const scratch = "/tmp/graven-gui-test";
 
-/// The panes docked, so clicks reach them (a ghost pane lets them through
-/// to the canvas).
+/// The panes docked, so clicks reach them without a hover bringing them
+/// in first.
 const config =
     \\[panes]
     \\layout = "test"

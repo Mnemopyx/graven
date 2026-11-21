@@ -20,7 +20,7 @@ What the app opens on, before there is a document: none of the canvas's interfac
   - **File:** New canvas… (Ctrl+N), Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import text…, Place image…, Export SVG…, Open example: PC keyboard, Open example: HP-15C keypad (each opened as an untitled copy, from examples/ where Graven was started; unsaved work asked about first), Quit.
   - **Edit:** Undo (Ctrl+Z), Redo (Ctrl+Shift+Z).
   - **Text:** Fonts…
-  - **View:** Zoom to context; Show text construction; pane appearance options (ghost style, deep background, vivid colour, halo, hot edges).
+  - **View:** Zoom to context; Show text construction; each pane docked or not.
 - **Theme:** follows the desktop's.
 
 ## Scrolling (decided 2026-11-21)
@@ -39,7 +39,7 @@ What the app opens on, before there is a document: none of the canvas's interfac
 
 ## Panes (`ghost.zig`)
 
-Four panes on the window's edges, each with a tab and three modes: **ghost** (see-through over the canvas), **docked** (beside it), **hidden**. Each has its own hue. With hot edges, holding the pointer on a tab opens its pane.
+Four panes on the window's edges, each with a tab. One toggle, the pin on the tab (since 2026-11-21): **docked** (beside the canvas) or **auto-hide** (the hot edge: holding the pointer on the tab slides the pane in over the canvas, ready to use and slightly translucent; it slides out when left; a click on the tab keeps it in). There is no pane shown but letting clicks through any more (the ghost mode confused the content under it). Panes are dark: grey text on deep purple, apart from the canvas, a light table whose layers are overlays. **Hidden** is left only for a view that has no use for a pane (a sheet's has no tools).
 
 - **Tree** (left): the document as a component tree. Canvas, panels, grids, tile prototypes, sketches, layers. Selecting a node makes it the context.
 - **Tools** (right, upper): the canvas tools. Select, Add panel, Add rows, Add columns, Add track (since 2026-11-20: one line where it is drawn, running right or down as dragged), Add shape (art), Select area, Constrain, Join, New sketch. Some tools have options here (shape kind; what new tracks are sized to and which way they run).
@@ -81,7 +81,7 @@ Four panes on the window's edges, each with a tab and three modes: **ghost** (se
 - **Zoom readout** (status bar, after the pointer position): the zoom as a percentage of actual size, `*` while the screen is not measured; a click (or View › Actual size) zooms to 100 %.
 - **View keys** (since 2026-11-17): Ctrl+0 zoom to context, Ctrl+Alt+0 to everything, Ctrl+1 actual size, Ctrl+2 200 %, Ctrl+= and Ctrl+- in and out through levels of actual size; 0, 1, 2, = and - alone too, except where text is typed. In the View menu with their shortcuts.
 - **Pane layouts** (since 2026-11-17): View › Pane layout: standard, compact, large-text and any saved; Next layout, Save layout as…, Reset this layout. The tree pane is now called the Browser.
-- **Pane modes** (since 2026-11-17): ghost, auto-hide, docked, hidden, by the tab's icons (auto-hide: an arrow into a box) or View. Auto-hide panes slide in on a rest on the tab and out when left; narrow windows (under 1000 px) make the side panes auto-hide. Hot corners (bottom right by default: all auto-hide panes in or out), set per corner in the config.
+- **Pane modes** (since 2026-11-21): docked or auto-hide, by the pin on the tab or View. Auto-hide panes slide in on a rest on the tab and out when left; narrow windows (under 1000 px) make the side panes auto-hide. Hot corners (bottom right by default: all auto-hide panes in or out), set per corner in the config.
 - **Frame the edit** (since 2026-11-17): Ctrl+9 (9 alone where nothing is typed), View › Frame the edit: the edit shown legible with as much round it as fits; status line says what was framed.
 - **Menus show shortcuts** at the right of each item, from the keymap (File, Edit, View so far); the rest of the menu items have none yet.
 
@@ -139,7 +139,7 @@ These are observations to start the discussion from, not decisions.
 7. **One window is not a pane:** the Fonts window is a separate OS window, where everything else is a pane.
 8. **Terminology:** the code says label, track, region, slot, stamp, prototype; the UI uses some of these and other words. There is no glossary.
 9. **The status bar mixes kinds of thing:** document counts, the tool hint, fonts and performance figures, all on one line.
-10. **Pane appearance is still experimental:** several View menu options exist only to compare looks (ghost style, halo, vivid colour).
+10. **Pane appearance settled (2026-11-21):** the ghost mode and its style experiments (one alpha, matched, tinted, outlined, haloed; deep background; hot edges as an option) are gone; panes are dark purple, docked or auto-hide.
 11. **Text entry:** the expression line and in-place flow editing both edit text, with overlapping roles.
 12. **Development switches are environment variables only:** sample loading, the view, text display settings and frame logging have no UI.
 
