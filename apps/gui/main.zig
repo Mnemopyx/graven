@@ -4085,7 +4085,16 @@ fn barEnd(wd: *dvui.WidgetData) void {
 /// Whether the right edge's column is laid out beside the canvas: either of
 /// its panes is docked.
 fn rightDocked() bool {
-    return tools_pane.mode == .docked or props_pane.mode == .docked;
+    // The whole edge docked (a pane a view hides counting as docked): the
+    // canvas gives the column its width. One docked alone keeps its place
+    // on the edge, over the canvas (`overlays`), the other independent.
+    const tools_in = tools_pane.mode == .docked or (tools_pane.mode == .hidden and tools_pane.view_hidden != null);
+    return tools_in and props_pane.mode == .docked;
+}
+
+/// A right-edge pane docked alone: drawn in its place over the canvas.
+fn dockedAlone(p: *const ghost_pane.Pane) bool {
+    return p.mode == .docked and !rightDocked();
 }
 
 /// The tool palette's height for a right edge `h` tall, kept so both panes
@@ -4260,12 +4269,12 @@ fn overlays() !void {
         const x = c.x + c.w - props_pane.size;
         const h = @max(2 * min_pane_height + split_grip, c.h - bottom);
         const th = toolsHeight(h);
-        if (tools_pane.drawn()) {
+        if (tools_pane.drawn() or dockedAlone(&tools_pane)) {
             var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = props_pane.size, .h = th }), 2);
             defer o.end();
             toolsContent();
         }
-        if (props_pane.drawn()) {
+        if (props_pane.drawn() or dockedAlone(&props_pane)) {
             var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y + th + split_grip, .w = props_pane.size, .h = h - th - split_grip }), 4);
             defer o.end();
             try propertiesBody();

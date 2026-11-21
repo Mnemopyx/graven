@@ -267,7 +267,7 @@ fn paneBase(base: dvui.Theme) dvui.Theme {
 /// The pane's background colour: its theme's, slightly translucent.
 pub fn fill(p: *const Pane) dvui.Color {
     const t = theme(p.look, paneBase(dvui.themeGet()));
-    return t.window.fill.?.opacity(p.look.fill_alpha);
+    return t.window.fill.?.opacity(if (p.mode == .docked) 1 else p.look.fill_alpha);
 }
 
 /// The family text fields and table cells are set in (one with legends'
@@ -345,8 +345,8 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     if (dvui.firstFrame(id) and had_focus != id) dvui.focusSubwindow(had_focus, null);
     p.sub_id = id;
     p.rect_px = fw.data().borderRectScale().r;
-    // Sliding out, it lets the pointer through.
-    if (dvui.currentWindow().subwindows.get(id)) |sw| sw.mouse_events = p.active;
+    // Sliding out, it lets the pointer through; docked, it takes it.
+    if (dvui.currentWindow().subwindows.get(id)) |sw| sw.mouse_events = p.interactive();
     return .{ .fw = fw, .prev_theme = prev_theme };
 }
 
