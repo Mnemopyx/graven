@@ -4166,21 +4166,23 @@ fn rightColumn() !void {
     defer col.deinit();
     barEnd(col.data());
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = tab_strip_h } });
-    // A view that hides the tools leaves the column to the properties.
-    const th = if (tools_pane.mode == .hidden and tools_pane.view_hidden != null) 0 else toolsHeight(col.data().contentRect().h - tab_strip_h);
-    if (th > 0) {
-        var top = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .h = th }, .max_size_content = .height(th), .expand = .horizontal, .background = tools_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&tools_pane) } });
+    // The column holds only the docked panes: both, split as the right
+    // edge is; one, the whole column. A pane there that auto-hides slides
+    // in over the canvas as it would with nothing docked.
+    const tools_in = tools_pane.mode == .docked;
+    const props_in = props_pane.mode == .docked;
+    if (tools_in) {
+        const th = if (props_in) toolsHeight(col.data().contentRect().h - tab_strip_h) else 0;
+        var top = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .h = th }, .max_size_content = .height(if (props_in) th else dvui.max_float_safe), .expand = if (props_in) .horizontal else .both, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tools_pane) } });
         defer top.deinit();
-        if (tools_pane.mode == .docked) {
-            const prev = ghost_pane.themePush(&tools_pane);
-            defer ghost_pane.themePop(prev);
-            toolsContent();
-        }
+        const prev = ghost_pane.themePush(&tools_pane);
+        defer ghost_pane.themePop(prev);
+        toolsContent();
     }
-    if (th > 0) _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = split_grip } });
-    var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = props_pane.mode == .docked, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
-    defer rest.deinit();
-    if (props_pane.mode == .docked) {
+    if (tools_in and props_in) _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = split_grip } });
+    if (props_in) {
+        var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
+        defer rest.deinit();
         const prev = ghost_pane.themePush(&props_pane);
         defer ghost_pane.themePop(prev);
         try propertiesBody();
@@ -4253,10 +4255,10 @@ fn overlays() !void {
         treeContent();
     }
     {
-        // The right edge: over the canvas's right side, or over the docked
-        // column's room when the other pane there is docked.
-        const x = if (rightDocked()) c.x + c.w + 1 else c.x + c.w - props_pane.size;
-        const h = @max(2 * min_pane_height + split_grip, c.h - if (rightDocked()) 0 else bottom);
+        // The right edge's auto-hide panes: over the canvas's right side,
+        // in their places on the edge, whatever the other pane there is.
+        const x = c.x + c.w - props_pane.size;
+        const h = @max(2 * min_pane_height + split_grip, c.h - bottom);
         const th = toolsHeight(h);
         if (tools_pane.drawn()) {
             var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = props_pane.size, .h = th }), 2);
