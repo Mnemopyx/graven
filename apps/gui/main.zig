@@ -18846,6 +18846,16 @@ fn selectionHandleAt(p: geom.Point) bool {
     return false;
 }
 
+/// Boundaries' halos (`haloBox`, `haloSegment`), logical pixels: half the
+/// core stroke, the glow's opacity at the core and its falloff radius
+/// (a(t) = a0 / (1 + (t/r0)²)), and the opacity it is cut off at. The
+/// owner, 2026-11-21, twice: too wide (core 3 px, r0 5 then 3 px, reaching
+/// some 19 px); now a 1.5 px core and a glow gone within 6 px.
+const halo_core_half: f64 = 0.75;
+const halo_a0: f64 = 0.45;
+const halo_r0: f64 = 1.5;
+const halo_cut: f64 = 0.03;
+
 /// A line's halo (device pixels, `p0` to `p1`): the inverse-square glow of
 /// `haloBox` round a segment, its rings stadiums (a segment offset).
 fn haloSegment(p0: dvui.Point.Physical, p1: dvui.Point.Physical, colour: dvui.Color) void {
@@ -18856,11 +18866,10 @@ fn haloSegment(p0: dvui.Point.Physical, p1: dvui.Point.Physical, colour: dvui.Co
     const len = @sqrt(dx * dx + dy * dy);
     if (!(len > 0)) return;
     const base = std.math.atan2(dy, dx);
-    const hw = 1.5 * ns;
-    // Boundaries: a tighter glow (the owner, 2026-11-21: 5 px was too wide).
-    const a0: f64 = 0.5;
-    const r0 = 3 * ns;
-    const t_max = r0 * @sqrt(a0 / 0.012 - 1);
+    const hw = halo_core_half * ns;
+    const a0: f64 = halo_a0;
+    const r0 = halo_r0 * ns;
+    const t_max = r0 * @sqrt(a0 / halo_cut - 1);
     var rings: [26]struct { r: f64, a: f64 } = undefined;
     var n: usize = 0;
     rings[n] = .{ .r = 0.01, .a = 0.95 };
@@ -19128,13 +19137,12 @@ fn haloBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color) void {
     const x1: f64 = @max(p0.x, p1.x);
     const y0: f64 = @min(p0.y, p1.y);
     const y1: f64 = @max(p0.y, p1.y);
-    const hw = 1.5 * ns; // half the core stroke
+    const hw = halo_core_half * ns; // half the core stroke
     const aa = 0.8 * ns; // the core's anti-aliased edge
     const core: f64 = 0.95;
-    // Boundaries: a tighter glow (the owner, 2026-11-21: 5 px was too wide).
-    const a0: f64 = 0.5;
-    const r0 = 3 * ns;
-    const t_max = r0 * @sqrt(a0 / 0.012 - 1);
+    const a0: f64 = halo_a0;
+    const r0 = halo_r0 * ns;
+    const t_max = r0 * @sqrt(a0 / halo_cut - 1);
     const inner_room = @min(x1 - x0, y1 - y0) / 2;
     // The rings: signed distance from the outline, and opacity there.
     var rings: [48]struct { d: f64, a: f64 } = undefined;

@@ -466,7 +466,9 @@ pub fn hotEdges(panes: []const *Pane, timer_id: dvui.Id) void {
             .active = p.active,
             .on_tab = p.tab_px.contains(mouse),
             .on_pane = p.rect_px.contains(mouse),
-            .editing = p.hasFocus(),
+            // Typing in one of its fields keeps it in; a selection made in
+            // it (a Browser node chosen) does not.
+            .editing = p.hasFocus() and dvui.currentWindow().textInputRequested() != null,
             .on_delay = on_delay,
         });
         switch (action) {
