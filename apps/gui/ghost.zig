@@ -287,10 +287,16 @@ pub fn fieldsFollowTheme() void {
     dvui.TextEntryWidget.defaults.font = fieldFont();
 }
 
-/// Sets the pane's theme for content drawn until `themePop`.
+/// Sets the pane's theme for content drawn until `themePop`. Its body text
+/// is in `field_family` too: the Browser and the properties show keys'
+/// names and legends (arrows, Greek, operators) that the interface's own
+/// font lacks; DejaVu Sans is Vera Sans extended, so the rest looks the
+/// same.
 pub fn themePush(p: *const Pane) dvui.Theme {
     const prev = dvui.themeGet();
-    dvui.themeSet(scaled(theme(p.look, paneBase(prev)), p.text_scale));
+    var t = scaled(theme(p.look, paneBase(prev)), p.text_scale);
+    if (field_family.len > 0) t.font_body = t.font_body.withFamily(field_family);
+    dvui.themeSet(t);
     fieldsFollowTheme();
     return prev;
 }
