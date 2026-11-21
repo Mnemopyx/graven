@@ -1,17 +1,16 @@
 //! Panes: a container for the app's side and bottom panes.
 //!
 //! A pane is attached to one edge of the app window and has a tab along
-//! that edge, as long as the pane. Its mode, one toggle: a click on the tab
-//! (the hot edge) pins it docked or unpins it, decided 2026-11-21 (the ghost mode, shown but letting clicks
-//! through, confused the content under it, and is gone):
+//! that edge, as long as the pane. Decided 2026-11-21: panes lie over the
+//! canvas and never move the views (no docking; the ghost mode, shown but
+//! letting clicks through, confused the content under it, and is gone).
 //!
 //! * auto (auto-hide, the hot edge): out of sight, only its tab showing.
 //!   Holding the pointer on the tab slides it in from its edge over the
 //!   canvas, ready to use, slightly translucent; once the pointer has been
 //!   away a moment (and none of its fields has the keyboard) it slides back
-//!   out.
-//! * docked: beside the canvas, always taking events within its bounds;
-//!   the caller lays the canvas out beside it.
+//!   out. A click on the tab pins it in (`pinned`: it stays when the
+//!   pointer leaves), another unpins it.
 //! * hidden: only the tab shows (a view that has no use for the pane: a
 //!   sheet's has no tools; not chosen on the tab).
 //!
@@ -22,7 +21,7 @@
 //!
 //! Immediate mode: the caller keeps a `Pane` per pane, calls `tab` while
 //! laying out the window's edge strips, and `begin`/`Open.end` around the
-//! content of a pane drawn over the canvas (or `themePush`/`themePop` around a docked
+//! content of a pane drawn over the canvas (`themePush`/`themePop` around
 //! one), then `hotEdges` once a frame.
 
 const std = @import("std");
@@ -31,7 +30,7 @@ const display = @import("display.zig");
 pub const dwell = @import("dwell.zig");
 
 pub const Edge = enum { left, right, top, bottom };
-pub const Mode = enum { auto, docked, hidden };
+pub const Mode = enum { auto, hidden };
 
 /// How a pane looks: its hue (deep purple by default), and how opaque its
 /// background is over the canvas.
@@ -56,8 +55,10 @@ pub const Pane = struct {
     size: f32,
     look: Look,
     mode: Mode = .auto,
-    /// An auto-hide pane in, taking events.
+    /// In, taking events.
     active: bool = false,
+    /// Pinned in: it stays when the pointer leaves (a click on its tab).
+    pinned: bool = false,
     hot: dwell.State = .{},
     /// Where it was drawn this frame, physical pixels; empty when it is not
     /// drawn over the canvas.
@@ -83,7 +84,7 @@ pub const Pane = struct {
 
     /// Whether it takes events within its bounds.
     pub fn interactive(p: *const Pane) bool {
-        return p.mode == .docked or (p.mode == .auto and p.active);
+        return p.mode == .auto and p.active;
     }
 
     /// Whether it is drawn over the canvas this frame: an auto-hide pane
@@ -267,7 +268,7 @@ fn paneBase(base: dvui.Theme) dvui.Theme {
 /// The pane's background colour: its theme's, slightly translucent.
 pub fn fill(p: *const Pane) dvui.Color {
     const t = theme(p.look, paneBase(dvui.themeGet()));
-    return t.window.fill.?.opacity(if (p.mode == .docked) 1 else p.look.fill_alpha);
+    return t.window.fill.?.opacity(p.look.fill_alpha);
 }
 
 /// The family text fields and table cells are set in (one with legends'
@@ -345,7 +346,7 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     if (dvui.firstFrame(id) and had_focus != id) dvui.focusSubwindow(had_focus, null);
     p.sub_id = id;
     p.rect_px = fw.data().borderRectScale().r;
-    // Sliding out, it lets the pointer through; docked, it takes it.
+    // Sliding out, it lets the pointer through.
     if (dvui.currentWindow().subwindows.get(id)) |sw| sw.mouse_events = p.interactive();
     return .{ .fw = fw, .prev_theme = prev_theme };
 }
@@ -354,8 +355,9 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
 pub const TabResult = union(enum) { none, toggle, mode: Mode };
 
 /// The pane's tab at `r` (logical pixels, relative to the current parent,
-/// a strip along the window's edge): a click docks the pane (pinned) or
-/// lets it auto-hide. Tabs always take events.
+/// a strip along the window's edge): a click pins an auto-hide pane in (shown
+/// over the canvas, staying when the pointer leaves) or unpins it. Tabs
+/// always take events.
 pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
     const lv = if (dvui.themeGet().dark) dark else light;
     const body_l: f32 = if (p.interactive()) lv.focus else lv.border;
@@ -371,19 +373,16 @@ pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
     p.tab_px = tb.data().borderRectScale().r;
     var result: TabResult = .none;
     _ = dvui.spacer(@src(), .{ .expand = if (vertical) .vertical else .horizontal });
-    // A click on the tab (the hot edge) pins the pane, docking it, or
-    // unpins it to auto-hide; a pane the view hid comes in.
+    // A click on the tab (the hot edge) pins the pane in, shown over the
+    // canvas, or unpins it; the views are not moved. A pane the view hid
+    // comes in.
     for (dvui.events()) |*e| {
         if (!dvui.eventMatchSimple(e, tb.data())) continue;
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
         if (me.action == .press and me.button.pointer()) {
             e.handle(@src(), tb.data());
-            result = switch (p.mode) {
-                .hidden => .toggle,
-                .docked => .{ .mode = .auto },
-                .auto => .{ .mode = .docked },
-            };
+            result = .toggle;
         } else if (me.action == .position) {
             dvui.cursorSet(.hand);
         }
@@ -399,12 +398,11 @@ pub fn apply(panes: []const *Pane, p: *Pane, r: TabResult) void {
         .toggle => {
             p.hot.clicked();
             switch (p.mode) {
-                .auto => if (p.active) deactivate(p) else activate(panes, p),
+                .auto => setPinned(panes, p, !p.pinned),
                 .hidden => {
                     p.mode = .auto;
-                    activate(panes, p);
+                    setPinned(panes, p, true);
                 },
-                .docked => {},
             }
         },
         .mode => |m| {
@@ -420,11 +418,17 @@ pub fn apply(panes: []const *Pane, p: *Pane, r: TabResult) void {
     }
 }
 
+/// Pins pane `p` in (`on`), or unpins it, sending it out.
+pub fn setPinned(panes: []const *Pane, p: *Pane, on: bool) void {
+    p.pinned = on;
+    if (on) activate(panes, p) else deactivate(p);
+}
+
 /// Brings auto-hide pane `p` in, taking events; any pane in that it
-/// overlaps (as last drawn) goes back out.
+/// overlaps (as last drawn) goes back out, unless pinned.
 pub fn activate(panes: []const *Pane, p: *Pane) void {
     for (panes) |q| {
-        if (q == p or !q.active or q.mode != .auto) continue;
+        if (q == p or !q.active or q.pinned or q.mode != .auto) continue;
         if (overlap(q.rect_px, p.rect_px)) deactivate(q);
     }
     p.active = true;
@@ -450,8 +454,9 @@ pub fn hotEdges(panes: []const *Pane, timer_id: dvui.Id) void {
     const mouse = dvui.currentWindow().mouse_pt;
     var soonest: ?i128 = null;
     for (panes) |p| {
-        // Auto-hide panes answer the pointer on their tabs.
-        if (p.mode != .auto) {
+        // Auto-hide panes answer the pointer on their tabs; a pinned one
+        // stays in.
+        if (p.mode != .auto or p.pinned) {
             p.hot = .{};
             continue;
         }

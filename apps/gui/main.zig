@@ -2254,6 +2254,10 @@ fn frame() !dvui.App.Result {
     accepted.beginFrame();
     if (leave_field) {
         leave_field = false;
+        // Fields are in the panes' own subwindows too (pinned over the
+        // canvas): none keeps the keyboard, the main window takes it.
+        for (all_panes) |p| if (p.sub_id) |id| dvui.focusWidget(null, id, null);
+        dvui.focusSubwindow(dvui.currentWindow().data().id, null);
         dvui.focusWidget(null, null, null);
     }
     // Buttons pressed last frame (or by a script): their actions.
@@ -2351,38 +2355,18 @@ fn frame() !dvui.App.Result {
         var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
         defer rest.deinit();
         body_px = rest.data().borderRectScale().r;
-        narrowPanes();
         panesForView();
         const size = rest.data().contentRect();
         const t: f32 = tab_size;
-        const status_h: f32 = if (bottom_pane.mode == .docked) statusHeight() else 0;
-        const body_h = @max(0, size.h - status_h - t);
-        // A side pane stops above a ghost bottom bar, so they never overlap.
-        const side_h = body_h;
+        // The edges' strips and the views; the panes lie over the views
+        // (`overlays`), never moving them.
+        const body_h = @max(0, size.h - t);
         {
             var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .rect = .{ .x = 0, .y = 0, .w = size.w, .h = body_h } });
             defer body.deinit();
-            sideStrip(&tree_pane, if (tree_pane.mode == .docked) body_h else side_h, 1);
-            if (tree_pane.mode == .docked) {
-                const prev = ghost_pane.themePush(&tree_pane);
-                defer ghost_pane.themePop(prev);
-                treePane();
-            }
+            sideStrip(&tree_pane, body_h, 1);
             viewArea();
-            if (rightDocked()) try rightColumn();
-            rightStrip(if (rightDocked()) body_h else side_h);
-        }
-        if (bottom_pane.mode == .docked) {
-            const prev = ghost_pane.themePush(&bottom_pane);
-            defer ghost_pane.themePop(prev);
-            var bottom = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .rect = .{ .x = t, .y = body_h, .w = @max(0, size.w - 2 * t), .h = status_h },
-                .background = true,
-                .color_fill = .{ .color = ghost_pane.fill(&bottom_pane) },
-                .border = .{ .y = 1 },
-            });
-            defer bottom.deinit();
-            try bottomContent();
+            rightStrip(body_h);
         }
         {
             // The bottom edge: the bottom bar's tab, as wide as the bar.
@@ -2425,7 +2409,7 @@ const split_grip = 8;
 var split_dragging = false;
 const min_pane_height = 48;
 /// Docked by default: the expression line is typed into often.
-var bottom_pane: ghost_pane.Pane = .{ .id = "expression-bar", .name = "Expression bar", .edge = .bottom, .size = default_status_height, .mode = .docked, .look = .{} };
+var bottom_pane: ghost_pane.Pane = .{ .id = "expression-bar", .name = "Expression bar", .edge = .bottom, .size = default_status_height, .pinned = true, .active = true, .reveal = 1, .look = .{} };
 const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bottom_pane };
 
 // Files ------------------------------------------------------------------------
@@ -3610,9 +3594,6 @@ fn loadPrefs() void {
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
     };
-    if (ps.get("panes.auto_hide_below")) |v| if (tomlFloat(v)) |f| {
-        auto_hide_below = @max(0, f);
-    };
     // Hot corners: an action's name each, or "" for nothing.
     for ([_][]const u8{ "top_left", "top_right", "bottom_left", "bottom_right" }, 0..) |name, i| {
         var kb: [48]u8 = undefined;
@@ -3632,7 +3613,9 @@ fn loadPrefs() void {
     // into the layout (written back as this machine's overrides).
     if (ps.get("panes.layout") == null) {
         for (all_panes, pane_keys) |p, key| if (ps.get(key)) |v| if (v == .string) if (modeByName(v.string)) |m| {
-            p.mode = m;
+            p.mode = if (m == .hidden) .hidden else .auto;
+            p.pinned = m == .pinned;
+            p.active = p.pinned;
         };
         if (ps.get("panes.tools_height")) |v| if (tomlFloat(v)) |f| {
             tools_height = f;
@@ -3753,24 +3736,25 @@ fn setLayoutName(n: []const u8) void {
     layout_name = layout_name_buf[0..k];
 }
 
-fn toLayoutMode(m: ghost_pane.Mode) layouts.Mode {
-    return std.meta.stringToEnum(layouts.Mode, @tagName(m)).?;
+/// A pane's state as a layout keeps it: hidden, pinned in, or auto-hide.
+fn toLayoutMode(p: *const ghost_pane.Pane) layouts.Mode {
+    if (p.chosen() == .hidden) return .hidden;
+    return if (p.pinned) .pinned else .auto;
 }
 
 /// Sets the panes as layout `l` has them.
 fn applyLayout(l: layouts.Layout) void {
     for (all_panes, l.panes) |p, set| {
-        p.mode = std.meta.stringToEnum(ghost_pane.Mode, @tagName(set.mode)).?;
+        p.mode = if (set.mode == .hidden) .hidden else .auto;
         p.forced = null;
         p.view_hidden = null;
-        p.active = false;
+        p.pinned = set.mode == .pinned;
+        p.active = p.pinned;
         p.hot = .{};
         if (set.size > 0) p.size = set.size;
         p.text_scale = set.text_scale;
     }
     tools_height = l.tools_height;
-    // A narrow window makes the side panes auto-hide again.
-    was_narrow = null;
 }
 
 /// The panes as they are, as a layout (each pane's own mode, not one a
@@ -3778,7 +3762,7 @@ fn applyLayout(l: layouts.Layout) void {
 fn currentLayout() layouts.Layout {
     var l: layouts.Layout = .{ .panes = undefined, .tools_height = @round(tools_height) };
     for (all_panes, &l.panes) |p, *set| set.* = .{
-        .mode = toLayoutMode(p.chosen()),
+        .mode = toLayoutMode(p),
         .size = if (p.edge == .bottom) 0 else @round(p.size),
         .text_scale = p.text_scale,
     };
@@ -3926,37 +3910,6 @@ fn layoutPrompt() void {
     dvui.refresh(null, @src(), null);
 }
 
-/// Below this window width (logical pixels) the side panes, ghost or
-/// docked, auto-hide, and get their own mode back when it widens; 0:
-/// never. `panes.auto_hide_below` in the local config.
-var auto_hide_below: f32 = 1000;
-var was_narrow: ?bool = null;
-
-/// Side panes to auto-hide in a narrow window, back as they were in a wide
-/// one (only when the width crosses the line, so a mode chosen meanwhile
-/// stands).
-fn narrowPanes() void {
-    const w = dvui.windowRect().w;
-    const narrow = auto_hide_below > 0 and w < auto_hide_below;
-    if (was_narrow != null and was_narrow.? == narrow) return;
-    was_narrow = narrow;
-    for (all_panes) |p| {
-        if (p.edge != .left and p.edge != .right) continue;
-        if (narrow) {
-            if (p.mode == .docked) {
-                p.forced = p.mode;
-                p.mode = .auto;
-                ghost_pane.deactivate(p);
-            }
-        } else if (p.forced) |m| {
-            p.mode = m;
-            p.forced = null;
-            ghost_pane.deactivate(p);
-        }
-    }
-    dvui.refresh(null, @src(), null);
-}
-
 /// Where the body (all below the title bar) is, device pixels: its corners
 /// are the hot corners.
 var body_px: dvui.Rect.Physical = .{};
@@ -4081,19 +4034,6 @@ fn barEnd(wd: *dvui.WidgetData) void {
 
 /// Whether the right edge's column is laid out beside the canvas: either of
 /// its panes is docked.
-fn rightDocked() bool {
-    // The whole edge docked (a pane a view hides counting as docked): the
-    // canvas gives the column its width. One docked alone keeps its place
-    // on the edge, over the canvas (`overlays`), the other independent.
-    const tools_in = tools_pane.mode == .docked or (tools_pane.mode == .hidden and tools_pane.view_hidden != null);
-    return tools_in and props_pane.mode == .docked;
-}
-
-/// A right-edge pane docked alone: drawn in its place over the canvas.
-fn dockedAlone(p: *const ghost_pane.Pane) bool {
-    return p.mode == .docked and !rightDocked();
-}
-
 /// The tool palette's height for a right edge `h` tall, kept so both panes
 /// keep some room.
 fn toolsHeight(h: f32) f32 {
@@ -4165,36 +4105,6 @@ fn splitGrip(strip: *dvui.WidgetData, at: f32) void {
     }
 }
 
-/// The right edge's docked column: the tool palette above (or room for it,
-/// when it is not docked), the properties below.
-fn rightColumn() !void {
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = props_pane.size }, .max_size_content = .width(props_pane.size), .expand = .vertical, .border = .{ .x = 1 } });
-    defer col.deinit();
-    barEnd(col.data());
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = tab_strip_h } });
-    // The column holds only the docked panes: both, split as the right
-    // edge is; one, the whole column. A pane there that auto-hides slides
-    // in over the canvas as it would with nothing docked.
-    const tools_in = tools_pane.mode == .docked;
-    const props_in = props_pane.mode == .docked;
-    if (tools_in) {
-        const th = if (props_in) toolsHeight(col.data().contentRect().h - tab_strip_h) else 0;
-        var top = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .h = th }, .max_size_content = .height(if (props_in) th else dvui.max_float_safe), .expand = if (props_in) .horizontal else .both, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tools_pane) } });
-        defer top.deinit();
-        const prev = ghost_pane.themePush(&tools_pane);
-        defer ghost_pane.themePop(prev);
-        toolsContent();
-    }
-    if (tools_in and props_in) _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = split_grip } });
-    if (props_in) {
-        var rest = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = ghost_pane.fill(&props_pane) } });
-        defer rest.deinit();
-        const prev = ghost_pane.themePush(&props_pane);
-        defer ghost_pane.themePop(prev);
-        try propertiesBody();
-    }
-}
-
 /// What a tab asked for, done; the canvas takes the keyboard back from a
 /// pane that stops taking events.
 fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
@@ -4205,13 +4115,14 @@ fn applyTab(p: *ghost_pane.Pane, r: ghost_pane.TabResult) void {
     dvui.refresh(null, @src(), null);
 }
 
-/// How much of each canvas edge ghost panes cover, logical pixels, so
+/// How much of each canvas edge pinned panes cover, logical pixels, so
 /// fitting a view keeps its subject clear of them.
 fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
+    // Pinned panes stay over the canvas: a fitted view keeps clear of them.
     return .{
-        .left = 0,
-        .right = 0,
-        .bottom = 0,
+        .left = if (tree_pane.pinned and tree_pane.mode == .auto) tree_pane.size + overlay_gap else 0,
+        .right = if ((props_pane.pinned and props_pane.mode == .auto) or (tools_pane.pinned and tools_pane.mode == .auto)) props_pane.size + overlay_gap else 0,
+        .bottom = if (bottom_pane.pinned and bottom_pane.mode == .auto) statusHeight() + overlay_gap else 0,
     };
 }
 
@@ -4227,10 +4138,10 @@ fn overlayOptions(id: usize) dvui.Options {
     };
 }
 
-/// A pane mode by name; "ghost" (gone) is auto-hide.
-fn modeByName(name: []const u8) ?ghost_pane.Mode {
-    const m = layouts.Mode.parse(name) orelse return null;
-    return std.meta.stringToEnum(ghost_pane.Mode, @tagName(m));
+/// A pane mode by name, as a layout keeps it ("ghost" and "docked", gone,
+/// are auto-hide and pinned).
+fn modeByName(name: []const u8) ?layouts.Mode {
+    return layouts.Mode.parse(name);
 }
 
 /// The panes over the canvas, attached to its edges, then the key
@@ -4254,7 +4165,8 @@ fn overlays() !void {
     const c = region_rect;
     if (c.w <= 0 or c.h <= 0) return;
     const g: f32 = overlay_gap;
-    const bottom: f32 = 0;
+    // The side panes stop above the bottom bar while it is in.
+    const bottom: f32 = if (bottom_pane.drawn()) statusHeight() else 0;
     if (tree_pane.drawn()) {
         var o = ghost_pane.begin(&tree_pane, tree_pane.slid(.{ .x = c.x, .y = c.y, .w = tree_pane.size, .h = @max(60, c.h - bottom) }), 1);
         defer o.end();
@@ -4266,12 +4178,12 @@ fn overlays() !void {
         const x = c.x + c.w - props_pane.size;
         const h = @max(2 * min_pane_height + split_grip, c.h - bottom);
         const th = toolsHeight(h);
-        if (tools_pane.drawn() or dockedAlone(&tools_pane)) {
+        if (tools_pane.drawn()) {
             var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = props_pane.size, .h = th }), 2);
             defer o.end();
             toolsContent();
         }
-        if (props_pane.drawn() or dockedAlone(&props_pane)) {
+        if (props_pane.drawn()) {
             var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y + th + split_grip, .w = props_pane.size, .h = h - th - split_grip }), 4);
             defer o.end();
             try propertiesBody();
@@ -5058,29 +4970,19 @@ fn menu() ?dvui.App.Result {
             if (menuAction("    Save layout as…", "global", kact("panes.layout-save-as"), 0, false, 21)) m.close();
             if (menuAction("    Reset this layout", "global", kact("panes.layout-reset"), 0, false, 22)) m.close();
         }
-        // Each pane docked or auto-hide, as its tab's pin sets it.
+        // Each pane pinned in or auto-hide, as a click on its tab sets it.
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 9 });
         for (all_panes, 0..) |pane, pi| {
             var buf: [64]u8 = undefined;
-            const on = pane.mode == .docked;
-            const text = std.fmt.bufPrint(&buf, "{s}{s}: docked", .{ if (on) "•  " else "    ", pane.name }) catch pane.name;
+            const on = pane.pinned;
+            const text = std.fmt.bufPrint(&buf, "{s}{s}: pinned", .{ if (on) "•  " else "    ", pane.name }) catch pane.name;
             if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 40 + pi }) != null) {
-                applyTab(pane, .{ .mode = if (on) .auto else .docked });
+                applyTab(pane, .toggle);
                 m.close();
             }
         }
     }
     return null;
-}
-
-/// The component tree: file, panels, regions, rows, tiles. Clicking a node
-/// makes it the context; its arrow opens or closes it.
-fn treePane() void {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = tree_pane.size }, .max_size_content = .width(tree_pane.size), .expand = .vertical, .border = .{ .w = 1 }, .background = true, .color_fill = .{ .color = ghost_pane.fill(&tree_pane) } });
-    defer pane.deinit();
-    barEnd(pane.data());
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = tab_strip_h } });
-    treeContent();
 }
 
 /// The tree itself, in whatever holds it; scrolls by wheel, with no bars.

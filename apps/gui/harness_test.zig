@@ -24,18 +24,18 @@ const process = layout.model.process;
 
 const scratch = "/tmp/graven-gui-test";
 
-/// The panes docked, so clicks reach them without a hover bringing them
-/// in first.
+/// The panes pinned in, so clicks reach them without a hover bringing
+/// them in first.
 const config =
     \\[panes]
     \\layout = "test"
     \\[panes.layouts.test.browser]
-    \\mode = "docked"
+    \\mode = "pinned"
     \\size = 300
     \\[panes.layouts.test.tools]
-    \\mode = "docked"
+    \\mode = "pinned"
     \\[panes.layouts.test.properties]
-    \\mode = "docked"
+    \\mode = "pinned"
     \\size = 380
     \\
 ;

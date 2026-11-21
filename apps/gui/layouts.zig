@@ -9,7 +9,7 @@
 //!     layout = "compact"              # the one in use (local.toml)
 //!
 //!     [panes.layouts.compact.browser]
-//!     mode = "auto"                   # auto, docked, hidden
+//!     mode = "auto"                   # auto, pinned, hidden
 //!     size = 220                      # its width, logical pixels
 //!     text_scale = 0.9                # its text and controls
 //!
@@ -45,13 +45,17 @@ pub const pane_count = @typeInfo(PaneId).@"enum".field_names.len;
 
 /// As ghost.zig's `Mode`, by name.
 pub const Mode = enum {
+    /// Auto-hide: in while the pointer rests on its tab.
     auto,
-    docked,
+    /// Pinned in, over the canvas.
+    pinned,
     hidden,
 
-    /// A mode by name; "ghost" (gone since 2026-11-21) is auto-hide.
+    /// A mode by name; "ghost" and "docked" (gone since 2026-11-21) are
+    /// auto-hide and pinned.
     pub fn parse(name: []const u8) ?Mode {
         if (std.mem.eql(u8, name, "ghost")) return .auto;
+        if (std.mem.eql(u8, name, "docked")) return .pinned;
         return std.meta.stringToEnum(Mode, name);
     }
 };
@@ -85,12 +89,12 @@ pub const height_max: f32 = 900;
 pub const Builtin = struct { name: []const u8, layout: Layout };
 
 pub const builtins = [_]Builtin{
-    // As Graven opens: the side panes auto-hide, the bar docked.
+    // As Graven opens: the side panes auto-hide, the bar pinned.
     .{ .name = "standard", .layout = .{ .panes = .{
         .{ .mode = .auto, .size = 240 },
         .{ .mode = .auto, .size = 320 },
         .{ .mode = .auto, .size = 320 },
-        .{ .mode = .docked },
+        .{ .mode = .pinned },
     } } },
     // For a small window: the side panes out of the way until wanted,
     // narrower, their text a little smaller.
@@ -98,14 +102,14 @@ pub const builtins = [_]Builtin{
         .{ .mode = .auto, .size = 220, .text_scale = 0.9 },
         .{ .mode = .auto, .size = 290, .text_scale = 0.9 },
         .{ .mode = .auto, .size = 290, .text_scale = 0.9 },
-        .{ .mode = .docked, .text_scale = 0.9 },
+        .{ .mode = .pinned, .text_scale = 0.9 },
     }, .tools_height = 110 } },
     // Larger text and controls throughout, the panes widened to match.
     .{ .name = "large-text", .layout = .{ .panes = .{
         .{ .mode = .auto, .size = 300, .text_scale = 1.25 },
         .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
         .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
-        .{ .mode = .docked, .text_scale = 1.25 },
+        .{ .mode = .pinned, .text_scale = 1.25 },
     }, .tools_height = 150 } },
 };
 
@@ -231,7 +235,7 @@ test "config keys set over the built-in, in range, the column one width" {
         .vals = &.{ .{ .string = "docked" }, .{ .integer = 5000 }, .{ .float = 280.5 }, .{ .float = 0.1 }, .{ .integer = 200 }, .{ .string = "nonsense" } },
     };
     const l = read(f, "mine");
-    try testing.expectEqual(Mode.docked, l.pane(.browser).mode);
+    try testing.expectEqual(Mode.pinned, l.pane(.browser).mode);
     try testing.expectEqual(size_max, l.pane(.browser).size);
     try testing.expectEqual(280.5, l.pane(.properties).size);
     try testing.expectEqual(280.5, l.pane(.tools).size);
