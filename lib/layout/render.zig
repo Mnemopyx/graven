@@ -142,6 +142,10 @@ pub const ObjectBox = struct {
     /// Its source bytes (its call included, for an object `\set` styles).
     start: u32,
     end: u32,
+    /// A leaf's own characters within its source (`\mathrm{SIN}`: SIN),
+    /// where the caret goes on either side of them; else `start`, `end`.
+    inner_start: u32 = 0,
+    inner_end: u32 = 0,
     nest: u8,
     kind: Kind,
 };

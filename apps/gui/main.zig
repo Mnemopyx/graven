@@ -241,6 +241,33 @@ pub const testing_api = struct {
         var hb: [8]Handle = undefined;
         return resizeHandles(&hb);
     }
+    /// The screen x of the left edges of glyphs `from` to `to` (exclusive,
+    /// counting from 0 in drawing order) of tile `designator`'s slot `slot`.
+    pub fn slotGlyphs(designator: []const u8, slot: []const u8, from: usize, to: usize) ?[3]f32 {
+        const id = state.model.findTile(designator) orelse return null;
+        const tracks = state.model.prototypeOf(id).tracks;
+        const k = for (tracks, 0..) |t, i| {
+            if (std.mem.eql(u8, t.name, slot)) break i;
+        } else return null;
+        var out: [3]f32 = undefined;
+        for (state.placed.items, 0..) |placed, pi| for (placed.labels) |l| {
+            if (l.tile == null or l.tile.? != id or l.slot != k) continue;
+            const o = panelOrigin(pi);
+            var n: usize = 0;
+            for (l.render.items) |it| switch (it) {
+                .glyph => |gl| {
+                    if (n >= from and n < to and n - from < out.len) {
+                        const p = toScreen(.{ .x = gl.transform.e + l.origin.x + o.x, .y = l.origin.y + o.y }) orelse return null;
+                        out[n - from] = p.x;
+                    }
+                    n += 1;
+                },
+                else => {},
+            };
+            return out;
+        };
+        return null;
+    }
     pub fn hoverKind() ?[]const u8 {
         return if (hover_target) |t| @tagName(t) else null;
     }
@@ -5848,7 +5875,7 @@ fn viewNode(n: u8) void {
 
 /// A tab strip's height, logical: fixed, so what lies over the views
 /// knows it before the strips are drawn.
-const tab_strip_h: f32 = 26;
+const tab_strip_h: f32 = 30;
 
 /// When and which tab was last clicked, for double-clicks.
 var tab_click: struct { view: u8 = docviews.none, ms: i64 = 0 } = .{};
@@ -5882,7 +5909,8 @@ fn viewLeaf(leaf: u8, shown: u8) void {
                 .padding = .{ .x = 6, .w = 2, .y = 1, .h = 1 },
             });
             defer tab.deinit();
-            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .gravity_y = 0.5, .id_extra = k })) {
+            // Room for descenders: no margin, a little padding below.
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 2, .h = 4 }, .id_extra = k })) {
                 const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
                 if (tab_click.view == v and now - tab_click.ms < 400) {
                     vl.toggleMaximize(v);
@@ -17799,7 +17827,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
     if (q.offset < piece.base) return;
     const local = q.offset - piece.base;
     if (piece.len > 0 and (local < piece.from or local > piece.from + piece.len)) return;
-    const c = r.caret(local) orelse return;
+    const c = caretAt(r, local) orelse return;
     const p0 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y0 });
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     markCaret(p0, p1);
@@ -17854,6 +17882,30 @@ fn labelBox(pi: usize, l: layout.place.PlacedLabel) geom.Box {
     return .{ .x0 = d.x0 + l.origin.x + o.x, .y0 = d.y0 + l.origin.y + o.y, .x1 = d.x1 + l.origin.x + o.x, .y1 = d.y1 + l.origin.y + o.y };
 }
 
+/// Where the caret at source offset `off` stands in render `r`: at the
+/// edge of the innermost object or field that starts or ends there (so
+/// every place inside an expression's braces has one: after the last of
+/// a script's characters, before its `}`), else where the render's own
+/// stops put it.
+fn caretAt(r: *const layout.render.Render, off: u32) ?layout.render.Caret {
+    var best: ?struct { c: layout.render.Caret, nest: u8 } = null;
+    for (r.boxes) |b| {
+        if (b.kind == .structure) continue;
+        // A leaf's edges are its characters' (inside \mathrm{…}'s braces).
+        const at_start = (if (b.kind == .leaf) b.inner_start else b.start) == off;
+        const at_end = (if (b.kind == .leaf) b.inner_end else b.end) == off;
+        if (!at_start and !at_end) continue;
+        if (best != null and best.?.nest >= b.nest) continue;
+        const bb = boxBounds(b);
+        // A field's height is its contents'; an empty one keeps a little.
+        const y0 = @min(bb.y0, b.baseline[0].y);
+        const y1 = @max(bb.y1, b.baseline[0].y + 0.3);
+        best = .{ .c = .{ .x = if (at_end) bb.x1 else bb.x0, .y0 = y0, .y1 = y1 }, .nest = b.nest };
+    }
+    if (best) |x| return x.c;
+    return r.caret(off);
+}
+
 /// The source offset in label `l` of panel `pi` (counted from `base` in
 /// what it is part of) whose caret is nearest worksheet point `p`.
 fn nearestCaret(pi: usize, l: layout.place.PlacedLabel, p: geom.Point, src_len: u32) u32 {
@@ -17863,7 +17915,7 @@ fn nearestCaret(pi: usize, l: layout.place.PlacedLabel, p: geom.Point, src_len: 
     var best_d: f64 = std.math.inf(f64);
     var off: u32 = 0;
     while (off <= src_len) : (off += 1) {
-        const c = l.render.caret(off) orelse continue;
+        const c = caretAt(l.render, off) orelse continue;
         const dy = if (local.y < c.y0) c.y0 - local.y else if (local.y > c.y1) local.y - c.y1 else 0;
         const d = @abs(c.x - local.x) + 4 * dy;
         if (d < best_d) {
@@ -17969,8 +18021,9 @@ fn haloSegment(p0: dvui.Point.Physical, p1: dvui.Point.Physical, colour: dvui.Co
     if (!(len > 0)) return;
     const base = std.math.atan2(dy, dx);
     const hw = 1.5 * ns;
-    const a0: f64 = 0.55;
-    const r0 = 5 * ns;
+    // Boundaries: a tighter glow (the owner, 2026-11-21: 5 px was too wide).
+    const a0: f64 = 0.5;
+    const r0 = 3 * ns;
     const t_max = r0 * @sqrt(a0 / 0.012 - 1);
     var rings: [26]struct { r: f64, a: f64 } = undefined;
     var n: usize = 0;
@@ -18019,8 +18072,9 @@ fn haloSegment(p0: dvui.Point.Physical, p1: dvui.Point.Physical, colour: dvui.Co
 fn haloPoint(q: dvui.Point.Physical, half: f32, colour: dvui.Color) void {
     const Index = dvui.Vertex.Index;
     const ns: f64 = dvui.windowNaturalScale();
-    const a0: f64 = 0.55;
-    const r0 = 4 * ns;
+    // Grab points: a fuller glow than boundaries' (the owner: subtle at 4 px).
+    const a0: f64 = 0.7;
+    const r0 = 5 * ns;
     const t_max = r0 * @sqrt(a0 / 0.012 - 1);
     const inner: f64 = @as(f64, half) * 1.2;
     var radii: [24]struct { r: f64, a: f64 } = undefined;
@@ -18241,8 +18295,9 @@ fn haloBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color) void {
     const hw = 1.5 * ns; // half the core stroke
     const aa = 0.8 * ns; // the core's anti-aliased edge
     const core: f64 = 0.95;
-    const a0: f64 = 0.55;
-    const r0 = 5 * ns;
+    // Boundaries: a tighter glow (the owner, 2026-11-21: 5 px was too wide).
+    const a0: f64 = 0.5;
+    const r0 = 3 * ns;
     const t_max = r0 * @sqrt(a0 / 0.012 - 1);
     const inner_room = @min(x1 - x0, y1 - y0) / 2;
     // The rings: signed distance from the outline, and opacity there.
@@ -20033,18 +20088,8 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
             if (d <= point_r) points.append(a, .{ .id = id, .kind = c.kind, .edges = c.edges, .at = c.at, .d = d }) catch {};
         }
         if (group) continue;
-        // The edges: the nearest place on each.
-        const sides = [_]struct { e: Edges, p: geom.Point }{
-            .{ .e = .{ .left = true }, .p = .{ .x = b.x0, .y = std.math.clamp(at.y, b.y0, b.y1) } },
-            .{ .e = .{ .right = true }, .p = .{ .x = b.x1, .y = std.math.clamp(at.y, b.y0, b.y1) } },
-            .{ .e = .{ .bottom = true }, .p = .{ .x = std.math.clamp(at.x, b.x0, b.x1), .y = b.y0 } },
-            .{ .e = .{ .top = true }, .p = .{ .x = std.math.clamp(at.x, b.x0, b.x1), .y = b.y1 } },
-        };
-        for (sides) |sd| {
-            const q = state.view.toPx(area, sd.p);
-            const d = @sqrt((q.x - pp.x) * (q.x - pp.x) + (q.y - pp.y) * (q.y - pp.y));
-            if (d <= edge_r) edges.append(a, .{ .id = id, .kind = .edge, .edges = sd.e, .at = sd.p, .d = d }) catch {};
-        }
+        // Whole edges are not engaged (the owner, 2026-11-21): the drag
+        // points (corners, edge middles, origin) do their work.
     }
     // Nearest first; at one place (a track's origin is its top-left
     // corner), moving before resizing.

@@ -68,6 +68,18 @@ pub fn contextOf(g: *glyphic.Engine, faces: []const *Face, st: model.TextStyle, 
 /// A face's cap height, font units.
 pub const capUnits = glyphic.faces.capUnits;
 
+/// Where a leaf's own characters sit in `markup` within its source span
+/// (`\mathrm{SIN}`: the SIN), or null for a structure, a leaf with no span,
+/// or one whose characters are not written as such (`\pi` for π).
+fn leafText(markup: []const u8, span: glyphic.entry.Span, node: *const glyphic.expr.Node) ?struct { start: u32, end: u32 } {
+    if (node.kind.isStructure() or node.kind == .row) return null;
+    if (span.start == glyphic.entry.Span.none.start or node.text.len == 0) return null;
+    if (span.end > markup.len or span.start > span.end) return null;
+    const i = std.mem.indexOf(u8, markup[span.start..span.end], node.text) orelse return null;
+    const st: u32 = @intCast(span.start + i);
+    return .{ .start = st, .end = st + @as(u32, @intCast(node.text.len)) };
+}
+
 /// Whether a top-row object of `kind` is text whose glyphs may be cut
 /// apart.
 fn cuttable(kind: glyphic.Kind) bool {
@@ -138,7 +150,12 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
                 // the start of the object each draws (its head's: the
                 // structure's), so the caret and the editor find it.
                 const own = spans.get(gl.object);
-                const src = if (cuttable(node.kind)) @min(span.start + gl.cluster, @max(span.end, span.start + 1) - 1) else if (own.start != glyphic.entry.Span.none.start) own.start else span.start;
+                // A leaf inside a structure (\mathrm{SIN} in a script's
+                // base): each glyph its own byte, where the leaf's text sits
+                // in its source, so a caret goes between its characters. A
+                // head keeps its structure's start (heads are found by it).
+                const inner = leafText(markup, own, e.node(gl.object));
+                const src = if (cuttable(node.kind)) @min(span.start + gl.cluster, @max(span.end, span.start + 1) - 1) else if (inner) |t| t.start + @min(gl.cluster, t.end - t.start) else if (own.start != glyphic.entry.Span.none.start) own.start else span.start;
                 try items.append(a, .{ .glyph = .{ .face = fid, .gid = gl.gid, .transform = gl.m.then(move), .element = @intCast(k), .source = src, .grow = gl.grow } });
             },
             .rule, .hole => {
@@ -164,7 +181,12 @@ pub fn render(gpa: Allocator, g: *const glyphic.Engine, faces: []const *Face, st
         for (laid.boxes.items) |b| {
             const kind = e.node(b.object).kind;
             const sp = spans.get(b.object);
+            const bstart: u32 = if (sp.start != glyphic.entry.Span.none.start) sp.start else span.start;
+            const bend: u32 = if (sp.start != glyphic.entry.Span.none.start) sp.end else span.end;
+            const inner = leafText(markup, sp, e.node(b.object));
             try boxes.append(a, .{
+                .inner_start = if (inner) |t| t.start else bstart,
+                .inner_end = if (inner) |t| t.end else bend,
                 .corners = .{ move.apply(b.corners[0]), move.apply(b.corners[1]), move.apply(b.corners[2]), move.apply(b.corners[3]) },
                 .baseline = .{ move.apply(b.baseline[0]), move.apply(b.baseline[1]) },
                 .element = @intCast(k),

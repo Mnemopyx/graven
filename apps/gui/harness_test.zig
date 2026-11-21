@@ -1608,3 +1608,28 @@ test "construction lines: made by a drag and by two clicks, chosen by a click ne
     try r.key(.delete, .none);
     try std.testing.expectEqual(1, api.guides().len);
 }
+
+test "a click puts the caret anywhere inside an expression's braces: between a word's letters, after a script's last character" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    api.centreOnTile("R2C3", 30);
+    try r.frames(2);
+    // SIN's g legend: $\mathrm{SIN}^{-1}$.
+    const g = api.slotRect("R2C3", "g").?;
+    // Its right end, high (the superscript): in the script, after its 1.
+    try r.clickAt(.{ .x = g.x + g.w - 1, .y = g.y + g.h * 0.2 });
+    try std.testing.expect(api.eqEditing());
+    try dvui.testing.writeText("2");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("$\\mathrm{SIN}^{-12}$", api.eqText().?);
+    try r.key(.escape, .none);
+    // Between S and I of SIN (low, in the base): inside \mathrm{…}.
+    const g2 = api.slotRect("R2C3", "g").?;
+    const sin = api.slotGlyphs("R2C3", "g", 0, 3).?;
+    try r.clickAt(.{ .x = (sin[0] + sin[1]) / 2, .y = g2.y + g2.h * 0.75 });
+    try dvui.testing.writeText("x");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("$\\mathrm{SxIN}^{-12}$", api.eqText().?);
+}
