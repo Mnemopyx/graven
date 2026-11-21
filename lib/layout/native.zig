@@ -562,6 +562,8 @@ test "a model writes and reads back to the same bytes, with its content" {
     _ = try m.addView(0, f, .{ .x = 200, .y = 0 }, 0.5);
     _ = try m.addLayer(0, "Background");
     _ = try m.addImage(0, "photo.png", "\x89PNG...", 40, 20, .{ .x = 0, .y = 0 }, 10, .none);
+    const gi = try m.addGuide(0, .{ .x = 3, .y = 4 }, 30);
+    try m.setGuide(0, gi, .{ .x = 3, .y = 4 }, 30, .angle);
     const p = try m.placePanel(.{ .name = "Panel 1", .origin = .{ .x = 5, .y = 5 }, .w = 60, .h = 0.1 + 0.2 });
 
     const bytes = try encode(gpa, &m);
@@ -582,6 +584,8 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqual(2, back.spaces.items.len);
     try testing.expectEqual(1, back.spaces.items[0].views.items.len);
     try testing.expectEqualStrings("\x89PNG...", back.spaces.items[0].images.items[0].data);
+    try testing.expectEqual(30, back.spaces.items[0].guides.items[0].angle);
+    try testing.expectEqual(model.GuideLock.angle, back.spaces.items[0].guides.items[0].lock);
     try testing.expectEqual(m.next_id, back.next_id);
     // It goes on being edited like any model.
     try back.insertRun(c, r, 0, .{ .style = style, .content = "more" });

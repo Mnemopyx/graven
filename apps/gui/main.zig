@@ -218,6 +218,13 @@ pub const testing_api = struct {
         };
         return null;
     }
+    pub fn screenOf(x: f64, y: f64) ?dvui.Point.Physical {
+        return toScreen(.{ .x = x, .y = y });
+    }
+    pub fn guides() []const layout.model.Guide {
+        if (shown_space >= state.model.spaces.items.len) return &.{};
+        return state.model.spaces.items[shown_space].guides.items;
+    }
     pub fn boundaryMode() bool {
         return boundary_mode;
     }
@@ -482,7 +489,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
+const Tool = enum { select, construction, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
 
 /// Join: the track a click on another track threads on into.
 var join_from: ?struct { panel: usize, region: usize } = null;
@@ -534,6 +541,8 @@ const Context = union(enum) {
     layer: struct { space: usize, index: usize },
     /// A raster image placed in a space.
     image: struct { space: usize, index: usize },
+    /// A construction line of a space.
+    guide: struct { space: usize, index: usize },
     /// A view of a sketch, placed in a space.
     sketch: struct { space: usize, index: usize },
     /// The document's sketches, and one of them.
@@ -587,6 +596,7 @@ const Context = union(enum) {
             .view => "View",
             .layer => "Layer",
             .image => "Image",
+            .guide => "Construction line",
             .sketch => "Sketch view",
             .sketches => "Sketches",
             .sketch_def => "Sketch",
@@ -3413,6 +3423,7 @@ fn contextValid(c: Context) bool {
         .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,
         .layer => |l| l.space < m.spaces.items.len and l.index < m.spaces.items[l.space].layers.items.len,
         .image => |im| im.space < m.spaces.items.len and im.index < m.spaces.items[im.space].images.items.len,
+        .guide => |g| g.space < m.spaces.items.len and g.index < m.spaces.items[g.space].guides.items.len,
         .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len,
         .sketches => true,
         .sketch_def => |i| i < m.sketches.items.len,
@@ -5326,7 +5337,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material => false,
     };
 }
 
@@ -5548,6 +5559,8 @@ const Palette = struct {
     /// The active selection, the flow cursor and shapes being drawn: their
     /// own blue (OKLCH 255), and they move (marching dashes, a pulse).
     select: dvui.Color = .{ .r = 0x1f, .g = 0x6f, .b = 0xe0 },
+    /// Construction lines: guides, never output.
+    construction: dvui.Color = .{ .r = 0x8a, .g = 0x4f, .b = 0xd8 },
     /// What fails a check: overflow, past an edge, ink in a margin.
     overflow: dvui.Color = .{ .r = 0xf3, .g = 0x46, .b = 0x00 },
     /// The background grid's ink: a cool neutral, laid on at low opacity
@@ -6428,6 +6441,8 @@ fn canvas(active: bool, view: u8) void {
     drawTrackPath(area);
     drawConstraintMarks(area);
     drawPointerMark();
+    drawGuides(area);
+    drawConstructionPreview(area);
     drawHover(area);
     drawEngagement(area);
     drawSnapGuides(area);
@@ -9420,6 +9435,7 @@ fn manufactureView(v: u8) void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
+
                 dvui.captureMouse(null, e.num);
             },
             .motion => if (dvui.captured(box.data().id)) {
@@ -10882,7 +10898,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (viewNavEvent(e, box, area)) continue;
         // Ctrl+< and Ctrl+>: a level out or in, whatever is being edited.
         if (!canvas_prompt and sketch_edit == null and cursorKeysReach()) if (keymap.match1(e, kmode("canvas"))) |inv| {
-            if (inv.action == kact("tool.select-boundaries")) {
+            if (inv.action == kact("tool.select-boundaries") or inv.action == kact("tool.construction-line")) {
                 e.handle(@src(), box.data());
                 _ = runAction(inv);
                 dvui.refresh(null, @src(), box.data().id);
@@ -11056,6 +11072,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }.f;
             if (is(inv, kact("canvas.tool.cancel"))) {
                 e.handle(@src(), box.data());
+                // A construction line half made: dropped, the tool kept.
+                if (state.tool == .construction and guide_start != null) {
+                    guide_start = null;
+                    guide_pending = false;
+                    dvui.refresh(null, @src(), box.data().id);
+                    continue;
+                }
                 state.tool = .select;
                 state.drag = null;
                 constrain_first = null;
@@ -11084,6 +11107,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 act(.removeControlPoint, .{path_selected.?}) catch {};
                 path_selected = null;
                 e.handle(@src(), box.data());
+                continue;
+            }
+            if (del and state.context == .guide) {
+                e.handle(@src(), box.data());
+                _ = runButtonAction(.{ .action = kact("guide.remove"), .arg = 0 });
+                dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
             if (del and state.moving == null) {
@@ -11209,7 +11238,20 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
-                if (state.tool == .select_area and me.button.pointer()) {
+                if (state.tool == .construction and me.button.pointer()) {
+                    // Construction line: a drag from its first point, or a
+                    // click there and a click at its second.
+                    const at = snap(state.view.toMm(area, me.p));
+                    if (guide_pending) {
+                        if (guide_start) |p0| addGuideThrough(p0, at, me.mod.shift());
+                        guide_start = null;
+                        guide_pending = false;
+                    } else {
+                        guide_start = at;
+                        guide_press_px = me.p;
+                    }
+                    state.press_consumed = true;
+                } else if (state.tool == .select_area and me.button.pointer()) {
                     const at = state.view.toMm(area, me.p);
                     state.drag = .{ .start = at, .at = at };
                 } else if (state.tool == .add_art and me.button.pointer()) {
@@ -11345,6 +11387,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
+                if (state.tool == .construction and guide_start != null and !guide_pending) {
+                    // Released where pressed (a few pixels allowed): the
+                    // second point is a click; else the drag made the line.
+                    const moved = @abs(me.p.x - guide_press_px.x) > 3 * dvui.windowNaturalScale() or @abs(me.p.y - guide_press_px.y) > 3 * dvui.windowNaturalScale();
+                    if (moved) {
+                        addGuideThrough(guide_start.?, snap(state.view.toMm(area, me.p)), me.mod.shift());
+                        guide_start = null;
+                    } else guide_pending = true;
+                }
                 if (dim_drag != null) {
                     _ = dimRelease();
                 } else if (engage_drag != null) {
@@ -12454,6 +12505,16 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = bwd.borderRectScale().r }, "Select boundaries (B): while on, the boundary nearest the pointer is highlighted and a click selects its container, its drag points haloed", .{}, .{});
     }
+    if (state.model.spaces.items.len > 0) {
+        // Construction line: a mode tool on a canvas or in a frame.
+        const on = state.tool == .construction;
+        var gwd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Construction line", dvui.entypo.flow_line, 0, .{
+            .data_out = &gwd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        });
+        dvui.tooltip(@src(), .{ .active_rect = gwd.borderRectScale().r }, "Construction line: an infinite guide line, from two points (a drag, or two clicks)", .{}, .{});
+    }
     if (on_canvas or state.context == .selection or state.context == .group) {
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
@@ -12489,6 +12550,7 @@ fn lowerKind() []const u8 {
         .view => "view",
         .layer => "layer",
         .image => "image",
+        .guide => "construction line",
         .sketch => "sketch view",
         .sketches => "sketches",
         .sketch_def => "sketch",
@@ -13181,6 +13243,25 @@ const button_handlers = [_]ButtonHandler{
                 else => return,
             };
             state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
+        }
+    }.f),
+    handler("tool.construction-line", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            guide_start = null;
+            guide_pending = false;
+            state.tool = if (state.tool == .construction) .select else .construction;
+        }
+    }.f),
+    handler("guide.remove", struct {
+        fn f(_: i32) void {
+            switch (state.context) {
+                .guide => |g| {
+                    act(.removeGuide, .{ g.space, g.index }) catch return;
+                    state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
+                },
+                else => {},
+            }
         }
     }.f),
     handler("tool.select-boundaries", struct {
@@ -14815,6 +14896,7 @@ fn properties() !void {
         .view => |v| try viewProperties(v.space, v.index),
         .layer => |l| try layerProperties(l.space, l.index),
         .image => |im| try imageProperties(im.space, im.index),
+        .guide => |g| guideProperties(g.space, g.index),
         .sketch => |sc| sketchProperties(sc.space, sc.index),
         .sketches => propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1),
         .sketch_def => |i| sketchDefProperties(i),
@@ -16052,6 +16134,7 @@ fn statusContent() void {
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
+        .construction => if (guide_pending) "Construction line: click its second point (Shift: 15° steps) · Esc cancels" else "Construction line: drag from a point to another, or click both (Shift: 15° steps) · Esc ends",
         .add_tracks => if (tracks_tool.kind == .track) "Add a track: drag it out, right or down, on the panel · Esc cancels" else if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
@@ -17740,6 +17823,8 @@ const HoverTarget = union(enum) {
     track: struct { panel: usize, region: usize, box: geom.Box },
     panel: struct { panel: usize, box: geom.Box },
     art: struct { panel: usize, index: usize, box: geom.Box },
+    /// Near a construction line: the line (its part in view).
+    guide: struct { space: usize, index: usize, seg: [2]geom.Point },
     /// Inside a tile, a slot's text: its label, and where in its source.
     slot: struct { tile: TileId, panel: usize, label: usize, box: geom.Box, offset: u32 },
     /// In an expression being edited: near an object's box (chosen by a
@@ -17823,6 +17908,8 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
             return .{ .eq_caret = .{ .offset = h.base + nearestCaret(h.pi, h.l, p, renderEnd(h.l)) } };
         }
     }
+    // A construction line, drawn over everything: near it, the line.
+    if (canvas_px) |area| if (guideNear(area, p)) |g| return .{ .guide = .{ .space = shown_space, .index = g.index, .seg = g.seg } };
     // A tile: near its outline, the tile; inside, the slot nearest.
     for (state.placed.items, 0..) |placed, pi| {
         if (!shownPanel(pi)) continue;
@@ -17871,6 +17958,62 @@ fn selectionHandleAt(p: geom.Point) bool {
     return false;
 }
 
+/// A line's halo (device pixels, `p0` to `p1`): the inverse-square glow of
+/// `haloBox` round a segment, its rings stadiums (a segment offset).
+fn haloSegment(p0: dvui.Point.Physical, p1: dvui.Point.Physical, colour: dvui.Color) void {
+    const Index = dvui.Vertex.Index;
+    const ns: f64 = dvui.windowNaturalScale();
+    const dx: f64 = p1.x - p0.x;
+    const dy: f64 = p1.y - p0.y;
+    const len = @sqrt(dx * dx + dy * dy);
+    if (!(len > 0)) return;
+    const base = std.math.atan2(dy, dx);
+    const hw = 1.5 * ns;
+    const a0: f64 = 0.55;
+    const r0 = 5 * ns;
+    const t_max = r0 * @sqrt(a0 / 0.012 - 1);
+    var rings: [26]struct { r: f64, a: f64 } = undefined;
+    var n: usize = 0;
+    rings[n] = .{ .r = 0.01, .a = 0.95 };
+    n += 1;
+    rings[n] = .{ .r = hw, .a = 0.95 };
+    n += 1;
+    rings[n] = .{ .r = hw + 0.8 * ns, .a = a0 };
+    n += 1;
+    var k: f64 = 1;
+    while (n < rings.len - 1) : (k += 1) {
+        const t = r0 * (std.math.pow(f64, 2, k * 0.5) - 1);
+        if (t >= t_max) break;
+        rings[n] = .{ .r = hw + 0.8 * ns + t, .a = a0 / (1 + (t / r0) * (t / r0)) };
+        n += 1;
+    }
+    rings[n] = .{ .r = hw + 0.8 * ns + t_max, .a = 0 };
+    n += 1;
+    const K = 8;
+    const per = 2 * K;
+    const lifo = dvui.currentWindow().lifo();
+    var tb = dvui.Triangles.Builder.init(lifo, n * per, (n - 1) * per * 6) catch return;
+    defer tb.deinit(lifo);
+    const ends = [2][2]f64{ .{ p1.x, p1.y }, .{ p0.x, p0.y } };
+    for (rings[0..n]) |r| {
+        const col: dvui.Color.PMA = .fromColor(colour.opacity(@floatCast(r.a)));
+        for (0..2) |e| for (0..K) |i| {
+            const th = base - 0.5 * std.math.pi + @as(f64, @floatFromInt(e)) * std.math.pi + std.math.pi * @as(f64, @floatFromInt(i)) / (K - 1);
+            tb.appendVertex(.{ .pos = .{ .x = @floatCast(ends[e][0] + r.r * @cos(th)), .y = @floatCast(ends[e][1] + r.r * @sin(th)) }, .col = col });
+        };
+    }
+    for (0..n - 1) |j| for (0..per) |i| {
+        const a: Index = @intCast(j * per + i);
+        const b: Index = @intCast(j * per + (i + 1) % per);
+        const c: Index = @intCast((j + 1) * per + i);
+        const d: Index = @intCast((j + 1) * per + (i + 1) % per);
+        const v = tb.vertexes.items;
+        tb.appendTriangles(&ccw(v[a].pos, v[b].pos, v[c].pos, a, b, c));
+        tb.appendTriangles(&ccw(v[b].pos, v[d].pos, v[c].pos, b, d, c));
+    };
+    dvui.renderTriangles(tb.build_unowned(), null) catch {};
+}
+
 /// A drag point's halo: the same inverse-square glow as `haloBox`, round
 /// about a grip of half size `half` at `q` (device pixels), drawn under it.
 fn haloPoint(q: dvui.Point.Physical, half: f32, colour: dvui.Color) void {
@@ -17914,6 +18057,122 @@ fn haloPoint(q: dvui.Point.Physical, half: f32, colour: dvui.Color) void {
         tb.appendTriangles(&ccw(v[b].pos, v[d].pos, v[c].pos, b, d, c));
     };
     dvui.renderTriangles(tb.build_unowned(), null) catch {};
+}
+
+// Construction lines ------------------------------------------------------
+//
+// Infinite guide lines in a space (decided 2026-11-21): made with the
+// Construction line tool, from two points (a drag, or a click, release and
+// a click), Shift turning by 15° steps. On a canvas a line runs on without
+// end: it is drawn where it crosses the view. In a frame it ends at the
+// frame's boundary. Never output; a guide for alignment and attachment.
+
+/// The first point of a line being made, and where it was pressed.
+var guide_start: ?geom.Point = null;
+var guide_press_px: dvui.Point.Physical = .{};
+/// The first point was a click: the next click is the second.
+var guide_pending = false;
+
+/// What a space's lines are drawn within: a frame's boundary, or (the
+/// canvas) the view as it is now.
+fn guideClipBox(area: dvui.Rect.Physical, space: usize) geom.Box {
+    if (space < state.model.spaces.items.len) if (state.model.spaces.items[space].bound) |b| return b;
+    const a = state.view.toMm(area, .{ .x = area.x, .y = area.y });
+    const b = state.view.toMm(area, .{ .x = area.x + area.w, .y = area.y + area.h });
+    return .{ .x0 = @min(a.x, b.x), .y0 = @min(a.y, b.y), .x1 = @max(a.x, b.x), .y1 = @max(a.y, b.y) };
+}
+
+/// A line through `p0` and `p1` added to the shown space (`steps`: its
+/// angle to the nearest 15°), and made the context.
+fn addGuideThrough(p0: geom.Point, p1: geom.Point, steps: bool) void {
+    if (p0.x == p1.x and p0.y == p1.y) return;
+    var angle = layout.model.lineAngle(p0, p1);
+    angle = if (steps) @round(angle / 15) * 15 else @round(angle * 1000) / 1000;
+    const i = act(.addGuide, .{ shown_space, p0, angle }) catch return;
+    state.context = .{ .guide = .{ .space = shown_space, .index = i } };
+    selection.clearRetainingCapacity();
+    state.status = "Construction line added. ";
+}
+
+/// The shown space's construction lines, where they cross what is drawn.
+fn drawGuides(area: dvui.Rect.Physical) void {
+    if (shown_space >= state.model.spaces.items.len) return;
+    const ns = dvui.windowNaturalScale();
+    const clip = guideClipBox(area, shown_space);
+    for (state.model.spaces.items[shown_space].guides.items, 0..) |g, gi| {
+        const seg = g.clip(clip) orelse continue;
+        const chosen = switch (state.context) {
+            .guide => |c| c.space == shown_space and c.index == gi,
+            else => false,
+        };
+        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, seg[0]), state.view.toPx(area, seg[1]) } }, .{ .thickness = (if (chosen) @as(f32, 1.6) else 1) * ns, .color = .{ .color = colors.construction.opacity(if (chosen) 1 else 0.7) } });
+    }
+}
+
+/// The line being made: through its first point and the pointer.
+fn drawConstructionPreview(area: dvui.Rect.Physical) void {
+    if (state.tool != .construction) return;
+    const p0 = guide_start orelse return;
+    const m = state.mouse orelse return;
+    if (p0.x == m.x and p0.y == m.y) return;
+    const ns = dvui.windowNaturalScale();
+    var angle = layout.model.lineAngle(p0, m);
+    if (shiftHeld()) angle = @round(angle / 15) * 15;
+    const g: layout.model.Guide = .{ .at = p0, .angle = angle };
+    const seg = g.clip(guideClipBox(area, shown_space)) orelse return;
+    dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, seg[0]), state.view.toPx(area, seg[1]) } }, .{ .thickness = ns, .color = .{ .color = colors.construction.opacity(0.45) } });
+    skRing(state.view.toPx(area, p0), 4 * ns, colors.construction, 1.5 * ns);
+}
+
+/// Whether Shift is held now.
+fn shiftHeld() bool {
+    return dvui.currentWindow().modifiers.shift();
+}
+
+/// The construction line nearest worksheet point `p` in the shown space,
+/// within the edge tolerance.
+const GuideHit = struct { index: usize, seg: [2]geom.Point };
+
+fn guideNear(area: dvui.Rect.Physical, p: geom.Point) ?GuideHit {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    const clip = guideClipBox(area, shown_space);
+    var best: ?GuideHit = null;
+    var best_d = edgeMm();
+    for (state.model.spaces.items[shown_space].guides.items, 0..) |g, gi| {
+        const seg = g.clip(clip) orelse continue;
+        const d = g.distance(p);
+        if (d <= best_d) {
+            best_d = d;
+            best = .{ .index = gi, .seg = seg };
+        }
+    }
+    return best;
+}
+
+/// A construction line's properties: name, a point it passes through,
+/// its angle and what holds it; Remove.
+fn guideProperties(space: usize, index: usize) void {
+    const saved_group = pushGroup("guide");
+    defer popGroup(saved_group);
+    if (space >= state.model.spaces.items.len or index >= state.model.spaces.items[space].guides.items.len) return;
+    const g = state.model.spaces.items[space].guides.items[index];
+    propText("Name", "{s}", .{g.name}, 1);
+    if (numberProp("Through across, mm", g.at.x, -1e6, 1e6, 2)) |v| actM(mergeKey(.{ "guide", g.id }), .setGuide, .{ space, index, geom.Point{ .x = v, .y = g.at.y }, g.angle, g.lock }) catch {};
+    if (numberProp("Through up, mm", g.at.y, -1e6, 1e6, 3)) |v| actM(mergeKey(.{ "guide", g.id }), .setGuide, .{ space, index, geom.Point{ .x = g.at.x, .y = v }, g.angle, g.lock }) catch {};
+    if (g.lock == .free) {
+        if (numberProp("Angle, °", g.angle, -360, 360, 4)) |v| actM(mergeKey(.{ "guide", g.id }), .setGuide, .{ space, index, g.at, v, g.lock }) catch {};
+    } else propText("Angle, °", "{d:.2}", .{g.angle}, 4);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 5 });
+        defer row.deinit();
+        propName("Held");
+        const names = [_][]const u8{ "free", "its angle", "horizontal", "vertical" };
+        var c: usize = @intFromEnum(g.lock);
+        if (tdropdown(@src(), &names, .{ .choice = &c }, .{}, .{ .expand = .horizontal }) and c != @intFromEnum(g.lock)) {
+            actM(mergeKey(.{ "guide lock", g.id }), .setGuide, .{ space, index, g.at, g.angle, @as(layout.model.GuideLock, @enumFromInt(c)) }) catch {};
+        }
+    }
+    keyButton(@src(), "Remove", 0, .{ .expand = .horizontal, .id_extra = 6, .margin = .{ .y = 6 }, .tag = "guide.remove" });
 }
 
 /// Select boundaries: the container whose boundary is nearest worksheet
@@ -18097,6 +18356,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
         .track => |x| if (halo_ok) haloBox(area, x.box, colors.select),
         .panel => |x| if (halo_ok) haloBox(area, x.box, colors.select),
         .art => |x| if (halo_ok) haloBox(area, x.box, colors.select),
+        .guide => |x| if (halo_ok) haloSegment(state.view.toPx(area, x.seg[0]), state.view.toPx(area, x.seg[1]), colors.select),
         .slot => |x| {
             state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
             state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
@@ -18131,6 +18391,11 @@ fn hoverPress(p: geom.Point) bool {
             levelSet(.{ .panel = x.panel });
             // The container is the selection: its drag points show.
             if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+        },
+        .guide => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .guide = .{ .space = x.space, .index = x.index } });
         },
         .art => |x| {
             if (canvas_eq != null) leaveCanvasEquation();

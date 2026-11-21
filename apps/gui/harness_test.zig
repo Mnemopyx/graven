@@ -1576,3 +1576,35 @@ test "Select boundaries: a mode toggled by its button or B, kept through Esc; th
     try r.key(.b, .none);
     try std.testing.expect(api.boundaryMode());
 }
+
+test "construction lines: made by a drag and by two clicks, chosen by a click near one, held vertical, removed by Delete" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("tool.construction-line");
+    try std.testing.expectEqualStrings("construction", api.toolName());
+    // A drag from (80, 50) to (110, 80) mm, mid-canvas: a 45° line.
+    try r.drag(api.screenOf(80, 50).?, api.screenOf(110, 80).?);
+    try std.testing.expectEqual(1, api.guides().len);
+    try std.testing.expectApproxEqAbs(45, api.guides()[0].angle, 1);
+    // A click at (70, 20), released where pressed, then a click at
+    // (130, 20): a horizontal line.
+    try r.clickAt(api.screenOf(70, 20).?);
+    try std.testing.expectEqual(1, api.guides().len);
+    try r.clickAt(api.screenOf(130, 20).?);
+    try std.testing.expectEqual(2, api.guides().len);
+    try std.testing.expectApproxEqAbs(0, api.guides()[1].angle, 1);
+    try std.testing.expectEqualStrings("guide", api.contextName());
+    // Esc ends the tool; a click near the first line, far off where it was
+    // drawn (it runs on), chooses it.
+    try r.key(.escape, .none);
+    try std.testing.expectEqualStrings("select", api.toolName());
+    try r.clickAt(api.screenOf(125, 95).?);
+    try std.testing.expectEqualStrings("guide", api.contextName());
+    // Held vertical: its angle 90.
+    try r.choose("guide.held", "vertical");
+    try std.testing.expectEqual(90, api.guides()[0].angle);
+    // Delete removes it.
+    try r.key(.delete, .none);
+    try std.testing.expectEqual(1, api.guides().len);
+}

@@ -100,3 +100,7 @@ Decided: a Text styles view (main-window tab per style), treatments as glyphic s
 
 Near a container's outline: the container; inside: its content, a slot's text taking the caret where pressed; inside an expression being edited, its objects the same way ("Pointing" in main.zig; status.md). Built for keys, tracks, panels and expression objects; next where wanted: line art, grids, images and views, and hover over a track's text.
 
+## Construction lines (2026-11-21)
+
+Step 1 built (the model object, the tool with both gestures, drawing clipped to the view or the frame, choosing, properties with locks). Next, step 2: snapping and attachment for containers, and dragging lines (status.md, "Construction lines").
+

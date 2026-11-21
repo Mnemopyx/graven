@@ -53,6 +53,7 @@ pub const actions = [_][:0]const u8{
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
     "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess", "addMaterial", "setMaterial", "removeMaterial", "addPlan", "setPlan", "removePlan", "setActivePlan",
     "removeRegion", "setOrientation", "splitIntoTracks",
+    "addGuide", "setGuide", "removeGuide",
 };
 
 fn Fn(comptime name: []const u8) type {

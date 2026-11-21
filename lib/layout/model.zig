@@ -824,6 +824,10 @@ pub const Space = struct {
     /// Views of the document's sketches placed in it: what is drawn in it
     /// with a sketch.
     sketch_views: std.ArrayList(SketchView) = .empty,
+    /// Construction lines: infinite lines, guides for alignment and
+    /// attachment, never drawn as output (a canvas or a frame holds no
+    /// drawing of its own).
+    guides: std.ArrayList(Guide) = .empty,
 
     /// The index of layer `id` (`.none` meaning the base layer).
     pub fn layerIndex(sp: Space, id: ObjectId) ?usize {
@@ -832,6 +836,82 @@ pub const Space = struct {
         return null;
     }
 };
+
+/// What holds a construction line's direction.
+pub const GuideLock = enum {
+    /// Turned freely.
+    free,
+    /// Its angle kept; it moves parallel.
+    angle,
+    /// Horizontal (angle 0).
+    horizontal,
+    /// Vertical (angle 90).
+    vertical,
+};
+
+/// A construction line (decided 2026-11-21): an infinite line in a space,
+/// through `at` at `angle`. On a canvas it runs on without end (drawn
+/// where it crosses the view); in a frame it ends at the frame's
+/// boundary. Never output: an alignment guide and an attachment for
+/// containers.
+pub const Guide = struct {
+    id: ObjectId = .none,
+    name: []const u8 = "",
+    /// A point it passes through, mm in the space.
+    at: geom.Point,
+    /// Its direction, degrees anticlockwise from the x axis, in [0, 180).
+    angle: f64,
+    lock: GuideLock = .free,
+
+    /// Its unit direction.
+    pub fn dir(g: Guide) geom.Point {
+        const r = g.angle * std.math.pi / 180;
+        return .{ .x = @cos(r), .y = @sin(r) };
+    }
+
+    /// The part of it inside box `b`, or null where it misses it.
+    pub fn clip(g: Guide, b: geom.Box) ?[2]geom.Point {
+        return clipLine(g.at, g.dir(), b);
+    }
+
+    /// How far point `p` is from it, mm.
+    pub fn distance(g: Guide, p: geom.Point) f64 {
+        const d = g.dir();
+        return @abs((p.x - g.at.x) * d.y - (p.y - g.at.y) * d.x);
+    }
+};
+
+/// The angle in [0, 180) of the line through `a` and `b`, degrees.
+pub fn lineAngle(a: geom.Point, b: geom.Point) f64 {
+    var deg = std.math.atan2(b.y - a.y, b.x - a.x) * 180 / std.math.pi;
+    while (deg < 0) deg += 180;
+    while (deg >= 180) deg -= 180;
+    return deg;
+}
+
+/// The infinite line through `p` along unit direction `d`, clipped to box
+/// `b` (Liang–Barsky): its two ends, or null where it misses.
+pub fn clipLine(p: geom.Point, d: geom.Point, b: geom.Box) ?[2]geom.Point {
+    var t0: f64 = -std.math.inf(f64);
+    var t1: f64 = std.math.inf(f64);
+    const sides = [_]struct { dd: f64, lo: f64, hi: f64, at: f64 }{
+        .{ .dd = d.x, .lo = b.x0, .hi = b.x1, .at = p.x },
+        .{ .dd = d.y, .lo = b.y0, .hi = b.y1, .at = p.y },
+    };
+    for (sides) |sd| {
+        if (@abs(sd.dd) < 1e-12) {
+            if (sd.at < sd.lo or sd.at > sd.hi) return null;
+            continue;
+        }
+        var ta = (sd.lo - sd.at) / sd.dd;
+        var tb = (sd.hi - sd.at) / sd.dd;
+        if (ta > tb) std.mem.swap(f64, &ta, &tb);
+        t0 = @max(t0, ta);
+        t1 = @min(t1, tb);
+    }
+    if (!(t0 <= t1)) return null;
+    return .{ .{ .x = p.x + d.x * t0, .y = p.y + d.y * t0 }, .{ .x = p.x + d.x * t1, .y = p.y + d.y * t1 } };
+}
 
 /// How a layer's content combines with what lies under it.
 pub const Blend = enum { normal, multiply, screen };
@@ -2762,6 +2842,54 @@ pub const Model = struct {
         im.h = w * @as(f64, @floatFromInt(im.px_h)) / @as(f64, @floatFromInt(im.px_w));
         im.w = w;
         im.layer = layer;
+        m.revision += 1;
+    }
+
+    /// A construction line in space `space` through `at` at `angle`
+    /// degrees, named Guide1, Guide2 …; its index.
+    pub fn addGuide(m: *Model, space: usize, at: geom.Point, angle: f64) Error!usize {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        if (!std.math.isFinite(angle) or !std.math.isFinite(at.x) or !std.math.isFinite(at.y)) return error.BadSize;
+        const list = &m.spaces.items[space].guides;
+        var nb: [32]u8 = undefined;
+        var n: usize = 1;
+        const name = while (true) : (n += 1) {
+            const cand = std.fmt.bufPrint(&nb, "Guide{d}", .{n}) catch "Guide";
+            const taken = for (list.items) |g| {
+                if (std.mem.eql(u8, g.name, cand)) break true;
+            } else false;
+            if (!taken) break cand;
+        };
+        var deg = @mod(angle, 180);
+        if (deg < 0) deg += 180;
+        try list.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .at = at, .angle = deg });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// Construction line `index` of space `space` set: through `at`, at
+    /// `angle` (horizontal and vertical locks set their own), held by `lock`.
+    pub fn setGuide(m: *Model, space: usize, index: usize, at: geom.Point, angle: f64, lock: GuideLock) Error!void {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        const list = m.spaces.items[space].guides.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!std.math.isFinite(angle) or !std.math.isFinite(at.x) or !std.math.isFinite(at.y)) return error.BadSize;
+        const g = &list[index];
+        g.at = at;
+        g.lock = lock;
+        var deg = @mod(angle, 180);
+        if (deg < 0) deg += 180;
+        g.angle = switch (lock) {
+            .horizontal => 0,
+            .vertical => 90,
+            else => deg,
+        };
+        m.revision += 1;
+    }
+
+    pub fn removeGuide(m: *Model, space: usize, index: usize) Error!void {
+        if (space >= m.spaces.items.len or index >= m.spaces.items[space].guides.items.len) return error.NoSuchItem;
+        _ = m.spaces.items[space].guides.orderedRemove(index);
         m.revision += 1;
     }
 
@@ -7116,4 +7244,29 @@ test "an older file's per-panel process settings become profiles: the 0.4 mm bui
     // Done again, nothing changes.
     try m.upgradeProcesses();
     try std.testing.expectEqual(@as(usize, 2), m.processes.items.len);
+}
+
+test "construction lines: added named, clipped to a box, set by their locks, removed" {
+    const testing = std.testing;
+    var m: Model = .init(testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const g0 = try m.addGuide(0, .{ .x = 0, .y = 0 }, 45);
+    const g1 = try m.addGuide(0, .{ .x = 5, .y = 1 }, 0);
+    const gs = m.spaces.items[0].guides.items;
+    try testing.expectEqualStrings("Guide1", gs[g0].name);
+    try testing.expectEqualStrings("Guide2", gs[g1].name);
+    // The 45° line through the origin crosses a 10 mm box corner to corner.
+    const seg = gs[g0].clip(.{ .x0 = 0, .y0 = 0, .x1 = 10, .y1 = 10 }).?;
+    try testing.expectApproxEqAbs(0, seg[0].x, 1e-9);
+    try testing.expectApproxEqAbs(10, seg[1].y, 1e-9);
+    // A horizontal one at y 1 misses a box above it.
+    try testing.expect(gs[g1].clip(.{ .x0 = 0, .y0 = 2, .x1 = 10, .y1 = 10 }) == null);
+    try testing.expectApproxEqAbs(1, gs[g1].distance(.{ .x = 100, .y = 2 }), 1e-9);
+    // Locked vertical: its angle is 90 whatever is given.
+    try m.setGuide(0, g1, .{ .x = 5, .y = 1 }, 30, .vertical);
+    try testing.expectEqual(@as(f64, 90), m.spaces.items[0].guides.items[g1].angle);
+    try testing.expectApproxEqAbs(135, lineAngle(.{ .x = 0, .y = 0 }, .{ .x = -1, .y = 1 }), 1e-9);
+    try m.removeGuide(0, g0);
+    try testing.expectEqual(1, m.spaces.items[0].guides.items.len);
 }
