@@ -1,15 +1,15 @@
 //! Panes: a container for the app's side and bottom panes.
 //!
 //! A pane is attached to one edge of the app window and has a tab along
-//! that edge, as long as the pane. Its mode, one toggle on the tab (the
-//! pin), decided 2026-11-21 (the ghost mode, shown but letting clicks
+//! that edge, as long as the pane. Its mode, one toggle: a click on the tab
+//! (the hot edge) pins it docked or unpins it, decided 2026-11-21 (the ghost mode, shown but letting clicks
 //! through, confused the content under it, and is gone):
 //!
 //! * auto (auto-hide, the hot edge): out of sight, only its tab showing.
 //!   Holding the pointer on the tab slides it in from its edge over the
 //!   canvas, ready to use, slightly translucent; once the pointer has been
 //!   away a moment (and none of its fields has the keyboard) it slides back
-//!   out. A click on the tab pins it in, another lets it go.
+//!   out.
 //! * docked: beside the canvas, always taking events within its bounds;
 //!   the caller lays the canvas out beside it.
 //! * hidden: only the tab shows (a view that has no use for the pane: a
@@ -354,10 +354,9 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
 pub const TabResult = union(enum) { none, toggle, mode: Mode };
 
 /// The pane's tab at `r` (logical pixels, relative to the current parent,
-/// a strip along the window's edge): its body toggles the pane between
-/// in and out; its pin docks it or lets it auto-hide. Tabs always take events.
+/// a strip along the window's edge): a click docks the pane (pinned) or
+/// lets it auto-hide. Tabs always take events.
 pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
-    const t = theme(p.look, dvui.themeGet());
     const lv = if (dvui.themeGet().dark) dark else light;
     const body_l: f32 = if (p.interactive()) lv.focus else lv.border;
     const vertical = p.edge == .left or p.edge == .right;
@@ -372,34 +371,23 @@ pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
     p.tab_px = tb.data().borderRectScale().r;
     var result: TabResult = .none;
     _ = dvui.spacer(@src(), .{ .expand = if (vertical) .vertical else .horizontal });
-    // One toggle: the pin. In, docked beside the canvas; out, auto-hide
-    // (the hot edge).
-    {
-        const on = p.mode == .docked;
-        var wd: dvui.WidgetData = undefined;
-        if (dvui.buttonIcon(@src(), "Dock", dvui.entypo.pin, .{}, .{ .fill_color = .{ .color = if (on) t.text else t.text.opacity(0.45) }, .stroke_color = .{ .color = if (on) t.text else t.text.opacity(0.45) } }, .{
-            .data_out = &wd,
-            .min_size_content = .{ .w = 11, .h = 11 },
-            .padding = .all(1),
-            .margin = .all(1),
-            .background = on,
-            .color_fill = .{ .color = t.control.fill.? },
-            .corners = .all(2),
-        })) result = .{ .mode = if (on) .auto else .docked };
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}: {s}", .{ p.name, if (on) "docked beside the canvas; click to auto-hide it (it slides in when the pointer rests on this tab)" else "auto-hide: slides in when the pointer rests on this tab (a click on the tab keeps it in); click to dock it" }, .{});
-    }
-    // A click anywhere else on the tab.
-    if (result == .none) for (dvui.events()) |*e| {
+    // A click on the tab (the hot edge) pins the pane, docking it, or
+    // unpins it to auto-hide; a pane the view hid comes in.
+    for (dvui.events()) |*e| {
         if (!dvui.eventMatchSimple(e, tb.data())) continue;
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
         if (me.action == .press and me.button.pointer()) {
             e.handle(@src(), tb.data());
-            result = .toggle;
+            result = switch (p.mode) {
+                .hidden => .toggle,
+                .docked => .{ .mode = .auto },
+                .auto => .{ .mode = .docked },
+            };
         } else if (me.action == .position) {
             dvui.cursorSet(.hand);
         }
-    };
+    }
     return result;
 }
 
