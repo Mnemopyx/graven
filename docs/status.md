@@ -358,7 +358,7 @@ The README sets the goals: HP-15C keypad legends first, aircraft panels last, SV
   - the drawn hyphen ignores the word's bold or italic;
   - forced wraps and hyphen breaks work in rows only, not in columns;
   - copying text keeps no formatting.
-- **`main` was fast-forwarded to `ui-dev` on 2026-11-15** (at `65a8dca`); fast-forward it again when the owner asks.
+- **`main` was fast-forwarded to `ui-dev` on 2026-11-21** (at `c914d44`; before that 2026-11-15); fast-forward it again when the owner asks.
 - **Open threads and next steps:** [handoff.md](handoff.md). **The GUI as it stands:** [ui-inventory.md](ui-inventory.md).
 
 ## Display: MSDF glyphs (in progress)
