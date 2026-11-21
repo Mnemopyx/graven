@@ -466,7 +466,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
+const Tool = enum { select, boundaries, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
 
 /// Join: the track a click on another track threads on into.
 var join_from: ?struct { panel: usize, region: usize } = null;
@@ -3338,7 +3338,15 @@ fn runAction(inv: keymap.Invocation) bool {
                 else => zoomToPercent(display.nextZoom(zoomPercent(), false)),
             }
         },
-        else => return false,
+        // A button's action given a key: its handler, on the context.
+        else => {
+            for (button_handlers) |h| if (h.action == inv.action) {
+                h.run(inv.arg);
+                dvui.refresh(null, @src(), null);
+                return true;
+            };
+            return false;
+        },
     }
     dvui.refresh(null, @src(), null);
     return true;
@@ -10789,7 +10797,7 @@ fn arrowCode(d: keymap.Direction) dvui.enums.Key {
 
 fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
-    const drawing = state.tool != .select;
+    const drawing = state.tool != .select and state.tool != .boundaries;
     canvas_id = box.data().id;
     validateCursor();
     for (dvui.events()) |*e| {
@@ -10848,6 +10856,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (viewNavEvent(e, box, area)) continue;
         // Ctrl+< and Ctrl+>: a level out or in, whatever is being edited.
         if (!canvas_prompt and sketch_edit == null and cursorKeysReach()) if (keymap.match1(e, kmode("canvas"))) |inv| {
+            if (inv.action == kact("tool.select-boundaries")) {
+                e.handle(@src(), box.data());
+                _ = runAction(inv);
+                state.status = if (state.tool == .boundaries) "Select boundaries: the nearest boundary is highlighted; a click selects its container · B or Esc ends" else "";
+                dvui.refresh(null, @src(), box.data().id);
+                continue;
+            }
             if (inv.action == kact("level.up") or inv.action == kact("level.down")) {
                 e.handle(@src(), box.data());
                 const moved = if (inv.action == kact("level.up")) levelUp() else levelDown();
@@ -11007,7 +11022,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
             continue;
         }
-        if (e.evt == .key and drawing) {
+        if (e.evt == .key and (drawing or state.tool == .boundaries)) {
             const inv = keymap.match1(e, kmode("canvas"));
             const is = struct {
                 fn f(i: ?keymap.Invocation, a: keymap.ActionId) bool {
@@ -11204,6 +11219,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
+                } else if (state.tool == .boundaries and me.button.pointer()) {
+                    // Select boundaries: the nearest boundary's container.
+                    _ = hoverPress(state.view.toMm(area, me.p));
+                    state.press_consumed = true;
+                    last_click = null;
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (state.tool == .select and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and hoverPress(state.view.toMm(area, me.p))) {
                     // Pointing: a container by its outline, content from
                     // inside (see "Pointing").
@@ -12397,6 +12418,16 @@ fn toolBar() void {
         .panel => |pi| state.model.panels.items[pi].unbounded,
         else => false,
     };
+    {
+        // Select boundaries: the boundary nearest the pointer, always.
+        const on = state.tool == .boundaries;
+        var bwd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Select boundaries", dvui.entypo.resize_full_screen, 0, .{
+            .data_out = &bwd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        });
+        dvui.tooltip(@src(), .{ .active_rect = bwd.borderRectScale().r }, "Select boundaries: the boundary nearest the pointer is highlighted, and a click selects its container", .{}, .{});
+    }
     if (on_canvas or state.context == .selection or state.context == .group) {
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
@@ -13124,6 +13155,13 @@ const button_handlers = [_]ButtonHandler{
                 else => return,
             };
             state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
+        }
+    }.f),
+    handler("tool.select-boundaries", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            if (canvas_eq != null) leaveCanvasEquation();
+            state.tool = if (state.tool == .boundaries) .select else .boundaries;
         }
     }.f),
     handler("tool.select-area", struct {
@@ -15988,6 +16026,7 @@ fn statusContent() void {
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
+        .boundaries => "Select boundaries: the nearest boundary is highlighted; a click selects its container · B or Esc ends",
         .add_tracks => if (tracks_tool.kind == .track) "Add a track: drag it out, right or down, on the panel · Esc cancels" else if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
@@ -17675,6 +17714,7 @@ const HoverTarget = union(enum) {
     tile: struct { id: TileId, box: geom.Box },
     track: struct { panel: usize, region: usize, box: geom.Box },
     panel: struct { panel: usize, box: geom.Box },
+    art: struct { panel: usize, index: usize, box: geom.Box },
     /// Inside a tile, a slot's text: its label, and where in its source.
     slot: struct { tile: TileId, panel: usize, label: usize, box: geom.Box, offset: u32 },
     /// In an expression being edited: near an object's box (chosen by a
@@ -17795,6 +17835,164 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
     return null;
 }
 
+/// Select boundaries: the container whose boundary is nearest worksheet
+/// point `p` (keys, tracks, line art, panels), within reach of it (the
+/// pointer inside, or near: 40 px); the smaller of two as near.
+fn nearestBoundary(p: geom.Point) ?HoverTarget {
+    const reach = 40 * edgeMm() / edge_px;
+    var best: ?HoverTarget = null;
+    var best_d: f64 = std.math.inf(f64);
+    var best_area: f64 = std.math.inf(f64);
+    const consider = struct {
+        fn f(t: HoverTarget, b: geom.Box, q: geom.Point, r: f64, bt: *?HoverTarget, bd: *f64, ba: *f64) void {
+            const inside = contains(b, q);
+            const d = outlineDistance(b, q);
+            if (!inside and d > r) return;
+            const ar = b.width() * b.height();
+            if (d < bd.* - 1e-9 or (@abs(d - bd.*) <= 1e-9 and ar < ba.*)) {
+                bt.* = t;
+                bd.* = d;
+                ba.* = ar;
+            }
+        }
+    }.f;
+    for (state.placed.items, 0..) |placed, pi| {
+        if (!shownPanel(pi)) continue;
+        for (placed.tiles) |t| {
+            if (t.spacer) continue;
+            const b = onSheet(pi, t.body);
+            consider(.{ .tile = .{ .id = t.id, .box = b } }, b, p, reach, &best, &best_d, &best_area);
+        }
+        for (placed.tracks) |t| {
+            const b = onSheet(pi, t.box);
+            consider(.{ .track = .{ .panel = t.panel, .region = t.member, .box = b } }, b, p, reach, &best, &best_d, &best_area);
+        }
+        for (placed.art) |pa| {
+            const b = onSheet(pi, pa.box);
+            consider(.{ .art = .{ .panel = pi, .index = pa.index, .box = b } }, b, p, reach, &best, &best_d, &best_area);
+        }
+    }
+    for (state.model.panels.items, 0..) |panel, pi| {
+        if (!shownPanel(pi) or panel.unbounded) continue;
+        const b = panel.box();
+        consider(.{ .panel = .{ .panel = pi, .box = b } }, b, p, reach, &best, &best_d, &best_area);
+    }
+    return best;
+}
+
+/// A highlighted boundary: a medium stroke along box `b` (worksheet mm)
+/// with a translucent halo either side whose opacity falls off as the
+/// inverse square of the distance from the stroke's edge,
+/// a(t) = a0 / (1 + (t / r0)²). DVUI has no shaders to blur or shade a
+/// distance field, so the halo is geometry: rings of the outline offset
+/// outward (rounded, as an offset rectangle is) and inward, each vertex
+/// coloured with the falloff's opacity at its distance, the opacity
+/// interpolated between rings, blended over what is beneath (premultiplied).
+/// Rings are closer where the falloff is steep.
+fn haloBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color) void {
+    const Index = dvui.Vertex.Index;
+    const ns: f64 = dvui.windowNaturalScale();
+    const p0 = state.view.toPx(area, .{ .x = b.x0, .y = b.y0 });
+    const p1 = state.view.toPx(area, .{ .x = b.x1, .y = b.y1 });
+    const x0: f64 = @min(p0.x, p1.x);
+    const x1: f64 = @max(p0.x, p1.x);
+    const y0: f64 = @min(p0.y, p1.y);
+    const y1: f64 = @max(p0.y, p1.y);
+    const hw = 1.5 * ns; // half the core stroke
+    const aa = 0.8 * ns; // the core's anti-aliased edge
+    const core: f64 = 0.95;
+    const a0: f64 = 0.55;
+    const r0 = 5 * ns;
+    const t_max = r0 * @sqrt(a0 / 0.012 - 1);
+    const inner_room = @min(x1 - x0, y1 - y0) / 2;
+    // The rings: signed distance from the outline, and opacity there.
+    var rings: [48]struct { d: f64, a: f64 } = undefined;
+    var n: usize = 0;
+    const falloff = struct {
+        fn f(t: f64, a: f64, r: f64) f64 {
+            return a / (1 + (t / r) * (t / r));
+        }
+    }.f;
+    // Inward, from the halo's inner end to the core.
+    var steps: [20]f64 = undefined;
+    var ns_steps: usize = 0;
+    {
+        var k: f64 = 1;
+        while (ns_steps < steps.len) : (k += 1) {
+            const t = r0 * (std.math.pow(f64, 2, k * 0.5) - 1);
+            if (t >= t_max) break;
+            steps[ns_steps] = t;
+            ns_steps += 1;
+        }
+    }
+    {
+        // Inner glow, deepest first (only as far as the box has room).
+        var i: usize = ns_steps + 1;
+        while (i > 0) {
+            i -= 1;
+            const t = if (i == ns_steps) t_max else steps[i];
+            const d = -(hw + aa + t);
+            if (-d >= inner_room) continue;
+            rings[n] = .{ .d = d, .a = if (i == ns_steps) 0 else falloff(t, a0, r0) };
+            n += 1;
+        }
+        if (hw + aa < inner_room) {
+            rings[n] = .{ .d = -(hw + aa), .a = a0 };
+            n += 1;
+        }
+        rings[n] = .{ .d = -@min(hw, inner_room), .a = core };
+        n += 1;
+        rings[n] = .{ .d = hw, .a = core };
+        n += 1;
+        rings[n] = .{ .d = hw + aa, .a = a0 };
+        n += 1;
+        for (0..ns_steps + 1) |j| {
+            const t = if (j == ns_steps) t_max else steps[j];
+            rings[n] = .{ .d = hw + aa + t, .a = if (j == ns_steps) 0 else falloff(t, a0, r0) };
+            n += 1;
+        }
+    }
+    // Each ring: 4 corners, K points each (an outward ring's corners are
+    // arcs; an inward ring's are its corners, repeated).
+    const K = 6;
+    const per = 4 * K;
+    const lifo = dvui.currentWindow().lifo();
+    var tb = dvui.Triangles.Builder.init(lifo, n * per, (n - 1) * per * 6) catch return;
+    defer tb.deinit(lifo);
+    const corner = [4][2]f64{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 } };
+    const arc_from = [4]f64{ std.math.pi, 1.5 * std.math.pi, 0, 0.5 * std.math.pi };
+    const inward = [4][2]f64{ .{ 1, 1 }, .{ -1, 1 }, .{ -1, -1 }, .{ 1, -1 } };
+    for (rings[0..n]) |r| {
+        const col: dvui.Color.PMA = .fromColor(colour.opacity(@floatCast(r.a)));
+        for (0..4) |c| for (0..K) |k| {
+            var x = corner[c][0];
+            var y = corner[c][1];
+            if (r.d >= 0) {
+                const th = arc_from[c] + 0.5 * std.math.pi * @as(f64, @floatFromInt(k)) / (K - 1);
+                x += r.d * @cos(th);
+                y += r.d * @sin(th);
+            } else {
+                x += -r.d * inward[c][0];
+                y += -r.d * inward[c][1];
+            }
+            tb.appendVertex(.{ .pos = .{ .x = @floatCast(x), .y = @floatCast(y) }, .col = col });
+        };
+    }
+    for (0..n - 1) |j| for (0..per) |i| {
+        const a: Index = @intCast(j * per + i);
+        const bb: Index = @intCast(j * per + (i + 1) % per);
+        const c: Index = @intCast((j + 1) * per + i);
+        const d: Index = @intCast((j + 1) * per + (i + 1) % per);
+        const va = tb.vertexes.items[a].pos;
+        const vb = tb.vertexes.items[bb].pos;
+        const vc = tb.vertexes.items[c].pos;
+        const vd = tb.vertexes.items[d].pos;
+        tb.appendTriangles(&ccw(va, vb, vc, a, bb, c));
+        tb.appendTriangles(&ccw(vb, vd, vc, bb, d, c));
+    };
+    dvui.renderTriangles(tb.build_unowned(), null) catch {};
+}
+
 /// The hover target as last found (for drawing), and what was found for.
 var hover_target: ?HoverTarget = null;
 
@@ -17802,16 +18000,18 @@ var hover_target: ?HoverTarget = null;
 /// an object's box; and sets the pointer's shape.
 fn drawHover(area: dvui.Rect.Physical) void {
     hover_target = null;
-    if (state.tool != .select or state.drag != null or panel_edit != null or sketch_edit != null or canvas_prompt or engagingPoint()) return;
+    if (state.tool != .select and state.tool != .boundaries) return;
+    if (state.drag != null or panel_edit != null or sketch_edit != null or canvas_prompt or engagingPoint()) return;
     const m = state.mouse orelse return;
-    const t = hoverTargetAt(m) orelse return;
+    const t = (if (state.tool == .boundaries) nearestBoundary(m) else hoverTargetAt(m)) orelse return;
     hover_target = t;
     const px = dvui.windowNaturalScale();
     const hover = colors.select.opacity(0.75);
     switch (t) {
-        .tile => |x| state.view.rect(area, x.box).stroke(.square, .{ .thickness = 2.5 * px, .color = .{ .color = hover } }),
-        .track => |x| state.view.rect(area, x.box).stroke(.square, .{ .thickness = 2.5 * px, .color = .{ .color = hover } }),
-        .panel => |x| state.view.rect(area, x.box).stroke(.square, .{ .thickness = 2.5 * px, .color = .{ .color = hover } }),
+        .tile => |x| haloBox(area, x.box, colors.select),
+        .track => |x| haloBox(area, x.box, colors.select),
+        .panel => |x| haloBox(area, x.box, colors.select),
+        .art => |x| haloBox(area, x.box, colors.select),
         .slot => |x| {
             state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
             state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
@@ -17826,7 +18026,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
 /// (a container selected, a slot's text edited there, an object chosen,
 /// the caret put). Whether it took the press.
 fn hoverPress(p: geom.Point) bool {
-    const t = hoverTargetAt(p) orelse return false;
+    const t = (if (state.tool == .boundaries) nearestBoundary(p) else hoverTargetAt(p)) orelse return false;
     switch (t) {
         .tile => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
@@ -17842,6 +18042,11 @@ fn hoverPress(p: geom.Point) bool {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
             levelSet(.{ .panel = x.panel });
+        },
+        .art => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .art = .{ .panel = x.panel, .index = x.index } });
         },
         .slot => |x| {
             // The slot's text edited, the caret where pressed.

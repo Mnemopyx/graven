@@ -156,3 +156,5 @@ These are observations to start the discussion from, not decisions.
 
 - **Outlines of layout regions** (2026-11-21, the owner: dashes did not look good): tracks and regions, a selected key's slots, tiles without a body (the plate's legend places), the sketch frame and picked objects are outlined with thin solid lines in their usual colours (`guideBox`, `guideOutline`), not dashed. Construction geometry inside a sketch stays dashed (a drafting convention).
 
+- **Select boundaries** (2026-11-21; tool palette, or B on the canvas; B or Esc ends it): the container whose boundary is nearest the pointer (keys, tracks, line art, panels; within 40 px or with the pointer inside) is highlighted, and a click selects it; content is not entered. **Boundary highlights** (this tool, and the select tool's outline zone) are a halo: a 3 px core stroke and a translucent glow either side whose opacity falls off as the inverse square of the distance from the stroke, a(t) = 0.55 / (1 + (t / 5 px)²), out to about 33 px (`haloBox`).
+

@@ -590,6 +590,7 @@ pub const all = [_]Element{
     .{ .id = "tool.fit-to-tiles", .kind = .button, .label = "Fit to tiles" },
     .{ .id = "tool.new-sketch", .kind = .button, .label = "New sketch" },
     .{ .id = "tool.select-area", .kind = .button, .label = "Select area" },
+    .{ .id = "tool.select-boundaries", .kind = .button, .label = "Select boundaries" },
     .{ .id = "tool.shape", .kind = .choice, .label = "Shape" },
     .{ .id = "tool.zoom-to-context", .kind = .button, .label = "Zoom to context" },
     .{ .id = "view.edits", .kind = .value, .label = "Edits" },
