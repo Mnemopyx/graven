@@ -6134,31 +6134,30 @@ fn argSplit(arg: i32) ?u8 {
 /// knows it before the strips are drawn.
 const tab_strip_h: f32 = 30;
 
-/// Room each side of a tab for a folder tab's flare, logical.
-const folder_flare: f32 = 10;
-
-/// Draws a window's shown tab as a file folder's tab joined to its view:
-/// its top corners filleted, its sides leaning out as they come down, then
-/// concave fillets turning them into the view's top edge (a filleted S
-/// each side), filled with the colour the view's top has, so the tab and
-/// the view read as one. `tab`: the tab's box; `strip`: the tab strip
-/// (its bottom is the view's top). The active window's outlined in the
-/// focus colour. Drawn before the tab's label, over the strip's line.
-fn folderTab(tab: dvui.Rect.Physical, strip: dvui.Rect.Physical, kind: docviews.Kind, active: bool) void {
+/// Draws a window's shown tab joined to its view, in three sections: the
+/// top, holding the tab's name; a wider middle band, a longer contact with
+/// the view; then the view itself. Each meets the next with fillets (top
+/// corners rounded, each step's inner corner and outer corner softened),
+/// all filled with the colour the view's top has (the ruler's, for a
+/// canvas) and outlined, so the tab and its view read as one piece.
+/// `tab`: the tab's box; `strip`: the tab strip (its bottom is the view's
+/// top). Drawn before the tab's label, over the strip's line.
+fn folderTab(tab: dvui.Rect.Physical, strip: dvui.Rect.Physical, kind: docviews.Kind) void {
     const s = dvui.windowNaturalScale();
     const base = strip.y + strip.h;
     const top = strip.y + 3 * s;
-    const rt = 5 * s; // top fillets
-    const rb = 6 * s; // the flares' fillets
-    const lean = 3 * s; // how far each side leans out
+    const band = base - 7 * s; // the middle band's top
+    const widen = 8 * s; // how far the band reaches past the top each side
+    const rt = 5 * s; // the top's corners
+    const rs = 3 * s; // the step's inner corners
+    const rc = 3 * s; // the band's outer corners
+    const rb = 4 * s; // into the view
     const left = tab.x;
     const right = tab.x + tab.w;
     const fill = if (kind == .canvas) colors.ruler else dvui.themeGet().color(.content, .fill);
-    const line = if (active) dvui.themeGet().focus else colors.edge.opacity(0.4);
-    const n_arc = 8;
-    // The outline, left to right: the left flare's fillet, the leaning side,
-    // the top's fillets, the right side, the right flare.
-    var pts: [4 * (n_arc + 1)]dvui.Point.Physical = undefined;
+    const line = colors.edge.opacity(0.45);
+    const n_arc = 6;
+    var pts: [8 * (n_arc + 1)]dvui.Point.Physical = undefined;
     var n: usize = 0;
     const arc = struct {
         fn add(out: []dvui.Point.Physical, at: *usize, c: dvui.Point.Physical, r: f32, a0: f32, a1: f32) void {
@@ -6170,49 +6169,43 @@ fn folderTab(tab: dvui.Rect.Physical, strip: dvui.Rect.Physical, kind: docviews.
         }
     }.add;
     const pi: f32 = std.math.pi;
-    // Angles with y downward: 0 right, pi/2 down.
-    arc(&pts, &n, .{ .x = left - lean - rb, .y = base - rb }, rb, pi / 2, 0);
+    // Angles with y downward: 0 right, pi/2 down. Left side, from the
+    // view's edge up; then the right side, down to it.
+    const bl = left - widen;
+    const br = right + widen;
+    arc(&pts, &n, .{ .x = bl - rb, .y = base - rb }, rb, pi / 2, 0);
+    arc(&pts, &n, .{ .x = bl + rc, .y = band + rc }, rc, pi, 1.5 * pi);
+    arc(&pts, &n, .{ .x = left - rs, .y = band - rs }, rs, pi / 2, 0);
     arc(&pts, &n, .{ .x = left + rt, .y = top + rt }, rt, pi, 1.5 * pi);
     arc(&pts, &n, .{ .x = right - rt, .y = top + rt }, rt, 1.5 * pi, 2 * pi);
-    arc(&pts, &n, .{ .x = right + lean + rb, .y = base - rb }, rb, pi, pi / 2);
-    // Drawn over its neighbours' room (the first tab's flare reaches past
-    // the views' left edge, over the bar beside it).
+    arc(&pts, &n, .{ .x = right + rs, .y = band - rs }, rs, pi, pi / 2);
+    arc(&pts, &n, .{ .x = br - rc, .y = band + rc }, rc, 1.5 * pi, 2 * pi);
+    arc(&pts, &n, .{ .x = br + rb, .y = base - rb }, rb, pi, pi / 2);
+    // Over the neighbours' room (the first tab's band reaches past the
+    // views' left edge, over the bar beside).
     const prev_clip = dvui.clipGet();
     dvui.clipSet(dvui.windowRectPixels());
     defer dvui.clipSet(prev_clip);
+    // Filled as a fan from the middle of its base: every point of the
+    // outline is seen from there.
     const lifo = dvui.currentWindow().lifo();
     const col: dvui.Color.PMA = .fromColor(fill);
     const Index = dvui.Vertex.Index;
-    // The body (top fillets and sides, down to the base): convex, a fan;
-    // each flare: a fan from its corner on the base.
-    {
-        const body = pts[n_arc .. 3 * (n_arc + 1) + 1];
-        var b = dvui.Triangles.Builder.init(lifo, body.len + 2, 3 * body.len) catch return;
-        defer b.deinit(lifo);
-        const c: dvui.Point.Physical = .{ .x = (left + right) / 2, .y = (top + base) / 2 };
-        b.appendVertex(.{ .pos = c, .col = col });
-        for (body) |p| b.appendVertex(.{ .pos = p, .col = col });
-        for (0..body.len - 1) |i| {
-            const a: Index = @intCast(i + 1);
-            b.appendTriangles(&ccw(c, body[i], body[i + 1], 0, a, a + 1));
-        }
-        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    var b = dvui.Triangles.Builder.init(lifo, n + 1, 3 * n) catch return;
+    defer b.deinit(lifo);
+    const c: dvui.Point.Physical = .{ .x = (left + right) / 2, .y = base };
+    b.appendVertex(.{ .pos = c, .col = col });
+    for (pts[0..n]) |p| b.appendVertex(.{ .pos = p, .col = col });
+    for (0..n - 1) |i| {
+        const k: Index = @intCast(i + 1);
+        b.appendTriangles(&ccw(c, pts[i], pts[i + 1], 0, k, k + 1));
     }
-    inline for (.{ 0, 3 * (n_arc + 1) }, .{ left - lean, right + lean }) |from, cx| {
-        const flare = pts[from .. from + n_arc + 1];
-        var b = dvui.Triangles.Builder.init(lifo, flare.len + 1, 3 * flare.len) catch return;
-        defer b.deinit(lifo);
-        const c: dvui.Point.Physical = .{ .x = cx, .y = base };
-        b.appendVertex(.{ .pos = c, .col = col });
-        for (flare) |p| b.appendVertex(.{ .pos = p, .col = col });
-        for (0..flare.len - 1) |i| {
-            const a: Index = @intCast(i + 1);
-            b.appendTriangles(&ccw(c, flare[i], flare[i + 1], 0, a, a + 1));
-        }
-        dvui.renderTriangles(b.build_unowned(), null) catch {};
-    }
-    dvui.Path.stroke(.{ .points = pts[0..n] }, .{ .thickness = if (active) 1.4 * s else 1 * s, .color = .{ .color = line } });
+    dvui.renderTriangles(b.build_unowned(), null) catch {};
+    dvui.Path.stroke(.{ .points = pts[0..n] }, .{ .thickness = s, .color = .{ .color = line } });
 }
+
+/// Room each side of a tab for its band, logical (`folderTab`).
+const folder_flare: f32 = 12;
 
 /// When and which tab was last clicked, for double-clicks.
 var tab_click: struct { view: u8 = docviews.none, ms: i64 = 0 } = .{};
@@ -6237,7 +6230,6 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             var lb: [96]u8 = undefined;
             const label = viewLabel(&lb, v);
             const current = v == shown;
-            const is_active = v == vl.active;
             var tab = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .id_extra = k,
                 // The first tab at the views' left edge keeps its place,
@@ -6247,7 +6239,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             });
             defer tab.deinit();
             // The window's tab shown is a folder's tab, joined to its view.
-            if (current) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[v].kind, is_active);
+            if (current) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[v].kind);
             // Room for descenders: no margin, a little padding below.
             const tab_font = dvui.Font.theme(.body).larger(-1);
             if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 2, .h = 4 }, .id_extra = k })) {

@@ -31,7 +31,7 @@ What the app opens on, before there is a document: none of the canvas's interfac
 ## Tab bar (2026-11-21)
 
 - The tab bar runs the window's full width: the edges' strips (and their hot edges) and docked panes start below it. The first tab stays where it was, at the views' left edge.
-- A window's shown tab is drawn as a file folder's tab joined to its view: top corners filleted, sides leaning out, then concave fillets turning into the view's top edge, filled with the colour the view's top has (the ruler's, for a canvas). The active window's is outlined in the focus colour; other tabs are plain labels.
+- A window's shown tab is joined to its view in three sections: the top, holding the name; a wider middle band, a longer contact with the view; then the view. Each meets the next with fillets (the top's corners, each step's inner and outer corners, into the view), all filled with the colour the view's top has (the ruler's, for a canvas) and outlined thinly; no highlight colour, the shape ties it to its view. Other tabs are plain labels.
 
 ## Splits
 
