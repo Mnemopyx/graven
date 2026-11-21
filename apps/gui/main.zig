@@ -901,12 +901,9 @@ fn init(win: *dvui.Window) !void {
     initWindowFrame(win);
     // Match the desktop now, then follow its changes.
     main_window = win;
-    // Text fields and cells in a font with legends' characters (Greek,
-    // arrows, mathematical operators): DejaVu Sans, built in
-    // (uifont/README.md).
-    if (win.addFont("DejaVu Sans", @embedFile("uifont/DejaVuSans.ttf"), null)) {
-        ghost_pane.field_family = "DejaVu Sans";
-    } else |_| {}
+    // The whole interface in DejaVu Sans (`ui_fonts`, set with the theme in
+    // `applyDesktop`); fields and cells say so too.
+    ghost_pane.field_family = "DejaVu Sans";
     const settings = desktop.read(gpa, dvui.io);
     applyDesktop(win, settings);
     desktop.watch(dvui.io, settings, wakeGui);
@@ -5670,12 +5667,38 @@ var colors: Palette = light_palette;
 /// The desktop settings in effect, for the title bar's button layout.
 var desk: desktop.Settings = .{};
 
+/// The interface's fonts: DejaVu Sans and DejaVu Sans Mono 2.37, built in
+/// (uifont/README.md), in place of DVUI's Bitstream Vera. DejaVu is Vera
+/// extended: the same shapes, with the characters legends use (Greek,
+/// arrows, mathematical operators), so a key's name or a legend shows
+/// wherever the interface writes it.
+const ui_fonts: []const dvui.Font.Source = &.{
+    .{ .family = dvui.Font.array("DejaVu Sans"), .bytes = @embedFile("uifont/DejaVuSans.ttf") },
+    .{ .family = dvui.Font.array("DejaVu Sans"), .weight = .bold, .bytes = @embedFile("uifont/DejaVuSans-Bold.ttf") },
+    .{ .family = dvui.Font.array("DejaVu Sans"), .style = .italic, .bytes = @embedFile("uifont/DejaVuSans-Oblique.ttf") },
+    .{ .family = dvui.Font.array("DejaVu Sans"), .weight = .bold, .style = .italic, .bytes = @embedFile("uifont/DejaVuSans-BoldOblique.ttf") },
+    .{ .family = dvui.Font.array("DejaVu Sans Mono"), .bytes = @embedFile("uifont/DejaVuSansMono.ttf") },
+    .{ .family = dvui.Font.array("DejaVu Sans Mono"), .weight = .bold, .bytes = @embedFile("uifont/DejaVuSansMono-Bold.ttf") },
+};
+
+/// `theme` with the interface's fonts (`ui_fonts`), its sizes kept.
+fn withUiFonts(theme: dvui.Theme) dvui.Theme {
+    var t = theme;
+    t.embedded_fonts = ui_fonts;
+    t.font_body = t.font_body.withFamily("DejaVu Sans");
+    t.font_heading = t.font_heading.withFamily("DejaVu Sans");
+    t.font_title = t.font_title.withFamily("DejaVu Sans");
+    t.font_mono = t.font_mono.withFamily("DejaVu Sans Mono");
+    return t;
+}
+
 /// Matches the desktop: DVUI's Adwaita theme in the desktop's scheme with
-/// its accent as the focus colour, and Graven's palette to suit.
+/// its accent as the focus colour, and Graven's palette to suit; the
+/// interface's own fonts.
 fn applyDesktop(win: *dvui.Window, s: desktop.Settings) void {
     desk = s;
     const dark = s.scheme == .dark;
-    var theme = if (dark) dvui.Theme.builtin.adwaita_dark else dvui.Theme.builtin.adwaita_light;
+    var theme = withUiFonts(if (dark) dvui.Theme.builtin.adwaita_dark else dvui.Theme.builtin.adwaita_light);
     if (s.accent) |a| theme.focus = .{ .r = @intFromFloat(a[0] * 255), .g = @intFromFloat(a[1] * 255), .b = @intFromFloat(a[2] * 255) };
     // Every colour through the display correction (display.zig).
     display.fixAll(dvui.Color, &theme);
