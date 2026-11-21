@@ -11247,10 +11247,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .select and boundary_mode and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p))) {
                     // Select boundaries: the nearest boundary's container,
                     // made the selection (its drag points shown).
-                    if (hoverPress(state.view.toMm(area, me.p))) {
-                        selection.clearRetainingCapacity();
-                        if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
-                    }
+                    _ = hoverPress(state.view.toMm(area, me.p));
                     state.press_consumed = true;
                     last_click = null;
                     dvui.refresh(null, @src(), box.data().id);
@@ -17723,7 +17720,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel
     const p0 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y0 });
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     markCaret(p0, p1);
-    dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 2.5 * px, .color = .{ .color = colors.select.opacity(pulse()) } });
+    speckleCaret(p0, p1);
 }
 
 // Pointing (decided 2026-11-20): near a container's outline the
@@ -18091,11 +18088,15 @@ fn drawHover(area: dvui.Rect.Physical) void {
     hover_target = t;
     const px = dvui.windowNaturalScale();
     const hover = colors.select.opacity(0.75);
+    // Halos mark what can be selected only while nothing is: with a
+    // selection its drag points glow (drawSelection); while content is
+    // edited, nothing does (the caret is the speckle).
+    const halo_ok = selection.items.len == 0 and canvas_eq == null and track_cursor == null;
     switch (t) {
-        .tile => |x| haloBox(area, x.box, colors.select),
-        .track => |x| haloBox(area, x.box, colors.select),
-        .panel => |x| haloBox(area, x.box, colors.select),
-        .art => |x| haloBox(area, x.box, colors.select),
+        .tile => |x| if (halo_ok) haloBox(area, x.box, colors.select),
+        .track => |x| if (halo_ok) haloBox(area, x.box, colors.select),
+        .panel => |x| if (halo_ok) haloBox(area, x.box, colors.select),
+        .art => |x| if (halo_ok) haloBox(area, x.box, colors.select),
         .slot => |x| {
             state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
             state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
@@ -18121,16 +18122,22 @@ fn hoverPress(p: geom.Point) bool {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
             levelSet(.{ .region = .{ .panel = x.panel, .region = x.region } });
+            // The container is the selection: its drag points show.
+            if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
         },
         .panel => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
             levelSet(.{ .panel = x.panel });
+            // The container is the selection: its drag points show.
+            if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
         },
         .art => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
             levelSet(.{ .art = .{ .panel = x.panel, .index = x.index } });
+            // The container is the selection: its drag points show.
+            if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
         },
         .slot => |x| {
             // The slot's text edited, the caret where pressed.
@@ -18215,7 +18222,6 @@ fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.P
         if (t.flow_panel != c.panel or t.region != c.region or t.track != at.segment) continue;
         const pos = at.along;
         const b = onSheet(pi, t.box);
-        const px = dvui.windowNaturalScale();
         // The cursor pulses: it is where typing goes.
         const focus = colors.select.opacity(pulse());
         // The segment, faintly, then the bar a little past its edges.
@@ -18223,7 +18229,7 @@ fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.P
         const over = 1.0;
         const p0: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y0 - over } else .{ .x = b.x0 - over, .y = b.y1 - pos };
         const p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
-        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, p0), state.view.toPx(area, p1) } }, .{ .thickness = 3 * px, .color = .{ .color = focus } });
+        speckleCaret(state.view.toPx(area, p0), state.view.toPx(area, p1));
         markCaret(state.view.toPx(area, p0), state.view.toPx(area, p1));
         return;
     }
@@ -18264,6 +18270,66 @@ fn marchingBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, width:
 }
 
 /// How strongly the flow cursor shows now, 0.55 to 1: a slow pulse.
+/// The caret's colour: a laser's red, unlike anything else drawn.
+const laser: dvui.Color = .{ .r = 0xff, .g = 0x1f, .b = 0x2d };
+
+/// The caret drawn as laser speckle (decided 2026-11-21: in content
+/// editing the caret attracts the eye, and nothing is haloed): from `p0` to
+/// `p1` (device pixels), a faint core line under grains whose brightness
+/// follows laser speckle's statistics, negative exponential (most grains
+/// dim, a few blazing: I = −ln U), peaked across the bar, the pattern
+/// re-drawn 25 times a second so it boils as a laser spot does.
+fn speckleCaret(p0: dvui.Point.Physical, p1: dvui.Point.Physical) void {
+    const Index = dvui.Vertex.Index;
+    animate();
+    const ns: f32 = dvui.windowNaturalScale();
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    const len = @sqrt(dx * dx + dy * dy);
+    if (!(len > 0)) return;
+    const u: [2]f32 = .{ dx / len, dy / len };
+    const nrm: [2]f32 = .{ -u[1], u[0] };
+    // The core: where the caret is, always legible.
+    dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 1.2 * ns, .color = .{ .color = laser.opacity(0.55) } });
+    const cell: f32 = 1.3 * ns;
+    const along: usize = @intFromFloat(@ceil(len / cell));
+    const across = 5;
+    const sigma: f32 = 1.4 * ns;
+    // The pattern: one per 40 ms, the same within a frame.
+    const tick: u64 = @intCast(@divTrunc(@max(0, platform.monotonicNs()), 40 * std.time.ns_per_ms));
+    var prng = std.Random.DefaultPrng.init(tick *% 0x9E3779B97F4A7C15 +% @as(u64, @intFromFloat(@abs(p0.x) * 7 + @abs(p0.y))));
+    const rnd = prng.random();
+    const n = along * across;
+    const lifo = dvui.currentWindow().lifo();
+    var tb = dvui.Triangles.Builder.init(lifo, 4 * n, 6 * n) catch return;
+    defer tb.deinit(lifo);
+    var k: usize = 0;
+    for (0..along) |i| for (0..across) |jj| {
+        const j: f32 = @as(f32, @floatFromInt(jj)) - (across - 1) / 2.0;
+        const off = j * cell * 0.8;
+        const env = @exp(-(off * off) / (2 * sigma * sigma));
+        const intensity: f32 = -@log(1 - rnd.float(f32) * 0.999);
+        const a = std.math.clamp(0.75 * intensity * env, 0, 1);
+        if (a < 0.04) continue;
+        const t = (@as(f32, @floatFromInt(i)) + 0.5 + (rnd.float(f32) - 0.5) * 0.6) * cell;
+        if (t > len) continue;
+        const cx = p0.x + u[0] * t + nrm[0] * (off + (rnd.float(f32) - 0.5) * 0.5 * cell);
+        const cy = p0.y + u[1] * t + nrm[1] * (off + (rnd.float(f32) - 0.5) * 0.5 * cell);
+        const h = 0.5 * cell * (0.6 + 0.4 * @min(1, intensity / 2));
+        const col: dvui.Color.PMA = .fromColor(laser.opacity(a));
+        const base: Index = @intCast(4 * k);
+        tb.appendVertex(.{ .pos = .{ .x = cx - h, .y = cy - h }, .col = col });
+        tb.appendVertex(.{ .pos = .{ .x = cx + h, .y = cy - h }, .col = col });
+        tb.appendVertex(.{ .pos = .{ .x = cx + h, .y = cy + h }, .col = col });
+        tb.appendVertex(.{ .pos = .{ .x = cx - h, .y = cy + h }, .col = col });
+        const v = tb.vertexes.items;
+        tb.appendTriangles(&ccw(v[base].pos, v[base + 1].pos, v[base + 2].pos, base, base + 1, base + 2));
+        tb.appendTriangles(&ccw(v[base].pos, v[base + 2].pos, v[base + 3].pos, base, base + 2, base + 3));
+        k += 1;
+    };
+    if (k > 0) dvui.renderTriangles(tb.build_unowned(), null) catch {};
+}
+
 fn pulse() f32 {
     animate();
     const t: f64 = @as(f64, @floatFromInt(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms))) / 1000;
@@ -19665,6 +19731,9 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
     const pp = state.view.toPx(area, at);
     for (constrainables(a)) |id| {
         if (isControlPoint(id)) continue;
+        // Drag points are the selection's (decided 2026-11-21): with
+        // nothing selected, the halo shows what a click would select.
+        if (std.mem.indexOfScalar(layout.model.ObjectId, selection.items, id) == null) continue;
         const b = containerBox(id) orelse continue;
         const mx = (b.x0 + b.x1) / 2;
         const my = (b.y0 + b.y1) / 2;
@@ -19992,11 +20061,14 @@ fn drawEngagement(area: dvui.Rect.Physical) void {
     if (h.kind == .edge) {
         const b = containerBox(h.id) orelse return;
         const pts: [2]geom.Point = if (h.edges.left) .{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x0, .y = b.y1 } } else if (h.edges.right) .{ .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x1, .y = b.y1 } } else if (h.edges.bottom) .{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x1, .y = b.y0 } } else .{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 } };
-        dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, pts[0]), state.view.toPx(area, pts[1]) } }, .{ .thickness = 3 * ns, .color = .{ .color = colour.opacity(0.8) } });
+        // The edge, haloed.
+        haloBox(area, .{ .x0 = @min(pts[0].x, pts[1].x), .y0 = @min(pts[0].y, pts[1].y), .x1 = @max(pts[0].x, pts[1].x), .y1 = @max(pts[0].y, pts[1].y) }, colour);
     }
     if (engage_lock != null) {
         if (!sparkCursor(q, true)) scintillate(q, 8 * ns);
     } else {
+        // The drag point, haloed.
+        haloPoint(q, 4 * ns, colour);
         skRing(q, 6 * ns, colour, 1.5 * ns);
     }
     annunciate(area, q, engageText(h));
@@ -20231,8 +20303,8 @@ fn drawSelection(area: dvui.Rect.Physical) void {
     for (hb[0..resizeHandles(&hb)]) |h| {
         const q = state.view.toPx(area, h.at);
         const s: f32 = 4.5 * px;
-        // In Select boundaries, the drag points glow.
-        if (boundary_mode) haloPoint(q, s, colors.select);
+        // A selection's drag points glow, set apart from the drawing.
+        if (canvas_eq == null and track_cursor == null) haloPoint(q, s, colors.select);
         const grip: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };
         grip.fill(.square, .{ .color = .{ .color = colors.paper } });
         grip.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
