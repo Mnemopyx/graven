@@ -218,6 +218,22 @@ pub const testing_api = struct {
         };
         return null;
     }
+    pub fn boundaryMode() bool {
+        return boundary_mode;
+    }
+    pub fn setBoundaryMode(on: bool) void {
+        boundary_mode = on;
+    }
+    /// A point just inside panel `name`'s left edge, mid-height.
+    pub fn panelEdge(name: []const u8) ?dvui.Point.Physical {
+        const pi = panelNamed(name) orelse return null;
+        const b = state.model.panels.items[pi].box();
+        return toScreen(.{ .x = b.x0 + 0.3 * edgeMm(), .y = (b.y0 + b.y1) / 2 });
+    }
+    pub fn handleCount() usize {
+        var hb: [8]Handle = undefined;
+        return resizeHandles(&hb);
+    }
     pub fn hoverKind() ?[]const u8 {
         return if (hover_target) |t| @tagName(t) else null;
     }
@@ -466,7 +482,7 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, boundaries, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
+const Tool = enum { select, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
 
 /// Join: the track a click on another track threads on into.
 var join_from: ?struct { panel: usize, region: usize } = null;
@@ -3431,6 +3447,7 @@ const Prefs = struct {
     show_construction: bool,
     grid: bg_grid.Mode,
     snap_grid: bool,
+    boundary_mode: bool,
     scroll: ScrollMode,
     display: display.Correction,
     px_per_mm: ?f32,
@@ -3454,7 +3471,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .scroll = scroll_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .scroll = scroll_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .hot_edges = hot_edges, .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -3482,6 +3499,9 @@ fn loadPrefs() void {
     };
     if (ps.get("view.snap_grid")) |v| if (v == .boolean) {
         snap_grid = v.boolean;
+    };
+    if (ps.get("view.boundary_mode")) |v| if (v == .boolean) {
+        boundary_mode = v.boolean;
     };
     // How scrolling acts: the machine's, as its pointing devices are.
     if (ps.get("view.scrolling")) |v| if (v == .string) if (std.meta.stringToEnum(ScrollMode, v.string)) |m| {
@@ -3619,6 +3639,7 @@ fn savePrefsIfChanged() void {
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
     ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
     ps.put("view.snap_grid", .{ .boolean = now.snap_grid }, .shared);
+    ps.put("view.boundary_mode", .{ .boolean = now.boundary_mode }, .shared);
     ps.put("view.scrolling", .{ .string = @tagName(now.scroll) }, .local);
     // The screen's correction belongs to this machine.
     ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
@@ -10433,6 +10454,11 @@ fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick
 
 /// Whether drags snap to the grid.
 var snap_grid: bool = true;
+/// Select boundaries (a persistent mode, toggled by its button or B, kept
+/// in the settings): with the select tool, the boundary nearest the
+/// pointer is highlighted and a click selects its container, never its
+/// content; the selection's drag points are haloed.
+var boundary_mode = false;
 
 /// The grid lines the drag in hand is on (canvas mm), for its guides;
 /// cleared when the drag ends.
@@ -10797,7 +10823,7 @@ fn arrowCode(d: keymap.Direction) dvui.enums.Key {
 
 fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
-    const drawing = state.tool != .select and state.tool != .boundaries;
+    const drawing = state.tool != .select;
     canvas_id = box.data().id;
     validateCursor();
     for (dvui.events()) |*e| {
@@ -10859,7 +10885,6 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             if (inv.action == kact("tool.select-boundaries")) {
                 e.handle(@src(), box.data());
                 _ = runAction(inv);
-                state.status = if (state.tool == .boundaries) "Select boundaries: the nearest boundary is highlighted; a click selects its container · B or Esc ends" else "";
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
@@ -11022,7 +11047,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
             continue;
         }
-        if (e.evt == .key and (drawing or state.tool == .boundaries)) {
+        if (e.evt == .key and drawing) {
             const inv = keymap.match1(e, kmode("canvas"));
             const is = struct {
                 fn f(i: ?keymap.Invocation, a: keymap.ActionId) bool {
@@ -11219,9 +11244,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
-                } else if (state.tool == .boundaries and me.button.pointer()) {
-                    // Select boundaries: the nearest boundary's container.
-                    _ = hoverPress(state.view.toMm(area, me.p));
+                } else if (state.tool == .select and boundary_mode and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p))) {
+                    // Select boundaries: the nearest boundary's container,
+                    // made the selection (its drag points shown).
+                    if (hoverPress(state.view.toMm(area, me.p))) {
+                        selection.clearRetainingCapacity();
+                        if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+                    }
                     state.press_consumed = true;
                     last_click = null;
                     dvui.refresh(null, @src(), box.data().id);
@@ -12419,14 +12448,14 @@ fn toolBar() void {
         else => false,
     };
     {
-        // Select boundaries: the boundary nearest the pointer, always.
-        const on = state.tool == .boundaries;
+        // Select boundaries: a mode, kept until toggled.
+        const on = boundary_mode;
         var bwd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Select boundaries", dvui.entypo.resize_full_screen, 0, .{
             .data_out = &bwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = bwd.borderRectScale().r }, "Select boundaries: the boundary nearest the pointer is highlighted, and a click selects its container", .{}, .{});
+        dvui.tooltip(@src(), .{ .active_rect = bwd.borderRectScale().r }, "Select boundaries (B): while on, the boundary nearest the pointer is highlighted and a click selects its container, its drag points haloed", .{}, .{});
     }
     if (on_canvas or state.context == .selection or state.context == .group) {
         const sel_on = state.tool == .select_area;
@@ -13159,9 +13188,9 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     handler("tool.select-boundaries", struct {
         fn f(_: i32) void {
-            state.drag = null;
             if (canvas_eq != null) leaveCanvasEquation();
-            state.tool = if (state.tool == .boundaries) .select else .boundaries;
+            boundary_mode = !boundary_mode;
+            state.status = if (boundary_mode) "Select boundaries on: the nearest boundary is highlighted; a click selects its container (B turns it off). " else "Select boundaries off. ";
         }
     }.f),
     handler("tool.select-area", struct {
@@ -16026,7 +16055,6 @@ fn statusContent() void {
         .add_panel => "Add panel: drag out its outline · Esc cancels",
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
-        .boundaries => "Select boundaries: the nearest boundary is highlighted; a click selects its container · B or Esc ends",
         .add_tracks => if (tracks_tool.kind == .track) "Add a track: drag it out, right or down, on the panel · Esc cancels" else if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
@@ -17835,6 +17863,62 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
     return null;
 }
 
+/// Whether worksheet point `p` is on one of the selection's resize
+/// handles (a press there drags it).
+fn selectionHandleAt(p: geom.Point) bool {
+    var hb: [8]Handle = undefined;
+    const tol = 6 / state.view.ppm;
+    for (hb[0..resizeHandles(&hb)]) |h| {
+        if (@abs(h.at.x - p.x) <= tol and @abs(h.at.y - p.y) <= tol) return true;
+    }
+    return false;
+}
+
+/// A drag point's halo: the same inverse-square glow as `haloBox`, round
+/// about a grip of half size `half` at `q` (device pixels), drawn under it.
+fn haloPoint(q: dvui.Point.Physical, half: f32, colour: dvui.Color) void {
+    const Index = dvui.Vertex.Index;
+    const ns: f64 = dvui.windowNaturalScale();
+    const a0: f64 = 0.55;
+    const r0 = 4 * ns;
+    const t_max = r0 * @sqrt(a0 / 0.012 - 1);
+    const inner: f64 = @as(f64, half) * 1.2;
+    var radii: [24]struct { r: f64, a: f64 } = undefined;
+    var n: usize = 0;
+    radii[n] = .{ .r = inner, .a = a0 };
+    n += 1;
+    var k: f64 = 1;
+    while (n < radii.len - 1) : (k += 1) {
+        const t = r0 * (std.math.pow(f64, 2, k * 0.5) - 1);
+        if (t >= t_max) break;
+        radii[n] = .{ .r = inner + t, .a = a0 / (1 + (t / r0) * (t / r0)) };
+        n += 1;
+    }
+    radii[n] = .{ .r = inner + t_max, .a = 0 };
+    n += 1;
+    const seg = 28;
+    const lifo = dvui.currentWindow().lifo();
+    var tb = dvui.Triangles.Builder.init(lifo, n * seg, (n - 1) * seg * 6) catch return;
+    defer tb.deinit(lifo);
+    for (radii[0..n]) |r| {
+        const col: dvui.Color.PMA = .fromColor(colour.opacity(@floatCast(r.a)));
+        for (0..seg) |i| {
+            const th = 2 * std.math.pi * @as(f64, @floatFromInt(i)) / seg;
+            tb.appendVertex(.{ .pos = .{ .x = q.x + @as(f32, @floatCast(r.r * @cos(th))), .y = q.y + @as(f32, @floatCast(r.r * @sin(th))) }, .col = col });
+        }
+    }
+    for (0..n - 1) |j| for (0..seg) |i| {
+        const a: Index = @intCast(j * seg + i);
+        const b: Index = @intCast(j * seg + (i + 1) % seg);
+        const c: Index = @intCast((j + 1) * seg + i);
+        const d: Index = @intCast((j + 1) * seg + (i + 1) % seg);
+        const v = tb.vertexes.items;
+        tb.appendTriangles(&ccw(v[a].pos, v[b].pos, v[c].pos, a, b, c));
+        tb.appendTriangles(&ccw(v[b].pos, v[d].pos, v[c].pos, b, d, c));
+    };
+    dvui.renderTriangles(tb.build_unowned(), null) catch {};
+}
+
 /// Select boundaries: the container whose boundary is nearest worksheet
 /// point `p` (keys, tracks, line art, panels), within reach of it (the
 /// pointer inside, or near: 40 px); the smaller of two as near.
@@ -18000,10 +18084,10 @@ var hover_target: ?HoverTarget = null;
 /// an object's box; and sets the pointer's shape.
 fn drawHover(area: dvui.Rect.Physical) void {
     hover_target = null;
-    if (state.tool != .select and state.tool != .boundaries) return;
+    if (state.tool != .select) return;
     if (state.drag != null or panel_edit != null or sketch_edit != null or canvas_prompt or engagingPoint()) return;
     const m = state.mouse orelse return;
-    const t = (if (state.tool == .boundaries) nearestBoundary(m) else hoverTargetAt(m)) orelse return;
+    const t = (if (boundary_mode) nearestBoundary(m) else hoverTargetAt(m)) orelse return;
     hover_target = t;
     const px = dvui.windowNaturalScale();
     const hover = colors.select.opacity(0.75);
@@ -18026,7 +18110,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
 /// (a container selected, a slot's text edited there, an object chosen,
 /// the caret put). Whether it took the press.
 fn hoverPress(p: geom.Point) bool {
-    const t = (if (state.tool == .boundaries) nearestBoundary(p) else hoverTargetAt(p)) orelse return false;
+    const t = (if (boundary_mode) nearestBoundary(p) else hoverTargetAt(p)) orelse return false;
     switch (t) {
         .tile => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
@@ -20147,6 +20231,8 @@ fn drawSelection(area: dvui.Rect.Physical) void {
     for (hb[0..resizeHandles(&hb)]) |h| {
         const q = state.view.toPx(area, h.at);
         const s: f32 = 4.5 * px;
+        // In Select boundaries, the drag points glow.
+        if (boundary_mode) haloPoint(q, s, colors.select);
         const grip: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };
         grip.fill(.square, .{ .color = .{ .color = colors.paper } });
         grip.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });

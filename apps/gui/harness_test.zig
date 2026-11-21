@@ -1537,17 +1537,19 @@ test "pointing: by a key's outline the key, inside it a slot's text, the caret w
     try std.testing.expect(std.mem.indexOf(u8, api.eqText().?, "10") != null);
 }
 
-test "Select boundaries: on by its button or B, the nearest boundary from anywhere near; a click selects its container; B or Esc ends it" {
+test "Select boundaries: a mode toggled by its button or B, kept through Esc; the nearest boundary; a click selects its container, its drag points shown" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
     try openExample(&r, "HP-15C keypad");
+    defer api.setBoundaryMode(false);
     api.centreOnTile("R1C3", 20);
     try r.frames(2);
     try r.press("tool.select-boundaries");
-    try std.testing.expectEqualStrings("boundaries", api.toolName());
+    try std.testing.expect(api.boundaryMode());
+    try std.testing.expectEqualStrings("select", api.toolName());
     // Inside the key, well away from its outline: still the key's boundary
-    // (no content in this tool).
+    // (no content in this mode); a click selects the key, not its text.
     const c = api.tileCenter("R1C3").?;
     const cw = dvui.currentWindow();
     _ = try cw.addEventMouseMotion(.{ .pt = c });
@@ -1556,11 +1558,21 @@ test "Select boundaries: on by its button or B, the nearest boundary from anywhe
     try r.clickAt(c);
     try std.testing.expectEqualStrings("tile", api.contextName());
     try std.testing.expect(!api.eqEditing());
-    // B ends it; B again starts it; Esc ends it.
-    try r.key(.b, .none);
-    try std.testing.expectEqualStrings("select", api.toolName());
-    try r.key(.b, .none);
-    try std.testing.expectEqualStrings("boundaries", api.toolName());
+    // Esc leaves the mode on.
     try r.key(.escape, .none);
-    try std.testing.expectEqualStrings("select", api.toolName());
+    try std.testing.expect(api.boundaryMode());
+    // Near the keys panel's edge: the panel, made the selection with its
+    // drag points.
+    api.setView(0, 0, 4);
+    try r.frames(2);
+    const pe = api.panelEdge("HP-15C keys").?;
+    try r.clickAt(pe);
+    try std.testing.expectEqualStrings("panel", api.contextName());
+    try std.testing.expectEqual(1, api.selectionCount());
+    try std.testing.expect(api.handleCount() > 0);
+    // B turns it off, and on again.
+    try r.key(.b, .none);
+    try std.testing.expect(!api.boundaryMode());
+    try r.key(.b, .none);
+    try std.testing.expect(api.boundaryMode());
 }
