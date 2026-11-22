@@ -116,6 +116,11 @@ pub const action_defs = [_]A{
     .{ .name = "view.scrolling", .param = .int },
     // What is being edited, legible, with as much around it as shows so.
     .{ .name = "view.frame-edit" },
+    // The context brought into view: nothing if it is already inside the
+    // view's margins, else the least pan (and only the zoom out needed) to
+    // bring it there. The Browser does it on a choice. No key yet (the
+    // owner, 2026-11-22).
+    .{ .name = "view.reveal" },
     .{ .name = "view.zoom-in", .repeat = true },
     .{ .name = "view.zoom-out", .repeat = true },
     // Drags snap to the grid, or not.

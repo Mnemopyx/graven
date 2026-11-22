@@ -1909,3 +1909,70 @@ test "the ribbon's drops: no Add shape on the canvas; in a panel, the ▾ after 
     try r.frames(2);
     try std.testing.expectEqualStrings("", api.dropOpen());
 }
+
+test "reveal: a choice in the Browser brings it into view, moving only as much as it must" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    const kb = "tree/untitled/Canvas, mm/PC keyboard (ANSI 104)";
+    const inside = struct {
+        fn f(b: dvui.Rect.Physical) bool {
+            const c = api.canvasClear().?;
+            return b.x >= c.x and b.y >= c.y and b.x + b.w <= c.x + c.w and b.y + b.h <= c.y + c.h;
+        }
+    }.f;
+    // Already in view: nothing moves.
+    try r.click(kb);
+    try r.frames(2);
+    try std.testing.expect(inside(api.contextOnScreen().?));
+    const v0 = api.viewNow();
+    try r.click(kb ++ "/Row2");
+    try r.frames(2);
+    const v1 = api.viewNow();
+    try std.testing.expect(v1.cx == v0.cx and v1.cy == v0.cy and v1.ppm == v0.ppm);
+    // Out of view: a pan brings it in, the zoom kept.
+    api.setView(v0.cx + 2000, v0.cy - 1500, v0.ppm);
+    try r.frames(2);
+    try r.click(kb ++ "/Row4");
+    try r.frames(2);
+    const v2 = api.viewNow();
+    try std.testing.expect(v2.ppm == v0.ppm);
+    try std.testing.expect(inside(api.contextOnScreen().?));
+    // Too big at this zoom: out just enough, and inside.
+    api.setView(v0.cx + 900, v0.cy, v0.ppm * 12);
+    try r.frames(2);
+    try r.click(kb ++ "/Row3");
+    try r.click(kb);
+    try r.frames(2);
+    const v3 = api.viewNow();
+    try std.testing.expect(v3.ppm < v0.ppm * 12);
+    try std.testing.expect(inside(api.contextOnScreen().?));
+    // The action from the View menu does the same.
+    api.setView(v0.cx - 3000, v0.cy, v0.ppm);
+    try r.frames(2);
+    try r.run("view.reveal");
+    try r.frames(2);
+    try std.testing.expect(inside(api.contextOnScreen().?));
+}
+
+test "reveal: a Browser choice brings up the view that shows it, forwarding the window's tab for it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    // A sheet view made current in the canvas's window.
+    api.openSheetFromBrowser(0);
+    try r.frames(2);
+    try std.testing.expectEqual(.sheet, api.activeView().kind);
+    try std.testing.expectEqual(2, api.activeTabs());
+    // A track chosen: the window's canvas tab comes forward, no new tab,
+    // and the track is in view.
+    try r.click("tree/untitled/Canvas, mm/PC keyboard (ANSI 104)/Row5");
+    try r.frames(2);
+    try std.testing.expectEqual(.canvas, api.activeView().kind);
+    try std.testing.expectEqual(2, api.activeTabs());
+    const b = api.contextOnScreen().?;
+    const c = api.canvasClear().?;
+    try std.testing.expect(b.x >= c.x and b.y >= c.y and b.x + b.w <= c.x + c.w and b.y + b.h <= c.y + c.h);
+}

@@ -506,6 +506,20 @@ pub const testing_api = struct {
         setView((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, ppm);
         dvui.refresh(null, @src(), null);
     }
+    /// Where the active canvas looks: centre (mm) and zoom (px/mm).
+    pub fn viewNow() struct { cx: f64, cy: f64, ppm: f64 } {
+        return .{ .cx = state.view.cx, .cy = state.view.cy, .ppm = state.view.ppm };
+    }
+    /// The canvas's clear part (what pinned panes leave), and the context's
+    /// box on screen when it has a place of its own: for checking reveals.
+    pub fn canvasClear() ?dvui.Rect.Physical {
+        return if (canvas_free) |cf| cf.free else null;
+    }
+    pub fn contextOnScreen() ?dvui.Rect.Physical {
+        const b = revealBox() orelse return null;
+        const cf = canvas_free orelse return null;
+        return state.view.rect(cf.area, b);
+    }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
         state.view.cy = cy;
@@ -3436,6 +3450,10 @@ fn runAction(inv: keymap.Invocation) bool {
             state.status = if (snap_grid) "Drags snap to the grid (Alt held lets go). " else "Drags no longer snap to the grid. ";
             return true;
         },
+        kact("view.reveal") => {
+            if (canvas_prompt) return false;
+            revealContext();
+        },
         kact("view.zoom-fit"), kact("view.zoom-all"), kact("view.zoom-to"), kact("view.zoom-in"), kact("view.zoom-out"), kact("view.frame-edit") => {
             if (canvas_prompt or !(state.view.ppm > 0)) return false;
             switch (inv.action) {
@@ -4920,6 +4938,7 @@ fn menu() ?dvui.App.Result {
         if (menuAction("    Zoom to context", "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
         if (menuAction("    Zoom to everything", "view", kact("view.zoom-all"), 0, false, 2)) m.close();
         if (menuAction("    Frame the edit", "view", kact("view.frame-edit"), 0, false, 7)) m.close();
+        if (menuAction("    Reveal the context", "view", kact("view.reveal"), 0, false, 9)) m.close();
         if (menuAction("    Show or hide auto-hide panes", "global", kact("panes.toggle-auto"), 0, false, 8)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
         if (menuAction("    New view side by side", "global", kact("views.split-across"), 0, false, 20)) m.close();
@@ -5288,6 +5307,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
             if (ctx == .sheet) showSheetView(ctx.sheet);
         } else tree_click = .{ .key = key, .ms = now };
         state.context = ctx;
+        bringUpContext(ctx);
         // The keyboard goes to the canvas, where keys act on the context
         // (Delete, arrows moving a track).
         if (canvas_id) |cid| dvui.focusWidget(cid, null, null);
@@ -5523,6 +5543,136 @@ fn mainCap(r: *const layout.Render) f64 {
 /// Centres the context in the canvas and zooms it to fill the canvas.
 fn zoomToContext() void {
     state.view.fit = contextExtents();
+}
+
+// Reveal ----------------------------------------------------------------------
+//
+// View › Reveal the context (`view.reveal`, no key yet; the owner,
+// 2026-11-22): the context brought into view without disturbing it. If it
+// already lies inside the canvas's clear part (what pinned panes leave)
+// less a margin, nothing moves. Otherwise the view pans the least that
+// brings it inside; only if it cannot fit at this zoom does the view zoom
+// out, just enough. Choosing an object in the Browser does this, after
+// bringing up the context that shows it (`bringUpContext`).
+
+/// A reveal waiting for its canvas to be drawn (a tab just opened has no
+/// size yet): applied by `canvas`, to the canvas owner's view.
+var reveal_pending: ?geom.Box = null;
+
+/// The margin a revealed context keeps from the view's edges: this share
+/// of the clear part's smaller side.
+const reveal_margin = 0.08;
+
+/// What the context occupies on the canvas, when it is a thing of its own
+/// there (not the whole canvas or document, nor a thing without a place).
+fn revealBox() ?geom.Box {
+    switch (state.context) {
+        .panel => |pi| {
+            if (pi >= state.model.panels.items.len or state.model.panels.items[pi].unbounded) return null;
+            return state.model.panels.items[pi].box();
+        },
+        .art, .view, .image, .flow => {
+            const b = contextExtents();
+            return if (b.isEmpty()) null else b;
+        },
+        .region => |rg| {
+            // A track: its outline.
+            var b: geom.Box = .empty;
+            for (trackOutline(rg.panel, rg.region)) |q| b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+            return if (b.isEmpty()) null else b;
+        },
+        .row, .tile, .group => {
+            var b: geom.Box = .empty;
+            for (state.placed.items, 0..) |*p, pi| for (p.tiles) |t| {
+                if (inContext(pi, t)) b = b.join(onSheet(pi, t.pitch_box));
+            };
+            return if (b.isEmpty()) null else b;
+        },
+        else => return null,
+    }
+}
+
+/// `view.reveal`: the context into the active canvas view, at its next
+/// frame.
+fn revealContext() void {
+    if (vl.views[vl.active].kind != .canvas) return;
+    reveal_pending = revealBox() orelse return;
+    dvui.refresh(null, @src(), null);
+}
+
+/// Box `b` (worksheet mm) into the canvas `area` now shows, as `reveal`
+/// says.
+fn revealNow(b: geom.Box, area: dvui.Rect.Physical) void {
+    const cf = canvas_free orelse return;
+    if (!(state.view.ppm > 0)) return;
+    const free = cf.free;
+    // The clear part less the rulers (top and left) and the margin.
+    const m: f64 = reveal_margin * @min(free.w, free.h);
+    const x0: f64 = free.x + cf.rw + m;
+    const y0: f64 = free.y + cf.rw + m;
+    const x1: f64 = free.x + free.w - m;
+    const y1: f64 = free.y + free.h - m;
+    if (x1 <= x0 or y1 <= y0) return;
+    // Too big at this zoom: out just enough.
+    const need = @min((x1 - x0) / @max(b.width(), 1e-9), (y1 - y0) / @max(b.height(), 1e-9));
+    if (need < state.view.ppm) state.view.ppm = need;
+    const r = state.view.rect(area, b);
+    const rx0: f64 = r.x;
+    const ry0: f64 = r.y;
+    const rx1: f64 = r.x + r.w;
+    const ry1: f64 = r.y + r.h;
+    // The least shift, in pixels, that brings it inside.
+    const sx: f64 = if (rx0 < x0) x0 - rx0 else if (rx1 > x1) x1 - rx1 else 0;
+    const sy: f64 = if (ry0 < y0) y0 - ry0 else if (ry1 > y1) y1 - ry1 else 0;
+    if (sx == 0 and sy == 0 and need >= state.view.ppm) return;
+    // A fit still in force would undo it next frame.
+    state.view.fit = null;
+    state.view.cx -= sx / state.view.ppm;
+    state.view.cy += sy / state.view.ppm;
+    dvui.refresh(null, @src(), null);
+}
+
+/// The space a context lives in, when it lives in one.
+fn spaceOfContext(ctx: Context) ?usize {
+    if (state.model.spaces.items.len == 0) return null;
+    const pi: ?usize = switch (ctx) {
+        .panel => |pi| pi,
+        .art => |l| l.panel,
+        .region => |r| r.panel,
+        .row => |r| r.panel,
+        .grid => |g| g.panel,
+        .tile => |id| if (findTile(id)) |f| f.panel else null,
+        .group => |g| return state.model.spaceOfId(g),
+        .view => |v| return v.space,
+        .layer => |l| return l.space,
+        .image => |im| return im.space,
+        .guide => |g| return g.space,
+        .sketch => |sk| return sk.space,
+        else => null,
+    };
+    const p = pi orelse return null;
+    if (p >= state.model.panels.items.len) return null;
+    return state.model.spaceOf(p);
+}
+
+/// A context chosen in the Browser, brought up in the active window: the
+/// view that shows it (a canvas of its space, its sheet, its plan) made
+/// current there, its tab forwarded if the window has one, else opened as
+/// a preview tab; then revealed in it. A context with no view of its own
+/// (a flow, a style) is revealed in the active view if that is a canvas.
+fn bringUpContext(ctx: Context) void {
+    const leaf = vl.leafOf(vl.active) orelse return;
+    const want: ?struct { view: docviews.View, space: usize } = switch (ctx) {
+        .sheet => |id| .{ .view = .{ .kind = .sheet, .target = @intFromEnum(id) }, .space = 0 },
+        .plan => |id| .{ .view = .{ .kind = .manufacture, .target = @intFromEnum(id) }, .space = 0 },
+        else => if (spaceOfContext(ctx)) |sp| .{ .view = .{ .target = spaceTarget(sp) }, .space = sp } else if (state.model.spaces.items.len == 0 and revealBox() != null) .{ .view = .{}, .space = 0 } else null,
+    };
+    if (want) |w| {
+        const cur = vl.views[vl.active];
+        const here = cur.kind == w.view.kind and (if (w.view.kind == .canvas) viewSpace(vl.active) == w.space else cur.target == w.view.target);
+        if (!here) _ = openInWindow(leaf, w.view, w.space, true);
+    }
+    revealContext();
 }
 
 /// Graven's own colours. The artwork (sheet, tiles, legends) keeps light
@@ -6861,6 +7011,10 @@ fn canvas(active: bool, view: u8) void {
         state.view.ppm = fitPpm(b);
         centreOn(.{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 });
     }
+    if (view == canvas_owner) if (reveal_pending) |b| {
+        reveal_pending = null;
+        revealNow(b, area);
+    };
     // Drawn last, over everything.
     defer drawRulers(area);
     const clip = dvui.clip(area);
