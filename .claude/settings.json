@@ -11,5 +11,20 @@
       "Bash(git log:*)",
       "Bash(git diff:*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r '.tool_input.command // empty'); case \"$cmd\" in *' build'*) \"$CLAUDE_PROJECT_DIR\"/scripts/zig-cache-prune.sh --quiet ;; esac",
+            "timeout": 900,
+            "statusMessage": "Checking the Zig build cache's size"
+          }
+        ]
+      }
+    ]
   }
 }
