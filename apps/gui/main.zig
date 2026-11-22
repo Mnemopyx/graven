@@ -13964,25 +13964,65 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     // in a fade across the bottom.
     var kb: [48]u8 = undefined;
     const badge = if (in_ribbon) badgeText(&kb, tag, arg) else null;
-    if (in_ribbon) {
-        o.margin = .{ .x = 2, .y = 1, .h = 1, .w = 2 };
-        o.min_size_content = .{ .w = ribbon_icon, .h = ribbon_icon };
-        o.max_size_content = .{ .w = ribbon_icon, .h = ribbon_icon };
-        o.padding = .{ .x = 7, .w = 7, .y = 3, .h = 11 };
-        o.gravity_y = 0.5;
-        o.corners = .all(5);
-    }
     const drop = if (in_ribbon) ribbon_next_drop else null;
     ribbon_next_drop = null;
-    if (drop != null) o.margin.?.w = 0;
-    if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
+    if (in_ribbon) {
+        if (ribbonKey(src, name, tvg, o, &wd)) pushButtonEvent(tag, arg);
+    } else if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
     if (out) |d| d.* = wd;
     if (badge) |b| keyFade(wd.borderRectScale().r, b);
     if (drop) |d| _ = dropButton(d, o.id_extra orelse 0, 2);
 }
 
-/// The ribbon's icon size, and its buttons' height, logical.
-const ribbon_icon: f32 = 26;
+/// The ribbon's icon size, logical (in a 42 px button).
+const ribbon_icon: f32 = 30;
+
+/// A ribbon button, drawn as a key in a row of keys (the owner's choice,
+/// 2026-11-22: "A3"): neighbours touching, corners 2 px, each shaded
+/// slightly from top to bottom like a raised key, a dark line (22 %) at
+/// its right and a light one at its left between it and the next; the
+/// icon large in the upper part. `o.color_fill`, when given, tints it (a
+/// tool on). Whether it was clicked.
+fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, o: dvui.Options, wd: *dvui.WidgetData) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .{ .x = 6, .w = 6, .y = 2, .h = 10 }, .min_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .max_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
+    bw.processEvents();
+    const r = bw.data().borderRectScale().r;
+    const s = dvui.windowNaturalScale();
+    // The key: a shade from top to bottom.
+    {
+        const top_c: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf8 };
+        const bot_c: dvui.Color = .{ .r = 0xe6, .g = 0xe4, .b = 0xdf };
+        const lifo = dvui.currentWindow().lifo();
+        var b = dvui.Triangles.Builder.init(lifo, 4, 6) catch return false;
+        defer b.deinit(lifo);
+        const p = [4]dvui.Point.Physical{ .{ .x = r.x, .y = r.y }, .{ .x = r.x + r.w, .y = r.y }, .{ .x = r.x + r.w, .y = r.y + r.h }, .{ .x = r.x, .y = r.y + r.h } };
+        const ct: dvui.Color.PMA = .fromColor(display.fix(top_c));
+        const cb: dvui.Color.PMA = .fromColor(display.fix(bot_c));
+        b.appendVertex(.{ .pos = p[0], .col = ct });
+        b.appendVertex(.{ .pos = p[1], .col = ct });
+        b.appendVertex(.{ .pos = p[2], .col = cb });
+        b.appendVertex(.{ .pos = p[3], .col = cb });
+        b.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
+        b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
+        dvui.renderTriangles(b.build_unowned(), null) catch {};
+    }
+    // On, hovered, pressed: tints over the shade.
+    if (o.color_fill) |cf| r.fill(.all(2 * s), .{ .color = cf });
+    if (bw.pressed()) {
+        r.fill(.all(2 * s), .{ .color = .{ .color = dvui.Color.black.opacity(0.10) } });
+    } else if (bw.hovered()) r.fill(.all(2 * s), .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.12) } });
+    // Between neighbours: a light line at the left, a dark one at the right.
+    (dvui.Rect.Physical{ .x = r.x, .y = r.y, .w = s, .h = r.h }).fill(.{}, .{ .color = .{ .color = dvui.Color.white } });
+    (dvui.Rect.Physical{ .x = r.x + r.w - s, .y = r.y, .w = s, .h = r.h }).fill(.{}, .{ .color = .{ .color = dvui.Color.black.opacity(0.22) } });
+    const ink = dvui.themeGet().color(.control, .text);
+    dvui.icon(@src(), name, tvg, .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none });
+    const clicked = bw.clicked();
+    bw.drawFocus();
+    wd.* = bw.data().*;
+    bw.deinit();
+    return clicked;
+}
 
 /// Key text `text` in a fade across the bottom of button `r`: the
 /// button's lower edge darkening into a band the key sits in (the owner's
