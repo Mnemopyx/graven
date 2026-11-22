@@ -1976,3 +1976,46 @@ test "reveal: a Browser choice brings up the view that shows it, forwarding the 
     const c = api.canvasClear().?;
     try std.testing.expect(b.x >= c.x and b.y >= c.y and b.x + b.w <= c.x + c.w and b.y + b.h <= c.y + c.h);
 }
+
+test "reveal: stepping by keys brings what it steps to into view; pointing does not move it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    const inside = struct {
+        fn f(b: dvui.Rect.Physical) bool {
+            const c = api.canvasClear().?;
+            return b.x >= c.x and b.y >= c.y and b.x + b.w <= c.x + c.w and b.y + b.h <= c.y + c.h;
+        }
+    }.f;
+    // Close in on a key and click it: pointing moves nothing.
+    api.centreOnTile("K30", 40);
+    try r.frames(2);
+    const v0 = api.viewNow();
+    try r.clickAt(api.tileCenter("K30").?);
+    try r.frames(2);
+    try std.testing.expectEqualStrings("tile", api.contextName());
+    const v1 = api.viewNow();
+    try std.testing.expect(v1.cx == v0.cx and v1.cy == v0.cy and v1.ppm == v0.ppm);
+    // A level out (Ctrl+<): its track, too long to fit at this zoom,
+    // revealed: zoomed out just enough, and inside.
+    try r.key(.comma, .lcontrol);
+    try r.frames(3);
+    // (The first leaves the key's text level; the second goes to its track.)
+    try r.key(.comma, .lcontrol);
+    try r.frames(3);
+    try std.testing.expect(!std.mem.eql(u8, api.contextName(), "tile"));
+    try std.testing.expect(inside(api.contextOnScreen().?));
+    try std.testing.expect(api.viewNow().ppm < v0.ppm);
+    // The flow cursor stepped by an arrow while the view is elsewhere: the
+    // cursor revealed, the zoom kept.
+    try r.cursor("\"PC keyboard (ANSI 104)\".Row1", 0);
+    try r.frames(2);
+    const v2 = api.viewNow();
+    api.setView(v2.cx + 3000, v2.cy, v2.ppm);
+    try r.frames(2);
+    try r.key(.right, .none);
+    try r.frames(3);
+    try std.testing.expect(inside(api.cursorOnScreen().?));
+    try std.testing.expect(api.viewNow().ppm == v2.ppm);
+}

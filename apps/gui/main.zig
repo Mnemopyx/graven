@@ -520,6 +520,13 @@ pub const testing_api = struct {
         const cf = canvas_free orelse return null;
         return state.view.rect(cf.area, b);
     }
+    /// The flow cursor's box on screen, if there is one.
+    pub fn cursorOnScreen() ?dvui.Rect.Physical {
+        const c = track_cursor orelse return null;
+        const b = cursorBox(c) orelse return null;
+        const cf = canvas_free orelse return null;
+        return state.view.rect(cf.area, b);
+    }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
         state.view.cy = cy;
@@ -2294,6 +2301,8 @@ fn frame() !dvui.App.Result {
         dvui.focusSubwindow(dvui.currentWindow().data().id, null);
         dvui.focusWidget(null, null, null);
     }
+    // Where the selection and the flow cursor are before this frame's keys.
+    const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
     ghost_pane.fieldsFollowTheme();
@@ -2422,6 +2431,7 @@ fn frame() !dvui.App.Result {
     ghost_pane.slide(&all_panes, root.data().id);
     hotCorners(root.data().id);
     sparkFrameEnd();
+    revealStep(step_from);
     return .ok;
 }
 
@@ -3480,6 +3490,8 @@ fn runAction(inv: keymap.Invocation) bool {
 }
 
 fn undo() void {
+    // Undo and redo do not reveal (the selection is not in the history).
+    no_step_reveal = true;
     const done = hist.undo(&state.model) catch {
         state.status = "Undo failed. ";
         return;
@@ -3489,6 +3501,7 @@ fn undo() void {
 }
 
 fn redo() void {
+    no_step_reveal = true;
     const done = hist.redoStep(&state.model) catch {
         state.status = "Redo failed. ";
         return;
@@ -5590,6 +5603,89 @@ fn revealBox() ?geom.Box {
         },
         else => return null,
     }
+}
+
+// Stepping by keys ------------------------------------------------------------
+//
+// When a key (not a modifier alone) moves the context or the flow cursor,
+// what it moved to is revealed in the active canvas: Tab hunting a
+// selection, Ctrl+< and Ctrl+> through the levels, the flow cursor moved
+// by the caret keys (through a flow's keys and tracks) or carried on by
+// typing. A frame whose keys
+// left both where they were reveals nothing, nor a context a key
+// changed by changing the document (Delete); nor do undo and redo (the
+// owner, 2026-11-22: the selection is not in the undo history). Pointing
+// never reveals: what is pointed at is in view.
+
+/// The context and the flow cursor, as one value to compare.
+const StepSig = struct { ctx: u64, cursor: ?TrackCursor, steps: usize };
+
+fn stepSignature() StepSig {
+    return .{ .ctx = state.context.key(), .cursor = track_cursor, .steps = hist.stepCount() };
+}
+
+/// Set by undo and redo: this frame's moves are not steps.
+var no_step_reveal = false;
+
+/// Whether this frame had a key pressed (or repeating) that is not a
+/// modifier alone.
+fn keyThisFrame() bool {
+    for (dvui.events()) |*e| {
+        if (e.evt != .key) continue;
+        const k = e.evt.key;
+        if (k.action != .down and k.action != .repeat) continue;
+        switch (k.code) {
+            .left_shift, .right_shift, .left_control, .right_control, .left_alt, .right_alt, .left_command, .right_command, .menu, .caps_lock => {},
+            else => return true,
+        }
+    }
+    return false;
+}
+
+/// At the frame's end: a step by keys revealed.
+fn revealStep(from: StepSig) void {
+    defer no_step_reveal = false;
+    if (no_step_reveal or canvas_prompt or !keyThisFrame()) return;
+    const now = stepSignature();
+    const moved_cursor = if (now.cursor) |c| if (from.cursor) |f| !std.meta.eql(c, f) else true else false;
+    if (now.ctx == from.ctx and !moved_cursor) return;
+    if (vl.views[vl.active].kind != .canvas) return;
+    if (track_cursor) |c| {
+        reveal_pending = cursorBox(c) orelse return;
+        dvui.refresh(null, @src(), null);
+    } else if (now.steps == from.steps) {
+        // A key that changed the document (Delete) leaves the context
+        // where it falls back to; only steps reveal.
+        revealContext();
+    }
+}
+
+/// The flow cursor's place on the worksheet: the bar across its segment,
+/// with a little room either side, as drawn by `drawCursor`.
+fn cursorBox(c: TrackCursor) ?geom.Box {
+    const stops = flowStops(c.panel, c.region);
+    var stop_panel: ?usize = null;
+    const at: struct { segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k| blk: {
+        stop_panel = stops[k].panel;
+        break :blk .{ .segment = stops[k].segment, .along = stops[k].along };
+    } else blk: {
+        const p = cursorPlace(c) orelse return null;
+        break :blk .{ .segment = p.segment, .along = p.along };
+    };
+    for (state.placed.items, 0..) |*placed, pi| {
+        if (stop_panel) |sp| if (sp != pi) continue;
+        for (placed.tracks) |t| {
+            if (t.flow_panel != c.panel or t.region != c.region or t.track != at.segment) continue;
+            const b = onSheet(pi, t.box);
+            // The bar, and a few mm of what follows it.
+            const room = 3.0;
+            return if (t.major == .row)
+                .{ .x0 = b.x0 + at.along - room, .y0 = b.y0, .x1 = b.x0 + at.along + room, .y1 = b.y1 }
+            else
+                .{ .x0 = b.x0, .y0 = b.y1 - at.along - room, .x1 = b.x1, .y1 = b.y1 - at.along + room };
+        }
+    }
+    return null;
 }
 
 /// `view.reveal`: the context into the active canvas view, at its next
