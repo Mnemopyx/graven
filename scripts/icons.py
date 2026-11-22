@@ -373,7 +373,7 @@ def sheet(json_path, out_path):
 
     meta = json.load(open(json_path))
     atlas = np.array(Image.open(os.path.join(os.path.dirname(json_path), "graven.png")).convert("RGBA"))
-    sizes = [16, 26, 32, 52, 96, 128]
+    sizes = [16, 26, 32, 64, 96, 128]
     dark = {"container": "#3f8f80", "track": "#b88a1e", "drawn": "#b9603a", "guide": "#7a64b0", "layer": "#6d6a64", "paper": "#3a3044"}
     columns = [
         ("light", (246, 245, 242), None, {}),
@@ -386,7 +386,7 @@ def sheet(json_path, out_path):
     H = 60 + rowh * len(glyphs)
     img = Image.new("RGB", (W, H), (216, 214, 209))
     d = ImageDraw.Draw(img)
-    d.text((10, 10), "Graven icon file: RGB the ground (magenta transparent, override keys), A the ink's distance. 16, 26, 32, 52, 96, 128 px.", fill=(40, 40, 40))
+    d.text((10, 10), "Graven icon file: RGB the ground (magenta transparent, override keys), A the ink's distance. 16, 26, 32, 64, 96, 128 px.", fill=(40, 40, 40))
     x = 160
     for title, *_ in columns:
         d.text((x, 36), title, fill=(40, 40, 40))
