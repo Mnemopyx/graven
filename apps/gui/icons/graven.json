@@ -1,0 +1,171 @@
+{
+ "atlas": {
+  "type": "msdf",
+  "distanceRange": 8.0,
+  "size": 64,
+  "width": 504,
+  "height": 72,
+  "yOrigin": "top"
+ },
+ "graven": {
+  "format": "graven-icons 1",
+  "about": "RGB: the ink's distance field (msdf, all channels equal). Alpha: 0 background, k the palette's k-th entry, the kind filling that pixel.",
+  "grid": 24,
+  "ink": "#2a2530",
+  "palette": [
+   {
+    "kind": "container",
+    "colour": "#8fd1c3"
+   },
+   {
+    "kind": "track",
+    "colour": "#f4c95d"
+   },
+   {
+    "kind": "drawn",
+    "colour": "#f29b6b"
+   },
+   {
+    "kind": "guide",
+    "colour": "#b8a2e3"
+   },
+   {
+    "kind": "select",
+    "colour": "#8fc1f0"
+   },
+   {
+    "kind": "view",
+    "colour": "#c9d6a3"
+   },
+   {
+    "kind": "layer",
+    "colour": "#d6d3cc"
+   },
+   {
+    "kind": "paper",
+    "colour": "#ffffff"
+   }
+  ]
+ },
+ "glyphs": [
+  {
+   "index": 0,
+   "icon": "add-panel",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 4,
+    "right": 68,
+    "bottom": 68
+   }
+  },
+  {
+   "index": 1,
+   "icon": "add-rows",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 4,
+    "right": 140,
+    "bottom": 68
+   }
+  },
+  {
+   "index": 2,
+   "icon": "add-columns",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 4,
+    "right": 212,
+    "bottom": 68
+   }
+  },
+  {
+   "index": 3,
+   "icon": "add-track",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 4,
+    "right": 284,
+    "bottom": 68
+   }
+  },
+  {
+   "index": 4,
+   "icon": "fit-to-tiles",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 4,
+    "right": 356,
+    "bottom": 68
+   }
+  },
+  {
+   "index": 5,
+   "icon": "construction-line",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 4,
+    "right": 428,
+    "bottom": 68
+   }
+  },
+  {
+   "index": 6,
+   "icon": "layers",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 4,
+    "right": 500,
+    "bottom": 68
+   }
+  }
+ ]
+}
