@@ -4,6 +4,7 @@
     python3 scripts/icons.py svg              # apps/gui/icons/graven/*.svg
     python3 scripts/icons.py build            # apps/gui/icons/graven.png + .json
     python3 scripts/icons.py sheet ATLAS.json OUT.png   # a contact sheet
+    python3 scripts/icons.py ribbon ATLAS.json OUT.png  # as the ribbon draws them
 
 The style rules, as the owner chose them (blueprint, "Icon style and ribbon
 keys"): outlined in one ink at a thin stroke, on a light ground; regions
@@ -345,7 +346,7 @@ def render(atlas, meta, glyph, px, ground, ink=None, recolour={}, shrink="averag
     size = meta["atlas"]["size"]
     rng = meta["atlas"]["distanceRange"]
     ink = np.array(hexrgb(ink or meta["graven"]["ink"])) / 255
-    ground = np.array(ground) / 255
+    ground = np.asarray(ground, dtype=float) / 255  # a colour, or px x px x 3
     k = size / px  # texels per pixel
     if shrink == "average" and k >= 2:
         # Shrinking: each texel drawn sharply (the ink over one texel), then
@@ -423,6 +424,58 @@ def sheet(json_path, out_path):
     print(f"sheet into {out_path}")
 
 
+def ribbon(json_path, out_path):
+    """The icons as the ribbon draws them, at the owner's screen's device
+    pixels: 64 px buttons at a 64 px pitch, the raised-key shade (A3) as
+    each cell's ground, the key in a fade across the bottom. Rows: the fade
+    as now (a 32 px band, 55 %), with Alt held (92 %), and a shorter band
+    (24 px) to compare."""
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    meta = json.load(open(json_path))
+    atlas = np.array(Image.open(os.path.join(os.path.dirname(json_path), "graven.png")).convert("RGBA"))
+    keys = {"add-panel": "P", "add-rows": "R", "add-columns": "\u21e7R", "add-track": "T", "fit-to-tiles": "F", "construction-line": "G", "layers": "L"}
+    font = ImageFont.truetype(os.path.join(HERE, "..", "apps", "gui", "uifont", "DejaVuSans-Bold.ttf"), 20)
+    label = ImageFont.truetype(os.path.join(HERE, "..", "apps", "gui", "uifont", "DejaVuSans.ttf"), 22)
+    B = 64
+    fade_ink = np.array([0x2c, 0x20, 0x3a], dtype=float)  # oklch(0.26 0.07 305)
+    rows = [("as now: 32 px band, 55 %", 32, 0.55), ("Alt held: 92 %", 32, 0.92), ("a 24 px band, 55 %", 24, 0.55)]
+    glyphs = meta["glyphs"]
+    W = 40 + len(glyphs) * B + 40
+    H = 30 + len(rows) * (B + 70)
+    img = Image.new("RGB", (W, H), (0xf0, 0xee, 0xea))
+    d = ImageDraw.Draw(img)
+    t = np.linspace(0, 1, B)[:, None, None]
+    shade = np.array([0xfb, 0xfa, 0xf8]) * (1 - t) + np.array([0xe6, 0xe4, 0xdf]) * t
+    shade = np.broadcast_to(shade, (B, B, 3))
+    for r, (title, band, alpha) in enumerate(rows):
+        y = 30 + r * (B + 70)
+        d.text((40, y - 4), title, font=label, fill=(60, 56, 64))
+        y += 30
+        for i, g in enumerate(glyphs):
+            x = 40 + i * B
+            tile = render(atlas, meta, g, B, shade).astype(float)
+            # Lines between neighbours: light at the left, dark at the right (2 px).
+            tile[:, 0:2] = 255
+            tile[:, B - 2:B] *= 0.78
+            # The fade.
+            inset = 2
+            top, y1 = B - band - inset, B - inset
+            ramp = np.zeros(B)
+            ramp[top:y1] = np.linspace(0, alpha, y1 - top)
+            a = ramp[:, None, None]
+            tile[:, inset:B - inset] = tile[:, inset:B - inset] * (1 - a) + fade_ink * a
+            im = Image.fromarray(tile.clip(0, 255).astype(np.uint8))
+            dd = ImageDraw.Draw(im)
+            k = keys.get(g["icon"], "?")
+            l, tp, rr, bt = dd.textbbox((0, 0), k, font=font)
+            dd.text(((B - (rr - l)) / 2 - l, y1 - bt - 1), k, font=font, fill=(255, 255, 255))
+            img.paste(im, (x, y))
+    img.save(out_path)
+    print(f"ribbon into {out_path}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "svg"
     if cmd == "svg":
@@ -430,6 +483,8 @@ if __name__ == "__main__":
     elif cmd == "build":
         write_svgs()
         build()
+    elif cmd == "ribbon":
+        ribbon(sys.argv[2], sys.argv[3])
     elif cmd == "sheet":
         sheet(sys.argv[2], sys.argv[3])
     else:
