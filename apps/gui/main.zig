@@ -14300,7 +14300,16 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
             else => {},
         }
     };
+    // A press would take the keyboard focus to the key (and draw its focus
+    // ring there); a ribbon key gives it straight back to where it was
+    // (the owner, 2026-11-22). Its click still comes: that needs the
+    // pointer's capture, not the focus.
+    const focus_had = dvui.focusedWidgetId();
+    const focus_sub = dvui.focusedSubwindowId();
     bw.processEvents();
+    if (dvui.focusedWidgetId() == bw.data().id and focus_had != bw.data().id) {
+        dvui.focusWidget(focus_had, focus_sub, null);
+    }
     const r = bw.data().borderRectScale().r;
     const s = dvui.windowNaturalScale();
     // The key: a shade from top to bottom.
