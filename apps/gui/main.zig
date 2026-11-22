@@ -13456,7 +13456,9 @@ fn toolPalette() void {
 fn toolBar() void {
     const saved_group = pushGroup("tool");
     defer popGroup(saved_group);
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    // In the ribbon, the keys fill its height: no padding above or below.
+    const pad_y: f32 = if (in_ribbon) 0 else 3;
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
     keyIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
@@ -14529,6 +14531,9 @@ fn ribbonDrops() void {
         const first = drop_focus;
         S.rect.x = 0;
         S.rect.y = ribbon_bottom;
+        // Its key joined to it (drawn here, over the strips under the
+        // ribbon; the panel covers the bridge's foot).
+        dropBridge(drop_anchor.get(d).scale(dvui.windowNaturalScale(), dvui.Rect.Physical), dvui.themeGet().color(.window, .fill).opacity(0.97));
         S.rect.w = win.w;
         var fw = dvui.floatingWindow(@src(), .{ .rect = &S.rect, .resize = .none }, .{ .id_extra = @intFromEnum(d), .min_size_content = .{ .w = win.w - 2 }, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.97) }, .border = .{ .h = 1 }, .corners = .all(0), .box_shadow = null });
         defer fw.deinit();
@@ -14696,12 +14701,86 @@ fn ribbon() void {
     toolPalette();
     // The palettes, as drop panels.
     if (state.model.spaces.items.len > 0) {
-        _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 6, .h = 6 } });
+        _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 } });
         var lwd: dvui.WidgetData = undefined;
         const r = keyIconData(@src(), "Layers", icons.graven(.layers) orelse dvui.entypo.layers, &lwd, "ribbon.layers");
         drop_anchor.set(.layers, r.toNatural());
         dvui.tooltip(@src(), .{ .active_rect = r }, "Layers: show or hide each, drag to reorder the stack, the chosen layer's settings (L; held, or clicked)", .{}, .{});
     }
+}
+
+/// While a drop panel is open: the key that opened it carried on down
+/// across the gap the panel is inset by, its shading (as the key's foot
+/// shows it, in the key's fade) running into the panel's `colour`, and
+/// flaring into the panel with concave fillets at the sides, so the key and
+/// its panel read as one (a folder tab's join; the owner, 2026-11-22).
+fn dropBridge(key: dvui.Rect.Physical, colour: dvui.Color) void {
+    const s = dvui.windowNaturalScale();
+    // The key's foot: its lower shade tinted as an open key is, under the
+    // fade's ink at its strength there.
+    const base = display.fix(dvui.Color{ .r = 0xe6, .g = 0xe4, .b = 0xdf });
+    const tinted = mix(base, colour, 0.3);
+    const fade_ink = ghost_pane.oklch(0.26, 0.07, ghost_pane.pane_hue, 1);
+    const held = dvui.currentWindow().modifiers.alt();
+    const foot = mix(tinted, fade_ink, if (held) 0.92 else 0.55);
+    const x0 = key.x + 1 * s;
+    const x1 = key.x + key.w - 1 * s;
+    const top = key.y + key.h - 1 * s;
+    // Across the panel's 2 logical inset below the ribbon, a hair into it.
+    const bottom = ribbon_bottom * s + 2.5 * s;
+    if (bottom <= top) return;
+    const f = @max(1, @min(4 * s, bottom - top));
+    const at = struct {
+        fn c(y: f32, y0: f32, y1: f32, c0: dvui.Color, c1: dvui.Color) dvui.Color.PMA {
+            const t = std.math.clamp((y - y0) / @max(y1 - y0, 1e-3), 0, 1);
+            return .fromColor(mix(c0, c1, t));
+        }
+    }.c;
+    const lifo = dvui.currentWindow().lifo();
+    const n_arc = 8;
+    var b = dvui.Triangles.Builder.init(lifo, 4 + 2 * (n_arc + 2), 6 + 2 * 3 * n_arc) catch return;
+    defer b.deinit(lifo);
+    // The stem: the key's foot down to the panel's colour.
+    const p = [4]dvui.Point.Physical{ .{ .x = x0, .y = top }, .{ .x = x1, .y = top }, .{ .x = x1, .y = bottom }, .{ .x = x0, .y = bottom } };
+    for (p) |q| b.appendVertex(.{ .pos = q, .col = at(q.y, top, bottom, foot, colour) });
+    b.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
+    b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
+    // Each fillet: a fan from the stem's foot corner over a quarter arc
+    // centred out and up from it, coloured as the stem is at each height.
+    var vi: dvui.Vertex.Index = 4;
+    for ([_]f32{ -1, 1 }) |side| {
+        const corner: dvui.Point.Physical = .{ .x = if (side < 0) x0 else x1, .y = bottom };
+        const c: dvui.Point.Physical = .{ .x = corner.x + side * f, .y = bottom - f };
+        const first = vi;
+        b.appendVertex(.{ .pos = corner, .col = at(corner.y, top, bottom, foot, colour) });
+        vi += 1;
+        var arc: [n_arc + 1]dvui.Point.Physical = undefined;
+        for (0..n_arc + 1) |i| {
+            const t = @as(f32, @floatFromInt(i)) / n_arc * (std.math.pi / 2.0);
+            arc[i] = .{ .x = c.x - side * f * @cos(t), .y = c.y + f * @sin(t) };
+            b.appendVertex(.{ .pos = arc[i], .col = at(arc[i].y, top, bottom, foot, colour) });
+            vi += 1;
+        }
+        for (0..n_arc) |i| {
+            const k: dvui.Vertex.Index = @intCast(i);
+            b.appendTriangles(&ccw(corner, arc[i], arc[i + 1], first, first + 1 + k, first + 2 + k));
+        }
+    }
+    // Past the ribbon's own clip, down to the panel.
+    const prev_clip = dvui.clipGet();
+    dvui.clipSet(dvui.windowRectPixels());
+    defer dvui.clipSet(prev_clip);
+    dvui.renderTriangles(b.build_unowned(), null) catch {};
+}
+
+/// Colour `a` moved `t` (0..1) of the way to `b`, alpha too.
+fn mix(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
+    const m = struct {
+        fn f(x: u8, y: u8, tt: f32) u8 {
+            return @intFromFloat(@round(@as(f32, @floatFromInt(x)) * (1 - tt) + @as(f32, @floatFromInt(y)) * tt));
+        }
+    }.f;
+    return .{ .r = m(a.r, b.r, t), .g = m(a.g, b.g, t), .b = m(a.b, b.b, t), .a = m(a.a, b.a, t) };
 }
 
 /// A ribbon button for action `id` (a registry button), its tooltip the
@@ -14714,7 +14793,7 @@ fn ribbonButton(src: std.builtin.SourceLocation, comptime id: []const u8, tvg: [
 }
 
 fn ribbonGap(id_extra: usize) void {
-    _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 6, .h = 6 }, .id_extra = id_extra });
+    _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 }, .id_extra = id_extra });
 }
 
 /// A legend sheet view's ribbon: its rows, its keys' names, and the canvas
@@ -14754,12 +14833,14 @@ fn planRibbon() void {
 /// A ribbon icon button tagged `id` (its badge after it); its rect.
 fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, wd: *dvui.WidgetData, comptime id: []const u8) dvui.Rect.Physical {
     _ = comptime elements.get(id);
-    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (drop_open == .layers) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+    // Open: tinted with its panel's colour, which the bridge carries down.
+    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (drop_open == .layers) .{ .color = ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3) } else null });
     return wd.borderRectScale().r;
 }
 
-/// The ribbon's height, logical.
-const ribbon_h: f32 = 52;
+/// The ribbon's height, logical: its keys' and no more (the owner,
+/// 2026-11-22: no margin above and below them).
+const ribbon_h: f32 = ribbon_pitch;
 /// Where the ribbon ends, logical (window coordinates): drop panels hang
 /// from it.
 var ribbon_bottom: f32 = 64;
