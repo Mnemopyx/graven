@@ -94,6 +94,28 @@ pub fn graven(comptime g: GIcon) ?[]const u8 {
     return t;
 }
 
+/// Graven icon `g`'s name in the icon files ("add-panel").
+pub fn gravenFileName(g: GIcon) []const u8 {
+    const names = comptime blk: {
+        const fields = @typeInfo(GIcon).@"enum".field_names;
+        var out: [fields.len][]const u8 = undefined;
+        for (fields, 0..) |f, i| {
+            var buf: [f.len]u8 = f[0..].*;
+            std.mem.replaceScalar(u8, &buf, '_', '-');
+            const done = buf;
+            out[i] = &done;
+        }
+        break :blk out;
+    };
+    return names[@intFromEnum(g)];
+}
+
+/// The icon-file name of `tvg` if it is one of Graven's own icons.
+pub fn gravenNameOf(tvg: []const u8) ?[]const u8 {
+    for (gcache, 0..) |c, i| if (c) |t| if (t.ptr == tvg.ptr) return gravenFileName(@enumFromInt(i));
+    return null;
+}
+
 /// Whether `tvg` is one of Graven's own icons (drawn in its own colours).
 pub fn isGraven(tvg: []const u8) bool {
     for (gcache) |c| if (c) |t| if (t.ptr == tvg.ptr) return true;

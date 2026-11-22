@@ -25,6 +25,7 @@ const fontwin = @import("fontwin.zig");
 const folders = @import("graven_fonts_folders");
 const richtext = @import("graven_richtext");
 const icons = @import("icons.zig");
+const iconfile = @import("iconfile.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
 const spark = @import("cursor.zig");
@@ -13979,10 +13980,15 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     if (drop) |d| _ = dropButton(d, o.id_extra orelse 0, 2);
 }
 
-/// The ribbon's icon size, and its keys' pitch (centre to centre), logical:
-/// 64 device pixels at 200 % (the owner, 2026-11-22).
+/// The ribbon's keys: square, side by side at this pitch, logical (64
+/// device pixels at 200 %; the owner, 2026-11-22). An icon from an icon
+/// file covers the whole key (its drawing inset in it); any other icon is
+/// drawn at `ribbon_icon`, centred in the key's upper part.
 const ribbon_icon: f32 = 26;
 const ribbon_pitch: f32 = 32;
+/// The key's letters: their foot this far above the key's bottom, logical
+/// (the owner, 2026-11-22).
+const ribbon_key_margin: f32 = 3;
 
 /// A ribbon button, drawn as a key in a row of keys (the owner's choice,
 /// 2026-11-22: "A3"): neighbours touching, corners 2 px, each shaded
@@ -13992,8 +13998,7 @@ const ribbon_pitch: f32 = 32;
 /// tool on). Whether it was clicked.
 fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, o: dvui.Options, wd: *dvui.WidgetData) bool {
     var bw: dvui.ButtonWidget = undefined;
-    const side = (ribbon_pitch - ribbon_icon) / 2;
-    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .{ .x = side, .w = side, .y = 2, .h = 10 }, .min_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .max_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
+    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .all(0), .min_size_content = .{ .w = ribbon_pitch, .h = ribbon_pitch }, .max_size_content = .{ .w = ribbon_pitch, .h = ribbon_pitch }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
     bw.processEvents();
     const r = bw.data().borderRectScale().r;
     const s = dvui.windowNaturalScale();
@@ -14024,9 +14029,19 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
     (dvui.Rect.Physical{ .x = r.x, .y = r.y, .w = s, .h = r.h }).fill(.{}, .{ .color = .{ .color = dvui.Color.white } });
     (dvui.Rect.Physical{ .x = r.x + r.w - s, .y = r.y, .w = s, .h = r.h }).fill(.{}, .{ .color = .{ .color = dvui.Color.black.opacity(0.22) } });
     const ink = dvui.themeGet().color(.control, .text);
-    // Graven's own icons in their own colours; others in the ink.
-    const own = icons.isGraven(tvg);
-    dvui.icon(@src(), name, tvg, if (own) .{ .fill_color = null, .stroke_color = null } else .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none });
+    // Graven's own icons from the icon files (the user's first), the
+    // whole key; failing that, as vectors: Graven's in their own colours,
+    // others in the ink.
+    const file_name = icons.gravenNameOf(tvg);
+    const drawn = if (file_name) |fname| blk: {
+        const cell = iconfile.get(fname) orelse break :blk false;
+        break :blk iconfile.draw(fname, r, iconfile.inkOf(cell), display.fix(dvui.Color.white));
+    } else false;
+    if (!drawn) {
+        const own = file_name != null;
+        const side = (ribbon_pitch - ribbon_icon) / 2;
+        dvui.icon(@src(), name, tvg, if (own) .{ .fill_color = null, .stroke_color = null } else .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none, .padding = .{ .x = side, .w = side, .y = 1, .h = 2 * side - 1 } });
+    }
     const clicked = bw.clicked();
     bw.drawFocus();
     wd.* = bw.data().*;
@@ -14061,8 +14076,11 @@ fn keyFade(r: dvui.Rect.Physical, text: []const u8) void {
     b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
     dvui.renderTriangles(b.build_unowned(), null) catch {};
     const font = dvui.Font.theme(.body).withSize(10).withWeight(.bold);
-    const size = font.textSize(text);
-    dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = r, .s = s }, .p = .{ .x = r.x + (r.w - size.w * s) / 2, .y = y1 - size.h * s - 0.5 * s }, .color = dvui.Color.white }) catch {};
+    var ascent: f32 = 0;
+    const size = font.textSizeEx(text, .{ .ascent_out = &ascent });
+    // The letters' foot (the baseline: keys have no descenders) a little
+    // above the key's bottom.
+    dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = r, .s = s }, .p = .{ .x = r.x + (r.w - size.w * s) / 2, .y = r.y + r.h - (ribbon_key_margin + ascent) * s }, .color = dvui.Color.white }) catch {};
 }
 
 // The ribbon's drops ------------------------------------------------------------
