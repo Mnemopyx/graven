@@ -13234,15 +13234,14 @@ fn propertiesBody() !void {
     try properties();
 }
 
-/// The Add tracks tool's choices, above the context's properties while it
-/// is active.
-fn tracksToolOptions() !void {
-    const saved_group = pushGroup("tool.add-tracks");
-    defer popGroup(saved_group);
-    headingAs("tool.add-tracks", "{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
+/// Keeps the Add tracks tool's "size to" valid as prototypes and styles
+/// come and go: one gone (or never chosen) becomes the document's first
+/// prototype, else the default style. Called when the tool is picked and
+/// when a drag is planned, so it holds with the Properties pane hidden
+/// (the owner, 2026-11-22: rows could not be laid out on the canvas while
+/// the pane, which alone did this, was auto-hidden).
+fn validTracksSizeTo() void {
     const protos = state.model.prototypes.items;
-    const styles = state.model.styles.items;
-    // Keep the choice valid as prototypes and styles come and go.
     switch (tracks_tool.size_to) {
         .prototype => |pid| if (state.model.protoIndex(pid) == null) {
             tracks_tool.size_to = if (protos.len > 0) .{ .prototype = protos[0].id } else .{ .style = null };
@@ -13251,6 +13250,17 @@ fn tracksToolOptions() !void {
             tracks_tool.size_to = .{ .style = null };
         },
     }
+}
+
+/// The Add tracks tool's choices, above the context's properties while it
+/// is active.
+fn tracksToolOptions() !void {
+    const saved_group = pushGroup("tool.add-tracks");
+    defer popGroup(saved_group);
+    headingAs("tool.add-tracks", "{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
+    const protos = state.model.prototypes.items;
+    const styles = state.model.styles.items;
+    validTracksSizeTo();
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9001 });
         defer row.deinit();
@@ -13374,6 +13384,7 @@ const TrackPlan = struct {
 };
 
 fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
+    validTracksSizeTo();
     const pi = switch (state.context) {
         .panel => |pi| pi,
         else => return null,
@@ -16477,6 +16488,7 @@ fn tracksMode(major: layout.model.Major, kind: layout.model.TileRegion.Kind) voi
         tracks_tool.major = major;
         tracks_tool.kind = kind;
         ensurePrototype() catch {};
+        validTracksSizeTo();
     }
 }
 
@@ -21370,6 +21382,29 @@ fn featureHit(at: geom.Point) ?FeatureHit {
             const pos = (constrain.featureAt(m, parent, end) orelse continue) + if (f.vertical()) off.y else off.x;
             const line = featureLine(f, pos, box);
             consider(.{ .end = end, .parent = parent, .p0 = line[0], .p1 = line[1] }, at, tol, rank(f), &best, &best_d);
+        }
+    }
+    // Construction lines in the shown space: a horizontal one's height, a
+    // vertical one's place across (`origin_y`, `origin_x`: its point), each
+    // offered along the line itself. A line at another angle has no single
+    // place on either axis, so is not offered.
+    if (shown_space < m.spaces.items.len) {
+        const parent: constrain.Parent = .{ .space = shown_space };
+        if (first_parent == null or std.meta.eql(first_parent.?, parent)) {
+            const far = 1e5;
+            const clip: geom.Box = if (canvas_free) |cf| guideClipBox(cf.area, shown_space) else .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
+            for (m.spaces.items[shown_space].guides.items) |g| {
+                const r = g.angle * std.math.pi / 180;
+                const horizontal = @abs(@sin(r)) < 1e-9;
+                const vertical_line = @abs(@cos(r)) < 1e-9;
+                if (!horizontal and !vertical_line) continue;
+                const f: Feature = if (horizontal) .origin_y else .origin_x;
+                if (first) |fh| if (f.vertical() != fh.end.feature.vertical()) continue;
+                const end: ConstraintEnd = .{ .object = g.id, .feature = f };
+                if (first) |fh| if (std.meta.eql(fh.end, end)) continue;
+                const seg = g.clip(clip) orelse continue;
+                consider(.{ .end = end, .parent = parent, .p0 = seg[0], .p1 = seg[1] }, at, tol, 0, &best, &best_d);
+            }
         }
     }
     // The parent's own features, once a first is picked.

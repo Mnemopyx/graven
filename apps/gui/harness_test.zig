@@ -2068,3 +2068,17 @@ test "the grid is the canvas's: shown and its spacing are document steps, undone
     try r.frames(2);
     try std.testing.expectEqual(0, api.model().spaces.items[0].grid_spacing);
 }
+
+test "rows on the canvas: R, then a drag, lays out a column of rows" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.key(.r, .none);
+    try std.testing.expectEqualStrings("add_tracks", api.toolName());
+    try r.drag(api.screenOf(40, 120).?, api.screenOf(160, 60).?);
+    try r.frames(2);
+    var n: usize = 0;
+    for (api.model().panels.items) |p| n += p.regions.items.len;
+    try std.testing.expect(n > 0);
+}
