@@ -20403,10 +20403,12 @@ fn drawHover(area: dvui.Rect.Physical) void {
     hover_target = t;
     const px = dvui.windowNaturalScale();
     const hover = colors.select.opacity(0.75);
-    // Halos mark what can be selected only while nothing is: with a
-    // selection its drag points glow (drawSelection); while content is
-    // edited, nothing does (the caret is the speckle).
-    const halo_ok = selection.items.len == 0 and canvas_eq == null and track_cursor == null;
+    // Halos mark what can be selected only while Select boundaries is on
+    // (off, hovering shows only a slot's text; the owner, 2026-11-22), and
+    // only while nothing is selected: with a selection its drag points
+    // glow (drawSelection); while content is edited, nothing does (the
+    // caret is the speckle).
+    const halo_ok = boundary_mode and selection.items.len == 0 and canvas_eq == null and track_cursor == null;
     switch (t) {
         .tile => |x| if (halo_ok) haloBox(area, x.box, colors.select),
         .track => |x| if (halo_ok) haloBox(area, x.box, colors.select),
