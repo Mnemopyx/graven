@@ -13973,11 +13973,10 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     const drop = if (in_ribbon) ribbon_next_drop else null;
     ribbon_next_drop = null;
     if (in_ribbon) {
-        if (ribbonKey(src, name, tvg, o, &wd)) pushButtonEvent(tag, arg);
+        if (ribbonKey(src, name, tvg, o, drop, &wd)) pushButtonEvent(tag, arg);
     } else if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
     if (out) |d| d.* = wd;
     if (badge) |b| keyFade(wd.borderRectScale().r, b);
-    if (drop) |d| _ = dropButton(d, o.id_extra orelse 0, 2);
 }
 
 /// The ribbon's keys: square, side by side at this pitch, logical (64
@@ -13996,9 +13995,30 @@ const ribbon_key_margin: f32 = 3;
 /// its right and a light one at its left between it and the next; the
 /// icon large in the upper part. `o.color_fill`, when given, tints it (a
 /// tool on). Whether it was clicked.
-fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, o: dvui.Options, wd: *dvui.WidgetData) bool {
+fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, o: dvui.Options, drop: ?Drop, wd: *dvui.WidgetData) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .all(0), .min_size_content = .{ .w = ribbon_pitch, .h = ribbon_pitch }, .max_size_content = .{ .w = ribbon_pitch, .h = ribbon_pitch }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
+    // A key with a drop: its top right corner is the drop's ▾, taking its
+    // presses before the key does (the owner, 2026-11-22: inside the key,
+    // keeping the pitch).
+    const corner: ?dvui.Rect.Physical = if (drop != null) blk: {
+        const r0 = bw.data().borderRectScale().r;
+        const s0 = dvui.windowNaturalScale();
+        break :blk .{ .x = r0.x + r0.w - drop_corner * s0, .y = r0.y, .w = drop_corner * s0, .h = drop_corner * s0 };
+    } else null;
+    if (drop) |d| for (dvui.events()) |*e| {
+        if (e.handled or e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        if (!me.button.pointer() or !corner.?.contains(me.p)) continue;
+        switch (me.action) {
+            .press => e.handle(@src(), bw.data()),
+            .release => {
+                e.handle(@src(), bw.data());
+                pushButtonEvent(uniqueTag(d.id()), 0);
+            },
+            else => {},
+        }
+    };
     bw.processEvents();
     const r = bw.data().borderRectScale().r;
     const s = dvui.windowNaturalScale();
@@ -14042,6 +14062,7 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
         const side = (ribbon_pitch - ribbon_icon) / 2;
         dvui.icon(@src(), name, tvg, if (own) .{ .fill_color = null, .stroke_color = null } else .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none, .padding = .{ .x = side, .w = side, .y = 1, .h = 2 * side - 1 } });
     }
+    if (drop) |d| dropCorner(d, corner.?, r, o.id_extra orelse 0);
     const clicked = bw.clicked();
     bw.drawFocus();
     wd.* = bw.data().*;
@@ -14157,15 +14178,41 @@ fn dropClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
 }
 
 /// The ▾ after a ribbon button: its drop's button. Returns its rect.
-fn dropButton(d: Drop, id_extra: usize, room: f32) dvui.Rect.Physical {
+/// A ribbon key's drop: a ▾ in its top right corner `cz`, on a small tab
+/// of the key's own colour so it reads over the icon; tinted while hovered
+/// and while its drop is open. (The press is taken in `ribbonKey`.)
+fn dropCorner(d: Drop, cz: dvui.Rect.Physical, key: dvui.Rect.Physical, id_extra: usize) void {
     const tag = uniqueTag(d.id());
     recordDrawn(tag, 0);
-    var wd: dvui.WidgetData = undefined;
-    if (dvui.buttonIcon(@src(), "More", dvui.entypo.chevron_small_down, .{}, .{}, .{ .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra, .data_out = &wd, .min_size_content = .{ .w = 10, .h = 36 }, .max_size_content = .{ .w = 10, .h = 36 }, .padding = .{ .x = 1, .w = 1, .y = 2, .h = 2 }, .margin = .{ .y = 1, .h = 1, .w = room + 2 }, .corners = .all(4), .gravity_y = 0.5, .color_fill = if (drop_open == d) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) pushButtonEvent(tag, 0);
-    const r = wd.borderRectScale().r;
-    drop_anchor.set(d, r.toNatural());
-    return r;
+    const s = dvui.windowNaturalScale();
+    const corners: dvui.CornerRect.Physical = .{ .bl = .theme(3 * s) };
+    cz.fill(corners, .{ .color = .{ .color = display.fix(dvui.Color{ .r = 0xe9, .g = 0xe7, .b = 0xe2 }) } });
+    if (drop_open == d) {
+        cz.fill(corners, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.35) } });
+    } else if (cz.contains(dvui.currentWindow().mouse_pt)) cz.fill(corners, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.18) } });
+    // Its element, for finding it by name.
+    var zb = dvui.box(@src(), .{}, .{ .rect = .{ .x = ribbon_pitch - drop_corner, .y = 0, .w = drop_corner, .h = drop_corner }, .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra });
+    zb.deinit();
+    // The ▾: a solid triangle in the ink.
+    const ink = dvui.themeGet().color(.control, .text);
+    const cx = cz.x + cz.w / 2 + 0.5 * s;
+    const cy = cz.y + cz.h / 2 - 0.5 * s;
+    const hw = 3.2 * s;
+    const hh = 1.9 * s;
+    const lifo = dvui.currentWindow().lifo();
+    var tb = dvui.Triangles.Builder.init(lifo, 3, 3) catch return;
+    defer tb.deinit(lifo);
+    const col: dvui.Color.PMA = .fromColor(ink);
+    const p = [3]dvui.Point.Physical{ .{ .x = cx - hw, .y = cy - hh }, .{ .x = cx + hw, .y = cy - hh }, .{ .x = cx, .y = cy + hh } };
+    for (p) |q| tb.appendVertex(.{ .pos = q, .col = col });
+    tb.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
+    dvui.renderTriangles(tb.build_unowned(), null) catch {};
+    // The drop hangs below the key (a pop-up opens at its anchor's top).
+    drop_anchor.set(d, (dvui.Rect.Physical{ .x = key.x, .y = key.y + key.h, .w = key.w, .h = 0 }).toNatural());
 }
+
+/// A ribbon key's drop corner's side, logical.
+const drop_corner: f32 = 12;
 
 /// Each frame: a key held long enough opens its drop; the drop open drawn.
 fn ribbonDrops() void {
