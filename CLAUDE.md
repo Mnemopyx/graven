@@ -58,7 +58,15 @@ Samples to look at: the example documents in `examples/` (`graven export example
 
 ## The GUI without a person at it
 
-Run it under Xvfb (`Xvfb :91 -screen 0 1600x1000x24 &`, then `DISPLAY=:91`), screenshot with `import -window root`. The window lands at (50, 90) on a 1600 x 1000 screen. Environment switches:
+Run it under Xvfb at the owner's laptop's resolution and scale (2880 × 1920 at 200 %; the owner, 2026-11-22), the window filling the screen, and screenshot with `import -window root`:
+
+```sh
+Xvfb :91 -screen 0 2880x1920x24 -dpi 192 &
+DISPLAY=:91 SDL_VIDEO_X11_SCALING_FACTOR=2 ./zig-out/bin/graven-gui &   # 200 %: laid out as on 1440 × 960
+W=$(DISPLAY=:91 xdotool search --name Graven | head -1); DISPLAY=:91 xdotool windowmove $W 0 0 windowsize $W 2880 1920
+```
+
+Screen points for clicks are device pixels (twice the layout's). Environment switches:
 
 | Switch | Effect |
 |---|---|
