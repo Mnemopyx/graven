@@ -13960,18 +13960,59 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     var wd: dvui.WidgetData = undefined;
     const out = o.data_out;
     o.data_out = &wd;
-    // In the ribbon: room after the button for its key's badge.
+    // In the ribbon: a larger button, its icon in the upper part, its key
+    // in a fade across the bottom.
     var kb: [48]u8 = undefined;
     const badge = if (in_ribbon) badgeText(&kb, tag, arg) else null;
-    if (in_ribbon) o.margin = .{ .x = 1, .y = 1, .h = 1, .w = if (badge) |b| badgeFont(false).textSize(b).w + 3 else 3 };
+    if (in_ribbon) {
+        o.margin = .{ .x = 2, .y = 1, .h = 1, .w = 2 };
+        o.min_size_content = .{ .w = ribbon_icon, .h = ribbon_icon };
+        o.max_size_content = .{ .w = ribbon_icon, .h = ribbon_icon };
+        o.padding = .{ .x = 7, .w = 7, .y = 3, .h = 11 };
+        o.gravity_y = 0.5;
+        o.corners = .all(5);
+    }
     const drop = if (in_ribbon) ribbon_next_drop else null;
     ribbon_next_drop = null;
     if (drop != null) o.margin.?.w = 0;
     if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
     if (out) |d| d.* = wd;
-    var last = wd.borderRectScale().r;
-    if (drop) |d| last = dropButton(d, o.id_extra orelse 0, if (badge) |b| badgeFont(false).textSize(b).w + 3 else 3);
-    if (badge) |b| keyBadge(last, b);
+    if (badge) |b| keyFade(wd.borderRectScale().r, b);
+    if (drop) |d| _ = dropButton(d, o.id_extra orelse 0, 2);
+}
+
+/// The ribbon's icon size, and its buttons' height, logical.
+const ribbon_icon: f32 = 26;
+
+/// Key text `text` in a fade across the bottom of button `r`: the
+/// button's lower edge darkening into a band the key sits in (the owner's
+/// choice, 2026-11-22, over badges); stronger while Alt is held.
+fn keyFade(r: dvui.Rect.Physical, text: []const u8) void {
+    const s = dvui.windowNaturalScale();
+    const held = dvui.currentWindow().modifiers.alt();
+    const band = 16 * s;
+    const inset = 1 * s;
+    const top = r.y + r.h - band - inset;
+    const x0 = r.x + inset;
+    const x1 = r.x + r.w - inset;
+    const y1 = r.y + r.h - inset;
+    const ink = ghost_pane.oklch(0.26, 0.07, ghost_pane.pane_hue, 1);
+    const lifo = dvui.currentWindow().lifo();
+    var b = dvui.Triangles.Builder.init(lifo, 4, 6) catch return;
+    defer b.deinit(lifo);
+    const clear: dvui.Color.PMA = .fromColor(ink.opacity(0));
+    const deep: dvui.Color.PMA = .fromColor(ink.opacity(if (held) 0.92 else 0.55));
+    const p = [4]dvui.Point.Physical{ .{ .x = x0, .y = top }, .{ .x = x1, .y = top }, .{ .x = x1, .y = y1 }, .{ .x = x0, .y = y1 } };
+    b.appendVertex(.{ .pos = p[0], .col = clear });
+    b.appendVertex(.{ .pos = p[1], .col = clear });
+    b.appendVertex(.{ .pos = p[2], .col = deep });
+    b.appendVertex(.{ .pos = p[3], .col = deep });
+    b.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
+    b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
+    dvui.renderTriangles(b.build_unowned(), null) catch {};
+    const font = dvui.Font.theme(.body).withSize(10).withWeight(.bold);
+    const size = font.textSize(text);
+    dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = r, .s = s }, .p = .{ .x = r.x + (r.w - size.w * s) / 2, .y = y1 - size.h * s - 0.5 * s }, .color = dvui.Color.white }) catch {};
 }
 
 // The ribbon's drops ------------------------------------------------------------
@@ -14052,7 +14093,7 @@ fn dropButton(d: Drop, id_extra: usize, room: f32) dvui.Rect.Physical {
     const tag = uniqueTag(d.id());
     recordDrawn(tag, 0);
     var wd: dvui.WidgetData = undefined;
-    if (dvui.buttonIcon(@src(), "More", dvui.entypo.chevron_small_down, .{}, .{}, .{ .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra, .data_out = &wd, .min_size_content = .{ .w = 9, .h = 16 }, .padding = .{ .x = 1, .w = 1, .y = 2, .h = 2 }, .margin = .{ .y = 1, .h = 1, .w = room }, .gravity_y = 0.5, .color_fill = if (drop_open == d) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) pushButtonEvent(tag, 0);
+    if (dvui.buttonIcon(@src(), "More", dvui.entypo.chevron_small_down, .{}, .{}, .{ .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra, .data_out = &wd, .min_size_content = .{ .w = 10, .h = 36 }, .max_size_content = .{ .w = 10, .h = 36 }, .padding = .{ .x = 1, .w = 1, .y = 2, .h = 2 }, .margin = .{ .y = 1, .h = 1, .w = room + 2 }, .corners = .all(4), .gravity_y = 0.5, .color_fill = if (drop_open == d) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) pushButtonEvent(tag, 0);
     const r = wd.borderRectScale().r;
     drop_anchor.set(d, r.toNatural());
     return r;
@@ -14324,7 +14365,7 @@ fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u
 }
 
 /// The ribbon's height, logical.
-const ribbon_h: f32 = 34;
+const ribbon_h: f32 = 52;
 /// Where the ribbon ends, logical (window coordinates): drop panels hang
 /// from it.
 var ribbon_bottom: f32 = 64;
