@@ -10,7 +10,14 @@
  "graven": {
   "format": "graven-icons 1",
   "about": "RGB: the icon's ground, a raster; `transparent` lets what is behind show, `overrides` name colours a program may replace. A: the ink, 0.5 - d / distanceRange (d px to the ink's edge, positive inside): 255 no ink, 128 the edge. Straight alpha, not premultiplied.",
+  "button": "each cell is a whole button; its ground may fill it",
   "grid": 24,
+  "art": {
+   "grid": 32,
+   "left": 3.0,
+   "top": 3.0,
+   "size": 26
+  },
   "ink": "#2a2530",
   "transparent": "#ff00ff",
   "overrides": [

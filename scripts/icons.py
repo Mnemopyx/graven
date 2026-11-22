@@ -56,9 +56,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(HERE, "..", "apps", "gui", "icons")
 SVG_DIR = os.path.join(ICON_DIR, "graven")
 
-# The file: a cell's side in pixels for the 24-unit grid, the ink's
-# distance range (pixels across both sides of the edge), the padding.
+# The file. A cell is a whole button (its ground may fill it): 64 px, the
+# ribbon's pitch at 200 %, a BUTTON-unit grid (2 px a unit). The drawing,
+# on its 24-unit grid, sits inside at ART units square (the ribbon's 26 of
+# 32), MARGIN all round. The ink's distance range (pixels across both sides
+# of the edge); the padding between cells (edge texels repeated, so a
+# ground filling its cell keeps its edge when enlarged).
 CELL = 64
+BUTTON = 32
+ART = 26
+MARGIN = (BUTTON - ART) / 2
 RANGE = 4.0
 PAD = 4
 
@@ -207,10 +214,11 @@ def cell_image(parts):
     max, exact where it matters, at the edges)."""
     import numpy as np
 
-    s = CELL / 24.0
+    s = CELL / BUTTON * ART / 24.0  # pixels per drawing unit
+    off = CELL / BUTTON * MARGIN
     ys, xs = np.mgrid[0:CELL, 0:CELL]
-    px = (xs + 0.5) / s
-    py = (ys + 0.5) / s
+    px = (xs + 0.5 - off) / s
+    py = (ys + 0.5 - off) / s
 
     def seg_dist(pts):
         best = np.full((CELL, CELL), 1e9)
@@ -265,8 +273,9 @@ def build():
         dist, rgb = cell_image(ICONS[name])
         x0 = (i % cols) * step + PAD
         y0 = (i // cols) * step + PAD
-        rgba[y0:y0 + CELL, x0:x0 + CELL, :3] = rgb
-        rgba[y0:y0 + CELL, x0:x0 + CELL, 3] = np.clip(np.round((0.5 - dist / RANGE) * 255), 0, 255).astype(np.uint8)
+        a = np.clip(np.round((0.5 - dist / RANGE) * 255), 0, 255).astype(np.uint8)
+        cell = np.dstack([rgb, a])
+        rgba[y0 - PAD:y0 + CELL + PAD, x0 - PAD:x0 + CELL + PAD] = np.pad(cell, ((PAD, PAD), (PAD, PAD), (0, 0)), mode="edge")
         glyphs.append({
             "index": i,
             "icon": name,
@@ -281,7 +290,9 @@ def build():
         "graven": {
             "format": "graven-icons 1",
             "about": "RGB: the icon's ground, a raster; `transparent` lets what is behind show, `overrides` name colours a program may replace. A: the ink, 0.5 - d / distanceRange (d px to the ink's edge, positive inside): 255 no ink, 128 the edge. Straight alpha, not premultiplied.",
+            "button": "each cell is a whole button; its ground may fill it",
             "grid": 24,
+            "art": {"grid": BUTTON, "left": MARGIN, "top": MARGIN, "size": ART},
             "ink": INK,
             "transparent": KEY,
             "overrides": [{"key": KIND[k], "name": k} for k in KIND],
@@ -389,7 +400,7 @@ def sheet(json_path, out_path):
     H = 60 + rowh * len(glyphs)
     img = Image.new("RGB", (W, H), (216, 214, 209))
     d = ImageDraw.Draw(img)
-    d.text((10, 10), "Graven icon file: RGB the ground (magenta transparent, override keys), A the ink's distance. 16, 26, 32, 64, 96, 128 px.", fill=(40, 40, 40))
+    d.text((10, 10), "Graven icon file: RGB the ground (magenta transparent, override keys), A the ink's distance; each cell a whole button (outlined). 16, 26, 32, 64, 96, 128 px.", fill=(40, 40, 40))
     x = 160
     for title, *_ in columns:
         d.text((x, 36), title, fill=(40, 40, 40))
@@ -402,7 +413,10 @@ def sheet(json_path, out_path):
             d.rectangle([x - 6, y - 4, x + colw - 20, y + rowh - 8], fill=ground)
             for s in sizes:
                 tile = render(atlas, meta, g, s, ground, ink, rec)
-                img.paste(Image.fromarray(tile), (x, y + (max(sizes) - s) // 2))
+                ty = y + (max(sizes) - s) // 2
+                img.paste(Image.fromarray(tile), (x, ty))
+                # The button the cell covers.
+                d.rectangle([x - 1, ty - 1, x + s, ty + s], outline=(150, 146, 140))
                 x += s + 12
             x += 20
     img.save(out_path)
