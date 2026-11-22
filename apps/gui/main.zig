@@ -13979,8 +13979,10 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     if (drop) |d| _ = dropButton(d, o.id_extra orelse 0, 2);
 }
 
-/// The ribbon's icon size, logical (in a 42 px button).
-const ribbon_icon: f32 = 30;
+/// The ribbon's icon size, and its keys' pitch (centre to centre), logical:
+/// 64 device pixels at 200 % (the owner, 2026-11-22).
+const ribbon_icon: f32 = 26;
+const ribbon_pitch: f32 = 32;
 
 /// A ribbon button, drawn as a key in a row of keys (the owner's choice,
 /// 2026-11-22: "A3"): neighbours touching, corners 2 px, each shaded
@@ -13990,7 +13992,8 @@ const ribbon_icon: f32 = 30;
 /// tool on). Whether it was clicked.
 fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, o: dvui.Options, wd: *dvui.WidgetData) bool {
     var bw: dvui.ButtonWidget = undefined;
-    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .{ .x = 6, .w = 6, .y = 2, .h = 10 }, .min_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .max_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
+    const side = (ribbon_pitch - ribbon_icon) / 2;
+    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .{ .x = side, .w = side, .y = 2, .h = 10 }, .min_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .max_size_content = .{ .w = ribbon_icon, .h = ribbon_icon }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
     bw.processEvents();
     const r = bw.data().borderRectScale().r;
     const s = dvui.windowNaturalScale();
