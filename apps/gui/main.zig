@@ -7769,7 +7769,9 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
         const on = soft_region != null and soft_region.? == ri;
         guideOutline(area, trackOutline(pi, ri), colors.guide.opacity(if (on) 0.6 else 0.3), px);
     }
-    drawThreads(area, pi, placed);
+    // Flow marks are a view layer of their own; a document without spaces
+    // (no layer stack) draws them with its panels.
+    if (state.model.spaces.items.len == 0) drawThreads(area, pi, placed);
     drawGrids(area, pi);
     for (placed.tiles) |t| {
         const in_context = inContext(pi, t);
@@ -7879,7 +7881,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
         }
     }
-    drawFlowMarks(area, pi, placed);
+    if (state.model.spaces.items.len == 0) drawFlowMarks(area, pi, placed);
     // On whichever panel its segment lies: a thread runs across panels.
     if (track_cursor) |c| if (canvas_eq == null) drawCursor(area, pi, placed, c);
 }
@@ -9118,7 +9120,7 @@ fn drawSpaceLayer(area: dvui.Rect.Physical, space: usize, depth: usize, li: usiz
 //
 // What the canvas draws besides the document's layers is in the same stack:
 // the grid (usually rearmost), the axes, the check results, the
-// construction lines. Each can be shown or hidden and moved among the
+// construction lines, the flow marks. Each can be shown or hidden and moved among the
 // document's layers in the Layers palette. They are the view's, not the
 // document's: kept for the session, not saved with the file.
 
@@ -9130,12 +9132,18 @@ const ViewLayer = enum {
     check_other,
     simulation,
     guides,
+    /// What a flow holds that output leaves out (breaks, paragraph marks,
+    /// empty runs, forced wraps) and the routes from each track into the
+    /// next (the owner, 2026-11-22: one layer, moved and shown or hidden in
+    /// the Layers palette).
+    flow_marks,
 
     fn label(v: ViewLayer) []const u8 {
         return switch (v) {
             .grid => "Grid",
             .axes => "Axes",
             .guides => "Construction lines",
+            .flow_marks => "Flow marks",
             else => v.check().?.label(),
         };
     }
@@ -9160,6 +9168,7 @@ const ViewLayer = enum {
             .grid => grid_mode != .none,
             .axes => show_axes,
             .guides => show_guides,
+            .flow_marks => show_flow_marks,
             else => check_shown.get(v.check().?),
         };
     }
@@ -9174,6 +9183,7 @@ const ViewLayer = enum {
             },
             .axes => show_axes = !show_axes,
             .guides => show_guides = !show_guides,
+            .flow_marks => show_flow_marks = !show_flow_marks,
             else => check_shown.set(v.check().?, !check_shown.get(v.check().?)),
         }
     }
@@ -9190,9 +9200,11 @@ var view_below: std.EnumArray(ViewLayer, u16) = .init(.{
     .check_other = view_top,
     .simulation = view_top,
     .guides = view_top,
+    .flow_marks = view_top,
 });
 var show_axes = true;
 var show_guides = true;
+var show_flow_marks = true;
 /// The grid's look when shown again.
 var grid_shown_as: bg_grid.Mode = .lines;
 
@@ -9213,7 +9225,24 @@ fn drawViewLayer(area: dvui.Rect.Physical, space: usize, v: ViewLayer, active: b
         .axes => drawAxes(area),
         // Construction lines: the view being worked in.
         .guides => if (active) drawGuides(area),
+        .flow_marks => drawFlowMarksLayer(area, space),
         else => drawChecks(area, space, v.check().?),
+    }
+}
+
+/// The flow marks of space `space`'s panels: those whose own layer is
+/// shown.
+fn drawFlowMarksLayer(area: dvui.Rect.Physical, space: usize) void {
+    const sp = state.model.spaces.items[space];
+    for (0..@min(state.model.panels.items.len, state.placed.items.len)) |pi| {
+        if (state.model.spaceOf(pi) != space) continue;
+        const lid = panelLayer(pi);
+        const visible = for (sp.layers.items) |l| {
+            if (l.id == lid) break l.visible;
+        } else true;
+        if (!visible) continue;
+        drawThreads(area, pi, &state.placed.items[pi]);
+        drawFlowMarks(area, pi, &state.placed.items[pi]);
     }
 }
 

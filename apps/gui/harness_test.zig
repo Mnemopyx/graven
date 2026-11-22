@@ -2019,3 +2019,27 @@ test "reveal: stepping by keys brings what it steps to into view; pointing does 
     try std.testing.expect(inside(api.cursorOnScreen().?));
     try std.testing.expect(api.viewNow().ppm == v2.ppm);
 }
+
+test "flow marks are a view layer: in the Layers panel, hidden by its eye and shown again, and moved below the document's layer" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "PC keyboard");
+    try r.press("ribbon.layers");
+    try r.frames(3);
+    try std.testing.expect(api.viewLayer("flow_marks").?.shown);
+    try std.testing.expectEqual(std.math.maxInt(u16), api.viewLayer("flow_marks").?.below);
+    try r.press("layers-palette.flow-marks.shown");
+    try r.frames(2);
+    try std.testing.expect(!api.viewLayer("flow_marks").?.shown);
+    try r.press("layers-palette.flow-marks.shown");
+    try r.frames(2);
+    try std.testing.expect(api.viewLayer("flow_marks").?.shown);
+    // Dragged by its grip below the document's layer.
+    const doc = try r.rectOf("layers-palette.layer1.choose");
+    const eye = try r.rectOf("layers-palette.flow-marks.shown");
+    const grip_x = doc.x + doc.w + 8;
+    try r.drag(.{ .x = grip_x, .y = eye.y + eye.h / 2 }, .{ .x = grip_x, .y = doc.y + doc.h * 0.9 });
+    try r.frames(3);
+    try std.testing.expect(api.viewLayer("flow_marks").?.below < std.math.maxInt(u16));
+}
