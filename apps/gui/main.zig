@@ -160,7 +160,7 @@ pub const testing_api = struct {
     /// (`maxInt(u16)`: above them all).
     pub fn viewLayer(name: []const u8) ?struct { shown: bool, below: u16 } {
         const v = std.meta.stringToEnum(ViewLayer, name) orelse return null;
-        return .{ .shown = v.shown(), .below = view_below.get(v) };
+        return .{ .shown = v.shown(), .below = overlayOf(shown_space, v).below };
     }
     /// The ribbon's drop open: "layers", "shape", "tracks", or "".
     pub fn dropRect() dvui.Rect.Physical {
@@ -1746,7 +1746,6 @@ fn deinit(_: *dvui.Window) void {
     dg_table.deinit(state.gpa);
     dg_table = .{};
     clearChecks();
-    check_shown = .initFill(true);
     clearPlanChecks();
     op_hidden.clearAndFree(state.gpa);
     meshJobWait();
@@ -3619,7 +3618,9 @@ fn loadPrefs() void {
         last_units = u;
     };
     if (ps.get("view.grid")) |v| if (v == .string) if (std.meta.stringToEnum(bg_grid.Mode, v.string)) |g| {
-        grid_mode = g;
+        // How grids are drawn; "none" (whether there is one is now the
+        // document's) reads as lines.
+        grid_mode = if (g == .none) .lines else g;
     };
     if (ps.get("view.snap_grid")) |v| if (v == .boolean) {
         snap_grid = v.boolean;
@@ -4971,10 +4972,18 @@ fn menu() ?dvui.App.Result {
         if (menuAction("    Zoom out", "view", kact("view.zoom-out"), 0, false, 6)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 91 });
         // DVUI's interface font has no check mark; a bullet marks what is on.
-        // The grid: lines, dots or none.
-        for ([_]bg_grid.Mode{ .lines, .dots, .none }, [_][]const u8{ "Grid: lines", "Grid: dots", "Grid: none" }, 0..) |gm, label, gi| {
+        // The grid: whether this canvas or frame has one (the document's),
+        // and how grids are drawn (a preference): lines, dots or pluses.
+        {
+            const on = ViewLayer.grid.shown();
+            if (tmenu(@src(), if (on) "•  Grid" else "    Grid", .{}, .{ .expand = .horizontal, .id_extra = 3 }) != null) {
+                ViewLayer.grid.toggle();
+                m.close();
+            }
+        }
+        for ([_]bg_grid.Mode{ .lines, .dots, .pluses }, [_][]const u8{ "Grids as lines", "Grids as dots", "Grids as pluses" }, 0..) |gm, label, gi| {
             var lb: [48]u8 = undefined;
-            const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (grid_mode == gm) "•  " else "    ", label }) catch label;
+            const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (gridLook() == gm) "•  " else "    ", label }) catch label;
             if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = gi }) != null) {
                 grid_mode = gm;
                 m.close();
@@ -9163,28 +9172,27 @@ const ViewLayer = enum {
         return if (v.check() != null) checksCurrent() else true;
     }
 
+    /// Shown in the shown space (the document's).
     fn shown(v: ViewLayer) bool {
-        return switch (v) {
-            .grid => grid_mode != .none,
-            .axes => show_axes,
-            .guides => show_guides,
-            .flow_marks => show_flow_marks,
-            else => check_shown.get(v.check().?),
-        };
+        return overlayOf(shown_space, v).shown;
     }
 
+    /// Shown or hidden in the shown space: a step of the document's.
     fn toggle(v: ViewLayer) void {
-        switch (v) {
-            .grid => if (grid_mode == .none) {
-                grid_mode = grid_shown_as;
-            } else {
-                grid_shown_as = grid_mode;
-                grid_mode = .none;
-            },
-            .axes => show_axes = !show_axes,
-            .guides => show_guides = !show_guides,
-            .flow_marks => show_flow_marks = !show_flow_marks,
-            else => check_shown.set(v.check().?, !check_shown.get(v.check().?)),
+        var st = overlayOf(shown_space, v);
+        st.shown = !st.shown;
+        setOverlay(shown_space, v, st);
+    }
+
+    /// The document's name for it.
+    fn overlay(v: ViewLayer) layout.model.Overlay {
+        return @enumFromInt(@intFromEnum(v));
+    }
+
+    comptime {
+        // The same layers, in the same order, as the document's.
+        for (@typeInfo(ViewLayer).@"enum".field_names, @typeInfo(layout.model.Overlay).@"enum".field_names) |a_, b_| {
+            if (!std.mem.eql(u8, a_, b_)) @compileError("ViewLayer and model.Overlay differ: " ++ a_);
         }
     }
 };
@@ -9192,28 +9200,36 @@ const ViewLayer = enum {
 /// How many of the document's layers each view layer lies above: 0, below
 /// them all; `top`, above them all.
 const view_top: u16 = std.math.maxInt(u16);
-var view_below: std.EnumArray(ViewLayer, u16) = .init(.{
-    .grid = 0,
-    .axes = 0,
-    .check_strokes = view_top,
-    .check_gaps = view_top,
-    .check_other = view_top,
-    .simulation = view_top,
-    .guides = view_top,
-    .flow_marks = view_top,
-});
-var show_axes = true;
-var show_guides = true;
-var show_flow_marks = true;
-/// The grid's look when shown again.
-var grid_shown_as: bg_grid.Mode = .lines;
+/// View layer `v`'s state in space `space`: the document's (defaults
+/// where there is no such space).
+fn overlayOf(space: usize, v: ViewLayer) layout.model.OverlayState {
+    if (space >= state.model.spaces.items.len) return (layout.model.Overlays{}).get(v.overlay());
+    return state.model.spaces.items[space].overlays.get(v.overlay());
+}
+
+/// View layer `v`'s state in space `space` set: one step of the document's.
+fn setOverlay(space: usize, v: ViewLayer, st: layout.model.OverlayState) void {
+    if (space >= state.model.spaces.items.len) return;
+    act(.setOverlay, .{ space, v.overlay(), st.shown, st.below }) catch {};
+}
+
+/// Check layer `l` shown in space `space`.
+fn checkShown(space: usize, l: CheckLayer) bool {
+    const v: ViewLayer = switch (l) {
+        .strokes => .check_strokes,
+        .gaps => .check_gaps,
+        .other => .check_other,
+        .simulation => .simulation,
+    };
+    return overlayOf(space, v).shown;
+}
 
 /// Space `space`'s layers and the view's own, bottom first.
 fn drawStack(area: dvui.Rect.Physical, space: usize, active: bool) void {
     if (space >= state.model.spaces.items.len) return;
     const n = state.model.spaces.items[space].layers.items.len;
     for (0..n + 1) |i| {
-        inline for (comptime std.enums.values(ViewLayer)) |v| if (@min(view_below.get(v), n) == i) drawViewLayer(area, space, v, active);
+        inline for (comptime std.enums.values(ViewLayer)) |v| if (@min(overlayOf(space, v).below, n) == i) drawViewLayer(area, space, v, active);
         if (i < n) drawSpaceLayer(area, space, 0, i);
     }
 }
@@ -9256,7 +9272,7 @@ fn stackEntries(space: usize, out: []StackEntry) []StackEntry {
     const n = state.model.spaces.items[space].layers.items.len;
     var k: usize = 0;
     for (0..n + 1) |i| {
-        for (std.enums.values(ViewLayer)) |v| if (@min(view_below.get(v), n) == i and v.present() and k < out.len) {
+        for (std.enums.values(ViewLayer)) |v| if (@min(overlayOf(space, v).below, n) == i and v.present() and k < out.len) {
             out[k] = .{ .view = v };
             k += 1;
         };
@@ -10460,7 +10476,6 @@ var checks_ms: f64 = 0;
 /// Shapes measured, kept for the session: a check again is quick.
 var check_cache: ?layout.check.Cache = null;
 var check_cache_gen: u64 = 0;
-var check_shown: std.EnumArray(CheckLayer, bool) = .initFill(true);
 
 fn checksCurrent() bool {
     return checks.len > 0 and checks_gen == doc_generation;
@@ -10574,7 +10589,7 @@ fn drawChecks(area: dvui.Rect.Physical, space: ?usize, only: ?CheckLayer) void {
             if (state.model.spaceOf(pi) != sp) continue;
         } else if (!shownPanel(pi)) continue;
         const at = panelOrigin(pi);
-        if (check_shown.get(.simulation) and (only == null or only.? == .simulation)) {
+        if (checkShown(state.model.spaceOf(pi), .simulation) and (only == null or only.? == .simulation)) {
             const lifo = dvui.currentWindow().lifo();
             for (ck.report.paths) |path| {
                 if (path.points.len < 2) continue;
@@ -10593,7 +10608,7 @@ fn drawChecks(area: dvui.Rect.Physical, space: ?usize, only: ?CheckLayer) void {
                 .gap => .gaps,
                 else => .other,
             };
-            if (!check_shown.get(layer)) continue;
+            if (!checkShown(state.model.spaceOf(pi), layer)) continue;
             if (only) |o| if (o != layer) continue;
             const colour = if (f.verdict == .fail) failing else marginal;
             if (region) |r| {
@@ -10644,8 +10659,18 @@ fn checkLayersList(space: usize) void {
     for (std.enums.values(CheckLayer), 0..) |l, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 600 + k });
         defer row.deinit();
-        var vis = check_shown.get(l);
-        if (tcheckbox(@src(), &vis, null, .{ .id_extra = 600 + k })) check_shown.set(l, vis);
+        var vis = checkShown(space, l);
+        if (tcheckbox(@src(), &vis, null, .{ .id_extra = 600 + k })) {
+            const v: ViewLayer = switch (l) {
+                .strokes => .check_strokes,
+                .gaps => .check_gaps,
+                .other => .check_other,
+                .simulation => .simulation,
+            };
+            var st = overlayOf(space, v);
+            st.shown = vis;
+            setOverlay(space, v, st);
+        }
         const c = checkCounts(space, l);
         var buf: [128]u8 = undefined;
         const text = if (l == .simulation)
@@ -11175,7 +11200,24 @@ fn spaceExtents() geom.Box {
 
 /// The canvas's axes through its origin, faint, with a mark at the origin.
 /// View › Grid: graph paper behind the canvas (grid.zig).
+/// How grids are drawn (a preference, kept in the settings): lines, dots
+/// or pluses. Whether a canvas or frame has a grid, and its spacing, are
+/// the document's (`Space.overlays`, `Space.grid_spacing`).
 var grid_mode: bg_grid.Mode = .lines;
+
+fn gridLook() bg_grid.Mode {
+    return if (grid_mode == .none) .lines else grid_mode;
+}
+
+/// The grid's levels in the shown space, document units: adaptive
+/// decades, or the space's own spacing (lines at it, stronger every ten).
+fn gridLevels(lo: f64, buf: []bg_grid.Level) []bg_grid.Level {
+    const unit_mm = 1 / docUnits().perMm();
+    const px_per_unit = state.view.ppm * unit_mm;
+    const spacing = if (shown_space < state.model.spaces.items.len) state.model.spaces.items[shown_space].grid_spacing else 0;
+    if (spacing > 0) return bg_grid.fixed(spacing / unit_mm, px_per_unit, lo, buf);
+    return bg_grid.levels(px_per_unit, lo, gridScale(), buf);
+}
 
 /// One rectangle of the grid, device pixels, and its colour.
 const GridQuad = struct { r: dvui.Rect.Physical, col: dvui.Color.PMA };
@@ -11184,12 +11226,12 @@ const GridQuad = struct { r: dvui.Rect.Physical, col: dvui.Color.PMA };
 /// document's units, each line one device pixel wide on the pixel grid
 /// (or a dot at each crossing), all of it in a few batched draws.
 fn drawGrid(area: dvui.Rect.Physical) void {
-    if (grid_mode == .none or !(state.view.ppm > 0)) return;
+    if (!(state.view.ppm > 0)) return;
+    const look = gridLook();
     const unit_mm = 1 / docUnits().perMm();
-    const px_per_unit = state.view.ppm * unit_mm;
-    const lo = if (grid_mode == .dots) bg_grid.dots_lo else bg_grid.fade_lo;
+    const lo = if (look == .lines) bg_grid.fade_lo else bg_grid.dots_lo;
     var buf: [8]bg_grid.Level = undefined;
-    const lv = bg_grid.levels(px_per_unit, lo, gridScale(), &buf);
+    const lv = gridLevels(lo, &buf);
     if (lv.len == 0) return;
     const a = dvui.currentWindow().arena();
     var quads: std.ArrayList(GridQuad) = .empty;
@@ -11223,7 +11265,7 @@ fn drawGrid(area: dvui.Rect.Physical) void {
             c.quads.append(c.a, .{ .r = r, .col = col(s) }) catch {};
         }
     };
-    if (grid_mode == .lines) {
+    if (look == .lines) {
         const base: Ctx = .{ .a = a, .quads = &quads, .area = area, .unit_mm = unit_mm, .t = t, .vertical = true };
         bg_grid.lines(lv, x0, x1, base, Ctx.line);
         var h = base;
@@ -11247,7 +11289,12 @@ fn drawGrid(area: dvui.Rect.Physical) void {
                     // A dot is a few pixels where a line is a long run of them:
                     // it needs more contrast to read.
                     const dot: dvui.Color.PMA = .fromColor(colors.grid.opacity(@min(0.85, 3 * colors.grid_major * @sqrt(l.strength))));
-                    quads.append(a, .{ .r = .{ .x = @floor(p.x - d / 2), .y = @floor(p.y - d / 2), .w = d, .h = d }, .col = dot }) catch {};
+                    if (look == .pluses) {
+                        // A plus: two short bars a line's width, crossing.
+                        const arm = 3 * d;
+                        quads.append(a, .{ .r = .{ .x = @floor(p.x - arm / 2), .y = @floor(p.y), .w = arm, .h = t }, .col = dot }) catch {};
+                        quads.append(a, .{ .r = .{ .x = @floor(p.x), .y = @floor(p.y - arm / 2), .w = t, .h = arm }, .col = dot }) catch {};
+                    } else quads.append(a, .{ .r = .{ .x = @floor(p.x - d / 2), .y = @floor(p.y - d / 2), .w = d, .h = d }, .col = dot }) catch {};
                 }
             }
         }
@@ -11386,7 +11433,7 @@ fn altHeld() bool {
 
 /// The grid step drags snap to now (canvas mm), or null when they do not.
 fn snapStep() ?f64 {
-    if (!snap_grid or grid_mode == .none or !(state.view.ppm > 0) or altHeld()) return null;
+    if (!snap_grid or !ViewLayer.grid.shown() or !(state.view.ppm > 0) or altHeld()) return null;
     const st = nudgeStep(false);
     return if (st > 0 and std.math.isFinite(st)) st else null;
 }
@@ -11708,7 +11755,7 @@ fn gridScale() bg_grid.Scale {
 fn nudgeStep(major: bool) f64 {
     const unit_mm = 1 / docUnits().perMm();
     var buf: [8]bg_grid.Level = undefined;
-    const lv = bg_grid.levels(state.view.ppm * unit_mm, bg_grid.fade_lo, gridScale(), &buf);
+    const lv = gridLevels(bg_grid.fade_lo, &buf);
     const u = bg_grid.units(lv) orelse return unit_mm;
     return (if (major) u.major else u.minor) * unit_mm;
 }
@@ -13151,7 +13198,14 @@ fn moveInStack(space: usize, entries: []const StackEntry, r: usize, b: usize) vo
     const n = state.model.spaces.items[space].layers.items.len;
     for (order[0..m]) |e| switch (e) {
         .doc => docs += 1,
-        .view => |v| view_below.set(v, if (docs >= n) view_top else docs),
+        .view => |v| {
+            var st = overlayOf(space, v);
+            const below: u16 = if (docs >= n) view_top else docs;
+            if (st.below != below) {
+                st.below = below;
+                setOverlay(space, v, st);
+            }
+        },
     };
 }
 
@@ -14694,7 +14748,7 @@ var chosen_view_layer: ?ViewLayer = null;
 fn viewLayerProperties(space: usize, v: ViewLayer) void {
     const saved_group = pushGroup("view-layer");
     defer popGroup(saved_group);
-    propText(asElement("view-layer.kind"), "{s}", .{"The view's own: kept for the session, not saved"}, 1);
+    propText(asElement("view-layer.kind"), "{s}", .{"Drawn by the editor, in this canvas's or frame's stack"}, 1);
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 2 });
         defer row.deinit();
@@ -14708,16 +14762,37 @@ fn viewLayerProperties(space: usize, v: ViewLayer) void {
         if (e == .view and e.view == v) break k;
     } else 0;
     propText(asElement("view-layer.place"), "{d} of {d}, from the bottom", .{ at + 1, entries.len }, 3);
-    if (v == .grid) {
+    if (v == .grid and space < state.model.spaces.items.len) {
+        // Its spacing (the document's), in the document's units; empty:
+        // adaptive.
+        const u = docUnits();
+        const spacing = state.model.spaces.items[space].grid_spacing;
+        var sb: [32]u8 = undefined;
+        const shown_text = if (spacing > 0) std.fmt.bufPrint(&sb, "{d}", .{@round(spacing * u.perMm() * 10000) / 10000}) catch "" else "";
+        var lb: [32]u8 = undefined;
+        const label = std.fmt.bufPrint(&lb, "Spacing, {s}", .{u.symbol()}) catch "Spacing";
+        if (sizesProp(elementLabel("view-layer.spacing", label), shown_text, 5)) |list| {
+            if (list.len == 0) {
+                act(.setGridSpacing, .{ space, 0 }) catch {};
+            } else if (list.len == 1 and list[0] > 0) act(.setGridSpacing, .{ space, list[0] / u.perMm() }) catch {};
+        }
+        propText(asElement("view-layer.spacing-note"), "{s}", .{if (spacing > 0) "lines at it, stronger every ten" else "empty: adaptive, following the zoom"}, 6);
+        // How grids are drawn: a preference, every document alike.
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4 });
         defer row.deinit();
         propName(asElement("view-layer.look"));
-        const names = [_][]const u8{ "Lines", "Dots" };
-        const shown_as = if (grid_mode == .none) grid_shown_as else grid_mode;
-        var choice: usize = if (shown_as == .dots) 1 else 0;
+        const names = [_][]const u8{ "Lines", "Dots", "Pluses" };
+        var choice: usize = switch (gridLook()) {
+            .dots => 1,
+            .pluses => 2,
+            else => 0,
+        };
         if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
-            const look: bg_grid.Mode = if (choice == 1) .dots else .lines;
-            if (grid_mode == .none) grid_shown_as = look else grid_mode = look;
+            grid_mode = switch (choice) {
+                1 => .dots,
+                2 => .pluses,
+                else => .lines,
+            };
         }
     }
 }
@@ -20115,7 +20190,7 @@ fn shiftHeld() bool {
 const GuideHit = struct { index: usize, seg: [2]geom.Point };
 
 fn guideNear(area: dvui.Rect.Physical, p: geom.Point) ?GuideHit {
-    if (shown_space >= state.model.spaces.items.len or !show_guides) return null;
+    if (shown_space >= state.model.spaces.items.len or !ViewLayer.guides.shown()) return null;
     const clip = guideClipBox(area, shown_space);
     var best: ?GuideHit = null;
     var best_d = edgeMm();

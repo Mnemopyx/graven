@@ -354,6 +354,8 @@ pub const all = [_]Element{
     .{ .id = "view-layer.visible", .kind = .toggle, .label = "Visible" },
     .{ .id = "view-layer.place", .kind = .value, .label = "Place" },
     .{ .id = "view-layer.look", .kind = .choice, .label = "Look" },
+    .{ .id = "view-layer.spacing", .kind = .field, .label = "Spacing" },
+    .{ .id = "view-layer.spacing-note", .kind = .value, .label = "" },
     .{ .id = "layer.lock", .kind = .choice, .label = "Lock" },
     .{ .id = "layer.locked-nothing-on-it-can-be-picked", .kind = .toggle, .label = "Locked: nothing on it can be picked" },
     .{ .id = "layer.move-down", .kind = .button, .label = "Move down" },

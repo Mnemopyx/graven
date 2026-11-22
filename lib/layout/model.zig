@@ -828,6 +828,15 @@ pub const Space = struct {
     /// attachment, never drawn as output (a canvas or a frame holds no
     /// drawing of its own).
     guides: std.ArrayList(Guide) = .empty,
+    /// The layers the editor draws besides the document's (the grid, the
+    /// axes, the check results, the construction lines, the flow marks):
+    /// in the space's stack, so the document's (the owner, 2026-11-22):
+    /// each shown or not, and where among the document's layers.
+    overlays: Overlays = .{},
+    /// The grid's spacing, mm; 0: adaptive, decades of the units that
+    /// follow the zoom. How the grid is drawn (lines, dots, pluses) is the
+    /// editor's preference, not the document's.
+    grid_spacing: f64 = 0,
 
     /// The index of layer `id` (`.none` meaning the base layer).
     pub fn layerIndex(sp: Space, id: ObjectId) ?usize {
@@ -934,6 +943,41 @@ pub const Output = enum {
 
 /// A layer of a space: what it shows, whether it can be changed, how it
 /// is composited, and what makes it.
+/// One of the editor's own layers in a space's stack (`Space.overlays`).
+pub const Overlay = enum { grid, axes, check_strokes, check_gaps, check_other, simulation, guides, flow_marks };
+
+/// An editor layer in a space's stack: shown or not, and how many of the
+/// space's layers lie below it (`maxInt`: above them all).
+pub const OverlayState = struct {
+    shown: bool = true,
+    below: u16 = std.math.maxInt(u16),
+};
+
+/// Each editor layer's state, by name (so a file read without one gives
+/// it its default): the grid and the axes at the back, the rest in front.
+pub const Overlays = struct {
+    grid: OverlayState = .{ .below = 0 },
+    axes: OverlayState = .{ .below = 0 },
+    check_strokes: OverlayState = .{},
+    check_gaps: OverlayState = .{},
+    check_other: OverlayState = .{},
+    simulation: OverlayState = .{},
+    guides: OverlayState = .{},
+    flow_marks: OverlayState = .{},
+
+    pub fn get(o: Overlays, w: Overlay) OverlayState {
+        return switch (w) {
+            inline else => |t| @field(o, @tagName(t)),
+        };
+    }
+
+    pub fn set(o: *Overlays, w: Overlay, v: OverlayState) void {
+        switch (w) {
+            inline else => |t| @field(o, @tagName(t)) = v,
+        }
+    }
+};
+
 pub const Layer = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -2744,6 +2788,22 @@ pub const Model = struct {
     /// The first "LayerN" not yet used in space `space`.
     pub fn nextLayerName(m: *const Model, space: usize, buf: []u8) []const u8 {
         return m.freshName(buf, .{ .space = m.spaces.items[space].id }, "Layer");
+    }
+
+    /// Shows or hides editor layer `which` in space `space`, and places it
+    /// with `below` of the space's layers under it (`maxInt`: on top).
+    pub fn setOverlay(m: *Model, space: usize, which: Overlay, shown: bool, below: u16) Error!void {
+        if (space >= m.spaces.items.len) return error.BadValue;
+        m.spaces.items[space].overlays.set(which, .{ .shown = shown, .below = below });
+        m.revision += 1;
+    }
+
+    /// Sets space `space`'s grid spacing, mm (0: adaptive).
+    pub fn setGridSpacing(m: *Model, space: usize, spacing: f64) Error!void {
+        if (space >= m.spaces.items.len) return error.BadValue;
+        if (!(spacing >= 0) or !std.math.isFinite(spacing)) return error.BadSize;
+        m.spaces.items[space].grid_spacing = spacing;
+        m.revision += 1;
     }
 
     /// Changes a layer's settings (not its ID).

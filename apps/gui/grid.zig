@@ -18,7 +18,9 @@
 
 const std = @import("std");
 
-pub const Mode = enum { lines, dots, none };
+/// How grids are drawn; `none` is only read from older settings (whether
+/// there is a grid is the document's now).
+pub const Mode = enum { lines, dots, pluses, none };
 
 /// Below this spacing on screen (pixels) a decade is not drawn.
 pub const fade_lo: f64 = 6;
@@ -94,6 +96,16 @@ pub fn levels(px_per_unit: f64, lo: f64, sc: Scale, out: []Level) []Level {
         if (s >= 1) break;
     }
     return out[0..n];
+}
+
+/// The levels for a grid of a set spacing (`step` document units): lines
+/// at it and, stronger, at ten times it, each as strong as its spacing on
+/// screen allows.
+pub fn fixed(step: f64, px_per_unit: f64, lo: f64, out: []Level) []Level {
+    if (!(step > 0) or !(px_per_unit > 0) or out.len < 2) return out[0..0];
+    out[0] = .{ .step = step, .strength = strength(step * px_per_unit, lo), .ratio = 10 };
+    out[1] = .{ .step = 10 * step, .strength = strength(10 * step * px_per_unit, lo), .ratio = 10 };
+    return out[0..2];
 }
 
 /// The minor unit (the finest level that shows, at least faintly) and the

@@ -2043,3 +2043,28 @@ test "flow marks are a view layer: in the Layers panel, hidden by its eye and sh
     try r.frames(3);
     try std.testing.expect(api.viewLayer("flow_marks").?.below < std.math.maxInt(u16));
 }
+
+test "the grid is the canvas's: shown and its spacing are document steps, undone like any; its look is a preference" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("ribbon.layers");
+    try r.frames(3);
+    try r.press("layers-palette.grid.choose");
+    try r.frames(2);
+    try r.field("view-layer.spacing", "5");
+    try r.frames(2);
+    try std.testing.expectEqual(5, api.model().spaces.items[0].grid_spacing);
+    try r.press("layers-palette.grid.shown");
+    try r.frames(2);
+    try std.testing.expect(!api.model().spaces.items[0].overlays.grid.shown);
+    try r.run("edit.undo");
+    try r.frames(2);
+    try std.testing.expect(api.model().spaces.items[0].overlays.grid.shown);
+    try r.run("edit.undo");
+    try r.frames(2);
+    try std.testing.expectEqual(0, api.model().spaces.items[0].grid_spacing);
+    try r.choose("view-layer.look", "Pluses");
+    try r.frames(2);
+    try std.testing.expectEqual(0, api.model().spaces.items[0].grid_spacing);
+}
