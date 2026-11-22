@@ -13061,8 +13061,8 @@ fn layersPalette() void {
                 before = k;
             }
             const name, const visible, const chosen, const arg: i32 = switch (e) {
-                .doc => |li| .{ sp.layers.items[li].name, sp.layers.items[li].visible, sp.layers.items[li].id == newObjectLayer(), @intCast(li) },
-                .view => |v| .{ v.label(), v.shown(), false, -1 - @as(i32, @intFromEnum(v)) },
+                .doc => |li| .{ sp.layers.items[li].name, sp.layers.items[li].visible, chosen_view_layer == null and sp.layers.items[li].id == newObjectLayer(), @intCast(li) },
+                .view => |v| .{ v.label(), v.shown(), chosen_view_layer == v, -1 - @as(i32, @intFromEnum(v)) },
             };
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = if (chosen) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) }, .corners = .all(3), .margin = .{ .y = 1, .h = 1 } });
             defer row.deinit();
@@ -13078,8 +13078,8 @@ fn layersPalette() void {
                 const pressed = if (visible) icons.button(@src(), .eye, "Shown: click to hide", eye_opts) else icons.button(@src(), .eye_slash, "Hidden: click to show", eye_opts);
                 if (pressed) pushButtonEvent(tag, arg);
             }
-            // Its name: a document layer's chooses it; the view's own are
-            // set in italic, and are not chosen.
+            // Its name chooses it, its settings shown beside the list; the
+            // view's own are set in italic.
             const dim: ?dvui.ColorOrGradient = if (visible) null else .{ .color = dvui.themeGet().color(.window, .text).opacity(0.5) };
             switch (e) {
                 .doc => |li| {
@@ -13095,7 +13095,17 @@ fn layersPalette() void {
                     if (bw.clicked()) pushButtonEvent(tag, arg);
                     bw.deinit();
                 },
-                .view => dvui.labelNoFmt(@src(), name, .{}, .{ .expand = .horizontal, .id_extra = id_extra, .gravity_y = 0.5, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .font = dvui.Font.theme(.body).withStyle(.italic), .color_text = dim }),
+                .view => {
+                    const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.choose", .{base}) catch base);
+                    checkElement(tag, .button, name);
+                    recordDrawn(tag, arg);
+                    var bw: dvui.ButtonWidget = undefined;
+                    bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = id_extra, .tag = tag, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .margin = .all(0), .background = false, .gravity_y = 0.5 });
+                    bw.processEvents();
+                    dvui.labelNoFmt(@src(), name, .{}, .{ .padding = .all(0), .margin = .all(0), .font = dvui.Font.theme(.body).withStyle(.italic), .color_text = dim });
+                    if (bw.clicked()) pushButtonEvent(tag, arg);
+                    bw.deinit();
+                },
             }
             // The grip: drag to another place.
             _ = dvui.ReorderWidget.draggable(@src(), .{ .reorderable = item }, .{ .expand = .vertical, .gravity_x = 1, .gravity_y = 0.5, .min_size_content = .{ .w = 14, .h = 18 }, .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.grip", .{base}) catch null });
@@ -14662,11 +14672,54 @@ fn layersPanel() void {
     }
     if (shown_space >= state.model.spaces.items.len) return;
     const sp = state.model.spaces.items[shown_space];
-    const li = sp.layerIndex(newObjectLayer()) orelse return;
     var right = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 340 }, .max_size_content = .width(340), .padding = .{ .x = 16, .y = 6 } });
     defer right.deinit();
+    if (chosen_view_layer) |v| {
+        dvui.labelNoFmt(@src(), v.label(), .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .h = 4 } });
+        viewLayerProperties(shown_space, v);
+        return;
+    }
+    const li = sp.layerIndex(newObjectLayer()) orelse return;
     dvui.labelNoFmt(@src(), sp.layers.items[li].name, .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .h = 4 } });
     layerProperties(shown_space, li) catch {};
+}
+
+/// The view's own layer chosen in the Layers panel, its settings shown
+/// beside the list; null: the document layer new objects go on.
+var chosen_view_layer: ?ViewLayer = null;
+
+/// A view layer's settings: what it is, shown or not, its place in the
+/// stack, and the grid's look for the grid. The view's, kept for the
+/// session, not saved with the document.
+fn viewLayerProperties(space: usize, v: ViewLayer) void {
+    const saved_group = pushGroup("view-layer");
+    defer popGroup(saved_group);
+    propText(asElement("view-layer.kind"), "{s}", .{"The view's own: kept for the session, not saved"}, 1);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 2 });
+        defer row.deinit();
+        propName(asElement("view-layer.shown"));
+        var on = v.shown();
+        if (tcheckbox(@src(), &on, "Visible", .{ .id_extra = 2 })) v.toggle();
+    }
+    var ebuf: [64]StackEntry = undefined;
+    const entries = stackEntries(space, &ebuf);
+    const at = for (entries, 0..) |e, k| {
+        if (e == .view and e.view == v) break k;
+    } else 0;
+    propText(asElement("view-layer.place"), "{d} of {d}, from the bottom", .{ at + 1, entries.len }, 3);
+    if (v == .grid) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 4 });
+        defer row.deinit();
+        propName(asElement("view-layer.look"));
+        const names = [_][]const u8{ "Lines", "Dots" };
+        const shown_as = if (grid_mode == .none) grid_shown_as else grid_mode;
+        var choice: usize = if (shown_as == .dots) 1 else 0;
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 4 })) {
+            const look: bg_grid.Mode = if (choice == 1) .dots else .lines;
+            if (grid_mode == .none) grid_shown_as = look else grid_mode = look;
+        }
+    }
 }
 
 /// While the ribbon is drawn: its buttons carry key badges.
@@ -15577,6 +15630,14 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     handler("layers-palette.*.choose", struct {
         fn f(arg: i32) void {
+            // The view's own (-1 - its number): its settings shown; new
+            // objects still go on the document layer chosen before.
+            if (arg < 0) {
+                const k: usize = @intCast(-1 - arg);
+                if (k < std.enums.values(ViewLayer).len) chosen_view_layer = std.enums.values(ViewLayer)[k];
+                return;
+            }
+            chosen_view_layer = null;
             if (shown_space >= state.model.spaces.items.len) return;
             const li: usize = @intCast(arg);
             const list = state.model.spaces.items[shown_space].layers.items;
