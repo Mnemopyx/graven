@@ -322,7 +322,10 @@ def resolve(cell, meta, recolour):
     return out
 
 
-def render(atlas, meta, glyph, px, ground, ink=None, recolour={}):
+def render(atlas, meta, glyph, px, ground, ink=None, recolour={}, shrink="average"):
+    # Shrinking by less than half reads the field directly (averaging over
+    # 1.2 texels a pixel beats against the texel grid: uneven dashes); by
+    # half or more, texels drawn sharply and averaged.
     """Icon `glyph` drawn `px` pixels square over `ground` (RGB 0..255)."""
     import numpy as np
     from PIL import Image
@@ -333,7 +336,7 @@ def render(atlas, meta, glyph, px, ground, ink=None, recolour={}):
     ink = np.array(hexrgb(ink or meta["graven"]["ink"])) / 255
     ground = np.array(ground) / 255
     k = size / px  # texels per pixel
-    if k >= 1:
+    if shrink == "average" and k >= 2:
         # Shrinking: each texel drawn sharply (the ink over one texel), then
         # averaged down: thin ink keeps its weight.
         cell = atlas[b["top"]:b["bottom"], b["left"]:b["right"]]
