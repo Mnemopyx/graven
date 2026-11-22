@@ -449,8 +449,10 @@ fn screen(p: struct { f64, f64 }) !dvui.Point.Physical {
 }
 
 /// The keyboard as a person makes it in the GUI: styles, the key
-/// prototype, a panel, six tracks in one flow, 104 keys from the content palette, their
-/// names, gaps and heights, and their legends from a CSV table.
+/// prototype, a panel, six tracks with a flow each (rows do not wrap into
+/// one another), 104 keys from the content palette, their names (across
+/// the panel), gaps and heights, and their legends from a CSV table over
+/// the panel.
 fn makeKeyboard(r: *Run) !void {
     try r.key(.m, .none);
     try makeStyle(r, "legend", "2.6");
@@ -474,7 +476,8 @@ fn makeKeyboard(r: *Run) !void {
     try checkSaveable("the panel");
     // Six tracks, one a row, laid out in advance: each drawn out on the
     // panel, then typed exactly (the half unit after the function row is
-    // where the second sits); the rest continue the first's flow.
+    // where the second sits). Each keeps the flow of its own it is made
+    // with, named for its row.
     const tops = [_][]const u8{ "133.825", "105.25", "86.2", "67.15", "48.1", "29.05" };
     for (tops, 1..) |top, k| {
         var nb: [16]u8 = undefined;
@@ -487,21 +490,18 @@ fn makeKeyboard(r: *Run) !void {
         try r.field("track.origin.across", "10");
         try r.field("track.origin.up", top);
         try r.field("track.length", "22.5");
-        if (k == 1) {
-            // Its flow, named for what it holds.
-            try r.press("track.flow.show");
-            try r.field("flow.name", "keys");
-        } else try r.choose("track.flow.choice", "keys");
+        try r.press("track.flow.show");
+        var fb: [16]u8 = undefined;
+        try r.field("flow.name", try std.fmt.bufPrint(&fb, "row {d}", .{k}));
     }
     try checkSaveable("the tracks");
 
-    // The keys, from the content palette at the cursor, put at the start
-    // of the first track: a row's keys, then a line break, which goes on
-    // in the next track.
+    // The keys, from the content palette at the cursor: each row's at the
+    // start of its own track.
     const panel_path = "\"PC keyboard (ANSI 104)\"";
-    try r.cursor(panel_path ++ ".Row1", 0);
-    for (rows, 0..) |row, ri| {
-        if (ri > 0) try r.press("palette.hard-break");
+    for (rows, 1..) |row, ri| {
+        var pb: [64]u8 = undefined;
+        try r.cursor(try std.fmt.bufPrint(&pb, panel_path ++ ".Row{d}", .{ri}), 0);
         for (row) |k| {
             var tb: [32]u8 = undefined;
             try r.press(try paletteKey(&tb, k.w));
@@ -509,10 +509,10 @@ fn makeKeyboard(r: *Run) !void {
     }
 
     try checkSaveable("the keys");
-    // Named in order, K1 to K104, from the first track's properties (its
-    // flow's keys, through all six).
-    try r.select(panel_path ++ ".Row1");
-    try r.press("track.name-keys");
+    // Named in order, K1 to K104, from the panel's properties (its tracks
+    // in turn, each row's keys).
+    try r.select(panel_path);
+    try r.press("panel.name-keys");
 
     // Gaps and heights, key by key: the key clicked on the canvas (the
     // panel chosen first, so a click picks a key rather than placing the
@@ -524,19 +524,19 @@ fn makeKeyboard(r: *Run) !void {
         n += 1;
         if (k.gap == 0 and k.h == 1) continue;
         var tb: [128]u8 = undefined;
-        _ = ri;
-        try r.select(try std.fmt.bufPrint(&tb, "keys.K{d}", .{n}));
+        try r.select(try std.fmt.bufPrint(&tb, panel_path ++ ".Row{d}.K{d}", .{ ri, n }));
         var vb: [16]u8 = undefined;
         if (k.gap != 0) try r.field("tile.gap-before", try std.fmt.bufPrint(&vb, "{d}", .{k.gap}));
         if (k.h != 1) try r.choose("tile.height", try std.fmt.bufPrint(&vb, "{d} u", .{k.h}));
     };
 
     try checkSaveable("gaps and heights");
-    // The legends: a table, one row a key, imported over the track.
+    // The legends: a table, one row a key, imported over the panel (the
+    // sheet covers every track's keys).
     const csv = try legendsCsv(std.heap.c_allocator);
     defer std.heap.c_allocator.free(csv);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/keyboard-legends.csv", .data = csv });
-    try r.select(panel_path ++ ".Row1");
+    try r.select(panel_path);
     try r.click("menu.file");
     try r.click("menu.importLegendSheetCSV");
     try dvui.testing.pressKey(.a, .lcontrol);

@@ -404,6 +404,8 @@ pub const all = [_]Element{
     .{ .id = "panel.margins.right", .kind = .field, .label = "Right, mm" },
     .{ .id = "panel.margins.top", .kind = .field, .label = "Top, mm" },
     .{ .id = "panel.name", .kind = .field, .label = "Name" },
+    .{ .id = "panel.key-prefix", .kind = .field, .label = "Key name prefix" },
+    .{ .id = "panel.name-keys", .kind = .button, .label = "Name keys in order" },
     .{ .id = "panel.origin-across", .kind = .field, .label = "Origin across, mm" },
     .{ .id = "panel.origin-up", .kind = .field, .label = "Origin up, mm" },
     .{ .id = "panel.outline", .kind = .value, .label = "Outline" },

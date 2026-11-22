@@ -311,7 +311,7 @@ test "an operation checked on its own: the plate waterjet cut, its outline and h
     for (r.findings) |f| try testing.expect(f.kind != .depth and f.kind != .colours);
 }
 
-test "the keyboard is six tracks, one a row, laid out in advance and threaded in one flow" {
+test "the keyboard is six tracks, one a row, laid out in advance, each its own flow" {
     const gpa = testing.allocator;
     var o = try open(@embedFile("pc-keyboard.graven"));
     defer close(&o);
@@ -323,11 +323,20 @@ test "the keyboard is six tracks, one a row, laid out in advance and threaded in
         var nb: [8]u8 = undefined;
         try testing.expectEqual(layout.model.TileRegion.Kind.track, r.kind);
         try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "Row{d}", .{k}), r.name);
-        try testing.expectEqual(r.flow, regions[0].flow);
+        // A flow of its own: rows do not wrap into one another.
+        for (regions[0 .. k - 1]) |q| try testing.expect(r.flow != q.flow);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "row {d}", .{k}), m.trackFlow(p, k - 1).?.name);
     }
-    try testing.expectEqualStrings("keys", m.trackFlow(p, 0).?.name);
-    // Its keys by name, within their flow.
-    try testing.expect(m.resolve("keys.K104") != null);
+    // Its keys by name, within their row; named K1 to K104 across the
+    // panel, so the legend sheet (over the panel) finds every one.
+    try testing.expect(m.resolve("\"PC keyboard (ANSI 104)\".Row6.K104") != null);
+    try testing.expect(m.resolve("\"PC keyboard (ANSI 104)\".Row1.K1") != null);
+    try testing.expectEqual(1, m.sheets.items.len);
+    try testing.expectEqual(m.panels.items[p].id, m.sheets.items[0].scope);
+    for (1..105) |n| {
+        var kb: [8]u8 = undefined;
+        try testing.expect((try m.keyInScope(gpa, m.sheets.items[0].scope, try std.fmt.bufPrint(&kb, "K{d}", .{n}))) != null);
+    }
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
     var b = try layout.solve(gpa, m, p, &labels);

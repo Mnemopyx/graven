@@ -67,6 +67,8 @@ pub const action_defs = [_]A{
     .{ .name = "track.make-tracks" },
     .{ .name = "track.remove" },
     .{ .name = "track.name-keys" },
+    // A panel's keys named in order: its tracks in turn, each flow's keys.
+    .{ .name = "panel.name-keys" },
     .{ .name = "track.flow.show" },
     .{ .name = "track.flow.join-after" },
     .{ .name = "track.flow.take-out" },

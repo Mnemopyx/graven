@@ -5425,6 +5425,44 @@ pub const Model = struct {
         return keys.items.len;
     }
 
+    /// Names the keys of every flow placed on panel `panel` "<prefix>1",
+    /// "<prefix>2" …: its tracks in order, each flow's keys in flow order
+    /// (a flow once, from the first of its tracks on the panel), spacers
+    /// left out. So a panel of one flow a row is named as one flow through
+    /// them all would be. A name that is another key's elsewhere names
+    /// none. The count named.
+    pub fn nameKeysInPanel(m: *Model, panel: usize, prefix: []const u8) Error!usize {
+        if (prefix.len == 0) return error.BadValue;
+        const al = m.arena.child_allocator;
+        var keys: std.ArrayList(TileId) = .empty;
+        defer keys.deinit(al);
+        var seen: std.ArrayList(ObjectId) = .empty;
+        defer seen.deinit(al);
+        for (m.panels.items[panel].regions.items, 0..) |r, ri| {
+            if (r.kind != .track) continue;
+            const f = m.trackFlow(panel, ri);
+            if (f) |fl| {
+                if (std.mem.indexOfScalar(ObjectId, seen.items, fl.id) != null) continue;
+                try seen.append(al, fl.id);
+            }
+            for (m.flowItems(panel, ri)) |item| if (item.tileOf()) |t| {
+                if (m.tileConst(t).removed or m.proto(m.tileConst(t).prototype).spacer) continue;
+                try keys.append(al, t);
+            };
+        }
+        var buf: [64]u8 = undefined;
+        for (keys.items, 1..) |_, n| {
+            const name = std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, n }) catch return error.BadValue;
+            if (m.findTile(name)) |other| if (std.mem.indexOfScalar(TileId, keys.items, other) == null) return error.DuplicateDesignator;
+        }
+        for (keys.items, 1..) |t, n| {
+            const name = std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, n }) catch unreachable;
+            m.tile(t).designator = try m.a().dupe(u8, name);
+        }
+        m.revision += 1;
+        return keys.items.len;
+    }
+
     /// The index in `panel` of the track with ID `id`.
     pub fn regionIndex(m: *const Model, panel: usize, id: ObjectId) ?usize {
         if (id == .none) return null;
@@ -7202,6 +7240,22 @@ test "a panel sized and a track moved and sized by typing, each undoable" {
     try std.testing.expectEqual(10, reg.origin.x);
     try std.testing.expectEqual(22.5, reg.w);
     try std.testing.expectEqual(6.5, reg.h);
+}
+
+test "a panel's keys named in order across its tracks, one flow each, as one flow would be" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    const p = try m.addPanel("P", 200, 80);
+    const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
+    const r1 = try m.addTracks(p, .{ .name = "Row1", .origin = .{ .x = 5, .y = 60 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
+    const r2 = try m.addTracks(p, .{ .name = "Row2", .origin = .{ .x = 5, .y = 40 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
+    try std.testing.expect(m.trackFlow(p, r1).?.id != m.trackFlow(p, r2).?.id);
+    for (0..3) |k| _ = try m.insertTile(p, r1, k, key, 1);
+    for (0..2) |k| _ = try m.insertTile(p, r2, k, key, 1);
+    try std.testing.expectEqual(@as(usize, 5), try m.nameKeysInPanel(p, "K"));
+    try std.testing.expectEqualStrings("K3", m.tileConst(m.flowItems(p, r1)[2].tileOf().?).designator);
+    try std.testing.expectEqualStrings("K4", m.tileConst(m.flowItems(p, r2)[0].tileOf().?).designator);
+    try std.testing.expectEqualStrings("K5", m.tileConst(m.flowItems(p, r2)[1].tileOf().?).designator);
 }
 
 test "a track renamed, its keys named in order, a gap set before one" {

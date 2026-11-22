@@ -13822,7 +13822,7 @@ fn dispatchButtons() void {
 }
 
 /// The button actions `runButtonAction` handles in its own switch.
-const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-keys", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel" };
+const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-keys", "panel.name-keys", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel" };
 
 /// Whether a button's action has a handler (every one should: a test
 /// checks).
@@ -13841,6 +13841,7 @@ fn runButtonAction(inv: keymap.Invocation) bool {
             else => return false,
         },
         kact("track.name-keys") => regionNameKeys(),
+        kact("panel.name-keys") => panelNameKeys(),
         kact("track.flow.show") => switch (state.context) {
             .region => |r| if (state.model.trackFlow(r.panel, r.region)) |f| {
                 state.context = .{ .flow = f.id };
@@ -13914,6 +13915,19 @@ fn regionNameKeys() void {
     };
     const prefix = key_name_prefix[0..key_name_prefix_len];
     if (act(.nameKeysInOrder, .{ r.panel, r.region, prefix })) |n| {
+        state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
+    } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
+}
+
+/// The context panel's keys named in order (its tracks in turn, each
+/// flow's keys): a keyboard of one flow a row named K1 … through all rows.
+fn panelNameKeys() void {
+    const pi = switch (state.context) {
+        .panel => |pi| pi,
+        else => return,
+    };
+    const prefix = key_name_prefix[0..key_name_prefix_len];
+    if (act(.nameKeysInPanel, .{ pi, prefix })) |n| {
         state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
     } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
 }
@@ -16653,6 +16667,17 @@ fn properties() !void {
                 if (numberProp("Height, mm", panel.h, 0.01, 100000, 12)) |v| actM(mergeKey(.{ "panel size", pi }), .setPanelSize, .{ pi, panel.w, v }) catch {};
             } else propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
             propText("Regions", "{d}", .{panel.regions.items.len}, 4);
+            if (panel.regions.items.len > 0) {
+                // Its keys named in order: its tracks in turn, each flow's
+                // keys (one flow a row named as one).
+                const prefix = key_name_prefix[0..key_name_prefix_len];
+                if (textProp(asElement("panel.key-prefix"), prefix, 30)) |v| {
+                    key_name_prefix_len = @min(v.len, key_name_prefix.len);
+                    @memcpy(key_name_prefix[0..key_name_prefix_len], v[0..key_name_prefix_len]);
+                }
+                var lb: [64]u8 = undefined;
+                actionButton(@src(), "panel.name-keys", std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name keys in order", 0, .{ .expand = .horizontal, .id_extra = 31 });
+            }
             if (panel.sketch != .none) sketchPanelProperties(pi) else propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
             if (state.model.spaces.items.len > 0) if (layerChoice(state.model.spaceOf(pi), panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
             var cutouts: usize = 0;
