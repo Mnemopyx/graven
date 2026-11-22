@@ -17,6 +17,9 @@ pub const simplify = @import("simplify.zig");
 pub const msdf = @import("msdf.zig");
 /// A stroke font: text as polylines, turned and sized freely (annotations).
 pub const strokefont = @import("strokefont.zig");
+/// The shortest route between two directed ends, bending no more sharply
+/// than a given radius (Dubins paths, with straight leads).
+pub const dubins = @import("dubins.zig");
 
 pub const Point = struct {
     x: f64,

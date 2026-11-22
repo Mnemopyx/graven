@@ -21255,7 +21255,9 @@ fn joinClick(at: geom.Point) void {
 }
 
 /// Each thread's links, faintly: from where its flow leaves one track (its
-/// last segment there) to where it enters the next.
+/// last segment there) to where it enters the next, by the shortest route
+/// that leaves and arrives along the tracks with a bounded bend
+/// (`geom.dubins`; the owner, 2026-11-22).
 fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
@@ -21277,20 +21279,40 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
         const rows = r.major() == .row;
         const p0: geom.Point = if (rows) .{ .x = from_box.x1, .y = (from_box.y0 + from_box.y1) / 2 } else .{ .x = (from_box.x0 + from_box.x1) / 2, .y = from_box.y0 };
         const p1: geom.Point = if (rows) .{ .x = to_box.x0, .y = (to_box.y0 + to_box.y1) / 2 } else .{ .x = (to_box.x0 + to_box.x1) / 2, .y = to_box.y1 };
-        const a = state.view.toPx(area, onSheetPoint(pi, p0));
-        const b = state.view.toPx(area, onSheetPoint(nt.panel, p1));
-        dvui.Path.stroke(.{ .points = &.{ a, b } }, .{ .thickness = 1.25 * px, .color = ink });
-        // An arrowhead where it enters.
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const len = @sqrt(dx * dx + dy * dy);
-        if (len < 1) continue;
-        const ux = dx / len;
-        const uy = dy / len;
+        // Rows run to the right, columns down: the route leaves the one
+        // track's end that way and comes into the next track's start
+        // that way, bending no more sharply than `thread_bend` of the
+        // track's thickness allows.
+        const angle: f64 = if (rows) 0 else -std.math.pi / 2.0;
+        const thick = if (rows) from_box.height() else from_box.width();
+        const radius = std.math.clamp(thread_bend * thick, 1.0, 8.0);
+        const lead = thread_lead * radius;
+        const rt = geom.dubins.route(
+            .{ .at = onSheetPoint(pi, p0), .angle = angle, .lead = lead },
+            .{ .at = onSheetPoint(nt.panel, p1), .angle = angle, .lead = lead },
+            radius,
+        );
+        var mm_buf: [256]geom.Point = undefined;
+        const tol = 0.3 / @max(state.view.ppm, 1e-6);
+        const mm_pts = rt.flatten(tol, &mm_buf);
+        if (mm_pts.len < 2) continue;
+        var px_buf: [256]dvui.Point.Physical = undefined;
+        for (mm_pts, 0..) |q, k| px_buf[k] = state.view.toPx(area, q);
+        const b = px_buf[mm_pts.len - 1];
+        dvui.Path.stroke(.{ .points = px_buf[0..mm_pts.len] }, .{ .thickness = 1.25 * px, .color = ink });
+        // An arrowhead where it enters, along the track (y down on screen).
+        const ux: f32 = @floatCast(@cos(rt.end_angle));
+        const uy: f32 = @floatCast(-@sin(rt.end_angle));
         const s: f32 = 6 * px;
         dvui.Path.stroke(.{ .points = &.{ .{ .x = b.x - s * ux + s * 0.5 * uy, .y = b.y - s * uy - s * 0.5 * ux }, b, .{ .x = b.x - s * ux - s * 0.5 * uy, .y = b.y - s * uy + s * 0.5 * ux } } }, .{ .thickness = 1.25 * px, .color = ink });
     }
 }
+
+/// The line from one track to the next in a flow: its tightest bend, as a
+/// share of the track's thickness (a radius, clamped to 1..8 mm), and the
+/// straight run at each end, as a share of that radius.
+const thread_bend = 0.3;
+const thread_lead = 0.6;
 
 fn onSheetPoint(pi: usize, p: geom.Point) geom.Point {
     const o = panelOrigin(pi);
