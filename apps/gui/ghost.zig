@@ -288,6 +288,12 @@ pub fn fieldsFollowTheme() void {
     dvui.TextEntryWidget.defaults.font = fieldFont();
 }
 
+/// The panes' dark theme, for what is drawn as they are (the ribbon's drop
+/// panels).
+pub fn darkTheme(base: dvui.Theme) dvui.Theme {
+    return theme(.{}, paneBase(base));
+}
+
 /// Sets the pane's theme for content drawn until `themePop`.
 pub fn themePush(p: *const Pane) dvui.Theme {
     const prev = dvui.themeGet();

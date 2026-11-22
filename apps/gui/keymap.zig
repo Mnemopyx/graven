@@ -35,7 +35,7 @@ pub const modes = [_]M{
     // No document yet.
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
-    .{ .name = "canvas", .kind = .major, .parent = "global", .allows = &.{ "canvas.object", "canvas.tile", "canvas.tool", "level", "tool" } },
+    .{ .name = "canvas", .kind = .major, .parent = "global", .allows = &.{ "canvas.object", "canvas.tile", "canvas.tool", "level", "tool", "ribbon" } },
     // Engagement points near the pointer (or one locked onto).
     .{ .name = "canvas.engage", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.engage"} },
     .{ .name = "canvas.selection", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.selection"} },
@@ -378,6 +378,7 @@ pub const binds = [_]B{
     .{ .mode = "canvas", .chord = "n", .action = "tool.new-sketch" },
     .{ .mode = "canvas", .chord = "k", .action = "tool.constrain" },
     .{ .mode = "canvas", .chord = "f", .action = "tool.fit-to-tiles" },
+    .{ .mode = "canvas", .chord = "l", .action = "ribbon.layers" },
 } ++ enters("canvas", "canvas.tool.finish") ++ arrows("canvas.selection", "canvas.selection.nudge") ++ shiftArrows("canvas.selection", "canvas.selection.nudge-far") ++ [_]B{
     .{ .mode = "canvas.engage", .chord = "tab", .action = "canvas.engage.lock", .arg = 0 },
     .{ .mode = "canvas.engage", .chord = "shift+tab", .action = "canvas.engage.lock", .arg = 1 },

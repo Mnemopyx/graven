@@ -1788,13 +1788,13 @@ test "tabs: a split's grip shows its options: swap sides, even out, stacked; a d
     try std.testing.expectApproxEqAbs(0.5, api.activeSplit().?.ratio, 1e-6);
 }
 
-test "the Tools pane's Layers shows the view's layers, top first; an eye hides one; a drag by its grip moves it in the stack, one undo step" {
+test "the ribbon's Layers panel shows the view's layers, top first; an eye hides one; a drag by its grip moves it in the stack, one undo step" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try r.press("tools-pane.layers");
-    try r.frames(2);
-    try std.testing.expectEqualStrings("layers", api.toolsTabName());
+    try r.press("ribbon.layers");
+    try r.frames(3);
+    try std.testing.expectEqualStrings("layers", api.dropOpen());
     // Two more layers: Layer1 at the bottom, Layer3 on top.
     try r.press("layers-palette.add-layer");
     try r.frames(2);
@@ -1813,7 +1813,8 @@ test "the Tools pane's Layers shows the view's layers, top first; an eye hides o
     // below Layer1: to the bottom of the stack.
     const top = try r.rectOf("layers-palette.layer3.choose");
     const bottom = try r.rectOf("layers-palette.layer1.choose");
-    const grip_x = top.x + top.w + 8;
+    const grip = try r.rectOf("layers-palette.layer3.grip");
+    const grip_x = grip.x + grip.w / 2;
     try r.drag(.{ .x = grip_x, .y = top.y + top.h / 2 }, .{ .x = grip_x, .y = bottom.y + bottom.h * 1.2 });
     try r.frames(3);
     ls = api.shownLayers();
@@ -1827,12 +1828,12 @@ test "the Tools pane's Layers shows the view's layers, top first; an eye hides o
     try std.testing.expectEqualStrings("Layer3", ls[2].name);
 }
 
-test "the Tools pane's Layers holds the view's own layers too: the grid hidden by its eye and shown again, then dragged from the back over the document's layer" {
+test "the ribbon's Layers panel holds the view's own layers too: the grid hidden by its eye and shown again, then dragged from the back over the document's layer" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    try r.press("tools-pane.layers");
-    try r.frames(2);
+    try r.press("ribbon.layers");
+    try r.frames(3);
     try std.testing.expectEqual(0, api.viewLayer("grid").?.below);
     try std.testing.expect(api.viewLayer("grid").?.shown);
     try r.press("layers-palette.grid.shown");
@@ -1870,4 +1871,34 @@ test "the ribbon: the canvas tools there, each with its key: P, R, Shift+R, T, S
     try r.key(.escape, .none);
     try r.press("tool.construction-line");
     try std.testing.expectEqualStrings("construction", api.toolName());
+}
+
+test "the ribbon's drops: the ▾ after Add shape opens its kinds, one chosen picks the tool; R held opens the tracks' kinds, tapped picks rows; Esc closes" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.press("ribbon.drop.shape");
+    try r.frames(3);
+    try std.testing.expectEqualStrings("shape", api.dropOpen());
+    try r.press("ribbon.shape.circle");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("", api.dropOpen());
+    try std.testing.expectEqualStrings("add_art", api.toolName());
+    try r.key(.escape, .none);
+    // R tapped: rows, no drop.
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.key(.r, .none);
+    try r.frames(2);
+    try std.testing.expectEqualStrings("add_tracks", api.toolName());
+    try std.testing.expectEqualStrings("", api.dropOpen());
+    try r.key(.escape, .none);
+    // L: the Layers panel; Esc closes it.
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.key(.l, .none);
+    try r.frames(3);
+    try std.testing.expectEqualStrings("layers", api.dropOpen());
+    try r.key(.escape, .none);
+    try r.frames(2);
+    try std.testing.expectEqualStrings("", api.dropOpen());
 }

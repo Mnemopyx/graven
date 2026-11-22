@@ -161,9 +161,12 @@ pub const testing_api = struct {
         const v = std.meta.stringToEnum(ViewLayer, name) orelse return null;
         return .{ .shown = v.shown(), .below = view_below.get(v) };
     }
-    /// The Tools pane's tab shown.
-    pub fn toolsTabName() []const u8 {
-        return if (tools_tab.applies()) @tagName(tools_tab) else "none";
+    /// The ribbon's drop open: "layers", "shape", "tracks", or "".
+    pub fn dropRect() dvui.Rect.Physical {
+        return drop_rect;
+    }
+    pub fn dropOpen() []const u8 {
+        return if (drop_open) |d| @tagName(d) else "";
     }
     /// Whether view `v`'s tab is a preview.
     pub fn isPreview(v: u8) bool {
@@ -2393,6 +2396,8 @@ fn frame() !dvui.App.Result {
         }
     }
     try overlays();
+    // The ribbon's drops, over the panes.
+    if (!canvas_prompt) ribbonDrops();
     savePrefsIfChanged();
     updateWindowTitle();
     if (quit_now) return .close;
@@ -4057,8 +4062,9 @@ fn toolsHeight(h: f32) f32 {
     return std.math.clamp(tools_height, min_pane_height, @max(min_pane_height, h - split_grip - min_pane_height));
 }
 
-/// The right edge's strip: the tools pane's tab, the grip where the two
-/// panes meet (drag it up or down), then the properties pane's tab.
+/// The right edge's strip: the properties pane's tab. (The Tools pane is
+/// retired, 2026-11-22: its tools are the ribbon's, its palettes its drop
+/// panels.)
 fn rightStrip(h: f32) void {
     var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = tab_size },
@@ -4070,10 +4076,7 @@ fn rightStrip(h: f32) void {
     defer strip.deinit();
     barEnd(strip.data());
     const bh: f32 = tab_strip_h;
-    const th = toolsHeight(h - bh);
-    applyTab(&tools_pane, ghost_pane.tab(&tools_pane, .{ .x = 0, .y = bh, .w = tab_size, .h = th }, 2));
-    splitGrip(strip.data(), bh + th);
-    applyTab(&props_pane, ghost_pane.tab(&props_pane, .{ .x = 0, .y = bh + th + split_grip, .w = tab_size, .h = @max(0, h - bh - th - split_grip) }, 4));
+    applyTab(&props_pane, ghost_pane.tab(&props_pane, .{ .x = 0, .y = bh, .w = tab_size, .h = @max(0, h - bh) }, 4));
 }
 
 /// The grip between the right edge's tabs: dragged, it moves where the
@@ -4138,7 +4141,7 @@ fn overlayInsets() struct { left: f32, right: f32, bottom: f32 } {
     // Pinned panes stay over the canvas: a fitted view keeps clear of them.
     return .{
         .left = if (tree_pane.pinned and tree_pane.mode == .auto) tree_pane.size + overlay_gap else 0,
-        .right = if ((props_pane.pinned and props_pane.mode == .auto) or (tools_pane.pinned and tools_pane.mode == .auto)) props_pane.size + overlay_gap else 0,
+        .right = if (props_pane.pinned and props_pane.mode == .auto) props_pane.size + overlay_gap else 0,
         .bottom = if (bottom_pane.pinned and bottom_pane.mode == .auto) statusHeight() + overlay_gap else 0,
     };
 }
@@ -4190,18 +4193,11 @@ fn overlays() !void {
         treeContent();
     }
     {
-        // The right edge's auto-hide panes: over the canvas's right side,
-        // in their places on the edge, whatever the other pane there is.
+        // The right edge's pane, over the canvas's right side.
         const x = c.x + c.w - props_pane.size;
-        const h = @max(2 * min_pane_height + split_grip, c.h - bottom);
-        const th = toolsHeight(h);
-        if (tools_pane.drawn()) {
-            var o = ghost_pane.begin(&tools_pane, tools_pane.slid(.{ .x = x, .y = c.y, .w = props_pane.size, .h = th }), 2);
-            defer o.end();
-            toolsContent();
-        }
+        const h = @max(2 * min_pane_height, c.h - bottom);
         if (props_pane.drawn()) {
-            var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y + th + split_grip, .w = props_pane.size, .h = h - th - split_grip }), 4);
+            var o = ghost_pane.begin(&props_pane, props_pane.slid(.{ .x = x, .y = c.y, .w = props_pane.size, .h = h }), 4);
             defer o.end();
             try propertiesBody();
         }
@@ -11434,6 +11430,17 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             e.handle(@src(), box.data());
             continue;
         }
+        if (key_hold) |h| if (keymap.released(e, kmode("canvas")) == h.inv.action) {
+            // Tapped: its action; held: the drop stays while the pointer is
+            // in it.
+            key_hold = null;
+            e.handle(@src(), box.data());
+            if (!h.opened) {
+                _ = runAction(h.inv);
+            } else if (!drop_entered) drop_open = null;
+            dvui.refresh(null, @src(), box.data().id);
+            continue;
+        };
         if (zoom_hold != null and keymap.released(e, kmode("view")) == kact("view.zoom-hold")) {
             // Tapped, no drag: a step about the pointer.
             const zh = zoom_hold.?;
@@ -11451,10 +11458,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (viewNavEvent(e, box, area)) continue;
         // Ctrl+< and Ctrl+>: a level out or in, whatever is being edited.
         if (!canvas_prompt and sketch_edit == null and cursorKeysReach()) if (keymap.match1(e, kmode("canvas"))) |inv| {
-            // The ribbon's tools, each by its key.
-            if (std.mem.startsWith(u8, keymap.R.actionName(inv.action), "tool.")) {
+            // The ribbon's tools, each by its key; one with a drop runs on
+            // release, its drop opening if the key is held.
+            const an = keymap.R.actionName(inv.action);
+            if (std.mem.startsWith(u8, an, "tool.") or std.mem.startsWith(u8, an, "ribbon.")) {
                 e.handle(@src(), box.data());
-                _ = runAction(inv);
+                if (Drop.heldBy(inv.action) != null) {
+                    if (key_hold == null) key_hold = .{ .inv = inv, .t0 = std.Io.Clock.awake.now(dvui.io).toMilliseconds() };
+                } else _ = runAction(inv);
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
@@ -12659,79 +12670,6 @@ fn tileFlag(placed: *const layout.place.Placed, id: TileId) Flags {
     return f;
 }
 
-/// The right side: a tool palette for the current context, then its
-/// properties.
-/// The tool palette, in whatever holds it.
-fn toolsContent() void {
-    if (canvas_prompt) return;
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
-    defer row.deinit();
-    const shown = toolsPaneTabs();
-    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .hide, .horizontal_bar = .hide }, .{ .expand = .both, .background = false });
-    defer scroll.deinit();
-    if (shown) |t| switch (t) {
-        .layers => layersPalette(),
-    };
-}
-
-// The Tools pane's tabs ------------------------------------------------------
-//
-// The Tools pane holds the palettes that apply to what the active view is
-// doing, one a tab: an icon each, with its tooltip, stacked down the pane's
-// inner edge (toward the views). A tab that does not apply to the active
-// view is not shown; the one chosen, when it does not apply, gives way to
-// the first that does.
-
-const ToolsTab = enum {
-    /// The active view's layers. (The tools are in the ribbon since
-    /// 2026-11-21; Layers moves to the ribbon's drop panel next.)
-    layers,
-
-    fn icon(t: ToolsTab) icons.Icon {
-        return switch (t) {
-            .layers => .stack,
-        };
-    }
-
-    fn tip(t: ToolsTab) []const u8 {
-        return switch (t) {
-            .layers => "Layers: show or hide each; drag to reorder the stack",
-        };
-    }
-
-    /// Whether it applies to the active view.
-    fn applies(t: ToolsTab) bool {
-        return switch (t) {
-            .layers => activeKind() == .canvas and state.model.spaces.items.len > 0,
-        };
-    }
-};
-
-/// The Tools pane's tab chosen.
-var tools_tab: ToolsTab = .layers;
-
-/// The tabs down the pane's inner edge; the one shown, if any applies.
-fn toolsPaneTabs() ?ToolsTab {
-    const shown: ?ToolsTab = if (tools_tab.applies()) tools_tab else null;
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .vertical, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).lighten(-4) }, .padding = .{ .y = 4, .h = 4 }, .border = .{ .w = 1 }, .color_border = .{ .color = dvui.themeGet().color(.window, .border).opacity(0.5) } });
-    defer col.deinit();
-    inline for (comptime std.enums.values(ToolsTab)) |t| if (t.applies()) {
-        const id = "tools-pane." ++ @tagName(t);
-        const tag = uniqueTag(id);
-        recordDrawn(tag, 0);
-        const on = shown != null and t == shown.?;
-        if (icons.button(@src(), comptime t.icon(), t.tip(), .{ .size = 18, .id_extra = @intFromEnum(t), .tone = if (on) dvui.themeGet().focus.opacity(0.6) else null, .opts = .{
-            .tag = tag,
-            .margin = .{ .x = 2, .w = 2, .y = 1, .h = 1 },
-            .padding = .all(5),
-            .background = on,
-            .color_fill = .{ .color = dvui.themeGet().color(.control, .fill) },
-            .corners = .all(3),
-        } })) pushButtonEvent(tag, 0);
-    };
-    return shown;
-}
-
 // The Layers palette ---------------------------------------------------------
 //
 // The active view's space's layers, top of the stack first: each shown or
@@ -12811,7 +12749,7 @@ fn layersPalette() void {
                 .view => dvui.labelNoFmt(@src(), name, .{}, .{ .expand = .horizontal, .id_extra = id_extra, .gravity_y = 0.5, .padding = .{ .x = 4, .w = 4, .y = 3, .h = 4 }, .font = dvui.Font.theme(.body).withStyle(.italic), .color_text = dim }),
             }
             // The grip: drag to another place.
-            _ = dvui.ReorderWidget.draggable(@src(), .{ .reorderable = item }, .{ .expand = .vertical, .gravity_x = 1, .gravity_y = 0.5, .min_size_content = .{ .w = 14, .h = 18 } });
+            _ = dvui.ReorderWidget.draggable(@src(), .{ .reorderable = item }, .{ .expand = .vertical, .gravity_x = 1, .gravity_y = 0.5, .min_size_content = .{ .w = 14, .h = 18 }, .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.grip", .{base}) catch null });
         }
         if (reorder.finalSlot()) before = m;
     }
@@ -13150,7 +13088,7 @@ fn toolPalette() void {
     const saved_group = pushGroup("tool");
     defer popGroup(saved_group);
     if (sketch_edit != null) return sketchPalette();
-    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_y = 0.5 });
+    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
     defer col.deinit();
     toolBar();
     if (state.tool != .add_art) return;
@@ -13225,6 +13163,7 @@ fn toolBar() void {
         defer dvui.alphaSet(prev_a);
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
+        ribbon_next_drop = .shape;
         keyIcon(@src(), "Add shape", dvui.entypo.circle, 0, .{
             .data_out = &awd,
             .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
@@ -13242,6 +13181,7 @@ fn toolBar() void {
         }, 0..) |mode, mi| {
             const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[4] and (mode[4] == .track or tracks_tool.major == mode[0]);
             var twd: dvui.WidgetData = undefined;
+            if (mi == 0) ribbon_next_drop = .tracks;
             keyIcon(@src(), mode[1], mode[2], 0, .{
                 .id_extra = mi,
                 .data_out = &twd,
@@ -13938,9 +13878,246 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     var kb: [48]u8 = undefined;
     const badge = if (in_ribbon) badgeText(&kb, tag, arg) else null;
     if (in_ribbon) o.margin = .{ .x = 1, .y = 1, .h = 1, .w = if (badge) |b| badgeFont(false).textSize(b).w + 3 else 3 };
+    const drop = if (in_ribbon) ribbon_next_drop else null;
+    ribbon_next_drop = null;
+    if (drop != null) o.margin.?.w = 0;
     if (dvui.buttonIcon(src, name, tvg, .{}, .{}, o)) pushButtonEvent(tag, arg);
     if (out) |d| d.* = wd;
-    if (badge) |b| keyBadge(wd.borderRectScale().r, b);
+    var last = wd.borderRectScale().r;
+    if (drop) |d| last = dropButton(d, o.id_extra orelse 0, if (badge) |b| badgeFont(false).textSize(b).w + 3 else 3);
+    if (badge) |b| keyBadge(last, b);
+}
+
+// The ribbon's drops ------------------------------------------------------------
+//
+// A ribbon button with more behind it has a ▾ after it: a pull-down (a
+// few choices) or a drop panel (a palette, the window's width, under the
+// ribbon, over the views). The ▾ opens it, as does holding the button's
+// key (a tap still runs the button). Nothing modal, no OK or Cancel: each
+// change applies as made (undo takes it back); it goes on Esc, a click
+// elsewhere, or once the pointer has been in it and leaves.
+
+const Drop = enum {
+    /// The Layers panel.
+    layers,
+    /// Add shape's kinds.
+    shape,
+    /// Add rows' kinds: rows, columns, one track.
+    tracks,
+
+    fn panel(d: Drop) bool {
+        return d == .layers;
+    }
+
+    fn id(d: Drop) []const u8 {
+        return switch (d) {
+            .layers => "ribbon.layers",
+            .shape => "ribbon.drop.shape",
+            .tracks => "ribbon.drop.tracks",
+        };
+    }
+
+    /// The tool action whose key, held, opens it.
+    fn heldBy(a: keymap.ActionId) ?Drop {
+        if (a == kact("tool.add-shape")) return .shape;
+        if (a == kact("tool.add-rows") or a == kact("tool.add-columns") or a == kact("tool.add-track")) return .tracks;
+        if (a == kact("ribbon.layers")) return .layers;
+        return null;
+    }
+};
+
+/// The next ribbon button's drop (set just before drawing it).
+var ribbon_next_drop: ?Drop = null;
+/// The drop open, where it hangs from (natural), and when it was opened
+/// (its first frame is the next: the click that opened it would close it).
+var drop_open: ?Drop = null;
+var drop_from: dvui.Rect.Natural = .{};
+var drop_frame: i128 = 0;
+var drop_focus = false;
+/// Whether the pointer has been in it (it goes once it leaves).
+var drop_entered = false;
+var drop_rect: dvui.Rect.Physical = .{};
+/// Each drop's ▾ (or button), where last drawn, natural.
+var drop_anchor: std.EnumArray(Drop, dvui.Rect.Natural) = .initFill(.{});
+/// A key held that opens a drop when held long enough (else, released,
+/// it runs its action).
+var key_hold: ?struct { inv: keymap.Invocation, t0: i64, opened: bool = false } = null;
+const hold_ms = 300;
+
+fn openDrop(d: ?Drop) void {
+    if (d != null and drop_open == d) {
+        drop_open = null;
+        return;
+    }
+    drop_open = d;
+    drop_frame = dvui.frameTimeNS();
+    drop_focus = true;
+    drop_entered = false;
+    if (d) |x| drop_from = drop_anchor.get(x);
+    dvui.refresh(null, @src(), null);
+}
+
+fn dropClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    drop_open = null;
+}
+
+/// The ▾ after a ribbon button: its drop's button. Returns its rect.
+fn dropButton(d: Drop, id_extra: usize, room: f32) dvui.Rect.Physical {
+    const tag = uniqueTag(d.id());
+    recordDrawn(tag, 0);
+    var wd: dvui.WidgetData = undefined;
+    if (dvui.buttonIcon(@src(), "More", dvui.entypo.chevron_small_down, .{}, .{}, .{ .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra, .data_out = &wd, .min_size_content = .{ .w = 9, .h = 16 }, .padding = .{ .x = 1, .w = 1, .y = 2, .h = 2 }, .margin = .{ .y = 1, .h = 1, .w = room }, .gravity_y = 0.5, .color_fill = if (drop_open == d) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null })) pushButtonEvent(tag, 0);
+    const r = wd.borderRectScale().r;
+    drop_anchor.set(d, r.toNatural());
+    return r;
+}
+
+/// Each frame: a key held long enough opens its drop; the drop open drawn.
+fn ribbonDrops() void {
+    if (key_hold) |*h| if (!h.opened) {
+        const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
+        if (now - h.t0 >= hold_ms) {
+            h.opened = true;
+            if (Drop.heldBy(h.inv.action)) |d| if (drop_open != d) openDrop(d);
+        } else dvui.timer(dvui.currentWindow().data().id, @intCast((hold_ms - (now - h.t0)) * 1000));
+    };
+    const d = drop_open orelse return;
+    if (d.panel() and activeKind() != .canvas) {
+        drop_open = null;
+        return;
+    }
+    // From the frame after it was asked for.
+    if (drop_frame == dvui.frameTimeNS()) {
+        dvui.refresh(null, @src(), null);
+        return;
+    }
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&drop_open), .close = dropClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    if (d.panel()) {
+        // The window's width, under the ribbon, dark as the panes. A plain
+        // floating window, not a pop-up: a row dragged in it floats in a
+        // window of its own, which would close a pop-up. It closes itself:
+        // Esc, a press outside it, the pointer leaving.
+        const win = dvui.windowRect();
+        const prev = dvui.themeGet();
+        dvui.themeSet(ghost_pane.darkTheme(prev));
+        defer dvui.themeSet(prev);
+        const S = struct {
+            var rect: dvui.Rect = .{};
+        };
+        const first = drop_focus;
+        S.rect.x = 0;
+        S.rect.y = ribbon_bottom;
+        S.rect.w = win.w;
+        var fw = dvui.floatingWindow(@src(), .{ .rect = &S.rect, .resize = .none }, .{ .id_extra = @intFromEnum(d), .min_size_content = .{ .w = win.w - 2 }, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.97) }, .border = .{ .h = 1 }, .corners = .all(0), .box_shadow = null });
+        defer fw.deinit();
+        // Its height follows its content (layers added while it is open).
+        _ = first;
+        fw.autoSize();
+        dropFocus(fw.data().id);
+        const r = fw.data().borderRectScale().r;
+        drop_rect = r;
+        for (dvui.events()) |*e| switch (e.evt) {
+            .key => |k| if (k.action == .down and k.code == .escape and !e.handled) {
+                e.handle(@src(), fw.data());
+                drop_open = null;
+            },
+            .mouse => |m| if (m.action == .press and !r.contains(m.p) and !drop_from.scale(dvui.windowNaturalScale(), dvui.Rect.Physical).contains(m.p)) {
+                drop_open = null;
+            },
+            else => {},
+        };
+        dropLeave(r);
+        switch (d) {
+            .layers => layersPanel(),
+            else => {},
+        }
+    } else {
+        var fm = dvui.floatingMenu(@src(), .{ .from = drop_from, .style = .popup }, .{ .id_extra = @intFromEnum(d) });
+        defer fm.deinit();
+        dropFocus(fm.data().id);
+        dropLeave(fm.data().borderRectScale().r);
+        switch (d) {
+            .shape => shapeMenu(),
+            .tracks => tracksMenu(),
+            else => {},
+        }
+    }
+}
+
+fn dropFocus(id: dvui.Id) void {
+    if (!drop_focus) return;
+    drop_focus = false;
+    dvui.focusSubwindow(id, null);
+}
+
+/// Once the pointer has been in the drop (`r`) and is away from it and
+/// its button, the drop goes; not while a key held is still down.
+fn dropLeave(r: dvui.Rect.Physical) void {
+    const m = dvui.currentWindow().mouse_pt;
+    const s = dvui.windowNaturalScale();
+    const near = r.outset(.all(12 * s));
+    const anchor = drop_from.scale(s, dvui.Rect.Physical).outset(.all(6 * s));
+    if (near.contains(m)) {
+        drop_entered = true;
+        return;
+    }
+    if (drop_entered and !anchor.contains(m) and key_hold == null) {
+        drop_open = null;
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+/// A row of a drop's list, its label from the left; pressed: its action.
+fn dropItem(comptime list: []const u8, name: []const u8, arg: i32, on: bool, id_extra: usize) void {
+    const tag = listTag(list, name);
+    recordDrawn(tag, arg);
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = id_extra, .tag = tag, .margin = .all(1), .padding = .{ .x = 10, .w = 14, .y = 4, .h = 5 }, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.3) } else null, .background = on });
+    bw.processEvents();
+    bw.drawBackground();
+    dvui.labelNoFmt(@src(), name, .{}, .{ .padding = .all(0), .margin = .all(0) });
+    if (bw.clicked()) pushButtonEvent(tag, arg);
+    bw.drawFocus();
+    bw.deinit();
+}
+
+const shape_names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "Ellipse", "Slot", "Polygon" };
+
+fn shapeMenu() void {
+    for (shape_names, 0..) |n, i| dropItem("ribbon.shape", n, @intCast(i), state.tool == .add_art and @intFromEnum(shape_kind) == i, i);
+}
+
+const track_names = [_][]const u8{ "Add rows", "Add columns", "Add track" };
+
+fn tracksMenu() void {
+    for (track_names, 0..) |n, i| {
+        const on = state.tool == .add_tracks and switch (i) {
+            0 => tracks_tool.kind == .region and tracks_tool.major == .row,
+            1 => tracks_tool.kind == .region and tracks_tool.major == .column,
+            else => tracks_tool.kind == .track,
+        };
+        dropItem("ribbon.tracks", n, @intCast(i), on, i);
+    }
+}
+
+/// The Layers panel: the stack (as the palette), and beside it the chosen
+/// layer's settings.
+fn layersPanel() void {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 8, .w = 8, .y = 4, .h = 6 } });
+    defer row.deinit();
+    {
+        var left = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 300 }, .max_size_content = .width(300) });
+        defer left.deinit();
+        layersPalette();
+    }
+    if (shown_space >= state.model.spaces.items.len) return;
+    const sp = state.model.spaces.items[shown_space];
+    const li = sp.layerIndex(newObjectLayer()) orelse return;
+    var right = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 340 }, .max_size_content = .width(340), .padding = .{ .x = 16, .y = 6 } });
+    defer right.deinit();
+    dvui.labelNoFmt(@src(), sp.layers.items[li].name, .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .h = 4 } });
+    layerProperties(shown_space, li) catch {};
 }
 
 /// While the ribbon is drawn: its buttons carry key badges.
@@ -13984,14 +14161,36 @@ fn keyBadge(r: dvui.Rect.Physical, text: []const u8) void {
 fn ribbon() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbon_h }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
     defer bar.deinit();
+    {
+        const br = bar.data().borderRectScale();
+        ribbon_bottom = (br.r.y + br.r.h) / dvui.windowNaturalScale();
+    }
     if (activeKind() != .canvas) return;
     in_ribbon = true;
     defer in_ribbon = false;
     toolPalette();
+    // The palettes, as drop panels.
+    if (state.model.spaces.items.len > 0) {
+        _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 6, .h = 6 } });
+        var lwd: dvui.WidgetData = undefined;
+        const r = keyIconData(@src(), "Layers", dvui.entypo.layers, &lwd, "ribbon.layers");
+        drop_anchor.set(.layers, r.toNatural());
+        dvui.tooltip(@src(), .{ .active_rect = r }, "Layers: show or hide each, drag to reorder the stack, the chosen layer's settings (L; held, or clicked)", .{}, .{});
+    }
+}
+
+/// A ribbon icon button tagged `id` (its badge after it); its rect.
+fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, wd: *dvui.WidgetData, comptime id: []const u8) dvui.Rect.Physical {
+    _ = comptime elements.get(id);
+    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (drop_open == .layers) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+    return wd.borderRectScale().r;
 }
 
 /// The ribbon's height, logical.
 const ribbon_h: f32 = 34;
+/// Where the ribbon ends, logical (window coordinates): drop panels hang
+/// from it.
+var ribbon_bottom: f32 = 64;
 
 /// A button's effect, by its action (elements.zig: the button's id),
 /// working on the context it was pressed in and its argument.
@@ -14618,9 +14817,40 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     // The Tools pane's tabs, and the Layers palette (the active view's
     // space; its argument a layer's index, bottom first).
-    handler("tools-pane.layers", struct {
+    handler("ribbon.layers", struct {
         fn f(_: i32) void {
-            tools_tab = .layers;
+            openDrop(.layers);
+        }
+    }.f),
+    handler("ribbon.drop.shape", struct {
+        fn f(_: i32) void {
+            openDrop(.shape);
+        }
+    }.f),
+    handler("ribbon.drop.tracks", struct {
+        fn f(_: i32) void {
+            openDrop(.tracks);
+        }
+    }.f),
+    handler("ribbon.shape.*", struct {
+        fn f(arg: i32) void {
+            if (arg < 0 or arg >= shape_names.len) return;
+            shape_kind = @enumFromInt(arg);
+            polygon_pts.clearRetainingCapacity();
+            state.drag = null;
+            state.tool = .add_art;
+            drop_open = null;
+        }
+    }.f),
+    handler("ribbon.tracks.*", struct {
+        fn f(arg: i32) void {
+            drop_open = null;
+            switch (arg) {
+                0 => tracksMode(.row, .region),
+                1 => tracksMode(.column, .region),
+                2 => tracksMode(.row, .track),
+                else => {},
+            }
         }
     }.f),
     handler("layers-palette.*.shown", struct {
