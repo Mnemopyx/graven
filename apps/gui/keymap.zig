@@ -656,18 +656,25 @@ pub fn match1(e: *const dvui.Event, m: ModeId) ?Invocation {
 /// shows it ("Ctrl+Shift+S"): the first chorded binding, else the first;
 /// null when none. `bind:` chords are the toolkit's and not shown.
 pub fn shortcut(buf: []u8, m: ModeId, a: ActionId, arg: i32) ?[]const u8 {
+    return shortcutPreferring(buf, m, a, arg, true);
+}
+
+/// As `shortcut`, preferring a chorded key (`chorded`: one that works
+/// while a field has the keyboard, for menus) or a single key (for the
+/// ribbon's keys, which show the single-key commands).
+pub fn shortcutPreferring(buf: []u8, m: ModeId, a: ActionId, arg: i32, chorded: bool) ?[]const u8 {
     var best: ?R.Binding = null;
     for (R.tables[m]) |b| {
         if (b.action != a or b.arg != arg or b.chord.what == .bind) continue;
-        if (best == null or (!best.?.chord.mods.chorded() and b.chord.mods.chorded())) best = b;
+        if (best == null or (best.?.chord.mods.chorded() != chorded and b.chord.mods.chorded() == chorded)) best = b;
     }
     const b = best orelse return null;
     var w: std.Io.Writer = .fixed(buf);
     const kn = platform.key_names;
-    if (b.chord.mods.ctrl) w.writeAll(kn.ctrl ++ "+") catch return null;
-    if (b.chord.mods.cmd) w.writeAll(kn.cmd ++ "+") catch return null;
-    if (b.chord.mods.alt) w.writeAll(kn.alt ++ "+") catch return null;
-    if (b.chord.mods.shift) w.writeAll(kn.shift ++ "+") catch return null;
+    if (b.chord.mods.ctrl) w.writeAll(kn.ctrl) catch return null;
+    if (b.chord.mods.cmd) w.writeAll(kn.cmd) catch return null;
+    if (b.chord.mods.alt) w.writeAll(kn.alt) catch return null;
+    if (b.chord.mods.shift) w.writeAll(kn.shift) catch return null;
     switch (b.chord.what) {
         .char => |c| w.writeAll(c) catch return null,
         .code => |k| w.writeAll(keyName(k)) catch return null,

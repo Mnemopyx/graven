@@ -12624,9 +12624,9 @@ fn levelSet(c: Context) void {
 
 /// The status after a level change: where one is now.
 fn levelStatus() []const u8 {
-    if (canvas_eq) |q| return if (q.head != null) "An object chosen: arrows nudge it, Tab the next; Ctrl+< out, Ctrl+> in. " else "Its text: type into it; Ctrl+< out to its container, Ctrl+> in to an object. ";
-    if (track_cursor != null) return "The track's content: the flow cursor; Ctrl+< out to the track, Ctrl+> in to the item after the cursor. ";
-    return std.fmt.bufPrint(&status_hunt_buf, "{s}: its size and place in the properties; Ctrl+< out, Ctrl+> in. ", .{state.context.kindName()}) catch "";
+    if (canvas_eq) |q| return if (q.head != null) "An object chosen: arrows nudge it, Tab the next; ⌃< out, ⌃> in. " else "Its text: type into it; ⌃< out to its container, ⌃> in to an object. ";
+    if (track_cursor != null) return "The track's content: the flow cursor; ⌃< out to the track, ⌃> in to the item after the cursor. ";
+    return std.fmt.bufPrint(&status_hunt_buf, "{s}: its size and place in the properties; ⌃< out, ⌃> in. ", .{state.context.kindName()}) catch "";
 }
 
 /// Ctrl+<: one level out. Whether there was one.
@@ -14654,11 +14654,12 @@ var in_ribbon = false;
 fn badgeText(buf: *[48]u8, tag: []const u8, arg: i32) ?[]const u8 {
     const a = buttonActionId(tag) orelse return null;
     var kb: [48]u8 = undefined;
-    const sc = keymap.shortcut(&kb, kmode("canvas"), a, arg) orelse return null;
-    const n = std.mem.replace(u8, sc, "Shift+", "⇧", buf);
-    _ = n;
-    const len = sc.len - std.mem.count(u8, sc, "Shift+") * ("Shift+".len - "⇧".len);
-    return buf[0..len];
+    // The canvas's keys, then the view's (0 zooms to the context); a
+    // single key over a chorded one.
+    const sc = keymap.shortcutPreferring(&kb, kmode("canvas"), a, arg, false) orelse keymap.shortcutPreferring(&kb, kmode("view"), a, arg, false) orelse return null;
+    // Modifiers come as symbols already (⇧R).
+    @memcpy(buf[0..sc.len], sc);
+    return buf[0..sc.len];
 }
 
 fn badgeFont(held: bool) dvui.Font {
@@ -14934,7 +14935,8 @@ const button_handlers = [_]ButtonHandler{
         }
     }.f),
     // The tools.
-    handler("tool.zoom-to-context", struct {
+    // The ribbon's Zoom to context: the view action its key (0) runs.
+    handler("view.zoom-fit", struct {
         fn f(_: i32) void {
             zoomToContext();
         }
@@ -20726,7 +20728,7 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
         dvui.labelNoFmt(@src(), switch (kind) {
             // Letters type text now: these two have no key.
             .run => "",
-            .hard_break => if (inTextTrack()) "Shift+Enter" else "Enter",
+            .hard_break => if (inTextTrack()) "⇧Enter" else "Enter",
             .paragraph => if (inTextTrack()) "Enter" else "",
             .next_prototype => "Tab",
             .join => "",

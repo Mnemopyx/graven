@@ -629,7 +629,7 @@ pub const all = [_]Element{
     .{ .id = "views.filter", .kind = .field, .label = "Find a context" },
     .{ .id = "views.contexts.*", .kind = .button, .label = "A context to show in this window" },
     .{ .id = "tool.shape", .kind = .choice, .label = "Shape" },
-    .{ .id = "tool.zoom-to-context", .kind = .button, .label = "Zoom to context" },
+    .{ .id = "tool.zoom-to-context", .kind = .button, .action = "view.zoom-fit", .label = "Zoom to context" },
     .{ .id = "view.edits", .kind = .value, .label = "Edits" },
     .{ .id = "view.moves", .kind = .value, .label = "Moves" },
     .{ .id = "view.name", .kind = .value, .label = "Name" },

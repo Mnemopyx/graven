@@ -25,7 +25,7 @@ pub const builtin_text =
     \\
     \\Compose control-panel and keycap legends from Unicode glyphs, and make them as exact vector geometry: SVG, 3MF for colour printing, STEP.
     \\
-    \\Start a canvas on the right, in millimetres or inches, or open a document. Legends are typed in LaTeX as KaTeX takes it (math between dollars); Ctrl+\ edits an equation or a key's text in place on the canvas.
+    \\Start a canvas on the right, in millimetres or inches, or open a document. Legends are typed in LaTeX as KaTeX takes it (math between dollars); ⌃\ edits an equation or a key's text in place on the canvas.
     \\
     \\News for this version shows here once it has been fetched.
 ;

@@ -34,11 +34,13 @@ pub const host_name_max: usize = if (is_windows) 256 else if (@hasDecl(std.posix
 
 /// Modifier keys as this system names them, for shortcuts shown.
 pub const key_names = struct {
-    /// The command key: ⌘ Cmd on a Mac, the Super (Windows) key elsewhere.
-    pub const cmd: []const u8 = if (is_macos) "Cmd" else "Super";
-    pub const alt: []const u8 = if (is_macos) "Option" else "Alt";
-    pub const ctrl: []const u8 = "Ctrl";
-    pub const shift: []const u8 = "Shift";
+    /// The modifiers as symbols, written straight before the key (the
+    /// owner, 2026-11-22): ⌃ Ctrl, ⇧ Shift, ⌥ Alt or Option, ⌘ Cmd (the
+    /// Super or Windows key elsewhere).
+    pub const cmd: []const u8 = "\u{2318}";
+    pub const alt: []const u8 = "\u{2325}";
+    pub const ctrl: []const u8 = "\u{2303}";
+    pub const shift: []const u8 = "\u{21E7}";
 };
 
 /// A monotonic clock, in nanoseconds from an arbitrary start: for timing,
