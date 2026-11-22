@@ -108,3 +108,7 @@ Step 1 built (the model object, the tool with both gestures, drawing clipped to 
 
 Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 built: + with its filterable pop-up (Ctrl+T), × taking a tab off its window (Ctrl+W), the split button (Alt: stacked; Ctrl+Shift+\\). Step 2 built: preview tabs (italic; the next context opened in the window takes their place; kept by work in them or a double-click). Step 3 built: the divider's grip and click with Swap sides, Even out, Stacked ⇄ Side by side; a double-click on the divider evens it out; the scrolling policy in the UI inventory. The three steps of the tabs plan are done (status.md, "Windows and tabs").
 
+## The ribbon (2026-11-21, 2026-11-22)
+
+Steps 1 and 2 built: the ribbon under the menu bar with the canvas tools and their key badges (Alt: full strength), single keys for the tools; ▾ and hold-to-open, pull-downs (shapes; rows, columns, track), the full-width Layers drop panel (no OK/Cancel); the Tools pane retired. Next, step 3: compact view strips (22 px, ▾ on the tab for the window's other tabs); then step 4: ribbons for sheet and plan views (status.md, "The ribbon").
+
