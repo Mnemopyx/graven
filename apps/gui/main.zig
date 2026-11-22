@@ -6054,7 +6054,7 @@ fn argSplit(arg: i32) ?u8 {
 
 /// A tab strip's height, logical: fixed, so what lies over the views
 /// knows it before the strips are drawn.
-const tab_strip_h: f32 = 30;
+const tab_strip_h: f32 = 22;
 
 /// Draws a window's shown tab joined to its view, in three sections: the
 /// top, holding the tab's name; a wider middle band, a longer contact with
@@ -6140,44 +6140,44 @@ fn viewLeaf(leaf: u8, shown: u8) void {
         var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = tab_strip_h - 1 }, .max_size_content = .{ .w = dvui.max_float_safe, .h = tab_strip_h - 1 }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) } });
         defer strip.deinit();
         const n = vl.nodes[leaf];
-        const many = blk: {
-            var c: usize = 0;
-            for (vl.open) |o| {
-                if (o) c += 1;
-            }
-            break :blk c > 1;
-        };
         const at_left = strip.data().rect.x <= 0.5 and @abs(strip.data().borderRectScale().r.x / dvui.windowNaturalScale() - region_rect.x) < 1;
-        for (n.tabList(), 0..) |v, k| {
-            var lb: [96]u8 = undefined;
-            const label = viewLabel(&lb, v);
-            const current = v == shown;
+        const tab_font = dvui.Font.theme(.body).larger(-2);
+        // The window's tab shown, a folder's tab joined to its view: its
+        // name, then ▾ for the window's other tabs and the document's
+        // contexts (Ctrl+E).
+        {
             var tab = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .id_extra = k,
-                // The first tab at the views' left edge keeps its place,
-                // its flare reaching over the bar beside; elsewhere, room.
-                .margin = .{ .x = if (k == 0 and at_left) 0 else folder_flare, .w = folder_flare },
-                .padding = .{ .x = 6, .w = 2, .y = 1, .h = 1 },
+                .margin = .{ .x = if (at_left) 0 else folder_flare, .w = folder_flare },
+                .padding = .{ .x = 6, .w = 0, .y = 0, .h = 0 },
             });
             defer tab.deinit();
-            // The window's tab shown is a folder's tab, joined to its view.
-            if (current) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[v].kind);
+            if (vl.open[shown]) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[shown].kind);
+            var lb: [96]u8 = undefined;
+            const label = if (vl.open[shown]) viewLabel(&lb, shown) else "";
             // Room for descenders: no margin, a little padding below.
-            const tab_font = dvui.Font.theme(.body).larger(-1);
-            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 2, .h = 4 }, .id_extra = k })) {
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = if (view_preview[shown]) tab_font.withStyle(.italic) else tab_font, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 1, .h = 3 } })) {
                 const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
-                if (tab_click.view == v and now - tab_click.ms < 400) {
+                if (tab_click.view == shown and now - tab_click.ms < 400) {
                     // A preview's: kept; a kept tab's: the region filled.
-                    if (view_preview[v]) view_preview[v] = false else vl.toggleMaximize(v);
+                    if (view_preview[shown]) view_preview[shown] = false else vl.toggleMaximize(shown);
                     tab_click = .{};
-                } else tab_click = .{ .view = v, .ms = now };
+                } else tab_click = .{ .view = shown, .ms = now };
+                if (shown != vl.active) view_to_activate = shown else vl.select(shown);
+            }
+            stripIcon(@src(), .caret_down, "views.add", "This window's tabs, and the document's contexts", @as(i32, shown) + 1, leaf, &tab_add_from[leaf]);
+        }
+        // A paged context: its page, and flipping.
+        if (vl.open[shown]) pageControl(shown, leaf);
+        // The window's other tabs, faint, where there is room: a click shows one.
+        for (n.tabList(), 0..) |v, k| {
+            if (v == shown) continue;
+            var lb: [96]u8 = undefined;
+            const label = viewLabel(&lb, v);
+            const f = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font;
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = f, .id_extra = k, .gravity_y = 0.5, .margin = .{ .x = 6 }, .padding = .{ .x = 2, .w = 2, .y = 1, .h = 3 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } })) {
                 if (v != vl.active) view_to_activate = v else vl.select(v);
             }
-            // ×: off this window's tabs (the context stays in the document).
-            if (many) keyIcon(@src(), "Remove from tabs", dvui.entypo.cross, @as(i32, v) + 1, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(2), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k, .tag = uniqueTag("views.close") });
         }
-        // +: a context to add, from a pop-up; at the right end, a split.
-        stripIcon(@src(), .plus, "views.add", "Add a view", @as(i32, shown) + 1, leaf, &tab_add_from[leaf]);
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         stripIcon(@src(), .square_split_horizontal, "views.split-across", "Split (Alt: stacked)", @as(i32, shown) + 1, leaf, null);
     }
@@ -6216,6 +6216,37 @@ fn stripIcon(src: std.builtin.SourceLocation, comptime i: icons.Icon, comptime i
         // Alt: the other way (a split stacked).
         pushButtonEvent(tag, arg | if (alt) @as(i32, 0x100) else 0);
     }
+}
+
+/// How many pages view `v`'s context has: 0 or 1 for one without pages
+/// (every context today; paged documents, frames as ordered pages, are to
+/// come).
+fn pageCount(v: u8) u32 {
+    _ = v;
+    return 0;
+}
+
+/// A paged context's page and its flipping, after the window's tab: ‹ n / m ›.
+fn pageControl(v: u8, leaf: u8) void {
+    const n_pages = pageCount(v);
+    if (n_pages < 2) return;
+    const p = @min(vl.views[v].page, n_pages - 1);
+    stripIcon(@src(), .caret_down, "views.page-prev", "The page before (PgUp; Home: the first)", @as(i32, v) + 1, leaf, null);
+    dvui.label(@src(), "{d} / {d}", .{ p + 1, n_pages }, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .id_extra = leaf });
+    stripIcon(@src(), .caret_down, "views.page-next", "The next page (PgDn; End: the last)", @as(i32, v) + 1, leaf, null);
+}
+
+/// View `v` flipped `by` pages (to the first or last when `ends`).
+fn flipPage(v: u8, forward: bool, ends: bool) void {
+    const n_pages = pageCount(v);
+    if (n_pages < 2) return;
+    const p = &vl.views[v].page;
+    if (ends) {
+        p.* = if (forward) n_pages - 1 else 0;
+    } else if (forward) {
+        p.* = @min(p.* + 1, n_pages - 1);
+    } else if (p.* > 0) p.* -= 1;
+    dvui.refresh(null, @src(), null);
 }
 
 /// The + pop-up: the window (a leaf of the split tree) it adds to, or
@@ -6300,6 +6331,39 @@ fn tabAddPopup(leaf: u8) void {
     const filter = std.mem.trim(u8, te.textGet(), " ");
     const enter = te.enter_pressed;
     te.deinit();
+    // This window's tabs: shown by a click, taken off by ×.
+    var first_tab: ?u8 = null;
+    {
+        const tabs = vl.nodes[leaf].tabList();
+        const cur = vl.currentOf(leaf);
+        var any = false;
+        for (tabs, 0..) |t, k| {
+            var lb: [96]u8 = undefined;
+            const name = viewLabel(&lb, t);
+            if (!filterMatches(name, filter)) continue;
+            if (!any) {
+                dvui.labelNoFmt(@src(), "This window", .{}, .{ .id_extra = 2000, .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.6) }, .margin = .{ .x = 4, .y = 6 } });
+                any = true;
+            }
+            if (first_tab == null and t != cur) first_tab = t;
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3000 + k });
+            defer row.deinit();
+            const tag = listTag("views.tabs", name);
+            recordDrawn(tag, t);
+            var bw: dvui.ButtonWidget = undefined;
+            bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = k, .tag = tag, .margin = .all(1), .padding = .{ .x = 6, .w = 6, .y = 3, .h = 4 } });
+            bw.processEvents();
+            bw.drawBackground();
+            var tb: [112]u8 = undefined;
+            const text = std.fmt.bufPrint(&tb, "{s}{s}{s}", .{ if (t == cur) "•  " else "    ", name, if (view_preview[t]) "  (preview)" else "" }) catch name;
+            dvui.labelNoFmt(@src(), text, .{}, .{ .gravity_y = 0.5, .padding = .all(0), .margin = .all(0), .font = if (view_preview[t]) dvui.Font.theme(.body).withStyle(.italic) else null });
+            if (bw.clicked()) pushButtonEvent(tag, t);
+            bw.drawFocus();
+            bw.deinit();
+            if (tabs.len > 1 or vl.views[t].kind != .canvas) keyIcon(@src(), "Remove from tabs", dvui.entypo.cross, @as(i32, t) + 1, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(3), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k, .tag = uniqueTag("views.close") });
+        }
+        if (any) _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = 4, .h = 2 }, .id_extra = 2001 });
+    }
     var first: ?usize = null;
     var group: ?u2 = null;
     for (all, 0..) |c, i| {
@@ -6324,10 +6388,15 @@ fn tabAddPopup(leaf: u8) void {
         bw.deinit();
     }
     if (first == null) dvui.labelNoFmt(@src(), "Nothing by that name", .{}, .{ .margin = .{ .x = 4, .y = 4 } });
-    if (enter) if (first) |i| {
-        tab_add_leaf = null;
-        addToWindow(leaf, all[i]);
-    };
+    if (enter) {
+        if (first_tab != null and filter.len > 0) {
+            tab_add_leaf = null;
+            activateView(first_tab.?);
+        } else if (first) |i| {
+            tab_add_leaf = null;
+            addToWindow(leaf, all[i]);
+        }
+    }
 }
 
 /// A new canvas view beside the active view (`dir`), looking where the
@@ -14251,6 +14320,24 @@ const button_handlers = [_]ButtonHandler{
         fn f(arg: i32) void {
             divider_menu = null;
             vl.turn(argSplit(arg) orelse return);
+        }
+    }.f),
+    handler("views.tabs.*", struct {
+        fn f(arg: i32) void {
+            tab_add_leaf = null;
+            if (arg < 0 or arg >= docviews.max_views) return;
+            const v: u8 = @intCast(arg);
+            if (vl.open[v]) activateView(v);
+        }
+    }.f),
+    handler("views.page-prev", struct {
+        fn f(arg: i32) void {
+            flipPage(if (arg > 1) @intCast(arg - 1) else vl.active, false, arg == 1);
+        }
+    }.f),
+    handler("views.page-next", struct {
+        fn f(arg: i32) void {
+            flipPage(if (arg > 1) @intCast(arg - 1) else vl.active, true, arg == 1);
         }
     }.f),
     handler("views.contexts.*", struct {

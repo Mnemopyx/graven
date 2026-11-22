@@ -263,13 +263,13 @@ pub fn Registry(
 
         /// The action named `name`; an unknown name fails the build.
         pub fn action(comptime name: []const u8) ActionId {
-            comptime @setEvalBranchQuota(100_000);
+            comptime @setEvalBranchQuota(1_000_000);
             return comptime @intCast(findAction(actions, name) orelse @compileError("no action \"" ++ name ++ "\""));
         }
 
         /// The mode named `name`; an unknown name fails the build.
         pub fn mode(comptime name: []const u8) ModeId {
-            comptime @setEvalBranchQuota(100_000);
+            comptime @setEvalBranchQuota(1_000_000);
             return comptime @intCast(findMode(modes, name) orelse @compileError("no mode \"" ++ name ++ "\""));
         }
 

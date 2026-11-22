@@ -30,6 +30,10 @@ pub const View = struct {
     cx: f64 = 0,
     cy: f64 = 0,
     ppm: f64 = 0,
+    /// For a context with ordered pages (a document of frames as pages,
+    /// to come): the page this view shows, from 0. Each view its own, so
+    /// two windows can show two pages of one document.
+    page: u32 = 0,
 };
 
 /// Side by side (`across`) or stacked (`down`).

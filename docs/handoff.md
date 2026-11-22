@@ -110,5 +110,5 @@ Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 buil
 
 ## The ribbon (2026-11-21, 2026-11-22)
 
-Steps 1 and 2 built: the ribbon under the menu bar with the canvas tools and their key badges (Alt: full strength), single keys for the tools; ▾ and hold-to-open, pull-downs (shapes; rows, columns, track), the full-width Layers drop panel (no OK/Cancel); the Tools pane retired. Next, step 3: compact view strips (22 px, ▾ on the tab for the window's other tabs); then step 4: ribbons for sheet and plan views (status.md, "The ribbon").
+Steps 1 and 2 built: the ribbon under the menu bar with the canvas tools and their key badges (Alt: full strength), single keys for the tools; ▾ and hold-to-open, pull-downs (shapes; rows, columns, track), the full-width Layers drop panel (no OK/Cancel); the Tools pane retired. Step 3 built: 22 px view strips, the ▾ list (this window's tabs, then the contexts; Ctrl+E), the page slot and `View.page` ready for paged documents. Next, step 4: ribbons for sheet and plan views (status.md, "The ribbon").
 
