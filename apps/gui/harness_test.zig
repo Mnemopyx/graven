@@ -2082,3 +2082,29 @@ test "rows on the canvas: R, then a drag, lays out a column of rows" {
     for (api.model().panels.items) |p| n += p.regions.items.len;
     try std.testing.expect(n > 0);
 }
+
+test "a horizontal construction line chosen with Constrain and held a distance from the canvas's origin" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("tool.construction-line");
+    try r.clickAt(api.screenOf(70, 20).?);
+    try r.clickAt(api.screenOf(130, 20).?);
+    try std.testing.expectEqual(1, api.guides().len);
+    try std.testing.expectApproxEqAbs(0, api.guides()[0].angle, 1e-9);
+    try r.key(.escape, .none);
+    // Constrain: the line first, then the canvas's origin line (y = 0).
+    try r.press("tool.constrain");
+    try r.clickAt(api.screenOf(100, 20).?);
+    try r.clickAt(api.screenOf(100, 0).?);
+    try r.frames(2);
+    // The prompt opens on its distance now (20 mm): 35 typed, applied.
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText("35");
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(3);
+    try std.testing.expectEqual(1, api.model().constraints.items.len);
+    try std.testing.expectApproxEqAbs(35, api.guides()[0].at.y, 1e-9);
+}

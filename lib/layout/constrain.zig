@@ -54,7 +54,9 @@ pub const Issue = struct {
 };
 
 /// Where an object is, and what it is.
-const Kind = enum { panel, region, art, image, control_point };
+/// A construction line is placed by its point: a horizontal one's height
+/// and a vertical one's place across are what a constraint holds.
+const Kind = enum { panel, region, art, image, control_point, guide };
 /// What an object sits in: a space (panels, images) or a panel (tracks,
 /// line art), whose frame its position is in.
 pub const Parent = union(enum) { space: usize, panel: usize };
@@ -79,7 +81,10 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
         }
         for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = .{ .panel = pi }, .holder = pi, .index = k };
     }
-    for (m.spaces.items, 0..) |s, si| for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
+    for (m.spaces.items, 0..) |s, si| {
+        for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
+        for (s.guides.items, 0..) |g, k| if (g.id == id) return .{ .kind = .guide, .parent = .{ .space = si }, .holder = si, .index = k };
+    }
     return null;
 }
 
@@ -130,6 +135,12 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
         },
         .control_point => blk: {
             const at = controlPointAt(p.regions.items[loc.index], loc.sub);
+            const v = if (vertical) at.y else at.x;
+            break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
+        },
+        // A construction line: its point, on each axis.
+        .guide => blk: {
+            const at = m.spaces.items[loc.holder].guides.items[loc.index].at;
             const v = if (vertical) at.y else at.x;
             break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
         },
@@ -193,6 +204,10 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
                 im.at.x = lo;
                 im.w = s;
             }
+        },
+        .guide => {
+            const g = &m.spaces.items[loc.holder].guides.items[loc.index];
+            if (vertical) g.at.y = o else g.at.x = o;
         },
     }
 }
