@@ -13525,12 +13525,12 @@ fn toolBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
-    keyIcon(@src(), "Zoom to context", dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
+    keyIcon(@src(), "Zoom to context", icons.graven(.zoom_to_context) orelse dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
     dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
     {
         const on = state.tool == .constrain;
         var cwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Constrain", dvui.entypo.ruler, 0, .{
+        keyIcon(@src(), "Constrain", icons.graven(.constrain) orelse dvui.entypo.ruler, 0, .{
             .data_out = &cwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -13569,7 +13569,7 @@ fn toolBar() void {
         defer dvui.alphaSet(prev_a);
         const on = state.tool == .new_sketch;
         var swd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "New sketch", dvui.entypo.pencil, 0, .{
+        keyIcon(@src(), "New sketch", icons.graven(.new_sketch) orelse dvui.entypo.pencil, 0, .{
             .data_out = &swd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -13582,7 +13582,7 @@ fn toolBar() void {
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
         ribbon_next_drop = .shape;
-        keyIcon(@src(), "Add shape", dvui.entypo.circle, 0, .{
+        keyIcon(@src(), "Add shape", icons.graven(.add_shape) orelse dvui.entypo.circle, 0, .{
             .data_out = &awd,
             .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -13629,7 +13629,7 @@ fn toolBar() void {
         // Select boundaries: a mode, kept until toggled.
         const on = boundary_mode;
         var bwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Select boundaries", dvui.entypo.resize_full_screen, 0, .{
+        keyIcon(@src(), "Select boundaries", icons.graven(.select_boundaries) orelse dvui.entypo.resize_full_screen, 0, .{
             .data_out = &bwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -13650,7 +13650,7 @@ fn toolBar() void {
         defer dvui.alphaSet(prev_a);
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Select area", dvui.entypo.select_arrows, 0, .{
+        keyIcon(@src(), "Select area", icons.graven(.select_area) orelse dvui.entypo.select_arrows, 0, .{
             .data_out = &swd,
             .color_fill = if (sel_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });

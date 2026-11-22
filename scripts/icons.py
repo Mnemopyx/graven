@@ -171,6 +171,46 @@ def polyline(pts):
     return [("ink", pts)]
 
 
+def corners(x0, y0, x1, y1, n):
+    """Four corner brackets of a frame, each arm `n` long."""
+    return (polyline([(x0, y0 + n), (x0, y0), (x0 + n, y0)]) + polyline([(x1 - n, y0), (x1, y0), (x1, y0 + n)])
+            + polyline([(x0, y1 - n), (x0, y1), (x0 + n, y1)]) + polyline([(x1 - n, y1), (x1, y1), (x1, y1 - n)]))
+
+
+def pointer(x, y):
+    """The pointer's arrow, its tip at (x, y), on paper."""
+    pts = [(0, 0), (0, 7.2), (1.7, 5.6), (2.9, 8.2), (4.1, 7.6), (2.9, 5.1), (5.2, 4.9)]
+    return polygon([(x + a, y + b) for a, b in pts], "paper")
+
+
+def curve(pts, n=10):
+    """A smooth line through `pts` (Catmull-Rom), as ink."""
+    out = []
+    p = [pts[0]] + pts + [pts[-1]]
+    for i in range(1, len(p) - 2):
+        p0, p1, p2, p3 = p[i - 1], p[i], p[i + 1], p[i + 2]
+        for k in range(n):
+            t = k / n
+            t2, t3 = t * t, t * t * t
+            out.append(tuple(0.5 * ((2 * p1[j]) + (-p0[j] + p2[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2 + (-p0[j] + 3 * p1[j] - 3 * p2[j] + p3[j]) * t3) for j in (0, 1)))
+    out.append(pts[-1])
+    return [("ink", out)]
+
+
+def dimension(a, b, off):
+    """A dimension between points `a` and `b`: a line `off` to the left of
+    them (looking from a to b), arrowheads at both ends, short extension
+    lines down to the points."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = math.hypot(dx, dy)
+    nx, ny = dy / n * off, -dx / n * off
+    a2 = (a[0] + nx, a[1] + ny)
+    b2 = (b[0] + nx, b[1] + ny)
+    gap = 0.25
+    ext = line(a[0] + nx * gap, a[1] + ny * gap, a2[0] + nx * 0.2, a2[1] + ny * 0.2) + line(b[0] + nx * gap, b[1] + ny * gap, b2[0] + nx * 0.2, b2[1] + ny * 0.2)
+    return ext + arrow(a2[0], a2[1], b2[0], b2[1], 2.2) + arrow(b2[0], b2[1], a2[0], a2[1], 2.2)
+
+
 ICONS = {
     # Containers made on the canvas.
     "add-panel": rect(2.5, 3, 15, 13, "container") + adds(),
@@ -182,6 +222,15 @@ ICONS = {
     "construction-line": dashes([(1.5, 16.5), (22.5, 3.5)], 2.4, 1.8) + circle(7, 13.1, 1.9, "guide") + circle(17, 6.9, 1.9, "guide"),
     # The view's layers.
     "layers": polygon([(12, 2), (21, 6.5), (12, 11), (3, 6.5)], "layer") + polyline([(3, 10), (12, 14.5), (21, 10)]) + polyline([(3, 13.5), (12, 18), (21, 13.5)]),
+    # The view: what is chosen, framed.
+    "zoom-to-context": [("fill", [(3, 2), (21, 2), (21, 17), (3, 17)], "view")] + corners(3, 2, 21, 17, 4) + rect(8, 6.5, 8, 6, "select", 0.8),
+    # Choosing: a container's boundary (haloed), an area.
+    "select-boundaries": [("fill", rounded(1.2, 1.2, 17.6, 15.6, 2.4), "select")] + rect(3, 3, 14, 12, "container") + rect(5, 7.2, 10, 3.6, "track", 0.6) + pointer(15.5, 9.5),
+    "select-area": container(3, 2.5, 15, 12, "select") + pointer(15.5, 9.5),
+    # Sketching inside a sketch: one made; a shape drawn; constrained.
+    "new-sketch": container(2.5, 2.5, 14.5, 13, "paper") + curve([(4.5, 12.5), (6, 6), (10, 5), (12, 10), (15, 6.5)]) + circle(15, 6.5, 1.5, "drawn") + circle(4.5, 12.5, 1.5, "drawn") + adds(),
+    "add-shape": circle(7.5, 7.5, 4.5, "drawn") + rect(9.5, 8.5, 7, 7, "drawn", 0.4) + adds(),
+    "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "drawn") + circle(18, 9, 1.8, "drawn") + dimension((4, 15), (18, 9), 4.2),
 }
 
 # --- SVG -------------------------------------------------------------------
@@ -438,7 +487,8 @@ def ribbon(json_path, out_path):
 
     meta = json.load(open(json_path))
     atlas = np.array(Image.open(os.path.join(os.path.dirname(json_path), "graven.png")).convert("RGBA"))
-    keys = {"add-panel": "P", "add-rows": "R", "add-columns": "\u21e7R", "add-track": "T", "fit-to-tiles": "F", "construction-line": "G", "layers": "L"}
+    keys = {"add-panel": "P", "add-rows": "R", "add-columns": "\u21e7R", "add-track": "T", "fit-to-tiles": "F", "construction-line": "G", "layers": "L",
+            "zoom-to-context": "0", "select-boundaries": "B", "select-area": "A", "new-sketch": "N", "add-shape": "S", "constrain": "K"}
     font = ImageFont.truetype(os.path.join(HERE, "..", "apps", "gui", "uifont", "DejaVuSans-Bold.ttf"), 20)
     label = ImageFont.truetype(os.path.join(HERE, "..", "apps", "gui", "uifont", "DejaVuSans.ttf"), 22)
     B = 64

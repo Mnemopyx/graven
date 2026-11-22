@@ -71,6 +71,12 @@ pub const GIcon = enum {
     fit_to_tiles,
     construction_line,
     layers,
+    zoom_to_context,
+    select_boundaries,
+    select_area,
+    new_sketch,
+    add_shape,
+    constrain,
 
     fn svg(comptime g: GIcon) []const u8 {
         const name = comptime blk: {
