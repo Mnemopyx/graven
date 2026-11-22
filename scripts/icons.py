@@ -69,6 +69,9 @@ ART = 26
 MARGIN = (BUTTON - ART) / 2
 RANGE = 4.0
 PAD = 4
+# The key in the ribbon's fade: its letters' foot this far above the button's
+# bottom (device pixels at 64; the owner, 2026-11-22).
+KEY_MARGIN = 6
 
 # --- Geometry --------------------------------------------------------------
 #
@@ -470,7 +473,7 @@ def ribbon(json_path, out_path):
             dd = ImageDraw.Draw(im)
             k = keys.get(g["icon"], "?")
             l, tp, rr, bt = dd.textbbox((0, 0), k, font=font)
-            dd.text(((B - (rr - l)) / 2 - l, y1 - bt - 1), k, font=font, fill=(255, 255, 255))
+            dd.text(((B - (rr - l)) / 2 - l, B - KEY_MARGIN - bt), k, font=font, fill=(255, 255, 255))
             img.paste(im, (x, y))
     img.save(out_path)
     print(f"ribbon into {out_path}")
