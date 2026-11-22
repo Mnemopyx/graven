@@ -1,7 +1,7 @@
 {
  "atlas": {
-  "type": "msdf",
-  "distanceRange": 8.0,
+  "type": "graven-ink",
+  "distanceRange": 4.0,
   "size": 64,
   "width": 504,
   "height": 72,
@@ -9,41 +9,42 @@
  },
  "graven": {
   "format": "graven-icons 1",
-  "about": "RGB: the ink's distance field (msdf, all channels equal). Alpha: 0 background, k the palette's k-th entry, the kind filling that pixel.",
+  "about": "RGB: the icon's ground, a raster; `transparent` lets what is behind show, `overrides` name colours a program may replace. A: the ink, 0.5 - d / distanceRange (d px to the ink's edge, positive inside): 255 no ink, 128 the edge. Straight alpha, not premultiplied.",
   "grid": 24,
   "ink": "#2a2530",
-  "palette": [
+  "transparent": "#ff00ff",
+  "overrides": [
    {
-    "kind": "container",
-    "colour": "#8fd1c3"
+    "key": "#8fd1c3",
+    "name": "container"
    },
    {
-    "kind": "track",
-    "colour": "#f4c95d"
+    "key": "#f4c95d",
+    "name": "track"
    },
    {
-    "kind": "drawn",
-    "colour": "#f29b6b"
+    "key": "#f29b6b",
+    "name": "drawn"
    },
    {
-    "kind": "guide",
-    "colour": "#b8a2e3"
+    "key": "#b8a2e3",
+    "name": "guide"
    },
    {
-    "kind": "select",
-    "colour": "#8fc1f0"
+    "key": "#8fc1f0",
+    "name": "select"
    },
    {
-    "kind": "view",
-    "colour": "#c9d6a3"
+    "key": "#c9d6a3",
+    "name": "view"
    },
    {
-    "kind": "layer",
-    "colour": "#d6d3cc"
+    "key": "#d6d3cc",
+    "name": "layer"
    },
    {
-    "kind": "paper",
-    "colour": "#ffffff"
+    "key": "#ffffff",
+    "name": "paper"
    }
   ]
  },

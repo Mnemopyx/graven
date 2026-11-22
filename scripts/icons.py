@@ -12,17 +12,28 @@ outline for the container a tool works inside (what it makes is solid); a
 ringed + for a tool that adds; the lowest band left light for the key's
 fade.
 
-The atlas (the owner's "option B", 2026-11-22): one PNG and its JSON, in
-msdf-atlas-gen's layout. Each icon is a cell. RGB holds the ink's signed
-distance field, the same value in all three channels (the ink is lines with
-round ends and joins, whose distance field is exact: distance to the
-nearest centre line less half the stroke), so a standard MSDF reader draws
-the ink. Alpha holds a palette index per pixel: 0 background, k the k-th
-entry of the JSON's `palette` (the kind filling that pixel, painted in
-order). A reader fills each pixel with its kind's colour (nearest texel:
-region edges lie under the ink, which hides them) and draws the ink over it
-from the field. Distances are stored as 0.5 + d / distanceRange (d in
-pixels at the made size, positive inside the ink), as msdf-atlas-gen does.
+The icon file (the owner's choice, 2026-11-22): one PNG and its JSON, the
+JSON in msdf-atlas-gen's layout (`atlas`, `glyphs` with `atlasBounds`), its
+type Graven's own ("graven-ink"). Each icon is a cell of the PNG.
+
+  RGB  the icon's ground: a plain raster image in full colour. Sub-pixel
+       detail is not asked of it. Two kinds of colour are read specially,
+       both named in the JSON: the transparent key (saturated magenta), where
+       whatever lies behind the icon shows; and the override keys, each a
+       named slot ("container", "track" ...) whose colour the program may
+       replace (a theme, a colour-blind set). An override key is the slot's
+       default colour itself, so the PNG looks right as it is.
+  A    the ink, one colour chosen when drawing: 0.5 - d / range, d the
+       distance (pixels at the made size) to the ink's edge, positive inside.
+       So 255 is no ink (pure RGB), low values ink; the edge is 128. Tools
+       that drop or premultiply the colour of low-alpha pixels lose only
+       colour the ink covers.
+
+Drawing it: each texel's colour is resolved first (key -> transparent,
+override -> its colour, as premultiplied RGBA), then filtered (averaged to
+shrink, bilinear to enlarge), so neither key shows as a fringe. The ink's
+coverage comes from A, sharpened to one pixel at the size drawn (when
+shrinking, worked out per texel and averaged, so thin ink keeps its weight).
 """
 import json, math, os, sys
 
@@ -39,16 +50,16 @@ KIND = {
     "layer": "#d6d3cc",
     "paper": "#ffffff",
 }
-PALETTE = list(KIND)  # alpha k -> PALETTE[k - 1]
+KEY = "#ff00ff"  # transparent
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(HERE, "..", "apps", "gui", "icons")
 SVG_DIR = os.path.join(ICON_DIR, "graven")
 
-# Atlas: a cell's side in pixels for the 24-unit grid, the distance range
-# (pixels, both ways), the padding round a cell.
+# The file: a cell's side in pixels for the 24-unit grid, the ink's
+# distance range (pixels across both sides of the edge), the padding.
 CELL = 64
-RANGE = 8.0
+RANGE = 4.0
 PAD = 4
 
 # --- Geometry --------------------------------------------------------------
@@ -185,24 +196,25 @@ def write_svgs():
     print(f"{len(ICONS)} SVGs into {os.path.normpath(SVG_DIR)}")
 
 
-# --- The atlas --------------------------------------------------------------
+# --- The icon file -----------------------------------------------------------
 
 
 def cell_image(parts):
-    """An icon's cell: the ink's distance (pixels, positive inside) and the
-    palette index per pixel."""
+    """An icon's cell: the ink's distance (pixels, positive inside) and its
+    ground (RGB, the key where nothing is filled). Parts are painted in
+    order, so a fill hides the ink beneath it: the distance there becomes
+    at most minus the depth inside the fill (fields combined by min and
+    max, exact where it matters, at the edges)."""
     import numpy as np
 
     s = CELL / 24.0
     ys, xs = np.mgrid[0:CELL, 0:CELL]
     px = (xs + 0.5) / s
     py = (ys + 0.5) / s
-    # Distance to the ink's centre lines, in grid units.
-    best = np.full((CELL, CELL), 1e9)
-    for part in parts:
-        if part[0] != "ink":
-            continue
-        for (x1, y1), (x2, y2) in zip(part[1], part[1][1:]):
+
+    def seg_dist(pts):
+        best = np.full((CELL, CELL), 1e9)
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
             dx, dy = x2 - x1, y2 - y1
             L2 = dx * dx + dy * dy
             if L2 < 1e-12:
@@ -211,11 +223,14 @@ def cell_image(parts):
                 t = np.clip(((px - x1) * dx + (py - y1) * dy) / L2, 0, 1)
                 d = np.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
             best = np.minimum(best, d)
-    dist = (STROKE / 2 - best) * s
-    # Fills, painted in order (even-odd inside test).
-    label = np.zeros((CELL, CELL), dtype=np.uint8)
+        return best
+
+    dist = np.full((CELL, CELL), -1e9)
+    rgb = np.empty((CELL, CELL, 3), dtype=np.uint8)
+    rgb[:] = hexrgb(KEY)
     for part in parts:
-        if part[0] != "fill":
+        if part[0] == "ink":
+            dist = np.maximum(dist, (STROKE / 2 - seg_dist(part[1])) * s)
             continue
         poly = part[1]
         inside = np.zeros((CELL, CELL), dtype=bool)
@@ -227,8 +242,10 @@ def cell_image(parts):
             with np.errstate(divide="ignore", invalid="ignore"):
                 xi = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
             inside ^= cross & (px < xi)
-        label[inside] = PALETTE.index(part[2]) + 1
-    return dist, label
+        rgb[inside] = hexrgb(KIND[part[2]])
+        depth = seg_dist(poly + [poly[0]]) * s
+        dist = np.where(inside, np.minimum(dist, -depth), dist)
+    return dist, rgb
 
 
 def build():
@@ -241,15 +258,15 @@ def build():
     step = CELL + 2 * PAD
     W, H = cols * step, rows * step
     rgba = np.zeros((H, W, 4), dtype=np.uint8)
+    rgba[..., :3] = hexrgb(KEY)
+    rgba[..., 3] = 255
     glyphs = []
     for i, name in enumerate(names):
-        dist, label = cell_image(ICONS[name])
-        v = np.clip(np.round((0.5 + dist / RANGE) * 255), 0, 255).astype(np.uint8)
+        dist, rgb = cell_image(ICONS[name])
         x0 = (i % cols) * step + PAD
         y0 = (i // cols) * step + PAD
-        for c in range(3):
-            rgba[y0:y0 + CELL, x0:x0 + CELL, c] = v
-        rgba[y0:y0 + CELL, x0:x0 + CELL, 3] = label
+        rgba[y0:y0 + CELL, x0:x0 + CELL, :3] = rgb
+        rgba[y0:y0 + CELL, x0:x0 + CELL, 3] = np.clip(np.round((0.5 - dist / RANGE) * 255), 0, 255).astype(np.uint8)
         glyphs.append({
             "index": i,
             "icon": name,
@@ -260,13 +277,14 @@ def build():
     png = os.path.join(ICON_DIR, "graven.png")
     Image.fromarray(rgba, "RGBA").save(png, optimize=True)
     meta = {
-        "atlas": {"type": "msdf", "distanceRange": RANGE, "size": CELL, "width": W, "height": H, "yOrigin": "top"},
+        "atlas": {"type": "graven-ink", "distanceRange": RANGE, "size": CELL, "width": W, "height": H, "yOrigin": "top"},
         "graven": {
             "format": "graven-icons 1",
-            "about": "RGB: the ink's distance field (msdf, all channels equal). Alpha: 0 background, k the palette's k-th entry, the kind filling that pixel.",
+            "about": "RGB: the icon's ground, a raster; `transparent` lets what is behind show, `overrides` name colours a program may replace. A: the ink, 0.5 - d / distanceRange (d px to the ink's edge, positive inside): 255 no ink, 128 the edge. Straight alpha, not premultiplied.",
             "grid": 24,
             "ink": INK,
-            "palette": [{"kind": k, "colour": KIND[k]} for k in PALETTE],
+            "transparent": KEY,
+            "overrides": [{"key": KIND[k], "name": k} for k in KIND],
         },
         "glyphs": glyphs,
     }
@@ -275,7 +293,7 @@ def build():
     print(f"{len(names)} icons into {os.path.normpath(png)} ({W} x {H}) and graven.json")
 
 
-# --- Reading it back: the contact sheet -------------------------------------
+# --- Reading it back ---------------------------------------------------------
 
 
 def hexrgb(h):
@@ -283,39 +301,70 @@ def hexrgb(h):
     return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
 
 
-def render(atlas, meta, glyph, px, ground, ink=None):
-    """Icon `glyph` drawn at `px` pixels square over `ground` (RGB), as a
-    reader of the format draws it: fills by nearest texel, the ink from the
-    field by bilinear sampling, antialiased over a pixel."""
+def resolve(cell, meta, recolour):
+    """A cell's ground as premultiplied RGBA floats (0..1): the key made
+    transparent, override keys given their slot's colour (`recolour` maps
+    names to colours; a slot not in it keeps its key)."""
     import numpy as np
+
+    g = meta["graven"]
+    rgb = cell[..., :3].astype(int)
+    out = np.empty(cell.shape[:2] + (4,), dtype=float)
+    out[..., :3] = rgb / 255
+    out[..., 3] = 1
+    def is_(c):
+        c = hexrgb(c)
+        return (rgb[..., 0] == c[0]) & (rgb[..., 1] == c[1]) & (rgb[..., 2] == c[2])
+    for o in g.get("overrides", []):
+        if o["name"] in recolour:
+            out[is_(o["key"]), :3] = np.array(hexrgb(recolour[o["name"]])) / 255
+    out[is_(g["transparent"])] = 0
+    return out
+
+
+def render(atlas, meta, glyph, px, ground, ink=None, recolour={}):
+    """Icon `glyph` drawn `px` pixels square over `ground` (RGB 0..255)."""
+    import numpy as np
+    from PIL import Image
 
     b = glyph["atlasBounds"]
     size = meta["atlas"]["size"]
     rng = meta["atlas"]["distanceRange"]
-    pal = [hexrgb(p["colour"]) for p in meta["graven"]["palette"]]
-    ink = hexrgb(ink or meta["graven"]["ink"])
+    ink = np.array(hexrgb(ink or meta["graven"]["ink"])) / 255
+    ground = np.array(ground) / 255
     k = size / px  # texels per pixel
-    ys, xs = np.mgrid[0:px, 0:px]
-    u = b["left"] + (xs + 0.5) * k - 0.5
-    v = b["top"] + (ys + 0.5) * k - 0.5
-    # Fills: nearest texel.
-    lab = atlas[np.clip(np.round(v).astype(int), 0, atlas.shape[0] - 1), np.clip(np.round(u).astype(int), 0, atlas.shape[1] - 1), 3]
-    out = np.empty((px, px, 3), dtype=float)
-    out[:] = ground
-    for i, c in enumerate(pal):
-        out[lab == i + 1] = c
-    # Ink: bilinear field, distance in screen pixels, a pixel's ramp.
-    x0 = np.floor(u).astype(int)
-    y0 = np.floor(v).astype(int)
-    fx, fy = u - x0, v - y0
-    f = atlas[..., 0].astype(float) / 255
-    def at(yy, xx):
-        return f[np.clip(yy, 0, f.shape[0] - 1), np.clip(xx, 0, f.shape[1] - 1)]
-    val = (at(y0, x0) * (1 - fx) * (1 - fy) + at(y0, x0 + 1) * fx * (1 - fy) + at(y0 + 1, x0) * (1 - fx) * fy + at(y0 + 1, x0 + 1) * fx * fy)
-    d_px = (val - 0.5) * rng / k
-    cov = np.clip(d_px + 0.5, 0, 1)[..., None]
-    out = out * (1 - cov) + np.array(ink) * cov
-    return out.clip(0, 255).astype(np.uint8)
+    if k >= 1:
+        # Shrinking: each texel drawn sharply (the ink over one texel), then
+        # averaged down: thin ink keeps its weight.
+        cell = atlas[b["top"]:b["bottom"], b["left"]:b["right"]]
+        col = resolve(cell, meta, recolour)
+        cov = np.clip((0.5 - cell[..., 3] / 255) * rng + 0.5, 0, 1)[..., None]
+        out = ground * (1 - col[..., 3:]) + col[..., :3]
+        out = out * (1 - cov) + ink * cov
+        chans = [np.asarray(Image.fromarray(out[..., c].astype(np.float32), "F").resize((px, px), Image.BOX)) for c in range(3)]
+        out = np.stack(chans, -1)
+    else:
+        # Enlarging: the ground bilinear from resolved texels; the ink's
+        # field bilinear, its edge one screen pixel wide.
+        pad = 1
+        x0, y0 = b["left"] - pad, b["top"] - pad
+        cell = atlas[y0:b["bottom"] + pad, x0:b["right"] + pad]
+        col = resolve(cell, meta, recolour)
+        a = cell[..., 3] / 255
+        ys, xs = np.mgrid[0:px, 0:px]
+        u = (xs + 0.5) * k - 0.5 + pad
+        v = (ys + 0.5) * k - 0.5 + pad
+        iu, iv = np.floor(u).astype(int), np.floor(v).astype(int)
+        fu, fv = (u - iu)[..., None], (v - iv)[..., None]
+        def bil(f):
+            f = f if f.ndim == 3 else f[..., None]
+            at = lambda yy, xx: f[np.clip(yy, 0, f.shape[0] - 1), np.clip(xx, 0, f.shape[1] - 1)]
+            return at(iv, iu) * (1 - fu) * (1 - fv) + at(iv, iu + 1) * fu * (1 - fv) + at(iv + 1, iu) * (1 - fu) * fv + at(iv + 1, iu + 1) * fu * fv
+        c = bil(col)
+        cov = np.clip((0.5 - bil(a)) * rng / k + 0.5, 0, 1)
+        out = ground * (1 - c[..., 3:]) + c[..., :3]
+        out = out * (1 - cov) + ink * cov
+    return (out * 255).clip(0, 255).round().astype(np.uint8)
 
 
 def sheet(json_path, out_path):
@@ -324,24 +373,32 @@ def sheet(json_path, out_path):
 
     meta = json.load(open(json_path))
     atlas = np.array(Image.open(os.path.join(os.path.dirname(json_path), "graven.png")).convert("RGBA"))
-    sizes = [16, 26, 32, 52, 96]
-    grounds = [((246, 245, 242), None), ((44, 34, 54), "#e8e4ee")]
+    sizes = [16, 26, 32, 52, 96, 128]
+    dark = {"container": "#3f8f80", "track": "#b88a1e", "drawn": "#b9603a", "guide": "#7a64b0", "layer": "#6d6a64", "paper": "#3a3044"}
+    columns = [
+        ("light", (246, 245, 242), None, {}),
+        ("dark ground, light ink, overrides", (44, 34, 54), "#e8e4ee", dark),
+    ]
     glyphs = meta["glyphs"]
     colw = sum(s + 12 for s in sizes) + 20
-    W = 160 + colw * len(grounds)
+    W = 160 + colw * len(columns)
     rowh = max(sizes) + 16
-    H = 40 + rowh * len(glyphs)
+    H = 60 + rowh * len(glyphs)
     img = Image.new("RGB", (W, H), (216, 214, 209))
     d = ImageDraw.Draw(img)
-    d.text((10, 10), "Graven icons from the atlas: fills by palette index, ink from the distance field (16, 26, 32, 52, 96 px; light and dark ground)", fill=(40, 40, 40))
+    d.text((10, 10), "Graven icon file: RGB the ground (magenta transparent, override keys), A the ink's distance. 16, 26, 32, 52, 96, 128 px.", fill=(40, 40, 40))
+    x = 160
+    for title, *_ in columns:
+        d.text((x, 36), title, fill=(40, 40, 40))
+        x += colw
     for r, g in enumerate(glyphs):
-        y = 40 + r * rowh
+        y = 60 + r * rowh
         d.text((10, y + rowh // 2 - 6), g["icon"], fill=(40, 40, 40))
         x = 160
-        for ground, ink in grounds:
+        for _, ground, ink, rec in columns:
             d.rectangle([x - 6, y - 4, x + colw - 20, y + rowh - 8], fill=ground)
             for s in sizes:
-                tile = render(atlas, meta, g, s, ground, ink)
+                tile = render(atlas, meta, g, s, ground, ink, rec)
                 img.paste(Image.fromarray(tile), (x, y + (max(sizes) - s) // 2))
                 x += s + 12
             x += 20
