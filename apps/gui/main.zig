@@ -14251,9 +14251,13 @@ fn ribbon() void {
         const br = bar.data().borderRectScale();
         ribbon_bottom = (br.r.y + br.r.h) / dvui.windowNaturalScale();
     }
-    if (activeKind() != .canvas) return;
     in_ribbon = true;
     defer in_ribbon = false;
+    switch (activeKind()) {
+        .sheet => return sheetRibbon(),
+        .manufacture => return planRibbon(),
+        .canvas => {},
+    }
     toolPalette();
     // The palettes, as drop panels.
     if (state.model.spaces.items.len > 0) {
@@ -14263,6 +14267,53 @@ fn ribbon() void {
         drop_anchor.set(.layers, r.toNatural());
         dvui.tooltip(@src(), .{ .active_rect = r }, "Layers: show or hide each, drag to reorder the stack, the chosen layer's settings (L; held, or clicked)", .{}, .{});
     }
+}
+
+/// A ribbon button for action `id` (a registry button), its tooltip the
+/// registry's label.
+fn ribbonButton(src: std.builtin.SourceLocation, comptime id: []const u8, tvg: []const u8, id_extra: usize) void {
+    const e = comptime elements.get(id);
+    var wd: dvui.WidgetData = undefined;
+    keyIcon(src, e.label, tvg, 0, .{ .data_out = &wd, .tag = uniqueTag(id), .id_extra = id_extra });
+    dvui.tooltip(src, .{ .active_rect = wd.borderRectScale().r }, "{s}", .{e.label}, .{ .id_extra = id_extra });
+}
+
+fn ribbonGap(id_extra: usize) void {
+    _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 6, .h = 6 }, .id_extra = id_extra });
+}
+
+/// A legend sheet view's ribbon: its rows, its keys' names, and the canvas
+/// beside it. (No single keys: letters type into the cells.)
+fn sheetRibbon() void {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    defer bar.deinit();
+    ribbonButton(@src(), "sheet.cell.add-a-row", dvui.entypo.add_to_list, 1);
+    ribbonButton(@src(), "sheet.cell.remove-this-row", dvui.entypo.circle_with_minus, 2);
+    ribbonGap(3);
+    ribbonButton(@src(), "sheet.cell.name-keys-by-grid-position-r1c1", dvui.entypo.grid, 4);
+    ribbonButton(@src(), "sheet.cell.name-keys-by-their-first-legend", dvui.entypo.text, 5);
+    ribbonGap(6);
+    // The canvas beside it, to see its keys change.
+    const prev = state.context;
+    defer state.context = prev;
+    state.context = .{ .sheet = sheet_sel.sheet };
+    ribbonButton(@src(), "sheet.open-it-beside-the-canvas", dvui.entypo.browser, 7);
+}
+
+/// A manufacturing view's ribbon: its plan's operations, checks and export.
+/// The buttons act on the view's plan (pressed with it as the context).
+fn planRibbon() void {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    defer bar.deinit();
+    const prev = state.context;
+    defer state.context = prev;
+    state.context = .{ .plan = @enumFromInt(vl.views[vl.active].target) };
+    ribbonButton(@src(), "plan.add-an-operation", dvui.entypo.add_to_list, 1);
+    ribbonGap(2);
+    ribbonButton(@src(), "plan.checks.check-this-plan", dvui.entypo.check, 3);
+    ribbonButton(@src(), "plan.checks.clear-results", dvui.entypo.erase, 4);
+    ribbonGap(5);
+    ribbonButton(@src(), "plan.export-this-plan-make-it-active", dvui.entypo.text_document, 6);
 }
 
 /// A ribbon icon button tagged `id` (its badge after it); its rect.

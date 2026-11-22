@@ -38,6 +38,8 @@ What the app opens on, before there is a document: none of the canvas's interfac
 - The tab bar runs the window's full width: the edges' strips (and their hot edges) and docked panes start below it. The first tab stays where it was, at the views' left edge.
 - A window's shown tab is joined to its view in three sections: the top, holding the name; a wider middle band, a longer contact with the view; then the view. Each meets the next with fillets (the top's corners, each step's inner and outer corners, into the view), all filled with the colour the view's top has (the ruler's, for a canvas) and outlined thinly; no highlight colour, the shape ties it to its view. Other tabs are plain labels.
 
+- A legend sheet view's ribbon (2026-11-22): Add a row, Remove this row | Name keys by grid position, Name keys by their first legend | Open it beside the canvas (no single keys: letters type into the cells). A manufacturing view's: Add an operation | Check this plan, Clear results | Export this plan (make it active); they act on the view's plan.
+
 ## View strips (2026-11-22)
 
 - Each window's strip is 22 px (was 30): its tab shown (the folder tab joined to its view; italic while a preview), with a ▾ in it opening the window's list (Ctrl+E, or Ctrl+T): this window's tabs first (a click shows one, × takes it off), then a filter and the document's contexts (a click shows one here, as a new tab when it is not one already; Enter takes the first match). The window's other tabs follow faintly where there is room (a click shows one). The split button at the right. The + button and the tabs' own × are gone from the strip (in the list now).
