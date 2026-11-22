@@ -45,7 +45,7 @@ $Z build gui-test             # the GUI driven headless (apps/gui/harness_test.z
 $Z build gui-test -Dgui-filter=tabs   # only the GUI tests whose names hold "tabs"
 ```
 
-Test what a change can affect, not everything. Interface work (widgets, panes, views, tabs, windows) stays apart from the document and its geometry, so it runs its own GUI tests (`-Dgui-filter`) and the views tests, not the example and SVG regressions.
+We are in development, not maintenance (the owner, 2026-11-22). Several changes may be made without building, and builds without testing. Do not run the full test suite (or the whole GUI suite) on every step: run it when the owner asks, or before a release. Otherwise, at most the few tests about what changed (`-Dgui-filter`), and only when they tell you something you need now. Interface work (widgets, panes, views, tabs, windows) stays apart from the document and its geometry, so it never needs the example and SVG regressions.
 
 Regression check after any engine or layout change: the PC keyboard sample's SVG must not change. (Its baseline was renewed on 2026-11-16, when placement moved onto engine v2; on 2026-11-18, when a shifted pair's base symbol moved into a slot of its own; and on 2026-11-20, when the keyboard became six tracks laid out in advance: the same geometry to 3e-14 mm, its row positions now typed rather than summed.)
 

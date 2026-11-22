@@ -1873,11 +1873,18 @@ test "the ribbon: the canvas tools there, each with its key: P, R, Shift+R, T, S
     try std.testing.expectEqualStrings("construction", api.toolName());
 }
 
-test "the ribbon's drops: the ▾ after Add shape opens its kinds, one chosen picks the tool; R held opens the tracks' kinds, tapped picks rows; Esc closes" {
+test "the ribbon's drops: no Add shape on the canvas; in a panel, the ▾ after it opens its kinds, one chosen picks the tool; R held opens the tracks' kinds, tapped picks rows; Esc closes" {
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
     try r.clickAt(api.screenOf(150, 100).?);
+    // On the canvas, no Add shape: nothing is drawn directly on it.
+    _ = try r.rectOf("tool.add-rows");
+    try std.testing.expect(dvui.tagGet("tool.add-shape") == null);
+    // Inside a panel it is there.
+    try openExample(&r, "PC keyboard");
+    try r.select("\"PC keyboard (ANSI 104)\"");
+    _ = try r.rectOf("tool.add-shape");
     try r.press("ribbon.drop.shape");
     try r.frames(3);
     try std.testing.expectEqualStrings("shape", api.dropOpen());
@@ -1887,14 +1894,14 @@ test "the ribbon's drops: the ▾ after Add shape opens its kinds, one chosen pi
     try std.testing.expectEqualStrings("add_art", api.toolName());
     try r.key(.escape, .none);
     // R tapped: rows, no drop.
-    try r.clickAt(api.screenOf(150, 100).?);
+    try r.clickAt(api.screenOf(-20, -20).?);
     try r.key(.r, .none);
     try r.frames(2);
     try std.testing.expectEqualStrings("add_tracks", api.toolName());
     try std.testing.expectEqualStrings("", api.dropOpen());
     try r.key(.escape, .none);
     // L: the Layers panel; Esc closes it.
-    try r.clickAt(api.screenOf(150, 100).?);
+    try r.clickAt(api.screenOf(-20, -20).?);
     try r.key(.l, .none);
     try r.frames(3);
     try std.testing.expectEqualStrings("layers", api.dropOpen());

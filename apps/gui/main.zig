@@ -13146,6 +13146,9 @@ fn toolBar() void {
     // In the ribbon every tool shows, faint where it does not apply to
     // the context yet; elsewhere only those that apply.
     // On a canvas or in a frame: start a sketch where the next click lands.
+    // Nothing is drawn directly on a canvas or in a frame, only inside a
+    // container (the owner, 2026-11-22). A sketch is one: what is drawn in
+    // it stays in it. New sketch: one where the next click lands.
     if (showTool(on_canvas)) {
         const prev_a = faintUnless(on_canvas);
         defer dvui.alphaSet(prev_a);
@@ -13158,9 +13161,9 @@ fn toolBar() void {
         dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "New sketch: click where its origin goes, then draw and constrain it", .{}, .{});
     }
 
-    if (showTool(state.context == .panel)) {
-        const prev_a = faintUnless(state.context == .panel);
-        defer dvui.alphaSet(prev_a);
+    // Line art only inside a panel: on the canvas's own panel (or a
+    // frame's) it would be drawn directly on the canvas.
+    if (inDrawingContainer()) {
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
         ribbon_next_drop = .shape;
@@ -13169,7 +13172,11 @@ fn toolBar() void {
             .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add shape: drag out line art on the panel; tracks under it flow around its ink", .{}, .{});
-
+    }
+    // Containers: tracks, on a panel or on the canvas.
+    if (showTool(state.context == .panel)) {
+        const prev_a = faintUnless(state.context == .panel);
+        defer dvui.alphaSet(prev_a);
         // Two track modes, one button each: rows (tiles flow left to right)
         // and columns (top to bottom).
         // And a third: one track, laid out where it is drawn, running the
@@ -13241,6 +13248,16 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add panel: drag out its outline on the sheet", .{}, .{});
     }
+}
+
+/// Whether the context is a panel that takes line art: not the canvas's
+/// own nor a frame's (nothing is drawn directly on a canvas or in a
+/// frame; only inside a container: a panel, a sketch).
+fn inDrawingContainer() bool {
+    return switch (state.context) {
+        .panel => |pi| pi < state.model.panels.items.len and !state.model.panels.items[pi].unbounded,
+        else => false,
+    };
 }
 
 /// Whether a tool that `applies` (or not) is shown: always in the ribbon.
@@ -14312,6 +14329,10 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     handler("tool.add-shape", struct {
         fn f(_: i32) void {
+            if (!inDrawingContainer() and state.tool != .add_art) {
+                state.status = "Shapes are drawn inside a panel: choose one first (nothing is drawn directly on the canvas). ";
+                return;
+            }
             state.drag = null;
             state.tool = if (state.tool == .add_art) .select else .add_art;
         }
@@ -14835,6 +14856,11 @@ const button_handlers = [_]ButtonHandler{
     handler("ribbon.shape.*", struct {
         fn f(arg: i32) void {
             if (arg < 0 or arg >= shape_names.len) return;
+            drop_open = null;
+            if (!inDrawingContainer()) {
+                state.status = "Shapes are drawn inside a panel: choose one first (nothing is drawn directly on the canvas). ";
+                return;
+            }
             shape_kind = @enumFromInt(arg);
             polygon_pts.clearRetainingCapacity();
             state.drag = null;
