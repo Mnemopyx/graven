@@ -112,3 +112,14 @@ Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 buil
 
 Steps 1 and 2 built: the ribbon under the menu bar with the canvas tools and their key badges (Alt: full strength), single keys for the tools; ▾ and hold-to-open, pull-downs (shapes; rows, columns, track), the full-width Layers drop panel (no OK/Cancel); the Tools pane retired. Step 3 built: 22 px view strips, the ▾ list (this window's tabs, then the contexts; Ctrl+E), the page slot and `View.page` ready for paged documents. Step 4 built: ribbons for sheet and plan views. The four steps of the ribbon plan are done; next as the owner names it (status.md, "The ribbon").
 
+
+## Icons and icon files (2026-11-22, paused: the owner moved on)
+
+Built: the style rules and seven icons (`scripts/icons.py`); the icon-file format (RGB a full-colour ground with a transparent key and override slots in the JSON, alpha one ink's distance; msdf-atlas-gen's layout, type `graven-ink`); the tools (`build`, `sheet`, `ribbon` previews); the GUI reading Graven's file and the user's `<data>/icons` (`iconfile.zig`, cached rasters per size); square 64 px ribbon keys, the key in a fade 3 above the bottom; a key's drop as its top right corner. Remaining, in order:
+
+1. **Step 3, the rest of the set:** Graven icons for the ribbon's borrowed ones (select, measure K, sketch N, select boundaries B, select area A, add shape), then the sheet and plan ribbons, by the style rules. Leave the top right corner clear on keys with a drop (the ▾ tab covers it now).
+2. **Style rules still open:** stroke fixed in pixels or scaling with size; colour by what a tool makes or what it works on; the dashed container and the ringed + on every add tool; a direction convention for arrows; the faint (not-applicable) treatment, which washes the icons out.
+3. **Override slots:** read from files but nothing recolours them; wire them to the theme (dark panes) and a colour-blind set, and choose the dark palette.
+4. **Pull-downs in the light theme;** the ribbon's height (52) now has room to spare under 32 px keys; the Alt-held fade not yet seen under Xvfb; hold-to-open not tested by a GUI test.
+5. **The blueprint** has none of the icon-file work yet (`docs/status.md` has it all).
+6. Leaks at exit from the element registry's records and the old TinyVG cache (not from `iconfile.zig`).
