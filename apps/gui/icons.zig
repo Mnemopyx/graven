@@ -60,6 +60,46 @@ pub const Icon = enum {
     }
 };
 
+/// Graven's own icons (scripts/icons.py writes them from the style rules:
+/// outlined, regions filled by kind of thing, a dashed outline for the
+/// container a tool works inside). Drawn in their own colours.
+pub const GIcon = enum {
+    add_panel,
+    add_rows,
+    add_columns,
+    add_track,
+    fit_to_tiles,
+    construction_line,
+    layers,
+
+    fn svg(comptime g: GIcon) []const u8 {
+        const name = comptime blk: {
+            var buf: [@tagName(g).len]u8 = @tagName(g)[0..].*;
+            std.mem.replaceScalar(u8, &buf, '_', '-');
+            const out = buf;
+            break :blk out;
+        };
+        return @embedFile("icons/graven/" ++ name ++ ".svg");
+    }
+};
+
+var gcache: [@typeInfo(GIcon).@"enum".field_names.len]?[]const u8 = @splat(null);
+
+/// Graven icon `g` as TinyVG (converted once), or null if it would not.
+pub fn graven(comptime g: GIcon) ?[]const u8 {
+    const k = @intFromEnum(g);
+    if (gcache[k]) |t| return t;
+    const t = dvui.svgToTvg(dvui.currentWindow().gpa, g.svg()) catch return null;
+    gcache[k] = t;
+    return t;
+}
+
+/// Whether `tvg` is one of Graven's own icons (drawn in its own colours).
+pub fn isGraven(tvg: []const u8) bool {
+    for (gcache) |c| if (c) |t| if (t.ptr == tvg.ptr) return true;
+    return false;
+}
+
 const Layers = struct { tone: []const u8, line: []const u8 };
 
 var cache: [@typeInfo(Icon).@"enum".field_names.len]?Layers = @splat(null);

@@ -13258,7 +13258,12 @@ fn toolBar() void {
             const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[4] and (mode[4] == .track or tracks_tool.major == mode[0]);
             var twd: dvui.WidgetData = undefined;
             if (mi == 0) ribbon_next_drop = .tracks;
-            keyIcon(@src(), mode[1], mode[2], 0, .{
+            const own: ?[]const u8 = switch (mi) {
+                0 => icons.graven(.add_rows),
+                1 => icons.graven(.add_columns),
+                else => icons.graven(.add_track),
+            };
+            keyIcon(@src(), mode[1], own orelse mode[2], 0, .{
                 .id_extra = mi,
                 .data_out = &twd,
                 .color_fill = if (mode_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
@@ -13271,7 +13276,7 @@ fn toolBar() void {
         defer dvui.alphaSet(prev_a);
         // Fit to tiles: the tracks shrink to what has been put in them.
         var fwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Fit to tiles", dvui.entypo.crop, 0, .{ .data_out = &fwd });
+        keyIcon(@src(), "Fit to tiles", icons.graven(.fit_to_tiles) orelse dvui.entypo.crop, 0, .{ .data_out = &fwd });
         dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
     }
     {
@@ -13288,7 +13293,7 @@ fn toolBar() void {
         // Construction line: a mode tool on a canvas or in a frame.
         const on = state.tool == .construction;
         var gwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Construction line", dvui.entypo.flow_line, 0, .{
+        keyIcon(@src(), "Construction line", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, .{
             .data_out = &gwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -13311,7 +13316,7 @@ fn toolBar() void {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
         var awd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Add panel", dvui.entypo.squared_plus, 0, .{
+        keyIcon(@src(), "Add panel", icons.graven(.add_panel) orelse dvui.entypo.squared_plus, 0, .{
             .data_out = &awd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -14016,7 +14021,9 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
     (dvui.Rect.Physical{ .x = r.x, .y = r.y, .w = s, .h = r.h }).fill(.{}, .{ .color = .{ .color = dvui.Color.white } });
     (dvui.Rect.Physical{ .x = r.x + r.w - s, .y = r.y, .w = s, .h = r.h }).fill(.{}, .{ .color = .{ .color = dvui.Color.black.opacity(0.22) } });
     const ink = dvui.themeGet().color(.control, .text);
-    dvui.icon(@src(), name, tvg, .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none });
+    // Graven's own icons in their own colours; others in the ink.
+    const own = icons.isGraven(tvg);
+    dvui.icon(@src(), name, tvg, if (own) .{ .fill_color = null, .stroke_color = null } else .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none });
     const clicked = bw.clicked();
     bw.drawFocus();
     wd.* = bw.data().*;
@@ -14344,7 +14351,7 @@ fn ribbon() void {
     if (state.model.spaces.items.len > 0) {
         _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 6, .h = 6 } });
         var lwd: dvui.WidgetData = undefined;
-        const r = keyIconData(@src(), "Layers", dvui.entypo.layers, &lwd, "ribbon.layers");
+        const r = keyIconData(@src(), "Layers", icons.graven(.layers) orelse dvui.entypo.layers, &lwd, "ribbon.layers");
         drop_anchor.set(.layers, r.toNatural());
         dvui.tooltip(@src(), .{ .active_rect = r }, "Layers: show or hide each, drag to reorder the stack, the chosen layer's settings (L; held, or clicked)", .{}, .{});
     }
