@@ -21,11 +21,12 @@ Graven composes control-panel and keycap legends, and tabletop game pieces (boar
 
 ## Toolchain
 
-Zig 0.17.0 (the build needs it: `minimum_zig_version`). In a cloud session without it:
+Zig 0.17.0 (the build needs it: `minimum_zig_version`). The cloud environment's setup script runs `scripts/cloud-setup.sh` (from `ui-dev`), so a cloud session normally starts with `zig` on the path (`/opt/zig17`), every Zig package in the cache, the fonts fetched and the GUI built once. Without it:
 
 ```sh
 pip install --target "$SCRATCH/zig17" ziglang==0.17.0
 Z="$SCRATCH/zig17/ziglang/zig"
+python3 scripts/zig-prefetch.py --zig "$Z"   # Zig cannot fetch through the cloud proxy; this caches every package itself
 ```
 
 Fonts for the math packages are not in git: `python3 scripts/fetch-fonts.py` puts them in `fonts/` (pinned by SHA-256; or `$GRAVEN_FONTS`).
