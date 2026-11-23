@@ -20389,6 +20389,21 @@ fn nearestBoundary(p: geom.Point) ?HoverTarget {
         const b = panel.box();
         consider(.{ .panel = .{ .panel = pi, .box = b } }, b, p, reach, &best, &best_d, &best_area);
     }
+    // Construction lines in the shown space (while their layer shows): a
+    // boundary too, by their distance from the pointer; a line has no
+    // area, so it wins a tie with a box's edge it lies on.
+    if (shown_space < state.model.spaces.items.len and ViewLayer.guides.shown()) {
+        const far = 1e5;
+        const clip: geom.Box = if (canvas_free) |cf| guideClipBox(cf.area, shown_space) else .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
+        for (state.model.spaces.items[shown_space].guides.items, 0..) |g, gi| {
+            const d = g.distance(p);
+            if (d > reach or d > best_d + 1e-9) continue;
+            const seg = g.clip(clip) orelse continue;
+            best = .{ .guide = .{ .space = shown_space, .index = gi, .seg = seg } };
+            best_d = d;
+            best_area = 0;
+        }
+    }
     return best;
 }
 

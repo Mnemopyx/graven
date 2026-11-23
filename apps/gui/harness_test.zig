@@ -2135,3 +2135,19 @@ test "the Text style panel: a style added there is the one new rows are set in" 
     };
     try std.testing.expectEqual(1, styled);
 }
+
+test "with Select boundaries on, a construction line near the pointer is a boundary: a click chooses it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("tool.construction-line");
+    try r.clickAt(api.screenOf(70, 20).?);
+    try r.clickAt(api.screenOf(130, 20).?);
+    try r.key(.escape, .none);
+    try r.clickAt(api.screenOf(100, 80).?);
+    try r.key(.b, .none);
+    try std.testing.expect(api.boundaryMode());
+    // Near it, not on it: about 1 mm off.
+    try r.clickAt(api.screenOf(100, 21).?);
+    try std.testing.expectEqualStrings("guide", api.contextName());
+}
