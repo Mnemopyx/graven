@@ -3573,6 +3573,7 @@ const Prefs = struct {
     snap_grid: bool,
     boundary_mode: bool,
     scroll: ScrollMode,
+    ribbon: RibbonSize,
     display: display.Correction,
     px_per_mm: ?f32,
     /// The pane layout in use: its name and how the panes are now.
@@ -3594,7 +3595,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .scroll = scroll_mode, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -3624,6 +3625,9 @@ fn loadPrefs() void {
     };
     if (ps.get("view.snap_grid")) |v| if (v == .boolean) {
         snap_grid = v.boolean;
+    };
+    if (ps.get("ribbon.size")) |v| if (v == .string) if (std.meta.stringToEnum(RibbonSize, v.string)) |z| {
+        ribbon_size = z;
     };
     if (ps.get("view.boundary_mode")) |v| if (v == .boolean) {
         boundary_mode = v.boolean;
@@ -3762,6 +3766,8 @@ fn savePrefsIfChanged() void {
     ps.put("view.snap_grid", .{ .boolean = now.snap_grid }, .shared);
     ps.put("view.boundary_mode", .{ .boolean = now.boundary_mode }, .shared);
     ps.put("view.scrolling", .{ .string = @tagName(now.scroll) }, .local);
+    // The ribbon's key size: this machine's (its screen).
+    ps.put("ribbon.size", .{ .string = @tagName(now.ribbon) }, .local);
     // The screen's correction belongs to this machine.
     ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
     ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
@@ -14357,11 +14363,94 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
 /// device pixels at 200 %; the owner, 2026-11-22). An icon from an icon
 /// file covers the whole key (its drawing inset in it); any other icon is
 /// drawn at `ribbon_icon`, centred in the key's upper part.
-const ribbon_icon: f32 = 26;
-const ribbon_pitch: f32 = 32;
+/// The ribbon's key size (right-click the ribbon to choose; this machine's
+/// setting, `ribbon.size`): the pitch in logical pixels. Medium is 64
+/// device pixels at 200 % (the owner, 2026-11-22).
+const RibbonSize = enum {
+    small,
+    medium,
+    large,
+    extra_large,
+
+    fn pitch(z: RibbonSize) f32 {
+        return switch (z) {
+            .small => 24,
+            .medium => 32,
+            .large => 40,
+            .extra_large => 48,
+        };
+    }
+
+    fn label(z: RibbonSize) []const u8 {
+        return switch (z) {
+            .small => "Small keys",
+            .medium => "Medium keys",
+            .large => "Large keys",
+            .extra_large => "Extra large keys",
+        };
+    }
+
+    fn tag(z: RibbonSize) []const u8 {
+        return switch (z) {
+            .small => "ribbon-size.small",
+            .medium => "ribbon-size.medium",
+            .large => "ribbon-size.large",
+            .extra_large => "ribbon-size.extra-large",
+        };
+    }
+};
+var ribbon_size: RibbonSize = .medium;
+
+/// The key-size pop-up (a right-click on the ribbon): open, where, and
+/// the frame it was asked for in (it is drawn from the next).
+var ribbon_size_menu = false;
+var ribbon_size_from: dvui.Rect.Natural = .{};
+var ribbon_size_frame: i128 = 0;
+
+fn ribbonSizeMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    ribbon_size_menu = false;
+}
+
+/// The ribbon's key sizes, the one in use marked; a choice is kept in this
+/// machine's settings.
+fn ribbonSizeMenu() void {
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&ribbon_size_menu), .close = ribbonSizeMenuClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var fm = dvui.floatingMenu(@src(), .{ .from = ribbon_size_from, .style = .popup }, .{});
+    defer fm.deinit();
+    inline for (comptime std.enums.values(RibbonSize), 0..) |z, i| {
+        const tag = uniqueTag(z.tag());
+        recordDrawn(tag, i);
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = i, .tag = tag, .margin = .all(1), .padding = .{ .x = 8, .w = 8, .y = 3, .h = 4 } });
+        bw.processEvents();
+        bw.drawBackground();
+        var lb: [48]u8 = undefined;
+        const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (ribbon_size == z) "•  " else "    ", z.label() }) catch z.label();
+        dvui.labelNoFmt(@src(), text, .{}, .{ .padding = .all(0), .margin = .all(0) });
+        if (bw.clicked()) pushButtonEvent(tag, i);
+        bw.drawFocus();
+        bw.deinit();
+    }
+}
+
+/// The ribbon keys' pitch, logical; what was drawn for 32 scales by
+/// `ribbonScale`.
+fn ribbonPitch() f32 {
+    return ribbon_size.pitch();
+}
+fn ribbonScale() f32 {
+    return ribbonPitch() / 32;
+}
+/// A borrowed (vector) icon's size in a key.
+fn ribbonIcon() f32 {
+    return 26 * ribbonScale();
+}
 /// The key's letters: their foot this far above the key's bottom, logical
 /// (the owner, 2026-11-22).
-const ribbon_key_margin: f32 = 3;
+fn ribbonKeyMargin() f32 {
+    return 3 * ribbonScale();
+}
 
 /// A ribbon button, drawn as a key in a row of keys (the owner's choice,
 /// 2026-11-22: "A3"): neighbours touching, corners 2 px, each shaded
@@ -14371,14 +14460,14 @@ const ribbon_key_margin: f32 = 3;
 /// tool on). Whether it was clicked.
 fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, o: dvui.Options, drop: ?Drop, wd: *dvui.WidgetData) bool {
     var bw: dvui.ButtonWidget = undefined;
-    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .all(0), .min_size_content = .{ .w = ribbon_pitch, .h = ribbon_pitch }, .max_size_content = .{ .w = ribbon_pitch, .h = ribbon_pitch }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
+    bw.init(src, .{}, .{ .id_extra = o.id_extra, .tag = o.tag, .margin = .all(0), .padding = .all(0), .min_size_content = .{ .w = ribbonPitch(), .h = ribbonPitch() }, .max_size_content = .{ .w = ribbonPitch(), .h = ribbonPitch() }, .gravity_y = 0.5, .background = false, .label = .{ .text = name } });
     // A key with a drop: its top right corner is the drop's ▾, taking its
     // presses before the key does (the owner, 2026-11-22: inside the key,
     // keeping the pitch).
     const corner: ?dvui.Rect.Physical = if (drop != null) blk: {
         const r0 = bw.data().borderRectScale().r;
         const s0 = dvui.windowNaturalScale();
-        break :blk .{ .x = r0.x + r0.w - drop_corner * s0, .y = r0.y, .w = drop_corner * s0, .h = drop_corner * s0 };
+        break :blk .{ .x = r0.x + r0.w - dropCorner_() * s0, .y = r0.y, .w = dropCorner_() * s0, .h = dropCorner_() * s0 };
     } else null;
     if (drop) |d| for (dvui.events()) |*e| {
         if (e.handled or e.evt != .mouse) continue;
@@ -14442,7 +14531,7 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
     } else false;
     if (!drawn) {
         const own = file_name != null;
-        const side = (ribbon_pitch - ribbon_icon) / 2;
+        const side = (ribbonPitch() - ribbonIcon()) / 2;
         dvui.icon(@src(), name, tvg, if (own) .{ .fill_color = null, .stroke_color = null } else .{ .fill_color = .{ .color = ink }, .stroke_color = .{ .color = ink } }, .{ .expand = .both, .role = .none, .padding = .{ .x = side, .w = side, .y = 1, .h = 2 * side - 1 } });
     }
     if (drop) |d| dropCorner(d, corner.?, r, o.id_extra orelse 0);
@@ -14459,7 +14548,7 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
 fn keyFade(r: dvui.Rect.Physical, text: []const u8) void {
     const s = dvui.windowNaturalScale();
     const held = dvui.currentWindow().modifiers.alt();
-    const band = 16 * s;
+    const band = 16 * ribbonScale() * s;
     const inset = 1 * s;
     const top = r.y + r.h - band - inset;
     const x0 = r.x + inset;
@@ -14479,12 +14568,12 @@ fn keyFade(r: dvui.Rect.Physical, text: []const u8) void {
     b.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
     b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
     dvui.renderTriangles(b.build_unowned(), null) catch {};
-    const font = dvui.Font.theme(.body).withSize(10).withWeight(.bold);
+    const font = dvui.Font.theme(.body).withSize(10 * ribbonScale()).withWeight(.bold);
     var ascent: f32 = 0;
     const size = font.textSizeEx(text, .{ .ascent_out = &ascent });
     // The letters' foot (the baseline: keys have no descenders) a little
     // above the key's bottom.
-    dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = r, .s = s }, .p = .{ .x = r.x + (r.w - size.w * s) / 2, .y = r.y + r.h - (ribbon_key_margin + ascent) * s }, .color = dvui.Color.white }) catch {};
+    dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = r, .s = s }, .p = .{ .x = r.x + (r.w - size.w * s) / 2, .y = r.y + r.h - (ribbonKeyMargin() + ascent) * s }, .color = dvui.Color.white }) catch {};
 }
 
 // The ribbon's drops ------------------------------------------------------------
@@ -14578,14 +14667,14 @@ fn dropCorner(d: Drop, cz: dvui.Rect.Physical, key: dvui.Rect.Physical, id_extra
         cz.fill(corners, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.35) } });
     } else if (cz.contains(dvui.currentWindow().mouse_pt)) cz.fill(corners, .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.18) } });
     // Its element, for finding it by name.
-    var zb = dvui.box(@src(), .{}, .{ .rect = .{ .x = ribbon_pitch - drop_corner, .y = 0, .w = drop_corner, .h = drop_corner }, .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra });
+    var zb = dvui.box(@src(), .{}, .{ .rect = .{ .x = ribbonPitch() - dropCorner_(), .y = 0, .w = dropCorner_(), .h = dropCorner_() }, .tag = tag, .id_extra = 7000 + 100 * @as(usize, @intFromEnum(d)) + id_extra });
     zb.deinit();
     // The ▾: a solid triangle in the ink.
     const ink = dvui.themeGet().color(.control, .text);
     const cx = cz.x + cz.w / 2 + 0.5 * s;
     const cy = cz.y + cz.h / 2 - 0.5 * s;
-    const hw = 3.2 * s;
-    const hh = 1.9 * s;
+    const hw = 3.2 * ribbonScale() * s;
+    const hh = 1.9 * ribbonScale() * s;
     const lifo = dvui.currentWindow().lifo();
     var tb = dvui.Triangles.Builder.init(lifo, 3, 3) catch return;
     defer tb.deinit(lifo);
@@ -14599,7 +14688,9 @@ fn dropCorner(d: Drop, cz: dvui.Rect.Physical, key: dvui.Rect.Physical, id_extra
 }
 
 /// A ribbon key's drop corner's side, logical.
-const drop_corner: f32 = 12;
+fn dropCorner_() f32 {
+    return 12 * ribbonScale();
+}
 
 /// Each frame: a key held long enough opens its drop; the drop open drawn.
 fn ribbonDrops() void {
@@ -14916,12 +15007,25 @@ fn keyBadge(r: dvui.Rect.Physical, text: []const u8) void {
 /// The ribbon: under the menu bar, the window's width, the active view's
 /// tools (a canvas view's today), each with its key.
 fn ribbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbon_h }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbonH() }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
     defer bar.deinit();
     {
         const br = bar.data().borderRectScale();
         ribbon_bottom = (br.r.y + br.r.h) / dvui.windowNaturalScale();
+        // A right-click anywhere on it: the key sizes.
+        for (dvui.events()) |*e| {
+            if (e.evt != .mouse or e.handled) continue;
+            const me = e.evt.mouse;
+            if (me.action != .press or me.button != .right or !br.r.contains(me.p)) continue;
+            e.handle(@src(), bar.data());
+            const ns = dvui.windowNaturalScale();
+            ribbon_size_from = .{ .x = me.p.x / ns, .y = me.p.y / ns, .w = 1, .h = 1 };
+            ribbon_size_menu = true;
+            ribbon_size_frame = dvui.frameTimeNS();
+            dvui.refresh(null, @src(), null);
+        }
     }
+    defer if (ribbon_size_menu and ribbon_size_frame != dvui.frameTimeNS()) ribbonSizeMenu();
     in_ribbon = true;
     defer in_ribbon = false;
     switch (activeKind()) {
@@ -15078,7 +15182,9 @@ fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u
 
 /// The ribbon's height, logical: its keys' and no more (the owner,
 /// 2026-11-22: no margin above and below them).
-const ribbon_h: f32 = ribbon_pitch;
+fn ribbonH() f32 {
+    return ribbonPitch();
+}
 /// Where the ribbon ends, logical (window coordinates): drop panels hang
 /// from it.
 var ribbon_bottom: f32 = 64;
@@ -15734,6 +15840,13 @@ const button_handlers = [_]ButtonHandler{
     handler("ribbon.layers", struct {
         fn f(_: i32) void {
             openDrop(.layers);
+        }
+    }.f),
+    handler("ribbon-size.*", struct {
+        fn f(arg: i32) void {
+            const all = std.enums.values(RibbonSize);
+            if (arg >= 0 and arg < all.len) ribbon_size = all[@intCast(arg)];
+            ribbon_size_menu = false;
         }
     }.f),
     handler("ribbon.styles", struct {
