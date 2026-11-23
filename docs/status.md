@@ -595,7 +595,7 @@ Done:
 - A click inside a text track's used segment places the cursor (in Select boundaries too); drag selects, Shift-click extends; Edit: Cut, Copy, Paste, Select all.
 
 To do (what still impedes text):
-- No Text tool: a column is "Add rows" (R); Add track (T) dragged down makes text run downward. Wanted: a text-box tool, dragged out, then typed in.
+- Decided (the owner, 2026-11-23): no free text tool, ever. Text always has a track to guide it (which way it runs, where it wraps, where the next line goes). Containers for content are named in the UI as content layouts: the ribbon's tools are Layout: column of rows (R), Layout: row of columns (Shift+R) and Layout: single track (T) (ids `tool.layout-column-of-rows`, `…-row-of-columns`, `…-single-track`); Properties heads one "Content layout"; default names Column1, Row1, Track1 (were Rows1, Columns1); Remove content layout; a panel's count is "Content layouts".
 - The panes start hidden though marked pinned; Properties only through View › Show or hide auto-hide panes.
 - A text track's Properties use tile words: Indent u, Row gap u, Depth rows (18) beside Rows (4), Pitch, "Make tracks of its 4 rows", Kind "column of rows, as needed", Content "From the start".
 - No paragraph settings where expected: alignment (left, centre, right, justified), line spacing, space between paragraphs, first-line indent (Paragraph style shows "None (the track's alignment)").

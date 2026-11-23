@@ -486,7 +486,7 @@ fn makeKeyboard(r: *Run) !void {
         var nb: [16]u8 = undefined;
         const name = try std.fmt.bufPrint(&nb, "Row{d}", .{k});
         try r.select("\"PC keyboard (ANSI 104)\"");
-        try r.press("tool.add-track");
+        try r.press("tool.layout-single-track");
         if (k == 1) try r.choose("tool.add-tracks.size-to", "Tile: key");
         try r.drag(try screen(.{ 20, 120 }), try screen(.{ 200, 121 }));
         try r.field("track.name", name);
@@ -1162,7 +1162,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     try r.drag(try screen(.{ 10, 10 }), try screen(.{ 160, 90 }));
     try r.select("Panel1");
     // Two rows of keys in a region: three, a line break, two.
-    try r.press("tool.add-rows");
+    try r.press("tool.layout-column-of-rows");
     try r.drag(try screen(.{ 15, 85 }), try screen(.{ 120, 45 }));
     try r.field("track.length", "5");
     try r.field("track.depth", "2");
@@ -1179,7 +1179,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     const before = try panelSvg(a, api.model(), "Panel1", face);
     defer a.free(before);
 
-    try r.select("Panel1.Rows1");
+    try r.select("Panel1.Column1");
     try r.press("track.make-tracks");
     try r.frames(3);
     const m = api.model();
@@ -1860,7 +1860,7 @@ test "the ribbon: the canvas tools there, each with its key: P, R, Shift+R, T, S
     var r = try Run.start();
     defer r.stop();
     try r.key(.m, .none);
-    _ = try r.rectOf("tool.add-rows");
+    _ = try r.rectOf("tool.layout-column-of-rows");
     // The canvas takes the keys once clicked in.
     try r.clickAt(api.screenOf(150, 100).?);
     try r.key(.p, .none);
@@ -1882,7 +1882,7 @@ test "the ribbon's drops: no Add shape on the canvas; in a panel, the ▾ after 
     try r.key(.m, .none);
     try r.clickAt(api.screenOf(150, 100).?);
     // On the canvas, no Add shape: nothing is drawn directly on it.
-    _ = try r.rectOf("tool.add-rows");
+    _ = try r.rectOf("tool.layout-column-of-rows");
     try std.testing.expect(dvui.tagGet("tool.add-shape") == null);
     // Inside a panel it is there.
     try openExample(&r, "PC keyboard");
@@ -2244,7 +2244,7 @@ test "a click on empty canvas or frame chooses it, Select boundaries on or off, 
         // The canvas's tools: a sketch, tracks, a panel, an area; no shape
         // (nothing is drawn directly on it).
         _ = try r.rectOf("tool.new-sketch");
-        _ = try r.rectOf("tool.add-rows");
+        _ = try r.rectOf("tool.layout-column-of-rows");
         _ = try r.rectOf("tool.add-panel");
         _ = try r.rectOf("tool.select-area");
         try std.testing.expect(dvui.tagGet("tool.add-shape") == null);

@@ -739,7 +739,7 @@ const Context = union(enum) {
             .worksheet => "Worksheet",
             .panel => "Panel",
             // A track laid out in advance is a track, not a region.
-            .region => |r| if (r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len and state.model.panels.items[r.panel].regions.items[r.region].kind == .track) "Track" else "Region",
+            .region => |r| if (r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len and state.model.panels.items[r.panel].regions.items[r.region].kind == .track) "Content layout: single track" else "Content layout",
             .row => "Row",
             .tile => "Tile",
             .art => "Line art",
@@ -13878,7 +13878,7 @@ fn validTracksSizeTo() void {
 fn tracksToolOptions() !void {
     const saved_group = pushGroup("tool.add-tracks");
     defer popGroup(saved_group);
-    headingAs("tool.add-tracks", "{s}", .{if (tracks_tool.kind == .track) "Add a track" else if (tracks_tool.major == .row) "Add rows" else "Add columns"}, 9000);
+    headingAs("tool.add-tracks", "{s}", .{if (tracks_tool.kind == .track) "Layout: single track" else if (tracks_tool.major == .row) "Layout: column of rows" else "Layout: row of columns"}, 9000);
     const protos = state.model.prototypes.items;
     const styles = state.model.styles.items;
     validTracksSizeTo();
@@ -14100,7 +14100,7 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     // resized once their tiles show what is needed.
     var name_buf: [32]u8 = undefined;
     // Generated names are identifiers, numbered within the panel.
-    const name = state.model.freshName(&name_buf, .{ .panel = plan.panel }, if (tracks_tool.kind == .track) "Track" else if (plan.major == .row) "Rows" else "Columns");
+    const name = state.model.freshName(&name_buf, .{ .panel = plan.panel }, if (tracks_tool.kind == .track) "Track" else if (plan.major == .row) "Column" else "Row");
     const r = act(.addTracks, .{plan.panel, .{
         .name = name,
         .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
@@ -14229,9 +14229,9 @@ fn toolBar() void {
         // And a third: one track, laid out where it is drawn, running the
         // way the drag goes.
         inline for (.{
-            .{ layout.model.Major.row, "Add rows", dvui.entypo.menu, "Add rows: a column of rows, added as content needs them, drawn out on the panel", layout.model.TileRegion.Kind.region },
-            .{ layout.model.Major.column, "Add columns", dvui.entypo.bar_graph, "Add columns: a row of columns, added as content needs them, drawn out on the panel", layout.model.TileRegion.Kind.region },
-            .{ layout.model.Major.row, "Add track", dvui.entypo.flow_line, "Add track: one line where it is drawn, running right or down as dragged; its own flow, or continuing another's", layout.model.TileRegion.Kind.track },
+            .{ layout.model.Major.row, "Layout: column of rows", dvui.entypo.menu, "Layout: column of rows, a content layout drawn out on the panel; content flows through its rows in order, a row added as it needs one", layout.model.TileRegion.Kind.region },
+            .{ layout.model.Major.column, "Layout: row of columns", dvui.entypo.bar_graph, "Layout: row of columns, a content layout drawn out on the panel; content flows through its columns in order, a column added as it needs one", layout.model.TileRegion.Kind.region },
+            .{ layout.model.Major.row, "Layout: single track", dvui.entypo.flow_line, "Layout: single track, one line where it is drawn, running right or down as dragged; its own flow, or continuing another's", layout.model.TileRegion.Kind.track },
         }, 0..) |mode, mi| {
             const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[4] and (mode[4] == .track or tracks_tool.major == mode[0]);
             var twd: dvui.WidgetData = undefined;
@@ -15331,7 +15331,7 @@ const Drop = enum {
     /// The tool action whose key, held, opens it.
     fn heldBy(a: keymap.ActionId) ?Drop {
         if (a == kact("tool.add-shape")) return .shape;
-        if (a == kact("tool.add-rows") or a == kact("tool.add-columns") or a == kact("tool.add-track")) return .tracks;
+        if (a == kact("tool.layout-column-of-rows") or a == kact("tool.layout-row-of-columns") or a == kact("tool.layout-single-track")) return .tracks;
         if (a == kact("ribbon.layers")) return .layers;
         if (a == kact("ribbon.styles")) return .styles;
         return null;
@@ -15532,7 +15532,7 @@ fn shapeMenu() void {
     for (shape_names, 0..) |n, i| dropItem("ribbon.shape", n, @intCast(i), state.tool == .add_art and @intFromEnum(shape_kind) == i, i);
 }
 
-const track_names = [_][]const u8{ "Add rows", "Add columns", "Add track" };
+const track_names = [_][]const u8{ "Layout: column of rows", "Layout: row of columns", "Layout: single track" };
 
 fn tracksMenu() void {
     for (track_names, 0..) |n, i| {
@@ -16091,17 +16091,17 @@ const button_handlers = [_]ButtonHandler{
             state.tool = if (state.tool == .add_art) .select else .add_art;
         }
     }.f),
-    handler("tool.add-rows", struct {
+    handler("tool.layout-column-of-rows", struct {
         fn f(_: i32) void {
             tracksMode(.row, .region);
         }
     }.f),
-    handler("tool.add-columns", struct {
+    handler("tool.layout-row-of-columns", struct {
         fn f(_: i32) void {
             tracksMode(.column, .region);
         }
     }.f),
-    handler("tool.add-track", struct {
+    handler("tool.layout-single-track", struct {
         fn f(_: i32) void {
             tracksMode(.row, .track);
         }
@@ -17894,7 +17894,7 @@ fn properties() !void {
                 if (numberProp("Width, mm", panel.w, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "panel size", pi }), .setPanelSize, .{ pi, v, panel.h }) catch {};
                 if (numberProp("Height, mm", panel.h, 0.01, 100000, 12)) |v| actM(mergeKey(.{ "panel size", pi }), .setPanelSize, .{ pi, panel.w, v }) catch {};
             } else propText("Size", "{d:.2} × {d:.2} mm", .{ panel.w, panel.h }, 3);
-            propText("Regions", "{d}", .{panel.regions.items.len}, 4);
+            propText("Content layouts", "{d}", .{panel.regions.items.len}, 4);
             if (panel.regions.items.len > 0) {
                 // Its keys named in order: its tracks in turn, each flow's
                 // keys (one flow a row named as one).
@@ -17933,7 +17933,7 @@ fn properties() !void {
             if (numberProp(asElement("track.origin.across"), region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
             if (numberProp(asElement("track.origin.up"), region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
             const is_track = region.kind == .track;
-            propText(asElement("track.kind"), "{s}", .{if (is_track) "one line, set in advance" else if (region.major() == .row) "column of rows, as needed" else "row of columns, as needed"}, 130);
+            propText(asElement("track.kind"), "{s}", .{if (is_track) "single track, laid out in advance" else if (region.major() == .row) "column of rows, added as content needs them" else "row of columns, added as content needs them"}, 130);
             // Which way its baselines run and how content stands on them:
             // rows and columns are two settings of these.
             if (numberProp(asElement("track.direction"), region.direction, -360, 360, 131)) |v| setOrientationOf(r.panel, r.region, v, region.rotation);
@@ -17979,7 +17979,7 @@ fn properties() !void {
                 const label = std.fmt.bufPrint(&lb, "Make tracks of its {d} {s}", .{ placed_rows.len, if (region.major() == .row) "rows" else "columns" }) catch "Make tracks";
                 if (placed_rows.len > 0) actionButton(@src(), "track.make-tracks", label, 0, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } });
             }
-            actionButton(@src(), "track.remove", if (is_track) "Remove track" else "Remove region", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
+            actionButton(@src(), "track.remove", "Remove content layout", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
             try trackFlowProperties(r.panel, r.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
@@ -19255,7 +19255,7 @@ fn statusContent() void {
         .add_art => if (shape_kind == .polygon) "Add polygon: click each corner; click the first again, or Enter, to close · Esc cancels" else "Add shape: drag out its box · Esc cancels",
         .select_area => "Select area: drag around the objects to pick · Esc cancels",
         .construction => if (guide_pending) "Construction line: click its second point (Shift: 15° steps) · Esc cancels" else "Construction line: drag from a point to another, or click both (Shift: 15° steps) · Esc ends",
-        .add_tracks => if (tracks_tool.kind == .track) "Add a track: drag it out, right or down, on the panel · Esc cancels" else if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
+        .add_tracks => if (tracks_tool.kind == .track) "Layout: single track: drag it out, right or down; content runs the way it is drawn · Esc cancels" else if (tracks_tool.major == .row) "Layout: column of rows: drag it out; content flows through its rows in order · Esc cancels" else "Layout: row of columns: drag it out; content flows through its columns in order · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
         .insert_figure => "Insert figure: drag out its size (its proportions kept), or click for its own size · Esc cancels",

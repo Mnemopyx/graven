@@ -389,9 +389,9 @@ pub const binds = [_]B{
     // The ribbon's tools, a single key each (shown on their buttons).
     .{ .mode = "canvas", .chord = "p", .action = "tool.add-panel" },
     .{ .mode = "canvas", .chord = "i", .action = "tool.insert-figure" },
-    .{ .mode = "canvas", .chord = "r", .action = "tool.add-rows" },
-    .{ .mode = "canvas", .chord = "shift+r", .action = "tool.add-columns" },
-    .{ .mode = "canvas", .chord = "t", .action = "tool.add-track" },
+    .{ .mode = "canvas", .chord = "r", .action = "tool.layout-column-of-rows" },
+    .{ .mode = "canvas", .chord = "shift+r", .action = "tool.layout-row-of-columns" },
+    .{ .mode = "canvas", .chord = "t", .action = "tool.layout-single-track" },
     .{ .mode = "canvas", .chord = "s", .action = "tool.add-shape" },
     .{ .mode = "canvas", .chord = "a", .action = "tool.select-area" },
     .{ .mode = "canvas", .chord = "n", .action = "tool.new-sketch" },
