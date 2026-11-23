@@ -476,6 +476,21 @@ pub fn dupeShapes(a: Allocator, shapes: []const Shape, d: Point) Allocator.Error
     return out;
 }
 
+/// A copy of `shapes` in `a`, transformed by `m`.
+pub fn transformShapes(a: Allocator, shapes: []const Shape, m: geom.Affine) Allocator.Error![]const Shape {
+    const out = try a.alloc(Shape, shapes.len);
+    for (shapes, out) |sh, *o| {
+        const contours = try a.alloc(geom.Contour, sh.outline.contours.len);
+        for (sh.outline.contours, contours) |c, *oc| {
+            const segs = try a.alloc(Segment, c.segments.len);
+            for (c.segments, segs) |sg, *os| os.* = sg.transformed(m);
+            oc.* = .{ .segments = segs };
+        }
+        o.* = .{ .name = try a.dupe(u8, sh.name), .outline = .{ .contours = contours }, .paint = sh.paint };
+    }
+    return out;
+}
+
 pub fn dupe(a: Allocator, art: Art) Allocator.Error!Art {
     const layers = try a.alloc(Layer, art.layers.len);
     for (art.layers, layers) |l, *out| {

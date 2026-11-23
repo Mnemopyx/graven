@@ -2511,7 +2511,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, export_sheet, export_3mf };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -3265,6 +3265,7 @@ fn systemFileChoice(a: std.mem.Allocator, kind: FilePromptKind) ?[:0]const u8 {
         .import_text => dvui.dialogNativeFileOpen(a, .{ .title = "Import text", .filters = &.{ "*.rtf", "*.txt" }, .filter_description = "RTF or plain text" }) catch null,
         .import_sheet => dvui.dialogNativeFileOpen(a, .{ .title = "Import a legend sheet", .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .import_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Import a figure", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
+        .replace_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Replace the figure's drawing", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
         .save_as => dvui.dialogNativeFileSave(a, .{ .title = "Save the document as", .path = file_path orelse "untitled" ++ doc_ext, .filters = &.{"*" ++ doc_ext}, .filter_description = "Graven documents" }) catch null,
         .export_sheet => dvui.dialogNativeFileSave(a, .{ .title = "Export the legend sheet", .path = sheetExportName(), .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .export_3mf => dvui.dialogNativeFileSave(a, .{ .title = "Export the panel as 3MF", .path = threeMfName(), .filters = &.{"*.3mf"}, .filter_description = "3MF files" }) catch null,
@@ -3278,6 +3279,7 @@ fn fileChosen(kind: FilePromptKind, path: []const u8) void {
         .import_text => importText(path),
         .import_sheet => importSheet(path),
         .import_figure => importFigure(path),
+        .replace_figure => replaceFigureFrom(path),
         .export_sheet => exportSheet(path),
         .export_3mf => exportThreeMf(path),
         .save_as => {
@@ -3330,6 +3332,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .import_text => importTitle(),
         .import_sheet => sheetImportTitle(),
         .import_figure => "Import a figure from an SVG file",
+        .replace_figure => "Replace the figure's drawing from an SVG file",
         .export_sheet => "Export the legend sheet as CSV",
         .export_3mf => "Export the panel as 3MF (its fabrication layers)",
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
@@ -3373,7 +3376,7 @@ fn filePrompt(kind: FilePromptKind) void {
         keyButton(@src(), switch (kind) {
             .open => "Open",
             .save_as => "Save",
-            .import_text, .import_sheet, .import_figure => "Import",
+            .import_text, .import_sheet, .import_figure, .replace_figure => "Import",
             .export_sheet, .export_3mf => "Export",
         }, 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
@@ -7823,6 +7826,18 @@ fn artProperties(pi: usize, index: usize) !void {
     defer popGroup(saved_group);
     const pa = state.model.panels.items[pi].art.items[index];
     propText("Name", "{s}", .{pa.name}, 1);
+    // A figure's placement: its figure, and its width (its height follows).
+    if (pa.figure != .none) {
+        const fname = if (state.model.figureIndex(pa.figure)) |fi| state.model.figures.items[fi].name else "(removed)";
+        propText("Figure", "{s}", .{fname}, 20);
+        var wb: [32]u8 = undefined;
+        if (sizesProp("Width, mm", std.fmt.bufPrint(&wb, "{d:.2}", .{pa.box().width()}) catch "", 21)) |list| if (list.len == 1) {
+            act(.setFigureArtWidth, .{ pi, index, list[0] }) catch {
+                state.status = "A width must be more than 0. ";
+            };
+        };
+        keyButton(@src(), "Show figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    }
     const b = pa.box();
     propText("Box", "({d:.1}, {d:.1}) to ({d:.1}, {d:.1}) mm", .{ b.x0, b.y0, b.x1, b.y1 }, 2);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 3);
@@ -9412,6 +9427,18 @@ fn insertFigureFromDrag(from: geom.Point, at: geom.Point) void {
         const h = fb.height();
         break :blk geom.Box{ .x0 = from.x - w / 2, .y0 = from.y - h / 2, .x1 = from.x + w / 2, .y1 = from.y + h / 2 };
     };
+    // Started on a panel: line art on it, made with it.
+    if (panelUnderForFigure(from)) |pi| {
+        const o = state.model.panels.items[pi].origin;
+        const ai = act(.placeFigureOnPanel, .{ pi, fi, geom.Point{ .x = b.x0 - o.x, .y = b.y0 - o.y }, b.width() }) catch {
+            state.status = "The figure was not placed. ";
+            return;
+        };
+        state.context = .{ .art = .{ .panel = pi, .index = ai } };
+        selection.clearRetainingCapacity();
+        if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+        return;
+    }
     const k = act(.placeFigure, .{ shown_space, fi, geom.Point{ .x = b.x0, .y = b.y0 }, b.width(), newObjectLayer() }) catch {
         state.status = "The figure was not placed. ";
         return;
@@ -9421,13 +9448,42 @@ fn insertFigureFromDrag(from: geom.Point, at: geom.Point) void {
     if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
 }
 
+/// The smallest bounded panel shown whose box holds `at`: where Insert
+/// figure puts the figure on the panel.
+fn panelUnderForFigure(at: geom.Point) ?usize {
+    var best: ?usize = null;
+    var best_area: f64 = std.math.inf(f64);
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (p.unbounded or !shownPanel(pi)) continue;
+        const b = panelBox(pi);
+        if (!contains(b, at)) continue;
+        const ar = b.width() * b.height();
+        if (ar < best_area) {
+            best_area = ar;
+            best = pi;
+        }
+    }
+    return best;
+}
+
+/// What keeps its proportions when resized: a placed figure (its ink's,
+/// inside its margin), or line art that is a figure's placement (its box's).
+const Proportions = struct { aspect: f64, margin: f64 };
+fn figureProportions(id: layout.model.ObjectId) ?Proportions {
+    if (figurePlaceOf(id)) |fp| return if (fp.h > 0) .{ .aspect = fp.w / fp.h, .margin = fp.margin } else null;
+    for (state.model.panels.items) |p| for (p.art.items) |x| if (x.id == id and x.figure != .none) {
+        const b = x.box();
+        return if (b.height() > 0) .{ .aspect = b.width() / b.height(), .margin = 0 } else null;
+    };
+    return null;
+}
+
 /// A placement's boundary `b`, resized from `was` by `edges`, made to keep
 /// its ink's proportions: the edge moved most decides; the edges not
 /// moved stay (a side's middle handle: the other axis about its middle).
-fn keepFigureProportions(fp: layout.model.FigurePlace, was: geom.Box, b: geom.Box, edges: Edges) geom.Box {
-    if (!(fp.h > 0)) return b;
-    const aspect = fp.w / fp.h;
-    const g = fp.margin;
+fn keepFigureProportions(pr: Proportions, was: geom.Box, b: geom.Box, edges: Edges) geom.Box {
+    const aspect = pr.aspect;
+    const g = pr.margin;
     const horiz = edges.left or edges.right;
     const vert = edges.bottom or edges.top;
     var w = @max(b.width() - 2 * g, 1e-3);
@@ -9468,6 +9524,7 @@ fn figurePlaceProperties(space: usize, index: usize) void {
         };
     };
     propText("Height", "{d:.2} mm (keeps its proportions)", .{fp.h}, 5);
+    keyButton(@src(), "Show figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
     var mb: [32]u8 = undefined;
     if (sizesProp("Margin, mm", std.fmt.bufPrint(&mb, "{d:.2}", .{fp.margin}) catch "", 6)) |list| if (list.len == 1) {
         act(.setFigurePlace, .{ space, index, fp.at, fp.w, list[0], fp.layer }) catch {
@@ -16984,12 +17041,47 @@ const button_handlers = [_]ButtonHandler{
             askForFile(.import_figure);
         }
     }.f),
+    handler("figure.replace-from-svg", struct {
+        fn f(_: i32) void {
+            if (state.context != .figure_def) return;
+            askForFile(.replace_figure);
+        }
+    }.f),
+    handler("figure-place.show-figure", struct {
+        fn f(_: i32) void {
+            const c = switch (state.context) {
+                .figure_place => |c| c,
+                else => return,
+            };
+            const fp = figurePlaceAt(c.space, c.index) orelse return;
+            showFigure(fp.figure);
+        }
+    }.f),
+    handler("art.show-figure", struct {
+        fn f(_: i32) void {
+            const l = switch (state.context) {
+                .art => |l| l,
+                else => return,
+            };
+            showFigure(state.model.panels.items[l.panel].art.items[l.index].figure);
+        }
+    }.f),
     handler("figure.remove-figure", struct {
         fn f(_: i32) void {
             const index = switch (state.context) {
                 .figure_def => |i| i,
                 else => return,
             };
+            // Placed: asked first (the status says so; a second press
+            // removes it and its placements).
+            const uses = state.model.figureUses(index);
+            const id = state.model.figures.items[index].id;
+            if (uses > 0 and remove_figure_armed != id) {
+                remove_figure_armed = id;
+                state.status = std.fmt.bufPrint(&import_status_buf, "Placed {d} {s}: press Remove figure again to remove it with {s}. ", .{ uses, if (uses == 1) "time" else "times", if (uses == 1) "its placement" else "its placements" }) catch "Placed: press Remove figure again to remove it with its placements. ";
+                return;
+            }
+            remove_figure_armed = .none;
             if (act(.removeFigure, .{index})) {
                 state.context = .figures;
             } else |_| state.status = "The figure was not removed. ";
@@ -22948,7 +23040,7 @@ fn selectionDrag(at: geom.Point) void {
             if (r.edges.bottom) b.y0 = @min(snapAxis(b.y0 + off.y, st, &snap_guide.y) - off.y, b.y1 - min);
             if (r.edges.top) b.y1 = @max(snapAxis(b.y1 + off.y, st, &snap_guide.y) - off.y, b.y0 + min);
         };
-        if (figurePlaceOf(r.id)) |fp| b = keepFigureProportions(fp, r.box, b, r.edges);
+        if (figureProportions(r.id)) |pr| b = keepFigureProportions(pr, r.box, b, r.edges);
         _ = actM(r.key, .placeObjects, .{ &[_]layout.model.ObjectId{r.id}, &[_]geom.Box{b} }) catch {};
         return;
     }
@@ -23384,7 +23476,7 @@ fn engageMotion(at: geom.Point) void {
         if (fr.edges.bottom) b.y0 = @min(q.y, b.y1 - min);
         if (fr.edges.top) b.y1 = @max(q.y, b.y0 + min);
         // A placed figure keeps its proportions.
-        if (figurePlaceOf(d.hit.id)) |fp| b = keepFigureProportions(fp, d.box, b, .{ .left = fr.edges.left, .right = fr.edges.right, .bottom = fr.edges.bottom, .top = fr.edges.top });
+        if (figureProportions(d.hit.id)) |pr| b = keepFigureProportions(pr, d.box, b, fr.edges);
     }
     _ = actM(d.key, .placeObjects, .{ &[_]layout.model.ObjectId{d.hit.id}, &[_]geom.Box{b} }) catch {};
 }
@@ -26216,13 +26308,49 @@ fn figureProperties(index: usize) void {
         if (p.stroke != null) strokes += 1;
     }
     propText("Paths", "{d} ({d} stroked)", .{ f.paths.len, strokes }, 4);
+    const uses = state.model.figureUses(index);
+    propText("Placed", "{d} {s}", .{ uses, if (uses == 1) "time" else "times" }, 6);
     // The ink, fitted into a box the pane's width.
     {
         var box = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .w = 120, .h = 220 }, .margin = .{ .y = 8 }, .background = true, .color_fill = .{ .color = colors.paper }, .border = .all(1), .id_extra = 5 });
         defer box.deinit();
         drawInk(box.data().contentRectScale().r, index, ink, b);
     }
-    keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Replace from SVG…", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+}
+
+/// Remove figure pressed once on a figure still placed: the figure's id,
+/// so a second press removes it and its placements.
+var remove_figure_armed: layout.model.ObjectId = .none;
+
+/// Replace from SVG: the file's drawing becomes the chosen figure's, and
+/// every placement of it follows.
+fn replaceFigureFrom(path: []const u8) void {
+    const index = switch (state.context) {
+        .figure_def => |i| i,
+        else => return,
+    };
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, a, .limited(64 << 20)) catch {
+        state.status = "That file could not be read. ";
+        return;
+    };
+    const r = layout.svg.parse(a, bytes) catch {
+        state.status = "That file is not an SVG drawing. ";
+        return;
+    };
+    if (r.paths.len == 0) {
+        state.status = "That drawing has no shapes Graven reads yet. ";
+        return;
+    }
+    act(.replaceFigure, .{ index, r.paths, std.fs.path.basename(path) }) catch {
+        state.status = "The figure was not replaced. ";
+        return;
+    };
+    state.status = "Replaced: every placement follows. ";
 }
 
 /// A figure's ink, worked out once per figure and document revision.
@@ -26259,7 +26387,18 @@ fn figureInk(index: usize) ?[]const layout.art.Shape {
 }
 
 /// The tolerance figures' strokes and drawings are flattened to, mm.
-const figure_tol = 0.002;
+const figure_tol = layout.model.figure_tolerance;
+
+/// Figure `id` made the context: chosen in the Browser, its node shown.
+fn showFigure(id: layout.model.ObjectId) void {
+    const fi = state.model.figureIndex(id) orelse {
+        state.status = "Its figure has been removed. ";
+        return;
+    };
+    selection.clearRetainingCapacity();
+    state.context = .{ .figure_def = fi };
+    state.expanded.put(state.gpa, Context.key(.figures), true) catch {};
+}
 
 /// Draws figure `index`'s ink (`shapes`, bounds `b`) fitted into `r`.
 fn drawInk(r: dvui.Rect.Physical, index: usize, shapes: []const layout.art.Shape, b: geom.Box) void {

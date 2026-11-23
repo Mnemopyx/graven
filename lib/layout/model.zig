@@ -782,6 +782,10 @@ pub const PanelArt = struct {
     /// A cutout: on a panel, a hole cut through it. Drawn as an outline,
     /// never filled, and its SVG is a hole in the panel's outline.
     cutout: bool = false,
+    /// The figure it is a placement of (its id), if any: its shapes are
+    /// that figure's ink, its frame's origin at the ink's bottom left,
+    /// made again when the figure changes or it is resized.
+    figure: ObjectId = .none,
 
     /// Its outline, if it is one closed path (one shape, one contour):
     /// what Make panel can take as a panel's edge.
@@ -1115,6 +1119,9 @@ pub const FigurePlace = struct {
 
 /// A new placement's margin, mm.
 pub const default_figure_margin = 1.0;
+
+/// The tolerance a figure's strokes are made to, mm.
+pub const figure_tolerance = 0.002;
 
 /// A layer the checks flag, and why.
 pub const LayerIssue = struct {
@@ -3131,16 +3138,129 @@ pub const Model = struct {
         return m.figures.items.len - 1;
     }
 
+    /// Renames a figure, and its placements with it.
     pub fn renameFigure(m: *Model, index: usize, name: []const u8) Error!void {
         if (index >= m.figures.items.len) return error.NoSuchItem;
-        m.figures.items[index].name = try m.a().dupe(u8, name);
+        const id = m.figures.items[index].id;
+        const n = try m.a().dupe(u8, name);
+        m.figures.items[index].name = n;
         m.figures.items[index].default_name = false;
+        for (m.spaces.items) |*sp| for (sp.figure_places.items) |*fp| {
+            if (fp.figure == id) fp.name = n;
+        };
+        for (m.panels.items) |*p| for (p.art.items) |*x| {
+            if (x.figure == id) x.name = n;
+        };
         m.revision += 1;
     }
 
+    /// Removes a figure and every placement of it.
     pub fn removeFigure(m: *Model, index: usize) Error!void {
         if (index >= m.figures.items.len) return error.NoSuchItem;
+        const id = m.figures.items[index].id;
+        for (m.spaces.items) |*sp| {
+            var k: usize = sp.figure_places.items.len;
+            while (k > 0) {
+                k -= 1;
+                if (sp.figure_places.items[k].figure == id) _ = sp.figure_places.orderedRemove(k);
+            }
+        }
+        for (m.panels.items) |*p| {
+            var k: usize = p.art.items.len;
+            while (k > 0) {
+                k -= 1;
+                if (p.art.items[k].figure == id) _ = p.art.orderedRemove(k);
+            }
+        }
         _ = m.figures.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// How many times figure `index` is placed (in spaces and on panels).
+    pub fn figureUses(m: *const Model, index: usize) usize {
+        if (index >= m.figures.items.len) return 0;
+        const id = m.figures.items[index].id;
+        var n: usize = 0;
+        for (m.spaces.items) |sp| for (sp.figure_places.items) |fp| {
+            if (fp.figure == id) n += 1;
+        };
+        for (m.panels.items) |p| for (p.art.items) |x| {
+            if (x.figure == id) n += 1;
+        };
+        return n;
+    }
+
+    /// Figure `index`'s ink, `w` mm wide (its proportions kept), its
+    /// bottom left at the origin; empty when it has no ink.
+    pub fn figureShapes(m: *Model, index: usize, w: f64) Error![]const art_.Shape {
+        const al = m.a();
+        const ink = try figure_.ink(al, m.figures.items[index], figure_tolerance);
+        const b = figure_.inkBounds(ink);
+        if (b.isEmpty() or !(b.width() > 0) or !(w > 0)) return &.{};
+        const k = w / b.width();
+        const t = geom.Affine.translate(-b.x0, -b.y0).then(geom.Affine.scale(k));
+        return art_.transformShapes(al, ink, t);
+    }
+
+    /// Places figure `figure` on panel `panel` as line art: its ink's
+    /// bottom left at `at` (panel frame), `w` mm wide; what flows under it
+    /// flows round its box at the placement margin. Its index among the
+    /// panel's art.
+    pub fn placeFigureOnPanel(m: *Model, panel: usize, figure: usize, at: geom.Point, w: f64) Error!usize {
+        if (panel >= m.panels.items.len or figure >= m.figures.items.len) return error.NoSuchItem;
+        if (!(w > 0)) return error.BadSize;
+        const shapes = try m.figureShapes(figure, w);
+        if (shapes.len == 0) return error.BadSize;
+        const f = m.figures.items[figure];
+        const list = &m.panels.items[panel].art;
+        try list.append(m.a(), .{
+            .id = m.newId(),
+            .name = try m.a().dupe(u8, f.name),
+            .at = at,
+            .shapes = shapes,
+            .wrap = .bounds,
+            .clearance = default_figure_margin,
+            .figure = f.id,
+        });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// Line art that is a figure's placement, made `w` mm wide (its
+    /// proportions kept), its bottom left where it was.
+    pub fn setFigureArtWidth(m: *Model, panel: usize, index: usize, w: f64) Error!void {
+        if (panel >= m.panels.items.len or index >= m.panels.items[panel].art.items.len) return error.NoSuchItem;
+        const x = &m.panels.items[panel].art.items[index];
+        const fi = m.figureIndex(x.figure) orelse return error.NoSuchItem;
+        if (!(w > 0)) return error.BadSize;
+        x.shapes = try m.figureShapes(fi, w);
+        m.revision += 1;
+    }
+
+    /// Figure `index`'s drawing replaced (from a file read again): every
+    /// placement follows, keeping its width and corner.
+    pub fn replaceFigure(m: *Model, index: usize, paths: []const figure_.Path, source: []const u8) Error!void {
+        if (index >= m.figures.items.len) return error.NoSuchItem;
+        const al = m.a();
+        const copy = try al.alloc(figure_.Path, paths.len);
+        for (paths, copy) |p, *c| {
+            c.* = p;
+            const subs = try al.alloc(figure_.Subpath, p.subpaths.len);
+            for (p.subpaths, subs) |sp, *o| o.* = .{ .segments = try al.dupe(geom.Segment, sp.segments), .closed = sp.closed };
+            c.subpaths = subs;
+        }
+        const f = &m.figures.items[index];
+        f.paths = copy;
+        f.source = try al.dupe(u8, source);
+        const fb = f.bounds();
+        for (m.spaces.items) |*sp| for (sp.figure_places.items) |*fp| {
+            if (fp.figure == f.id and fb.width() > 0) fp.h = fp.w * fb.height() / fb.width();
+        };
+        for (m.panels.items) |*p| for (p.art.items) |*x| {
+            if (x.figure != f.id) continue;
+            const w = x.box().width();
+            x.shapes = try m.figureShapes(index, if (w > 0) w else 10);
+        };
         m.revision += 1;
     }
 

@@ -128,7 +128,7 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
             const x = p.art.items[loc.index];
             var b = x.box();
             if (b.isEmpty()) b = .{ .x0 = x.at.x, .y0 = x.at.y, .x1 = x.at.x, .y1 = x.at.y };
-            break :blk pick(b, x.holds, vertical, false);
+            break :blk pick(b, x.holds, vertical, x.figure != .none);
         },
         .image => blk: {
             const im = m.spaces.items[loc.holder].images.items[loc.index];
@@ -189,6 +189,13 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
         .art => {
             const x = &p.art.items[loc.index];
             if (vertical) x.at.y += lo - sh.lo else x.at.x += lo - sh.lo;
+            // A figure's placement: its ink made again at the width (its
+            // height follows, its proportions kept).
+            if (!vertical and x.figure != .none and @abs(s - (sh.hi - sh.lo)) > 1e-9) {
+                if (m.figureIndex(x.figure)) |fi| if (m.figureShapes(fi, s)) |shapes| {
+                    if (shapes.len > 0) x.shapes = shapes;
+                } else |_| {};
+            }
         },
         .control_point => {
             const r = &p.regions.items[loc.index];

@@ -55,7 +55,7 @@ pub const actions = [_][:0]const u8{
     "removeRegion", "setOrientation", "splitIntoTracks",
     "addGuide", "setGuide", "removeGuide",
     "nameKeysInPanel", "setOverlay", "setGridSpacing",
-    "addFigure", "placeFigure", "setFigurePlace", "removeFigurePlace", "renameFigure", "removeFigure",
+    "addFigure", "placeFigure", "placeFigureOnPanel", "setFigureArtWidth", "replaceFigure", "setFigurePlace", "removeFigurePlace", "renameFigure", "removeFigure",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -90,6 +90,7 @@ pub const Tag = blk: {
 /// One logged change: an action and its arguments, or the whole model
 /// after a change no single action expresses (native-format bytes).
 pub const Op = blk: {
+    @setEvalBranchQuota(100_000);
     var names: [actions.len + 1][]const u8 = undefined;
     var types: [actions.len + 1]type = undefined;
     for (actions, 0..) |a, i| {
