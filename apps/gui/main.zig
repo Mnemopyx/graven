@@ -4399,7 +4399,9 @@ fn overlays() !void {
     // (keys for a track of tiles; the flow's breaks and runs), the move
     // palette for a selected track.
     const moving_track = track_cursor == null and state.context == .row;
-    if (track_cursor != null or moving_track) {
+    // Not in a track of text, for now (the owner, 2026-11-23): its keys
+    // are the usual typing ones, and the palette covered the work.
+    if ((track_cursor != null and !inTextTrack()) or moving_track) {
         // Sized to its content again when what it offers changes.
         const what: u64 = if (moving_track) 1 else if (paletteFor(track_cursor.?.panel, track_cursor.?.region)) |pal| (@as(u64, @backingInt(pal.prototype)) << 8) | (@as(u64, pal.tile_count) << 2) | @as(u64, @intFromBool(inTextTrack())) << 1 else 2;
         const S = struct {
