@@ -604,3 +604,11 @@ To do (what still impedes text):
 - A green line runs down the centre of the column and past its bottom.
 - Copy and paste are plain text (an equation pastes as its characters).
 - Keycap-specific features still visible elsewhere: Add keycap art on prototypes, the legend sheet's wording ("its keys' legends"), the File menu's keyboard and keypad examples.
+
+### Leading (2026-11-23)
+
+The owner, 2026-11-23: leading sets the distance between baselines, flexible in being fixed or relative and in its units. A text layout's Properties have a Leading field: "12pt" or "5mm" fixed; "+2pt", "+3mm", "-1pt" or "+10%" added to the prevailing font size (the style's em); "120%" a share of it; "auto" the style's own line spacing. It is stored as typed (`TileRegion.leading`, `Leading` in `model.zig`, action `setLeading`) and resolved when needed: when the style's size changes, the layout's baselines are re-spaced (`followLeading`, joined to that change's undo step). Below it, "Baselines apart" gives what it comes to in mm and pt, and how far above or below the font size. A text layout's length and depth are in mm.
+
+Decided the same day, to build generally: Properties' size values keep the unit they were typed in (the value and its unit stored, converted when needed, not once on entry). Leading is the first.
+
+To do: what a line taller than the leading does (exact with a clash flagged, or the line pushed down; asked); space between paragraphs; Indent and Row gap still in u.

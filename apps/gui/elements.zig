@@ -202,6 +202,8 @@ pub const all = [_]Element{
     .{ .id = "track.depth", .kind = .field, .label = "Depth, rows" },
     .{ .id = "track.size", .kind = .value, .label = "Size" },
     .{ .id = "track.pitch", .kind = .value, .label = "Pitch" },
+    .{ .id = "track.leading", .kind = .field, .label = "Leading" },
+    .{ .id = "track.baselines", .kind = .value, .label = "Baselines apart" },
     .{ .id = "track.rows", .kind = .value, .label = "Rows" },
     .{ .id = "track.items", .kind = .value, .label = "Items" },
     .{ .id = "track.key-prefix", .kind = .field, .label = "Key name prefix" },

@@ -12368,6 +12368,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     const drawing = state.tool != .select;
     canvas_id = box.data().id;
     validateCursor();
+    followLeading();
     for (dvui.events()) |*e| {
         // While a new canvas's units are asked for, the canvas takes no
         // input but Enter, which makes it (unless an open or save prompt
@@ -17946,12 +17947,14 @@ fn properties() !void {
                 // Text is measured in mm (the owner, 2026-11-23: text
                 // first); tiles in their unit.
                 if (region.style != null) {
-                    if (numberProp(elementLabel("track.length", "Length, mm"), along * region.pitch, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v / region.pitch, across }) catch {};
+                    if (numberProp(elementLabel("track.length", "Length, mm"), @round(along * region.pitch * 1000) / 1000, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v / region.pitch, across }) catch {};
                 } else if (numberProp(asElement("track.length"), along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
-                if (!is_track) if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
+                if (!is_track) if (region.style != null) {
+                    if (numberProp(elementLabel("track.depth", "Depth, mm"), @round(across * region.pitch * 1000) / 1000, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v / region.pitch }) catch {};
+                } else if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
                 if (region.style != null) propText(asElement("track.size"), "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
-            propText(asElement("track.pitch"), "{d:.2} mm", .{region.pitch}, 4);
+            if (region.style != null) leadingProps(r.panel, r.region) else propText(asElement("track.pitch"), "{d:.2} mm", .{region.pitch}, 4);
             if (!is_track) propText(elementLabel("track.rows", if (region.major() == .row) null else "Columns"), "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
@@ -18587,6 +18590,55 @@ fn styleRules(sid: layout.model.StyleId) !void {
         }
     }
     keyButton(@src(), "Add a rule", idArg(sid), .{ .id_extra = 5100, .margin = .{ .y = 4 } });
+}
+
+/// A style's em (its font size), mm, as its font resolves it.
+fn styleEmMm(sid: layout.model.StyleId) f64 {
+    const style = state.model.textStyle(sid).*;
+    const ctx = if (state.labels) |*l| l.context(sid) else null;
+    const cap = if (ctx) |c| c.cap_height else style.cap_height;
+    return style.em_size orelse if (ctx) |c| cap * @as(f64, @floatFromInt(c.text.upem)) / layout.legend.capUnits(c.text) else cap / layout.model.cap_per_em;
+}
+
+/// Leading is kept as typed, with its unit (the owner, 2026-11-23: values
+/// keep their units and are converted when needed, not once on entry): a
+/// layout whose style's size has changed since gets its baselines re-spaced,
+/// joined to the change that moved them, so one undo takes both back.
+fn followLeading() void {
+    // Only once the styles are resolved: until then sizes are guesses.
+    if (state.labels == null) return;
+    for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |rg, ri| {
+        const sid = rg.style orelse continue;
+        if (state.model.styleIndex(sid) == null) continue;
+        const want = if (rg.leading) |l| l.resolve(styleEmMm(sid)) else continue;
+        if (!(want > 0.01) or @abs(want - rg.pitch) < 1e-9) continue;
+        _ = hist.join(&state.model, .setLeading, .{ pi, ri, rg.leading, want }) catch {};
+    };
+}
+
+/// A text layout's leading: typed fixed ("12pt", "5mm") or relative to
+/// its style's font size ("+2pt", "+3mm", "+10%", "120%"); "auto" for the
+/// style's own line spacing. Below it, what it comes to.
+fn leadingProps(pi: usize, ri: usize) void {
+    const region = state.model.panels.items[pi].regions.items[ri];
+    const sid = region.style orelse return;
+    if (state.model.styleIndex(sid) == null) return;
+    const em = styleEmMm(sid);
+    var buf: [48]u8 = undefined;
+    const shown = if (region.leading) |l| l.format(&buf) else "auto";
+    if (textProp(asElement("track.leading"), shown, 4)) |typed| {
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
+            if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {};
+        } else if (layout.model.Leading.parse(typed)) |l| {
+            act(.setLeading, .{ pi, ri, l, l.resolve(em) }) catch {
+                state.status = "That leading is too small: baselines must be apart. ";
+            };
+        } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the style's own). ";
+    }
+    const pt = region.pitch / layout.model.mm_per_pt;
+    const em_pt = em / layout.model.mm_per_pt;
+    const extra = pt - em_pt;
+    propText(asElement("track.baselines"), "{d:.2} mm ({d:.1} pt; size {d:.1} pt {s} {d:.1})", .{ region.pitch, pt, em_pt, if (extra >= 0) "+" else "−", @abs(extra) }, 4000);
 }
 
 /// A style's size, two ways: as a point size (its em, as other software

@@ -546,6 +546,73 @@ pub const FlowSource = struct {
 /// A region holding a track: one flow of items (tiles, blanks, runs of
 /// text or equations, hard breaks) poured in order through its segments,
 /// rows or columns placed from the region's top-left corner.
+/// Leading, the distance from one baseline to the next (decided
+/// 2026-11-23, the owner): fixed ("12pt", "5mm") or relative to the
+/// prevailing font size ("+2pt", "+3mm", "+10%", "-1pt"), or a share of it
+/// ("120%"), in points, millimetres or percent.
+pub const Leading = struct {
+    amount: f64,
+    unit: Unit = .pt,
+    /// Added to the font size (typed with a sign).
+    relative: bool = false,
+
+    pub const Unit = enum { pt, mm, percent };
+
+    /// Reads "12pt", "+2pt", "-0.5 mm", "+10%", "120%"; a bare number is
+    /// points. Null when it does not read as one.
+    pub fn parse(text: []const u8) ?Leading {
+        var t = std.mem.trim(u8, text, " \t");
+        if (t.len == 0) return null;
+        const relative = t[0] == '+' or t[0] == '-';
+        var unit: Unit = .pt;
+        if (std.mem.endsWith(u8, t, "%")) {
+            unit = .percent;
+            t = t[0 .. t.len - 1];
+        } else if (std.ascii.endsWithIgnoreCase(t, "mm")) {
+            unit = .mm;
+            t = t[0 .. t.len - 2];
+        } else if (std.ascii.endsWithIgnoreCase(t, "pt")) {
+            t = t[0 .. t.len - 2];
+        }
+        t = std.mem.trim(u8, t, " \t");
+        const v = std.fmt.parseFloat(f64, t) catch return null;
+        if (!std.math.isFinite(v)) return null;
+        return .{ .amount = v, .unit = unit, .relative = relative };
+    }
+
+    /// As typed: "+2pt", "12pt", "120%".
+    pub fn format(l: Leading, buf: []u8) []const u8 {
+        const sign: []const u8 = if (l.relative and l.amount >= 0) "+" else "";
+        const u: []const u8 = switch (l.unit) {
+            .pt => "pt",
+            .mm => "mm",
+            .percent => "%",
+        };
+        return std.fmt.bufPrint(buf, "{s}{d}{s}", .{ sign, l.amount, u }) catch "?";
+    }
+
+    /// Baseline to baseline, mm, for a font size (its em) of `em` mm.
+    pub fn resolve(l: Leading, em: f64) f64 {
+        const v: f64 = switch (l.unit) {
+            .pt => l.amount * mm_per_pt,
+            .mm => l.amount,
+            .percent => em * l.amount / 100,
+        };
+        return if (l.relative) em + v else v;
+    }
+};
+
+test "leading: fixed, relative and shares of the font size" {
+    const em = 10 * mm_per_pt;
+    try std.testing.expectApproxEqAbs(12 * mm_per_pt, Leading.parse("12pt").?.resolve(em), 1e-9);
+    try std.testing.expectApproxEqAbs(12 * mm_per_pt, Leading.parse("+2pt").?.resolve(em), 1e-9);
+    try std.testing.expectApproxEqAbs(em + 3, Leading.parse("+3 mm").?.resolve(em), 1e-9);
+    try std.testing.expectApproxEqAbs(em * 1.1, Leading.parse("+10%").?.resolve(em), 1e-9);
+    try std.testing.expectApproxEqAbs(em * 1.2, Leading.parse("120%").?.resolve(em), 1e-9);
+    try std.testing.expectApproxEqAbs(9 * mm_per_pt, Leading.parse("-1pt").?.resolve(em), 1e-9);
+    try std.testing.expect(Leading.parse("abc") == null);
+}
+
 pub const TileRegion = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -588,6 +655,9 @@ pub const TileRegion = struct {
     path: std.ArrayList(ControlPoint) = .empty,
     /// Space between segments the path continues to, u.
     gap: f64 = 0,
+    /// Its leading, as typed: what sets `pitch` (baseline to baseline) for
+    /// a region of text; null for its style's own line spacing.
+    leading: ?Leading = null,
     /// How each segment's content is set in it: from its start, about its
     /// centre, or back from its end. (Its origin places the segment; this
     /// only arranges what is in it.)
@@ -6269,6 +6339,22 @@ pub const Model = struct {
             r.w = across;
             r.h = along;
         }
+        m.revision += 1;
+    }
+
+    /// Sets a region's leading (null: its style's own line spacing) and
+    /// the baseline-to-baseline distance it comes to, `pitch` mm; the
+    /// region keeps its size in mm, its rows re-spaced.
+    pub fn setLeading(m: *Model, panel: usize, region: usize, leading: ?Leading, pitch: f64) Error!void {
+        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+        if (!(pitch > 0.01) or !std.math.isFinite(pitch)) return error.BadSize;
+        const r = &m.panels.items[panel].regions.items[region];
+        const k = r.pitch / pitch;
+        r.w *= k;
+        r.h *= k;
+        r.gap *= k;
+        r.pitch = pitch;
+        r.leading = leading;
         m.revision += 1;
     }
 
