@@ -7837,6 +7837,7 @@ fn artProperties(pi: usize, index: usize) !void {
             };
         };
         keyButton(@src(), "Show figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        borderProps(pa.id, pa.border, 22);
     }
     const b = pa.box();
     propText("Box", "({d:.1}, {d:.1}) to ({d:.1}, {d:.1}) mm", .{ b.x0, b.y0, b.x1, b.y1 }, 2);
@@ -9364,7 +9365,13 @@ fn drawFigurePlaces(area: dvui.Rect.Physical, space: usize, layer: layout.model.
             .figure_place => |c| c.space == space and c.index == k,
             else => false,
         };
-        if (sel) marchingBox(area, fp.box(), colors.select, 2 * px);
+        if (!sel) continue;
+        if (fp.border.fractions() != null) {
+            const a = dvui.currentWindow().arena();
+            const ol = fp.border.outline(a, fp.inkBox(), fp.margin) catch continue;
+            const bd = Boundary.outline(a, ol, 0.1 / state.view.ppm, .{ .x = 0, .y = 0 }) catch continue;
+            haloBoundary(area, bd, colors.select);
+        } else marchingBox(area, fp.box(), colors.select, 2 * px);
     }
 }
 
@@ -9509,6 +9516,31 @@ fn keepFigureProportions(pr: Proportions, was: geom.Box, b: geom.Box, edges: Edg
 
 /// A placed figure's properties: its figure, place, size (its
 /// proportions kept), margin, layer; Remove.
+/// The border being set in Properties for a figure's placement, until
+/// Apply: its kind and least radius (an object's own until changed).
+var border_pending: struct { obj: layout.model.ObjectId = .none, kind: layout.model.BorderKind = .box, radius: f64 = 3 } = .{};
+
+/// Border (Box or Dubins), its least radius, and Apply, for the
+/// placement `obj` bordered by `b`, in the current group.
+fn borderProps(obj: layout.model.ObjectId, b: layout.model.FigureBorder, n: usize) void {
+    if (border_pending.obj != obj) border_pending = .{ .obj = obj, .kind = b.kind, .radius = b.radius };
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+        defer row.deinit();
+        propName("Border");
+        const names = [_][]const u8{ "Box", "Dubins" };
+        var choice: usize = @intFromEnum(border_pending.kind);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n })) border_pending.kind = @enumFromInt(choice);
+    }
+    if (border_pending.kind == .dubins) {
+        var rb: [32]u8 = undefined;
+        if (sizesProp("Min radius, mm", std.fmt.bufPrint(&rb, "{d:.2}", .{border_pending.radius}) catch "", n + 1)) |list| if (list.len == 1) {
+            if (list[0] >= 0) border_pending.radius = list[0] else state.status = "A radius cannot be negative. ";
+        };
+    }
+    keyButton(@src(), "Apply border", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+}
+
 fn figurePlaceProperties(space: usize, index: usize) void {
     const saved_group = pushGroup("figure-place");
     defer popGroup(saved_group);
@@ -9531,6 +9563,7 @@ fn figurePlaceProperties(space: usize, index: usize) void {
             state.status = "A margin cannot be negative. ";
         };
     };
+    borderProps(fp.id, fp.border, 7);
     keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
@@ -17057,6 +17090,28 @@ const button_handlers = [_]ButtonHandler{
             showFigure(fp.figure);
         }
     }.f),
+    handler("figure-place.apply-border", struct {
+        fn f(_: i32) void {
+            const c = switch (state.context) {
+                .figure_place => |c| c,
+                else => return,
+            };
+            act(.setPlaceBorder, .{ c.space, c.index, border_pending.kind, border_pending.radius }) catch {
+                state.status = "The border could not be made. ";
+            };
+        }
+    }.f),
+    handler("art.apply-border", struct {
+        fn f(_: i32) void {
+            const l = switch (state.context) {
+                .art => |l| l,
+                else => return,
+            };
+            act(.setArtBorder, .{ l.panel, l.index, border_pending.kind, border_pending.radius }) catch {
+                state.status = "The border could not be made. ";
+            };
+        }
+    }.f),
     handler("art.show-figure", struct {
         fn f(_: i32) void {
             const l = switch (state.context) {
@@ -21280,7 +21335,16 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                 const one = Boundary.outline(a, sh.outline, tol, o) catch continue;
                 rings.appendSlice(a, one.rings) catch {};
             }
-            const bd: Boundary = if (rings.items.len > 0) .{ .rings = rings.items } else Boundary.box(a, b) catch continue;
+            var bd: Boundary = if (rings.items.len > 0) .{ .rings = rings.items } else Boundary.box(a, b) catch continue;
+            // A figure's with a wrap: its border.
+            if (pa.index < state.model.panels.items[pi].art.items.len) {
+                const ma = state.model.panels.items[pi].art.items[pa.index];
+                if (ma.figure != .none and ma.border.fractions() != null) {
+                    if (ma.border.outline(a, ma.box(), ma.clearance)) |ol| {
+                        bd = Boundary.outline(a, ol, tol, o) catch bd;
+                    } else |_| {}
+                }
+            }
             cand.consider(.{ .art = .{ .panel = pi, .index = pa.index, .box = b } }, bd);
         }
     }
@@ -21296,7 +21360,10 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
     if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items, 0..) |fp, k| {
         if (!layerOpen(shown_space, fp.layer)) continue;
         const b = fp.box();
-        const bd = Boundary.box(a, b) catch continue;
+        const bd = (if (fp.border.fractions() != null)
+            Boundary.outline(a, fp.border.outline(a, fp.inkBox(), fp.margin) catch continue, tol, .{ .x = 0, .y = 0 })
+        else
+            Boundary.box(a, b)) catch continue;
         cand.consider(.{ .figure_place = .{ .space = shown_space, .index = k, .box = b } }, bd);
     };
     // Construction lines in the shown space (while their layer shows): a

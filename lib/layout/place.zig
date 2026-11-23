@@ -788,6 +788,24 @@ pub const KeepOut = struct {
 
     pub fn of(a: Allocator, pa: model.PanelArt) Allocator.Error!KeepOut {
         const b = pa.box();
+        // A figure's placement with a wrap: its tracks flow round the wrap,
+        // which holds the clearance already.
+        if (pa.figure != .none and pa.wrap != .none) if (pa.border.fractions() != null) {
+            const o = try pa.border.outline(a, b, pa.clearance);
+            var polys: std.ArrayList([]const Point) = .empty;
+            var wb: Box = .empty;
+            for (o.contours) |c| {
+                var pts: std.ArrayList(Point) = .empty;
+                for (c.segments) |sg| {
+                    if (pts.items.len == 0) try pts.append(a, sg.start());
+                    const n: usize = if (sg == .line) 1 else 16;
+                    for (1..n + 1) |i| try pts.append(a, pointOn(sg, @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n))));
+                }
+                for (pts.items) |q| wb = wb.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+                try polys.append(a, pts.items);
+            }
+            return .{ .box = wb, .polys = polys.items, .clearance = 0 };
+        };
         if (pa.wrap != .ink) return .{ .box = b, .polys = &.{}, .clearance = pa.clearance };
         var polys: std.ArrayList([]const Point) = .empty;
         for (pa.shapes) |sh| for (sh.outline.contours) |c| {

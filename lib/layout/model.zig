@@ -786,6 +786,8 @@ pub const PanelArt = struct {
     /// that figure's ink, its frame's origin at the ink's bottom left,
     /// made again when the figure changes or it is resized.
     figure: ObjectId = .none,
+    /// A figure's placement's border (its margin is the clearance).
+    border: FigureBorder = .{},
 
     /// Its outline, if it is one closed path (one shape, one contour):
     /// what Make panel can take as a panel's edge.
@@ -1086,6 +1088,44 @@ pub const Image = struct {
     }
 };
 
+/// How a figure's placement is bordered: a box round its ink at the
+/// margin, or a wrap (`geom.wrap`) of lines and arcs no tighter than
+/// `radius` round its ink at the margin, made by Apply and kept: `path`,
+/// mm with the ink's bottom left at the origin, made at ink width
+/// `made_w` (scaled with the placement since).
+pub const BorderKind = enum { box, dubins };
+pub const FigureBorder = struct {
+    kind: BorderKind = .box,
+    radius: f64 = 3,
+    path: geom.Outline = .{ .contours = &.{} },
+    made_w: f64 = 0,
+
+    /// The wrap's bounds as multiples of the ink's width, about the ink's
+    /// bottom left; null for a box (or a wrap not made).
+    pub fn fractions(b: FigureBorder) ?geom.Box {
+        if (b.kind != .dubins or !(b.made_w > 0) or b.path.contours.len == 0) return null;
+        const pb = b.path.bounds();
+        return .{ .x0 = pb.x0 / b.made_w, .y0 = pb.y0 / b.made_w, .x1 = pb.x1 / b.made_w, .y1 = pb.y1 / b.made_w };
+    }
+
+    /// The border round ink box `ink` at `margin`, in `ink`'s frame.
+    pub fn outline(b: FigureBorder, a: std.mem.Allocator, ink: geom.Box, margin: f64) std.mem.Allocator.Error!geom.Outline {
+        if (b.fractions() == null) {
+            const g = margin;
+            const pts = [_]geom.Point{ .{ .x = ink.x0 - g, .y = ink.y0 - g }, .{ .x = ink.x1 + g, .y = ink.y0 - g }, .{ .x = ink.x1 + g, .y = ink.y1 + g }, .{ .x = ink.x0 - g, .y = ink.y1 + g } };
+            const segs = try a.alloc(geom.Segment, 4);
+            for (segs, 0..) |*sg, i| sg.* = .{ .line = .{ pts[i], pts[(i + 1) % 4] } };
+            const cs = try a.alloc(geom.Contour, 1);
+            cs[0] = .{ .segments = segs };
+            return .{ .contours = cs };
+        }
+        const k = ink.width() / b.made_w;
+        return b.path.transformed(a, geom.Affine.scale(k).then(geom.Affine.translate(ink.x0, ink.y0))) catch |e| switch (e) {
+            else => return error.OutOfMemory,
+        };
+    }
+};
+
 /// A figure placed in a space: which figure, where its ink is and how big
 /// (its proportions the figure's), and its boundary, a box round the ink
 /// at a margin: what is selected, moved and resized, and what content
@@ -1105,13 +1145,16 @@ pub const FigurePlace = struct {
     margin: f64 = default_figure_margin,
     /// Its object origin on its boundary.
     holds: OriginPoint = .{},
+    border: FigureBorder = .{},
 
     /// Its ink's box.
     pub fn inkBox(f: FigurePlace) geom.Box {
         return .{ .x0 = f.at.x, .y0 = f.at.y, .x1 = f.at.x + f.w, .y1 = f.at.y + f.h };
     }
-    /// Its boundary: the ink's box grown by the margin.
+    /// Its boundary's box: the ink's box grown by the margin, or its
+    /// wrap's bounds.
     pub fn box(f: FigurePlace) geom.Box {
+        if (f.border.fractions()) |fr| return .{ .x0 = f.at.x + fr.x0 * f.w, .y0 = f.at.y + fr.y0 * f.w, .x1 = f.at.x + fr.x1 * f.w, .y1 = f.at.y + fr.y1 * f.w };
         const g = f.margin;
         return .{ .x0 = f.at.x - g, .y0 = f.at.y - g, .x1 = f.at.x + f.w + g, .y1 = f.at.y + f.h + g };
     }
@@ -3042,8 +3085,60 @@ pub const Model = struct {
         fp.h = if (fp.w > 0) w * fp.h / fp.w else fp.h;
         fp.w = w;
         fp.at = at;
+        const remake = fp.margin != margin;
         fp.margin = margin;
         fp.layer = layer;
+        if (remake and fp.border.kind == .dubins) if (m.figureIndex(fp.figure)) |fi| {
+            fp.border.path = try m.figureWrap(fi, fp.w, fp.margin, fp.border.radius);
+            fp.border.made_w = fp.w;
+        };
+        m.revision += 1;
+    }
+
+    /// The wrap round figure `fi`'s ink placed `w` mm wide, at `margin`,
+    /// bending no tighter than `radius`: mm, the ink's bottom left at the
+    /// origin.
+    pub fn figureWrap(m: *Model, fi: usize, w: f64, margin: f64, radius: f64) Error!geom.Outline {
+        const al = m.a();
+        const shapes = try m.figureShapes(fi, w);
+        var pts: std.ArrayList(geom.Point) = .empty;
+        for (shapes) |sh| for (sh.outline.contours) |c| {
+            try pts.appendSlice(al, try figure_.flatten(al, c.segments, figure_tolerance));
+        };
+        return geom.wrap.wrap(al, pts.items, margin, radius);
+    }
+
+    /// A space's placement's border set: a box, or a wrap no tighter than
+    /// `radius` (made now, at its margin).
+    pub fn setPlaceBorder(m: *Model, space: usize, index: usize, kind: BorderKind, radius: f64) Error!void {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        const list = m.spaces.items[space].figure_places.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!(radius >= 0)) return error.BadSize;
+        const fp = &list[index];
+        fp.border.kind = kind;
+        fp.border.radius = radius;
+        if (kind == .dubins) {
+            const fi = m.figureIndex(fp.figure) orelse return error.NoSuchItem;
+            fp.border.path = try m.figureWrap(fi, fp.w, fp.margin, radius);
+            fp.border.made_w = fp.w;
+        }
+        m.revision += 1;
+    }
+
+    /// A panel's figure placement's border set (its clearance the margin).
+    pub fn setArtBorder(m: *Model, panel: usize, index: usize, kind: BorderKind, radius: f64) Error!void {
+        if (panel >= m.panels.items.len or index >= m.panels.items[panel].art.items.len) return error.NoSuchItem;
+        if (!(radius >= 0)) return error.BadSize;
+        const x = &m.panels.items[panel].art.items[index];
+        x.border.kind = kind;
+        x.border.radius = radius;
+        if (kind == .dubins) {
+            const fi = m.figureIndex(x.figure) orelse return error.NoSuchItem;
+            const w = x.box().width();
+            x.border.path = try m.figureWrap(fi, w, x.clearance, radius);
+            x.border.made_w = w;
+        }
         m.revision += 1;
     }
 
@@ -3254,12 +3349,21 @@ pub const Model = struct {
         f.source = try al.dupe(u8, source);
         const fb = f.bounds();
         for (m.spaces.items) |*sp| for (sp.figure_places.items) |*fp| {
-            if (fp.figure == f.id and fb.width() > 0) fp.h = fp.w * fb.height() / fb.width();
+            if (fp.figure != f.id) continue;
+            if (fb.width() > 0) fp.h = fp.w * fb.height() / fb.width();
+            if (fp.border.kind == .dubins) {
+                fp.border.path = try m.figureWrap(index, fp.w, fp.margin, fp.border.radius);
+                fp.border.made_w = fp.w;
+            }
         };
         for (m.panels.items) |*p| for (p.art.items) |*x| {
             if (x.figure != f.id) continue;
             const w = x.box().width();
             x.shapes = try m.figureShapes(index, if (w > 0) w else 10);
+            if (x.border.kind == .dubins) {
+                x.border.path = try m.figureWrap(index, x.box().width(), x.clearance, x.border.radius);
+                x.border.made_w = x.box().width();
+            }
         };
         m.revision += 1;
     }

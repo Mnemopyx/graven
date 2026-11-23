@@ -25,6 +25,7 @@ pub const dubins = @import("dubins.zig");
 pub const path = @import("path.zig");
 /// Strokes: a path's ink at a pen width, with caps and joins.
 pub const stroke = @import("stroke.zig");
+pub const wrap = @import("wrap.zig");
 
 pub const Point = struct {
     x: f64,
@@ -536,4 +537,5 @@ test {
     _ = strokefont;
     _ = path;
     _ = stroke;
+    _ = wrap;
 }

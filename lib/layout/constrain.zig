@@ -222,6 +222,18 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
         // keeps them; here each axis is as given).
         .figure_place => {
             const fp = &m.spaces.items[loc.holder].figure_places.items[loc.index];
+            // A wrap: its bounds scale with the ink's width.
+            if (fp.border.fractions()) |fr| {
+                if (vertical) {
+                    fp.at.y = lo - fr.y0 * fp.w;
+                } else {
+                    const w = @max(s / @max(fr.x1 - fr.x0, 1e-9), 1e-3);
+                    if (fp.w > 0) fp.h = w * fp.h / fp.w;
+                    fp.w = w;
+                    fp.at.x = lo - fr.x0 * w;
+                }
+                return;
+            }
             const ink = @max(s - 2 * fp.margin, 1e-3);
             if (vertical) {
                 fp.at.y = lo + fp.margin;
