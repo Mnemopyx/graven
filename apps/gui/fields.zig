@@ -14,10 +14,16 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
+const units = @import("graven_layout").units;
 
 /// Called when a field offers its text, before the caller takes it: the
 /// app starts a new undo step for it.
 pub var on_accept: ?*const fn () void = null;
+
+/// The unit the label of the field about to be drawn names (set with the
+/// label, taken by the next number field): every field so labelled reads
+/// typed units through `units`, the same way.
+pub var label_unit: ?units.Unit = null;
 
 /// The id of the field about to be drawn (the app sets it with the
 /// field's row; see main.zig, "Element ids").
@@ -196,6 +202,13 @@ pub fn reject(te: *dvui.TextEntryWidget) void {
 /// A number field: returns a new value, accepted and within `min` and
 /// `max`; anything else typed goes back.
 pub fn numberField(src: std.builtin.SourceLocation, comptime T: type, value: T, min: T, max: T, opts: dvui.Options) ?T {
+    // Labelled with a unit: any unit of its kind, through `units`.
+    const lu = label_unit;
+    label_unit = null;
+    if (lu) |u| {
+        const v = unitNumberField(src, @floatCast(value), @floatCast(min), @floatCast(max), u, opts) orelse return null;
+        return @floatCast(v);
+    }
     var buf: [64]u8 = undefined;
     const shown = std.fmt.bufPrint(&buf, "{d}", .{value}) catch "";
     var te = dvui.textEntry(src, .{ .text_initial = shown }, opts);
@@ -205,6 +218,34 @@ pub fn numberField(src: std.builtin.SourceLocation, comptime T: type, value: T, 
         reject(te);
         return null;
     };
+    if (!(v >= min and v <= max)) {
+        reject(te);
+        return null;
+    }
+    if (v == value) return null;
+    return v;
+}
+
+/// A number field in `unit` (the unit its label names): it takes any unit
+/// of that dimension typed after the number ("1in" in a mm field), read by
+/// `units`, the one path for typed units; a bare number is in `unit`. A
+/// relative or percent value needs a reference, which this field has not:
+/// it goes back. Returns the new value in `unit`, within `min` and `max`.
+pub fn unitNumberField(src: std.builtin.SourceLocation, value: f64, min: f64, max: f64, unit: units.Unit, opts: dvui.Options) ?f64 {
+    var buf: [64]u8 = undefined;
+    const shown = std.fmt.bufPrint(&buf, "{d}", .{value}) catch "";
+    var te = dvui.textEntry(src, .{ .text_initial = shown }, opts);
+    defer te.deinit();
+    const text = accept(te, shown) orelse return null;
+    const q = units.Quantity.parse(text, unit) orelse {
+        reject(te);
+        return null;
+    };
+    const base = q.resolve(null) orelse {
+        reject(te);
+        return null;
+    };
+    const v = units.fromBase(base, unit);
     if (!(v >= min and v <= max)) {
         reject(te);
         return null;

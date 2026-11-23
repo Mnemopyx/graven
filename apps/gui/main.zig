@@ -17666,6 +17666,9 @@ fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: an
 /// The left-hand name of a property row.
 fn propName(name: []const u8) void {
     tagParent(name);
+    // The unit its label names, if any: the field drawn next takes any
+    // unit of that kind (see `units`, the one path for typed units).
+    accepted.label_unit = layout.units.ofLabel(name);
     dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
 }
 
@@ -18622,7 +18625,7 @@ fn followLeading() void {
     for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |rg, ri| {
         const sid = rg.style orelse continue;
         if (state.model.styleIndex(sid) == null) continue;
-        const want = if (rg.leading) |l| l.resolve(styleEmMm(sid)) else continue;
+        const want = if (rg.leading) |l| (l.resolve(styleEmMm(sid)) orelse continue) else continue;
         if (!(want > 0.01) or @abs(want - rg.pitch) < 1e-9) continue;
         _ = hist.join(&state.model, .setLeading, .{ pi, ri, rg.leading, want }) catch {};
     };
@@ -18641,8 +18644,8 @@ fn leadingProps(pi: usize, ri: usize) void {
     if (textProp(asElement("track.leading"), shown, 4)) |typed| {
         if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
             if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {};
-        } else if (layout.model.Leading.parse(typed)) |l| {
-            act(.setLeading, .{ pi, ri, l, l.resolve(em) }) catch {
+        } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
+            act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
                 state.status = "That leading is too small: baselines must be apart. ";
             };
         } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the style's own). ";
@@ -24494,6 +24497,7 @@ fn pickedConstraintProperties() bool {
         defer row.deinit();
         propName("Value");
         const v0 = @round(c.value * k * 1000) / 1000;
+        accepted.label_unit = if (k == 1) .mm else .in;
         if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| _ = act(.setConstraintValue, .{ c.id, v / k }) catch {};
     }
     {
@@ -24608,6 +24612,7 @@ fn constraintProperties() void {
         const flagged = constraintIssue(c.id);
         dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged != null) .{ .color = colors.overflow } else null, .id_extra = ci });
         const v0 = @round(c.value * k * 1000) / 1000;
+        accepted.label_unit = if (k == 1) .mm else .in;
         if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| _ = act(.setConstraintValue, .{ c.id, v / k }) catch {};
     }
     if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });

@@ -6,6 +6,7 @@
 //! structure that can be dumped, diffed and tested.
 
 pub const model = @import("model.zig");
+pub const units = @import("units.zig");
 pub const names = @import("names.zig");
 pub const place = @import("place.zig");
 pub const art = @import("art.zig");

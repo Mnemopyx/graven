@@ -616,3 +616,7 @@ To do: what a line taller than the leading does (exact with a clash flagged, or 
 ### Space before and after paragraphs (2026-11-23)
 
 Paragraph styles already had space before, space after, indents, first line, alignment and extra space between lines, and placement honoured them; but the button that makes a style sat beside the Style dropdown and was pushed out of the pane, and the settings showed only for a paragraph in a style. Now the Paragraph section always shows them, and a paragraph in no style that is changed gets one of its own (Paragraph1, …), made and applied as one undo step; the new-style button sits on its own line. "Between lines" is "Extra between lines" (it adds to the leading). Still to do: the Flow, In it and flow buttons sit under Paragraph but are the layout's; these fields are in pt only (typed units, as leading takes them, to come).
+
+### Units for property values (2026-11-23)
+
+One path for typed units, `lib/layout/units.zig`; which units Graven reads now and how a new one is added: [units.md](units.md). Every number field whose label names a unit takes any unit of its kind (a length field "1in", "12pt", "4pc"; an angle field "45°"), through `propName` → `fields.label_unit` → `fields.unitNumberField`; leading is a stored `Quantity`. Still to do: the other properties stored as quantities (converted on entry today), and `u` as a unit.
