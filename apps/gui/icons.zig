@@ -77,6 +77,7 @@ pub const GIcon = enum {
     new_sketch,
     add_shape,
     constrain,
+    text_style,
 
     fn svg(comptime g: GIcon) []const u8 {
         const name = comptime blk: {

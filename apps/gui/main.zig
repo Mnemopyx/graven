@@ -13244,7 +13244,11 @@ fn validTracksSizeTo() void {
     const protos = state.model.prototypes.items;
     switch (tracks_tool.size_to) {
         .prototype => |pid| if (state.model.protoIndex(pid) == null) {
-            tracks_tool.size_to = if (protos.len > 0) .{ .prototype = protos[0].id } else .{ .style = null };
+            // A text style chosen in the Text style panel, else the first
+            // tile prototype, else the default text style.
+            tracks_tool.size_to = if (text_style != null and state.model.styleIndex(text_style.?) != null)
+                .{ .style = text_style }
+            else if (protos.len > 0) .{ .prototype = protos[0].id } else .{ .style = null };
         },
         .style => |sid| if (sid != null and state.model.styleIndex(sid.?) == null) {
             tracks_tool.size_to = .{ .style = null };
@@ -14499,9 +14503,11 @@ const Drop = enum {
     shape,
     /// Add rows' kinds: rows, columns, one track.
     tracks,
+    /// The Text style panel.
+    styles,
 
     fn panel(d: Drop) bool {
-        return d == .layers;
+        return d == .layers or d == .styles;
     }
 
     fn id(d: Drop) []const u8 {
@@ -14509,6 +14515,7 @@ const Drop = enum {
             .layers => "ribbon.layers",
             .shape => "ribbon.drop.shape",
             .tracks => "ribbon.drop.tracks",
+            .styles => "ribbon.styles",
         };
     }
 
@@ -14517,6 +14524,7 @@ const Drop = enum {
         if (a == kact("tool.add-shape")) return .shape;
         if (a == kact("tool.add-rows") or a == kact("tool.add-columns") or a == kact("tool.add-track")) return .tracks;
         if (a == kact("ribbon.layers")) return .layers;
+        if (a == kact("ribbon.styles")) return .styles;
         return null;
     }
 };
@@ -14654,6 +14662,7 @@ fn ribbonDrops() void {
         dropLeave(r);
         switch (d) {
             .layers => layersPanel(),
+            .styles => stylesPanel(),
             else => {},
         }
     } else {
@@ -14723,6 +14732,65 @@ fn tracksMenu() void {
         };
         dropItem("ribbon.tracks", n, @intCast(i), on, i);
     }
+}
+
+/// The text style chosen in the Text style panel: new text rows (Add rows,
+/// columns, a track) are set in it. Null: none chosen yet (the document's
+/// first style shows as chosen, or the default Label while it has none).
+var text_style: ?layout.model.StyleId = null;
+
+/// The style the Text style panel shows as chosen.
+fn chosenTextStyle() ?layout.model.StyleId {
+    if (text_style) |s| if (state.model.styleIndex(s) != null) return s;
+    if (state.model.styles.items.len > 0) return state.model.styles.items[0].id;
+    return null;
+}
+
+/// The Text style panel: the document's text styles (the default Label
+/// offered while it has none), Add a style, and beside them the chosen
+/// style's settings. Choosing one sets new text rows in it.
+fn stylesPanel() void {
+    const saved_group = pushGroup("styles-palette");
+    defer popGroup(saved_group);
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 8, .w = 8, .y = 4, .h = 6 } });
+    defer row.deinit();
+    const chosen = chosenTextStyle();
+    {
+        var left = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 300 }, .max_size_content = .width(300), .padding = .all(6) });
+        defer left.deinit();
+        dvui.labelNoFmt(@src(), "Text styles", .{}, .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) }, .margin = .{ .x = 2, .h = 4 } });
+        const styles = state.model.styles.items;
+        const n = @max(styles.len, 1);
+        for (0..n) |k| {
+            const name = if (styles.len == 0) "Label (default)" else styles[k].name;
+            const arg: i32 = if (styles.len == 0) -1 else @intCast(k);
+            const on = if (styles.len == 0) true else chosen != null and styles[k].id == chosen.?;
+            var r = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .color_fill = .{ .color = if (on) dvui.themeGet().color(.highlight, .fill) else dvui.themeGet().color(.window, .fill) }, .corners = .all(3), .margin = .{ .y = 1, .h = 1 }, .id_extra = k });
+            defer r.deinit();
+            listItem("styles-palette", name);
+            const base = next_element orelse "styles-palette";
+            next_element = null;
+            const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}.choose", .{base}) catch base);
+            checkElement(tag, .button, name);
+            recordDrawn(tag, arg);
+            var bw: dvui.ButtonWidget = undefined;
+            bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = k, .tag = tag, .padding = .{ .x = 6, .w = 4, .y = 4, .h = 5 }, .margin = .all(0), .background = false });
+            bw.processEvents();
+            dvui.labelNoFmt(@src(), name, .{}, .{ .padding = .all(0), .margin = .all(0) });
+            if (bw.clicked()) pushButtonEvent(tag, arg);
+            bw.deinit();
+        }
+        keyButton(@src(), "Add a style", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("styles-palette.add-style") });
+    }
+    var right = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 380 }, .max_size_content = .width(380), .padding = .{ .x = 16, .y = 6 } });
+    defer right.deinit();
+    const sid = chosen orelse {
+        dvui.labelNoFmt(@src(), "Label: made when chosen, or when text is first set", .{}, .{ .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) } });
+        return;
+    };
+    const si = state.model.styleIndex(sid) orelse return;
+    dvui.labelNoFmt(@src(), state.model.styles.items[si].name, .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .h = 4 } });
+    styleProperties(sid) catch {};
 }
 
 /// The Layers panel: the stack (as the palette), and beside it the chosen
@@ -14870,6 +14938,12 @@ fn ribbon() void {
         drop_anchor.set(.layers, r.toNatural());
         dvui.tooltip(@src(), .{ .active_rect = r }, "Layers: show or hide each, drag to reorder the stack, the chosen layer's settings (L; held, or clicked)", .{}, .{});
     }
+    {
+        var swd: dvui.WidgetData = undefined;
+        const r = keyIconData(@src(), "Text style", icons.graven(.text_style) orelse dvui.entypo.text, &swd, "ribbon.styles");
+        drop_anchor.set(.styles, r.toNatural());
+        dvui.tooltip(@src(), .{ .active_rect = r }, "Text style: the one new text and text rows are set in, and its settings (Y)", .{}, .{});
+    }
 }
 
 /// While a drop panel is open: the key that opened it carried on down
@@ -14997,7 +15071,8 @@ fn planRibbon() void {
 fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, wd: *dvui.WidgetData, comptime id: []const u8) dvui.Rect.Physical {
     _ = comptime elements.get(id);
     // Open: tinted with its panel's colour, which the bridge carries down.
-    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (drop_open == .layers) .{ .color = ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3) } else null });
+    const open = if (drop_open) |d| std.mem.eql(u8, d.id(), id) else false;
+    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (open) .{ .color = ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3) } else null });
     return wd.borderRectScale().r;
 }
 
@@ -15659,6 +15734,35 @@ const button_handlers = [_]ButtonHandler{
     handler("ribbon.layers", struct {
         fn f(_: i32) void {
             openDrop(.layers);
+        }
+    }.f),
+    handler("ribbon.styles", struct {
+        fn f(_: i32) void {
+            openDrop(.styles);
+        }
+    }.f),
+    // A style chosen in the Text style panel: new text rows are set in it
+    // (arg: its index; -1, the default Label, made now).
+    handler("styles-palette.*.choose", struct {
+        fn f(arg: i32) void {
+            const sid: layout.model.StyleId = if (arg < 0)
+                (labelStyle() catch return)
+            else blk: {
+                const i: usize = @intCast(arg);
+                if (i >= state.model.styles.items.len) return;
+                break :blk state.model.styles.items[i].id;
+            };
+            text_style = sid;
+            tracks_tool.size_to = .{ .style = sid };
+        }
+    }.f),
+    handler("styles-palette.add-style", struct {
+        fn f(_: i32) void {
+            var buf: [32]u8 = undefined;
+            const name = state.model.freshName(&buf, .styles, "Style");
+            const sid = act(.addStyle, .{ name, layout.model.StyleSize{ .cap_height = 3 } }) catch return;
+            text_style = sid;
+            tracks_tool.size_to = .{ .style = sid };
         }
     }.f),
     handler("ribbon.drop.shape", struct {

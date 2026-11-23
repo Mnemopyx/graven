@@ -262,7 +262,7 @@
   },
   {
    "index": 12,
-   "icon": "constrain",
+   "icon": "text-style",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -274,6 +274,23 @@
     "left": 292,
     "top": 76,
     "right": 356,
+    "bottom": 140
+   }
+  },
+  {
+   "index": 13,
+   "icon": "constrain",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 76,
+    "right": 428,
     "bottom": 140
    }
   }

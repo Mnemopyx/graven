@@ -230,6 +230,8 @@ ICONS = {
     # Sketching inside a sketch: one made; a shape drawn; constrained.
     "new-sketch": container(2.5, 2.5, 14.5, 13, "paper") + curve([(4.5, 12.5), (6, 6), (10, 5), (12, 10), (15, 6.5)]) + circle(15, 6.5, 1.5, "drawn") + circle(4.5, 12.5, 1.5, "drawn") + adds(),
     "add-shape": circle(7.5, 7.5, 4.5, "drawn") + rect(9.5, 8.5, 7, 7, "drawn", 0.4) + adds(),
+    # Text: a style (a line of text set in it, on its track).
+    "text-style": rect(2.5, 9.5, 19, 6.5, "track", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
     "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "drawn") + circle(18, 9, 1.8, "drawn") + dimension((4, 15), (18, 9), 4.2),
 }
 

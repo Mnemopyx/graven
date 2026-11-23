@@ -2108,3 +2108,30 @@ test "a horizontal construction line chosen with Constrain and held a distance f
     try std.testing.expectEqual(1, api.model().constraints.items.len);
     try std.testing.expectApproxEqAbs(35, api.guides()[0].at.y, 1e-9);
 }
+
+test "the Text style panel: a style added there is the one new rows are set in" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.press("ribbon.styles");
+    try r.frames(3);
+    try std.testing.expectEqualStrings("styles", api.dropOpen());
+    try r.press("styles-palette.add-style");
+    try r.frames(2);
+    const m = api.model();
+    try std.testing.expectEqual(1, m.styles.items.len);
+    try r.key(.escape, .none);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(150, 100).?);
+    try r.key(.r, .none);
+    try r.drag(api.screenOf(40, 120).?, api.screenOf(160, 60).?);
+    try r.frames(2);
+    var styled: usize = 0;
+    for (m.panels.items) |p| for (p.regions.items) |reg| {
+        if (reg.style) |s| if (s == m.styles.items[0].id) {
+            styled += 1;
+        };
+    };
+    try std.testing.expectEqual(1, styled);
+}

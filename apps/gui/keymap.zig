@@ -390,6 +390,7 @@ pub const binds = [_]B{
     .{ .mode = "canvas", .chord = "k", .action = "tool.constrain" },
     .{ .mode = "canvas", .chord = "f", .action = "tool.fit-to-tiles" },
     .{ .mode = "canvas", .chord = "l", .action = "ribbon.layers" },
+    .{ .mode = "canvas", .chord = "y", .action = "ribbon.styles" },
     // A paged context's pages (none has pages yet).
     .{ .mode = "canvas", .chord = "page_up", .action = "views.page-prev", .arg = 0 },
     .{ .mode = "canvas", .chord = "page_down", .action = "views.page-next", .arg = 0 },
