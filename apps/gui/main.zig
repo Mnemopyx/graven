@@ -3610,6 +3610,11 @@ fn runAction(inv: keymap.Invocation) bool {
         },
         // A button's action given a key: its handler, on the context.
         else => {
+            // The flow cursor's actions, from a menu: at the cursor.
+            if (track_cursor != null and flowAction(inv)) {
+                dvui.refresh(null, @src(), null);
+                return true;
+            }
             for (button_handlers) |h| if (h.action == inv.action) {
                 h.run(inv.arg);
                 dvui.refresh(null, @src(), null);
@@ -5087,6 +5092,13 @@ fn menu() ?dvui.App.Result {
         if (menuAction("Redo", "global", kact("edit.redo"), 0, !hist.canRedo(), 2)) {
             m.close();
         }
+        // Text in a track, at the flow cursor.
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
+        const no_sel = track_cursor == null or flowSelection() == null;
+        if (menuAction("Cut", "canvas.flow", kact("canvas.flow.cut"), 0, no_sel, 3)) m.close();
+        if (menuAction("Copy", "canvas.flow", kact("canvas.flow.copy"), 0, no_sel, 4)) m.close();
+        if (menuAction("Paste", "canvas.flow", kact("canvas.flow.paste"), 0, track_cursor == null, 5)) m.close();
+        if (menuAction("Select all", "canvas.flow", kact("canvas.flow.select.all"), 0, track_cursor == null, 6)) m.close();
     }
     if (tmenu(@src(), "Text", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -10891,6 +10903,7 @@ fn manufactureView(v: u8) void {
             },
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
+                text_drag = false;
 
                 dvui.captureMouse(null, e.num);
             },
@@ -12826,6 +12839,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
+                } else if (state.tool == .select and me.button.pointer() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and textPress(state.view.toMm(area, me.p), me.mod.shift())) {
+                    // Well inside a used segment of a text track: the text
+                    // cursor there, typing (see "Clicking into text").
+                    state.press_consumed = true;
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (state.tool == .select and boundary_mode and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and nearestBoundary(state.view.toMm(area, me.p)) != null) {
                     // Select boundaries: the nearest boundary's container,
                     // made the selection (its drag points shown). With no
@@ -12865,7 +12883,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (dim_drag != null) {
+                if (text_drag) {
+                    e.handle(@src(), box.data());
+                    textDragTo(state.view.toMm(area, me.p));
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (dim_drag != null) {
                     e.handle(@src(), box.data());
                     dimMotion(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
@@ -19443,6 +19465,111 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
         }
     }
     return null;
+}
+
+// Clicking into text ------------------------------------------------------------
+//
+// A press well inside a used segment of a text track (one holding content,
+// so placed) puts the flow cursor there and starts typing, in Select
+// boundaries too: only within reach of a segment's edge does the press go
+// to the boundaries. A drag from there selects text; Shift-click extends
+// the selection.
+
+/// The text track one of whose placed segments holds worksheet point `at`
+/// clearly inside: farther than a couple of edge widths from its sides (a
+/// quarter of the segment's height or width at most).
+fn textSegmentAt(at: geom.Point) ?struct { panel: usize, region: usize } {
+    const margin_full = 2 * edgeMm();
+    for (state.model.panels.items, 0..) |p, pi| {
+        if (!shownPanel(pi) or pi >= state.placed.items.len) continue;
+        if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(pi), panelLayer(pi))) continue;
+        for (state.placed.items[pi].tracks) |t| {
+            if (t.member >= p.regions.items.len or p.regions.items[t.member].style == null) continue;
+            const b = onSheet(pi, t.box);
+            const m = @min(margin_full, 0.25 * @min(b.width(), b.height()));
+            if (at.x >= b.x0 + m and at.x <= b.x1 - m and at.y >= b.y0 + m and at.y <= b.y1 - m) return .{ .panel = pi, .region = t.member };
+        }
+    }
+    return null;
+}
+
+/// The place in the flow of thread head `head` nearest worksheet point
+/// `at` on panel `pi`: in the segment holding it, else (`clamp`, for a
+/// drag) the nearest of the thread's segments there.
+fn flowPlaceAt(pi: usize, head: layout.model.TrackRef, at: geom.Point, clamp: bool) ?layout.model.FlowPos {
+    if (pi >= state.placed.items.len) return null;
+    var best_t: ?layout.place.PlacedTrack = null;
+    var best_d: f64 = std.math.inf(f64);
+    for (state.placed.items[pi].tracks) |t| {
+        if (t.flow_panel != head.panel or t.region != head.region) continue;
+        const b = onSheet(pi, t.box);
+        const dx = @max(@max(b.x0 - at.x, at.x - b.x1), 0);
+        const dy = @max(@max(b.y0 - at.y, at.y - b.y1), 0);
+        const d = dx * dx + dy * dy;
+        if (d < best_d) {
+            best_d = d;
+            best_t = t;
+        }
+    }
+    const t = best_t orelse return null;
+    if (best_d > 0 and !clamp) return null;
+    const b = onSheet(pi, t.box);
+    const cx = std.math.clamp(at.x, b.x0, b.x1);
+    const cy = std.math.clamp(at.y, b.y0, b.y1);
+    const along = if (t.major == .row) cx - b.x0 else b.y1 - cy;
+    var best: ?Stop = null;
+    for (flowStops(head.panel, head.region)) |st| {
+        if (st.panel != pi or st.segment != t.track) continue;
+        if (best == null or @abs(st.along - along) < @abs(best.?.along - along)) best = st;
+    }
+    if (best) |st| return .{ .index = st.index, .offset = st.offset };
+    return .{ .index = indexAt(head.panel, head.region, t.track, along), .offset = 0 };
+}
+
+/// A drag in text under way: the pointer selects from where it went down.
+var text_drag = false;
+
+/// A plain press at `at` clearly inside a text track's segment: that track
+/// the context and the flow cursor where pressed, ready for typing (and a
+/// drag from here selecting). With `extend` (Shift), the selection runs
+/// from the cursor that was to here, in the same flow. Whether it was one.
+fn textPress(at: geom.Point, extend: bool) bool {
+    const t = textSegmentAt(at) orelse return false;
+    const head = state.model.threadHead(t.panel, t.region);
+    if (extend) {
+        const c = track_cursor orelse return false;
+        if (c.panel != head.panel or c.region != head.region) return false;
+    }
+    const pos = flowPlaceAt(t.panel, head, at, true) orelse return false;
+    if (canvas_eq != null) leaveCanvasEquation();
+    if (extend) {
+        const c = track_cursor.?;
+        if (flow_anchor == null) flow_anchor = .{ .index = c.index, .offset = c.offset };
+    } else {
+        flow_anchor = null;
+        hunt_clear();
+        selection.clearRetainingCapacity();
+        state.context = .{ .region = .{ .panel = t.panel, .region = t.region } };
+    }
+    track_cursor = .{ .panel = head.panel, .region = head.region, .index = pos.index, .offset = pos.offset };
+    typing_seq += 1;
+    text_drag = true;
+    text_drag_panel = t.panel;
+    last_click = null;
+    revealInTree(state.context);
+    return true;
+}
+var text_drag_panel: usize = 0;
+
+/// The pointer at `at` in a text drag: the cursor follows it, the anchor
+/// staying where the drag began.
+fn textDragTo(at: geom.Point) void {
+    const c = track_cursor orelse return;
+    const pos = flowPlaceAt(text_drag_panel, .{ .panel = c.panel, .region = c.region }, at, true) orelse return;
+    if (pos.index == c.index and pos.offset == c.offset) return;
+    if (flow_anchor == null) flow_anchor = .{ .index = c.index, .offset = c.offset };
+    track_cursor.?.index = pos.index;
+    track_cursor.?.offset = pos.offset;
 }
 
 // The character cursor ------------------------------------------------------
