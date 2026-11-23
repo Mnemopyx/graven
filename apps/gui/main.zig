@@ -233,6 +233,9 @@ pub const testing_api = struct {
         const c = eqChoice(dvui.currentWindow().arena()) orelse return null;
         return c.kind;
     }
+    pub fn shownSpace() usize {
+        return shown_space;
+    }
     pub fn contextIsCanvas() bool {
         return switch (state.context) {
             .panel => |pi| pi < state.model.panels.items.len and state.model.panels.items[pi].unbounded,
@@ -12261,9 +12264,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
-                } else if (state.tool == .select and boundary_mode and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p))) {
+                } else if (state.tool == .select and boundary_mode and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and nearestBoundary(state.view.toMm(area, me.p)) != null) {
                     // Select boundaries: the nearest boundary's container,
-                    // made the selection (its drag points shown).
+                    // made the selection (its drag points shown). With no
+                    // boundary in reach, the press is a plain one: a click
+                    // on the canvas or frame chooses it.
                     _ = hoverPress(state.view.toMm(area, me.p));
                     state.press_consumed = true;
                     last_click = null;

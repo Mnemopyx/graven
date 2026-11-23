@@ -2193,3 +2193,53 @@ test "a construction line chosen, then K: H holds it horizontal; K, D and a clic
     try std.testing.expect(y0 != 30);
     try std.testing.expectApproxEqAbs(30, api.guides()[0].at.y, 1e-9);
 }
+
+test "a click on empty canvas or frame chooses it, Select boundaries on or off, and the ribbon has its tools" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    defer api.setBoundaryMode(false);
+    for ([_]bool{ false, true }) |boundaries| {
+        api.setBoundaryMode(boundaries);
+        // A key chosen, then a click well away from every boundary.
+        api.centreOnTile("R1C3", 20);
+        try r.frames(2);
+        try r.clickAt(api.tileCenter("R1C3").?);
+        try std.testing.expectEqualStrings("tile", api.contextName());
+        api.setView(0, 0, 4);
+        try r.frames(2);
+        try r.clickAt(api.screenOf(-60, -60).?);
+        try r.frames(2);
+        try std.testing.expect(api.contextIsCanvas());
+        try std.testing.expectEqual(0, api.selectionCount());
+        // The canvas's tools: a sketch, tracks, a panel, an area; no shape
+        // (nothing is drawn directly on it).
+        _ = try r.rectOf("tool.new-sketch");
+        _ = try r.rectOf("tool.add-rows");
+        _ = try r.rectOf("tool.add-panel");
+        _ = try r.rectOf("tool.select-area");
+        try std.testing.expect(dvui.tagGet("tool.add-shape") == null);
+    }
+    // The same in a frame: what Select area takes moved into a new one.
+    api.setBoundaryMode(false);
+    try r.press("tool.select-area");
+    try r.drag(api.screenOf(-5, -5).?, api.screenOf(200, 140).?);
+    try r.frames(2);
+    try r.press("selection.move-to-a-new-frame");
+    try r.frames(4);
+    try std.testing.expectEqual(1, api.shownSpace());
+    // What was moved stays chosen; a click on the frame's empty part
+    // chooses the frame.
+    try std.testing.expect(!api.contextIsCanvas());
+    api.setBoundaryMode(true);
+    api.setView(0, 0, 2);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(-60, -60).?);
+    try r.frames(2);
+    try std.testing.expect(api.contextIsCanvas());
+    try std.testing.expectEqual(1, api.shownSpace());
+    try std.testing.expectEqual(0, api.selectionCount());
+    _ = try r.rectOf("tool.new-sketch");
+    try std.testing.expect(dvui.tagGet("tool.add-shape") == null);
+}
