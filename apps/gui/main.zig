@@ -11532,6 +11532,7 @@ fn updateModeStack() void {
         push(&st, &n, kmode("view"));
         if ((engage_n > 0 or engage_lock != null) and engaging()) push(&st, &n, kmode("canvas.engage"));
         if (selection.items.len > 0 and track_cursor == null) push(&st, &n, kmode("canvas.selection"));
+        if (constrain_menu != null) push(&st, &n, kmode("canvas.constrain-menu"));
         if (track_cursor != null) push(&st, &n, kmode("canvas.flow"));
         if (canvas_eq) |q| {
             push(&st, &n, kmode("canvas.equation"));
@@ -11858,6 +11859,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         }
         // Scrolling, pinching and Z-drags, whatever mode the canvas is in.
         if (viewNavEvent(e, box, area)) continue;
+        // The constraint pop-up's keys (H, V, D, Escape) while it is open.
+        if (constrain_menu != null) if (keymap.match1(e, kmode("canvas.constrain-menu"))) |inv| {
+            e.handle(@src(), box.data());
+            _ = runAction(inv);
+            dvui.refresh(null, @src(), box.data().id);
+            continue;
+        };
         // Ctrl+< and Ctrl+>: a level out or in, whatever is being edited.
         if (!canvas_prompt and sketch_edit == null and cursorKeysReach()) if (keymap.match1(e, kmode("canvas"))) |inv| {
             // The ribbon's tools, each by its key; one with a drop runs on
@@ -14401,6 +14409,96 @@ const RibbonSize = enum {
 };
 var ribbon_size: RibbonSize = .medium;
 
+/// The constraint pop-up for a chosen construction line (K with it
+/// chosen): which line, where it opened, the frame it was asked in.
+var constrain_menu: ?struct { space: usize, index: usize } = null;
+var constrain_menu_from: dvui.Rect.Natural = .{};
+var constrain_menu_frame: i128 = 0;
+
+fn openConstrainMenu(space: usize, index: usize) void {
+    constrain_menu = .{ .space = space, .index = index };
+    const m = dvui.currentWindow().mouse_pt;
+    const ns = dvui.windowNaturalScale();
+    constrain_menu_from = .{ .x = m.x / ns, .y = m.y / ns, .w = 1, .h = 1 };
+    constrain_menu_frame = dvui.frameTimeNS();
+    dvui.refresh(null, @src(), null);
+}
+
+fn constrainMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    closeConstrainMenu();
+}
+
+/// The pop-up closed, the keyboard back on the canvas (the menu's
+/// subwindow had it).
+fn closeConstrainMenu() void {
+    constrain_menu = null;
+    const main_sw = dvui.currentWindow().data().id;
+    dvui.focusSubwindow(main_sw, null);
+    if (canvas_id) |id| dvui.focusWidget(id, main_sw, null);
+}
+
+/// The pop-up: Horizontal, Vertical, and Distance from… (a line already
+/// horizontal or vertical), each with its key.
+fn constrainMenu() void {
+    const cm = constrain_menu orelse return;
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&constrain_menu), .close = constrainMenuClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var fm = dvui.floatingMenu(@src(), .{ .from = constrain_menu_from, .style = .popup }, .{});
+    defer fm.deinit();
+    const straight = guideFeature(cm.space, cm.index) != null;
+    inline for (.{ "constrain-menu.horizontal", "constrain-menu.vertical", "constrain-menu.distance" }, 0..) |id, i| {
+        const tag = uniqueTag(id);
+        recordDrawn(tag, 0);
+        const off = i == 2 and !straight;
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = i, .tag = tag, .margin = .all(1), .padding = .{ .x = 8, .w = 8, .y = 3, .h = 4 } });
+        bw.processEvents();
+        bw.drawBackground();
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            const ink = dvui.themeGet().color(.window, .text);
+            dvui.labelNoFmt(@src(), comptime elements.get(id).label, .{}, .{ .padding = .all(0), .margin = .all(0), .expand = .horizontal, .color_text = if (off) .{ .color = ink.opacity(0.4) } else null });
+            var kb: [24]u8 = undefined;
+            if (keymap.shortcut(&kb, kmode("canvas.constrain-menu"), kact(id), 0)) |sc| dvui.labelNoFmt(@src(), sc, .{}, .{ .padding = .{ .x = 16 }, .margin = .all(0), .color_text = .{ .color = ink.opacity(0.55) } });
+        }
+        if (bw.clicked()) pushButtonEvent(tag, 0);
+        bw.drawFocus();
+        bw.deinit();
+    }
+}
+
+/// The construction line the pop-up is for, held horizontal or vertical
+/// (turned about its point): one step.
+fn holdGuide(lock: layout.model.GuideLock) void {
+    const cm = constrain_menu orelse return;
+    closeConstrainMenu();
+    if (cm.space >= state.model.spaces.items.len) return;
+    const list = state.model.spaces.items[cm.space].guides.items;
+    if (cm.index >= list.len) return;
+    const g = list[cm.index];
+    const angle: f64 = if (lock == .horizontal) 0 else 90;
+    act(.setGuide, .{ cm.space, cm.index, g.at, angle, lock }) catch return;
+    state.status = if (lock == .horizontal) "Held horizontal. " else "Held vertical. ";
+}
+
+/// A horizontal or vertical construction line as the Constrain tool's
+/// first pick (its height or place across, along it); null for a line at
+/// another angle.
+fn guideFeature(space: usize, index: usize) ?FeatureHit {
+    if (space >= state.model.spaces.items.len) return null;
+    const list = state.model.spaces.items[space].guides.items;
+    if (index >= list.len) return null;
+    const g = list[index];
+    const r = g.angle * std.math.pi / 180;
+    const horizontal = @abs(@sin(r)) < 1e-9;
+    if (!horizontal and @abs(@cos(r)) >= 1e-9) return null;
+    const far = 1e5;
+    const clip: geom.Box = if (canvas_free) |cf| guideClipBox(cf.area, space) else .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
+    const seg = g.clip(clip) orelse return null;
+    return .{ .end = .{ .object = g.id, .feature = if (horizontal) .origin_y else .origin_x }, .parent = .{ .space = space }, .p0 = seg[0], .p1 = seg[1] };
+}
+
 /// The key-size pop-up (a right-click on the ribbon): open, where, and
 /// the frame it was asked for in (it is drawn from the next).
 var ribbon_size_menu = false;
@@ -15026,6 +15124,7 @@ fn ribbon() void {
         }
     }
     defer if (ribbon_size_menu and ribbon_size_frame != dvui.frameTimeNS()) ribbonSizeMenu();
+    defer if (constrain_menu != null and constrain_menu_frame != dvui.frameTimeNS()) constrainMenu();
     in_ribbon = true;
     defer in_ribbon = false;
     switch (activeKind()) {
@@ -15288,7 +15387,41 @@ const button_handlers = [_]ButtonHandler{
         fn f(_: i32) void {
             state.drag = null;
             constrain_first = null;
+            // A construction line chosen: the tool is applied to it, its
+            // constraints offered (the owner, 2026-11-23).
+            if (state.tool != .constrain) if (state.context == .guide) {
+                openConstrainMenu(state.context.guide.space, state.context.guide.index);
+                return;
+            };
             state.tool = if (state.tool == .constrain) .select else .constrain;
+        }
+    }.f),
+    handler("constrain-menu.horizontal", struct {
+        fn f(_: i32) void {
+            holdGuide(.horizontal);
+        }
+    }.f),
+    handler("constrain-menu.vertical", struct {
+        fn f(_: i32) void {
+            holdGuide(.vertical);
+        }
+    }.f),
+    handler("constrain-menu.distance", struct {
+        fn f(_: i32) void {
+            const cm = constrain_menu orelse return;
+            closeConstrainMenu();
+            const hit = guideFeature(cm.space, cm.index) orelse {
+                state.status = "A distance needs the line horizontal or vertical first (H or V). ";
+                return;
+            };
+            state.tool = .constrain;
+            constrain_first = hit;
+            state.status = "Distance: click what the line keeps to. ";
+        }
+    }.f),
+    handler("constrain-menu.close", struct {
+        fn f(_: i32) void {
+            closeConstrainMenu();
         }
     }.f),
     handler("tool.add-prototype", struct {

@@ -39,6 +39,9 @@ pub const modes = [_]M{
     // Engagement points near the pointer (or one locked onto).
     .{ .name = "canvas.engage", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.engage"} },
     .{ .name = "canvas.selection", .kind = .sub, .parent = "canvas", .allows = &.{"canvas.selection"} },
+    // The constraints for the object chosen (K with one chosen), while
+    // their pop-up is open.
+    .{ .name = "canvas.constrain-menu", .kind = .sub, .parent = "canvas", .allows = &.{"constrain-menu"} },
     .{ .name = "canvas.flow", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.flow"} },
     .{ .name = "canvas.equation", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.equation"} },
     .{ .name = "canvas.equation.head", .kind = .sub, .parent = "canvas.equation", .allows = &.{"canvas.equation.head"} },
@@ -401,6 +404,10 @@ pub const binds = [_]B{
     .{ .mode = "canvas.engage", .chord = "shift+tab", .action = "canvas.engage.lock", .arg = 1 },
     .{ .mode = "canvas.engage", .chord = "escape", .action = "canvas.engage.release" },
     .{ .mode = "canvas.selection", .chord = "tab", .action = "canvas.selection.hunt", .arg = 0 },
+    .{ .mode = "canvas.constrain-menu", .chord = "h", .action = "constrain-menu.horizontal" },
+    .{ .mode = "canvas.constrain-menu", .chord = "v", .action = "constrain-menu.vertical" },
+    .{ .mode = "canvas.constrain-menu", .chord = "d", .action = "constrain-menu.distance" },
+    .{ .mode = "canvas.constrain-menu", .chord = "escape", .action = "constrain-menu.close" },
     .{ .mode = "canvas.selection", .chord = "shift+tab", .action = "canvas.selection.hunt", .arg = 1 },
     .{ .mode = "canvas.selection", .chord = "escape", .action = "canvas.selection.clear" },
 } ++ flowMoves() ++ [_]B{

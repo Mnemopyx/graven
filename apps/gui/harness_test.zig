@@ -56,6 +56,9 @@ pub const Run = struct {
         threaded = .init(std.heap.c_allocator, .{});
         const t = try dvui.testing.init(.{ .io = threaded.io(), .allocator = std.heap.c_allocator, .window_size = .{ .w = 1600, .h = 4000 } });
         try gui.dvui_app.initFn.?(t.window);
+        // A preference an earlier test changed (the process's, not the
+        // config's): each test starts from the default.
+        api.setBoundaryMode(false);
         var r: Run = .{ .t = t };
         try r.frames(3);
         return r;
@@ -2093,6 +2096,8 @@ test "a horizontal construction line chosen with Constrain and held a distance f
     try std.testing.expectEqual(1, api.guides().len);
     try std.testing.expectApproxEqAbs(0, api.guides()[0].angle, 1e-9);
     try r.key(.escape, .none);
+    // Nothing chosen (with the line chosen, K opens its pop-up instead).
+    try r.clickAt(api.screenOf(100, 80).?);
     // Constrain: the line first, then the canvas's origin line (y = 0).
     try r.press("tool.constrain");
     try r.clickAt(api.screenOf(100, 20).?);
@@ -2150,4 +2155,41 @@ test "with Select boundaries on, a construction line near the pointer is a bound
     // Near it, not on it: about 1 mm off.
     try r.clickAt(api.screenOf(100, 21).?);
     try std.testing.expectEqualStrings("guide", api.contextName());
+}
+
+test "a construction line chosen, then K: H holds it horizontal; K, D and a click on the origin set its distance" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.press("tool.construction-line");
+    try r.clickAt(api.screenOf(60, 10).?);
+    try r.clickAt(api.screenOf(140, 50).?);
+    try r.key(.escape, .none);
+    try std.testing.expect(@abs(api.guides()[0].angle) > 1);
+    // Chosen with Select boundaries, a click near it.
+    try r.clickAt(api.screenOf(100, 80).?);
+    try r.key(.b, .none);
+    try r.clickAt(api.screenOf(100, 31).?);
+    try std.testing.expectEqualStrings("guide", api.contextName());
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.h, .none);
+    try r.frames(2);
+    try std.testing.expectApproxEqAbs(0, api.guides()[0].angle, 1e-9);
+    const y0 = api.guides()[0].at.y;
+    // K again: Distance from…, then the canvas's origin line.
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.d, .none);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(100, 0).?);
+    try r.frames(2);
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText("30");
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(3);
+    try std.testing.expect(y0 != 30);
+    try std.testing.expectApproxEqAbs(30, api.guides()[0].at.y, 1e-9);
 }
