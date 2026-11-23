@@ -2569,8 +2569,7 @@ fn proceed(p: Pending) void {
     switch (p) {
         .new_canvas => newCanvas(),
         .open => {
-            file_prompt = .open;
-            file_prompt_new = true;
+            askForFile(.open);
         },
         .quit => quit_now = true,
         .example => |path| openExample(path),
@@ -2585,8 +2584,7 @@ fn save() void {
 }
 
 fn saveAs() void {
-    file_prompt = .save_as;
-    file_prompt_new = true;
+    askForFile(.save_as);
 }
 
 // Files: writing, autosave, recovery and other writers -----------------------
@@ -3211,9 +3209,104 @@ fn contentionPrompt() void {
     keyButton(@src(), "Overwrite with mine", 0, .{});
 }
 
+/// Asks for a file to open, import, save or export as: the system's file
+/// dialog where there is one, else Graven's own prompt for a typed name.
+fn askForFile(kind: FilePromptKind) void {
+    file_prompt = kind;
+    file_prompt_new = true;
+    file_prompt_system = systemFileDialog();
+}
+
+/// Whether the file prompt now open is to be the system's dialog (shown by
+/// the prompt's next frame).
+var file_prompt_system = false;
+/// Frames still to draw before the system's file dialog opens, so what
+/// asked for it (a menu) has gone from the screen while it holds the frame.
+var system_dialog_wait: u8 = 0;
+
+/// Whether the system has a file dialog to show: Windows' and macOS's own;
+/// on Linux, one of the programs tinyfiledialogs runs (zenity, kdialog …)
+/// on the path. Never under the GUI's tests.
+fn systemFileDialog() bool {
+    if (comptime builtin.is_test or !dvui.useTinyFileDialogs) return false;
+    if (comptime builtin.os.tag != .linux) return true;
+    const cached = struct {
+        var known: ?bool = null;
+    };
+    if (cached.known) |k| return k;
+    const path = platform.env("PATH") orelse "";
+    var found = false;
+    var it = std.mem.splitScalar(u8, path, ':');
+    outer: while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        for ([_][]const u8{ "zenity", "kdialog", "qarma", "matedialog", "yad" }) |prog| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, prog }) catch continue;
+            std.Io.Dir.cwd().access(dvui.io, full, .{}) catch continue;
+            found = true;
+            break :outer;
+        }
+    }
+    cached.known = found;
+    return found;
+}
+
+/// The system's file dialog for `kind`: to open or import, the file types
+/// it reads; to save or export, a name to write. Null when cancelled.
+fn systemFileChoice(a: std.mem.Allocator, kind: FilePromptKind) ?[:0]const u8 {
+    return switch (kind) {
+        .open => dvui.dialogNativeFileOpen(a, .{ .title = "Open a document", .filters = &.{"*" ++ doc_ext}, .filter_description = "Graven documents" }) catch null,
+        .import_text => dvui.dialogNativeFileOpen(a, .{ .title = "Import text", .filters = &.{ "*.rtf", "*.txt" }, .filter_description = "RTF or plain text" }) catch null,
+        .import_sheet => dvui.dialogNativeFileOpen(a, .{ .title = "Import a legend sheet", .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
+        .import_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Import a figure", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
+        .save_as => dvui.dialogNativeFileSave(a, .{ .title = "Save the document as", .path = file_path orelse "untitled" ++ doc_ext, .filters = &.{"*" ++ doc_ext}, .filter_description = "Graven documents" }) catch null,
+        .export_sheet => dvui.dialogNativeFileSave(a, .{ .title = "Export the legend sheet", .path = sheetExportName(), .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
+        .export_3mf => dvui.dialogNativeFileSave(a, .{ .title = "Export the panel as 3MF", .path = threeMfName(), .filters = &.{"*.3mf"}, .filter_description = "3MF files" }) catch null,
+    };
+}
+
+/// What the file prompt does with the file chosen.
+fn fileChosen(kind: FilePromptKind, path: []const u8) void {
+    switch (kind) {
+        .open => openDocument(path),
+        .import_text => importText(path),
+        .import_sheet => importSheet(path),
+        .import_figure => importFigure(path),
+        .export_sheet => exportSheet(path),
+        .export_3mf => exportThreeMf(path),
+        .save_as => {
+            // A name without an extension takes Graven's.
+            const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
+            if (!writeDocument(full)) after_save = null;
+        },
+    }
+}
+
 /// The file prompt: a name to open or save as; Enter or the button does
 /// it, Esc or Cancel closes it.
 fn filePrompt(kind: FilePromptKind) void {
+    if (file_prompt_system) {
+        // The system's dialog, in place of Graven's prompt; it holds the
+        // frame while open, so a frame is drawn first (the menu closed).
+        if (file_prompt_new) {
+            file_prompt_new = false;
+            system_dialog_wait = 3;
+        }
+        if (system_dialog_wait > 0) {
+            system_dialog_wait -= 1;
+            dvui.refresh(null, @src(), null);
+            return;
+        }
+        file_prompt_system = false;
+        file_prompt = null;
+        dvui.refresh(null, @src(), null);
+        const chosen = systemFileChoice(dvui.currentWindow().arena(), kind) orelse {
+            after_save = null;
+            return;
+        };
+        fileChosen(kind, chosen);
+        return;
+    }
     const saved_group = pushGroup("dialog.file");
     defer popGroup(saved_group);
     const c = region_rect;
@@ -3290,19 +3383,7 @@ fn filePrompt(kind: FilePromptKind) void {
     if (!go or path.len == 0) return;
     file_prompt = null;
     dvui.refresh(null, @src(), null);
-    switch (kind) {
-        .open => openDocument(path),
-        .import_text => importText(path),
-        .import_sheet => importSheet(path),
-        .import_figure => importFigure(path),
-        .export_sheet => exportSheet(path),
-        .export_3mf => exportThreeMf(path),
-        .save_as => {
-            // A name without an extension takes Graven's.
-            const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
-            if (!writeDocument(full)) after_save = null;
-        },
-    }
+    fileChosen(kind, path);
 }
 
 /// Unsaved changes: Save (then go on), Don't save, or Cancel.
@@ -4919,21 +5000,18 @@ fn menu() ?dvui.App.Result {
         }
         if (!canvas_prompt) if (tmenu(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
-            file_prompt = .import_text;
-            file_prompt_new = true;
+            askForFile(.import_text);
         };
         if (!canvas_prompt) if (tmenu(@src(), "Import figure (SVG)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
-            file_prompt = .import_figure;
-            file_prompt_new = true;
+            askForFile(.import_figure);
         };
         if (!canvas_prompt) if (tmenu(@src(), "Export legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetToExport() == null) {
                 state.status = "Show or choose a legend sheet first: it is what is exported. ";
             } else {
-                file_prompt = .export_sheet;
-                file_prompt_new = true;
+                askForFile(.export_sheet);
             }
         };
         if (!canvas_prompt) if (tmenu(@src(), "Export panel as 3MF…", .{}, .{ .expand = .horizontal }) != null) {
@@ -4942,8 +5020,7 @@ fn menu() ?dvui.App.Result {
                 if (state.model.panels.items[pi].fab.layers.len == 0) {
                     state.status = "This panel has no fabrication layers yet (its properties, Fabrication): there is nothing to make. ";
                 } else {
-                    file_prompt = .export_3mf;
-                    file_prompt_new = true;
+                    askForFile(.export_3mf);
                 }
             } else state.status = "Choose a panel first: it is what is exported. ";
         };
@@ -4956,8 +5033,7 @@ fn menu() ?dvui.App.Result {
             if (sheetImportTarget() == null) {
                 state.status = "Choose a sheet, or a grid, track or panel of keys, first: the table goes into it. ";
             } else {
-                file_prompt = .import_sheet;
-                file_prompt_new = true;
+                askForFile(.import_sheet);
             }
         };
         if (tmenu(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
@@ -4965,6 +5041,7 @@ fn menu() ?dvui.App.Result {
             if (!canvas_prompt and openCanvas()) {
                 image_prompt = true;
                 image_prompt_new = true;
+                image_prompt_system = systemFileDialog();
             }
         }
         if (tmenu(@src(), "Export SVG…", .{}, .{ .expand = .horizontal }) != null) {
@@ -10924,12 +11001,30 @@ fn moveImageKey(code: dvui.enums.Key) bool {
 
 /// File › Place image is asking for the file.
 var image_prompt = false;
+/// Whether the image prompt is the system's file dialog (see `askForFile`).
+var image_prompt_system = false;
 /// The prompt has just opened: its file field takes the keyboard.
 var image_prompt_new = false;
 
 /// The Place image prompt: a PNG or JPEG file, placed in the shown space
 /// at 150 dpi on the active layer.
 fn imagePrompt() void {
+    if (image_prompt_system) {
+        if (image_prompt_new) {
+            image_prompt_new = false;
+            system_dialog_wait = 3;
+        }
+        if (system_dialog_wait > 0) {
+            system_dialog_wait -= 1;
+            dvui.refresh(null, @src(), null);
+            return;
+        }
+        image_prompt_system = false;
+        image_prompt = false;
+        dvui.refresh(null, @src(), null);
+        if (dvui.dialogNativeFileOpen(dvui.currentWindow().arena(), .{ .title = "Place an image", .filters = &.{ "*.png", "*.jpg", "*.jpeg" }, .filter_description = "PNG or JPEG images" }) catch null) |path| placeImage(path);
+        return;
+    }
     const saved_group = pushGroup("dialog.image");
     defer popGroup(saved_group);
     const c = region_rect;
@@ -16614,8 +16709,7 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     handler("figures.import-svg", struct {
         fn f(_: i32) void {
-            file_prompt = .import_figure;
-            file_prompt_new = true;
+            askForFile(.import_figure);
         }
     }.f),
     handler("figure.remove-figure", struct {
