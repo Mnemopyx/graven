@@ -56,7 +56,7 @@ pub const Issue = struct {
 /// Where an object is, and what it is.
 /// A construction line is placed by its point: a horizontal one's height
 /// and a vertical one's place across are what a constraint holds.
-const Kind = enum { panel, region, art, image, control_point, guide };
+const Kind = enum { panel, region, art, image, figure_place, control_point, guide };
 /// What an object sits in: a space (panels, images) or a panel (tracks,
 /// line art), whose frame its position is in.
 pub const Parent = union(enum) { space: usize, panel: usize };
@@ -83,6 +83,7 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
     }
     for (m.spaces.items, 0..) |s, si| {
         for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
+        for (s.figure_places.items, 0..) |fp, k| if (fp.id == id) return .{ .kind = .figure_place, .parent = .{ .space = si }, .holder = si, .index = k };
         for (s.guides.items, 0..) |g, k| if (g.id == id) return .{ .kind = .guide, .parent = .{ .space = si }, .holder = si, .index = k };
     }
     return null;
@@ -132,6 +133,10 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
         .image => blk: {
             const im = m.spaces.items[loc.holder].images.items[loc.index];
             break :blk pick(im.box(), im.holds, vertical, true);
+        },
+        .figure_place => blk: {
+            const fp = m.spaces.items[loc.holder].figure_places.items[loc.index];
+            break :blk pick(fp.box(), fp.holds, vertical, true);
         },
         .control_point => blk: {
             const at = controlPointAt(p.regions.items[loc.index], loc.sub);
@@ -203,6 +208,20 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
             } else {
                 im.at.x = lo;
                 im.w = s;
+            }
+        },
+        // Its boundary at `lo`, `s` long: the ink inside it at the
+        // margin (a placement keeps its proportions: the editor's resize
+        // keeps them; here each axis is as given).
+        .figure_place => {
+            const fp = &m.spaces.items[loc.holder].figure_places.items[loc.index];
+            const ink = @max(s - 2 * fp.margin, 1e-3);
+            if (vertical) {
+                fp.at.y = lo + fp.margin;
+                fp.h = ink;
+            } else {
+                fp.at.x = lo + fp.margin;
+                fp.w = ink;
             }
         },
         .guide => {

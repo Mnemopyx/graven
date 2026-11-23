@@ -632,7 +632,10 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, construction, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch };
+const Tool = enum { select, construction, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch, insert_figure };
+
+/// The figure Insert figure places (its id), chosen in the Browser.
+var insert_figure: layout.model.ObjectId = .none;
 
 /// Join: the track a click on another track threads on into.
 var join_from: ?struct { panel: usize, region: usize } = null;
@@ -684,6 +687,8 @@ const Context = union(enum) {
     layer: struct { space: usize, index: usize },
     /// A raster image placed in a space.
     image: struct { space: usize, index: usize },
+    /// A figure placed in a space.
+    figure_place: struct { space: usize, index: usize },
     /// A construction line of a space.
     guide: struct { space: usize, index: usize },
     /// A view of a sketch, placed in a space.
@@ -737,6 +742,7 @@ const Context = union(enum) {
             .row => "Row",
             .tile => "Tile",
             .art => "Line art",
+            .figure_place => "Placed figure",
             .group => "Group",
             .selection => "Selection",
             .view => "View",
@@ -3658,6 +3664,7 @@ fn contextValid(c: Context) bool {
         .view => |v| v.space < m.spaces.items.len and v.index < m.spaces.items[v.space].views.items.len,
         .layer => |l| l.space < m.spaces.items.len and l.index < m.spaces.items[l.space].layers.items.len,
         .image => |im| im.space < m.spaces.items.len and im.index < m.spaces.items[im.space].images.items.len,
+        .figure_place => |fc| fc.space < m.spaces.items.len and fc.index < m.spaces.items[fc.space].figure_places.items.len,
         .guide => |g| g.space < m.spaces.items.len and g.index < m.spaces.items[g.space].guides.items.len,
         .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len,
         .sketches => true,
@@ -5300,6 +5307,10 @@ fn worksheetTree() void {
                 var ib: [96]u8 = undefined;
                 _ = treeNode(.{ .image = .{ .space = si, .index = ii } }, std.fmt.bufPrint(&ib, "Image {s}", .{im.name}) catch im.name, 2, false, false);
             }
+            for (sp.figure_places.items, 0..) |fp, k| {
+                var fb: [96]u8 = undefined;
+                _ = treeNode(.{ .figure_place = .{ .space = si, .index = k } }, std.fmt.bufPrint(&fb, "Figure {s}", .{fp.name}) catch fp.name, 2, false, false);
+            }
             panelChildren(state.model.rootOf(si), 2);
             for (state.model.panels.items, 0..) |panel, pi| {
                 if (panel.id == sp.root or panel.space != sp.id) continue;
@@ -5506,7 +5517,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place => false,
     };
 }
 
@@ -7337,6 +7348,8 @@ fn canvas(active: bool, view: u8) void {
     // and their count and length.
     if (state.drag) |d| if (state.tool == .add_tracks) {
         if (planTracks(d.start, d.at)) |plan| drawTrackPlan(area, plan);
+    } else if (state.tool == .insert_figure) {
+        drawInsertPreview(area, d.start, d.at);
     } else {
         const r = state.view.rect(area, dragBox(d.start, d.at));
         r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.12) } });
@@ -9242,6 +9255,228 @@ fn imageAt(space: usize, index: usize) ?layout.model.Image {
     return if (index < list.len) list[index] else null;
 }
 
+fn figurePlaceAt(space: usize, index: usize) ?layout.model.FigurePlace {
+    if (space >= state.model.spaces.items.len) return null;
+    const list = state.model.spaces.items[space].figure_places.items;
+    return if (index < list.len) list[index] else null;
+}
+
+/// The placement with id `id`, if it is one.
+fn figurePlaceOf(id: layout.model.ObjectId) ?layout.model.FigurePlace {
+    for (state.model.spaces.items) |sp| for (sp.figure_places.items) |fp| if (fp.id == id) return fp;
+    return null;
+}
+
+/// A figure's ink as triangles in its own coordinates, worked out once
+/// per figure (its paths' identity) and kept.
+const FigureTris = struct { paths: [*]const layout.figure.Path, bounds: geom.Box, colors: []layout.art.Color, tris: [][]const [3]geom.Point };
+var figure_tris: std.AutoHashMapUnmanaged(layout.model.ObjectId, FigureTris) = .empty;
+var figure_tris_arena: ?std.heap.ArenaAllocator = null;
+
+fn figureTris(fi: usize) ?FigureTris {
+    const f = state.model.figures.items[fi];
+    if (figure_tris.get(f.id)) |t| if (t.paths == f.paths.ptr) return t;
+    if (figure_tris_arena == null) figure_tris_arena = .init(state.gpa);
+    const a = figure_tris_arena.?.allocator();
+    const shapes = layout.figure.ink(a, f, figure_tol) catch return null;
+    const colors_ = a.alloc(layout.art.Color, shapes.len) catch return null;
+    const tris = a.alloc([]const [3]geom.Point, shapes.len) catch return null;
+    for (shapes, colors_, tris) |sh, *c, *t| {
+        c.* = switch (sh.paint.fill) {
+            .solid => |col| col,
+            else => .{ .r = 0, .g = 0, .b = 0, .a = 255 },
+        };
+        const lines = a.alloc([]const geom.Point, sh.outline.contours.len) catch return null;
+        for (sh.outline.contours, lines) |ct, *l| {
+            var pts: std.ArrayList(geom.Point) = .empty;
+            for (ct.segments) |seg| flatten(a, &pts, seg, figure_tol) catch {};
+            l.* = pts.items;
+        }
+        const region = geom.fill.nonzero(a, lines, figure_tol * 0.1) catch {
+            t.* = &.{};
+            continue;
+        };
+        t.* = region.triangles;
+    }
+    const out: FigureTris = .{ .paths = f.paths.ptr, .bounds = layout.figure.inkBounds(shapes), .colors = colors_, .tris = tris };
+    figure_tris.put(state.gpa, f.id, out) catch {};
+    return out;
+}
+
+/// Figure `fi`'s ink drawn into `ink` (mm in the shown space), at `alpha`.
+fn drawFigureInk(area: dvui.Rect.Physical, fi: usize, ink: geom.Box, alpha: f32) void {
+    const ft = figureTris(fi) orelse return;
+    const fb = ft.bounds;
+    if (fb.isEmpty() or !(fb.width() > 0) or !(fb.height() > 0)) return;
+    const sx = ink.width() / fb.width();
+    const sy = ink.height() / fb.height();
+    const lifo = dvui.currentWindow().lifo();
+    const Index = dvui.Vertex.Index;
+    for (ft.tris, ft.colors) |tris, col| {
+        const pma: dvui.Color.PMA = .fromColor(display.fix(dvui.Color{ .r = col.r, .g = col.g, .b = col.b, .a = col.a }).opacity(alpha * dvui.currentWindow().alpha));
+        const batch = 20000;
+        var from: usize = 0;
+        while (from < tris.len) : (from += batch) {
+            const part = tris[from..@min(from + batch, tris.len)];
+            var tb = dvui.Triangles.Builder.init(lifo, 3 * part.len, 3 * part.len) catch return;
+            defer tb.deinit(lifo);
+            for (part, 0..) |t, j| {
+                var v: [3]dvui.Point.Physical = undefined;
+                for (t, &v) |q, *o| o.* = state.view.toPx(area, .{ .x = ink.x0 + (q.x - fb.x0) * sx, .y = ink.y0 + (q.y - fb.y0) * sy });
+                for (v) |pos| tb.appendVertex(.{ .pos = pos, .col = pma });
+                const i: Index = @intCast(3 * j);
+                tb.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
+            }
+            dvui.renderTriangles(tb.build_unowned(), null) catch {};
+        }
+    }
+}
+
+/// The figures placed in space `space` on layer `layer`: their ink; the
+/// chosen one's boundary.
+fn drawFigurePlaces(area: dvui.Rect.Physical, space: usize, layer: layout.model.ObjectId) void {
+    const sp = state.model.spaces.items[space];
+    const px = dvui.windowNaturalScale();
+    for (sp.figure_places.items, 0..) |fp, k| {
+        if ((if (fp.layer == .none) sp.base_layer else fp.layer) != layer) continue;
+        if (state.model.figureIndex(fp.figure)) |fi| {
+            drawFigureInk(area, fi, fp.inkBox(), 1);
+        } else {
+            // Its figure removed: where it was.
+            state.view.rect(area, fp.inkBox()).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.overflow } });
+        }
+        const sel = switch (state.context) {
+            .figure_place => |c| c.space == space and c.index == k,
+            else => false,
+        };
+        if (sel) marchingBox(area, fp.box(), colors.select, 2 * px);
+    }
+}
+
+/// The top-most placed figure of the shown space whose boundary holds `at`.
+fn figurePlaceUnder(at: geom.Point) ?Context {
+    if (shown_space >= state.model.spaces.items.len) return null;
+    const sp = state.model.spaces.items[shown_space];
+    var hit: ?Context = null;
+    var hit_layer: usize = 0;
+    for (sp.figure_places.items, 0..) |fp, k| {
+        if (!contains(fp.box(), at) or !layerOpen(shown_space, fp.layer)) continue;
+        const li = sp.layerIndex(fp.layer) orelse 0;
+        if (hit == null or li >= hit_layer) {
+            hit = .{ .figure_place = .{ .space = shown_space, .index = k } };
+            hit_layer = li;
+        }
+    }
+    return hit;
+}
+
+/// Insert figure's ink box for a drag from `start` to `at`: the figure's
+/// proportions, as large as the drag reaches on either axis, from
+/// `start` the way the drag goes. Null for a drag too short to size it.
+fn insertBox(from: geom.Point, at: geom.Point) ?geom.Box {
+    const fi = state.model.figureIndex(insert_figure) orelse return null;
+    const fb = state.model.figures.items[fi].bounds();
+    if (fb.isEmpty() or !(fb.width() > 0) or !(fb.height() > 0)) return null;
+    const aspect = fb.width() / fb.height();
+    const dx = at.x - from.x;
+    const dy = at.y - from.y;
+    if (@max(@abs(dx), @abs(dy)) * state.view.ppm < 4 * dvui.windowNaturalScale()) return null;
+    var w = @abs(dx);
+    var h = @abs(dy);
+    if (w < h * aspect) w = h * aspect else h = w / aspect;
+    const x0 = if (dx < 0) from.x - w else from.x;
+    const y0 = if (dy < 0) from.y - h else from.y;
+    return .{ .x0 = x0, .y0 = y0, .x1 = x0 + w, .y1 = y0 + h };
+}
+
+/// While Insert figure is dragged: the ink in the box it will fill, and
+/// the boundary round it.
+fn drawInsertPreview(area: dvui.Rect.Physical, from: geom.Point, at: geom.Point) void {
+    const px = dvui.windowNaturalScale();
+    const b = insertBox(from, at) orelse return;
+    if (state.model.figureIndex(insert_figure)) |fi| drawFigureInk(area, fi, b, 0.6);
+    const g = layout.model.default_figure_margin;
+    const outer: geom.Box = .{ .x0 = b.x0 - g, .y0 = b.y0 - g, .x1 = b.x1 + g, .y1 = b.y1 + g };
+    state.view.rect(area, outer).stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+}
+
+/// Insert figure let go: the figure placed in the box dragged (its ink
+/// that size), or at its own size centred where clicked; it is then the
+/// selection, and the tool done.
+fn insertFigureFromDrag(from: geom.Point, at: geom.Point) void {
+    state.tool = .select;
+    const fi = state.model.figureIndex(insert_figure) orelse return;
+    const b = insertBox(from, at) orelse blk: {
+        const fb = state.model.figures.items[fi].bounds();
+        const w = fb.width();
+        const h = fb.height();
+        break :blk geom.Box{ .x0 = from.x - w / 2, .y0 = from.y - h / 2, .x1 = from.x + w / 2, .y1 = from.y + h / 2 };
+    };
+    const k = act(.placeFigure, .{ shown_space, fi, geom.Point{ .x = b.x0, .y = b.y0 }, b.width(), newObjectLayer() }) catch {
+        state.status = "The figure was not placed. ";
+        return;
+    };
+    state.context = .{ .figure_place = .{ .space = shown_space, .index = k } };
+    selection.clearRetainingCapacity();
+    if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+}
+
+/// A placement's boundary `b`, resized from `was` by `edges`, made to keep
+/// its ink's proportions: the edge moved most decides; the edges not
+/// moved stay (a side's middle handle: the other axis about its middle).
+fn keepFigureProportions(fp: layout.model.FigurePlace, was: geom.Box, b: geom.Box, edges: Edges) geom.Box {
+    if (!(fp.h > 0)) return b;
+    const aspect = fp.w / fp.h;
+    const g = fp.margin;
+    const horiz = edges.left or edges.right;
+    const vert = edges.bottom or edges.top;
+    var w = @max(b.width() - 2 * g, 1e-3);
+    var h = @max(b.height() - 2 * g, 1e-3);
+    if (horiz and vert) {
+        if (@abs(b.width() - was.width()) / @max(was.width(), 1e-9) >= @abs(b.height() - was.height()) / @max(was.height(), 1e-9)) h = w / aspect else w = h * aspect;
+    } else if (horiz) h = w / aspect else w = h * aspect;
+    var o = b;
+    const W = w + 2 * g;
+    const H = h + 2 * g;
+    if (edges.left) o.x0 = o.x1 - W else if (edges.right) o.x1 = o.x0 + W else {
+        const mx = (was.x0 + was.x1) / 2;
+        o.x0 = mx - W / 2;
+        o.x1 = mx + W / 2;
+    }
+    if (edges.bottom) o.y0 = o.y1 - H else if (edges.top) o.y1 = o.y0 + H else {
+        const my = (was.y0 + was.y1) / 2;
+        o.y0 = my - H / 2;
+        o.y1 = my + H / 2;
+    }
+    return o;
+}
+
+/// A placed figure's properties: its figure, place, size (its
+/// proportions kept), margin, layer; Remove.
+fn figurePlaceProperties(space: usize, index: usize) void {
+    const saved_group = pushGroup("figure-place");
+    defer popGroup(saved_group);
+    const fp = figurePlaceAt(space, index) orelse return;
+    const fname = if (state.model.figureIndex(fp.figure)) |fi| state.model.figures.items[fi].name else "(removed)";
+    propText("Figure", "{s}", .{fname}, 1);
+    if (layerChoice(space, fp.layer, 2)) |l| act(.setFigurePlace, .{ space, index, fp.at, fp.w, fp.margin, l }) catch {};
+    propText("Place", "({d:.2}, {d:.2}) mm", .{ fp.at.x, fp.at.y }, 3);
+    var buf: [32]u8 = undefined;
+    if (sizesProp("Width, mm", std.fmt.bufPrint(&buf, "{d:.2}", .{fp.w}) catch "", 4)) |list| if (list.len == 1) {
+        act(.setFigurePlace, .{ space, index, fp.at, list[0], fp.margin, fp.layer }) catch {
+            state.status = "A width must be more than 0. ";
+        };
+    };
+    propText("Height", "{d:.2} mm (keeps its proportions)", .{fp.h}, 5);
+    var mb: [32]u8 = undefined;
+    if (sizesProp("Margin, mm", std.fmt.bufPrint(&mb, "{d:.2}", .{fp.margin}) catch "", 6)) |list| if (list.len == 1) {
+        act(.setFigurePlace, .{ space, index, fp.at, fp.w, list[0], fp.layer }) catch {
+            state.status = "A margin cannot be negative. ";
+        };
+    };
+    keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+}
+
 /// Space `space`'s layers, bottom first, each at its opacity: its images,
 /// views and panels on that layer.
 fn drawSpace(area: dvui.Rect.Physical, space: usize, depth: usize) void {
@@ -9256,6 +9491,7 @@ fn drawSpaceLayer(area: dvui.Rect.Physical, space: usize, depth: usize, li: usiz
     const prev = dvui.alpha(@floatCast(l.opacity));
     defer dvui.alphaSet(prev);
     drawImages(area, space, l.id, l.blend);
+    drawFigurePlaces(area, space, l.id);
     drawViews(area, space, depth, l.id);
     drawSpacePanels(area, space, l.id);
 }
@@ -11163,6 +11399,9 @@ fn extentsOf(space: usize, depth: usize) geom.Box {
     if (space < state.model.spaces.items.len) for (state.model.spaces.items[space].images.items) |im| {
         b = b.join(im.box());
     };
+    if (space < state.model.spaces.items.len) for (state.model.spaces.items[space].figure_places.items) |fp| {
+        b = b.join(fp.box());
+    };
     if (depth < view_depth and space < state.model.spaces.items.len) for (state.model.spaces.items[space].views.items) |sv| {
         const src = state.model.spaceIndex(sv.source) orelse continue;
         if (sv.window == null and state.model.spaces.items[src].bound == null and extentsOf(src, depth + 1).isEmpty()) continue;
@@ -12263,6 +12502,13 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         state.context = .{ .panel = state.model.rootOf(sc.space) };
                         dvui.refresh(null, @src(), box.data().id);
                     },
+                    .figure_place => |c| {
+                        e.handle(@src(), box.data());
+                        actV(.removeFigurePlace, .{ c.space, c.index });
+                        selection.clearRetainingCapacity();
+                        state.context = .{ .panel = state.model.rootOf(c.space) };
+                        dvui.refresh(null, @src(), box.data().id);
+                    },
                     .image => |im| {
                         e.handle(@src(), box.data());
                         actV(.removeImage, .{im.space, im.index});
@@ -12544,6 +12790,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         .add_tracks => addTracksFromDrag(d.start, d.at),
                         .add_art => addArtFromDrag(dragBox(d.start, d.at)),
                         .select_area => selectArea(dragBox(d.start, d.at)),
+                        .insert_figure => insertFigureFromDrag(d.start, d.at),
                         else => addPanelFromDrag(dragBox(d.start, d.at)),
                     }
                 } else if (state.moving) |mv| {
@@ -12700,6 +12947,7 @@ fn objectOfContext(c: Context) ?layout.model.ObjectId {
         .art => |l| state.model.idAt(.{ .art = .{ .panel = l.panel, .index = l.index } }),
         .group => |g| g,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else return null,
+        .figure_place => |fc| if (figurePlaceAt(fc.space, fc.index)) |fp| fp.id else return null,
         else => return null,
     };
     return if (id == .none) null else id;
@@ -12709,6 +12957,7 @@ fn objectOfContext(c: Context) ?layout.model.ObjectId {
 /// panel; else the selection.
 fn contextOfObject(id: layout.model.ObjectId) Context {
     for (state.model.panels.items, 0..) |p, pi| if (p.id == id) return .{ .panel = pi };
+    for (state.model.spaces.items, 0..) |sp, si| for (sp.figure_places.items, 0..) |fp, k| if (fp.id == id) return .{ .figure_place = .{ .space = si, .index = k } };
     return .selection;
 }
 
@@ -13080,6 +13329,7 @@ fn dragTakes(at: geom.Point) ?layout.model.ObjectId {
         for (pnl.art.items) |x| if (x.id == id) return id;
     }
     if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].images.items) |im| if (im.id == id) return id;
+    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items) |fp| if (fp.id == id) return id;
     return null;
 }
 
@@ -13144,6 +13394,11 @@ fn pick(at: geom.Point) void {
     selection.clearRetainingCapacity();
     // An image, then a view, by their boxes; anything over them wins.
     if (imageUnder(at)) |im| state.context = im;
+    if (figurePlaceUnder(at)) |fc| {
+        state.context = fc;
+        // The container is the selection: its drag points show.
+        if (objectOfContext(fc)) |id| selection.append(state.gpa, id) catch {};
+    }
     if (viewUnder(at)) |v| state.context = v;
     // A sketch, by its box; a second click on it soon after enters it.
     if (sketchUnder(at)) |sr| {
@@ -13846,6 +14101,22 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add panel: drag out its outline on the sheet", .{}, .{});
     }
+    // Insert figure: the figure chosen in the Browser, dragged out on the
+    // canvas or frame shown.
+    {
+        const applies = state.context == .figure_def or state.tool == .insert_figure;
+        if (showTool(applies)) {
+            const prev_a = faintUnless(applies);
+            defer dvui.alphaSet(prev_a);
+            const on = state.tool == .insert_figure;
+            var fwd: dvui.WidgetData = undefined;
+            keyIcon(@src(), "Insert figure", dvui.entypo.flower, 0, .{
+                .data_out = &fwd,
+                .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+            });
+            dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Insert figure: drag out where the figure chosen in the Browser goes, or click for its own size", .{}, .{});
+        }
+    }
 }
 
 /// Whether the context is a panel that takes line art: not the canvas's
@@ -13903,6 +14174,7 @@ fn lowerKind() []const u8 {
         .material => "material",
         .figures => "figures",
         .figure_def => "figure",
+        .figure_place => "placed figure",
     };
 }
 
@@ -16816,6 +17088,40 @@ const button_handlers = [_]ButtonHandler{
             moveTrackArrow(@enumFromInt(@as(u2, @intCast(arg))));
         }
     }.f),
+    handler("tool.insert-figure", struct {
+        fn f(_: i32) void {
+            state.drag = null;
+            if (state.tool == .insert_figure) {
+                state.tool = .select;
+                return;
+            }
+            const fi = switch (state.context) {
+                .figure_def => |i| i,
+                else => {
+                    state.status = "Choose a figure in the Browser first: it is what is inserted. ";
+                    return;
+                },
+            };
+            if (fi >= state.model.figures.items.len) return;
+            if (state.model.figures.items[fi].bounds().isEmpty()) {
+                state.status = "That figure has no ink to place. ";
+                return;
+            }
+            insert_figure = state.model.figures.items[fi].id;
+            state.tool = .insert_figure;
+        }
+    }.f),
+    handler("figure-place.remove-figure", struct {
+        fn f(_: i32) void {
+            const c = switch (state.context) {
+                .figure_place => |c| c,
+                else => return,
+            };
+            actV(.removeFigurePlace, .{ c.space, c.index });
+            selection.clearRetainingCapacity();
+            state.context = .{ .panel = state.model.rootOf(c.space) };
+        }
+    }.f),
     handler("tool.add-panel", struct {
         fn f(_: i32) void {
             state.tool = if (state.tool == .add_panel) .select else .add_panel;
@@ -17446,6 +17752,7 @@ fn properties() !void {
         .view => |v| try viewProperties(v.space, v.index),
         .layer => |l| try layerProperties(l.space, l.index),
         .image => |im| try imageProperties(im.space, im.index),
+        .figure_place => |c| figurePlaceProperties(c.space, c.index),
         .guide => |g| guideProperties(g.space, g.index),
         .sketch => |sc| sketchProperties(sc.space, sc.index),
         .sketches => propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1),
@@ -18690,6 +18997,7 @@ fn statusContent() void {
         .add_tracks => if (tracks_tool.kind == .track) "Add a track: drag it out, right or down, on the panel · Esc cancels" else if (tracks_tool.major == .row) "Add rows: drag them out on the panel · Esc cancels" else "Add columns: drag them out on the panel · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
+        .insert_figure => "Insert figure: drag out its size (its proportions kept), or click for its own size · Esc cancels",
         .constrain => if (constrain_first == null) "Constrain: click an edge, centre line or origin line of what is to move · Esc cancels" else "Constrain: click what it keeps to (its own, a peer's, or the parent's) · Esc cancels",
     };
     dvui.labelNoFmt(@src(), hint, .{}, field.override(.{ .expand = .horizontal }).override(muted));
@@ -20381,6 +20689,8 @@ const HoverTarget = union(enum) {
     /// A grid on a panel (keys placed on a pitch grid): its whole extent.
     grid: struct { panel: usize, index: usize },
     art: struct { panel: usize, index: usize, box: geom.Box },
+    /// A placed figure, by its boundary.
+    figure_place: struct { space: usize, index: usize, box: geom.Box },
     /// Near a construction line: the line (its part in view).
     guide: struct { space: usize, index: usize, seg: [2]geom.Point },
     /// Inside a tile, a slot's text: its label, and where in its source.
@@ -20890,6 +21200,13 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         const bd = (if (edge) |e| Boundary.outline(a, e, tol, panelOrigin(pi)) else Boundary.box(a, b)) catch continue;
         cand.consider(.{ .panel = .{ .panel = pi, .box = b } }, bd);
     }
+    // Placed figures: their boundaries.
+    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items, 0..) |fp, k| {
+        if (!layerOpen(shown_space, fp.layer)) continue;
+        const b = fp.box();
+        const bd = Boundary.box(a, b) catch continue;
+        cand.consider(.{ .figure_place = .{ .space = shown_space, .index = k, .box = b } }, bd);
+    };
     // Construction lines in the shown space (while their layer shows): a
     // boundary too, by their distance from the pointer; a line has no
     // area, so it wins a tie with a box's edge it lies on.
@@ -21107,7 +21424,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
         skRing(c, 3 * px, colors.select, 1.5 * px);
     };
     switch (t) {
-        .tile, .track, .row, .panel, .grid, .art, .guide => {},
+        .tile, .track, .row, .panel, .grid, .art, .guide, .figure_place => {},
         .slot => |x| {
             state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
             state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
@@ -21157,6 +21474,13 @@ fn hoverPress(p: geom.Point) bool {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
             levelSet(.{ .guide = .{ .space = x.space, .index = x.index } });
+        },
+        .figure_place => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .figure_place = .{ .space = x.space, .index = x.index } });
+            // The container is the selection: its drag points show.
+            if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
         },
         .art => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
@@ -21973,6 +22297,7 @@ fn contextObject() ?layout.model.ObjectId {
         .region => |r| m.panels.items[r.panel].regions.items[r.region].id,
         .art => |l| m.panels.items[l.panel].art.items[l.index].id,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else null,
+        .figure_place => |c| if (figurePlaceAt(c.space, c.index)) |fp| fp.id else null,
         else => null,
     };
 }
@@ -21991,6 +22316,7 @@ fn constrainables(a: std.mem.Allocator) []layout.model.ObjectId {
         for (p.art.items) |x| list.append(a, x.id) catch {};
     }
     if (shown_space < m.spaces.items.len) for (m.spaces.items[shown_space].images.items) |im| list.append(a, im.id) catch {};
+    if (shown_space < m.spaces.items.len) for (m.spaces.items[shown_space].figure_places.items) |fp| list.append(a, fp.id) catch {};
     return list.items;
 }
 
@@ -22622,6 +22948,7 @@ fn selectionDrag(at: geom.Point) void {
             if (r.edges.bottom) b.y0 = @min(snapAxis(b.y0 + off.y, st, &snap_guide.y) - off.y, b.y1 - min);
             if (r.edges.top) b.y1 = @max(snapAxis(b.y1 + off.y, st, &snap_guide.y) - off.y, b.y0 + min);
         };
+        if (figurePlaceOf(r.id)) |fp| b = keepFigureProportions(fp, r.box, b, r.edges);
         _ = actM(r.key, .placeObjects, .{ &[_]layout.model.ObjectId{r.id}, &[_]geom.Box{b} }) catch {};
         return;
     }
@@ -23056,6 +23383,8 @@ fn engageMotion(at: geom.Point) void {
         if (fr.edges.right) b.x1 = @max(q.x, b.x0 + min);
         if (fr.edges.bottom) b.y0 = @min(q.y, b.y1 - min);
         if (fr.edges.top) b.y1 = @max(q.y, b.y0 + min);
+        // A placed figure keeps its proportions.
+        if (figurePlaceOf(d.hit.id)) |fp| b = keepFigureProportions(fp, d.box, b, .{ .left = fr.edges.left, .right = fr.edges.right, .bottom = fr.edges.bottom, .top = fr.edges.top });
     }
     _ = actM(d.key, .placeObjects, .{ &[_]layout.model.ObjectId{d.hit.id}, &[_]geom.Box{b} }) catch {};
 }

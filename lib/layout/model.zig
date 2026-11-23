@@ -822,6 +822,8 @@ pub const Space = struct {
     base_layer: ObjectId = .none,
     /// Raster images placed in it.
     images: std.ArrayList(Image) = .empty,
+    /// Figures placed in it, each with its own boundary.
+    figure_places: std.ArrayList(FigurePlace) = .empty,
     /// Views of the document's sketches placed in it: what is drawn in it
     /// with a sketch.
     sketch_views: std.ArrayList(SketchView) = .empty,
@@ -1079,6 +1081,40 @@ pub const Image = struct {
         return @as(f64, @floatFromInt(i.px_w)) / (i.w / 25.4);
     }
 };
+
+/// A figure placed in a space: which figure, where its ink is and how big
+/// (its proportions the figure's), and its boundary, a box round the ink
+/// at a margin: what is selected, moved and resized, and what content
+/// will keep clear of.
+pub const FigurePlace = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    layer: ObjectId = .none,
+    /// The figure's id.
+    figure: ObjectId,
+    /// Its ink's bottom-left corner, mm in the space.
+    at: geom.Point,
+    /// Its ink's size, mm.
+    w: f64,
+    h: f64,
+    /// The boundary's distance outside the ink, mm.
+    margin: f64 = default_figure_margin,
+    /// Its object origin on its boundary.
+    holds: OriginPoint = .{},
+
+    /// Its ink's box.
+    pub fn inkBox(f: FigurePlace) geom.Box {
+        return .{ .x0 = f.at.x, .y0 = f.at.y, .x1 = f.at.x + f.w, .y1 = f.at.y + f.h };
+    }
+    /// Its boundary: the ink's box grown by the margin.
+    pub fn box(f: FigurePlace) geom.Box {
+        const g = f.margin;
+        return .{ .x0 = f.at.x - g, .y0 = f.at.y - g, .x1 = f.at.x + f.w + g, .y1 = f.at.y + f.h + g };
+    }
+};
+
+/// A new placement's margin, mm.
+pub const default_figure_margin = 1.0;
 
 /// A layer the checks flag, and why.
 pub const LayerIssue = struct {
@@ -2960,6 +2996,60 @@ pub const Model = struct {
         if (space >= m.spaces.items.len or index >= m.spaces.items[space].guides.items.len) return error.NoSuchItem;
         _ = m.spaces.items[space].guides.orderedRemove(index);
         m.revision += 1;
+    }
+
+    /// Places figure `figure` (its index) in space `space`, its ink's
+    /// bottom-left corner at `at`, `w` mm wide (its height keeps the ink's
+    /// proportions), on layer `layer`, named after the figure. Its index
+    /// among the space's placements.
+    pub fn placeFigure(m: *Model, space: usize, figure: usize, at: geom.Point, w: f64, layer: ObjectId) Error!usize {
+        if (space >= m.spaces.items.len or figure >= m.figures.items.len) return error.NoSuchItem;
+        if (!(w > 0)) return error.BadSize;
+        if (m.spaces.items[space].layerIndex(layer) == null) return error.NoSuchLayer;
+        const f = m.figures.items[figure];
+        const fb = f.bounds();
+        if (fb.isEmpty() or !(fb.width() > 0)) return error.BadSize;
+        const list = &m.spaces.items[space].figure_places;
+        try list.append(m.a(), .{
+            .id = m.newId(),
+            .name = try m.a().dupe(u8, f.name),
+            .layer = layer,
+            .figure = f.id,
+            .at = at,
+            .w = w,
+            .h = w * fb.height() / fb.width(),
+        });
+        m.revision += 1;
+        return list.items.len - 1;
+    }
+
+    /// Sets a placement's ink corner, width (its height follows), margin
+    /// and layer.
+    pub fn setFigurePlace(m: *Model, space: usize, index: usize, at: geom.Point, w: f64, margin: f64, layer: ObjectId) Error!void {
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        const list = m.spaces.items[space].figure_places.items;
+        if (index >= list.len) return error.NoSuchItem;
+        if (!(w > 0) or !(margin >= 0)) return error.BadSize;
+        if (m.spaces.items[space].layerIndex(layer) == null) return error.NoSuchLayer;
+        const fp = &list[index];
+        fp.h = if (fp.w > 0) w * fp.h / fp.w else fp.h;
+        fp.w = w;
+        fp.at = at;
+        fp.margin = margin;
+        fp.layer = layer;
+        m.revision += 1;
+    }
+
+    pub fn removeFigurePlace(m: *Model, space: usize, index: usize) Error!void {
+        if (space >= m.spaces.items.len or index >= m.spaces.items[space].figure_places.items.len) return error.NoSuchItem;
+        _ = m.spaces.items[space].figure_places.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// The figure with id `id`: its index.
+    pub fn figureIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.figures.items, 0..) |f, i| if (f.id == id) return i;
+        return null;
     }
 
     pub fn removeImage(m: *Model, space: usize, index: usize) void {

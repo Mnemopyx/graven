@@ -384,6 +384,7 @@ pub const binds = [_]B{
     .{ .mode = "canvas", .chord = "g", .action = "tool.construction-line" },
     // The ribbon's tools, a single key each (shown on their buttons).
     .{ .mode = "canvas", .chord = "p", .action = "tool.add-panel" },
+    .{ .mode = "canvas", .chord = "i", .action = "tool.insert-figure" },
     .{ .mode = "canvas", .chord = "r", .action = "tool.add-rows" },
     .{ .mode = "canvas", .chord = "shift+r", .action = "tool.add-columns" },
     .{ .mode = "canvas", .chord = "t", .action = "tool.add-track" },
