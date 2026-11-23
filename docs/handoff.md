@@ -144,5 +144,5 @@ Built: the style rules and seven icons (`scripts/icons.py`); the icon-file forma
 2. **Style rules still open:** stroke fixed in pixels or scaling with size; colour by what a tool makes or what it works on; the dashed container and the ringed + on every add tool; a direction convention for arrows; the faint (not-applicable) treatment, which washes the icons out.
 3. **Override slots:** read from files but nothing recolours them; wire them to the theme (dark panes) and a colour-blind set, and choose the dark palette.
 4. **Pull-downs in the light theme;** the Alt-held fade not yet seen under Xvfb; hold-to-open not tested by a GUI test.
-5. **The blueprint** has none of the icon-file work yet (`docs/status.md` has it all).
+5. **The blueprint** has the icon-file design ("Icon files: a full-colour ground and one ink as a distance field", recorded 2026-11-23); `docs/status.md` has the build detail.
 6. Leaks at exit from the element registry's records and the old TinyVG cache (not from `iconfile.zig`).
