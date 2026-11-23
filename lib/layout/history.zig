@@ -51,7 +51,7 @@ pub const actions = [_][:0]const u8{
     "addSketch", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "makeSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
-    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLeading", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess", "addMaterial", "setMaterial", "removeMaterial", "addPlan", "setPlan", "removePlan", "setActivePlan",
+    "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLeading", "copyStyle", "copyParagraphStyle", "addStyleTemplate", "renameStyleTemplate", "setFlowStyle", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess", "addMaterial", "setMaterial", "removeMaterial", "addPlan", "setPlan", "removePlan", "setActivePlan",
     "removeRegion", "setOrientation", "splitIntoTracks",
     "addGuide", "setGuide", "removeGuide",
     "nameKeysInPanel", "setOverlay", "setGridSpacing",
@@ -176,6 +176,8 @@ pub const History = struct {
     next_step: u32 = 1,
     /// The last step's merge key, while ops with it may still join it.
     merge_key: ?u64 = null,
+    /// The next joined op starts a new step instead (`beginStep`).
+    fresh: bool = false,
     /// Where the log stood when last saved; null when never saved.
     saved: ?Mark = null,
     /// The saved state was folded into the checkpoint, or undone and
@@ -280,6 +282,13 @@ pub const History = struct {
         if (h.log.items.len > 0 and h.redo.items.len == 0) h.merge_key = key;
     }
 
+    /// Makes the next op a new step even when it is joined, so that a
+    /// sequence of joined ops (written to join whatever step is current)
+    /// can be one step of its own when a person asks for it.
+    pub fn beginStep(h: *History) void {
+        h.fresh = true;
+    }
+
     const Mode = union(enum) { new, merge: u64, join };
 
     fn doIn(h: *History, m: *Model, comptime tag: Tag, args: Args(@tagName(tag)), mode: Mode) Error!Result(@tagName(tag)) {
@@ -305,7 +314,9 @@ pub const History = struct {
         try h.record(.{ .snapshot = bytes }, @intCast(bytes.len), .new);
     }
 
-    fn record(h: *History, op: Op, size: u32, mode: Mode) Error!void {
+    fn record(h: *History, op: Op, size: u32, mode_in: Mode) Error!void {
+        const mode: Mode = if (h.fresh) .new else mode_in;
+        h.fresh = false;
         if (mode == .join and h.log.items.len == 0) {
             // Nothing to join: it becomes part of the checkpoint, which the
             // caller's model already shows. (Rebuilt lazily by the caller's

@@ -714,6 +714,10 @@ const Context = union(enum) {
     /// The document's text styles, and one of them.
     styles,
     style: layout.model.StyleId,
+    /// The document's style templates (each new flow's style is copied
+    /// from one), and one of them.
+    templates,
+    template: layout.model.ObjectId,
     /// The document's process profiles, and one of them.
     processes,
     process: layout.model.ObjectId,
@@ -764,6 +768,8 @@ const Context = union(enum) {
             .sheet => "Legend sheet",
             .styles => "Text styles",
             .style => "Text style",
+            .templates => "Style templates",
+            .template => "Style template",
             .processes => "Processes",
             .process => "Process profile",
             .plans => "Manufacturing plans",
@@ -3690,6 +3696,8 @@ fn contextValid(c: Context) bool {
         .sheet => |id| m.sheetIndex(id) != null,
         .styles => true,
         .style => |id| m.styleIndex(id) != null,
+        .templates => true,
+        .template => |id| m.styleTemplate(id) != null,
         .processes => true,
         .process => |id| m.processIndex(id) != null,
         .plans, .materials => true,
@@ -5228,6 +5236,10 @@ fn treeContent() void {
     if (treeNode(.styles, "Text styles", 1, state.model.styles.items.len > 0, false)) {
         for (state.model.styles.items) |st| _ = treeNode(.{ .style = st.id }, st.name, 2, false, false);
     }
+    // What new flows' styles are copied from.
+    if (state.model.templates.items.len > 0) if (treeNode(.templates, "Style templates", 1, true, false)) {
+        for (state.model.templates.items) |t| _ = treeNode(.{ .template = t.id }, t.name, 2, false, false);
+    };
     // Always listed: how panels are made is chosen here.
     if (treeNode(.processes, "Processes", 1, state.model.processes.items.len > 0, false)) {
         for (state.model.processes.items) |pr| _ = treeNode(.{ .process = pr.id }, pr.profile.name, 2, false, false);
@@ -5549,7 +5561,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .templates, .template, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place => false,
     };
 }
 
@@ -14122,6 +14134,9 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         state.status = "The tracks were not added. ";
         return;
     };
+    // A text layout's new flow: its style copied from the Default
+    // template, in the same undo step.
+    if (tracks_tool.size_to == .style) styleNewFlow(plan.panel, r) catch {};
     // Empty tracks, the user fills them: the cursor waits at the start.
     state.context = .{ .region = .{ .panel = plan.panel, .region = r } };
     track_cursor = .{ .panel = plan.panel, .region = r, .index = 0 };
@@ -14366,6 +14381,8 @@ fn lowerKind() []const u8 {
         .sheet => "the sheet's keys",
         .styles => "text styles",
         .style => "text style",
+        .templates => "style templates",
+        .template => "style template",
         .processes => "process profiles",
         .process => "process profile",
         .plans => "manufacturing plans",
@@ -14538,7 +14555,7 @@ fn dispatchButtons() void {
 }
 
 /// The button actions `runButtonAction` handles in its own switch.
-const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-tiles", "panel.name-tiles", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel" };
+const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-tiles", "panel.name-tiles", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel", "flow-style.reset-from-template", "flow-style.save-as-template" };
 
 /// Whether a button's action has a handler (every one should: a test
 /// checks).
@@ -14585,6 +14602,8 @@ fn runButtonAction(inv: keymap.Invocation) bool {
             else => return false,
         },
         kact("panel.release") => panelRelease(),
+        kact("flow-style.reset-from-template") => flowStyleReset(),
+        kact("flow-style.save-as-template") => flowStyleSaveTemplate(),
         kact("dialog.confirm"), kact("dialog.cancel") => dialog_answer = inv.action,
         else => {
             for (button_handlers) |h| if (h.action == inv.action) {
@@ -17957,7 +17976,9 @@ fn properties() !void {
                 } else if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
                 if (region.style != null) propText(asElement("track.size"), "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
-            if (region.style != null) leadingProps(r.panel, r.region) else propText(asElement("track.pitch"), "{d:.2} mm", .{region.pitch}, 4);
+            if (region.style != null) {
+                if (flowStyled(r.panel, r.region) == null) leadingProps(r.panel, r.region);
+            } else propText(asElement("track.pitch"), "{d:.2} mm", .{region.pitch}, 4);
             if (!is_track) propText(elementLabel("track.rows", if (region.major() == .row) null else "Columns"), "{d}", .{tracksIn(r.panel, r.region).len}, 5);
             const head = state.model.threadHead(r.panel, r.region);
             const is_head = head.panel == r.panel and head.region == r.region;
@@ -17987,6 +18008,7 @@ fn properties() !void {
             }
             actionButton(@src(), "track.remove", "Remove content layout", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
             try trackFlowProperties(r.panel, r.region);
+            try flowStyleProperties(head.panel, head.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.panel, head.region);
             threadProperties(r.panel, r.region);
@@ -18037,6 +18059,8 @@ fn properties() !void {
         .sheets => propText("Legend sheets", "{d}", .{state.model.sheets.items.len}, 1),
         .styles => try stylesProperties(),
         .style => |sid| try styleProperties(sid),
+        .templates => propText("Style templates", "{d}", .{state.model.templates.items.len}, 1),
+        .template => |id| try templateProperties(id),
         .processes => processesProperties(),
         .process => |id| processProperties(id),
         .plans => plansProperties(),
@@ -18329,6 +18353,44 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
     if (changed) try act(.setTrackFlow, .{pi, ri, alignment, indent, gap});
 }
 
+/// A paragraph style's settings as fields (alignment, indents, first
+/// line, space before and after, extra between lines), into `ps`; whether
+/// one changed. `n` sets them apart from another set in the same pane.
+fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize) bool {
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 904 + n });
+        defer row.deinit();
+        propName("Lines");
+        const names = [_][]const u8{ "From the start", "Centred", "Back from the end", "Justified" };
+        var choice: usize = @intFromEnum(ps.alignment);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 904 + n })) {
+            ps.alignment = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    const pt_per_mm = 72.0 / 25.4;
+    const fields = [_]struct { name: []const u8, field: []const u8, min: f64 }{
+        .{ .name = "Indent at start, pt", .field = "indent_start", .min = 0 },
+        .{ .name = "Indent at end, pt", .field = "indent_end", .min = 0 },
+        .{ .name = "First line, pt", .field = "first", .min = -1000 },
+        .{ .name = "Space before, pt", .field = "space_before", .min = 0 },
+        .{ .name = "Space after, pt", .field = "space_after", .min = 0 },
+        .{ .name = "Extra between lines, pt", .field = "line_gap", .min = 0 },
+    };
+    inline for (fields, 0..) |f, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 910 + k + n });
+        defer row.deinit();
+        propName(f.name);
+        const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
+        if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k + n })) |nv| {
+            @field(ps, f.field) = nv / pt_per_mm;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 /// The paragraph at the flow cursor (else the track's first): which
 /// paragraph style it takes, and that style's settings, which every
 /// paragraph in it shares. Lengths in points, as type is measured.
@@ -18345,7 +18407,8 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         defer row.deinit();
         propName("Style");
         const names = try a.alloc([]const u8, m.paragraph_styles.items.len + 1);
-        names[0] = "None (the track's alignment)";
+        const flow_def = if (m.trackFlow(pi, ri)) |fl| fl.paragraph_default else null;
+        names[0] = if (flow_def != null) "The flow style's" else "None (the track's alignment)";
         for (m.paragraph_styles.items, names[1..]) |ps, *n| n.* = ps.name;
         var choice: usize = if (current) |id| (if (m.paraIndex(id)) |x| x + 1 else 0) else 0;
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
@@ -18364,43 +18427,14 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
     // The settings show for any paragraph (the owner, 2026-11-23: space
     // before and after paragraphs are to be found here): one in no style
     // that is changed gets a style of its own, made with the change.
-    var ps: layout.model.ParagraphStyle = if (current) |cid| (if (m.paraStyle(cid)) |p| p.* else .{ .name = "" }) else .{ .name = "" };
+    const flow_default = if (m.trackFlow(pi, ri)) |fl| fl.paragraph_default else null;
+    var ps: layout.model.ParagraphStyle = if (current orelse flow_default) |cid| (if (m.paraStyle(cid)) |p| p.* else .{ .name = "" }) else .{ .name = "" };
     if (current) |cid| if (textProp("Name", ps.name, 903)) |name| {
         ps.name = name;
         _ = try actM(mergeKey(.{ "paragraph style", cid }), .setParagraphStyle, .{ cid, ps });
         return;
     };
-    var changed = false;
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 904 });
-        defer row.deinit();
-        propName("Lines");
-        const names = [_][]const u8{ "From the start", "Centred", "Back from the end", "Justified" };
-        var choice: usize = @intFromEnum(ps.alignment);
-        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 904 })) {
-            ps.alignment = @enumFromInt(choice);
-            changed = true;
-        }
-    }
-    const pt_per_mm = 72.0 / 25.4;
-    const fields = [_]struct { name: []const u8, field: []const u8, min: f64 }{
-        .{ .name = "Indent at start, pt", .field = "indent_start", .min = 0 },
-        .{ .name = "Indent at end, pt", .field = "indent_end", .min = 0 },
-        .{ .name = "First line, pt", .field = "first", .min = -1000 },
-        .{ .name = "Space before, pt", .field = "space_before", .min = 0 },
-        .{ .name = "Space after, pt", .field = "space_after", .min = 0 },
-        .{ .name = "Extra between lines, pt", .field = "line_gap", .min = 0 },
-    };
-    inline for (fields, 0..) |f, k| {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 910 + k });
-        defer row.deinit();
-        propName(f.name);
-        const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
-        if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k })) |nv| {
-            @field(ps, f.field) = nv / pt_per_mm;
-            changed = true;
-        }
-    }
+    const changed = paragraphFields(&ps, 0);
     if (changed) {
         if (current) |cid| {
             _ = try actM(mergeKey(.{ "paragraph style", cid }), .setParagraphStyle, .{ cid, ps });
@@ -18625,9 +18659,199 @@ fn followLeading() void {
     for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |rg, ri| {
         const sid = rg.style orelse continue;
         if (state.model.styleIndex(sid) == null) continue;
-        const want = if (rg.leading) |l| (l.resolve(styleEmMm(sid)) orelse continue) else continue;
+        const fl = state.model.trackFlow(pi, ri);
+        const flow_styled = if (fl) |f| f.style != .none else false;
+        if (flow_styled and fl.?.leading == null) {
+            // The flow style's leading is its font's own: auto.
+            if (styleLinePitch(sid)) |lp| if (rg.leading != null or @abs(lp - rg.pitch) > 1e-6) {
+                _ = hist.join(&state.model, .setLeading, .{ pi, ri, null, lp }) catch {};
+            };
+            continue;
+        }
+        const lead = if (flow_styled) fl.?.leading else rg.leading;
+        const want = if (lead) |l| (l.resolve(styleEmMm(sid)) orelse continue) else continue;
         if (!(want > 0.01) or @abs(want - rg.pitch) < 1e-9) continue;
-        _ = hist.join(&state.model, .setLeading, .{ pi, ri, rg.leading, want }) catch {};
+        _ = hist.join(&state.model, .setLeading, .{ pi, ri, lead, want }) catch {};
+    };
+}
+
+// Style templates and flow styles (decided 2026-11-23, the owner) --------
+//
+// Every new flow has a style copied from a style template; a document has a
+// Default one. A flow's style (its text style, the paragraph settings its
+// paragraphs in no style of their own take, its leading) is its own:
+// changing it re-sets the whole flow; changing a template later leaves the
+// flows made from it as they are.
+
+/// The Default style template, made (in the step under way) when the
+/// document has none: the label style, a paragraph style of plain
+/// settings, the font's own leading.
+fn defaultTemplate() !layout.model.ObjectId {
+    if (state.model.templates.items.len > 0) return state.model.templates.items[0].id;
+    const text = try labelStyle();
+    const para = try hist.join(&state.model, .addParagraphStyle, .{layout.model.ParagraphStyle{ .name = "Default paragraph" }});
+    return try hist.join(&state.model, .addStyleTemplate, .{ "Default", text, @as(?layout.model.ParaId, para), @as(?layout.model.Leading, null) });
+}
+
+/// Gives the flow of text layout `ri` of panel `pi` a style copied from
+/// template `tid` (null: the Default), joined to the step under way.
+fn styleFlowFrom(pi: usize, ri: usize, tid: ?layout.model.ObjectId) !void {
+    const m = &state.model;
+    const fl = m.trackFlow(pi, ri) orelse return;
+    const fid = fl.id;
+    var nb: [96]u8 = undefined;
+    const fname = std.fmt.bufPrint(&nb, "{s}", .{fl.name}) catch "Flow";
+    const id = tid orelse try defaultTemplate();
+    const t = (m.styleTemplate(id) orelse return).*;
+    var b1: [128]u8 = undefined;
+    const text = try hist.join(m, .copyStyle, .{ t.text, std.fmt.bufPrint(&b1, "{s} text", .{fname}) catch "Flow text" });
+    var b2: [128]u8 = undefined;
+    const para: ?layout.model.ParaId = if (t.paragraph) |p| try hist.join(m, .copyParagraphStyle, .{ p, std.fmt.bufPrint(&b2, "{s} paragraph", .{fname}) catch "Flow paragraph" }) else null;
+    _ = try hist.join(m, .setFlowStyle, .{ fid, text, para, t.leading, id });
+}
+
+fn styleNewFlow(pi: usize, ri: usize) !void {
+    try styleFlowFrom(pi, ri, null);
+}
+
+/// The flow of track `ri` of panel `pi`, when it has a flow style.
+fn flowStyled(pi: usize, ri: usize) ?*const layout.model.Flow {
+    const head = state.model.threadHead(pi, ri);
+    const fl = state.model.trackFlow(head.panel, head.region) orelse return null;
+    if (fl.style == .none or state.model.styleIndex(fl.style) == null) return null;
+    return fl;
+}
+
+/// A style template: its name, and what it holds (a text style, a
+/// paragraph style and a leading, copied into each flow made from it).
+fn templateProperties(id: layout.model.ObjectId) !void {
+    const m = &state.model;
+    const t = (m.styleTemplate(id) orelse return).*;
+    if (textProp("Name", t.name, 1)) |name| _ = try act(.renameStyleTemplate, .{ id, name });
+    if (m.styleIndex(t.text)) |si| propText("Text style", "{s}", .{m.styles.items[si].name}, 2);
+    if (t.paragraph) |p| if (m.paraStyle(p)) |ps| propText("Paragraph style", "{s}", .{ps.name}, 3);
+    var buf: [48]u8 = undefined;
+    propText("Leading", "{s}", .{if (t.leading) |l| l.format(&buf) else "auto"}, 4);
+    var n: usize = 0;
+    for (m.flows.items) |f| {
+        if (f.template == id) n += 1;
+    }
+    propText("Flows made from it", "{d}", .{n}, 5);
+}
+
+/// The track the flow-style buttons act on: the context's, else the
+/// flow cursor's.
+fn flowStyleTrack() ?struct { usize, usize } {
+    return switch (state.context) {
+        .region => |r| .{ r.panel, r.region },
+        else => if (track_cursor) |c| .{ c.panel, c.region } else null,
+    };
+}
+
+/// Copies the flow's template again (Default when it has none), as one
+/// step.
+fn flowStyleReset() void {
+    const t = flowStyleTrack() orelse return;
+    const fl = flowStyled(t[0], t[1]) orelse return;
+    const m = &state.model;
+    hist.beginStep();
+    styleFlowFrom(t[0], t[1], if (fl.template != .none and m.styleTemplate(fl.template) != null) fl.template else null) catch {
+        state.status = "The flow style was not reset. ";
+    };
+}
+
+/// A new style template from the flow's style; the flow then names it.
+fn flowStyleSaveTemplate() void {
+    const t = flowStyleTrack() orelse return;
+    const fl = flowStyled(t[0], t[1]) orelse return;
+    const m = &state.model;
+    saveTemplate(m, fl) catch {
+        state.status = "The style template was not made. ";
+        return;
+    };
+    state.status = "Saved as a style template: new flows can be made from it. ";
+}
+
+fn saveTemplate(m: *layout.model.Model, fl: *const layout.model.Flow) !void {
+    const fid = fl.id;
+    var nb: [32]u8 = undefined;
+    const tname = m.freshName(&nb, .flows, "Template");
+    var b1: [64]u8 = undefined;
+    const text = try act(.copyStyle, .{ fl.style, std.fmt.bufPrint(&b1, "{s} text", .{tname}) catch "Template text" });
+    // The copy may have moved the flows: read it again by id.
+    const f2 = &m.flows.items[m.flowIndex(fid) orelse return];
+    var b2: [64]u8 = undefined;
+    const para: ?layout.model.ParaId = if (f2.paragraph_default) |p| try hist.join(m, .copyParagraphStyle, .{ p, std.fmt.bufPrint(&b2, "{s} paragraph", .{tname}) catch "Template paragraph" }) else null;
+    const f3 = &m.flows.items[m.flowIndex(fid) orelse return];
+    const tid = try hist.join(m, .addStyleTemplate, .{ tname, text, para, f3.leading });
+    const f4 = &m.flows.items[m.flowIndex(fid) orelse return];
+    _ = try hist.join(m, .setFlowStyle, .{ fid, f4.style, f4.paragraph_default, f4.leading, tid });
+}
+
+/// The flow style: which template it came from (choosing another copies
+/// that one), its text size, its leading and the paragraph settings its
+/// paragraphs take; Save as template.
+fn flowStyleProperties(pi: usize, ri: usize) !void {
+    const fl = flowStyled(pi, ri) orelse return;
+    const saved_group = pushGroup("flow-style");
+    defer popGroup(saved_group);
+    const m = &state.model;
+    heading("Flow style", .{}, 3000);
+    // Its own box: the fields it shares with Text style and Paragraph
+    // keep ids apart from theirs.
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = 3000 });
+    defer box.deinit();
+    const fid = fl.id;
+    // The template: choosing one (the same one too: Reset) copies it again.
+    if (m.templates.items.len > 0) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3001 });
+        defer row.deinit();
+        propName("From template");
+        const a = dvui.currentWindow().arena();
+        const names = try a.alloc([]const u8, m.templates.items.len);
+        var choice: usize = 0;
+        for (m.templates.items, names, 0..) |t, *n, k| {
+            n.* = t.name;
+            if (t.id == fl.template) choice = k;
+        }
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 3001 })) {
+            hist.beginStep();
+            try styleFlowFrom(pi, ri, m.templates.items[choice].id);
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3002 });
+        defer row.deinit();
+        actionButton(@src(), "flow-style.reset-from-template", null, 0, .{ .expand = .horizontal, .id_extra = 3002 });
+        actionButton(@src(), "flow-style.save-as-template", null, 0, .{ .expand = .horizontal, .id_extra = 3003 });
+    }
+    // Its text: size (and cap height), as the style's own properties.
+    try styleSizeProps(fl.style, false);
+    // Its leading, kept as typed.
+    {
+        const em = styleEmMm(fl.style);
+        var buf: [48]u8 = undefined;
+        const shown = if (fl.leading) |l| l.format(&buf) else "auto";
+        if (textProp(asElement("track.leading"), shown, 3004)) |typed| {
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
+                _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template });
+            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
+                if ((l.resolve(em) orelse 0) > 0.01) {
+                    _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, l), fl.template });
+                } else state.status = "That leading is too small: baselines must be apart. ";
+            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the font's own). ";
+        }
+        const region = m.panels.items[pi].regions.items[ri];
+        const pt = region.pitch / layout.model.mm_per_pt;
+        const em_pt = em / layout.model.mm_per_pt;
+        const extra = pt - em_pt;
+        propText(asElement("track.baselines"), "{d:.2} mm ({d:.1} pt; size {d:.1} pt {s} {d:.1})", .{ region.pitch, pt, em_pt, if (extra >= 0) "+" else "−", @abs(extra) }, 3005);
+    }
+    // The paragraph settings its paragraphs take (each may have its own
+    // style instead: Paragraph, below).
+    if (fl.paragraph_default) |pid| if (m.paraStyle(pid)) |p| {
+        var ps = p.*;
+        if (paragraphFields(&ps, 2000)) _ = try actM(mergeKey(.{ "paragraph style", pid }), .setParagraphStyle, .{ pid, ps });
     };
 }
 

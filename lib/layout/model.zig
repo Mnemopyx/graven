@@ -531,6 +531,29 @@ pub const Flow = struct {
     items: std.ArrayList(Item) = .empty,
     /// Where text imported into it came from, in the order it came.
     sources: std.ArrayList(FlowSource) = .empty,
+    /// Its flow style (decided 2026-11-23, the owner), copied from a style
+    /// template when it is made: its own text style (what its runs are set
+    /// in unless one is given another), the paragraph settings a
+    /// paragraph in no style of its own takes, and its leading (its
+    /// tracks' baselines). Changing it re-sets the whole flow.
+    style: StyleId = .none,
+    paragraph_default: ?ParaId = null,
+    leading: ?Leading = null,
+    /// The template it was copied from.
+    template: ObjectId = .none,
+};
+
+/// A style template (decided 2026-11-23, the owner): what a new flow's
+/// style is copied from. A document has a Default one; flows made from a
+/// template keep their copy when the template changes later.
+pub const StyleTemplate = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    /// The text style and paragraph style it holds (the document's, kept
+    /// for it), and its leading.
+    text: StyleId = .none,
+    paragraph: ?ParaId = null,
+    leading: ?Leading = null,
 };
 
 /// Where imported text came from: the source's URI (relative to the
@@ -1786,6 +1809,9 @@ pub const Model = struct {
     styles: std.ArrayList(TextStyle) = .empty,
     /// Named paragraph settings, which paragraphs of flows take.
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
+    /// Style templates, which new flows' styles are copied from (see
+    /// `StyleTemplate`); the first is the Default.
+    templates: std.ArrayList(StyleTemplate) = .empty,
     /// The flows: content and the tracks it runs through (see `Flow`).
     flows: std.ArrayList(Flow) = .empty,
     /// Legend sheets: keypads' slot content as tables (see `LegendSheet`).
@@ -5755,6 +5781,77 @@ pub const Model = struct {
         s.name = try m.a().dupe(u8, style.name);
         s.id = id;
         m.paragraph_styles.items[i] = s;
+        m.revision += 1;
+    }
+
+    /// A copy of text style `id` named `name`: its size, base, faces and
+    /// rules, its own from now on.
+    pub fn copyStyle(m: *Model, id: StyleId, name: []const u8) Error!StyleId {
+        const src = m.textStyle(id).*;
+        const nid = m.newId();
+        var st: TextStyle = .{ .id = nid, .name = try m.a().dupe(u8, name), .base = src.base, .cap_height = src.cap_height, .em_size = src.em_size, .line_pitch = src.line_pitch };
+        try st.faces.appendSlice(m.a(), src.faces.items);
+        try st.rules.appendSlice(m.a(), src.rules.items);
+        try m.styles.append(m.a(), st);
+        m.revision += 1;
+        return nid;
+    }
+
+    /// A copy of paragraph style `id` named `name`.
+    pub fn copyParagraphStyle(m: *Model, id: ParaId, name: []const u8) Error!ParaId {
+        var ps = (m.paraStyle(id) orelse return error.NoSuchStyle).*;
+        ps.name = name;
+        return m.addParagraphStyle(ps);
+    }
+
+    /// A new style template holding text style `text`, paragraph style
+    /// `paragraph` and leading `leading`. Returns its ID.
+    pub fn addStyleTemplate(m: *Model, name: []const u8, text: StyleId, paragraph: ?ParaId, leading: ?Leading) Error!ObjectId {
+        if (m.styleIndex(text) == null) return error.NoSuchStyle;
+        if (paragraph) |p| if (m.paraIndex(p) == null) return error.NoSuchStyle;
+        const id = m.newId();
+        try m.templates.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .text = text, .paragraph = paragraph, .leading = leading });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Renames style template `id`.
+    pub fn renameStyleTemplate(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        const t = m.styleTemplate(id) orelse return error.NoSuchObject;
+        t.name = try m.a().dupe(u8, name);
+        m.revision += 1;
+    }
+
+    /// Style template `id`, if it is one.
+    pub fn styleTemplate(m: *const Model, id: ObjectId) ?*StyleTemplate {
+        for (m.templates.items) |*t| if (t.id == id) return t;
+        return null;
+    }
+
+    /// Sets flow `id`'s style: its text style, the paragraph settings its
+    /// paragraphs in no style take, its leading, and the template it came
+    /// from. Its runs in its old text style move to the new one.
+    pub fn setFlowStyle(m: *Model, id: ObjectId, text: StyleId, paragraph: ?ParaId, leading: ?Leading, template: ObjectId) Error!void {
+        const fi = m.flowIndex(id) orelse return error.NoSuchObject;
+        if (m.styleIndex(text) == null) return error.NoSuchStyle;
+        if (paragraph) |p| if (m.paraIndex(p) == null) return error.NoSuchStyle;
+        const f = &m.flows.items[fi];
+        const old = f.style;
+        if (old != .none and old != text) for (f.items.items) |*it| switch (it.what) {
+            .run => |*r| if (r.style == old) {
+                r.style = text;
+            },
+            else => {},
+        };
+        f.style = text;
+        // Its tracks take it for new runs.
+        for (f.tracks.items) |tid| if (m.trackById(tid)) |tr| {
+            const rg = &m.panels.items[tr.panel].regions.items[tr.region];
+            if (rg.style != null) rg.style = text;
+        };
+        f.paragraph_default = paragraph;
+        f.leading = leading;
+        f.template = template;
         m.revision += 1;
     }
 

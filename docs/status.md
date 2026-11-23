@@ -620,3 +620,14 @@ Paragraph styles already had space before, space after, indents, first line, ali
 ### Units for property values (2026-11-23)
 
 One path for typed units, `lib/layout/units.zig`; which units Graven reads now and how a new one is added: [units.md](units.md). Every number field whose label names a unit takes any unit of its kind (a length field "1in", "12pt", "4pc"; an angle field "45°"), through `propName` → `fields.label_unit` → `fields.unitNumberField`; leading is a stored `Quantity`. Still to do: the other properties stored as quantities (converted on entry today), and `u` as a unit.
+
+### Style templates and flow styles (2026-11-23)
+
+The owner: every new flow has a style copied from a style template; there is a default template; style values that affect the whole flow can be changed. Paragraph overrides stay.
+
+- Model: `StyleTemplate` (`Model.templates`: a name, a text style, an optional paragraph style, a leading kept as typed). A flow has a style of its own (`Flow.style`, `paragraph_default`, `leading`, and the `template` it came from), set by `setFlowStyle` (its runs and its tracks move to the new text style). Ops `copyStyle`, `copyParagraphStyle`, `addStyleTemplate`, `renameStyleTemplate`, `setFlowStyle`. Placement: paragraphs in no paragraph style take the flow's `paragraph_default`.
+- A flow made with a layout tool sized to text copies the template "Default" (made on first use from the label style and "Default paragraph"): its own "<flow> text" and "<flow> paragraph" styles.
+- Properties, "Flow style" (on a content layout whose flow has one): From template (choosing one copies it in), Reset from template, Save as template, Size and Cap height, Leading (as typed; "auto" follows the font's own line spacing), and the paragraph settings for the whole flow. Changing any re-sets the whole flow at once; one undo step each. A paragraph may still take its own style (Paragraph, below it: "The flow style's" or another).
+- Browser: "Style templates", each with its name (editable), styles, leading, and how many flows were made from it.
+- `History.beginStep`: makes the next op a new step even when joined, so a sequence written with `join` can be its own step.
+- Still to do: editing a template's values directly (today: change a flow, Save as template); choosing the template a new flow takes (today always Default); a flow style for flows made otherwise (sized to a prototype, the keyboard's).

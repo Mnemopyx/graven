@@ -1273,7 +1273,10 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         // Its content and first paragraph's style: the flow's (a tile's
         // face track: the tile's content there).
         const flow_items: []const model.Item = if (own) m.flowItems(head.panel, head.region) else synth_items.items[ri];
-        const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph else null) else null;
+        // A paragraph in no style of its own takes the flow style's
+        // paragraph settings (decided 2026-11-23: a flow's style).
+        const flow_default: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph_default else null) else null;
+        const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph orelse fl.paragraph_default else null) else null;
         const fri = head.region;
         const fpi = head.panel;
         const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_para, .first_line = true, .soft = false } else for (entries) |e| {
@@ -1471,10 +1474,11 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     // the next paragraph, after both paragraphs' spacing.
                     var first_line = false;
                     if (item.what == .paragraph) {
-                        const next: ?model.ParagraphStyle = if (item.what.paragraph) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
+                        const next_id = item.what.paragraph orelse flow_default;
+                        const next: ?model.ParagraphStyle = if (next_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
                         path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
                         style = next;
-                        style_id = item.what.paragraph;
+                        style_id = next_id;
                         first_line = true;
                     } else path.lead = if (style) |st| st.line_gap else 0;
                     // Past this leg's last track: the rest goes on into
