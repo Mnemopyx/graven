@@ -378,6 +378,19 @@ pub const testing_api = struct {
     pub fn loadTextSample() !geom.Point {
         return loadText();
     }
+    /// Imports the SVG file at `path` as a figure, as File, Import figure
+    /// does; its index, null when nothing was imported.
+    /// The document's figures' names, in the Browser's order.
+    pub fn figureNames(a: std.mem.Allocator) ![]const []const u8 {
+        const out = try a.alloc([]const u8, state.model.figures.items.len);
+        for (state.model.figures.items, out) |f, *n| n.* = f.name;
+        return out;
+    }
+    pub fn importFigureFile(path: []const u8) ?usize {
+        const n = state.model.figures.items.len;
+        importFigure(path);
+        return if (state.model.figures.items.len > n) n else null;
+    }
     // Scripting by name (decided 2026-11-20): objects by name path, UI
     // elements by id (see "Element ids"), through the paths a person's
     // input takes. Each takes effect in the next frame.
@@ -678,6 +691,9 @@ const Context = union(enum) {
     /// The document's sketches, and one of them.
     sketches,
     sketch_def: usize,
+    /// The document's figures (line art kept as prototypes), and one.
+    figures,
+    figure_def: usize,
     /// A grid on a panel.
     grid: struct { panel: usize, index: usize },
     /// The file's tile prototypes, and one of them.
@@ -730,6 +746,8 @@ const Context = union(enum) {
             .sketch => "Sketch view",
             .sketches => "Sketches",
             .sketch_def => "Sketch",
+            .figures => "Figures",
+            .figure_def => "Figure",
             .grid => "Grid",
             .prototypes => "Tile prototypes",
             .prototype => "Tile prototype",
@@ -2358,6 +2376,12 @@ fn frame() !dvui.App.Result {
             // repository's root), opened as untitled copies.
             if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {};
         }
+        // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
+        // the context.
+        if (platform.env("GRAVEN_FIGURE")) |path| {
+            if (canvas_prompt) createCanvas(.mm);
+            importFigure(path);
+        }
         // GRAVEN_VIEW=cx,cy,ppm: the view's centre (mm) and zoom (px/mm).
         if (platform.env("GRAVEN_VIEW")) |v| {
             var it = std.mem.splitScalar(u8, v, ',');
@@ -2481,7 +2505,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet, export_sheet, export_3mf };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, export_sheet, export_3mf };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -3206,6 +3230,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .save_as => "Save the document as",
         .import_text => importTitle(),
         .import_sheet => sheetImportTitle(),
+        .import_figure => "Import a figure from an SVG file",
         .export_sheet => "Export the legend sheet as CSV",
         .export_3mf => "Export the panel as 3MF (its fabrication layers)",
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
@@ -3249,7 +3274,7 @@ fn filePrompt(kind: FilePromptKind) void {
         keyButton(@src(), switch (kind) {
             .open => "Open",
             .save_as => "Save",
-            .import_text, .import_sheet => "Import",
+            .import_text, .import_sheet, .import_figure => "Import",
             .export_sheet, .export_3mf => "Export",
         }, 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
@@ -3269,6 +3294,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .open => openDocument(path),
         .import_text => importText(path),
         .import_sheet => importSheet(path),
+        .import_figure => importFigure(path),
         .export_sheet => exportSheet(path),
         .export_3mf => exportThreeMf(path),
         .save_as => {
@@ -3333,6 +3359,7 @@ fn contextGroup(c: Context) []const u8 {
         .region => "track",
         .sketch => "sketch-view",
         .sketch_def => "sketch",
+        .figure_def => "figure",
         else => @tagName(c),
     };
 }
@@ -3352,6 +3379,7 @@ fn contextOfRef(ref: layout.model.Model.Ref) ?Context {
             .flows => .flows,
             .sheets => .sheets,
             .sketches => .sketches,
+            .figures => .figures,
             .processes => .processes,
             .materials => .materials,
             .plans => .plans,
@@ -3362,6 +3390,7 @@ fn contextOfRef(ref: layout.model.Model.Ref) ?Context {
         .flow => |id| .{ .flow = id },
         .sheet => |id| .{ .sheet = id },
         .sketch => |i| .{ .sketch_def = i },
+        .figure => |i| .{ .figure_def = i },
         .process => |id| .{ .process = id },
         .material => |id| .{ .material = id },
         .plan => |id| .{ .plan = id },
@@ -3552,6 +3581,8 @@ fn contextValid(c: Context) bool {
         .sketch => |sc| sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len,
         .sketches => true,
         .sketch_def => |i| i < m.sketches.items.len,
+        .figures => true,
+        .figure_def => |i| i < m.figures.items.len,
         .grid => |g| g.panel < np and g.index < m.panels.items[g.panel].grids.items.len,
         .prototype => |id| m.protoIndex(id) != null,
         .flows => true,
@@ -4891,6 +4922,11 @@ fn menu() ?dvui.App.Result {
             file_prompt = .import_text;
             file_prompt_new = true;
         };
+        if (!canvas_prompt) if (tmenu(@src(), "Import figure (SVG)…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            file_prompt = .import_figure;
+            file_prompt_new = true;
+        };
         if (!canvas_prompt) if (tmenu(@src(), "Export legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetToExport() == null) {
@@ -5090,6 +5126,10 @@ fn treeContent() void {
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
         for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
     };
+    // Always listed: where figures are imported into.
+    if (treeNode(.figures, "Figures", 1, state.model.figures.items.len > 0, false)) {
+        for (state.model.figures.items, 0..) |f, i| _ = treeNode(.{ .figure_def = i }, f.name, 2, false, f.default_name);
+    }
     sheetsTree();
     // The flows: each with its tracks in order; one with none is unplaced.
     if (state.model.flows.items.len > 0) if (treeNode(.flows, "Flows", 1, true, false)) {
@@ -5389,7 +5429,7 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material => false,
+        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def => false,
     };
 }
 
@@ -13766,6 +13806,8 @@ fn lowerKind() []const u8 {
         .plan => "manufacturing plan",
         .materials => "materials",
         .material => "material",
+        .figures => "figures",
+        .figure_def => "figure",
     };
 }
 
@@ -16570,6 +16612,23 @@ const button_handlers = [_]ButtonHandler{
             } else |_| state.status = "The view was not placed. ";
         }
     }.f),
+    handler("figures.import-svg", struct {
+        fn f(_: i32) void {
+            file_prompt = .import_figure;
+            file_prompt_new = true;
+        }
+    }.f),
+    handler("figure.remove-figure", struct {
+        fn f(_: i32) void {
+            const index = switch (state.context) {
+                .figure_def => |i| i,
+                else => return,
+            };
+            if (act(.removeFigure, .{index})) {
+                state.context = .figures;
+            } else |_| state.status = "The figure was not removed. ";
+        }
+    }.f),
     handler("sketch.delete-sketch", struct {
         fn f(_: i32) void {
             const index = switch (state.context) {
@@ -17297,6 +17356,8 @@ fn properties() !void {
         .sketch => |sc| sketchProperties(sc.space, sc.index),
         .sketches => propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1),
         .sketch_def => |i| sketchDefProperties(i),
+        .figures => figuresProperties(),
+        .figure_def => |i| figureProperties(i),
         .grid => |g| try gridProperties(g.panel, g.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| {
@@ -25705,6 +25766,150 @@ fn sketchDefProperties(index: usize) void {
     // A view of it at the middle of what is shown.
     keyButton(@src(), "Place a view here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     keyButton(@src(), "Delete sketch", 0, .{ .expand = .horizontal });
+}
+
+/// The document's figures: how many, and Import SVG.
+fn figuresProperties() void {
+    const saved_group = pushGroup("figures");
+    defer popGroup(saved_group);
+    propText("Figures", "{d}", .{state.model.figures.items.len}, 1);
+    keyButton(@src(), "Import SVG…", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+}
+
+/// A figure's properties: its name, where it came from, its size and
+/// paths, a drawing of its ink; Remove figure.
+fn figureProperties(index: usize) void {
+    const saved_group = pushGroup("figure");
+    defer popGroup(saved_group);
+    if (index >= state.model.figures.items.len) return;
+    const f = state.model.figures.items[index];
+    if (textProp("Name", f.name, 1)) |v| act(.renameFigure, .{ index, v }) catch {};
+    if (f.source.len > 0) propText("From", "{s}", .{f.source}, 2);
+    const ink = figureInk(index) orelse return;
+    const b = layout.figure.inkBounds(ink);
+    if (b.isEmpty()) propText("Size", "{s}", .{"no ink"}, 3) else propText("Size", "{d:.2} × {d:.2} mm", .{ b.width(), b.height() }, 3);
+    var strokes: usize = 0;
+    for (f.paths) |p| {
+        if (p.stroke != null) strokes += 1;
+    }
+    propText("Paths", "{d} ({d} stroked)", .{ f.paths.len, strokes }, 4);
+    // The ink, fitted into a box the pane's width.
+    {
+        var box = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .w = 120, .h = 220 }, .margin = .{ .y = 8 }, .background = true, .color_fill = .{ .color = colors.paper }, .border = .all(1), .id_extra = 5 });
+        defer box.deinit();
+        drawInk(box.data().contentRectScale().r, index, ink, b);
+    }
+    keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+}
+
+/// A figure's ink, worked out once per figure and document revision.
+var figure_ink: struct {
+    arena: ?std.heap.ArenaAllocator = null,
+    index: usize = std.math.maxInt(usize),
+    revision: u64 = std.math.maxInt(u64),
+    shapes: []const layout.art.Shape = &.{},
+    regions: []const geom.fill.Region = &.{},
+} = .{};
+
+fn figureInk(index: usize) ?[]const layout.art.Shape {
+    if (index >= state.model.figures.items.len) return null;
+    const fi = &figure_ink;
+    if (fi.index == index and fi.revision == state.model.revision and fi.arena != null) return fi.shapes;
+    if (fi.arena) |*ar| ar.deinit();
+    fi.arena = .init(state.gpa);
+    const a = fi.arena.?.allocator();
+    fi.index = index;
+    fi.revision = state.model.revision;
+    fi.shapes = layout.figure.ink(a, state.model.figures.items[index], figure_tol) catch &.{};
+    const regions = a.alloc(geom.fill.Region, fi.shapes.len) catch return fi.shapes;
+    for (fi.shapes, regions) |sh, *r| {
+        const lines = a.alloc([]const geom.Point, sh.outline.contours.len) catch return fi.shapes;
+        for (sh.outline.contours, lines) |c, *l| {
+            var pts: std.ArrayList(geom.Point) = .empty;
+            for (c.segments) |seg| flatten(a, &pts, seg, figure_tol) catch {};
+            l.* = pts.items;
+        }
+        r.* = geom.fill.nonzero(a, lines, figure_tol * 0.1) catch .{ .loops = &.{}, .triangles = &.{} };
+    }
+    fi.regions = regions;
+    return fi.shapes;
+}
+
+/// The tolerance figures' strokes and drawings are flattened to, mm.
+const figure_tol = 0.002;
+
+/// Draws figure `index`'s ink (`shapes`, bounds `b`) fitted into `r`.
+fn drawInk(r: dvui.Rect.Physical, index: usize, shapes: []const layout.art.Shape, b: geom.Box) void {
+    _ = index;
+    if (b.isEmpty() or !(b.width() > 0 or b.height() > 0)) return;
+    const pad: f64 = 8 * dvui.windowNaturalScale();
+    const sx = (@as(f64, r.w) - 2 * pad) / @max(b.width(), 1e-9);
+    const sy = (@as(f64, r.h) - 2 * pad) / @max(b.height(), 1e-9);
+    const s = @max(0, @min(sx, sy));
+    const ox = @as(f64, r.x) + (@as(f64, r.w) - b.width() * s) / 2;
+    const oy = @as(f64, r.y) + (@as(f64, r.h) + b.height() * s) / 2;
+    const lifo = dvui.currentWindow().lifo();
+    const Index = dvui.Vertex.Index;
+    for (shapes, 0..) |sh, k| {
+        if (k >= figure_ink.regions.len) break;
+        const col = switch (sh.paint.fill) {
+            .solid => |c| c,
+            else => continue,
+        };
+        const pma: dvui.Color.PMA = .fromColor(.{ .r = col.r, .g = col.g, .b = col.b, .a = col.a });
+        const tris = figure_ink.regions[k].triangles;
+        const batch = 20000;
+        var from: usize = 0;
+        while (from < tris.len) : (from += batch) {
+            const part = tris[from..@min(from + batch, tris.len)];
+            var tb = dvui.Triangles.Builder.init(lifo, 3 * part.len, 3 * part.len) catch return;
+            defer tb.deinit(lifo);
+            for (part, 0..) |t, j| {
+                var v: [3]dvui.Point.Physical = undefined;
+                for (t, &v) |q, *o| o.* = .{ .x = @floatCast(ox + (q.x - b.x0) * s), .y = @floatCast(oy - (q.y - b.y0) * s) };
+                for (v) |pos| tb.appendVertex(.{ .pos = pos, .col = pma });
+                const i: Index = @intCast(3 * j);
+                tb.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
+            }
+            dvui.renderTriangles(tb.build_unowned(), null) catch {};
+        }
+    }
+}
+
+/// File, Import figure (SVG): the file's drawing as a new figure, named
+/// after the file, made the context.
+fn importFigure(path: []const u8) void {
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, a, .limited(64 << 20)) catch {
+        state.status = "That file could not be read. ";
+        return;
+    };
+    const r = layout.svg.parse(a, bytes) catch {
+        state.status = "That file is not an SVG drawing. ";
+        return;
+    };
+    if (r.paths.len == 0) {
+        state.status = "That drawing has no shapes Graven reads yet. ";
+        return;
+    }
+    const base = std.fs.path.basename(path);
+    const stem = base[0 .. base.len - std.fs.path.extension(base).len];
+    var nb: [96]u8 = undefined;
+    const name = state.model.freshOrSame(&nb, .figures, stem, "Figure");
+    const i = act(.addFigure, .{ name, r.paths, base }) catch {
+        state.status = "The figure was not added. ";
+        return;
+    };
+    state.context = .{ .figure_def = i };
+    state.expanded.put(state.gpa, Context.key(.figures), true) catch {};
+    const rep = r.report;
+    const sb = &import_status_buf;
+    state.status = if (rep.skipped() + rep.gradients + rep.dashes == 0)
+        std.fmt.bufPrint(sb, "Imported {d} shapes as figure {s}. ", .{ rep.shapes, name }) catch "Imported. "
+    else
+        std.fmt.bufPrint(sb, "Imported {d} shapes as figure {s}; not read yet: {d} text, {d} use, {d} images, {d} clipped or masked, {d} gradients (painted black), {d} dashed (drawn solid). ", .{ rep.shapes, name, rep.text, rep.uses, rep.images, rep.clips, rep.gradients, rep.dashes }) catch "Imported, with parts not read yet. ";
 }
 
 /// A sketch panel's own properties: its sketch, and how it cuts.

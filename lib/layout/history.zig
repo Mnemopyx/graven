@@ -55,6 +55,7 @@ pub const actions = [_][:0]const u8{
     "removeRegion", "setOrientation", "splitIntoTracks",
     "addGuide", "setGuide", "removeGuide",
     "nameKeysInPanel", "setOverlay", "setGridSpacing",
+    "addFigure", "renameFigure", "removeFigure",
 };
 
 fn Fn(comptime name: []const u8) type {

@@ -2271,3 +2271,29 @@ test "a click on empty canvas or frame chooses it, Select boundaries on or off, 
     _ = try r.rectOf("tool.new-sketch");
     try std.testing.expect(dvui.tagGet("tool.add-shape") == null);
 }
+
+test "File, Import figure: an SVG's drawing a figure in the Browser's Figures, its properties shown; renamed, removed, the removal undone" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.frames(2);
+    const i = api.importFigureFile("examples/figures/caps-and-joins.svg").?;
+    try r.frames(2);
+    try std.testing.expectEqualStrings("figure_def", api.contextName());
+    var names = try api.figureNames(std.testing.allocator);
+    try std.testing.expectEqualStrings("capsAndJoins", names[i]);
+    std.testing.allocator.free(names);
+    try r.field("figure.name", "Samples");
+    names = try api.figureNames(std.testing.allocator);
+    try std.testing.expectEqualStrings("Samples", names[i]);
+    std.testing.allocator.free(names);
+    try r.press("figure.remove-figure");
+    try std.testing.expectEqualStrings("figures", api.contextName());
+    names = try api.figureNames(std.testing.allocator);
+    try std.testing.expectEqual(0, names.len);
+    std.testing.allocator.free(names);
+    try r.key(.z, .lcontrol);
+    names = try api.figureNames(std.testing.allocator);
+    try std.testing.expectEqual(1, names.len);
+    std.testing.allocator.free(names);
+}
