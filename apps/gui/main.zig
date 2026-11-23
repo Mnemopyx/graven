@@ -18348,22 +18348,25 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 901 })) {
             try act(.setParagraphAt, .{ pi, ri, at, if (choice == 0) null else m.paragraph_styles.items[choice - 1].id });
         }
-        if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_y = 0.5, .tag = tagFor("New paragraph style") } })) {
-            var buf: [32]u8 = undefined;
-            var base: layout.model.ParagraphStyle = if (current) |id| (if (m.paraStyle(id)) |ps| ps.* else .{ .name = "" }) else .{ .name = "" };
-            base.name = m.nextParagraphStyleName(&buf);
-            const id = try act(.addParagraphStyle, .{base});
-            try act(.setParagraphAt, .{ pi, ri, at, id });
-        }
     }
-    const id = current orelse return;
-    var ps = (m.paraStyle(id) orelse return).*;
-    const key = mergeKey(.{ "paragraph style", id });
-    if (textProp("Name", ps.name, 903)) |name| {
+    // A new style from this paragraph's settings: its own button, below
+    // (beside the dropdown it was pushed out of the pane).
+    if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_x = 1, .tag = tagFor("New paragraph style") } })) {
+        var buf: [32]u8 = undefined;
+        var base: layout.model.ParagraphStyle = if (current) |cid| (if (m.paraStyle(cid)) |ps| ps.* else .{ .name = "" }) else .{ .name = "" };
+        base.name = m.nextParagraphStyleName(&buf);
+        const nid = try act(.addParagraphStyle, .{base});
+        _ = try hist.join(m, .setParagraphAt, .{ pi, ri, at, nid });
+    }
+    // The settings show for any paragraph (the owner, 2026-11-23: space
+    // before and after paragraphs are to be found here): one in no style
+    // that is changed gets a style of its own, made with the change.
+    var ps: layout.model.ParagraphStyle = if (current) |cid| (if (m.paraStyle(cid)) |p| p.* else .{ .name = "" }) else .{ .name = "" };
+    if (current) |cid| if (textProp("Name", ps.name, 903)) |name| {
         ps.name = name;
-        _ = try actM(key, .setParagraphStyle, .{ id, ps });
+        _ = try actM(mergeKey(.{ "paragraph style", cid }), .setParagraphStyle, .{ cid, ps });
         return;
-    }
+    };
     var changed = false;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 904 });
@@ -18383,7 +18386,7 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         .{ .name = "First line, pt", .field = "first", .min = -1000 },
         .{ .name = "Space before, pt", .field = "space_before", .min = 0 },
         .{ .name = "Space after, pt", .field = "space_after", .min = 0 },
-        .{ .name = "Between lines, pt", .field = "line_gap", .min = 0 },
+        .{ .name = "Extra between lines, pt", .field = "line_gap", .min = 0 },
     };
     inline for (fields, 0..) |f, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 910 + k });
@@ -18395,7 +18398,16 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
             changed = true;
         }
     }
-    if (changed) _ = try act(.setParagraphStyle, .{ id, ps });
+    if (changed) {
+        if (current) |cid| {
+            _ = try actM(mergeKey(.{ "paragraph style", cid }), .setParagraphStyle, .{ cid, ps });
+        } else {
+            var buf: [32]u8 = undefined;
+            ps.name = m.nextParagraphStyleName(&buf);
+            const nid = try act(.addParagraphStyle, .{ps});
+            _ = try hist.join(m, .setParagraphAt, .{ pi, ri, at, nid });
+        }
+    }
 }
 
 // The expression and its style ---------------------------------------------

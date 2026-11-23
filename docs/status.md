@@ -612,3 +612,7 @@ The owner, 2026-11-23: leading sets the distance between baselines, flexible in 
 Decided the same day, to build generally: Properties' size values keep the unit they were typed in (the value and its unit stored, converted when needed, not once on entry). Leading is the first.
 
 To do: what a line taller than the leading does (exact with a clash flagged, or the line pushed down; asked); space between paragraphs; Indent and Row gap still in u.
+
+### Space before and after paragraphs (2026-11-23)
+
+Paragraph styles already had space before, space after, indents, first line, alignment and extra space between lines, and placement honoured them; but the button that makes a style sat beside the Style dropdown and was pushed out of the pane, and the settings showed only for a paragraph in a style. Now the Paragraph section always shows them, and a paragraph in no style that is changed gets one of its own (Paragraph1, …), made and applied as one undo step; the new-style button sits on its own line. "Between lines" is "Extra between lines" (it adds to the leading). Still to do: the Flow, In it and flow buttons sit under Paragraph but are the layout's; these fields are in pt only (typed units, as leading takes them, to come).
