@@ -1,4 +1,4 @@
-# Handoff: open threads (2026-11-15)
+# Handoff: open threads (2026-11-15; latest threads 2026-11-23)
 
 Where each line of work stood at the end of the session that built math mode, the math font packages, drawn arrows, the MSDF text display and the 3MF export. Each thread names its next step. The blueprint has the full reasoning; `docs/status.md` has the inventory.
 
@@ -100,18 +100,41 @@ Decided: a Text styles view (main-window tab per style), treatments as glyphic s
 
 Near a container's outline: the container; inside: its content, a slot's text taking the caret where pressed; inside an expression being edited, its objects the same way ("Pointing" in main.zig; status.md). Built for keys, tracks, panels and expression objects; next where wanted: line art, grids, images and views, and hover over a track's text.
 
-## Construction lines (2026-11-21)
+## Construction lines (2026-11-21, 2026-11-23)
 
-Step 1 built (the model object, the tool with both gestures, drawing clipped to the view or the frame, choosing, properties with locks). Next, step 2: snapping and attachment for containers, and dragging lines (status.md, "Construction lines").
+Step 1 built (the model object, the tool with both gestures, drawing clipped to the view or the frame, choosing, properties with locks). Built since: the Constrain tool picks a horizontal or vertical line like an edge and holds it a distance from origins, edges or other lines (`constrain.zig`, `Kind.guide`); with Select boundaries (B) on, lines glow when near and a click chooses them; **a chosen line, then K, opens a pop-up** (Horizontal H, Vertical V, Distance from… D; mode `canvas.constrain-menu`). The owner's rule from this: applying a constraint is a tool on an object (select, apply), not a property to edit. Open: H/V turn the line about its stored point (its first click), which may not be what the owner expects (about the point nearest the pointer, or the middle of what shows, are alternatives: ask if it comes up); the line is no longer glowing after H, though it stays chosen; angles other than 0/90 and distances along slanted lines are not constrainable. Next, step 2's rest: snapping and attachment for containers, and dragging lines (status.md, "Construction lines").
 
 ## Windows and tabs (2026-11-21)
 
 Tabs are a per-window quick-view of contexts (VS Code as the model). Step 1 built: + with its filterable pop-up (Ctrl+T), × taking a tab off its window (Ctrl+W), the split button (Alt: stacked; Ctrl+Shift+\\). Step 2 built: preview tabs (italic; the next context opened in the window takes their place; kept by work in them or a double-click). Step 3 built: the divider's grip and click with Swap sides, Even out, Stacked ⇄ Side by side; a double-click on the divider evens it out; the scrolling policy in the UI inventory. The three steps of the tabs plan are done (status.md, "Windows and tabs").
 
-## The ribbon (2026-11-21, 2026-11-22)
+## The ribbon (2026-11-21 to 2026-11-23)
 
-Steps 1 and 2 built: the ribbon under the menu bar with the canvas tools and their key badges (Alt: full strength), single keys for the tools; ▾ and hold-to-open, pull-downs (shapes; rows, columns, track), the full-width Layers drop panel (no OK/Cancel); the Tools pane retired. Step 3 built: 22 px view strips, the ▾ list (this window's tabs, then the contexts; Ctrl+E), the page slot and `View.page` ready for paged documents. Step 4 built: ribbons for sheet and plan views. The four steps of the ribbon plan are done; next as the owner names it (status.md, "The ribbon").
+Steps 1 and 2 built: the ribbon under the menu bar with the canvas tools and their key badges (Alt: full strength), single keys for the tools; ▾ and hold-to-open, pull-downs (shapes; rows, columns, track), the full-width Layers drop panel (no OK/Cancel); the Tools pane retired. Step 3 built: 22 px view strips, the ▾ list (this window's tabs, then the contexts; Ctrl+E), the page slot and `View.page` ready for paged documents. Step 4 built: ribbons for sheet and plan views. Since: no top or bottom margins; the open drop key's shade carried into its panel by a filleted bridge; modifier symbols ⌃ ⇧ ⌥ ⌘ in badges (`platform.key_names`, no "+"); zoom-fit's key shows "0"; a non-modal key gives the keyboard back to where it was; the **Text style key (Y)** with a drop panel (choose or add a style; rows and columns are set in the chosen one, `text_style`, `validTracksSizeTo`); **key sizes from a right-click** (small 24, medium 32, large 40, extra large 48), kept in this machine's settings (`ribbon.size`, local). Next as the owner names it (status.md, "The ribbon").
 
+## Reveal, keyboard stepping (2026-11-22)
+
+`view.reveal` (no key yet, the owner's choice): brings the chosen object's display context forward (a tab already in the window is used) and jumps (no animation) to show it. The Browser's choices reveal; keyboard stepping (selection hunting, levels, the flow cursor) reveals. Decided: selection stays out of undo; no scrolling of sheet rows from the Browser. Remaining steps are in status.md ("Reveal").
+
+## Routes and flow marks (2026-11-22)
+
+`lib/geom/dubins.zig`: the shortest route between two directed ends with a bounded bend (Dubins paths with straight leads). First use: the line from one track into the next in a flow. That line and the break glyphs are one view layer, "Flow marks", shown, hidden and moved in the Layers panel.
+
+## Editor layers and grids belong to the document (2026-11-22)
+
+Each canvas and frame (`Space`) holds `overlays` (grid, axes, checks, simulation, construction lines, flow marks: shown, and place in the stack) and `grid_spacing`: recorded, undone, saved. How a grid is drawn (lines, dots, pluses) is a preference. Every Layers-panel row can be chosen, its settings on the right. Not yet: units per canvas or frame; pluses not yet seen on screen.
+
+## Selection display (2026-11-22)
+
+Halos only while Select boundaries (B) is on (the owner's correction: verify the behaviour a toggle controls, not just the button). B persists in the settings between runs: check its state before judging a screenshot. The GUI tests reset it at each start (it is process state and leaked between tests).
+
+## The PC keyboard example (2026-11-22)
+
+Reworked: a flow per row (no wrapping), the keys named across the panel, the sheet over the panel still mapping. `examples/pc-keyboard.graven` was regenerated and `examples/examples_test.zig` updated, but **the examples tests and the model tests have not been run since** (they run with the library suite; run `zig build test` before the next release, and check the keyboard SVG baseline).
+
+## Build cache (2026-11-22)
+
+`scripts/zig-cache-prune.sh`, run by a Claude Code hook after build commands, keeps `.zig-cache` under 10 GB by tracing no-change builds of `install` and `gui-build` and deleting what they do not open. A step not traced (`gui-test`, `test`) rebuilds from scratch after a prune. The cloud disk allowance is about 40 GB.
 
 ## Icons and icon files (2026-11-22, paused: the owner moved on)
 
@@ -120,6 +143,6 @@ Built: the style rules and seven icons (`scripts/icons.py`); the icon-file forma
 1. **Step 3, the rest of the set:** the canvas ribbon is done (2026-11-22: zoom to context, constrain, new sketch, add shape, select boundaries, select area); the sheet and plan ribbons remain, by the style rules. Leave the top right corner clear on keys with a drop.
 2. **Style rules still open:** stroke fixed in pixels or scaling with size; colour by what a tool makes or what it works on; the dashed container and the ringed + on every add tool; a direction convention for arrows; the faint (not-applicable) treatment, which washes the icons out.
 3. **Override slots:** read from files but nothing recolours them; wire them to the theme (dark panes) and a colour-blind set, and choose the dark palette.
-4. **Pull-downs in the light theme;** the ribbon's height (52) now has room to spare under 32 px keys; the Alt-held fade not yet seen under Xvfb; hold-to-open not tested by a GUI test.
+4. **Pull-downs in the light theme;** the Alt-held fade not yet seen under Xvfb; hold-to-open not tested by a GUI test.
 5. **The blueprint** has none of the icon-file work yet (`docs/status.md` has it all).
 6. Leaks at exit from the element registry's records and the old TinyVG cache (not from `iconfile.zig`).
