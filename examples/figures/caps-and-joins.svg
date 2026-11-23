@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="60mm" viewBox="0 0 80 60">
+  <!-- caps: butt, square, round -->
+  <g stroke="#1a3a6b" stroke-width="4" fill="none">
+    <line x1="8" y1="8" x2="30" y2="8" stroke-linecap="butt"/>
+    <line x1="8" y1="18" x2="30" y2="18" stroke-linecap="square"/>
+    <line x1="8" y1="28" x2="30" y2="28" stroke-linecap="round"/>
+  </g>
+  <!-- joins: miter, round, bevel -->
+  <g stroke="#8b1e1e" stroke-width="3" fill="none">
+    <polyline points="40,12 48,4 56,12" stroke-linejoin="miter"/>
+    <polyline points="40,22 48,14 56,22" stroke-linejoin="round"/>
+    <polyline points="40,32 48,24 56,32" stroke-linejoin="bevel"/>
+  </g>
+  <!-- filled and stroked shapes -->
+  <rect x="62" y="4" width="14" height="10" rx="3" fill="#f2c14e" stroke="#333" stroke-width="1"/>
+  <circle cx="69" cy="26" r="6" fill="#7fb069" stroke="#2d4a22" stroke-width="1.5"/>
+  <!-- an arc, stroked with round caps -->
+  <path d="M 8 50 A 14 10 0 0 1 36 50" fill="none" stroke="#5b3a8c" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- an even-odd ring -->
+  <path d="M 44 38 h 20 v 18 h -20 z M 49 42 h 10 v 10 h -10 z" fill="#3c7a89" fill-rule="evenodd"/>
+</svg>

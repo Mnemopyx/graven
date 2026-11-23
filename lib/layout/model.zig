@@ -23,6 +23,7 @@ const glyphic = @import("graven_glyphic");
 const Allocator = std.mem.Allocator;
 const geom = @import("graven_geom");
 const art_ = @import("art.zig");
+const figure_ = @import("figure.zig");
 pub const process = @import("process.zig");
 pub const manufacture = @import("manufacture.zig");
 pub const sketch_ = @import("graven_sketch");
@@ -1681,6 +1682,9 @@ pub const Model = struct {
     prototypes: std.ArrayList(TilePrototype) = .empty,
     /// The document's sketches; spaces hold views of them.
     sketches: std.ArrayList(SketchItem) = .empty,
+    /// The document's figures: line art kept as prototypes, ink only
+    /// (see `figure.zig`).
+    figures: std.ArrayList(figure_.Figure) = .empty,
     /// The built-in Blank prototype, once a blank has been made.
     blank_prototype: ?PrototypeId = null,
     styles: std.ArrayList(TextStyle) = .empty,
@@ -1977,6 +1981,7 @@ pub const Model = struct {
         flows,
         sheets,
         sketches,
+        figures,
         processes,
         materials,
         plans,
@@ -2017,6 +2022,7 @@ pub const Model = struct {
             .flows => for (m.flows.items) |f| if (eq(u8, f.name, name)) return true,
             .sheets => for (m.sheets.items) |sh| if (eq(u8, sh.name, name)) return true,
             .sketches => for (m.sketches.items) |sk| if (eq(u8, sk.name, name)) return true,
+            .figures => for (m.figures.items) |f| if (eq(u8, f.name, name)) return true,
             .processes => for (m.processes.items) |pr| if (eq(u8, pr.profile.name, name)) return true,
             .materials => for (m.materials.items) |mt| if (eq(u8, mt.material.name, name)) return true,
             .plans => for (m.plans.items) |pl| if (eq(u8, pl.name, name)) return true,
@@ -2068,18 +2074,20 @@ pub const Model = struct {
         flow: ObjectId,
         sheet: ObjectId,
         sketch: usize,
+        figure: usize,
         process: ObjectId,
         material: ObjectId,
         plan: ObjectId,
     };
 
-    pub const Collection = enum { styles, paragraph_styles, prototypes, flows, sheets, sketches, processes, materials, plans };
+    pub const Collection = enum { styles, paragraph_styles, prototypes, flows, sheets, sketches, figures, processes, materials, plans };
 
     /// The collections' names in paths.
     pub const collection_names = [_]struct { []const u8, Collection }{
         .{ "Styles", .styles },          .{ "ParagraphStyles", .paragraph_styles }, .{ "Prototypes", .prototypes },
         .{ "Flows", .flows },            .{ "Sheets", .sheets },                    .{ "Sketches", .sketches },
         .{ "Processes", .processes },    .{ "Materials", .materials },              .{ "Plans", .plans },
+        .{ "Figures", .figures },
     };
 
     /// The object a name path reaches: names joined by "." (a name that is
@@ -2158,6 +2166,7 @@ pub const Model = struct {
                 .flows => for (m.flows.items) |f| if (eq(u8, f.name, name)) return .{ .flow = f.id },
                 .sheets => for (m.sheets.items) |sh| if (eq(u8, sh.name, name)) return .{ .sheet = sh.id },
                 .sketches => for (m.sketches.items, 0..) |sk, i| if (eq(u8, sk.name, name)) return .{ .sketch = i },
+                .figures => for (m.figures.items, 0..) |f, i| if (eq(u8, f.name, name)) return .{ .figure = i },
                 .processes => for (m.processes.items) |pr| if (eq(u8, pr.profile.name, name)) return .{ .process = pr.id },
                 .materials => for (m.materials.items) |mt| if (eq(u8, mt.material.name, name)) return .{ .material = mt.id },
                 .plans => for (m.plans.items) |pl| if (eq(u8, pl.name, name)) return .{ .plan = pl.id },
@@ -3008,6 +3017,40 @@ pub const Model = struct {
             }
         }
         _ = m.sketches.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// Adds a figure made of `paths` (copied), its name `name`, from file
+    /// `source` (a name, or ""). Returns its index.
+    pub fn addFigure(m: *Model, name: []const u8, paths: []const figure_.Path, source: []const u8) Error!usize {
+        const al = m.a();
+        const copy = try al.alloc(figure_.Path, paths.len);
+        for (paths, copy) |p, *c| {
+            c.* = p;
+            const subs = try al.alloc(figure_.Subpath, p.subpaths.len);
+            for (p.subpaths, subs) |sp, *o| o.* = .{ .segments = try al.dupe(geom.Segment, sp.segments), .closed = sp.closed };
+            c.subpaths = subs;
+        }
+        try m.figures.append(al, .{
+            .id = m.newId(),
+            .name = try al.dupe(u8, name),
+            .paths = copy,
+            .source = try al.dupe(u8, source),
+        });
+        m.revision += 1;
+        return m.figures.items.len - 1;
+    }
+
+    pub fn renameFigure(m: *Model, index: usize, name: []const u8) Error!void {
+        if (index >= m.figures.items.len) return error.NoSuchItem;
+        m.figures.items[index].name = try m.a().dupe(u8, name);
+        m.figures.items[index].default_name = false;
+        m.revision += 1;
+    }
+
+    pub fn removeFigure(m: *Model, index: usize) Error!void {
+        if (index >= m.figures.items.len) return error.NoSuchItem;
+        _ = m.figures.orderedRemove(index);
         m.revision += 1;
     }
 

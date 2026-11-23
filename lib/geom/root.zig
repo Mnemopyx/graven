@@ -23,6 +23,8 @@ pub const dubins = @import("dubins.zig");
 /// Polyline paths (rings and lines): the nearest point on one to a point,
 /// inside, area.
 pub const path = @import("path.zig");
+/// Strokes: a path's ink at a pen width, with caps and joins.
+pub const stroke = @import("stroke.zig");
 
 pub const Point = struct {
     x: f64,
@@ -533,4 +535,5 @@ test {
     _ = msdf;
     _ = strokefont;
     _ = path;
+    _ = stroke;
 }

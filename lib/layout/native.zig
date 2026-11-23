@@ -565,6 +565,15 @@ test "a model writes and reads back to the same bytes, with its content" {
     const gi = try m.addGuide(0, .{ .x = 3, .y = 4 }, 30);
     try m.setGuide(0, gi, .{ .x = 3, .y = 4 }, 30, .angle);
     const p = try m.placePanel(.{ .name = "Panel 1", .origin = .{ .x = 5, .y = 5 }, .w = 60, .h = 0.1 + 0.2 });
+    const fig_segs = [_]@import("graven_geom").Segment{
+        .{ .line = .{ .{ .x = 0, .y = 0 }, .{ .x = 4, .y = 0 } } },
+        .{ .conic = .{ .p = .{ .{ .x = 4, .y = 0 }, .{ .x = 4, .y = 4 }, .{ .x = 0, .y = 4 } }, .w = 0.7071067811865476 } },
+    };
+    const fi = try m.addFigure("Logo", &.{.{
+        .subpaths = &.{.{ .segments = &fig_segs, .closed = false }},
+        .fill = .{ .r = 10, .g = 20, .b = 30 },
+        .stroke = .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.3, .cap = .round, .join = .bevel },
+    }}, "logo.svg");
 
     const bytes = try encode(gpa, &m);
     defer gpa.free(bytes);
@@ -586,6 +595,11 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqualStrings("\x89PNG...", back.spaces.items[0].images.items[0].data);
     try testing.expectEqual(30, back.spaces.items[0].guides.items[0].angle);
     try testing.expectEqual(model.GuideLock.angle, back.spaces.items[0].guides.items[0].lock);
+    const fb = back.figures.items[fi];
+    try testing.expectEqualStrings("Logo", fb.name);
+    try testing.expectEqual(0.7071067811865476, fb.paths[0].subpaths[0].segments[1].conic.w);
+    try testing.expectEqual(.round, fb.paths[0].stroke.?.cap);
+    try testing.expectEqual(30, fb.paths[0].fill.?.b);
     try testing.expectEqual(m.next_id, back.next_id);
     // It goes on being edited like any model.
     try back.insertRun(c, r, 0, .{ .style = style, .content = "more" });
