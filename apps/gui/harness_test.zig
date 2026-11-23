@@ -2141,6 +2141,34 @@ test "the Text style panel: a style added there is the one new rows are set in" 
     try std.testing.expectEqual(1, styled);
 }
 
+test "Select boundaries: a track's whole outline, all its rows, is its boundary; a row holding content is one within it, an empty row none" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    // Three rows of 6 mm down from `o`, 60 mm long: the first two hold
+    // content, the third is empty. Pointed at 15 mm along, clear of the
+    // selected track's drag points (its corners and mid-sides).
+    const o = try api.loadTextSample();
+    try r.frames(2);
+    try r.key(.escape, .none);
+    api.setBoundaryMode(true);
+    defer api.setBoundaryMode(false);
+    // Just below the third (empty) row, outside: the track.
+    try r.clickAt(api.screenOf(o.x + 15, o.y - 30 + 11.6).?);
+    try std.testing.expectEqualStrings("region", api.contextName());
+    // Inside the empty row, near the track's bottom: still the track.
+    try r.clickAt(api.screenOf(o.x + 15, o.y - 30 + 12.4).?);
+    try std.testing.expectEqualStrings("region", api.contextName());
+    // Just above the first row, outside: the track (its top is shared).
+    try r.key(.escape, .none);
+    try r.clickAt(api.screenOf(o.x + 15, o.y - 30 + 30.4).?);
+    try std.testing.expectEqualStrings("region", api.contextName());
+    // Just inside the first row: the row.
+    try r.key(.escape, .none);
+    try r.clickAt(api.screenOf(o.x + 15, o.y - 30 + 29.6).?);
+    try std.testing.expectEqualStrings("row", api.contextName());
+}
+
 test "with Select boundaries on, a construction line near the pointer is a boundary: a click chooses it" {
     var r = try Run.start();
     defer r.stop();

@@ -20,6 +20,9 @@ pub const strokefont = @import("strokefont.zig");
 /// The shortest route between two directed ends, bending no more sharply
 /// than a given radius (Dubins paths, with straight leads).
 pub const dubins = @import("dubins.zig");
+/// Polyline paths (rings and lines): the nearest point on one to a point,
+/// inside, area.
+pub const path = @import("path.zig");
 
 pub const Point = struct {
     x: f64,
@@ -529,4 +532,5 @@ test {
     _ = simplify;
     _ = msdf;
     _ = strokefont;
+    _ = path;
 }
