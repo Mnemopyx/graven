@@ -42,8 +42,8 @@ test "the PC keyboard: 104 keys in 22.5 × 6.5 u, nothing overflowing, its legen
         if (!std.mem.startsWith(u8, st.name, "legend")) continue;
         try testing.expectEqualStrings("Inter", st.face("text").?.family);
     }
-    // A sheet over its track: a column a slot.
-    const id = try m.makeSheet("Keyboard legends", m.panels.items[p].regions.items[0].id);
+    // A sheet over the panel (each row is a flow of its own): a column a slot.
+    const id = try m.makeSheet("Keyboard legends", m.panels.items[p].id);
     const sh = m.sheets.items[m.sheetIndex(id).?];
     try testing.expectEqual(104, sh.rows.items.len);
     try testing.expectEqualStrings("top", sh.columns.items[0]);

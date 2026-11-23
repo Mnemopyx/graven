@@ -5541,8 +5541,7 @@ pub const Model = struct {
         defer keys.deinit(al);
         var seen: std.ArrayList(ObjectId) = .empty;
         defer seen.deinit(al);
-        for (m.panels.items[panel].regions.items, 0..) |r, ri| {
-            if (r.kind != .track) continue;
+        for (m.panels.items[panel].regions.items, 0..) |_, ri| {
             const f = m.trackFlow(panel, ri);
             if (f) |fl| {
                 if (std.mem.indexOfScalar(ObjectId, seen.items, fl.id) != null) continue;
