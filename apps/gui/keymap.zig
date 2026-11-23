@@ -69,9 +69,9 @@ pub const action_defs = [_]A{
     // is its action's name, see elements.zig), on the context.
     .{ .name = "track.make-tracks" },
     .{ .name = "track.remove" },
-    .{ .name = "track.name-keys" },
+    .{ .name = "track.name-tiles" },
     // A panel's keys named in order: its tracks in turn, each flow's keys.
-    .{ .name = "panel.name-keys" },
+    .{ .name = "panel.name-tiles" },
     .{ .name = "track.flow.show" },
     .{ .name = "track.flow.join-after" },
     .{ .name = "track.flow.take-out" },

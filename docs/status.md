@@ -582,3 +582,25 @@ The owner's request: the canvas as translucent layers on a light table, lit by a
 - **Black Light Table**: a near-UV lamp. Document colours (tile art fills and edges, figures, images, ink, paper, grid) are shown by lightness on a ramp from near-black to the lamp's violet (`canvas_theme.uv`), so paper and faces glow violet and ink is dark. Emphasis is in fluorescent pigments and glows (a halo of wider, fainter strokes under it, `glowUnder`/`glowRect` in `main.zig`): selection and handles fluorescent yellow, guides green, construction lines pink, warnings orange. The caret keeps its laser red.
 - Chosen in View (the two themes listed under the grid entries) or with **U** (ultraviolet) in the view mode, cycling; kept in the shared settings as `view.canvas_theme`.
 - To do: sheet views and pane previews that use the paper colour follow the theme; a third theme is one more `Theme` value and its palette in `setPalette`.
+
+## Text first: making a column of text (2026-11-23)
+
+The owner, 2026-11-23: Graven is not a keyboard, keypad or keycap program; tiles and arrays can make keys, and the keyboard is one example. Text comes first. A column of text was made in the GUI (new canvas, Add rows, drag, type) and what got in the way noted.
+
+Done:
+- Add rows, Add columns and Add track size to a text style by default (the chosen one, else Label): they no longer make a "Key" keycap prototype and size to 19.05 mm units (an 80 mm drag gave a 19 mm column). Tiles only when a prototype is chosen in the tool's options.
+- The insert palette (key sizes, blanks, runs, breaks) is off everywhere; the move palette stays.
+- Properties: "Name keys in order" is "Name tiles in order" (`track.name-tiles`, `panel.name-tiles`, `sheet.cell.name-tiles-…`); a legend row's "Key" is "Tile"; a text track's length is in mm.
+- Start screen and news: "Text, symbols and legends, set as exact geometry".
+- A click inside a text track's used segment places the cursor (in Select boundaries too); drag selects, Shift-click extends; Edit: Cut, Copy, Paste, Select all.
+
+To do (what still impedes text):
+- No Text tool: a column is "Add rows" (R); Add track (T) dragged down makes text run downward. Wanted: a text-box tool, dragged out, then typed in.
+- The panes start hidden though marked pinned; Properties only through View › Show or hide auto-hide panes.
+- A text track's Properties use tile words: Indent u, Row gap u, Depth rows (18) beside Rows (4), Pitch, "Make tracks of its 4 rows", Kind "column of rows, as needed", Content "From the start".
+- No paragraph settings where expected: alignment (left, centre, right, justified), line spacing, space between paragraphs, first-line indent (Paragraph style shows "None (the track's alignment)").
+- Font and size only through Text styles in the Browser, not on the text selected; no bold or italic within a run.
+- Plain text shows the equation engine's raw parameters under "Expression object" (Rotate pivot ink_centre, Show sub, Fence step …).
+- A green line runs down the centre of the column and past its bottom.
+- Copy and paste are plain text (an equation pastes as its characters).
+- Keycap-specific features still visible elsewhere: Add keycap art on prototypes, the legend sheet's wording ("its keys' legends"), the File menu's keyboard and keypad examples.

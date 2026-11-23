@@ -515,7 +515,7 @@ fn makeKeyboard(r: *Run) !void {
     // Named in order, K1 to K104, from the panel's properties (its tracks
     // in turn, each row's keys).
     try r.select(panel_path);
-    try r.press("panel.name-keys");
+    try r.press("panel.name-tiles");
 
     // Gaps and heights, key by key: the key clicked on the canvas (the
     // panel chosen first, so a click picks a key rather than placing the
@@ -893,7 +893,7 @@ fn make15c(r: *Run) !void {
     // place, a table imported into it.
     try r.press("panel.grids.grid1");
     try r.press("grid.make-a-legend-sheet");
-    try r.press("sheet.cell.name-keys-by-grid-position-r1c1");
+    try r.press("sheet.cell.name-tiles-by-grid-position-r1c1");
     var out: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
     defer out.deinit();
     const w = &out.writer;

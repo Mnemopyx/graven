@@ -1519,7 +1519,7 @@ fn splash() void {
         dvui.labelNoFmt(@src(), "√x", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.8, .font = dvui.Font.theme(.body).larger(2), .color_text = .{ .color = ink.opacity(0.6) } });
     }
     dvui.labelNoFmt(@src(), "Graven", .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.title).larger(14) });
-    dvui.labelNoFmt(@src(), "Legends for control panels and keycaps, as exact geometry", .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 10 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) } });
+    dvui.labelNoFmt(@src(), "Text, symbols and legends, set as exact geometry", .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 10 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) } });
     dvui.label(@src(), "Version {s}", .{layout.version}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-1) });
     dvui.labelNoFmt(@src(), licence_text, .{}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) } });
 }
@@ -4399,9 +4399,10 @@ fn overlays() !void {
     // (keys for a track of tiles; the flow's breaks and runs), the move
     // palette for a selected track.
     const moving_track = track_cursor == null and state.context == .row;
-    // Not in a track of text, for now (the owner, 2026-11-23): its keys
-    // are the usual typing ones, and the palette covered the work.
-    if ((track_cursor != null and !inTextTrack()) or moving_track) {
+    // The insert palette is off for now (the owner, 2026-11-23: it
+    // covered the work, and Graven is not a keycap program); the move
+    // palette stays.
+    if (moving_track) {
         // Sized to its content again when what it offers changes.
         const what: u64 = if (moving_track) 1 else if (paletteFor(track_cursor.?.panel, track_cursor.?.region)) |pal| (@as(u64, @backingInt(pal.prototype)) << 8) | (@as(u64, pal.tile_count) << 2) | @as(u64, @intFromBool(inTextTrack())) << 1 else 2;
         const S = struct {
@@ -7268,15 +7269,15 @@ fn sheetViewProperties() void {
         propText("Row", "{d} of {d}", .{ sheet_sel.row + 1, sh.rows.items.len }, 9701);
         if (sheetRowKey(si, sheet_sel.row)) |key| {
             const t = m.tileConst(key);
-            propText("Key", "{s} ({s})", .{ t.designator, m.prototypeOf(key).name }, 9702);
-        } else propText("Key", "none named {s} here", .{row.key}, 9702);
+            propText("Tile", "{s} ({s})", .{ t.designator, m.prototypeOf(key).name }, 9702);
+        } else propText("Tile", "none named {s} here", .{row.key}, 9702);
         if (sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
             const slot = sh.columns.items[sheet_sel.col - 1];
             propText("Slot", "{s}{s}", .{ slot, if (sheetCellTarget() == null) " (not on this key)" else "" }, 9703);
         }
     }
-    keyButton(@src(), "Name keys by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    keyButton(@src(), "Name keys by their first legend", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "Name tiles by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "Name tiles by their first legend", 0, .{ .expand = .horizontal });
     keyButton(@src(), "Add a row", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     if (sh.rows.items.len > 0) keyButton(@src(), "Remove this row", 0, .{ .expand = .horizontal });
 }
@@ -13858,11 +13859,13 @@ fn validTracksSizeTo() void {
     const protos = state.model.prototypes.items;
     switch (tracks_tool.size_to) {
         .prototype => |pid| if (state.model.protoIndex(pid) == null) {
-            // A text style chosen in the Text style panel, else the first
-            // tile prototype, else the default text style.
+            // Text first (the owner, 2026-11-23): a text style chosen in
+            // the Text style panel, else the default one. Tiles only when
+            // a prototype is chosen in the tool's options.
+            _ = protos;
             tracks_tool.size_to = if (text_style != null and state.model.styleIndex(text_style.?) != null)
                 .{ .style = text_style }
-            else if (protos.len > 0) .{ .prototype = protos[0].id } else .{ .style = null };
+            else .{ .style = null };
         },
         .style => |sid| if (sid != null and state.model.styleIndex(sid.?) == null) {
             tracks_tool.size_to = .{ .style = null };
@@ -14534,7 +14537,7 @@ fn dispatchButtons() void {
 }
 
 /// The button actions `runButtonAction` handles in its own switch.
-const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-keys", "panel.name-keys", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel" };
+const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-tiles", "panel.name-tiles", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel" };
 
 /// Whether a button's action has a handler (every one should: a test
 /// checks).
@@ -14552,8 +14555,8 @@ fn runButtonAction(inv: keymap.Invocation) bool {
             .region => |r| removeRegionOf(r.panel, r.region),
             else => return false,
         },
-        kact("track.name-keys") => regionNameKeys(),
-        kact("panel.name-keys") => panelNameKeys(),
+        kact("track.name-tiles") => regionNameKeys(),
+        kact("panel.name-tiles") => panelNameKeys(),
         kact("track.flow.show") => switch (state.context) {
             .region => |r| if (state.model.trackFlow(r.panel, r.region)) |f| {
                 state.context = .{ .flow = f.id };
@@ -15863,8 +15866,8 @@ fn sheetRibbon() void {
     ribbonButton(@src(), "sheet.cell.add-a-row", dvui.entypo.add_to_list, 1);
     ribbonButton(@src(), "sheet.cell.remove-this-row", dvui.entypo.circle_with_minus, 2);
     ribbonGap(3);
-    ribbonButton(@src(), "sheet.cell.name-keys-by-grid-position-r1c1", dvui.entypo.grid, 4);
-    ribbonButton(@src(), "sheet.cell.name-keys-by-their-first-legend", dvui.entypo.text, 5);
+    ribbonButton(@src(), "sheet.cell.name-tiles-by-grid-position-r1c1", dvui.entypo.grid, 4);
+    ribbonButton(@src(), "sheet.cell.name-tiles-by-their-first-legend", dvui.entypo.text, 5);
     ribbonGap(6);
     // The canvas beside it, to see its keys change.
     const prev = state.context;
@@ -16513,13 +16516,13 @@ const button_handlers = [_]ButtonHandler{
             } else |_| {}
         }
     }.f),
-    handler("sheet.cell.name-keys-by-grid-position-r1c1", struct {
+    handler("sheet.cell.name-tiles-by-grid-position-r1c1", struct {
         fn f(_: i32) void {
             const si = state.model.sheetIndex(sheet_sel.sheet) orelse return;
             nameSheetKeys(si, .position);
         }
     }.f),
-    handler("sheet.cell.name-keys-by-their-first-legend", struct {
+    handler("sheet.cell.name-tiles-by-their-first-legend", struct {
         fn f(_: i32) void {
             const si = state.model.sheetIndex(sheet_sel.sheet) orelse return;
             nameSheetKeys(si, .legend);
@@ -17563,7 +17566,8 @@ fn tracksMode(major: layout.model.Major, kind: layout.model.TileRegion.Kind) voi
         state.tool = .add_tracks;
         tracks_tool.major = major;
         tracks_tool.kind = kind;
-        ensurePrototype() catch {};
+        // No keycap prototype made: tracks are of text unless a prototype
+        // is chosen.
         validTracksSizeTo();
     }
 }
@@ -17900,7 +17904,7 @@ fn properties() !void {
                     @memcpy(key_name_prefix[0..key_name_prefix_len], v[0..key_name_prefix_len]);
                 }
                 var lb: [64]u8 = undefined;
-                actionButton(@src(), "panel.name-keys", std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name keys in order", 0, .{ .expand = .horizontal, .id_extra = 31 });
+                actionButton(@src(), "panel.name-tiles", std.fmt.bufPrint(&lb, "Name tiles in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name tiles in order", 0, .{ .expand = .horizontal, .id_extra = 31 });
             }
             if (panel.sketch != .none) sketchPanelProperties(pi) else propText("Outline", "{s}", .{if (panel.edge) |e| e.prim.label() else "Rectangle"}, 8);
             if (state.model.spaces.items.len > 0) if (layerChoice(state.model.spaceOf(pi), panelLayer(pi), 10)) |l| try act(.setPanelLayer, .{pi, l});
@@ -17939,7 +17943,11 @@ fn properties() !void {
                 const rows = region.major() == .row;
                 const along = if (rows) region.w else region.h;
                 const across = if (rows) region.h else region.w;
-                if (numberProp(asElement("track.length"), along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
+                // Text is measured in mm (the owner, 2026-11-23: text
+                // first); tiles in their unit.
+                if (region.style != null) {
+                    if (numberProp(elementLabel("track.length", "Length, mm"), along * region.pitch, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v / region.pitch, across }) catch {};
+                } else if (numberProp(asElement("track.length"), along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
                 if (!is_track) if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
                 if (region.style != null) propText(asElement("track.size"), "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
@@ -17956,7 +17964,7 @@ fn properties() !void {
                     @memcpy(key_name_prefix[0..key_name_prefix_len], v[0..key_name_prefix_len]);
                 }
                 var lb: [64]u8 = undefined;
-                actionButton(@src(), "track.name-keys", std.fmt.bufPrint(&lb, "Name keys in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name keys in order", 0, .{ .expand = .horizontal, .id_extra = 25 });
+                actionButton(@src(), "track.name-tiles", std.fmt.bufPrint(&lb, "Name tiles in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name tiles in order", 0, .{ .expand = .horizontal, .id_extra = 25 });
             }
             if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText(asElement("track.outside-issue"), "{d:.2} mm past the panel", .{i.amount}, 7);
