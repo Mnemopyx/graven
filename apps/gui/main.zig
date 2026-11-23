@@ -28,6 +28,7 @@ const icons = @import("icons.zig");
 const iconfile = @import("iconfile.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
+const canvas_theme = @import("canvas_theme.zig");
 const spark = @import("cursor.zig");
 const layouts = @import("layouts.zig");
 const docviews = @import("views.zig");
@@ -920,6 +921,7 @@ fn strokeLoop(area: dvui.Rect.Physical, line: []const geom.Point, at: geom.Point
     const pts = lifo.alloc(dvui.Point.Physical, line.len) catch return;
     defer lifo.free(pts);
     for (line, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+    glowUnder(pts, true, width, color);
     dvui.Path.stroke(.{ .points = pts }, .{ .thickness = width, .color = .{ .color = color }, .closed = true });
 }
 
@@ -3585,6 +3587,7 @@ fn runAction(inv: keymap.Invocation) bool {
             } else runChecks(checkTarget());
             return true;
         },
+        kact("view.canvas-theme") => setCanvasTheme(if (inv.arg < 0 or inv.arg >= canvas_theme.all.len) canvas_theme.current.next() else @enumFromInt(inv.arg)),
         kact("view.snap-grid") => {
             snap_grid = !snap_grid;
             state.status = if (snap_grid) "Drags snap to the grid (Alt held lets go). " else "Drags no longer snap to the grid. ";
@@ -3706,6 +3709,7 @@ const Prefs = struct {
     grid: bg_grid.Mode,
     snap_grid: bool,
     boundary_mode: bool,
+    canvas_theme: canvas_theme.Theme,
     scroll: ScrollMode,
     ribbon: RibbonSize,
     display: display.Correction,
@@ -3729,7 +3733,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -3765,6 +3769,10 @@ fn loadPrefs() void {
     };
     if (ps.get("view.boundary_mode")) |v| if (v == .boolean) {
         boundary_mode = v.boolean;
+    };
+    if (ps.get("view.canvas_theme")) |v| if (v == .string) if (std.meta.stringToEnum(canvas_theme.Theme, v.string)) |t| {
+        canvas_theme.current = t;
+        setPalette();
     };
     // How scrolling acts: the machine's, as its pointing devices are.
     if (ps.get("view.scrolling")) |v| if (v == .string) if (std.meta.stringToEnum(ScrollMode, v.string)) |m| {
@@ -3899,6 +3907,7 @@ fn savePrefsIfChanged() void {
     ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
     ps.put("view.snap_grid", .{ .boolean = now.snap_grid }, .shared);
     ps.put("view.boundary_mode", .{ .boolean = now.boundary_mode }, .shared);
+    ps.put("view.canvas_theme", .{ .string = @tagName(now.canvas_theme) }, .shared);
     ps.put("view.scrolling", .{ .string = @tagName(now.scroll) }, .local);
     // The ribbon's key size: this machine's (its screen).
     ps.put("ribbon.size", .{ .string = @tagName(now.ribbon) }, .local);
@@ -5131,6 +5140,11 @@ fn menu() ?dvui.App.Result {
             }
         }
         if (menuAction(if (snap_grid) "•  Snap to grid" else "    Snap to grid", "view", kact("view.snap-grid"), 0, false, 9)) m.close();
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 94 });
+        inline for (canvas_theme.all, 0..) |t, ti| {
+            const text = if (canvas_theme.current == t) "•  " ++ comptime t.label() else "    " ++ comptime t.label();
+            if (menuAction(text, "view", kact("view.canvas-theme"), @intFromEnum(t), false, 40 + ti)) m.close();
+        }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 93 });
         if (menuAction(if (scroll_mode == .auto) "•  Scrolling: trackpad pans, wheel zooms" else "    Scrolling: trackpad pans, wheel zooms", "view", kact("view.scrolling"), 0, false, 30)) m.close();
         if (menuAction(if (scroll_mode == .zoom) "•  Scrolling zooms" else "    Scrolling zooms", "view", kact("view.scrolling"), 1, false, 31)) m.close();
@@ -6023,8 +6037,72 @@ fn applyDesktop(win: *dvui.Window, s: desktop.Settings) void {
     // Every colour through the display correction (display.zig).
     display.fixAll(dvui.Color, &theme);
     win.themeSet(theme);
-    colors = if (dark) dark_palette else light_palette;
+    setPalette();
+}
+
+/// Graven's palette for the desktop's scheme, its canvas colours as the
+/// canvas theme lights them (canvas_theme.zig), through the display
+/// correction.
+fn setPalette() void {
+    colors = if (desk.scheme == .dark) dark_palette else light_palette;
+    if (canvas_theme.current == .black_light_table) {
+        const ct = canvas_theme;
+        colors.desk = .{ .r = ct.uv_dark.r, .g = ct.uv_dark.g, .b = ct.uv_dark.b };
+        inline for (.{ "paper", "panel_edge", "margin", "body", "face", "ink", "grid" }) |f| @field(colors, f) = ct.uv(@field(colors, f));
+        colors.grid_major = 0.4;
+        colors.select = .{ .r = ct.fluor_select.r, .g = ct.fluor_select.g, .b = ct.fluor_select.b };
+        colors.guide = .{ .r = ct.fluor_guide.r, .g = ct.fluor_guide.g, .b = ct.fluor_guide.b };
+        colors.construction = .{ .r = ct.fluor_construction.r, .g = ct.fluor_construction.g, .b = ct.fluor_construction.b };
+        colors.overflow = .{ .r = ct.fluor_overflow.r, .g = ct.fluor_overflow.g, .b = ct.fluor_overflow.b };
+        colors.missing = .{ .r = ct.fluor_missing.r, .g = ct.fluor_missing.g, .b = ct.fluor_missing.b };
+    }
     display.fixAll(dvui.Color, &colors);
+}
+
+/// Whether `c` is one of the fluorescent pigments the canvas theme draws
+/// emphasis in (whatever its opacity), so it glows.
+fn fluorescent(c: dvui.Color) bool {
+    if (!canvas_theme.glows()) return false;
+    for ([_]dvui.Color{ colors.select, colors.guide, colors.construction, colors.overflow }) |f| {
+        if (c.r == f.r and c.g == f.g and c.b == f.b) return true;
+    }
+    return false;
+}
+
+/// The halo of a fluorescent stroke: wider, fainter strokes under it (the
+/// pigment's glow), on the Black Light Table only.
+fn glowUnder(pts: []const dvui.Point.Physical, closed: bool, width: f32, c: dvui.Color) void {
+    if (!fluorescent(c)) return;
+    const a: f32 = @as(f32, @floatFromInt(c.a)) / 255;
+    const ns = dvui.windowNaturalScale();
+    for ([_]f32{ 7, 4 }, [_]f32{ 0.10, 0.18 }) |grow, k| {
+        dvui.Path.stroke(.{ .points = pts }, .{ .thickness = width + grow * ns, .color = .{ .color = c.opacity(a * k) }, .closed = closed });
+    }
+}
+
+/// `glowUnder` for a rectangle's outline, its corners rounded by `radius`.
+fn glowRect(r: dvui.Rect.Physical, radius: f32, width: f32, c: dvui.Color) void {
+    if (!fluorescent(c)) return;
+    const a: f32 = @as(f32, @floatFromInt(c.a)) / 255;
+    const ns = dvui.windowNaturalScale();
+    for ([_]f32{ 7, 4 }, [_]f32{ 0.10, 0.18 }) |grow, k| {
+        r.stroke(.round(radius), .{ .thickness = width + grow * ns, .color = .{ .color = c.opacity(a * k) } });
+    }
+}
+
+/// A document's own colour on the canvas: lit by the canvas theme, then
+/// through the display correction.
+fn docColor(c: dvui.Color) dvui.Color {
+    return display.fix(canvas_theme.lit(c));
+}
+
+fn setCanvasTheme(t: canvas_theme.Theme) void {
+    canvas_theme.current = t;
+    setPalette();
+    state.status = switch (t) {
+        .light_table => "Canvas theme: Light Table (white light under the layers). ",
+        .black_light_table => "Canvas theme: Black Light Table (near-UV light; emphasis fluoresces). ",
+    };
 }
 
 var main_window: ?*dvui.Window = null;
@@ -7983,13 +8061,17 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
             const edge = piece.shape.paint.edge orelse continue;
             const width: f32 = @max(px, @as(f32, @floatCast(piece.shape.paint.edge_width * state.view.ppm)));
-            for (piece.lines) |line| strokeLoop(area, line, o, width, .{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a });
+            for (piece.lines) |line| strokeLoop(area, line, o, width, docColor(.{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a }));
         }
         if (flagged.missing) face.fill(.round(radius), .{ .color = .{ .color = colors.missing } });
         if (flagged.overflow) face.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
         // A size its prototype does not allow: the body outlined in warning.
         if (flagged.size and !in_context) body.stroke(.round(radius), .{ .thickness = 1.5 * px, .color = .{ .color = colors.overflow } });
-        if (in_context) body.stroke(.round(radius), .{ .thickness = (if (state.context == .tile) @as(f32, 3) else 2) * px, .color = .{ .color = colors.select } });
+        if (in_context) {
+            const w = (if (state.context == .tile) @as(f32, 3) else 2) * px;
+            glowRect(body, radius, w, colors.select);
+            body.stroke(.round(radius), .{ .thickness = w, .color = .{ .color = colors.select } });
+        }
         if (in_context and state.context == .tile) drawTileTracks(area, pi, t);
     }
     // Line art, over the tracks; the selected piece outlined.
@@ -8003,7 +8085,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
             const edge = piece.shape.paint.edge orelse continue;
             const width: f32 = @max(px, @as(f32, @floatCast(piece.shape.paint.edge_width * state.view.ppm)));
-            for (piece.lines) |line| strokeLoop(area, line, o, width, .{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a });
+            for (piece.lines) |line| strokeLoop(area, line, o, width, docColor(.{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a }));
         }
         const sel = switch (state.context) {
             .art => |l| l.panel == pi and l.index == pa.index,
@@ -8209,7 +8291,7 @@ const Paint = union(enum) {
     fn at(p: Paint, q: geom.Point) dvui.Color.PMA {
         const c: dvui.Color = switch (p) {
             .flat => |c| c,
-            .art => |f| if (f.at(q)) |ac| display.fix(dvui.Color{ .r = ac.r, .g = ac.g, .b = ac.b, .a = ac.a }) else .transparent,
+            .art => |f| if (f.at(q)) |ac| docColor(.{ .r = ac.r, .g = ac.g, .b = ac.b, .a = ac.a }) else .transparent,
         };
         return .fromColor(c.opacity(dvui.currentWindow().alpha));
     }
@@ -9329,7 +9411,7 @@ fn drawFigureInk(area: dvui.Rect.Physical, fi: usize, ink: geom.Box, alpha: f32)
     const lifo = dvui.currentWindow().lifo();
     const Index = dvui.Vertex.Index;
     for (ft.tris, ft.colors) |tris, col| {
-        const pma: dvui.Color.PMA = .fromColor(display.fix(dvui.Color{ .r = col.r, .g = col.g, .b = col.b, .a = col.a }).opacity(alpha * dvui.currentWindow().alpha));
+        const pma: dvui.Color.PMA = .fromColor(docColor(.{ .r = col.r, .g = col.g, .b = col.b, .a = col.a }).opacity(alpha * dvui.currentWindow().alpha));
         const batch = 20000;
         var from: usize = 0;
         while (from < tris.len) : (from += batch) {
@@ -9776,7 +9858,7 @@ fn drawImages(area: dvui.Rect.Physical, space: usize, layer: layout.model.Object
         const a = dvui.currentWindow().alpha;
         dvui.alphaSet(1);
         // The display's white level dims it; its gamma cannot reach pixels.
-        dvui.renderTexture(tex, .{ .r = r, .s = px }, .{ .colormod = display.fix(dvui.Color{ .r = 255, .g = 255, .b = 255 }).opacity(a) }) catch {};
+        dvui.renderTexture(tex, .{ .r = r, .s = px }, .{ .colormod = docColor(.{ .r = 255, .g = 255, .b = 255 }).opacity(a) }) catch {};
         dvui.alphaSet(a);
         const sel = switch (state.context) {
             .image => |c| c.space == space and c.index == ii,
@@ -21754,6 +21836,7 @@ fn marchingBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, width:
     const pts = [_]dvui.Point.Physical{ .{ .x = r.x, .y = r.y }, .{ .x = r.x + r.w, .y = r.y }, .{ .x = r.x + r.w, .y = r.y + r.h }, .{ .x = r.x, .y = r.y + r.h } };
     const dash: f32 = 6 * ns;
     const phase: f32 = @floatCast(@mod(@as(f64, @floatFromInt(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms))) * 0.03 * ns, 2 * dash));
+    glowUnder(&pts, true, width, colour);
     // Under the dashes, a faint solid line, so the box reads between them.
     r.stroke(.square, .{ .thickness = width, .color = .{ .color = colour.opacity(0.25) } });
     var walked: f32 = -phase;
@@ -21898,6 +21981,7 @@ fn guideOutline(area: dvui.Rect.Physical, pts: []const geom.Point, colour: dvui.
     const q = lifo.alloc(dvui.Point.Physical, pts.len) catch return;
     defer lifo.free(q);
     for (pts, q) |p, *o| o.* = state.view.toPx(area, p);
+    glowUnder(q, true, px, colour);
     dvui.Path.stroke(.{ .points = q }, .{ .thickness = px, .color = .{ .color = colour }, .closed = true });
 }
 

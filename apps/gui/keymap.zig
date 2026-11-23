@@ -130,6 +130,8 @@ pub const action_defs = [_]A{
     .{ .name = "view.zoom-out", .repeat = true },
     // Drags snap to the grid, or not.
     .{ .name = "view.snap-grid" },
+    // The canvas theme (canvas_theme.zig): arg its index, -1 the next one.
+    .{ .name = "view.canvas-theme", .param = .int },
     // The fabrication checks (DRC) and the process's simulation, run on
     // the context's panel, else every panel with a process profile; shown
     // as result layers. Only ever run when asked.
@@ -352,6 +354,8 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "kp_subtract", .action = "view.zoom-out" },
     // Inkscape's key for snapping.
     .{ .mode = "view", .chord = "char:%", .action = "view.snap-grid" },
+    // U for ultraviolet: the next canvas theme (Light Table, Black Light Table).
+    .{ .mode = "view", .chord = "u", .action = "view.canvas-theme", .arg = -1 },
     .{ .mode = "view", .chord = "c", .action = "fab.check" },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
