@@ -426,6 +426,7 @@ pub const binds = [_]B{
     .{ .mode = "canvas.constrain-objects", .chord = "b", .action = "constrain-objects.bottom" },
     .{ .mode = "canvas.constrain-objects", .chord = "l", .action = "constrain-objects.left" },
     .{ .mode = "canvas.constrain-objects", .chord = "r", .action = "constrain-objects.right" },
+    .{ .mode = "canvas.constrain-objects", .chord = "m", .action = "constrain-objects.measure" },
     .{ .mode = "canvas.constrain-objects", .chord = "escape", .action = "constrain-objects.close" },
     .{ .mode = "canvas.selection", .chord = "shift+tab", .action = "canvas.selection.hunt", .arg = 1 },
     .{ .mode = "canvas.selection", .chord = "escape", .action = "canvas.selection.clear" },

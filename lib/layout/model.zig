@@ -127,6 +127,10 @@ pub const Constraint = struct {
     /// 1: `a`'s feature right of (or above) `b`'s, or `a` the larger; -1:
     /// the other way. Kept as it was made, whatever the value.
     side: f64 = 1,
+    /// Driving: it sets where things are. Reference (false): a dimension
+    /// that reports what the geometry measures, follows it, and takes no
+    /// part in solving (drawn with its value in parentheses).
+    driving: bool = true,
     /// Where its dimension is drawn, relative to the constrained object
     /// (end `a`), so it moves with it.
     place: ConstraintPlace = .{},
@@ -5820,6 +5824,20 @@ pub const Model = struct {
         if (!std.math.isFinite(value) or value < 0) return error.BadConstraint;
         const i = m.constraintIndex(id) orelse return error.NoSuchObject;
         m.constraints.items[i].value = value;
+        m.revision += 1;
+    }
+
+    /// Makes constraint `id` driving or a reference. Made driving, it holds
+    /// `value` on `side` (what it measures now, so nothing moves).
+    pub fn setConstraintDriving(m: *Model, id: ObjectId, driving: bool, value: f64, side: f64) Error!void {
+        if (!std.math.isFinite(value) or value < 0) return error.BadConstraint;
+        const i = m.constraintIndex(id) orelse return error.NoSuchObject;
+        const c = &m.constraints.items[i];
+        c.driving = driving;
+        if (driving) {
+            c.value = value;
+            c.side = if (side < 0) -1 else 1;
+        }
         m.revision += 1;
     }
 

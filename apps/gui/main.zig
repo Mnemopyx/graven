@@ -392,6 +392,9 @@ pub const testing_api = struct {
     pub fn constraintPromptOpen() bool {
         return constrain_prompt != null;
     }
+    pub fn constraintAt(i: usize) layout.model.Constraint {
+        return state.model.constraints.items[i];
+    }
     pub fn constraintCount() usize {
         return state.model.constraints.items.len;
     }
@@ -16154,6 +16157,7 @@ const button_handlers = [_]ButtonHandler{
             // Objects chosen: their constraints offered (W, H, G, T, B, L, R).
             if (state.tool != .constrain) if (openObjectsMenu()) return;
             constrain_batch = null;
+            constrain_measure = false;
             state.tool = if (state.tool == .constrain) .select else .constrain;
         }
     }.f),
@@ -16218,6 +16222,22 @@ const button_handlers = [_]ButtonHandler{
     handler("constrain-objects.right", struct {
         fn f(_: i32) void {
             edgesPick(.right);
+        }
+    }.f),
+    handler("constrain-objects.measure", struct {
+        fn f(_: i32) void {
+            closeObjectsMenu();
+            constrain_batch = null;
+            state.tool = .constrain;
+            constrain_first = null;
+            constrain_measure = true;
+            state.status = "Measure: pick a feature, then another. The dimension follows them and moves nothing. ";
+        }
+    }.f),
+    handler("constraint.driving-or-reference", struct {
+        fn f(_: i32) void {
+            const id = picked_constraint orelse return;
+            toggleDriving(id);
         }
     }.f),
     handler("constrain-objects.close", struct {
@@ -24845,6 +24865,14 @@ fn constrainClick() void {
             state.status = if (first.end.feature.vertical()) "Pick a horizontal feature: a line, an edge, a top or bottom. " else "Pick a vertical feature: a line, an edge, a left or right. ";
             return;
         }
+        if (constrain_measure) {
+            constrain_measure = false;
+            constrain_first = null;
+            constrain_hover = null;
+            state.tool = .select;
+            addMeasure(first.end, hit.end);
+            return;
+        }
         const value = constrain.measure(&state.model, .{ .a = first.end, .b = hit.end }) orelse 0;
         const k = docUnits().perMm();
         constrain_prompt = .{ .a = first.end, .b = hit.end, .value = @round(@abs(value) * k * 10) / 10, .side = if (value < 0) -1 else 1, .batch = constrain_batch != null };
@@ -24937,7 +24965,7 @@ fn objectsMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
     closeObjectsMenu();
 }
 
-const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right" };
+const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right", "constrain-objects.measure" };
 
 /// The objects' pop-up: each choice with its key; those needing two or
 /// more objects dimmed with one.
@@ -25048,6 +25076,36 @@ fn edgesPick(f: Feature) void {
     constrain_first = .{ .end = .{ .object = id, .feature = f }, .parent = parent, .p0 = p0, .p1 = p1 };
     state.status = if (f.vertical()) "Click what their edges keep to: a horizontal line, an edge, a top or bottom. " else "Click what their edges keep to: a vertical line, an edge, a left or right. ";
 }
+
+/// A constraint just added that contradicts what holds is kept as a
+/// reference dimension instead (in the same undo step): it shows what is
+/// there, and moves nothing.
+fn keepOrMeasure(key: u64, id: layout.model.ObjectId) void {
+    const issues = constrain.check(&state.model, state.gpa) catch return;
+    defer state.gpa.free(issues);
+    for (issues) |i| if (i.constraint == id and (i.kind == .conflict or i.kind == .inverted)) {
+        _ = actM(key, .setConstraintDriving, .{ id, false, 0.0, 1.0 }) catch return;
+        state.status = "That contradicts the constraints already there: kept as a reference dimension (in parentheses). ";
+        return;
+    };
+}
+
+/// A reference dimension made between two picks (M): what they measure,
+/// shown, never driving.
+fn addMeasure(a: ConstraintEnd, b: ConstraintEnd) void {
+    const measured = constrain.measure(&state.model, .{ .a = a, .b = b }) orelse {
+        state.status = "Those two cannot be measured. ";
+        return;
+    };
+    _ = act(.addConstraint, .{.{ .a = a, .b = b, .value = @abs(measured), .side = if (measured < 0) -1 else 1, .driving = false }}) catch {
+        state.status = "That dimension could not be added. ";
+        return;
+    };
+    state.status = "Reference dimension: it follows what it measures. ";
+}
+
+/// The Constrain tool's next two picks make a reference dimension.
+var constrain_measure = false;
 
 fn featureName(f: Feature) []const u8 {
     return switch (f) {
@@ -25192,9 +25250,13 @@ fn constrainPromptWindow() void {
         dvui.refresh(null, @src(), null);
         return;
     }
-    _ = act(.addConstraint, .{.{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b, .value = @abs(value_mm), .side = pr.side }}) catch {
+    drag_count += 1;
+    const add_key = mergeKey(.{ "constrain-add", drag_count });
+    if (actM(add_key, .addConstraint, .{.{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b, .value = @abs(value_mm), .side = pr.side }})) |new_id| {
+        keepOrMeasure(add_key, new_id);
+    } else |_| {
         state.status = "That constraint could not be added. ";
-    };
+    }
     constrain_prompt = null;
     if (canvas_id) |id| dvui.focusWidget(id, null, null);
     dvui.refresh(null, @src(), null);
@@ -25291,8 +25353,10 @@ var dim_drag: ?struct {
 } = null;
 
 /// A dimension's value as drawn, in the document's units.
+/// A reference dimension's in parentheses: what the geometry measures.
 fn dimText(buf: []u8, c: layout.model.Constraint) []const u8 {
-    return std.fmt.bufPrint(buf, "{d}", .{@round(@abs(c.value) * docUnits().perMm() * 100) / 100}) catch "";
+    const v = @round(constrain.shownValue(&state.model, c) * docUnits().perMm() * 100) / 100;
+    return (if (c.driving) std.fmt.bufPrint(buf, "{d}", .{v}) else std.fmt.bufPrint(buf, "({d})", .{v})) catch "";
 }
 
 /// Where a dimension's value is drawn: on its line, upright (device
@@ -25381,17 +25445,38 @@ fn pickedConstraintProperties() bool {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         propName("Value");
-        const v0 = @round(c.value * k * 1000) / 1000;
-        accepted.label_unit = if (k == 1) .mm else .in;
-        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| setConstraintValue(c.id, v / k);
+        if (c.driving) {
+            const v0 = @round(c.value * k * 1000) / 1000;
+            accepted.label_unit = if (k == 1) .mm else .in;
+            if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| setConstraintValue(c.id, v / k);
+        } else {
+            var vb: [32]u8 = undefined;
+            dvui.labelNoFmt(@src(), dimText(&vb, c), .{}, .{ .gravity_y = 0.5, .id_extra = 9583 });
+        }
     }
+    propText("Kind", "{s}", .{if (c.driving) "Driving: it sets where things are" else "Reference: it reports, and moves nothing"}, 9584);
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
+        keyButton(@src(), "Driving or reference", 0, .{});
         keyButton(@src(), "Place it as at first", 0, .{});
         keyButton(@src(), "Remove", 0, .{});
     }
     return true;
+}
+
+/// Constraint `id` made a reference, or driving at what it measures now
+/// (so nothing moves).
+fn toggleDriving(id: layout.model.ObjectId) void {
+    const c = constraintById(id) orelse return;
+    if (c.driving) {
+        _ = act(.setConstraintDriving, .{ id, false, 0.0, 1.0 }) catch {};
+        state.status = "A reference dimension now: it follows what it measures. ";
+        return;
+    }
+    const measured = constrain.measure(&state.model, c) orelse return;
+    _ = act(.setConstraintDriving, .{ id, true, @abs(measured), @as(f64, if (measured < 0) -1 else 1) }) catch {};
+    state.status = "Driving now: it holds what it measured. ";
 }
 
 /// A constraint's value as typed: never negative (its side stays as it
@@ -25412,7 +25497,9 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
         if (constrain.spaceOf(m, parent) != shown_space) continue;
         const off = constrain.frameOffset(m, parent);
         const hot = (picked_constraint != null and picked_constraint.? == c.id) or (if (engageTarget()) |h| isDimKind(h.kind) and h.id == c.id else false) or (dim_drag != null and dim_drag.?.id == c.id);
-        const colour = if (constraintIssue(c.id) != null) colors.overflow else if (hot) colors.select else colors.guide;
+        const lit = if (constraintIssue(c.id) != null) colors.overflow else if (hot) colors.select else colors.guide;
+        // A reference dimension: quieter, it only reports.
+        const colour = if (c.driving or hot) lit else lit.opacity(0.6);
         const ink: dvui.ColorOrGradient = .{ .color = colour };
         const v = c.a.feature.vertical();
         _ = off;
@@ -25501,6 +25588,11 @@ fn constraintProperties() void {
             std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
         const flagged = constraintIssue(c.id);
         dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged != null) .{ .color = colors.overflow } else null, .id_extra = ci });
+        if (!c.driving) {
+            var vb: [32]u8 = undefined;
+            dvui.labelNoFmt(@src(), dimText(&vb, c), .{}, .{ .gravity_y = 0.5, .id_extra = ci });
+            continue;
+        }
         const v0 = @round(c.value * k * 1000) / 1000;
         accepted.label_unit = if (k == 1) .mm else .in;
         if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| setConstraintValue(c.id, v / k);

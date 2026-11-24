@@ -2350,3 +2350,27 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     try std.testing.expectEqual(7, api.constraintCount());
     for (cols) |c| try std.testing.expectApproxEqAbs(175 - 20 - 12, api.boxAt(c).?.y1, 1e-6);
 }
+
+test "K, M on a column: a reference dimension that follows and moves nothing" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try api.loadColumns(false);
+    try r.frames(3);
+    const cols = [_][]const u8{ "Panel.Column1", "Panel.Column2" };
+    const before = api.boxAt(cols[1]).?;
+    // M, then Column1's right edge and Column2's left: measured, not held.
+    try std.testing.expect(api.chooseAll(cols[0..1]));
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.m, .none);
+    try r.frames(2);
+    const b1 = api.boxAt(cols[0]).?;
+    try r.clickAt(api.screenOf(30 + b1.x1, 20 + (b1.y0 + b1.y1) / 2).?);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(30 + before.x0, 20 + (before.y0 + before.y1) / 2).?);
+    try r.frames(3);
+    try std.testing.expectEqual(1, api.constraintCount());
+    try std.testing.expect(!api.constraintAt(0).driving);
+    try std.testing.expectApproxEqAbs(before.x0, api.boxAt(cols[1]).?.x0, 1e-9);
+}

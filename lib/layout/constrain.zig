@@ -352,6 +352,13 @@ pub fn featureAt(m: *const Model, parent: Parent, end: model.ConstraintEnd) ?f64
     return sh.lo + sh.f * size + t.g * size + t.c;
 }
 
+/// Constraint `c`'s value as drawn: its own when driving, what the
+/// geometry measures when a reference (never negative).
+pub fn shownValue(m: *const Model, c: model.Constraint) f64 {
+    if (c.driving) return c.value;
+    return @abs(measure(m, c) orelse return c.value);
+}
+
 /// What constraint `c` measures as things are now, signed (its magnitude
 /// the value it would keep, its sign the side): an offset between its
 /// features, or a difference of sizes.
@@ -510,6 +517,8 @@ fn note(gpa: Allocator, issues: ?*std.ArrayList(Issue), id: ObjectId, kind: @Fie
 
 /// Whether constraint `c` can be solved for at all; why not, noted.
 fn usable(m: *const Model, gpa: Allocator, issues: ?*std.ArrayList(Issue), c: model.Constraint) Allocator.Error!bool {
+    // A reference dimension only reports what is there.
+    if (!c.driving) return false;
     const la = locate(m, c.a.object) orelse {
         try note(gpa, issues, c.id, .missing_object);
         return false;
@@ -1146,4 +1155,33 @@ test "a column in a panel keeps to construction lines on the canvas; values are 
     defer back.deinit();
     try testing.expectEqual(7, back.constraints.items[1].value);
     try testing.expectEqual(-1, back.constraints.items[1].side);
+}
+
+test "a reference dimension follows what it measures and moves nothing; made driving it holds" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const p = try m.placePanel(.{ .name = "A", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 });
+    const q = try m.placePanel(.{ .name = "B", .space = m.spaces.items[0].id, .origin = .{ .x = 70, .y = 0 }, .w = 40, .h = 30 });
+    try h.reset(&m);
+    const a = m.panels.items[p].id;
+    const b = m.panels.items[q].id;
+    // A reference: B's left from A's right, 20 now; any value given is
+    // not held.
+    const k = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b, .feature = .left }, .b = .{ .object = a, .feature = .right }, .value = 5, .driving = false }});
+    try testing.expectApproxEqAbs(@as(f64, 70), m.panels.items[q].origin.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20), shownValue(&m, m.constraints.items[0]), 1e-9);
+    try h.do(&m, .placeObjects, .{ &[_]ObjectId{b}, &[_]geom.Box{.{ .x0 = 80, .x1 = 120, .y0 = 0, .y1 = 30 }} });
+    try testing.expectApproxEqAbs(@as(f64, 30), shownValue(&m, m.constraints.items[0]), 1e-9);
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(0, issues.len);
+    // Made driving at what it measures: nothing moves, then it holds.
+    try h.do(&m, .setConstraintDriving, .{ k, true, 30.0, 1.0 });
+    try testing.expectApproxEqAbs(@as(f64, 80), m.panels.items[q].origin.x, 1e-9);
+    try h.do(&m, .placeObjects, .{ &[_]ObjectId{a}, &[_]geom.Box{.{ .x0 = 10, .x1 = 60, .y0 = 0, .y1 = 30 }} });
+    try testing.expectApproxEqAbs(@as(f64, 90), m.panels.items[q].origin.x, 1e-9);
 }
