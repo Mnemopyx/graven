@@ -4,8 +4,8 @@
 //!
 //! Tags (main.zig, "Tags"): a property row "<section heading>/<field>", a
 //! button "<section heading>/<label>", a menu item "menu/<label>", a
-//! Browser node "tree/<path>", a content palette button "palette.<kind>"
-//! (`palette.key.1-25u`).
+//! Browser node "tree/<path>". Tiles and blanks are typed through the
+//! Tiles case (`chooseCase`, `typeTile`).
 //! A dropdown is chosen through `testing_api.choose` (its entries carry no
 //! tags); everything else is clicked and typed.
 //!
@@ -436,15 +436,25 @@ fn legendsCsv(a: std.mem.Allocator) ![]u8 {
     return out.toOwnedSlice();
 }
 
-/// The content palette's key of size `w` u: palette.key.1-25u.
-fn paletteKey(buf: []u8, w: f64) ![]const u8 {
-    const t = try std.fmt.bufPrint(buf, "palette.key.{d}u", .{w});
-    for (t) |*c| if (c.* == '.') {
-        c.* = '-';
-    };
-    // The dots between the parts again.
-    @memcpy(t[0.."palette.key.".len], "palette.key.");
-    return t;
+/// The key prototype's tile lengths, in the order the Tiles case puts them
+/// on the digit keys (1 the first).
+const key_widths = [_]f64{ 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 6.25 };
+
+/// Chooses case `name` at the flow cursor as a person does: Ctrl+Space,
+/// its name typed, Enter.
+fn chooseCase(r: *Run, name: []const u8) !void {
+    try r.key(.space, .lcontrol);
+    try dvui.testing.writeText(name);
+    try r.frames(1);
+    try r.key(.enter, .none);
+}
+
+/// A tile `w` u long typed at the cursor through the Tiles case: its digit.
+fn typeTile(r: *Run, w: f64) !void {
+    const i = std.mem.indexOfScalar(f64, &key_widths, w) orelse return error.NoSuchWidth;
+    const digit = [1]u8{"1234567890"[i]};
+    try dvui.testing.writeText(&digit);
+    try r.frames(1);
 }
 
 fn screen(p: struct { f64, f64 }) !dvui.Point.Physical {
@@ -499,17 +509,16 @@ fn makeKeyboard(r: *Run) !void {
     }
     try checkSaveable("the tracks");
 
-    // The keys, from the content palette at the cursor: each row's at the
-    // start of its own track.
+    // The keys, typed through the Tiles case (a digit a tile length): each
+    // row's at the start of its own track.
     const panel_path = "\"PC keyboard (ANSI 104)\"";
     for (rows, 1..) |row, ri| {
         var pb: [64]u8 = undefined;
         try r.cursor(try std.fmt.bufPrint(&pb, panel_path ++ ".Row{d}", .{ri}), 0);
-        for (row) |k| {
-            var tb: [32]u8 = undefined;
-            try r.press(try paletteKey(&tb, k.w));
-        }
+        if (ri == 1) try chooseCase(r, "Tiles");
+        for (row) |k| try typeTile(r, k.w);
     }
+    try chooseCase(r, "Text");
 
     try checkSaveable("the keys");
     // Named in order, K1 to K104, from the panel's properties (its tracks
@@ -1166,10 +1175,12 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     try r.drag(try screen(.{ 15, 85 }), try screen(.{ 120, 45 }));
     try r.field("track.length", "5");
     try r.field("track.depth", "2");
+    try chooseCase(&r, "Tiles");
     for (0..5) |k| {
-        if (k == 3) try r.press("palette.hard-break");
-        try r.press("palette.key.1u");
+        if (k == 3) try r.key(.enter, .lshift);
+        try typeTile(&r, 1);
     }
+    try chooseCase(&r, "Text");
     try r.frames(3);
     const a = std.heap.c_allocator;
     const font = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "examples/fonts/Inter-Medium.otf", a, .limited(64 << 20));
@@ -1194,7 +1205,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     defer a.free(after);
     try std.testing.expectEqualStrings(before, after);
     // The second track removed (its keys with it), and put back by undo.
-    try r.select("Panel1.Rows2");
+    try r.select("Panel1.Column2");
     _ = try r.rectOf("track.direction");
     try r.press("track.remove");
     try r.frames(3);
