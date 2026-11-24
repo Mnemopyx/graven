@@ -545,7 +545,7 @@ pub const Labels = struct {
         h.update(std.mem.asBytes(&(st.em_size orelse @as(f64, -1))));
         h.update(std.mem.asBytes(&(st.line_pitch orelse @as(f64, -1))));
         for (st.rules.items) |r| {
-            h.update(&.{if (r.kind) |k| @as(u8, @intFromEnum(k)) else 255});
+            h.update(&.{if (r.kind) |k| @as(u8, @backingInt(k)) else 255});
             h.update(std.mem.asBytes(&r.param));
             switch (r.value) {
                 .number => |x| h.update(std.mem.asBytes(&x)),
@@ -745,7 +745,7 @@ const Flow = struct {
 
     /// Starts segment `seg`: makes it, and works out the stretches of it
     /// that tiles from earlier segments close.
-    fn enter(f: Flow, a: Allocator, path: *Path, seg: usize, tall: []const Tall, closed: *std.ArrayList([2]f64)) Allocator.Error!void {
+    fn enter(f: Flow, a: Allocator, path: *Path, seg: usize, tall: []const Tall, up: []const UpKeep, closed: *std.ArrayList([2]f64)) Allocator.Error!void {
         try path.ensure(a, seg);
         const band = path.boxes.items[seg];
         closed.clearRetainingCapacity();
@@ -757,6 +757,7 @@ const Flow = struct {
                 .{ band.y1 - @min(t.box.y1, band.y1), band.y1 - @max(t.box.y0, band.y0) };
             try closed.append(a, c);
         }
+        for (up) |u| if (u.seg == seg) try closed.append(a, u.stretch);
         for (f.keepouts) |k| try k.closes(a, f.rows, band, closed);
     }
 };
@@ -955,6 +956,149 @@ const Cut = struct {
     }
 };
 
+/// How far a line's text reaches above and below its baseline, mm: its
+/// ink (`asc`, `desc`, never less than its fonts' own) and its fonts' own
+/// ascender and descender (`fasc`, `fdesc`).
+const LineInk = struct { asc: f64 = 0, desc: f64 = 0, fasc: f64 = 0, fdesc: f64 = 0 };
+
+/// The ink of segment `seg`'s runs, pieces `first` to `stop`. A piece is
+/// measured on its own only when the whole run it was cut from reaches
+/// past its font's extent.
+fn lineInk(a: Allocator, labels: *Labels, items: []const model.Item, cuts: []const ?Cut, renders: []const ?*const rendering.Render, f: Flow, seg: usize, first: usize, stop: usize) Allocator.Error!LineInk {
+    var ink: LineInk = .{};
+    for (first..stop) |k| {
+        if (f.dropped[k] or f.dup[k] or f.segs_of[k] != seg) continue;
+        const run = switch (items[k].what) {
+            .run => |r| r,
+            else => continue,
+        };
+        const ctx = labels.context(run.style) orelse continue;
+        const ext = ctx.text.extents();
+        const ku = ctx.cap_height / legend.capUnits(ctx.text);
+        const fa = ext.ascender * ku;
+        const fd = -ext.descender * ku;
+        ink.fasc = @max(ink.fasc, fa);
+        ink.fdesc = @max(ink.fdesc, fd);
+        ink.asc = @max(ink.asc, fa);
+        ink.desc = @max(ink.desc, fd);
+        const d = if (cuts[k]) |c| blk: {
+            if (c.space != null) continue;
+            const whole = c.render.ink;
+            if (whole.y1 <= fa and -whole.y0 <= fd) continue;
+            const piece = try c.render.between(a, c.from, c.to);
+            break :blk piece.ink;
+        } else if (renders[k]) |r| r.ink else continue;
+        if (d.isEmpty()) continue;
+        ink.asc = @max(ink.asc, d.y1);
+        ink.desc = @max(ink.desc, -d.y0);
+    }
+    return ink;
+}
+
+/// A row's lines growing to fit what they hold (`ParagraphStyle.tall`
+/// `.move`):
+/// the ink of the line before.
+const Grow = struct {
+    prev: ?LineInk = null,
+
+    /// Before the flow leaves segment `seg`: moves it on across by however
+    /// far its ink and the line before's would overlap past their fonts'
+    /// own extents (or past the leading, where that is wider).
+    fn line(g: *Grow, a: Allocator, labels: *Labels, items: []const model.Item, cuts: []const ?Cut, renders: []const ?*const rendering.Render, f: Flow, path: *Path, style: ?model.ParagraphStyle, seg: usize, first: usize, stop: usize) Allocator.Error!void {
+        const ink = try lineInk(a, labels, items, cuts, renders, f, seg, first, stop);
+        defer g.prev = ink;
+        const mode: model.TallContent = if (style) |st| st.tall else .around;
+        if (mode != .move or seg == 0 or path.member.items[seg] != path.member.items[seg - 1]) return;
+        const pv = g.prev orelse return;
+        if (ink.asc == 0 or pv.desc == 0) return;
+        const r = path.regionOf(seg);
+        const dist = (path.origins.items[seg].across - path.origins.items[seg - 1].across) * r.pitch;
+        const allowed = @max(dist, ink.fasc + pv.fdesc);
+        const deficit = ink.asc + pv.desc - allowed;
+        if (deficit > 1e-6) path.shift(seg, deficit / r.pitch);
+    }
+};
+
+/// A stretch of segment `seg` closed (from `stretch[0]` to `stretch[1]`
+/// along it) by something reaching up into it from a later line.
+const UpKeep = struct { seg: usize, stretch: [2]f64 };
+
+/// Lines breaking around what reaches past a line's font extents
+/// (`ParagraphStyle.tall` `.around`): reaching down, it closes its stretch
+/// of the lines after (as a tile thicker than its row does); reaching up,
+/// of the lines before, found as the flow is set and set again with them.
+const Around = struct {
+    found: std.ArrayList(UpKeep) = .empty,
+
+    /// After the flow leaves segment `seg` (its alignment shift known).
+    fn line(g: *Around, a: Allocator, labels: *Labels, items: []const model.Item, cuts: []const ?Cut, renders: []const ?*const rendering.Render, f: Flow, path: *Path, style: ?model.ParagraphStyle, seg: usize, first: usize, stop: usize, sh: f64, tall: *std.ArrayList(Tall)) Allocator.Error!void {
+        const mode: model.TallContent = if (style) |st| st.tall else .around;
+        if (mode != .around) return;
+        const band = path.boxes.items[seg];
+        const r = path.regionOf(seg);
+        // Its baseline, and where a line's text reaches from one: the
+        // band's half less half a cap above and below it.
+        const half = (r.pitch + f.cap) / 2;
+        const base = band.y1 - half;
+        for (first..stop) |k| {
+            if (f.dropped[k] or f.dup[k] or f.segs_of[k] != seg) continue;
+            const run = switch (items[k].what) {
+                .run => |rn| rn,
+                else => continue,
+            };
+            const ctx = labels.context(run.style) orelse continue;
+            const ext = ctx.text.extents();
+            const ku = ctx.cap_height / legend.capUnits(ctx.text);
+            const fa = ext.ascender * ku;
+            const fd = -ext.descender * ku;
+            var design: Box = undefined;
+            var ink: Box = undefined;
+            if (cuts[k]) |c| {
+                if (c.space != null) continue;
+                if (c.render.ink.y1 <= fa and -c.render.ink.y0 <= fd) continue;
+                const piece = try c.render.between(a, c.from, c.to);
+                design = piece.design;
+                ink = piece.ink;
+            } else if (renders[k]) |rr| {
+                design = rr.design;
+                ink = rr.ink;
+            } else continue;
+            if (ink.isEmpty() or (ink.y1 <= fa and -ink.y0 <= fd)) continue;
+            // Along the line, with a little room either side.
+            const start = f.spans[k][0] + sh + (if (k < f.extra.len) f.extra[k] else 0);
+            const room = 0.15 * f.cap;
+            const x0 = band.x0 + start - design.x0 + ink.x0 - room;
+            const x1 = band.x0 + start - design.x0 + ink.x1 + room;
+            // Down: into the lines after, where it reaches their text.
+            if (-ink.y0 > fd) {
+                const bottom = base + ink.y0;
+                try tall.append(a, .{ .box = .{ .x0 = x0, .x1 = x1, .y0 = bottom + half - fa, .y1 = band.y1 }, .seg = seg });
+            }
+            // Up: into the lines before, where it reaches their text.
+            if (ink.y1 > fa) {
+                const top = base + ink.y1;
+                var j = seg;
+                while (j > 0) {
+                    j -= 1;
+                    const bj = path.boxes.items[j];
+                    if (top <= bj.y1 - half - fd) break;
+                    if (x1 <= bj.x0 or x0 >= bj.x1) continue;
+                    try g.found.append(a, .{ .seg = j, .stretch = .{ @max(x0, bj.x0) - bj.x0, @min(x1, bj.x1) - bj.x0 } });
+                }
+            }
+        }
+    }
+
+    /// Whether `found` holds a stretch `known` lacks.
+    fn anyNew(found: []const UpKeep, known: []const UpKeep) bool {
+        outer: for (found) |u| {
+            for (known) |k| if (k.seg == u.seg and u.stretch[0] >= k.stretch[0] - 1e-6 and u.stretch[1] <= k.stretch[1] + 1e-6) continue :outer;
+            return true;
+        }
+        return false;
+    }
+};
+
 /// Whether flow piece `index` is the space between two words of a run.
 fn isSpace(cuts: []const ?Cut, index: usize) bool {
     return if (cuts[index]) |c| c.space != null else false;
@@ -1081,6 +1225,16 @@ pub const Path = struct {
             try p.member.append(a, at);
         }
         p.lead = 0;
+    }
+
+    /// Moves segment `k` on across by `by`, u (a line grown to clear the
+    /// one before); the segments after it are made from it.
+    pub fn shift(p: *Path, k: usize, by: f64) void {
+        const r = p.regionOf(k);
+        const across = p.origins.items[k].across + by;
+        const o: model.Segment = .{ .along = r.pathAt(across), .across = across };
+        p.origins.items[k] = o;
+        p.boxes.items[k] = r.boxAt(o);
     }
 
     /// Whether segment `n` (the next) would take the flow past the last of
@@ -1235,492 +1389,529 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     var junk_wraps: std.ArrayList(PlacedWrap) = .empty;
     var junk_issues: std.ArrayList(Issue) = .empty;
     for (0..2) |pass| {
-    const own = pass == 0;
-    if (!own) try tileRegions(a, m, labels, tiles.items, &synth, &synth_items, &synth_owner, &synth_which);
-    const regs: []const model.TileRegion = if (own) m.panels.items[panel].regions.items else synth.items;
-    for (regs, 0..) |region, ri| {
-        const out_tracks = if (own) &tracks else &junk_tracks;
-        const out_placed_items = if (own) &placed_items else &junk_items;
-        const out_flows = if (own) &flows else &junk_flows;
-        const out_exits = if (own) &exits else &junk_exits;
-        const out_wraps = if (own) &wraps else &junk_wraps;
-        const out_issues = if (own) &issues else &junk_issues;
-        // A thread is laid out a leg at a time: the run of its tracks on
-        // one panel. A track threaded after another here is in its leg.
-        const before = if (own) m.threadBefore(panel, ri) else null;
-        if (before) |b| if (b.panel == panel) continue;
-        const head: model.TrackRef = if (own) m.threadHead(panel, ri) else .{ .panel = panel, .region = ri };
-        var all_buf: [256]model.TrackRef = undefined;
-        const thread_all = if (own) m.thread(head, &all_buf) else all_buf[0..0];
-        var thread_buf: [256]usize = undefined;
-        var leg_n: usize = 0;
-        var at_k: usize = 0;
-        while (at_k < thread_all.len and !(thread_all[at_k].panel == panel and thread_all[at_k].region == ri)) at_k += 1;
-        while (at_k < thread_all.len and thread_all[at_k].panel == panel and leg_n < thread_buf.len) : (at_k += 1) {
-            thread_buf[leg_n] = thread_all[at_k].region;
-            leg_n += 1;
-        }
-        if (leg_n == 0) {
-            thread_buf[0] = ri;
-            leg_n = 1;
-        }
-        const thread = thread_buf[0..leg_n];
-        // The thread's next track, on another panel, if it goes on.
-        const more: ?model.TrackRef = if (at_k < thread_all.len) thread_all[at_k] else null;
-        // The flow is the thread's first track's; where it enters this
-        // leg is the start, or what the panel before handed on.
-        const flow_r = if (own) &m.panels.items[head.panel].regions.items[head.region] else &regs[ri];
-        // Its content and first paragraph's style: the flow's (a tile's
-        // face track: the tile's content there).
-        const flow_items: []const model.Item = if (own) m.flowItems(head.panel, head.region) else synth_items.items[ri];
-        // A paragraph in no style of its own takes the flow style's
-        // paragraph settings (decided 2026-11-23: a flow's style).
-        const flow_default: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph_default else null) else null;
-        const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph orelse fl.paragraph_default else null) else null;
-        const fri = head.region;
-        const fpi = head.panel;
-        const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_para, .first_line = true, .soft = false } else for (entries) |e| {
-            if (e.track == region.id) break e;
-        } else null;
-        // Rows run right and stack down; columns run down and set to the
-        // right. An item's size along is its width in a row and its height
-        // in a column.
-        const rows = region.major() == .row;
-        const length = region.segmentLength() * region.pitch;
-        const tol = 1e-9;
-        // The flow as the pass sees it. A run in a row is set once on one
-        // line, then cut where it may break (between words, see
-        // `rendering.Render.opportunities`): a piece per word or stretch of
-        // words, with a space piece between (dropped where a wrap leaves it
-        // at a segment's start). A formula has no breaks and stays whole.
-        // Each piece remembers its item, and its source bytes there.
-        var pieces: std.ArrayList(model.Item) = .empty;
-        var cuts: std.ArrayList(?Cut) = .empty;
-        var item_of: std.ArrayList(usize) = .empty;
-        var src_off: std.ArrayList(u32) = .empty;
-        var src_len: std.ArrayList(u32) = .empty;
-        for (flow_items, 0..) |item, mi| {
-            const whole = struct {
-                fn add(al: Allocator, ps: *std.ArrayList(model.Item), cs: *std.ArrayList(?Cut), io: *std.ArrayList(usize), so: *std.ArrayList(u32), sl: *std.ArrayList(u32), it: model.Item, index: usize) Allocator.Error!void {
-                    try ps.append(al, it);
-                    try cs.append(al, null);
-                    try io.append(al, index);
-                    try so.append(al, 0);
-                    try sl.append(al, if (it.what == .run) @intCast(it.what.run.content.len) else 0);
-                }
-            }.add;
-            const run = switch (item.what) {
-                .run => |run| run,
-                else => null,
-            };
-            if (run == null or run.?.content.len == 0 or labels.context(run.?.style) == null) {
-                try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
-                continue;
+        const own = pass == 0;
+        if (!own) try tileRegions(a, m, labels, tiles.items, &synth, &synth_items, &synth_owner, &synth_which);
+        const regs: []const model.TileRegion = if (own) m.panels.items[panel].regions.items else synth.items;
+        for (regs, 0..) |region, ri| {
+            const out_tracks = if (own) &tracks else &junk_tracks;
+            const out_placed_items = if (own) &placed_items else &junk_items;
+            const out_flows = if (own) &flows else &junk_flows;
+            const out_exits = if (own) &exits else &junk_exits;
+            const out_wraps = if (own) &wraps else &junk_wraps;
+            const out_issues = if (own) &issues else &junk_issues;
+            // A thread is laid out a leg at a time: the run of its tracks on
+            // one panel. A track threaded after another here is in its leg.
+            const before = if (own) m.threadBefore(panel, ri) else null;
+            if (before) |b| if (b.panel == panel) continue;
+            const head: model.TrackRef = if (own) m.threadHead(panel, ri) else .{ .panel = panel, .region = ri };
+            var all_buf: [256]model.TrackRef = undefined;
+            const thread_all = if (own) m.thread(head, &all_buf) else all_buf[0..0];
+            var thread_buf: [256]usize = undefined;
+            var leg_n: usize = 0;
+            var at_k: usize = 0;
+            while (at_k < thread_all.len and !(thread_all[at_k].panel == panel and thread_all[at_k].region == ri)) at_k += 1;
+            while (at_k < thread_all.len and thread_all[at_k].panel == panel and leg_n < thread_buf.len) : (at_k += 1) {
+                thread_buf[leg_n] = thread_all[at_k].region;
+                leg_n += 1;
             }
-            const full = (try labels.get(.{ .style = run.?.style, .anchor = .start, .box = null, .markup = run.?.content, .math = run.?.equation })) orelse {
-                try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
-                continue;
-            };
-            // Its cuts: each break opportunity (a space, \allowbreak, or a
-            // soft hyphen) and, inside words, between glyphs (taken only
-            // for a word longer than its line). The pieces between them
-            // inside a word are bound, so the word breaks as one.
-            const Bound = struct { cut: rendering.Render.Cut, end: @TypeOf(@as(Cut, undefined).end), opp: ?u32 };
-            var cut_at: std.ArrayList(Bound) = .empty;
-            for (full.opportunities, 0..) |o, k| try cut_at.append(a, .{ .cut = .at(full, @intCast(k)), .end = if (o.hyphen) .hyphen else .space, .opp = @intCast(k) });
-            // In a column, text is set a character at a time, upright:
-            // a cut between each two, any of them a place to go on.
-            for (try full.forcedCuts(a)) |c| try cut_at.append(a, .{ .cut = c, .end = if (rows) .forced else .glyph, .opp = null });
-            if (cut_at.items.len == 0) {
-                try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
-                continue;
+            if (leg_n == 0) {
+                thread_buf[0] = ri;
+                leg_n = 1;
             }
-            std.mem.sort(Bound, cut_at.items, {}, struct {
-                fn lt(_: void, x: Bound, y: Bound) bool {
-                    return x.cut.src0 < y.cut.src0;
-                }
-            }.lt);
-            const content_len: u32 = @intCast(run.?.content.len);
-            var prev: ?rendering.Render.Cut = null;
-            for (0..cut_at.items.len + 1) |k| {
-                const next: ?Bound = if (k < cut_at.items.len) cut_at.items[k] else null;
-                const from: u32 = if (prev) |p_| p_.src1 else 0;
-                const to: u32 = if (next) |n_| n_.cut.src0 else content_len;
-                const bound_on = if (next) |n_| n_.end == .forced else false;
-                try pieces.append(a, .{ .gap = if (k == 0) item.gap else 0, .bind = bound_on, .what = .{ .run = run.? } });
-                try cuts.append(a, .{ .render = full, .from = prev, .to = if (next) |n_| n_.cut else null, .end = if (next) |n_| n_.end else .none });
-                try item_of.append(a, mi);
-                try src_off.append(a, from);
-                try src_len.append(a, @max(to, from) - from);
-                if (next) |n_| if (n_.end == .space) {
-                    const o = full.opportunities[n_.opp.?];
-                    try pieces.append(a, .{ .what = .{ .run = run.? } });
-                    try cuts.append(a, .{ .render = full, .space = n_.opp.?, .end = .space });
-                    try item_of.append(a, mi);
-                    try src_off.append(a, o.start);
-                    try src_len.append(a, o.end - o.start);
-                };
-                prev = if (next) |n_| n_.cut else null;
-            }
-            // The item's own binding holds after its last piece.
-            pieces.items[pieces.items.len - 1].bind = item.bind;
-        }
-        const items = pieces.items;
-
-        // First, every item's size along, and for a run its render.
-        const sizes = try a.alloc(f64, items.len);
-        const renders = try a.alloc(?*const rendering.Render, items.len);
-        for (items, sizes, renders, 0..) |item, *size, *rr, index| {
-            rr.* = null;
-            size.* = switch (item.what) {
-                // In its prototype's unit, so a key keeps its size in a
-                // track of another pitch.
-                .tile => |id| blk: {
-                    const t = m.tileConst(id);
-                    const unit = m.proto(t.prototype).unitIn(flow_r.pitch);
-                    break :blk (if (rows) t.w else t.h) * unit;
-                },
-                .run => |run| blk: {
-                    if (cuts.items[index]) |c| break :blk if (rows) c.size() else columnStep(labels, run.style, c);
-                    if (run.content.len == 0) break :blk 0.5 * region.pitch;
-                    _ = labels.context(run.style) orelse {
-                        try out_issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
-                        break :blk 0.5 * region.pitch;
-                    };
-                    const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content, .math = run.equation })) orelse break :blk 0.5 * region.pitch;
-                    rr.* = render;
-                    const d = render.design;
-                    break :blk if (d.isEmpty()) 0 else if (rows) d.x1 - d.x0 else d.y1 - d.y0;
-                },
-                .hard_break, .paragraph => 0,
-            };
-        }
-
-        // Then the flow: each item's segment and span. A group (items
-        // bound to the next, see `Model.bound`) breaks as one: when it does
-        // not fit, the whole of it moves on. A tile thicker than its segment
-        // reaches into the segments that follow, closing the stretch it
-        // covers there, so their content flows around it.
-        const segs_of = try a.alloc(usize, items.len);
-        const spans = try a.alloc([2]f64, items.len);
-        const dropped = try a.alloc(bool, items.len);
-        @memset(dropped, false);
-        // A tile listed again is placed once, at its first entry.
-        const dup = try a.alloc(bool, items.len);
-        @memset(dup, false);
-        var seen: std.AutoHashMapUnmanaged(TileId, void) = .empty;
-        // The segments, made as the flow reaches them: their origins along
-        // the path, their bands, and how far each one's content reaches.
-        // The paragraph being set.
-        const seg0: usize = if (entry) |e| e.segment else 0;
-        var style_id: ?model.ParaId = if (entry) |e| e.paragraph else null;
-        var style: ?model.ParagraphStyle = if (style_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
-        var path: Path = .{ .regions = regs, .thread = thread, .avoid = if (own) tracks.items else &.{}, .more = more != null };
-        // The pieces this leg places: from where the flow enters, to where
-        // it leaves for the next panel (or its end). Waiting, none.
-        const leg_lo: usize = if (entry) |e| @min(e.piece, items.len) else items.len;
-        var leg_hi: usize = items.len;
-        var exited = false;
-        var drop_first = if (entry) |e| e.soft else false;
-        // Set while a word longer than its line is cut to fit (a forced
-        // wrap): up to its last piece.
-        var forcing: ?usize = null;
-        try path.ensure(a, 0);
-        // Each segment's alignment shift, set when the flow leaves it.
-        var shifts: std.ArrayList(f64) = .empty;
-        // Tiles placed so far that reach past their segment's band, with
-        // the segment that placed them; and the stretches they close in
-        // the segment being filled.
-        var tall: std.ArrayList(Tall) = .empty;
-        var closed: std.ArrayList([2]f64) = .empty;
-        var first_in_seg: usize = leg_lo;
-        var seg: usize = 0;
-        var in_seg: usize = 0;
-        var para: f64 = 0;
-        var natural: f64 = 0;
-        const stretch = try a.alloc(bool, items.len);
-        for (stretch, 0..) |*st, k| st.* = isSpace(cuts.items, k);
-        const extra = try a.alloc(f64, items.len);
-        @memset(extra, 0);
-        const flow: Flow = .{ .m = m, .region = flow_r, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = if (own) keepouts.items else label_keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
-        // The bounds of the segment being filled: its first line takes the
-        // first-line indent. The first segment too: line art may close stretches of it.
-        try flow.enter(a, &path, 0, tall.items, &closed);
-        var line: Line = lineIn(style, if (entry) |e| e.first_line else true, segLength(&path, rows, 0));
-        var pos: f64 = line.lo;
-        for (items[leg_lo..], leg_lo..) |item, index| {
-            // Entering after a wrap upstream: what a wrap drops at a
-            // line's start is dropped here too.
-            if (drop_first) {
-                drop_first = false;
-                const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
-                if (drops) {
-                    segs_of[index] = seg;
-                    spans[index] = .{ pos, pos };
-                    dropped[index] = true;
-                    continue;
-                }
-            }
-            if (item.breaks()) {
-                segs_of[index] = seg;
-                spans[index] = .{ pos, pos };
-                natural = @max(natural, para);
-                para = 0;
-                if (seg + 1 < max_segments) {
-                    try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
-                    seg += 1;
-                    first_in_seg = index + 1;
-                    // A line break: the paragraph's next line. A separator:
-                    // the next paragraph, after both paragraphs' spacing.
-                    var first_line = false;
-                    if (item.what == .paragraph) {
-                        const next_id = item.what.paragraph orelse flow_default;
-                        const next: ?model.ParagraphStyle = if (next_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
-                        path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
-                        style = next;
-                        style_id = next_id;
-                        first_line = true;
-                    } else path.lead = if (style) |st| st.line_gap else 0;
-                    // Past this leg's last track: the rest goes on into
-                    // the thread's next panel.
-                    if (path.leaves(seg)) {
-                        try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
-                        leg_hi = index + 1;
-                        exited = true;
-                        break;
+            const thread = thread_buf[0..leg_n];
+            // The thread's next track, on another panel, if it goes on.
+            const more: ?model.TrackRef = if (at_k < thread_all.len) thread_all[at_k] else null;
+            // The flow is the thread's first track's; where it enters this
+            // leg is the start, or what the panel before handed on.
+            const flow_r = if (own) &m.panels.items[head.panel].regions.items[head.region] else &regs[ri];
+            // Its content and first paragraph's style: the flow's (a tile's
+            // face track: the tile's content there).
+            const flow_items: []const model.Item = if (own) m.flowItems(head.panel, head.region) else synth_items.items[ri];
+            // A paragraph in no style of its own takes the flow style's
+            // paragraph settings (decided 2026-11-23: a flow's style).
+            const flow_default: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph_default else null) else null;
+            const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph orelse fl.paragraph_default else null) else null;
+            const fri = head.region;
+            const fpi = head.panel;
+            const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_para, .first_line = true, .soft = false } else for (entries) |e| {
+                if (e.track == region.id) break e;
+            } else null;
+            // Rows run right and stack down; columns run down and set to the
+            // right. An item's size along is its width in a row and its height
+            // in a column.
+            const rows = region.major() == .row;
+            const length = region.segmentLength() * region.pitch;
+            const tol = 1e-9;
+            // The flow as the pass sees it. A run in a row is set once on one
+            // line, then cut where it may break (between words, see
+            // `rendering.Render.opportunities`): a piece per word or stretch of
+            // words, with a space piece between (dropped where a wrap leaves it
+            // at a segment's start). A formula has no breaks and stays whole.
+            // Each piece remembers its item, and its source bytes there.
+            var pieces: std.ArrayList(model.Item) = .empty;
+            var cuts: std.ArrayList(?Cut) = .empty;
+            var item_of: std.ArrayList(usize) = .empty;
+            var src_off: std.ArrayList(u32) = .empty;
+            var src_len: std.ArrayList(u32) = .empty;
+            for (flow_items, 0..) |item, mi| {
+                const whole = struct {
+                    fn add(al: Allocator, ps: *std.ArrayList(model.Item), cs: *std.ArrayList(?Cut), io: *std.ArrayList(usize), so: *std.ArrayList(u32), sl: *std.ArrayList(u32), it: model.Item, index: usize) Allocator.Error!void {
+                        try ps.append(al, it);
+                        try cs.append(al, null);
+                        try io.append(al, index);
+                        try so.append(al, 0);
+                        try sl.append(al, if (it.what == .run) @intCast(it.what.run.content.len) else 0);
                     }
-                    try flow.enter(a, &path, seg, tall.items, &closed);
-                    line = lineIn(style, first_line, segLength(&path, rows, seg));
-                    pos = line.lo;
-                    in_seg = 0;
-                }
-                continue;
-            }
-            if (item.tileOf()) |id| {
-                if (seen.contains(id)) {
-                    dup[index] = true;
-                    segs_of[index] = seg;
-                    spans[index] = .{ pos, pos };
+                }.add;
+                const run = switch (item.what) {
+                    .run => |run| run,
+                    else => null,
+                };
+                if (run == null or run.?.content.len == 0 or labels.context(run.?.style) == null) {
+                    try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                     continue;
                 }
-                try seen.put(a, id, {});
-            }
-            const gap = item.gap * region.pitch;
-            const size = sizes[index];
-            // Inside a group (bound to the item before), no break.
-            const in_group = index > 0 and m.bound(items, index - 1);
-            var start = Flow.clear(closed.items, pos + gap, size);
-            para += gap + size;
-            // What must fit here: this item, or its whole group.
-            var need = size;
-            var group_end = index;
-            if (!in_group) {
-                while (group_end + 1 < items.len and m.bound(items, group_end)) : (group_end += 1) need += items[group_end + 1].gap * region.pitch + sizes[group_end + 1];
-                // Ending at a soft hyphen: unless the rest of the word fits
-                // too, the line would end here, with a hyphen.
-                if (endsIn(cuts.items, group_end, .hyphen)) {
-                    var rest = need;
-                    var k = group_end;
-                    while (k + 1 < items.len and item_of.items[k + 1] == item_of.items[k] and (endsIn(cuts.items, k, .hyphen) or endsIn(cuts.items, k, .forced))) : (k += 1) rest += sizes[k + 1];
-                    if (start + rest > line.hi + tol) need += hyphenSize(labels, items[index].what.run.style);
-                }
-            }
-            if (forcing) |f| if (index > f) {
-                forcing = null;
-            };
-            // Cutting a word to fit: a piece of it that does not fit goes
-            // on to the next line.
-            const forced_break = forcing != null and in_group and start + size > line.hi + tol and in_seg > 0;
-            // It does not fit: on to the next segment, made as needed, if
-            // this one holds something already.
-            if (((!in_group and start + need > line.hi + tol and in_seg > 0) or forced_break) and seg + 1 < max_segments) {
-                line.soft = true;
-                try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
-                seg += 1;
-                first_in_seg = index;
-                path.lead = if (style) |st| st.line_gap else 0;
-                if (path.leaves(seg)) {
-                    try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
-                    leg_hi = index;
-                    exited = true;
-                    break;
-                }
-                try flow.enter(a, &path, seg, tall.items, &closed);
-                line = lineIn(style, false, segLength(&path, rows, seg));
-                pos = line.lo;
-                in_seg = 0;
-                start = Flow.clear(closed.items, pos + gap, size);
-                // Landing at the start after a soft break, a tile whose
-                // prototype says so, or a space between words, is dropped.
-                const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
-                if (drops) {
-                    para -= gap + size;
-                    segs_of[index] = seg;
-                    spans[index] = .{ pos, pos };
-                    dropped[index] = true;
+                const full = (try labels.get(.{ .style = run.?.style, .anchor = .start, .box = null, .markup = run.?.content, .math = run.?.equation })) orelse {
+                    try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
+                    continue;
+                };
+                // Its cuts: each break opportunity (a space, \allowbreak, or a
+                // soft hyphen) and, inside words, between glyphs (taken only
+                // for a word longer than its line). The pieces between them
+                // inside a word are bound, so the word breaks as one.
+                const Bound = struct { cut: rendering.Render.Cut, end: @TypeOf(@as(Cut, undefined).end), opp: ?u32 };
+                var cut_at: std.ArrayList(Bound) = .empty;
+                for (full.opportunities, 0..) |o, k| try cut_at.append(a, .{ .cut = .at(full, @intCast(k)), .end = if (o.hyphen) .hyphen else .space, .opp = @intCast(k) });
+                // In a column, text is set a character at a time, upright:
+                // a cut between each two, any of them a place to go on.
+                for (try full.forcedCuts(a)) |c| try cut_at.append(a, .{ .cut = c, .end = if (rows) .forced else .glyph, .opp = null });
+                if (cut_at.items.len == 0) {
+                    try whole(a, &pieces, &cuts, &item_of, &src_off, &src_len, item, mi);
                     continue;
                 }
+                std.mem.sort(Bound, cut_at.items, {}, struct {
+                    fn lt(_: void, x: Bound, y: Bound) bool {
+                        return x.cut.src0 < y.cut.src0;
+                    }
+                }.lt);
+                const content_len: u32 = @intCast(run.?.content.len);
+                var prev: ?rendering.Render.Cut = null;
+                for (0..cut_at.items.len + 1) |k| {
+                    const next: ?Bound = if (k < cut_at.items.len) cut_at.items[k] else null;
+                    const from: u32 = if (prev) |p_| p_.src1 else 0;
+                    const to: u32 = if (next) |n_| n_.cut.src0 else content_len;
+                    const bound_on = if (next) |n_| n_.end == .forced else false;
+                    try pieces.append(a, .{ .gap = if (k == 0) item.gap else 0, .bind = bound_on, .what = .{ .run = run.? } });
+                    try cuts.append(a, .{ .render = full, .from = prev, .to = if (next) |n_| n_.cut else null, .end = if (next) |n_| n_.end else .none });
+                    try item_of.append(a, mi);
+                    try src_off.append(a, from);
+                    try src_len.append(a, @max(to, from) - from);
+                    if (next) |n_| if (n_.end == .space) {
+                        const o = full.opportunities[n_.opp.?];
+                        try pieces.append(a, .{ .what = .{ .run = run.? } });
+                        try cuts.append(a, .{ .render = full, .space = n_.opp.?, .end = .space });
+                        try item_of.append(a, mi);
+                        try src_off.append(a, o.start);
+                        try src_len.append(a, o.end - o.start);
+                    };
+                    prev = if (next) |n_| n_.cut else null;
+                }
+                // The item's own binding holds after its last piece.
+                pieces.items[pieces.items.len - 1].bind = item.bind;
             }
-            // A word that does not fit even a line of its own is cut
-            // between its glyphs, where it must.
-            if (!in_group and forcing == null and in_seg == 0 and start + need > line.hi + tol and endsIn(cuts.items, index, .forced)) forcing = group_end;
-            const end = start + size;
-            pos = @max(pos, end);
-            in_seg += 1;
-            path.reach.items[seg] = @max(path.reach.items[seg], end);
-            segs_of[index] = seg;
-            spans[index] = .{ start, end };
-        }
-        if (!exited) try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
+            const items = pieces.items;
 
-        // Last, each item where it landed. The pieces of a word that were
-        // not wrapped between are set as one.
-        var chain: ?usize = null;
-        for (items[leg_lo..leg_hi], leg_lo..) |item, index| {
-            const sg = segs_of[index];
-            if (endsIn(cuts.items, index, .forced) and !dropped[index] and index + 1 < leg_hi and segs_of[index + 1] == sg and !dropped[index + 1]) {
-                if (chain == null) chain = index;
-                continue;
+            // First, every item's size along, and for a run its render.
+            const sizes = try a.alloc(f64, items.len);
+            const renders = try a.alloc(?*const rendering.Render, items.len);
+            for (items, sizes, renders, 0..) |item, *size, *rr, index| {
+                rr.* = null;
+                size.* = switch (item.what) {
+                    // In its prototype's unit, so a key keeps its size in a
+                    // track of another pitch.
+                    .tile => |id| blk: {
+                        const t = m.tileConst(id);
+                        const unit = m.proto(t.prototype).unitIn(flow_r.pitch);
+                        break :blk (if (rows) t.w else t.h) * unit;
+                    },
+                    .run => |run| blk: {
+                        if (cuts.items[index]) |c| break :blk if (rows) c.size() else columnStep(labels, run.style, c);
+                        if (run.content.len == 0) break :blk 0.5 * region.pitch;
+                        _ = labels.context(run.style) orelse {
+                            try out_issues.append(a, .{ .kind = .style_error, .region = ri, .item = item_of.items[index] });
+                            break :blk 0.5 * region.pitch;
+                        };
+                        const render = (try labels.get(.{ .style = run.style, .anchor = .start, .box = null, .markup = run.content, .math = run.equation })) orelse break :blk 0.5 * region.pitch;
+                        rr.* = render;
+                        const d = render.design;
+                        break :blk if (d.isEmpty()) 0 else if (rows) d.x1 - d.x0 else d.y1 - d.y0;
+                    },
+                    .hard_break, .paragraph => 0,
+                };
             }
-            const first = chain orelse index;
-            chain = null;
-            const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
-            const start = spans[first][0] + (if (first == index) sh else shifts.items[sg] + extra[first]);
-            const end = spans[index][1] + sh;
-            try out_placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
-            if (dropped[index] or dup[index]) continue;
-            const band = path.boxes.items[sg];
-            // A line ending inside a word: at a soft hyphen, a hyphen is
-            // drawn; at a cut, the wrap is recorded.
-            const line_ends = (index + 1 < leg_hi and segs_of[index + 1] != sg) or (index + 1 == leg_hi and exited);
-            if (line_ends and endsIn(cuts.items, index, .forced)) try out_wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
-            if (line_ends and endsIn(cuts.items, index, .hyphen)) if (try labels.get(.{ .style = item.what.run.style, .anchor = .start, .box = null, .markup = hyphen_markup })) |hr| {
-                const cap = labels.context(item.what.run.style).?.cap_height;
-                const hd = hr.design;
-                try placed_labels.append(a, .{
-                    .tile = if (own) null else synth_owner.items[ri],
-                    .slot = if (own) item_of.items[index] else synth_which.items[ri],
-                    .box = .{ .x0 = band.x0 + end, .x1 = band.x0 + end + (hd.x1 - hd.x0), .y0 = band.y0, .y1 = band.y1 },
-                    .origin = .{ .x = band.x0 + end - hd.x0, .y = (band.y0 + band.y1 - cap) / 2 },
-                    .style = item.what.run.style,
-                    .render = hr,
-                });
-            };
-            switch (item.what) {
-                .tile => |pid| {
-                    const t = m.tileConst(pid);
-                    const unit = m.proto(t.prototype).unitIn(region.pitch);
-                    const pitch_box = flow.tileBox(pid, band, start);
-                    const proto = m.proto(t.prototype);
-                    const body = proto.body_inset.inset(pitch_box);
-                    // A spacer is drawn by nothing and bounds nothing.
-                    if (proto.spacer) {
-                        try tiles.append(a, .{ .id = pid, .region = ri, .row = sg, .pitch_box = pitch_box, .body = pitch_box, .face = pitch_box, .shapes = &.{}, .spacer = true });
+
+            // Then the flow: each item's segment and span. A group (items
+            // bound to the next, see `Model.bound`) breaks as one: when it does
+            // not fit, the whole of it moves on. A tile thicker than its segment
+            // reaches into the segments that follow, closing the stretch it
+            // covers there, so their content flows around it.
+            const segs_of = try a.alloc(usize, items.len);
+            const spans = try a.alloc([2]f64, items.len);
+            const dropped = try a.alloc(bool, items.len);
+            @memset(dropped, false);
+            // A tile listed again is placed once, at its first entry.
+            const dup = try a.alloc(bool, items.len);
+            @memset(dup, false);
+            var seen: std.AutoHashMapUnmanaged(TileId, void) = .empty;
+            const stretch = try a.alloc(bool, items.len);
+            for (stretch, 0..) |*st, k| st.* = isSpace(cuts.items, k);
+            const extra = try a.alloc(f64, items.len);
+            const flow: Flow = .{ .m = m, .region = flow_r, .rows = rows, .length = length, .ri = ri, .items = items, .segs_of = segs_of, .spans = spans, .dropped = dropped, .dup = dup, .keepouts = if (own) keepouts.items else label_keepouts.items, .stretch = stretch, .extra = extra, .cap = trackCap(m, labels, region) };
+            const seg0: usize = if (entry) |e| e.segment else 0;
+            // The pieces this leg places: from where the flow enters, to where
+            // it leaves for the next panel (or its end). Waiting, none.
+            const leg_lo: usize = if (entry) |e| @min(e.piece, items.len) else items.len;
+            var leg_hi: usize = items.len;
+            var exited = false;
+            var natural: f64 = 0;
+            var path: Path = undefined;
+            // Each segment's alignment shift, set when the flow leaves it.
+            var shifts: std.ArrayList(f64) = .empty;
+            // Stretches of earlier lines closed by what reaches up into them
+            // from later ones (see `Around`): the flow is set again with them
+            // until it finds none new (three times at most).
+            var up_keep: std.ArrayList(UpKeep) = .empty;
+            const exits_mark = out_exits.items.len;
+            const issues_mark = out_issues.items.len;
+            var attempt: usize = 0;
+            while (true) : (attempt += 1) {
+                @memset(dropped, false);
+                @memset(dup, false);
+                @memset(extra, 0);
+                seen.clearRetainingCapacity();
+                shifts.clearRetainingCapacity();
+                out_exits.shrinkRetainingCapacity(exits_mark);
+                out_issues.shrinkRetainingCapacity(issues_mark);
+                leg_hi = items.len;
+                exited = false;
+                natural = 0;
+                var around: Around = .{};
+                // The segments, made as the flow reaches them: their origins along
+                // the path, their bands, and how far each one's content reaches.
+                // The paragraph being set.
+                var style_id: ?model.ParaId = if (entry) |e| e.paragraph else null;
+                var style: ?model.ParagraphStyle = if (style_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
+                path = .{ .regions = regs, .thread = thread, .avoid = if (own) tracks.items else &.{}, .more = more != null };
+                var drop_first = if (entry) |e| e.soft else false;
+                // Set while a word longer than its line is cut to fit (a forced
+                // wrap): up to its last piece.
+                var forcing: ?usize = null;
+                try path.ensure(a, 0);
+                // Tiles placed so far that reach past their segment's band, with
+                // the segment that placed them; and the stretches they close in
+                // the segment being filled.
+                var tall: std.ArrayList(Tall) = .empty;
+                var closed: std.ArrayList([2]f64) = .empty;
+                var first_in_seg: usize = leg_lo;
+                var seg: usize = 0;
+                var in_seg: usize = 0;
+                var para: f64 = 0;
+                // The bounds of the segment being filled: its first line takes the
+                // first-line indent. The first segment too: line art may close stretches of it.
+                try flow.enter(a, &path, 0, tall.items, up_keep.items, &closed);
+                var line: Line = lineIn(style, if (entry) |e| e.first_line else true, segLength(&path, rows, 0));
+                // Lines that grow to clear what the line before holds (unless
+                // their paragraph's spacing is fixed): each line's ink, and the
+                // line before's.
+                var grow: Grow = .{};
+                var pos: f64 = line.lo;
+                for (items[leg_lo..], leg_lo..) |item, index| {
+                    // Entering after a wrap upstream: what a wrap drops at a
+                    // line's start is dropped here too.
+                    if (drop_first) {
+                        drop_first = false;
+                        const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
+                        if (drops) {
+                            segs_of[index] = seg;
+                            spans[index] = .{ pos, pos };
+                            dropped[index] = true;
+                            continue;
+                        }
+                    }
+                    if (item.breaks()) {
+                        segs_of[index] = seg;
+                        spans[index] = .{ pos, pos };
+                        natural = @max(natural, para);
+                        para = 0;
+                        if (seg + 1 < max_segments) {
+                            if (rows) try grow.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, index);
+                            try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
+                            if (rows) try around.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, index, shifts.items[seg], &tall);
+                            seg += 1;
+                            first_in_seg = index + 1;
+                            // A line break: the paragraph's next line. A separator:
+                            // the next paragraph, after both paragraphs' spacing.
+                            var first_line = false;
+                            if (item.what == .paragraph) {
+                                const next_id = item.what.paragraph orelse flow_default;
+                                const next: ?model.ParagraphStyle = if (next_id) |id| (if (m.paraStyle(id)) |ps| ps.* else null) else null;
+                                path.lead = (if (style) |st| st.space_after else 0) + (if (next) |st| st.space_before else 0);
+                                style = next;
+                                style_id = next_id;
+                                first_line = true;
+                            } else path.lead = if (style) |st| st.line_gap else 0;
+                            // Past this leg's last track: the rest goes on into
+                            // the thread's next panel.
+                            if (path.leaves(seg)) {
+                                try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
+                                leg_hi = index + 1;
+                                exited = true;
+                                break;
+                            }
+                            try flow.enter(a, &path, seg, tall.items, up_keep.items, &closed);
+                            line = lineIn(style, first_line, segLength(&path, rows, seg));
+                            pos = line.lo;
+                            in_seg = 0;
+                        }
                         continue;
                     }
-                    const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| blk: {
-                        const got = try labels.sketchShapes(a, ps, m.tileConst(pid).params.items, pitch_box);
-                        if (got == null) try out_issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg });
-                        break :blk got;
-                    } else null;
-                    const shapes = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
-                        error.CurveCrossesCut => blk: {
-                            try out_issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = sg });
-                            break :blk try art.plainShapes(a, proto.*, unit, pitch_box);
-                        },
-                        else => |e| return e,
-                    } else try art.plainShapes(a, proto.*, unit, pitch_box);
-                    try tiles.append(a, .{
-                        .id = pid,
-                        .region = ri,
-                        .row = sg,
-                        .pitch_box = pitch_box,
-                        .body = body,
-                        .face = proto.face_inset.inset(body),
-                        .shapes = shapes,
-                    });
-                    if (!proto.allows(t.w, t.h)) try out_issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = sg });
-                    bounds = bounds.join(pitch_box);
-                },
-                .run => |run| {
-                    const render = if (cuts.items[index]) |c| blk: {
-                        const piece = try a.create(rendering.Render);
-                        if (c.space) |k| {
-                            // A space is drawn only where a decoration
-                            // runs under it.
-                            piece.* = try c.render.spacePiece(a, k);
-                            const drawn = for (piece.items) |it| {
-                                if (it == .path) break true;
-                            } else false;
-                            if (!drawn) continue;
-                        } else piece.* = try c.render.between(a, cuts.items[first].?.from, c.to);
-                        break :blk piece;
-                    } else renders[index] orelse continue;
-                    if (render.syntax.len > 0) try out_issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
-                    const d = render.design;
-                    const cap = labels.context(run.style).?.cap_height;
-                    // On a baseline that centres its capitals across a
-                    // row; centred across a column, one line below another.
-                    // In a column, a character's capitals sit a quarter cap
-                    // below where its step starts.
-                    const origin: Point = if (rows)
-                        .{ .x = band.x0 + start - d.x0, .y = (band.y0 + band.y1 - cap) / 2 }
-                    else if (cuts.items[index] != null)
-                        .{ .x = (band.x0 + band.x1 - (d.x1 - d.x0)) / 2 - d.x0, .y = band.y1 - start - 1.25 * cap }
-                    else
-                        .{ .x = (band.x0 + band.x1 - (d.x1 - d.x0)) / 2 - d.x0, .y = band.y1 - start - d.y1 };
-                    const box: Box = if (rows)
-                        .{ .x0 = band.x0 + start, .x1 = band.x0 + end, .y0 = band.y0, .y1 = band.y1 }
-                    else
-                        .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
+                    if (item.tileOf()) |id| {
+                        if (seen.contains(id)) {
+                            dup[index] = true;
+                            segs_of[index] = seg;
+                            spans[index] = .{ pos, pos };
+                            continue;
+                        }
+                        try seen.put(a, id, {});
+                    }
+                    const gap = item.gap * region.pitch;
+                    const size = sizes[index];
+                    // Inside a group (bound to the item before), no break.
+                    const in_group = index > 0 and m.bound(items, index - 1);
+                    var start = Flow.clear(closed.items, pos + gap, size);
+                    para += gap + size;
+                    // What must fit here: this item, or its whole group.
+                    var need = size;
+                    var group_end = index;
+                    if (!in_group) {
+                        while (group_end + 1 < items.len and m.bound(items, group_end)) : (group_end += 1) need += items[group_end + 1].gap * region.pitch + sizes[group_end + 1];
+                        // Ending at a soft hyphen: unless the rest of the word fits
+                        // too, the line would end here, with a hyphen.
+                        if (endsIn(cuts.items, group_end, .hyphen)) {
+                            var rest = need;
+                            var k = group_end;
+                            while (k + 1 < items.len and item_of.items[k + 1] == item_of.items[k] and (endsIn(cuts.items, k, .hyphen) or endsIn(cuts.items, k, .forced))) : (k += 1) rest += sizes[k + 1];
+                            if (start + rest > line.hi + tol) need += hyphenSize(labels, items[index].what.run.style);
+                        }
+                    }
+                    if (forcing) |f| if (index > f) {
+                        forcing = null;
+                    };
+                    // Cutting a word to fit: a piece of it that does not fit goes
+                    // on to the next line.
+                    const forced_break = forcing != null and in_group and start + size > line.hi + tol and in_seg > 0;
+                    // It does not fit: on to the next segment, made as needed, if
+                    // this one holds something already.
+                    if (((!in_group and start + need > line.hi + tol and in_seg > 0) or forced_break) and seg + 1 < max_segments) {
+                        line.soft = true;
+                        if (rows) try grow.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, index);
+                        try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
+                        if (rows) try around.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, index, shifts.items[seg], &tall);
+                        seg += 1;
+                        first_in_seg = index;
+                        path.lead = if (style) |st| st.line_gap else 0;
+                        if (path.leaves(seg)) {
+                            try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
+                            leg_hi = index;
+                            exited = true;
+                            break;
+                        }
+                        try flow.enter(a, &path, seg, tall.items, up_keep.items, &closed);
+                        line = lineIn(style, false, segLength(&path, rows, seg));
+                        pos = line.lo;
+                        in_seg = 0;
+                        start = Flow.clear(closed.items, pos + gap, size);
+                        // Landing at the start after a soft break, a tile whose
+                        // prototype says so, or a space between words, is dropped.
+                        const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
+                        if (drops) {
+                            para -= gap + size;
+                            segs_of[index] = seg;
+                            spans[index] = .{ pos, pos };
+                            dropped[index] = true;
+                            continue;
+                        }
+                    }
+                    // A word that does not fit even a line of its own is cut
+                    // between its glyphs, where it must.
+                    if (!in_group and forcing == null and in_seg == 0 and start + need > line.hi + tol and endsIn(cuts.items, index, .forced)) forcing = group_end;
+                    const end = start + size;
+                    pos = @max(pos, end);
+                    in_seg += 1;
+                    path.reach.items[seg] = @max(path.reach.items[seg], end);
+                    segs_of[index] = seg;
+                    spans[index] = .{ start, end };
+                }
+                if (!exited) {
+                    if (rows) try grow.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, items.len);
+                    try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, items.len, closed.items.len > 0, line);
+                    if (rows) try around.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, items.len, shifts.items[seg], &tall);
+                }
+                natural = @max(natural, para);
+                if (attempt >= 4 or (!Around.anyNew(around.found.items, up_keep.items) and !Around.anyNew(up_keep.items, around.found.items))) break;
+            // Set again with what this setting found (not what it was
+            // set with: what reaches up may have moved).
+            up_keep.clearRetainingCapacity();
+            try up_keep.appendSlice(a, around.found.items);
+            }
+
+            // Last, each item where it landed. The pieces of a word that were
+            // not wrapped between are set as one.
+            var chain: ?usize = null;
+            for (items[leg_lo..leg_hi], leg_lo..) |item, index| {
+                const sg = segs_of[index];
+                if (endsIn(cuts.items, index, .forced) and !dropped[index] and index + 1 < leg_hi and segs_of[index + 1] == sg and !dropped[index + 1]) {
+                    if (chain == null) chain = index;
+                    continue;
+                }
+                const first = chain orelse index;
+                chain = null;
+                const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
+                const start = spans[first][0] + (if (first == index) sh else shifts.items[sg] + extra[first]);
+                const end = spans[index][1] + sh;
+                try out_placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
+                if (dropped[index] or dup[index]) continue;
+                const band = path.boxes.items[sg];
+                // A line ending inside a word: at a soft hyphen, a hyphen is
+                // drawn; at a cut, the wrap is recorded.
+                const line_ends = (index + 1 < leg_hi and segs_of[index + 1] != sg) or (index + 1 == leg_hi and exited);
+                if (line_ends and endsIn(cuts.items, index, .forced)) try out_wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
+                if (line_ends and endsIn(cuts.items, index, .hyphen)) if (try labels.get(.{ .style = item.what.run.style, .anchor = .start, .box = null, .markup = hyphen_markup })) |hr| {
+                    const cap = labels.context(item.what.run.style).?.cap_height;
+                    const hd = hr.design;
                     try placed_labels.append(a, .{
-                        .run = if (own) .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
-                        .tile_run = if (own) null else .{ .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] },
                         .tile = if (own) null else synth_owner.items[ri],
                         .slot = if (own) item_of.items[index] else synth_which.items[ri],
-                        .box = box,
-                        .origin = origin,
-                        .style = run.style,
-                        .render = render,
+                        .box = .{ .x0 = band.x0 + end, .x1 = band.x0 + end + (hd.x1 - hd.x0), .y0 = band.y0, .y1 = band.y1 },
+                        .origin = .{ .x = band.x0 + end - hd.x0, .y = (band.y0 + band.y1 - cap) / 2 },
+                        .style = item.what.run.style,
+                        .render = hr,
                     });
-                    for (render.diagnostics) |dg| if (dg.kind == .missing_glyph) {
-                        try out_issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = item_of.items[index] });
-                        break;
-                    };
-                    if (lacksVariant(render.diagnostics)) try out_issues.append(a, .{ .kind = .variant_missing, .region = ri, .row = sg, .item = item_of.items[index] });
-                },
-                .hard_break, .paragraph => {},
+                };
+                switch (item.what) {
+                    .tile => |pid| {
+                        const t = m.tileConst(pid);
+                        const unit = m.proto(t.prototype).unitIn(region.pitch);
+                        const pitch_box = flow.tileBox(pid, band, start);
+                        const proto = m.proto(t.prototype);
+                        const body = proto.body_inset.inset(pitch_box);
+                        // A spacer is drawn by nothing and bounds nothing.
+                        if (proto.spacer) {
+                            try tiles.append(a, .{ .id = pid, .region = ri, .row = sg, .pitch_box = pitch_box, .body = pitch_box, .face = pitch_box, .shapes = &.{}, .spacer = true });
+                            continue;
+                        }
+                        const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| blk: {
+                            const got = try labels.sketchShapes(a, ps, m.tileConst(pid).params.items, pitch_box);
+                            if (got == null) try out_issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg });
+                            break :blk got;
+                        } else null;
+                        const shapes = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
+                            error.CurveCrossesCut => blk: {
+                                try out_issues.append(a, .{ .kind = .tile_art, .tile = pid, .region = ri, .row = sg });
+                                break :blk try art.plainShapes(a, proto.*, unit, pitch_box);
+                            },
+                            else => |e| return e,
+                        } else try art.plainShapes(a, proto.*, unit, pitch_box);
+                        try tiles.append(a, .{
+                            .id = pid,
+                            .region = ri,
+                            .row = sg,
+                            .pitch_box = pitch_box,
+                            .body = body,
+                            .face = proto.face_inset.inset(body),
+                            .shapes = shapes,
+                        });
+                        if (!proto.allows(t.w, t.h)) try out_issues.append(a, .{ .kind = .tile_size, .tile = pid, .region = ri, .row = sg });
+                        bounds = bounds.join(pitch_box);
+                    },
+                    .run => |run| {
+                        const render = if (cuts.items[index]) |c| blk: {
+                            const piece = try a.create(rendering.Render);
+                            if (c.space) |k| {
+                                // A space is drawn only where a decoration
+                                // runs under it.
+                                piece.* = try c.render.spacePiece(a, k);
+                                const drawn = for (piece.items) |it| {
+                                    if (it == .path) break true;
+                                } else false;
+                                if (!drawn) continue;
+                            } else piece.* = try c.render.between(a, cuts.items[first].?.from, c.to);
+                            break :blk piece;
+                        } else renders[index] orelse continue;
+                        if (render.syntax.len > 0) try out_issues.append(a, .{ .kind = .markup_error, .region = ri, .row = sg, .item = item_of.items[index], .syntax = render.syntax[0] });
+                        const d = render.design;
+                        const cap = labels.context(run.style).?.cap_height;
+                        // On a baseline that centres its capitals across a
+                        // row; centred across a column, one line below another.
+                        // In a column, a character's capitals sit a quarter cap
+                        // below where its step starts.
+                        const origin: Point = if (rows)
+                            .{ .x = band.x0 + start - d.x0, .y = (band.y0 + band.y1 - cap) / 2 }
+                        else if (cuts.items[index] != null)
+                            .{ .x = (band.x0 + band.x1 - (d.x1 - d.x0)) / 2 - d.x0, .y = band.y1 - start - 1.25 * cap }
+                        else
+                            .{ .x = (band.x0 + band.x1 - (d.x1 - d.x0)) / 2 - d.x0, .y = band.y1 - start - d.y1 };
+                        const box: Box = if (rows)
+                            .{ .x0 = band.x0 + start, .x1 = band.x0 + end, .y0 = band.y0, .y1 = band.y1 }
+                        else
+                            .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
+                        try placed_labels.append(a, .{
+                            .run = if (own) .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
+                            .tile_run = if (own) null else .{ .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] },
+                            .tile = if (own) null else synth_owner.items[ri],
+                            .slot = if (own) item_of.items[index] else synth_which.items[ri],
+                            .box = box,
+                            .origin = origin,
+                            .style = run.style,
+                            .render = render,
+                        });
+                        for (render.diagnostics) |dg| if (dg.kind == .missing_glyph) {
+                            try out_issues.append(a, .{ .kind = .missing_glyph, .region = ri, .row = sg, .item = item_of.items[index] });
+                            break;
+                        };
+                        if (lacksVariant(render.diagnostics)) try out_issues.append(a, .{ .kind = .variant_missing, .region = ri, .row = sg, .item = item_of.items[index] });
+                    },
+                    .hard_break, .paragraph => {},
+                }
             }
+            try out_flows.append(a, .{ .region = fri, .flow_panel = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
+            for (path.reach.items, 0..) |r_, t| {
+                const len_t = segLength(&path, rows, t);
+                if (r_ > len_t + tol) try out_issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
+            }
+            // Its segments: past the soft area each is flagged; past the panel,
+            // the region is (to be fitted, or the panel resized).
+            var all: Box = .empty;
+            var local: usize = 0;
+            for (path.origins.items, path.boxes.items, 0..) |o, b, t| {
+                if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
+                const member = thread[path.member.items[t]];
+                const soft = path.regionOf(t).softArea();
+                try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major(), .box = b, .origin = o });
+                local += 1;
+                all = all.join(b);
+                // Along, the path and the segment length are the boundary: a
+                // segment is always within it. Across, past the segments the
+                // space was drawn out for is flagged.
+                const past = if (rows) b.y0 < soft.y0 - tol or b.y1 > soft.y1 + tol else b.x0 < soft.x0 - tol or b.x1 > soft.x1 + tol;
+                if (past) try out_issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
+            }
+            // The canvas has no outline to keep to.
+            const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
+            if (past > 1e-9 and !m.panels.items[panel].unbounded) try out_issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+            for (thread) |member| if (!regs[member].supported())
+                try out_issues.append(a, .{ .kind = .unsupported_direction, .region = member });
         }
-        natural = @max(natural, para);
-        try out_flows.append(a, .{ .region = fri, .flow_panel = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
-        for (path.reach.items, 0..) |r_, t| {
-            const len_t = segLength(&path, rows, t);
-            if (r_ > len_t + tol) try out_issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
-        }
-        // Its segments: past the soft area each is flagged; past the panel,
-        // the region is (to be fitted, or the panel resized).
-        var all: Box = .empty;
-        var local: usize = 0;
-        for (path.origins.items, path.boxes.items, 0..) |o, b, t| {
-            if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
-            const member = thread[path.member.items[t]];
-            const soft = path.regionOf(t).softArea();
-            try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major(), .box = b, .origin = o });
-            local += 1;
-            all = all.join(b);
-            // Along, the path and the segment length are the boundary: a
-            // segment is always within it. Across, past the segments the
-            // space was drawn out for is flagged.
-            const past = if (rows) b.y0 < soft.y0 - tol or b.y1 > soft.y1 + tol else b.x0 < soft.x0 - tol or b.x1 > soft.x1 + tol;
-            if (past) try out_issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
-        }
-        // The canvas has no outline to keep to.
-        const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
-        if (past > 1e-9 and !m.panels.items[panel].unbounded) try out_issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
-        for (thread) |member| if (!regs[member].supported())
-            try out_issues.append(a, .{ .kind = .unsupported_direction, .region = member });
-    }
     }
     // A tile track's problems are its tile's.
     for (junk_issues.items) |i| {
@@ -1733,8 +1924,6 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         };
         try issues.append(a, .{ .kind = kind, .tile = synth_owner.items[r], .slot = synth_which.items[r], .syntax = i.syntax });
     }
-
-
 
     // Runs of text in tracks reach past the tiles' boxes: the bounds hold
     // their ink too, so a canvas with only text still has extents.
@@ -2029,7 +2218,7 @@ test "changing a prototype changes every tile made from it" {
     defer after.deinit();
     for (after.tiles[0..2]) |t| try testing.expectApproxEqAbs(@as(f64, 3.5), t.face.x0 - t.pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), after.tiles[2].face.x0 - after.tiles[2].pitch_box.x0, 1e-9);
-    try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, @enumFromInt(9999)));
+    try testing.expectError(error.NoSuchPrototype, m.setTilePrototype(m.findTile("K1").?, @fromBackingInt(@intCast(9999))));
 }
 
 test "changing a prototype's track moves every tile's text in it" {
@@ -2428,7 +2617,11 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
     const si = try m.addSketch(0, "Key", .{ .x = 0, .y = 0 });
     const sk = &m.sketches.items[si].sketch;
     const al = m.arena.allocator();
-    const P = struct { fn f(x: f64, y: f64) geom.Point { return .{ .x = x, .y = y }; } }.f;
+    const P = struct {
+        fn f(x: f64, y: f64) geom.Point {
+            return .{ .x = x, .y = y };
+        }
+    }.f;
     try sk.setParam(al, "w", "19.05");
     try sk.setParam(al, "h", "19.05");
     try sk.setParam(al, "homing", "0");

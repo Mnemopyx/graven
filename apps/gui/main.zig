@@ -18400,6 +18400,21 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
             changed = true;
         }
     }
+    // What a line does about something taller than its font (a
+    // display-style formula): the lines around break around it, it moves
+    // down, or the spacing is fixed.
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 919 + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.tall != ps.tall else false;
+        propName("Tall content");
+        const names = [_][]const u8{ "Lines flow around it", "Its line moves down", "Fixed spacing (may overlap)" };
+        var choice: usize = @intFromEnum(ps.tall);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 919 + n })) {
+            ps.tall = @enumFromInt(choice);
+            changed = true;
+        }
+    }
     // The style Enter gives the paragraph after (FrameMaker's Next ¶ Tag).
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 920 + n });

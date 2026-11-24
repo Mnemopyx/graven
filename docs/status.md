@@ -631,3 +631,13 @@ The owner: every new flow has a style from a style template; there is a default 
 - Next paragraph (FrameMaker's Next ¶ Tag): a paragraph style names the style Enter gives the paragraph after, when Enter ends a paragraph at its end (`ParagraphStyle.next`, `Model.paragraphStyleAfter`).
 - `History.beginStep`: makes the next op a new step even when joined.
 - Still to do: Fixed leading or lines that grow to fit (the open question on lines taller than the leading; needs placement to move a line's baseline after it is set); choosing the template a new flow takes (today always Default); removing override styles no flow uses (one per flow at most: reused by name); a flow style for flows made otherwise (sized to a prototype, the keyboard's).
+
+### Tall content in lines (2026-11-23)
+
+The owner: content in a line that reaches past the font's ascender or descender (his example: a display-style formula set among text) may make the lines around it break around it; an option. `ParagraphStyle.tall` (Properties: "Tall content"):
+
+- **Lines flow around it** (default): what reaches down closes its stretch of the lines after (as a tile thicker than its row does, `Tall`); what reaches up closes its stretch of the lines before (`UpKeep`), found as the flow is set, and the flow is set again with them until what it finds is what it was set with (at most five settings; `Around` in place.zig).
+- **Its line moves down**: the line's baseline moves just enough to clear the line before (ink beyond the fonts' extents, or beyond the leading where that is wider), and the lines after follow (`Grow`).
+- **Fixed spacing (may overlap)**: as before.
+
+Measured from each piece's ink (`Render.ink`), and only for runs whose ink passes their font's ascender or descender, so plain text never moves. Rows only so far (not column tracks). The keyboard and HP-15C SVGs are unchanged.

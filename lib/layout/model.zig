@@ -91,7 +91,7 @@ pub const Feature = enum {
     baseline,
 
     pub fn vertical(f: Feature) bool {
-        return @intFromEnum(f) >= @intFromEnum(Feature.bottom);
+        return @backingInt(f) >= @backingInt(Feature.bottom);
     }
 };
 
@@ -168,6 +168,9 @@ pub const ParagraphAlign = enum { start, centre, end, justify };
 /// first line's further indent (negative for a hanging one), space before
 /// and after the paragraph and between its lines, added to where its
 /// segments go along the track's path.
+/// See `ParagraphStyle.tall`.
+pub const TallContent = enum { around, move, fixed };
+
 pub const ParagraphStyle = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -178,6 +181,12 @@ pub const ParagraphStyle = struct {
     space_before: f64 = 0,
     space_after: f64 = 0,
     line_gap: f64 = 0,
+    /// What a line does about something it holds that reaches past its
+    /// font's own ascender or descender (a display-style formula): the
+    /// lines above and below break around it (the owner, 2026-11-23), it
+    /// moves down to clear the line above (the lines after it follow), or
+    /// the spacing is fixed (FrameMaker's Fixed) and they may overlap.
+    tall: TallContent = .around,
     /// The style a new paragraph takes when Enter ends one in this style
     /// (FrameMaker's Next ¶ Tag); null: this one.
     next: ?ParaId = null,
@@ -725,8 +734,6 @@ pub const TileRegion = struct {
     pub fn segmentLength(r: TileRegion) f64 {
         return if (r.major() == .row) r.w else r.h;
     }
-
-
 
     /// The band of a segment attached to the path at `s`, mm in the
     /// panel frame: a whole segment's length along, centred on `s` (the
@@ -2015,7 +2022,7 @@ pub const Model = struct {
 
     /// A new object ID.
     pub fn newId(m: *Model) ObjectId {
-        const id: ObjectId = @enumFromInt(m.next_id);
+        const id: ObjectId = @fromBackingInt(@intCast(m.next_id));
         m.next_id += 1;
         return id;
     }
@@ -2214,9 +2221,9 @@ pub const Model = struct {
 
     /// The collections' names in paths.
     pub const collection_names = [_]struct { []const u8, Collection }{
-        .{ "Styles", .styles },          .{ "ParagraphStyles", .paragraph_styles }, .{ "Prototypes", .prototypes },
-        .{ "Flows", .flows },            .{ "Sheets", .sheets },                    .{ "Sketches", .sketches },
-        .{ "Processes", .processes },    .{ "Materials", .materials },              .{ "Plans", .plans },
+        .{ "Styles", .styles },       .{ "ParagraphStyles", .paragraph_styles }, .{ "Prototypes", .prototypes },
+        .{ "Flows", .flows },         .{ "Sheets", .sheets },                    .{ "Sketches", .sketches },
+        .{ "Processes", .processes }, .{ "Materials", .materials },              .{ "Plans", .plans },
         .{ "Figures", .figures },
     };
 
@@ -4430,7 +4437,7 @@ pub const Model = struct {
                     const text = if (ci < row.cells.items.len) row.cells.items[ci] else "";
                     for (near.items) |t| {
                         const track = m.tileTrackNamed(t, col) orelse continue;
-                        const gop = try done.getOrPut(al, .{ @intFromEnum(t), @intFromEnum(track) });
+                        const gop = try done.getOrPut(al, .{ @backingInt(t), @backingInt(track) });
                         if (gop.found_existing) continue;
                         const now = try m.tileTrackText(al, t, track);
                         defer al.free(now);
@@ -6526,7 +6533,6 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-
     pub fn addPrototype(m: *Model, p: TilePrototype) Error!PrototypeId {
         var copy = try m.dupePrototype(p);
         copy.id = m.newId();
@@ -6823,7 +6829,7 @@ test "designators are unique and actions bump the revision" {
     const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
     const q = try m.addTile(.{ .designator = "Q", .prototype = key });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
-    try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = @enumFromInt(9999) }));
+    try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = @fromBackingInt(@intCast(9999)) }));
     try m.place(p, r, null, .{ .what = .{ .tile = q } });
     const before = m.revision;
     try m.setTrackText(q, "top", "q");
@@ -7011,7 +7017,7 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     try std.testing.expectEqual(20, region.w);
     try std.testing.expectEqual(3, region.h);
     try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.boxAt(.{ .across = 1 }).height(), 1e-9);
-    try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = @enumFromInt(9999), .count = 1, .length = 2, .pitch = 4 }));
+    try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = @fromBackingInt(@intCast(9999)), .count = 1, .length = 2, .pitch = 4 }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
 }
 
@@ -7439,7 +7445,7 @@ test "spaces, prototypes, styles and tiles are connected by ID; a panel given no
     try std.testing.expect(m.inSpace(m.rootOf(f), f));
     // Tiles are found by their IDs, which are not positions.
     const t = try m.addTile(.{ .designator = "A" });
-    try std.testing.expect(@intFromEnum(t) >= m.tiles.items.len);
+    try std.testing.expect(@backingInt(t) >= m.tiles.items.len);
     try std.testing.expectEqualStrings("A", m.tileConst(t).designator);
     try std.testing.expectEqual(t, m.findTile("A").?);
 }
