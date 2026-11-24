@@ -23,6 +23,8 @@ pub const constraint = @import("graven_constraint");
 pub const dual = constraint.dual;
 pub const solver = @import("solve.zig");
 pub const expr = constraint.expr;
+/// Arrays (polar and rectangular) as plain geometry and constraints.
+pub const arrays = @import("arrays.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -629,4 +631,5 @@ test {
     _ = solver;
     _ = expr;
     _ = @import("tests.zig");
+    _ = arrays;
 }

@@ -61,7 +61,7 @@ pub const Issue = struct {
 /// Where an object is, and what it is.
 /// A construction line is placed by its point: a horizontal one's height
 /// and a vertical one's place across are what a constraint holds.
-const Kind = enum { panel, region, art, image, figure_place, control_point, guide, grid };
+const Kind = enum { panel, region, art, image, figure_place, control_point, guide };
 /// What an object sits in: a workspace (panels, content layouts set
 /// straight on it, images) or a panel (its content layouts, line art),
 /// whose frame its position is in.
@@ -87,12 +87,6 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
             if (r.id == id) return .{ .kind = .region, .parent = pa, .index = k };
             for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = pa, .index = k, .sub = j };
         }
-    }
-    // A grid (an array): its cells' extent; its origin its first point
-    // (a polar one's, its centre).
-    for (0..m.parentCount()) |pk| {
-        const pa = m.parentAt(pk);
-        for (m.gridsIn(pa), 0..) |g, k| if (g.id == id) return .{ .kind = .grid, .parent = pa, .index = k };
     }
     for (m.panels.items, 0..) |p, pi| {
         if (p.id == id) return .{ .kind = .panel, .parent = .{ .space = m.spaceOf(pi) }, .holder = pi };
@@ -165,19 +159,6 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
             const at = controlPointAt(m.regionsIn(loc.parent)[loc.index], loc.sub);
             const v = if (vertical) at.y else at.x;
             break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
-        },
-        // A grid: its cells' extent, its origin where its first point is (a
-        // polar grid's centre). A polar grid sizes evenly: its width (the
-        // diameter) is what changes it, its height follows.
-        .grid => blk: {
-            const b = m.gridExtent(loc.parent, loc.index);
-            const o = m.gridsIn(loc.parent)[loc.index].origin;
-            const polar = m.gridShape(loc.parent, loc.index).polar != null;
-            const lo = if (vertical) b.y0 else b.x0;
-            const hi = if (vertical) b.y1 else b.x1;
-            const at = if (vertical) o.y else o.x;
-            const f = if (hi > lo) (at - lo) / (hi - lo) else 0.5;
-            break :blk .{ .lo = lo, .hi = hi, .f = f, .resizable = !(polar and vertical) };
         },
         // A construction line: its point, on each axis.
         .guide => blk: {
@@ -284,20 +265,6 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
         .guide => {
             const g = &m.spaces.items[loc.holder].guides.items[loc.index];
             if (vertical) g.at.y = o else g.at.x = o;
-        },
-        // A grid: its origin to `o`; its steps scaled to the size (a polar
-        // grid's rings and radius by its width, the diameter). A grid that
-        // follows another keeps the shape it follows.
-        .grid => {
-            const g = &m.gridsIn(loc.parent)[loc.index];
-            if (vertical) g.origin.y = o else g.origin.x = o;
-            const old = sh.hi - sh.lo;
-            if (!sh.resizable or g.link != .none or !(old > 1e-9) or !(s > 1e-9) or @abs(s - old) < 1e-12) return;
-            const k = s / old;
-            if (g.shape.polar) |*pol| {
-                pol.radius *= k;
-                g.shape.pitch_y *= k;
-            } else if (vertical) g.shape.pitch_y *= k else g.shape.pitch_x *= k;
         },
     }
 }

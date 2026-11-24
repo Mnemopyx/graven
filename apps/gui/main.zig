@@ -688,6 +688,8 @@ var array_tool: struct {
     polar: bool = false,
     around: u32 = 8,
     rings: u32 = 1,
+    /// How far round it goes, degrees (360: all the way).
+    sweep: f64 = 360,
 } = .{};
 
 /// The figure Insert figure places (its id), chosen in the Browser.
@@ -7629,7 +7631,6 @@ fn canvas(active: bool, view: u8) void {
     drawHover(area);
     drawEngagement(area);
     drawSnapGuides(area);
-    drawRingGrip(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -8770,7 +8771,10 @@ var grid_dropped: layout.model.Model.Dropped = .leave;
 /// reaching half a step past the outer ones; the context grid's stronger.
 fn drawGrids(area: dvui.Rect.Physical, pi: Parent) void {
     const px = dvui.windowNaturalScale();
-    for (state.model.gridsIn(pi), 0..) |_, gi| {
+    for (state.model.gridsIn(pi), 0..) |grid, gi| {
+        // An array's borders are its sketch's geometry, drawn as the
+        // sketch.
+        if (grid.array != null) continue;
         const sh = state.model.gridShape(pi, gi);
         const sel = switch (state.context) {
             .grid => |g| g.parent.eql(pi) and g.index == gi,
@@ -13068,11 +13072,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
-                if (state.tool == .select and me.button.pointer() and ringStart(area, me.p)) {
-                    // On a chosen polar array's outer ring: it turns with
-                    // the pointer about its centre.
-                    state.press_consumed = true;
-                } else if (state.tool == .construction and me.button.pointer()) {
+                if (state.tool == .construction and me.button.pointer()) {
                     // Construction line: a drag from its first point, or a
                     // click there and a click at its second.
                     const at = snap(state.view.toMm(area, me.p));
@@ -13174,11 +13174,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (ring_drag != null) {
-                    e.handle(@src(), box.data());
-                    ringMotion(state.view.toMm(area, me.p), me.mod.shift());
-                    dvui.refresh(null, @src(), box.data().id);
-                } else if (text_drag) {
+                if (text_drag) {
                     e.handle(@src(), box.data());
                     textDragTo(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
@@ -13255,10 +13251,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         guide_start = null;
                     } else guide_pending = true;
                 }
-                if (ring_drag != null) {
-                    ring_drag = null;
-                    state.press_consumed = false;
-                } else if (dim_drag != null) {
+                if (dim_drag != null) {
                     _ = dimRelease();
                 } else if (engage_drag != null) {
                     // A press on an engagement point that did not drag is
@@ -13441,7 +13434,6 @@ fn objectOfContext(c: Context) ?layout.model.ObjectId {
         .group => |g| g,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else return null,
         .figure_place => |fc| if (figurePlaceAt(fc.space, fc.index)) |fp| fp.id else return null,
-        .grid => |g| if (state.model.hasParent(g.parent) and g.index < state.model.gridsIn(g.parent).len) state.model.gridsIn(g.parent)[g.index].id else return null,
         else => return null,
     };
     return if (id == .none) null else id;
@@ -14411,81 +14403,6 @@ fn drawArrayPlan(area: dvui.Rect.Physical, b: geom.Box) void {
     }
 }
 
-/// A polar array being turned: grabbed on its outer ring, it turns about
-/// its centre with the pointer (Shift: in 15° steps from where it was).
-var ring_drag: ?struct { parent: Parent, gi: usize, start0: f64, a0: f64, key: u64 } = null;
-
-/// The chosen polar grid (the context), if any.
-fn contextPolar() ?struct { parent: Parent, gi: usize } {
-    const g = switch (state.context) {
-        .grid => |g| g,
-        else => return null,
-    };
-    if (!state.model.hasParent(g.parent) or g.index >= state.model.gridsIn(g.parent).len) return null;
-    if (state.model.gridShape(g.parent, g.index).polar == null) return null;
-    return .{ .parent = g.parent, .gi = g.index };
-}
-
-/// A polar grid's centre and outer radius, sheet mm.
-fn polarRing(parent: Parent, gi: usize) struct { c: geom.Point, r: f64 } {
-    const b = onSheet(parent, state.model.gridExtent(parent, gi));
-    return .{ .c = .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 }, .r = (b.x1 - b.x0) / 2 };
-}
-
-/// Whether `p` (window pixels) is on the chosen polar array's outer ring;
-/// if so, a turn starts there.
-fn ringStart(area: dvui.Rect.Physical, p: dvui.Point.Physical) bool {
-    const pg = contextPolar() orelse return false;
-    const ring = polarRing(pg.parent, pg.gi);
-    const at = state.view.toMm(area, p);
-    const d = @sqrt((at.x - ring.c.x) * (at.x - ring.c.x) + (at.y - ring.c.y) * (at.y - ring.c.y));
-    const tol = 8 * dvui.windowNaturalScale() / state.view.ppm;
-    if (@abs(d - ring.r) > tol) return false;
-    drag_count += 1;
-    ring_drag = .{
-        .parent = pg.parent,
-        .gi = pg.gi,
-        .start0 = state.model.gridShape(pg.parent, pg.gi).polar.?.start,
-        .a0 = std.math.radiansToDegrees(std.math.atan2(at.y - ring.c.y, at.x - ring.c.x)),
-        .key = mergeKey(.{ "ring-turn", drag_count }),
-    };
-    return true;
-}
-
-fn ringMotion(at: geom.Point, steps: bool) void {
-    const rd = ring_drag orelse return;
-    if (!state.model.hasParent(rd.parent) or rd.gi >= state.model.gridsIn(rd.parent).len) return;
-    var sh = state.model.gridShape(rd.parent, rd.gi);
-    if (sh.polar == null) return;
-    const ring = polarRing(rd.parent, rd.gi);
-    var turn = std.math.radiansToDegrees(std.math.atan2(at.y - ring.c.y, at.x - ring.c.x)) - rd.a0;
-    if (steps) turn = @round(turn / 15) * 15;
-    // Kept within ±180° of where it started (no jump past the half turn).
-    var to = rd.start0 + turn;
-    to = @mod(to + 180, 360) - 180;
-    sh.polar.?.start = to;
-    actM(rd.key, .setGridShape, .{ rd.parent, rd.gi, sh, grid_dropped }) catch {};
-    // The status outlives the frame: not in the frame's arena.
-    const S = struct {
-        var buf: [64]u8 = undefined;
-    };
-    state.status = std.fmt.bufPrint(&S.buf, "Turned to {d:.1}° (Shift: 15° steps). ", .{to}) catch "";
-}
-
-/// The chosen polar array's grip: a ring on its outer edge where column
-/// 0 points, showing it can be turned there.
-fn drawRingGrip(area: dvui.Rect.Physical) void {
-    const pg = contextPolar() orelse return;
-    const px = dvui.windowNaturalScale();
-    const ring = polarRing(pg.parent, pg.gi);
-    const a = std.math.degreesToRadians(state.model.gridShape(pg.parent, pg.gi).polar.?.start);
-    const q = state.view.toPx(area, .{ .x = ring.c.x + ring.r * @cos(a), .y = ring.c.y + ring.r * @sin(a) });
-    const r: f32 = 5 * px;
-    const box: dvui.Rect.Physical = .{ .x = q.x - r, .y = q.y - r, .w = 2 * r, .h = 2 * r };
-    box.fill(.all(r), .{ .color = .{ .color = colors.select } });
-    box.inset(.all(1.5 * px)).fill(.all(r), .{ .color = .{ .color = dvui.Color.white } });
-}
-
 /// A polar array being dragged out from its centre `c` to its outer edge
 /// at `at`: its rings and the borders between its cells.
 fn drawPolarPlan(area: dvui.Rect.Physical, c: geom.Point, at: geom.Point) void {
@@ -14493,50 +14410,62 @@ fn drawPolarPlan(area: dvui.Rect.Physical, c: geom.Point, at: geom.Point) void {
     const R = @sqrt((at.x - c.x) * (at.x - c.x) + (at.y - c.y) * (at.y - c.y));
     if (R <= 0) return;
     const n = array_tool.around;
+    const sweep = @min(360, @max(1, array_tool.sweep));
+    const full = sweep >= 360;
+    const step = sweep / @as(f64, @floatFromInt(n));
+    const first = 90 + if (full) step / 2 else sweep / 2;
     const rings: f64 = @floatFromInt(array_tool.rings);
-    const step = 360.0 / @as(f64, @floatFromInt(n));
-    // Rings: the outer edge, and the borders between rings.
+    // Rings (arcs over the sweep): the outer edge, and the borders
+    // between rings.
     for (1..array_tool.rings + 1) |k| {
         const r = R * @as(f64, @floatFromInt(k)) / rings;
-        var prev: geom.Point = .{ .x = c.x + r, .y = c.y };
-        for (1..97) |j| {
-            const a = std.math.tau * @as(f64, @floatFromInt(j)) / 96;
+        const outer = k == array_tool.rings;
+        var prev: ?geom.Point = null;
+        for (0..97) |j| {
+            const a = std.math.degreesToRadians(first - sweep * @as(f64, @floatFromInt(j)) / 96);
             const q: geom.Point = .{ .x = c.x + r * @cos(a), .y = c.y + r * @sin(a) };
-            strokeLine(area, prev, q, if (k == array_tool.rings) colors.select else colors.select.opacity(0.7), if (k == array_tool.rings) 1.5 * px else px);
+            if (prev) |p0| strokeLine(area, p0, q, if (outer) colors.select else colors.select.opacity(0.7), if (outer) 1.5 * px else px);
             prev = q;
         }
     }
-    // Radial borders, half a step either side of each cell's middle.
-    for (0..n) |i| {
-        const a = std.math.degreesToRadians(90 - (@as(f64, @floatFromInt(i)) - 0.5) * step);
+    // Radial borders.
+    const lines = if (full) n else n + 1;
+    for (0..lines) |i| {
+        const a = std.math.degreesToRadians(first - @as(f64, @floatFromInt(i)) * step);
         strokeLine(area, c, .{ .x = c.x + R * @cos(a), .y = c.y + R * @sin(a) }, colors.select.opacity(0.7), px);
     }
 }
 
-/// Add array, polar: a polar grid centred at `c`, its rings filling out to
-/// `at`'s distance; its points the cells' middles (column 0 straight up,
-/// then clockwise).
+/// Add array, polar: its sketch (a centre point, radial borders a fixed
+/// angle apart, equally spaced rings) centred at `c`, out to `at`'s
+/// distance, and a grid whose points are its cells' middles (column 0
+/// straight up, then clockwise).
 fn addPolarFromDrag(c: geom.Point, at: geom.Point) void {
     defer state.tool = .select;
-    const parent: Parent = switch (state.context) {
-        .panel => |pi| .{ .panel = pi },
-        .space => |si| .{ .space = si },
-        else => return,
-    };
+    const parent = arrayParent() orelse return;
     const R = @sqrt((at.x - c.x) * (at.x - c.x) + (at.y - c.y) * (at.y - c.y));
     if (!(R > 0.5)) {
         state.status = "The array was too small: drag from its centre out to its edge. ";
         return;
     }
-    const ring = R / @as(f64, @floatFromInt(array_tool.rings));
-    const o = parentOrigin(parent);
-    const gi = act(.addGrid, .{ parent, geom.Point{ .x = c.x - o.x, .y = c.y - o.y }, layout.model.GridShape{
-        .cols = array_tool.around,
-        .rows = array_tool.rings,
-        .pitch_x = 360.0 / @as(f64, @floatFromInt(array_tool.around)),
-        .pitch_y = ring,
-        .polar = .{ .radius = ring / 2 },
-    } }) catch {
+    // Its first border: column 0 straight up, the sweep either side.
+    const sweep = @min(360, @max(1, array_tool.sweep));
+    const first = 90 + if (sweep >= 360) 180.0 / @as(f64, @floatFromInt(array_tool.around)) else sweep / 2;
+    addArrayGrid(parent, c, true, array_tool.around, array_tool.rings, .{ .x = R, .y = first }, sweep);
+}
+
+/// Where a new array goes: the workspace shown, or the panel chosen.
+fn arrayParent() ?Parent {
+    return switch (state.context) {
+        .panel => |pi| .{ .panel = pi },
+        .space => |si| .{ .space = si },
+        else => null,
+    };
+}
+
+/// An array made (its sketch and its grid), and chosen.
+fn addArrayGrid(parent: Parent, at: geom.Point, polar: bool, cols: u32, rows: u32, size: geom.Point, sweep: f64) void {
+    const gi = act(.addArray, .{ parent, at, polar, cols, rows, size, sweep }) catch {
         state.status = "The array was not added. ";
         return;
     };
@@ -14544,35 +14473,19 @@ fn addPolarFromDrag(c: geom.Point, at: geom.Point) void {
     state.expanded.put(state.gpa, Context.key(parentContext(parent)), true) catch {};
 }
 
-/// Add array: a grid over box `b` (sheet mm), its cells `b` divided by the
-/// tool's counts; its points the cells' centres. On the workspace (canvas
-/// or frame) or the panel chosen.
+/// Add array: a rectangular array over box `b` (sheet mm): its sketch's
+/// borders, equally spaced, and a grid whose points are its cells'
+/// middles. On the workspace (canvas or frame) or the panel chosen.
 fn addArrayFromDrag(b: geom.Box) void {
     defer state.tool = .select;
-    const parent: Parent = switch (state.context) {
-        .panel => |pi| .{ .panel = pi },
-        .space => |si| .{ .space = si },
-        else => return,
-    };
+    const parent = arrayParent() orelse return;
     const w = b.x1 - b.x0;
     const h = b.y1 - b.y0;
     if (!(w > 0.5 and h > 0.5)) {
         state.status = "The array was too small: drag out its area. ";
         return;
     }
-    const cols: f64 = @floatFromInt(array_tool.cols);
-    const rows: f64 = @floatFromInt(array_tool.rows);
-    const px_ = w / cols;
-    const py_ = h / rows;
-    const o = parentOrigin(parent);
-    // Point (0, 0): the top-left cell's centre, in the parent's frame.
-    const origin: geom.Point = .{ .x = b.x0 + px_ / 2 - o.x, .y = b.y1 - py_ / 2 - o.y };
-    const gi = act(.addGrid, .{ parent, origin, layout.model.GridShape{ .cols = array_tool.cols, .rows = array_tool.rows, .pitch_x = px_, .pitch_y = py_ } }) catch {
-        state.status = "The array was not added. ";
-        return;
-    };
-    state.context = .{ .grid = .{ .parent = parent, .index = gi } };
-    state.expanded.put(state.gpa, Context.key(parentContext(parent)), true) catch {};
+    addArrayGrid(parent, .{ .x = b.x0, .y = b.y1 }, false, array_tool.cols, array_tool.rows, .{ .x = w, .y = h }, 0);
 }
 
 fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
@@ -16061,6 +15974,12 @@ fn arrayMenu() void {
         const cur: *u32 = if (array_tool.polar) (if (i == 0) &array_tool.around else &array_tool.rings) else (if (i == 0) &array_tool.cols else &array_tool.rows);
         if (accepted.numberField(@src(), f64, @floatFromInt(cur.*), 1, 999, .{ .id_extra = i, .expand = .horizontal })) |v| cur.* = @intFromFloat(@round(v));
     }
+    if (array_tool.polar) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3 });
+        defer row.deinit();
+        propName("Sweep, °");
+        if (accepted.numberField(@src(), f64, array_tool.sweep, 1, 360, .{ .id_extra = 3, .expand = .horizontal })) |v| array_tool.sweep = v;
+    }
     keyButton(@src(), "Apply", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
 }
 
@@ -16616,21 +16535,6 @@ const button_handlers = [_]ButtonHandler{
     handler("constrain-objects.right", struct {
         fn f(_: i32) void {
             edgesPick(.right);
-        }
-    }.f),
-    handler("constrain-objects.lock-centre", struct {
-        fn f(_: i32) void {
-            lockCentres();
-        }
-    }.f),
-    handler("constrain-objects.diameter", struct {
-        fn f(_: i32) void {
-            holdSpan(false);
-        }
-    }.f),
-    handler("constrain-objects.radius", struct {
-        fn f(_: i32) void {
-            holdSpan(true);
         }
     }.f),
     handler("constrain-objects.measure", struct {
@@ -25835,7 +25739,7 @@ fn objectsMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
     closeObjectsMenu();
 }
 
-const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right", "constrain-objects.lock-centre", "constrain-objects.diameter", "constrain-objects.radius", "constrain-objects.measure" };
+const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right", "constrain-objects.measure" };
 
 /// The objects' pop-up: each choice with its key; those needing two or
 /// more objects dimmed with one.
@@ -25873,42 +25777,6 @@ fn objectsMenu() void {
 
 /// Equal widths (or heights) for the chosen objects: each held equal to
 /// the first, one undo step.
-/// Lock centre: each chosen object's centre held where it is, from its
-/// parent's origin (two distances, across and up), one undo step.
-fn lockCentres() void {
-    const cb = constrain_batch orelse return;
-    closeObjectsMenu();
-    constrain_batch = null;
-    drag_count += 1;
-    const key = mergeKey(.{ "constrain-centre", drag_count });
-    for (cb.ids[0..cb.n]) |id| {
-        const parent = constrain.parentOf(&state.model, id) orelse continue;
-        inline for (.{ .{ Feature.centre_x, Feature.origin_x }, .{ Feature.centre_y, Feature.origin_y } }) |fs| {
-            const a: layout.model.ConstraintEnd = .{ .object = id, .feature = fs[0] };
-            const b: layout.model.ConstraintEnd = .{ .feature = fs[1] };
-            const at = (constrain.featureAt(&state.model, parent, a) orelse 0) - (constrain.featureAt(&state.model, parent, b) orelse 0);
-            _ = actM(key, .addConstraint, .{.{ .a = a, .b = b, .value = @abs(at), .side = if (at < 0) -1 else 1 }}) catch {};
-        }
-    }
-    state.status = "Centre locked. ";
-}
-
-/// Diameter (or radius): each chosen object's width held as it is (its
-/// right edge from its left, or from its centre), a dimension to change.
-fn holdSpan(radius: bool) void {
-    const cb = constrain_batch orelse return;
-    closeObjectsMenu();
-    constrain_batch = null;
-    drag_count += 1;
-    const key = mergeKey(.{ "constrain-span", drag_count });
-    for (cb.ids[0..cb.n]) |id| {
-        const b = constrain.boxOf(&state.model, id) orelse continue;
-        const w = b.width();
-        _ = actM(key, .addConstraint, .{.{ .a = .{ .object = id, .feature = .right }, .b = .{ .object = id, .feature = if (radius) .centre_x else .left }, .value = if (radius) w / 2 else w, .side = 1 }}) catch {};
-    }
-    state.status = if (radius) "Radius held: change its value to resize. " else "Diameter held: change its value to resize. ";
-}
-
 fn equalSizes(vertical: bool) void {
     const cb = constrain_batch orelse return;
     closeObjectsMenu();
@@ -26829,13 +26697,13 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at);
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_array, rect_array };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
-const SkGeo = enum { point, line, polyline, arc, circle };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt } };
-var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle };
+const SkGeo = enum { point, line, polyline, arc, circle, array };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{ .polar_array, .rect_array } };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polar_array };
 
 /// The geometry button tool `t` belongs to.
 fn skGeoOf(t: SkTool) ?SkGeo {
@@ -27227,8 +27095,11 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
         var buf: [3]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, @intCast(gi))) |r| {
             const p = s.point(r) catch continue;
-            const d = skDist(p, q);
-            if (d > radius or sk_nhits >= sk_hits.len) continue;
+            const d0 = skDist(p, q);
+            if (d0 > radius or sk_nhits >= sk_hits.len) continue;
+            // The sketch's own origin after its geometry at the same place
+            // (an array's centre sits on it).
+            const d = if (g.reference) d0 + radius else d0;
             // Insertion by distance.
             var k = sk_nhits;
             while (k > 0 and pdist[k - 1] > d) : (k -= 1) {
@@ -27301,7 +27172,7 @@ fn skToolClicks(t: SkTool) usize {
     return switch (t) {
         .none => 0,
         .point => 1,
-        .segment, .polyline, .circle, .line, .ray => 2,
+        .segment, .polyline, .circle, .line, .ray, .polar_array, .rect_array => 2,
         .arc_centre, .arc_3pt, .circle_3pt => 3,
     };
 }
@@ -27327,6 +27198,14 @@ fn skToolClick(p: geom.Point) void {
         },
         .ray => if (skDist(c[0], c[1]) > 1e-9) {
             _ = skEdit(.{ .ray = .{ .o = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+        },
+        // An array: its centre then its edge (its first border there), or
+        // two corners; its counts from the array tool's.
+        .polar_array => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .array = .{ .polar = true, .at = c[0], .to = c[1], .cols = array_tool.around, .rows = array_tool.rings, .sweep = array_tool.sweep } });
+        },
+        .rect_array => if (@abs(c[0].x - c[1].x) > 1e-9 and @abs(c[0].y - c[1].y) > 1e-9) {
+            _ = skEdit(.{ .array = .{ .polar = false, .at = c[0], .to = c[1], .cols = array_tool.cols, .rows = array_tool.rows } });
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
             _ = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
@@ -27802,6 +27681,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.constraint.distance") => skConstrain(.distance, area),
             kact("sketch.constraint.radius") => skConstrain(.radius, area),
             kact("sketch.constraint.angle") => skConstrain(.angle, area),
+            kact("sketch.constraint.lock") => skConstrain(.fixed, area),
             kact("sketch.tool.next") => skCycleTool(),
             else => used = false,
         }
@@ -28418,7 +28298,7 @@ fn sketchPalette() void {
         below = flex.data().borderRectScale().r;
         keyButton(@src(), "Select", 0, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null });
         keyButton(@src(), "Construction", 0, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null });
-        const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle" };
+        const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Array" };
         for (names, 0..) |name, g| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == g else false;
             keyButton(@src(), name, @intCast(g), .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null });
@@ -28440,7 +28320,8 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
     // Floating over what is below the buttons, as tall as its rows.
     const fields: f32 = @floatFromInt(skStepFieldCount());
     const hint_rows: f32 = if (tools.len > 1) (if (g == .line and !sk_construction) 2 else 1) else 0;
-    const h: f32 = 20 + (if (tools.len > 1) @as(f32, 32) else 0) + hint_rows * 24 + 28 + fields * 40;
+    const counts: f32 = if (g == .array) (if (sk_tool == .polar_array) 3 else 2) else 0;
+    const h: f32 = 20 + (if (tools.len > 1) @as(f32, 32) else 0) + hint_rows * 24 + 28 + (fields + counts) * 40;
     var fw: dvui.FloatingWidget = undefined;
     fw.init(@src(), .{}, .{
         .rect = .{ .x = buttons.x / ns, .y = (buttons.y + buttons.h) / ns + 4, .w = buttons.w / ns, .h = h },
@@ -28473,8 +28354,29 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
     const faint = dvui.themeGet().color(.control, .text).opacity(0.65);
     if (tools.len > 1) dvui.labelNoFmt(@src(), "M: next option", .{}, .{ .color_text = .{ .color = faint } });
     if (g == .line and !sk_construction) dvui.labelNoFmt(@src(), "Ray and line: construction only", .{}, .{ .color_text = .{ .color = faint } });
+    if (g == .array) skArrayCounts();
     dvui.label(@src(), "{s}: point {d} of {d}", .{ skToolName(sk_tool), sk_nclicks + 1, skToolClicks(sk_tool) }, .{ .color_text = .{ .color = faint } });
     skStepFields();
+}
+
+/// The array macro's counts (the array tool's, shared): a polar array's
+/// columns round, rings and sweep; a rectangular one's columns and rows.
+fn skArrayCounts() void {
+    const saved = pushGroup("array");
+    defer popGroup(saved);
+    const polar = sk_tool == .polar_array;
+    const labels: [3][]const u8 = if (polar) .{ "Around", "Rings", "Sweep, °" } else .{ "Columns", "Rows", "" };
+    inline for (0..3) |i| if (i < 2 or polar) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
+        defer row.deinit();
+        propName(labels[i]);
+        if (i == 2) {
+            if (accepted.numberField(@src(), f64, array_tool.sweep, 1, 360, .{ .id_extra = i, .expand = .horizontal })) |v| array_tool.sweep = v;
+        } else {
+            const cur: *u32 = if (polar) (if (i == 0) &array_tool.around else &array_tool.rings) else (if (i == 0) &array_tool.cols else &array_tool.rows);
+            if (accepted.numberField(@src(), f64, @floatFromInt(cur.*), 1, 999, .{ .id_extra = i, .expand = .horizontal })) |v| cur.* = @intFromFloat(@round(v));
+        }
+    };
 }
 
 fn skToolName(t: SkTool) []const u8 {
@@ -28489,6 +28391,8 @@ fn skToolName(t: SkTool) []const u8 {
         .arc_3pt => "3 points",
         .circle => "Centre",
         .circle_3pt => "3 points",
+        .polar_array => "Polar",
+        .rect_array => "Rectangular",
     };
 }
 
@@ -28585,7 +28489,7 @@ fn sketchConstrainButtons() void {
         .{ .k = .distance_y, .name = "Vertical distance" },
         .{ .k = .radius, .name = "Radius R" },
         .{ .k = .angle, .name = "Angle A" },
-        .{ .k = .fixed, .name = "Lock" },
+        .{ .k = .fixed, .name = "Lock L" },
         .{ .k = .tangent, .name = "Tangent T" },
         .{ .k = .perpendicular, .name = "Perpendicular P" },
         .{ .k = .parallel, .name = "Parallel" },

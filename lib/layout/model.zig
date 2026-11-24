@@ -1268,6 +1268,11 @@ pub const SketchEdit = union(enum) {
     arc: struct { c: geom.Point, a: geom.Point, b: geom.Point, construction: bool = false },
     line: struct { through: geom.Point, angle: f64 },
     ray: struct { o: geom.Point, angle: f64 },
+    /// An array's geometry (see `sketch_.arrays`): polar, centred at `at`
+    /// out to `to` (its first border there), `cols` round and `rows`
+    /// rings over `sweep` degrees; or rectangular, `cols` × `rows` cells
+    /// between corners `at` and `to`.
+    array: struct { polar: bool, at: geom.Point, to: geom.Point, cols: u32, rows: u32, sweep: f64 = 360 },
     construction: struct { g: sketch_.GeomId, on: bool },
     remove: sketch_.GeomId,
     constrain: sketch_.Constraint,
@@ -1549,6 +1554,12 @@ pub const Grid = struct {
     shape: GridShape,
     /// The grid whose shape it takes, if any.
     link: ObjectId = .none,
+    /// An array: the sketch whose geometry gives its points (the middles of
+    /// its cells), and that geometry's parts by ID. Its origin and spacing
+    /// come from that sketch as solved, where its first view in the space
+    /// puts it; its counts are its own (`shape.cols`, `shape.rows`).
+    sketch: ObjectId = .none,
+    array: ?sketch_.arrays.Refs = null,
     stamps: std.ArrayList(Stamp) = .empty,
     instances: std.ArrayList(GridInstance) = .empty,
 };
@@ -3797,6 +3808,7 @@ pub const Model = struct {
     /// The shape grid `gi` of panel `panel` has: its own, or the one it
     /// follows (through any chain of links).
     pub fn gridShape(m: *const Model, parent: Parent, gi: usize) GridShape {
+        if (m.arrayLayout(parent, gi)) |al| return al.shape;
         var g = &m.gridsIn(parent)[gi];
         var hops: usize = 0;
         while (g.link != .none and hops < 16) : (hops += 1) {
@@ -3817,30 +3829,114 @@ pub const Model = struct {
 
     /// Where point (`col`, `row`) of grid `gi` is, mm in the panel frame.
     pub fn gridPoint(m: *const Model, parent: Parent, gi: usize, col: f64, row: f64) geom.Point {
-        const g = m.gridsIn(parent)[gi];
+        const go = m.gridOrigin(parent, gi);
         const sh = m.gridShape(parent, gi);
         if (sh.polar) |pol| {
             const ang = std.math.degreesToRadians(pol.start - col * sh.stepX());
             const r = @max(0, pol.radius + row * sh.stepY());
-            return .{ .x = g.origin.x + r * @cos(ang), .y = g.origin.y + r * @sin(ang) };
+            return .{ .x = go.x + r * @cos(ang), .y = go.y + r * @sin(ang) };
         }
-        return .{ .x = g.origin.x + col * sh.stepX(), .y = g.origin.y - row * sh.stepY() };
+        return .{ .x = go.x + col * sh.stepX(), .y = go.y - row * sh.stepY() };
+    }
+
+    /// An array grid's shape and origin (in its parent's frame), from its
+    /// sketch as solved; null for a grid of another kind, or one whose
+    /// sketch or view is gone.
+    pub fn arrayLayout(m: *const Model, parent: Parent, gi: usize) ?struct { shape: GridShape, origin: geom.Point } {
+        const g = m.gridsIn(parent)[gi];
+        const refs = g.array orelse return null;
+        const si = m.sketchIndex(g.sketch) orelse return null;
+        const space = switch (parent) {
+            .space => |i| i,
+            .panel => |pi| m.spaceOf(pi),
+        };
+        if (space >= m.spaces.items.len) return null;
+        var at: ?geom.Point = null;
+        for (m.spaces.items[space].sketch_views.items) |v| if (v.sketch == g.sketch) {
+            at = v.at;
+            break;
+        };
+        var o = at orelse return null;
+        if (parent == .panel) {
+            const po = m.panels.items[parent.panel].origin;
+            o = .{ .x = o.x - po.x, .y = o.y - po.y };
+        }
+        const cells = sketch_.arrays.cells(&m.sketches.items[si].sketch, refs) catch return null;
+        const cols: f64 = @floatFromInt(@max(1, g.shape.cols));
+        const rows: f64 = @floatFromInt(@max(1, g.shape.rows));
+        var sh = g.shape;
+        sh.stretch_x = 1;
+        sh.stretch_y = 1;
+        switch (cells) {
+            .polar => |p| {
+                sh.pitch_x = std.math.radiansToDegrees(p.step);
+                sh.pitch_y = p.r / rows;
+                sh.polar = .{ .radius = sh.pitch_y / 2, .start = std.math.radiansToDegrees(p.first - p.step / 2) };
+                return .{ .shape = sh, .origin = .{ .x = o.x + p.c.x, .y = o.y + p.c.y } };
+            },
+            .rect => |b| {
+                sh.pitch_x = (b.x1 - b.x0) / cols;
+                sh.pitch_y = (b.y1 - b.y0) / rows;
+                sh.polar = null;
+                return .{ .shape = sh, .origin = .{ .x = o.x + b.x0 + sh.pitch_x / 2, .y = o.y + b.y1 - sh.pitch_y / 2 } };
+            },
+        }
+    }
+
+    /// Grid `gi`'s point (0, 0), mm in its parent's frame (an array's from
+    /// its sketch).
+    pub fn gridOrigin(m: *const Model, parent: Parent, gi: usize) geom.Point {
+        if (m.arrayLayout(parent, gi)) |al| return al.origin;
+        return m.gridsIn(parent)[gi].origin;
+    }
+
+    /// Adds an array to `parent` (a workspace, or a panel): a sketch of its
+    /// geometry (see `sketch_.arrays`), viewed in the space at `at`, and a
+    /// grid whose points are its cells' middles. Polar: `cols` round, `rows`
+    /// rings, centred at `at`, out to `size.x` (its first border at angle
+    /// `size.y`, degrees), over `sweep` degrees. Rectangular: its top-left
+    /// cell's corner at `at`, `size` across and down. Returns the grid's
+    /// index.
+    pub fn addArray(m: *Model, parent: Parent, at: geom.Point, polar: bool, cols: u32, rows: u32, size: geom.Point, sweep: f64) Error!usize {
+        if (!m.hasParent(parent)) return error.NoSuchItem;
+        if (cols == 0 or rows == 0) return error.BadSize;
+        const space = switch (parent) {
+            .space => |i| i,
+            .panel => |pi| m.spaceOf(pi),
+        };
+        if (space >= m.spaces.items.len) return error.NoSuchItem;
+        var name_buf: [32]u8 = undefined;
+        const sk_name = m.freshName(&name_buf, .sketches, "Array");
+        var sk = try sketch_.Sketch.init(m.a());
+        const refs = (if (polar)
+            sketch_.arrays.addPolar(&sk, m.a(), .{ .x = 0, .y = 0 }, size.x, std.math.degreesToRadians(size.y), std.math.degreesToRadians(sweep), cols, rows)
+        else
+            sketch_.arrays.addRect(&sk, m.a(), .{ .x0 = 0, .y0 = -size.y, .x1 = size.x, .y1 = 0 }, cols, rows)) catch return error.BadSize;
+        const sid = m.newId();
+        try m.sketches.append(m.a(), .{ .id = sid, .name = try m.a().dupe(u8, sk_name), .default_name = true, .sketch = sk });
+        try m.spaces.items[space].sketch_views.append(m.a(), .{ .id = m.newId(), .sketch = sid, .at = at });
+        const gi = try m.addGrid(parent, .{ .x = 0, .y = 0 }, .{ .cols = cols, .rows = rows, .pitch_x = 1, .pitch_y = 1 });
+        const g = &m.gridsIn(parent)[gi];
+        g.sketch = sid;
+        g.array = refs;
+        m.revision += 1;
+        return gi;
     }
 
     /// Grid `gi`'s extent, mm in its parent's frame: its cells' outer
     /// borders, half a step past its outer points; a polar grid's, the
     /// square round its outer ring.
     pub fn gridExtent(m: *const Model, parent: Parent, gi: usize) geom.Box {
-        const g = m.gridsIn(parent)[gi];
+        const go = m.gridOrigin(parent, gi);
         const sh = m.gridShape(parent, gi);
         if (sh.polar) |pol| {
             const r = @max(0, pol.radius + (@as(f64, @floatFromInt(sh.rows)) - 0.5) * sh.stepY());
-            return .{ .x0 = g.origin.x - r, .x1 = g.origin.x + r, .y0 = g.origin.y - r, .y1 = g.origin.y + r };
+            return .{ .x0 = go.x - r, .x1 = go.x + r, .y0 = go.y - r, .y1 = go.y + r };
         }
         const w = @as(f64, @floatFromInt(sh.cols)) * sh.stepX();
         const h = @as(f64, @floatFromInt(sh.rows)) * sh.stepY();
-        const x0 = g.origin.x - sh.stepX() / 2;
-        const y1 = g.origin.y + sh.stepY() / 2;
+        const x0 = go.x - sh.stepX() / 2;
+        const y1 = go.y + sh.stepY() / 2;
         return .{ .x0 = x0, .x1 = x0 + w, .y0 = y1 - h, .y1 = y1 };
     }
 
@@ -5101,6 +5197,17 @@ pub const Model = struct {
             .arc => |e| out = try sk.addArc(al, e.c, e.a, e.b, e.construction),
             .line => |e| out = try sk.addLine(al, e.through, e.angle),
             .ray => |e| out = try sk.addRay(al, e.o, e.angle),
+            .array => |e| {
+                const r = @sqrt((e.to.x - e.at.x) * (e.to.x - e.at.x) + (e.to.y - e.at.y) * (e.to.y - e.at.y));
+                const refs = if (e.polar)
+                    try sketch_.arrays.addPolar(sk, al, e.at, r, std.math.atan2(e.to.y - e.at.y, e.to.x - e.at.x), std.math.degreesToRadians(e.sweep), e.cols, e.rows)
+                else
+                    try sketch_.arrays.addRect(sk, al, .{ .x0 = @min(e.at.x, e.to.x), .y0 = @min(e.at.y, e.to.y), .x1 = @max(e.at.x, e.to.x), .y1 = @max(e.at.y, e.to.y) }, e.cols, e.rows);
+                out = switch (refs) {
+                    .polar => |p| p.centre,
+                    .rect => |q| q.left,
+                };
+            },
             .construction => |e| try sk.setConstruction(e.g, e.on),
             .remove => |g| try sk.removeGeometry(g),
             .constrain => |c| {
