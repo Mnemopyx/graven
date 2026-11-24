@@ -211,7 +211,33 @@ pub fn textAt(m: Measure, place: Placement, at: Point) Placement {
     return p;
 }
 
+/// `place` kept within `reach` (mm) of what it measures, so a dimension
+/// reads as belonging to its features (the owner, 2026-11-24): its line no
+/// further than `reach` beyond the farther feature across, its value no
+/// further than `reach` beyond either end along.
+pub fn withinReach(m: Measure, place: Placement, reach: f64) Placement {
+    var p = place;
+    const mid = mul(add(m.p0, m.p1), 0.5);
+    const n0 = dot(sub(m.p0, mid), m.normal);
+    const n1 = dot(sub(m.p1, mid), m.normal);
+    p.offset = std.math.clamp(p.offset, @min(n0, n1) - reach, @max(n0, n1) + reach);
+    const half = @abs(dot(sub(m.p1, m.p0), m.dir)) / 2;
+    p.text = std.math.clamp(p.text, -(half + reach), half + reach);
+    return p;
+}
+
 const testing = std.testing;
+
+test "within reach: the line and the value kept near the features" {
+    const m: Measure = .{ .p0 = .{ .x = 0, .y = 0 }, .p1 = .{ .x = 40, .y = 10 }, .dir = .{ .x = 1, .y = 0 }, .normal = .{ .x = 0, .y = 1 } };
+    // Mid (20, 5); features at -5 and +5 across, 20 each way along.
+    const far = withinReach(m, .{ .offset = 100, .text = -100 }, 8);
+    try testing.expectEqual(@as(f64, 13), far.offset);
+    try testing.expectEqual(@as(f64, -28), far.text);
+    const below = withinReach(m, .{ .offset = -100, .text = 3 }, 8);
+    try testing.expectEqual(@as(f64, -13), below.offset);
+    try testing.expectEqual(@as(f64, 3), below.text);
+}
 
 const test_style: Style = .{ .gap = 1, .overshoot = 2, .arrow = 3, .arrow_half = 1, .text_width = 10, .text_clear = 1 };
 

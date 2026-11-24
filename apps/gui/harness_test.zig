@@ -2374,3 +2374,22 @@ test "K, M on a column: a reference dimension that follows and moves nothing" {
     try std.testing.expect(!api.constraintAt(0).driving);
     try std.testing.expectApproxEqAbs(before.x0, api.boxAt(cols[1]).?.x0, 1e-9);
 }
+
+test "a removed column takes its constraints with it, in the same step; undo brings both back" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try api.loadColumns(true);
+    try r.frames(3);
+    try std.testing.expectEqual(9, api.constraintCount());
+    // Column2: its gap to Column1, Column3's gap to it, its equal width and
+    // its top go; the rest stay.
+    try r.select("Panel.Column2");
+    try r.press("track.remove");
+    try std.testing.expect(api.boxAt("Panel.Column2") == null);
+    try std.testing.expectEqual(5, api.constraintCount());
+    try r.run("edit.undo");
+    try r.frames(2);
+    try std.testing.expect(api.boxAt("Panel.Column2") != null);
+    try std.testing.expectEqual(9, api.constraintCount());
+}

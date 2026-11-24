@@ -100,6 +100,13 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
     return null;
 }
 
+/// Whether constraint `c` names an object that is gone (removed since
+/// it was made): abandoned, it constrains nothing.
+pub fn abandoned(m: *const Model, c: model.Constraint) bool {
+    if (locate(m, c.a.object) == null) return true;
+    return c.b.object != .none and locate(m, c.b.object) == null;
+}
+
 fn parentEql(a: Parent, b: Parent) bool {
     return a.eql(b);
 }
@@ -471,13 +478,11 @@ fn alongNormal(e: ?[2]f64, vertical: bool) ?[2]f64 {
 /// line without end; null for an unbounded workspace.
 fn acrossOf(m: *const Model, parent: Parent, id: ObjectId, vertical: bool) ?[2]f64 {
     const inf = std.math.inf(f64);
-    if (id == .none) {
-        const lo = parentFeature(m, parent, if (vertical) .left else .bottom) orelse return null;
-        const hi = parentFeature(m, parent, if (vertical) .right else .top) orelse return null;
-        const off = frameOffset(m, parent);
-        const o = if (vertical) off.x else off.y;
-        return .{ lo + o, hi + o };
-    }
+    // A frame's own lines (its axes and edges) and construction lines run
+    // on: a dimension needs no extension line along them (the owner,
+    // 2026-11-24).
+    _ = parent;
+    if (id == .none) return .{ -inf, inf };
     const loc = locate(m, id) orelse return null;
     if (loc.kind == .guide) return .{ -inf, inf };
     const b = boxOf(m, id) orelse return null;

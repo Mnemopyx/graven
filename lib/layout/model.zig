@@ -1045,7 +1045,7 @@ pub const Output = enum {
 /// A layer of a space: what it shows, whether it can be changed, how it
 /// is composited, and what makes it.
 /// One of the editor's own layers in a space's stack (`Space.overlays`).
-pub const Overlay = enum { grid, axes, check_strokes, check_gaps, check_other, simulation, guides, flow_marks };
+pub const Overlay = enum { grid, axes, check_strokes, check_gaps, check_other, simulation, guides, flow_marks, constraints };
 
 /// An editor layer in a space's stack: shown or not, and how many of the
 /// space's layers lie below it (`maxInt`: above them all).
@@ -1065,6 +1065,7 @@ pub const Overlays = struct {
     simulation: OverlayState = .{},
     guides: OverlayState = .{},
     flow_marks: OverlayState = .{},
+    constraints: OverlayState = .{},
 
     pub fn get(o: Overlays, w: Overlay) OverlayState {
         return switch (w) {

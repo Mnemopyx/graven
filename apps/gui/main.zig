@@ -769,6 +769,10 @@ const Context = union(enum) {
     plan: layout.model.ObjectId,
     materials,
     material: layout.model.ObjectId,
+    /// Every layout constraint in the document (the abandoned among them),
+    /// and one of them.
+    constraints,
+    constraint: layout.model.ObjectId,
 
     fn key(c: Context) u64 {
         var h: std.hash.Wyhash = .init(0);
@@ -820,6 +824,8 @@ const Context = union(enum) {
             .plan => "Manufacturing plan",
             .materials => "Materials",
             .material => "Material",
+            .constraints => "Constraints",
+            .constraint => "Constraint",
         };
     }
 };
@@ -3539,14 +3545,50 @@ fn leavePrompt(p: Pending) void {
 var hist: history.History = undefined;
 
 fn act(comptime tag: history.Tag, args: history.Args(@tagName(tag))) history.Error!history.Result(@tagName(tag)) {
-    return hist.do(&state.model, tag, args);
+    const before = Abandoned.now();
+    const r = try hist.do(&state.model, tag, args);
+    before.dropNew();
+    return r;
 }
+
+/// The constraints abandoned (`constrain.abandoned`: an object they name
+/// removed) before a change.
+const Abandoned = struct {
+    ids: [64]layout.model.ObjectId = undefined,
+    n: usize = 0,
+
+    fn now() Abandoned {
+        var r: Abandoned = .{};
+        for (state.model.constraints.items) |c| if (r.n < r.ids.len and constrain.abandoned(&state.model, c)) {
+            r.ids[r.n] = c.id;
+            r.n += 1;
+        };
+        return r;
+    }
+
+    /// The constraints the change abandoned (an equal size left with one
+    /// object among them) removed in the same step (the owner,
+    /// 2026-11-24). Those abandoned before it are left to be chosen and
+    /// deleted (the Constraints list).
+    fn dropNew(before: Abandoned) void {
+        const m = &state.model;
+        if (m.constraints.items.len == 0) return;
+        const after = now();
+        for (after.ids[0..after.n]) |id| {
+            if (std.mem.indexOfScalar(layout.model.ObjectId, before.ids[0..before.n], id) != null) continue;
+            _ = hist.join(m, .removeConstraint, .{id}) catch {};
+        }
+    }
+};
 
 /// An action that cannot fail but for memory to log it.
 fn actV(comptime tag: history.Tag, args: history.Args(@tagName(tag))) void {
+    const before = Abandoned.now();
     hist.do(&state.model, tag, args) catch {
         state.status = "That change could not be recorded. ";
+        return;
     };
+    before.dropNew();
 }
 
 /// The logical group of a context's elements (elements.zig).
@@ -3606,7 +3648,10 @@ fn newFieldStep() void {
 /// An action that joins the step before when that had the same `key`: a
 /// run of nudges, or typing, undone as one.
 fn actM(key: u64, comptime tag: history.Tag, args: history.Args(@tagName(tag))) history.Error!history.Result(@tagName(tag)) {
-    return hist.doMerged(&state.model, key, tag, args);
+    const before = Abandoned.now();
+    const r = try hist.doMerged(&state.model, key, tag, args);
+    before.dropNew();
+    return r;
 }
 
 fn mergeKey(parts: anytype) u64 {
@@ -3803,6 +3848,8 @@ fn contextValid(c: Context) bool {
         .plans, .materials => true,
         .plan => |id| m.planIndex(id) != null,
         .material => |id| m.materialIndex(id) != null,
+        .constraints => true,
+        .constraint => |id| constraintById(id) != null,
     };
 }
 
@@ -5359,6 +5406,14 @@ fn treeContent() void {
     if (treeNode(.figures, "Figures", 1, state.model.figures.items.len > 0, false)) {
         for (state.model.figures.items, 0..) |f, i| _ = treeNode(.{ .figure_def = i }, f.name, 2, false, f.default_name);
     }
+    // Every constraint, wherever it is and whether what it names is still
+    // there (the owner, 2026-11-24): one place to choose any of them.
+    if (state.model.constraints.items.len > 0) if (treeNode(.constraints, "Constraints", 1, true, false)) {
+        for (state.model.constraints.items) |c| {
+            var b: [300]u8 = undefined;
+            _ = treeNode(.{ .constraint = c.id }, constraintText(&b, c), 2, false, false);
+        }
+    };
     sheetsTree();
     // The flows: each with its tracks in order; one with none is unplaced.
     if (state.model.flows.items.len > 0) if (treeNode(.flows, "Flows", 1, true, false)) {
@@ -5599,6 +5654,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
     const selected = state.context.eql(ctx);
     const flagged = switch (ctx) {
         .panel => |pi| panelIssue(pi) != null,
+        .constraint => |cid| if (constraintById(cid)) |c| constrain.abandoned(&state.model, c) or constraintIssue(cid) != null else false,
         else => false,
     };
     if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
@@ -5660,7 +5716,7 @@ fn inContext(pi: Parent, t: layout.place.PlacedTile) bool {
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .space, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .templates, .template, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place => false,
+        .file, .worksheet, .space, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .templates, .template, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place, .constraints, .constraint => false,
     };
 }
 
@@ -9816,6 +9872,8 @@ const ViewLayer = enum {
     /// next (the owner, 2026-11-22: one layer, moved and shown or hidden in
     /// the Layers palette).
     flow_marks,
+    /// Layout constraints: their dimensions and equal marks.
+    constraints,
 
     fn label(v: ViewLayer) []const u8 {
         return switch (v) {
@@ -9823,6 +9881,7 @@ const ViewLayer = enum {
             .axes => "Axes",
             .guides => "Construction lines",
             .flow_marks => "Flow marks",
+            .constraints => "Constraints",
             else => v.check().?.label(),
         };
     }
@@ -9912,6 +9971,7 @@ fn drawViewLayer(area: dvui.Rect.Physical, space: usize, v: ViewLayer, active: b
         // Construction lines: the view being worked in.
         .guides => if (active) drawGuides(area),
         .flow_marks => drawFlowMarksLayer(area, space),
+        .constraints => drawConstraintsLayer(area, space),
         else => drawChecks(area, space, v.check().?),
     }
 }
@@ -14505,6 +14565,8 @@ fn lowerKind() []const u8 {
         .plans => "manufacturing plans",
         .plan => "manufacturing plan",
         .materials => "materials",
+        .constraints => "constraints",
+        .constraint => "constraint",
         .material => "material",
         .figures => "figures",
         .figure_def => "figure",
@@ -17109,6 +17171,11 @@ const button_handlers = [_]ButtonHandler{
             act(.setConstraintPlace, .{ id, .{} }) catch {};
         }
     }.f),
+    handler("constraints-list.remove-abandoned", struct {
+        fn f(_: i32) void {
+            removeAbandoned();
+        }
+    }.f),
     handler("constraint.remove", struct {
         fn f(_: i32) void {
             const id = picked_constraint orelse return;
@@ -18036,6 +18103,8 @@ fn properties() !void {
         else => return planEditor(@enumFromInt(vl.views[vl.active].target)),
     };
     if (sketch_edit != null) return sketchModeProperties();
+    // A constraint chosen in the Browser is the picked one.
+    if (state.context == .constraint) picked_constraint = state.context.constraint;
     if (pickedConstraintProperties()) return;
     if (panel_edit != null) {
         panelEditHeader();
@@ -18238,6 +18307,9 @@ fn properties() !void {
         .materials => materialsProperties(),
         .material => |id| materialProperties(id),
         .sheet => |id| sheetProperties(id),
+        .constraints => constraintsProperties(),
+        // Shown as the picked constraint (`pickedConstraintProperties`).
+        .constraint => {},
     }
 }
 
@@ -24310,8 +24382,9 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
     }
     // Nearest first; at one place (a track's origin is its top-left
     // corner), moving before resizing.
-    // Constraint dimensions: the value (a point) and the line.
-    for (state.model.constraints.items) |c| {
+    // Constraint dimensions: the value (a point) and the line (none while
+    // the Constraints layer is hidden).
+    if (ViewLayer.constraints.shown()) for (state.model.constraints.items) |c| {
         const g = dimGeom(c) orelse continue;
         const lq = state.view.toPx(area, g.d.text_at);
         const dl = @sqrt((lq.x - pp.x) * (lq.x - pp.x) + (lq.y - pp.y) * (lq.y - pp.y));
@@ -24322,7 +24395,7 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
         }
         const dd = segDistPx(pp, state.view.toPx(area, g.d.line[0]), state.view.toPx(area, g.d.line[1]));
         if (dd <= edge_r) edges.append(a, .{ .id = c.id, .kind = .dim_line, .edges = .{}, .at = at, .d = dd }) catch {};
-    }
+    };
     const by_d = struct {
         fn lt(_: void, x: EngageHit, y: EngageHit) bool {
             if (@abs(x.d - y.d) > 0.5) return x.d < y.d;
@@ -25148,8 +25221,12 @@ fn objectName(id: layout.model.ObjectId) []const u8 {
         }
         for (p.art.items) |x| if (x.id == id) return x.name;
     }
-    for (m.spaces.items) |s| for (s.images.items) |im| if (im.id == id) return im.name;
-    return "(gone)";
+    for (m.spaces.items) |s| {
+        for (s.images.items) |im| if (im.id == id) return im.name;
+        for (s.guides.items, 0..) |g, k| if (g.id == id) return if (g.name.len > 0) g.name else std.fmt.allocPrint(dvui.currentWindow().arena(), "construction line {d}", .{k + 1}) catch "a construction line";
+        for (s.figure_places.items) |fp| if (fp.id == id) return fp.name;
+    }
+    return "(removed)";
 }
 
 /// "the right edge of Panel 1", or of "itself" when it is `self`.
@@ -25403,8 +25480,14 @@ fn dimMotion(at: geom.Point) void {
     if (!d.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 3) return;
     d.moved = true;
     // The line through the pointer; the value, taken, at it along the line.
-    const place = if (d.kind == .dim_value) cdim.textAt(d.g.ms, d.place, at) else cdim.offsetThrough(d.g.ms, d.place, at);
+    const place = cdim.withinReach(d.g.ms, if (d.kind == .dim_value) cdim.textAt(d.g.ms, d.place, at) else cdim.offsetThrough(d.g.ms, d.place, at), dimReach());
     _ = actM(d.key, .setConstraintPlace, .{ d.id, place }) catch {};
+}
+
+/// How far a dimension may be dragged from what it measures, mm: 12 mm,
+/// or 90 points on screen when zoomed far out.
+fn dimReach() f64 {
+    return @max(12.0, 90.0 * @as(f64, dvui.windowNaturalScale()) / @as(f64, state.view.ppm));
 }
 
 /// The drag ends; one that did not move picks the constraint. Whether
@@ -25465,6 +25548,68 @@ fn pickedConstraintProperties() bool {
     return true;
 }
 
+/// "Column1's left edge from construction line 1, 20", a constraint in a
+/// line; "Abandoned: …" when an object it names is gone.
+fn constraintText(buf: []u8, c: layout.model.Constraint) []const u8 {
+    var b1: [120]u8 = undefined;
+    var b2: [120]u8 = undefined;
+    var vb: [32]u8 = undefined;
+    const gone = constrain.abandoned(&state.model, c);
+    const rel = if (c.kind == .equal_size) "size equal to" else "from";
+    const what = if (c.kind == .equal_size) std.fmt.bufPrint(&b2, "{s}'s", .{objectName(c.b.object)}) catch "" else endText(&b2, c.b, c.a.object);
+    return std.fmt.bufPrint(buf, "{s}{s} {s} {s}{s}{s}", .{
+        if (gone) "Abandoned: " else "",
+        if (c.kind == .equal_size) objectName(c.a.object) else endText(&b1, c.a, null),
+        rel,
+        what,
+        if (c.kind == .equal_size) "" else ", ",
+        if (c.kind == .equal_size or gone) "" else dimText(&vb, c),
+    }) catch "";
+}
+
+/// The document's constraints: how many, the abandoned ones (an object
+/// they name was removed) removed together, each listed to choose.
+fn constraintsProperties() void {
+    const saved_group = pushGroup("constraints-list");
+    defer popGroup(saved_group);
+    const m = &state.model;
+    var gone: usize = 0;
+    for (m.constraints.items) |c| if (constrain.abandoned(m, c)) {
+        gone += 1;
+    };
+    propText("Constraints", "{d}", .{m.constraints.items.len}, 9650);
+    propText("Abandoned", "{d}", .{gone}, 9651);
+    if (gone > 0) keyButton(@src(), "Remove abandoned", 0, .{});
+    for (m.constraints.items, 0..) |c, ci| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = ci, .margin = .{ .y = 2 } });
+        defer row.deinit();
+        if (icons.button(@src(), .trash, "Remove this constraint", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+            act(.removeConstraint, .{c.id}) catch {};
+            return;
+        }
+        var b: [300]u8 = undefined;
+        const flagged = constrain.abandoned(m, c) or constraintIssue(c.id) != null;
+        if (dvui.labelClick(@src(), "{s}", .{constraintText(&b, c)}, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged) .{ .color = colors.overflow } else null, .id_extra = ci })) {
+            state.context = .{ .constraint = c.id };
+            picked_constraint = c.id;
+        }
+    }
+}
+
+/// Every abandoned constraint removed: one step.
+fn removeAbandoned() void {
+    const m = &state.model;
+    var ids: std.ArrayList(layout.model.ObjectId) = .empty;
+    defer ids.deinit(state.gpa);
+    for (m.constraints.items) |c| if (constrain.abandoned(m, c)) ids.append(state.gpa, c.id) catch return;
+    hist.beginStep();
+    for (ids.items) |id| _ = hist.join(m, .removeConstraint, .{id}) catch {};
+    if (picked_constraint) |p| if (constraintById(p) == null) {
+        picked_constraint = null;
+    };
+    state.status = "Abandoned constraints removed. ";
+}
+
 /// Constraint `id` made a reference, or driving at what it measures now
 /// (so nothing moves).
 fn toggleDriving(id: layout.model.ObjectId) void {
@@ -25489,12 +25634,14 @@ fn setConstraintValue(id: layout.model.ObjectId, mm: f64) void {
     _ = act(.setConstraintValue, .{ id, mm }) catch {};
 }
 
-fn drawConstraintMarks(area: dvui.Rect.Physical) void {
+/// The Constraints layer: space `space`'s constraints, as dimensions and
+/// equal marks.
+fn drawConstraintsLayer(area: dvui.Rect.Physical, space: usize) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
     for (m.constraints.items) |c| {
         const parent = constrain.parentOf(m, c.a.object) orelse continue;
-        if (constrain.spaceOf(m, parent) != shown_space) continue;
+        if (constrain.spaceOf(m, parent) != space) continue;
         const off = constrain.frameOffset(m, parent);
         const hot = (picked_constraint != null and picked_constraint.? == c.id) or (if (engageTarget()) |h| isDimKind(h.kind) and h.id == c.id else false) or (dim_drag != null and dim_drag.?.id == c.id);
         const lit = if (constraintIssue(c.id) != null) colors.overflow else if (hot) colors.select else colors.guide;
@@ -25532,6 +25679,13 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
             },
         }
     }
+}
+
+/// The constraint marks of the view being worked in: the context object's
+/// origin and, while constraining, the picks.
+fn drawConstraintMarks(area: dvui.Rect.Physical) void {
+    const m = &state.model;
+    const px = dvui.windowNaturalScale();
     // The context object's origin: a ring with a cross (not while text is
     // typed: `quietText`).
     if (!quietText()) if (contextObject()) |id| if (constrain.parentOf(m, id)) |parent| if (constrain.originOf(m, id)) |o| {
@@ -26892,7 +27046,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                     const c = it.sketch.constraints.items[d.c];
                     if (skDimMeasure(it.sketch, c)) |ms| {
                         const r = sketch_edit.?;
-                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketch, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.textAt(ms, c.place, q) } } }) catch {};
+                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketch, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach()) } } }) catch {};
                     }
                 }
             } else if (sk_box) |*b| {
