@@ -44,6 +44,31 @@ pub const Path = struct {
     stroke: ?Stroke = null,
 };
 
+/// What fills an area: solid, or a hatch of parallel lines.
+pub const Pattern = union(enum) {
+    solid,
+    hatch: Hatch,
+
+    pub const Hatch = struct {
+        /// Degrees, anticlockwise from the x axis.
+        angle: f64 = 45,
+        /// mm, line to line (centres).
+        spacing: f64 = 1,
+        /// mm, each line's width.
+        width: f64 = 0.15,
+    };
+};
+
+/// An area of a sketch filled in a fill style: inside the closed path
+/// its geometry `geoms` makes; with `enclosed` off, the closed paths of
+/// the sketch's other geometry inside it are left out (holes).
+pub const Fill = struct {
+    geoms: []const u32,
+    /// Its fill style (`Model.fill_styles`).
+    style: @import("model.zig").ObjectId,
+    enclosed: bool = false,
+};
+
 /// A sketch's geometry inked: drawn as a stroke in a stroke style.
 pub const Ink = struct {
     /// The geometry, in the figure's sketch.
@@ -67,6 +92,8 @@ pub const Figure = struct {
     /// the sketch; it is drawn where the sketch's views are.
     sketch: @import("model.zig").ObjectId = .none,
     inks: []const Ink = &.{},
+    /// Areas of the sketch filled (drawn under its ink).
+    fills: []const Fill = &.{},
 
     /// Its paths' bounds, strokes' widths included (a pen's reach, not
     /// its caps' or miters' exact extent).

@@ -486,8 +486,28 @@ pub const Sketch = struct {
     /// The output geometry joined end to end into closed contours (pieces
     /// turned round as they need to be), and how many pieces were left that
     /// close no contour. Allocated from `a`.
-    pub fn profiles(s: *const Sketch, a: Allocator) Allocator.Error!struct { contours: []geom.Contour, open: usize } {
-        const segs = try s.physical(a);
+    pub fn profiles(s: *const Sketch, a: Allocator) Allocator.Error!Chained {
+        return chain(a, try s.physical(a));
+    }
+
+    /// Geometry `ids` (removed and unbounded ones left out) as exact
+    /// segments, allocated from `a`.
+    pub fn segmentsOf(s: *const Sketch, a: Allocator, ids: []const GeomId) Allocator.Error![]geom.Segment {
+        var out: std.ArrayList(geom.Segment) = .empty;
+        for (ids) |id| {
+            if (id >= s.geometry.items.len or s.geometry.items[id].removed) continue;
+            try s.appendSegments(a, s.geometry.items[id], &out);
+        }
+        return out.items;
+    }
+
+    /// Segments joined end to end into closed contours (see `profiles`).
+    pub const Chained = struct { contours: []geom.Contour, open: usize };
+
+    /// `segs` joined end to end into closed contours (pieces turned round
+    /// as they need to be), and how many pieces were left that close no
+    /// contour. Allocated from `a`.
+    pub fn chain(a: Allocator, segs: []const geom.Segment) Allocator.Error!Chained {
         const used = try a.alloc(bool, segs.len);
         @memset(used, false);
         const near = struct {
@@ -500,11 +520,11 @@ pub const Sketch = struct {
         for (segs, 0..) |first, i| {
             if (used[i]) continue;
             used[i] = true;
-            var chain: std.ArrayList(geom.Segment) = .empty;
-            try chain.append(a, first);
+            var pieces: std.ArrayList(geom.Segment) = .empty;
+            try pieces.append(a, first);
             var closed = near(first.end(), first.start());
             while (!closed) {
-                const end = chain.items[chain.items.len - 1].end();
+                const end = pieces.items[pieces.items.len - 1].end();
                 const next = for (segs, 0..) |sg, k| {
                     if (used[k]) continue;
                     if (near(sg.start(), end)) break .{ k, sg };
@@ -512,29 +532,29 @@ pub const Sketch = struct {
                 } else null;
                 const nx = next orelse break;
                 used[nx[0]] = true;
-                try chain.append(a, nx[1]);
-                closed = near(nx[1].end(), chain.items[0].start());
+                try pieces.append(a, nx[1]);
+                closed = near(nx[1].end(), pieces.items[0].start());
             }
             if (!closed) {
-                open += chain.items.len;
+                open += pieces.items.len;
                 continue;
             }
             // Exactly closed: each piece starts where the last ended.
-            for (chain.items[1..], 1..) |*sg, k| setStart(sg, chain.items[k - 1].end());
-            setEnd(&chain.items[chain.items.len - 1], chain.items[0].start());
-            try contours.append(a, .{ .segments = chain.items });
+            for (pieces.items[1..], 1..) |*sg, k| setStart(sg, pieces.items[k - 1].end());
+            setEnd(&pieces.items[pieces.items.len - 1], pieces.items[0].start());
+            try contours.append(a, .{ .segments = pieces.items });
         }
         return .{ .contours = contours.items, .open = open };
     }
 
-    fn setStart(sg: *geom.Segment, p: Point) void {
+    pub fn setStart(sg: *geom.Segment, p: Point) void {
         switch (sg.*) {
             .conic => |*c| c.p[0] = p,
             inline else => |*q| q[0] = p,
         }
     }
 
-    fn setEnd(sg: *geom.Segment, p: Point) void {
+    pub fn setEnd(sg: *geom.Segment, p: Point) void {
         switch (sg.*) {
             .conic => |*c| c.p[2] = p,
             inline else => |*q| q[q.len - 1] = p,

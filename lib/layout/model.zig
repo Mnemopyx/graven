@@ -158,7 +158,16 @@ pub const StrokeStyle = struct {
     stroke: figure_.Stroke,
 };
 
-/// A paragraph style's index in `Model.paragraph_styles`.
+/// A named fill: a colour in a pattern (solid, or a hatch). `cutout`
+/// says what it means for manufacture: the area is cut out.
+pub const FillStyle = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    color: art_.Color,
+    pattern: figure_.Pattern,
+    cutout: bool = false,
+};
+
 /// A paragraph style's ID: its own object ID.
 pub const ParaId = ObjectId;
 
@@ -2038,6 +2047,10 @@ pub const Model = struct {
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
     /// Named pens (see `StrokeStyle`): what inked line art is drawn with.
     stroke_styles: std.ArrayList(StrokeStyle) = .empty,
+    /// Named fills (see `FillStyle`): what sketch areas are filled with.
+    fill_styles: std.ArrayList(FillStyle) = .empty,
+    /// The fill style new fills take.
+    current_fill: ObjectId = .none,
     /// The stroke style new ink takes (`.none`: the first, or a default
     /// made when first wanted).
     current_stroke: ObjectId = .none,
@@ -2446,6 +2459,7 @@ pub const Model = struct {
         materials,
         plans,
         stroke_styles,
+        fill_styles,
         /// A prototype's slots.
         prototype: PrototypeId,
         /// A plan's operations.
@@ -2490,6 +2504,7 @@ pub const Model = struct {
             .materials => for (m.materials.items) |mt| if (eq(u8, mt.material.name, name)) return true,
             .plans => for (m.plans.items) |pl| if (eq(u8, pl.name, name)) return true,
             .stroke_styles => for (m.stroke_styles.items) |st| if (eq(u8, st.name, name)) return true,
+            .fill_styles => for (m.fill_styles.items) |st| if (eq(u8, st.name, name)) return true,
             .prototype => |id| if (m.protoIndex(id)) |k| {
                 for (m.prototypes.items[k].tracks) |tt| if (eq(u8, tt.name, name)) return true;
             },
@@ -6276,6 +6291,15 @@ pub const Model = struct {
             const ski = m.sketchIndex(f.sketch) orelse continue;
             const sk = &m.sketches.items[ski].sketch;
             var paths: std.ArrayList(figure_.Path) = .empty;
+            for (f.fills) |fill| {
+                const si = m.fillStyleIndex(fill.style) orelse continue;
+                const st = m.fill_styles.items[si];
+                const region = try fillRegion(al, sk, fill, st.pattern);
+                if (region.contours.len == 0) continue;
+                const sub = try al.alloc(figure_.Subpath, region.contours.len);
+                for (region.contours, sub) |c, *sp| sp.* = .{ .segments = c.segments, .closed = true };
+                try paths.append(al, .{ .subpaths = sub, .fill = st.color, .fill_rule = .evenodd });
+            }
             for (f.inks) |ink| {
                 if (ink.geom >= sk.geometry.items.len) continue;
                 const g = sk.geometry.items[ink.geom];
@@ -6290,6 +6314,205 @@ pub const Model = struct {
             }
             f.paths = paths.items;
         }
+    }
+
+    /// The area fill `fill` covers in sketch `sk`, in `pattern`: exact
+    /// contours (a hatch's lines as thin areas cut to it).
+    fn fillRegion(al: std.mem.Allocator, sk: *const sketch_.Sketch, fill: figure_.Fill, pattern: figure_.Pattern) Error!geom.Outline {
+        const Sk = sketch_.Sketch;
+        const edge = try Sk.chain(al, try sk.segmentsOf(al, fill.geoms));
+        if (edge.contours.len == 0) return .blank;
+        var inputs: std.ArrayList(geom.Outline) = .empty;
+        try inputs.append(al, .{ .contours = edge.contours });
+        const box = (geom.Outline{ .contours = edge.contours }).bounds();
+        // The holes: the closed paths of the rest of the sketch's bounded
+        // geometry inside it (each circle a path of its own).
+        if (!fill.enclosed) {
+            var rest: std.ArrayList(geom.Segment) = .empty;
+            var circles: std.ArrayList(geom.Contour) = .empty;
+            for (sk.geometry.items, 0..) |g, gi| {
+                if (g.removed or g.reference) continue;
+                if (std.mem.indexOfScalar(u32, fill.geoms, @intCast(gi)) != null) continue;
+                if (g.kind == .circle) {
+                    var one: std.ArrayList(geom.Segment) = .empty;
+                    try sk.appendSegments(al, g, &one);
+                    try circles.append(al, .{ .segments = one.items });
+                } else try sk.appendSegments(al, g, &rest);
+            }
+            const chained = try Sk.chain(al, rest.items);
+            try circles.appendSlice(al, chained.contours);
+            for (circles.items) |c| {
+                if (c.segments.len == 0) continue;
+                if (!insideContours(edge.contours, c.segments[0].at(0.5))) continue;
+                try inputs.append(al, .{ .contours = try al.dupe(geom.Contour, &.{c}) });
+            }
+        }
+        const holes = inputs.items.len - 1;
+        switch (pattern) {
+            .solid => {},
+            .hatch => |h| {
+                if (!(h.spacing > 0) or !(h.width > 0)) return .blank;
+                // Strips across the box, at the angle, a spacing apart.
+                const th = h.angle * std.math.pi / 180;
+                const d: geom.Point = .{ .x = @cos(th), .y = @sin(th) };
+                const n: geom.Point = .{ .x = -d.y, .y = d.x };
+                const c: geom.Point = .{ .x = (box.x0 + box.x1) / 2, .y = (box.y0 + box.y1) / 2 };
+                const half = std.math.hypot(box.x1 - box.x0, box.y1 - box.y0) / 2 + h.width;
+                const count: usize = @intFromFloat(@min(4000, @ceil(half / h.spacing)));
+                var strips: std.ArrayList(geom.Contour) = .empty;
+                var k: isize = -@as(isize, @intCast(count));
+                while (k <= @as(isize, @intCast(count))) : (k += 1) {
+                    const o = @as(f64, @floatFromInt(k)) * h.spacing;
+                    const lo = o - h.width / 2;
+                    const hi = o + h.width / 2;
+                    const P = struct {
+                        fn p(cc: geom.Point, dd: geom.Point, nn: geom.Point, t: f64, s: f64) geom.Point {
+                            return .{ .x = cc.x + dd.x * t + nn.x * s, .y = cc.y + dd.y * t + nn.y * s };
+                        }
+                    };
+                    const q = [4]geom.Point{ P.p(c, d, n, -half, lo), P.p(c, d, n, half, lo), P.p(c, d, n, half, hi), P.p(c, d, n, -half, hi) };
+                    const segs = try al.alloc(geom.Segment, 4);
+                    for (0..4) |j| segs[j] = .{ .line = .{ q[j], q[(j + 1) % 4] } };
+                    try strips.append(al, .{ .segments = segs });
+                }
+                try inputs.append(al, .{ .contours = strips.items });
+            },
+        }
+        const R = struct {
+            holes: usize,
+            fn inside(ctx: *const anyopaque, in: []const bool) bool {
+                const r: *const @This() = @ptrCast(@alignCast(ctx));
+                if (!in[0]) return false;
+                for (in[1 .. 1 + r.holes]) |x| if (x) return false;
+                return in.len == 1 + r.holes or in[in.len - 1];
+            }
+        };
+        const r: R = .{ .holes = holes };
+        return geom.boolean.combine(al, inputs.items, .{ .ctx = &r, .inside = R.inside }) catch return error.OutOfMemory;
+    }
+
+    /// Whether `p` is inside `contours` (even-odd), their segments
+    /// flattened finely.
+    fn insideContours(contours: []const geom.Contour, p: geom.Point) bool {
+        var in = false;
+        for (contours) |c| for (c.segments) |sg| {
+            var prev = sg.start();
+            for (1..33) |i| {
+                const q = sg.at(@as(f64, @floatFromInt(i)) / 32);
+                if ((prev.y > p.y) != (q.y > p.y)) {
+                    const x = prev.x + (p.y - prev.y) * (q.x - prev.x) / (q.y - prev.y);
+                    if (x > p.x) in = !in;
+                }
+                prev = q;
+            }
+        };
+        return in;
+    }
+
+    pub fn fillStyleIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.fill_styles.items, 0..) |st, i| if (st.id == id) return i;
+        return null;
+    }
+
+    fn checkFill(st: FillStyle) Error!void {
+        switch (st.pattern) {
+            .solid => {},
+            .hatch => |h| if (!(h.spacing > 0) or !(h.width > 0) or !std.math.isFinite(h.angle) or !(h.width < h.spacing) or !std.math.isFinite(h.spacing)) return error.BadValue,
+        }
+    }
+
+    /// Adds a fill style; returns its ID.
+    pub fn addFillStyle(m: *Model, style: FillStyle) Error!ObjectId {
+        try checkFill(style);
+        var st = style;
+        st.id = m.newId();
+        st.name = try m.a().dupe(u8, style.name);
+        try m.fill_styles.append(m.a(), st);
+        m.revision += 1;
+        return st.id;
+    }
+
+    /// Changes fill style `id` (its name too): the fills in it follow.
+    pub fn setFillStyle(m: *Model, id: ObjectId, style: FillStyle) Error!void {
+        const i = m.fillStyleIndex(id) orelse return error.NoSuchStyle;
+        try checkFill(style);
+        var st = style;
+        st.id = id;
+        st.name = try m.a().dupe(u8, style.name);
+        m.fill_styles.items[i] = st;
+        try m.syncSketchFigures(.none);
+        m.revision += 1;
+    }
+
+    /// Makes fill style `id` the one new fills take.
+    pub fn setCurrentFill(m: *Model, id: ObjectId) Error!void {
+        if (m.fillStyleIndex(id) == null) return error.NoSuchStyle;
+        m.current_fill = id;
+        m.revision += 1;
+    }
+
+    /// The fill style new fills take: the current one, else the first.
+    pub fn currentFill(m: *const Model) ?ObjectId {
+        if (m.fillStyleIndex(m.current_fill) != null) return m.current_fill;
+        return if (m.fill_styles.items.len > 0) m.fill_styles.items[0].id else null;
+    }
+
+    /// The fill style new fills take, made (a 45° hatch, meaning a
+    /// cutout) when the document has none.
+    fn fillStyleForNew(m: *Model) Error!ObjectId {
+        if (m.currentFill()) |id| return id;
+        const id = try m.addFillStyle(.{ .name = "Hatch 45°", .color = .{ .r = 0, .g = 0, .b = 0 }, .pattern = .{ .hatch = .{} }, .cutout = true });
+        m.current_fill = id;
+        return id;
+    }
+
+    /// Fills the area geometry `geoms` of sketch `index` closes, in the
+    /// current fill style, its enclosed paths filled too or left out
+    /// (`enclosed`); with `on` false, takes off the fill of that boundary.
+    /// A fill of the same boundary is replaced.
+    pub fn setFill(m: *Model, index: usize, geoms: []const u32, enclosed: bool, on: bool) Error!void {
+        const item = try m.sketchAt(index);
+        if (geoms.len == 0) return error.NoSuchItem;
+        for (geoms) |g| if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
+        // The boundary must close.
+        {
+            var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+            defer scratch.deinit();
+            const ch = try sketch_.Sketch.chain(scratch.allocator(), try item.sketch.segmentsOf(scratch.allocator(), geoms));
+            if (on and (ch.contours.len == 0 or ch.open > 0)) return error.NotEnclosed;
+        }
+        const sorted = try m.a().dupe(u32, geoms);
+        std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
+        const fi = try m.sketchFigureFor(index, on) orelse return;
+        const f = &m.figures.items[fi];
+        var fills: std.ArrayList(figure_.Fill) = .empty;
+        var replaced = false;
+        for (f.fills) |k| {
+            if (!std.mem.eql(u32, k.geoms, sorted)) {
+                try fills.append(m.a(), k);
+            } else if (on) {
+                // In its place, the current style taken.
+                try fills.append(m.a(), .{ .geoms = sorted, .style = try m.fillStyleForNew(), .enclosed = enclosed });
+                replaced = true;
+            }
+        }
+        if (on and !replaced) try fills.append(m.a(), .{ .geoms = sorted, .style = try m.fillStyleForNew(), .enclosed = enclosed });
+        f.fills = fills.items;
+        try m.syncSketchFigures(item.id);
+        m.revision += 1;
+    }
+
+    /// The figure over sketch `index`, made when it has none and `make`.
+    fn sketchFigureFor(m: *Model, index: usize, make: bool) Error!?usize {
+        const item = try m.sketchAt(index);
+        if (m.sketchFigure(item.id)) |fi| return fi;
+        if (!make) return null;
+        var name_buf: [64]u8 = undefined;
+        const base = std.fmt.bufPrint(&name_buf, "{s} figure", .{item.name}) catch "Figure";
+        var buf2: [80]u8 = undefined;
+        const name = m.freshName(&buf2, .figures, base);
+        try m.figures.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .paths = &.{}, .sketch = item.id });
+        return m.figures.items.len - 1;
     }
 
     /// The stroke style new ink takes, made (a fine black pen) when the
@@ -6307,15 +6530,7 @@ pub const Model = struct {
     pub fn setInk(m: *Model, index: usize, g: u32, on: bool) Error!void {
         const item = try m.sketchAt(index);
         if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
-        const fi = m.sketchFigure(item.id) orelse blk: {
-            if (!on) return;
-            var name_buf: [64]u8 = undefined;
-            const base = std.fmt.bufPrint(&name_buf, "{s} figure", .{item.name}) catch "Figure";
-            var buf2: [80]u8 = undefined;
-            const name = m.freshName(&buf2, .figures, base);
-            try m.figures.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .paths = &.{}, .sketch = item.id });
-            break :blk m.figures.items.len - 1;
-        };
+        const fi = try m.sketchFigureFor(index, on) orelse return;
         const f = &m.figures.items[fi];
         var inks: std.ArrayList(figure_.Ink) = .empty;
         for (f.inks) |k| if (k.geom != g) try inks.append(m.a(), k);
@@ -8522,4 +8737,44 @@ test "construction lines: added named, clipped to a box, set by their locks, rem
     try testing.expectApproxEqAbs(135, lineAngle(.{ .x = 0, .y = 0 }, .{ .x = -1, .y = 1 }), 1e-9);
     try m.removeGuide(0, g0);
     try testing.expectEqual(1, m.spaces.items[0].guides.items.len);
+}
+
+test "a sketch's area filled: a hatch inside a circle, an enclosed circle left out or filled" {
+    const gpa = std.testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketch(0, "Disc", .{ .x = 0, .y = 0 });
+    const outer = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10, .construction = true } });
+    _ = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 5, .construction = true } });
+    // Solid, the inner circle a hole: the ring's area.
+    _ = try m.addFillStyle(.{ .name = "Solid", .color = .{ .r = 0, .g = 0, .b = 0 }, .pattern = .solid });
+    try m.setFill(si, &.{outer}, false, true);
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    const area = struct {
+        fn f(fig: figure_.Figure) f64 {
+            var t: f64 = 0;
+            for (fig.paths) |p| for (p.subpaths) |sp| {
+                t += (geom.Contour{ .segments = sp.segments }).signedArea();
+            };
+            return @abs(t);
+        }
+    }.f;
+    const ring = std.math.pi * (100.0 - 25.0);
+    try std.testing.expectApproxEqRel(ring, area(m.figures.items[fi]), 1e-3);
+    // Enclosed paths filled: the whole disc.
+    try m.setFill(si, &.{outer}, true, true);
+    try std.testing.expectEqual(@as(usize, 1), m.figures.items[fi].fills.len);
+    try std.testing.expectApproxEqRel(std.math.pi * 100.0, area(m.figures.items[fi]), 1e-3);
+    // A hatch (lines 0.25 of their spacing wide): about a quarter of it.
+    const h = try m.addFillStyle(.{ .name = "Hatch", .color = .{ .r = 0, .g = 0, .b = 0 }, .pattern = .{ .hatch = .{ .spacing = 1, .width = 0.25 } } });
+    try m.setCurrentFill(h);
+    try m.setFill(si, &.{outer}, true, true);
+    try std.testing.expectApproxEqRel(std.math.pi * 25.0, area(m.figures.items[fi]), 0.03);
+    // An open boundary is refused.
+    const seg = try m.editSketch(si, .{ .segment = .{ .a = .{ .x = 20, .y = 0 }, .b = .{ .x = 30, .y = 0 } } });
+    try std.testing.expectError(error.NotEnclosed, m.setFill(si, &.{seg}, false, true));
+    // Off.
+    try m.setFill(si, &.{outer}, false, false);
+    try std.testing.expectEqual(@as(usize, 0), m.figures.items[fi].fills.len);
 }

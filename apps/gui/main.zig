@@ -17659,6 +17659,21 @@ const button_handlers = [_]ButtonHandler{
             layFlashEnd(arg);
         }
     }.f),
+    handler("fill.fill-selection-f", struct {
+        fn f(_: i32) void {
+            skFill();
+        }
+    }.f),
+    handler("fill.take-off-fill-f", struct {
+        fn f(_: i32) void {
+            skFill();
+        }
+    }.f),
+    handler("fill.new-fill-style", struct {
+        fn f(_: i32) void {
+            newFillStyle();
+        }
+    }.f),
     handler("ink.ink-selection-i", struct {
         fn f(_: i32) void {
             skInk();
@@ -27184,6 +27199,138 @@ fn newStrokeStyle() void {
     _ = actM(key, .setCurrentStroke, .{id}) catch {};
 }
 
+/// Whether Fill (F) fills the closed paths inside the boundary too
+/// (otherwise they are left out, holes).
+var fill_enclosed = false;
+
+/// The figure fill of the sketch being edited whose boundary is exactly
+/// `gs` (any order), if any.
+fn skFillOf(gs: []const skl.GeomId) ?usize {
+    const r = sketch_edit orelse return null;
+    const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return null;
+    for (state.model.figures.items[fi].fills, 0..) |f, i| {
+        if (f.geoms.len != gs.len) continue;
+        var all = true;
+        for (gs) |g| if (std.mem.indexOfScalar(u32, f.geoms, g) == null) {
+            all = false;
+        };
+        if (all) return i;
+    }
+    return null;
+}
+
+/// Fill (F): the area the selected curves close filled in the current
+/// fill style (its enclosed paths filled or left out as Properties says);
+/// a boundary filled already has its fill taken off.
+fn skFill() void {
+    const r = sketch_edit orelse return;
+    var buf: [256]skl.GeomId = undefined;
+    const gs = skInkable(&buf);
+    if (gs.len == 0) {
+        state.status = "Fill: select the lines and arcs (or the circle) around the area first. ";
+        return;
+    }
+    const on = skFillOf(gs) == null;
+    act(.setFill, .{ r.sketch, gs, fill_enclosed, on }) catch |err| {
+        state.status = if (err == error.NotEnclosed) "Fill: the selection must close a path (end to end, round to its start). " else "The fill could not be made. ";
+        return;
+    };
+    state.status = if (on) "Filled in the current fill style. " else "Fill taken off. ";
+}
+
+/// Fill in sketch-mode Properties: filling the selection, the fill style
+/// it takes (chosen, its pattern, angle, spacing, line width, what it
+/// means), whether enclosed paths are filled, a new style.
+fn sketchFillProperties() void {
+    const saved_group = pushGroup("fill");
+    defer popGroup(saved_group);
+    heading("{s}", .{"Fill"}, 8180);
+    var buf: [256]skl.GeomId = undefined;
+    const gs = skInkable(&buf);
+    if (gs.len > 0) keyButton(@src(), if (skFillOf(gs) != null) "Take off fill  F" else "Fill selection  F", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    // The selection's own fill's setting, when it has one; else the one
+    // new fills take.
+    const own: ?usize = if (gs.len > 0) skFillOf(gs) else null;
+    if (own) |k| {
+        const r = sketch_edit.?;
+        const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id).?;
+        var on = state.model.figures.items[fi].fills[k].enclosed;
+        if (tcheckbox(@src(), &on, "Fill enclosed paths", .{ .id_extra = 8181 })) {
+            fill_enclosed = on;
+            actV(.setFill, .{ r.sketch, gs, on, true });
+        }
+    } else _ = tcheckbox(@src(), &fill_enclosed, "Fill enclosed paths", .{ .id_extra = 8181 });
+    const m = &state.model;
+    if (m.fill_styles.items.len == 0) {
+        propText("Style", "{s}", .{"Hatch 45°, made with the first fill"}, 8182);
+    } else {
+        const ar = dvui.currentWindow().arena();
+        const names = ar.alloc([]const u8, m.fill_styles.items.len) catch return;
+        for (m.fill_styles.items, 0..) |st, i| names[i] = st.name;
+        var choice: usize = m.fillStyleIndex(m.currentFill().?) orelse 0;
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8182 });
+            defer row.deinit();
+            propName("Fill style");
+            if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 8182 })) actV(.setCurrentFill, .{m.fill_styles.items[choice].id});
+        }
+        const st = m.fill_styles.items[choice];
+        var next = st;
+        var changed = false;
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8183 });
+            defer row.deinit();
+            propName("Pattern");
+            const kinds = [_][]const u8{ "Solid", "Hatch" };
+            var k: usize = @intFromEnum(std.meta.activeTag(st.pattern));
+            if (tdropdown(@src(), &kinds, .{ .choice = &k }, .{}, .{ .expand = .horizontal, .id_extra = 8183 })) {
+                next.pattern = if (k == 0) .solid else .{ .hatch = .{} };
+                changed = true;
+            }
+        }
+        switch (st.pattern) {
+            .solid => {},
+            .hatch => |h| {
+                var nh = h;
+                if (numberProp("Angle, °", h.angle, -360, 360, 8184)) |v| {
+                    nh.angle = v;
+                    changed = true;
+                }
+                if (numberProp("Spacing, mm", h.spacing, 0.05, 100, 8185)) |v| {
+                    nh.spacing = v;
+                    changed = true;
+                }
+                if (numberProp("Line width, mm", h.width, 0.01, 100, 8186)) |v| {
+                    nh.width = v;
+                    changed = true;
+                }
+                if (changed and std.meta.activeTag(next.pattern) == .hatch) next.pattern = .{ .hatch = nh };
+            },
+        }
+        var cut = st.cutout;
+        if (tcheckbox(@src(), &cut, "Means a cutout", .{ .id_extra = 8187 })) {
+            next.cutout = cut;
+            changed = true;
+        }
+        if (changed) _ = actM(mergeKey(.{ "fill-style", st.id }), .setFillStyle, .{ st.id, next }) catch {
+            state.status = "A hatch's lines must be narrower than their spacing. ";
+        };
+    }
+    keyButton(@src(), "New fill style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+}
+
+/// A new fill style, like the current one (or a 45° hatch), made current.
+fn newFillStyle() void {
+    const m = &state.model;
+    var st: layout.model.FillStyle = .{ .name = "", .color = .{ .r = 0, .g = 0, .b = 0 }, .pattern = .{ .hatch = .{} }, .cutout = true };
+    if (m.currentFill()) |id| st = m.fill_styles.items[m.fillStyleIndex(id).?];
+    var buf: [32]u8 = undefined;
+    st.name = std.fmt.bufPrint(&buf, "Fill {d}", .{m.fill_styles.items.len + 1}) catch "Fill";
+    const key = mergeKey(.{ "new-fill", m.revision });
+    const id = actM(key, .addFillStyle, .{st}) catch return;
+    _ = actM(key, .setCurrentFill, .{id}) catch {};
+}
+
 fn leaveSketch() void {
     sketch_edit = null;
     sk_summary = false;
@@ -27943,6 +28090,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.constraint.lock") => skConstrain(.fixed, area),
             kact("sketch.tool.next") => skCycleTool(),
             kact("sketch.ink") => skInk(),
+            kact("sketch.fill") => skFill(),
             else => used = false,
         }
         if (used) {
@@ -28833,6 +28981,7 @@ fn sketchModeProperties() void {
     if (skCaptionPoint() != null) keyButton(@src(), "Add caption", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     keyButton(@src(), "Finish sketch…  Enter", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     sketchInkProperties();
+    sketchFillProperties();
     skConstraintList(it);
     sketchPhysicalWhen(it);
     sketchParameters(it);
