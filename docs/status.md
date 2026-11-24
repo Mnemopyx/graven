@@ -30,9 +30,9 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
 ### Layout model (`lib/layout`)
 
 - **Canvas:** units of mm, inches or mils, with an optional sheet.
-- **Spaces and frames:** frames are spaces of their own. Views place one space inside another.
+- **Spaces and frames:** frames are spaces of their own. Views place one space inside another. A canvas or frame is a workspace, not a container (2026-11-24): it holds containers (panels, content layouts, grids, placed figures, images) and construction lines, never content of its own.
 - **Structure:** layers, images, groups, and object IDs that last.
-- **Panels:** margins and compliance checks. Panels can be made from closed paths and can have cutouts.
+- **Panels:** margins and compliance checks. Panels can be made from enclosed sketches and can have cutouts.
 - **Tiles:** tile prototypes with tracks on their faces (rows, or columns set a character at a time), sizing rules, art drawn at 1u and stretched, and their own unit.
 - **Tracks:**
   - rows or columns along a path with control points, where segments step by pitch and are bound to the path at their centre;
@@ -647,3 +647,15 @@ Measured from each piece's ink (`Render.ink`), and only for runs whose ink passe
 ### A quiet canvas while typing (2026-11-23)
 
 The owner: while content is edited, the centre line and container emphasis distract; a shaded band showing margin around the content region, no outline. While the flow cursor is in a track (`quietText`): each content layout is drawn as a soft tinted band around the area its content may take (half a row wide, 1 to 4 mm; a little deeper for the one typed in), with no track outlines, row lines, centre line (`drawTrackPath`) or origin ring; the current line's wash, the cursor and the selection stay. Holding Ctrl shows the full guides again (G was proposed, but G types a g). Arranging layouts (no cursor in text) shows everything as before.
+
+### Workspaces hold containers: the hidden canvas panel removed (2026-11-24)
+
+The owner: the hidden panel was a hack to accommodate a design change; the implementation follows the design. Content must exist within a container; the canvas and frames are not containers, they are workspaces that may contain containers. Non-container drawing tools do not work on a canvas or frame; a sketch may go there (its bounds become a container), and an enclosed sketch may be made a panel.
+
+- **Model:** `Panel.unbounded`, `Space.root` and `Model.rootOf` are gone. A space holds `regions` (content layouts) and `grids` of its own; they and everything about them are addressed by `Parent` (`.space` or `.panel`, then an index): `regionsIn`, `gridsIn`, `artIn` (always empty for a workspace), `parentAt`/`parentSlot`/`parentCount` (spaces, then panels), `parentOrigin`, `containerOf`. Line art only in panels; carrying it to a workspace is refused. `makePanel` (line art made a panel) is gone; `releasePanel` sets a panel's content layouts on its workspace and refuses one holding line art or grids.
+- **Placement:** solved per parent (`solve(gpa, m, parent, labels)`); a workspace has no outline, edge or margins. The GUI keeps one solve per parent (`placedOf`).
+- **Old files:** read as before, then `upgradeRoots` moves each root panel's content layouts and grids onto its workspace (shifted by the root's origin) and puts any line art it held in a new panel around it. Op logs from before (segment version 2 or less) are replayed with the old meanings (`legacy.zig`, `history.LegacyOp`) and the history starts at the load (nothing to undo past it; the next save writes the whole file). The examples' exports are byte-identical.
+- **GUI:** a canvas or frame is the context `.space`; its Properties, its Browser node (open by default), Ctrl+< from a panel, and Delete fall back to it. Layouts (R, Shift+R, T) draw on a panel or straight on the workspace; Add shape only in a panel; the line art Make panel button is gone (Add panel and a sketch's Make panel remain).
+- **Checked:** layout tests; the HP-15C made in the GUI; the levels, Select boundaries, pointing, Browser, tabs and canvas GUI tests (three updated: the canvas's context is a space, its layouts on it); the keyboard and HP-15C SVG and 3MF exports byte-identical; by eye under Xvfb (the text sample straight on the canvas, no panel; the HP-15C).
+- **Not checked by the GUI tests:** the PC keyboard made in the GUI, and a region's rows made into tracks, stop where they press the content palette's keys: the insert palette is off (the owner, 2026-11-23), so those two tests fail before and after this change.
+

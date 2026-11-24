@@ -569,6 +569,7 @@ pub const all = [_]Element{
     .{ .id = "sheet.cell.remove-this-row", .kind = .button, .label = "Remove this row" },
     .{ .id = "sheet.cell.row", .kind = .value, .label = "Row" },
     .{ .id = "sheet.cell.slot", .kind = .value, .label = "Slot" },
+    .{ .id = "sheet.cell.tile", .kind = .value, .label = "Tile" },
     .{ .id = "sheet.columns", .kind = .value, .label = "Columns" },
     .{ .id = "sheet.name", .kind = .value, .label = "Name" },
     .{ .id = "sheet.not-found", .kind = .value, .label = "Not found" },

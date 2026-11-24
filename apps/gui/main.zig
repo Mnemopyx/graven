@@ -5540,7 +5540,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
     const node_tag = treePathTag(depth, text, "");
     const id: usize = @truncate(key ^ salt);
     const open = state.expanded.get(key) orelse switch (ctx) {
-        .file, .worksheet, .panel, .region, .prototypes, .flows => true,
+        .file, .worksheet, .space, .panel, .region, .prototypes, .flows => true,
         else => false,
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });

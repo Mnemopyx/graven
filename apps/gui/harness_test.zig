@@ -1189,7 +1189,7 @@ test "a region's rows made into tracks, one a row: the panel the same; a track r
     const regions = m.panels.items[pi].regions.items;
     try std.testing.expectEqual(2, regions.len);
     for (regions) |t| try std.testing.expectEqual(layout.model.TileRegion.Kind.track, t.kind);
-    try std.testing.expectEqual(m.trackFlow(pi, 0).?.id, m.trackFlow(pi, 1).?.id);
+    try std.testing.expectEqual(m.trackFlow(.{ .panel = pi }, 0).?.id, m.trackFlow(.{ .panel = pi }, 1).?.id);
     const after = try panelSvg(a, m, "Panel1", face);
     defer a.free(after);
     try std.testing.expectEqualStrings(before, after);
@@ -1348,7 +1348,7 @@ test "the discovery path: a track's groups and elements, and which are shown now
     // And acted on by its name.
     try r.field("track.origin.up", "134");
     const row1 = api.model().resolve("\"PC keyboard (ANSI 104)\".Row1").?.region;
-    try std.testing.expectEqual(134, api.model().panels.items[row1.panel].regions.items[row1.region].origin.y);
+    try std.testing.expectEqual(134, api.model().regionsIn(row1.parent)[row1.region].origin.y);
 }
 
 test {
@@ -1488,7 +1488,7 @@ test "Ctrl+< and Ctrl+> go a level out and in: a key's text, the key, its track,
     try r.key(.comma, .lcontrol);
     try std.testing.expectEqualStrings("panel", api.contextName());
     try r.key(.comma, .lcontrol);
-    try std.testing.expectEqualStrings("panel", api.contextName());
+    try std.testing.expectEqualStrings("space", api.contextName());
     try std.testing.expect(api.contextIsCanvas());
     // Back in the way it came: the panel, the track, the key, its text.
     try r.key(.period, .lcontrol);
@@ -2081,9 +2081,9 @@ test "rows on the canvas: R, then a drag, lays out a column of rows" {
     try std.testing.expectEqualStrings("add_tracks", api.toolName());
     try r.drag(api.screenOf(40, 120).?, api.screenOf(160, 60).?);
     try r.frames(2);
-    var n: usize = 0;
-    for (api.model().panels.items) |p| n += p.regions.items.len;
-    try std.testing.expect(n > 0);
+    // Straight on the canvas: a container of its own there, in no panel.
+    try std.testing.expectEqual(0, api.model().panels.items.len);
+    try std.testing.expect(api.model().spaces.items[0].regions.items.len > 0);
 }
 
 test "a horizontal construction line chosen with Constrain and held a distance from the canvas's origin" {
