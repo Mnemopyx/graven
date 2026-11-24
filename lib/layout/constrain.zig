@@ -75,11 +75,15 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
     if (id == .none) return null;
     for (m.panels.items, 0..) |p, pi| {
         if (p.id == id) return if (p.unbounded) null else .{ .kind = .panel, .parent = .{ .space = m.spaceOf(pi) }, .holder = pi };
+        // What sits straight on a canvas or frame (in its unbounded panel)
+        // has that space for its parent, as its construction lines do: the
+        // panel is only where such things are kept, its frame the space's.
+        const pp: Parent = if (p.unbounded) .{ .space = m.spaceOf(pi) } else .{ .panel = pi };
         for (p.regions.items, 0..) |r, k| {
-            if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
-            for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = .{ .panel = pi }, .holder = pi, .index = k, .sub = j };
+            if (r.id == id) return .{ .kind = .region, .parent = pp, .holder = pi, .index = k };
+            for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = pp, .holder = pi, .index = k, .sub = j };
         }
-        for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = .{ .panel = pi }, .holder = pi, .index = k };
+        for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = pp, .holder = pi, .index = k };
     }
     for (m.spaces.items, 0..) |s, si| {
         for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
@@ -938,6 +942,36 @@ test "moving into a frame takes the constraint group; copying copies its constra
     // Undo brings the dropped constraint back.
     _ = try h.undo(&m);
     try testing.expectEqual(3, m.constraints.items.len);
+}
+
+test "a column straight on the canvas keeps to a construction line there" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const root = m.rootOf(0);
+    const body = try m.addStyle("Body", .{ .cap_height = 3 });
+    const r = try m.addTracks(root, .{ .name = "Column1", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
+    const gi = try m.addGuide(0, .{ .x = 0, .y = 150 }, 0);
+    m.spaces.items[0].guides.items[gi].lock = .horizontal;
+    const gid = m.spaces.items[0].guides.items[gi].id;
+    const vi = try m.addGuide(0, .{ .x = 5, .y = 0 }, 90);
+    m.spaces.items[0].guides.items[vi].lock = .vertical;
+    const vid = m.spaces.items[0].guides.items[vi].id;
+    try h.reset(&m);
+    const rid = m.panels.items[root].regions.items[r].id;
+    // Its top 10 mm below the horizontal line, its left 7 mm right of the
+    // vertical one.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .top }, .b = .{ .object = gid, .feature = .origin_y }, .value = -10 }});
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .left }, .b = .{ .object = vid, .feature = .origin_x }, .value = 7 }});
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(0, issues.len);
+    const b = boxOf(&m, rid).?;
+    try testing.expectApproxEqAbs(@as(f64, 140), b.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 12), b.x0, 1e-9);
 }
 
 test "a track's control point can be constrained, and the rows follow it" {
