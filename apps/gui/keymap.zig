@@ -474,7 +474,8 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow", .chord = "ctrl+n", .action = "canvas.flow.caret.line-down" },
     .{ .mode = "canvas.flow", .chord = "ctrl+k", .action = "canvas.flow.delete-line-end" },
     .{ .mode = "canvas.flow", .chord = "ctrl+t", .action = "canvas.flow.transpose" },
-    // Cases of sorts: Ctrl+Space, then type part of a name, a digit for a
+    // Cases of sorts: Ctrl+Space, then type part of a name, a digit (by
+    // position: the number row's keys, whatever the layout types there) for a
     // row (0: the first), Enter for the highlighted one, Space for the case
     // before, or Esc.
     .{ .mode = "canvas.flow", .chord = "ctrl+space", .action = "canvas.flow.choose-case" },
@@ -486,16 +487,16 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow.case-picker", .chord = "down", .action = "canvas.flow.case-picker.move", .arg = 1 },
     .{ .mode = "canvas.flow.case-picker", .chord = "backspace", .action = "canvas.flow.case-picker.back" },
     .{ .mode = "canvas.flow.case-picker", .chord = "escape", .action = "canvas.flow.case-picker.cancel" },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:0", .action = "canvas.flow.case-picker.pick", .arg = 0 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:1", .action = "canvas.flow.case-picker.pick", .arg = 1 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:2", .action = "canvas.flow.case-picker.pick", .arg = 2 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:3", .action = "canvas.flow.case-picker.pick", .arg = 3 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:4", .action = "canvas.flow.case-picker.pick", .arg = 4 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:5", .action = "canvas.flow.case-picker.pick", .arg = 5 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:6", .action = "canvas.flow.case-picker.pick", .arg = 6 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:7", .action = "canvas.flow.case-picker.pick", .arg = 7 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:8", .action = "canvas.flow.case-picker.pick", .arg = 8 },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char:9", .action = "canvas.flow.case-picker.pick", .arg = 9 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E10", .action = "canvas.flow.case-picker.pick", .arg = 0 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E01", .action = "canvas.flow.case-picker.pick", .arg = 1 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E02", .action = "canvas.flow.case-picker.pick", .arg = 2 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E03", .action = "canvas.flow.case-picker.pick", .arg = 3 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E04", .action = "canvas.flow.case-picker.pick", .arg = 4 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E05", .action = "canvas.flow.case-picker.pick", .arg = 5 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E06", .action = "canvas.flow.case-picker.pick", .arg = 6 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E07", .action = "canvas.flow.case-picker.pick", .arg = 7 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E08", .action = "canvas.flow.case-picker.pick", .arg = 8 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "@E09", .action = "canvas.flow.case-picker.pick", .arg = 9 },
     .{ .mode = "canvas.flow", .chord = "ctrl+w", .action = "canvas.flow.delete-word-back" },
     .{ .mode = "canvas.flow", .chord = "ctrl+b", .action = "canvas.flow.caret.char-left" },
     .{ .mode = "canvas.flow", .chord = "ctrl+f", .action = "canvas.flow.caret.char-right" },

@@ -12722,6 +12722,18 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
         }
         // Typing at the flow cursor goes into the flow.
+        // The text of a key taken by its place (a case picked by digit).
+        if (swallow_text) switch (e.evt) {
+            .text => {
+                swallow_text = false;
+                e.handle(@src(), box.data());
+                continue;
+            },
+            .key => |k| if (k.action == .down and !isModifierKey(k.code)) {
+                swallow_text = false;
+            },
+            else => {},
+        };
         if (e.evt == .text and !e.handled and track_cursor != null and !case_picker and !canvas_prompt and cursorKeysReach()) {
             const txt = switch (e.evt.text.action) {
                 .value => |v| v.txt,
@@ -20793,6 +20805,9 @@ fn flowAction(inv: keymap.Invocation) bool {
         },
         // A digit: the row it numbers; Enter: the highlighted row.
         kact("canvas.flow.case-picker.pick"), kact("canvas.flow.case-picker.take") => {
+            // A digit is bound by its key's place: the text it types is not
+            // typed.
+            if (inv.action == kact("canvas.flow.case-picker.pick")) swallow_text = true;
             var buf: [case_rows_max]?usize = undefined;
             const rows = caseRows(&buf);
             const n: usize = if (inv.action == kact("canvas.flow.case-picker.take")) case_hi else @intCast(inv.arg);
@@ -20897,6 +20912,9 @@ fn isModifierKey(k: dvui.enums.Key) bool {
 /// document's), null for plain text; the one before it.
 var active_case: ?usize = null;
 var prev_case: ?usize = null;
+/// Whether the next typed text is dropped: a key bound by its place
+/// (`@E01`) acted, and its text event follows.
+var swallow_text = false;
 /// Whether Ctrl+Space was pressed and a case is being chosen.
 var case_picker = false;
 
