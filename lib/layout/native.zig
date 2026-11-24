@@ -391,6 +391,20 @@ pub fn checksum(bytes: []const u8) u32 {
 
 /// The model held in a model block's payload, in a new model's arena.
 pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
+    var m = try decodeModelBlockKeepingRoots(gpa, b);
+    errdefer m.deinit();
+    // An older document's own panels for its workspaces' loose objects.
+    m.upgradeRoots() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {},
+    };
+    return m;
+}
+
+/// As `decodeModelBlock`, but an older document's own panels for its
+/// workspaces are left as they were (see `legacy.zig`): for replaying an
+/// op log written then, after which `Model.upgradeRoots` is called.
+pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model {
     if (b.version > model_version) return error.TooNew;
     if (b.version < model_version) return error.TooOld;
     var m: model.Model = .init(gpa);
@@ -412,6 +426,19 @@ pub fn decodeModelBlock(gpa: Allocator, b: Block) Error!model.Model {
         else => {},
     };
     return m;
+}
+
+/// As `decode`, keeping an older document's own panels for its
+/// workspaces (see `decodeModelBlockKeepingRoots`).
+pub fn decodeKeepingRoots(gpa: Allocator, bytes: []const u8) Error!model.Model {
+    if (bytes.len < magic.len or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadFile;
+    var i: usize = magic.len;
+    while (i < bytes.len) {
+        const b = try readBlock(bytes, i);
+        i = b.end;
+        if (std.mem.eql(u8, &b.kind, &model_block)) return decodeModelBlockKeepingRoots(gpa, b);
+    }
+    return error.NoModel;
 }
 
 /// Reads a native file into a new model, its strings and lists in the
@@ -550,7 +577,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.inch);
+    const c: model.Parent = .{ .space = try m.startCanvas(.inch) };
     const style = try m.addStyle("Label", .{ .cap_height = 3 });
     try m.setStyleFace(style, "math", .{ .family = "Libertinus Math" });
     try m.setStyleRule(style, .variable, .scale, .{ .number = 1.2 });
@@ -652,7 +679,7 @@ test "a model dumps as text, a field a line" {
     const gpa = testing.allocator;
     var m: model.Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: model.Parent = .{ .space = try m.startCanvas(.mm) };
     const style = try m.addStyle("Body", .{ .cap_height = 3 });
     const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = 1.5, .y = 2 }, .style = style, .count = 1, .length = 40, .pitch = 5 });
     try m.insertRun(c, r, 0, .{ .style = style, .content = "Hello \"you\"" });

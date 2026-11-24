@@ -240,11 +240,11 @@ test "a plate's stack: base, holes through, an inlaid legend; heights from its s
     const plate = try m.placePanel(.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 40, .h = 20 });
     const key = try m.addPrototype(.{ .name = "Key" });
     const legend = try m.addPrototype(.{ .name = "Legend", .tracks = &.{.{ .name = "f", .style = style, .alignment = .centre }} });
-    const g = try m.addGrid(plate, .{ .x = 10, .y = 8 }, .{ .cols = 2, .rows = 1, .pitch_x = 20, .pitch_y = 10 });
-    _ = try m.addStamp(plate, g, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 6, .h = 5 });
-    _ = try m.fillGrid(plate, g, 0);
-    _ = try m.addStamp(plate, g, .{ .name = "Legends", .prototype = legend, .role = .legend, .w = 10, .h = 4, .offset = .{ .x = 0, .y = 6 } });
-    const t = try m.placeInstance(plate, g, 1, 0, 0, 1, 1);
+    const g = try m.addGrid(.{ .panel = plate }, .{ .x = 10, .y = 8 }, .{ .cols = 2, .rows = 1, .pitch_x = 20, .pitch_y = 10 });
+    _ = try m.addStamp(.{ .panel = plate }, g, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 6, .h = 5 });
+    _ = try m.fillGrid(.{ .panel = plate }, g, 0);
+    _ = try m.addStamp(.{ .panel = plate }, g, .{ .name = "Legends", .prototype = legend, .role = .legend, .w = 10, .h = 4, .offset = .{ .x = 0, .y = 6 } });
+    const t = try m.placeInstance(.{ .panel = plate }, g, 1, 0, 0, 1, 1);
     try m.setTrackText(t, "f", "HOD");
     const gold: model.FabColour = .{ .name = "gold", .color = .hex("#d4a017") };
     // Made by FDM at 0.2 mm layers: a depth not a whole number of them is
@@ -258,7 +258,7 @@ test "a plate's stack: base, holes through, an inlaid legend; heights from its s
 
     var labels: place.Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var placed = try place.solve(gpa, &m, plate, &labels);
+    var placed = try place.solve(gpa, &m, .{ .panel = plate }, &labels);
     defer placed.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();

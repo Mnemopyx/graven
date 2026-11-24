@@ -39,8 +39,8 @@ pub const Issue = struct {
         missing_object,
         /// Its ends' objects are in different parents.
         cross_parent,
-        /// It refers to its parent's edges, and the parent has none (an
-        /// unbounded canvas or frame).
+        /// It refers to its parent's edges, and the parent has none (the
+        /// canvas, or a frame without a boundary).
         no_parent_edge,
         /// Its ends are on different axes.
         mixed_axes,
@@ -57,15 +57,18 @@ pub const Issue = struct {
 /// A construction line is placed by its point: a horizontal one's height
 /// and a vertical one's place across are what a constraint holds.
 const Kind = enum { panel, region, art, image, figure_place, control_point, guide };
-/// What an object sits in: a space (panels, images) or a panel (tracks,
-/// line art), whose frame its position is in.
-pub const Parent = union(enum) { space: usize, panel: usize };
+/// What an object sits in: a workspace (panels, content layouts set
+/// straight on it, images) or a panel (its content layouts, line art),
+/// whose frame its position is in.
+pub const Parent = model.Parent;
 
 const Loc = struct {
     kind: Kind,
     parent: Parent,
-    /// Panel index (panels, and things in panels), or space index (images).
-    holder: usize,
+    /// Panel index (panels, line art), or space index (images, figure
+    /// placements, construction lines); content layouts and control
+    /// points are found by `parent`.
+    holder: usize = 0,
     index: usize = 0,
     /// A control point's index in its track's path.
     sub: usize = 0,
@@ -73,12 +76,15 @@ const Loc = struct {
 
 fn locate(m: *const Model, id: ObjectId) ?Loc {
     if (id == .none) return null;
-    for (m.panels.items, 0..) |p, pi| {
-        if (p.id == id) return if (p.unbounded) null else .{ .kind = .panel, .parent = .{ .space = m.spaceOf(pi) }, .holder = pi };
-        for (p.regions.items, 0..) |r, k| {
-            if (r.id == id) return .{ .kind = .region, .parent = .{ .panel = pi }, .holder = pi, .index = k };
-            for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = .{ .panel = pi }, .holder = pi, .index = k, .sub = j };
+    for (0..m.parentCount()) |pk| {
+        const pa = m.parentAt(pk);
+        for (m.regionsIn(pa), 0..) |r, k| {
+            if (r.id == id) return .{ .kind = .region, .parent = pa, .index = k };
+            for (r.path.items, 0..) |cp, j| if (cp.id == id) return .{ .kind = .control_point, .parent = pa, .index = k, .sub = j };
         }
+    }
+    for (m.panels.items, 0..) |p, pi| {
+        if (p.id == id) return .{ .kind = .panel, .parent = .{ .space = m.spaceOf(pi) }, .holder = pi };
         for (p.art.items, 0..) |x, k| if (x.id == id) return .{ .kind = .art, .parent = .{ .panel = pi }, .holder = pi, .index = k };
     }
     for (m.spaces.items, 0..) |s, si| {
@@ -90,10 +96,7 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
 }
 
 fn parentEql(a: Parent, b: Parent) bool {
-    return switch (a) {
-        .space => |s| b == .space and b.space == s,
-        .panel => |p| b == .panel and b.panel == p,
-    };
+    return a.eql(b);
 }
 
 /// An object's extent on one axis, where its origin is across it, and
@@ -117,11 +120,13 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
                 .{ .lo = b.x0, .hi = b.x1, .f = frac(holds.x), .resizable = resizable };
         }
     }.f;
-    const p = &m.panels.items[loc.holder];
+    // A panel, or the panel holding line art (nothing else is found by
+    // `holder` in the panels).
+    const p: *model.Panel = if (loc.kind == .panel or loc.kind == .art) &m.panels.items[loc.holder] else undefined;
     return switch (loc.kind) {
         .panel => pick(p.box(), p.holds, vertical, true),
         .region => blk: {
-            const r = p.regions.items[loc.index];
+            const r = m.regionsIn(loc.parent)[loc.index];
             break :blk pick(r.softArea(), r.holds, vertical, true);
         },
         .art => blk: {
@@ -139,7 +144,7 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
             break :blk pick(fp.box(), fp.holds, vertical, true);
         },
         .control_point => blk: {
-            const at = controlPointAt(p.regions.items[loc.index], loc.sub);
+            const at = controlPointAt(m.regionsIn(loc.parent)[loc.index], loc.sub);
             const v = if (vertical) at.y else at.x;
             break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
         },
@@ -167,7 +172,9 @@ pub fn controlPointAt(r: model.TileRegion, k: usize) geom.Point {
 fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
     const sh = shapeOf(m, loc, vertical);
     const lo = o - sh.f * s;
-    const p = &m.panels.items[loc.holder];
+    // A panel, or the panel holding line art (nothing else is found by
+    // `holder` in the panels).
+    const p: *model.Panel = if (loc.kind == .panel or loc.kind == .art) &m.panels.items[loc.holder] else undefined;
     switch (loc.kind) {
         .panel => if (vertical) {
             p.origin.y = lo;
@@ -177,7 +184,7 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
             p.w = s;
         },
         .region => {
-            const r = &p.regions.items[loc.index];
+            const r = &m.regionsIn(loc.parent)[loc.index];
             if (vertical) {
                 r.origin.y = lo + s;
                 r.h = s / r.pitch;
@@ -198,7 +205,7 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
             }
         },
         .control_point => {
-            const r = &p.regions.items[loc.index];
+            const r = &m.regionsIn(loc.parent)[loc.index];
             const cp = &r.path.items[loc.sub];
             // Back from the panel frame to u along and across.
             if (r.major() == .row) {
@@ -251,7 +258,7 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
 }
 
 /// A feature of a parent, in the frame its children are placed in; null
-/// for an edge of an unbounded space.
+/// for an edge of a workspace without a boundary (the canvas).
 fn parentFeature(m: *const Model, parent: Parent, f: Feature) ?f64 {
     const space_bound = struct {
         fn of(mm: *const Model, si: usize) ?geom.Box {
@@ -264,19 +271,15 @@ fn parentFeature(m: *const Model, parent: Parent, f: Feature) ?f64 {
         .space => |si| bound = space_bound(m, si),
         .panel => |pi| {
             const p = m.panels.items[pi];
-            if (p.unbounded) {
-                bound = space_bound(m, m.spaceOf(pi));
-            } else {
-                bound = .{ .x0 = 0, .y0 = 0, .x1 = p.w, .y1 = p.h };
-                holds = p.holds;
-            }
+            bound = .{ .x0 = 0, .y0 = 0, .x1 = p.w, .y1 = p.h };
+            holds = p.holds;
         },
     }
     if (f == .origin_x or f == .origin_y) {
         const b = bound orelse return 0;
         // A space's origin is its coordinates' origin; a panel's is its
         // object origin, in its own frame.
-        if (parent == .space or m.panels.items[parent.panel].unbounded) return 0;
+        if (parent == .space) return 0;
         return if (f == .origin_x) b.x0 + frac(holds.x) * b.width() else b.y0 + frac(holds.y) * b.height();
     }
     const b = bound orelse return null;
@@ -307,7 +310,7 @@ pub fn spaceOf(m: *const Model, parent: Parent) usize {
 }
 
 /// Where a parent's frame sits in its space: a panel's origin corner (0
-/// for a space, and for a space's unbounded panel).
+/// for a workspace).
 pub fn frameOffset(m: *const Model, parent: Parent) geom.Point {
     return switch (parent) {
         .space => .{ .x = 0, .y = 0 },
@@ -384,7 +387,7 @@ fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
         // A track of text, in rows: its first row's capitals centred in
         // the row (as the flow sets them), from its top.
         .region => {
-            const r = m.panels.items[loc.holder].regions.items[loc.index];
+            const r = m.regionsIn(loc.parent)[loc.index];
             if (r.major() != .row) return null;
             const sid = r.style orelse return null;
             if (m.styleIndex(sid) == null) return null;
@@ -756,7 +759,8 @@ test "a constraint moves what it constrains, exactly, and keeps it there" {
     defer m.deinit();
     var h: history.History = .init(gpa);
     defer h.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     // Two points of line art (no shapes: each is its place) placed roughly.
     _ = try m.addArt(c, .{ .name = "A", .at = .{ .x = 10.3, .y = 20.7 }, .shapes = &.{} });
     _ = try m.addArt(c, .{ .name = "B", .at = .{ .x = 31.9, .y = 18.2 }, .shapes = &.{} });
@@ -793,10 +797,10 @@ test "sizes change about the origin, follow a resized parent, and conflicts are 
     defer m.deinit();
     var h: history.History = .init(gpa);
     defer h.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: model.Parent = .{ .space = try m.startCanvas(.mm) };
     const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 100, .h = 60 });
     const style = try m.addStyle("Body", .{ .cap_height = 3 });
-    const r = try m.addTracks(p, .{ .name = "t", .origin = .{ .x = 9, .y = 52 }, .style = style, .count = 4, .length = 10, .pitch = 5 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "t", .origin = .{ .x = 9, .y = 52 }, .style = style, .count = 4, .length = 10, .pitch = 5 });
     _ = c;
     try h.reset(&m);
     const pid = m.panels.items[p].id;
@@ -876,8 +880,8 @@ test "side-by-side text columns share their first baseline" {
     const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 100 });
     const body = try m.addStyle("Body", .{ .cap_height = 3 });
     const big = try m.addStyle("Big", .{ .cap_height = 5 });
-    const left = try m.addTracks(p, .{ .name = "left", .origin = .{ .x = 10, .y = 90 }, .style = body, .count = 5, .length = 10, .pitch = 6 });
-    const right = try m.addTracks(p, .{ .name = "right", .origin = .{ .x = 110, .y = 83.7 }, .style = big, .count = 5, .length = 8, .pitch = 9 });
+    const left = try m.addTracks(.{ .panel = p }, .{ .name = "left", .origin = .{ .x = 10, .y = 90 }, .style = body, .count = 5, .length = 10, .pitch = 6 });
+    const right = try m.addTracks(.{ .panel = p }, .{ .name = "right", .origin = .{ .x = 110, .y = 83.7 }, .style = big, .count = 5, .length = 8, .pitch = 9 });
     try h.reset(&m);
     const pp = &m.panels.items[p];
     const lid = pp.regions.items[left].id;
@@ -903,11 +907,14 @@ test "moving into a frame takes the constraint group; copying copies its constra
     defer m.deinit();
     var h: history.History = .init(gpa);
     defer h.deinit();
-    const c = try m.startCanvas(.mm);
-    for ([_]geom.Point{ .{ .x = 10, .y = 10 }, .{ .x = 40, .y = 12 }, .{ .x = 80, .y = 30 } }) |at| _ = try m.addArt(c, .{ .name = "x", .at = at, .shapes = &.{} });
+    _ = try m.startCanvas(.mm);
+    var ids: [3]ObjectId = undefined;
+    for ([_]geom.Point{ .{ .x = 10, .y = 10 }, .{ .x = 40, .y = 12 }, .{ .x = 80, .y = 30 } }, 0..) |at, k| {
+        const pi = try m.placePanel(.{ .name = "x", .origin = at, .w = 5, .h = 5 });
+        ids[k] = m.panels.items[pi].id;
+    }
     const frame = try m.addFrame("Frame", null);
     try h.reset(&m);
-    const ids = [3]ObjectId{ m.panels.items[c].art.items[0].id, m.panels.items[c].art.items[1].id, m.panels.items[c].art.items[2].id };
     // B is kept 30 mm right of A; A is kept level with C.
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[1], .feature = .origin_x }, .b = .{ .object = ids[0], .feature = .origin_x }, .value = 30 }});
     _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[0], .feature = .origin_y }, .b = .{ .object = ids[2], .feature = .origin_y } }});
@@ -949,9 +956,9 @@ test "a track's control point can be constrained, and the rows follow it" {
     _ = try m.startCanvas(.mm);
     const p = try m.placePanel(.{ .name = "P", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 200, .h = 120 });
     const body = try m.addStyle("Body", .{ .cap_height = 3 });
-    const r = try m.addTracks(p, .{ .name = "poem", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "poem", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
     try h.reset(&m);
-    const cp = try h.do(&m, .addControlPoint, .{ p, r, 2.0, 4.0 });
+    const cp = try h.do(&m, .addControlPoint, .{ .{ .panel = p }, r, 2.0, 4.0 });
     const rid = m.panels.items[p].regions.items[r].id;
     // The point kept 30 mm right of the track's left edge: it moves there,
     // and with it the path.
@@ -1004,7 +1011,8 @@ test "a dimension's place is kept, undone, and written with the file" {
     defer m.deinit();
     var h: history.History = .init(gpa);
     defer h.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     _ = try m.addArt(c, .{ .name = "A", .at = .{ .x = 10, .y = 20 }, .shapes = &.{} });
     _ = try m.addArt(c, .{ .name = "B", .at = .{ .x = 30, .y = 20 }, .shapes = &.{} });
     try h.reset(&m);

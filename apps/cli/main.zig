@@ -749,7 +749,6 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
 
     var chosen: std.ArrayList(usize) = .empty;
     for (m.panels.items, 0..) |p, pi| {
-        if (p.unbounded) continue;
         if (opts.panel) |want| if (!std.mem.eql(u8, p.name, want)) continue;
         try chosen.append(arena, pi);
     }
@@ -767,7 +766,7 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
             };
             break :blk try std.fmt.allocPrint(arena, "{s}-{s}{s}", .{ stem, safe, ext });
         };
-        var placed = try layout.solve(gpa, m, pi, &labels);
+        var placed = try layout.solve(gpa, m, .{ .panel = pi }, &labels);
         defer placed.deinit();
         if (opts.check) {
             try printChecks(init, m, pi, &placed, faces, opts.svg);

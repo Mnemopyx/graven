@@ -27,7 +27,7 @@ pub const TrackGround = struct {
     arena: std.heap.ArenaAllocator,
     m: *const model.Model,
     labels: *const place.Labels,
-    panel: usize,
+    parent: model.Parent,
     path: place.Path,
     keepouts: []const place.KeepOut,
     /// The flow's first paragraph style, for the first piece's indents.
@@ -41,41 +41,41 @@ pub const TrackGround = struct {
     /// `placed` is the panel as solved, for the tracks placed before this
     /// one (segments are kept clear of them) and nothing else; null when
     /// there are none to keep clear of.
-    pub fn init(gpa: Allocator, m: *const model.Model, labels: *const place.Labels, panel: usize, track: usize, placed: ?*const place.Placed) Allocator.Error!*TrackGround {
+    pub fn init(gpa: Allocator, m: *const model.Model, labels: *const place.Labels, parent: model.Parent, track: usize, placed: ?*const place.Placed) Allocator.Error!*TrackGround {
         const g = try gpa.create(TrackGround);
         errdefer gpa.destroy(g);
-        g.* = .{ .arena = .init(gpa), .m = m, .labels = labels, .panel = panel, .path = undefined, .keepouts = &.{}, .paragraph = null };
+        g.* = .{ .arena = .init(gpa), .m = m, .labels = labels, .parent = parent, .path = undefined, .keepouts = &.{}, .paragraph = null };
         errdefer g.arena.deinit();
         const a = g.arena.allocator();
-        const regions = m.panels.items[panel].regions.items;
+        const regions = m.regionsIn(parent);
 
         // The leg: this track and those threaded after it on this panel.
-        const head = m.threadHead(panel, track);
+        const head = m.threadHead(parent, track);
         var all_buf: [256]model.TrackRef = undefined;
         const all = m.thread(head, &all_buf);
         var leg: std.ArrayList(usize) = .empty;
         var k: usize = 0;
-        while (k < all.len and !(all[k].panel == panel and all[k].region == track)) k += 1;
-        while (k < all.len and all[k].panel == panel) : (k += 1) try leg.append(a, all[k].region);
+        while (k < all.len and !(all[k].parent.eql(parent) and all[k].region == track)) k += 1;
+        while (k < all.len and all[k].parent.eql(parent)) : (k += 1) try leg.append(a, all[k].region);
         if (leg.items.len == 0) try leg.append(a, track);
         const more = k < all.len;
 
         // Tracks placed before this one on the panel, to keep clear of.
         var avoid: std.ArrayList(place.PlacedTrack) = .empty;
         if (placed) |pl| for (pl.tracks) |t| {
-            if (t.panel == panel and t.member < track) try avoid.append(a, t);
+            if (t.parent.eql(parent) and t.member < track) try avoid.append(a, t);
         };
         // What art on the panel closes.
         var keep: std.ArrayList(place.KeepOut) = .empty;
-        for (m.panels.items[panel].art.items) |pa| {
+        for (m.artIn(parent)) |pa| {
             if (pa.wrap == .none or !pa.wrap_tracks) continue;
             try keep.append(a, try place.KeepOut.of(a, pa));
         }
         g.keepouts = keep.items;
         g.path = .{ .regions = regions, .thread = leg.items, .avoid = avoid.items, .more = more };
         // The flow's first paragraph, when the flow starts here.
-        if (head.panel == panel and head.region == track) {
-            if (m.ownParagraph(head.panel, head.region)) |id| if (m.paraStyle(id)) |ps| {
+        if (head.parent.eql(parent) and head.region == track) {
+            if (m.ownParagraph(head.parent, head.region)) |id| if (m.paraStyle(id)) |ps| {
                 g.paragraph = ps.*;
             };
         }
@@ -184,16 +184,16 @@ test "a row track's pieces are v1's segments: same bands, baselines where v1 set
     defer m.deinit();
     const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 60);
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 10, .y = 50 }, .style = style, .count = 3, .length = 5, .pitch = 6 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 10, .y = 50 }, .style = style, .count = 3, .length = 5, .pitch = 6 });
     // Enough words for several 30 mm rows.
-    try m.insertRun(p, r, 0, .{ .style = style, .content = "HOH HOH HOH HOH HOH HOH HOH HOH HOH" });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = style, .content = "HOH HOH HOH HOH HOH HOH HOH HOH HOH" });
     var labels: place.Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try place.solve(gpa, &m, p, &labels);
+    var s = try place.solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     try testing.expect(s.tracks.len >= 2);
 
-    const g = try TrackGround.init(gpa, &m, &labels, p, r, &s);
+    const g = try TrackGround.init(gpa, &m, &labels, .{ .panel = p }, r, &s);
     defer g.deinit();
     const gr = g.ground();
     for (s.tracks, 0..) |t, k| {
@@ -221,7 +221,7 @@ test "art closes stretches of a piece, as it does v1's lines" {
     defer m.deinit();
     const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 60);
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 2, .length = 15, .pitch = 6 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 2, .length = 15, .pitch = 6 });
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     // A box 20 mm wide from x 40, wrapped by its bounds, 1 mm clear.
@@ -229,7 +229,7 @@ test "art closes stretches of a piece, as it does v1's lines" {
     _ = try m.addArt(p, .{ .name = "block", .at = .{ .x = 40, .y = 30 }, .shapes = block, .wrap = .bounds, .clearance = 1 });
     var labels: place.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    const g = try TrackGround.init(gpa, &m, &labels, p, r, null);
+    const g = try TrackGround.init(gpa, &m, &labels, .{ .panel = p }, r, null);
     defer g.deinit();
     const piece = g.ground().piece(0, 0).?;
     // 90 mm long, open but for 39 to 61 mm.
@@ -248,14 +248,14 @@ test "a thread: pieces go on into the next track; one on another panel says ther
     const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("left", 100, 60);
     const q = try m.addPanel("right", 100, 60);
-    const a = try m.addTracks(p, .{ .name = "a", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
-    const b = try m.addTracks(p, .{ .name = "b", .origin = .{ .x = 0, .y = 20 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
-    const c = try m.addTracks(q, .{ .name = "c", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
-    try m.joinTracks(p, a, b);
-    try m.threadTracks(p, b, q, c);
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "a", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "b", .origin = .{ .x = 0, .y = 20 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
+    const c = try m.addTracks(.{ .panel = q }, .{ .name = "c", .origin = .{ .x = 0, .y = 50 }, .style = style, .count = 1, .length = 10, .pitch = 6 });
+    try m.joinTracks(.{ .panel = p }, a, b);
+    try m.threadTracks(.{ .panel = p }, b, .{ .panel = q }, c);
     var labels: place.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    const g = try TrackGround.init(gpa, &m, &labels, p, a, null);
+    const g = try TrackGround.init(gpa, &m, &labels, .{ .panel = p }, a, null);
     defer g.deinit();
     const gr = g.ground();
     // Track a's one row, then track b's; then the flow leaves the panel.
@@ -274,10 +274,10 @@ test "a column's pieces run down the page, up to the right" {
     defer m.deinit();
     const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 60);
-    const r = try m.addTracks(p, .{ .name = "down", .origin = .{ .x = 10, .y = 50 }, .style = style, .count = 2, .length = 8, .pitch = 5, .major = .column });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "down", .origin = .{ .x = 10, .y = 50 }, .style = style, .count = 2, .length = 8, .pitch = 5, .major = .column });
     var labels: place.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    const g = try TrackGround.init(gpa, &m, &labels, p, r, null);
+    const g = try TrackGround.init(gpa, &m, &labels, .{ .panel = p }, r, null);
     defer g.deinit();
     const piece = g.ground().piece(0, 0).?;
     const f = piece.frame(0);

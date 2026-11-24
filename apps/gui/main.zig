@@ -52,6 +52,7 @@ const geom = layout.geom;
 const Boundary = geom.path.Path;
 const Model = layout.Model;
 const TileId = layout.TileId;
+const Parent = layout.model.Parent;
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = start },
@@ -208,7 +209,7 @@ pub const testing_api = struct {
     pub fn tileCenter(designator: []const u8) ?dvui.Point.Physical {
         const id = state.model.findTile(designator) orelse return null;
         const f = findTile(id) orelse return null;
-        const b = onSheet(f.panel, f.tile.body);
+        const b = onSheet(f.parent, f.tile.body);
         return toScreen(.{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 });
     }
     /// While an expression is edited on the canvas: its objects' boxes
@@ -216,8 +217,9 @@ pub const testing_api = struct {
     /// screen rectangles; and the one chosen's kind.
     pub fn eqBoxes(out: []dvui.Rect.Physical) []dvui.Rect.Physical {
         var n: usize = 0;
-        for (state.placed.items, 0..) |placed, pi| {
-            const o = panelOrigin(pi);
+        for (state.solved.items, 0..) |placed, k| {
+            const pi = state.model.parentAt(k);
+            const o = parentOrigin(pi);
             for (placed.labels) |l| {
                 _ = eqPiece(pi, l) orelse continue;
                 for (l.render.boxes) |b| {
@@ -241,7 +243,7 @@ pub const testing_api = struct {
     }
     pub fn contextIsCanvas() bool {
         return switch (state.context) {
-            .panel => |pi| pi < state.model.panels.items.len and state.model.panels.items[pi].unbounded,
+            .space => |si| si < state.model.spaces.items.len,
             else => false,
         };
     }
@@ -253,7 +255,7 @@ pub const testing_api = struct {
     }
     pub fn contextRegionName() ?[]const u8 {
         return switch (state.context) {
-            .region => |r| state.model.panels.items[r.panel].regions.items[r.region].name,
+            .region => |r| state.model.regionsIn(r.parent)[r.region].name,
             else => null,
         };
     }
@@ -277,7 +279,7 @@ pub const testing_api = struct {
     pub fn tileEdge(designator: []const u8) ?dvui.Point.Physical {
         const id = state.model.findTile(designator) orelse return null;
         const f = findTile(id) orelse return null;
-        const b = onSheet(f.panel, f.tile.body);
+        const b = onSheet(f.parent, f.tile.body);
         return toScreen(.{ .x = b.x0 + 0.3 * edgeMm(), .y = (b.y0 + b.y1) / 2 });
     }
     /// The screen box of tile `designator`'s slot `slot`'s text.
@@ -287,9 +289,9 @@ pub const testing_api = struct {
         const k = for (tracks, 0..) |t, i| {
             if (std.mem.eql(u8, t.name, slot)) break i;
         } else return null;
-        for (state.placed.items, 0..) |placed, pi| for (placed.labels) |l| {
+        for (state.solved.items, 0..) |placed, pk| for (placed.labels) |l| {
             if (l.tile == null or l.tile.? != id or l.slot != k) continue;
-            const b = labelBox(pi, l);
+            const b = labelBox(state.model.parentAt(pk), l);
             const p0 = toScreen(.{ .x = b.x0, .y = b.y1 }) orelse return null;
             const p1 = toScreen(.{ .x = b.x1, .y = b.y0 }) orelse return null;
             return .{ .x = @min(p0.x, p1.x), .y = @min(p0.y, p1.y), .w = @abs(p1.x - p0.x), .h = @abs(p1.y - p0.y) };
@@ -328,9 +330,9 @@ pub const testing_api = struct {
             if (std.mem.eql(u8, t.name, slot)) break i;
         } else return null;
         var out: [3]f32 = undefined;
-        for (state.placed.items, 0..) |placed, pi| for (placed.labels) |l| {
+        for (state.solved.items, 0..) |placed, pk| for (placed.labels) |l| {
             if (l.tile == null or l.tile.? != id or l.slot != k) continue;
-            const o = panelOrigin(pi);
+            const o = parentOrigin(state.model.parentAt(pk));
             var n: usize = 0;
             for (l.render.items) |it| switch (it) {
                 .glyph => |gl| {
@@ -412,7 +414,7 @@ pub const testing_api = struct {
     pub fn cursor(path: []const u8, index: usize) bool {
         const ref = state.model.resolve(path) orelse return false;
         const t: layout.model.TrackRef = switch (ref) {
-            .region => |r| .{ .panel = r.panel, .region = r.region },
+            .region => |r| .{ .parent = r.parent, .region = r.region },
             .flow => |id| blk: {
                 const fi = state.model.flowIndex(id) orelse return false;
                 const f = state.model.flows.items[fi];
@@ -422,10 +424,10 @@ pub const testing_api = struct {
             },
             else => return false,
         };
-        const head = state.model.threadHead(t.panel, t.region);
-        if (index > state.model.flowItems(head.panel, head.region).len) return false;
-        state.context = .{ .region = .{ .panel = t.panel, .region = t.region } };
-        track_cursor = .{ .panel = head.panel, .region = head.region, .index = index };
+        const head = state.model.threadHead(t.parent, t.region);
+        if (index > state.model.flowItems(head.parent, head.region).len) return false;
+        state.context = .{ .region = .{ .parent = t.parent, .region = t.region } };
+        track_cursor = .{ .parent = head.parent, .region = head.region, .index = index };
         dvui.refresh(null, @src(), null);
         return true;
     }
@@ -516,7 +518,8 @@ pub const testing_api = struct {
     }
     /// Grid `gi` of panel `pi`'s point at `col`, `row` on the screen.
     pub fn gridPoint(pi: usize, gi: usize, col: u32, row: u32) ?dvui.Point.Physical {
-        return toScreen(onSheetPoint(pi, state.model.gridPoint(pi, gi, @floatFromInt(col), @floatFromInt(row))));
+        const p: Parent = .{ .panel = pi };
+        return toScreen(onSheetPoint(p, state.model.gridPoint(p, gi, @floatFromInt(col), @floatFromInt(row))));
     }
     pub fn panelNamed(name: []const u8) ?usize {
         for (state.model.panels.items, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) return i;
@@ -526,7 +529,7 @@ pub const testing_api = struct {
     pub fn centreOnTile(designator: []const u8, ppm: f64) void {
         const id = state.model.findTile(designator) orelse return;
         const f = findTile(id) orelse return;
-        const b = onSheet(f.panel, f.tile.body);
+        const b = onSheet(f.parent, f.tile.body);
         setView((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, ppm);
         dvui.refresh(null, @src(), null);
     }
@@ -592,7 +595,9 @@ const State = struct {
     model: Model,
     labels: ?layout.Labels = null,
     /// One solve per panel, in the panel's own frame.
-    placed: std.ArrayList(layout.place.Placed) = .empty,
+    /// Each parent placed, by `Model.parentSlot`: the workspaces, then
+    /// the panels (see `placedOf`).
+    solved: std.ArrayList(layout.place.Placed) = .empty,
     placed_rev: u64 = std.math.maxInt(u64),
     /// Labels whose ink reaches into the worksheet's margins.
     intrusions: []layout.drc.MarginIntrusion = &.{},
@@ -639,7 +644,7 @@ const Tool = enum { select, construction, add_panel, add_tracks, add_art, select
 var insert_figure: layout.model.ObjectId = .none;
 
 /// Join: the track a click on another track threads on into.
-var join_from: ?struct { panel: usize, region: usize } = null;
+var join_from: ?struct { parent: Parent, region: usize } = null;
 
 /// What Add shape draws: a closed path, dragged out as a box (a polygon
 /// is clicked corner by corner).
@@ -672,9 +677,11 @@ const Context = union(enum) {
     /// The file: everything, the worksheet included.
     file,
     worksheet,
+    /// A workspace: the canvas, or a frame (by index).
+    space: usize,
     panel: usize,
-    region: struct { panel: usize, region: usize },
-    row: struct { panel: usize, region: usize, row: usize },
+    region: struct { parent: Parent, region: usize },
+    row: struct { parent: Parent, region: usize, row: usize },
     tile: TileId,
     /// Line art placed on a panel.
     art: struct { panel: usize, index: usize },
@@ -701,7 +708,7 @@ const Context = union(enum) {
     figures,
     figure_def: usize,
     /// A grid on a panel.
-    grid: struct { panel: usize, index: usize },
+    grid: struct { parent: Parent, index: usize },
     /// The file's tile prototypes, and one of them.
     prototypes,
     prototype: layout.model.PrototypeId,
@@ -743,7 +750,8 @@ const Context = union(enum) {
             .worksheet => "Worksheet",
             .panel => "Panel",
             // A track laid out in advance is a track, not a region.
-            .region => |r| if (r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len and state.model.panels.items[r.panel].regions.items[r.region].kind == .track) "Content layout: single track" else "Content layout",
+            .space => |si| if (si == 0) "Canvas" else "Frame",
+            .region => |r| if (state.model.hasParent(r.parent) and r.region < state.model.regionsIn(r.parent).len and state.model.regionsIn(r.parent)[r.region].kind == .track) "Content layout: single track" else "Content layout",
             .row => "Row",
             .tile => "Tile",
             .art => "Line art",
@@ -1030,11 +1038,49 @@ var shown_space: usize = 0;
 /// Objects picked together with Select area, all in the shown space.
 var selection: std.ArrayList(layout.model.ObjectId) = .empty;
 
-/// The shown space's own panel (its loose objects), if the document is a
-/// canvas.
-fn spaceRoot() ?usize {
+/// The shown workspace, as a parent, if the document is a canvas.
+fn shownParent() ?Parent {
     if (shown_space >= state.model.spaces.items.len) return null;
-    return state.model.rootOf(shown_space);
+    return .{ .space = shown_space };
+}
+
+/// The context for empty space: the shown workspace on a canvas, else the
+/// worksheet.
+fn workspaceContext() Context {
+    return if (shownParent() != null) .{ .space = shown_space } else .worksheet;
+}
+
+/// Whether what is directly in parent `p` can be picked: its layer (a
+/// panel's own, a workspace's base layer) shown and not locked.
+fn parentLayerOpen(p: Parent) bool {
+    if (state.model.spaces.items.len == 0) return true;
+    return switch (p) {
+        .space => |si| si < state.model.spaces.items.len and layerOpen(si, state.model.spaces.items[si].base_layer),
+        .panel => |pi| layerOpen(state.model.spaceOf(pi), panelLayer(pi)),
+    };
+}
+
+/// The context for parent `p`: its workspace or its panel.
+fn parentContext(p: Parent) Context {
+    return switch (p) {
+        .space => |si| .{ .space = si },
+        .panel => |pi| .{ .panel = pi },
+    };
+}
+
+/// Whether parent `p` is shown: the shown workspace, or a panel in it.
+fn shownIn(p: Parent) bool {
+    return switch (p) {
+        .space => |si| si == shown_space,
+        .panel => |pi| shownPanel(pi),
+    };
+}
+
+/// The placed content of parent `p` (see `State.solved`), if placed.
+fn placedOf(p: Parent) ?*const layout.place.Placed {
+    if (!state.model.hasParent(p)) return null;
+    const k = state.model.parentSlot(p);
+    return if (k < state.solved.items.len) &state.solved.items[k] else null;
 }
 
 /// Whether panel `pi` is shown: it lives in the shown space (a worksheet
@@ -1047,12 +1093,14 @@ fn shownPanel(pi: usize) bool {
 /// Shows the space the context belongs to.
 fn followContext() void {
     if (state.model.spaces.items.len == 0) return;
-    const pi: ?usize = switch (state.context) {
-        .panel => |pi| pi,
-        .art => |l| l.panel,
-        .region => |r| r.panel,
-        .row => |r| r.panel,
-        .tile => |id| if (findTile(id)) |f| f.panel else null,
+    const pi: ?Parent = switch (state.context) {
+        .space => |si| .{ .space = si },
+        .panel => |pi| .{ .panel = pi },
+        .art => |l| .{ .panel = l.panel },
+        .region => |r| r.parent,
+        .row => |r| r.parent,
+        .grid => |g| g.parent,
+        .tile => |id| if (findTile(id)) |f| f.parent else null,
         .group => |g| {
             if (state.model.spaceOfId(g)) |sp| shown_space = sp;
             return;
@@ -1071,8 +1119,8 @@ fn followContext() void {
         },
         else => null,
     };
-    if (pi) |p| if (p < state.model.panels.items.len) {
-        shown_space = state.model.spaceOf(p);
+    if (pi) |p| if (state.model.hasParent(p)) {
+        shown_space = state.model.spaceOfParent(p);
     };
     if (shown_space >= state.model.spaces.items.len) shown_space = 0;
 }
@@ -1125,7 +1173,7 @@ fn createCanvas(units: layout.model.Units) void {
     hist.reset(&state.model) catch {};
     last_units = units;
     canvas_prompt = false;
-    state.context = .{ .panel = ci };
+    state.context = .{ .space = ci };
     state.view.fit = canvas_view;
 }
 
@@ -1635,18 +1683,24 @@ fn exportSvg() void {
     export_prompt = true;
 }
 
-/// What Export SVG writes: the selected panel, else the canvas's loose
-/// objects (on a worksheet, the first panel).
-fn exportPanel() ?usize {
+/// What Export SVG writes: the selected panel (or the workspace a chosen
+/// content layout is set on), else the shown workspace's content layouts
+/// and grids (on a worksheet, the first panel).
+fn exportPanel() ?Parent {
     switch (state.context) {
-        .panel => |pi| return pi,
-        .art => |l| return l.panel,
-        .region => |r| return r.panel,
-        .row => |r| return r.panel,
+        .panel => |pi| return .{ .panel = pi },
+        .art => |l| return .{ .panel = l.panel },
+        .region => |r| return r.parent,
+        .row => |r| return r.parent,
         else => {},
     }
-    if (spaceRoot()) |ri| return ri;
-    return if (state.model.panels.items.len > 0) 0 else null;
+    if (shownParent()) |p| return p;
+    return if (state.model.panels.items.len > 0) .{ .panel = 0 } else null;
+}
+
+/// The panel a 3MF is made of: the chosen one (only a panel is made).
+fn exportPart() ?usize {
+    return (exportPanel() orelse return null).panelIndex();
 }
 
 /// The export prompt: the file to write, then Export (or Enter); Esc or
@@ -1664,7 +1718,7 @@ fn exportPrompt() void {
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(12) });
     defer body.deinit();
     const pi = exportPanel();
-    const what = if (pi) |p| (if (state.model.panels.items[p].unbounded) "the canvas's loose objects" else state.model.panels.items[p].name) else "nothing yet";
+    const what = if (pi) |p| (if (p == .space) "the workspace's content layouts" else state.model.parentName(p)) else "nothing yet";
     dvui.label(@src(), "Export SVG: {s}", .{what}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -1705,7 +1759,7 @@ fn exportPrompt() void {
         state.status = "There is nothing to export yet. ";
         return;
     };
-    if (p >= state.placed.items.len or path.len == 0) return;
+    if (placedOf(p) == null or path.len == 0) return;
     // Never a stale layout: threads followed to the end first.
     const labels = if (state.labels) |*l| l else return;
     const entries = layout.place.handoffs(state.gpa, &state.model, labels, thread_entries) catch {
@@ -1734,14 +1788,13 @@ fn exportPrompt() void {
 /// shown space's canvas, right of what it holds, with the cursor in it;
 /// where its track starts (its first row's top left).
 fn loadText() !geom.Point {
-    const space = state.model.spaces.items[shown_space];
-    const pi = state.model.panelIndex(space.root) orelse return error.NoCanvas;
+    const pi = shownParent() orelse return error.NoCanvas;
     const held = spaceExtents();
     const at: geom.Point = if (held.isEmpty()) .{ .x = 0, .y = 30 } else .{ .x = held.x1 + 20, .y = held.y1 };
     const r = try text_sample.build(&state.model, pi, try labelStyle(), at);
     try hist.snapshot(&state.model);
-    state.context = .{ .region = .{ .panel = pi, .region = r } };
-    track_cursor = .{ .panel = pi, .region = r, .index = 1, .offset = 0 };
+    state.context = .{ .region = .{ .parent = pi, .region = r } };
+    track_cursor = .{ .parent = pi, .region = r, .index = 1, .offset = 0 };
     state.view.fit = .{ .x0 = at.x - 5, .y0 = at.y - 25, .x1 = at.x + 65, .y1 = at.y + 5 };
     return at;
 }
@@ -1802,7 +1855,7 @@ fn deinit(_: *dvui.Window) void {
     tags_given.deinit(state.gpa);
     tags_given = .empty;
     clearPlaced();
-    state.placed.deinit(state.gpa);
+    state.solved.deinit(state.gpa);
     if (state.labels) |*l| l.deinit();
     if (state.face) |f| f.deinit();
     state.flat.arena.deinit();
@@ -1900,12 +1953,12 @@ fn listFonts(gpa: std.mem.Allocator) ![]Font {
     return list.toOwnedSlice(gpa);
 }
 
-/// Every panel laid out at once, threads entering where they did when last
-/// worked out (`thread_entries`).
+/// Every workspace and panel laid out at once (`State.solved`), threads
+/// entering where they did when last worked out (`thread_entries`).
 fn solvePanels(labels: *layout.Labels) !void {
     clearPlaced();
-    for (0..state.model.panels.items.len) |pi| {
-        try state.placed.append(state.gpa, try layout.place.solveWith(state.gpa, &state.model, pi, labels, thread_entries));
+    for (0..state.model.parentCount()) |k| {
+        try state.solved.append(state.gpa, try layout.place.solveWith(state.gpa, &state.model, state.model.parentAt(k), labels, thread_entries));
     }
 }
 
@@ -1936,7 +1989,7 @@ fn followThreads(labels: *layout.Labels) !void {
     const gpa = state.gpa;
     var exits: std.ArrayList(layout.place.Handoff) = .empty;
     defer exits.deinit(gpa);
-    for (state.placed.items) |pl| try exits.appendSlice(gpa, pl.exits);
+    for (state.solved.items) |pl| try exits.appendSlice(gpa, pl.exits);
     if (layout.place.sameHandoffs(exits.items, thread_entries)) {
         catching_up = reflower != null and reflower.?.busy();
         return;
@@ -2005,7 +2058,7 @@ fn update() !void {
     const t0: std.Io.Timestamp = .now(dvui.io, .awake);
     try solvePanels(labels);
     try followThreads(labels);
-    state.intrusions = try layout.drc.marginIntrusions(state.gpa, &state.model, state.placed.items);
+    state.intrusions = try layout.drc.marginIntrusions(state.gpa, &state.model, state.solved.items);
     state.panel_issues = try layout.drc.panelIssues(state.gpa, &state.model);
     state.layer_issues = try state.model.layerIssues(state.gpa);
     state.solve_ms = @as(f64, @floatFromInt(t0.untilNow(dvui.io, .awake).toNanoseconds())) / 1e6;
@@ -2015,8 +2068,8 @@ fn update() !void {
     for (&view_slots) |*sl| if (sl.flat) |*f| f.reset(f.tol);
     // A selected row the flow no longer reaches gives way to its track.
     switch (state.context) {
-        .row => |r| if (placedTrack(r.panel, r.region, r.row) == null and r.panel < state.model.panels.items.len and r.region < state.model.panels.items[r.panel].regions.items.len) {
-            state.context = .{ .region = .{ .panel = r.panel, .region = r.region } };
+        .row => |r| if (placedTrack(r.parent, r.region, r.row) == null and state.model.hasParent(r.parent) and r.region < state.model.regionsIn(r.parent).len) {
+            state.context = .{ .region = .{ .parent = r.parent, .region = r.region } };
         },
         else => {},
     }
@@ -2194,17 +2247,26 @@ fn clearPlaced() void {
     state.panel_issues = &.{};
     state.gpa.free(state.layer_issues);
     state.layer_issues = &.{};
-    for (state.placed.items) |*p| p.deinit();
-    state.placed.clearRetainingCapacity();
+    for (state.solved.items) |*p| p.deinit();
+    state.solved.clearRetainingCapacity();
     state.placed_rev = std.math.maxInt(u64);
 }
 
 /// A placed tile and the panel it is on.
-const Found = struct { panel: usize, tile: *const layout.place.PlacedTile };
+const Found = struct { parent: Parent, tile: *const layout.place.PlacedTile };
 
 fn findTile(id: TileId) ?Found {
-    for (state.placed.items, 0..) |*p, pi| if (p.findTile(id)) |t| return .{ .panel = pi, .tile = t };
+    for (state.solved.items, 0..) |*p, k| if (p.findTile(id)) |t| return .{ .parent = state.model.parentAt(k), .tile = t };
     return null;
+}
+
+/// Where parent `p`'s frame origin sits in its space: a panel's (as
+/// dragged, see `panelOrigin`), or a workspace's own (0, 0).
+fn parentOrigin(p: Parent) geom.Point {
+    return switch (p) {
+        .space => .{ .x = 0, .y = 0 },
+        .panel => |pi| panelOrigin(pi),
+    };
 }
 
 /// Where panel `pi` sits on the worksheet: its origin, or its preview
@@ -2231,9 +2293,10 @@ fn panelBox(pi: usize) geom.Box {
     return .{ .x0 = o.x, .y0 = o.y, .x1 = o.x + p.w, .y1 = o.y + p.h };
 }
 
-/// A box in panel `pi`'s frame, moved onto the worksheet.
-fn onSheet(pi: usize, b: geom.Box) geom.Box {
-    const o = panelOrigin(pi);
+/// A box in parent `pi`'s frame, moved into its space (onto the
+/// worksheet).
+fn onSheet(pi: Parent, b: geom.Box) geom.Box {
+    const o = parentOrigin(pi);
     return .{ .x0 = b.x0 + o.x, .y0 = b.y0 + o.y, .x1 = b.x1 + o.x, .y1 = b.y1 + o.y };
 }
 
@@ -2838,7 +2901,7 @@ fn importText(path: []const u8) void {
     switch (target) {
         .cursor => {
             const c = track_cursor.?;
-            const region = state.model.panels.items[c.panel].regions.items[c.region];
+            const region = state.model.regionsIn(c.parent)[c.region];
             flow = region.flow;
             at = c.index;
             base = region.style orelse (labelStyleIn(key) catch return);
@@ -2934,7 +2997,7 @@ var threemf_name: [600]u8 = undefined;
 
 /// The panel's name as a .3mf file beside the document.
 fn threeMfName() []const u8 {
-    const pi = exportPanel() orelse return "";
+    const pi = exportPart() orelse return "";
     const name = state.model.panels.items[pi].name;
     const dir: []const u8 = if (file_path) |fp| (std.fs.path.dirname(fp) orelse "") else "";
     return (if (dir.len > 0)
@@ -2947,7 +3010,7 @@ fn threeMfName() []const u8 {
 /// planned over its layout, one object a colour, as built (as the CLI's
 /// `graven 3mf` does).
 fn exportThreeMf(path: []const u8) void {
-    const pi = exportPanel() orelse return;
+    const pi = exportPart() orelse return;
     const labels = if (state.labels) |*l| l else return;
     var arena: std.heap.ArenaAllocator = .init(state.gpa);
     defer arena.deinit();
@@ -2957,7 +3020,7 @@ fn exportThreeMf(path: []const u8) void {
         return;
     };
     defer state.gpa.free(entries);
-    var placed = layout.place.solveWith(state.gpa, &state.model, pi, labels, entries) catch {
+    var placed = layout.place.solveWith(state.gpa, &state.model, .{ .panel = pi }, labels, entries) catch {
         state.status = "The 3MF could not be made. ";
         return;
     };
@@ -3006,9 +3069,9 @@ fn sheetImportTarget() ?layout.import.SheetTarget {
     }
     return switch (state.context) {
         .sheet => |id| if (m.sheetIndex(id) != null) .{ .into = id } else null,
-        .grid => |g| .{ .new = .{ .name = "Legends", .scope = m.panels.items[g.panel].grids.items[g.index].id } },
-        .region => |r| .{ .new = .{ .name = "Legends", .scope = m.panels.items[r.panel].regions.items[r.region].id } },
-        .panel => |pi| if (!m.panels.items[pi].unbounded) .{ .new = .{ .name = "Legends", .scope = m.panels.items[pi].id } } else null,
+        .grid => |g| .{ .new = .{ .name = "Legends", .scope = m.gridsIn(g.parent)[g.index].id } },
+        .region => |r| .{ .new = .{ .name = "Legends", .scope = m.regionsIn(r.parent)[r.region].id } },
+        .panel => |pi| .{ .new = .{ .name = "Legends", .scope = m.panels.items[pi].id } },
         else => null,
     };
 }
@@ -3127,7 +3190,6 @@ fn openExample(path: []const u8) void {
     // Shown whole: its panels fill the view.
     var all: ?geom.Box = null;
     for (state.model.panels.items) |pn| {
-        if (pn.unbounded) continue;
         all = if (all) |b| b.join(pn.box()) else pn.box();
     }
     if (all) |b| state.view.fit = b;
@@ -3144,7 +3206,7 @@ fn install(opened: *history.Opened, path: []const u8) void {
     hist = opened.history;
     canvas_prompt = false;
     shown_space = 0;
-    state.context = if (state.model.spaces.items.len > 0) .{ .panel = state.model.rootOf(0) } else .worksheet;
+    state.context = if (state.model.spaces.items.len > 0) .{ .space = 0 } else .worksheet;
     for (state.model.styles.items) |st| {
         if (std.mem.eql(u8, st.name, "Label")) state.label_style = st.id;
     }
@@ -3465,10 +3527,10 @@ fn contextGroup(c: Context) []const u8 {
 /// The Browser's context for an object reached by name.
 fn contextOfRef(ref: layout.model.Model.Ref) ?Context {
     return switch (ref) {
-        .space => |si| .{ .panel = state.model.rootOf(si) },
+        .space => |si| .{ .space = si },
         .panel => |pi| .{ .panel = pi },
-        .region => |r| .{ .region = .{ .panel = r.panel, .region = r.region } },
-        .grid => |g| .{ .grid = .{ .panel = g.panel, .index = g.index } },
+        .region => |r| .{ .region = .{ .parent = r.parent, .region = r.region } },
+        .grid => |g| .{ .grid = .{ .parent = g.parent, .index = g.index } },
         .art => |a| .{ .art = .{ .panel = a.panel, .index = a.index } },
         .tile => |t| .{ .tile = t },
         .collection => |c| switch (c) {
@@ -3662,7 +3724,8 @@ fn afterHistory() void {
     track_cursor = null;
     state.moving = null;
     if (!contextValid(state.context)) {
-        state.context = if (state.model.spaces.items.len > shown_space) .{ .panel = state.model.rootOf(shown_space) } else .worksheet;
+        if (shown_space >= state.model.spaces.items.len) shown_space = 0;
+        state.context = workspaceContext();
     }
     if (shown_space >= state.model.spaces.items.len) shown_space = 0;
 }
@@ -3672,9 +3735,10 @@ fn contextValid(c: Context) bool {
     const np = m.panels.items.len;
     return switch (c) {
         .file, .worksheet, .prototypes, .selection => true,
+        .space => |si| si < m.spaces.items.len,
         .panel => |pi| pi < np,
-        .region => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len,
-        .row => |r| r.panel < np and r.region < m.panels.items[r.panel].regions.items.len and r.row < segmentCount(r.panel, r.region),
+        .region => |r| m.hasParent(r.parent) and r.region < m.regionsIn(r.parent).len,
+        .row => |r| m.hasParent(r.parent) and r.region < m.regionsIn(r.parent).len and r.row < segmentCount(r.parent, r.region),
         .tile => |id| m.tileIndex(id) != null and !m.tileConst(id).removed,
         .art => |l| l.panel < np and l.index < m.panels.items[l.panel].art.items.len,
         .group => |g| m.group(g) != null,
@@ -3688,7 +3752,7 @@ fn contextValid(c: Context) bool {
         .sketch_def => |i| i < m.sketches.items.len,
         .figures => true,
         .figure_def => |i| i < m.figures.items.len,
-        .grid => |g| g.panel < np and g.index < m.panels.items[g.panel].grids.items.len,
+        .grid => |g| m.hasParent(g.parent) and g.index < m.gridsIn(g.parent).len,
         .prototype => |id| m.protoIndex(id) != null,
         .flows => true,
         .flow => |id| m.flowIndex(id) != null,
@@ -4412,7 +4476,7 @@ fn overlays() !void {
     // palette stays.
     if (moving_track) {
         // Sized to its content again when what it offers changes.
-        const what: u64 = if (moving_track) 1 else if (paletteFor(track_cursor.?.panel, track_cursor.?.region)) |pal| (@as(u64, @backingInt(pal.prototype)) << 8) | (@as(u64, pal.tile_count) << 2) | @as(u64, @intFromBool(inTextTrack())) << 1 else 2;
+        const what: u64 = if (moving_track) 1 else if (paletteFor(track_cursor.?.parent, track_cursor.?.region)) |pal| (@as(u64, @backingInt(pal.prototype)) << 8) | (@as(u64, pal.tile_count) << 2) | @as(u64, @intFromBool(inTextTrack())) << 1 else 2;
         const S = struct {
             var rect: dvui.Rect = .{ .w = 400, .h = 64 };
             var shown: u64 = 0;
@@ -4469,19 +4533,19 @@ const ExprTarget = union(enum) {
     /// newline for each hard break).
     tile_track: struct { tile: TileId, track: layout.model.ObjectId },
     /// A run of markup (text, an equation) in a track's flow.
-    run: struct { panel: usize, region: usize, item: usize },
+    run: struct { parent: Parent, region: usize, item: usize },
 
     fn content(t: ExprTarget) []const u8 {
         return switch (t) {
             .tile_track => |tt| state.model.tileTrackText(dvui.currentWindow().arena(), tt.tile, tt.track) catch "",
-            .run => |r| state.model.flowItems(r.panel, r.region)[r.item].what.run.content,
+            .run => |r| state.model.flowItems(r.parent, r.region)[r.item].what.run.content,
         };
     }
 
     fn store(t: ExprTarget, text: []const u8) !void {
         switch (t) {
             .tile_track => |tt| try actM(mergeKey(.{ "tile track", tt.tile, tt.track }), .setTileTrackText, .{ tt.tile, tt.track, text }),
-            .run => |r| try actM(mergeKey(.{ "run", r.panel, r.region, r.item }), .setRunContent, .{ r.panel, r.region, r.item, text }),
+            .run => |r| try actM(mergeKey(.{ "run", r.parent, r.region, r.item }), .setRunContent, .{ r.parent, r.region, r.item, text }),
         }
     }
 
@@ -4489,7 +4553,7 @@ const ExprTarget = union(enum) {
     fn isMath(t: ExprTarget) bool {
         return switch (t) {
             .tile_track => false,
-            .run => |r| state.model.flowItems(r.panel, r.region)[r.item].what.run.equation,
+            .run => |r| state.model.flowItems(r.parent, r.region)[r.item].what.run.equation,
         };
     }
 
@@ -4504,10 +4568,10 @@ fn exprTarget() ?ExprTarget {
     // In a sheet view: the selected cell, through its key's slot.
     if (activeKind() == .sheet) return sheetCellTarget();
     if (canvas_eq) |q| if (eqContent(q) != null) return q.target;
-    if (equationEdited()) |e| return .{ .run = .{ .panel = e.panel, .region = e.region, .item = e.item } };
+    if (equationEdited()) |e| return .{ .run = .{ .parent = e.parent, .region = e.region, .item = e.item } };
     return switch (state.context) {
         .tile => |id| if (exprTrackOf(id)) |tr| .{ .tile_track = .{ .tile = id, .track = tr } } else null,
-        .region => if (runAtCursor()) |r| .{ .run = .{ .panel = r.panel, .region = r.region, .item = r.item } } else null,
+        .region => if (runAtCursor()) |r| .{ .run = .{ .parent = r.parent, .region = r.region, .item = r.item } } else null,
         else => null,
     };
 }
@@ -4748,11 +4812,12 @@ fn completionList(entry: dvui.Rect.Physical) void {
 }
 
 fn firstSyntaxProblem(target: ExprTarget) ?layout.render.Syntax {
-    for (state.placed.items, 0..) |*p, pi| for (p.issues) |i| {
+    for (state.solved.items, 0..) |*p, pk| for (p.issues) |i| {
+        const pi = state.model.parentAt(pk);
         if (i.kind != .markup_error) continue;
         const hit = switch (target) {
             .tile_track => |tt| i.tile == tt.tile and i.slot != null and if (state.model.tileTrackIndex(tt.tile, tt.track)) |k| i.slot.? == k else false,
-            .run => |r| r.panel == pi and i.region == r.region and i.item == r.item,
+            .run => |r| r.parent.eql(pi) and i.region == r.region and i.item == r.item,
         };
         if (hit) return i.syntax;
     };
@@ -5051,7 +5116,7 @@ fn menu() ?dvui.App.Result {
         };
         if (!canvas_prompt) if (tmenu(@src(), "Export panel as 3MF…", .{}, .{ .expand = .horizontal }) != null) {
             m.close();
-            if (exportPanel()) |pi| {
+            if (exportPart()) |pi| {
                 if (state.model.panels.items[pi].fab.layers.len == 0) {
                     state.status = "This panel has no fabrication layers yet (its properties, Fabrication): there is nothing to make. ";
                 } else {
@@ -5269,7 +5334,7 @@ fn treeContent() void {
                 var tb: [160]u8 = undefined;
                 const name = trackPlaceLabel(&tb, t);
                 // Salted: the same track also has a row on its panel.
-                _ = treeNodeSalted(.{ .region = .{ .panel = t.panel, .region = t.region } }, name, 3, false, false, 0x5f10);
+                _ = treeNodeSalted(.{ .region = .{ .parent = t.parent, .region = t.region } }, name, 3, false, false, 0x5f10);
             };
         }
     };
@@ -5327,10 +5392,9 @@ fn sheetProperties(id: layout.model.ObjectId) void {
 /// A track's name with where it is: its panel's name, unless it lies on
 /// the canvas or a frame itself.
 fn trackPlaceLabel(buf: []u8, t: layout.model.TrackRef) []const u8 {
-    const p = state.model.panels.items[t.panel];
-    const name = p.regions.items[t.region].name;
-    if (p.unbounded) return name;
-    return std.fmt.bufPrint(buf, "{s} (on {s})", .{ name, p.name }) catch name;
+    const name = state.model.regionsIn(t.parent)[t.region].name;
+    const pi = t.parent.panelIndex() orelse return name;
+    return std.fmt.bufPrint(buf, "{s} (on {s})", .{ name, state.model.panels.items[pi].name }) catch name;
 }
 
 /// The worksheet's branch: its panels, their labels, regions, rows and
@@ -5342,7 +5406,7 @@ fn worksheetTree() void {
         var tb: [64]u8 = undefined;
         for (state.model.spaces.items, 0..) |sp, si| {
             const title = if (si == 0) std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas" else sp.name;
-            if (!treeNode(.{ .panel = state.model.rootOf(si) }, title, 1, true, sp.default_name)) continue;
+            if (!treeNode(.{ .space = si }, title, 1, true, sp.default_name)) continue;
             for (sp.groups.items) |g| {
                 if (state.model.parentGroup(g.id) == null) groupTree(g.id, 2);
             }
@@ -5355,11 +5419,11 @@ fn worksheetTree() void {
                 var fb: [96]u8 = undefined;
                 _ = treeNode(.{ .figure_place = .{ .space = si, .index = k } }, std.fmt.bufPrint(&fb, "Figure {s}", .{fp.name}) catch fp.name, 2, false, false);
             }
-            panelChildren(state.model.rootOf(si), 2);
+            parentChildren(.{ .space = si }, 2);
             for (state.model.panels.items, 0..) |panel, pi| {
-                if (panel.id == sp.root or panel.space != sp.id) continue;
+                if (panel.space != sp.id) continue;
                 if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
-                panelChildren(pi, 3);
+                parentChildren(.{ .panel = pi }, 3);
             }
         }
         return;
@@ -5368,7 +5432,7 @@ fn worksheetTree() void {
     if (!treeNode(.worksheet, sheet.name, 1, state.model.panels.items.len > 0, sheet.default_name)) return;
     for (state.model.panels.items, 0..) |panel, pi| {
         if (!treeNode(.{ .panel = pi }, panel.name, 2, hasChildren(panel), panel.default_name)) continue;
-        panelChildren(pi, 3);
+        parentChildren(.{ .panel = pi }, 3);
     }
 }
 
@@ -5391,15 +5455,16 @@ fn hasChildren(panel: layout.model.Panel) bool {
     return panel.regions.items.len > 0 or panel.art.items.len > 0 or panel.grids.items.len > 0;
 }
 
-/// A panel's art and tracks (with their rows and tiles) in the
-/// tree, from depth `d`.
-fn panelChildren(pi: usize, d: usize) void {
+/// A panel's art, or a workspace's or a panel's grids and content layouts
+/// (with their rows and tiles), in the tree, from depth `d`.
+fn parentChildren(pi: Parent, d: usize) void {
     var name_buf: [64]u8 = undefined;
-    const panel = state.model.panels.items[pi];
     {
-        for (panel.art.items, 0..) |pa, ai| _ = treeNode(.{ .art = .{ .panel = pi, .index = ai } }, pa.name, d, false, false);
-        for (panel.grids.items, 0..) |g, gi| _ = treeNode(.{ .grid = .{ .panel = pi, .index = gi } }, g.name, d, false, g.default_name);
-        for (panel.regions.items, 0..) |region, ri| {
+        if (pi.panelIndex()) |pn| for (state.model.panels.items[pn].art.items, 0..) |pa, ai| {
+            _ = treeNode(.{ .art = .{ .panel = pn, .index = ai } }, pa.name, d, false, false);
+        };
+        for (state.model.gridsIn(pi), 0..) |g, gi| _ = treeNode(.{ .grid = .{ .parent = pi, .index = gi } }, g.name, d, false, g.default_name);
+        for (state.model.regionsIn(pi), 0..) |region, ri| {
             // The rows lying in it; in a thread, numbered through the
             // thread's flow, and named by their place in this track.
             const here = tracksIn(pi, ri);
@@ -5408,17 +5473,17 @@ fn panelChildren(pi: usize, d: usize) void {
             const has = if (one) for (here) |pt| {
                 if (segmentFilled(pi, pt)) break true;
             } else false else here.len > 0;
-            if (!treeNode(.{ .region = .{ .panel = pi, .region = ri } }, region.name, d, has, false)) continue;
+            if (!treeNode(.{ .region = .{ .parent = pi, .region = ri } }, region.name, d, has, false)) continue;
             for (here) |pt| {
                 const rowi = pt.track;
                 const flow_ri = pt.region;
                 const title = std.fmt.bufPrint(&name_buf, "{s} {d}", .{ trackWord(region.major()), pt.local + 1 }) catch "Row";
                 // What the flow put in this segment, from the last solve.
-                const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
+                const placed_items: []const layout.place.PlacedItem = if (placedOf(pi)) |pl| pl.items else &.{};
                 const filled = segmentFilled(pi, pt);
-                if (!one) if (!treeNode(.{ .row = .{ .panel = pt.flow_panel, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
+                if (!one) if (!treeNode(.{ .row = .{ .parent = pt.flow_parent, .region = flow_ri, .row = rowi } }, title, d + 1, filled, false)) continue;
                 for (placed_items) |it| {
-                    if (it.flow_panel != pt.flow_panel or it.region != flow_ri or it.segment != rowi) continue;
+                    if (!it.flow_parent.eql(pt.flow_parent) or it.region != flow_ri or it.segment != rowi) continue;
                     // Blanks, runs and breaks are not things to select here.
                     const id = (modelItem(pi, it) orelse continue).tileOf() orelse continue;
                     if (state.model.proto(state.model.tileConst(id).prototype).spacer) continue;
@@ -5440,10 +5505,10 @@ fn panelChildren(pi: usize, d: usize) void {
 
 /// Whether placed segment `pt` (on panel `pi`) holds anything but breaks,
 /// from the last solve.
-fn segmentFilled(pi: usize, pt: layout.place.PlacedTrack) bool {
-    const placed_items: []const layout.place.PlacedItem = if (pi < state.placed.items.len) state.placed.items[pi].items else &.{};
+fn segmentFilled(pi: Parent, pt: layout.place.PlacedTrack) bool {
+    const placed_items: []const layout.place.PlacedItem = if (placedOf(pi)) |pl_| pl_.items else &.{};
     for (placed_items) |it| {
-        if (it.flow_panel == pt.flow_panel and it.region == pt.region and it.segment == pt.track and !isBreak(pi, it)) return true;
+        if (it.flow_parent.eql(pt.flow_parent) and it.region == pt.region and it.segment == pt.track and !isBreak(pi, it)) return true;
     }
     return false;
 }
@@ -5513,9 +5578,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
         const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
         if (tree_click.key == key and now - tree_click.ms < 400) {
             tree_click = .{};
-            if (ctx == .panel) if (ctx.panel < state.model.panels.items.len and state.model.panels.items[ctx.panel].unbounded) {
-                showSpaceView(state.model.spaceOf(ctx.panel));
-            };
+            if (ctx == .space) showSpaceView(ctx.space);
             if (ctx == .sheet) showSheetView(ctx.sheet);
         } else tree_click = .{ .key = key, .ms = now };
         state.context = ctx;
@@ -5539,29 +5602,29 @@ fn revealInTree(ctx: Context) void {
     const f = findTile(id) orelse return;
     for ([_]Context{
         .worksheet,
-        .{ .panel = f.panel },
-        .{ .region = .{ .panel = f.panel, .region = f.tile.region } },
-        .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } },
+        parentContext(f.parent),
+        .{ .region = .{ .parent = f.parent, .region = f.tile.region } },
+        .{ .row = .{ .parent = f.parent, .region = f.tile.region, .row = f.tile.row } },
     }) |c| state.expanded.put(state.gpa, c.key(), true) catch {};
     state.expanded.put(state.gpa, Context.key(.file), true) catch {};
 }
 
 /// Whether a placed tile on panel `pi` belongs to the context, for canvas
 /// highlighting.
-fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
+fn inContext(pi: Parent, t: layout.place.PlacedTile) bool {
     return switch (state.context) {
         .tile => |id| t.id == id,
-        .row => |r| r.panel == pi and t.region == r.region and t.row == r.row,
-        .region => |r| r.panel == pi and t.region == r.region,
+        .row => |r| r.parent.eql(pi) and t.region == r.region and t.row == r.row,
+        .region => |r| r.parent.eql(pi) and t.region == r.region,
         // Every tile made from the prototype.
         .prototype => |p| state.model.tileConst(t.id).prototype == p,
         // Every instance bound to the grid.
-        .grid => |g| g.panel == pi and t.grid != null and if (state.model.gridInstanceOf(t.id)) |at| at.grid == g.index else false,
+        .grid => |g| g.parent.eql(pi) and t.grid != null and if (state.model.gridInstanceOf(t.id)) |at| at.grid == g.index else false,
         // A flow's tiles: those in its tracks.
         .flow => |id| if (state.model.trackFlow(pi, t.region)) |f| f.id == id else false,
         // A sheet's keys: those of its rows.
         .sheet => |id| sheetCovers(id, t.id),
-        .file, .worksheet, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .templates, .template, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place => false,
+        .file, .worksheet, .space, .panel, .art, .group, .selection, .view, .layer, .image, .guide, .sketch, .sketches, .sketch_def, .prototypes, .flows, .sheets, .styles, .style, .templates, .template, .processes, .process, .plans, .plan, .materials, .material, .figures, .figure_def, .figure_place => false,
     };
 }
 
@@ -5569,8 +5632,9 @@ fn inContext(pi: usize, t: layout.place.PlacedTile) bool {
 fn contextExtents() geom.Box {
     switch (state.context) {
         .file, .worksheet, .prototypes => return if (openCanvas()) contentExtents() else state.model.sheet.box(),
-        .panel => |pi| return if (state.model.panels.items[pi].unbounded) contentExtents() else state.model.panels.items[pi].box(),
-        .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
+        .space => return contentExtents(),
+        .panel => |pi| return state.model.panels.items[pi].box(),
+        .art => |l| return onSheet(.{ .panel = l.panel }, state.model.panels.items[l.panel].art.items[l.index].box()),
         .view => |v| if (viewAt(v.space, v.index)) |sv| {
             const b = viewBox(sv);
             if (!b.isEmpty()) return withNameRoom(b);
@@ -5580,15 +5644,16 @@ fn contextExtents() geom.Box {
         .flow => |id| if (state.model.flowIndex(id)) |fi| {
             var fb: geom.Box = .empty;
             for (state.model.flows.items[fi].tracks.items) |tid| if (state.model.trackById(tid)) |t| {
-                if (state.model.spaceOf(t.panel) != shown_space) continue;
-                for (trackOutline(t.panel, t.region)) |q| fb = fb.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+                if (state.model.spaceOfParent(t.parent) != shown_space) continue;
+                for (trackOutline(t.parent, t.region)) |q| fb = fb.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
             };
             if (!fb.isEmpty()) return fb;
         },
         else => {},
     }
     var b: geom.Box = .empty;
-    for (state.placed.items, 0..) |*p, pi| for (p.tiles) |t| {
+    for (state.solved.items, 0..) |*p, k| for (p.tiles) |t| {
+        const pi = state.model.parentAt(k);
         if (inContext(pi, t)) b = b.join(onSheet(pi, t.pitch_box));
     };
     return if (b.isEmpty()) state.model.sheet.box() else b;
@@ -5648,7 +5713,7 @@ fn frameEdit() void {
     var n: usize = 0;
     var cap: ?f64 = null;
     var focus: ?geom.Point = null;
-    var pi_edit: ?usize = null;
+    var pi_edit: ?Parent = null;
     const add = struct {
         fn f(buf: *[6]geom.Box, len: *usize, b: geom.Box) void {
             if (b.isEmpty() or len.* >= buf.len) return;
@@ -5661,7 +5726,8 @@ fn frameEdit() void {
         else => null,
     } else if (track_cursor == null and state.context == .tile) state.context.tile else null;
     if (tile_id) |id| {
-        for (state.placed.items, 0..) |*pl, pi| for (pl.tiles) |t| if (t.id == id) {
+        for (state.solved.items, 0..) |*pl, k| for (pl.tiles) |t| if (t.id == id) {
+            const pi = state.model.parentAt(k);
             const b = onSheet(pi, t.pitch_box);
             add(&units, &n, b);
             focus = .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 };
@@ -5671,16 +5737,15 @@ fn frameEdit() void {
             };
         };
     } else if (track_cursor) |c| {
-        const stops = flowStops(c.panel, c.region);
-        const at: ?struct { panel: usize, segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k|
-            .{ .panel = stops[k].panel, .segment = stops[k].segment, .along = stops[k].along }
-        else if (cursorPlace(c)) |cp| .{ .panel = c.panel, .segment = cp.segment, .along = cp.along } else null;
-        if (at) |a| if (a.panel < state.placed.items.len) {
-            const pl = &state.placed.items[a.panel];
+        const stops = flowStops(c.parent, c.region);
+        const at: ?struct { parent: Parent, segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k|
+            .{ .parent = stops[k].parent, .segment = stops[k].segment, .along = stops[k].along }
+        else if (cursorPlace(c)) |cp| .{ .parent = c.parent, .segment = cp.segment, .along = cp.along } else null;
+        if (at) |a| if (placedOf(a.parent)) |pl| {
             var track: geom.Box = .empty;
             for (pl.tracks) |t| {
-                if (t.flow_panel != c.panel or t.region != c.region) continue;
-                const b = onSheet(a.panel, t.box);
+                if (!t.flow_parent.eql(c.parent) or t.region != c.region) continue;
+                const b = onSheet(a.parent, t.box);
                 track = track.join(b);
                 if (t.track == a.segment) {
                     add(&units, &n, b);
@@ -5690,9 +5755,9 @@ fn frameEdit() void {
                 }
             }
             add(&units, &n, track);
-            pi_edit = a.panel;
+            pi_edit = a.parent;
             var found: ?f64 = null;
-            for (pl.labels) |l| if (l.run) |r| if (r.panel == c.panel and r.region == c.region) {
+            for (pl.labels) |l| if (l.run) |r| if (r.parent.eql(c.parent) and r.region == c.region) {
                 found = @max(found orelse 0, mainCap(l.render));
             };
             if (found) |f| if (f > 0) {
@@ -5704,7 +5769,7 @@ fn frameEdit() void {
         zoomToContext();
         return;
     };
-    if (pi_edit) |pi| if (!state.model.panels.items[pi].unbounded) add(&units, &n, panelBox(pi));
+    if (pi_edit) |pi| if (pi.panelIndex()) |i| add(&units, &n, panelBox(i));
     add(&units, &n, if (openCanvas()) contentExtents() else state.model.sheet.box());
     const c = cap orelse 0;
     if (!(c > 0)) {
@@ -5780,7 +5845,7 @@ const reveal_margin = 0.08;
 fn revealBox() ?geom.Box {
     switch (state.context) {
         .panel => |pi| {
-            if (pi >= state.model.panels.items.len or state.model.panels.items[pi].unbounded) return null;
+            if (pi >= state.model.panels.items.len) return null;
             return state.model.panels.items[pi].box();
         },
         .art, .view, .image, .flow => {
@@ -5790,12 +5855,13 @@ fn revealBox() ?geom.Box {
         .region => |rg| {
             // A track: its outline.
             var b: geom.Box = .empty;
-            for (trackOutline(rg.panel, rg.region)) |q| b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+            for (trackOutline(rg.parent, rg.region)) |q| b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
             return if (b.isEmpty()) null else b;
         },
         .row, .tile, .group => {
             var b: geom.Box = .empty;
-            for (state.placed.items, 0..) |*p, pi| for (p.tiles) |t| {
+            for (state.solved.items, 0..) |*p, k| for (p.tiles) |t| {
+                const pi = state.model.parentAt(k);
                 if (inContext(pi, t)) b = b.join(onSheet(pi, t.pitch_box));
             };
             return if (b.isEmpty()) null else b;
@@ -5862,19 +5928,20 @@ fn revealStep(from: StepSig) void {
 /// The flow cursor's place on the worksheet: the bar across its segment,
 /// with a little room either side, as drawn by `drawCursor`.
 fn cursorBox(c: TrackCursor) ?geom.Box {
-    const stops = flowStops(c.panel, c.region);
-    var stop_panel: ?usize = null;
+    const stops = flowStops(c.parent, c.region);
+    var stop_panel: ?Parent = null;
     const at: struct { segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k| blk: {
-        stop_panel = stops[k].panel;
+        stop_panel = stops[k].parent;
         break :blk .{ .segment = stops[k].segment, .along = stops[k].along };
     } else blk: {
         const p = cursorPlace(c) orelse return null;
         break :blk .{ .segment = p.segment, .along = p.along };
     };
-    for (state.placed.items, 0..) |*placed, pi| {
-        if (stop_panel) |sp| if (sp != pi) continue;
+    for (state.solved.items, 0..) |*placed, k| {
+        const pi = state.model.parentAt(k);
+        if (stop_panel) |sp| if (!sp.eql(pi)) continue;
         for (placed.tracks) |t| {
-            if (t.flow_panel != c.panel or t.region != c.region or t.track != at.segment) continue;
+            if (!t.flow_parent.eql(c.parent) or t.region != c.region or t.track != at.segment) continue;
             const b = onSheet(pi, t.box);
             // The bar, and a few mm of what follows it.
             const room = 3.0;
@@ -5930,13 +5997,14 @@ fn revealNow(b: geom.Box, area: dvui.Rect.Physical) void {
 /// The space a context lives in, when it lives in one.
 fn spaceOfContext(ctx: Context) ?usize {
     if (state.model.spaces.items.len == 0) return null;
-    const pi: ?usize = switch (ctx) {
-        .panel => |pi| pi,
-        .art => |l| l.panel,
-        .region => |r| r.panel,
-        .row => |r| r.panel,
-        .grid => |g| g.panel,
-        .tile => |id| if (findTile(id)) |f| f.panel else null,
+    const pi: ?Parent = switch (ctx) {
+        .space => |si| .{ .space = si },
+        .panel => |pi| .{ .panel = pi },
+        .art => |l| .{ .panel = l.panel },
+        .region => |r| r.parent,
+        .row => |r| r.parent,
+        .grid => |g| g.parent,
+        .tile => |id| if (findTile(id)) |f| f.parent else null,
         .group => |g| return state.model.spaceOfId(g),
         .view => |v| return v.space,
         .layer => |l| return l.space,
@@ -5946,8 +6014,8 @@ fn spaceOfContext(ctx: Context) ?usize {
         else => null,
     };
     const p = pi orelse return null;
-    if (p >= state.model.panels.items.len) return null;
-    return state.model.spaceOf(p);
+    if (!state.model.hasParent(p)) return null;
+    return state.model.spaceOfParent(p);
 }
 
 /// A context chosen in the Browser, brought up in the active window: the
@@ -7311,7 +7379,7 @@ fn nameSheetKeys(si: usize, how: enum { position, legend }) void {
         switch (how) {
             .position => {
                 const at = m.gridInstanceOf(tile) orelse continue;
-                const inst = m.panels.items[at.panel].grids.items[at.grid].instances.items[at.index];
+                const inst = m.gridsIn(at.parent)[at.grid].instances.items[at.index];
                 want = std.fmt.bufPrint(&nb, "R{d}C{d}", .{ inst.row + 1, inst.col + 1 }) catch continue;
             },
             .legend => {
@@ -7515,8 +7583,8 @@ fn drawPanelMargins(area: dvui.Rect.Physical, pi: usize) void {
     if (ink.width() > 0 and ink.height() > 0) state.view.rect(area, ink).stroke(.square, .{ .thickness = px, .color = .{ .color = colors.guide.opacity(0.45) } });
 }
 
-fn inMargin(pi: usize, tile: ?TileId, slot: usize, run_region: ?usize) bool {
-    for (state.intrusions) |i| if (i.panel == pi and i.tile == tile and i.slot == slot and i.run_region == run_region) return true;
+fn inMargin(pi: Parent, tile: ?TileId, slot: usize, run_region: ?usize) bool {
+    for (state.intrusions) |i| if (i.parent.eql(pi) and i.tile == tile and i.slot == slot and i.run_region == run_region) return true;
     return false;
 }
 
@@ -7546,7 +7614,7 @@ fn frameProperties(space: usize) !void {
     propText("Groups", "{d}", .{sp.groups.items.len}, 3);
     var panels: usize = 0;
     for (state.model.panels.items) |p| {
-        if (p.space == spaceId(space) and !p.unbounded) panels += 1;
+        if (p.space == spaceId(space)) panels += 1;
     }
     propText("Panels", "{d}", .{panels}, 4);
     keyButton(@src(), "Fit frame to its contents", 0, .{ .margin = .{ .y = 8 } });
@@ -7688,11 +7756,11 @@ fn idBox(id: layout.model.ObjectId) geom.Box {
 fn memberBox(mb: layout.model.Member) geom.Box {
     switch (mb) {
         .panel => |pi| return state.model.panels.items[pi].box(),
-        .art => |l| return onSheet(l.panel, state.model.panels.items[l.panel].art.items[l.index].box()),
+        .art => |l| return onSheet(.{ .panel = l.panel }, state.model.panels.items[l.panel].art.items[l.index].box()),
         .region => |l| {
             var b: geom.Box = .empty;
-            if (l.panel < state.placed.items.len) for (state.placed.items[l.panel].tracks) |t| {
-                if (t.region == l.index) b = b.join(onSheet(l.panel, t.box));
+            if (placedOf(l.parent)) |pl| for (pl.tracks) |t| {
+                if (t.region == l.index) b = b.join(onSheet(l.parent, t.box));
             };
             return b;
         },
@@ -7708,27 +7776,21 @@ fn selectArea(b: geom.Box) void {
     defer inside.deinit(state.gpa);
     for (state.model.panels.items, 0..) |p, pi| {
         if (!shownPanel(pi)) continue;
-        if (!p.unbounded) {
-            if (layout.model.within(p.box(), b)) inside.append(state.gpa, p.id) catch {};
-            continue;
-        }
-        const kinds = [_]struct { n: usize, k: u2 }{ .{ .n = p.art.items.len, .k = 1 }, .{ .n = p.regions.items.len, .k = 2 } };
-        for (kinds) |kind| for (0..kind.n) |i| {
-            const loc: layout.model.Member = switch (kind.k) {
-                1 => .{ .art = .{ .panel = pi, .index = i } },
-                else => .{ .region = .{ .panel = pi, .index = i } },
-            };
-            const mb = memberBox(loc);
-            if (!mb.isEmpty() and layout.model.within(mb, b)) inside.append(state.gpa, state.model.idAt(loc)) catch {};
-        };
+        if (layout.model.within(p.box(), b)) inside.append(state.gpa, p.id) catch {};
     }
+    // The content layouts set straight on the shown workspace.
+    if (shownParent()) |sp| for (0..state.model.regionsIn(sp).len) |i| {
+        const loc: layout.model.Member = .{ .region = .{ .parent = sp, .index = i } };
+        const mb = memberBox(loc);
+        if (!mb.isEmpty() and layout.model.within(mb, b)) inside.append(state.gpa, state.model.idAt(loc)) catch {};
+    };
     for (inside.items) |id| {
         const top = state.model.topLevel(id);
         if (std.mem.indexOfScalar(layout.model.ObjectId, selection.items, top) != null) continue;
         if (top != id and !layout.model.within(idBox(top), b)) continue;
         selection.append(state.gpa, top) catch {};
     }
-    state.context = if (selection.items.len > 0) .selection else if (spaceRoot()) |r| .{ .panel = r } else .worksheet;
+    state.context = if (selection.items.len > 0) .selection else if (shownParent() != null) .{ .space = shown_space } else .worksheet;
     track_cursor = null;
     if (selection.items.len == 0) state.status = "Nothing lies wholly inside that area. ";
 }
@@ -7736,9 +7798,9 @@ fn selectArea(b: geom.Box) void {
 /// The outermost group holding what context `c` names, if it is grouped.
 fn groupOf(c: Context) ?layout.model.ObjectId {
     const loc: layout.model.Member = switch (c) {
-        .panel => |pi| if (state.model.panels.items[pi].unbounded) return null else .{ .panel = pi },
+        .panel => |pi| .{ .panel = pi },
         .art => |l| .{ .art = .{ .panel = l.panel, .index = l.index } },
-        .region => |r| .{ .region = .{ .panel = r.panel, .index = r.region } },
+        .region => |r| .{ .region = .{ .parent = r.parent, .index = r.region } },
         else => return null,
     };
     const id = state.model.idAt(loc);
@@ -7785,10 +7847,10 @@ fn drawPicked(area: dvui.Rect.Physical) void {
 
 /// The canvas's properties: its units (a conversion: nothing moves), and
 /// what it holds.
-fn canvasProperties(pi: usize) !void {
+fn canvasProperties() !void {
     const saved_group = pushGroup("canvas");
     defer popGroup(saved_group);
-    const panel = state.model.panels.items[pi];
+    const sp = state.model.spaces.items[0];
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });
         defer row.deinit();
@@ -7797,11 +7859,10 @@ fn canvasProperties(pi: usize) !void {
         var choice: usize = @intFromEnum(state.model.units);
         if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 1 })) actV(.setCanvasUnits, .{@enumFromInt(choice)});
     }
-    propText("Tracks", "{d}", .{panel.regions.items.len}, 3);
-    propText("Line art", "{d}", .{panel.art.items.len}, 4);
+    propText("Tracks", "{d}", .{sp.regions.items.len}, 3);
     var on_canvas: usize = 0;
     for (state.model.panels.items) |p| {
-        if (p.space == spaceId(0) and !p.unbounded) on_canvas += 1;
+        if (p.space == spaceId(0)) on_canvas += 1;
     }
     propText("Panels", "{d}", .{on_canvas}, 5);
     {
@@ -7982,8 +8043,7 @@ fn artProperties(pi: usize, index: usize) !void {
 }
 
 /// Line art's shape: what it was drawn as, a rounded rectangle's corner
-/// radius, whether it is a cutout, and Make panel for a closed path lying
-/// loose in a space.
+/// radius, whether it is a cutout.
 fn shapeProperties(pi: usize, index: usize) !void {
     const saved_group = pushGroup("art.shape");
     defer popGroup(saved_group);
@@ -8008,19 +8068,13 @@ fn shapeProperties(pi: usize, index: usize) !void {
         var on = pa.cutout;
         if (tcheckbox(@src(), &on, "Cut through the panel", .{ .id_extra = 12 })) try act(.setArtCutout, .{pi, index, on});
     }
-    if (!state.model.panels.items[pi].unbounded) return;
-    if (pa.closedPath() == null) {
-        propText("Panel", "{s}", .{"only a single closed path makes one"}, 13);
-        return;
-    }
-    keyButton(@src(), "Make panel", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Tiles and legends of panel `pi`, moved onto the worksheet.
-fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
+fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
     const radius: f32 = @floatCast(1.0 * state.view.ppm);
-    const o = panelOrigin(pi);
+    const o = parentOrigin(pi);
     // While text is typed, the scaffolding steps back (the owner,
     // 2026-11-23): each content layout is a soft band around where its
     // content may go, with no outlines; holding Ctrl shows them again.
@@ -8044,11 +8098,11 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     // across as the space it was drawn out for): faint, and stronger for
     // the context's track.
     const soft_region: ?usize = switch (state.context) {
-        .region => |r| if (r.panel == pi) r.region else null,
-        .row => |r| if (placedTrack(r.panel, r.region, r.row)) |pt| (if (pt.panel == pi) pt.member else null) else (if (r.panel == pi) r.region else null),
+        .region => |r| if (r.parent.eql(pi)) r.region else null,
+        .row => |r| if (placedTrack(r.parent, r.region, r.row)) |pt| (if (pt.parent.eql(pi)) pt.member else null) else (if (r.parent.eql(pi)) r.region else null),
         else => null,
     };
-    for (0..state.model.panels.items[pi].regions.items.len) |ri| {
+    for (0..state.model.regionsIn(pi).len) |ri| {
         const on = soft_region != null and soft_region.? == ri;
         if (quiet) {
             contentBand(area, pi, ri, on);
@@ -8124,7 +8178,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
             for (piece.lines) |line| strokeLoop(area, line, o, width, docColor(.{ .r = edge.r, .g = edge.g, .b = edge.b, .a = edge.a }));
         }
         const sel = switch (state.context) {
-            .art => |l| l.panel == pi and l.index == pa.index,
+            .art => |l| pi.eql(.{ .panel = l.panel }) and l.index == pa.index,
             else => false,
         };
         if (sel) marchingBox(area, onSheet(pi, pa.box), colors.select, 1.5 * px);
@@ -8350,13 +8404,13 @@ fn ccw(p0: dvui.Point.Physical, p1: dvui.Point.Physical, p2: dvui.Point.Physical
 
 /// The expression line's cursor in placed label `l` of panel `pi`, if it
 /// is the one being edited.
-fn caretIn(pi: usize, l: layout.place.PlacedLabel) ?layout.render.Caret {
+fn caretIn(pi: Parent, l: layout.place.PlacedLabel) ?layout.render.Caret {
     const c = expr_caret orelse return null;
     const mine = switch (c.target) {
         // A tile track's text is set piece by piece with no offsets kept:
         // no caret in it yet.
         .tile_track => false,
-        .run => |t| t.panel == pi and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
+        .run => |t| t.parent.eql(pi) and l.run != null and l.run.?.region == t.region and l.run.?.item == t.item,
     };
     if (!mine) return null;
     // A run set piece by piece: the piece the caret is in (or just after)
@@ -8548,16 +8602,16 @@ fn drawRulers(area: dvui.Rect.Physical) void {
 /// outlines and content, as the view maps them.
 fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model.ObjectId) void {
     const px = dvui.windowNaturalScale();
+    // The workspace's own content layouts and grids, on its base layer.
+    if (space orelse if (shownParent()) |_| shown_space else null) |si| if (si < state.model.spaces.items.len) {
+        const on_base = if (layer) |l| l == state.model.spaces.items[si].base_layer else true;
+        if (on_base) if (placedOf(.{ .space = si })) |pl| drawPanel(area, .{ .space = si }, pl);
+    };
     for (0..state.model.panels.items.len) |pi| {
         if (space) |sp| {
             if (state.model.spaceOf(pi) != sp) continue;
         } else if (!shownPanel(pi)) continue;
         if (layer) |l| if (panelLayer(pi) != l) continue;
-        // A space's own panel has no outline: only its content.
-        if (state.model.panels.items[pi].unbounded) {
-            if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
-            continue;
-        }
         const outline = state.view.rect(area, panelBox(pi));
         const is_context = switch (state.context) {
             .panel => |c| c == pi,
@@ -8570,12 +8624,13 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
         const thickness = if (is_context or off) 2 * px else px;
         // A panel made from a closed path is drawn as that path; its
         // margins (still a band inside its box) are not shown.
-        const shaped = pi < state.placed.items.len and state.model.panels.items[pi].edge != null and state.placed.items[pi].edge != null;
+        const pl = placedOf(.{ .panel = pi });
+        const shaped = pl != null and state.model.panels.items[pi].edge != null and pl.?.edge != null;
         // Its body: the edge with its holes and cutouts cut out (notches
         // where they cross it).
-        const body: ?geom.Outline = if (pi < state.placed.items.len) state.placed.items[pi].body else null;
+        const body: ?geom.Outline = if (pl) |q| q.body else null;
         if (shaped) {
-            strokeOutline(area, body orelse state.placed.items[pi].edge.?, panelOrigin(pi), thickness, edge);
+            strokeOutline(area, body orelse pl.?.edge.?, panelOrigin(pi), thickness, edge);
         } else {
             drawPanelMargins(area, pi);
             // The selected panel's outline marches; others are content edges.
@@ -8584,7 +8639,7 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
                 if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness);
             } else if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
         }
-        if (pi < state.placed.items.len) drawPanel(area, pi, &state.placed.items[pi]);
+        if (pl) |q| drawPanel(area, .{ .panel = pi }, q);
     }
 }
 
@@ -8600,13 +8655,12 @@ var grid_dropped: layout.model.Model.Dropped = .leave;
 
 /// A grid's construction lines on panel `pi`: faint, through its points,
 /// reaching half a step past the outer ones; the context grid's stronger.
-fn drawGrids(area: dvui.Rect.Physical, pi: usize) void {
+fn drawGrids(area: dvui.Rect.Physical, pi: Parent) void {
     const px = dvui.windowNaturalScale();
-    const panel = state.model.panels.items[pi];
-    for (panel.grids.items, 0..) |_, gi| {
+    for (state.model.gridsIn(pi), 0..) |_, gi| {
         const sh = state.model.gridShape(pi, gi);
         const sel = switch (state.context) {
-            .grid => |g| g.panel == pi and g.index == gi,
+            .grid => |g| g.parent.eql(pi) and g.index == gi,
             else => false,
         };
         const colour = if (sel) colors.select.opacity(0.6) else colors.guide.opacity(0.25);
@@ -8843,7 +8897,7 @@ fn panelGrids(pi: usize) !void {
 /// document's sketches when first chosen), or one of the document's
 /// sketches; and the sketch's parameters other than its size, for this
 /// stamp.
-fn stampShape(pi: usize, gi: usize, si: usize, st: layout.model.Stamp, n: usize) !void {
+fn stampShape(pi: Parent, gi: usize, si: usize, st: layout.model.Stamp, n: usize) !void {
     const Shape = layout.model.ShapeSketch;
     const kinds = std.enums.values(Shape);
     const ready = [_][]const u8{ "Circle", "Rectangle", "Rounded rectangle", "Slot" };
@@ -8905,23 +8959,23 @@ fn stampShape(pi: usize, gi: usize, si: usize, st: layout.model.Stamp, n: usize)
     }
 }
 
-fn gridProperties(pi: usize, gi: usize) !void {
+fn gridProperties(pi: Parent, gi: usize) !void {
     const saved_group = pushGroup("grid");
     defer popGroup(saved_group);
-    const g = state.model.panels.items[pi].grids.items[gi];
+    const g = state.model.gridsIn(pi)[gi];
     var sh = state.model.gridShape(pi, gi);
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
-    propText("On", "{s}", .{state.model.panels.items[pi].name}, 2);
+    propText("On", "{s}", .{state.model.parentName(pi)}, 2);
     // Its keys' legends as a sheet (theirs and those beside them).
     if (g.instances.items.len > 0) keyButton(@src(), "Make a legend sheet", 0, .{ .expand = .horizontal, .id_extra = 6 });
     if (state.model.findGrid(g.link)) |src| {
-        const sg = state.model.panels.items[src.panel].grids.items[src.index];
-        propText("Follows", "{s} on {s}", .{ sg.name, state.model.panels.items[src.panel].name }, 3);
+        const sg = state.model.gridsIn(src.parent)[src.index];
+        propText("Follows", "{s} on {s}", .{ sg.name, state.model.parentName(src.parent) }, 3);
         keyButton(@src(), "Show the grid it follows", 0, .{ .expand = .horizontal, .id_extra = 4 });
         propText("", "Changing its shape here stops it following.", .{}, 5);
     } else {
         var followers: usize = 0;
-        for (state.model.panels.items) |p| for (p.grids.items) |o| {
+        for (0..state.model.parentCount()) |k| for (state.model.gridsIn(state.model.parentAt(k))) |o| {
             if (o.link == g.id) followers += 1;
         };
         if (followers > 0) propText("Followed by", "{d} grids", .{followers}, 3);
@@ -8971,7 +9025,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
     const proto_names = try lifo.alloc([]const u8, state.model.prototypes.items.len);
     defer lifo.free(proto_names);
     for (state.model.prototypes.items, proto_names) |p, *nm| nm.* = p.name;
-    const stamps = state.model.panels.items[pi].grids.items[gi].stamps.items;
+    const stamps = state.model.gridsIn(pi)[gi].stamps.items;
     for (stamps, 0..) |st, si| {
         const n = 100 + si * 20;
         headingAs(scopeId("grid.stamp", st.name), "Stamp: {s}", .{st.name}, n);
@@ -9046,7 +9100,7 @@ fn gridProperties(pi: usize, gi: usize) !void {
         var which: std.ArrayList(usize) = .empty;
         const arena = dvui.currentWindow().arena();
         for (state.model.panels.items, 0..) |p, qi| {
-            if (qi == pi or p.unbounded) continue;
+            if (pi.eql(.{ .panel = qi })) continue;
             others.append(arena, p.name) catch {};
             which.append(arena, qi) catch {};
         }
@@ -9058,8 +9112,8 @@ fn gridProperties(pi: usize, gi: usize) !void {
             others.append(arena, "choose a part…") catch {};
             if (tdropdown(@src(), others.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 96 }) and choice < which.items.len) {
                 const qi = which.items[choice];
-                const ngi = try act(.addLinkedGrid, .{ qi, g.origin, g.id });
-                state.context = .{ .grid = .{ .panel = qi, .index = ngi } };
+                const ngi = try act(.addLinkedGrid, .{ Parent{ .panel = qi }, g.origin, g.id });
+                state.context = .{ .grid = .{ .parent = .{ .panel = qi }, .index = ngi } };
                 return;
             }
         }
@@ -9071,10 +9125,10 @@ fn gridProperties(pi: usize, gi: usize) !void {
 
 /// A tile bound to a grid: its point, how many points it spans, and
 /// removing it; unbound, binding it again at the nearest point.
-fn instanceProperties(pi: usize, gi: usize, ii: usize) !void {
+fn instanceProperties(pi: Parent, gi: usize, ii: usize) !void {
     const saved_group = pushGroup("instance");
     defer popGroup(saved_group);
-    const g = state.model.panels.items[pi].grids.items[gi];
+    const g = state.model.gridsIn(pi)[gi];
     const inst = g.instances.items[ii];
     const sh = state.model.gridShape(pi, gi);
     _ = sh;
@@ -9140,22 +9194,22 @@ fn leavePanelEdit() void {
 }
 
 /// The panel editing mode's grid and stamp, when both exist.
-fn peTarget() ?struct { panel: usize, grid: usize, stamp: usize } {
+fn peTarget() ?struct { parent: Parent, grid: usize, stamp: usize } {
     const pe = panel_edit orelse return null;
     if (pe.panel >= state.model.panels.items.len) return null;
-    const grids = state.model.panels.items[pe.panel].grids.items;
+    const grids = state.model.gridsIn(.{ .panel = pe.panel });
     if (pe.grid >= grids.len) return null;
     if (pe.stamp >= grids[pe.grid].stamps.items.len) return null;
-    return .{ .panel = pe.panel, .grid = pe.grid, .stamp = pe.stamp };
+    return .{ .parent = .{ .panel = pe.panel }, .grid = pe.grid, .stamp = pe.stamp };
 }
 
 /// The point of the mode's grid nearest `at` (space mm), when `at` lies
 /// within half a step of the grid's points.
 fn peGridAt(at: geom.Point) ?GridAt {
     const pe = panel_edit orelse return null;
-    if (pe.panel >= state.model.panels.items.len or pe.grid >= state.model.panels.items[pe.panel].grids.items.len) return null;
-    const o = onSheetPoint(pe.panel, state.model.gridPoint(pe.panel, pe.grid, 0, 0));
-    const sh = state.model.gridShape(pe.panel, pe.grid);
+    if (pe.panel >= state.model.panels.items.len or pe.grid >= state.model.gridsIn(.{ .panel = pe.panel }).len) return null;
+    const o = onSheetPoint(.{ .panel = pe.panel }, state.model.gridPoint(.{ .panel = pe.panel }, pe.grid, 0, 0));
+    const sh = state.model.gridShape(.{ .panel = pe.panel }, pe.grid);
     const c = @round((at.x - o.x) / sh.stepX());
     const r = @round((o.y - at.y) / sh.stepY());
     if (c < 0 or r < 0 or c >= @as(f64, @floatFromInt(sh.cols)) or r >= @as(f64, @floatFromInt(sh.rows))) return null;
@@ -9176,14 +9230,14 @@ fn drawPanelEdit(area: dvui.Rect.Physical) void {
     const r0 = @min(from.row, hover.row);
     const cols = @max(from.col, hover.col) - c0 + 1;
     const rows = @max(from.row, hover.row) - r0 + 1;
-    const st = state.model.panels.items[t.panel].grids.items[t.grid].stamps.items[t.stamp];
-    const sh = state.model.gridShape(t.panel, t.grid);
+    const st = state.model.gridsIn(t.parent)[t.grid].stamps.items[t.stamp];
+    const sh = state.model.gridShape(t.parent, t.grid);
     const w = st.w + @as(f64, @floatFromInt(cols - 1)) * sh.stepX();
     const h = st.h + @as(f64, @floatFromInt(rows - 1)) * sh.stepY();
-    const p = state.model.gridPoint(t.panel, t.grid, @as(f64, @floatFromInt(c0)) + @as(f64, @floatFromInt(cols - 1)) / 2, @as(f64, @floatFromInt(r0)) + @as(f64, @floatFromInt(rows - 1)) / 2);
+    const p = state.model.gridPoint(t.parent, t.grid, @as(f64, @floatFromInt(c0)) + @as(f64, @floatFromInt(cols - 1)) / 2, @as(f64, @floatFromInt(r0)) + @as(f64, @floatFromInt(rows - 1)) / 2);
     const cx = p.x + st.offset.x;
     const cy = p.y + st.offset.y;
-    guideBox(area, onSheet(t.panel, .{ .x0 = cx - w / 2, .x1 = cx + w / 2, .y0 = cy - h / 2, .y1 = cy + h / 2 }), colors.select, 1.5 * px);
+    guideBox(area, onSheet(t.parent, .{ .x0 = cx - w / 2, .x1 = cx + w / 2, .y0 = cy - h / 2, .y1 = cy + h / 2 }), colors.select, 1.5 * px);
 }
 
 fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
@@ -9208,7 +9262,7 @@ fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical
                     else => return,
                 };
                 const at = state.model.gridInstanceOf(id) orelse return;
-                act(.removeInstance, .{ at.panel, at.grid, at.index }) catch {};
+                act(.removeInstance, .{ at.parent, at.grid, at.index }) catch {};
                 state.context = .{ .panel = pe.panel };
             },
             else => return,
@@ -9268,9 +9322,9 @@ fn panelEditEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical
 /// another grid or stamp, the panel itself).
 fn pickInPanel(pi: usize, at: geom.Point) void {
     state.context = .{ .panel = pi };
-    if (pi >= state.placed.items.len) return;
-    for (state.placed.items[pi].tiles) |t| {
-        if (contains(onSheet(pi, t.pitch_box), at)) state.context = .{ .tile = t.id };
+    const pl = placedOf(.{ .panel = pi }) orelse return;
+    for (pl.tiles) |t| {
+        if (contains(onSheet(.{ .panel = pi }, t.pitch_box), at)) state.context = .{ .tile = t.id };
     }
 }
 
@@ -9281,16 +9335,16 @@ fn peRelease(from: GridAt, to: GridAt) void {
         state.status = "Choose a grid and a stamp to place. ";
         return;
     };
-    const sid = state.model.panels.items[t.panel].grids.items[t.grid].stamps.items[t.stamp].id;
+    const sid = state.model.gridsIn(t.parent)[t.grid].stamps.items[t.stamp].id;
     if (from.col == to.col and from.row == to.row) {
-        if (state.model.instanceAt(t.panel, t.grid, sid, from.col, from.row)) |ii| {
-            state.context = .{ .tile = state.model.panels.items[t.panel].grids.items[t.grid].instances.items[ii].tile };
+        if (state.model.instanceAt(t.parent, t.grid, sid, from.col, from.row)) |ii| {
+            state.context = .{ .tile = state.model.gridsIn(t.parent)[t.grid].instances.items[ii].tile };
             return;
         }
     }
     const c0 = @min(from.col, to.col);
     const r0 = @min(from.row, to.row);
-    const id = act(.placeInstance, .{ t.panel, t.grid, t.stamp, c0, r0, @max(from.col, to.col) - c0 + 1, @max(from.row, to.row) - r0 + 1 }) catch {
+    const id = act(.placeInstance, .{ t.parent, t.grid, t.stamp, c0, r0, @max(from.col, to.col) - c0 + 1, @max(from.row, to.row) - r0 + 1 }) catch {
         state.status = "It could not be placed there. ";
         return;
     };
@@ -9357,13 +9411,13 @@ fn panelEditHeader() void {
 /// The layer last chosen; new objects in its space go on it.
 var active_layer: layout.model.ObjectId = .none;
 
-/// The layer a panel is on, resolved (a space's own panel is on its base
+/// The layer a panel is on, resolved (one on none is on its space's base
 /// layer).
 fn panelLayer(pi: usize) layout.model.ObjectId {
     const p = state.model.panels.items[pi];
     if (state.model.spaces.items.len == 0) return .none;
     const sp = state.model.spaces.items[state.model.spaceOf(pi)];
-    return if (p.unbounded or p.layer == .none) sp.base_layer else p.layer;
+    return if (p.layer == .none) sp.base_layer else p.layer;
 }
 
 /// Whether what is on layer `id` of space `space` can be picked: the layer
@@ -9579,7 +9633,8 @@ fn panelUnderForFigure(at: geom.Point) ?usize {
     var best: ?usize = null;
     var best_area: f64 = std.math.inf(f64);
     for (state.model.panels.items, 0..) |p, pi| {
-        if (p.unbounded or !shownPanel(pi)) continue;
+        _ = p;
+        if (!shownPanel(pi)) continue;
         const b = panelBox(pi);
         if (!contains(b, at)) continue;
         const ar = b.width() * b.height();
@@ -9829,15 +9884,16 @@ fn drawViewLayer(area: dvui.Rect.Physical, space: usize, v: ViewLayer, active: b
 /// shown.
 fn drawFlowMarksLayer(area: dvui.Rect.Physical, space: usize) void {
     const sp = state.model.spaces.items[space];
-    for (0..@min(state.model.panels.items.len, state.placed.items.len)) |pi| {
-        if (state.model.spaceOf(pi) != space) continue;
-        const lid = panelLayer(pi);
+    for (0..@min(state.model.parentCount(), state.solved.items.len)) |k| {
+        const pi = state.model.parentAt(k);
+        if (state.model.spaceOfParent(pi) != space) continue;
+        const lid = if (pi.panelIndex()) |i| panelLayer(i) else sp.base_layer;
         const visible = for (sp.layers.items) |l| {
             if (l.id == lid) break l.visible;
         } else true;
         if (!visible) continue;
-        drawThreads(area, pi, &state.placed.items[pi]);
-        drawFlowMarks(area, pi, &state.placed.items[pi]);
+        drawThreads(area, pi, &state.solved.items[k]);
+        drawFlowMarks(area, pi, &state.solved.items[k]);
     }
 }
 
@@ -10165,7 +10221,7 @@ fn planEditor(id: ObjectId) void {
         names.append(ar, "choose a panel") catch return;
         pids.append(ar, .none) catch return;
         for (m.panels.items) |pn| {
-            if (pn.unbounded or pn.id == .none or p.part(pn.id) != null) continue;
+            if (pn.id == .none or p.part(pn.id) != null) continue;
             names.append(ar, pn.name) catch return;
             pids.append(ar, pn.id) catch return;
         }
@@ -10373,8 +10429,7 @@ fn mfgGeometry(plan: manufacture.Plan) []const MfgPart {
     var parts: std.ArrayList(MfgPart) = .empty;
     for (plan.parts) |pt| {
         const pi = m.panelIndex(pt.panel) orelse continue;
-        if (pi >= state.placed.items.len) continue;
-        const fp = layout.fab.plan(a, m, pi, &state.placed.items[pi], faceTable()) catch continue;
+        const fp = layout.fab.plan(a, m, pi, placedOf(.{ .panel = pi }) orelse continue, faceTable()) catch continue;
         var layers: std.ArrayList(MfgLayer) = .empty;
         for (fp.steps) |st| {
             const l = m.panels.items[pi].fab.layers[st.layer];
@@ -10458,12 +10513,12 @@ fn runPlanChecks(id: ObjectId) void {
         const prof = m.profileById(op.process) orelse continue;
         for (plan.parts) |pt| {
             const panel = m.panelIndex(pt.panel) orelse continue;
-            if (panel >= state.placed.items.len) continue;
+            const placed = placedOf(.{ .panel = panel }) orelse continue;
             const any = for (op.targets) |t| {
                 if (t.panel == pt.panel) break true;
             } else false;
             if (!any) continue;
-            const report = layout.check.runWith(a, m, panel, &state.placed.items[panel], faceTable(), &check_cache.?, .{ .profile = prof.*, .targets = op.targets, .tolerance = plan.tolerance }) catch continue;
+            const report = layout.check.runWith(a, m, panel, placed, faceTable(), &check_cache.?, .{ .profile = prof.*, .targets = op.targets, .tolerance = plan.tolerance }) catch continue;
             const areas = a.alloc(?geom.fill.Region, report.findings.len) catch return;
             for (report.findings, areas) |f, *r| {
                 r.* = null;
@@ -10550,7 +10605,7 @@ fn drawPlanChecks(area: dvui.Rect.Physical, id: ObjectId) void {
             const colour = if (f.verdict == .fail) failing else marginal;
             if (region) |r| {
                 fillRegion(area, r, at, .{ .flat = colour.opacity(0.8) });
-            } else state.view.rect(area, onSheet(oc.panel, f.box)).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = colour } });
+            } else state.view.rect(area, onSheet(.{ .panel = oc.panel }, f.box)).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = colour } });
         };
     }
 }
@@ -10590,7 +10645,7 @@ fn planSteps(a: std.mem.Allocator, plan: manufacture.Plan, pi: usize) ![]const l
     const pn = m.panels.items[pi];
     const part = plan.part(pn.id) orelse return &.{};
     const mat_colour: ?layout.model.FabColour = if (m.materialIndex(part.material)) |mi| (if (m.materials.items[mi].material.finishes.len > 0) m.materials.items[mi].material.finishes[0] else null) else null;
-    const fp = try layout.fab.plan(a, m, pi, &state.placed.items[pi], faceTable());
+    const fp = try layout.fab.plan(a, m, pi, placedOf(.{ .panel = pi }) orelse return &.{}, faceTable());
     var out: std.ArrayList(layout.fab.Step) = .empty;
     for (fp.steps) |st| {
         const name = pn.fab.layers[st.layer].name;
@@ -10712,7 +10767,7 @@ fn planMesh(plan: manufacture.Plan) ?occt3d.Mesh {
     var parts: std.ArrayList(@typeInfo(@TypeOf(job.parts)).pointer.child) = .empty;
     for (plan.parts) |pt| {
         const pi = m.panelIndex(pt.panel) orelse continue;
-        if (pi >= state.placed.items.len) continue;
+        if (placedOf(.{ .panel = pi }) == null) continue;
         const steps = planSteps(a, plan, pi) catch continue;
         const exact = layout.fab.slabs(a, steps) catch continue;
         // For viewing: each region simplified to the plan's tolerance,
@@ -11083,7 +11138,7 @@ fn checkTarget() ?usize {
     };
     if (pi >= state.model.panels.items.len) return null;
     const p = state.model.panels.items[pi];
-    if (p.unbounded or state.model.processOf(pi) == null or p.fab.layers.len == 0) return null;
+    if (state.model.processOf(pi) == null or p.fab.layers.len == 0) return null;
     return pi;
 }
 
@@ -11111,12 +11166,12 @@ fn runChecks(only: ?usize) void {
     var skipped: usize = 0;
     for (state.model.panels.items, 0..) |p, pi| {
         if (only) |o| if (o != pi) continue;
-        if (p.unbounded or pi >= state.placed.items.len) continue;
+        const placed = placedOf(.{ .panel = pi }) orelse continue;
         if (state.model.processOf(pi) == null or p.fab.layers.len == 0) {
             skipped += 1;
             continue;
         }
-        const report = layout.check.run(a, &state.model, pi, &state.placed.items[pi], faceTable(), &check_cache.?) catch {
+        const report = layout.check.run(a, &state.model, pi, placed, faceTable(), &check_cache.?) catch {
             state.status = "The checks could not be run. ";
             return;
         };
@@ -11194,7 +11249,7 @@ fn drawChecks(area: dvui.Rect.Physical, space: ?usize, only: ?CheckLayer) void {
             if (region) |r| {
                 fillRegion(area, r, at, .{ .flat = colour.opacity(0.8) });
             } else {
-                state.view.rect(area, onSheet(pi, f.box)).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = colour } });
+                state.view.rect(area, onSheet(.{ .panel = pi }, f.box)).stroke(.square, .{ .thickness = 2 * px, .color = .{ .color = colour } });
             }
         }
     }
@@ -11602,9 +11657,14 @@ fn extentsOf(space: usize, depth: usize) geom.Box {
     var b: geom.Box = .empty;
     for (state.model.panels.items, 0..) |p, pi| {
         if (state.model.spaces.items.len > 0 and p.space != spaceId(space)) continue;
-        if (pi < state.placed.items.len and !state.placed.items[pi].bounds.isEmpty()) b = b.join(onSheet(pi, state.placed.items[pi].bounds));
-        if (!p.unbounded) b = b.join(p.box());
+        if (placedOf(.{ .panel = pi })) |pl| if (!pl.bounds.isEmpty()) {
+            b = b.join(onSheet(.{ .panel = pi }, pl.bounds));
+        };
+        b = b.join(p.box());
     }
+    if (space < state.model.spaces.items.len) if (placedOf(.{ .space = space })) |pl| if (!pl.bounds.isEmpty()) {
+        b = b.join(pl.bounds);
+    };
     if (space < state.model.spaces.items.len) for (state.model.spaces.items[space].images.items) |im| {
         b = b.join(im.box());
     };
@@ -12688,10 +12748,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
             if (del and state.moving == null) {
                 switch (state.context) {
-                    .panel => |pi| if (!state.model.panels.items[pi].unbounded) {
+                    .panel => |pi| {
                         e.handle(@src(), box.data());
                         actV(.removePanel, .{pi});
-                        state.context = .worksheet;
+                        state.context = workspaceContext();
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     // The same action as its Remove button.
@@ -12709,26 +12769,26 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     .sketch => |sc| {
                         e.handle(@src(), box.data());
                         actV(.removeSketchView, .{ sc.space, sc.index });
-                        state.context = .{ .panel = state.model.rootOf(sc.space) };
+                        state.context = .{ .space = sc.space };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .figure_place => |c| {
                         e.handle(@src(), box.data());
                         actV(.removeFigurePlace, .{ c.space, c.index });
                         selection.clearRetainingCapacity();
-                        state.context = .{ .panel = state.model.rootOf(c.space) };
+                        state.context = .{ .space = c.space };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .image => |im| {
                         e.handle(@src(), box.data());
                         actV(.removeImage, .{im.space, im.index});
-                        state.context = .{ .panel = state.model.rootOf(im.space) };
+                        state.context = .{ .space = im.space };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     .view => |v| {
                         e.handle(@src(), box.data());
                         actV(.removeView, .{v.space, v.index});
-                        state.context = .{ .panel = state.model.rootOf(v.space) };
+                        state.context = .{ .space = v.space };
                         dvui.refresh(null, @src(), box.data().id);
                     },
                     // A tile leaves its track, which closes up behind it.
@@ -12739,9 +12799,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         // Its track, while that still exists (a grid's tile
                         // may leave none behind), else its panel.
                         state.context = if (found) |f| blk: {
-                            if (f.panel >= state.model.panels.items.len) break :blk .worksheet;
-                            if (f.tile.region >= state.model.panels.items[f.panel].regions.items.len) break :blk .{ .panel = f.panel };
-                            break :blk .{ .row = .{ .panel = f.panel, .region = f.tile.region, .row = f.tile.row } };
+                            if (!state.model.hasParent(f.parent)) break :blk .worksheet;
+                            if (f.tile.region >= state.model.regionsIn(f.parent).len) break :blk parentContext(f.parent);
+                            break :blk .{ .row = .{ .parent = f.parent, .region = f.tile.region, .row = f.tile.row } };
                         } else .worksheet;
                         dvui.refresh(null, @src(), box.data().id);
                     },
@@ -12846,7 +12906,9 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 } else if (state.tool == .add_tracks and me.button.pointer()) {
                     // Tracks are drawn from a point on the panel chosen for them.
                     const at = state.view.toMm(area, me.p);
-                    if (state.context == .panel and panelHolds(state.context.panel, at)) {
+                    // Or anywhere on the workspace: a content layout is a
+                    // container of its own there.
+                    if ((state.context == .panel and panelHolds(state.context.panel, at)) or state.context == .space) {
                         const p = snap(at);
                         state.drag = .{ .start = p, .at = p };
                     }
@@ -12897,7 +12959,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     const at = state.view.toMm(area, me.p);
                     const hit = pathHit(at).?;
                     const t = pathRegion().?;
-                    path_drag = .{ .panel = t.panel, .region = t.region, .id = hit.id, .from_across = hit.across, .start = at, .at = at };
+                    path_drag = .{ .parent = t.parent, .region = t.region, .id = hit.id, .from_across = hit.across, .start = at, .at = at };
                 } else if (drawing and me.button.pointer()) {
                     // A panel is drawn from a point on the sheet.
                     const at = snap(state.view.toMm(area, me.p));
@@ -13160,9 +13222,9 @@ var band_drag = false;
 /// The container context `c` is, if it is one.
 fn objectOfContext(c: Context) ?layout.model.ObjectId {
     const id = switch (c) {
-        .panel => |pi| if (pi < state.model.panels.items.len and !state.model.panels.items[pi].unbounded) state.model.panels.items[pi].id else return null,
-        .region => |r| state.model.idAt(.{ .region = .{ .panel = r.panel, .index = r.region } }),
-        .row => |r| state.model.idAt(.{ .region = .{ .panel = r.panel, .index = r.region } }),
+        .panel => |pi| if (pi < state.model.panels.items.len) state.model.panels.items[pi].id else return null,
+        .region => |r| state.model.idAt(.{ .region = .{ .parent = r.parent, .index = r.region } }),
+        .row => |r| state.model.idAt(.{ .region = .{ .parent = r.parent, .index = r.region } }),
         .art => |l| state.model.idAt(.{ .art = .{ .panel = l.panel, .index = l.index } }),
         .group => |g| g,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else return null,
@@ -13185,7 +13247,7 @@ fn parentObject(id: layout.model.ObjectId) ?layout.model.ObjectId {
     if (state.model.group(id) != null) return null;
     const pr = constrain.parentOf(&state.model, id) orelse return null;
     return switch (pr) {
-        .panel => |pi| if (pi < state.model.panels.items.len and !state.model.panels.items[pi].unbounded) state.model.panels.items[pi].id else null,
+        .panel => |pi| if (pi < state.model.panels.items.len) state.model.panels.items[pi].id else null,
         .space => null,
     };
 }
@@ -13223,26 +13285,26 @@ fn levelPush(b: LevelBack) void {
 fn levelParent(c: Context) ?Context {
     return switch (c) {
         .tile => |id| blk: {
-            if (state.model.gridInstanceOf(id)) |g| break :blk .{ .grid = .{ .panel = g.panel, .index = g.grid } };
+            if (state.model.gridInstanceOf(id)) |g| break :blk .{ .grid = .{ .parent = g.parent, .index = g.grid } };
             const f = findTile(id) orelse break :blk null;
-            if (f.panel >= state.model.panels.items.len) break :blk null;
+            if (!state.model.hasParent(f.parent)) break :blk null;
             // The track it lies in: the segment of its flow that placed it,
             // which may be a later track of the thread than the flow's first.
-            if (f.panel < state.placed.items.len) for (state.placed.items[f.panel].tracks) |tr| {
-                if (tr.region == f.tile.region and tr.track == f.tile.row and tr.panel == f.panel) break :blk .{ .region = .{ .panel = tr.panel, .region = tr.member } };
+            if (placedOf(f.parent)) |pl| for (pl.tracks) |tr| {
+                if (tr.region == f.tile.region and tr.track == f.tile.row and tr.flow_parent.eql(f.parent)) break :blk .{ .region = .{ .parent = tr.parent, .region = tr.member } };
             };
-            if (f.tile.region < state.model.panels.items[f.panel].regions.items.len) break :blk .{ .region = .{ .panel = f.panel, .region = f.tile.region } };
-            break :blk .{ .panel = f.panel };
+            if (f.tile.region < state.model.regionsIn(f.parent).len) break :blk .{ .region = .{ .parent = f.parent, .region = f.tile.region } };
+            break :blk parentContext(f.parent);
         },
-        .region => |r| .{ .panel = r.panel },
-        .row => |r| .{ .region = .{ .panel = r.panel, .region = r.region } },
+        .region => |r| parentContext(r.parent),
+        .row => |r| .{ .region = .{ .parent = r.parent, .region = r.region } },
         .art => |l| .{ .panel = l.panel },
-        .grid => |g| .{ .panel = g.panel },
+        .grid => |g| parentContext(g.parent),
         .panel => |pi| blk: {
-            if (pi >= state.model.panels.items.len or state.model.panels.items[pi].unbounded) break :blk null;
-            const root = state.model.rootOf(state.model.spaceOf(pi));
-            break :blk if (root == pi) null else .{ .panel = root };
+            if (pi >= state.model.panels.items.len or state.model.spaces.items.len == 0) break :blk null;
+            break :blk .{ .space = state.model.spaceOf(pi) };
         },
+        .space => null,
         .group, .selection, .image, .view, .sketch => blk: {
             const sp: usize = switch (c) {
                 .image => |im| im.space,
@@ -13250,7 +13312,7 @@ fn levelParent(c: Context) ?Context {
                 .sketch => |k| k.space,
                 else => shown_space,
             };
-            break :blk .{ .panel = state.model.rootOf(sp) };
+            break :blk if (sp < state.model.spaces.items.len) .{ .space = sp } else null;
         },
         .worksheet => null,
         else => null,
@@ -13264,28 +13326,29 @@ fn levelParent(c: Context) ?Context {
 fn levelFirstChild(c: Context) ?Context {
     switch (c) {
         .worksheet, .file => {
-            for (state.model.panels.items, 0..) |p, pi| if (!p.unbounded) return .{ .panel = pi };
+            if (state.model.panels.items.len > 0) return .{ .panel = 0 };
+            return null;
+        },
+        .space => |si| {
+            if (si >= state.model.spaces.items.len) return null;
+            for (0..state.model.panels.items.len) |qi| if (state.model.spaceOf(qi) == si) return .{ .panel = qi };
+            // Content layouts straight on the workspace.
+            const sp = state.model.spaces.items[si];
+            if (sp.regions.items.len > 0) return .{ .region = .{ .parent = .{ .space = si }, .region = 0 } };
+            if (sp.grids.items.len > 0) return .{ .grid = .{ .parent = .{ .space = si }, .index = 0 } };
             return null;
         },
         .panel => |pi| {
             if (pi >= state.model.panels.items.len) return null;
             const p = state.model.panels.items[pi];
-            if (p.unbounded) {
-                const sp = state.model.spaceOf(pi);
-                for (state.model.panels.items, 0..) |q, qi| if (qi != pi and !q.unbounded and state.model.spaceOf(qi) == sp) return .{ .panel = qi };
-                // Tracks straight on the canvas.
-                if (p.regions.items.len > 0) return .{ .region = .{ .panel = pi, .region = 0 } };
-                if (p.art.items.len > 0) return .{ .art = .{ .panel = pi, .index = 0 } };
-                return null;
-            }
-            if (p.regions.items.len > 0) return .{ .region = .{ .panel = pi, .region = 0 } };
-            if (p.grids.items.len > 0) return .{ .grid = .{ .panel = pi, .index = 0 } };
+            if (p.regions.items.len > 0) return .{ .region = .{ .parent = .{ .panel = pi }, .region = 0 } };
+            if (p.grids.items.len > 0) return .{ .grid = .{ .parent = .{ .panel = pi }, .index = 0 } };
             if (p.art.items.len > 0) return .{ .art = .{ .panel = pi, .index = 0 } };
             return null;
         },
         .grid => |g| {
-            if (g.panel >= state.model.panels.items.len or g.index >= state.model.panels.items[g.panel].grids.items.len) return null;
-            for (state.model.panels.items[g.panel].grids.items[g.index].instances.items) |inst| return .{ .tile = inst.tile };
+            if (!state.model.hasParent(g.parent) or g.index >= state.model.gridsIn(g.parent).len) return null;
+            for (state.model.gridsIn(g.parent)[g.index].instances.items) |inst| return .{ .tile = inst.tile };
             return null;
         },
         else => return null,
@@ -13332,7 +13395,7 @@ fn levelUp() bool {
         flow_anchor = null;
         const ctx: Context = switch (state.context) {
             .region, .row => state.context,
-            else => .{ .region = .{ .panel = c.panel, .region = c.region } },
+            else => .{ .region = .{ .parent = c.parent, .region = c.region } },
         };
         levelSet(ctx);
         return true;
@@ -13366,18 +13429,18 @@ fn levelDownInner() bool {
     if (track_cursor) |c| {
         // In a track's content: the item after the cursor, a tile chosen
         // or a run's text edited; back where Ctrl+< left, if it left one.
-        if (level_back) |b| if (b == .eq) if (b.eq.target == .run) if (b.eq.target.run.panel == c.panel and b.eq.target.run.region == c.region and eqContent(b.eq) != null) {
+        if (level_back) |b| if (b == .eq) if (b.eq.target == .run) if (b.eq.target.run.parent.eql(c.parent) and b.eq.target.run.region == c.region and eqContent(b.eq) != null) {
             canvas_eq = b.eq;
             canvas_eq_seq += 1;
             level_back = null;
             return true;
         };
-        const items = state.model.flowItems(c.panel, c.region);
+        const items = state.model.flowItems(c.parent, c.region);
         if (c.index >= items.len) return false;
         switch (items[c.index].what) {
             .run => |r| {
                 flow_anchor = null;
-                canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = c.index } }, .math = r.equation, .offset = 0 };
+                canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = c.index } }, .math = r.equation, .offset = 0 };
                 canvas_eq_seq += 1;
                 eqMove(@min(c.offset, @as(u32, @intCast(r.content.len))), null);
                 return true;
@@ -13421,14 +13484,14 @@ fn levelDownInner() bool {
         },
         // A track: its content, the flow cursor at its start.
         .region, .row => {
-            const pr: struct { panel: usize, region: usize } = switch (state.context) {
-                .region => |r| .{ .panel = r.panel, .region = r.region },
-                .row => |r| .{ .panel = r.panel, .region = r.region },
+            const pr: struct { parent: Parent, region: usize } = switch (state.context) {
+                .region => |r| .{ .parent = r.parent, .region = r.region },
+                .row => |r| .{ .parent = r.parent, .region = r.region },
                 else => unreachable,
             };
-            const head = state.model.threadHead(pr.panel, pr.region);
-            state.context = .{ .region = .{ .panel = pr.panel, .region = pr.region } };
-            track_cursor = .{ .panel = head.panel, .region = head.region, .index = 0 };
+            const head = state.model.threadHead(pr.parent, pr.region);
+            state.context = .{ .region = .{ .parent = pr.parent, .region = pr.region } };
+            track_cursor = .{ .parent = head.parent, .region = head.region, .index = 0 };
             dvui.refresh(null, @src(), null);
             return true;
         },
@@ -13456,8 +13519,8 @@ fn clickAt(at: geom.Point, p: dvui.Point.Physical) void {
         // A grid's tile sits in no track: its panel, then.
         // The track it lies in (as Ctrl+< finds it), else its panel.
         .tile => if (levelParent(state.context)) |up| switch (up) {
-            .region => |r| state.model.panels.items[r.panel].regions.items[r.region].id,
-            .grid => |g| state.model.panels.items[g.panel].id,
+            .region => |r| state.model.regionsIn(r.parent)[r.region].id,
+            .grid => |g| state.model.parentId(g.parent),
             .panel => |pi| state.model.panels.items[pi].id,
             else => null,
         } else null,
@@ -13533,7 +13596,7 @@ fn shiftClick(at: geom.Point) void {
     hunt_clear();
     track_cursor = null;
     toggleSelected(id);
-    state.context = if (selection.items.len == 0) (if (spaceRoot()) |r| Context{ .panel = r } else .worksheet) else if (selection.items.len == 1) contextOfObject(selection.items[0]) else .selection;
+    state.context = if (selection.items.len == 0) workspaceContext() else if (selection.items.len == 1) contextOfObject(selection.items[0]) else .selection;
 }
 
 /// Whether a drag from `at` should take what is there along: an
@@ -13557,10 +13620,9 @@ fn grabbedPanel() ?usize {
     return panelToMove(state.press_at orelse return null);
 }
 
-/// Whether worksheet point `at` lies on panel `pi`: always, for the canvas.
+/// Whether worksheet point `at` lies on panel `pi`.
 fn panelHolds(pi: usize, at: geom.Point) bool {
-    const p = state.model.panels.items[pi];
-    return p.unbounded or contains(p.box(), at);
+    return contains(state.model.panels.items[pi].box(), at);
 }
 
 /// The panel a drag from worksheet point `at` would move: the selected
@@ -13570,11 +13632,11 @@ fn panelHolds(pi: usize, at: geom.Point) bool {
 fn panelToMove(at: geom.Point) ?usize {
     switch (state.context) {
         // The canvas itself never moves.
-        .panel => |pi| return if (!state.model.panels.items[pi].unbounded and contains(state.model.panels.items[pi].box(), at)) pi else null,
+        .panel => |pi| return if (contains(state.model.panels.items[pi].box(), at)) pi else null,
         .worksheet => {
             var found: ?usize = null;
             for (state.model.panels.items, 0..) |p, pi| {
-                if (p.unbounded or !contains(p.box(), at)) continue;
+                if (!contains(p.box(), at)) continue;
                 if (found != null) return null;
                 found = pi;
             }
@@ -13602,14 +13664,14 @@ fn pick(at: geom.Point) void {
     // A click in a text track makes it the context and puts the flow
     // cursor there at once; in the context's tracks, the cursor too;
     // anywhere else picks as usual.
-    if (textTrackAt(at)) |t| state.context = .{ .region = .{ .panel = t.panel, .region = t.region } };
+    if (textTrackAt(at)) |t| state.context = .{ .region = .{ .parent = t.parent, .region = t.region } };
     if (cursorAt(at)) |c| {
         track_cursor = c;
         return;
     }
     track_cursor = null;
     // Empty space is the worksheet, or on a canvas the shown space itself.
-    state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
+    state.context = workspaceContext();
     selection.clearRetainingCapacity();
     // An image, then a view, by their boxes; anything over them wins.
     if (imageUnder(at)) |im| state.context = im;
@@ -13624,29 +13686,32 @@ fn pick(at: geom.Point) void {
         pickSketch(sr);
         if (sketch_edit != null) return;
     }
-    for (state.model.panels.items, 0..) |panel, pi| {
-        if (!shownPanel(pi)) continue;
-        if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(pi), panelLayer(pi))) continue;
-        const b = panel.box();
-        if (!panel.unbounded and at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = pi };
-        if (pi >= state.placed.items.len) continue;
-        for (state.placed.items[pi].tiles) |t| {
+    for (0..state.model.parentCount()) |k| {
+        const pi = state.model.parentAt(k);
+        if (!shownIn(pi)) continue;
+        if (pi.panelIndex()) |i| {
+            if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(i), panelLayer(i))) continue;
+            const b = state.model.panels.items[i].box();
+            if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = i };
+        } else if (!layerOpen(shown_space, state.model.spaces.items[shown_space].base_layer)) continue;
+        const pl = placedOf(pi) orelse continue;
+        for (pl.tiles) |t| {
             const body = onSheet(pi, t.body);
             if (at.x >= body.x0 and at.x <= body.x1 and at.y >= body.y0 and at.y <= body.y1) state.context = .{ .tile = t.id };
         }
         // Line art, by its box: drawn over the tracks, it is picked over
         // what is under it.
-        for (state.placed.items[pi].art) |pa| {
-            if (contains(onSheet(pi, pa.box), at)) state.context = .{ .art = .{ .panel = pi, .index = pa.index } };
-        }
-        for (state.placed.items[pi].labels) |l| {
+        if (pi.panelIndex()) |i| for (pl.art) |pa| {
+            if (contains(onSheet(pi, pa.box), at)) state.context = .{ .art = .{ .panel = i, .index = pa.index } };
+        };
+        for (pl.labels) |l| {
             if (l.tile != null) continue;
             // A run of text or an equation in a track: the track becomes
             // the context, with the cursor just after the run.
             if (l.run) |run| {
                 if (contains(onSheet(pi, l.box), at)) {
-                    state.context = .{ .region = .{ .panel = pi, .region = run.region } };
-                    track_cursor = .{ .panel = pi, .region = run.region, .index = run.item + 1 };
+                    state.context = .{ .region = .{ .parent = pi, .region = run.region } };
+                    track_cursor = .{ .parent = pi, .region = run.region, .index = run.item + 1 };
                 }
                 continue;
             }
@@ -13974,7 +14039,7 @@ fn styleLinePitch(style: ?layout.model.StyleId) ?f64 {
 }
 
 /// Sets a track's or region's orientation, saying why when it cannot be.
-fn setOrientationOf(pi: usize, ri: usize, direction: f64, rotation: f64) void {
+fn setOrientationOf(pi: Parent, ri: usize, direction: f64, rotation: f64) void {
     actM(mergeKey(.{ "track orientation", pi, ri }), .setOrientation, .{ pi, ri, direction, rotation }) catch |err| {
         state.status = if (err == error.BadJoin) "A flow's tracks all run one way: take this one out of its flow to turn it. " else "The orientation was not set. ";
     };
@@ -13982,11 +14047,11 @@ fn setOrientationOf(pi: usize, ri: usize, direction: f64, rotation: f64) void {
 
 /// Removes a track or region; its flow goes on in its other tracks (the
 /// last one's text kept, unplaced). Its panel becomes the context.
-fn removeRegionOf(pi: usize, ri: usize) void {
+fn removeRegionOf(pi: Parent, ri: usize) void {
     actV(.removeRegion, .{ pi, ri });
     track_cursor = null;
     path_selected = null;
-    state.context = .{ .panel = pi };
+    state.context = parentContext(pi);
 }
 
 /// "Row" or "Column".
@@ -14017,7 +14082,7 @@ fn ensurePrototype() !void {
 /// the prototype's smallest tile, and along to its size step, no shorter
 /// than its smallest tile; set out from `start` the way the drag went.
 const TrackPlan = struct {
-    panel: usize,
+    parent: Parent,
     count: usize,
     length: f64,
     pitch: f64,
@@ -14028,8 +14093,9 @@ const TrackPlan = struct {
 
 fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
     validTracksSizeTo();
-    const pi = switch (state.context) {
-        .panel => |pi| pi,
+    const pi: Parent = switch (state.context) {
+        .panel => |pi| .{ .panel = pi },
+        .space => |si| .{ .space = si },
         else => return null,
     };
     // A track runs the way it is drawn; a region the way the tool says.
@@ -14071,12 +14137,12 @@ fn planTracks(from: geom.Point, at: geom.Point) ?TrackPlan {
     const h = (if (major == .row) thickness else length) * pitch;
     const x0 = if (dx >= 0) from.x else from.x - w;
     const y0 = if (dy >= 0) from.y else from.y - h;
-    return .{ .panel = pi, .count = tracks, .length = length, .pitch = pitch, .major = major, .box = .{ .x0 = x0, .y0 = y0, .x1 = x0 + w, .y1 = y0 + h } };
+    return .{ .parent = pi, .count = tracks, .length = length, .pitch = pitch, .major = major, .box = .{ .x0 = x0, .y0 = y0, .x1 = x0 + w, .y1 = y0 + h } };
 }
 
 fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
     const px = dvui.windowNaturalScale();
-    const fits = layout.model.within(plan.box, state.model.panels.items[plan.panel].box());
+    const fits = if (plan.parent.panelIndex()) |i| layout.model.within(plan.box, state.model.panels.items[i].box()) else true;
     const colour = if (fits) colors.select else colors.overflow;
     const r = state.view.rect(area, plan.box);
     r.fill(.square, .{ .color = .{ .color = colour.opacity(0.12) } });
@@ -14117,15 +14183,16 @@ fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
 fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     defer state.tool = .select;
     const plan = planTracks(from, at) orelse return;
-    const panel = state.model.panels.items[plan.panel];
+    const o = parentOrigin(plan.parent);
     // Tracks may run past the panel: flagged, to be fitted or the panel
     // resized once their tiles show what is needed.
     var name_buf: [32]u8 = undefined;
-    // Generated names are identifiers, numbered within the panel.
-    const name = state.model.freshName(&name_buf, .{ .panel = plan.panel }, if (tracks_tool.kind == .track) "Track" else if (plan.major == .row) "Column" else "Row");
-    const r = act(.addTracks, .{plan.panel, .{
+    // Generated names are identifiers, numbered within the panel (or the
+    // workspace).
+    const name = state.model.freshName(&name_buf, state.model.containerOf(plan.parent), if (tracks_tool.kind == .track) "Track" else if (plan.major == .row) "Column" else "Row");
+    const r = act(.addTracks, .{plan.parent, .{
         .name = name,
-        .origin = .{ .x = plan.box.x0 - panel.origin.x, .y = plan.box.y1 - panel.origin.y },
+        .origin = .{ .x = plan.box.x0 - o.x, .y = plan.box.y1 - o.y },
         .major = plan.major,
         .kind = tracks_tool.kind,
         .prototype = switch (tracks_tool.size_to) {
@@ -14145,11 +14212,11 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     };
     // A text layout's new flow: its style copied from the Default
     // template, in the same undo step.
-    if (tracks_tool.size_to == .style) styleNewFlow(plan.panel, r) catch {};
+    if (tracks_tool.size_to == .style) styleNewFlow(plan.parent, r) catch {};
     // Empty tracks, the user fills them: the cursor waits at the start.
-    state.context = .{ .region = .{ .panel = plan.panel, .region = r } };
-    track_cursor = .{ .panel = plan.panel, .region = r, .index = 0 };
-    state.expanded.put(state.gpa, Context.key(.{ .panel = plan.panel }), true) catch {};
+    state.context = .{ .region = .{ .parent = plan.parent, .region = r } };
+    track_cursor = .{ .parent = plan.parent, .region = r, .index = 0 };
+    state.expanded.put(state.gpa, Context.key(parentContext(plan.parent)), true) catch {};
 }
 
 /// Tools for the current context, as icon buttons; with Add shape on,
@@ -14211,10 +14278,7 @@ fn toolBar() void {
         else => {},
     }
 
-    const on_canvas = switch (state.context) {
-        .panel => |pi| state.model.panels.items[pi].unbounded,
-        else => false,
-    };
+    const on_canvas = state.context == .space;
     // In the ribbon every tool shows, faint where it does not apply to
     // the context yet; elsewhere only those that apply.
     // On a canvas or in a frame: start a sketch where the next click lands.
@@ -14245,9 +14309,9 @@ fn toolBar() void {
         });
         dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add shape: drag out line art on the panel; tracks under it flow around its ink", .{}, .{});
     }
-    // Containers: tracks, on a panel or on the canvas.
-    if (showTool(state.context == .panel)) {
-        const prev_a = faintUnless(state.context == .panel);
+    // Containers: tracks, on a panel or on the canvas (or a frame).
+    if (showTool(state.context == .panel or state.context == .space)) {
+        const prev_a = faintUnless(state.context == .panel or state.context == .space);
         defer dvui.alphaSet(prev_a);
         // Two track modes, one button each: rows (tiles flow left to right)
         // and columns (top to bottom).
@@ -14348,7 +14412,7 @@ fn toolBar() void {
 /// frame; only inside a container: a panel, a sketch).
 fn inDrawingContainer() bool {
     return switch (state.context) {
-        .panel => |pi| pi < state.model.panels.items.len and !state.model.panels.items[pi].unbounded,
+        .panel => |pi| pi < state.model.panels.items.len,
         else => false,
     };
 }
@@ -14367,6 +14431,7 @@ fn lowerKind() []const u8 {
     return switch (state.context) {
         .file => "file",
         .worksheet => "worksheet",
+        .space => |si| if (si == 0) "canvas" else "frame",
         .panel => "panel",
         .region => "region",
         .row => "row",
@@ -14579,20 +14644,20 @@ fn runButtonAction(inv: keymap.Invocation) bool {
     switch (inv.action) {
         kact("track.make-tracks") => regionMakeTracks(),
         kact("track.remove") => switch (state.context) {
-            .region => |r| removeRegionOf(r.panel, r.region),
+            .region => |r| removeRegionOf(r.parent, r.region),
             else => return false,
         },
         kact("track.name-tiles") => regionNameKeys(),
         kact("panel.name-tiles") => panelNameKeys(),
         kact("track.flow.show") => switch (state.context) {
-            .region => |r| if (state.model.trackFlow(r.panel, r.region)) |f| {
+            .region => |r| if (state.model.trackFlow(r.parent, r.region)) |f| {
                 state.context = .{ .flow = f.id };
             },
             else => return false,
         },
         kact("track.flow.join-after") => switch (state.context) {
             .region => |r| {
-                join_from = .{ .panel = r.panel, .region = r.region };
+                join_from = .{ .parent = r.parent, .region = r.region };
                 state.tool = .join;
             },
             else => return false,
@@ -14637,12 +14702,12 @@ fn regionMakeTracks() void {
         .region => |r| r,
         else => return,
     };
-    const placed_rows = tracksIn(r.panel, r.region);
+    const placed_rows = tracksIn(r.parent, r.region);
     if (placed_rows.len == 0) return;
     const a = dvui.currentWindow().arena();
     const origins = a.alloc(geom.Point, placed_rows.len) catch return;
     for (placed_rows, origins) |t, *o| o.* = .{ .x = t.box.x0, .y = t.box.y1 };
-    if (act(.splitIntoTracks, .{ r.panel, r.region, origins })) |n| {
+    if (act(.splitIntoTracks, .{ r.parent, r.region, origins })) |n| {
         track_cursor = null;
         state.status = std.fmt.bufPrint(&import_status_buf, "{d} tracks, its flow running through them. ", .{n}) catch "Made tracks. ";
     } else |_| state.status = "The tracks were not made. ";
@@ -14659,7 +14724,7 @@ fn regionNameKeys() void {
         else => return,
     };
     const prefix = key_name_prefix[0..key_name_prefix_len];
-    if (act(.nameKeysInOrder, .{ r.panel, r.region, prefix })) |n| {
+    if (act(.nameKeysInOrder, .{ r.parent, r.region, prefix })) |n| {
         state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
     } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
 }
@@ -14672,7 +14737,7 @@ fn panelNameKeys() void {
         else => return,
     };
     const prefix = key_name_prefix[0..key_name_prefix_len];
-    if (act(.nameKeysInPanel, .{ pi, prefix })) |n| {
+    if (act(.nameKeysInPanel, .{ Parent{ .panel = pi }, prefix })) |n| {
         state.status = std.fmt.bufPrint(&import_status_buf, "{d} keys named. ", .{n}) catch "Named. ";
     } else |err| state.status = if (err == error.DuplicateDesignator) "A name is another key's elsewhere: none renamed. " else "The keys were not named. ";
 }
@@ -14683,9 +14748,9 @@ fn trackTakeOut() void {
         .region => |r| r,
         else => return,
     };
-    const f = state.model.trackFlow(r.panel, r.region) orelse return;
+    const f = state.model.trackFlow(r.parent, r.region) orelse return;
     const alone = f.tracks.items.len == 1;
-    if (act(.detachTrack, .{ r.panel, r.region })) {
+    if (act(.detachTrack, .{ r.parent, r.region })) {
         state.status = if (alone) "Taken out: its text is kept in the flow, now unplaced (under Flows in the Browser). " else "Taken out: the flow keeps all its text, on its other tracks. ";
     } else |_| state.status = "The track was not taken out. ";
 }
@@ -16142,7 +16207,7 @@ const button_handlers = [_]ButtonHandler{
                 .region => |r| r,
                 else => return,
             };
-            state.status = if (fitRegion(r.panel, r.region)) "" else "The tracks already fit their content (or hold none). ";
+            state.status = if (fitRegion(r.parent, r.region)) "" else "The tracks already fit their content (or hold none). ";
         }
     }.f),
     handler("tool.construction-line", struct {
@@ -16158,7 +16223,7 @@ const button_handlers = [_]ButtonHandler{
             switch (state.context) {
                 .guide => |g| {
                     act(.removeGuide, .{ g.space, g.index }) catch return;
-                    state.context = if (spaceRoot()) |ri| .{ .panel = ri } else .worksheet;
+                    state.context = workspaceContext();
                 },
                 else => {},
             }
@@ -16236,7 +16301,7 @@ const button_handlers = [_]ButtonHandler{
     handler("panel.grids.*", struct {
         fn f(arg: i32) void {
             const pi = contextPanel() orelse return;
-            state.context = .{ .grid = .{ .panel = pi, .index = @intCast(arg) } };
+            state.context = .{ .grid = .{ .parent = .{ .panel = pi }, .index = @intCast(arg) } };
         }
     }.f),
     handler("panel.grids.add-grid", struct {
@@ -16250,11 +16315,11 @@ const button_handlers = [_]ButtonHandler{
             const cols: u32 = @intFromFloat(@max(1, @floor(inner_w / step)));
             const rows: u32 = @intFromFloat(@max(1, @floor(inner_h / step)));
             const origin: geom.Point = .{ .x = panel.margins.left + step / 2, .y = panel.h - panel.margins.top - step / 2 };
-            const gi = act(.addGrid, .{ pi, origin, layout.model.GridShape{ .cols = cols, .rows = rows, .pitch_x = step, .pitch_y = step } }) catch {
+            const gi = act(.addGrid, .{ Parent{ .panel = pi }, origin, layout.model.GridShape{ .cols = cols, .rows = rows, .pitch_x = step, .pitch_y = step } }) catch {
                 state.status = "The grid could not be added. ";
                 return;
             };
-            state.context = .{ .grid = .{ .panel = pi, .index = gi } };
+            state.context = .{ .grid = .{ .parent = .{ .panel = pi }, .index = gi } };
         }
     }.f),
     // A grid.
@@ -16263,7 +16328,7 @@ const button_handlers = [_]ButtonHandler{
             const g = contextGrid() orelse return;
             var nb: [96]u8 = undefined;
             const name = state.model.freshName(&nb, .sheets, "Legends");
-            if (act(.makeSheet, .{ name, state.model.panels.items[g.panel].grids.items[g.index].id })) |id| {
+            if (act(.makeSheet, .{ name, state.model.gridsIn(g.parent)[g.index].id })) |id| {
                 state.context = .{ .sheet = id };
                 // Beside the canvas, to see its edits.
                 openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
@@ -16274,14 +16339,14 @@ const button_handlers = [_]ButtonHandler{
     handler("grid.show-the-grid-it-follows", struct {
         fn f(_: i32) void {
             const g = contextGrid() orelse return;
-            const link = state.model.panels.items[g.panel].grids.items[g.index].link;
-            if (state.model.findGrid(link)) |src| state.context = .{ .grid = .{ .panel = src.panel, .index = src.index } };
+            const link = state.model.gridsIn(g.parent)[g.index].link;
+            if (state.model.findGrid(link)) |src| state.context = .{ .grid = .{ .parent = src.parent, .index = src.index } };
         }
     }.f),
     handler("grid.stamp.*.fill-empty-points", struct {
         fn f(arg: i32) void {
             const g = contextGrid() orelse return;
-            const made = act(.fillGrid, .{ g.panel, g.index, @as(usize, @intCast(arg)) }) catch 0;
+            const made = act(.fillGrid, .{ g.parent, g.index, @as(usize, @intCast(arg)) }) catch 0;
             var buf: [64]u8 = undefined;
             state.status = dvui.currentWindow().arena().dupe(u8, std.fmt.bufPrint(&buf, "{d} placed. ", .{made}) catch "") catch "";
         }
@@ -16289,7 +16354,7 @@ const button_handlers = [_]ButtonHandler{
     handler("grid.stamp.*.remove-stamp", struct {
         fn f(arg: i32) void {
             const g = contextGrid() orelse return;
-            act(.removeStamp, .{ g.panel, g.index, @as(usize, @intCast(arg)) }) catch {};
+            act(.removeStamp, .{ g.parent, g.index, @as(usize, @intCast(arg)) }) catch {};
         }
     }.f),
     handler("grid.add-stamp.parts", struct {
@@ -16310,27 +16375,27 @@ const button_handlers = [_]ButtonHandler{
     handler("grid.remove-grid", struct {
         fn f(_: i32) void {
             const g = contextGrid() orelse return;
-            act(.removeGrid, .{ g.panel, g.index }) catch return;
-            state.context = .{ .panel = g.panel };
+            act(.removeGrid, .{ g.parent, g.index }) catch return;
+            state.context = parentContext(g.parent);
         }
     }.f),
     // A tile on a grid.
     handler("instance.grid", struct {
         fn f(_: i32) void {
             const at = contextInstance() orelse return;
-            state.context = .{ .grid = .{ .panel = at.panel, .index = at.grid } };
+            state.context = .{ .grid = .{ .parent = at.parent, .index = at.grid } };
         }
     }.f),
     handler("instance.bind-to-the-nearest-point", struct {
         fn f(_: i32) void {
             const at = contextInstance() orelse return;
-            const inst = state.model.panels.items[at.panel].grids.items[at.grid].instances.items[at.index];
+            const inst = state.model.gridsIn(at.parent)[at.grid].instances.items[at.index];
             const c = inst.loose orelse return;
-            const sh = state.model.gridShape(at.panel, at.grid);
-            const o = state.model.gridPoint(at.panel, at.grid, 0, 0);
+            const sh = state.model.gridShape(at.parent, at.grid);
+            const o = state.model.gridPoint(at.parent, at.grid, 0, 0);
             const col = @min(@as(f64, @floatFromInt(sh.cols - inst.cols)), @max(0, @round((c.x - o.x) / sh.stepX())));
             const row = @min(@as(f64, @floatFromInt(sh.rows - inst.rows)), @max(0, @round((o.y - c.y) / sh.stepY())));
-            act(.bindInstance, .{ at.panel, at.grid, at.index, @as(u32, @intFromFloat(col)), @as(u32, @intFromFloat(row)) }) catch {
+            act(.bindInstance, .{ at.parent, at.grid, at.index, @as(u32, @intFromFloat(col)), @as(u32, @intFromFloat(row)) }) catch {
                 state.status = "It does not fit on the grid. ";
             };
         }
@@ -16338,15 +16403,15 @@ const button_handlers = [_]ButtonHandler{
     handler("instance.remove-from-the-grid", struct {
         fn f(_: i32) void {
             const at = contextInstance() orelse return;
-            act(.removeInstance, .{ at.panel, at.grid, at.index }) catch return;
-            state.context = .{ .grid = .{ .panel = at.panel, .index = at.grid } };
+            act(.removeInstance, .{ at.parent, at.grid, at.index }) catch return;
+            state.context = .{ .grid = .{ .parent = at.parent, .index = at.grid } };
         }
     }.f),
     // Panel editing.
     handler("panel.editing.grid-settings", struct {
         fn f(_: i32) void {
             const p = panel_edit orelse return;
-            state.context = .{ .grid = .{ .panel = p.panel, .index = p.grid } };
+            state.context = .{ .grid = .{ .parent = .{ .panel = p.panel }, .index = p.grid } };
         }
     }.f),
     handler("panel.editing.leave-panel-editing", struct {
@@ -16446,7 +16511,7 @@ const button_handlers = [_]ButtonHandler{
                 state.status = "Only an empty layer, other than the space's first, can be removed. ";
                 return;
             };
-            state.context = .{ .panel = state.model.rootOf(l.space) };
+            state.context = .{ .space = l.space };
         }
     }.f),
     // A tile prototype: its slots and art.
@@ -16772,7 +16837,7 @@ const button_handlers = [_]ButtonHandler{
             const sv = viewAt(v.space, v.index) orelse return;
             const src_i = state.model.spaceIndex(sv.source) orelse return;
             shown_space = src_i;
-            state.context = .{ .panel = state.model.rootOf(src_i) };
+            state.context = .{ .space = src_i };
             state.view.fit = contentExtents();
         }
     }.f),
@@ -16783,7 +16848,7 @@ const button_handlers = [_]ButtonHandler{
                 else => return,
             };
             actV(.removeView, .{ v.space, v.index });
-            state.context = .{ .panel = state.model.rootOf(v.space) };
+            state.context = .{ .space = v.space };
         }
     }.f),
     // The legend font.
@@ -16872,24 +16937,7 @@ const button_handlers = [_]ButtonHandler{
             const parent = state.model.parentGroup(id);
             const space = state.model.spaceOfId(id) orelse shown_space;
             act(.ungroup, .{id}) catch return;
-            state.context = if (parent) |p| .{ .group = p } else .{ .panel = state.model.rootOf(space) };
-        }
-    }.f),
-    handler("art.shape.make-panel", struct {
-        fn f(_: i32) void {
-            const a = switch (state.context) {
-                .art => |a| a,
-                else => return,
-            };
-            const np = act(.makePanel, .{ a.panel, a.index }) catch {
-                state.status = "A panel could not be made from it. ";
-                return;
-            };
-            hist.join(&state.model, .setPanelLayer, .{ np, newObjectLayer() }) catch {};
-            state.context = .{ .panel = np };
-            state.expanded.put(state.gpa, Context.key(.{ .panel = np }), true) catch {};
-            if (canvas_id) |id| dvui.focusWidget(id, null, null);
-            state.status = "Made a panel: what it encloses moves with it. ";
+            state.context = if (parent) |p| .{ .group = p } else .{ .space = space };
         }
     }.f),
     // Plans, checks, images, views.
@@ -16926,7 +16974,7 @@ const button_handlers = [_]ButtonHandler{
                 else => return,
             };
             actV(.removeImage, .{ im.space, im.index });
-            state.context = .{ .panel = state.model.rootOf(im.space) };
+            state.context = .{ .space = im.space };
         }
     }.f),
     handler("view.place-in.*", struct {
@@ -17405,7 +17453,7 @@ const button_handlers = [_]ButtonHandler{
             };
             actV(.removeFigurePlace, .{ c.space, c.index });
             selection.clearRetainingCapacity();
-            state.context = .{ .panel = state.model.rootOf(c.space) };
+            state.context = .{ .space = c.space };
         }
     }.f),
     handler("tool.add-panel", struct {
@@ -17420,24 +17468,24 @@ const button_handlers = [_]ButtonHandler{
 fn contextPanel() ?usize {
     return switch (state.context) {
         .panel => |pi| pi,
-        .grid => |g| g.panel,
-        .region => |r| r.panel,
+        .grid => |g| g.parent.panelIndex(),
+        .region => |r| r.parent.panelIndex(),
         else => null,
     };
 }
 
 /// The context grid.
-fn contextGrid() ?struct { panel: usize, index: usize } {
+fn contextGrid() ?struct { parent: Parent, index: usize } {
     return switch (state.context) {
-        .grid => |g| .{ .panel = g.panel, .index = g.index },
+        .grid => |g| .{ .parent = g.parent, .index = g.index },
         else => null,
     };
 }
 
 /// The grid instance the context tile is.
-fn contextInstance() ?struct { panel: usize, grid: usize, index: usize } {
+fn contextInstance() ?struct { parent: Parent, grid: usize, index: usize } {
     return switch (state.context) {
-        .tile => |id| if (state.model.gridInstanceOf(id)) |at| .{ .panel = at.panel, .grid = at.grid, .index = at.index } else null,
+        .tile => |id| if (state.model.gridInstanceOf(id)) |at| .{ .parent = at.parent, .grid = at.grid, .index = at.index } else null,
         else => null,
     };
 }
@@ -17461,9 +17509,9 @@ fn fabEdit(edit: *const fn (layers: *std.ArrayList(layout.model.FabLayer), pi: u
 /// grid steps.
 fn addStampKind(name: []const u8, role: layout.model.GridRole, w: f64, h: f64, dy: f64) void {
     const g = contextGrid() orelse return;
-    const sh = state.model.gridShape(g.panel, g.index);
+    const sh = state.model.gridShape(g.parent, g.index);
     const proto_id = if (state.model.prototypes.items.len == 0) (act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) catch return) else state.model.prototypes.items[0].id;
-    _ = act(.addStamp, .{ g.panel, g.index, layout.model.Stamp{ .name = name, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
+    _ = act(.addStamp, .{ g.parent, g.index, layout.model.Stamp{ .name = name, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
         state.status = "The stamp could not be added. ";
     };
 }
@@ -17578,7 +17626,7 @@ fn focusCanvas() void {
 /// The palette's tile (or blank) `arg` inserted at the flow cursor.
 fn paletteInsert(tile: bool, arg: i32) void {
     const c = track_cursor orelse return;
-    const pal = paletteFor(c.panel, c.region) orelse return;
+    const pal = paletteFor(c.parent, c.region) orelse return;
     const i: usize = @intCast(arg);
     const sizes: []const f64 = if (tile) pal.tiles[0..pal.tile_count] else &pal.blanks;
     if (i >= sizes.len) return;
@@ -17889,12 +17937,9 @@ fn properties() !void {
         if (panel_edit == null) return;
     }
     defer constraintProperties();
-    const on_canvas = switch (state.context) {
-        .panel => |pi| state.model.panels.items[pi].unbounded,
-        else => false,
-    };
+    const on_canvas = state.context == .space;
     const frame_root = switch (state.context) {
-        .panel => |pi| state.model.panels.items[pi].unbounded and state.model.spaceOf(pi) != 0,
+        .space => |si| si != 0,
         else => false,
     };
     // An expression edited on the canvas, a tile's slot or a run of a
@@ -17919,9 +17964,10 @@ fn properties() !void {
             propText("Tiles", "{d}", .{state.model.tiles.items.len}, 4);
             try propFont("Legend font", 5);
         },
-        .panel => |pi| if (state.model.panels.items[pi].unbounded) {
-            if (state.model.spaceOf(pi) == 0) try canvasProperties(pi) else try frameProperties(state.model.spaceOf(pi));
-        } else {
+        .space => |si| if (si < state.model.spaces.items.len) {
+            if (si == 0) try canvasProperties() else try frameProperties(si);
+        },
+        .panel => |pi| {
             const panel = state.model.panels.items[pi];
             if (textProp("Name", panel.name, 1)) |name| actM(mergeKey(.{ "panel name", pi }), .renamePanel, .{ pi, name }) catch {};
             // Typed exactly: where it sits (bottom left, mm) and, for a
@@ -17968,18 +18014,18 @@ fn properties() !void {
             actionButton(@src(), "panel.release", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         },
         .region => |r| {
-            const region = state.model.panels.items[r.panel].regions.items[r.region];
-            if (textProp(asElement("track.name"), region.name, 1)) |name| actM(mergeKey(.{ "track name", r.panel, r.region }), .renameRegion, .{ r.panel, r.region, name }) catch {};
+            const region = state.model.regionsIn(r.parent)[r.region];
+            if (textProp(asElement("track.name"), region.name, 1)) |name| actM(mergeKey(.{ "track name", r.parent, r.region }), .renameRegion, .{ r.parent, r.region, name }) catch {};
             // Typed exactly: where it starts (panel mm) and its extent in
             // its pitch (u), along its tracks and across them.
-            if (numberProp(asElement("track.origin.across"), region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
-            if (numberProp(asElement("track.origin.up"), region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.panel, r.region }), .moveRegion, .{ r.panel, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
+            if (numberProp(asElement("track.origin.across"), region.origin.x, -100000, 100000, 2)) |v| actM(mergeKey(.{ "track at", r.parent, r.region }), .moveRegion, .{ r.parent, r.region, geom.Point{ .x = v, .y = region.origin.y } }) catch {};
+            if (numberProp(asElement("track.origin.up"), region.origin.y, -100000, 100000, 21)) |v| actM(mergeKey(.{ "track at", r.parent, r.region }), .moveRegion, .{ r.parent, r.region, geom.Point{ .x = region.origin.x, .y = v } }) catch {};
             const is_track = region.kind == .track;
             propText(asElement("track.kind"), "{s}", .{if (is_track) "single track, laid out in advance" else if (region.major() == .row) "column of rows, added as content needs them" else "row of columns, added as content needs them"}, 130);
             // Which way its baselines run and how content stands on them:
             // rows and columns are two settings of these.
-            if (numberProp(asElement("track.direction"), region.direction, -360, 360, 131)) |v| setOrientationOf(r.panel, r.region, v, region.rotation);
-            if (numberProp(asElement("track.rotation"), region.rotation, -360, 360, 132)) |v| setOrientationOf(r.panel, r.region, region.direction, v);
+            if (numberProp(asElement("track.direction"), region.direction, -360, 360, 131)) |v| setOrientationOf(r.parent, r.region, v, region.rotation);
+            if (numberProp(asElement("track.rotation"), region.rotation, -360, 360, 132)) |v| setOrientationOf(r.parent, r.region, region.direction, v);
             if (!region.supported()) propText(asElement("track.orientation-issue"), "{s}", .{"set as the nearest of rows or columns for now"}, 133);
             {
                 const rows = region.major() == .row;
@@ -17988,20 +18034,20 @@ fn properties() !void {
                 // Text is measured in mm (the owner, 2026-11-23: text
                 // first); tiles in their unit.
                 if (region.style != null) {
-                    if (numberProp(elementLabel("track.length", "Length, mm"), @round(along * region.pitch * 1000) / 1000, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v / region.pitch, across }) catch {};
-                } else if (numberProp(asElement("track.length"), along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, v, across }) catch {};
+                    if (numberProp(elementLabel("track.length", "Length, mm"), @round(along * region.pitch * 1000) / 1000, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.parent, r.region }), .setRegionSize, .{ r.parent, r.region, v / region.pitch, across }) catch {};
+                } else if (numberProp(asElement("track.length"), along, 0.01, 100000, 3)) |v| actM(mergeKey(.{ "track size", r.parent, r.region }), .setRegionSize, .{ r.parent, r.region, v, across }) catch {};
                 if (!is_track) if (region.style != null) {
-                    if (numberProp(elementLabel("track.depth", "Depth, mm"), @round(across * region.pitch * 1000) / 1000, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v / region.pitch }) catch {};
-                } else if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.panel, r.region }), .setRegionSize, .{ r.panel, r.region, along, v }) catch {};
+                    if (numberProp(elementLabel("track.depth", "Depth, mm"), @round(across * region.pitch * 1000) / 1000, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.parent, r.region }), .setRegionSize, .{ r.parent, r.region, along, v / region.pitch }) catch {};
+                } else if (numberProp(elementLabel("track.depth", if (rows) null else "Depth, columns"), across, 0.01, 100000, 22)) |v| actM(mergeKey(.{ "track size", r.parent, r.region }), .setRegionSize, .{ r.parent, r.region, along, v }) catch {};
                 if (region.style != null) propText(asElement("track.size"), "{d:.1} × {d:.1} mm", .{ region.w * region.pitch, region.h * region.pitch }, 23);
             }
             if (region.style != null) {
-                if (flowStyled(r.panel, r.region) == null) leadingProps(r.panel, r.region);
+                if (flowStyled(r.parent, r.region) == null) leadingProps(r.parent, r.region);
             } else propText(asElement("track.pitch"), "{d:.2} mm", .{region.pitch}, 4);
-            if (!is_track) propText(elementLabel("track.rows", if (region.major() == .row) null else "Columns"), "{d}", .{tracksIn(r.panel, r.region).len}, 5);
-            const head = state.model.threadHead(r.panel, r.region);
-            const is_head = head.panel == r.panel and head.region == r.region;
-            propText(asElement("track.items"), "{d}{s}", .{ state.model.flowItems(head.panel, head.region).len, if (!is_head) " in its flow" else "" }, 8);
+            if (!is_track) propText(elementLabel("track.rows", if (region.major() == .row) null else "Columns"), "{d}", .{tracksIn(r.parent, r.region).len}, 5);
+            const head = state.model.threadHead(r.parent, r.region);
+            const is_head = head.parent.eql(r.parent) and head.region == r.region;
+            propText(asElement("track.items"), "{d}{s}", .{ state.model.flowItems(head.parent, head.region).len, if (!is_head) " in its flow" else "" }, 8);
             if (region.style == null) {
                 // Its keys named in flow order: the prefix, then 1, 2 …
                 const prefix = key_name_prefix[0..key_name_prefix_len];
@@ -18012,7 +18058,7 @@ fn properties() !void {
                 var lb: [64]u8 = undefined;
                 actionButton(@src(), "track.name-tiles", std.fmt.bufPrint(&lb, "Name tiles in order: {s}1, {s}2 …", .{ prefix, prefix }) catch "Name tiles in order", 0, .{ .expand = .horizontal, .id_extra = 25 });
             }
-            if (r.panel < state.placed.items.len) for (state.placed.items[r.panel].issues) |i| {
+            if (placedOf(r.parent)) |pl| for (pl.issues) |i| {
                 if (i.kind == .region_outside and i.region == r.region) propText(asElement("track.outside-issue"), "{d:.2} mm past the panel", .{i.amount}, 7);
             };
             if (region.prototype) |pid| if (state.model.protoIndex(pid) != null) propText(asElement("track.prototype"), "{s}", .{state.model.proto(pid).name}, 6);
@@ -18020,32 +18066,32 @@ fn properties() !void {
             // A region's rows (or columns) as tracks of their own, where
             // they are now, its flow running on through them.
             if (!is_track) {
-                const placed_rows = tracksIn(r.panel, r.region);
+                const placed_rows = tracksIn(r.parent, r.region);
                 var lb: [48]u8 = undefined;
                 const label = std.fmt.bufPrint(&lb, "Make tracks of its {d} {s}", .{ placed_rows.len, if (region.major() == .row) "rows" else "columns" }) catch "Make tracks";
                 if (placed_rows.len > 0) actionButton(@src(), "track.make-tracks", label, 0, .{ .expand = .horizontal, .id_extra = 134, .margin = .{ .y = 6 } });
             }
             actionButton(@src(), "track.remove", "Remove content layout", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
-            try trackFlowProperties(r.panel, r.region);
-            try flowStyleProperties(head.panel, head.region);
+            try trackFlowProperties(r.parent, r.region);
+            try flowStyleProperties(head.parent, head.region);
             // The flow's paragraphs are its thread's.
-            try paragraphProperties(head.panel, head.region);
-            threadProperties(r.panel, r.region);
+            try paragraphProperties(head.parent, head.region);
+            threadProperties(r.parent, r.region);
             if (!expr_first) try expressionProperties();
         },
         .row => |r| {
-            const pt = placedTrack(r.panel, r.region, r.row);
+            const pt = placedTrack(r.parent, r.region, r.row);
             const member = if (pt) |x| x.member else r.region;
-            const on = if (pt) |x| x.panel else r.panel;
+            const on = if (pt) |x| x.parent else r.parent;
             // A track that no longer exists shows nothing.
-            if (on >= state.model.panels.items.len or member >= state.model.panels.items[on].regions.items.len) return;
-            const region = state.model.panels.items[on].regions.items[member];
+            if (!state.model.hasParent(on) or member >= state.model.regionsIn(on).len) return;
+            const region = state.model.regionsIn(on)[member];
             propText(trackWord(region.major()), "{d} of {d} in {s}", .{ (if (pt) |x| x.local else r.row) + 1, tracksIn(on, member).len, region.name }, 1);
             var where_buf: [96]u8 = undefined;
-            propText("Placed", "{s}", .{trackWhere(&where_buf, r.panel, r.region, r.row)}, 2);
+            propText("Placed", "{s}", .{trackWhere(&where_buf, r.parent, r.region, r.row)}, 2);
             var held: usize = 0;
-            for (flowItems(r.panel, r.region)) |it| {
-                if (it.segment == r.row and !isBreak(r.panel, it)) held += 1;
+            for (flowItems(r.parent, r.region)) |it| {
+                if (it.segment == r.row and !isBreak(r.parent, it)) held += 1;
             }
             propText("Items", "{d}", .{held}, 3);
         },
@@ -18067,7 +18113,7 @@ fn properties() !void {
         .sketch_def => |i| sketchDefProperties(i),
         .figures => figuresProperties(),
         .figure_def => |i| figureProperties(i),
-        .grid => |g| try gridProperties(g.panel, g.index),
+        .grid => |g| try gridProperties(g.parent, g.index),
         .prototypes => propText("Prototypes", "{d}", .{state.model.prototypes.items.len}, 1),
         .prototype => |id| {
             try prototypeProperties(id);
@@ -18096,7 +18142,7 @@ fn tileProperties(id: TileId) !void {
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
     const on_grid = state.model.gridInstanceOf(id);
-    if (on_grid) |at| try instanceProperties(at.panel, at.grid, at.index);
+    if (on_grid) |at| try instanceProperties(at.parent, at.grid, at.index);
     if (on_grid == null) {
         try sizeProperty(id, .horizontal);
         try sizeProperty(id, .vertical);
@@ -18109,8 +18155,8 @@ fn tileProperties(id: TileId) !void {
         propText("Row", "{d}", .{pt.row + 1}, 5);
     }
     if (on_grid == null) if (flowPosOf(id)) |at| {
-        const gap = state.model.flowItems(at.panel, at.region)[at.index].gap;
-        if (numberProp("Gap before, u", gap, 0, 1000, 8)) |v| actM(mergeKey(.{ "tile gap", id }), .setItemGap, .{ at.panel, at.region, at.index, v }) catch {};
+        const gap = state.model.flowItems(at.parent, at.region)[at.index].gap;
+        if (numberProp("Gap before, u", gap, 0, 1000, 8)) |v| actM(mergeKey(.{ "tile gap", id }), .setItemGap, .{ at.parent, at.region, at.index, v }) catch {};
     };
 
     {
@@ -18145,7 +18191,7 @@ fn tileProperties(id: TileId) !void {
         if (offered) |now| try act(.setTileTrackText, .{ id, tt.id, now });
         propText("Runs", "{s}, {s}", .{ if (tt.major == .row) "in rows" else "down columns, a character at a time", @tagName(tt.alignment) }, n + 1);
         if (found) |f| {
-            for (state.placed.items[f.panel].issues, 0..) |i, q| if (i.tile == id and i.slot == k) {
+            if (placedOf(f.parent)) |pl| for (pl.issues, 0..) |i, q| if (i.tile == id and i.slot == k) {
                 propText("Issue", "{s}", .{@tagName(i.kind)}, n + 2 + @min(q, 5));
             };
             for (state.intrusions) |i| if (i.tile == id and i.slot == k) {
@@ -18156,12 +18202,13 @@ fn tileProperties(id: TileId) !void {
 }
 
 /// Where tile `id` is in a flow: the flow's first track and its index.
-fn flowPosOf(id: TileId) ?struct { panel: usize, region: usize, index: usize } {
-    for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |_, ri| {
+fn flowPosOf(id: TileId) ?struct { parent: Parent, region: usize, index: usize } {
+    for (0..state.model.parentCount()) |pk| for (0..state.model.regionsIn(state.model.parentAt(pk)).len) |ri| {
+        const pi = state.model.parentAt(pk);
         const head = state.model.threadHead(pi, ri);
-        if (head.panel != pi or head.region != ri) continue;
+        if (!head.parent.eql(pi) or head.region != ri) continue;
         for (state.model.flowItems(pi, ri), 0..) |item, k| if (item.tileOf()) |t| {
-            if (t == id) return .{ .panel = pi, .region = ri, .index = k };
+            if (t == id) return .{ .parent = pi, .region = ri, .index = k };
         };
     };
     return null;
@@ -18342,8 +18389,8 @@ fn protoUnit(p: layout.model.TilePrototype) f64 {
 
 /// How a track holds its content: alignment in each row or column, the
 /// indent after hard breaks, and the gap between rows the path makes.
-fn trackFlowProperties(pi: usize, ri: usize) !void {
-    const region = state.model.panels.items[pi].regions.items[ri];
+fn trackFlowProperties(pi: Parent, ri: usize) !void {
+    const region = state.model.regionsIn(pi)[ri];
     var alignment = region.alignment;
     var indent = state.model.trackIndent(pi, ri);
     var gap = region.gap;
@@ -18450,11 +18497,11 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
 /// The paragraph at the flow cursor (else the track's first): which
 /// paragraph style it takes, and that style's settings, which every
 /// paragraph in it shares. Lengths in points, as type is measured.
-fn paragraphProperties(pi: usize, ri: usize) !void {
+fn paragraphProperties(pi: Parent, ri: usize) !void {
     const saved_group = pushGroup("paragraph");
     defer popGroup(saved_group);
     const m = &state.model;
-    const at: usize = if (track_cursor) |c| (if (c.panel == pi and c.region == ri) c.index else 0) else 0;
+    const at: usize = if (track_cursor) |c| (if (c.parent.eql(pi) and c.region == ri) c.index else 0) else 0;
     heading("Paragraph", .{}, 900);
     const current = m.paragraphStyleAt(pi, ri, at);
     const a = dvui.currentWindow().arena();
@@ -18567,7 +18614,7 @@ fn valueEditor(p: glyphic.Param, v: *glyphic.Value, default: bool, n: usize) boo
 /// The text style the expression line's target is set in.
 fn exprStyle(target: ExprTarget) ?layout.model.StyleId {
     return switch (target) {
-        .run => |r| state.model.flowItems(r.panel, r.region)[r.item].what.run.style,
+        .run => |r| state.model.flowItems(r.parent, r.region)[r.item].what.run.style,
         .tile_track => |tt| for (state.model.prototypeOf(tt.tile).tracks) |t| {
             if (t.id == tt.track) break t.style;
         } else null,
@@ -18712,7 +18759,8 @@ fn styleEmMm(sid: layout.model.StyleId) f64 {
 fn followLeading() void {
     // Only once the styles are resolved: until then sizes are guesses.
     if (state.labels == null) return;
-    for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |rg, ri| {
+    for (0..state.model.parentCount()) |k| for (state.model.regionsIn(state.model.parentAt(k)), 0..) |rg, ri| {
+        const pi = state.model.parentAt(k);
         const sid = rg.style orelse continue;
         if (state.model.styleIndex(sid) == null) continue;
         const fl = state.model.trackFlow(pi, ri);
@@ -18756,7 +18804,7 @@ fn defaultTemplate() !layout.model.ObjectId {
 /// Gives the flow of text layout `ri` of panel `pi` the styles of
 /// template `tid` (null: the Default), with no overrides, joined to the
 /// step under way.
-fn styleFlowFrom(pi: usize, ri: usize, tid: ?layout.model.ObjectId) !void {
+fn styleFlowFrom(pi: Parent, ri: usize, tid: ?layout.model.ObjectId) !void {
     const m = &state.model;
     const fid = (m.trackFlow(pi, ri) orelse return).id;
     const id = tid orelse try defaultTemplate();
@@ -18764,14 +18812,14 @@ fn styleFlowFrom(pi: usize, ri: usize, tid: ?layout.model.ObjectId) !void {
     _ = try hist.join(m, .setFlowStyle, .{ fid, t.text, t.paragraph, @as(?layout.model.Leading, null), id });
 }
 
-fn styleNewFlow(pi: usize, ri: usize) !void {
+fn styleNewFlow(pi: Parent, ri: usize) !void {
     try styleFlowFrom(pi, ri, null);
 }
 
 /// The flow of track `ri` of panel `pi`, when it has a flow style.
-fn flowStyled(pi: usize, ri: usize) ?*const layout.model.Flow {
+fn flowStyled(pi: Parent, ri: usize) ?*const layout.model.Flow {
     const head = state.model.threadHead(pi, ri);
-    const fl = state.model.trackFlow(head.panel, head.region) orelse return null;
+    const fl = state.model.trackFlow(head.parent, head.region) orelse return null;
     if (fl.style == .none or state.model.styleIndex(fl.style) == null) return null;
     return fl;
 }
@@ -18889,10 +18937,10 @@ fn templateProperties(id: layout.model.ObjectId) !void {
 
 /// The track the flow-style buttons act on: the context's, else the
 /// flow cursor's.
-fn flowStyleTrack() ?struct { usize, usize } {
+fn flowStyleTrack() ?struct { Parent, usize } {
     return switch (state.context) {
-        .region => |r| .{ r.panel, r.region },
-        else => if (track_cursor) |c| .{ c.panel, c.region } else null,
+        .region => |r| .{ r.parent, r.region },
+        else => if (track_cursor) |c| .{ c.parent, c.region } else null,
     };
 }
 
@@ -18983,7 +19031,7 @@ fn saveTemplate(fid: layout.model.ObjectId) !void {
 /// styles), and its text size, leading and paragraph settings, each the
 /// template's unless the flow overrides it (marked *); Update style for
 /// all flows, Clear overrides, Save as template.
-fn flowStyleProperties(pi: usize, ri: usize) !void {
+fn flowStyleProperties(pi: Parent, ri: usize) !void {
     const fl = flowStyled(pi, ri) orelse return;
     const saved_group = pushGroup("flow-style");
     defer popGroup(saved_group);
@@ -19042,7 +19090,7 @@ fn flowStyleProperties(pi: usize, ri: usize) !void {
             } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the template's). ";
             return;
         }
-        const region = m.panels.items[pi].regions.items[ri];
+        const region = m.regionsIn(pi)[ri];
         const pt = region.pitch / layout.model.mm_per_pt;
         const em_pt = em / layout.model.mm_per_pt;
         const extra = pt - em_pt;
@@ -19065,8 +19113,8 @@ fn flowStyleProperties(pi: usize, ri: usize) !void {
 /// A text layout's leading: typed fixed ("12pt", "5mm") or relative to
 /// its style's font size ("+2pt", "+3mm", "+10%", "120%"); "auto" for the
 /// style's own line spacing. Below it, what it comes to.
-fn leadingProps(pi: usize, ri: usize) void {
-    const region = state.model.panels.items[pi].regions.items[ri];
+fn leadingProps(pi: Parent, ri: usize) void {
+    const region = state.model.regionsIn(pi)[ri];
     const sid = region.style orelse return;
     if (state.model.styleIndex(sid) == null) return;
     const em = styleEmMm(sid);
@@ -19722,7 +19770,7 @@ fn statusContent() void {
     var missing: usize = 0;
     var lacking: usize = 0;
     var overflow: usize = 0;
-    for (state.placed.items) |*p| {
+    for (state.solved.items) |*p| {
         tiles += p.tiles.len;
         labels += p.labels.len;
         for (p.issues) |i| switch (i.kind) {
@@ -19765,7 +19813,7 @@ fn statusContent() void {
     var lack_buf: [48]u8 = undefined;
     const lack = if (lacking > 0) std.fmt.bufPrint(&lack_buf, " · {d} lacking bold/italic", .{lacking}) catch "" else "";
     const counts = std.fmt.bufPrint(&counts_buf, "{d} panels ({d} out of compliance) · {d} tiles · {d} text pieces · {d} missing glyphs{s} · {d} overflows · {d} in margins{s}{s}", .{
-        state.model.panels.items.len - state.model.spaces.items.len, state.panel_issues.len, tiles, labels, missing, lack, overflow, state.intrusions.len, layer_flags,
+        state.model.panels.items.len, state.panel_issues.len, tiles, labels, missing, lack, overflow, state.intrusions.len, layer_flags,
         if (catching_up) " · reflowing flows…" else "",
     }) catch "";
     dvui.labelNoFmt(@src(), counts, .{}, field);
@@ -19805,7 +19853,7 @@ fn statusContent() void {
 /// Where things go in: before item `index` of a track's flow.
 /// The flow cursor: in the flow of track `region` of `panel` (the first of
 /// its thread), before item `index`, or `offset` bytes into the run there.
-const TrackCursor = struct { panel: usize, region: usize, index: usize, offset: u32 = 0 };
+const TrackCursor = struct { parent: Parent, region: usize, index: usize, offset: u32 = 0 };
 var track_cursor: ?TrackCursor = null;
 /// Where a selection in the flow started (Shift with a movement key): it
 /// runs from here to the cursor.
@@ -19828,7 +19876,7 @@ var palette_prototype: ?layout.model.PrototypeId = null;
 /// is not a spacer.
 fn cyclePalettePrototype(back: bool) void {
     const c = track_cursor orelse return;
-    const pal = paletteFor(c.panel, c.region) orelse return;
+    const pal = paletteFor(c.parent, c.region) orelse return;
     const protos = state.model.prototypes.items;
     var at = protoPos(pal.prototype);
     for (0..protos.len) |_| {
@@ -19848,9 +19896,9 @@ const InsertPalette = struct {
     blanks: [10]f64 = undefined,
 };
 
-fn paletteFor(panel: usize, region: usize) ?InsertPalette {
+fn paletteFor(panel: Parent, region: usize) ?InsertPalette {
     if (state.model.prototypes.items.len == 0) return null;
-    const r = state.model.panels.items[panel].regions.items[region];
+    const r = state.model.regionsIn(panel)[region];
     // The prototype the tile row inserts: the one chosen with Tab, else the
     // track's own.
     const own = if (r.prototype) |rp| (if (state.model.protoIndex(rp) != null) rp else state.model.prototypes.items[0].id) else state.model.prototypes.items[0].id;
@@ -19877,9 +19925,9 @@ fn paletteFor(panel: usize, region: usize) ?InsertPalette {
 
 /// The region the context is, which the flow cursor belongs to. A track
 /// as the context is for moving it, not filling it.
-fn contextRegion() ?struct { panel: usize, region: usize } {
+fn contextRegion() ?struct { parent: Parent, region: usize } {
     return switch (state.context) {
-        .region => |r| .{ .panel = r.panel, .region = r.region },
+        .region => |r| .{ .parent = r.parent, .region = r.region },
         else => null,
     };
 }
@@ -19887,7 +19935,7 @@ fn contextRegion() ?struct { panel: usize, region: usize } {
 /// The item of a region's flow that a click `along` mm into segment `seg`
 /// goes before: the first in that segment whose middle lies beyond it, else
 /// the segment's hard break (the end of its line), else past its last item.
-fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
+fn indexAt(pi: Parent, region: usize, seg: usize, along: f64) usize {
     var after: ?usize = null;
     for (flowItems(pi, region)) |it| {
         if (it.segment != seg) continue;
@@ -19899,63 +19947,63 @@ fn indexAt(pi: usize, region: usize, seg: usize, along: f64) usize {
 }
 
 /// How many rows or columns a track's flow reached in the last solve.
-fn segmentCount(pi: usize, region: usize) usize {
+fn segmentCount(pi: Parent, region: usize) usize {
     // A thread's flow has a part on each panel it runs through.
     var n: usize = 0;
-    for (state.placed.items) |pl| for (pl.flows) |f| {
-        if (f.flow_panel == pi and f.region == region) n = @max(n, f.segments);
+    for (state.solved.items) |pl| for (pl.flows) |f| {
+        if (f.flow_parent.eql(pi) and f.region == region) n = @max(n, f.segments);
     };
     return n;
 }
 
 /// The placed items of the flow of track `region` of panel `pi` (the
 /// first of its thread), on every panel it runs through.
-fn flowItems(pi: usize, region: usize) []const layout.place.PlacedItem {
+fn flowItems(pi: Parent, region: usize) []const layout.place.PlacedItem {
     var list: std.ArrayList(layout.place.PlacedItem) = .empty;
     const a = dvui.currentWindow().arena();
-    for (state.placed.items) |pl| for (pl.items) |it| {
-        if (it.flow_panel == pi and it.region == region) list.append(a, it) catch {};
+    for (state.solved.items) |pl| for (pl.items) |it| {
+        if (it.flow_parent.eql(pi) and it.region == region) list.append(a, it) catch {};
     };
     return list.items;
 }
 
 /// Segment `t` of the flow of track `region` (the first of its thread), as
 /// the last solve placed it.
-fn placedTrack(pi: usize, region: usize, t: usize) ?layout.place.PlacedTrack {
-    for (state.placed.items) |pl| for (pl.tracks) |tr| {
-        if (tr.flow_panel == pi and tr.region == region and tr.track == t) return tr;
+fn placedTrack(pi: Parent, region: usize, t: usize) ?layout.place.PlacedTrack {
+    for (state.solved.items) |pl| for (pl.tracks) |tr| {
+        if (tr.flow_parent.eql(pi) and tr.region == region and tr.track == t) return tr;
     };
     return null;
 }
 
 /// The segments lying in track `ri`, as the last solve placed them (a
 /// threaded track's are its thread's flow's).
-fn tracksIn(pi: usize, ri: usize) []const layout.place.PlacedTrack {
-    if (pi >= state.placed.items.len) return &.{};
+fn tracksIn(pi: Parent, ri: usize) []const layout.place.PlacedTrack {
+    if (placedOf(pi) == null) return &.{};
     var list: std.ArrayList(layout.place.PlacedTrack) = .empty;
     const a = dvui.currentWindow().arena();
-    for (state.placed.items[pi].tracks) |tr| if (tr.member == ri) list.append(a, tr) catch {};
+    for (placedOf(pi).?.tracks) |tr| if (tr.member == ri) list.append(a, tr) catch {};
     return list.items;
 }
 
 /// Where row or column `t` of a track's path lies, from the last solve.
-fn segmentOrigin(pi: usize, region: usize, t: usize) ?layout.model.Segment {
+fn segmentOrigin(pi: Parent, region: usize, t: usize) ?layout.model.Segment {
     return if (placedTrack(pi, region, t)) |tr| tr.origin else null;
 }
 
 /// The model's item for a placed one, while the model still has it: the
 /// placement is from the last solve, and an edit since may have removed it.
-fn modelItem(pi: usize, it: layout.place.PlacedItem) ?layout.model.Item {
+fn modelItem(pi: Parent, it: layout.place.PlacedItem) ?layout.model.Item {
     _ = pi;
     // The flow is its thread's first track's, on whichever panel.
-    if (it.flow_panel >= state.model.panels.items.len) return null;
-    if (it.region >= state.model.panels.items[it.flow_panel].regions.items.len) return null;
-    const items = state.model.flowItems(it.flow_panel, it.region);
+    if (!state.model.hasParent(it.flow_parent)) return null;
+    if (it.region >= state.model.regionsIn(it.flow_parent).len) return null;
+    const items = state.model.flowItems(it.flow_parent, it.region);
     if (it.index >= items.len) return null;
     return items[it.index];
 }
 
-fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
+fn isBreak(pi: Parent, it: layout.place.PlacedItem) bool {
     const item = modelItem(pi, it) orelse return false;
     return item.breaks();
 }
@@ -19965,34 +20013,34 @@ fn isBreak(pi: usize, it: layout.place.PlacedItem) bool {
 fn cursorAt(at: geom.Point) ?TrackCursor {
     if (canvas_eq != null) leaveCanvasEquation();
     const cr = contextRegion() orelse return null;
-    if (cr.panel >= state.placed.items.len) return null;
+    const crp = placedOf(cr.parent) orelse return null;
     // In any of the context's thread's segments on its panel: a cursor in
     // the thread's flow.
-    const head = state.model.threadHead(cr.panel, cr.region);
-    for (state.placed.items[cr.panel].tracks) |t| {
-        if (t.flow_panel != head.panel or t.region != head.region) continue;
-        const b = onSheet(cr.panel, t.box);
+    const head = state.model.threadHead(cr.parent, cr.region);
+    for (crp.tracks) |t| {
+        if (!t.flow_parent.eql(head.parent) or t.region != head.region) continue;
+        const b = onSheet(cr.parent, t.box);
         if (!contains(b, at)) continue;
         const along = if (t.major == .row) at.x - b.x0 else b.y1 - at.y;
         flow_anchor = null;
         typing_seq += 1;
         // The nearest place in that segment the cursor can stop.
         var best: ?Stop = null;
-        for (flowStops(head.panel, head.region)) |st| {
-            if (st.panel != cr.panel or st.segment != t.track) continue;
+        for (flowStops(head.parent, head.region)) |st| {
+            if (!st.parent.eql(cr.parent) or st.segment != t.track) continue;
             if (best == null or @abs(st.along - along) < @abs(best.?.along - along)) best = st;
         }
-        if (best) |st| return .{ .panel = head.panel, .region = head.region, .index = st.index, .offset = st.offset };
-        return .{ .panel = head.panel, .region = head.region, .index = indexAt(head.panel, head.region, t.track, along) };
+        if (best) |st| return .{ .parent = head.parent, .region = head.region, .index = st.index, .offset = st.offset };
+        return .{ .parent = head.parent, .region = head.region, .index = indexAt(head.parent, head.region, t.track, along) };
     }
     // An empty flow has no segment placed yet: a click in one of its
     // tracks starts it, at its beginning.
-    if (state.model.flowItems(head.panel, head.region).len == 0) {
-        const r = state.model.panels.items[cr.panel].regions.items[cr.region];
-        if (contains(onSheet(cr.panel, r.bounds()), at)) {
+    if (state.model.flowItems(head.parent, head.region).len == 0) {
+        const r = state.model.regionsIn(cr.parent)[cr.region];
+        if (contains(onSheet(cr.parent, r.bounds()), at)) {
             flow_anchor = null;
             typing_seq += 1;
-            return .{ .panel = head.panel, .region = head.region, .index = 0 };
+            return .{ .parent = head.parent, .region = head.region, .index = 0 };
         }
     }
     return null;
@@ -20009,16 +20057,18 @@ fn cursorAt(at: geom.Point) ?TrackCursor {
 /// The text track one of whose placed segments holds worksheet point `at`
 /// clearly inside: farther than a couple of edge widths from its sides (a
 /// quarter of the segment's height or width at most).
-fn textSegmentAt(at: geom.Point) ?struct { panel: usize, region: usize } {
+fn textSegmentAt(at: geom.Point) ?struct { parent: Parent, region: usize } {
     const margin_full = 2 * edgeMm();
-    for (state.model.panels.items, 0..) |p, pi| {
-        if (!shownPanel(pi) or pi >= state.placed.items.len) continue;
-        if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(pi), panelLayer(pi))) continue;
-        for (state.placed.items[pi].tracks) |t| {
-            if (t.member >= p.regions.items.len or p.regions.items[t.member].style == null) continue;
+    for (0..state.model.parentCount()) |k| {
+        const pi = state.model.parentAt(k);
+        if (!shownIn(pi) or !parentLayerOpen(pi)) continue;
+        const pl = placedOf(pi) orelse continue;
+        const regions = state.model.regionsIn(pi);
+        for (pl.tracks) |t| {
+            if (t.member >= regions.len or regions[t.member].style == null) continue;
             const b = onSheet(pi, t.box);
             const m = @min(margin_full, 0.25 * @min(b.width(), b.height()));
-            if (at.x >= b.x0 + m and at.x <= b.x1 - m and at.y >= b.y0 + m and at.y <= b.y1 - m) return .{ .panel = pi, .region = t.member };
+            if (at.x >= b.x0 + m and at.x <= b.x1 - m and at.y >= b.y0 + m and at.y <= b.y1 - m) return .{ .parent = pi, .region = t.member };
         }
     }
     return null;
@@ -20027,12 +20077,12 @@ fn textSegmentAt(at: geom.Point) ?struct { panel: usize, region: usize } {
 /// The place in the flow of thread head `head` nearest worksheet point
 /// `at` on panel `pi`: in the segment holding it, else (`clamp`, for a
 /// drag) the nearest of the thread's segments there.
-fn flowPlaceAt(pi: usize, head: layout.model.TrackRef, at: geom.Point, clamp: bool) ?layout.model.FlowPos {
-    if (pi >= state.placed.items.len) return null;
+fn flowPlaceAt(pi: Parent, head: layout.model.TrackRef, at: geom.Point, clamp: bool) ?layout.model.FlowPos {
+    const pl = placedOf(pi) orelse return null;
     var best_t: ?layout.place.PlacedTrack = null;
     var best_d: f64 = std.math.inf(f64);
-    for (state.placed.items[pi].tracks) |t| {
-        if (t.flow_panel != head.panel or t.region != head.region) continue;
+    for (pl.tracks) |t| {
+        if (!t.flow_parent.eql(head.parent) or t.region != head.region) continue;
         const b = onSheet(pi, t.box);
         const dx = @max(@max(b.x0 - at.x, at.x - b.x1), 0);
         const dy = @max(@max(b.y0 - at.y, at.y - b.y1), 0);
@@ -20049,12 +20099,12 @@ fn flowPlaceAt(pi: usize, head: layout.model.TrackRef, at: geom.Point, clamp: bo
     const cy = std.math.clamp(at.y, b.y0, b.y1);
     const along = if (t.major == .row) cx - b.x0 else b.y1 - cy;
     var best: ?Stop = null;
-    for (flowStops(head.panel, head.region)) |st| {
-        if (st.panel != pi or st.segment != t.track) continue;
+    for (flowStops(head.parent, head.region)) |st| {
+        if (!st.parent.eql(pi) or st.segment != t.track) continue;
         if (best == null or @abs(st.along - along) < @abs(best.?.along - along)) best = st;
     }
     if (best) |st| return .{ .index = st.index, .offset = st.offset };
-    return .{ .index = indexAt(head.panel, head.region, t.track, along), .offset = 0 };
+    return .{ .index = indexAt(head.parent, head.region, t.track, along), .offset = 0 };
 }
 
 /// A drag in text under way: the pointer selects from where it went down.
@@ -20066,12 +20116,12 @@ var text_drag = false;
 /// from the cursor that was to here, in the same flow. Whether it was one.
 fn textPress(at: geom.Point, extend: bool) bool {
     const t = textSegmentAt(at) orelse return false;
-    const head = state.model.threadHead(t.panel, t.region);
+    const head = state.model.threadHead(t.parent, t.region);
     if (extend) {
         const c = track_cursor orelse return false;
-        if (c.panel != head.panel or c.region != head.region) return false;
+        if (!c.parent.eql(head.parent) or c.region != head.region) return false;
     }
-    const pos = flowPlaceAt(t.panel, head, at, true) orelse return false;
+    const pos = flowPlaceAt(t.parent, head, at, true) orelse return false;
     if (canvas_eq != null) leaveCanvasEquation();
     if (extend) {
         const c = track_cursor.?;
@@ -20080,23 +20130,23 @@ fn textPress(at: geom.Point, extend: bool) bool {
         flow_anchor = null;
         hunt_clear();
         selection.clearRetainingCapacity();
-        state.context = .{ .region = .{ .panel = t.panel, .region = t.region } };
+        state.context = .{ .region = .{ .parent = t.parent, .region = t.region } };
     }
-    track_cursor = .{ .panel = head.panel, .region = head.region, .index = pos.index, .offset = pos.offset };
+    track_cursor = .{ .parent = head.parent, .region = head.region, .index = pos.index, .offset = pos.offset };
     typing_seq += 1;
     text_drag = true;
-    text_drag_panel = t.panel;
+    text_drag_parent = t.parent;
     last_click = null;
     revealInTree(state.context);
     return true;
 }
-var text_drag_panel: usize = 0;
+var text_drag_parent: Parent = .{ .space = 0 };
 
 /// The pointer at `at` in a text drag: the cursor follows it, the anchor
 /// staying where the drag began.
 fn textDragTo(at: geom.Point) void {
     const c = track_cursor orelse return;
-    const pos = flowPlaceAt(text_drag_panel, .{ .panel = c.panel, .region = c.region }, at, true) orelse return;
+    const pos = flowPlaceAt(text_drag_parent, .{ .parent = c.parent, .region = c.region }, at, true) orelse return;
     if (pos.index == c.index and pos.offset == c.offset) return;
     if (flow_anchor == null) flow_anchor = .{ .index = c.index, .offset = c.offset };
     track_cursor.?.index = pos.index;
@@ -20114,7 +20164,7 @@ fn textDragTo(at: geom.Point) void {
 /// A place the flow cursor can stop: before item `index`, or `offset`
 /// bytes into the run there; where it shows: on panel `panel`, in flow
 /// segment `segment`, `along` mm into it.
-const Stop = struct { index: usize, offset: u32, panel: usize, segment: usize, along: f64 };
+const Stop = struct { index: usize, offset: u32, parent: Parent, segment: usize, along: f64 };
 
 fn stopBefore(x: Stop, y: Stop) bool {
     return x.index < y.index or (x.index == y.index and x.offset < y.offset);
@@ -20122,28 +20172,29 @@ fn stopBefore(x: Stop, y: Stop) bool {
 
 /// Every place the cursor can stop in the flow of track `fr` of panel `fp`
 /// (the first of its thread), in order, from the last solve.
-fn flowStops(fp: usize, fr: usize) []Stop {
+fn flowStops(fp: Parent, fr: usize) []Stop {
     const a = dvui.currentWindow().arena();
     var list: std.ArrayList(Stop) = .empty;
-    if (fp >= state.model.panels.items.len or fr >= state.model.panels.items[fp].regions.items.len) return &.{};
+    if (!state.model.hasParent(fp) or fr >= state.model.regionsIn(fp).len) return &.{};
     const items = state.model.flowItems(fp, fr);
     var last: ?Stop = null;
-    for (state.placed.items, 0..) |pl, pi| {
+    for (state.solved.items, 0..) |pl, k| {
+        const pi = state.model.parentAt(k);
         for (pl.items) |it| {
-            if (it.flow_panel != fp or it.region != fr or it.index >= items.len) continue;
-            list.append(a, .{ .index = it.index, .offset = 0, .panel = pi, .segment = it.segment, .along = it.span[0] }) catch {};
-            const end: Stop = .{ .index = it.index + 1, .offset = 0, .panel = pi, .segment = it.segment, .along = it.span[1] };
+            if (!it.flow_parent.eql(fp) or it.region != fr or it.index >= items.len) continue;
+            list.append(a, .{ .index = it.index, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[0] }) catch {};
+            const end: Stop = .{ .index = it.index + 1, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[1] };
             if (last == null or !stopBefore(end, last.?)) last = end;
         }
         // The characters of the runs set here.
         for (pl.labels) |l| {
             const r = l.run orelse continue;
-            if (r.panel != fp or r.region != fr or r.item >= items.len or items[r.item].what != .run) continue;
+            if (!r.parent.eql(fp) or r.region != fr or r.item >= items.len or items[r.item].what != .run) continue;
             const content = items[r.item].what.run.content;
             const t = trackHolding(pi, fp, fr, l.origin) orelse continue;
             const add = struct {
-                fn f(lst: *std.ArrayList(Stop), al: std.mem.Allocator, item: usize, off: u32, len: usize, panel: usize, seg: usize, along: f64) void {
-                    const s0: Stop = if (off >= len) .{ .index = item + 1, .offset = 0, .panel = panel, .segment = seg, .along = along } else .{ .index = item, .offset = off, .panel = panel, .segment = seg, .along = along };
+                fn f(lst: *std.ArrayList(Stop), al: std.mem.Allocator, item: usize, off: u32, len: usize, parent: Parent, seg: usize, along: f64) void {
+                    const s0: Stop = if (off >= len) .{ .index = item + 1, .offset = 0, .parent = parent, .segment = seg, .along = along } else .{ .index = item, .offset = off, .parent = parent, .segment = seg, .along = along };
                     lst.append(al, s0) catch {};
                 }
             }.f;
@@ -20167,8 +20218,8 @@ fn flowStops(fp: usize, fr: usize) []Stop {
     if (last) |e| list.append(a, e) catch {};
     if (list.items.len == 0) {
         // An empty flow: its first segment's start.
-        for (state.placed.items, 0..) |pl, pi| for (pl.tracks) |t| {
-            if (t.flow_panel == fp and t.region == fr and t.track == 0) return a.dupe(Stop, &.{.{ .index = 0, .offset = 0, .panel = pi, .segment = 0, .along = 0 }}) catch &.{};
+        for (state.solved.items, 0..) |pl, k| for (pl.tracks) |t| {
+            if (t.flow_parent.eql(fp) and t.region == fr and t.track == 0) return a.dupe(Stop, &.{.{ .index = 0, .offset = 0, .parent = state.model.parentAt(k), .segment = 0, .along = 0 }}) catch &.{};
         };
         return &.{};
     }
@@ -20189,11 +20240,12 @@ fn flowStops(fp: usize, fr: usize) []Stop {
 
 /// The placed segment of the flow of track `fr` of panel `fp` on panel
 /// `pi` that holds point `p` (panel frame): the one whose band it is in.
-fn trackHolding(pi: usize, fp: usize, fr: usize, p: geom.Point) ?layout.place.PlacedTrack {
+fn trackHolding(pi: Parent, fp: Parent, fr: usize, p: geom.Point) ?layout.place.PlacedTrack {
     var best: ?layout.place.PlacedTrack = null;
     var best_d: f64 = std.math.inf(f64);
-    for (state.placed.items[pi].tracks) |t| {
-        if (t.flow_panel != fp or t.region != fr) continue;
+    const pl = placedOf(pi) orelse return null;
+    for (pl.tracks) |t| {
+        if (!t.flow_parent.eql(fp) or t.region != fr) continue;
         const b = t.box;
         const dy = if (p.y < b.y0) b.y0 - p.y else if (p.y > b.y1) p.y - b.y1 else 0;
         const dx = if (p.x < b.x0) b.x0 - p.x else if (p.x > b.x1) p.x - b.x1 else 0;
@@ -20219,7 +20271,7 @@ fn stopAt(stops: []const Stop, index: usize, offset: u32) ?usize {
 
 /// The character at a stop, for telling words apart: none (null) before an
 /// item that is not text.
-fn stopChar(fp: usize, fr: usize, st: Stop) ?u8 {
+fn stopChar(fp: Parent, fr: usize, st: Stop) ?u8 {
     const items = state.model.flowItems(fp, fr);
     if (st.index >= items.len or items[st.index].what != .run) return null;
     const content = items[st.index].what.run.content;
@@ -20251,7 +20303,7 @@ fn flowMoveAction(a: keymap.ActionId) bool {
         if (a == kact("canvas.flow.select." ++ m.name)) found = .{ .move = m.move, .select = true };
     }
     const f = found orelse return false;
-    const stops = flowStops(c.panel, c.region);
+    const stops = flowStops(c.parent, c.region);
     const i = stopAt(stops, c.index, c.offset) orelse return true;
     const here = stops[i];
     var j = i;
@@ -20260,16 +20312,16 @@ fn flowMoveAction(a: keymap.ActionId) bool {
         .char_right => j = @min(i + 1, stops.len - 1),
         .word_left => {
             j = i -| 1;
-            while (j > 0 and !(isWordChar(stopChar(c.panel, c.region, stops[j])) and !isWordChar(stopChar(c.panel, c.region, stops[j - 1])))) j -= 1;
+            while (j > 0 and !(isWordChar(stopChar(c.parent, c.region, stops[j])) and !isWordChar(stopChar(c.parent, c.region, stops[j - 1])))) j -= 1;
         },
         .word_right => {
             j = @min(i + 1, stops.len - 1);
-            while (j + 1 < stops.len and !(isWordChar(stopChar(c.panel, c.region, stops[j])) and !isWordChar(stopChar(c.panel, c.region, stops[j - 1])))) j += 1;
+            while (j + 1 < stops.len and !(isWordChar(stopChar(c.parent, c.region, stops[j])) and !isWordChar(stopChar(c.parent, c.region, stops[j - 1])))) j += 1;
         },
-        .line_start => while (j > 0 and stops[j - 1].panel == here.panel and stops[j - 1].segment == here.segment) {
+        .line_start => while (j > 0 and stops[j - 1].parent.eql(here.parent) and stops[j - 1].segment == here.segment) {
             j -= 1;
         },
-        .line_end => while (j + 1 < stops.len and stops[j + 1].panel == here.panel and stops[j + 1].segment == here.segment) {
+        .line_end => while (j + 1 < stops.len and stops[j + 1].parent.eql(here.parent) and stops[j + 1].segment == here.segment) {
             j += 1;
         },
         .text_start => j = 0,
@@ -20306,9 +20358,9 @@ fn flowMoveAction(a: keymap.ActionId) bool {
 }
 
 /// The selection in the flow, faintly: across each segment it covers.
-fn drawFlowSelection(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
+fn drawFlowSelection(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.Placed, c: TrackCursor) void {
     const an = flow_anchor orelse return;
-    const stops = flowStops(c.panel, c.region);
+    const stops = flowStops(c.parent, c.region);
     const a0 = stopAt(stops, an.index, an.offset) orelse return;
     const c0 = stopAt(stops, c.index, c.offset) orelse return;
     if (a0 == c0) return;
@@ -20319,12 +20371,12 @@ fn drawFlowSelection(area: dvui.Rect.Physical, pi: usize, placed: *const layout.
         // A run of stops on one segment.
         const st = stops[k];
         var e = k;
-        while (e + 1 <= hi and stops[e + 1].panel == st.panel and stops[e + 1].segment == st.segment) e += 1;
+        while (e + 1 <= hi and stops[e + 1].parent.eql(st.parent) and stops[e + 1].segment == st.segment) e += 1;
         const to = if (e < hi) stops[e].along else stops[hi].along;
         // Past its last stop the selection runs on to the segment's end
         // when it goes on beyond it.
-        if (st.panel == pi) for (placed.tracks) |t| {
-            if (t.flow_panel != c.panel or t.region != c.region or t.track != st.segment) continue;
+        if (st.parent.eql(pi)) for (placed.tracks) |t| {
+            if (!t.flow_parent.eql(c.parent) or t.region != c.region or t.track != st.segment) continue;
             const b = onSheet(pi, t.box);
             const x1 = if (e < hi) b.x1 else b.x0 + to;
             const r: geom.Box = .{ .x0 = b.x0 + st.along, .x1 = @max(b.x0 + st.along, x1), .y0 = b.y0, .y1 = b.y1 };
@@ -20337,18 +20389,18 @@ fn drawFlowSelection(area: dvui.Rect.Physical, pi: usize, placed: *const layout.
 
 /// Where the cursor shows: the segment and the distance along it, mm.
 fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
-    if (c.panel >= state.placed.items.len) return null;
+    if (placedOf(c.parent) == null) return null;
     var prev: ?layout.place.PlacedItem = null;
     var here: ?layout.place.PlacedItem = null;
-    for (flowItems(c.panel, c.region)) |it| {
+    for (flowItems(c.parent, c.region)) |it| {
         // A run set word by word has several pieces: the cursor goes after
         // the last of the item before it, before the first of its own.
         if (it.index + 1 == c.index) prev = it;
         if (it.index == c.index and here == null) here = it;
     }
     // After a hard break: the start of the next segment.
-    if (prev) |p| if (isBreak(c.panel, p)) {
-        const seg = if (here) |h| h.segment else @min(p.segment + 1, @max(1, segmentCount(c.panel, c.region)) - 1);
+    if (prev) |p| if (isBreak(c.parent, p)) {
+        const seg = if (here) |h| h.segment else @min(p.segment + 1, @max(1, segmentCount(c.parent, c.region)) - 1);
         return .{ .segment = seg, .along = 0 };
     };
     if (here) |h| {
@@ -20362,22 +20414,22 @@ fn cursorPlace(c: TrackCursor) ?struct { segment: usize, along: f64 } {
 /// The run of text or an equation the expression line edits while the
 /// cursor is in a track: the one just before the cursor, else the one just
 /// after it.
-fn runAtCursor() ?struct { panel: usize, region: usize, item: usize } {
+fn runAtCursor() ?struct { parent: Parent, region: usize, item: usize } {
     const c = track_cursor orelse return null;
-    const items = state.model.flowItems(c.panel, c.region);
-    if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
-    if (c.index > 0 and c.index <= items.len and items[c.index - 1].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index - 1 };
-    if (c.index < items.len and items[c.index].what == .run) return .{ .panel = c.panel, .region = c.region, .item = c.index };
+    const items = state.model.flowItems(c.parent, c.region);
+    if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) return .{ .parent = c.parent, .region = c.region, .item = c.index };
+    if (c.index > 0 and c.index <= items.len and items[c.index - 1].what == .run) return .{ .parent = c.parent, .region = c.region, .item = c.index - 1 };
+    if (c.index < items.len and items[c.index].what == .run) return .{ .parent = c.parent, .region = c.region, .item = c.index };
     return null;
 }
 
 /// Fits a region's rows or columns to their content: as long as its
 /// longest paragraph needs, from the last solve. Whether it changed.
-fn fitRegion(pi: usize, region: usize) bool {
-    if (pi >= state.placed.items.len) return false;
-    for (state.placed.items[pi].flows) |f| {
+fn fitRegion(pi: Parent, region: usize) bool {
+    if (placedOf(pi) == null) return false;
+    for (placedOf(pi).?.flows) |f| {
         if (f.region != region) continue;
-        const r = state.model.panels.items[pi].regions.items[region];
+        const r = state.model.regionsIn(pi)[region];
         if (!(f.natural > 0) or @abs(f.natural - r.segmentLength()) < 1e-9) return false;
         act(.setSegmentLength, .{pi, region, f.natural}) catch return false;
         return true;
@@ -20397,12 +20449,12 @@ fn validateCursor() void {
         track_cursor = null;
         return;
     };
-    const head = state.model.threadHead(cr.panel, cr.region);
-    if (head.panel != c.panel or head.region != c.region or c.panel >= state.model.panels.items.len) {
+    const head = state.model.threadHead(cr.parent, cr.region);
+    if (!head.parent.eql(c.parent) or head.region != c.region or !state.model.hasParent(c.parent)) {
         track_cursor = null;
         return;
     }
-    const r_items = state.model.flowItems(c.panel, c.region);
+    const r_items = state.model.flowItems(c.parent, c.region);
     track_cursor.?.index = @min(c.index, r_items.len);
     // Within a run, only while there is a run there and the offset is in it.
     const tc = &track_cursor.?;
@@ -20441,8 +20493,8 @@ fn flowAction(inv: keymap.Invocation) bool {
         typing_seq += 1;
         return true;
     }
-    const region = state.model.panels.items[c.panel].regions.items[c.region];
-    const len = state.model.flowItems(c.panel, c.region).len;
+    const region = state.model.regionsIn(c.parent)[c.region];
+    const len = state.model.flowItems(c.parent, c.region).len;
     switch (inv.action) {
         kact("canvas.flow.copy") => copyFlowSelection(false),
         kact("canvas.flow.cut") => copyFlowSelection(true),
@@ -20452,7 +20504,7 @@ fn flowAction(inv: keymap.Invocation) bool {
             typing_seq += 1;
         },
         kact("canvas.flow.select.all") => {
-            const stops = flowStops(c.panel, c.region);
+            const stops = flowStops(c.parent, c.region);
             if (stops.len > 0) {
                 flow_anchor = .{ .index = stops[0].index, .offset = stops[0].offset };
                 track_cursor.?.index = stops[stops.len - 1].index;
@@ -20474,20 +20526,20 @@ fn flowAction(inv: keymap.Invocation) bool {
             _ = deleteFlowSelection();
             const cc = track_cursor.?;
             const line = inv.action == kact("canvas.flow.new-line");
-            const pos = act(.breakAt, .{ cc.panel, cc.region, flowPos(cc), !(line or region.style == null) }) catch return true;
+            const pos = act(.breakAt, .{ cc.parent, cc.region, flowPos(cc), !(line or region.style == null) }) catch return true;
             setFlowPos(pos);
             typing_seq += 1;
         },
         kact("canvas.flow.delete-back") => {
             if (deleteFlowSelection()) return true;
             const from = charBeforeCursor(c) orelse return true;
-            const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, from, flowPos(c) }) catch return true;
+            const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, from, flowPos(c) }) catch return true;
             setFlowPos(pos);
         },
         kact("canvas.flow.delete-forward") => {
             if (deleteFlowSelection()) return true;
             const to = charAfterCursor(c, len) orelse return true;
-            const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, flowPos(c), to }) catch return true;
+            const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, flowPos(c), to }) catch return true;
             setFlowPos(pos);
         },
         kact("canvas.flow.leave") => {
@@ -20510,7 +20562,7 @@ var typing_seq: u64 = 0;
 
 fn typingKey() u64 {
     const c = track_cursor orelse return 0;
-    return mergeKey(.{ "type", c.panel, c.region, typing_seq });
+    return mergeKey(.{ "type", c.parent, c.region, typing_seq });
 }
 
 fn flowPos(c: TrackCursor) layout.model.FlowPos {
@@ -20537,7 +20589,7 @@ fn flowSelection() ?[2]layout.model.FlowPos {
 fn deleteFlowSelection() bool {
     const c = track_cursor orelse return false;
     const sel = flowSelection() orelse return false;
-    const pos = actM(typingKey(), .deleteRange, .{ c.panel, c.region, sel[0], sel[1] }) catch return true;
+    const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, sel[0], sel[1] }) catch return true;
     setFlowPos(pos);
     return true;
 }
@@ -20546,8 +20598,8 @@ fn deleteFlowSelection() bool {
 fn typeIntoFlow(text: []const u8) void {
     _ = deleteFlowSelection();
     const c = track_cursor orelse return;
-    const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
-    const pos = actM(typingKey(), .insertText, .{ c.panel, c.region, flowPos(c), text, style }) catch return;
+    const style = state.model.regionsIn(c.parent)[c.region].style orelse (labelStyle() catch return);
+    const pos = actM(typingKey(), .insertText, .{ c.parent, c.region, flowPos(c), text, style }) catch return;
     setFlowPos(pos);
 }
 
@@ -20555,7 +20607,7 @@ fn typeIntoFlow(text: []const u8) void {
 fn copyFlowSelection(cut: bool) void {
     const c = track_cursor orelse return;
     const sel = flowSelection() orelse return;
-    const text = state.model.flowText(state.gpa, c.panel, c.region, sel[0], sel[1]) catch return;
+    const text = state.model.flowText(state.gpa, c.parent, c.region, sel[0], sel[1]) catch return;
     defer state.gpa.free(text);
     dvui.clipboardTextSet(text);
     if (cut) {
@@ -20568,7 +20620,7 @@ fn copyFlowSelection(cut: bool) void {
 /// else at the end of the run before, else the item before.
 fn charBeforeCursor(c: TrackCursor) ?layout.model.FlowPos {
     const a = dvui.currentWindow().arena();
-    const items = state.model.flowItems(c.panel, c.region);
+    const items = state.model.flowItems(c.parent, c.region);
     if (c.offset > 0 and c.index < items.len and items[c.index].what == .run) {
         const at = layout.edit.charBefore(a, items[c.index].what.run.content, c.offset, items[c.index].what.run.equation) catch null;
         return .{ .index = c.index, .offset = at orelse 0 };
@@ -20585,7 +20637,7 @@ fn charBeforeCursor(c: TrackCursor) ?layout.model.FlowPos {
 /// Where the character at the cursor ends.
 fn charAfterCursor(c: TrackCursor, len: usize) ?layout.model.FlowPos {
     if (c.index >= len) return null;
-    const items = state.model.flowItems(c.panel, c.region);
+    const items = state.model.flowItems(c.parent, c.region);
     if (items[c.index].what == .run) {
         const content = items[c.index].what.run.content;
         const end = (layout.edit.charAfter(dvui.currentWindow().arena(), content, c.offset, items[c.index].what.run.equation) catch null) orelse @as(u32, @intCast(content.len));
@@ -20607,33 +20659,33 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: 
     const c = track_cursor orelse return;
     switch (kind) {
         .tile => {
-            const pal = paletteFor(c.panel, c.region) orelse return;
-            _ = act(.insertTile, .{c.panel, c.region, c.index, pal.prototype, size}) catch return;
+            const pal = paletteFor(c.parent, c.region) orelse return;
+            _ = act(.insertTile, .{c.parent, c.region, c.index, pal.prototype, size}) catch return;
         },
         .blank => {
-            const pal = paletteFor(c.panel, c.region) orelse return;
+            const pal = paletteFor(c.parent, c.region) orelse return;
             // The palette's blanks are in the prototype's u, as its tiles
             // are; a blank is stored in its track's unit.
-            const r = state.model.panels.items[c.panel].regions.items[c.region];
+            const r = state.model.regionsIn(c.parent)[c.region];
             const unit = state.model.proto(pal.prototype).unitIn(r.pitch);
-            _ = act(.insertBlank, .{c.panel, c.region, c.index, size * unit / r.pitch}) catch return;
+            _ = act(.insertBlank, .{c.parent, c.region, c.index, size * unit / r.pitch}) catch return;
         },
         .hard_break => {
             // With the track's indent, a blank follows: the cursor goes past
             // it, to where the new paragraph's content starts.
-            const n = act(.insertBreak, .{c.panel, c.region, c.index}) catch return;
+            const n = act(.insertBreak, .{c.parent, c.region, c.index}) catch return;
             track_cursor.?.index += n;
             return;
         },
         .paragraph => {
             // The new paragraph takes the style of the one it splits; at
             // its end, that style's next (FrameMaker's Next ¶ Tag).
-            const style = state.model.paragraphStyleAfter(c.panel, c.region, c.index);
-            act(.insertParagraph, .{c.panel, c.region, c.index, style}) catch return;
+            const style = state.model.paragraphStyleAfter(c.parent, c.region, c.index);
+            act(.insertParagraph, .{c.parent, c.region, c.index, style}) catch return;
         },
         .run => {
-            const style = state.model.panels.items[c.panel].regions.items[c.region].style orelse (labelStyle() catch return);
-            act(.insertRun, .{c.panel, c.region, c.index, .{ .style = style, .content = "" }}) catch return;
+            const style = state.model.regionsIn(c.parent)[c.region].style orelse (labelStyle() catch return);
+            act(.insertRun, .{c.parent, c.region, c.index, .{ .style = style, .content = "" }}) catch return;
             focus_expression = true;
         },
     }
@@ -20644,7 +20696,7 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: 
 /// a group breaks as one.
 fn toggleBindAtCursor() void {
     const c = track_cursor orelse return;
-    const items = state.model.flowItems(c.panel, c.region);
+    const items = state.model.flowItems(c.parent, c.region);
     if (c.index == 0 or c.index >= items.len) {
         state.status = "Put the cursor between two items to join or part them. ";
         return;
@@ -20654,7 +20706,7 @@ fn toggleBindAtCursor() void {
         state.status = "A hard break cannot be part of a group. ";
         return;
     }
-    act(.setBind, .{c.panel, c.region, c.index - 1, !before.bind}) catch return;
+    act(.setBind, .{c.parent, c.region, c.index - 1, !before.bind}) catch return;
     state.status = if (before.bind) "Parted: a break may fall here. " else "Joined: no break falls here. ";
 }
 
@@ -20674,13 +20726,13 @@ var focus_expression_at: ?usize = null;
 
 /// The equation the expression line builds while equation mode is on;
 /// `shown` once the line has had the keyboard.
-var equation_edit: ?struct { panel: usize, region: usize, item: usize, shown: bool = false } = null;
+var equation_edit: ?struct { parent: Parent, region: usize, item: usize, shown: bool = false } = null;
 
 /// The equation being built, while it is still one.
 fn equationEdited() ?@TypeOf(equation_edit.?) {
     const e = equation_edit orelse return null;
-    if (e.panel >= state.model.panels.items.len or e.region >= state.model.panels.items[e.panel].regions.items.len) return null;
-    const items = state.model.flowItems(e.panel, e.region);
+    if (!state.model.hasParent(e.parent) or e.region >= state.model.regionsIn(e.parent).len) return null;
+    const items = state.model.flowItems(e.parent, e.region);
     if (e.item >= items.len or items[e.item].what != .run or !items[e.item].what.run.equation) return null;
     return e;
 }
@@ -20689,7 +20741,7 @@ fn equationEdited() ?@TypeOf(equation_edit.?) {
 /// just before it, else the one just after it; with the cursor's offset in
 /// its markup.
 fn equationAtCursor(c: TrackCursor) ?struct { item: usize, offset: u32 } {
-    const items = state.model.flowItems(c.panel, c.region);
+    const items = state.model.flowItems(c.parent, c.region);
     const isEq = struct {
         fn f(its: []const layout.model.Item, i: usize) bool {
             return i < its.len and its[i].what == .run and its[i].what.run.equation;
@@ -20711,18 +20763,18 @@ fn leaveEquation(to_flow: bool) void {
     equation_edit = null;
     typing_seq += 1;
     state.status = "";
-    const content = state.model.flowItems(e.panel, e.region)[e.item].what.run.content;
+    const content = state.model.flowItems(e.parent, e.region)[e.item].what.run.content;
     // Empty: nothing typed (an equation of empty slots stays).
     if (content.len == 0) {
-        const pos = act(.deleteRange, .{ e.panel, e.region, layout.model.FlowPos{ .index = e.item }, layout.model.FlowPos{ .index = e.item + 1 } }) catch return;
-        if (track_cursor) |*tc| if (tc.panel == e.panel and tc.region == e.region) {
+        const pos = act(.deleteRange, .{ e.parent, e.region, layout.model.FlowPos{ .index = e.item }, layout.model.FlowPos{ .index = e.item + 1 } }) catch return;
+        if (track_cursor) |*tc| if (tc.parent.eql(e.parent) and tc.region == e.region) {
             tc.index = pos.index;
             tc.offset = pos.offset;
         };
         return;
     }
     if (!to_flow) return;
-    if (track_cursor) |*tc| if (tc.panel == e.panel and tc.region == e.region) {
+    if (track_cursor) |*tc| if (tc.parent.eql(e.parent) and tc.region == e.region) {
         tc.index = e.item + 1;
         tc.offset = 0;
     };
@@ -20734,7 +20786,7 @@ fn leaveEquation(to_flow: bool) void {
 fn tabEquation(back: bool) void {
     const c = track_cursor orelse return;
     const eq = equationAtCursor(c) orelse return;
-    const content = state.model.flowItems(c.panel, c.region)[eq.item].what.run.content;
+    const content = state.model.flowItems(c.parent, c.region)[eq.item].what.run.content;
     const anchors = layout.edit.slots(dvui.currentWindow().arena(), content) catch return;
     if (anchors.len == 0) {
         state.status = "This equation has no slots to go round. ";
@@ -20805,8 +20857,8 @@ var canvas_eq_seq: u64 = 0;
 fn eqContent(q: CanvasEq) ?[]const u8 {
     switch (q.target) {
         .run => |r| {
-            if (r.panel >= state.model.panels.items.len or r.region >= state.model.panels.items[r.panel].regions.items.len) return null;
-            const items = state.model.flowItems(r.panel, r.region);
+            if (!state.model.hasParent(r.parent) or r.region >= state.model.regionsIn(r.parent).len) return null;
+            const items = state.model.flowItems(r.parent, r.region);
             if (r.item >= items.len or items[r.item].what != .run or items[r.item].what.run.equation != q.math) return null;
             return items[r.item].what.run.content;
         },
@@ -20889,7 +20941,7 @@ fn headAt(p: *const EqParse, at: u32) ?glyphic.Id {
 fn eqStore(q: CanvasEq, text: []const u8) void {
     const key = mergeKey(.{ "canvas equation", q.target.key(), canvas_eq_seq });
     const done = switch (q.target) {
-        .run => |r| actM(key, .setRunContent, .{ r.panel, r.region, r.item, text }),
+        .run => |r| actM(key, .setRunContent, .{ r.parent, r.region, r.item, text }),
         .tile_track => |tt| actM(key, .setTileTrackText, .{ tt.tile, tt.track, text }),
     };
     done catch {
@@ -20936,7 +20988,7 @@ fn eqPlaces(a: std.mem.Allocator, src: []const u8, math: bool) []u32 {
 /// just after (past its closing $, or at the start of the item after a run
 /// ending in math), with the caret's place in that run's source.
 fn inlineMathAt(c: TrackCursor) ?struct { item: usize, offset: u32 } {
-    const items = state.model.flowItems(c.panel, c.region);
+    const items = state.model.flowItems(c.parent, c.region);
     const isText = struct {
         fn f(its: []const layout.model.Item, i: usize) bool {
             return i < its.len and its[i].what == .run and !its[i].what.run.equation;
@@ -20965,7 +21017,7 @@ fn enterEquation() void {
     if (inlineMathAt(c)) |at| {
         {
             flow_anchor = null;
-            canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
+            canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
             canvas_eq_seq += 1;
             eqMove(at.offset, null);
             state.status = "Inline math: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
@@ -20978,11 +21030,11 @@ fn enterEquation() void {
     } else {
         _ = deleteFlowSelection();
         const cc = track_cursor orelse return;
-        const style = state.model.panels.items[cc.panel].regions.items[cc.region].style orelse (labelStyle() catch return);
-        item = act(.insertEquation, .{ cc.panel, cc.region, flowPos(cc), style }) catch return;
+        const style = state.model.regionsIn(cc.parent)[cc.region].style orelse (labelStyle() catch return);
+        item = act(.insertEquation, .{ cc.parent, cc.region, flowPos(cc), style }) catch return;
     }
     flow_anchor = null;
-    canvas_eq = .{ .target = .{ .run = .{ .panel = c.panel, .region = c.region, .item = item } }, .math = true, .offset = offset };
+    canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = item } }, .math = true, .offset = offset };
     canvas_eq_seq += 1;
     eqMove(offset, null);
     state.status = "Equation: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
@@ -21019,7 +21071,7 @@ fn leaveCanvasEquation() void {
     };
     if (!q.math) {
         // A text run: the flow cursor after the math the caret was in.
-        if (track_cursor) |*tc| if (tc.panel == r.panel and tc.region == r.region) {
+        if (track_cursor) |*tc| if (tc.parent.eql(r.parent) and tc.region == r.region) {
             const end = if (layout.edit.mathAt(src, q.offset)) |m| @min(m[1] + 1, @as(u32, @intCast(src.len))) else q.offset;
             tc.index = r.item;
             tc.offset = end;
@@ -21033,14 +21085,14 @@ fn leaveCanvasEquation() void {
     }
     // Nothing in it (empty, or only empty structures): it goes.
     if (!(layout.edit.hasChars(dvui.currentWindow().arena(), src, true) catch true)) {
-        const pos = act(.deleteRange, .{ r.panel, r.region, layout.model.FlowPos{ .index = r.item }, layout.model.FlowPos{ .index = r.item + 1 } }) catch return;
+        const pos = act(.deleteRange, .{ r.parent, r.region, layout.model.FlowPos{ .index = r.item }, layout.model.FlowPos{ .index = r.item + 1 } }) catch return;
         if (track_cursor) |*tc| {
             tc.index = pos.index;
             tc.offset = pos.offset;
         }
         return;
     }
-    if (track_cursor) |*tc| if (tc.panel == r.panel and tc.region == r.region) {
+    if (track_cursor) |*tc| if (tc.parent.eql(r.parent) and tc.region == r.region) {
         tc.index = r.item + 1;
         tc.offset = 0;
     };
@@ -21362,13 +21414,13 @@ fn eqAction(inv: keymap.Invocation) bool {
 /// something else.
 const EqPiece = struct { from: u32, len: u32, base: u32 };
 
-fn eqPiece(pi: usize, l: layout.place.PlacedLabel) ?EqPiece {
+fn eqPiece(pi: Parent, l: layout.place.PlacedLabel) ?EqPiece {
     const q = canvas_eq orelse return null;
-    if (pi >= state.placed.items.len) return null;
+    if (placedOf(pi) == null) return null;
     return switch (q.target) {
         .run => |t| blk: {
             const run = l.run orelse return null;
-            if (run.panel != t.panel or run.region != t.region or run.item != t.item) return null;
+            if (!run.parent.eql(t.parent) or run.region != t.region or run.item != t.item) return null;
             break :blk .{ .from = run.from, .len = run.len, .base = 0 };
         },
         .tile_track => |tt| blk: {
@@ -21461,7 +21513,7 @@ fn eqTargetName(buf: []u8, q: CanvasEq) []const u8 {
             } else "?";
             break :blk std.fmt.bufPrint(buf, "{s}, slot {s}", .{ if (t.designator.len > 0) t.designator else "a tile", slot }) catch "a tile's slot";
         },
-        .run => |r| std.fmt.bufPrint(buf, "{s} {d} in {s}", .{ if (q.math) "equation" else "text run", r.item + 1, state.model.panels.items[r.panel].regions.items[r.region].name }) catch "a run",
+        .run => |r| std.fmt.bufPrint(buf, "{s} {d} in {s}", .{ if (q.math) "equation" else "text run", r.item + 1, state.model.regionsIn(r.parent)[r.region].name }) catch "a run",
     };
 }
 
@@ -21488,7 +21540,7 @@ fn strokeQuad(area: dvui.Rect.Physical, c: [4]geom.Point, at: geom.Point, colour
 /// strong (its neighbours a little stronger than the rest), then the
 /// caret: a bar, or on a head nothing more (its box is the choice).
 /// Drawn at worksheet offset `o`.
-fn drawCanvasEq(area: dvui.Rect.Physical, pi: usize, l: layout.place.PlacedLabel, o: geom.Point) void {
+fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabel, o: geom.Point) void {
     const q = canvas_eq orelse return;
     const piece = eqPiece(pi, l) orelse return;
     const px = dvui.windowNaturalScale();
@@ -21568,21 +21620,21 @@ const edge_px: f64 = 5;
 const HoverTarget = union(enum) {
     /// Near a container's outline: the container.
     tile: struct { id: TileId, box: geom.Box },
-    track: struct { panel: usize, region: usize, box: geom.Box },
+    track: struct { parent: Parent, region: usize, box: geom.Box },
     /// A segment of a track that holds content (an empty one has no
     /// boundary until it does): `panel` and `region` name the track holding
     /// the flow, `row` the segment's index in it.
-    row: struct { panel: usize, region: usize, row: usize, box: geom.Box },
+    row: struct { parent: Parent, region: usize, row: usize, box: geom.Box },
     panel: struct { panel: usize, box: geom.Box },
     /// A grid on a panel (keys placed on a pitch grid): its whole extent.
-    grid: struct { panel: usize, index: usize },
+    grid: struct { parent: Parent, index: usize },
     art: struct { panel: usize, index: usize, box: geom.Box },
     /// A placed figure, by its boundary.
     figure_place: struct { space: usize, index: usize, box: geom.Box },
     /// Near a construction line: the line (its part in view).
     guide: struct { space: usize, index: usize, seg: [2]geom.Point },
     /// Inside a tile, a slot's text: its label, and where in its source.
-    slot: struct { tile: TileId, panel: usize, label: usize, box: geom.Box, offset: u32 },
+    slot: struct { tile: TileId, parent: Parent, label: usize, box: geom.Box, offset: u32 },
     /// In an expression being edited: near an object's box (chosen by a
     /// press), or inside text (the caret put there).
     eq_object: struct { start: u32, end: u32, corners: [4]geom.Point, at: geom.Point },
@@ -21604,8 +21656,8 @@ fn outlineDistance(b: geom.Box, p: geom.Point) f64 {
 }
 
 /// A label's box on the worksheet (its design box, the ink's where wider).
-fn labelBox(pi: usize, l: layout.place.PlacedLabel) geom.Box {
-    const o = panelOrigin(pi);
+fn labelBox(pi: Parent, l: layout.place.PlacedLabel) geom.Box {
+    const o = parentOrigin(pi);
     const d = l.render.design.join(l.render.ink);
     return .{ .x0 = d.x0 + l.origin.x + o.x, .y0 = d.y0 + l.origin.y + o.y, .x1 = d.x1 + l.origin.x + o.x, .y1 = d.y1 + l.origin.y + o.y };
 }
@@ -21636,8 +21688,8 @@ fn caretAt(r: *const layout.render.Render, off: u32) ?layout.render.Caret {
 
 /// The source offset in label `l` of panel `pi` (counted from `base` in
 /// what it is part of) whose caret is nearest worksheet point `p`.
-fn nearestCaret(pi: usize, l: layout.place.PlacedLabel, p: geom.Point, src_len: u32) u32 {
-    const o = panelOrigin(pi);
+fn nearestCaret(pi: Parent, l: layout.place.PlacedLabel, p: geom.Point, src_len: u32) u32 {
+    const o = parentOrigin(pi);
     const local: geom.Point = .{ .x = p.x - l.origin.x - o.x, .y = p.y - l.origin.y - o.y };
     var best: u32 = 0;
     var best_d: f64 = std.math.inf(f64);
@@ -21666,10 +21718,11 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
     const tol = edgeMm();
     // In an expression being edited: its objects first.
     if (canvas_eq) |q| {
-        var best: ?struct { b: layout.render.ObjectBox, base: u32, pi: usize, l: layout.place.PlacedLabel } = null;
-        for (state.placed.items, 0..) |placed, pi| for (placed.labels) |l| {
+        var best: ?struct { b: layout.render.ObjectBox, base: u32, pi: Parent, l: layout.place.PlacedLabel } = null;
+        for (state.solved.items, 0..) |placed, k| for (placed.labels) |l| {
+            const pi = state.model.parentAt(k);
             const piece = eqPiece(pi, l) orelse continue;
-            const o = panelOrigin(pi);
+            const o = parentOrigin(pi);
             const local: geom.Point = .{ .x = p.x - l.origin.x - o.x, .y = p.y - l.origin.y - o.y };
             for (l.render.boxes) |b| {
                 if (b.kind == .field) continue;
@@ -21680,7 +21733,7 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
             }
         };
         if (best) |h| {
-            const o = panelOrigin(h.pi);
+            const o = parentOrigin(h.pi);
             const local: geom.Point = .{ .x = p.x - h.l.origin.x - o.x, .y = p.y - h.l.origin.y - o.y };
             if (outlineDistance(boxBounds(h.b), local) <= tol)
                 return .{ .eq_object = .{ .start = h.b.start + h.base, .end = h.b.end + h.base, .corners = h.b.corners, .at = .{ .x = h.l.origin.x + o.x, .y = h.l.origin.y + o.y } } };
@@ -21691,8 +21744,9 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
     // A construction line, drawn over everything: near it, the line.
     if (canvas_px) |area| if (guideNear(area, p)) |g| return .{ .guide = .{ .space = shown_space, .index = g.index, .seg = g.seg } };
     // A tile: near its outline, the tile; inside, the slot nearest.
-    for (state.placed.items, 0..) |placed, pi| {
-        if (!shownPanel(pi)) continue;
+    for (state.solved.items, 0..) |placed, pk| {
+        const pi = state.model.parentAt(pk);
+        if (!shownIn(pi)) continue;
         for (placed.tiles) |t| {
             if (t.spacer) continue;
             const body = onSheet(pi, t.body);
@@ -21708,19 +21762,20 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
             }
             const hit = best orelse return .{ .tile = .{ .id = t.id, .box = body } };
             const l = placed.labels[hit.k];
-            return .{ .slot = .{ .tile = t.id, .panel = pi, .label = hit.k, .box = hit.box, .offset = nearestCaret(pi, l, p, renderEnd(l)) } };
+            return .{ .slot = .{ .tile = t.id, .parent = pi, .label = hit.k, .box = hit.box, .offset = nearestCaret(pi, l, p, renderEnd(l)) } };
         }
     }
     // A track's outline, then a panel's.
-    for (state.placed.items, 0..) |placed, pi| {
-        if (!shownPanel(pi)) continue;
+    for (state.solved.items, 0..) |placed, k| {
+        const pi = state.model.parentAt(k);
+        if (!shownIn(pi)) continue;
         for (placed.tracks) |t| {
             const b = onSheet(pi, t.box);
-            if (outlineDistance(b, p) <= tol) return .{ .track = .{ .panel = t.panel, .region = t.member, .box = b } };
+            if (outlineDistance(b, p) <= tol) return .{ .track = .{ .parent = t.parent, .region = t.member, .box = b } };
         }
     }
     for (state.model.panels.items, 0..) |panel, pi| {
-        if (!shownPanel(pi) or panel.unbounded) continue;
+        if (!shownPanel(pi)) continue;
         const b = panel.box();
         if (outlineDistance(b, p) <= tol) return .{ .panel = .{ .panel = pi, .box = b } };
     }
@@ -22023,9 +22078,10 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
     const cand: Pick = .{ .p = p, .reach = reach, .best = &best, .best_d = &best_d, .best_area = &best_area, .best_inside = &best_inside };
     // Curves flattened to a tenth of a pixel.
     const tol = 0.1 * edgeMm() / edge_px;
-    for (state.placed.items, 0..) |placed, pi| {
-        if (!shownPanel(pi)) continue;
-        const o = panelOrigin(pi);
+    for (state.solved.items, 0..) |placed, pk| {
+        const pi = state.model.parentAt(pk);
+        if (!shownIn(pi)) continue;
+        const o = parentOrigin(pi);
         for (placed.tiles) |t| {
             if (t.spacer) continue;
             const b = onSheet(pi, t.body);
@@ -22039,17 +22095,17 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         }
         // Each track once, whole: every row (or column) it has, filled or
         // not, inside one outline.
-        for (0..state.model.panels.items[pi].regions.items.len) |ri| {
+        for (0..state.model.regionsIn(pi).len) |ri| {
             const pts = trackOutline(pi, ri);
             if (pts.len < 3) continue;
             var b = geom.Box.empty;
             for (pts) |q| b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
             const bd = Boundary.polygon(a, pts) catch continue;
-            cand.consider(.{ .track = .{ .panel = pi, .region = ri, .box = b } }, bd);
+            cand.consider(.{ .track = .{ .parent = pi, .region = ri, .box = b } }, bd);
         }
         // Grids: the outline round all their cells (half a cell beyond
         // the outer rows and columns, as they are drawn).
-        for (0..state.model.panels.items[pi].grids.items.len) |gi| {
+        for (0..state.model.gridsIn(pi).len) |gi| {
             const sh = state.model.gridShape(pi, gi);
             if (sh.cols == 0 or sh.rows == 0) continue;
             const cols: f64 = @floatFromInt(sh.cols);
@@ -22061,15 +22117,15 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                 q.* = .{ .x = g.x + o.x, .y = g.y + o.y };
             }
             const bd = Boundary.polygon(a, pts) catch continue;
-            cand.consider(.{ .grid = .{ .panel = pi, .index = gi } }, bd);
+            cand.consider(.{ .grid = .{ .parent = pi, .index = gi } }, bd);
         }
         // Its segments that hold content, each a boundary within it.
         for (placed.tracks) |t| {
             const b = onSheet(pi, t.box);
             const bd = Boundary.box(a, b) catch continue;
-            cand.consider(.{ .row = .{ .panel = t.flow_panel, .region = t.region, .row = t.track, .box = b } }, bd);
+            cand.consider(.{ .row = .{ .parent = t.flow_parent, .region = t.region, .row = t.track, .box = b } }, bd);
         }
-        for (placed.art) |pa| {
+        if (pi.panelIndex()) |ai| for (placed.art) |pa| {
             const b = onSheet(pi, pa.box);
             var rings: std.ArrayList(geom.path.Ring) = .empty;
             for (pa.shapes) |sh| {
@@ -22078,22 +22134,23 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
             }
             var bd: Boundary = if (rings.items.len > 0) .{ .rings = rings.items } else Boundary.box(a, b) catch continue;
             // A figure's with a wrap: its border.
-            if (pa.index < state.model.panels.items[pi].art.items.len) {
-                const ma = state.model.panels.items[pi].art.items[pa.index];
+            if (pa.index < state.model.panels.items[ai].art.items.len) {
+                const ma = state.model.panels.items[ai].art.items[pa.index];
                 if (ma.figure != .none and ma.border.fractions() != null) {
                     if (ma.border.outline(a, ma.box(), ma.clearance)) |ol| {
                         bd = Boundary.outline(a, ol, tol, o) catch bd;
                     } else |_| {}
                 }
             }
-            cand.consider(.{ .art = .{ .panel = pi, .index = pa.index, .box = b } }, bd);
-        }
+            cand.consider(.{ .art = .{ .panel = ai, .index = pa.index, .box = b } }, bd);
+        };
     }
-    for (state.model.panels.items, 0..) |panel, pi| {
-        if (!shownPanel(pi) or panel.unbounded) continue;
+    for (0..state.model.panels.items.len) |pi| {
+        if (!shownPanel(pi)) continue;
         const b = panelBox(pi);
-        // Its edge path when it has one (Make panel), else its rectangle.
-        const edge: ?geom.Outline = if (pi < state.placed.items.len) state.placed.items[pi].edge else null;
+        // Its edge path when it has one (a sketch made a panel), else its
+        // rectangle.
+        const edge: ?geom.Outline = if (placedOf(.{ .panel = pi })) |pl| pl.edge else null;
         const bd = (if (edge) |e| Boundary.outline(a, e, tol, panelOrigin(pi)) else Boundary.box(a, b)) catch continue;
         cand.consider(.{ .panel = .{ .panel = pi, .box = b } }, bd);
     }
@@ -22349,7 +22406,7 @@ fn hoverPress(p: geom.Point) bool {
         .track => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
-            levelSet(.{ .region = .{ .panel = x.panel, .region = x.region } });
+            levelSet(.{ .region = .{ .parent = x.parent, .region = x.region } });
             // The container is the selection: its drag points show.
             if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
         },
@@ -22363,12 +22420,12 @@ fn hoverPress(p: geom.Point) bool {
         .grid => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
-            levelSet(.{ .grid = .{ .panel = x.panel, .index = x.index } });
+            levelSet(.{ .grid = .{ .parent = x.parent, .index = x.index } });
         },
         .row => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
             track_cursor = null;
-            levelSet(.{ .row = .{ .panel = x.panel, .region = x.region, .row = x.row } });
+            levelSet(.{ .row = .{ .parent = x.parent, .region = x.region, .row = x.row } });
         },
         .guide => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
@@ -22391,7 +22448,7 @@ fn hoverPress(p: geom.Point) bool {
         },
         .slot => |x| {
             // The slot's text edited, the caret where pressed.
-            const l = state.placed.items[x.panel].labels[x.label];
+            const l = (placedOf(x.parent) orelse return false).labels[x.label];
             const k = l.slot;
             const tracks = state.model.prototypeOf(x.tile).tracks;
             if (k >= tracks.len) return false;
@@ -22403,7 +22460,7 @@ fn hoverPress(p: geom.Point) bool {
             if (canvas_eq == null) return true;
             // The caret: the press's place in this piece, past what comes
             // before the piece in the slot's text.
-            const base: u32 = if (eqPiece(x.panel, l)) |pc| pc.base else 0;
+            const base: u32 = if (eqPiece(x.parent, l)) |pc| pc.base else 0;
             canvas_eq_seq += 1;
             eqMove(base + x.offset, null);
         },
@@ -22427,8 +22484,9 @@ fn hoverPress(p: geom.Point) bool {
 fn eqBoxPress(p: geom.Point) bool {
     if (canvas_eq == null) return false;
     var best: ?struct { b: layout.render.ObjectBox, base: u32 } = null;
-    for (state.placed.items, 0..) |placed, pi| {
-        const o = panelOrigin(pi);
+    for (state.solved.items, 0..) |placed, k| {
+        const pi = state.model.parentAt(k);
+        const o = parentOrigin(pi);
         for (placed.labels) |l| {
             const piece = eqPiece(pi, l) orelse continue;
             const local: geom.Point = .{ .x = p.x - l.origin.x - o.x, .y = p.y - l.origin.y - o.y };
@@ -22458,18 +22516,18 @@ fn insideQuad(c: [4]geom.Point, p: geom.Point) bool {
 }
 
 /// The cursor: a bar across its row or column between items.
-fn drawCursor(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed, c: TrackCursor) void {
+fn drawCursor(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.Placed, c: TrackCursor) void {
     drawFlowSelection(area, pi, placed, c);
-    const stops = flowStops(c.panel, c.region);
+    const stops = flowStops(c.parent, c.region);
     const at: struct { segment: usize, along: f64 } = if (stopAt(stops, c.index, c.offset)) |k| blk: {
-        if (stops[k].panel != pi) return;
+        if (!stops[k].parent.eql(pi)) return;
         break :blk .{ .segment = stops[k].segment, .along = stops[k].along };
     } else blk: {
         const p = cursorPlace(c) orelse return;
         break :blk .{ .segment = p.segment, .along = p.along };
     };
     for (placed.tracks) |t| {
-        if (t.flow_panel != c.panel or t.region != c.region or t.track != at.segment) continue;
+        if (!t.flow_parent.eql(c.parent) or t.region != c.region or t.track != at.segment) continue;
         const pos = at.along;
         const b = onSheet(pi, t.box);
         // The cursor pulses: it is where typing goes.
@@ -22601,8 +22659,8 @@ fn guideBox(area: dvui.Rect.Physical, b: geom.Box, colour: dvui.Color, px: f32) 
 
 /// Track `ri`'s boundary in panel `pi`, sheet mm: down one edge and back up
 /// the other, each a segment's half length from the path.
-fn trackOutline(pi: usize, ri: usize) []const geom.Point {
-    const r = state.model.panels.items[pi].regions.items[ri];
+fn trackOutline(pi: Parent, ri: usize) []const geom.Point {
+    const r = state.model.regionsIn(pi)[ri];
     const a = dvui.currentWindow().arena();
     const reach = r.crossLength();
     const n: usize = @intFromFloat(@min(1000, @max(8, @ceil(reach * 8))));
@@ -22621,7 +22679,7 @@ fn trackOutline(pi: usize, ri: usize) []const geom.Point {
 
 /// The selected tile's tracks: their boxes on its face, outlined; the one
 /// the expression line edits stronger.
-fn drawTileTracks(area: dvui.Rect.Physical, pi: usize, t: layout.place.PlacedTile) void {
+fn drawTileTracks(area: dvui.Rect.Physical, pi: Parent, t: layout.place.PlacedTile) void {
     const px = dvui.windowNaturalScale();
     const edited = exprTrackOf(t.id);
     for (state.model.prototypeOf(t.id).tracks) |tt| {
@@ -22656,7 +22714,7 @@ fn quietText() bool {
 /// Content layout `ri` of panel `pi` while text is typed: a soft band
 /// around the area its content may take (half a row wide, 1 to 4 mm),
 /// the area itself left clear; a little deeper for the one typed in.
-fn contentBand(area: dvui.Rect.Physical, pi: usize, ri: usize, on: bool) void {
+fn contentBand(area: dvui.Rect.Physical, pi: Parent, ri: usize, on: bool) void {
     const pts = trackOutline(pi, ri);
     if (pts.len < 2) return;
     var b: geom.Box = .{ .x0 = pts[0].x, .x1 = pts[0].x, .y0 = pts[0].y, .y1 = pts[0].y };
@@ -22666,7 +22724,7 @@ fn contentBand(area: dvui.Rect.Physical, pi: usize, ri: usize, on: bool) void {
         b.y0 = @min(b.y0, q.y);
         b.y1 = @max(b.y1, q.y);
     }
-    const r = state.model.panels.items[pi].regions.items[ri];
+    const r = state.model.regionsIn(pi)[ri];
     const w = std.math.clamp(0.5 * r.pitch, 1, 4);
     const tint: dvui.Color = colors.guide.opacity(if (on) 0.16 else 0.09);
     const sides = [_]geom.Box{
@@ -22683,14 +22741,14 @@ fn contentBand(area: dvui.Rect.Physical, pi: usize, ri: usize, on: bool) void {
 /// of its segment's content, each paragraph separator as a pilcrow, each
 /// empty run as a dashed slot, and each forced wrap (a word cut to fit its
 /// line) as a hooked arrow, right then down, at the end of its line.
-fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
+fn drawFlowMarks(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.Placed) void {
     const px = dvui.windowNaturalScale();
     const ghost = colors.guide.opacity(0.55);
     for (placed.wraps) |w| {
-        const r = state.model.panels.items[w.flow_panel].regions.items[w.region];
+        const r = state.model.regionsIn(w.flow_parent)[w.region];
         if (r.major() != .row) continue;
         const band = for (placed.tracks) |t| {
-            if (t.region == w.region and t.flow_panel == w.flow_panel and t.track == w.segment) break onSheet(pi, t.box);
+            if (t.region == w.region and t.flow_parent.eql(w.flow_parent) and t.track == w.segment) break onSheet(pi, t.box);
         } else continue;
         const u = r.pitch * 0.32;
         const x0 = band.x0 + w.along + u * 0.25;
@@ -22713,14 +22771,14 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
         const item = modelItem(pi, it) orelse continue;
         if (k + 1 >= placed.items.len) break;
         const nx = placed.items[k + 1];
-        if (nx.region != it.region or nx.flow_panel != it.flow_panel or nx.segment != it.segment) continue;
+        if (nx.region != it.region or !nx.flow_parent.eql(it.flow_parent) or nx.segment != it.segment) continue;
         _ = modelItem(pi, nx) orelse continue;
         _ = item;
-        const r = state.model.panels.items[it.flow_panel].regions.items[it.region];
+        const r = state.model.regionsIn(it.flow_parent)[it.region];
         // Bound by hand, or a letter tile to its word.
-        if (nx.index != it.index + 1 or !state.model.bound(state.model.flowItems(it.flow_panel, it.region), it.index)) continue;
+        if (nx.index != it.index + 1 or !state.model.bound(state.model.flowItems(it.flow_parent, it.region), it.index)) continue;
         const band = for (placed.tracks) |t| {
-            if (t.region == it.region and t.flow_panel == it.flow_panel and t.track == it.segment) break onSheet(pi, t.box);
+            if (t.region == it.region and t.flow_parent.eql(it.flow_parent) and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
         const a_mid = (it.span[0] + it.span[1]) / 2;
         const b_mid = (nx.span[0] + nx.span[1]) / 2;
@@ -22731,10 +22789,10 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
     }
     for (placed.items) |it| {
         const what = (modelItem(pi, it) orelse continue).what;
-        const r = state.model.panels.items[it.flow_panel].regions.items[it.region];
+        const r = state.model.regionsIn(it.flow_parent)[it.region];
         if (what != .hard_break and what != .paragraph and !(what == .run and what.run.content.len == 0)) continue;
         const band = for (placed.tracks) |t| {
-            if (t.region == it.region and t.flow_panel == it.flow_panel and t.track == it.segment) break onSheet(pi, t.box);
+            if (t.region == it.region and t.flow_parent.eql(it.flow_parent) and t.track == it.segment) break onSheet(pi, t.box);
         } else continue;
         const rows = r.major() == .row;
         if (what == .run) {
@@ -22792,7 +22850,7 @@ fn drawFlowMarks(area: dvui.Rect.Physical, pi: usize, placed: *const layout.plac
 fn trackPalette() void {
     palette_id_count = 0;
     if (track_cursor == null) return;
-    const palette = if (tileRowsShown()) paletteFor(track_cursor.?.panel, track_cursor.?.region) else null;
+    const palette = if (tileRowsShown()) paletteFor(track_cursor.?.parent, track_cursor.?.region) else null;
     if (palette) |pal| {
         const name = state.model.proto(pal.prototype).name;
         dvui.label(@src(), "Insert {s} tiles, blanks, text or equations, and breaks at the cursor · Backspace and Delete remove · arrows move · Esc ends", .{name}, .{ .font = dvui.Font.theme(.body).larger(-2), .padding = .{ .x = 6, .y = 2, .h = 2 } });
@@ -22822,7 +22880,7 @@ fn trackPalette() void {
 /// there Enter ends the paragraph, and Shift+Enter the line.
 fn inTextTrack() bool {
     const c = track_cursor orelse return false;
-    return state.model.panels.items[c.panel].regions.items[c.region].style != null;
+    return state.model.regionsIn(c.parent)[c.region].style != null;
 }
 
 /// A palette button for an item that is not a tile: its key, a picture and
@@ -22925,7 +22983,7 @@ fn flowButton(kind: enum { run, hard_break, paragraph, next_prototype, join }, i
         const next_name = blk: {
             if (kind != .next_prototype) break :blk "";
             const c = track_cursor orelse break :blk "";
-            const pal = paletteFor(c.panel, c.region) orelse break :blk "";
+            const pal = paletteFor(c.parent, c.region) orelse break :blk "";
             break :blk std.fmt.allocPrint(dvui.currentWindow().arena(), "Tiles: {s} · next kind", .{state.model.proto(pal.prototype).name}) catch "";
         };
         dvui.labelNoFmt(@src(), switch (kind) {
@@ -23009,8 +23067,8 @@ fn paletteButton(tile: bool, size: f64, i: usize) bool {
 
 /// The step a region's tracks move in: the finer of its prototype's size
 /// steps along and across (0.25 u for keyboard keys).
-fn moveStep(panel: usize, region: usize) f64 {
-    const r = state.model.panels.items[panel].regions.items[region];
+fn moveStep(panel: Parent, region: usize) f64 {
+    const r = state.model.regionsIn(panel)[region];
     if (state.model.prototypes.items.len == 0) return 0.25;
     const p = state.model.proto(r.prototype orelse state.model.prototypes.items[0].id).*;
     return @min(p.step(r.major(), .along), p.step(r.major(), .across));
@@ -23024,8 +23082,8 @@ fn moveTrackArrow(arrow: Arrow) void {
         .row => |r| r,
         else => return,
     };
-    const major = state.model.panels.items[t.panel].regions.items[t.region].major();
-    const s = moveStep(t.panel, t.region);
+    const major = state.model.regionsIn(t.parent)[t.region].major();
+    const s = moveStep(t.parent, t.region);
     // Rows run right and stack down; columns run down and set right.
     var along: f64 = 0;
     var across: f64 = 0;
@@ -23058,9 +23116,9 @@ fn moveTrackArrow(arrow: Arrow) void {
         state.status = "Rows keep an even pitch: move a row along, or set paragraph spacing. ";
         return;
     }
-    const pt = placedTrack(t.panel, t.region, t.row) orelse return;
+    const pt = placedTrack(t.parent, t.region, t.row) orelse return;
     const o = pt.origin;
-    _ = actM(mergeKey(.{ "bend", pt.panel, pt.member, t.row }), .bendPath, .{ pt.panel, pt.member, o.across, o.along + along, o.across }) catch {
+    _ = actM(mergeKey(.{ "bend", pt.parent, pt.member, t.row }), .bendPath, .{ pt.parent, pt.member, o.across, o.along + along, o.across }) catch {
         state.status = "It did not move. ";
         return;
     };
@@ -23087,8 +23145,8 @@ fn movePalette() void {
         .row => |r| r,
         else => return,
     };
-    const region = state.model.panels.items[t.panel].regions.items[t.region];
-    const s = moveStep(t.panel, t.region);
+    const region = state.model.regionsIn(t.parent)[t.region];
+    const s = moveStep(t.parent, t.region);
     const word = trackWord(region.major());
     var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer body.deinit();
@@ -23111,16 +23169,16 @@ fn movePalette() void {
     dvui.label(@src(), "Move {s} {d} of {s} in {d} u steps", .{ word, t.row + 1, region.name, s }, .{ .font = dvui.Font.theme(.heading) });
     dvui.label(@src(), "Arrow keys or these buttons move it, tiles and all. The path bends through it: rows that only continue the path follow; the rest stay.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2) });
     var where_buf: [96]u8 = undefined;
-    dvui.labelNoFmt(@src(), trackWhere(&where_buf, t.panel, t.region, t.row), .{}, .{ .font = dvui.Font.theme(.mono) });
+    dvui.labelNoFmt(@src(), trackWhere(&where_buf, t.parent, t.region, t.row), .{}, .{ .font = dvui.Font.theme(.mono) });
 }
 
 /// Where a row or column sits from where a straight path would put it, in
 /// plain words: "0.25 u up · 1.5 u left" (a row) or "1 u right · 0.5 u
 /// down" (a column).
-fn trackWhere(buf: []u8, pi: usize, region: usize, t: usize) []const u8 {
+fn trackWhere(buf: []u8, pi: Parent, region: usize, t: usize) []const u8 {
     const pt = placedTrack(pi, region, t) orelse return "";
     const o = pt.origin;
-    const member = state.model.panels.items[pt.panel].regions.items[pt.member];
+    const member = state.model.regionsIn(pt.parent)[pt.member];
     // Straight on from its track's origin, one thickness each.
     const across = o.across - @as(f64, @floatFromInt(pt.local));
     // Along, from where an unshaped track's segment sits (its middle on
@@ -23229,8 +23287,8 @@ fn constraintIssue(id: layout.model.ObjectId) ?constrain.Issue {
 fn contextObject() ?layout.model.ObjectId {
     const m = &state.model;
     return switch (state.context) {
-        .panel => |pi| if (m.panels.items[pi].unbounded) null else m.panels.items[pi].id,
-        .region => |r| m.panels.items[r.panel].regions.items[r.region].id,
+        .panel => |pi| m.panels.items[pi].id,
+        .region => |r| m.regionsIn(r.parent)[r.region].id,
         .art => |l| m.panels.items[l.panel].art.items[l.index].id,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else null,
         .figure_place => |c| if (figurePlaceAt(c.space, c.index)) |fp| fp.id else null,
@@ -23242,9 +23300,13 @@ fn contextObject() ?layout.model.ObjectId {
 fn constrainables(a: std.mem.Allocator) []layout.model.ObjectId {
     var list: std.ArrayList(layout.model.ObjectId) = .empty;
     const m = &state.model;
+    if (shown_space < m.spaces.items.len) for (m.spaces.items[shown_space].regions.items) |r| {
+        list.append(a, r.id) catch {};
+        for (r.path.items) |cp| list.append(a, cp.id) catch {};
+    };
     for (m.panels.items) |p| {
         if (p.space != spaceId(shown_space)) continue;
-        if (!p.unbounded) list.append(a, p.id) catch {};
+        list.append(a, p.id) catch {};
         for (p.regions.items) |r| {
             list.append(a, r.id) catch {};
             for (r.path.items) |cp| list.append(a, cp.id) catch {};
@@ -23316,7 +23378,7 @@ fn featureHit(at: geom.Point) ?FeatureHit {
     // The parent panel, if the first pick's parent is one: its features
     // are offered as the parent's, not as a peer's.
     const parent_panel_id: ?layout.model.ObjectId = if (first_parent) |fp| switch (fp) {
-        .panel => |pi| if (m.panels.items[pi].unbounded) null else m.panels.items[pi].id,
+        .panel => |pi| m.panels.items[pi].id,
         .space => null,
     } else null;
     for (constrainables(a)) |id| {
@@ -23366,7 +23428,7 @@ fn featureHit(at: geom.Point) ?FeatureHit {
         const off = constrain.frameOffset(m, parent);
         const far = 1e5;
         var pbox: geom.Box = .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
-        if (parent == .panel and !m.panels.items[parent.panel].unbounded) pbox = m.panels.items[parent.panel].box();
+        if (parent == .panel) pbox = m.panels.items[parent.panel].box();
         for (all_features) |f| {
             if (f.vertical() != fh.end.feature.vertical()) continue;
             const end: ConstraintEnd = .{ .feature = f };
@@ -23381,7 +23443,7 @@ fn featureHit(at: geom.Point) ?FeatureHit {
 /// A track's flow: which it is (chosen from the document's), where the
 /// track comes in it, what it continues and goes on into, and buttons to
 /// join a track after it or take it out of its flow.
-fn threadProperties(pi: usize, ri: usize) void {
+fn threadProperties(pi: Parent, ri: usize) void {
     const m = &state.model;
     const before = m.threadBefore(pi, ri);
     const after = m.threadAfter(pi, ri);
@@ -23408,7 +23470,7 @@ fn threadProperties(pi: usize, ri: usize) void {
         }
         if (m.trackFlow(pi, ri)) |f| {
             const k = for (f.tracks.items, 0..) |t, i| {
-                if (t == m.panels.items[pi].regions.items[ri].id) break i;
+                if (t == m.regionsIn(pi)[ri].id) break i;
             } else 0;
             propText(asElement("track.flow.position"), "track {d} of {d}", .{ k + 1, f.tracks.items.len }, 32);
             actionButton(@src(), "track.flow.show", null, 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
@@ -23491,20 +23553,21 @@ fn flowProperties(id: layout.model.ObjectId) void {
 }
 
 /// A track's name, with its panel's when that is not panel `here`.
-fn trackLabel(buf: []u8, t: layout.model.TrackRef, here: usize) []const u8 {
-    const p = state.model.panels.items[t.panel];
-    const name = p.regions.items[t.region].name;
-    if (t.panel == here) return name;
-    return std.fmt.bufPrint(buf, "{s} (on {s})", .{ name, p.name }) catch name;
+fn trackLabel(buf: []u8, t: layout.model.TrackRef, here: Parent) []const u8 {
+    const name = state.model.regionsIn(t.parent)[t.region].name;
+    if (t.parent.eql(here)) return name;
+    return std.fmt.bufPrint(buf, "{s} (on {s})", .{ name, state.model.parentName(t.parent) }) catch name;
 }
 
 /// The track under `at` (sheet mm) in the shown space: the one a placed
 /// segment there lies in, or whose boundary holds it.
-fn trackUnder(at: geom.Point) ?struct { panel: usize, region: usize } {
-    for (state.model.panels.items, 0..) |p, pi| {
-        if (p.space != spaceId(shown_space) or pi >= state.placed.items.len) continue;
-        for (state.placed.items[pi].tracks) |t| if (contains(onSheet(pi, t.box), at)) return .{ .panel = pi, .region = t.member };
-        for (p.regions.items, 0..) |r, k| if (contains(onSheet(pi, r.bounds()), at)) return .{ .panel = pi, .region = k };
+fn trackUnder(at: geom.Point) ?struct { parent: Parent, region: usize } {
+    for (0..state.model.parentCount()) |pk| {
+        const pi = state.model.parentAt(pk);
+        if (!shownIn(pi)) continue;
+        const pl = placedOf(pi) orelse continue;
+        for (pl.tracks) |t| if (contains(onSheet(pi, t.box), at)) return .{ .parent = pi, .region = t.member };
+        for (state.model.regionsIn(pi), 0..) |r, k| if (contains(onSheet(pi, r.bounds()), at)) return .{ .parent = pi, .region = k };
     }
     return null;
 }
@@ -23519,7 +23582,7 @@ fn joinClick(at: geom.Point) void {
         state.status = "No track there: nothing joined. ";
         return;
     };
-    act(.threadTracks, .{ from.panel, from.region, to.panel, to.region }) catch {
+    act(.threadTracks, .{ from.parent, from.region, to.parent, to.region }) catch {
         state.status = "Not joined: a flow joins tracks running the same way, and the track joined must start its own flow. ";
         return;
     };
@@ -23530,22 +23593,22 @@ fn joinClick(at: geom.Point) void {
 /// last segment there) to where it enters the next, by the shortest route
 /// that leaves and arrives along the tracks with a bounded bend
 /// (`geom.dubins`; the owner, 2026-11-22).
-fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Placed) void {
+fn drawThreads(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.Placed) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
     const ink: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.7) };
-    for (m.panels.items[pi].regions.items, 0..) |r, ri| {
+    for (m.regionsIn(pi), 0..) |r, ri| {
         const nt = m.threadAfter(pi, ri) orelse continue;
         // On another panel: drawn when both are in the shown space.
-        if (m.panels.items[nt.panel].space != m.panels.items[pi].space) continue;
+        if (m.spaceOfParent(nt.parent) != m.spaceOfParent(pi)) continue;
         // Leaving: its last segment the flow reached, else its first.
         var from_box: geom.Box = r.boxAt(.{ .along = r.pathAt(0), .across = 0 });
         for (placed.tracks) |t| if (t.member == ri) {
             from_box = t.box;
         };
-        const nr = m.panels.items[nt.panel].regions.items[nt.region];
+        const nr = m.regionsIn(nt.parent)[nt.region];
         var to_box: geom.Box = nr.boxAt(.{ .along = nr.pathAt(0), .across = 0 });
-        if (nt.panel < state.placed.items.len) for (state.placed.items[nt.panel].tracks) |t| if (t.member == nt.region and t.local == 0) {
+        if (placedOf(nt.parent)) |npl| for (npl.tracks) |t| if (t.member == nt.region and t.local == 0) {
             to_box = t.box;
         };
         const rows = r.major() == .row;
@@ -23561,7 +23624,7 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
         const lead = thread_lead * radius;
         const rt = geom.dubins.route(
             .{ .at = onSheetPoint(pi, p0), .angle = angle, .lead = lead },
-            .{ .at = onSheetPoint(nt.panel, p1), .angle = angle, .lead = lead },
+            .{ .at = onSheetPoint(nt.parent, p1), .angle = angle, .lead = lead },
             radius,
         );
         var mm_buf: [256]geom.Point = undefined;
@@ -23586,8 +23649,8 @@ fn drawThreads(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.
 const thread_bend = 0.3;
 const thread_lead = 0.6;
 
-fn onSheetPoint(pi: usize, p: geom.Point) geom.Point {
-    const o = panelOrigin(pi);
+fn onSheetPoint(pi: Parent, p: geom.Point) geom.Point {
+    const o = parentOrigin(pi);
     return .{ .x = o.x + p.x, .y = o.y + p.y };
 }
 
@@ -23772,8 +23835,8 @@ var nudge_status: [64]u8 = undefined;
 /// minor or major unit (`nudgeStep`).
 fn selectionStep(major: bool) f64 {
     if (selection.items.len == 1) {
-        for (state.model.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, ri| {
-            if (r.id == selection.items[0]) return if (major) r.pitch else moveStep(pi, ri) * r.pitch;
+        for (0..state.model.parentCount()) |k| for (state.model.regionsIn(state.model.parentAt(k)), 0..) |r, ri| {
+            if (r.id == selection.items[0]) return if (major) r.pitch else moveStep(state.model.parentAt(k), ri) * r.pitch;
         };
     }
     return nudgeStep(major);
@@ -24639,12 +24702,15 @@ fn drawSelection(area: dvui.Rect.Physical) void {
 
 /// The text track (one sized to a text style) whose segment `at` lies in,
 /// in the shown space.
-fn textTrackAt(at: geom.Point) ?struct { panel: usize, region: usize } {
-    for (state.model.panels.items, 0..) |p, pi| {
-        if (p.space != spaceId(shown_space) or pi >= state.placed.items.len) continue;
-        for (state.placed.items[pi].tracks) |t| {
-            if (t.member >= p.regions.items.len or p.regions.items[t.member].style == null) continue;
-            if (contains(onSheet(pi, t.box), at)) return .{ .panel = pi, .region = t.member };
+fn textTrackAt(at: geom.Point) ?struct { parent: Parent, region: usize } {
+    for (0..state.model.parentCount()) |pk| {
+        const pi = state.model.parentAt(pk);
+        if (!shownIn(pi)) continue;
+        const pl = placedOf(pi) orelse continue;
+        const regions = state.model.regionsIn(pi);
+        for (pl.tracks) |t| {
+            if (t.member >= regions.len or regions[t.member].style == null) continue;
+            if (contains(onSheet(pi, t.box), at)) return .{ .parent = pi, .region = t.member };
         }
     }
     return null;
@@ -24682,7 +24748,7 @@ fn featureName(f: Feature) []const u8 {
 }
 
 fn isControlPoint(id: layout.model.ObjectId) bool {
-    for (state.model.panels.items) |p| for (p.regions.items) |r| for (r.path.items) |cp| if (cp.id == id) return true;
+    for (0..state.model.parentCount()) |k| for (state.model.regionsIn(state.model.parentAt(k))) |r| for (r.path.items) |cp| if (cp.id == id) return true;
     return false;
 }
 
@@ -24691,6 +24757,14 @@ fn isControlPoint(id: layout.model.ObjectId) bool {
 fn objectName(id: layout.model.ObjectId) []const u8 {
     const m = &state.model;
     if (id == .none) return "the parent";
+    for (m.spaces.items) |sp| {
+        if (sp.id == id) return sp.name;
+        for (sp.regions.items) |r| {
+            if (r.id == id) return r.name;
+            for (r.path.items, 0..) |cp, k| if (cp.id == id)
+                return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} path point {d}", .{ r.name, k + 1 }) catch r.name;
+        }
+    }
     for (m.panels.items) |p| {
         if (p.id == id) return p.name;
         for (p.regions.items) |r| {
@@ -25132,6 +25206,7 @@ fn originPicker(id: layout.model.ObjectId) void {
             for (p.regions.items) |r| if (r.id == id) break :blk r.holds;
             for (p.art.items) |x| if (x.id == id) break :blk x.holds;
         }
+        for (m.spaces.items) |s| for (s.regions.items) |r| if (r.id == id) break :blk r.holds;
         for (m.spaces.items) |s| for (s.images.items) |im| if (im.id == id) break :blk im.holds;
         return;
     };
@@ -25170,7 +25245,7 @@ fn originPicker(id: layout.model.ObjectId) void {
 // Delete. Rows keep their pitch: the path only sets where each starts.
 
 var path_drag: ?struct {
-    panel: usize,
+    parent: Parent,
     region: usize,
     id: ?layout.model.ObjectId,
     from_across: f64,
@@ -25180,29 +25255,29 @@ var path_drag: ?struct {
 var path_selected: ?layout.model.ObjectId = null;
 
 /// The track whose path is shown: the context's, or its row's.
-fn pathRegion() ?struct { panel: usize, region: usize } {
+fn pathRegion() ?struct { parent: Parent, region: usize } {
     return switch (state.context) {
-        .region => |r| .{ .panel = r.panel, .region = r.region },
+        .region => |r| .{ .parent = r.parent, .region = r.region },
         // The track the row lies in (in a thread, not always the flow's).
-        .row => |r| if (placedTrack(r.panel, r.region, r.row)) |pt| .{ .panel = pt.panel, .region = pt.member } else .{ .panel = r.panel, .region = r.region },
+        .row => |r| if (placedTrack(r.parent, r.region, r.row)) |pt| .{ .parent = pt.parent, .region = pt.member } else .{ .parent = r.parent, .region = r.region },
         else => null,
     };
 }
 
 /// A path point (u from the region's origin) on the canvas, mm: at the
 /// start of a row, half a row in (the middle of its thickness).
-fn pathToMm(pi: usize, ri: usize, along: f64, across: f64) geom.Point {
-    const o = panelOrigin(pi);
-    const r = state.model.panels.items[pi].regions.items[ri];
+fn pathToMm(pi: Parent, ri: usize, along: f64, across: f64) geom.Point {
+    const o = parentOrigin(pi);
+    const r = state.model.regionsIn(pi)[ri];
     return if (r.major() == .row)
         .{ .x = o.x + r.origin.x + along * r.pitch, .y = o.y + r.origin.y - (across + 0.5) * r.pitch }
     else
         .{ .x = o.x + r.origin.x + (across + 0.5) * r.pitch, .y = o.y + r.origin.y - along * r.pitch };
 }
 
-fn pathFromMm(pi: usize, ri: usize, p: geom.Point) struct { along: f64, across: f64 } {
-    const o = panelOrigin(pi);
-    const r = state.model.panels.items[pi].regions.items[ri];
+fn pathFromMm(pi: Parent, ri: usize, p: geom.Point) struct { along: f64, across: f64 } {
+    const o = parentOrigin(pi);
+    const r = state.model.regionsIn(pi)[ri];
     return if (r.major() == .row)
         .{ .along = (p.x - o.x - r.origin.x) / r.pitch, .across = (o.y + r.origin.y - p.y) / r.pitch - 0.5 }
     else
@@ -25211,8 +25286,8 @@ fn pathFromMm(pi: usize, ri: usize, p: geom.Point) struct { along: f64, across: 
 
 /// How far across the path is drawn: its soft area, its last point, or
 /// its last row, whichever is furthest.
-fn pathReach(pi: usize, ri: usize) f64 {
-    const r = state.model.panels.items[pi].regions.items[ri];
+fn pathReach(pi: Parent, ri: usize) f64 {
+    const r = state.model.regionsIn(pi)[ri];
     var reach = r.h;
     if (r.major() == .column) reach = r.w;
     for (r.path.items) |cp| reach = @max(reach, cp.across + 1);
@@ -25224,14 +25299,14 @@ fn pathReach(pi: usize, ri: usize) f64 {
 /// place on the path (no ID), with where it is across.
 fn pathHit(at: geom.Point) ?struct { id: ?layout.model.ObjectId, across: f64 } {
     const t = pathRegion() orelse return null;
-    const r = state.model.panels.items[t.panel].regions.items[t.region];
+    const r = state.model.regionsIn(t.parent)[t.region];
     const tol = 7 / state.view.ppm;
     for (r.path.items) |cp| {
-        const q = pathToMm(t.panel, t.region, cp.along, cp.across);
+        const q = pathToMm(t.parent, t.region, cp.along, cp.across);
         if (@abs(q.x - at.x) <= tol and @abs(q.y - at.y) <= tol) return .{ .id = cp.id, .across = cp.across };
     }
-    const u = pathFromMm(t.panel, t.region, at);
-    if (u.across < -0.5 or u.across > pathReach(t.panel, t.region)) return null;
+    const u = pathFromMm(t.parent, t.region, at);
+    if (u.across < -0.5 or u.across > pathReach(t.parent, t.region)) return null;
     const across = @max(0, u.across);
     if (@abs(u.along - r.pathAt(across)) * r.pitch > tol) return null;
     return .{ .id = null, .across = across };
@@ -25248,18 +25323,18 @@ fn finishPathDrag() void {
             state.status = "Control point: drag it to bend the path; Delete removes it. ";
             return;
         }
-        const r = state.model.panels.items[pd.panel].regions.items[pd.region];
-        path_selected = act(.addControlPoint, .{ pd.panel, pd.region, r.pathAt(pd.from_across), pd.from_across }) catch null;
+        const r = state.model.regionsIn(pd.parent)[pd.region];
+        path_selected = act(.addControlPoint, .{ pd.parent, pd.region, r.pathAt(pd.from_across), pd.from_across }) catch null;
         state.status = "A control point: drag it to bend the path. ";
         return;
     }
-    const u = pathFromMm(pd.panel, pd.region, pd.at);
+    const u = pathFromMm(pd.parent, pd.region, pd.at);
     const across = @max(0, u.across);
     if (pd.id) |id| {
         act(.moveControlPoint, .{ id, u.along, across }) catch {};
         path_selected = id;
     } else {
-        path_selected = act(.bendPath, .{ pd.panel, pd.region, pd.from_across, u.along, across }) catch null;
+        path_selected = act(.bendPath, .{ pd.parent, pd.region, pd.from_across, u.along, across }) catch null;
     }
     state.status = "";
 }
@@ -25272,22 +25347,22 @@ fn drawTrackPath(area: dvui.Rect.Physical) void {
         path_selected = null;
         return;
     };
-    if (t.panel >= state.model.panels.items.len or t.region >= state.model.panels.items[t.panel].regions.items.len) return;
-    const r = state.model.panels.items[t.panel].regions.items[t.region];
+    if (!state.model.hasParent(t.parent) or t.region >= state.model.regionsIn(t.parent).len) return;
+    const r = state.model.regionsIn(t.parent)[t.region];
     const px = dvui.windowNaturalScale();
-    const reach = pathReach(t.panel, t.region);
+    const reach = pathReach(t.parent, t.region);
     var pts: std.ArrayList(dvui.Point.Physical) = .empty;
     const a = dvui.currentWindow().arena();
     const steps: usize = @intFromFloat(@min(2000, @ceil(reach * 8)));
     for (0..steps + 1) |k| {
         const across = reach * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(@max(1, steps)));
-        pts.append(a, state.view.toPx(area, pathToMm(t.panel, t.region, r.pathAt(across), across))) catch return;
+        pts.append(a, state.view.toPx(area, pathToMm(t.parent, t.region, r.pathAt(across), across))) catch return;
     }
     const ink: dvui.ColorOrGradient = .{ .color = colors.guide.opacity(0.85) };
     if (pts.items.len >= 2) dvui.Path.stroke(.{ .points = pts.items }, .{ .thickness = 1.5 * px, .color = ink });
     for (r.path.items) |cp| {
         const dragged = if (path_drag) |pd| pd.id != null and pd.id.? == cp.id else false;
-        const at = if (dragged) path_drag.?.at else pathToMm(t.panel, t.region, cp.along, cp.across);
+        const at = if (dragged) path_drag.?.at else pathToMm(t.parent, t.region, cp.along, cp.across);
         const q = state.view.toPx(area, at);
         const s: f32 = 4 * px;
         const box: dvui.Rect.Physical = .{ .x = q.x - s, .y = q.y - s, .w = 2 * s, .h = 2 * s };

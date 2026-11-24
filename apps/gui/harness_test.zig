@@ -615,7 +615,7 @@ fn panel3mf(a: std.mem.Allocator, m: *layout.Model, name: []const u8, face: *lay
     const faces = [_]*layout.Face{face};
     var labels: layout.Labels = .init(a, &faces);
     defer labels.deinit();
-    var placed = try layout.solve(a, m, pi, &labels);
+    var placed = try layout.solve(a, m, .{ .panel = pi }, &labels);
     defer placed.deinit();
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
@@ -634,7 +634,7 @@ fn panelSvg(a: std.mem.Allocator, m: *layout.Model, name: []const u8, face: *lay
     const faces = [_]*layout.Face{face};
     var labels: layout.Labels = .init(a, &faces);
     defer labels.deinit();
-    var placed = try layout.solve(a, m, pi, &labels);
+    var placed = try layout.solve(a, m, .{ .panel = pi }, &labels);
     defer placed.deinit();
     return layout.output.panelSvg(a, &placed, &faces, .{});
 }

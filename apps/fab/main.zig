@@ -85,7 +85,7 @@ fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, 
 
     var chosen: std.ArrayList(usize) = .empty;
     for (m.panels.items, 0..) |p, pi| {
-        if (p.unbounded or p.fab.layers.len == 0) continue;
+        if (p.fab.layers.len == 0) continue;
         if (only) |want| if (!std.mem.eql(u8, p.name, want)) continue;
         try chosen.append(arena, pi);
     }

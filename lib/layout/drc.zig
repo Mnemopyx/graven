@@ -29,9 +29,8 @@ pub fn panelIssues(gpa: std.mem.Allocator, m: *const model.Model) ![]PanelIssue 
     var out: std.ArrayList(PanelIssue) = .empty;
     errdefer out.deinit(gpa);
     for (m.panels.items, 0..) |p, pi| {
-        // Without a sheet, or for the canvas itself, there is nothing to
-        // comply with here.
-        if (!m.has_sheet or p.unbounded) continue;
+        // Without a sheet there is nothing to comply with here.
+        if (!m.has_sheet) continue;
         const off = overhang(p.box(), m.sheet.box());
         const ink = overhang(p.inkArea(), m.sheet.inkArea());
         if (off > 1e-9 or ink > 1e-9) try out.append(gpa, .{ .panel = pi, .off_sheet = @max(off, 0), .ink_outside = @max(ink, 0) });
@@ -80,7 +79,8 @@ test "a panel reaching only into the sheet's margins complies; its ink area ther
 
 /// A label whose ink reaches into the worksheet's margins.
 pub const MarginIntrusion = struct {
-    panel: usize,
+    /// The workspace or panel it is in.
+    parent: model.Parent,
     /// The tile whose slot holds the label; null for a label placed
     /// directly on the panel, `slot` then being its index there.
     tile: ?model.TileId,
@@ -96,20 +96,21 @@ pub const MarginIntrusion = struct {
 };
 
 /// Labels whose ink box leaves their panel's ink area or the sheet's.
-/// `placed` holds one solve per panel, in panel order. The ink box bounds
+/// `placed` holds one solve per parent, in `Model.parentAt` order (the
+/// workspaces, then the panels). The ink box bounds
 /// the exact outlines, so a label inside it is inside the area.
 pub fn marginIntrusions(gpa: std.mem.Allocator, m: *const model.Model, placed: []const place.Placed) ![]MarginIntrusion {
     var out: std.ArrayList(MarginIntrusion) = .empty;
     errdefer out.deinit(gpa);
-    // Without a sheet, or on the canvas's own unbounded panel, that limit
-    // falls away; with neither, there is nothing to intrude on.
+    // Without a sheet, or on a workspace, which has no ink area, that
+    // limit falls away; with neither, there is nothing to intrude on.
     const inf = std.math.inf(f64);
     const open: Box = .{ .x0 = -inf, .y0 = -inf, .x1 = inf, .y1 = inf };
     const sheet = if (m.has_sheet) m.sheet.inkArea() else open;
-    for (placed, 0..) |p, pi| {
-        const panel = m.panels.items[pi];
-        const o = panel.origin;
-        const pa = if (panel.unbounded) open else panel.inkArea();
+    for (placed, 0..) |p, k| {
+        const pi = m.parentAt(k);
+        const o = m.parentOrigin(pi);
+        const pa = if (pi.panelIndex()) |i| m.panels.items[i].inkArea() else open;
         const area: Box = .{ .x0 = @max(sheet.x0, pa.x0), .y0 = @max(sheet.y0, pa.y0), .x1 = @min(sheet.x1, pa.x1), .y1 = @min(sheet.y1, pa.y1) };
         for (p.labels) |l| {
             const ink = l.render.ink;
@@ -118,7 +119,7 @@ pub fn marginIntrusions(gpa: std.mem.Allocator, m: *const model.Model, placed: [
             const y = o.y + l.origin.y;
             const b: Box = .{ .x0 = x + ink.x0, .y0 = y + ink.y0, .x1 = x + ink.x1, .y1 = y + ink.y1 };
             const amount = @max(@max(area.x0 - b.x0, b.x1 - area.x1), @max(area.y0 - b.y0, b.y1 - area.y1));
-            if (amount > 0) try out.append(gpa, .{ .panel = pi, .tile = l.tile, .slot = l.slot, .run_region = if (l.run) |r| r.region else null, .ink = b, .amount = amount });
+            if (amount > 0) try out.append(gpa, .{ .parent = pi, .tile = l.tile, .slot = l.slot, .run_region = if (l.run) |r| r.region else null, .ink = b, .amount = amount });
         }
     }
     return out.toOwnedSlice(gpa);
@@ -138,16 +139,16 @@ test "ink past a margin is found; a panel in the margin alone is not" {
     const p = try m.placePanel(.{ .name = "P", .origin = .{ .x = 5, .y = 100 }, .w = 60, .h = 30 });
     // No panel margins: this test is about the sheet's.
     try m.setPanelMargins(p, .{});
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 30 }, .w = 3, .h = 1, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 30 }, .w = 3, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
         try m.setTrackText(t, "top", "H");
-        try m.place(p, r, null, .{ .what = .{ .tile = t } });
+        try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = t } });
     }
     var labels: place.Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try place.solve(gpa, &m, p, &labels);
+    var s = try place.solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
 
     const found = try marginIntrusions(gpa, &m, &.{s});

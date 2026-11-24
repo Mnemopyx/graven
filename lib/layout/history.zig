@@ -25,6 +25,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const native = @import("native.zig");
 const constrain = @import("constrain.zig");
+const legacy = @import("legacy.zig");
 const Model = model.Model;
 const Allocator = std.mem.Allocator;
 
@@ -33,7 +34,7 @@ pub const actions = [_][:0]const u8{
     "startCanvas",       "setCanvasUnits",     "addFrame",            "setFrameBound",      "markFrameNameDefault",
     "setSheet",          "setMargins",         "setRulerOrigin",      "setUnits",           "nameWorksheet",
     "placePanel",        "movePanel",          "removePanel",         "setPanelMargins",    "setPanelLayer",
-    "makePanel",         "releasePanel",       "addArt",              "moveArt",            "removeArt",
+    "releasePanel",       "addArt",              "moveArt",            "removeArt",
     "setArtWrap",        "setArtWrapsTracks",  "setArtCutout",        "setArtCorner",       "addTracks",
     "insertTile",        "insertBlank",        "insertRun",           "insertBreak",        "removeAt",
     "removeTile",        "setTileSize",        "setTilePrototype",    "setRunContent",
@@ -103,6 +104,82 @@ pub const Op = blk: {
 };
 
 pub const Error = Model.Error || native.Error;
+
+// Logs written before workspaces held containers directly (segment version
+// 2 and older; 2026-11-24): a content layout's or a grid's parent was a
+// panel's index (a workspace's own panel among them), and Make panel took
+// loose line art. Such a log is read with these types and replayed by
+// `applyLegacy` (see `legacy.zig`).
+
+const legacy_actions = actions ++ [_][:0]const u8{"makePanel"};
+
+fn LegacyArgs(comptime name: []const u8) type {
+    if (std.mem.eql(u8, name, "makePanel")) return struct { usize, usize };
+    const A = Args(name);
+    const fields = @typeInfo(A).@"struct".field_types;
+    var types: [fields.len]type = undefined;
+    for (fields, &types) |f, *t| t.* = if (f == model.Parent) usize else f;
+    return @Tuple(&types);
+}
+
+pub const LegacyOp = blk: {
+    @setEvalBranchQuota(200_000);
+    var names: [legacy_actions.len + 1][]const u8 = undefined;
+    var types: [legacy_actions.len + 1]type = undefined;
+    for (legacy_actions, 0..) |a, i| {
+        names[i] = a;
+        types[i] = LegacyArgs(a);
+    }
+    names[legacy_actions.len] = "snapshot";
+    types[legacy_actions.len] = []const u8;
+    const Tags = @Enum(u16, .exhaustive, &names, &std.simd.iota(u16, names.len));
+    break :blk @Union(.auto, Tags, &names, &types, &@splat(.{}));
+};
+
+const LegacyEntry = struct {
+    op: LegacyOp,
+    step: u32,
+    size: u32 = 0,
+};
+
+const LegacySegment = struct {
+    writer: [16]u8 = @splat(0),
+    device: []const u8 = "",
+    time: i64 = 0,
+    tool: []const u8 = "",
+    first: u64 = 0,
+    entries: []const LegacyEntry = &.{},
+    views: []const u8 = &.{},
+};
+
+/// Applies an op of an older log to a model read with its workspaces' own
+/// panels kept (see `legacy.zig`), then solves its constraints.
+fn applyLegacy(m: *Model, op: LegacyOp) Error!void {
+    switch (op) {
+        .snapshot => |bytes| {
+            const next = try native.decodeKeepingRoots(m.arena.child_allocator, bytes);
+            const rev = m.revision;
+            m.deinit();
+            m.* = next;
+            m.revision = rev + 1;
+        },
+        .startCanvas => |args| _ = try legacy.startCanvas(m, args[0]),
+        .addFrame => |args| _ = try legacy.addFrame(m, args[0], args[1]),
+        .makePanel => |args| _ = try legacy.makePanel(m, args[0], args[1]),
+        .releasePanel => |args| _ = try legacy.releasePanel(m, args[0]),
+        inline else => |args, tag| {
+            @setEvalBranchQuota(100_000);
+            const A = Args(@tagName(tag));
+            var conv: A = undefined;
+            inline for (0..args.len) |k| {
+                conv[k] = if (@TypeOf(conv[k]) == model.Parent) .{ .panel = args[k] } else args[k];
+            }
+            try applyOnly(m, @unionInit(Op, @tagName(tag), conv));
+        },
+    }
+    try m.syncSheets();
+    try constrain.solve(m, m.arena.child_allocator, null);
+}
 
 /// Applies op `op` to `m`, then solves its constraints, so what they
 /// constrain follows (see `constrain`).
@@ -478,7 +555,8 @@ test "undo restores, redo reapplies, and a new step drops the redo" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -506,7 +584,7 @@ test "a sketch is drawn and constrained through the history, and saves and reope
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: model.Parent = .{ .space = try m.startCanvas(.mm) };
     _ = c;
     var h: History = .init(gpa);
     defer h.deinit();
@@ -553,7 +631,8 @@ test "ops with one merge key make one step; joined ops undo with their step; sna
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -596,33 +675,33 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     const key_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }});
     const legend_proto = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Legend", .tracks = &.{.{ .name = "f", .alignment = .centre }} }});
     // 10 columns by 4 rows, 13 mm apart across and 12 down.
-    const g = try h.do(&m, .addGrid, .{ plate, .{ .x = 10, .y = 50 }, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12 } });
-    const holes = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Holes", .prototype = key_proto, .role = .hole, .w = 10, .h = 8 } });
-    const legends = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Legends", .prototype = legend_proto, .role = .legend, .w = 11, .h = 3, .offset = .{ .x = 0, .y = 6 } } });
+    const g = try h.do(&m, .addGrid, .{ .{ .panel = plate }, .{ .x = 10, .y = 50 }, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12 } });
+    const holes = try h.do(&m, .addStamp, .{ .{ .panel = plate }, g, model.Stamp{ .name = "Holes", .prototype = key_proto, .role = .hole, .w = 10, .h = 8 } });
+    const legends = try h.do(&m, .addStamp, .{ .{ .panel = plate }, g, model.Stamp{ .name = "Legends", .prototype = legend_proto, .role = .legend, .w = 11, .h = 3, .offset = .{ .x = 0, .y = 6 } } });
     // A prototype a stamp uses stays, even with no instances made yet; the
     // stamp keeps naming it, not whatever comes to sit where it was.
     const early = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Early" }});
     const spare = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "Spare" }});
-    const empty = try h.do(&m, .addStamp, .{ plate, g, model.Stamp{ .name = "Empty", .prototype = spare, .w = 5, .h = 5 } });
+    const empty = try h.do(&m, .addStamp, .{ .{ .panel = plate }, g, model.Stamp{ .name = "Empty", .prototype = spare, .w = 5, .h = 5 } });
     try testing.expectError(error.PrototypeInUse, m.removePrototype(spare));
     try h.do(&m, .removePrototype, .{early});
     try testing.expectEqual(spare, m.panels.items[plate].grids.items[g].stamps.items[empty].prototype);
     try testing.expectEqualStrings("Spare", m.proto(spare).name);
-    try h.do(&m, .removeStamp, .{ plate, g, empty });
-    try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ plate, g, holes }));
-    try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ plate, g, legends }));
+    try h.do(&m, .removeStamp, .{ .{ .panel = plate }, g, empty });
+    try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ .{ .panel = plate }, g, holes }));
+    try testing.expectEqual(@as(usize, 40), try h.do(&m, .fillGrid, .{ .{ .panel = plate }, g, legends }));
     // The keys: a part whose grid follows the plate's.
     const plate_grid = m.panels.items[plate].grids.items[g].id;
-    const kg = try h.do(&m, .addLinkedGrid, .{ keys, .{ .x = 10, .y = 50 }, plate_grid });
-    const caps = try h.do(&m, .addStamp, .{ keys, kg, model.Stamp{ .name = "Keys", .prototype = key_proto, .w = 9, .h = 7 } });
-    _ = try h.do(&m, .fillGrid, .{ keys, kg, caps });
+    const kg = try h.do(&m, .addLinkedGrid, .{ .{ .panel = keys }, .{ .x = 10, .y = 50 }, plate_grid });
+    const caps = try h.do(&m, .addStamp, .{ .{ .panel = keys }, kg, model.Stamp{ .name = "Keys", .prototype = key_proto, .w = 9, .h = 7 } });
+    _ = try h.do(&m, .fillGrid, .{ .{ .panel = keys }, kg, caps });
     // ENTER: column 5, rows 2 and 3, on both grids.
-    const enter_hole = m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 2).?;
-    try h.do(&m, .setInstanceSpan, .{ plate, g, enter_hole, 1, 2 });
-    const enter_key = m.instanceAt(keys, kg, m.panels.items[keys].grids.items[kg].stamps.items[caps].id, 5, 2).?;
-    try h.do(&m, .setInstanceSpan, .{ keys, kg, enter_key, 1, 2 });
+    const enter_hole = m.instanceAt(.{ .panel = plate }, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 2).?;
+    try h.do(&m, .setInstanceSpan, .{ .{ .panel = plate }, g, enter_hole, 1, 2 });
+    const enter_key = m.instanceAt(.{ .panel = keys }, kg, m.panels.items[keys].grids.items[kg].stamps.items[caps].id, 5, 2).?;
+    try h.do(&m, .setInstanceSpan, .{ .{ .panel = keys }, kg, enter_key, 1, 2 });
     try testing.expectEqual(@as(usize, 79), m.panels.items[plate].grids.items[g].instances.items.len);
-    const eb = m.instanceBox(plate, g, m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 3).?).?;
+    const eb = m.instanceBox(.{ .panel = plate }, g, m.instanceAt(.{ .panel = plate }, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 3).?).?;
     try testing.expectApproxEqAbs(@as(f64, 8 + 12), eb.height(), 1e-9);
     // Its centre is between rows 2 and 3.
     try testing.expectApproxEqAbs(@as(f64, 50 - 2.5 * 12), (eb.y0 + eb.y1) / 2, 1e-9);
@@ -633,7 +712,7 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     const k00 = m.panels.items[keys].grids.items[kg].instances.items[0].tile;
     try m.setTrackText(k00, "top", "ON");
     const before = m.panels.items[keys].grids.items[kg].instances.items.len;
-    const wide = try h.do(&m, .placeInstance, .{ keys, kg, caps, 0, 0, 2, 1 });
+    const wide = try h.do(&m, .placeInstance, .{ .{ .panel = keys }, kg, caps, 0, 0, 2, 1 });
     try testing.expectEqual(k00, wide);
     try testing.expectEqual(before - 1, m.panels.items[keys].grids.items[kg].instances.items.len);
     try testing.expect(try h.undo(&m));
@@ -641,30 +720,30 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
 
     // Stretching the plate's grid moves the holes, the legends and the
     // keys on the other part together.
-    try h.do(&m, .setGridShape, .{ plate, g, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .leave });
-    const hole9 = m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 9, 0).?;
-    const key9 = m.instanceAt(keys, kg, m.panels.items[keys].grids.items[kg].stamps.items[caps].id, 9, 0).?;
-    const hb = m.instanceBox(plate, g, hole9).?;
-    const kb = m.instanceBox(keys, kg, key9).?;
+    try h.do(&m, .setGridShape, .{ .{ .panel = plate }, g, model.GridShape{ .cols = 10, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .leave });
+    const hole9 = m.instanceAt(.{ .panel = plate }, g, m.panels.items[plate].grids.items[g].stamps.items[holes].id, 9, 0).?;
+    const key9 = m.instanceAt(.{ .panel = keys }, kg, m.panels.items[keys].grids.items[kg].stamps.items[caps].id, 9, 0).?;
+    const hb = m.instanceBox(.{ .panel = plate }, g, hole9).?;
+    const kb = m.instanceBox(.{ .panel = keys }, kg, key9).?;
     try testing.expectApproxEqAbs(@as(f64, 10 + 9 * 13 * 1.1), (hb.x0 + hb.x1) / 2, 1e-9);
     try testing.expectApproxEqAbs((hb.x0 + hb.x1) / 2, (kb.x0 + kb.x1) / 2, 1e-9);
     // A legend sits above its hole, in line with it.
-    const leg9 = m.instanceBox(plate, g, m.instanceAt(plate, g, m.panels.items[plate].grids.items[g].stamps.items[legends].id, 9, 0).?).?;
+    const leg9 = m.instanceBox(.{ .panel = plate }, g, m.instanceAt(.{ .panel = plate }, g, m.panels.items[plate].grids.items[g].stamps.items[legends].id, 9, 0).?).?;
     try testing.expectApproxEqAbs((hb.x0 + hb.x1) / 2, (leg9.x0 + leg9.x1) / 2, 1e-9);
     try testing.expect(leg9.y0 > hb.y1);
 
     // One column fewer: left in place, the last column's holes keep their
     // places, unbound; the keys' grid follows and its keys are left too.
-    try h.do(&m, .setGridShape, .{ plate, g, model.GridShape{ .cols = 9, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .leave });
+    try h.do(&m, .setGridShape, .{ .{ .panel = plate }, g, model.GridShape{ .cols = 9, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .leave });
     const left = m.panels.items[plate].grids.items[g].instances.items[hole9];
     try testing.expect(left.loose != null);
     try testing.expectApproxEqAbs((hb.x0 + hb.x1) / 2, left.loose.?.x, 1e-9);
     try testing.expect(m.panels.items[keys].grids.items[kg].instances.items[key9].loose != null);
-    try testing.expectEqual(@as(u32, 9), m.gridShape(keys, kg).cols);
+    try testing.expectEqual(@as(u32, 9), m.gridShape(.{ .panel = keys }, kg).cols);
     // Undone, and done again removing them instead.
     try testing.expect(try h.undo(&m));
-    try testing.expectEqual(@as(u32, 10), m.gridShape(keys, kg).cols);
-    try h.do(&m, .setGridShape, .{ plate, g, model.GridShape{ .cols = 9, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .remove });
+    try testing.expectEqual(@as(u32, 10), m.gridShape(.{ .panel = keys }, kg).cols);
+    try h.do(&m, .setGridShape, .{ .{ .panel = plate }, g, model.GridShape{ .cols = 9, .rows = 4, .pitch_x = 13, .pitch_y = 12, .stretch_x = 1.1 }, .remove });
     try testing.expectEqual(@as(usize, 79 - 8), m.panels.items[plate].grids.items[g].instances.items.len);
     try testing.expectEqual(@as(usize, 39 - 4), m.panels.items[keys].grids.items[kg].instances.items.len);
 
@@ -675,7 +754,7 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     const place = @import("place.zig");
     var labels: place.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    var placed = try place.solve(gpa, &m, plate, &labels);
+    var placed = try place.solve(gpa, &m, .{ .panel = plate }, &labels);
     defer placed.deinit();
     try testing.expect(placed.edge != null);
     var cut: usize = 0;
@@ -691,7 +770,7 @@ test "a keypad grid: holes, legends and keys bound to its points, keys on a part
     var back = try native.decode(gpa, bytes);
     defer back.deinit();
     try testing.expectEqual(plate_grid, back.panels.items[keys].grids.items[kg].link);
-    const back_enter = back.instanceAt(plate, g, back.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 3).?;
+    const back_enter = back.instanceAt(.{ .panel = plate }, g, back.panels.items[plate].grids.items[g].stamps.items[holes].id, 5, 3).?;
     try testing.expectEqual(@as(u32, 2), back.panels.items[plate].grids.items[g].instances.items[back_enter].rows);
     try testing.expectEqual(model.GridRole.legend, back.panels.items[plate].grids.items[g].stamps.items[legends].role);
 }
@@ -733,7 +812,9 @@ test "every op encodes and decodes, as the file's log will hold them" {
 
 pub const segment_block = "OPSG".*;
 pub const trailer_block = "TRLR".*;
-const segment_version: u16 = 2;
+/// 3: parents are workspaces or panels (2026-11-24); older segments are
+/// read as `LegacySegment`.
+const segment_version: u16 = 3;
 
 /// Who writes: one run of an app. A new run is a new writer, so a crashed
 /// run's unsaved segments count as someone else's.
@@ -1051,22 +1132,47 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
     var saved_log: []const Entry = &.{};
     var unsaved: ?Unsaved = null;
     var views: []const u8 = &.{};
+    // An older log (see `LegacyOp`), replayed as it was written.
+    var old_log: std.ArrayList(LegacyEntry) = .empty;
+    defer old_log.deinit(gpa);
+    var old_pending: ?LegacySegment = null;
+    var is_old = false;
     while (i < bytes.len) {
         const b = native.readBlock(bytes, i) catch {
             damaged = true;
             break;
         };
         if (std.mem.eql(u8, &b.kind, &segment_block)) {
-            pending = if (b.version < 2)
-                .{ .entries = native.decodeValue(a, []const Entry, b.payload) catch {
+            if (b.version < segment_version) {
+                // Older segments only before newer ones: a file is written
+                // whole again once read.
+                if (h.log.items.len > 0) {
                     damaged = true;
                     break;
-                } }
-            else
-                native.decodeValue(a, Segment, b.payload) catch {
+                }
+                is_old = true;
+                old_pending = if (b.version < 2)
+                    .{ .entries = native.decodeValue(a, []const LegacyEntry, b.payload) catch {
+                        damaged = true;
+                        break;
+                    } }
+                else
+                    native.decodeValue(a, LegacySegment, b.payload) catch {
+                        damaged = true;
+                        break;
+                    };
+                const os = old_pending.?;
+                pending = .{ .writer = os.writer, .device = os.device, .time = os.time, .tool = os.tool, .first = os.first, .views = os.views };
+            } else {
+                if (is_old) {
+                    damaged = true;
+                    break;
+                }
+                pending = native.decodeValue(a, Segment, b.payload) catch {
                     damaged = true;
                     break;
                 };
+            }
             pending_at = i;
         } else if (std.mem.eql(u8, &b.kind, &trailer_block)) {
             const t = readTrailer(b.version, b.payload) orelse {
@@ -1077,15 +1183,23 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
                 damaged = true;
                 break;
             };
-            const fits = t.segment_at == pending_at and t.previous == previous and seg.first <= h.log.items.len and
-                t.log_len == seg.first + seg.entries.len and t.segment_at + t.segment_len <= bytes.len and
+            const n_entries = if (old_pending) |os| os.entries.len else seg.entries.len;
+            const log_len = if (is_old) old_log.items.len else h.log.items.len;
+            const fits = t.segment_at == pending_at and t.previous == previous and seg.first <= log_len and
+                t.log_len == seg.first + n_entries and t.segment_at + t.segment_len <= bytes.len and
                 native.checksum(bytes[@intCast(t.segment_at)..@intCast(t.segment_at + t.segment_len)]) == t.segment_crc;
             if (!fits) {
                 damaged = true;
                 break;
             }
-            h.log.shrinkRetainingCapacity(@intCast(seg.first));
-            try h.log.appendSlice(gpa, seg.entries);
+            if (old_pending) |os| {
+                old_log.shrinkRetainingCapacity(@intCast(seg.first));
+                try old_log.appendSlice(gpa, os.entries);
+                old_pending = null;
+            } else {
+                h.log.shrinkRetainingCapacity(@intCast(seg.first));
+                try h.log.appendSlice(gpa, seg.entries);
+            }
             if (seg.views.len > 0) views = seg.views;
             pending = null;
             previous = native.checksum(b.payload);
@@ -1093,9 +1207,9 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
                 saved_log = try a.dupe(Entry, h.log.items);
                 unsaved = null;
             } else if (unsaved) |*u| {
-                u.entries += seg.entries.len;
+                u.entries += n_entries;
             } else {
-                unsaved = .{ .entries = seg.entries.len, .writer = seg.writer, .device = seg.device, .time = seg.time };
+                unsaved = .{ .entries = n_entries, .writer = seg.writer, .device = seg.device, .time = seg.time };
             }
             file = .{ .len = b.end, .trailer_at = i, .trailer_crc = previous, .appendable = true };
         }
@@ -1106,6 +1220,28 @@ pub fn openFile(gpa: Allocator, bytes: []const u8) Error!Opened {
     if (damaged) file.appendable = false;
     file.entries = h.log.items.len;
     file.unsaved = unsaved != null;
+    if (is_old) {
+        // The older log replayed as written, then the workspaces' own
+        // panels taken away. What was read becomes the checkpoint: undo
+        // starts from here, and the next write is the whole file.
+        var m = try native.decodeKeepingRoots(gpa, h.checkpoint);
+        errdefer m.deinit();
+        for (old_log.items) |e| applyLegacy(&m, e.op) catch {
+            damaged = true;
+            break;
+        };
+        try m.upgradeRoots();
+        m.revision = 1;
+        const fresh = try native.encode(gpa, &m);
+        gpa.free(h.checkpoint);
+        h.checkpoint = fresh;
+        h.log.clearRetainingCapacity();
+        h.next_step = 1;
+        h.saved = .{ .len = 0, .last = 0 };
+        h.file = .{ .len = 0, .appendable = false };
+        h.stable = 0;
+        return .{ .model = m, .history = h, .damaged = damaged, .views = views };
+    }
     var m = try native.decode(gpa, h.checkpoint);
     errdefer m.deinit();
     var max_step: u32 = 0;
@@ -1139,7 +1275,8 @@ test "a saved document reopens with its history: undo reaches back past the save
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -1180,7 +1317,8 @@ test "a torn end of the file is dropped, and the checkpoint still opens" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -1205,7 +1343,8 @@ test "autosaves append unsaved steps; undo then edit appends a segment that repl
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -1266,7 +1405,8 @@ test "another writer's append is noticed before writing" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -1294,7 +1434,8 @@ test "past the limits the oldest steps fold into the checkpoint" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     h.limits = .{ .steps = 4 };
@@ -1329,7 +1470,8 @@ test "not saving drops the autosaved steps from the file" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -1393,20 +1535,20 @@ test "a thread of tracks is kept in the file, and its join is a step undo takes 
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
     const key = try m.addPrototype(.{ .name = "key" });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 60, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "B", .origin = .{ .x = 60, .y = 90 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
-    _ = try h.do(&m, .joinTracks, .{ p, a, b });
+    _ = try h.do(&m, .joinTracks, .{ .{ .panel = p }, a, b });
     const bytes = try fileBytes(&h, gpa, test_writer, 1);
     defer gpa.free(bytes);
     var o = try openFile(gpa, bytes);
     defer o.model.deinit();
     defer o.history.deinit();
-    try testing.expectEqual(b, o.model.threadAfter(p, a).?.region);
+    try testing.expectEqual(b, o.model.threadAfter(.{ .panel = p }, a).?.region);
     try testing.expect(try o.history.undo(&o.model));
-    try testing.expect(o.model.threadAfter(p, a) == null);
+    try testing.expect(o.model.threadAfter(.{ .panel = p }, a) == null);
 }
 
 test "a sheet's edits are steps undo takes back, and the sheet is kept in the file" {
@@ -1416,9 +1558,9 @@ test "a sheet's edits are steps undo takes back, and the sheet is kept in the fi
     _ = try m.startCanvas(.mm);
     const p = try m.addPanel("Keys", 60, 30);
     const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
-    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 1, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
-    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
-    const k = try m.addInstance(p, g, st, 0, 0);
+    const g = try m.addGrid(.{ .panel = p }, .{ .x = 10, .y = 20 }, .{ .cols = 1, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+    const st = try m.addStamp(.{ .panel = p }, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    const k = try m.addInstance(.{ .panel = p }, g, st, 0, 0);
     var h: History = .init(gpa);
     defer h.deinit();
     try h.reset(&m);
@@ -1483,14 +1625,14 @@ test "the actions added for making the examples in the GUI save and reopen" {
     const st = try h.do(&m, .addStyle, .{ "s", model.StyleSize{} });
     try h.do(&m, .setLinePitch, .{ st, @as(?f64, 1.5) });
     const key = try h.do(&m, .addPrototype, .{model.TilePrototype{ .name = "key", .unit = 19.05 }});
-    const r = try h.do(&m, .addTracks, .{ p, Model.Tracks{ .name = "Tracks 1", .origin = .{ .x = 5, .y = 25 }, .prototype = key, .count = 1, .length = 4, .pitch = 19.05 } });
-    try h.do(&m, .renameRegion, .{ p, r, "keys" });
-    try h.do(&m, .moveRegion, .{ p, r, .{ .x = 10, .y = 20 } });
-    try h.do(&m, .setRegionSize, .{ p, r, 4, 1 });
-    _ = try h.do(&m, .insertTile, .{ p, r, 0, key, 1 });
-    _ = try h.do(&m, .insertTile, .{ p, r, 1, key, 1 });
-    try h.do(&m, .setItemGap, .{ p, r, 1, 0.25 });
-    _ = try h.do(&m, .nameKeysInOrder, .{ p, r, "K" });
+    const r = try h.do(&m, .addTracks, .{ .{ .panel = p }, Model.Tracks{ .name = "Tracks 1", .origin = .{ .x = 5, .y = 25 }, .prototype = key, .count = 1, .length = 4, .pitch = 19.05 } });
+    try h.do(&m, .renameRegion, .{ .{ .panel = p }, r, "keys" });
+    try h.do(&m, .moveRegion, .{ .{ .panel = p }, r, .{ .x = 10, .y = 20 } });
+    try h.do(&m, .setRegionSize, .{ .{ .panel = p }, r, 4, 1 });
+    _ = try h.do(&m, .insertTile, .{ .{ .panel = p }, r, 0, key, 1 });
+    _ = try h.do(&m, .insertTile, .{ .{ .panel = p }, r, 1, key, 1 });
+    try h.do(&m, .setItemGap, .{ .{ .panel = p }, r, 1, 0.25 });
+    _ = try h.do(&m, .nameKeysInOrder, .{ .{ .panel = p }, r, "K" });
     try h.do(&m, .setPanelFab, .{ p, model.Fab{ .thickness = 2, .layers = &.{.{ .name = "Base", .source = .edge, .op = .{ .add = .{ .name = "black", .color = .hex("#1e1e1e") } } }} } });
     const bytes = try fileBytes(&h, gpa, test_writer, 1);
     defer gpa.free(bytes);
@@ -1499,7 +1641,7 @@ test "the actions added for making the examples in the GUI save and reopen" {
     defer o.history.deinit();
     try testing.expect(!o.damaged);
     try testing.expectEqualStrings("Plate", o.model.panels.items[p].name);
-    try testing.expectEqualStrings("K2", o.model.tileConst(o.model.flowItems(p, r)[1].tileOf().?).designator);
+    try testing.expectEqualStrings("K2", o.model.tileConst(o.model.flowItems(.{ .panel = p }, r)[1].tileOf().?).designator);
 }
 
 test "materials, plans and the active plan: saved with their steps, reopened, undone" {

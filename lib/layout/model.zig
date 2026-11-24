@@ -516,8 +516,32 @@ fn monotoneCubic(pts: []const ControlPoint, x: f64) f64 {
 /// top to bottom, or columns, filled top to bottom and set left to right.
 pub const Major = enum { row, column };
 
-/// A track by its panel and its index there.
-pub const TrackRef = struct { panel: usize, region: usize };
+/// What a content layout (a track or a region) or a grid sits in: a
+/// workspace (the canvas or a frame, by index), or a panel (by index). A
+/// workspace is not a container: it holds containers (panels, content
+/// layouts, grids, figure placements), never content of its own.
+pub const Parent = union(enum) {
+    space: usize,
+    panel: usize,
+
+    pub fn eql(x: Parent, y: Parent) bool {
+        return switch (x) {
+            .space => |i| y == .space and y.space == i,
+            .panel => |i| y == .panel and y.panel == i,
+        };
+    }
+
+    /// The panel it is, if it is one.
+    pub fn panelIndex(x: Parent) ?usize {
+        return switch (x) {
+            .panel => |i| i,
+            .space => null,
+        };
+    }
+};
+
+/// A track by its parent and its index there.
+pub const TrackRef = struct { parent: Parent, region: usize };
 
 /// A flow: a continuous body of content that belongs together (an
 /// article, a chapter, a row of keys), poured through the tracks it is
@@ -853,16 +877,25 @@ pub const PanelArt = struct {
     }
 };
 
-/// A space: the canvas, or a frame. Each has its own coordinates, an
-/// unbounded panel (`root`) holding its loose objects, its panels (those
-/// whose `space` is it), and its selection groups.
+/// A space: the canvas, or a frame. A workspace, not a container: it has
+/// its own coordinates and holds containers (its panels, those whose
+/// `space` is it; the content layouts and grids set straight on it; figure
+/// placements and images), its construction lines and its selection
+/// groups, never loose content.
 pub const Space = struct {
     id: ObjectId = .none,
     name: []const u8,
     /// True while the name is one the app gave it (Frame 1).
     default_name: bool = false,
-    /// The panel holding the space's loose objects (see `Model.rootOf`).
-    root: ObjectId,
+    /// Content layouts (tracks and regions) set straight on it, in its
+    /// coordinates.
+    regions: std.ArrayList(TileRegion) = .empty,
+    /// Grids set straight on it.
+    grids: std.ArrayList(Grid) = .empty,
+    /// Older documents' own panel for loose objects (read, never written):
+    /// its content layouts and grids move onto the space on loading
+    /// (`upgradeRoots`), and the panel goes.
+    old_root: ObjectId = .none,
     /// The frame's boundary in its own coordinates, mm; null for the canvas,
     /// which has none. Content past it is flagged, not refused.
     bound: ?geom.Box = null,
@@ -894,6 +927,9 @@ pub const Space = struct {
     /// follow the zoom. How the grid is drawn (lines, dots, pluses) is the
     /// editor's preference, not the document's.
     grid_spacing: f64 = 0,
+
+    /// The older fields' names in files (read, never written).
+    pub const file_names = .{ .old_root = "root" };
 
     /// The index of layer `id` (`.none` meaning the base layer).
     pub fn layerIndex(sp: Space, id: ObjectId) ?usize {
@@ -1264,7 +1300,7 @@ pub const SpaceView = struct {
 /// hold an `ObjectId` and find it with `Model.locate`.
 pub const Member = union(enum) {
     panel: usize,
-    region: struct { panel: usize, index: usize },
+    region: struct { parent: Parent, index: usize },
     art: struct { panel: usize, index: usize },
 };
 
@@ -1365,10 +1401,6 @@ pub const Panel = struct {
     name: []const u8,
     /// True while the name is one the app gave it (Panel 1), not the user.
     default_name: bool = false,
-    /// A space's own panel: it holds the space's loose objects, with no
-    /// outline, margins or sheet to keep to (see `Model.startCanvas` and
-    /// `Model.addFrame`).
-    unbounded: bool = false,
     /// The space (the canvas, or a frame) the panel lives in (see
     /// `Model.spaceOf`); its origin is in that space's coordinates.
     /// `.none` for a panel of a worksheet, which has no spaces.
@@ -2009,15 +2041,16 @@ pub const Model = struct {
         return n;
     }
 
+    /// Makes the document a canvas (space 0), in `units`. Returns the
+    /// canvas's index among the spaces.
     pub fn startCanvas(m: *Model, units: Units) Error!usize {
-        if (m.panels.items.len > 0) return error.NoRoom;
+        if (m.panels.items.len > 0 or m.spaces.items.len > 0) return error.NoRoom;
         m.units = units;
         m.has_sheet = false;
-        const sid = m.newId();
-        const root = try m.addRoot("Canvas", sid);
-        try m.spaces.append(m.a(), .{ .id = sid, .name = "Canvas", .root = m.panels.items[root].id });
+        try m.spaces.append(m.a(), .{ .id = m.newId(), .name = "Canvas" });
         try m.addBaseLayer(0);
-        return root;
+        m.revision += 1;
+        return 0;
     }
 
     /// A new object ID.
@@ -2027,17 +2060,124 @@ pub const Model = struct {
         return id;
     }
 
-    fn addRoot(m: *Model, name: []const u8, space: ObjectId) Error!usize {
-        try m.panels.append(m.a(), .{ .id = m.newId(), .name = name, .unbounded = true, .space = space, .w = 0, .h = 0, .margins = .all(0), .default_margins = false });
-        m.revision += 1;
-        return m.panels.items.len - 1;
+    /// The canvas, as a parent, if the document is a canvas.
+    pub fn canvas(m: *const Model) ?Parent {
+        if (m.spaces.items.len == 0) return null;
+        return .{ .space = 0 };
     }
 
-    /// The canvas's own panel, holding its loose objects, if the document
-    /// is a canvas.
-    pub fn canvas(m: *const Model) ?usize {
-        if (m.spaces.items.len == 0) return null;
-        return m.rootOf(0);
+    /// The content layouts (tracks and regions) in `parent`.
+    pub fn regionsIn(m: *const Model, parent: Parent) []TileRegion {
+        return switch (parent) {
+            .space => |i| m.spaces.items[i].regions.items,
+            .panel => |i| m.panels.items[i].regions.items,
+        };
+    }
+
+    /// The list of `parent`'s content layouts, to add to or take from.
+    pub fn regionList(m: *Model, parent: Parent) *std.ArrayList(TileRegion) {
+        return switch (parent) {
+            .space => |i| &m.spaces.items[i].regions,
+            .panel => |i| &m.panels.items[i].regions,
+        };
+    }
+
+    /// The grids in `parent`.
+    pub fn gridsIn(m: *const Model, parent: Parent) []Grid {
+        return switch (parent) {
+            .space => |i| m.spaces.items[i].grids.items,
+            .panel => |i| m.panels.items[i].grids.items,
+        };
+    }
+
+    pub fn gridList(m: *Model, parent: Parent) *std.ArrayList(Grid) {
+        return switch (parent) {
+            .space => |i| &m.spaces.items[i].grids,
+            .panel => |i| &m.panels.items[i].grids,
+        };
+    }
+
+    /// Line art in `parent`: a panel's; a workspace holds none.
+    pub fn artIn(m: *const Model, parent: Parent) []PanelArt {
+        return switch (parent) {
+            .space => &.{},
+            .panel => |i| m.panels.items[i].art.items,
+        };
+    }
+
+    /// Whether `parent` still exists.
+    pub fn hasParent(m: *const Model, parent: Parent) bool {
+        return switch (parent) {
+            .space => |i| i < m.spaces.items.len,
+            .panel => |i| i < m.panels.items.len,
+        };
+    }
+
+    /// The index of the space `parent` is in (a workspace is its own).
+    pub fn spaceOfParent(m: *const Model, parent: Parent) usize {
+        return switch (parent) {
+            .space => |i| i,
+            .panel => |i| m.spaceOf(i),
+        };
+    }
+
+    /// Where `parent`'s frame origin sits in its space, mm: a panel's
+    /// origin; a workspace's own (0, 0).
+    pub fn parentOrigin(m: *const Model, parent: Parent) geom.Point {
+        return switch (parent) {
+            .space => .{ .x = 0, .y = 0 },
+            .panel => |i| m.panels.items[i].origin,
+        };
+    }
+
+    /// The object ID of `parent`.
+    pub fn parentId(m: *const Model, parent: Parent) ObjectId {
+        return switch (parent) {
+            .space => |i| m.spaces.items[i].id,
+            .panel => |i| m.panels.items[i].id,
+        };
+    }
+
+    /// The parent whose ID is `id`.
+    pub fn parentOfId(m: *const Model, id: ObjectId) ?Parent {
+        if (m.spaceIndex(id)) |i| return .{ .space = i };
+        if (m.panelIndex(id)) |i| return .{ .panel = i };
+        return null;
+    }
+
+    /// `parent`'s name.
+    pub fn parentName(m: *const Model, parent: Parent) []const u8 {
+        return switch (parent) {
+            .space => |i| m.spaces.items[i].name,
+            .panel => |i| m.panels.items[i].name,
+        };
+    }
+
+    /// Where names of `parent`'s content layouts and grids must be unique.
+    pub fn containerOf(m: *const Model, parent: Parent) Container {
+        return switch (parent) {
+            .space => |i| .{ .space = m.spaces.items[i].id },
+            .panel => |i| .{ .panel = i },
+        };
+    }
+
+    /// How many parents there are: the spaces, then the panels (see
+    /// `parentAt`).
+    pub fn parentCount(m: *const Model) usize {
+        return m.spaces.items.len + m.panels.items.len;
+    }
+
+    /// The `i`th parent, counting the spaces, then the panels.
+    pub fn parentAt(m: *const Model, i: usize) Parent {
+        return if (i < m.spaces.items.len) .{ .space = i } else .{ .panel = i - m.spaces.items.len };
+    }
+
+    /// The inverse of `parentAt`.
+    pub fn parentSlot(m: *const Model, parent: Parent) usize {
+        return switch (parent) {
+            .space => |i| i,
+            .panel => |i| m.spaces.items.len + i,
+        };
     }
 
     /// Adds a frame: a space of its own, with `bound` (its own coordinates,
@@ -2048,9 +2188,9 @@ pub const Model = struct {
         const sid = m.spaces.items.len;
         const id = m.newId();
         const owned = try m.a().dupe(u8, name);
-        const root = try m.addRoot(owned, id);
-        try m.spaces.append(m.a(), .{ .id = id, .name = owned, .root = m.panels.items[root].id, .bound = edge });
+        try m.spaces.append(m.a(), .{ .id = id, .name = owned, .bound = edge });
         try m.addBaseLayer(sid);
+        m.revision += 1;
         return sid;
     }
 
@@ -2090,11 +2230,6 @@ pub const Model = struct {
         return null;
     }
 
-    /// The index of space `space`'s own panel.
-    pub fn rootOf(m: *const Model, space: usize) usize {
-        return m.panelIndex(m.spaces.items[space].root).?;
-    }
-
     /// Whether panel `panel` lives in space `space` (by index).
     pub fn inSpace(m: *const Model, panel: usize, space: usize) bool {
         return space < m.spaces.items.len and m.panels.items[panel].space == m.spaces.items[space].id;
@@ -2105,8 +2240,8 @@ pub const Model = struct {
     pub const Container = union(enum) {
         /// The document's canvas and frames.
         spaces,
-        /// A space's panels, layers, groups, views, images and sketch
-        /// views (`.none`: a worksheet's panels).
+        /// A space's panels, content layouts, grids, layers, groups,
+        /// views, images and sketch views (`.none`: a worksheet's panels).
         space: ObjectId,
         /// A panel's tracks and regions, grids and line art.
         panel: usize,
@@ -2136,9 +2271,11 @@ pub const Model = struct {
         switch (c) {
             .spaces => for (m.spaces.items) |sp| if (eq(u8, sp.name, name)) return true,
             .space => |sid| {
-                for (m.panels.items) |p| if (p.space == sid and !p.unbounded and eq(u8, p.name, name)) return true;
+                for (m.panels.items) |p| if (p.space == sid and eq(u8, p.name, name)) return true;
                 if (m.spaceIndex(sid)) |si| {
                     const sp = m.spaces.items[si];
+                    for (sp.regions.items) |r| if (eq(u8, r.name, name)) return true;
+                    for (sp.grids.items) |g| if (eq(u8, g.name, name)) return true;
                     for (sp.layers.items) |l| if (eq(u8, l.name, name)) return true;
                     for (sp.groups.items) |g| if (eq(u8, g.name, name)) return true;
                     for (sp.images.items) |im| if (eq(u8, im.name, name)) return true;
@@ -2199,8 +2336,8 @@ pub const Model = struct {
     pub const Ref = union(enum) {
         space: usize,
         panel: usize,
-        region: struct { panel: usize, region: usize },
-        grid: struct { panel: usize, index: usize },
+        region: struct { parent: Parent, region: usize },
+        grid: struct { parent: Parent, index: usize },
         art: struct { panel: usize, index: usize },
         tile: TileId,
         /// A document collection itself (Styles, Flows …).
@@ -2270,7 +2407,7 @@ pub const Model = struct {
     fn resolveFirst(m: *const Model, name: []const u8) ?Ref {
         const eq = std.mem.eql;
         for (m.spaces.items, 0..) |sp, i| if (eq(u8, sp.name, name)) return .{ .space = i };
-        for (m.panels.items, 0..) |p, i| if (!p.unbounded and eq(u8, p.name, name)) return .{ .panel = i };
+        for (m.panels.items, 0..) |p, i| if (eq(u8, p.name, name)) return .{ .panel = i };
         for (collection_names) |c| if (eq(u8, c[0], name)) return .{ .collection = c[1] };
         for (collection_names) |c| if (m.resolveIn(.{ .collection = c[1] }, name)) |r| return r;
         return null;
@@ -2280,18 +2417,20 @@ pub const Model = struct {
         const eq = std.mem.eql;
         switch (at) {
             .space => |si| {
-                const sid = m.spaces.items[si].id;
-                for (m.panels.items, 0..) |p, i| if (p.space == sid and !p.unbounded and eq(u8, p.name, name)) return .{ .panel = i };
+                const sp = m.spaces.items[si];
+                for (m.panels.items, 0..) |p, i| if (p.space == sp.id and eq(u8, p.name, name)) return .{ .panel = i };
+                for (sp.regions.items, 0..) |r, i| if (eq(u8, r.name, name)) return .{ .region = .{ .parent = .{ .space = si }, .region = i } };
+                for (sp.grids.items, 0..) |g, i| if (eq(u8, g.name, name)) return .{ .grid = .{ .parent = .{ .space = si }, .index = i } };
                 return null;
             },
             .panel => |pi| {
                 const p = m.panels.items[pi];
-                for (p.regions.items, 0..) |r, i| if (eq(u8, r.name, name)) return .{ .region = .{ .panel = pi, .region = i } };
-                for (p.grids.items, 0..) |g, i| if (eq(u8, g.name, name)) return .{ .grid = .{ .panel = pi, .index = i } };
+                for (p.regions.items, 0..) |r, i| if (eq(u8, r.name, name)) return .{ .region = .{ .parent = .{ .panel = pi }, .region = i } };
+                for (p.grids.items, 0..) |g, i| if (eq(u8, g.name, name)) return .{ .grid = .{ .parent = .{ .panel = pi }, .index = i } };
                 for (p.art.items, 0..) |a_, i| if (eq(u8, a_.name, name)) return .{ .art = .{ .panel = pi, .index = i } };
                 return null;
             },
-            .region => |r| return m.keyInFlow(m.flowItems(r.panel, r.region), name),
+            .region => |r| return m.keyInFlow(m.flowItems(r.parent, r.region), name),
             .flow => |id| {
                 const fi = m.flowIndex(id) orelse return null;
                 return m.keyInFlow(m.flows.items[fi].items.items, name);
@@ -2331,9 +2470,12 @@ pub const Model = struct {
     /// panels: see `findGroup`).
     pub fn locate(m: *const Model, id: ObjectId) ?Member {
         if (id == .none) return null;
+        for (m.spaces.items, 0..) |sp, si| {
+            for (sp.regions.items, 0..) |r, i| if (r.id == id) return .{ .region = .{ .parent = .{ .space = si }, .index = i } };
+        }
         for (m.panels.items, 0..) |p, pi| {
             if (p.id == id) return .{ .panel = pi };
-            for (p.regions.items, 0..) |r, i| if (r.id == id) return .{ .region = .{ .panel = pi, .index = i } };
+            for (p.regions.items, 0..) |r, i| if (r.id == id) return .{ .region = .{ .parent = .{ .panel = pi }, .index = i } };
             for (p.art.items, 0..) |x, i| if (x.id == id) return .{ .art = .{ .panel = pi, .index = i } };
         }
         return null;
@@ -2343,7 +2485,7 @@ pub const Model = struct {
     pub fn idAt(m: *const Model, loc: Member) ObjectId {
         return switch (loc) {
             .panel => |pi| m.panels.items[pi].id,
-            .region => |l| m.panels.items[l.panel].regions.items[l.index].id,
+            .region => |l| m.regionsIn(l.parent)[l.index].id,
             .art => |l| m.panels.items[l.panel].art.items[l.index].id,
         };
     }
@@ -2365,7 +2507,7 @@ pub const Model = struct {
     pub fn spaceOfId(m: *const Model, id: ObjectId) ?usize {
         if (m.findGroup(id)) |at| return at.space;
         const loc = m.locate(id) orelse return null;
-        return m.spaceOf(memberPanel(loc));
+        return m.spaceOfParent(memberParent(loc));
     }
 
     /// The group directly holding `id` (an object or a group), if any.
@@ -2446,7 +2588,7 @@ pub const Model = struct {
     }
 
     /// An object is gone: out of every group, and groups left empty go too.
-    fn forget(m: *Model, id: ObjectId) void {
+    pub fn forget(m: *Model, id: ObjectId) void {
         m.dropMember(id);
         var again = true;
         while (again) {
@@ -2482,7 +2624,7 @@ pub const Model = struct {
                     at.* = .{ .x = at.x + dx, .y = at.y + dy };
                 },
                 .region => |l| {
-                    const o = &m.panels.items[l.panel].regions.items[l.index].origin;
+                    const o = &m.regionsIn(l.parent)[l.index].origin;
                     o.* = .{ .x = o.x + dx, .y = o.y + dy };
                 },
             }
@@ -2491,8 +2633,8 @@ pub const Model = struct {
     }
 
     /// Moves `ids` (objects and groups, all of one space) into space
-    /// `dest`, keeping their coordinates: panels change space, loose
-    /// labels, tracks and line art move to `dest`'s own panel, and groups
+    /// `dest`, keeping their coordinates: panels change space, content
+    /// layouts move onto `dest`, and groups
     /// go with their members. They arrive as one new group named
     /// "from <source>", whose ID is returned. (Once constraints exist, the
     /// constraint group comes too, and constraints reaching outside it are
@@ -2616,24 +2758,14 @@ pub const Model = struct {
             return id;
         }
         const loc = m.locate(id) orelse return error.NoSuchItem;
-        const droot = m.rootOf(dest);
         switch (loc) {
-            .art => |l| {
-                const src = &m.panels.items[l.panel].art;
-                var item = src.items[l.index];
-                if (copy) {
-                    item.shapes = try art_.dupeShapes(m.a(), item.shapes, .{ .x = 0, .y = 0 });
-                    item.prim = try art_.dupePrimitive(m.a(), item.prim);
-                    item.id = m.newId();
-                } else _ = src.orderedRemove(l.index);
-                try m.panels.items[droot].art.append(m.a(), item);
-                try pairs.append(m.a(), .{ id, item.id });
-                return item.id;
-            },
+            // Line art is content: it goes only with its panel, never
+            // loose onto a workspace.
+            .art => return error.NoRoom,
             .region => |l| {
-                const src = &m.panels.items[l.panel].regions;
+                const src = m.regionList(l.parent);
                 const item = if (copy) try m.copyRegion(src.items[l.index]) else src.orderedRemove(l.index);
-                try m.panels.items[droot].regions.append(m.a(), item);
+                try m.spaces.items[dest].regions.append(m.a(), item);
                 try pairs.append(m.a(), .{ id, item.id });
                 return item.id;
             },
@@ -2653,10 +2785,11 @@ pub const Model = struct {
         }
     }
 
-    fn memberPanel(mb: Member) usize {
+    fn memberParent(mb: Member) Parent {
         return switch (mb) {
-            .panel => |pi| pi,
-            inline else => |l| l.panel,
+            .panel => |pi| .{ .panel = pi },
+            .region => |l| l.parent,
+            .art => |l| .{ .panel = l.panel },
         };
     }
 
@@ -2670,13 +2803,13 @@ pub const Model = struct {
         // flow holds when the track starts it (copies of a whole panel are
         // rejoined by `copyPanel`).
         const src = m.trackById(r.id);
-        const own: []const Item = if (src) |t| m.ownItems(t.panel, t.region) else &.{};
-        const src_flow: ?Flow = if (src) |t| (if (m.trackFlow(t.panel, t.region)) |f| f.* else null) else null;
+        const own: []const Item = if (src) |t| m.ownItems(t.parent, t.region) else &.{};
+        const src_flow: ?Flow = if (src) |t| (if (m.trackFlow(t.parent, t.region)) |f| f.* else null) else null;
         const fi = try m.newFlow(r.name, c.id);
         c.flow = m.flows.items[fi].id;
         if (src_flow) |f| {
             m.flows.items[fi].indent = f.indent;
-            if (own.len > 0 or m.firstOfFlow(src.?.panel, src.?.region)) m.flows.items[fi].paragraph = f.paragraph;
+            if (own.len > 0 or m.firstOfFlow(src.?.parent, src.?.region)) m.flows.items[fi].paragraph = f.paragraph;
         }
         c.path = .empty;
         for (r.path.items) |cp| try c.path.append(m.a(), .{ .id = m.newId(), .along = cp.along, .across = cp.across });
@@ -2714,16 +2847,16 @@ pub const Model = struct {
         // Its flows, among the copies: the copies of a flow's tracks on
         // the panel run through the flow of the first of them, in order.
         for (p.regions.items, 0..) |r, k| {
-            const f = m.trackFlow(pi, k) orelse continue;
+            const f = m.trackFlow(.{ .panel = pi }, k) orelse continue;
             // Only from the first of the flow's tracks on this panel.
             const first = for (f.tracks.items) |id| {
-                if (m.regionIndex(pi, id) != null) break id;
+                if (m.regionIndex(.{ .panel = pi }, id) != null) break id;
             } else continue;
             if (first != r.id) continue;
             const into = m.flowIndex(c.regions.items[k].flow).?;
             for (f.tracks.items) |id| {
                 if (id == r.id) continue;
-                const n = m.regionIndex(pi, id) orelse continue;
+                const n = m.regionIndex(.{ .panel = pi }, id) orelse continue;
                 const gone = c.regions.items[n].flow;
                 try m.flows.items[into].tracks.append(m.a(), c.regions.items[n].id);
                 c.regions.items[n].flow = m.flows.items[into].id;
@@ -2854,7 +2987,7 @@ pub const Model = struct {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         if (!(w > 0) or !(h > 0)) return error.BadSize;
         const p = &m.panels.items[panel];
-        if (p.unbounded or p.edge != null or p.sketch != .none) return error.BadSize;
+        if (p.edge != null or p.sketch != .none) return error.BadSize;
         p.w = w;
         p.h = h;
         m.revision += 1;
@@ -2868,7 +3001,7 @@ pub const Model = struct {
     }
 
     pub fn compliantAt(m: *const Model, panel: usize, origin: geom.Point) bool {
-        if (!m.has_sheet or m.panels.items[panel].unbounded) return true;
+        if (!m.has_sheet) return true;
         var p = m.panels.items[panel];
         p.origin = origin;
         return m.onSheet(p.box()) and within(p.inkArea(), m.sheet.inkArea());
@@ -2981,12 +3114,11 @@ pub const Model = struct {
         const sp = m.spaces.items[space];
         const id = sp.layers.items[index].id;
         const base = id == sp.base_layer;
+        // Content layouts and grids set on the workspace are on its base
+        // layer.
+        if (base and (sp.regions.items.len > 0 or sp.grids.items.len > 0)) return true;
         for (m.panels.items) |p| {
             if (p.space != sp.id) continue;
-            if (p.id == sp.root) {
-                if (base and (p.regions.items.len > 0 or p.art.items.len > 0)) return true;
-                continue;
-            }
             if (p.layer == id or (p.layer == .none and base)) return true;
         }
         for (sp.views.items) |v| if (v.layer == id or (v.layer == .none and base)) return true;
@@ -3006,7 +3138,6 @@ pub const Model = struct {
     /// Puts panel `panel` on layer `layer` of its space.
     pub fn setPanelLayer(m: *Model, panel: usize, layer: ObjectId) Error!void {
         const p = &m.panels.items[panel];
-        if (p.unbounded) return error.NoSuchItem;
         if (m.spaces.items[m.spaceOf(panel)].layerIndex(layer) == null) return error.NoSuchLayer;
         p.layer = layer;
         m.revision += 1;
@@ -3445,7 +3576,7 @@ pub const Model = struct {
     /// Makes a panel of the view `view` of an enclosed sketch, in space
     /// `space`: the view becomes the panel, its edge the sketch's outlines
     /// (cut by nesting), and it follows the sketch. What the outermost
-    /// outline encloses (tracks, line art) moves onto the panel, keeping
+    /// outline encloses (content layouts) moves onto the panel, keeping
     /// where it is. Refused unless the sketch's output has exactly one
     /// outermost closed outline. Returns the panel's index.
     pub fn makeSketchPanel(m: *Model, space: usize, view: usize) Error!usize {
@@ -3470,10 +3601,8 @@ pub const Model = struct {
         p.h = edge.h;
         p.edge = edge.art;
         // What the outermost outline encloses moves onto the panel.
-        const root = m.rootOf(space);
-        const rp = m.panels.items[root];
         const outer: geom.Outline = .{ .contours = edge.art.shapes[0].outline.contours[0..1] };
-        const off: geom.Point = .{ .x = p.origin.x - rp.origin.x, .y = p.origin.y - rp.origin.y };
+        const off: geom.Point = p.origin;
         const inside = struct {
             fn f(o: geom.Outline, d: geom.Point, q: geom.Point) bool {
                 return art_.contains(o, .{ .x = q.x - d.x, .y = q.y - d.y });
@@ -3484,7 +3613,7 @@ pub const Model = struct {
                     f(o, d, .{ .x = bx.x0, .y = bx.y1 }) and f(o, d, .{ .x = bx.x1, .y = bx.y1 });
             }
         };
-        const src = &m.panels.items[root];
+        const src = &m.spaces.items[space];
         const d: geom.Point = .{ .x = -off.x, .y = -off.y };
         var i = src.regions.items.len;
         while (i > 0) {
@@ -3495,16 +3624,7 @@ pub const Model = struct {
             moved.origin = .{ .x = moved.origin.x + d.x, .y = moved.origin.y + d.y };
             try p.regions.insert(m.a(), 0, moved);
         }
-        i = src.art.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (!inside.box(outer, off, src.art.items[i].box())) continue;
-            var moved = src.art.orderedRemove(i);
-            moved.at = .{ .x = moved.at.x + d.x, .y = moved.at.y + d.y };
-            try p.art.insert(m.a(), 0, moved);
-        }
         for (p.regions.items) |x| m.forget(x.id);
-        for (p.art.items) |x| m.forget(x.id);
         _ = m.spaces.items[space].sketch_views.orderedRemove(view);
         try m.panels.append(m.a(), p);
         m.revision += 1;
@@ -3516,80 +3636,80 @@ pub const Model = struct {
 
     /// The shape grid `gi` of panel `panel` has: its own, or the one it
     /// follows (through any chain of links).
-    pub fn gridShape(m: *const Model, panel: usize, gi: usize) GridShape {
-        var g = &m.panels.items[panel].grids.items[gi];
+    pub fn gridShape(m: *const Model, parent: Parent, gi: usize) GridShape {
+        var g = &m.gridsIn(parent)[gi];
         var hops: usize = 0;
         while (g.link != .none and hops < 16) : (hops += 1) {
             const at = m.findGrid(g.link) orelse break;
-            g = &m.panels.items[at.panel].grids.items[at.index];
+            g = &m.gridsIn(at.parent)[at.index];
         }
         return g.shape;
     }
 
     /// The panel and index of grid `id`.
-    pub fn findGrid(m: *const Model, id: ObjectId) ?struct { panel: usize, index: usize } {
+    pub fn findGrid(m: *const Model, id: ObjectId) ?struct { parent: Parent, index: usize } {
         if (id == .none) return null;
-        for (m.panels.items, 0..) |p, pi| for (p.grids.items, 0..) |g, gi| {
-            if (g.id == id) return .{ .panel = pi, .index = gi };
+        for (0..m.parentCount()) |k| for (m.gridsIn(m.parentAt(k)), 0..) |g, gi| {
+            if (g.id == id) return .{ .parent = m.parentAt(k), .index = gi };
         };
         return null;
     }
 
     /// Where point (`col`, `row`) of grid `gi` is, mm in the panel frame.
-    pub fn gridPoint(m: *const Model, panel: usize, gi: usize, col: f64, row: f64) geom.Point {
-        const g = m.panels.items[panel].grids.items[gi];
-        const sh = m.gridShape(panel, gi);
+    pub fn gridPoint(m: *const Model, parent: Parent, gi: usize, col: f64, row: f64) geom.Point {
+        const g = m.gridsIn(parent)[gi];
+        const sh = m.gridShape(parent, gi);
         return .{ .x = g.origin.x + col * sh.stepX(), .y = g.origin.y - row * sh.stepY() };
     }
 
     /// The stamp `id` of grid `gi`, by index.
-    pub fn stampIndex(m: *const Model, panel: usize, gi: usize, id: ObjectId) ?usize {
-        for (m.panels.items[panel].grids.items[gi].stamps.items, 0..) |st, i| if (st.id == id) return i;
+    pub fn stampIndex(m: *const Model, parent: Parent, gi: usize, id: ObjectId) ?usize {
+        for (m.gridsIn(parent)[gi].stamps.items, 0..) |st, i| if (st.id == id) return i;
         return null;
     }
 
     /// The box instance `ii` of grid `gi` takes, mm in the panel frame.
-    pub fn instanceBox(m: *const Model, panel: usize, gi: usize, ii: usize) ?geom.Box {
-        const g = m.panels.items[panel].grids.items[gi];
+    pub fn instanceBox(m: *const Model, parent: Parent, gi: usize, ii: usize) ?geom.Box {
+        const g = m.gridsIn(parent)[gi];
         const inst = g.instances.items[ii];
-        const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp) orelse return null];
-        const sh = m.gridShape(panel, gi);
+        const st = g.stamps.items[m.stampIndex(parent, gi, inst.stamp) orelse return null];
+        const sh = m.gridShape(parent, gi);
         const w = st.w + @as(f64, @floatFromInt(inst.cols - 1)) * sh.stepX();
         const h = st.h + @as(f64, @floatFromInt(inst.rows - 1)) * sh.stepY();
         const c: geom.Point = inst.loose orelse blk: {
-            const p = m.gridPoint(panel, gi, @as(f64, @floatFromInt(inst.col)) + @as(f64, @floatFromInt(inst.cols - 1)) / 2, @as(f64, @floatFromInt(inst.row)) + @as(f64, @floatFromInt(inst.rows - 1)) / 2);
+            const p = m.gridPoint(parent, gi, @as(f64, @floatFromInt(inst.col)) + @as(f64, @floatFromInt(inst.cols - 1)) / 2, @as(f64, @floatFromInt(inst.row)) + @as(f64, @floatFromInt(inst.rows - 1)) / 2);
             break :blk .{ .x = p.x + st.offset.x, .y = p.y + st.offset.y };
         };
         return .{ .x0 = c.x - w / 2, .x1 = c.x + w / 2, .y0 = c.y - h / 2, .y1 = c.y + h / 2 };
     }
 
     /// The grid and instance tile `id` is bound to, if any.
-    pub fn gridInstanceOf(m: *const Model, id: TileId) ?struct { panel: usize, grid: usize, index: usize } {
-        for (m.panels.items, 0..) |p, pi| for (p.grids.items, 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
-            if (inst.tile == id) return .{ .panel = pi, .grid = gi, .index = ii };
+    pub fn gridInstanceOf(m: *const Model, id: TileId) ?struct { parent: Parent, grid: usize, index: usize } {
+        for (0..m.parentCount()) |k| for (m.gridsIn(m.parentAt(k)), 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
+            if (inst.tile == id) return .{ .parent = m.parentAt(k), .grid = gi, .index = ii };
         };
         return null;
     }
 
     /// Adds a grid to panel `panel`, point (0, 0) at `origin`; returns its
     /// index.
-    pub fn addGrid(m: *Model, panel: usize, origin: geom.Point, shape: GridShape) Error!usize {
-        if (panel >= m.panels.items.len) return error.NoSuchItem;
+    pub fn addGrid(m: *Model, parent: Parent, origin: geom.Point, shape: GridShape) Error!usize {
+        if (!m.hasParent(parent)) return error.NoSuchItem;
         if (shape.cols == 0 or shape.rows == 0 or !(shape.pitch_x > 0 and shape.pitch_y > 0) or !(shape.stretch_x > 0 and shape.stretch_y > 0)) return error.BadSize;
-        const p = &m.panels.items[panel];
         var name_buf: [32]u8 = undefined;
-        const name = m.freshName(&name_buf, .{ .panel = panel }, "Grid");
-        try p.grids.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .default_name = true, .origin = origin, .shape = shape });
+        const name = m.freshName(&name_buf, m.containerOf(parent), "Grid");
+        const list = m.gridList(parent);
+        try list.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .default_name = true, .origin = origin, .shape = shape });
         m.revision += 1;
-        return p.grids.items.len - 1;
+        return list.items.len - 1;
     }
 
     /// Adds a grid to panel `panel` that follows grid `source` (on any
     /// panel), point (0, 0) at `origin`; returns its index.
-    pub fn addLinkedGrid(m: *Model, panel: usize, origin: geom.Point, source: ObjectId) Error!usize {
+    pub fn addLinkedGrid(m: *Model, parent: Parent, origin: geom.Point, source: ObjectId) Error!usize {
         const at = m.findGrid(source) orelse return error.NoSuchObject;
-        const gi = try m.addGrid(panel, origin, m.gridShape(at.panel, at.index));
-        m.panels.items[panel].grids.items[gi].link = source;
+        const gi = try m.addGrid(parent, origin, m.gridShape(at.parent, at.index));
+        m.gridsIn(parent)[gi].link = source;
         return gi;
     }
 
@@ -3600,14 +3720,15 @@ pub const Model = struct {
     /// as its own and stops following). Instances on points it no longer
     /// has, on it and on every grid following it, are removed or left in
     /// place, unbound, as `dropped` says.
-    pub fn setGridShape(m: *Model, panel: usize, gi: usize, shape: GridShape, dropped: Dropped) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+    pub fn setGridShape(m: *Model, parent: Parent, gi: usize, shape: GridShape, dropped: Dropped) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
         if (shape.cols == 0 or shape.rows == 0 or !(shape.pitch_x > 0 and shape.pitch_y > 0) or !(shape.stretch_x > 0 and shape.stretch_y > 0)) return error.BadSize;
-        const id = m.panels.items[panel].grids.items[gi].id;
+        const id = m.gridsIn(parent)[gi].id;
         // Settle the ones about to lose their points first, at their places
         // under the old shape.
-        for (m.panels.items, 0..) |*p, pi| for (p.grids.items, 0..) |*g, gj| {
-            if (!(pi == panel and gj == gi) and !m.follows(g.*, id)) continue;
+        for (0..m.parentCount()) |pk| for (m.gridsIn(m.parentAt(pk)), 0..) |*g, gj| {
+            const pi = m.parentAt(pk);
+            if (!(pi.eql(parent) and gj == gi) and !m.follows(g.*, id)) continue;
             var ii: usize = 0;
             while (ii < g.instances.items.len) {
                 const inst = g.instances.items[ii];
@@ -3629,7 +3750,7 @@ pub const Model = struct {
                 }
             }
         };
-        const g = &m.panels.items[panel].grids.items[gi];
+        const g = &m.gridsIn(parent)[gi];
         g.shape = shape;
         g.link = .none;
         m.revision += 1;
@@ -3642,36 +3763,36 @@ pub const Model = struct {
         while (link != .none and hops < 16) : (hops += 1) {
             if (link == id) return true;
             const at = m.findGrid(link) orelse return false;
-            link = m.panels.items[at.panel].grids.items[at.index].link;
+            link = m.gridsIn(at.parent)[at.index].link;
         }
         return false;
     }
 
     /// Moves grid `gi`'s point (0, 0) to `origin`.
-    pub fn moveGrid(m: *Model, panel: usize, gi: usize, origin: geom.Point) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        m.panels.items[panel].grids.items[gi].origin = origin;
+    pub fn moveGrid(m: *Model, parent: Parent, gi: usize, origin: geom.Point) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        m.gridsIn(parent)[gi].origin = origin;
         m.revision += 1;
     }
 
     /// Removes grid `gi` and its instances. Grids following it keep its
     /// shape as their own.
-    pub fn removeGrid(m: *Model, panel: usize, gi: usize) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const id = m.panels.items[panel].grids.items[gi].id;
-        const shape = m.gridShape(panel, gi);
+    pub fn removeGrid(m: *Model, parent: Parent, gi: usize) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const id = m.gridsIn(parent)[gi].id;
+        const shape = m.gridShape(parent, gi);
         for (m.panels.items) |*p| for (p.grids.items) |*g| if (g.link == id) {
             g.shape = shape;
             g.link = .none;
         };
-        const g = m.panels.items[panel].grids.orderedRemove(gi);
+        const g = m.gridList(parent).orderedRemove(gi);
         for (g.instances.items) |inst| m.tile(inst.tile).removed = true;
         m.revision += 1;
     }
 
     /// Adds a stamp to grid `gi`; returns its index.
-    pub fn addStamp(m: *Model, panel: usize, gi: usize, stamp: Stamp) Error!usize {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+    pub fn addStamp(m: *Model, parent: Parent, gi: usize, stamp: Stamp) Error!usize {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
         if (m.protoIndex(stamp.prototype) == null) return error.NoSuchPrototype;
         if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
         if (stamp.sketch != .none and m.sketchIndex(stamp.sketch) == null) return error.NoSuchItem;
@@ -3679,7 +3800,7 @@ pub const Model = struct {
         st.id = m.newId();
         st.name = try m.a().dupe(u8, stamp.name);
         st.params = try m.dupeParams(stamp.params);
-        const g = &m.panels.items[panel].grids.items[gi];
+        const g = &m.gridsIn(parent)[gi];
         try g.stamps.append(m.a(), st);
         m.revision += 1;
         return g.stamps.items.len - 1;
@@ -3687,9 +3808,9 @@ pub const Model = struct {
 
     /// Changes stamp `si` of grid `gi` (its prototype, role, size, offset
     /// or name), and with it every instance of it.
-    pub fn setStamp(m: *Model, panel: usize, gi: usize, si: usize, stamp: Stamp) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const g = &m.panels.items[panel].grids.items[gi];
+    pub fn setStamp(m: *Model, parent: Parent, gi: usize, si: usize, stamp: Stamp) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const g = &m.gridsIn(parent)[gi];
         if (si >= g.stamps.items.len) return error.NoSuchItem;
         if (m.protoIndex(stamp.prototype) == null) return error.NoSuchPrototype;
         if (!(stamp.w > 0 and stamp.h > 0)) return error.BadSize;
@@ -3709,9 +3830,9 @@ pub const Model = struct {
     }
 
     /// Removes stamp `si` of grid `gi` and its instances.
-    pub fn removeStamp(m: *Model, panel: usize, gi: usize, si: usize) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const g = &m.panels.items[panel].grids.items[gi];
+    pub fn removeStamp(m: *Model, parent: Parent, gi: usize, si: usize) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const g = &m.gridsIn(parent)[gi];
         if (si >= g.stamps.items.len) return error.NoSuchItem;
         const st = g.stamps.orderedRemove(si);
         var ii: usize = 0;
@@ -3731,8 +3852,8 @@ pub const Model = struct {
 
     /// The instance of stamp `stamp` on point (`col`, `row`) of grid `gi`,
     /// by index (one spanning it counts).
-    pub fn instanceAt(m: *const Model, panel: usize, gi: usize, stamp: ObjectId, col: u32, row: u32) ?usize {
-        for (m.panels.items[panel].grids.items[gi].instances.items, 0..) |inst, ii| {
+    pub fn instanceAt(m: *const Model, parent: Parent, gi: usize, stamp: ObjectId, col: u32, row: u32) ?usize {
+        for (m.gridsIn(parent)[gi].instances.items, 0..) |inst, ii| {
             if (inst.stamp != stamp or inst.loose != null) continue;
             if (col >= inst.col and col < inst.col + inst.cols and row >= inst.row and row < inst.row + inst.rows) return ii;
         }
@@ -3742,16 +3863,16 @@ pub const Model = struct {
     /// Makes a tile of stamp `si` and binds it to point (`col`, `row`) of
     /// grid `gi`; returns the tile. A point already holding an instance of
     /// the stamp is refused.
-    pub fn addInstance(m: *Model, panel: usize, gi: usize, si: usize, col: u32, row: u32) Error!TileId {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
+    pub fn addInstance(m: *Model, parent: Parent, gi: usize, si: usize, col: u32, row: u32) Error!TileId {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
         const st = blk: {
-            const g = m.panels.items[panel].grids.items[gi];
+            const g = m.gridsIn(parent)[gi];
             if (si >= g.stamps.items.len) return error.NoSuchItem;
             break :blk g.stamps.items[si];
         };
-        const sh = m.gridShape(panel, gi);
+        const sh = m.gridShape(parent, gi);
         if (col >= sh.cols or row >= sh.rows) return error.NoSuchItem;
-        if (m.instanceAt(panel, gi, st.id, col, row) != null) return error.NoRoom;
+        if (m.instanceAt(parent, gi, st.id, col, row) != null) return error.NoRoom;
         var buf: [48]u8 = undefined;
         const prefix: []const u8 = switch (st.role) {
             .part => "K",
@@ -3759,23 +3880,23 @@ pub const Model = struct {
             .legend => "L",
         };
         const id = try m.addTile(.{ .designator = m.freeDesignator(prefix, &buf), .prototype = st.prototype });
-        try m.panels.items[panel].grids.items[gi].instances.append(m.a(), .{ .tile = id, .stamp = st.id, .col = col, .row = row });
+        try m.gridsIn(parent)[gi].instances.append(m.a(), .{ .tile = id, .stamp = st.id, .col = col, .row = row });
         m.revision += 1;
         return id;
     }
 
     /// Fills every point of grid `gi` not holding an instance of stamp
     /// `si` with one; returns how many were made.
-    pub fn fillGrid(m: *Model, panel: usize, gi: usize, si: usize) Error!usize {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const sh = m.gridShape(panel, gi);
-        const g = m.panels.items[panel].grids.items[gi];
+    pub fn fillGrid(m: *Model, parent: Parent, gi: usize, si: usize) Error!usize {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const sh = m.gridShape(parent, gi);
+        const g = m.gridsIn(parent)[gi];
         if (si >= g.stamps.items.len) return error.NoSuchItem;
         const sid = g.stamps.items[si].id;
         var n: usize = 0;
         for (0..sh.rows) |r| for (0..sh.cols) |c| {
-            if (m.instanceAt(panel, gi, sid, @intCast(c), @intCast(r)) != null) continue;
-            _ = try m.addInstance(panel, gi, si, @intCast(c), @intCast(r));
+            if (m.instanceAt(parent, gi, sid, @intCast(c), @intCast(r)) != null) continue;
+            _ = try m.addInstance(parent, gi, si, @intCast(c), @intCast(r));
             n += 1;
         };
         return n;
@@ -3784,10 +3905,10 @@ pub const Model = struct {
     /// Sets how many points instance `ii` spans, from its point right and
     /// down. Instances of the same stamp on the points it newly covers are
     /// removed; refused past the grid's edge.
-    pub fn setInstanceSpan(m: *Model, panel: usize, gi: usize, ii: usize, cols: u32, rows: u32) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const sh = m.gridShape(panel, gi);
-        var g = &m.panels.items[panel].grids.items[gi];
+    pub fn setInstanceSpan(m: *Model, parent: Parent, gi: usize, ii: usize, cols: u32, rows: u32) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const sh = m.gridShape(parent, gi);
+        var g = &m.gridsIn(parent)[gi];
         if (ii >= g.instances.items.len) return error.NoSuchItem;
         const inst = g.instances.items[ii];
         if (cols == 0 or rows == 0 or inst.col + cols > sh.cols or inst.row + rows > sh.rows) return error.BadSize;
@@ -3814,11 +3935,11 @@ pub const Model = struct {
     /// first such instance (its labels with it) is moved and stretched to
     /// the block, the rest removed; with none, a new one is made. Returns
     /// its tile.
-    pub fn placeInstance(m: *Model, panel: usize, gi: usize, si: usize, col: u32, row: u32, cols: u32, rows: u32) Error!TileId {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const sh = m.gridShape(panel, gi);
+    pub fn placeInstance(m: *Model, parent: Parent, gi: usize, si: usize, col: u32, row: u32, cols: u32, rows: u32) Error!TileId {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const sh = m.gridShape(parent, gi);
         if (cols == 0 or rows == 0 or col + cols > sh.cols or row + rows > sh.rows) return error.BadSize;
-        const g = &m.panels.items[panel].grids.items[gi];
+        const g = &m.gridsIn(parent)[gi];
         if (si >= g.stamps.items.len) return error.NoSuchItem;
         const sid = g.stamps.items[si].id;
         var kept: ?TileId = null;
@@ -3846,18 +3967,18 @@ pub const Model = struct {
             m.revision += 1;
             return t;
         }
-        const id = try m.addInstance(panel, gi, si, col, row);
-        const gg = &m.panels.items[panel].grids.items[gi];
+        const id = try m.addInstance(parent, gi, si, col, row);
+        const gg = &m.gridsIn(parent)[gi];
         gg.instances.items[gg.instances.items.len - 1].cols = cols;
         gg.instances.items[gg.instances.items.len - 1].rows = rows;
         return id;
     }
 
     /// Binds instance `ii` to point (`col`, `row`) (an unbound one too).
-    pub fn bindInstance(m: *Model, panel: usize, gi: usize, ii: usize, col: u32, row: u32) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const sh = m.gridShape(panel, gi);
-        const g = &m.panels.items[panel].grids.items[gi];
+    pub fn bindInstance(m: *Model, parent: Parent, gi: usize, ii: usize, col: u32, row: u32) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const sh = m.gridShape(parent, gi);
+        const g = &m.gridsIn(parent)[gi];
         if (ii >= g.instances.items.len) return error.NoSuchItem;
         const inst = &g.instances.items[ii];
         if (col + inst.cols > sh.cols or row + inst.rows > sh.rows) return error.BadSize;
@@ -3868,9 +3989,9 @@ pub const Model = struct {
     }
 
     /// Removes instance `ii` of grid `gi` and its tile.
-    pub fn removeInstance(m: *Model, panel: usize, gi: usize, ii: usize) Error!void {
-        if (panel >= m.panels.items.len or gi >= m.panels.items[panel].grids.items.len) return error.NoSuchItem;
-        const g = &m.panels.items[panel].grids.items[gi];
+    pub fn removeInstance(m: *Model, parent: Parent, gi: usize, ii: usize) Error!void {
+        if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        const g = &m.gridsIn(parent)[gi];
         if (ii >= g.instances.items.len) return error.NoSuchItem;
         const inst = g.instances.orderedRemove(ii);
         m.tile(inst.tile).removed = true;
@@ -4323,10 +4444,11 @@ pub const Model = struct {
     /// track's, in its flow's order; a panel's grids' and tracks'), into
     /// `out`.
     pub fn scopeTiles(m: *const Model, al: Allocator, scope: ObjectId, out: *std.ArrayList(TileId)) Allocator.Error!void {
-        for (m.panels.items, 0..) |p, pi| {
-            const whole = p.id == scope;
-            for (p.grids.items) |g| if (whole or g.id == scope) try gridTiles(m, al, g, out);
-            for (p.regions.items, 0..) |r, ri| if (whole or r.id == scope) {
+        for (0..m.parentCount()) |k| {
+            const pi = m.parentAt(k);
+            const whole = m.parentId(pi) == scope;
+            for (m.gridsIn(pi)) |g| if (whole or g.id == scope) try gridTiles(m, al, g, out);
+            for (m.regionsIn(pi), 0..) |r, ri| if (whole or r.id == scope) {
                 for (m.ownItems(pi, ri)) |item| if (item.tileOf()) |t| if (!m.tileConst(t).removed) try out.append(al, t);
             };
         }
@@ -4357,10 +4479,10 @@ pub const Model = struct {
     pub fn companions(m: *const Model, al: Allocator, t: TileId, out: *std.ArrayList(TileId)) Allocator.Error!void {
         try out.append(al, t);
         const at = m.gridInstanceOf(t) orelse return;
-        const g = m.panels.items[at.panel].grids.items[at.grid];
+        const g = m.gridsIn(at.parent)[at.grid];
         const inst = g.instances.items[at.index];
         const root = if (g.link != .none) g.link else g.id;
-        for (m.panels.items) |p| for (p.grids.items) |h| {
+        for (0..m.parentCount()) |pk| for (m.gridsIn(m.parentAt(pk))) |h| {
             if (h.id == g.id) continue;
             const hroot = if (h.link != .none) h.link else h.id;
             if (hroot != root) continue;
@@ -4911,130 +5033,37 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Make panel: loose line art `index` in space panel `root`, a closed
-    /// path, becomes the edge of a new panel there, and what it encloses
-    /// (tracks and other line art, by their boxes' corners) moves onto the panel, keeping where it is. The panel takes
-    /// the path's place in its group; what moves onto it leaves its groups.
-    /// Returns the panel's index.
-    pub fn makePanel(m: *Model, root: usize, index: usize) Error!usize {
-        const rp = m.panels.items[root];
-        if (!rp.unbounded or index >= rp.art.items.len) return error.NoSuchItem;
-        const edge_art = rp.art.items[index];
-        const path = edge_art.closedPath() orelse return error.NoSuchItem;
-        const b = edge_art.box();
-        if (!(b.width() > 0 and b.height() > 0)) return error.BadSize;
-        // The path in the space panel's frame, for the enclosure test.
-        const at = edge_art.at;
-        const inside = struct {
-            fn f(o: geom.Outline, off: geom.Point, q: geom.Point) bool {
-                return art_.contains(o, .{ .x = q.x - off.x, .y = q.y - off.y });
-            }
-            fn box(o: geom.Outline, off: geom.Point, bx: geom.Box) bool {
-                if (bx.isEmpty()) return false;
-                return f(o, off, .{ .x = bx.x0, .y = bx.y0 }) and f(o, off, .{ .x = bx.x1, .y = bx.y0 }) and
-                    f(o, off, .{ .x = bx.x0, .y = bx.y1 }) and f(o, off, .{ .x = bx.x1, .y = bx.y1 });
-            }
-        };
-        var name_buf: [64]u8 = undefined;
-        const name = m.nextPanelName(&name_buf, rp.space, "Panel");
-        const origin: geom.Point = .{ .x = rp.origin.x + b.x0, .y = rp.origin.y + b.y0 };
-        // From the space panel's frame to the new panel's.
-        const d: geom.Point = .{ .x = rp.origin.x - origin.x, .y = rp.origin.y - origin.y };
-        var p: Panel = .{
-            .id = m.newId(),
-            .name = try m.a().dupe(u8, name),
-            .default_name = true,
-            .space = rp.space,
-            .origin = origin,
-            .w = b.width(),
-            .h = b.height(),
-        };
-        var e = edge_art;
-        e.at = .{ .x = at.x + d.x, .y = at.y + d.y };
-        e.cutout = false;
-        p.edge = e;
-        // What it encloses moves across, from the end so indices hold.
-        const src = &m.panels.items[root];
-        var i = src.regions.items.len;
-        while (i > 0) {
-            i -= 1;
-            const r = src.regions.items[i];
-            if (!inside.box(path, at, r.bounds())) continue;
-            var moved = src.regions.orderedRemove(i);
-            moved.origin = .{ .x = moved.origin.x + d.x, .y = moved.origin.y + d.y };
-            try p.regions.insert(m.a(), 0, moved);
-        }
-        i = src.art.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (i == index) continue;
-            if (!inside.box(path, at, src.art.items[i].box())) continue;
-            var moved = src.art.orderedRemove(i);
-            moved.at = .{ .x = moved.at.x + d.x, .y = moved.at.y + d.y };
-            try p.art.insert(m.a(), 0, moved);
-        }
-        // The path itself, which is now the panel's edge (its index has
-        // moved down by the art taken before it).
-        for (src.art.items, 0..) |x, k| if (x.id == edge_art.id) {
-            _ = src.art.orderedRemove(k);
-            break;
-        };
-        for (p.regions.items) |x| m.forget(x.id);
-        for (p.art.items) |x| m.forget(x.id);
-        m.replaceMember(edge_art.id, p.id);
-        try m.panels.append(m.a(), p);
-        m.revision += 1;
-        return m.panels.items.len - 1;
-    }
-
-    /// Release panel: the panel goes, its edge (a rectangle, if it had
-    /// none) becomes loose line art in its space again, and its
-    /// tracks and line art become loose objects there, all where they
-    /// were. The edge takes the panel's place in its group. Returns the
-    /// edge's ID.
+    /// Release panel: a panel made from a sketch goes back to being a view
+    /// of its sketch, and its content layouts are set straight on its
+    /// space, all where they were; the view takes the panel's place in its
+    /// group. A panel holding line art not of a sketch is refused: line art
+    /// is content, and a workspace holds none. Returns what takes the
+    /// panel's place: the view, or nothing.
     pub fn releasePanel(m: *Model, panel: usize) Error!ObjectId {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
         const p = m.panels.items[panel];
-        if (p.unbounded) return error.NoSuchItem;
-        const root_before = m.rootOf(m.spaceOf(panel));
-        const rp = m.panels.items[root_before];
-        // From the panel's frame to its space panel's.
-        const d: geom.Point = .{ .x = p.origin.x - rp.origin.x, .y = p.origin.y - rp.origin.y };
-        var e: PanelArt = p.edge orelse blk: {
-            const prim: art_.Primitive = .{ .rect = .{ .w = p.w, .h = p.h } };
-            break :blk .{
-                .id = m.newId(),
-                .name = try m.a().dupe(u8, p.name),
-                .at = .{ .x = 0, .y = 0 },
-                .shapes = try art_.primitive(m.a(), try m.a().dupe(u8, p.name), prim, .{ .edge = .{ .r = 0x33, .g = 0x33, .b = 0x33 } }),
-                .prim = prim,
-                .wrap = .none,
-            };
-        };
-        if (e.id == .none) e.id = m.newId();
-        e.at = .{ .x = e.at.x + d.x, .y = e.at.y + d.y };
-        const dst = &m.panels.items[root_before];
-        // A sketch panel goes back to being a view of its sketch.
+        if (p.art.items.len > 0 or p.grids.items.len > 0) return error.NoRoom;
+        const space = m.spaceOf(panel);
+        const d = p.origin;
+        var took: ObjectId = .none;
         if (p.sketch != .none) {
-            try m.spaces.items[m.spaceOf(panel)].sketch_views.append(m.a(), .{ .id = e.id, .sketch = p.sketch, .at = p.sketch_at, .layer = p.layer });
-        } else try dst.art.append(m.a(), e);
+            took = m.newId();
+            try m.spaces.items[space].sketch_views.append(m.a(), .{ .id = took, .sketch = p.sketch, .at = p.sketch_at, .layer = p.layer });
+        }
+        const dst = &m.spaces.items[space];
         for (p.regions.items) |r| {
             var x = r;
             x.origin = .{ .x = x.origin.x + d.x, .y = x.origin.y + d.y };
             try dst.regions.append(m.a(), x);
         }
-        for (p.art.items) |pa| {
-            var x = pa;
-            x.at = .{ .x = x.at.x + d.x, .y = x.at.y + d.y };
-            try dst.art.append(m.a(), x);
-        }
-        m.replaceMember(p.id, e.id);
+        if (took != .none) m.replaceMember(p.id, took) else m.forget(p.id);
         _ = m.panels.orderedRemove(panel);
         m.revision += 1;
-        return e.id;
+        return took;
     }
 
     /// Where `old` is a group's member, `new` takes its place.
-    fn replaceMember(m: *Model, old: ObjectId, new: ObjectId) void {
+    pub fn replaceMember(m: *Model, old: ObjectId, new: ObjectId) void {
         for (m.spaces.items) |*sp| for (sp.groups.items) |*g| {
             for (g.members.items) |*mb| if (mb.* == old) {
                 mb.* = new;
@@ -5084,7 +5113,6 @@ pub const Model = struct {
     /// removed too. Later panels move down one index.
     pub fn removePanel(m: *Model, panel: usize) void {
         const p = m.panels.orderedRemove(panel);
-        // Spaces' own panels follow the renumbering.
         m.forget(p.id);
         for (p.regions.items) |r| m.forget(r.id);
         for (p.art.items) |pa| m.forget(pa.id);
@@ -5149,7 +5177,7 @@ pub const Model = struct {
         return m.freshName(buf, .{ .space = space }, prefix);
     }
 
-    pub fn addRegion(m: *Model, panel: usize, region: TileRegion) Error!usize {
+    pub fn addRegion(m: *Model, parent: Parent, region: TileRegion) Error!usize {
         if (!(region.pitch > 0 and region.w > 0 and region.h > 0)) return error.BadSize;
         var r = region;
         r.id = m.newId();
@@ -5162,7 +5190,7 @@ pub const Model = struct {
         // A flow of its own.
         const fi = try m.newFlow(r.name, r.id);
         r.flow = m.flows.items[fi].id;
-        const regions = &m.panels.items[panel].regions;
+        const regions = m.regionList(parent);
         try regions.append(m.a(), r);
         m.revision += 1;
         return regions.items.len - 1;
@@ -5191,7 +5219,7 @@ pub const Model = struct {
     /// its first segment, and a soft area `count` segments thick for the
     /// rest to expand into. The user adds the content. Returns the region's
     /// index.
-    pub fn addTracks(m: *Model, panel: usize, t: Tracks) Error!usize {
+    pub fn addTracks(m: *Model, parent: Parent, t: Tracks) Error!usize {
         var along: f64 = 0;
         var across: f64 = 1;
         if (t.prototype) |pid| {
@@ -5204,7 +5232,7 @@ pub const Model = struct {
         } else return error.NoSuchPrototype;
         if (t.count == 0 or !(t.length > 0) or !(t.length >= along - 1e-9)) return error.BadSize;
         const thickness = @as(f64, @floatFromInt(t.count)) * across;
-        const r = try m.addRegion(panel, .{
+        const r = try m.addRegion(parent, .{
             .name = t.name,
             .origin = t.origin,
             .w = if (t.major == .row) t.length else thickness,
@@ -5225,9 +5253,9 @@ pub const Model = struct {
     /// Removes track or region `region` of `panel`. Its flow goes on in
     /// its other tracks; left with none, it keeps its text, unplaced, and
     /// lets go of its tiles (as a removed panel's tracks do).
-    pub fn removeRegion(m: *Model, panel: usize, region: usize) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
-        const r = m.panels.items[panel].regions.orderedRemove(region);
+    pub fn removeRegion(m: *Model, parent: Parent, region: usize) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchRow;
+        const r = m.regionList(parent).orderedRemove(region);
         m.forget(r.id);
         m.tidyFlows();
         m.revision += 1;
@@ -5239,17 +5267,17 @@ pub const Model = struct {
     /// stays one thick, a region keeps its depth, and a region stacks on
     /// the side its new axis case does. A flow's tracks all run one way, so
     /// that turn is refused for a track sharing its flow (`BadJoin`).
-    pub fn setOrientation(m: *Model, panel: usize, region: usize, direction: f64, rotation: f64) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+    pub fn setOrientation(m: *Model, parent: Parent, region: usize, direction: f64, rotation: f64) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchRow;
         if (!std.math.isFinite(direction) or !std.math.isFinite(rotation)) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         const before = r.major();
         var next = r.*;
         next.direction = direction;
         next.rotation = rotation;
         const after = next.major();
         if (after != before) {
-            if (m.trackFlow(panel, region)) |f| if (f.tracks.items.len > 1) return error.BadJoin;
+            if (m.trackFlow(parent, region)) |f| if (f.tracks.items.len > 1) return error.BadJoin;
             std.mem.swap(f64, &r.w, &r.h);
             if (r.kind == .region) r.stack = TileRegion.oriented(after).stack;
         }
@@ -5265,24 +5293,24 @@ pub const Model = struct {
     /// on through them as it did (named after it, numbered within the panel:
     /// keys1, keys2 …). Its path's control points go (a track's
     /// path is its own); its length stays. Returns how many tracks.
-    pub fn splitIntoTracks(m: *Model, panel: usize, region: usize, origins: []const geom.Point) Error!usize {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+    pub fn splitIntoTracks(m: *Model, parent: Parent, region: usize, origins: []const geom.Point) Error!usize {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchRow;
         if (origins.len == 0) return error.BadSize;
-        const r0 = m.panels.items[panel].regions.items[region];
+        const r0 = m.regionsIn(parent)[region];
         if (r0.kind != .region) return error.BadJoin;
         const base = try m.a().dupe(u8, r0.name);
         const into = r0.flow;
-        var pos = m.flowPosition(panel, region) orelse return error.BadJoin;
+        var pos = m.flowPosition(parent, region) orelse return error.BadJoin;
         var name_buf: [160]u8 = undefined;
         var ib: [96]u8 = undefined;
         // Its own name gives way, and numbers follow its stem (Rows1 →
         // Rows1, Rows2 …; keys → keys1, keys2 …).
         const stem = std.mem.trimEnd(u8, names.identifier(&ib, base, "Track"), "0123456789");
-        m.panels.items[panel].regions.items[region].name = "";
+        m.regionsIn(parent)[region].name = "";
         for (origins, 0..) |o, k| {
-            const name = m.freshName(&name_buf, .{ .panel = panel }, stem);
+            const name = m.freshName(&name_buf, m.containerOf(parent), stem);
             if (k == 0) {
-                const r = &m.panels.items[panel].regions.items[region];
+                const r = &m.regionsIn(parent)[region];
                 r.kind = .track;
                 r.name = try m.a().dupe(u8, name);
                 r.origin = o;
@@ -5290,14 +5318,14 @@ pub const Model = struct {
                 r.path = .empty;
                 continue;
             }
-            var t = m.panels.items[panel].regions.items[region];
+            var t = m.regionsIn(parent)[region];
             t.name = name;
             t.origin = o;
-            const ri = try m.addRegion(panel, t);
+            const ri = try m.addRegion(parent, t);
             // Its own flow, made for it, gives way to the region's.
-            const own = m.panels.items[panel].regions.items[ri].flow;
+            const own = m.regionsIn(parent)[ri].flow;
             pos += 1;
-            try m.assignTrack(panel, ri, into, pos);
+            try m.assignTrack(parent, ri, into, pos);
             if (m.flowIndex(own)) |fi| if (m.flows.items[fi].tracks.items.len == 0 and m.flows.items[fi].items.items.len == 0) {
                 _ = m.flows.orderedRemove(fi);
             };
@@ -5321,60 +5349,60 @@ pub const Model = struct {
     }
 
     /// The index of the flow track `region` of `panel` is assigned to.
-    pub fn trackFlowIndex(m: *const Model, panel: usize, region: usize) ?usize {
-        return m.flowIndex(m.panels.items[panel].regions.items[region].flow);
+    pub fn trackFlowIndex(m: *const Model, parent: Parent, region: usize) ?usize {
+        return m.flowIndex(m.regionsIn(parent)[region].flow);
     }
 
     /// The flow track `region` of `panel` is assigned to.
-    pub fn trackFlow(m: *const Model, panel: usize, region: usize) ?*const Flow {
-        return &m.flows.items[m.trackFlowIndex(panel, region) orelse return null];
+    pub fn trackFlow(m: *const Model, parent: Parent, region: usize) ?*const Flow {
+        return &m.flows.items[m.trackFlowIndex(parent, region) orelse return null];
     }
 
     /// Whether track `region` of `panel` is the first of its flow's: the
     /// one its content starts in (as a thread's first track held it).
-    pub fn firstOfFlow(m: *const Model, panel: usize, region: usize) bool {
-        const f = m.trackFlow(panel, region) orelse return true;
-        return f.tracks.items.len == 0 or f.tracks.items[0] == m.panels.items[panel].regions.items[region].id;
+    pub fn firstOfFlow(m: *const Model, parent: Parent, region: usize) bool {
+        const f = m.trackFlow(parent, region) orelse return true;
+        return f.tracks.items.len == 0 or f.tracks.items[0] == m.regionsIn(parent)[region].id;
     }
 
     /// The content of track `region`'s flow, where that track starts it:
     /// on the flow's first track, all of it; on the others, nothing. (So
     /// a pass over every track meets each flow's content once.)
-    pub fn ownItems(m: *const Model, panel: usize, region: usize) []const Item {
-        if (!m.firstOfFlow(panel, region)) return &.{};
-        const f = m.trackFlow(panel, region) orelse return &.{};
+    pub fn ownItems(m: *const Model, parent: Parent, region: usize) []const Item {
+        if (!m.firstOfFlow(parent, region)) return &.{};
+        const f = m.trackFlow(parent, region) orelse return &.{};
         return f.items.items;
     }
 
     /// The content of the flow track `region` of `panel` is assigned to,
     /// whichever of its tracks it is.
-    pub fn flowItems(m: *const Model, panel: usize, region: usize) []const Item {
-        const f = m.trackFlow(panel, region) orelse return &.{};
+    pub fn flowItems(m: *const Model, parent: Parent, region: usize) []const Item {
+        const f = m.trackFlow(parent, region) orelse return &.{};
         return f.items.items;
     }
 
     /// The first paragraph's style of track `region`'s flow, where the
     /// track starts it (else null, as `ownItems`).
-    pub fn ownParagraph(m: *const Model, panel: usize, region: usize) ?ParaId {
-        if (!m.firstOfFlow(panel, region)) return null;
-        const f = m.trackFlow(panel, region) orelse return null;
+    pub fn ownParagraph(m: *const Model, parent: Parent, region: usize) ?ParaId {
+        if (!m.firstOfFlow(parent, region)) return null;
+        const f = m.trackFlow(parent, region) orelse return null;
         return f.paragraph;
     }
 
     /// The new-paragraph indent of track `region`'s flow, u.
-    pub fn trackIndent(m: *const Model, panel: usize, region: usize) f64 {
-        const f = m.trackFlow(panel, region) orelse return 0;
+    pub fn trackIndent(m: *const Model, parent: Parent, region: usize) f64 {
+        const f = m.trackFlow(parent, region) orelse return 0;
         return f.indent;
     }
 
     /// The flow track `region` of `panel` is assigned to, to change. Every
     /// track has one (`addRegion`, `copyRegion`).
-    fn flowOf(m: *Model, panel: usize, region: usize) *Flow {
-        return &m.flows.items[m.trackFlowIndex(panel, region).?];
+    fn flowOf(m: *Model, parent: Parent, region: usize) *Flow {
+        return &m.flows.items[m.trackFlowIndex(parent, region).?];
     }
 
-    fn flow(m: *Model, panel: usize, region: usize) *std.ArrayList(Item) {
-        return &m.flowOf(panel, region).items;
+    fn flow(m: *Model, parent: Parent, region: usize) *std.ArrayList(Item) {
+        return &m.flowOf(parent, region).items;
     }
 
     /// A new flow named `name` (or, when a flow has that name, `name` 2,
@@ -5457,22 +5485,22 @@ pub const Model = struct {
     /// it. The flow it leaves keeps its content, going on from its next
     /// track; left with none, it keeps its text unplaced, or goes when it
     /// held none. A flow's tracks all run the same way.
-    pub fn assignTrack(m: *Model, panel: usize, region: usize, id: ObjectId, position: ?usize) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
+    pub fn assignTrack(m: *Model, parent: Parent, region: usize, id: ObjectId, position: ?usize) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchRow;
         const to = m.flowIndex(id) orelse return error.NoSuchObject;
-        const r = m.panels.items[panel].regions.items[region];
+        const r = m.regionsIn(parent)[region];
         for (m.flows.items[to].tracks.items) |tid| if (tid != r.id) if (m.trackById(tid)) |t| {
             if (m.trackPtr(t).major() != r.major()) return error.BadJoin;
         };
         // Out of the flow it is in.
-        if (m.trackFlowIndex(panel, region)) |from| {
-            const k = m.flowPosition(panel, region).?;
+        if (m.trackFlowIndex(parent, region)) |from| {
+            const k = m.flowPosition(parent, region).?;
             _ = m.flows.items[from].tracks.orderedRemove(k);
         }
         const list = &m.flows.items[to].tracks;
         const at = @min(position orelse list.items.len, list.items.len);
         try list.insert(m.a(), at, r.id);
-        m.panels.items[panel].regions.items[region].flow = id;
+        m.regionsIn(parent)[region].flow = id;
         m.tidyFlows();
         m.revision += 1;
     }
@@ -5480,16 +5508,16 @@ pub const Model = struct {
     /// Takes track `region` of `panel` out of its flow, which keeps its
     /// content (unplaced, if this was its only track); the track gets a
     /// new flow of its own, empty. Not for a track alone in an empty flow.
-    pub fn detachTrack(m: *Model, panel: usize, region: usize) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
-        const f = m.trackFlow(panel, region) orelse return error.BadJoin;
+    pub fn detachTrack(m: *Model, parent: Parent, region: usize) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchRow;
+        const f = m.trackFlow(parent, region) orelse return error.BadJoin;
         if (f.tracks.items.len <= 1 and f.items.items.len == 0) return error.BadJoin;
-        const fi = m.trackFlowIndex(panel, region).?;
-        _ = m.flows.items[fi].tracks.orderedRemove(m.flowPosition(panel, region).?);
-        const r = &m.panels.items[panel].regions.items[region];
+        const fi = m.trackFlowIndex(parent, region).?;
+        _ = m.flows.items[fi].tracks.orderedRemove(m.flowPosition(parent, region).?);
+        const r = &m.regionsIn(parent)[region];
         const ni = try m.newFlow(r.name, r.id);
         m.flows.items[ni].indent = m.flows.items[fi].indent;
-        m.panels.items[panel].regions.items[region].flow = m.flows.items[ni].id;
+        m.regionsIn(parent)[region].flow = m.flows.items[ni].id;
         m.revision += 1;
     }
 
@@ -5583,8 +5611,62 @@ pub const Model = struct {
     /// The pitch of flow `id`'s first track, if it has one, mm.
     pub fn flowPitch(m: *const Model, id: ObjectId) ?f64 {
         const fi = m.flowIndex(id) orelse return null;
-        for (m.flows.items[fi].tracks.items) |tid| if (m.trackById(tid)) |t| return m.panels.items[t.panel].regions.items[t.region].pitch;
+        for (m.flows.items[fi].tracks.items) |tid| if (m.trackById(tid)) |t| return m.regionsIn(t.parent)[t.region].pitch;
         return null;
+    }
+
+    /// An older document kept each workspace's loose objects on a panel of
+    /// its own (its `root`), standing in for the workspace. Called on
+    /// loading: that panel's content layouts and grids are set straight on
+    /// the workspace, where they were (the panel sat at the workspace's
+    /// origin), and the panel goes. Line art on it, which a workspace
+    /// cannot hold, goes onto a new panel around it, so nothing is lost.
+    pub fn upgradeRoots(m: *Model) Error!void {
+        for (m.spaces.items) |*sp| {
+            const root = sp.old_root;
+            sp.old_root = .none;
+            const pi = m.panelIndex(root) orelse continue;
+            const rp = m.panels.items[pi];
+            const d = rp.origin;
+            for (rp.regions.items) |r| {
+                var x = r;
+                x.origin = .{ .x = x.origin.x + d.x, .y = x.origin.y + d.y };
+                try sp.regions.append(m.a(), x);
+            }
+            for (rp.grids.items) |g| {
+                var x = g;
+                x.origin = .{ .x = x.origin.x + d.x, .y = x.origin.y + d.y };
+                try sp.grids.append(m.a(), x);
+            }
+            var art_panel: ?Panel = null;
+            if (rp.art.items.len > 0) {
+                var b: geom.Box = .empty;
+                for (rp.art.items) |x| b = b.join(x.box());
+                if (b.isEmpty()) b = .{ .x0 = 0, .y0 = 0, .x1 = 1, .y1 = 1 };
+                var name_buf: [64]u8 = undefined;
+                const name = m.nextPanelName(&name_buf, sp.id, "Panel");
+                var np: Panel = .{
+                    .id = m.newId(),
+                    .name = try m.a().dupe(u8, name),
+                    .default_name = true,
+                    .space = sp.id,
+                    .origin = .{ .x = d.x + b.x0, .y = d.y + b.y0 },
+                    .w = @max(b.width(), 1),
+                    .h = @max(b.height(), 1),
+                    .margins = .all(0),
+                    .default_margins = false,
+                };
+                for (rp.art.items) |x| {
+                    var y = x;
+                    y.at = .{ .x = y.at.x - b.x0, .y = y.at.y - b.y0 };
+                    try np.art.append(m.a(), y);
+                }
+                art_panel = np;
+            }
+            m.forget(root);
+            _ = m.panels.orderedRemove(pi);
+            if (art_panel) |np| try m.panels.append(m.a(), np);
+        }
     }
 
     /// An older document's rows or columns, as directions (see
@@ -5605,8 +5687,8 @@ pub const Model = struct {
     /// Inserts item `item` at position `index` of a track's flow (0
     /// before the first item; null for the end). Its tile, if any, must
     /// already exist.
-    pub fn place(m: *Model, panel: usize, region: usize, index: ?usize, item: Item) Error!void {
-        const items = m.flow(panel, region);
+    pub fn place(m: *Model, parent: Parent, region: usize, index: ?usize, item: Item) Error!void {
+        const items = m.flow(parent, region);
         const at = index orelse items.items.len;
         if (at > items.items.len) return error.NoSuchItem;
         var it = item;
@@ -5618,10 +5700,10 @@ pub const Model = struct {
     /// Inserts a new tile made from `prototype` at position `index` of a
     /// track's flow: `along` u long in the track's direction and the
     /// prototype's smallest size across. Returns it.
-    pub fn insertTile(m: *Model, panel: usize, region: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
+    pub fn insertTile(m: *Model, parent: Parent, region: usize, index: usize, prototype: PrototypeId, along: f64) Error!TileId {
         if (m.protoIndex(prototype) == null) return error.NoSuchPrototype;
-        if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
-        const major = m.panels.items[panel].regions.items[region].major();
+        if (index > m.flow(parent, region).items.len) return error.NoSuchItem;
+        const major = m.regionsIn(parent)[region].major();
         const across = m.proto(prototype).smallest(major, .across);
         var buf: [64]u8 = undefined;
         const id = try m.addTile(.{
@@ -5630,7 +5712,7 @@ pub const Model = struct {
             .w = if (major == .row) along else across,
             .h = if (major == .row) across else along,
         });
-        try m.place(panel, region, index, .{ .what = .{ .tile = id } });
+        try m.place(parent, region, index, .{ .what = .{ .tile = id } });
         return id;
     }
 
@@ -5672,11 +5754,11 @@ pub const Model = struct {
 
     /// Inserts a blank, a tile of the built-in Blank prototype, `length` u
     /// long (in the track's unit) at position `index` of a track. Returns it.
-    pub fn insertBlank(m: *Model, panel: usize, region: usize, index: usize, length: f64) Error!TileId {
+    pub fn insertBlank(m: *Model, parent: Parent, region: usize, index: usize, length: f64) Error!TileId {
         if (!(length > 0)) return error.BadSize;
-        if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
+        if (index > m.flow(parent, region).items.len) return error.NoSuchItem;
         const blank = try m.blankPrototype();
-        const major = m.panels.items[panel].regions.items[region].major();
+        const major = m.regionsIn(parent)[region].major();
         var buf: [64]u8 = undefined;
         const id = try m.addTile(.{
             .designator = m.nextDesignator(&buf, "B"),
@@ -5684,18 +5766,18 @@ pub const Model = struct {
             .w = if (major == .row) length else 1,
             .h = if (major == .row) 1 else length,
         });
-        try m.place(panel, region, index, .{ .what = .{ .tile = id } });
+        try m.place(parent, region, index, .{ .what = .{ .tile = id } });
         return id;
     }
 
     /// Inserts a hard break at position `index` of a track: what follows
     /// starts the next segment. With the track's indent set, a blank that
     /// long follows it. Returns how many items went in (1, or 2).
-    pub fn insertBreak(m: *Model, panel: usize, region: usize, index: usize) Error!usize {
-        try m.place(panel, region, index, .{ .what = .hard_break });
-        const indent = m.trackIndent(panel, region);
+    pub fn insertBreak(m: *Model, parent: Parent, region: usize, index: usize) Error!usize {
+        try m.place(parent, region, index, .{ .what = .hard_break });
+        const indent = m.trackIndent(parent, region);
         if (!(indent > 0)) return 1;
-        _ = try m.insertBlank(panel, region, index + 1, indent);
+        _ = try m.insertBlank(parent, region, index + 1, indent);
         return 2;
     }
 
@@ -5885,7 +5967,7 @@ pub const Model = struct {
         f.style = text;
         // Its tracks take it for new runs.
         for (f.tracks.items) |tid| if (m.trackById(tid)) |tr| {
-            const rg = &m.panels.items[tr.panel].regions.items[tr.region];
+            const rg = &m.regionsIn(tr.parent)[tr.region];
             if (rg.style != null) rg.style = text;
         };
         f.paragraph_default = paragraph;
@@ -5902,15 +5984,15 @@ pub const Model = struct {
     /// Inserts a paragraph separator at position `index` of a track: the
     /// paragraph before it ends, and the one after it is set in `style`
     /// (null: the track's).
-    pub fn insertParagraph(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
+    pub fn insertParagraph(m: *Model, parent: Parent, region: usize, index: usize, style: ?ParaId) Error!void {
         if (style) |id| if (m.paraIndex(id) == null) return error.NoSuchStyle;
-        try m.place(panel, region, index, .{ .what = .{ .paragraph = style } });
+        try m.place(parent, region, index, .{ .what = .{ .paragraph = style } });
     }
 
     /// Where the paragraph holding item `index` of a track takes its
     /// style from: the separator before it, or (null) the track.
-    pub fn paragraphStart(m: *const Model, panel: usize, region: usize, index: usize) ?usize {
-        const items = m.flowItems(panel, region);
+    pub fn paragraphStart(m: *const Model, parent: Parent, region: usize, index: usize) ?usize {
+        const items = m.flowItems(parent, region);
         var k = @min(index, items.len);
         while (k > 0) {
             k -= 1;
@@ -5920,18 +6002,18 @@ pub const Model = struct {
     }
 
     /// The paragraph style of the paragraph holding item `index`.
-    pub fn paragraphStyleAt(m: *const Model, panel: usize, region: usize, index: usize) ?ParaId {
-        const f = m.trackFlow(panel, region) orelse return null;
-        const k = m.paragraphStart(panel, region, index) orelse return f.paragraph;
+    pub fn paragraphStyleAt(m: *const Model, parent: Parent, region: usize, index: usize) ?ParaId {
+        const f = m.trackFlow(parent, region) orelse return null;
+        const k = m.paragraphStart(parent, region, index) orelse return f.paragraph;
         return f.items.items[k].what.paragraph;
     }
 
     /// Sets the paragraph style of the paragraph holding item `index`
     /// (null: none), at its separator or, for the first, on the track.
-    pub fn setParagraphAt(m: *Model, panel: usize, region: usize, index: usize, style: ?ParaId) Error!void {
+    pub fn setParagraphAt(m: *Model, parent: Parent, region: usize, index: usize, style: ?ParaId) Error!void {
         if (style) |id| if (m.paraIndex(id) == null) return error.NoSuchStyle;
-        const f = m.flowOf(panel, region);
-        if (m.paragraphStart(panel, region, index)) |k| {
+        const f = m.flowOf(parent, region);
+        if (m.paragraphStart(parent, region, index)) |k| {
             f.items.items[k].what = .{ .paragraph = style };
         } else f.paragraph = style;
         m.revision += 1;
@@ -5939,39 +6021,39 @@ pub const Model = struct {
 
     /// Joins item `index` of a track to the next one, or parts them: with
     /// `bind`, no break falls between them, so they move as one group.
-    pub fn setBind(m: *Model, panel: usize, region: usize, index: usize, bind: bool) Error!void {
-        const items = m.flow(panel, region).items;
+    pub fn setBind(m: *Model, parent: Parent, region: usize, index: usize, bind: bool) Error!void {
+        const items = m.flow(parent, region).items;
         if (index + 1 >= items.len) return error.NoSuchItem;
         items[index].bind = bind;
         m.revision += 1;
     }
 
     /// Sets the gap before flow item `index`, u (in its track's pitch).
-    pub fn setItemGap(m: *Model, panel: usize, region: usize, index: usize, gap: f64) Error!void {
+    pub fn setItemGap(m: *Model, parent: Parent, region: usize, index: usize, gap: f64) Error!void {
         if (!(gap >= 0)) return error.BadSize;
-        const items = m.flow(panel, region).items;
+        const items = m.flow(parent, region).items;
         if (index >= items.len) return error.NoSuchItem;
         items[index].gap = gap;
         m.revision += 1;
     }
 
     /// Renames track `region` of `panel`.
-    pub fn renameRegion(m: *Model, panel: usize, region: usize, name: []const u8) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+    pub fn renameRegion(m: *Model, parent: Parent, region: usize, name: []const u8) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchItem;
         if (name.len == 0) return error.BadValue;
-        m.panels.items[panel].regions.items[region].name = try m.a().dupe(u8, name);
+        m.regionsIn(parent)[region].name = try m.a().dupe(u8, name);
         m.revision += 1;
     }
 
     /// Names the keys of the flow track `region` of `panel` is in, in flow
     /// order, `prefix`1, `prefix`2 … (spacers left out). Refused, changing
     /// nothing, when a name would be another key's elsewhere.
-    pub fn nameKeysInOrder(m: *Model, panel: usize, region: usize, prefix: []const u8) Error!usize {
+    pub fn nameKeysInOrder(m: *Model, parent: Parent, region: usize, prefix: []const u8) Error!usize {
         if (prefix.len == 0) return error.BadValue;
         const al = m.arena.child_allocator;
         var keys: std.ArrayList(TileId) = .empty;
         defer keys.deinit(al);
-        for (m.flowItems(panel, region)) |item| if (item.tileOf()) |t| {
+        for (m.flowItems(parent, region)) |item| if (item.tileOf()) |t| {
             if (m.tileConst(t).removed or m.proto(m.tileConst(t).prototype).spacer) continue;
             try keys.append(al, t);
         };
@@ -5994,20 +6076,20 @@ pub const Model = struct {
     /// left out. So a panel of one flow a row is named as one flow through
     /// them all would be. A name that is another key's elsewhere names
     /// none. The count named.
-    pub fn nameKeysInPanel(m: *Model, panel: usize, prefix: []const u8) Error!usize {
+    pub fn nameKeysInPanel(m: *Model, parent: Parent, prefix: []const u8) Error!usize {
         if (prefix.len == 0) return error.BadValue;
         const al = m.arena.child_allocator;
         var keys: std.ArrayList(TileId) = .empty;
         defer keys.deinit(al);
         var seen: std.ArrayList(ObjectId) = .empty;
         defer seen.deinit(al);
-        for (m.panels.items[panel].regions.items, 0..) |_, ri| {
-            const f = m.trackFlow(panel, ri);
+        for (m.regionsIn(parent), 0..) |_, ri| {
+            const f = m.trackFlow(parent, ri);
             if (f) |fl| {
                 if (std.mem.indexOfScalar(ObjectId, seen.items, fl.id) != null) continue;
                 try seen.append(al, fl.id);
             }
-            for (m.flowItems(panel, ri)) |item| if (item.tileOf()) |t| {
+            for (m.flowItems(parent, ri)) |item| if (item.tileOf()) |t| {
                 if (m.tileConst(t).removed or m.proto(m.tileConst(t).prototype).spacer) continue;
                 try keys.append(al, t);
             };
@@ -6026,33 +6108,36 @@ pub const Model = struct {
     }
 
     /// The index in `panel` of the track with ID `id`.
-    pub fn regionIndex(m: *const Model, panel: usize, id: ObjectId) ?usize {
+    pub fn regionIndex(m: *const Model, parent: Parent, id: ObjectId) ?usize {
         if (id == .none) return null;
-        for (m.panels.items[panel].regions.items, 0..) |r, k| if (r.id == id) return k;
+        for (m.regionsIn(parent), 0..) |r, k| if (r.id == id) return k;
         return null;
     }
 
     /// The track with ID `id`, on whichever panel.
     pub fn trackById(m: *const Model, id: ObjectId) ?TrackRef {
         if (id == .none) return null;
-        for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |r, k| if (r.id == id) return .{ .panel = pi, .region = k };
+        for (0..m.parentCount()) |i| {
+            const parent = m.parentAt(i);
+            for (m.regionsIn(parent), 0..) |r, k| if (r.id == id) return .{ .parent = parent, .region = k };
+        }
         return null;
     }
 
     /// Where track `region` of `panel` comes in its flow's list, if it is
     /// in it.
-    fn flowPosition(m: *const Model, panel: usize, region: usize) ?usize {
-        const f = m.trackFlow(panel, region) orelse return null;
-        const id = m.panels.items[panel].regions.items[region].id;
+    fn flowPosition(m: *const Model, parent: Parent, region: usize) ?usize {
+        const f = m.trackFlow(parent, region) orelse return null;
+        const id = m.regionsIn(parent)[region].id;
         for (f.tracks.items, 0..) |t, k| if (t == id) return k;
         return null;
     }
 
     /// The track before track `region` of `panel` in its flow (whose
     /// content goes on into it), on whichever panel, if any.
-    pub fn threadBefore(m: *const Model, panel: usize, region: usize) ?TrackRef {
-        const f = m.trackFlow(panel, region) orelse return null;
-        var k = m.flowPosition(panel, region) orelse return null;
+    pub fn threadBefore(m: *const Model, parent: Parent, region: usize) ?TrackRef {
+        const f = m.trackFlow(parent, region) orelse return null;
+        var k = m.flowPosition(parent, region) orelse return null;
         while (k > 0) {
             k -= 1;
             if (m.trackById(f.tracks.items[k])) |t| return t;
@@ -6062,24 +6147,24 @@ pub const Model = struct {
 
     /// The track after track `region` of `panel` in its flow (its content
     /// goes on into it once this one is full), if any.
-    pub fn threadAfter(m: *const Model, panel: usize, region: usize) ?TrackRef {
-        const f = m.trackFlow(panel, region) orelse return null;
-        const k = m.flowPosition(panel, region) orelse return null;
+    pub fn threadAfter(m: *const Model, parent: Parent, region: usize) ?TrackRef {
+        const f = m.trackFlow(parent, region) orelse return null;
+        const k = m.flowPosition(parent, region) orelse return null;
         for (f.tracks.items[k + 1 ..]) |id| if (m.trackById(id)) |t| return t;
         return null;
     }
 
     /// The first track of track `region`'s flow (itself when it is the
     /// first, or in none).
-    pub fn threadHead(m: *const Model, panel: usize, region: usize) TrackRef {
-        const f = m.trackFlow(panel, region) orelse return .{ .panel = panel, .region = region };
+    pub fn threadHead(m: *const Model, parent: Parent, region: usize) TrackRef {
+        const f = m.trackFlow(parent, region) orelse return .{ .parent = parent, .region = region };
         for (f.tracks.items) |id| if (m.trackById(id)) |t| return t;
-        return .{ .panel = panel, .region = region };
+        return .{ .parent = parent, .region = region };
     }
 
     /// The tracks of the flow track `head` is in, in order, into `buf`.
     pub fn thread(m: *const Model, head: TrackRef, buf: []TrackRef) []TrackRef {
-        const f = m.trackFlow(head.panel, head.region) orelse {
+        const f = m.trackFlow(head.parent, head.region) orelse {
             if (buf.len == 0) return buf[0..0];
             buf[0] = head;
             return buf[0..1];
@@ -6095,13 +6180,13 @@ pub const Model = struct {
     }
 
     fn trackPtr(m: *Model, t: TrackRef) *TileRegion {
-        return &m.panels.items[t.panel].regions.items[t.region];
+        return &m.regionsIn(t.parent)[t.region];
     }
 
     /// Joins track `to` after track `from`, on one panel (see
     /// `threadTracks`).
-    pub fn joinTracks(m: *Model, panel: usize, from: usize, to: usize) Error!void {
-        return m.threadTracks(panel, from, panel, to);
+    pub fn joinTracks(m: *Model, parent: Parent, from: usize, to: usize) Error!void {
+        return m.threadTracks(parent, from, parent, to);
     }
 
     /// Joins track `to` (of `to_panel`) after track `from` (of
@@ -6110,19 +6195,19 @@ pub const Model = struct {
     /// `from`, on this panel or another. What `to`'s thread held is added
     /// to the end of the flow, as a new paragraph. Both must run the same
     /// way, and `to` must start its thread and not be in `from`'s.
-    pub fn threadTracks(m: *Model, from_panel: usize, from: usize, to_panel: usize, to: usize) Error!void {
-        if (from_panel >= m.panels.items.len or to_panel >= m.panels.items.len) return error.NoSuchRow;
-        if (from >= m.panels.items[from_panel].regions.items.len or to >= m.panels.items[to_panel].regions.items.len) return error.NoSuchRow;
-        const f: TrackRef = .{ .panel = from_panel, .region = from };
-        const t: TrackRef = .{ .panel = to_panel, .region = to };
+    pub fn threadTracks(m: *Model, from_parent: Parent, from: usize, to_parent: Parent, to: usize) Error!void {
+        if (!m.hasParent(from_parent) or !m.hasParent(to_parent)) return error.NoSuchRow;
+        if (from >= m.regionsIn(from_parent).len or to >= m.regionsIn(to_parent).len) return error.NoSuchRow;
+        const f: TrackRef = .{ .parent = from_parent, .region = from };
+        const t: TrackRef = .{ .parent = to_parent, .region = to };
         if (m.trackPtr(f).major() != m.trackPtr(t).major()) return error.BadJoin;
-        if (m.threadBefore(to_panel, to) != null) return error.BadJoin;
-        const fi = m.trackFlowIndex(from_panel, from) orelse return error.BadJoin;
-        const gi = m.trackFlowIndex(to_panel, to) orelse return error.BadJoin;
+        if (m.threadBefore(to_parent, to) != null) return error.BadJoin;
+        const fi = m.trackFlowIndex(from_parent, from) orelse return error.BadJoin;
+        const gi = m.trackFlowIndex(to_parent, to) orelse return error.BadJoin;
         if (fi == gi) return error.BadJoin;
         // `to`'s flow's tracks go in after `from`, its content after the
         // flow's, as a new paragraph; its flow goes.
-        const at = (m.flowPosition(from_panel, from) orelse return error.BadJoin) + 1;
+        const at = (m.flowPosition(from_parent, from) orelse return error.BadJoin) + 1;
         const g = m.flows.items[gi];
         const into = &m.flows.items[fi];
         try into.tracks.insertSlice(m.a(), at, g.tracks.items);
@@ -6141,45 +6226,45 @@ pub const Model = struct {
     /// Takes track `region` out of its thread: the tracks either side are
     /// joined, and the flow stays whole on the thread (on the next track
     /// when `region` held it); what no longer fits overflows the last.
-    pub fn unjoinTrack(m: *Model, panel: usize, region: usize) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchRow;
-        const before = m.threadBefore(panel, region);
-        const after = m.threadAfter(panel, region);
+    pub fn unjoinTrack(m: *Model, parent: Parent, region: usize) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchRow;
+        const before = m.threadBefore(parent, region);
+        const after = m.threadAfter(parent, region);
         if (before == null and after == null) return error.BadJoin;
         // Its flow keeps the content (starting in the next track, when it
         // started in this one); the track gets a flow of its own, empty.
-        const fi = m.trackFlowIndex(panel, region).?;
-        const k = m.flowPosition(panel, region).?;
+        const fi = m.trackFlowIndex(parent, region).?;
+        const k = m.flowPosition(parent, region).?;
         _ = m.flows.items[fi].tracks.orderedRemove(k);
         const indent = m.flows.items[fi].indent;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         const ni = try m.newFlow(r.name, r.id);
         m.flows.items[ni].indent = indent;
-        m.panels.items[panel].regions.items[region].flow = m.flows.items[ni].id;
+        m.regionsIn(parent)[region].flow = m.flows.items[ni].id;
         m.revision += 1;
     }
 
     /// Sets how a track's segments hold their content: its alignment, the
     /// indent after hard breaks (u), and the gap between segments the path
     /// continues to (u).
-    pub fn setTrackFlow(m: *Model, panel: usize, region: usize, alignment: Align, indent: f64, gap: f64) Error!void {
+    pub fn setTrackFlow(m: *Model, parent: Parent, region: usize, alignment: Align, indent: f64, gap: f64) Error!void {
         if (!(indent >= 0) or !(gap >= 0)) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         r.alignment = alignment;
         r.gap = gap;
-        m.flowOf(panel, region).indent = indent;
+        m.flowOf(parent, region).indent = indent;
         m.revision += 1;
     }
 
     /// Inserts a run of markup (text, an equation, or both) at position
     /// `index` of a track.
-    pub fn insertRun(m: *Model, panel: usize, region: usize, index: usize, run: Run) Error!void {
-        try m.place(panel, region, index, .{ .what = .{ .run = run } });
+    pub fn insertRun(m: *Model, parent: Parent, region: usize, index: usize, run: Run) Error!void {
+        try m.place(parent, region, index, .{ .what = .{ .run = run } });
     }
 
     /// Sets the markup of the run at position `index` of a track.
-    pub fn setRunContent(m: *Model, panel: usize, region: usize, index: usize, content: []const u8) Error!void {
-        const items = m.flow(panel, region).items;
+    pub fn setRunContent(m: *Model, parent: Parent, region: usize, index: usize, content: []const u8) Error!void {
+        const items = m.flow(parent, region).items;
         if (index >= items.len or items[index].what != .run) return error.NoSuchItem;
         items[index].what.run.content = try m.a().dupe(u8, content);
         m.revision += 1;
@@ -6192,8 +6277,8 @@ pub const Model = struct {
     // `edit`): only characters are removed, and a run split in two keeps
     // what each part reads as.
 
-    fn runAt(m: *Model, panel: usize, region: usize, index: usize) ?*Run {
-        const items = m.flow(panel, region).items;
+    fn runAt(m: *Model, parent: Parent, region: usize, index: usize) ?*Run {
+        const items = m.flow(parent, region).items;
         if (index >= items.len or items[index].what != .run) return null;
         return &items[index].what.run;
     }
@@ -6201,22 +6286,22 @@ pub const Model = struct {
     /// Types plain `text` in at `at` (newlines break paragraphs): into the
     /// run there, else onto the end of the run before, else as a new run in
     /// `style`. Returns the place after it.
-    pub fn insertText(m: *Model, panel: usize, region: usize, at: FlowPos, text: []const u8, style: StyleId) Error!FlowPos {
+    pub fn insertText(m: *Model, parent: Parent, region: usize, at: FlowPos, text: []const u8, style: StyleId) Error!FlowPos {
         var pos = at;
         var lines = std.mem.splitScalar(u8, text, '\n');
         var first = true;
         while (lines.next()) |line_raw| {
-            if (!first) pos = try m.breakAt(panel, region, pos, true);
+            if (!first) pos = try m.breakAt(parent, region, pos, true);
             first = false;
             const line = std.mem.trimEnd(u8, line_raw, "\r");
             if (line.len == 0) continue;
             var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
             defer scratch.deinit();
             const esc = try edit_.escape(scratch.allocator(), line);
-            const items = m.flow(panel, region).items;
+            const items = m.flow(parent, region).items;
             if (pos.index > items.len) return error.NoSuchItem;
-            const here = m.runAt(panel, region, pos.index);
-            const before = if (pos.index > 0) m.runAt(panel, region, pos.index - 1) else null;
+            const here = m.runAt(parent, region, pos.index);
+            const before = if (pos.index > 0) m.runAt(parent, region, pos.index - 1) else null;
             if (here != null and !(here.?.equation and pos.offset == 0)) {
                 // Into the run at the place (inside an equation, into it).
                 const r = here.?;
@@ -6228,11 +6313,11 @@ pub const Model = struct {
                 const r = before.?;
                 r.content = try std.mem.concat(m.a(), u8, &.{ r.content, esc });
             } else {
-                try m.place(panel, region, pos.index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, esc) } } });
+                try m.place(parent, region, pos.index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, esc) } } });
                 pos = .{ .index = pos.index + 1 };
             }
             // At the end of a run: the place before what follows it.
-            if (m.runAt(panel, region, pos.index)) |r| if (pos.offset >= r.content.len) {
+            if (m.runAt(parent, region, pos.index)) |r| if (pos.offset >= r.content.len) {
                 pos = .{ .index = pos.index + 1 };
             };
         }
@@ -6243,21 +6328,21 @@ pub const Model = struct {
     /// Deletes what lies between `from` and `to` (either way round): the
     /// characters of the runs at either end, and every item between; runs
     /// left side by side in one style are joined. Returns where it was.
-    pub fn deleteRange(m: *Model, panel: usize, region: usize, from: FlowPos, to: FlowPos) Error!FlowPos {
+    pub fn deleteRange(m: *Model, parent: Parent, region: usize, from: FlowPos, to: FlowPos) Error!FlowPos {
         var f = from;
         var t = to;
         if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
         var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
         defer scratch.deinit();
         const sa = scratch.allocator();
-        const len = m.flow(panel, region).items.len;
+        const len = m.flow(parent, region).items.len;
         if (f.index > len or t.index > len) return error.NoSuchItem;
         if (f.index == t.index) {
-            if (m.runAt(panel, region, f.index)) |r| if (t.offset > f.offset) {
+            if (m.runAt(parent, region, f.index)) |r| if (t.offset > f.offset) {
                 r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, t.offset, r.equation));
                 // Nothing left of it: it goes.
                 if (!try edit_.hasChars(sa, r.content, r.equation)) {
-                    try m.removeAt(panel, region, f.index);
+                    try m.removeAt(parent, region, f.index);
                     f.offset = 0;
                 }
             };
@@ -6265,12 +6350,12 @@ pub const Model = struct {
             return f;
         }
         // The start of the run the range ends in.
-        if (t.offset > 0) if (m.runAt(panel, region, t.index)) |r| {
+        if (t.offset > 0) if (m.runAt(parent, region, t.index)) |r| {
             r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, 0, t.offset, r.equation));
         };
         // The end of the run it starts in.
         var keep = f.index;
-        if (f.offset > 0) if (m.runAt(panel, region, f.index)) |r| {
+        if (f.offset > 0) if (m.runAt(parent, region, f.index)) |r| {
             r.content = try m.a().dupe(u8, try edit_.deleteChars(sa, r.content, f.offset, @intCast(r.content.len), r.equation));
             keep = f.index + 1;
         };
@@ -6278,24 +6363,24 @@ pub const Model = struct {
         var k = t.index;
         while (k > keep) {
             k -= 1;
-            try m.removeAt(panel, region, k);
+            try m.removeAt(parent, region, k);
         }
         var result: FlowPos = if (f.offset > 0) f else .{ .index = keep };
         // Runs left side by side, in one style: one run.
-        if (keep > 0) if (m.runAt(panel, region, keep - 1)) |a_run| if (m.runAt(panel, region, keep)) |b_run| {
+        if (keep > 0) if (m.runAt(parent, region, keep - 1)) |a_run| if (m.runAt(parent, region, keep)) |b_run| {
             if (a_run.style == b_run.style and !a_run.equation and !b_run.equation) {
                 const joined_at: u32 = @intCast(a_run.content.len);
                 a_run.content = try std.mem.concat(m.a(), u8, &.{ a_run.content, b_run.content });
-                try m.removeAt(panel, region, keep);
+                try m.removeAt(parent, region, keep);
                 if (f.offset == 0) result = .{ .index = keep - 1, .offset = joined_at };
             }
         };
         // A run left with nothing in it goes.
-        if (m.runAt(panel, region, result.index)) |r| if (!try edit_.hasChars(sa, r.content, r.equation)) {
-            try m.removeAt(panel, region, result.index);
+        if (m.runAt(parent, region, result.index)) |r| if (!try edit_.hasChars(sa, r.content, r.equation)) {
+            try m.removeAt(parent, region, result.index);
             result.offset = 0;
         };
-        if (m.runAt(panel, region, result.index)) |r| if (result.offset >= r.content.len and result.offset > 0) {
+        if (m.runAt(parent, region, result.index)) |r| if (result.offset >= r.content.len and result.offset > 0) {
             result = .{ .index = result.index + 1 };
         };
         m.revision += 1;
@@ -6306,10 +6391,10 @@ pub const Model = struct {
     /// the run is split there (its markup kept whole); inside an
     /// equation's structure, or in an equation, it goes after that run.
     /// Returns the equation's index.
-    pub fn insertEquation(m: *Model, panel: usize, region: usize, at: FlowPos, style: StyleId) Error!usize {
+    pub fn insertEquation(m: *Model, parent: Parent, region: usize, at: FlowPos, style: StyleId) Error!usize {
         var index = at.index;
-        if (index > m.flow(panel, region).items.len) return error.NoSuchItem;
-        if (at.offset > 0) if (m.runAt(panel, region, at.index)) |r| {
+        if (index > m.flow(parent, region).items.len) return error.NoSuchItem;
+        if (at.offset > 0) if (m.runAt(parent, region, at.index)) |r| {
             index = at.index + 1;
             if (at.offset < r.content.len and !r.equation) {
                 var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
@@ -6317,11 +6402,11 @@ pub const Model = struct {
                 if (try edit_.splitAt(scratch.allocator(), r.content, at.offset)) |parts| {
                     const rs = r.style;
                     r.content = try m.a().dupe(u8, parts[0]);
-                    try m.place(panel, region, index, .{ .what = .{ .run = .{ .style = rs, .content = try m.a().dupe(u8, parts[1]) } } });
+                    try m.place(parent, region, index, .{ .what = .{ .run = .{ .style = rs, .content = try m.a().dupe(u8, parts[1]) } } });
                 }
             }
         };
-        try m.place(panel, region, index, .{ .what = .{ .run = .{ .style = style, .content = "", .equation = true } } });
+        try m.place(parent, region, index, .{ .what = .{ .run = .{ .style = style, .content = "", .equation = true } } });
         m.revision += 1;
         return index;
     }
@@ -6333,9 +6418,9 @@ pub const Model = struct {
     /// The style a paragraph begun at item `index` of a track takes: the
     /// one it splits, or, begun at that one's end, its next (FrameMaker's
     /// Next ¶ Tag); null for the flow's own.
-    pub fn paragraphStyleAfter(m: *Model, panel: usize, region: usize, index: usize) ?ParaId {
-        const here = m.paragraphStyleAt(panel, region, index);
-        const f = m.trackFlow(panel, region) orelse return here;
+    pub fn paragraphStyleAfter(m: *Model, parent: Parent, region: usize, index: usize) ?ParaId {
+        const here = m.paragraphStyleAt(parent, region, index);
+        const f = m.trackFlow(parent, region) orelse return here;
         const items = f.items.items;
         const at_end = index >= items.len or items[index].what == .paragraph;
         if (!at_end) return here;
@@ -6344,9 +6429,9 @@ pub const Model = struct {
         return if (next == f.paragraph_default) null else next;
     }
 
-    pub fn breakAt(m: *Model, panel: usize, region: usize, at: FlowPos, paragraph: bool) Error!FlowPos {
+    pub fn breakAt(m: *Model, parent: Parent, region: usize, at: FlowPos, paragraph: bool) Error!FlowPos {
         var index = at.index;
-        if (at.offset > 0) if (m.runAt(panel, region, at.index)) |r| {
+        if (at.offset > 0) if (m.runAt(parent, region, at.index)) |r| {
             index = at.index + 1;
             if (at.offset < r.content.len) {
                 var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
@@ -6354,22 +6439,22 @@ pub const Model = struct {
                 if (try edit_.splitAt(scratch.allocator(), r.content, at.offset)) |parts| {
                     const style = r.style;
                     r.content = try m.a().dupe(u8, parts[0]);
-                    try m.place(panel, region, index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, parts[1]) } } });
+                    try m.place(parent, region, index, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, parts[1]) } } });
                 }
             }
         };
         if (paragraph) {
-            const style = m.paragraphStyleAfter(panel, region, index);
-            try m.insertParagraph(panel, region, index, style);
+            const style = m.paragraphStyleAfter(parent, region, index);
+            try m.insertParagraph(parent, region, index, style);
             return .{ .index = index + 1 };
         }
-        const n = try m.insertBreak(panel, region, index);
+        const n = try m.insertBreak(parent, region, index);
         return .{ .index = index + n };
     }
 
     /// The plain text between `from` and `to` (either way round): the
     /// characters of runs, a newline for each break or paragraph.
-    pub fn flowText(m: *Model, gpa: Allocator, panel: usize, region: usize, from: FlowPos, to: FlowPos) Error![]u8 {
+    pub fn flowText(m: *Model, gpa: Allocator, parent: Parent, region: usize, from: FlowPos, to: FlowPos) Error![]u8 {
         var f = from;
         var t = to;
         if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
@@ -6377,7 +6462,7 @@ pub const Model = struct {
         defer scratch.deinit();
         const sa = scratch.allocator();
         var out: std.ArrayList(u8) = .empty;
-        const items = m.flow(panel, region).items;
+        const items = m.flow(parent, region).items;
         var k = f.index;
         while (k <= t.index and k < items.len) : (k += 1) {
             const lo: u32 = if (k == f.index) f.offset else 0;
@@ -6395,8 +6480,8 @@ pub const Model = struct {
 
     /// Removes item `index` of a track: a blank, run or break, or a tile,
     /// which leaves every track it is in.
-    pub fn removeAt(m: *Model, panel: usize, region: usize, index: usize) Error!void {
-        const items = m.flow(panel, region);
+    pub fn removeAt(m: *Model, parent: Parent, region: usize, index: usize) Error!void {
+        const items = m.flow(parent, region);
         if (index >= items.items.len) return error.NoSuchItem;
         if (items.items[index].tileOf()) |id| {
             m.removeTile(id);
@@ -6409,19 +6494,19 @@ pub const Model = struct {
     /// Sets the length of a track's segments, u, as Fit to tiles does with
     /// the length its longest paragraph needs (see `place.Placed`).
     /// Moves a track region to `origin` (the point it holds, panel mm).
-    pub fn moveRegion(m: *Model, panel: usize, region: usize, origin: geom.Point) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+    pub fn moveRegion(m: *Model, parent: Parent, region: usize, origin: geom.Point) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchItem;
         // Its bends are along and across it: they move with it.
-        m.panels.items[panel].regions.items[region].origin = origin;
+        m.regionsIn(parent)[region].origin = origin;
         m.revision += 1;
     }
 
     /// Sets a track region's extent, in its pitch: `along` its tracks and
     /// `across` them (how many tracks deep, fractions allowed).
-    pub fn setRegionSize(m: *Model, panel: usize, region: usize, along: f64, across: f64) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+    pub fn setRegionSize(m: *Model, parent: Parent, region: usize, along: f64, across: f64) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchItem;
         if (!(along > 0) or !(across > 0)) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         if (r.major() == .row) {
             r.w = along;
             r.h = across;
@@ -6435,10 +6520,10 @@ pub const Model = struct {
     /// Sets a region's leading (null: its style's own line spacing) and
     /// the baseline-to-baseline distance it comes to, `pitch` mm; the
     /// region keeps its size in mm, its rows re-spaced.
-    pub fn setLeading(m: *Model, panel: usize, region: usize, leading: ?Leading, pitch: f64) Error!void {
-        if (panel >= m.panels.items.len or region >= m.panels.items[panel].regions.items.len) return error.NoSuchItem;
+    pub fn setLeading(m: *Model, parent: Parent, region: usize, leading: ?Leading, pitch: f64) Error!void {
+        if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchItem;
         if (!(pitch > 0.01) or !std.math.isFinite(pitch)) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         const k = r.pitch / pitch;
         r.w *= k;
         r.h *= k;
@@ -6448,35 +6533,35 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    pub fn setSegmentLength(m: *Model, panel: usize, region: usize, length: f64) Error!void {
+    pub fn setSegmentLength(m: *Model, parent: Parent, region: usize, length: f64) Error!void {
         if (!(length > 0)) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         if (r.major() == .row) r.w = length else r.h = length;
         m.revision += 1;
     }
 
     /// Older documents' history only: a segment moved by hand, now a
     /// control point where that segment was placed (see `bendPath`).
-    pub fn moveSegment(m: *Model, panel: usize, region: usize, segment: usize, solved: []const Segment, along: f64, across: f64, avoid: []const geom.Box) Error!void {
+    pub fn moveSegment(m: *Model, parent: Parent, region: usize, segment: usize, solved: []const Segment, along: f64, across: f64, avoid: []const geom.Box) Error!void {
         _ = avoid;
         if (segment >= solved.len) return error.NoSuchRow;
         const here = solved[segment];
-        _ = try m.bendPath(panel, region, here.across, here.along + along, here.across + across);
+        _ = try m.bendPath(parent, region, here.across, here.along + along, here.across + across);
     }
 
     /// Older documents' history only: the path now keeps its control points.
-    pub fn trimSegments(m: *Model, panel: usize, region: usize, count: usize) void {
+    pub fn trimSegments(m: *Model, parent: Parent, region: usize, count: usize) void {
         _ = m;
-        _ = panel;
+        _ = parent;
         _ = region;
         _ = count;
     }
 
     /// Adds a control point to a track's path at (`along`, `across`) u
     /// from its region's origin. Returns its ID.
-    pub fn addControlPoint(m: *Model, panel: usize, region: usize, along: f64, across: f64) Error!ObjectId {
+    pub fn addControlPoint(m: *Model, parent: Parent, region: usize, along: f64, across: f64) Error!ObjectId {
         if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         const id = m.newId();
         try r.path.append(m.a(), .{ .id = id, .along = along, .across = across });
         m.revision += 1;
@@ -6486,16 +6571,16 @@ pub const Model = struct {
     /// Bends a track's path where a segment attaches to it (`at_across`):
     /// the control point there moves to (`along`, `across`), or one is
     /// made there and moved. The segments after it follow the new shape.
-    pub fn bendPath(m: *Model, panel: usize, region: usize, at_across: f64, along: f64, across: f64) Error!ObjectId {
+    pub fn bendPath(m: *Model, parent: Parent, region: usize, at_across: f64, along: f64, across: f64) Error!ObjectId {
         if (!std.math.isFinite(along) or !std.math.isFinite(across) or across < 0) return error.BadSize;
-        const r = &m.panels.items[panel].regions.items[region];
+        const r = &m.regionsIn(parent)[region];
         for (r.path.items) |*cp| if (@abs(cp.across - at_across) < 1e-6) {
             cp.along = along;
             cp.across = across;
             m.revision += 1;
             return cp.id;
         };
-        return m.addControlPoint(panel, region, along, across);
+        return m.addControlPoint(parent, region, along, across);
     }
 
     fn controlPoint(m: *Model, id: ObjectId) ?*ControlPoint {
@@ -6570,7 +6655,7 @@ pub const Model = struct {
             if (!t.removed and t.prototype == id) n += 1;
         }
         // A grid's stamp uses it whether or not it has instances yet.
-        for (m.panels.items) |p| for (p.grids.items) |g| for (g.stamps.items) |st| {
+        for (0..m.parentCount()) |pk| for (m.gridsIn(m.parentAt(pk))) |g| for (g.stamps.items) |st| {
             if (st.prototype == id) n += 1;
         };
         return n;
@@ -6790,8 +6875,8 @@ test "removing a panel removes its tiles and frees their designators" {
     defer m.deinit();
     _ = try m.placePanel(.{ .name = "A", .w = 50, .h = 50 });
     const b = try m.placePanel(.{ .name = "B", .origin = .{ .x = 100, .y = 0 }, .w = 50, .h = 50 });
-    const r = try m.addRegion(b, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 2, .h = 1, .pitch = 19.05 });
-    try m.place(b, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "K1" }) } });
+    const r = try m.addRegion(.{ .panel = b }, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 2, .h = 1, .pitch = 19.05 });
+    try m.place(.{ .panel = b }, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = "K1" }) } });
     m.removePanel(0);
     try std.testing.expectEqualStrings("B", m.panels.items[0].name);
     m.removePanel(0);
@@ -6825,12 +6910,12 @@ test "designators are unique and actions bump the revision" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
-    const r = try m.addRegion(p, .{ .name = "main", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 2, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "main", .origin = .{ .x = 0, .y = 50 }, .w = 5, .h = 2, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
     const q = try m.addTile(.{ .designator = "Q", .prototype = key });
     try std.testing.expectError(error.DuplicateDesignator, m.addTile(.{ .designator = "Q" }));
     try std.testing.expectError(error.NoSuchPrototype, m.addTile(.{ .designator = "R", .prototype = @fromBackingInt(@intCast(9999)) }));
-    try m.place(p, r, null, .{ .what = .{ .tile = q } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = q } });
     const before = m.revision;
     try m.setTrackText(q, "top", "q");
     try std.testing.expect(m.revision > before);
@@ -6935,28 +7020,28 @@ test "tracks are added empty; a removed tile leaves them" {
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
     const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.5 }, .tracks = &.{.{ .name = "top" }} });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 2, .length = 4.5, .pitch = 19.05 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 2, .length = 4.5, .pitch = 19.05 });
     const region = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(4.5, region.w);
     try std.testing.expectEqual(2, region.h);
     // No segments stored: they come as the flow needs them, along a path
     // that is straight until it is given control points.
     try std.testing.expectEqual(0, region.path.items.len);
-    try std.testing.expectEqual(0, m.flowItems(p, r).len);
+    try std.testing.expectEqual(0, m.flowItems(.{ .panel = p }, r).len);
     try std.testing.expectEqual(0, m.tiles.items.len);
 
     // Columns: as thick as the smallest width, as long as asked.
-    const c = try m.addTracks(p, .{ .name = "side", .origin = .{ .x = 120, .y = 95 }, .major = .column, .prototype = key, .count = 3, .length = 2, .pitch = 19.05 });
+    const c = try m.addTracks(.{ .panel = p }, .{ .name = "side", .origin = .{ .x = 120, .y = 95 }, .major = .column, .prototype = key, .count = 3, .length = 2, .pitch = 19.05 });
     const side = m.panels.items[p].regions.items[c];
     try std.testing.expectEqual(3, side.w);
     try std.testing.expectEqual(2, side.h);
-    try std.testing.expectError(error.BadSize, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .prototype = key, .count = 1, .length = 0.5, .pitch = 19.05 }));
+    try std.testing.expectError(error.BadSize, m.addTracks(.{ .panel = p }, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .prototype = key, .count = 1, .length = 0.5, .pitch = 19.05 }));
 
-    for (0..4) |i| _ = try m.insertTile(p, r, i, key, 1);
+    for (0..4) |i| _ = try m.insertTile(.{ .panel = p }, r, i, key, 1);
     const t1 = m.findTile("T1").?;
     m.removeTile(t1);
     try std.testing.expectEqual(null, m.findTile("T1"));
-    try std.testing.expectEqual(3, m.flowItems(p, r).len);
+    try std.testing.expectEqual(3, m.flowItems(.{ .panel = p }, r).len);
 }
 
 test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
@@ -6964,13 +7049,13 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
     const key = try m.addPrototype(.{ .name = "key", .widths = &.{ 1, 1.25, 1.5 } });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 1, .length = 2, .pitch = 19.05 });
-    _ = try m.insertTile(p, r, 0, key, 1);
-    _ = try m.insertTile(p, r, 1, key, 1);
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "keys", .origin = .{ .x = 5, .y = 95 }, .prototype = key, .count = 1, .length = 2, .pitch = 19.05 });
+    _ = try m.insertTile(.{ .panel = p }, r, 0, key, 1);
+    _ = try m.insertTile(.{ .panel = p }, r, 1, key, 1);
     // T1 T2; insert a 1.5 u tile between them, and a blank before it.
-    const t = try m.insertTile(p, r, 1, key, 1.5);
-    const b = try m.insertBlank(p, r, 1, 0.25);
-    const items = m.flowItems(p, r);
+    const t = try m.insertTile(.{ .panel = p }, r, 1, key, 1.5);
+    const b = try m.insertBlank(.{ .panel = p }, r, 1, 0.25);
+    const items = m.flowItems(.{ .panel = p }, r);
     try std.testing.expectEqual(4, items.len);
     // A blank is a tile of the built-in Blank prototype.
     try std.testing.expectEqual(b, items[1].tileOf().?);
@@ -6982,26 +7067,26 @@ test "tiles, blanks, runs and breaks are inserted and removed in flow order" {
     try std.testing.expectEqualStrings("T3", m.tileConst(t).designator);
     try std.testing.expectEqual(1.5, m.tileConst(t).w);
     // Removing the blank, then the tile.
-    try m.removeAt(p, r, 1);
-    try m.removeAt(p, r, 1);
-    const left = m.flowItems(p, r);
+    try m.removeAt(.{ .panel = p }, r, 1);
+    try m.removeAt(.{ .panel = p }, r, 1);
+    const left = m.flowItems(.{ .panel = p }, r);
     try std.testing.expectEqual(2, left.len);
     try std.testing.expectEqual(null, m.findTile("T3"));
-    try std.testing.expectError(error.NoSuchItem, m.removeAt(p, r, 5));
+    try std.testing.expectError(error.NoSuchItem, m.removeAt(.{ .panel = p }, r, 5));
     // A new tile takes the lowest free designator.
-    _ = try m.insertTile(p, r, 0, key, 1);
+    _ = try m.insertTile(.{ .panel = p }, r, 0, key, 1);
     try std.testing.expect(m.findTile("T3") != null);
     // Text and equations share the flow with the tiles, and a hard break
     // goes between any two items.
-    try m.insertRun(p, r, 1, .{ .content = "x = \\frac{1}{2}" });
-    _ = try m.insertBreak(p, r, 2);
-    const mixed = m.flowItems(p, r);
+    try m.insertRun(.{ .panel = p }, r, 1, .{ .content = "x = \\frac{1}{2}" });
+    _ = try m.insertBreak(.{ .panel = p }, r, 2);
+    const mixed = m.flowItems(.{ .panel = p }, r);
     try std.testing.expectEqual(5, mixed.len);
     try std.testing.expectEqualStrings("x = \\frac{1}{2}", mixed[1].what.run.content);
     try std.testing.expect(mixed[2].what == .hard_break);
-    try m.setRunContent(p, r, 1, "word");
-    try std.testing.expectEqualStrings("word", m.flowItems(p, r)[1].what.run.content);
-    try std.testing.expectError(error.NoSuchItem, m.setRunContent(p, r, 0, "x"));
+    try m.setRunContent(.{ .panel = p }, r, 1, "word");
+    try std.testing.expectEqualStrings("word", m.flowItems(.{ .panel = p }, r)[1].what.run.content);
+    try std.testing.expectError(error.NoSuchItem, m.setRunContent(.{ .panel = p }, r, 0, "x"));
 }
 
 test "tracks sized to a text style are one line pitch thick, and keep the style" {
@@ -7010,15 +7095,15 @@ test "tracks sized to a text style are one line pitch thick, and keep the style"
     const p = try m.addPanel("board", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 3 });
     // A 4.2 mm line pitch (the caller measures it from the style's font).
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 5, .y = 95 }, .style = body, .count = 3, .length = 20, .pitch = 4.2 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 5, .y = 95 }, .style = body, .count = 3, .length = 20, .pitch = 4.2 });
     const region = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(body, region.style.?);
     try std.testing.expectEqual(null, region.prototype);
     try std.testing.expectEqual(20, region.w);
     try std.testing.expectEqual(3, region.h);
     try std.testing.expectApproxEqAbs(@as(f64, 4.2), region.boxAt(.{ .across = 1 }).height(), 1e-9);
-    try std.testing.expectError(error.NoSuchStyle, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = @fromBackingInt(@intCast(9999)), .count = 1, .length = 2, .pitch = 4 }));
-    try std.testing.expectError(error.NoSuchPrototype, m.addTracks(p, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
+    try std.testing.expectError(error.NoSuchStyle, m.addTracks(.{ .panel = p }, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .style = @fromBackingInt(@intCast(9999)), .count = 1, .length = 2, .pitch = 4 }));
+    try std.testing.expectError(error.NoSuchPrototype, m.addTracks(.{ .panel = p }, .{ .name = "x", .origin = .{ .x = 0, .y = 0 }, .count = 1, .length = 2, .pitch = 4 }));
 }
 
 /// A small dot of line art at `at` on panel `panel`, named `name` (tests:
@@ -7030,17 +7115,23 @@ fn testDot(m: *Model, panel: usize, name: []const u8, at: geom.Point) !usize {
     return m.addArt(panel, .{ .name = name, .at = at, .shapes = try art_.primitive(arena.allocator(), name, prim, .{}), .prim = prim });
 }
 
-test "a canvas: units chosen up front, no sheet, loose objects on an unbounded panel" {
+test "a canvas: units chosen up front, no sheet; it holds containers, never content of its own" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    const c = try m.startCanvas(.mil);
-    try std.testing.expectEqual(c, m.canvas().?);
+    const ci = try m.startCanvas(.mil);
+    const c: Parent = .{ .space = ci };
+    try std.testing.expect(c.eql(m.canvas().?));
     try std.testing.expectEqual(Units.mil, m.units);
     try std.testing.expect(!m.has_sheet);
     try std.testing.expectError(error.NoRoom, m.startCanvas(.mm));
-    // Line art anywhere, even far from the origin or at negative positions.
-    _ = try testDot(&m, c, "Volume", .{ .x = -500, .y = 1200 });
-    try std.testing.expect(m.compliant(c));
+    // No panel stands in for the canvas.
+    try std.testing.expectEqual(0, m.panels.items.len);
+    // A content layout set straight on it, anywhere, even far from the
+    // origin or at negative positions.
+    const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
+    const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = -500, .y = 1200 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    try std.testing.expectEqual(Member{ .region = .{ .parent = c, .index = r } }, m.locate(m.regionsIn(c)[r].id).?);
+    try std.testing.expectEqual(ci, m.spaceOfId(m.regionsIn(c)[r].id).?);
     // A panel too can go anywhere: there is no sheet to keep to.
     const p = try m.placePanel(.{ .name = "Part", .origin = .{ .x = 5000, .y = -5000 }, .w = 50, .h = 20 });
     try std.testing.expect(m.compliant(p));
@@ -7052,37 +7143,36 @@ test "a canvas: units chosen up front, no sheet, loose objects on an unbounded p
 test "frames are spaces: moving keeps coordinates and IDs, and arrives as one group; a group moves as one" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
-    // On the canvas: a panel, a loose track and line art.
+    const c: Parent = .{ .space = try m.startCanvas(.mm) };
+    // On the canvas: a panel holding line art, and a track set straight
+    // on the canvas.
     const p = try m.placePanel(.{ .name = "Front", .origin = .{ .x = 10, .y = 10 }, .w = 50, .h = 30 });
+    _ = try testDot(&m, p, "Dot", .{ .x = 5, .y = 8 });
     const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
     const r = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 100, .y = 50 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
     _ = try m.insertTile(c, r, 0, key, 1);
-    _ = try testDot(&m, c, "Stays", .{ .x = 5, .y = 80 });
-    _ = try testDot(&m, c, "Goes", .{ .x = 120, .y = 70 });
     const pid = m.panels.items[p].id;
-    const rid = m.panels.items[c].regions.items[r].id;
-    const lid = m.panels.items[c].art.items[1].id;
+    const rid = m.regionsIn(c)[r].id;
     const f = try m.addFrame("Frame 1", null);
     try std.testing.expectEqual(1, f);
-    const froot = m.rootOf(f);
-    const g = try m.moveToSpace(&.{ pid, rid, lid }, f);
-    // Panels change space; loose objects move to the frame's own panel,
-    // coordinates and IDs kept.
+    const fp: Parent = .{ .space = f };
+    const g = try m.moveToSpace(&.{ pid, rid }, f);
+    // Panels change space, their line art with them; the track is set on
+    // the frame; coordinates and IDs kept.
     try std.testing.expectEqual(f, m.spaceOf(p));
     try std.testing.expectEqual(10, m.panels.items[p].origin.x);
-    try std.testing.expectEqual(0, m.panels.items[c].regions.items.len);
-    try std.testing.expectEqualStrings("Stays", m.panels.items[c].art.items[0].name);
-    try std.testing.expectEqual(Member{ .region = .{ .panel = froot, .index = 0 } }, m.locate(rid).?);
-    try std.testing.expectEqual(Member{ .art = .{ .panel = froot, .index = 0 } }, m.locate(lid).?);
+    try std.testing.expectEqual(1, m.panels.items[p].art.items.len);
+    try std.testing.expectEqual(0, m.regionsIn(c).len);
+    try std.testing.expectEqual(Member{ .region = .{ .parent = fp, .index = 0 } }, m.locate(rid).?);
+    // Line art goes only with its panel.
+    try std.testing.expectError(error.NoRoom, m.moveToSpace(&.{m.panels.items[p].art.items[0].id}, 0));
     // One group, named after where it came from; one move places all.
     const group = m.group(g).?;
     try std.testing.expectEqualStrings("from Canvas", group.name);
-    try std.testing.expectEqual(3, group.members.items.len);
+    try std.testing.expectEqual(2, group.members.items.len);
     try m.moveGroup(g, -10, 5);
     try std.testing.expectEqual(0, m.panels.items[p].origin.x);
-    try std.testing.expectEqual(90, m.panels.items[froot].regions.items[0].origin.x);
-    try std.testing.expectEqual(75, m.panels.items[froot].art.items[0].at.y);
+    try std.testing.expectEqual(90, m.regionsIn(fp)[0].origin.x);
     // Copying leaves the original, and copies get new IDs (and tiles new
     // designators).
     const tiles_before = m.tiles.items.len;
@@ -7108,7 +7198,8 @@ test "frames are spaces: moving keeps coordinates and IDs, and arrives as one gr
 test "groups made in place nest, survive other objects going, move as one, and ungroup into their parent" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 200, 200);
     var ids: [4]ObjectId = undefined;
     for (&ids, 0..) |*id, i| {
         const li = try testDot(&m, c, "L", .{ .x = @floatFromInt(i * 10), .y = 0 });
@@ -7140,62 +7231,24 @@ test "groups made in place nest, survive other objects going, move as one, and u
     try std.testing.expectEqual(null, m.group(outer));
 }
 
-test "a closed path becomes a panel with what it encloses, cutouts included, and releases back" {
+test "releasing a panel sets its content layouts on its workspace; one holding line art is refused" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    // A rounded rectangle 100 x 60 at (10, 10), two circular cutouts in
-    // it, a dot and a track inside, and a dot outside.
-    const prim: art_.Primitive = .{ .rounded = .{ .w = 100, .h = 60, .r = 6 } };
-    const outline = try m.addArt(c, .{ .name = "Outline", .at = .{ .x = 10, .y = 10 }, .shapes = try art_.primitive(a, "Outline", prim, .{}), .prim = prim });
-    for ([_]f64{ 20, 90 }) |x| {
-        const hole: art_.Primitive = .{ .circle = 6 };
-        const ai = try m.addArt(c, .{ .name = "Hole", .at = .{ .x = x, .y = 15 }, .shapes = try art_.primitive(a, "Hole", hole, .{}), .prim = hole });
-        try m.setArtCutout(c, ai, true);
-    }
-    _ = try testDot(&m, c, "Inside", .{ .x = 40, .y = 50 });
-    const outside = try testDot(&m, c, "Outside", .{ .x = 200, .y = 50 });
+    const c: Parent = .{ .space = try m.startCanvas(.mm) };
+    const p = try m.placePanel(.{ .name = "Front", .origin = .{ .x = 10, .y = 10 }, .w = 100, .h = 60 });
     const key = try m.addPrototype(.{ .name = "key", .unit = 10 });
-    _ = try m.addTracks(c, .{ .name = "keys", .origin = .{ .x = 40, .y = 40 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
-    const edge_id = m.panels.items[c].art.items[outline].id;
-    const g = try m.makeGroup(&.{ edge_id, m.panels.items[c].art.items[outside].id }, "g");
-
-    const p = try m.makePanel(c, outline);
-    const panel = m.panels.items[p];
-    try std.testing.expect(!panel.unbounded);
-    try std.testing.expectEqual(10, panel.origin.x);
-    try std.testing.expectEqual(100, panel.w);
-    try std.testing.expect(panel.edge != null);
-    try std.testing.expectEqual(1, panel.regions.items.len);
-    try std.testing.expectEqual(3, panel.art.items.len);
-    try std.testing.expect(panel.art.items[0].cutout);
-    // In the panel's frame now: the dot at (40, 50) on the canvas.
-    try std.testing.expectEqual(30, panel.art.items[2].at.x);
-    try std.testing.expectEqual(40, panel.art.items[2].at.y);
-    // Left on the canvas: only the outside dot.
-    try std.testing.expectEqual(1, m.panels.items[c].art.items.len);
-    // The panel took the outline's place in its group.
-    try std.testing.expectEqual(g, m.parentGroup(panel.id).?);
-
-    // It moves with all of it; released, everything is loose again where
-    // the move left it.
-    try m.movePanel(p, .{ .x = 15, .y = 10 });
-    const back = try m.releasePanel(p);
-    try std.testing.expectEqual(1, m.panels.items.len);
-    const root = m.panels.items[c];
-    try std.testing.expectEqual(5, root.art.items.len);
-    try std.testing.expectEqual(1, root.regions.items.len);
-    try std.testing.expectEqual(edge_id, back);
-    try std.testing.expectEqual(15, root.art.items[1].at.x);
-    try std.testing.expectEqual(45, root.art.items[4].at.x);
-    try std.testing.expectEqual(45, root.regions.items[0].origin.x);
-    try std.testing.expectEqual(g, m.parentGroup(edge_id).?);
-    // A rounded rectangle's corner can be changed.
-    try m.setArtCorner(c, 1, 2);
-    try std.testing.expectEqual(2, root.art.items[1].prim.rounded.r);
+    _ = try m.addTracks(.{ .panel = p }, .{ .name = "keys", .origin = .{ .x = 30, .y = 40 }, .prototype = key, .count = 1, .length = 3, .pitch = 10 });
+    const g = try m.makeGroup(&.{m.panels.items[p].id}, "g");
+    try std.testing.expectEqual(ObjectId.none, try m.releasePanel(p));
+    try std.testing.expectEqual(0, m.panels.items.len);
+    // Where it was, now in the canvas's coordinates; the group went with
+    // its only member.
+    try std.testing.expectEqual(1, m.regionsIn(c).len);
+    try std.testing.expectEqual(40, m.regionsIn(c)[0].origin.x);
+    try std.testing.expectEqual(null, m.group(g));
+    const q = try m.placePanel(.{ .name = "Back", .w = 100, .h = 60 });
+    _ = try testDot(&m, q, "Dot", .{ .x = 5, .y = 5 });
+    try std.testing.expectError(error.NoRoom, m.releasePanel(q));
 }
 
 test "a view shows another space live, at a scale, and views that would show themselves are refused" {
@@ -7297,34 +7350,34 @@ test "a flow is edited in place: typed into, deleted across items, broken and jo
     defer m.deinit();
     const p = try m.addPanel("page", 100, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
-    const items = &m.flowOf(p, r).items;
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
+    const items = &m.flowOf(.{ .panel = p }, r).items;
     // Typing into an empty flow makes a run; more goes on its end.
-    var at = try m.insertText(p, r, .{ .index = 0 }, "Hello", body);
+    var at = try m.insertText(.{ .panel = p }, r, .{ .index = 0 }, "Hello", body);
     try std.testing.expectEqual(FlowPos{ .index = 1 }, at);
-    at = try m.insertText(p, r, at, " world {1}", body);
+    at = try m.insertText(.{ .panel = p }, r, at, " world {1}", body);
     try std.testing.expectEqualStrings("Hello world \\{1\\}", items.items[0].what.run.content);
     // A paragraph broken inside it: two runs either side of a separator.
-    at = try m.breakAt(p, r, .{ .index = 0, .offset = 5 }, true);
+    at = try m.breakAt(.{ .panel = p }, r, .{ .index = 0, .offset = 5 }, true);
     try std.testing.expectEqual(@as(usize, 3), items.items.len);
     try std.testing.expectEqualStrings("Hello", items.items[0].what.run.content);
     try std.testing.expectEqualStrings(" world \\{1\\}", items.items[2].what.run.content);
     try std.testing.expectEqual(FlowPos{ .index = 2 }, at);
     // Deleting across the separator joins the runs again, less what lay
     // between: "Hel" + "orld {1}".
-    at = try m.deleteRange(p, r, .{ .index = 0, .offset = 3 }, .{ .index = 2, .offset = 2 });
+    at = try m.deleteRange(.{ .panel = p }, r, .{ .index = 0, .offset = 3 }, .{ .index = 2, .offset = 2 });
     try std.testing.expectEqual(@as(usize, 1), items.items.len);
     try std.testing.expectEqualStrings("Helorld \\{1\\}", items.items[0].what.run.content);
     try std.testing.expectEqual(FlowPos{ .index = 0, .offset = 3 }, at);
     // Copied as plain text.
-    const text = try m.flowText(gpa, p, r, .{ .index = 0, .offset = 0 }, .{ .index = 1 });
+    const text = try m.flowText(gpa, .{ .panel = p }, r, .{ .index = 0, .offset = 0 }, .{ .index = 1 });
     defer gpa.free(text);
     try std.testing.expectEqualStrings("Helorld {1}", text);
     // Deleting a whole run takes it away.
-    _ = try m.deleteRange(p, r, .{ .index = 0 }, .{ .index = 1 });
+    _ = try m.deleteRange(.{ .panel = p }, r, .{ .index = 0 }, .{ .index = 1 });
     try std.testing.expectEqual(@as(usize, 0), items.items.len);
     // Pasted lines become paragraphs.
-    at = try m.insertText(p, r, .{ .index = 0 }, "one\ntwo", body);
+    at = try m.insertText(.{ .panel = p }, r, .{ .index = 0 }, "one\ntwo", body);
     try std.testing.expectEqual(@as(usize, 3), items.items.len);
     try std.testing.expect(items.items[1].what == .paragraph);
 }
@@ -7335,11 +7388,11 @@ test "an equation is its own item: put in a run of text, kept apart from it" {
     defer m.deinit();
     const p = try m.addPanel("page", 100, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const r = try m.addTracks(p, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
-    const items = &m.flowOf(p, r).items;
-    _ = try m.insertText(p, r, .{ .index = 0 }, "area is ", body);
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "T", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 4, .length = 40, .pitch = 6 });
+    const items = &m.flowOf(.{ .panel = p }, r).items;
+    _ = try m.insertText(.{ .panel = p }, r, .{ .index = 0 }, "area is ", body);
     // Inside the text: the run splits either side of the new equation.
-    const eq = try m.insertEquation(p, r, .{ .index = 0, .offset = 4 }, body);
+    const eq = try m.insertEquation(.{ .panel = p }, r, .{ .index = 0, .offset = 4 }, body);
     try std.testing.expectEqual(@as(usize, 1), eq);
     try std.testing.expectEqual(@as(usize, 3), items.items.len);
     try std.testing.expect(items.items[1].what.run.equation);
@@ -7347,29 +7400,29 @@ test "an equation is its own item: put in a run of text, kept apart from it" {
     try std.testing.expectEqualStrings(" is ", items.items[2].what.run.content);
     items.items[1].what.run.content = "\\frac{a}{}";
     // Typed into an empty slot, it goes into the equation.
-    var at = try m.insertText(p, r, .{ .index = 1, .offset = 9 }, "2", body);
+    var at = try m.insertText(.{ .panel = p }, r, .{ .index = 1, .offset = 9 }, "2", body);
     try std.testing.expectEqualStrings("\\frac{a}{2}", items.items[1].what.run.content);
     // Typed just before it or just after it, it goes into the text.
-    at = try m.insertText(p, r, .{ .index = 1 }, ":", body);
+    at = try m.insertText(.{ .panel = p }, r, .{ .index = 1 }, ":", body);
     try std.testing.expectEqualStrings("area:", items.items[0].what.run.content);
     try std.testing.expectEqual(FlowPos{ .index = 1 }, at);
-    at = try m.insertText(p, r, .{ .index = 2 }, "x", body);
+    at = try m.insertText(.{ .panel = p }, r, .{ .index = 2 }, "x", body);
     try std.testing.expectEqual(@as(usize, 3), items.items.len);
     try std.testing.expectEqualStrings("x is ", items.items[2].what.run.content);
     // Deleting the end of the text before it leaves the two apart.
-    at = try m.deleteRange(p, r, .{ .index = 0, .offset = 2 }, .{ .index = 1 });
+    at = try m.deleteRange(.{ .panel = p }, r, .{ .index = 0, .offset = 2 }, .{ .index = 1 });
     try std.testing.expectEqual(@as(usize, 3), items.items.len);
     try std.testing.expectEqualStrings("ar", items.items[0].what.run.content);
     try std.testing.expectEqualStrings("\\frac{a}{2}", items.items[1].what.run.content);
     // At the end of an equation a new one goes after it.
-    try std.testing.expectEqual(@as(usize, 2), try m.insertEquation(p, r, .{ .index = 1, .offset = 3 }, body));
+    try std.testing.expectEqual(@as(usize, 2), try m.insertEquation(.{ .panel = p }, r, .{ .index = 1, .offset = 3 }, body));
 }
 
 test "a panel made from an enclosed sketch: cut by nesting, following its sketch" {
     const gpa = std.testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: Parent = .{ .space = try m.startCanvas(.mm) };
     const si = try m.addSketch(0, "Plate", .{ .x = 10, .y = 20 });
     const al = m.a();
     const P = struct {
@@ -7436,13 +7489,10 @@ test "spaces, prototypes, styles and tiles are connected by ID; a panel given no
     try std.testing.expectEqual(m.spaces.items[0].id, m.panels.items[p].space);
     try std.testing.expect(m.inSpace(p, 0));
     try std.testing.expect(!m.inSpace(p, f));
-    // Removing a panel before a space's own panel leaves the space's own
-    // panel found.
-    const froot = m.rootOf(f);
+    // A workspace stands for itself: no panel stands in for it.
     m.removePanel(p);
-    try std.testing.expectEqual(froot - 1, m.rootOf(f));
-    try std.testing.expect(m.panels.items[m.rootOf(f)].unbounded);
-    try std.testing.expect(m.inSpace(m.rootOf(f), f));
+    try std.testing.expectEqual(0, m.panels.items.len);
+    try std.testing.expectEqual(Parent{ .space = f }, m.parentOfId(m.spaces.items[f].id).?);
     // Tiles are found by their IDs, which are not positions.
     const t = try m.addTile(.{ .designator = "A" });
     try std.testing.expect(@backingInt(t) >= m.tiles.items.len);
@@ -7458,10 +7508,10 @@ test "a tile's track text reads back as set; a stamp's new prototype leaves a ti
     const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top" }} });
     const tall = try m.addPrototype(.{ .name = "tall", .tracks = &.{.{ .name = "top", .major = .column }} });
     const other = try m.addPrototype(.{ .name = "other" });
-    const g = try m.addGrid(p, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 10, .pitch_y = 10 });
-    const st = try m.addStamp(p, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
-    const a = try m.addInstance(p, g, st, 0, 0);
-    const b = try m.addInstance(p, g, st, 1, 0);
+    const g = try m.addGrid(.{ .panel = p }, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 10, .pitch_y = 10 });
+    const st = try m.addStamp(.{ .panel = p }, g, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+    const a = try m.addInstance(.{ .panel = p }, g, st, 0, 0);
+    const b = try m.addInstance(.{ .panel = p }, g, st, 1, 0);
     const top = m.tileTrackNamed(a, "top").?;
     try m.setTileTrackText(a, top, "ON\nOFF");
     const text = try m.tileTrackText(std.testing.allocator, a, top);
@@ -7471,7 +7521,7 @@ test "a tile's track text reads back as set; a stamp's new prototype leaves a ti
     try m.setTilePrototype(b, tall);
     var next = m.panels.items[p].grids.items[g].stamps.items[st];
     next.prototype = other;
-    try m.setStamp(p, g, st, next);
+    try m.setStamp(.{ .panel = p }, g, st, next);
     try std.testing.expectEqual(other, m.tileConst(a).prototype);
     try std.testing.expectEqual(tall, m.tileConst(b).prototype);
 }
@@ -7513,11 +7563,11 @@ test "generated names: identifiers, numbered within their container" {
     var buf: [32]u8 = undefined;
     // Within a panel: tracks, grids and art share one namespace.
     try std.testing.expectEqualStrings("Track1", m.freshName(&buf, .{ .panel = p }, "Track"));
-    _ = try m.addTracks(p, .{ .name = "Track1", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    _ = try m.addTracks(.{ .panel = p }, .{ .name = "Track1", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
     try std.testing.expectEqualStrings("Track2", m.freshName(&buf, .{ .panel = p }, "Track"));
     // Another panel is another container.
     try std.testing.expectEqualStrings("Track1", m.freshName(&buf, .{ .panel = q }, "Track"));
-    _ = try m.addGrid(p, .{ .x = 0, .y = 0 }, .{ .cols = 2, .rows = 2, .pitch_x = 10, .pitch_y = 10 });
+    _ = try m.addGrid(.{ .panel = p }, .{ .x = 0, .y = 0 }, .{ .cols = 2, .rows = 2, .pitch_x = 10, .pitch_y = 10 });
     try std.testing.expectEqualStrings("Grid1", m.panels.items[p].grids.items[0].name);
     // A typed name made an identifier when it must be one: kept when free.
     try std.testing.expectEqualStrings("RoundedRectangle", m.freshOrSame(&buf, .{ .panel = p }, "Rounded rectangle", "Shape"));
@@ -7530,23 +7580,23 @@ test "name paths: a panel's track, a flow's key, a collection's member, quoted n
     defer m.deinit();
     const p = try m.addPanel("PC keyboard", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const r = try m.addTracks(p, .{ .name = "Row1", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
-    try std.testing.expectEqual(Model.Ref{ .region = .{ .panel = p, .region = r } }, m.resolve("\"PC keyboard\".Row1").?);
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "Row1", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try std.testing.expectEqual(Model.Ref{ .region = .{ .parent = .{ .panel = p }, .region = r } }, m.resolve("\"PC keyboard\".Row1").?);
     try std.testing.expectEqual(Model.Ref{ .style = body }, m.resolve("Styles.Body").?);
     // A member of a collection by its name alone.
     try std.testing.expectEqual(Model.Ref{ .style = body }, m.resolve("Body").?);
     try std.testing.expectEqual(Model.Ref{ .collection = .flows }, m.resolve("Flows").?);
     // Alone, Row1 is the flow that took the track's name; the track is the
     // panel's.
-    try std.testing.expectEqual(Model.Ref{ .flow = m.trackFlow(p, r).?.id }, m.resolve("Row1").?);
+    try std.testing.expectEqual(Model.Ref{ .flow = m.trackFlow(.{ .panel = p }, r).?.id }, m.resolve("Row1").?);
     try std.testing.expect(m.resolve("Nowhere") == null);
     try std.testing.expect(m.resolve("\"PC keyboard\".Row2") == null);
     try std.testing.expect(m.resolve("\"unclosed") == null);
     // Keys within their flow, from the flow or a track of it.
     const proto = try m.addPrototype(.{ .name = "Key" });
     const t = try m.addTile(.{ .designator = "K1", .prototype = proto });
-    try m.flow(p, r).append(m.a(), .{ .what = .{ .tile = t } });
-    const flow_name = m.trackFlow(p, r).?.name;
+    try m.flow(.{ .panel = p }, r).append(m.a(), .{ .what = .{ .tile = t } });
+    const flow_name = m.trackFlow(.{ .panel = p }, r).?.name;
     var buf: [64]u8 = undefined;
     try std.testing.expectEqual(Model.Ref{ .tile = t }, m.resolve(std.fmt.bufPrint(&buf, "{s}.K1", .{flow_name}) catch unreachable).?);
     try std.testing.expectEqual(Model.Ref{ .tile = t }, m.resolve("\"PC keyboard\".Row1.K1").?);
@@ -7557,31 +7607,31 @@ test "flows: a track drawn has its own; joining makes one flow, unjoining gives 
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
     try std.testing.expectEqual(2, m.flows.items.len);
-    try std.testing.expectEqualStrings("A", m.trackFlow(p, a).?.name);
+    try std.testing.expectEqualStrings("A", m.trackFlow(.{ .panel = p }, a).?.name);
     // A second flow named alike gets a generated name (an identifier,
     // numbered among the flows).
     try std.testing.expectEqualStrings("Flow1", m.flows.items[m.flowIndex(try m.addFlow("A")).?].name);
     try m.removeFlow(m.flows.items[2].id);
-    _ = try m.insertText(p, a, .{ .index = 0 }, "first", body);
-    _ = try m.insertText(p, b, .{ .index = 0 }, "second", body);
-    try m.joinTracks(p, a, b);
+    _ = try m.insertText(.{ .panel = p }, a, .{ .index = 0 }, "first", body);
+    _ = try m.insertText(.{ .panel = p }, b, .{ .index = 0 }, "second", body);
+    try m.joinTracks(.{ .panel = p }, a, b);
     // One flow through both, A's content then B's as a new paragraph.
     try std.testing.expectEqual(1, m.flows.items.len);
-    try std.testing.expectEqual(m.trackFlow(p, a), m.trackFlow(p, b));
-    try std.testing.expectEqual(3, m.flowItems(p, b).len);
-    try std.testing.expectEqual(3, m.ownItems(p, a).len);
-    try std.testing.expectEqual(0, m.ownItems(p, b).len);
-    try std.testing.expectEqual(b, m.threadAfter(p, a).?.region);
-    try std.testing.expectEqual(a, m.threadHead(p, b).region);
+    try std.testing.expectEqual(m.trackFlow(.{ .panel = p }, a), m.trackFlow(.{ .panel = p }, b));
+    try std.testing.expectEqual(3, m.flowItems(.{ .panel = p }, b).len);
+    try std.testing.expectEqual(3, m.ownItems(.{ .panel = p }, a).len);
+    try std.testing.expectEqual(0, m.ownItems(.{ .panel = p }, b).len);
+    try std.testing.expectEqual(b, m.threadAfter(.{ .panel = p }, a).?.region);
+    try std.testing.expectEqual(a, m.threadHead(.{ .panel = p }, b).region);
     // A out: the flow keeps everything and starts in B; A has a new one.
-    try m.unjoinTrack(p, a);
+    try m.unjoinTrack(.{ .panel = p }, a);
     try std.testing.expectEqual(2, m.flows.items.len);
-    try std.testing.expectEqual(3, m.ownItems(p, b).len);
-    try std.testing.expectEqual(0, m.flowItems(p, a).len);
-    try std.testing.expect(m.threadAfter(p, b) == null);
+    try std.testing.expectEqual(3, m.ownItems(.{ .panel = p }, b).len);
+    try std.testing.expectEqual(0, m.flowItems(.{ .panel = p }, a).len);
+    try std.testing.expect(m.threadAfter(.{ .panel = p }, b) == null);
 }
 
 test "tracks: removed, the flow goes on in the rest; the last one's text kept unplaced" {
@@ -7589,18 +7639,18 @@ test "tracks: removed, the flow goes on in the rest; the last one's text kept un
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 0, .y = 80 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "B", .origin = .{ .x = 0, .y = 80 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
     try std.testing.expectEqual(1, m.panels.items[p].regions.items[a].h);
-    _ = try m.insertText(p, a, .{ .index = 0 }, "words", body);
-    const flow = m.trackFlow(p, a).?.id;
-    try m.assignTrack(p, b, flow, null);
+    _ = try m.insertText(.{ .panel = p }, a, .{ .index = 0 }, "words", body);
+    const flow = m.trackFlow(.{ .panel = p }, a).?.id;
+    try m.assignTrack(.{ .panel = p }, b, flow, null);
     try std.testing.expectEqual(1, m.flows.items.len);
-    try m.removeRegion(p, a);
+    try m.removeRegion(.{ .panel = p }, a);
     // B, now first, holds the flow.
     try std.testing.expectEqual(1, m.panels.items[p].regions.items.len);
-    try std.testing.expectEqual(1, m.flowItems(p, 0).len);
-    try m.removeRegion(p, 0);
+    try std.testing.expectEqual(1, m.flowItems(.{ .panel = p }, 0).len);
+    try m.removeRegion(.{ .panel = p }, 0);
     try std.testing.expectEqual(1, m.flows.items.len);
     try std.testing.expectEqual(0, m.flows.items[0].tracks.items.len);
 }
@@ -7610,22 +7660,22 @@ test "tracks: turned to run down, a track keeps its length and stays one thick; 
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
-    try m.setOrientation(p, a, -90, 90);
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try m.setOrientation(.{ .panel = p }, a, -90, 90);
     const r = m.panels.items[p].regions.items[a];
     try std.testing.expectEqual(Major.column, r.major());
     try std.testing.expectEqual(1, r.w);
     try std.testing.expectEqual(40, r.h);
     try std.testing.expect(r.supported());
     // At an angle: kept, not supported yet.
-    try m.setOrientation(p, a, -80, 90);
+    try m.setOrientation(.{ .panel = p }, a, -80, 90);
     try std.testing.expect(!m.panels.items[p].regions.items[a].supported());
-    try m.setOrientation(p, a, 0, 0);
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 0, .y = 80 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
-    try m.assignTrack(p, b, m.trackFlow(p, a).?.id, null);
-    try std.testing.expectError(error.BadJoin, m.setOrientation(p, a, -90, 90));
+    try m.setOrientation(.{ .panel = p }, a, 0, 0);
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "B", .origin = .{ .x = 0, .y = 80 }, .style = body, .kind = .track, .count = 1, .length = 40, .pitch = 6 });
+    try m.assignTrack(.{ .panel = p }, b, m.trackFlow(.{ .panel = p }, a).?.id, null);
+    try std.testing.expectError(error.BadJoin, m.setOrientation(.{ .panel = p }, a, -90, 90));
     // Rotation alone is any track's own.
-    try m.setOrientation(p, a, 0, 180);
+    try m.setOrientation(.{ .panel = p }, a, 0, 180);
 }
 
 test "flows: a panel's copy gets copies of its flows; a panel removed leaves its text unplaced" {
@@ -7634,25 +7684,25 @@ test "flows: a panel's copy gets copies of its flows; a panel removed leaves its
     const p = try m.addPanel("page", 200, 100);
     const q = try m.addPanel("other", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    _ = try m.insertText(p, a, .{ .index = 0 }, "words", body);
-    try m.joinTracks(p, a, b);
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    _ = try m.insertText(.{ .panel = p }, a, .{ .index = 0 }, "words", body);
+    try m.joinTracks(.{ .panel = p }, a, b);
     const c = try m.copyPanel(p);
     // The copy's two tracks run through one new flow holding a copy.
     try std.testing.expectEqual(2, m.flows.items.len);
-    try std.testing.expect(m.trackFlow(c, a) != m.trackFlow(p, a));
-    try std.testing.expectEqual(m.trackFlow(c, a), m.trackFlow(c, b));
-    try std.testing.expectEqualStrings("words", m.flowItems(c, a)[0].what.run.content);
+    try std.testing.expect(m.trackFlow(.{ .panel = c }, a) != m.trackFlow(.{ .panel = p }, a));
+    try std.testing.expectEqual(m.trackFlow(.{ .panel = c }, a), m.trackFlow(.{ .panel = c }, b));
+    try std.testing.expectEqualStrings("words", m.flowItems(.{ .panel = c }, a)[0].what.run.content);
     // A flow on two panels: removing one leaves it on the other.
-    const k = try m.addTracks(q, .{ .name = "K", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    try m.threadTracks(p, b, q, k);
+    const k = try m.addTracks(.{ .panel = q }, .{ .name = "K", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    try m.threadTracks(.{ .panel = p }, b, .{ .panel = q }, k);
     m.removePanel(c);
     m.removePanel(p);
     // q is now panel 0: the flow runs through K alone, its text kept; the
     // copy's flow, its tracks gone, keeps its text unplaced.
     try std.testing.expectEqual(2, m.flows.items.len);
-    try std.testing.expectEqualStrings("words", m.ownItems(0, k)[0].what.run.content);
+    try std.testing.expectEqualStrings("words", m.ownItems(.{ .panel = 0 }, k)[0].what.run.content);
     // Its last track gone, that text stays too, unplaced.
     m.removePanel(0);
     try std.testing.expectEqual(2, m.flows.items.len);
@@ -7667,39 +7717,39 @@ test "flows: tracks assigned, moved within, detached; flows added, renamed, remo
     defer m.deinit();
     const p = try m.addPanel("page", 300, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const b = try m.addTracks(p, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const c = try m.addTracks(p, .{ .name = "C", .origin = .{ .x = 100, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    _ = try m.insertText(p, a, .{ .index = 0 }, "story", body);
-    const story = m.trackFlow(p, a).?.id;
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const b = try m.addTracks(.{ .panel = p }, .{ .name = "B", .origin = .{ .x = 50, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const c = try m.addTracks(.{ .panel = p }, .{ .name = "C", .origin = .{ .x = 100, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    _ = try m.insertText(.{ .panel = p }, a, .{ .index = 0 }, "story", body);
+    const story = m.trackFlow(.{ .panel = p }, a).?.id;
     try m.renameFlow(story, "Story");
     // B and C into A's flow: their own empty flows go.
-    try m.assignTrack(p, b, story, null);
-    try m.assignTrack(p, c, story, null);
+    try m.assignTrack(.{ .panel = p }, b, story, null);
+    try m.assignTrack(.{ .panel = p }, c, story, null);
     try std.testing.expectEqual(1, m.flows.items.len);
-    try std.testing.expectEqual(c, m.threadAfter(p, b).?.region);
+    try std.testing.expectEqual(c, m.threadAfter(.{ .panel = p }, b).?.region);
     // C moved to the front: the content starts there now.
-    try m.assignTrack(p, c, story, 0);
-    try std.testing.expectEqual(c, m.threadHead(p, a).region);
-    try std.testing.expectEqual(1, m.ownItems(p, c).len);
-    try std.testing.expectEqual(0, m.ownItems(p, a).len);
+    try m.assignTrack(.{ .panel = p }, c, story, 0);
+    try std.testing.expectEqual(c, m.threadHead(.{ .panel = p }, a).region);
+    try std.testing.expectEqual(1, m.ownItems(.{ .panel = p }, c).len);
+    try std.testing.expectEqual(0, m.ownItems(.{ .panel = p }, a).len);
     // An unplaced flow, and a track given to it: Story keeps its content.
     const notes = try m.addFlow("Notes");
     try std.testing.expectEqual(0, m.flows.items[m.flowIndex(notes).?].tracks.items.len);
-    try m.assignTrack(p, a, notes, null);
-    try std.testing.expectEqualStrings("Notes", m.trackFlow(p, a).?.name);
-    try std.testing.expectEqualStrings("Story", m.trackFlow(p, c).?.name);
+    try m.assignTrack(.{ .panel = p }, a, notes, null);
+    try std.testing.expectEqualStrings("Notes", m.trackFlow(.{ .panel = p }, a).?.name);
+    try std.testing.expectEqualStrings("Story", m.trackFlow(.{ .panel = p }, c).?.name);
     // Detaching every Story track leaves it unplaced, its text kept.
-    try m.detachTrack(p, c);
-    try m.detachTrack(p, b);
+    try m.detachTrack(.{ .panel = p }, c);
+    try m.detachTrack(.{ .panel = p }, b);
     const si = m.flowIndex(story).?;
     try std.testing.expectEqual(0, m.flows.items[si].tracks.items.len);
     try std.testing.expectEqual(1, m.flows.items[si].items.items.len);
     // A track alone in an empty flow has nothing to detach from.
-    try std.testing.expectError(error.BadJoin, m.detachTrack(p, b));
+    try std.testing.expectError(error.BadJoin, m.detachTrack(.{ .panel = p }, b));
     // Removing Notes gives A an empty flow of its own; Story removed, gone.
     try m.removeFlow(notes);
-    try std.testing.expect(m.trackFlow(p, a).?.id != notes);
+    try std.testing.expect(m.trackFlow(.{ .panel = p }, a).?.id != notes);
     try m.removeFlow(story);
     try std.testing.expect(m.flowIndex(story) == null);
 }
@@ -7709,9 +7759,9 @@ test "flows: a flow's tracks run one way" {
     defer m.deinit();
     const p = try m.addPanel("page", 300, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 2.5 });
-    const a = try m.addTracks(p, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    const col = try m.addTracks(p, .{ .name = "Col", .origin = .{ .x = 50, .y = 90 }, .major = .column, .style = body, .count = 2, .length = 40, .pitch = 6 });
-    try std.testing.expectError(error.BadJoin, m.assignTrack(p, col, m.trackFlow(p, a).?.id, null));
+    const a = try m.addTracks(.{ .panel = p }, .{ .name = "A", .origin = .{ .x = 0, .y = 90 }, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    const col = try m.addTracks(.{ .panel = p }, .{ .name = "Col", .origin = .{ .x = 50, .y = 90 }, .major = .column, .style = body, .count = 2, .length = 40, .pitch = 6 });
+    try std.testing.expectError(error.BadJoin, m.assignTrack(.{ .panel = p }, col, m.trackFlow(.{ .panel = p }, a).?.id, null));
 }
 
 /// A two-key keypad with a gold legend beside one key on a plate grid
@@ -7728,13 +7778,13 @@ const SheetFixture = struct {
         const keys = try m.addPanel("Keys", 60, 30);
         const key = try m.addPrototype(.{ .name = "key", .tracks = &.{ .{ .name = "top" }, .{ .name = "g" } } });
         const goldp = try m.addPrototype(.{ .name = "gold", .tracks = &.{.{ .name = "f" }} });
-        const pg = try m.addGrid(plate, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
-        const golds = try m.addStamp(plate, pg, .{ .name = "Gold", .prototype = goldp, .w = 8, .h = 3 });
-        const kg = try m.addLinkedGrid(keys, .{ .x = 10, .y = 20 }, m.panels.items[plate].grids.items[pg].id);
-        const caps = try m.addStamp(keys, kg, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
-        const a = try m.addInstance(keys, kg, caps, 0, 0);
-        const b = try m.addInstance(keys, kg, caps, 1, 0);
-        const gold = try m.addInstance(plate, pg, golds, 1, 0);
+        const pg = try m.addGrid(.{ .panel = plate }, .{ .x = 10, .y = 20 }, .{ .cols = 2, .rows = 1, .pitch_x = 12, .pitch_y = 12 });
+        const golds = try m.addStamp(.{ .panel = plate }, pg, .{ .name = "Gold", .prototype = goldp, .w = 8, .h = 3 });
+        const kg = try m.addLinkedGrid(.{ .panel = keys }, .{ .x = 10, .y = 20 }, m.panels.items[plate].grids.items[pg].id);
+        const caps = try m.addStamp(.{ .panel = keys }, kg, .{ .name = "Keys", .prototype = key, .w = 8, .h = 8 });
+        const a = try m.addInstance(.{ .panel = keys }, kg, caps, 0, 0);
+        const b = try m.addInstance(.{ .panel = keys }, kg, caps, 1, 0);
+        const gold = try m.addInstance(.{ .panel = plate }, pg, golds, 1, 0);
         try m.renameTile(a, "SIN");
         try m.renameTile(b, "COS");
         try m.setTileTrackText(a, m.tileTrackNamed(a, "top").?, "SIN");
@@ -7824,9 +7874,9 @@ test "a panel sized and a track moved and sized by typing, each undoable" {
     try std.testing.expectEqual(448.63, m.panels.items[p].w);
     try std.testing.expectError(error.BadSize, m.setPanelSize(p, 0, 10));
     const st = try m.addStyle("s", .{});
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 3, .y = 4 }, .style = st, .count = 2, .length = 10, .pitch = 5 });
-    try m.moveRegion(p, r, .{ .x = 10, .y = 133.83 });
-    try m.setRegionSize(p, r, 22.5, 6.5);
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "keys", .origin = .{ .x = 3, .y = 4 }, .style = st, .count = 2, .length = 10, .pitch = 5 });
+    try m.moveRegion(.{ .panel = p }, r, .{ .x = 10, .y = 133.83 });
+    try m.setRegionSize(.{ .panel = p }, r, 22.5, 6.5);
     const reg = m.panels.items[p].regions.items[r];
     try std.testing.expectEqual(10, reg.origin.x);
     try std.testing.expectEqual(22.5, reg.w);
@@ -7838,15 +7888,15 @@ test "a panel's keys named in order across its tracks, one flow each, as one flo
     defer m.deinit();
     const p = try m.addPanel("P", 200, 80);
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
-    const r1 = try m.addTracks(p, .{ .name = "Row1", .origin = .{ .x = 5, .y = 60 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
-    const r2 = try m.addTracks(p, .{ .name = "Row2", .origin = .{ .x = 5, .y = 40 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
-    try std.testing.expect(m.trackFlow(p, r1).?.id != m.trackFlow(p, r2).?.id);
-    for (0..3) |k| _ = try m.insertTile(p, r1, k, key, 1);
-    for (0..2) |k| _ = try m.insertTile(p, r2, k, key, 1);
-    try std.testing.expectEqual(@as(usize, 5), try m.nameKeysInPanel(p, "K"));
-    try std.testing.expectEqualStrings("K3", m.tileConst(m.flowItems(p, r1)[2].tileOf().?).designator);
-    try std.testing.expectEqualStrings("K4", m.tileConst(m.flowItems(p, r2)[0].tileOf().?).designator);
-    try std.testing.expectEqualStrings("K5", m.tileConst(m.flowItems(p, r2)[1].tileOf().?).designator);
+    const r1 = try m.addTracks(.{ .panel = p }, .{ .name = "Row1", .origin = .{ .x = 5, .y = 60 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
+    const r2 = try m.addTracks(.{ .panel = p }, .{ .name = "Row2", .origin = .{ .x = 5, .y = 40 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
+    try std.testing.expect(m.trackFlow(.{ .panel = p }, r1).?.id != m.trackFlow(.{ .panel = p }, r2).?.id);
+    for (0..3) |k| _ = try m.insertTile(.{ .panel = p }, r1, k, key, 1);
+    for (0..2) |k| _ = try m.insertTile(.{ .panel = p }, r2, k, key, 1);
+    try std.testing.expectEqual(@as(usize, 5), try m.nameKeysInPanel(.{ .panel = p }, "K"));
+    try std.testing.expectEqualStrings("K3", m.tileConst(m.flowItems(.{ .panel = p }, r1)[2].tileOf().?).designator);
+    try std.testing.expectEqualStrings("K4", m.tileConst(m.flowItems(.{ .panel = p }, r2)[0].tileOf().?).designator);
+    try std.testing.expectEqualStrings("K5", m.tileConst(m.flowItems(.{ .panel = p }, r2)[1].tileOf().?).designator);
 }
 
 test "a track renamed, its keys named in order, a gap set before one" {
@@ -7854,19 +7904,19 @@ test "a track renamed, its keys named in order, a gap set before one" {
     defer m.deinit();
     const p = try m.addPanel("P", 200, 50);
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05 });
-    const r = try m.addTracks(p, .{ .name = "Tracks 1", .origin = .{ .x = 5, .y = 40 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
-    for (0..3) |k| _ = try m.insertTile(p, r, k, key, 1);
-    try m.renameRegion(p, r, "keys");
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "Tracks 1", .origin = .{ .x = 5, .y = 40 }, .prototype = key, .count = 1, .length = 8, .pitch = 19.05 });
+    for (0..3) |k| _ = try m.insertTile(.{ .panel = p }, r, k, key, 1);
+    try m.renameRegion(.{ .panel = p }, r, "keys");
     try std.testing.expectEqualStrings("keys", m.panels.items[p].regions.items[r].name);
-    try std.testing.expectEqual(@as(usize, 3), try m.nameKeysInOrder(p, r, "K"));
-    try std.testing.expectEqualStrings("K2", m.tileConst(m.flowItems(p, r)[1].tileOf().?).designator);
-    try m.setItemGap(p, r, 2, 0.25);
-    try std.testing.expectEqual(0.25, m.flowItems(p, r)[2].gap);
+    try std.testing.expectEqual(@as(usize, 3), try m.nameKeysInOrder(.{ .panel = p }, r, "K"));
+    try std.testing.expectEqualStrings("K2", m.tileConst(m.flowItems(.{ .panel = p }, r)[1].tileOf().?).designator);
+    try m.setItemGap(.{ .panel = p }, r, 2, 0.25);
+    try std.testing.expectEqual(0.25, m.flowItems(.{ .panel = p }, r)[2].gap);
     // A name another key has elsewhere: refused, nothing renamed.
     const other = try m.addTile(.{ .designator = "Q1", .prototype = key });
     _ = other;
-    try std.testing.expectError(error.DuplicateDesignator, m.nameKeysInOrder(p, r, "Q"));
-    try std.testing.expectEqualStrings("K1", m.tileConst(m.flowItems(p, r)[0].tileOf().?).designator);
+    try std.testing.expectError(error.DuplicateDesignator, m.nameKeysInOrder(.{ .panel = p }, r, "Q"));
+    try std.testing.expectEqualStrings("K1", m.tileConst(m.flowItems(.{ .panel = p }, r)[0].tileOf().?).designator);
 }
 
 test "an older file's per-panel process settings become profiles: the 0.4 mm built-in, or their own" {

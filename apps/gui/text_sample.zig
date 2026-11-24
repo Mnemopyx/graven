@@ -7,9 +7,10 @@ const layout = @import("graven_layout");
 const Model = layout.Model;
 const StyleId = layout.model.StyleId;
 
-/// Adds the track to panel `panel` (a canvas) at `origin`, its rows 60 mm
-/// long, in style `style`; returns the track's index.
-pub fn build(m: *Model, panel: usize, style: StyleId, origin: layout.geom.Point) !usize {
+/// Adds the track to `parent` (a workspace, or a panel) at `origin`, its
+/// rows 60 mm long, in style `style`; returns the track's index.
+pub fn build(m: *Model, parent: layout.model.Parent, style: StyleId, origin: layout.geom.Point) !usize {
+    const panel = parent;
     const pitch = 6;
     const r = try m.addTracks(panel, .{ .name = "Text", .origin = origin, .style = style, .count = 3, .length = 60.0 / pitch, .pitch = pitch });
     try m.insertRun(panel, r, 0, .{ .style = style, .content = "A circle of diameter $d$ has area " });
@@ -21,7 +22,7 @@ pub fn build(m: *Model, panel: usize, style: StyleId, origin: layout.geom.Point)
 test "the text sample: a track with text, an equation, and text" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: layout.model.Parent = .{ .space = try m.startCanvas(.mm) };
     const st = try m.addStyle("Label", .{ .cap_height = 3 });
     const r = try build(&m, c, st, .{ .x = 0, .y = 0 });
     const items = m.flowItems(c, r);

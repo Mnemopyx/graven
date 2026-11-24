@@ -53,8 +53,8 @@ pub const PlacedLabel = struct {
     /// null and `slot` is the item's index.
     run: ?struct {
         region: usize,
-        /// The panel of the track holding the flow.
-        panel: usize = 0,
+        /// The parent (workspace or panel) of the track holding the flow.
+        parent: model.Parent,
         item: usize,
         /// The piece of the item's markup it sets (words between breaks,
         /// when a run breaks across segments): its start and length
@@ -136,15 +136,15 @@ pub const Issue = struct {
 
 /// A segment as placed: where its band lies.
 pub const PlacedTrack = struct {
-    /// The track whose flow it holds (the first of its thread, on panel
-    /// `flow_panel`), and its index in that flow's segments.
+    /// The track whose flow it holds (the first of its thread, in
+    /// `flow_parent`), and its index in that flow's segments.
     region: usize,
     track: usize,
-    flow_panel: usize = 0,
-    /// The track it lies in (on `panel`, the panel placed), and its index
+    flow_parent: model.Parent,
+    /// The track it lies in (in `parent`, the one placed), and its index
     /// there: the same as `region` and `track` unless the track is
     /// threaded after another.
-    panel: usize = 0,
+    parent: model.Parent,
     member: usize = 0,
     local: usize = 0,
     major: model.Major,
@@ -159,9 +159,9 @@ pub const PlacedTrack = struct {
 /// where it starts and ends along it, mm from the segment's start. A hard
 /// break has no length; it sits where its segment's content ends.
 pub const PlacedItem = struct {
-    /// The track holding the flow (on panel `flow_panel`).
+    /// The track holding the flow (in `flow_parent`).
     region: usize,
-    flow_panel: usize = 0,
+    flow_parent: model.Parent,
     /// Its index in the region's flow.
     index: usize,
     segment: usize,
@@ -180,10 +180,10 @@ pub const PlacedArt = struct {
 /// What a region's flow needs: the length, u, that would set its longest
 /// paragraph (the items between hard breaks) in one segment.
 pub const PlacedFlow = struct {
-    /// The track holding the flow (on panel `flow_panel`): a thread's
-    /// flow has one of these on each panel it runs through.
+    /// The track holding the flow (in `flow_parent`): a thread's flow has
+    /// one of these in each parent it runs through.
     region: usize,
-    flow_panel: usize = 0,
+    flow_parent: model.Parent,
     /// Laid out on a panel downstream, before where the flow enters it is
     /// known (see `Handoff`): nothing is placed in it yet.
     waiting: bool = false,
@@ -210,11 +210,11 @@ pub const Handoff = struct {
 
 /// Where a word too long for its line was cut to wrap (no break
 /// opportunity fitted): the end of that line, `along` mm into segment
-/// `segment` of the flow of track `region` on panel `flow_panel`. Shown
+/// `segment` of the flow of track `region` in `flow_parent`. Shown
 /// while editing; not an issue.
 pub const PlacedWrap = struct {
     region: usize,
-    flow_panel: usize = 0,
+    flow_parent: model.Parent,
     segment: usize,
     along: f64,
 };
@@ -238,7 +238,7 @@ pub const Placed = struct {
     bounds: Box,
     /// The panel's outline, in the panel frame, when it is more than a
     /// plain rectangle: its edge path (Make panel), or its rectangle when
-    /// it has cutouts. Null for a plain rectangle and for a space's panel.
+    /// it has cutouts. Null for a plain rectangle and for a workspace.
     edge: ?geom.Outline = null,
     /// The panel's body: its edge with its cutouts and hole tiles cut out
     /// exactly (a hole across the edge leaves a notch; overlapping holes
@@ -1278,14 +1278,15 @@ fn panelBody(a: Allocator, edge: geom.Outline, arts: []const PlacedArt, tiles: [
     };
 }
 
-pub fn solve(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels) Error!Placed {
-    return solveWith(gpa, m, panel, labels, &.{});
+pub fn solve(gpa: Allocator, m: *const Model, parent: model.Parent, labels: *Labels) Error!Placed {
+    return solveWith(gpa, m, parent, labels, &.{});
 }
 
-/// Places every tile and label of one panel, given where threads from
-/// other panels enter it (`entries`; see `Handoff`). A thread entering
-/// with no entry given is left waiting (`PlacedFlow.waiting`).
-pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels, entries: []const Handoff) Error!Placed {
+/// Places every tile and label in one parent (a workspace's content
+/// layouts and grids, or a panel's), given where threads from other
+/// parents enter it (`entries`; see `Handoff`). A thread entering with no
+/// entry given is left waiting (`PlacedFlow.waiting`).
+pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: *Labels, entries: []const Handoff) Error!Placed {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -1301,13 +1302,14 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     var exits: std.ArrayList(Handoff) = .empty;
     var placed_labels: std.ArrayList(PlacedLabel) = .empty;
     var wraps: std.ArrayList(PlacedWrap) = .empty;
-    const outline: Box = .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[panel].w, .y1 = m.panels.items[panel].h };
+    // A panel's outline; a workspace has none to keep to.
+    const outline: ?Box = if (parent.panelIndex()) |pi| .{ .x0 = 0, .y0 = 0, .x1 = m.panels.items[pi].w, .y1 = m.panels.items[pi].h } else null;
     // Line art on the panel: drawn over the tracks, and what wraps is
     // something their flow goes around.
     var keepouts: std.ArrayList(KeepOut) = .empty;
     var label_keepouts: std.ArrayList(KeepOut) = .empty;
     var placed_art: std.ArrayList(PlacedArt) = .empty;
-    for (m.panels.items[panel].art.items, 0..) |pa, ai| {
+    for (m.artIn(parent), 0..) |pa, ai| {
         try placed_art.append(a, .{ .index = ai, .box = pa.box(), .shapes = try art.dupeShapes(a, pa.shapes, pa.at), .cutout = pa.cutout });
         bounds = bounds.join(pa.box());
         if (pa.wrap == .none) continue;
@@ -1316,9 +1318,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         if (pa.wrap_tracks) try keepouts.append(a, k);
     }
     // Grids' instances: tiles at their points.
-    for (m.panels.items[panel].grids.items, 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
-        const box = m.instanceBox(panel, gi, ii) orelse continue;
-        const st = g.stamps.items[m.stampIndex(panel, gi, inst.stamp).?];
+    for (m.gridsIn(parent), 0..) |g, gi| for (g.instances.items, 0..) |inst, ii| {
+        const box = m.instanceBox(parent, gi, ii) orelse continue;
+        const st = g.stamps.items[m.stampIndex(parent, gi, inst.stamp).?];
         const t = m.tileConst(inst.tile);
         const proto = m.proto(t.prototype);
         const body = proto.body_inset.inset(box);
@@ -1391,7 +1393,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
     for (0..2) |pass| {
         const own = pass == 0;
         if (!own) try tileRegions(a, m, labels, tiles.items, &synth, &synth_items, &synth_owner, &synth_which);
-        const regs: []const model.TileRegion = if (own) m.panels.items[panel].regions.items else synth.items;
+        const regs: []const model.TileRegion = if (own) m.regionsIn(parent) else synth.items;
         for (regs, 0..) |region, ri| {
             const out_tracks = if (own) &tracks else &junk_tracks;
             const out_placed_items = if (own) &placed_items else &junk_items;
@@ -1401,16 +1403,16 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             const out_issues = if (own) &issues else &junk_issues;
             // A thread is laid out a leg at a time: the run of its tracks on
             // one panel. A track threaded after another here is in its leg.
-            const before = if (own) m.threadBefore(panel, ri) else null;
-            if (before) |b| if (b.panel == panel) continue;
-            const head: model.TrackRef = if (own) m.threadHead(panel, ri) else .{ .panel = panel, .region = ri };
+            const before = if (own) m.threadBefore(parent, ri) else null;
+            if (before) |b| if (b.parent.eql(parent)) continue;
+            const head: model.TrackRef = if (own) m.threadHead(parent, ri) else .{ .parent = parent, .region = ri };
             var all_buf: [256]model.TrackRef = undefined;
             const thread_all = if (own) m.thread(head, &all_buf) else all_buf[0..0];
             var thread_buf: [256]usize = undefined;
             var leg_n: usize = 0;
             var at_k: usize = 0;
-            while (at_k < thread_all.len and !(thread_all[at_k].panel == panel and thread_all[at_k].region == ri)) at_k += 1;
-            while (at_k < thread_all.len and thread_all[at_k].panel == panel and leg_n < thread_buf.len) : (at_k += 1) {
+            while (at_k < thread_all.len and !(thread_all[at_k].parent.eql(parent) and thread_all[at_k].region == ri)) at_k += 1;
+            while (at_k < thread_all.len and thread_all[at_k].parent.eql(parent) and leg_n < thread_buf.len) : (at_k += 1) {
                 thread_buf[leg_n] = thread_all[at_k].region;
                 leg_n += 1;
             }
@@ -1423,16 +1425,16 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
             const more: ?model.TrackRef = if (at_k < thread_all.len) thread_all[at_k] else null;
             // The flow is the thread's first track's; where it enters this
             // leg is the start, or what the panel before handed on.
-            const flow_r = if (own) &m.panels.items[head.panel].regions.items[head.region] else &regs[ri];
+            const flow_r = if (own) &m.regionsIn(head.parent)[head.region] else &regs[ri];
             // Its content and first paragraph's style: the flow's (a tile's
             // face track: the tile's content there).
-            const flow_items: []const model.Item = if (own) m.flowItems(head.panel, head.region) else synth_items.items[ri];
+            const flow_items: []const model.Item = if (own) m.flowItems(head.parent, head.region) else synth_items.items[ri];
             // A paragraph in no style of its own takes the flow style's
             // paragraph settings (decided 2026-11-23: a flow's style).
-            const flow_default: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph_default else null) else null;
-            const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.panel, head.region)) |fl| fl.paragraph orelse fl.paragraph_default else null) else null;
+            const flow_default: ?model.ParaId = if (own) (if (m.trackFlow(head.parent, head.region)) |fl| fl.paragraph_default else null) else null;
+            const flow_para: ?model.ParaId = if (own) (if (m.trackFlow(head.parent, head.region)) |fl| fl.paragraph orelse fl.paragraph_default else null) else null;
             const fri = head.region;
-            const fpi = head.panel;
+            const fpi = head.parent;
             const entry: ?Handoff = if (before == null) Handoff{ .track = region.id, .piece = 0, .segment = 0, .paragraph = flow_para, .first_line = true, .soft = false } else for (entries) |e| {
                 if (e.track == region.id) break e;
             } else null;
@@ -1663,7 +1665,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                             // Past this leg's last track: the rest goes on into
                             // the thread's next panel.
                             if (path.leaves(seg)) {
-                                try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
+                                try out_exits.append(a, .{ .track = m.regionsIn(more.?.parent)[more.?.region].id, .piece = index + 1, .segment = seg0 + seg, .paragraph = style_id, .first_line = first_line, .soft = false });
                                 leg_hi = index + 1;
                                 exited = true;
                                 break;
@@ -1721,7 +1723,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         first_in_seg = index;
                         path.lead = if (style) |st| st.line_gap else 0;
                         if (path.leaves(seg)) {
-                            try out_exits.append(a, .{ .track = m.panels.items[more.?.panel].regions.items[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
+                            try out_exits.append(a, .{ .track = m.regionsIn(more.?.parent)[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
                             leg_hi = index;
                             exited = true;
                             break;
@@ -1779,13 +1781,13 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 const sh = if (dropped[index] or dup[index]) 0 else shifts.items[sg] + extra[index];
                 const start = spans[first][0] + (if (first == index) sh else shifts.items[sg] + extra[first]);
                 const end = spans[index][1] + sh;
-                try out_placed_items.append(a, .{ .region = fri, .flow_panel = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
+                try out_placed_items.append(a, .{ .region = fri, .flow_parent = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
                 if (dropped[index] or dup[index]) continue;
                 const band = path.boxes.items[sg];
                 // A line ending inside a word: at a soft hyphen, a hyphen is
                 // drawn; at a cut, the wrap is recorded.
                 const line_ends = (index + 1 < leg_hi and segs_of[index + 1] != sg) or (index + 1 == leg_hi and exited);
-                if (line_ends and endsIn(cuts.items, index, .forced)) try out_wraps.append(a, .{ .region = fri, .flow_panel = fpi, .segment = seg0 + sg, .along = end });
+                if (line_ends and endsIn(cuts.items, index, .forced)) try out_wraps.append(a, .{ .region = fri, .flow_parent = fpi, .segment = seg0 + sg, .along = end });
                 if (line_ends and endsIn(cuts.items, index, .hyphen)) if (try labels.get(.{ .style = item.what.run.style, .anchor = .start, .box = null, .markup = hyphen_markup })) |hr| {
                     const cap = labels.context(item.what.run.style).?.cap_height;
                     const hd = hr.design;
@@ -1866,7 +1868,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                         else
                             .{ .x0 = band.x0, .x1 = band.x1, .y1 = band.y1 - start, .y0 = band.y1 - end };
                         try placed_labels.append(a, .{
-                            .run = if (own) .{ .region = fri, .panel = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
+                            .run = if (own) .{ .region = fri, .parent = fpi, .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] } else null,
                             .tile_run = if (own) null else .{ .item = item_of.items[index], .from = src_off.items[first], .len = src_off.items[index] + src_len.items[index] - src_off.items[first] },
                             .tile = if (own) null else synth_owner.items[ri],
                             .slot = if (own) item_of.items[index] else synth_which.items[ri],
@@ -1884,7 +1886,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                     .hard_break, .paragraph => {},
                 }
             }
-            try out_flows.append(a, .{ .region = fri, .flow_panel = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
+            try out_flows.append(a, .{ .region = fri, .flow_parent = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
             for (path.reach.items, 0..) |r_, t| {
                 const len_t = segLength(&path, rows, t);
                 if (r_ > len_t + tol) try out_issues.append(a, .{ .kind = .row_overflow, .region = ri, .row = t, .amount = r_ - len_t });
@@ -1897,7 +1899,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 if (t > 0 and path.member.items[t] != path.member.items[t - 1]) local = 0;
                 const member = thread[path.member.items[t]];
                 const soft = path.regionOf(t).softArea();
-                try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_panel = fpi, .panel = panel, .member = member, .local = local, .major = region.major(), .box = b, .origin = o });
+                try out_tracks.append(a, .{ .region = fri, .track = seg0 + t, .flow_parent = fpi, .parent = parent, .member = member, .local = local, .major = region.major(), .box = b, .origin = o });
                 local += 1;
                 all = all.join(b);
                 // Along, the path and the segment length are the boundary: a
@@ -1906,9 +1908,11 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
                 const past = if (rows) b.y0 < soft.y0 - tol or b.y1 > soft.y1 + tol else b.x0 < soft.x0 - tol or b.x1 > soft.x1 + tol;
                 if (past) try out_issues.append(a, .{ .kind = .past_soft_area, .region = ri, .row = t });
             }
-            // The canvas has no outline to keep to.
-            const past = @max(@max(outline.x0 - all.x0, all.x1 - outline.x1), @max(outline.y0 - all.y0, all.y1 - outline.y1));
-            if (past > 1e-9 and !m.panels.items[panel].unbounded) try out_issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+            // A workspace has no outline to keep to.
+            if (outline) |ol| {
+                const past = @max(@max(ol.x0 - all.x0, all.x1 - ol.x1), @max(ol.y0 - all.y0, all.y1 - ol.y1));
+                if (past > 1e-9) try out_issues.append(a, .{ .kind = .region_outside, .region = ri, .amount = past });
+            }
             for (thread) |member| if (!regs[member].supported())
                 try out_issues.append(a, .{ .kind = .unsupported_direction, .region = member });
         }
@@ -1934,19 +1938,22 @@ pub fn solveWith(gpa: Allocator, m: *const Model, panel: usize, labels: *Labels,
         bounds = bounds.join(.{ .x0 = l.origin.x + ink.x0, .y0 = l.origin.y + ink.y0, .x1 = l.origin.x + ink.x1, .y1 = l.origin.y + ink.y1 });
     }
 
-    const this = m.panels.items[panel];
-    const has_cutout = for (this.art.items) |pa| {
-        if (pa.cutout) break true;
-    } else for (tiles.items) |t| {
-        if (t.grid == .hole) break true;
-    } else false;
+    // A panel's edge; a workspace has none, nor anything to cut through.
     var edge: ?geom.Outline = null;
-    if (this.edge) |e| {
-        const shapes = try art.dupeShapes(a, e.shapes, e.at);
-        if (shapes.len > 0) edge = shapes[0].outline;
-    } else if (has_cutout and !this.unbounded) {
-        const shapes = try art.primitive(a, "edge", .{ .rect = .{ .w = this.w, .h = this.h } }, .{});
-        edge = shapes[0].outline;
+    if (parent.panelIndex()) |pi| {
+        const this = m.panels.items[pi];
+        const has_cutout = for (this.art.items) |pa| {
+            if (pa.cutout) break true;
+        } else for (tiles.items) |t| {
+            if (t.grid == .hole) break true;
+        } else false;
+        if (this.edge) |e| {
+            const shapes = try art.dupeShapes(a, e.shapes, e.at);
+            if (shapes.len > 0) edge = shapes[0].outline;
+        } else if (has_cutout) {
+            const shapes = try art.primitive(a, "edge", .{ .rect = .{ .w = this.w, .h = this.h } }, .{});
+            edge = shapes[0].outline;
+        }
     }
     if (edge) |e| bounds = bounds.join(e.bounds());
     const body: ?geom.Outline = if (edge) |e| try panelBody(a, e, placed_art.items, tiles.items) else null;
@@ -1980,41 +1987,44 @@ pub fn sameHandoffs(x: []const Handoff, y: []const Handoff) bool {
     return true;
 }
 
-/// The panels a thread crosses into or out of: the only ones whose
-/// solving changes where threads enter other panels.
-fn threadPanels(gpa: Allocator, m: *const Model) Allocator.Error![]usize {
+/// The parents (by `Model.parentSlot`) a thread crosses into or out of:
+/// the only ones whose solving changes where threads enter others.
+fn threadParents(gpa: Allocator, m: *const Model) Allocator.Error![]usize {
     var list: std.ArrayList(usize) = .empty;
     errdefer list.deinit(gpa);
-    for (m.panels.items, 0..) |p, pi| for (p.regions.items, 0..) |_, ri| {
-        const n = m.threadAfter(pi, ri) orelse continue;
-        if (n.panel == pi) continue;
-        for ([_]usize{ pi, n.panel }) |x| if (std.mem.indexOfScalar(usize, list.items, x) == null) try list.append(gpa, x);
-    };
+    for (0..m.parentCount()) |k| {
+        const pi = m.parentAt(k);
+        for (m.regionsIn(pi), 0..) |_, ri| {
+            const n = m.threadAfter(pi, ri) orelse continue;
+            if (n.parent.eql(pi)) continue;
+            for ([_]usize{ k, m.parentSlot(n.parent) }) |x| if (std.mem.indexOfScalar(usize, list.items, x) == null) try list.append(gpa, x);
+        }
+    }
     std.mem.sort(usize, list.items, {}, std.sort.asc(usize));
     return list.toOwnedSlice(gpa);
 }
 
-/// Where every thread enters each panel it runs on into, worked out by
-/// solving the panels threads cross, each with the handoffs the others
+/// Where every thread enters each parent it runs on into, worked out by
+/// solving the parents threads cross, each with the handoffs the others
 /// gave last time, until those stop changing. `start` is a first guess
 /// (the last known handoffs, say); the result is the caller's.
 pub fn handoffs(gpa: Allocator, m: *const Model, labels: *Labels, start: []const Handoff) Error![]Handoff {
-    const panels = try threadPanels(gpa, m);
-    defer gpa.free(panels);
+    const parents = try threadParents(gpa, m);
+    defer gpa.free(parents);
     var entries: std.ArrayList(Handoff) = .empty;
     errdefer entries.deinit(gpa);
     try entries.appendSlice(gpa, start);
-    if (panels.len == 0) {
+    if (parents.len == 0) {
         entries.clearRetainingCapacity();
         return entries.toOwnedSlice(gpa);
     }
-    // Each pass carries a thread at least one panel further.
+    // Each pass carries a thread at least one parent further.
     var pass: usize = 0;
-    while (pass < m.panels.items.len + 2) : (pass += 1) {
+    while (pass < m.parentCount() + 2) : (pass += 1) {
         var next: std.ArrayList(Handoff) = .empty;
         defer next.deinit(gpa);
-        for (panels) |pi| {
-            var placed = try solveWith(gpa, m, pi, labels, entries.items);
+        for (parents) |k| {
+            var placed = try solveWith(gpa, m, m.parentAt(k), labels, entries.items);
             defer placed.deinit();
             try next.appendSlice(gpa, placed.exits);
         }
@@ -2025,8 +2035,9 @@ pub fn handoffs(gpa: Allocator, m: *const Model, labels: *Labels, start: []const
     return entries.toOwnedSlice(gpa);
 }
 
-/// Every panel placed, threads followed across panels (see `handoffs`).
-/// The caller deinits each and frees the slice.
+/// Every parent placed (in `Model.parentAt` order: the workspaces, then
+/// the panels), threads followed across them (see `handoffs`). The caller
+/// deinits each and frees the slice.
 pub fn solveAll(gpa: Allocator, m: *const Model, labels: *Labels) Error![]Placed {
     const entries = try handoffs(gpa, m, labels, &.{});
     defer gpa.free(entries);
@@ -2035,7 +2046,7 @@ pub fn solveAll(gpa: Allocator, m: *const Model, labels: *Labels) Error![]Placed
         for (out.items) |*p| p.deinit();
         out.deinit(gpa);
     }
-    for (0..m.panels.items.len) |pi| try out.append(gpa, try solveWith(gpa, m, pi, labels, entries));
+    for (0..m.parentCount()) |k| try out.append(gpa, try solveWith(gpa, m, m.parentAt(k), labels, entries));
     return out.toOwnedSlice(gpa);
 }
 
@@ -2054,24 +2065,24 @@ test "segments pack by gaps, a hard break starts the next, and a tall tile close
     var m: Model = .init(testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
-    const r = try m.addRegion(p, .{ .name = "pad", .origin = .{ .x = 10, .y = 90 }, .w = 5, .h = 2, .pitch = 10 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "pad", .origin = .{ .x = 10, .y = 90 }, .w = 5, .h = 2, .pitch = 10 });
     const one = try m.addTile(.{ .designator = "1" });
     const two = try m.addTile(.{ .designator = "2" });
     const tall = try m.addTile(.{ .designator = "T", .h = 2 });
     const wide = try m.addTile(.{ .designator = "0", .w = 2 });
-    try m.place(p, r, null, .{ .what = .{ .tile = one } });
-    try m.place(p, r, null, .{ .gap = 0.5, .what = .{ .tile = two } });
-    try m.place(p, r, null, .{ .what = .{ .tile = tall } });
-    try m.place(p, r, null, .{ .what = .hard_break });
-    try m.place(p, r, null, .{ .what = .{ .tile = wide } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = one } });
+    try m.place(.{ .panel = p }, r, null, .{ .gap = 0.5, .what = .{ .tile = two } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = tall } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .hard_break });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = wide } });
     // The tall key, listed once, closes 25..35 mm of the second row: this
     // key, which would land at 20..30, goes on past it.
     const three = try m.addTile(.{ .designator = "3" });
-    try m.place(p, r, null, .{ .what = .{ .tile = three } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = three } });
 
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
-    var s = try solve(testing.allocator, &m, p, &labels);
+    var s = try solve(testing.allocator, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     try testing.expectEqual(5, s.tiles.len);
     try testing.expectEqual(25, s.findTile(two).?.pitch_box.x0);
@@ -2087,11 +2098,11 @@ test "a row too long wraps on into a new one, past the soft area, flagged" {
     var m: Model = .init(testing.allocator);
     defer m.deinit();
     const p = try m.addPanel("board", 200, 100);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 100 }, .w = 2, .h = 1, .pitch = 10 });
-    for ([_][]const u8{ "A", "B", "C" }) |d| try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = d }) } });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 100 }, .w = 2, .h = 1, .pitch = 10 });
+    for ([_][]const u8{ "A", "B", "C" }) |d| try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = d }) } });
     var labels: Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
-    var s = try solve(testing.allocator, &m, p, &labels);
+    var s = try solve(testing.allocator, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.past_soft_area, s.issues[0].kind);
@@ -2109,16 +2120,16 @@ test "legends render once per identical text and sit on their track's line" {
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     for ([_][]const u8{ "K1", "K2" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
         try m.setTrackText(t, "top", "H");
-        try m.place(p, r, null, .{ .what = .{ .tile = t } });
+        try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = t } });
     }
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     try testing.expectEqual(2, s.labels.len);
     try testing.expectEqual(s.labels[0].render, s.labels[1].render);
@@ -2131,7 +2142,7 @@ test "legends render once per identical text and sit on their track's line" {
 
     // A style change drops its renders.
     try m.setCapHeight(style, 2.5);
-    var s2 = try solve(gpa, &m, p, &labels);
+    var s2 = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s2.deinit();
     try testing.expectEqual(1, labels.cache.count());
     try testing.expectApproxEqAbs((s2.labels[0].box.y0 + s2.labels[0].box.y1 - 2.5) / 2, s2.labels[0].origin.y, 1e-9);
@@ -2146,13 +2157,13 @@ test "a run being typed is stored as typed, flagged, and still drawn" {
     defer m.deinit();
     const style = try m.addStyle("label", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 10, .y = 40 }, .style = style, .count = 1, .length = 10, .pitch = 5 });
-    try m.insertRun(p, r, 0, .{ .style = style, .content = "$H^" });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 10, .y = 40 }, .style = style, .count = 1, .length = 10, .pitch = 5 });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = style, .content = "$H^" });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
-    try testing.expectEqualStrings("$H^", m.flowItems(p, r)[0].what.run.content);
+    try testing.expectEqualStrings("$H^", m.flowItems(.{ .panel = p }, r)[0].what.run.content);
     try testing.expectEqual(1, s.labels.len);
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.markup_error, s.issues[0].kind);
@@ -2177,14 +2188,14 @@ test "a legend with characters no face covers is reported on its tile" {
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 3, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .tracks = &.{.{ .name = "top", .style = style }} });
     const t = try m.addTile(.{ .designator = "K1", .prototype = key });
     try m.setTrackText(t, "top", "HQ");
-    try m.place(p, r, null, .{ .what = .{ .tile = t } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = t } });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     try testing.expectEqual(1, s.issues.len);
     try testing.expectEqual(.missing_glyph, s.issues[0].kind);
@@ -2199,22 +2210,22 @@ test "changing a prototype changes every tile made from it" {
     var m: Model = .init(gpa);
     defer m.deinit();
     const p = try m.addPanel("board", 100, 50);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(2) });
     const flat = try m.addPrototype(.{ .name = "flat" });
-    for ([_][]const u8{ "K1", "K2", "K3" }) |d| try m.place(p, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = d, .prototype = key }) } });
+    for ([_][]const u8{ "K1", "K2", "K3" }) |d| try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = try m.addTile(.{ .designator = d, .prototype = key }) } });
     try m.setTilePrototype(m.findTile("K3").?, flat);
 
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var before = try solve(gpa, &m, p, &labels);
+    var before = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer before.deinit();
     try testing.expectApproxEqAbs(@as(f64, 2.5), before.tiles[0].face.x0 - before.tiles[0].pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), before.tiles[2].face.x0 - before.tiles[2].pitch_box.x0, 1e-9);
 
     // A wider face inset on the prototype: K1 and K2 follow, K3 does not.
     try m.setPrototype(key, .{ .name = "key", .body_inset = .all(0.5), .face_inset = .all(3) });
-    var after = try solve(gpa, &m, p, &labels);
+    var after = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer after.deinit();
     for (after.tiles[0..2]) |t| try testing.expectApproxEqAbs(@as(f64, 3.5), t.face.x0 - t.pitch_box.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), after.tiles[2].face.x0 - after.tiles[2].pitch_box.x0, 1e-9);
@@ -2230,21 +2241,21 @@ test "changing a prototype's track moves every tile's text in it" {
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 3 });
     const p = try m.addPanel("board", 100, 50);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 50 }, .w = 4, .h = 1, .pitch = 19.05 });
     const key = try m.addPrototype(.{ .name = "key", .face_inset = .all(2), .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
     for ([_][]const u8{ "K1", "K2", "K3" }) |d| {
         const t = try m.addTile(.{ .designator = d, .prototype = key });
         try m.setTrackText(t, "top", "H");
-        try m.place(p, r, null, .{ .what = .{ .tile = t } });
+        try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = t } });
     }
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var before = try solve(gpa, &m, p, &labels);
+    var before = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer before.deinit();
     var moved = m.proto(key).tracks[0];
     moved.place.inset = .{ .left = 3, .right = 1, .top = 1, .bottom = 1 };
     try m.setPrototypeTrack(key, moved.id, moved);
-    var after = try solve(gpa, &m, p, &labels);
+    var after = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer after.deinit();
     try testing.expectEqual(3, after.labels.len);
     for (before.labels, after.labels) |b, a| try testing.expectApproxEqAbs(@as(f64, 2), a.box.x0 - b.box.x0, 1e-9);
@@ -2260,15 +2271,15 @@ test "a tile's text wraps around art placed over its track" {
     const style = try m.addStyle("legend", .{ .cap_height = 8 });
     const p = try m.addPanel("board", 100, 100);
     const key = try m.addPrototype(.{ .name = "key", .unit = 40, .tracks = &.{.{ .name = "top", .style = style, .place = .{ .inset = .all(1) } }} });
-    const r = try m.addTracks(p, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 1, .pitch = 40 });
-    const t = try m.insertTile(p, r, 0, key, 1);
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "keys", .origin = .{ .x = 10, .y = 90 }, .prototype = key, .count = 1, .length = 1, .pitch = 40 });
+    const t = try m.insertTile(.{ .panel = p }, r, 0, key, 1);
     // "HH HH" is about 20 mm of ink: one line on the 38 mm face.
     try m.setTrackText(t, "top", "HH HH");
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     {
         // One line: both words on it.
-        var s = try solve(gpa, &m, p, &labels);
+        var s = try solve(gpa, &m, .{ .panel = p }, &labels);
         defer s.deinit();
         try testing.expectApproxEqAbs(s.labels[0].origin.y, s.labels[s.labels.len - 1].origin.y, 1e-9);
     }
@@ -2279,7 +2290,7 @@ test "a tile's text wraps around art placed over its track" {
     defer arena.deinit();
     const disc = try art.ellipse(arena.allocator(), "disc", 20, 40, .{});
     _ = try m.addArt(p, .{ .name = "disc", .at = .{ .x = 30, .y = 50 }, .shapes = disc, .clearance = 1, .wrap_tracks = false });
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     // Two lines now, every word's ink left of the disc.
     var lowest: f64 = s.labels[0].origin.y;
@@ -2300,14 +2311,14 @@ test "a run of text breaks between its words; a space a wrap leaves at a row's s
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 4 });
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
     // Three words in one run; 30 mm rows hold two.
-    try m.insertRun(p, r, 0, .{ .style = body, .content = "HOD ADD HOD" });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = body, .content = "HOD ADD HOD" });
     // An equation stays whole, spaces and all.
-    try m.insertRun(p, r, 1, .{ .style = body, .content = "A = \\frac{H}{D}", .equation = true });
+    try m.insertRun(.{ .panel = p }, r, 1, .{ .style = body, .content = "A = \\frac{H}{D}", .equation = true });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     // Five pieces of item 0 (three words, two spaces), one of item 1.
     var words: usize = 0;
@@ -2348,9 +2359,9 @@ test "a run with markup breaks between words, inside a bold group too, keeping i
     defer m.deinit();
     const p = try m.addPanel("page", 200, 100);
     const body = try m.addStyle("Body", .{ .cap_height = 4 });
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = 3, .pitch = 10 });
     const src = "HOD \\textbf{ADD HOD} HOD";
-    try m.insertRun(p, r, 0, .{ .style = body, .content = src });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = body, .content = src });
     // Its fonts as resolving them would give: the bold face second.
     var resolved: fonts.Resolved = .{ .gpa = gpa };
     defer resolved.deinit();
@@ -2360,7 +2371,7 @@ test "a run with markup breaks between words, inside a bold group too, keeping i
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     try labels.syncResolved(&resolved);
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     // Four word pieces: HOD, ADD (bold), HOD (bold), HOD.
     var words: [4]PlacedLabel = undefined;
@@ -2401,19 +2412,19 @@ test "paragraphs: indents, a justified paragraph, a centred one, and space betwe
     defer m.deinit();
     const p = try m.addPanel("page", 200, 200);
     const body = try m.addStyle("Body", .{ .cap_height = 4 });
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 200 }, .style = body, .count = 12, .length = 6, .pitch = 10 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 0, .y = 200 }, .style = body, .count = 12, .length = 6, .pitch = 10 });
     const just = try m.addParagraphStyle(.{ .name = "Body", .alignment = .justify, .indent_start = 4, .first = 6, .indent_end = 2, .space_after = 5 });
     const centred = try m.addParagraphStyle(.{ .name = "Centred", .alignment = .centre, .space_before = 3, .line_gap = 2 });
-    try m.setParagraphAt(p, r, 0, just);
-    try m.insertRun(p, r, 0, .{ .style = body, .content = "HOD ADD HOD ADD HOD ADD HOD" });
-    try m.insertParagraph(p, r, 1, centred);
-    try m.insertRun(p, r, 2, .{ .style = body, .content = "HOD ADD HOD ADD HOD ADD" });
-    try testing.expectEqual(just, m.paragraphStyleAt(p, r, 0));
-    try testing.expectEqual(centred, m.paragraphStyleAt(p, r, 2));
+    try m.setParagraphAt(.{ .panel = p }, r, 0, just);
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = body, .content = "HOD ADD HOD ADD HOD ADD HOD" });
+    try m.insertParagraph(.{ .panel = p }, r, 1, centred);
+    try m.insertRun(.{ .panel = p }, r, 2, .{ .style = body, .content = "HOD ADD HOD ADD HOD ADD" });
+    try testing.expectEqual(just, m.paragraphStyleAt(.{ .panel = p }, r, 0));
+    try testing.expectEqual(centred, m.paragraphStyleAt(.{ .panel = p }, r, 2));
 
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     try testing.expectEqual(0, s.issues.len);
     // Per segment: where its words start and end along it.
@@ -2463,7 +2474,7 @@ test "text on a canvas, with no sheet or panel, solves and exports" {
     const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: model.Parent = .{ .space = try m.startCanvas(.mm) };
     const style = try m.addStyle("Label", .{ .cap_height = 3 });
     // A track far from the origin, below and left of it: the canvas has
     // no edge.
@@ -2492,24 +2503,24 @@ test "a panel made from a rounded rectangle exports its outline with the cutouts
     const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    _ = try m.startCanvas(.mm);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const prim: art.Primitive = .{ .rounded = .{ .w = 80, .h = 50, .r = 5 } };
-    const outline = try m.addArt(c, .{ .name = "Outline", .at = .{ .x = 0, .y = 0 }, .shapes = try art.primitive(a, "Outline", prim, .{ .edge = .{ .r = 0, .g = 0, .b = 0 } }), .prim = prim });
+    const outline: model.PanelArt = .{ .name = "Outline", .at = .{ .x = 0, .y = 0 }, .shapes = try art.primitive(a, "Outline", prim, .{ .edge = .{ .r = 0, .g = 0, .b = 0 } }), .prim = prim };
+    const c = try m.placePanel(.{ .name = "Panel", .w = 80, .h = 50, .edge = outline });
     for ([_]f64{ 8, 66 }) |x| {
         const hole: art.Primitive = .{ .circle = 6 };
         const ai = try m.addArt(c, .{ .name = "Hole", .at = .{ .x = x, .y = 22 }, .shapes = try art.primitive(a, "Hole", hole, .{}), .prim = hole });
         try m.setArtCutout(c, ai, true);
     }
     const style = try m.addStyle("Label", .{ .cap_height = 3 });
-    const r = try m.addTracks(c, .{ .name = "text", .origin = .{ .x = 30, .y = 30 }, .style = style, .count = 1, .length = 6, .pitch = 5 });
-    try m.insertRun(c, r, 0, .{ .style = style, .content = "HOD" });
-    const p = try m.makePanel(c, outline);
+    const r = try m.addTracks(.{ .panel = c }, .{ .name = "text", .origin = .{ .x = 30, .y = 30 }, .style = style, .count = 1, .length = 6, .pitch = 5 });
+    try m.insertRun(.{ .panel = c }, r, 0, .{ .style = style, .content = "HOD" });
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = c }, &labels);
     defer s.deinit();
     try testing.expect(s.edge != null);
     try testing.expectEqual(1, s.labels.len);
@@ -2540,9 +2551,9 @@ test "a word longer than its line is cut to wrap, and the wrap recorded, not fla
     };
     // Rows a little over a third of the word long: it takes three, after
     // a short word that fits the first.
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 6, .length = w * 0.4 / 10, .pitch = 10 });
-    try m.insertRun(p, r, 0, .{ .style = body, .content = "H " ++ word });
-    var s = try solve(gpa, &m, p, &labels);
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 6, .length = w * 0.4 / 10, .pitch = 10 });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = body, .content = "H " ++ word });
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     for (s.issues) |i| try testing.expect(i.kind != .row_overflow);
     // The short word stays alone on the first row; the long one goes on to
@@ -2574,10 +2585,10 @@ test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word do
     const half = (try labels.get(.{ .style = body, .anchor = .start, .box = null, .markup = "HODDA" })).?.design;
     const w = half.x1 - half.x0;
     // Rows that hold "HODDA-" but not the whole word.
-    const r = try m.addTracks(p, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = w * 1.5 / 10, .pitch = 10 });
-    try m.insertRun(p, r, 0, .{ .style = body, .content = "HODDA\\-HODDA" });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 0, .y = 100 }, .style = body, .count = 3, .length = w * 1.5 / 10, .pitch = 10 });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = body, .content = "HODDA\\-HODDA" });
     {
-        var s = try solve(gpa, &m, p, &labels);
+        var s = try solve(gpa, &m, .{ .panel = p }, &labels);
         defer s.deinit();
         var runs: usize = 0;
         var hyphens: usize = 0;
@@ -2591,7 +2602,7 @@ test "a line breaks at a soft hyphen, with a hyphen drawn, only when the word do
     }
     // Rows long enough for the whole word: no break, no hyphen.
     m.panels.items[p].regions.items[r].w = w * 3 / 10;
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     for (s.labels) |l| try testing.expect(l.run != null);
     var segs: [2]usize = .{ 9, 9 };
@@ -2610,7 +2621,7 @@ test "tiles drawn from a prototype's sketch, solved for each size; a size that d
     const faces = [_]*font.Face{face};
     var m: Model = .init(gpa);
     defer m.deinit();
-    const c = try m.startCanvas(.mm);
+    const c: model.Parent = .{ .space = try m.startCanvas(.mm) };
     // A body 0.5 mm in from the pitch box on every side, from w and h; a
     // homing bump, construction until a tile asks for it; and a slot that
     // needs a tile wider than 25 mm.
@@ -2690,21 +2701,21 @@ test "a tile's tracks: a row wraps between words in the face; a column sets lett
     defer m.deinit();
     const style = try m.addStyle("legend", .{ .cap_height = 2 });
     const p = try m.addPanel("board", 100, 60);
-    const r = try m.addRegion(p, .{ .name = "row", .origin = .{ .x = 0, .y = 60 }, .w = 3, .h = 2, .pitch = 19.05 });
+    const r = try m.addRegion(.{ .panel = p }, .{ .name = "row", .origin = .{ .x = 0, .y = 60 }, .w = 3, .h = 2, .pitch = 19.05 });
     // A tall key: a row track across its top, a column track below it.
     const key = try m.addPrototype(.{ .name = "key", .unit = 19.05, .face_inset = .all(1), .tracks = &.{
         .{ .name = "words", .style = style, .place = .{ .inset = .{ .bottom = 30 } } },
         .{ .name = "down", .style = style, .major = .column, .alignment = .start, .place = .{ .inset = .{ .top = 8 } } },
     } });
     const t = try m.addTile(.{ .designator = "K1", .prototype = key, .h = 2 });
-    try m.place(p, r, null, .{ .what = .{ .tile = t } });
+    try m.place(.{ .panel = p }, r, null, .{ .what = .{ .tile = t } });
     try m.setTileTrackText(t, m.tileTrackNamed(t, "words").?, "one two three four five");
     try m.setTileTrackText(t, m.tileTrackNamed(t, "down").?, "ENTER");
     try testing.expect(m.tileTrackNamed(t, "side") == null);
 
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
-    var s = try solve(gpa, &m, p, &labels);
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
     defer s.deinit();
     const tb = s.findTile(t).?.face;
     var words: usize = 0;
@@ -2737,13 +2748,13 @@ test "a grid stamp drawn from a ready-made sketch: each hole is the sketch solve
     const plate = try m.placePanel(.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 60, .h = 30 });
     const key = try m.addPrototype(.{ .name = "Key" });
     const rr = try m.addShapeSketch(.rounded_rectangle);
-    const g = try m.addGrid(plate, .{ .x = 10, .y = 15 }, .{ .cols = 3, .rows = 1, .pitch_x = 15, .pitch_y = 12 });
-    _ = try m.addStamp(plate, g, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 9.5, .h = 8.5, .sketch = m.sketches.items[rr].id, .params = &.{.{ .name = "r", .value = 2 }} });
-    _ = try m.fillGrid(plate, g, 0);
+    const g = try m.addGrid(.{ .panel = plate }, .{ .x = 10, .y = 15 }, .{ .cols = 3, .rows = 1, .pitch_x = 15, .pitch_y = 12 });
+    _ = try m.addStamp(.{ .panel = plate }, g, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 9.5, .h = 8.5, .sketch = m.sketches.items[rr].id, .params = &.{.{ .name = "r", .value = 2 }} });
+    _ = try m.fillGrid(.{ .panel = plate }, g, 0);
     var labels: Labels = .init(gpa, &faces);
     defer labels.deinit();
     {
-        var placed = try solve(gpa, &m, plate, &labels);
+        var placed = try solve(gpa, &m, .{ .panel = plate }, &labels);
         defer placed.deinit();
         try testing.expectEqual(@as(usize, 0), placed.issues.len);
         var holes: usize = 0;
@@ -2771,7 +2782,7 @@ test "a grid stamp drawn from a ready-made sketch: each hole is the sketch solve
     var lens: [2]f64 = undefined;
     for ([_][]const u8{ "1", "3" }, &lens) |r, *len| {
         _ = try m.editSketch(rr, .{ .param = .{ .name = "r", .expr = r } });
-        var placed = try solve(gpa, &m, plate, &labels);
+        var placed = try solve(gpa, &m, .{ .panel = plate }, &labels);
         defer placed.deinit();
         try testing.expectEqual(@as(usize, 0), placed.issues.len);
         var longest: f64 = 0;
