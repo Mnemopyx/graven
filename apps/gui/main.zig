@@ -674,7 +674,21 @@ const State = struct {
 };
 
 /// What a canvas drag does: pick things, or draw out a new panel.
-const Tool = enum { select, construction, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch, insert_figure };
+const Tool = enum { select, construction, add_panel, add_tracks, add_art, select_area, constrain, join, new_sketch, insert_figure, add_array };
+
+/// The array tool's choices (its drop): the cell counts across and down.
+/// Apply arms the tool; a drag then lays the array's cells over the area
+/// dragged, as a grid (the shared primitive: its points are the cells'
+/// centres) on the canvas, a frame or a panel.
+var array_tool: struct {
+    cols: u32 = 4,
+    rows: u32 = 3,
+    /// A polar array: `cols` round a centre, `rows` rings; dragged out
+    /// from the centre to its outer edge.
+    polar: bool = false,
+    around: u32 = 8,
+    rings: u32 = 1,
+} = .{};
 
 /// The figure Insert figure places (its id), chosen in the Browser.
 var insert_figure: layout.model.ObjectId = .none;
@@ -7620,6 +7634,8 @@ fn canvas(active: bool, view: u8) void {
     // and their count and length.
     if (state.drag) |d| if (state.tool == .add_tracks) {
         if (planTracks(d.start, d.at)) |plan| drawTrackPlan(area, plan);
+    } else if (state.tool == .add_array) {
+        if (array_tool.polar) drawPolarPlan(area, d.start, d.at) else drawArrayPlan(area, dragBox(d.start, d.at));
     } else if (state.tool == .insert_figure) {
         drawInsertPreview(area, d.start, d.at);
     } else {
@@ -8759,21 +8775,43 @@ fn drawGrids(area: dvui.Rect.Physical, pi: Parent) void {
             .grid => |g| g.parent.eql(pi) and g.index == gi,
             else => false,
         };
-        const colour = if (sel) colors.select.opacity(0.6) else colors.guide.opacity(0.25);
+        const colour = if (sel) colors.select.opacity(0.35) else colors.guide.opacity(0.15);
         const cols: f64 = @floatFromInt(sh.cols);
         const rows: f64 = @floatFromInt(sh.rows);
+        // Its cells: the borders halfway between points, the outer ones
+        // half a step past the last points; stronger than the lines
+        // through the points (an array reads as its cells).
+        const cell = if (sel) colors.select.opacity(0.75) else colors.guide.opacity(0.4);
+        for (0..sh.cols + 1) |c| {
+            const cf: f64 = @as(f64, @floatFromInt(c)) - 0.5;
+            gridLine(area, pi, gi, cf, -0.5, cf, rows - 0.5, cell, px);
+        }
+        for (0..sh.rows + 1) |r| {
+            const rf: f64 = @as(f64, @floatFromInt(r)) - 0.5;
+            gridLine(area, pi, gi, -0.5, rf, cols - 0.5, rf, cell, px);
+        }
         for (0..sh.cols) |c| {
             const cf: f64 = @floatFromInt(c);
-            const a = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, cf, -0.5)));
-            const b = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, cf, rows - 0.5)));
-            strokeLine(area, .{ .x = a.x0, .y = a.y0 }, .{ .x = b.x0, .y = b.y0 }, colour, px);
+            gridLine(area, pi, gi, cf, -0.5, cf, rows - 0.5, colour, px);
         }
         for (0..sh.rows) |r| {
             const rf: f64 = @floatFromInt(r);
-            const a = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, -0.5, rf)));
-            const b = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, cols - 0.5, rf)));
-            strokeLine(area, .{ .x = a.x0, .y = a.y0 }, .{ .x = b.x0, .y = b.y0 }, colour, px);
+            gridLine(area, pi, gi, -0.5, rf, cols - 0.5, rf, colour, px);
         }
+    }
+}
+
+/// A line of grid `gi` from point (`c0`, `r0`) to (`c1`, `r1`) (fractions
+/// allowed): straight on a Cartesian grid; on a polar one an arc or a ray,
+/// drawn in short pieces.
+fn gridLine(area: dvui.Rect.Physical, pi: Parent, gi: usize, c0: f64, r0: f64, c1: f64, r1: f64, colour: dvui.Color, px: f32) void {
+    const n: usize = if (state.model.gridShape(pi, gi).polar != null) 64 else 1;
+    var prev = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, c0, r0)));
+    for (1..n + 1) |k| {
+        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
+        const q = onSheet(pi, pointBox(state.model.gridPoint(pi, gi, c0 + (c1 - c0) * t, r0 + (r1 - r0) * t)));
+        strokeLine(area, .{ .x = prev.x0, .y = prev.y0 }, .{ .x = q.x0, .y = q.y0 }, colour, px);
+        prev = q;
     }
 }
 
@@ -9078,21 +9116,32 @@ fn gridProperties(pi: Parent, gi: usize) !void {
     }
     heading("Points", .{}, 10);
     var changed = false;
-    if (numberProp("Columns", @floatFromInt(sh.cols), 1, 200, 11)) |v| {
+    const polar = sh.polar != null;
+    if (numberProp(if (polar) "Around" else "Columns", @floatFromInt(sh.cols), 1, 200, 11)) |v| {
         sh.cols = @intFromFloat(@round(v));
         changed = true;
     }
-    if (numberProp("Rows", @floatFromInt(sh.rows), 1, 200, 12)) |v| {
+    if (numberProp(if (polar) "Rings" else "Rows", @floatFromInt(sh.rows), 1, 200, 12)) |v| {
         sh.rows = @intFromFloat(@round(v));
         changed = true;
     }
-    if (numberProp("Spacing across, mm", sh.pitch_x, 0.1, 1000, 13)) |v| {
+    if (numberProp(if (polar) "Angle between, °" else "Spacing across, mm", sh.pitch_x, 0.1, 1000, 13)) |v| {
         sh.pitch_x = v;
         changed = true;
     }
-    if (numberProp("Spacing down, mm", sh.pitch_y, 0.1, 1000, 14)) |v| {
+    if (numberProp(if (polar) "Ring spacing, mm" else "Spacing down, mm", sh.pitch_y, 0.1, 1000, 14)) |v| {
         sh.pitch_y = v;
         changed = true;
+    }
+    if (sh.polar) |*pol| {
+        if (numberProp("First ring radius, mm", pol.radius, 0, 10000, 31)) |v| {
+            pol.radius = v;
+            changed = true;
+        }
+        if (numberProp("Start angle, °", pol.start, -360, 360, 32)) |v| {
+            pol.start = v;
+            changed = true;
+        }
     }
     if (numberProp("Stretch across", sh.stretch_x, 0.01, 100, 15)) |v| {
         sh.stretch_x = v;
@@ -13045,6 +13094,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                             state.press_consumed = true;
                         } else state.drag = .{ .start = p, .at = p };
                     }
+                } else if (state.tool == .add_array and me.button.pointer()) {
+                    // An array is a container: on the workspace, or on the
+                    // panel chosen.
+                    const at = state.view.toMm(area, me.p);
+                    if ((state.context == .panel and panelHolds(state.context.panel, at)) or state.context == .space) {
+                        const p = snap(at);
+                        state.drag = .{ .start = p, .at = p };
+                    }
                 } else if (state.tool == .add_tracks and me.button.pointer()) {
                     // Tracks are drawn from a point on the panel chosen for them.
                     const at = state.view.toMm(area, me.p);
@@ -13211,6 +13268,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     state.drag = null;
                     switch (state.tool) {
                         .add_tracks => addTracksFromDrag(d.start, d.at),
+                        .add_array => if (array_tool.polar) addPolarFromDrag(d.start, d.at) else addArrayFromDrag(dragBox(d.start, d.at)),
                         .add_art => addArtFromDrag(dragBox(d.start, d.at)),
                         .select_area => selectArea(dragBox(d.start, d.at)),
                         .insert_figure => insertFigureFromDrag(d.start, d.at),
@@ -14322,6 +14380,113 @@ fn drawTrackPlan(area: dvui.Rect.Physical, plan: TrackPlan) void {
 /// Makes the empty tracks a finished drag planned, makes their region the
 /// context and puts the flow cursor at the start of the first, ready for
 /// tiles. One use ends the tool.
+/// The array being dragged out: its outline and its cells' borders.
+fn drawArrayPlan(area: dvui.Rect.Physical, b: geom.Box) void {
+    const px = dvui.windowNaturalScale();
+    const r = state.view.rect(area, b);
+    r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
+    r.stroke(.square, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+    const cols: f64 = @floatFromInt(array_tool.cols);
+    const rows: f64 = @floatFromInt(array_tool.rows);
+    for (1..array_tool.cols) |c| {
+        const x = b.x0 + (b.x1 - b.x0) * @as(f64, @floatFromInt(c)) / cols;
+        strokeLine(area, .{ .x = x, .y = b.y0 }, .{ .x = x, .y = b.y1 }, colors.select.opacity(0.7), px);
+    }
+    for (1..array_tool.rows) |k| {
+        const y = b.y0 + (b.y1 - b.y0) * @as(f64, @floatFromInt(k)) / rows;
+        strokeLine(area, .{ .x = b.x0, .y = y }, .{ .x = b.x1, .y = y }, colors.select.opacity(0.7), px);
+    }
+}
+
+/// A polar array being dragged out from its centre `c` to its outer edge
+/// at `at`: its rings and the borders between its cells.
+fn drawPolarPlan(area: dvui.Rect.Physical, c: geom.Point, at: geom.Point) void {
+    const px = dvui.windowNaturalScale();
+    const R = @sqrt((at.x - c.x) * (at.x - c.x) + (at.y - c.y) * (at.y - c.y));
+    if (R <= 0) return;
+    const n = array_tool.around;
+    const rings: f64 = @floatFromInt(array_tool.rings);
+    const step = 360.0 / @as(f64, @floatFromInt(n));
+    // Rings: the outer edge, and the borders between rings.
+    for (1..array_tool.rings + 1) |k| {
+        const r = R * @as(f64, @floatFromInt(k)) / rings;
+        var prev: geom.Point = .{ .x = c.x + r, .y = c.y };
+        for (1..97) |j| {
+            const a = std.math.tau * @as(f64, @floatFromInt(j)) / 96;
+            const q: geom.Point = .{ .x = c.x + r * @cos(a), .y = c.y + r * @sin(a) };
+            strokeLine(area, prev, q, if (k == array_tool.rings) colors.select else colors.select.opacity(0.7), if (k == array_tool.rings) 1.5 * px else px);
+            prev = q;
+        }
+    }
+    // Radial borders, half a step either side of each cell's middle.
+    for (0..n) |i| {
+        const a = std.math.degreesToRadians(90 - (@as(f64, @floatFromInt(i)) - 0.5) * step);
+        strokeLine(area, c, .{ .x = c.x + R * @cos(a), .y = c.y + R * @sin(a) }, colors.select.opacity(0.7), px);
+    }
+}
+
+/// Add array, polar: a polar grid centred at `c`, its rings filling out to
+/// `at`'s distance; its points the cells' middles (column 0 straight up,
+/// then clockwise).
+fn addPolarFromDrag(c: geom.Point, at: geom.Point) void {
+    defer state.tool = .select;
+    const parent: Parent = switch (state.context) {
+        .panel => |pi| .{ .panel = pi },
+        .space => |si| .{ .space = si },
+        else => return,
+    };
+    const R = @sqrt((at.x - c.x) * (at.x - c.x) + (at.y - c.y) * (at.y - c.y));
+    if (!(R > 0.5)) {
+        state.status = "The array was too small: drag from its centre out to its edge. ";
+        return;
+    }
+    const ring = R / @as(f64, @floatFromInt(array_tool.rings));
+    const o = parentOrigin(parent);
+    const gi = act(.addGrid, .{ parent, geom.Point{ .x = c.x - o.x, .y = c.y - o.y }, layout.model.GridShape{
+        .cols = array_tool.around,
+        .rows = array_tool.rings,
+        .pitch_x = 360.0 / @as(f64, @floatFromInt(array_tool.around)),
+        .pitch_y = ring,
+        .polar = .{ .radius = ring / 2 },
+    } }) catch {
+        state.status = "The array was not added. ";
+        return;
+    };
+    state.context = .{ .grid = .{ .parent = parent, .index = gi } };
+    state.expanded.put(state.gpa, Context.key(parentContext(parent)), true) catch {};
+}
+
+/// Add array: a grid over box `b` (sheet mm), its cells `b` divided by the
+/// tool's counts; its points the cells' centres. On the workspace (canvas
+/// or frame) or the panel chosen.
+fn addArrayFromDrag(b: geom.Box) void {
+    defer state.tool = .select;
+    const parent: Parent = switch (state.context) {
+        .panel => |pi| .{ .panel = pi },
+        .space => |si| .{ .space = si },
+        else => return,
+    };
+    const w = b.x1 - b.x0;
+    const h = b.y1 - b.y0;
+    if (!(w > 0.5 and h > 0.5)) {
+        state.status = "The array was too small: drag out its area. ";
+        return;
+    }
+    const cols: f64 = @floatFromInt(array_tool.cols);
+    const rows: f64 = @floatFromInt(array_tool.rows);
+    const px_ = w / cols;
+    const py_ = h / rows;
+    const o = parentOrigin(parent);
+    // Point (0, 0): the top-left cell's centre, in the parent's frame.
+    const origin: geom.Point = .{ .x = b.x0 + px_ / 2 - o.x, .y = b.y1 - py_ / 2 - o.y };
+    const gi = act(.addGrid, .{ parent, origin, layout.model.GridShape{ .cols = array_tool.cols, .rows = array_tool.rows, .pitch_x = px_, .pitch_y = py_ } }) catch {
+        state.status = "The array was not added. ";
+        return;
+    };
+    state.context = .{ .grid = .{ .parent = parent, .index = gi } };
+    state.expanded.put(state.gpa, Context.key(parentContext(parent)), true) catch {};
+}
+
 fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
     defer state.tool = .select;
     const plan = planTracks(from, at) orelse return;
@@ -14479,6 +14644,20 @@ fn toolBar() void {
             });
             dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, mode[3], .{}, .{ .id_extra = mi });
         }
+    }
+    // Array: a grid of cells, its counts chosen in its drop, then dragged
+    // out on the canvas, a frame or a panel.
+    if (showTool(state.context == .panel or state.context == .space)) {
+        const prev_a = faintUnless(state.context == .panel or state.context == .space);
+        defer dvui.alphaSet(prev_a);
+        const on = state.tool == .add_array;
+        var awd: dvui.WidgetData = undefined;
+        ribbon_next_drop = .array;
+        keyIcon(@src(), "Add array", dvui.entypo.grid, 0, .{
+            .data_out = &awd,
+            .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
+        });
+        dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add array: choose its columns and rows, Apply, then drag out its cells", .{}, .{});
     }
     if (showTool(state.context == .region)) {
         const prev_a = faintUnless(state.context == .region);
@@ -15553,6 +15732,8 @@ const Drop = enum {
     tracks,
     /// The Text style panel.
     styles,
+    /// Add array's kind and cell counts.
+    array,
 
     fn panel(d: Drop) bool {
         return d == .layers or d == .styles;
@@ -15564,6 +15745,7 @@ const Drop = enum {
             .shape => "ribbon.drop.shape",
             .tracks => "ribbon.drop.tracks",
             .styles => "ribbon.styles",
+            .array => "ribbon.drop.array",
         };
     }
 
@@ -15573,6 +15755,7 @@ const Drop = enum {
         if (a == kact("tool.layout-column-of-rows") or a == kact("tool.layout-row-of-columns") or a == kact("tool.layout-single-track")) return .tracks;
         if (a == kact("ribbon.layers")) return .layers;
         if (a == kact("ribbon.styles")) return .styles;
+        if (a == kact("tool.add-array")) return .array;
         return null;
     }
 };
@@ -15723,6 +15906,7 @@ fn ribbonDrops() void {
         switch (d) {
             .shape => shapeMenu(),
             .tracks => tracksMenu(),
+            .array => arrayMenu(),
             else => {},
         }
     }
@@ -15769,6 +15953,27 @@ const shape_names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "
 
 fn shapeMenu() void {
     for (shape_names, 0..) |n, i| dropItem("ribbon.shape", n, @intCast(i), state.tool == .add_art and @intFromEnum(shape_kind) == i, i);
+}
+
+const array_names = [_][]const u8{ "Rectangular array", "Polar array" };
+
+/// Add array's drop: its kind, its counts, and Apply (which arms the tool:
+/// the next drag lays out the cells).
+fn arrayMenu() void {
+    for (array_names, 0..) |n, i| dropItem("ribbon.array", n, @intCast(i), (i == 1) == array_tool.polar, i);
+    const saved = pushGroup("array");
+    defer popGroup(saved);
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .min_size_content = .{ .w = 200 }, .padding = .{ .x = 10, .w = 10, .y = 4, .h = 6 } });
+    defer box.deinit();
+    const labels: [2][]const u8 = if (array_tool.polar) .{ "Around", "Rings" } else .{ "Columns", "Rows" };
+    inline for (0..2) |i| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
+        defer row.deinit();
+        propName(labels[i]);
+        const cur: *u32 = if (array_tool.polar) (if (i == 0) &array_tool.around else &array_tool.rings) else (if (i == 0) &array_tool.cols else &array_tool.rows);
+        if (accepted.numberField(@src(), f64, @floatFromInt(cur.*), 1, 999, .{ .id_extra = i, .expand = .horizontal })) |v| cur.* = @intFromFloat(@round(v));
+    }
+    keyButton(@src(), "Apply", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
 }
 
 const track_names = [_][]const u8{ "Layout: column of rows", "Layout: row of columns", "Layout: single track" };
@@ -16937,6 +17142,39 @@ const button_handlers = [_]ButtonHandler{
     handler("ribbon.drop.shape", struct {
         fn f(_: i32) void {
             openDrop(.shape);
+        }
+    }.f),
+    handler("ribbon.drop.array", struct {
+        fn f(_: i32) void {
+            openDrop(.array);
+        }
+    }.f),
+    handler("tool.add-array", struct {
+        fn f(_: i32) void {
+            // On: off. Off: its drop, to choose the counts and Apply.
+            if (state.tool == .add_array) {
+                state.tool = .select;
+                state.drag = null;
+                return;
+            }
+            openDrop(.array);
+        }
+    }.f),
+    handler("ribbon.array.*", struct {
+        fn f(arg: i32) void {
+            if (arg == 0 or arg == 1) array_tool.polar = arg == 1;
+        }
+    }.f),
+    handler("array.apply", struct {
+        fn f(_: i32) void {
+            drop_open = null;
+            if (!(state.context == .space or state.context == .panel)) {
+                state.status = "An array goes on a canvas, a frame or a panel: choose one first. ";
+                return;
+            }
+            state.drag = null;
+            state.tool = .add_array;
+            focusCanvas();
         }
     }.f),
     handler("ribbon.drop.tracks", struct {
@@ -20042,6 +20280,10 @@ fn statusContent() void {
         .construction => if (guide_pending) "Construction line: click its second point (Shift: 15° steps) · Esc cancels" else "Construction line: drag from a point to another, or click both (Shift: 15° steps) · Esc ends",
         .add_tracks => if (tracks_tool.kind == .track) "Layout: single track: drag it out, right or down; content runs the way it is drawn · Esc cancels" else if (tracks_tool.major == .row) "Layout: column of rows: drag it out; content flows through its rows in order · Esc cancels" else "Layout: row of columns: drag it out; content flows through its columns in order · Esc cancels",
         .join => "Join: click the track the flow goes on into · Esc cancels",
+        .add_array => (if (array_tool.polar)
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "Add polar array: drag from its centre out to its edge; {d} around, {d} rings · Esc cancels", .{ array_tool.around, array_tool.rings })
+        else
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "Add array: drag out its {d} × {d} cells · Esc cancels", .{ array_tool.cols, array_tool.rows })) catch "Add array: drag out its cells · Esc cancels",
         .new_sketch => "New sketch: click where its origin goes · Esc cancels",
         .insert_figure => "Insert figure: drag out its size (its proportions kept), or click for its own size · Esc cancels",
         .constrain => if (constrain_first == null) "Constrain: click an edge, centre line or origin line of what is to move · Esc cancels" else "Constrain: click what it keeps to (its own, a peer's, or the parent's) · Esc cancels",

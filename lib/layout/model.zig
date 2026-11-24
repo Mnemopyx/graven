@@ -1511,6 +1511,19 @@ pub const GridShape = struct {
     /// Scales the spacing, so the whole grid stretches.
     stretch_x: f64 = 1,
     stretch_y: f64 = 1,
+    /// A polar grid (a polar array): its columns run round a centre (the
+    /// grid's origin) and its rows are rings out from it. Then the step
+    /// across (`stepX`) is the angle between columns, degrees, clockwise,
+    /// and the step down (`stepY`) the distance between rings, mm. Null: a
+    /// Cartesian grid.
+    polar: ?Polar = null,
+
+    pub const Polar = struct {
+        /// The first ring's radius (row 0), mm.
+        radius: f64,
+        /// Column 0's direction, degrees (90: straight up).
+        start: f64 = 90,
+    };
 
     pub fn stepX(g: GridShape) f64 {
         return g.pitch_x * g.stretch_x;
@@ -3806,6 +3819,11 @@ pub const Model = struct {
     pub fn gridPoint(m: *const Model, parent: Parent, gi: usize, col: f64, row: f64) geom.Point {
         const g = m.gridsIn(parent)[gi];
         const sh = m.gridShape(parent, gi);
+        if (sh.polar) |pol| {
+            const ang = std.math.degreesToRadians(pol.start - col * sh.stepX());
+            const r = @max(0, pol.radius + row * sh.stepY());
+            return .{ .x = g.origin.x + r * @cos(ang), .y = g.origin.y + r * @sin(ang) };
+        }
         return .{ .x = g.origin.x + col * sh.stepX(), .y = g.origin.y - row * sh.stepY() };
     }
 
@@ -3821,8 +3839,11 @@ pub const Model = struct {
         const inst = g.instances.items[ii];
         const st = g.stamps.items[m.stampIndex(parent, gi, inst.stamp) orelse return null];
         const sh = m.gridShape(parent, gi);
-        const w = st.w + @as(f64, @floatFromInt(inst.cols - 1)) * sh.stepX();
-        const h = st.h + @as(f64, @floatFromInt(inst.rows - 1)) * sh.stepY();
+        // A polar grid's spans do not grow the box (its steps are an angle
+        // and a ring): the stamp's size, at the spanned points' middle.
+        const polar = sh.polar != null;
+        const w = if (polar) st.w else st.w + @as(f64, @floatFromInt(inst.cols - 1)) * sh.stepX();
+        const h = if (polar) st.h else st.h + @as(f64, @floatFromInt(inst.rows - 1)) * sh.stepY();
         const c: geom.Point = inst.loose orelse blk: {
             const p = m.gridPoint(parent, gi, @as(f64, @floatFromInt(inst.col)) + @as(f64, @floatFromInt(inst.cols - 1)) / 2, @as(f64, @floatFromInt(inst.row)) + @as(f64, @floatFromInt(inst.rows - 1)) / 2);
             break :blk .{ .x = p.x + st.offset.x, .y = p.y + st.offset.y };

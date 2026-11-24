@@ -421,6 +421,7 @@ pub const binds = [_]B{
     .{ .mode = "canvas", .chord = "n", .action = "tool.new-sketch" },
     .{ .mode = "canvas", .chord = "k", .action = "tool.constrain" },
     .{ .mode = "canvas", .chord = "f", .action = "tool.fit-to-tiles" },
+    .{ .mode = "canvas", .chord = "x", .action = "tool.add-array" },
     .{ .mode = "canvas", .chord = "l", .action = "ribbon.layers" },
     .{ .mode = "canvas", .chord = "y", .action = "ribbon.styles" },
     // A paged context's pages (none has pages yet).
