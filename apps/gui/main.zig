@@ -27908,7 +27908,187 @@ fn skCornerAnchor(s: *const skl.Sketch, a: skl.GeomId, b: skl.GeomId) ?geom.Poin
         }
     };
     const m = skMid(skMid(sa[0], sa[1]), skMid(sb[0], sb[1]));
-    return .{ .x = q.x + 0.4 * (m.x - q.x), .y = q.y + 0.4 * (m.y - q.y) };
+    return .{ .x = q.x + 0.55 * (m.x - q.x), .y = q.y + 0.55 * (m.y - q.y) };
+}
+
+/// Sets of equal sizes and angles in a sketch (the owner, 2026-11-24:
+/// where a number of values are equal, one annotation: θ = 108°, s =
+/// 10.48): the equal and equal-angle constraints joined into sets by what
+/// they share, each set named (s, s′, s″ for lengths; r … for radii; θ …
+/// for angles), each member marked with the name, the value noted once.
+const EqualSets = struct {
+    const Member = struct { kind: enum { len, radius, angle }, a: skl.GeomId, b: skl.GeomId = 0 };
+    members: std.ArrayList(Member) = .empty,
+    parent: std.ArrayList(usize) = .empty,
+    /// Each member's set (its root's index into `names`).
+    set_of: []usize = &.{},
+    names: std.ArrayList([]const u8) = .empty,
+    /// Per set: its kind's member, for the value.
+    first: std.ArrayList(usize) = .empty,
+
+    fn find(e: *EqualSets, i: usize) usize {
+        var x = i;
+        while (e.parent.items[x] != x) x = e.parent.items[x];
+        return x;
+    }
+
+    fn add(e: *EqualSets, ar: std.mem.Allocator, m: Member) usize {
+        for (e.members.items, 0..) |x, i| if (std.meta.eql(x, m)) return i;
+        e.members.append(ar, m) catch return 0;
+        e.parent.append(ar, e.members.items.len - 1) catch {};
+        return e.members.items.len - 1;
+    }
+
+    fn pair(c: skl.Constraint, s: *const skl.Sketch) ?[2]Member {
+        return switch (c.kind) {
+            .equal => |q| blk: {
+                const round = q.a < s.geometry.items.len and s.geometry.items[q.a].kind != .segment;
+                const k: @FieldType(Member, "kind") = if (round) .radius else .len;
+                break :blk .{ .{ .kind = k, .a = q.a }, .{ .kind = k, .a = q.b } };
+            },
+            .equal_angle => |q| .{ .{ .kind = .angle, .a = q.a, .b = q.b }, .{ .kind = .angle, .a = q.c, .b = q.d } },
+            else => null,
+        };
+    }
+
+    fn build(e: *EqualSets, ar: std.mem.Allocator, s: *const skl.Sketch) void {
+        for (s.constraints.items) |c| {
+            const pr = pair(c, s) orelse continue;
+            const i = e.add(ar, pr[0]);
+            const j = e.add(ar, pr[1]);
+            if (i >= e.parent.items.len or j >= e.parent.items.len) continue;
+            const ri = e.find(i);
+            const rj = e.find(j);
+            if (ri != rj) e.parent.items[rj] = ri;
+        }
+        e.set_of = ar.alloc(usize, e.members.items.len) catch return;
+        var roots: std.ArrayList(usize) = .empty;
+        var counts = [3]usize{ 0, 0, 0 };
+        for (e.members.items, 0..) |m, i| {
+            const r = e.find(i);
+            const k = for (roots.items, 0..) |x, n| {
+                if (x == r) break n;
+            } else blk: {
+                roots.append(ar, r) catch return;
+                const base: []const u8 = switch (m.kind) {
+                    .len => "s",
+                    .radius => "r",
+                    .angle => "θ",
+                };
+                const n = counts[@intFromEnum(m.kind)];
+                counts[@intFromEnum(m.kind)] += 1;
+                const name = switch (n) {
+                    0 => base,
+                    1 => std.fmt.allocPrint(ar, "{s}′", .{base}) catch base,
+                    2 => std.fmt.allocPrint(ar, "{s}″", .{base}) catch base,
+                    else => std.fmt.allocPrint(ar, "{s}{d}", .{ base, n + 1 }) catch base,
+                };
+                e.names.append(ar, name) catch return;
+                e.first.append(ar, i) catch return;
+                break :blk roots.items.len - 1;
+            };
+            e.set_of[i] = k;
+        }
+    }
+
+    /// The name of constraint `c`'s set.
+    fn symbolOf(e: *const EqualSets, c: skl.Constraint) ?[]const u8 {
+        const m: Member = switch (c.kind) {
+            .equal => |q| for (e.members.items) |x| {
+                if (x.kind != .angle and x.a == q.a) break x;
+            } else return null,
+            .equal_angle => |q| .{ .kind = .angle, .a = q.a, .b = q.b },
+            else => return null,
+        };
+        for (e.members.items, 0..) |x, i| if (std.meta.eql(x, m)) return e.names.items[e.set_of[i]];
+        return null;
+    }
+};
+
+/// Where a set member is marked, in the sketch's frame.
+fn skMemberAt(s: *const skl.Sketch, m: EqualSets.Member) ?geom.Point {
+    if (m.a >= s.geometry.items.len) return null;
+    return switch (m.kind) {
+        .angle => skCornerAnchor(s, m.a, m.b),
+        .len => switch (s.geometry.items[m.a].kind) {
+            .segment => |sg| skMid(skVal(s, sg.a), skVal(s, sg.b)),
+            else => null,
+        },
+        .radius => switch (s.geometry.items[m.a].kind) {
+            .circle => |ci| blk: {
+                const cc = skVal(s, ci.c);
+                const r = s.vars.items[ci.r];
+                break :blk .{ .x = cc.x + r * 0.7071, .y = cc.y + r * 0.7071 };
+            },
+            .arc => |a| skArcMid(skVal(s, a.c), skVal(s, a.a), skVal(s, a.b)),
+            else => null,
+        },
+    };
+}
+
+/// A set's value now: a length or radius (document units), or an angle
+/// (degrees, 0 to 180).
+fn skMemberValue(s: *const skl.Sketch, m: EqualSets.Member) ?f64 {
+    if (m.a >= s.geometry.items.len) return null;
+    return switch (m.kind) {
+        .angle => blk: {
+            var v = s.measure(.{ .kind = .{ .angle = .{ .a = m.a, .b = m.b, .value = 0 } } }) orelse return null;
+            if (v < 0) v += std.math.pi;
+            break :blk v * 180 / std.math.pi;
+        },
+        .len => switch (s.geometry.items[m.a].kind) {
+            .segment => |sg| skDist(skVal(s, sg.a), skVal(s, sg.b)) * docUnits().perMm(),
+            else => null,
+        },
+        .radius => switch (s.geometry.items[m.a].kind) {
+            .circle => |ci| s.vars.items[ci.r] * docUnits().perMm(),
+            .arc => |a| skDist(skVal(s, a.c), skVal(s, a.a)) * docUnits().perMm(),
+            else => null,
+        },
+    };
+}
+
+/// Each equal set's members marked with its name, and its value noted
+/// once, at the middle of its members (sets meeting there stacked).
+fn skDrawEqualSets(area: dvui.Rect.Physical, it: SkPlace, e: *const EqualSets) void {
+    const s = it.sketch;
+    const px = dvui.windowNaturalScale();
+    const colour = colors.guide;
+    for (e.members.items, 0..) |m, i| {
+        const at = skMemberAt(s, m) orelse continue;
+        const q = skPx(area, it, at);
+        strokeText(e.names.items[e.set_of[i]], .{ .at = .{ .x = q.x, .y = q.y }, .size = dim_cap * px, .y_down = true, .align_x = 0.5, .align_y = 0.5 }, colour);
+    }
+    var placed: std.ArrayList(dvui.Point.Physical) = .empty;
+    const ar = dvui.currentWindow().arena();
+    for (e.names.items, 0..) |name, k| {
+        var sum: geom.Point = .{ .x = 0, .y = 0 };
+        var n: f64 = 0;
+        for (e.members.items, 0..) |m, i| {
+            if (e.set_of[i] != k) continue;
+            const at = skMemberAt(s, m) orelse continue;
+            sum.x += at.x;
+            sum.y += at.y;
+            n += 1;
+        }
+        if (n == 0) continue;
+        var q = skPx(area, it, .{ .x = sum.x / n, .y = sum.y / n });
+        // Below the middle (a centre point is often there), clear of any
+        // note already there.
+        q.y += 2 * dim_cap * px;
+        for (placed.items) |o| if (@abs(o.x - q.x) < 40 * px and @abs(o.y - q.y) < 1.8 * dim_cap * px) {
+            q.y = o.y + 1.8 * dim_cap * px;
+        };
+        placed.append(ar, q) catch {};
+        const m = e.members.items[e.first.items[k]];
+        const v = skMemberValue(s, m) orelse continue;
+        var buf: [48]u8 = undefined;
+        const text = if (m.kind == .angle)
+            std.fmt.bufPrint(&buf, "{s} = {d:.1}°", .{ name, v }) catch name
+        else
+            std.fmt.bufPrint(&buf, "{s} = {d:.2}", .{ name, v }) catch name;
+        strokeText(text, .{ .at = .{ .x = q.x, .y = q.y }, .size = dim_cap * px, .y_down = true, .align_x = 0.5, .align_y = 0.5 }, colour);
+    }
 }
 
 /// What equal angles come to now (degrees, 0 to 180): the second
@@ -28560,6 +28740,11 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
         }
     }
     skDrawFlash(area, it);
+    // Equal sizes and angles in named sets: each member marked with its
+    // set's name, the set's value noted once.
+    var eq_sets: EqualSets = .{};
+    eq_sets.build(dvui.currentWindow().arena(), s);
+    skDrawEqualSets(area, it, &eq_sets);
     // Constraint glyphs and values.
     for (s.constraints.items, 0..) |c, ci| {
         const anchor = skAnchor(s, c) orelse continue;
@@ -28589,21 +28774,14 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             .parallel => "||",
             .perpendicular => "perp",
             .tangent => "tan",
-            // Equal sides: each its current length (in parentheses: it
-            // follows from the equality).
-            .equal => |e| blk: {
-                const g = s.geometry.items[e.b];
-                if (g.kind != .segment) break :blk "=";
-                const p0 = s.point(.{ .geom = e.b, .role = .start }) catch break :blk "=";
-                const p1 = s.point(.{ .geom = e.b, .role = .end }) catch break :blk "=";
-                break :blk std.fmt.bufPrint(&tb, "=({d:.2})", .{skDist(p0, p1) * docUnits().perMm()}) catch "=";
+            // Equal sizes and angles: their sets are named and noted once
+            // (`skDrawEqualSets`); a selected one shows its set's name.
+            .equal, .equal_angle => blk: {
+                if (!skSelected(.{ .constraint = @intCast(ci) })) continue;
+                break :blk eq_sets.symbolOf(c) orelse "=";
             },
             .symmetric => "sym",
             .equal_distance => "=",
-            .equal_angle => blk: {
-                const v = skEqualAngle(c) orelse break :blk "∠=";
-                break :blk std.fmt.bufPrint(&tb, "∠=({d:.1}°)", .{v}) catch "∠=";
-            },
             .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
                 const v = skShownValue(c).?;
                 const u: []const u8 = if (c.kind == .angle) "°" else "";
