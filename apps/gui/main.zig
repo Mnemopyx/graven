@@ -27915,7 +27915,7 @@ fn skCornerAnchor(s: *const skl.Sketch, a: skl.GeomId, b: skl.GeomId) ?geom.Poin
 /// where a number of values are equal, one annotation: θ = 108°, s =
 /// 10.48): the equal and equal-angle constraints joined into sets by what
 /// they share, each set named (s, s′, s″ for lengths; r … for radii; θ …
-/// for angles), each member marked with the equal symbol (= or ∠=; the
+/// for angles), each member marked with the equal symbol (= for sizes, ≅ for angles; the
 /// owner: the user will know what θ and s mean), the value noted once.
 const EqualSets = struct {
     const Member = struct { kind: enum { len, radius, angle }, a: skl.GeomId, b: skl.GeomId = 0 };
@@ -28046,7 +28046,7 @@ fn skDrawEqualSets(area: dvui.Rect.Physical, it: SkPlace, e: *const EqualSets) v
         const at = skMemberAt(s, m) orelse continue;
         const q = skPx(area, it, at);
         // The equal constraint's own symbol; the note names the set.
-        const mark: []const u8 = if (m.kind == .angle) "∠=" else "=";
+        const mark: []const u8 = if (m.kind == .angle) "≅" else "=";
         strokeText(mark, .{ .at = .{ .x = q.x, .y = q.y }, .size = dim_cap * px, .y_down = true, .align_x = 0.5, .align_y = 0.5 }, colour);
     }
     var placed: std.ArrayList(dvui.Point.Physical) = .empty;
@@ -28768,7 +28768,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             // (`skDrawEqualSets`); a selected one shows its set's name.
             .equal, .equal_angle => blk: {
                 if (!skSelected(.{ .constraint = @intCast(ci) })) continue;
-                break :blk if (c.kind == .equal_angle) "∠=" else "=";
+                break :blk if (c.kind == .equal_angle) "≅" else "=";
             },
             .symmetric => "sym",
             .equal_distance => "=",

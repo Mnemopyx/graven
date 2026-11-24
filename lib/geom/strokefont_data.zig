@@ -118,5 +118,6 @@ pub const extra = [_]struct { cp: u21, g: []const u8 }{
     .{ .cp = 0x2033, .g = "LXQFOL RUFSL" },
     .{ .cp = 0x00B7, .g = "NVSPRRQQRPSP" },
     .{ .cp = 0x2220, .g = "F^[HI[\\[" },
+    .{ .cp = 0x2245, .g = "E_ILKJNHQJSKVLYL[I RIP[P RIU[U" },
     .{ .cp = 0x03B8, .g = "I[XPWUVXTZQ[OZMWLSLNMJOGQFTGVIWLXP RLPXP" },
 };
