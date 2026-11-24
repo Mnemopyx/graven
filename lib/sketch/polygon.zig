@@ -8,8 +8,9 @@
 //! corner: driving at n - 3, reference at the other three. With all
 //! sides equal, those angles are the ones left free (an equilateral
 //! polygon of n sides has n - 3 shape freedoms); more would be redundant.
-//! The circle passes through three corners (any three fix a circle; the
-//! rest lie on it already). What is left free: the centre, the size
+//! A construction circle passes through three corners (any three fix a
+//! circle; the rest lie on it already); another, about the same centre,
+//! touches the first side (and so every side, at its middle). What is left free: the centre, the size
 //! (the circle's radius) and the turn.
 
 const std = @import("std");
@@ -26,6 +27,8 @@ const Error = root.Error;
 pub const Refs = struct {
     /// The construction circle through its corners.
     circle: GeomId,
+    /// The construction circle touching its sides at their middles.
+    inner: GeomId,
     /// The first side (from the corner dragged to, anticlockwise).
     first: GeomId,
     sides: u32,
@@ -63,7 +66,13 @@ pub fn addRegular(s: *Sketch, a: Allocator, c: Point, corner: Point, n: u32, con
         _ = try s.addConstraint(a, .{ .kind = .{ .angle = .{ .a = next, .b = g, .value = interior } }, .driving = i < n - 3 });
         if (i < 3) _ = try s.addConstraint(a, .{ .kind = .{ .point_on = .{ .p = .{ .geom = g, .role = .start }, .on = circle } } });
     }
-    return .{ .circle = circle, .first = sides.items[0], .sides = n };
+    // The inscribed circle: about the same centre, touching each side at
+    // its middle (tangent to the first; the rest follow, the polygon being
+    // regular).
+    const inner = try s.addCircle(a, c, r * @cos(step / 2), true);
+    _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = inner, .role = .centre }, .{ .geom = circle, .role = .centre } } } });
+    _ = try s.addConstraint(a, .{ .kind = .{ .tangent = .{ .a = inner, .b = sides.items[0] } } });
+    return .{ .circle = circle, .inner = inner, .first = sides.items[0], .sides = n };
 }
 
 test "a regular polygon: four freedoms left, none redundant, sides equal" {
@@ -87,6 +96,9 @@ test "a regular polygon: four freedoms left, none redundant, sides equal" {
         const l0 = len(segs.items[0]);
         for (segs.items) |sg| try std.testing.expectApproxEqAbs(l0, len(sg), 1e-6);
         try std.testing.expect(l0 > 2 * 10 * @sin(std.math.pi / @as(f64, @floatFromInt(n))) + 0.1);
+        // The inscribed circle followed: its radius the apothem.
+        const ri = s.vars.items[s.geometry.items[refs.inner].kind.circle.r];
+        try std.testing.expectApproxEqAbs(l0 / (2 * @tan(std.math.pi / @as(f64, @floatFromInt(n)))), ri, 1e-6);
     }
 }
 
