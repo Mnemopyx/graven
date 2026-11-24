@@ -2451,7 +2451,7 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {};
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample();
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -25512,6 +25512,9 @@ var sk_lock_index: usize = 0;
 var sk_pointer: ?geom.Point = null;
 /// A point being dragged (`moved` once it has), each drag one undo step.
 var sk_drag: ?struct { p: skl.PointRef, moved: bool, start: geom.Point } = null;
+/// A drag of a dimension's value: the value slides along its line and the
+/// line across with it (its placement, saved with it).
+var sk_dim_drag: ?struct { c: skl.ConstraintId, moved: bool, start: geom.Point, seq: u64 } = null;
 var sk_drag_seq: u64 = 0;
 /// A selection box being dragged out on empty space.
 var sk_box: ?struct { start: geom.Point, at: geom.Point } = null;
@@ -25559,6 +25562,24 @@ fn enterSketch(ref: SketchRef) void {
     state.context = .{ .sketch = .{ .space = ref.space, .index = ref.index } };
 }
 
+/// GRAVEN_SAMPLE=sketch: the ready-made rectangle sketch edited on the
+/// canvas, its width dimension moved below it (extension lines) and its
+/// value along, its height's to the right: dimensions after drafting
+/// practice, to look at.
+fn loadSketchSample() void {
+    const index = act(.addShapeSketch, .{layout.model.ShapeSketch.rectangle}) catch return;
+    enterSketchAt(index, shown_space, .{ .x = 0, .y = 0 });
+    const sk = &state.model.sketches.items[index].sketch;
+    for (sk.constraints.items, 0..) |c, ci| {
+        if (std.mem.eql(u8, c.expr, "w")) _ = skEdit(.{ .place = .{ .c = @intCast(ci), .place = .{ .offset = -12, .text = 3 } } });
+        if (std.mem.eql(u8, c.expr, "h")) _ = skEdit(.{ .place = .{ .c = @intCast(ci), .place = .{ .offset = -10 } } });
+    }
+    state.view.cx = 0;
+    state.view.cy = -3;
+    state.view.ppm = 40;
+    state.view.fit = null;
+}
+
 /// Edits sketch `index` with its origin at `at` in space `space`.
 fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sketch_edit = .{ .sketch = index, .space = space, .at = at };
@@ -25583,6 +25604,7 @@ fn leaveSketch() void {
     sk_dim = null;
     sk_lock = null;
     sk_drag = null;
+    sk_dim_drag = null;
     sk_box = null;
     sk_sel.clearRetainingCapacity();
     state.status = "";
@@ -25771,11 +25793,33 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
             ncurves += 1;
         }
     }
+    // Dimensions, by their value or their line (after points, before
+    // curves): pressed and dragged, they are placed.
+    const px = dvui.windowNaturalScale();
+    for (s.constraints.items, 0..) |c, ci| {
+        if (sk_nhits >= sk_hits.len) break;
+        if (c.place.hidden) continue;
+        const ms = skDimMeasure(s, c) orelse continue;
+        const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, 0));
+        const near = @min(skDist(d.text_at, q), segPointDist(d.line[0], d.line[1], q));
+        if (near > radius) continue;
+        sk_hits[sk_nhits] = .{ .pick = .{ .constraint = @intCast(ci) }, .at = d.text_at };
+        sk_nhits += 1;
+    }
     for (curves[0..ncurves]) |c| {
         if (sk_nhits >= sk_hits.len) break;
         sk_hits[sk_nhits] = c;
         sk_nhits += 1;
     }
+}
+
+/// How far point `q` is from the segment `a`–`b`.
+fn segPointDist(a: geom.Point, b: geom.Point, q: geom.Point) f64 {
+    const vx = b.x - a.x;
+    const vy = b.y - a.y;
+    const len2 = vx * vx + vy * vy;
+    const t = if (len2 > 0) std.math.clamp(((q.x - a.x) * vx + (q.y - a.y) * vy) / len2, 0, 1) else 0;
+    return skDist(.{ .x = a.x + t * vx, .y = a.y + t * vy }, q);
 }
 
 /// What the pointer is on: the locked hit, else the nearest.
@@ -26141,6 +26185,55 @@ fn skArcMid(c: geom.Point, a: geom.Point, b: geom.Point) geom.Point {
     return .{ .x = c.x + r * @cos(t), .y = c.y + r * @sin(t) };
 }
 
+const cdim = skl.constraint.dimension;
+
+/// What a sketch distance measures, for drawing it after drafting practice
+/// (`graven_constraint`'s dimensions): a horizontal or vertical distance
+/// along its axis, its line placed up or left; an aligned one along the
+/// points' join, placed to its left.
+fn skDimMeasure(s: *const skl.Sketch, c: skl.Constraint) ?cdim.Measure {
+    switch (c.kind) {
+        inline .distance, .distance_x, .distance_y => |d| {
+            const pa = s.point(d.a) catch return null;
+            const pb = s.point(d.b) catch return null;
+            return switch (c.kind) {
+                .distance_x => .{ .p0 = pa, .p1 = pb, .dir = .{ .x = 1, .y = 0 }, .normal = .{ .x = 0, .y = 1 } },
+                .distance_y => .{ .p0 = pa, .p1 = pb, .dir = .{ .x = 0, .y = 1 }, .normal = .{ .x = -1, .y = 0 } },
+                else => blk: {
+                    const len = skDist(pa, pb);
+                    const u: geom.Point = if (len > 1e-12) .{ .x = (pb.x - pa.x) / len, .y = (pb.y - pa.y) / len } else .{ .x = 1, .y = 0 };
+                    break :blk .{ .p0 = pa, .p1 = pb, .dir = u, .normal = .{ .x = -u.y, .y = u.x } };
+                },
+            };
+        },
+        else => return null,
+    }
+}
+
+/// A dimension drawn after drafting practice: extension lines, the
+/// dimension line, filled arrowheads and its value, in screen sizes.
+/// `toPx` maps the measure's frame to device pixels.
+fn drawDimension(area: dvui.Rect.Physical, it: SkPlace, ms: cdim.Measure, place: cdim.Placement, text: []const u8, colour: dvui.Color, hot: bool) void {
+    const px = dvui.windowNaturalScale();
+    const w = strokefont.width(text) * dim_cap * px;
+    const d = cdim.linear(ms, place, cdim.Style.screen(state.view.ppm / px, w / px));
+    const thin: dvui.ColorOrGradient = .{ .color = colour.opacity(0.7) };
+    for (d.ext) |e| if (e) |pts| {
+        dvui.Path.stroke(.{ .points = &.{ skPx(area, it, pts[0]), skPx(area, it, pts[1]) } }, .{ .thickness = px, .color = thin });
+    };
+    dvui.Path.stroke(.{ .points = &.{ skPx(area, it, d.line[0]), skPx(area, it, d.line[1]) } }, .{ .thickness = if (hot) 2 * px else px, .color = thin });
+    if (d.arrows) |arrows| for (arrows) |a| {
+        const pts = [_]dvui.Point.Physical{ skPx(area, it, a.tip), skPx(area, it, a.wings[0]), skPx(area, it, a.wings[1]) };
+        dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
+    };
+    // The value on its line, upright, at its place.
+    const q0 = skPx(area, it, d.text_at);
+    const q1 = skPx(area, it, .{ .x = d.text_at.x + d.text_dir.x, .y = d.text_at.y + d.text_dir.y });
+    var pl = alongPlace(q0, q1, 0);
+    pl.at = .{ .x = q0.x, .y = q0.y };
+    strokeText(text, pl, colour);
+}
+
 fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
     const curveMid = struct {
         fn f(sk_: *const skl.Sketch, g: skl.GeomId) ?geom.Point {
@@ -26171,7 +26264,13 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
         },
         .point_on => |po| s.point(po.p) catch null,
         .fixed => |f| s.point(f.p) catch null,
-        inline .distance, .distance_x, .distance_y => |d| skMid(s.point(d.a) catch return null, s.point(d.b) catch return null),
+        .distance, .distance_x, .distance_y => blk: {
+            const ms = skDimMeasure(s, c) orelse break :blk null;
+            // Where its value sits, as placed (the drafting rules may move a
+            // value that does not fit; this is where it is picked).
+            const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / dvui.windowNaturalScale(), 0));
+            break :blk d.text_at;
+        },
         .line_distance => |d| s.point(d.p) catch null,
         .radius => |r| curveMid(s, r.g),
         .angle => |a| curveMid(s, a.b),
@@ -26290,6 +26389,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             if (target != null and target.?.pick == .point and !sk_press_ctrl) {
                 sk_drag = .{ .p = target.?.pick.point, .moved = false, .start = q };
                 sk_drag_seq += 1;
+            } else if (target != null and target.?.pick == .constraint and !sk_press_ctrl and target.?.pick.constraint < it.sketch.constraints.items.len and skDimMeasure(it.sketch, it.sketch.constraints.items[target.?.pick.constraint]) != null) {
+                sk_drag_seq += 1;
+                sk_dim_drag = .{ .c = target.?.pick.constraint, .moved = false, .start = q, .seq = sk_drag_seq };
             } else sk_box = .{ .start = q, .at = q };
         },
         .motion => if (dvui.captured(box.data().id)) {
@@ -26300,6 +26402,16 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                     d.moved = true;
                     const r = sketch_edit.?;
                     _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketch, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
+                }
+            } else if (sk_dim_drag) |*d| {
+                const moved_px = skDist(d.start, q) * state.view.ppm;
+                if (d.moved or moved_px > 3) {
+                    d.moved = true;
+                    const c = it.sketch.constraints.items[d.c];
+                    if (skDimMeasure(it.sketch, c)) |ms| {
+                        const r = sketch_edit.?;
+                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketch, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.textAt(ms, c.place, q) } } }) catch {};
+                    }
                 }
             } else if (sk_box) |*b| {
                 b.at = q;
@@ -26315,6 +26427,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             if (sk_drag) |d| {
                 if (!d.moved) skClickSelect(.{ .point = d.p }, false);
                 sk_drag = null;
+            } else if (sk_dim_drag) |d| {
+                if (!d.moved) skClickSelect(.{ .constraint = d.c }, false);
+                sk_dim_drag = null;
             } else if (sk_box) |b| {
                 sk_box = null;
                 if (skDist(b.start, b.at) * state.view.ppm < 4) {
@@ -26614,21 +26729,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
         // from the centre through the curve, its value turned along it;
         // the rest their mark beside their anchor.
         switch (c.kind) {
-            inline .distance, .distance_x, .distance_y => |d| {
-                const pa = s.point(d.a) catch continue;
-                const pb = s.point(d.b) catch continue;
-                const end: geom.Point = switch (c.kind) {
-                    .distance_x => .{ .x = pb.x, .y = pa.y },
-                    .distance_y => .{ .x = pa.x, .y = pb.y },
-                    else => pb,
-                };
-                const qa = skPx(area, it, pa);
-                const qe = skPx(area, it, end);
-                dvui.Path.stroke(.{ .points = &.{ qa, qe } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
-                if (@abs(qe.x - qa.x) + @abs(qe.y - qa.y) >= 1) {
-                    strokeText(text, alongPlace(qa, qe, 0.5), colour);
-                    continue;
-                }
+            .distance, .distance_x, .distance_y => if (skDimMeasure(s, c)) |ms| {
+                if (c.place.hidden) continue;
+                drawDimension(area, it, ms, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
+                continue;
             },
             .radius => |r| if (skRadiusLeader(s, r.g)) |ld| {
                 const qc = skPx(area, it, ld.centre);

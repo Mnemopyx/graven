@@ -601,6 +601,10 @@ test "a model writes and reads back to the same bytes, with its content" {
         .fill = .{ .r = 10, .g = 20, .b = 30 },
         .stroke = .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.3, .cap = .round, .join = .bevel },
     }}, "logo.svg");
+    // A sketch dimension placed off its geometry (its placement is saved).
+    const ski = try m.addShapeSketch(.rectangle);
+    const dim_c: u32 = @intCast(m.sketches.items[ski].sketch.constraints.items.len - 1);
+    _ = try m.editSketch(ski, .{ .place = .{ .c = dim_c, .place = .{ .offset = -12.5, .text = 3, .outside = true } } });
 
     const bytes = try encode(gpa, &m);
     defer gpa.free(bytes);
@@ -627,6 +631,10 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqual(0.7071067811865476, fb.paths[0].subpaths[0].segments[1].conic.w);
     try testing.expectEqual(.round, fb.paths[0].stroke.?.cap);
     try testing.expectEqual(30, fb.paths[0].fill.?.b);
+    const pl = back.sketches.items[ski].sketch.constraints.items[dim_c].place;
+    try testing.expectEqual(-12.5, pl.offset);
+    try testing.expectEqual(3, pl.text);
+    try testing.expect(pl.outside);
     try testing.expectEqual(m.next_id, back.next_id);
     // It goes on being edited like any model.
     try back.insertRun(c, r, 0, .{ .style = style, .content = "more" });

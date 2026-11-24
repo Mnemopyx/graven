@@ -19,9 +19,10 @@
 
 const std = @import("std");
 const geom = @import("graven_geom");
-pub const dual = @import("dual.zig");
+pub const constraint = @import("graven_constraint");
+pub const dual = constraint.dual;
 pub const solver = @import("solve.zig");
-pub const expr = @import("expr.zig");
+pub const expr = constraint.expr;
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -117,6 +118,9 @@ pub const Constraint = struct {
     /// its value (mm, or degrees for an angle) each time it is solved;
     /// empty for a plain value.
     expr: []const u8 = "",
+    /// Where its dimension is drawn (a dimension only): saved with it, so
+    /// it reopens where it was left.
+    place: constraint.dimension.Placement = .{},
 
     /// Whether it has a value (a dimension).
     pub fn isDimension(c: Constraint) bool {
@@ -379,6 +383,12 @@ pub const Sketch = struct {
             inline .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => |*d| d.value = value,
             else => return error.WrongKind,
         }
+    }
+
+    /// Where a dimension is drawn (placement only: nothing moves).
+    pub fn setPlace(s: *Sketch, id: ConstraintId, place: constraint.dimension.Placement) Error!void {
+        if (id >= s.constraints.items.len) return error.NoSuchConstraint;
+        s.constraints.items[id].place = place;
     }
 
     /// Makes a dimension driving or reference.

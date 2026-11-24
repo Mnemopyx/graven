@@ -19,7 +19,7 @@ A bare number is in the field's own unit, the one its label names ("Width, mm").
 
 ## How it works
 
-- `lib/layout/units.zig` is the one path: the table of units (`table`: each unit's kind, the symbols it may be typed as, and its size in base units, mm or degrees), `Quantity` (a value, its unit, whether it is relative) with `parse`, `resolve` (to base units, against the property's reference) and `format`, and `ofLabel` (the unit a field's label names).
+- `lib/constraint/units.zig` is the one path: the table of units (`table`: each unit's kind, the symbols it may be typed as, and its size in base units, mm or degrees), `Quantity` (a value, its unit, whether it is relative) with `parse`, `resolve` (to base units, against the property's reference) and `format`, and `ofLabel` (the unit a field's label names).
 - Every number field labelled with a unit reads what is typed through it: `propName` sets the field's unit from its label (`fields.label_unit`), and the number field takes it (`fields.unitNumberField`). Fields typed in document units (constraint values) set it to mm or in.
 - A new unit is one entry in `table`; every field of its kind then takes it.
 

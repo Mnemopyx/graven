@@ -947,6 +947,35 @@ test "moving into a frame takes the constraint group; copying copies its constra
     try testing.expectEqual(3, m.constraints.items.len);
 }
 
+test "a column straight on the canvas keeps to a construction line there" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    const root: Parent = .{ .space = try m.startCanvas(.mm) };
+    const body = try m.addStyle("Body", .{ .cap_height = 3 });
+    const r = try m.addTracks(root, .{ .name = "Column1", .origin = .{ .x = 20, .y = 110 }, .style = body, .count = 12, .length = 20, .pitch = 6 });
+    const gi = try m.addGuide(0, .{ .x = 0, .y = 150 }, 0);
+    m.spaces.items[0].guides.items[gi].lock = .horizontal;
+    const gid = m.spaces.items[0].guides.items[gi].id;
+    const vi = try m.addGuide(0, .{ .x = 5, .y = 0 }, 90);
+    m.spaces.items[0].guides.items[vi].lock = .vertical;
+    const vid = m.spaces.items[0].guides.items[vi].id;
+    try h.reset(&m);
+    const rid = m.spaces.items[0].regions.items[r].id;
+    // Its top 10 mm below the horizontal line, its left 7 mm right of the
+    // vertical one.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .top }, .b = .{ .object = gid, .feature = .origin_y }, .value = -10 }});
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = rid, .feature = .left }, .b = .{ .object = vid, .feature = .origin_x }, .value = 7 }});
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(0, issues.len);
+    const b = boxOf(&m, rid).?;
+    try testing.expectApproxEqAbs(@as(f64, 140), b.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 12), b.x0, 1e-9);
+}
+
 test "a track's control point can be constrained, and the rows follow it" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
