@@ -188,9 +188,36 @@ pub const Sort = union(enum) {
     text: []const u8,
     /// A tile of `prototype` (null: the track's own), as long along its
     /// track as `size`.
-    tile: struct { prototype: ?PrototypeId = null, size: SortSize },
+    tile: struct { prototype: ?PrototypeId = null, size: SortSize, id: []const u8 = "" },
     /// A blank (space between tiles), as long as `size`.
-    blank: SortSize,
+    blank: struct { size: SortSize, id: []const u8 = "" },
+
+    /// The short id a key shows for the sort (Travis, 2026-11-24): its own
+    /// `id` when it has one; else text as it is, a tile by its length
+    /// (`length`, resolved where it is put: 1¼), a blank by its length after
+    /// a ␣ (␣½). Written into `buf` when made.
+    pub fn shortId(s: Sort, buf: []u8, length: ?f64) []const u8 {
+        switch (s) {
+            .text => |t| return t,
+            .tile => |t| if (t.id.len > 0) return t.id,
+            .blank => |b| if (b.id.len > 0) return b.id,
+        }
+        const mark: []const u8 = if (s == .blank) "␣" else "";
+        const v = length orelse return if (s == .blank) "␣" else "▭";
+        const whole = @floor(v + 1e-9);
+        const frac = v - whole;
+        const fracs = [_]struct { f64, []const u8 }{ .{ 0.25, "¼" }, .{ 0.5, "½" }, .{ 0.75, "¾" }, .{ 1.0 / 3.0, "⅓" }, .{ 2.0 / 3.0, "⅔" }, .{ 0.125, "⅛" } };
+        if (frac < 1e-6) return std.fmt.bufPrint(buf, "{s}{d}", .{ mark, whole }) catch mark;
+        for (fracs) |f| if (@abs(frac - f[0]) < 1e-6) {
+            return if (whole == 0)
+                std.fmt.bufPrint(buf, "{s}{s}", .{ mark, f[1] }) catch mark
+            else
+                std.fmt.bufPrint(buf, "{s}{d}{s}", .{ mark, whole, f[1] }) catch mark;
+        };
+        var t = std.fmt.bufPrint(buf, "{s}{d:.2}", .{ mark, v }) catch return mark;
+        while (t[t.len - 1] == '0') t = t[0 .. t.len - 1];
+        return t;
+    }
 };
 
 /// A sort's length along its track: `units` of its prototype's unit, or
@@ -280,7 +307,7 @@ const tiles_keys = blk: {
     for (0..10) |i| ks[i] = .{
         .key = .{ .pos = .{ .row = .E, .col = @intCast(i + 1) } },
         .lower = .{ .tile = .{ .size = .{ .step = i } } },
-        .upper = .{ .blank = .{ .step = i } },
+        .upper = .{ .blank = .{ .size = .{ .step = i } } },
     };
     break :blk ks;
 };

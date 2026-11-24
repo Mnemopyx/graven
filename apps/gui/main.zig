@@ -21041,7 +21041,7 @@ fn insertSort(sort: layout.model.Sort) void {
             _ = act(.insertTile, .{ c.parent, c.region, index, proto, size }) catch return;
         },
         .blank => |b| {
-            const size = switch (b) {
+            const size = switch (b.size) {
                 .units => |u| u,
                 .step => |k| if (k < pal.blanks.len) pal.blanks[k] else return,
             };
@@ -21056,26 +21056,20 @@ fn insertSort(sort: layout.model.Sort) void {
 /// A sort as a key of the overlay shows it: text as it is, a tile or a
 /// blank by its length.
 fn sortLabel(a: std.mem.Allocator, sort: layout.model.Sort) []const u8 {
-    const num = struct {
-        fn f(al: std.mem.Allocator, mark: []const u8, v: f64) []const u8 {
-            var t = std.fmt.allocPrint(al, "{d:.2}", .{v}) catch return mark;
-            while (std.mem.indexOfScalar(u8, t, '.') != null and (t[t.len - 1] == '0' or t[t.len - 1] == '.')) t = t[0 .. t.len - 1];
-            return std.mem.concat(al, u8, &.{ mark, t }) catch mark;
-        }
-    }.f;
     const c = track_cursor;
     const pal = if (c) |cc| paletteFor(cc.parent, cc.region) else null;
-    return switch (sort) {
-        .text => |t| t,
-        .tile => |t| switch (t.size) {
-            .units => |u| num(a, "▭", u),
-            .step => |k| if (pal != null and k < pal.?.tile_count) num(a, "▭", pal.?.tiles[k]) else "▭",
-        },
-        .blank => |b| switch (b) {
-            .units => |u| num(a, "␣", u),
-            .step => |k| if (pal != null and k < pal.?.blanks.len) num(a, "␣", pal.?.blanks[k]) else "␣",
-        },
+    // The length it would have here, for its short id.
+    const size: ?layout.model.SortSize = switch (sort) {
+        .text => null,
+        .tile => |t| t.size,
+        .blank => |b| b.size,
     };
+    const length: ?f64 = if (size) |sz| switch (sz) {
+        .units => |u| u,
+        .step => |k| if (pal) |p| (if (sort == .tile) (if (k < p.tile_count) p.tiles[k] else null) else (if (k < p.blanks.len) p.blanks[k] else null)) else null,
+    } else null;
+    const buf = a.alloc(u8, 32) catch return "";
+    return sort.shortId(buf, length);
 }
 
 /// The active case on a keyboard, over the canvas's foot (the gray
