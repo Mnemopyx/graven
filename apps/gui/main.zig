@@ -20183,7 +20183,17 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
         for (pl.items) |it| {
             if (!it.flow_parent.eql(fp) or it.region != fr or it.index >= items.len) continue;
             list.append(a, .{ .index = it.index, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[0] }) catch {};
-            const end: Stop = .{ .index = it.index + 1, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[1] };
+            var end: Stop = .{ .index = it.index + 1, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[1] };
+            // After a break or paragraph end the cursor is at the next
+            // line's start, even when nothing is set there yet (Enter at the
+            // end of the text).
+            if (items[it.index].breaks()) for (pl.tracks) |t| {
+                if (t.flow_parent.eql(fp) and t.region == fr and t.track == it.segment + 1) {
+                    end.segment = t.track;
+                    end.along = 0;
+                    break;
+                }
+            };
             if (last == null or !stopBefore(end, last.?)) last = end;
         }
         // The characters of the runs set here.
