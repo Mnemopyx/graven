@@ -58,7 +58,7 @@ pub const Position = struct {
 /// scancode).
 pub const GridKey = struct { pos: Position, hid: u16 };
 
-fn k(comptime s: []const u8, hid: u16) GridKey {
+fn gk(comptime s: []const u8, hid: u16) GridKey {
     return .{ .pos = .{ .row = @fromBackingInt(@intCast(s[0] - 'A')), .col = (s[1] - '0') * 10 + (s[2] - '0') }, .hid = hid };
 }
 
@@ -67,35 +67,35 @@ pub const grid = blk: {
     @setEvalBranchQuota(100_000);
     break :blk [_]GridKey{
         // Digit row.
-        k("E00", 53), k("E01", 30), k("E02", 31), k("E03", 32), k("E04", 33), k("E05", 34),
-        k("E06", 35), k("E07", 36), k("E08", 37), k("E09", 38), k("E10", 39), k("E11", 45),
-        k("E12", 46),  k("E13", 137), // JIS yen
+        gk("E00", 53), gk("E01", 30), gk("E02", 31), gk("E03", 32), gk("E04", 33), gk("E05", 34),
+        gk("E06", 35), gk("E07", 36), gk("E08", 37), gk("E09", 38), gk("E10", 39), gk("E11", 45),
+        gk("E12", 46),  gk("E13", 137), // JIS yen
         // First letter row (QWERTY's Q to ]; D13 is ANSI's backslash).
-        k("D01", 20),  k("D02", 26),
-        k("D03", 8),   k("D04", 21),
-        k("D05", 23),  k("D06", 28),
-        k("D07", 24),  k("D08", 12),
-        k("D09", 18),  k("D10", 19),
-        k("D11", 47),  k("D12", 48),
-        k("D13", 49),
+        gk("D01", 20),  gk("D02", 26),
+        gk("D03", 8),   gk("D04", 21),
+        gk("D05", 23),  gk("D06", 28),
+        gk("D07", 24),  gk("D08", 12),
+        gk("D09", 18),  gk("D10", 19),
+        gk("D11", 47),  gk("D12", 48),
+        gk("D13", 49),
         // Home row (C12 is ISO's key left of Enter).
-         k("C01", 4),
-        k("C02", 22),  k("C03", 7),
-        k("C04", 9),   k("C05", 10),
-        k("C06", 11),  k("C07", 13),
-        k("C08", 14),  k("C09", 15),
-        k("C10", 51),  k("C11", 52),
-        k("C12", 50),
+         gk("C01", 4),
+        gk("C02", 22),  gk("C03", 7),
+        gk("C04", 9),   gk("C05", 10),
+        gk("C06", 11),  gk("C07", 13),
+        gk("C08", 14),  gk("C09", 15),
+        gk("C10", 51),  gk("C11", 52),
+        gk("C12", 50),
         // Bottom row (B00 is ISO's key beside the left Shift, B11 JIS's ro).
-         k("B00", 100),
-        k("B01", 29),  k("B02", 27),
-        k("B03", 6),   k("B04", 25),
-        k("B05", 5),   k("B06", 17),
-        k("B07", 16),  k("B08", 54),
-        k("B09", 55),  k("B10", 56),
-        k("B11", 135),
+         gk("B00", 100),
+        gk("B01", 29),  gk("B02", 27),
+        gk("B03", 6),   gk("B04", 25),
+        gk("B05", 5),   gk("B06", 17),
+        gk("B07", 16),  gk("B08", 54),
+        gk("B09", 55),  gk("B10", 56),
+        gk("B11", 135),
         // The space bar.
-        k("A03", 44),
+        gk("A03", 44),
     };
 };
 
@@ -134,6 +134,28 @@ pub const Sym = struct {
 
     pub fn slice(s: *const Sym) []const u8 {
         return s.buf[0..s.len];
+    }
+};
+
+/// A key named by its position or by the symbol it types (unshifted, or
+/// with Shift where no key types it unshifted).
+pub const Key = union(enum) {
+    pos: Position,
+    sym: []const u8,
+
+    /// Where the key is on layout `l` (null: a symbol it lacks).
+    pub fn on(k: Key, l: *const Layout) ?Position {
+        return switch (k) {
+            .pos => |p| p,
+            .sym => |s| (l.find(s) orelse return null).pos,
+        };
+    }
+
+    pub fn eql(a: Key, b: Key) bool {
+        return switch (a) {
+            .pos => |p| b == .pos and b.pos.eql(p),
+            .sym => |s| b == .sym and std.mem.eql(u8, s, b.sym),
+        };
     }
 };
 

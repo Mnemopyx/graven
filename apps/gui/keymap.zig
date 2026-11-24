@@ -216,8 +216,11 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.flow.transpose", .repeat = true },
     .{ .name = "canvas.flow.choose-case" },
     .{ .name = "canvas.flow.case-picker.pick", .param = .int },
-    .{ .name = "canvas.flow.case-picker.previous" },
+    .{ .name = "canvas.flow.case-picker.previous", .param = .int },
     .{ .name = "canvas.flow.case-picker.cancel" },
+    .{ .name = "canvas.flow.case-picker.take" },
+    .{ .name = "canvas.flow.case-picker.move", .repeat = true, .param = .int },
+    .{ .name = "canvas.flow.case-picker.back", .repeat = true },
     .{ .name = "canvas.flow.leave" },
 
     .{ .name = "canvas.equation.leave" },
@@ -471,11 +474,17 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow", .chord = "ctrl+n", .action = "canvas.flow.caret.line-down" },
     .{ .mode = "canvas.flow", .chord = "ctrl+k", .action = "canvas.flow.delete-line-end" },
     .{ .mode = "canvas.flow", .chord = "ctrl+t", .action = "canvas.flow.transpose" },
-    // Cases of sorts: Ctrl+Space, then a digit (0: plain text) or Space
-    // (the case before) or Esc.
+    // Cases of sorts: Ctrl+Space, then type part of a name, a digit for a
+    // row (0: the first), Enter for the highlighted one, Space for the case
+    // before, or Esc.
     .{ .mode = "canvas.flow", .chord = "ctrl+space", .action = "canvas.flow.choose-case" },
     .{ .mode = "canvas.flow.case-picker", .chord = "ctrl+space", .action = "canvas.flow.case-picker.previous" },
-    .{ .mode = "canvas.flow.case-picker", .chord = "char: ", .action = "canvas.flow.case-picker.previous" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char: ", .action = "canvas.flow.case-picker.previous", .arg = 1 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "enter", .action = "canvas.flow.case-picker.take" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "kp_enter", .action = "canvas.flow.case-picker.take" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "up", .action = "canvas.flow.case-picker.move", .arg = -1 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "down", .action = "canvas.flow.case-picker.move", .arg = 1 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "backspace", .action = "canvas.flow.case-picker.back" },
     .{ .mode = "canvas.flow.case-picker", .chord = "escape", .action = "canvas.flow.case-picker.cancel" },
     .{ .mode = "canvas.flow.case-picker", .chord = "char:0", .action = "canvas.flow.case-picker.pick", .arg = 0 },
     .{ .mode = "canvas.flow.case-picker", .chord = "char:1", .action = "canvas.flow.case-picker.pick", .arg = 1 },
@@ -754,7 +763,6 @@ fn assignScancodes() void {
                 break;
             }
         }
-        if (log) std.debug.print("keys: event {d} {s} at {s}\n", .{ e.num, @tagName(k.code), if (pos) |p| &p.name() else "?" });
         if (placed_len == placed.len) continue;
         placed[placed_len] = .{ .num = e.num, .pos = pos };
         placed_len += 1;

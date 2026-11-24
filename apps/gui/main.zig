@@ -12799,8 +12799,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 .key => |k| k.action == .down and !keymap.printable(k.code) and !isModifierKey(k.code),
                 else => false,
             };
-            if (case_picker and !e.handled and ends) {
-                if (inv == null or !keymap.actionUnder(inv.?.action, "canvas.flow.case-picker")) case_picker = false;
+            if (case_picker and !e.handled and ends and (inv == null or !keymap.actionUnder(inv.?.action, "canvas.flow.case-picker"))) {
+                // Typed characters search the cases' names.
+                if (e.evt == .text and inv == null) {
+                    if (e.evt.text.action == .value) caseQueryAdd(e.evt.text.action.value.txt);
+                    e.handle(@src(), box.data());
+                    dvui.refresh(null, @src(), box.data().id);
+                    continue;
+                }
+                case_picker = false;
             }
             if (if (inv) |v| flowAction(v) else false) {
                 e.handle(@src(), box.data());
@@ -20779,13 +20786,37 @@ fn flowAction(inv: keymap.Invocation) bool {
             deleteFlowTo(c, .{ .index = from.index, .offset = from.offset });
         },
         kact("canvas.flow.transpose") => transposeChars(c),
-        kact("canvas.flow.choose-case") => case_picker = true,
-        kact("canvas.flow.case-picker.pick") => {
-            case_picker = false;
-            const n: usize = @intCast(inv.arg);
-            chooseCase(if (n == 0) null else if (caseAt(n - 1) != null) n - 1 else return true);
+        kact("canvas.flow.choose-case") => {
+            case_picker = true;
+            case_query_len = 0;
+            case_hi = 0;
         },
+        // A digit: the row it numbers; Enter: the highlighted row.
+        kact("canvas.flow.case-picker.pick"), kact("canvas.flow.case-picker.take") => {
+            var buf: [case_rows_max]?usize = undefined;
+            const rows = caseRows(&buf);
+            const n: usize = if (inv.action == kact("canvas.flow.case-picker.take")) case_hi else @intCast(inv.arg);
+            if (n >= @min(rows.len, 10)) return true;
+            case_picker = false;
+            chooseCase(rows[n]);
+        },
+        kact("canvas.flow.case-picker.move") => {
+            var buf: [case_rows_max]?usize = undefined;
+            const rows = caseRows(&buf);
+            if (rows.len == 0) return true;
+            case_hi = if (inv.arg < 0) case_hi -| 1 else @min(case_hi + 1, @min(rows.len, 10) - 1);
+        },
+        kact("canvas.flow.case-picker.back") => if (case_query_len > 0) {
+            case_query_len -= 1;
+            case_hi = 0;
+        },
+        // Space: the case before, unless a name is being typed (then a
+        // space in it); Ctrl+Space (arg 0) always.
         kact("canvas.flow.case-picker.previous") => {
+            if (inv.arg == 1 and case_query_len > 0) {
+                caseQueryAdd(" ");
+                return true;
+            }
             case_picker = false;
             chooseCase(prev_case);
         },
@@ -20882,9 +20913,86 @@ fn caseCount() usize {
 }
 
 fn chooseCase(i: ?usize) void {
+    if (i) |c| {
+        // Most recent first.
+        var k: usize = std.mem.indexOfScalar(usize, case_recent[0..case_recent_len], c) orelse @min(case_recent_len, case_recent.len - 1);
+        if (k == case_recent_len) case_recent_len += 1;
+        while (k > 0) : (k -= 1) case_recent[k] = case_recent[k - 1];
+        case_recent[0] = c;
+    }
     if (i == active_case) return;
     prev_case = active_case;
     active_case = i;
+}
+
+/// The name being typed to find a case, and the row highlighted.
+var case_query: [64]u8 = undefined;
+var case_query_len: usize = 0;
+var case_hi: usize = 0;
+/// The cases chosen lately, most recent first.
+var case_recent: [32]usize = undefined;
+var case_recent_len: usize = 0;
+const case_rows_max = 512;
+
+fn caseQueryAdd(txt: []const u8) void {
+    const n = @min(txt.len, case_query.len - case_query_len);
+    @memcpy(case_query[case_query_len..][0..n], txt[0..n]);
+    case_query_len += n;
+    case_hi = 0;
+}
+
+fn caseName(i: ?usize) []const u8 {
+    const c = i orelse return "Text";
+    return if (caseAt(c)) |cs| cs.name else "";
+}
+
+/// How well `name` answers `q` (ASCII case ignored): 3 starts with it, 2
+/// has it, 1 has its characters in order; 0 not at all.
+fn caseMatch(name: []const u8, q: []const u8) u8 {
+    if (q.len == 0) return 3;
+    if (std.ascii.startsWithIgnoreCase(name, q)) return 3;
+    if (std.ascii.findIgnoreCase(name, q) != null) return 2;
+    var k: usize = 0;
+    for (name) |ch| {
+        if (k < q.len and std.ascii.toLower(ch) == std.ascii.toLower(q[k])) k += 1;
+    }
+    return if (k == q.len) 1 else 0;
+}
+
+/// The picker's rows (null: plain text): with no name typed, Text, then
+/// the cases chosen lately, then the rest in order; with one, the cases it
+/// finds, best first.
+fn caseRows(buf: *[case_rows_max]?usize) []?usize {
+    var n: usize = 0;
+    const q = case_query[0..case_query_len];
+    const n_cases = caseCount();
+    if (q.len == 0) {
+        buf[n] = null;
+        n += 1;
+        for (case_recent[0..case_recent_len]) |c| if (c < n_cases and n < buf.len) {
+            buf[n] = c;
+            n += 1;
+        };
+        for (0..n_cases) |c| {
+            if (n >= buf.len) break;
+            if (std.mem.indexOfScalar(usize, case_recent[0..case_recent_len], c) != null) continue;
+            buf[n] = c;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+    var grade: u8 = 3;
+    while (grade > 0) : (grade -= 1) {
+        if (caseMatch("Text", q) == grade and n < buf.len) {
+            buf[n] = null;
+            n += 1;
+        }
+        for (0..n_cases) |c| if (n < buf.len and caseMatch(caseName(c), q) == grade) {
+            buf[n] = c;
+            n += 1;
+        };
+    }
+    return buf[0..n];
 }
 
 /// The sort typed text `txt` stands for in the active case, if any.
@@ -20937,19 +21045,24 @@ fn caseHint() void {
     const S = struct {
         var shown: u64 = 0;
     };
-    const key: u64 = (if (case_picker) @as(u64, 1) else 0) | (@as(u64, active_case orelse 0xff) << 1) | (@as(u64, caseCount()) << 10);
+    const key: u64 = (if (case_picker) @as(u64, 1) else 0) | (@as(u64, active_case orelse 0xff) << 1) | (@as(u64, caseCount()) << 10) | (@as(u64, case_query_len) << 30) | (@as(u64, case_hi) << 40) | (@as(u64, std.hash.Wyhash.hash(0, case_query[0..case_query_len]) & 0xfff) << 48);
     if (key != S.shown) dvui.refresh(null, @src(), null);
     S.shown = key;
     const a = dvui.currentWindow().arena();
     const font = ghost_pane.fieldFont();
     var lines: std.ArrayList([]const u8) = .empty;
+    var hi_line: ?usize = null;
     if (case_picker) {
-        lines.append(a, "Case: a digit, Space for the one before, Esc to cancel") catch {};
-        lines.append(a, if (active_case == null) "0  Text  (now)" else "0  Text") catch {};
-        for (0..@min(caseCount(), 9)) |i| {
-            const c = caseAt(i).?;
-            lines.append(a, std.fmt.allocPrint(a, "{d}  {s}{s}", .{ i + 1, c.name, if (active_case == i) "  (now)" else "" }) catch "") catch {};
+        var buf: [case_rows_max]?usize = undefined;
+        const rows = caseRows(&buf);
+        const q = case_query[0..case_query_len];
+        lines.append(a, if (q.len == 0) "Case: type to find, a digit or Enter to take, Space for the one before" else std.fmt.allocPrint(a, "Case: {s}_", .{q}) catch "") catch {};
+        for (rows[0..@min(rows.len, 10)], 0..) |r, k| {
+            if (k == case_hi) hi_line = lines.items.len;
+            lines.append(a, std.fmt.allocPrint(a, "{d}  {s}{s}", .{ k, caseName(r), if (r == active_case) "  (now)" else "" }) catch "") catch {};
         }
+        if (rows.len > 10) lines.append(a, std.fmt.allocPrint(a, "   … {d} more: type to find", .{rows.len - 10}) catch "") catch {};
+        if (rows.len == 0) lines.append(a, "   no case has that name") catch {};
     } else {
         const c = caseAt(active_case.?) orelse return;
         lines.append(a, std.fmt.allocPrint(a, "Case: {s}", .{c.name}) catch "") catch {};
@@ -20976,7 +21089,10 @@ fn caseHint() void {
     });
     defer fw.deinit();
     dvui.raiseSubwindow(fw.data().id);
-    for (lines.items, 0..) |l, i| dvui.labelNoFmt(@src(), l, .{}, .{ .id_extra = i, .font = font, .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 } });
+    for (lines.items, 0..) |l, i| {
+        const hl = hi_line != null and hi_line.? == i;
+        dvui.labelNoFmt(@src(), l, .{}, .{ .id_extra = i, .font = font, .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 }, .expand = .horizontal, .background = hl, .color_fill = if (hl) .{ .color = dvui.themeGet().color(.highlight, .fill) } else null });
+    }
 }
 
 /// Deletes between the cursor and `to` (either side of it).

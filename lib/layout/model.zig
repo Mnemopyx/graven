@@ -201,11 +201,12 @@ pub const SortSize = union(enum) {
     step: u8,
 };
 
-/// One key of a case: where it is on the keyboard (`graven_keys`: the same
-/// key whatever the layout), its sort, and the sort its upper case (Shift
-/// or Caps Lock) types.
+/// One key of a case: which key (`graven_keys`: by its position, the same
+/// key whatever the layout, or by the symbol it types, wherever the layout
+/// puts it), its sort, and the sort its upper case (Shift or Caps Lock)
+/// types.
 pub const CaseKey = struct {
-    key: keyboard.Position,
+    key: keyboard.Key,
     lower: ?Sort = null,
     upper: ?Sort = null,
 };
@@ -223,7 +224,7 @@ pub const Case = struct {
     /// upper one where typing `txt` took Shift (or Caps Lock).
     pub fn sortFor(c: Case, on: *const keyboard.Layout, txt: []const u8) ?Sort {
         const at = on.find(txt) orelse return null;
-        for (c.keys) |k| if (k.key.eql(at.pos)) return if (at.shift) k.upper else k.lower;
+        for (c.keys) |k| if (k.key.on(on)) |p| if (p.eql(at.pos)) return if (at.shift) k.upper else k.lower;
         return null;
     }
 };
@@ -231,13 +232,53 @@ pub const Case = struct {
 /// Graven's own cases. Tiles: the digit row's keys (E01 to E10, which type
 /// digits unshifted on most layouts, shifted on French) type the track's
 /// tiles, its first ten lengths; with Shift, blanks of one to ten steps
-/// (the keyboard tile entry of before, 2026-11-18).
-pub const builtin_cases = [_]Case{.{ .name = "Tiles", .keys = &tiles_keys }};
+/// (the keyboard tile entry of before, 2026-11-18). Greek: on the keys
+/// that type the Latin letters, wherever the layout has them.
+pub const builtin_cases = [_]Case{
+    .{ .name = "Tiles", .keys = &tiles_keys },
+    .{ .name = "Greek", .keys = &greek_keys },
+};
+
+/// Greek on the Latin letters as RFC 1345 pairs them (a α, h θ, c ξ, q ψ,
+/// w ω …); Shift gives the capital.
+const greek_keys = blk: {
+    const pairs = [_]struct { u8, []const u8, []const u8 }{
+        .{ 'a', "α", "Α" },
+        .{ 'b', "β", "Β" },
+        .{ 'g', "γ", "Γ" },
+        .{ 'd', "δ", "Δ" },
+        .{ 'e', "ε", "Ε" },
+        .{ 'z', "ζ", "Ζ" },
+        .{ 'y', "η", "Η" },
+        .{ 'h', "θ", "Θ" },
+        .{ 'i', "ι", "Ι" },
+        .{ 'k', "κ", "Κ" },
+        .{ 'l', "λ", "Λ" },
+        .{ 'm', "μ", "Μ" },
+        .{ 'n', "ν", "Ν" },
+        .{ 'c', "ξ", "Ξ" },
+        .{ 'o', "ο", "Ο" },
+        .{ 'p', "π", "Π" },
+        .{ 'r', "ρ", "Ρ" },
+        .{ 's', "σ", "Σ" },
+        .{ 't', "τ", "Τ" },
+        .{ 'u', "υ", "Υ" },
+        .{ 'f', "φ", "Φ" },
+        .{ 'x', "χ", "Χ" },
+        .{ 'q', "ψ", "Ψ" },
+        .{ 'w', "ω", "Ω" },
+        .{ 'j', "ς", "ϑ" },
+        .{ 'v', "ϕ", "ϖ" },
+    };
+    var ks: [pairs.len]CaseKey = undefined;
+    for (pairs, 0..) |p, i| ks[i] = .{ .key = .{ .sym = &.{p[0]} }, .lower = .{ .text = p[1] }, .upper = .{ .text = p[2] } };
+    break :blk ks;
+};
 
 const tiles_keys = blk: {
     var ks: [10]CaseKey = undefined;
     for (0..10) |i| ks[i] = .{
-        .key = .{ .row = .E, .col = @intCast(i + 1) },
+        .key = .{ .pos = .{ .row = .E, .col = @intCast(i + 1) } },
         .lower = .{ .tile = .{ .size = .{ .step = i } } },
         .upper = .{ .blank = .{ .step = i } },
     };
@@ -6539,7 +6580,7 @@ pub const Model = struct {
 
     /// Puts `sort` (null: none) on key `key` of case `id`, its lower or
     /// upper case.
-    pub fn setCaseKey(m: *Model, id: ObjectId, key: keyboard.Position, upper: bool, sort: ?Sort) Error!void {
+    pub fn setCaseKey(m: *Model, id: ObjectId, key: keyboard.Key, upper: bool, sort: ?Sort) Error!void {
         const c = for (m.cases.items) |*c| {
             if (c.id == id) break c;
         } else return error.NoSuchObject;
