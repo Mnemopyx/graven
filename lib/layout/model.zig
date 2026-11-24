@@ -150,6 +150,14 @@ pub const Constraint = struct {
 /// are not read: its dimensions come back on their features.)
 pub const ConstraintPlace = @import("graven_constraint").dimension.Placement;
 
+/// A named pen: what a stroke is drawn with (colour, width, caps, joins).
+/// Ink that takes it follows when it changes.
+pub const StrokeStyle = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    stroke: figure_.Stroke,
+};
+
 /// A paragraph style's index in `Model.paragraph_styles`.
 /// A paragraph style's ID: its own object ID.
 pub const ParaId = ObjectId;
@@ -2028,6 +2036,11 @@ pub const Model = struct {
     styles: std.ArrayList(TextStyle) = .empty,
     /// Named paragraph settings, which paragraphs of flows take.
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
+    /// Named pens (see `StrokeStyle`): what inked line art is drawn with.
+    stroke_styles: std.ArrayList(StrokeStyle) = .empty,
+    /// The stroke style new ink takes (`.none`: the first, or a default
+    /// made when first wanted).
+    current_stroke: ObjectId = .none,
     /// Style templates, which new flows' styles are copied from (see
     /// `StyleTemplate`); the first is the Default.
     templates: std.ArrayList(StyleTemplate) = .empty,
@@ -2432,6 +2445,7 @@ pub const Model = struct {
         processes,
         materials,
         plans,
+        stroke_styles,
         /// A prototype's slots.
         prototype: PrototypeId,
         /// A plan's operations.
@@ -2475,6 +2489,7 @@ pub const Model = struct {
             .processes => for (m.processes.items) |pr| if (eq(u8, pr.profile.name, name)) return true,
             .materials => for (m.materials.items) |mt| if (eq(u8, mt.material.name, name)) return true,
             .plans => for (m.plans.items) |pl| if (eq(u8, pl.name, name)) return true,
+            .stroke_styles => for (m.stroke_styles.items) |st| if (eq(u8, st.name, name)) return true,
             .prototype => |id| if (m.protoIndex(id)) |k| {
                 for (m.prototypes.items[k].tracks) |tt| if (eq(u8, tt.name, name)) return true;
             },
@@ -6239,6 +6254,46 @@ pub const Model = struct {
     }
 
     /// A new paragraph style. Returns its ID.
+    pub fn strokeStyleIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.stroke_styles.items, 0..) |st, i| if (st.id == id) return i;
+        return null;
+    }
+
+    fn checkStroke(st: figure_.Stroke) Error!void {
+        if (!(st.width > 0) or !std.math.isFinite(st.width) or !(st.miter_limit >= 1)) return error.BadValue;
+    }
+
+    /// Adds a stroke style; returns its ID.
+    pub fn addStrokeStyle(m: *Model, name: []const u8, stroke: figure_.Stroke) Error!ObjectId {
+        try checkStroke(stroke);
+        const id = m.newId();
+        try m.stroke_styles.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = stroke });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Changes stroke style `id` (its name too): the ink in it follows.
+    pub fn setStrokeStyle(m: *Model, id: ObjectId, name: []const u8, stroke: figure_.Stroke) Error!void {
+        const i = m.strokeStyleIndex(id) orelse return error.NoSuchStyle;
+        try checkStroke(stroke);
+        m.stroke_styles.items[i] = .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = stroke };
+        m.revision += 1;
+    }
+
+    /// Makes stroke style `id` the one new ink takes.
+    pub fn setCurrentStroke(m: *Model, id: ObjectId) Error!void {
+        if (m.strokeStyleIndex(id) == null) return error.NoSuchStyle;
+        m.current_stroke = id;
+        m.revision += 1;
+    }
+
+    /// The stroke style new ink takes: the current one, else the first;
+    /// null when there is none.
+    pub fn currentStroke(m: *const Model) ?ObjectId {
+        if (m.strokeStyleIndex(m.current_stroke) != null) return m.current_stroke;
+        return if (m.stroke_styles.items.len > 0) m.stroke_styles.items[0].id else null;
+    }
+
     pub fn addParagraphStyle(m: *Model, style: ParagraphStyle) Error!ParaId {
         try checkParagraph(style);
         var s = style;
