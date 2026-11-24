@@ -27908,14 +27908,15 @@ fn skCornerAnchor(s: *const skl.Sketch, a: skl.GeomId, b: skl.GeomId) ?geom.Poin
         }
     };
     const m = skMid(skMid(sa[0], sa[1]), skMid(sb[0], sb[1]));
-    return .{ .x = q.x + 0.55 * (m.x - q.x), .y = q.y + 0.55 * (m.y - q.y) };
+    return .{ .x = q.x + 0.9 * (m.x - q.x), .y = q.y + 0.9 * (m.y - q.y) };
 }
 
 /// Sets of equal sizes and angles in a sketch (the owner, 2026-11-24:
 /// where a number of values are equal, one annotation: θ = 108°, s =
 /// 10.48): the equal and equal-angle constraints joined into sets by what
 /// they share, each set named (s, s′, s″ for lengths; r … for radii; θ …
-/// for angles), each member marked with the name, the value noted once.
+/// for angles), each member marked with the equal symbol (= or ∠=; the
+/// owner: the user will know what θ and s mean), the value noted once.
 const EqualSets = struct {
     const Member = struct { kind: enum { len, radius, angle }, a: skl.GeomId, b: skl.GeomId = 0 };
     members: std.ArrayList(Member) = .empty,
@@ -27990,19 +27991,6 @@ const EqualSets = struct {
             e.set_of[i] = k;
         }
     }
-
-    /// The name of constraint `c`'s set.
-    fn symbolOf(e: *const EqualSets, c: skl.Constraint) ?[]const u8 {
-        const m: Member = switch (c.kind) {
-            .equal => |q| for (e.members.items) |x| {
-                if (x.kind != .angle and x.a == q.a) break x;
-            } else return null,
-            .equal_angle => |q| .{ .kind = .angle, .a = q.a, .b = q.b },
-            else => return null,
-        };
-        for (e.members.items, 0..) |x, i| if (std.meta.eql(x, m)) return e.names.items[e.set_of[i]];
-        return null;
-    }
 };
 
 /// Where a set member is marked, in the sketch's frame.
@@ -28054,10 +28042,12 @@ fn skDrawEqualSets(area: dvui.Rect.Physical, it: SkPlace, e: *const EqualSets) v
     const s = it.sketch;
     const px = dvui.windowNaturalScale();
     const colour = colors.guide;
-    for (e.members.items, 0..) |m, i| {
+    for (e.members.items) |m| {
         const at = skMemberAt(s, m) orelse continue;
         const q = skPx(area, it, at);
-        strokeText(e.names.items[e.set_of[i]], .{ .at = .{ .x = q.x, .y = q.y }, .size = dim_cap * px, .y_down = true, .align_x = 0.5, .align_y = 0.5 }, colour);
+        // The equal constraint's own symbol; the note names the set.
+        const mark: []const u8 = if (m.kind == .angle) "∠=" else "=";
+        strokeText(mark, .{ .at = .{ .x = q.x, .y = q.y }, .size = dim_cap * px, .y_down = true, .align_x = 0.5, .align_y = 0.5 }, colour);
     }
     var placed: std.ArrayList(dvui.Point.Physical) = .empty;
     const ar = dvui.currentWindow().arena();
@@ -28778,7 +28768,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             // (`skDrawEqualSets`); a selected one shows its set's name.
             .equal, .equal_angle => blk: {
                 if (!skSelected(.{ .constraint = @intCast(ci) })) continue;
-                break :blk eq_sets.symbolOf(c) orelse "=";
+                break :blk if (c.kind == .equal_angle) "∠=" else "=";
             },
             .symmetric => "sym",
             .equal_distance => "=",
