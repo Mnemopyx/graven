@@ -74,7 +74,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 
 | Switch | Effect |
 |---|---|
-| `GRAVEN_SAMPLE=hp15c`, `keyboard`, `text`, `sketch` or `columns` | opens that example (`examples/hp15c.graven`, `examples/pc-keyboard.graven`, from the repository root) as an untitled copy; `text`: a track with text and an equation on a new canvas, the cursor in it; `sketch`: the ready-made rectangle sketch being edited, two of its dimensions placed off it (drafting-style dimensions to look at); `columns`: three text columns in a panel constrained to canvas construction lines (widths, gutters, tops) |
+| `GRAVEN_SAMPLE=hp15c`, `keyboard`, `text`, `sketch`, `columns` or `columns-free` | opens that example (`examples/hp15c.graven`, `examples/pc-keyboard.graven`, from the repository root) as an untitled copy; `text`: a track with text and an equation on a new canvas, the cursor in it; `sketch`: the ready-made rectangle sketch being edited, two of its dimensions placed off it (drafting-style dimensions to look at); `columns`: three text columns in a panel constrained to canvas construction lines (widths, gutters, tops); `columns-free`: the same, unconstrained |
 | `GRAVEN_VIEW=cx,cy,ppm` | view centre (mm) and zoom (px/mm) |
 | `GRAVEN_EXACT_TEXT=1` | text from outlines instead of the glyph atlas |
 | `GRAVEN_TEXT_GAMMA`, `GRAVEN_TEXT_DARKEN` | display gamma (2.2), stem darkening (0) |

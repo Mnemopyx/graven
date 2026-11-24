@@ -381,6 +381,39 @@ pub const testing_api = struct {
     pub fn loadTextSample() !geom.Point {
         return loadText();
     }
+    /// The columns sample (GRAVEN_SAMPLE=columns): three text columns in
+    /// a panel and two construction lines, constrained or not.
+    pub fn loadColumns(constrained: bool) !void {
+        return loadColumnsSampleWith(constrained);
+    }
+    pub fn objectsMenuOpen() bool {
+        return constrain_objects_menu;
+    }
+    pub fn constraintPromptOpen() bool {
+        return constrain_prompt != null;
+    }
+    pub fn constraintCount() usize {
+        return state.model.constraints.items.len;
+    }
+    /// The box of the object at name path `path`, in its parent's frame.
+    pub fn boxAt(path: []const u8) ?geom.Box {
+        const ref = state.model.resolve(path) orelse return null;
+        return constrain.boxOf(&state.model, objectOfContext(contextOfRef(ref) orelse return null) orelse return null);
+    }
+    /// Chooses the objects at name paths `paths` together, as Ctrl-clicks
+    /// do. False when one has no such name.
+    pub fn chooseAll(paths: []const []const u8) bool {
+        selection.clearRetainingCapacity();
+        for (paths) |path| {
+            const ref = state.model.resolve(path) orelse return false;
+            const id = objectOfContext(contextOfRef(ref) orelse return false) orelse return false;
+            selection.append(state.gpa, id) catch return false;
+        }
+        track_cursor = null;
+        state.context = .selection;
+        dvui.refresh(null, @src(), null);
+        return true;
+    }
     /// Imports the SVG file at `path` as a figure, as File, Import figure
     /// does; its index, null when nothing was imported.
     /// The document's figures' names, in the Browser's order.
@@ -2451,7 +2484,7 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {};
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -12188,6 +12221,7 @@ fn updateModeStack() void {
         if ((engage_n > 0 or engage_lock != null) and engaging()) push(&st, &n, kmode("canvas.engage"));
         if (selection.items.len > 0 and track_cursor == null) push(&st, &n, kmode("canvas.selection"));
         if (constrain_menu != null) push(&st, &n, kmode("canvas.constrain-menu"));
+        if (constrain_objects_menu) push(&st, &n, kmode("canvas.constrain-objects"));
         if (track_cursor != null) push(&st, &n, kmode("canvas.flow"));
         if (canvas_eq) |q| {
             push(&st, &n, kmode("canvas.equation"));
@@ -12517,6 +12551,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         if (viewNavEvent(e, box, area)) continue;
         // The constraint pop-up's keys (H, V, D, Escape) while it is open.
         if (constrain_menu != null) if (keymap.match1(e, kmode("canvas.constrain-menu"))) |inv| {
+            e.handle(@src(), box.data());
+            _ = runAction(inv);
+            dvui.refresh(null, @src(), box.data().id);
+            continue;
+        };
+        if (constrain_objects_menu) if (keymap.match1(e, kmode("canvas.constrain-objects"))) |inv| {
             e.handle(@src(), box.data());
             _ = runAction(inv);
             dvui.refresh(null, @src(), box.data().id);
@@ -15842,6 +15882,7 @@ fn ribbon() void {
     }
     defer if (ribbon_size_menu and ribbon_size_frame != dvui.frameTimeNS()) ribbonSizeMenu();
     defer if (constrain_menu != null and constrain_menu_frame != dvui.frameTimeNS()) constrainMenu();
+    defer if (constrain_objects_menu and constrain_menu_frame != dvui.frameTimeNS()) objectsMenu();
     in_ribbon = true;
     defer in_ribbon = false;
     switch (activeKind()) {
@@ -16110,6 +16151,9 @@ const button_handlers = [_]ButtonHandler{
                 openConstrainMenu(state.context.guide.space, state.context.guide.index);
                 return;
             };
+            // Objects chosen: their constraints offered (W, H, G, T, B, L, R).
+            if (state.tool != .constrain) if (openObjectsMenu()) return;
+            constrain_batch = null;
             state.tool = if (state.tool == .constrain) .select else .constrain;
         }
     }.f),
@@ -16139,6 +16183,47 @@ const button_handlers = [_]ButtonHandler{
     handler("constrain-menu.close", struct {
         fn f(_: i32) void {
             closeConstrainMenu();
+        }
+    }.f),
+    handler("constrain-objects.equal-width", struct {
+        fn f(_: i32) void {
+            equalSizes(false);
+        }
+    }.f),
+    handler("constrain-objects.equal-height", struct {
+        fn f(_: i32) void {
+            equalSizes(true);
+        }
+    }.f),
+    handler("constrain-objects.gap", struct {
+        fn f(_: i32) void {
+            gapsPrompt();
+        }
+    }.f),
+    handler("constrain-objects.top", struct {
+        fn f(_: i32) void {
+            edgesPick(.top);
+        }
+    }.f),
+    handler("constrain-objects.bottom", struct {
+        fn f(_: i32) void {
+            edgesPick(.bottom);
+        }
+    }.f),
+    handler("constrain-objects.left", struct {
+        fn f(_: i32) void {
+            edgesPick(.left);
+        }
+    }.f),
+    handler("constrain-objects.right", struct {
+        fn f(_: i32) void {
+            edgesPick(.right);
+        }
+    }.f),
+    handler("constrain-objects.close", struct {
+        fn f(_: i32) void {
+            closeObjectsMenu();
+            constrain_batch = null;
         }
     }.f),
     handler("tool.add-prototype", struct {
@@ -23281,6 +23366,21 @@ var constrain_prompt: ?struct {
     /// Which way it runs, as measured (`Constraint.side`).
     side: f64 = 1,
     new: bool = true,
+    /// Made for every object of `constrain_batch` (end `a` each one's,
+    /// its side as measured), not only end `a`.
+    batch: bool = false,
+} = null;
+
+/// Several objects constrained at once (K on a selection): their IDs, and
+/// what is made: each one's `feature` kept to a feature picked next, or
+/// the gaps between neighbours, across or down.
+var constrain_batch: ?struct {
+    ids: [64]layout.model.ObjectId = undefined,
+    n: usize = 0,
+    kind: enum { edge, gap } = .edge,
+    feature: Feature = .left,
+    /// For gaps: stacked (gaps down), else across.
+    down: bool = false,
 } = null;
 
 var constraint_issues: []constrain.Issue = &.{};
@@ -23402,7 +23502,9 @@ fn featureHit(at: geom.Point) ?FeatureHit {
     for (constrainables(a)) |id| {
         if (parent_panel_id != null and id == parent_panel_id.?) continue;
         const parent = constrain.parentOf(m, id) orelse continue;
-        if (first_parent) |fp| if (!std.meta.eql(fp, parent)) continue;
+        // Any frame of the first pick's workspace (a column in a panel
+        // against a line on the canvas): positions are in one space.
+        if (first_parent) |fp| if (constrain.spaceOf(m, fp) != constrain.spaceOf(m, parent)) continue;
         const off = constrain.frameOffset(m, parent);
         const box = offsetBox(constrain.boxOf(m, id) orelse continue, off);
         const point = isControlPoint(id);
@@ -23423,7 +23525,7 @@ fn featureHit(at: geom.Point) ?FeatureHit {
     // place on either axis, so is not offered.
     if (shown_space < m.spaces.items.len) {
         const parent: constrain.Parent = .{ .space = shown_space };
-        if (first_parent == null or std.meta.eql(first_parent.?, parent)) {
+        if (first_parent == null or constrain.spaceOf(m, first_parent.?) == shown_space) {
             const far = 1e5;
             const clip: geom.Box = if (canvas_free) |cf| guideClipBox(cf.area, shown_space) else .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
             for (m.spaces.items[shown_space].guides.items) |g| {
@@ -24739,16 +24841,212 @@ fn textTrackAt(at: geom.Point) ?struct { parent: Parent, region: usize } {
 fn constrainClick() void {
     const hit = constrain_hover orelse return;
     if (constrain_first) |first| {
+        if (constrain_batch != null and first.end.feature.vertical() != hit.end.feature.vertical()) {
+            state.status = if (first.end.feature.vertical()) "Pick a horizontal feature: a line, an edge, a top or bottom. " else "Pick a vertical feature: a line, an edge, a left or right. ";
+            return;
+        }
         const value = constrain.measure(&state.model, .{ .a = first.end, .b = hit.end }) orelse 0;
         const k = docUnits().perMm();
-        constrain_prompt = .{ .a = first.end, .b = hit.end, .value = @round(@abs(value) * k * 10) / 10, .side = if (value < 0) -1 else 1 };
+        constrain_prompt = .{ .a = first.end, .b = hit.end, .value = @round(@abs(value) * k * 10) / 10, .side = if (value < 0) -1 else 1, .batch = constrain_batch != null };
         constrain_first = null;
         constrain_hover = null;
         state.tool = .select;
         return;
     }
     if (hit.end.object == .none) return;
+    constrain_batch = null;
     constrain_first = hit;
+}
+
+/// The batch's constraints, one undo step: each object's feature kept
+/// `mm` from `to` (each on its own side, as measured), or each gap between
+/// neighbours `mm`.
+fn applyBatch(to: ConstraintEnd, mm: f64) void {
+    const cb = constrain_batch orelse return;
+    drag_count += 1;
+    const key = mergeKey(.{ "constrain-batch", drag_count });
+    var made: usize = 0;
+    switch (cb.kind) {
+        .edge => for (cb.ids[0..cb.n]) |id| {
+            const a: ConstraintEnd = .{ .object = id, .feature = cb.feature };
+            const measured = constrain.measure(&state.model, .{ .a = a, .b = to }) orelse continue;
+            _ = actM(key, .addConstraint, .{.{ .a = a, .b = to, .value = mm, .side = if (measured < 0) -1 else 1 }}) catch continue;
+            made += 1;
+        },
+        // Neighbours in order: the next one's near edge `mm` past the
+        // last one's far edge (down: below its bottom).
+        .gap => for (1..cb.n) |k| {
+            const prev = cb.ids[k - 1];
+            const next = cb.ids[k];
+            const c: layout.model.Constraint = if (cb.down)
+                .{ .a = .{ .object = next, .feature = .top }, .b = .{ .object = prev, .feature = .bottom }, .value = mm, .side = -1 }
+            else
+                .{ .a = .{ .object = next, .feature = .left }, .b = .{ .object = prev, .feature = .right }, .value = mm, .side = 1 };
+            _ = actM(key, .addConstraint, .{c}) catch continue;
+            made += 1;
+        },
+    }
+    const B = struct {
+        var buf: [64]u8 = undefined;
+    };
+    state.status = std.fmt.bufPrint(&B.buf, "{d} constraints made. ", .{made}) catch "";
+}
+
+/// The objects chosen for constraining (the selection, else the chosen
+/// object), into `out`; how many.
+fn chosenObjects(out: []layout.model.ObjectId) usize {
+    var n: usize = 0;
+    for (selection.items) |id| {
+        if (n == out.len) break;
+        if (constrain.boxOf(&state.model, id) == null) continue;
+        out[n] = id;
+        n += 1;
+    }
+    if (n == 0) if (objectOfContext(state.context)) |id| if (constrain.boxOf(&state.model, id) != null) {
+        out[0] = id;
+        n = 1;
+    };
+    return n;
+}
+
+/// K on chosen objects: their pop-up (equal widths and heights, gaps,
+/// edges to a feature picked next). Whether there were any.
+fn openObjectsMenu() bool {
+    var cb: @TypeOf(constrain_batch.?) = .{};
+    cb.n = chosenObjects(&cb.ids);
+    if (cb.n == 0) return false;
+    constrain_batch = cb;
+    constrain_objects_menu = true;
+    const m = dvui.currentWindow().mouse_pt;
+    const ns = dvui.windowNaturalScale();
+    constrain_menu_from = .{ .x = m.x / ns, .y = m.y / ns, .w = 1, .h = 1 };
+    constrain_menu_frame = dvui.frameTimeNS();
+    dvui.refresh(null, @src(), null);
+    return true;
+}
+
+/// The objects' pop-up is open.
+var constrain_objects_menu = false;
+
+fn closeObjectsMenu() void {
+    constrain_objects_menu = false;
+    closeConstrainMenu();
+}
+
+fn objectsMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    closeObjectsMenu();
+}
+
+const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right" };
+
+/// The objects' pop-up: each choice with its key; those needing two or
+/// more objects dimmed with one.
+fn objectsMenu() void {
+    if (!constrain_objects_menu) return;
+    const cb = constrain_batch orelse {
+        constrain_objects_menu = false;
+        return;
+    };
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&constrain_objects_menu), .close = objectsMenuClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var fm = dvui.floatingMenu(@src(), .{ .from = constrain_menu_from, .style = .popup }, .{});
+    defer fm.deinit();
+    inline for (objects_menu_ids, 0..) |id, i| {
+        const tag = uniqueTag(id);
+        recordDrawn(tag, 0);
+        const off = i < 3 and cb.n < 2;
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = i, .tag = tag, .margin = .all(1), .padding = .{ .x = 8, .w = 8, .y = 3, .h = 4 } });
+        bw.processEvents();
+        bw.drawBackground();
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer row.deinit();
+            const ink = dvui.themeGet().color(.window, .text);
+            dvui.labelNoFmt(@src(), comptime elements.get(id).label, .{}, .{ .padding = .all(0), .margin = .all(0), .expand = .horizontal, .color_text = if (off) .{ .color = ink.opacity(0.4) } else null });
+            var kb: [24]u8 = undefined;
+            if (keymap.shortcut(&kb, kmode("canvas.constrain-objects"), kact(id), 0)) |sc| dvui.labelNoFmt(@src(), sc, .{}, .{ .padding = .{ .x = 16 }, .margin = .all(0), .color_text = .{ .color = ink.opacity(0.55) } });
+        }
+        if (bw.clicked()) pushButtonEvent(tag, 0);
+        bw.drawFocus();
+        bw.deinit();
+    }
+}
+
+/// Equal widths (or heights) for the chosen objects: each held equal to
+/// the first, one undo step.
+fn equalSizes(vertical: bool) void {
+    const cb = constrain_batch orelse return;
+    closeObjectsMenu();
+    constrain_batch = null;
+    if (cb.n < 2) {
+        state.status = "Equal sizes need two or more objects chosen. ";
+        return;
+    }
+    drag_count += 1;
+    const key = mergeKey(.{ "constrain-equal", drag_count });
+    const f: Feature = if (vertical) .bottom else .left;
+    for (cb.ids[1..cb.n]) |id| _ = actM(key, .addConstraint, .{.{ .kind = .equal_size, .a = .{ .object = id, .feature = f }, .b = .{ .object = cb.ids[0], .feature = f } }}) catch {};
+    state.status = if (vertical) "Equal heights. " else "Equal widths. ";
+}
+
+/// Gaps between the chosen objects: in order across (or down, when they
+/// are stacked), the value asked for, the first gap's as it is offered.
+fn gapsPrompt() void {
+    var cb = constrain_batch orelse return;
+    closeObjectsMenu();
+    if (cb.n < 2) {
+        constrain_batch = null;
+        state.status = "Gaps need two or more objects chosen. ";
+        return;
+    }
+    // Stacked when they spread further down than across.
+    var lo: geom.Point = .{ .x = std.math.inf(f64), .y = std.math.inf(f64) };
+    var hi: geom.Point = .{ .x = -std.math.inf(f64), .y = -std.math.inf(f64) };
+    for (cb.ids[0..cb.n]) |id| {
+        const b = constrain.boxOf(&state.model, id) orelse continue;
+        const c: geom.Point = .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 };
+        lo = .{ .x = @min(lo.x, c.x), .y = @min(lo.y, c.y) };
+        hi = .{ .x = @max(hi.x, c.x), .y = @max(hi.y, c.y) };
+    }
+    cb.down = hi.y - lo.y > hi.x - lo.x;
+    cb.kind = .gap;
+    const Ctx = struct { down: bool };
+    const order = struct {
+        fn lt(cx: Ctx, x: layout.model.ObjectId, y: layout.model.ObjectId) bool {
+            const bx = constrain.boxOf(&state.model, x).?;
+            const by = constrain.boxOf(&state.model, y).?;
+            return if (cx.down) bx.y1 > by.y1 else bx.x0 < by.x0;
+        }
+    }.lt;
+    std.mem.sort(layout.model.ObjectId, cb.ids[0..cb.n], Ctx{ .down = cb.down }, order);
+    constrain_batch = cb;
+    const b0 = constrain.boxOf(&state.model, cb.ids[0]).?;
+    const b1 = constrain.boxOf(&state.model, cb.ids[1]).?;
+    const gap = if (cb.down) b0.y0 - b1.y1 else b1.x0 - b0.x1;
+    const k = docUnits().perMm();
+    constrain_prompt = .{ .a = .{ .object = cb.ids[1], .feature = if (cb.down) .top else .left }, .b = .{ .object = cb.ids[0], .feature = if (cb.down) .bottom else .right }, .value = @round(@abs(gap) * k * 10) / 10, .batch = true };
+}
+
+/// Each chosen object's `f` kept to a feature: the next click picks it.
+fn edgesPick(f: Feature) void {
+    var cb = constrain_batch orelse return;
+    closeObjectsMenu();
+    cb.kind = .edge;
+    cb.feature = f;
+    constrain_batch = cb;
+    const id = cb.ids[0];
+    const parent = constrain.parentOf(&state.model, id) orelse return;
+    const b = offsetBox(constrain.boxOf(&state.model, id) orelse return, constrain.frameOffset(&state.model, parent));
+    const p0: geom.Point, const p1: geom.Point = switch (f) {
+        .top => .{ .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 } },
+        .bottom => .{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x1, .y = b.y0 } },
+        .left => .{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x0, .y = b.y1 } },
+        else => .{ .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x1, .y = b.y1 } },
+    };
+    state.tool = .constrain;
+    constrain_first = .{ .end = .{ .object = id, .feature = f }, .parent = parent, .p0 = p0, .p1 = p1 };
+    state.status = if (f.vertical()) "Click what their edges keep to: a horizontal line, an edge, a top or bottom. " else "Click what their edges keep to: a vertical line, an edge, a left or right. ";
 }
 
 fn featureName(f: Feature) []const u8 {
@@ -24820,7 +25118,12 @@ fn constrainPromptWindow() void {
     dvui.labelNoFmt(@src(), "Constrain", .{}, .{ .font = dvui.Font.theme(.heading) });
     var b1: [120]u8 = undefined;
     var b2: [120]u8 = undefined;
-    dvui.label(@src(), "{s}, against {s}", .{ endText(&b1, pr.a, null), endText(&b2, pr.b, pr.a.object) }, .{ .font = dvui.Font.theme(.body).larger(-1), .margin = .{ .y = 4 } });
+    if (pr.batch) if (constrain_batch) |cb| {
+        if (cb.kind == .gap)
+            dvui.label(@src(), "The {d} gaps between {d} objects, {s}", .{ cb.n - 1, cb.n, if (cb.down) "down" else "across" }, .{ .font = dvui.Font.theme(.body).larger(-1), .margin = .{ .y = 4 } })
+        else
+            dvui.label(@src(), "Each of {d} objects' {s}, against {s}", .{ cb.n, featureName(cb.feature), endText(&b2, pr.b, null) }, .{ .font = dvui.Font.theme(.body).larger(-1), .margin = .{ .y = 4 } });
+    } else dvui.label(@src(), "{s}, against {s}", .{ endText(&b1, pr.a, null), endText(&b2, pr.b, pr.a.object) }, .{ .font = dvui.Font.theme(.body).larger(-1), .margin = .{ .y = 4 } });
     var go = false;
     var cancel = false;
     for (dvui.events()) |*e| {
@@ -24833,7 +25136,7 @@ fn constrainPromptWindow() void {
         e.handle(@src(), fw.data());
     }
     const two_objects = pr.b.object != pr.a.object;
-    {
+    if (!pr.batch) {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
         defer row.deinit();
         propName("Relation");
@@ -24872,11 +25175,23 @@ fn constrainPromptWindow() void {
     }
     if (cancel) {
         constrain_prompt = null;
+        constrain_batch = null;
         dvui.refresh(null, @src(), null);
         return;
     }
     if (!go) return;
     const value_mm = pr.value / docUnits().perMm();
+    if (pr.batch) {
+        applyBatch(pr.b, @abs(value_mm));
+        constrain_prompt = null;
+        constrain_batch = null;
+        // The keyboard back on the canvas (the prompt's window had it).
+        const main_sw = dvui.currentWindow().data().id;
+        dvui.focusSubwindow(main_sw, null);
+        if (canvas_id) |id| dvui.focusWidget(id, main_sw, null);
+        dvui.refresh(null, @src(), null);
+        return;
+    }
     _ = act(.addConstraint, .{.{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b, .value = @abs(value_mm), .side = pr.side }}) catch {
         state.status = "That constraint could not be added. ";
     };
@@ -25583,6 +25898,10 @@ fn enterSketch(ref: SketchRef) void {
 /// vertical one (ends in different frames), its width 55 mm, gutters of
 /// 6 mm, the others as wide as it and level with it.
 fn loadColumnsSample() !void {
+    return loadColumnsSampleWith(true);
+}
+
+fn loadColumnsSampleWith(constrained: bool) !void {
     const m = &state.model;
     const space = shown_space;
     const style = try labelStyle();
@@ -25600,6 +25919,8 @@ fn loadColumnsSample() !void {
     m.spaces.items[space].guides.items[vi].lock = .vertical;
     const vid = m.spaces.items[space].guides.items[vi].id;
     try hist.snapshot(m);
+    state.view.fit = .{ .x0 = 25, .y0 = 15, .x1 = 245, .y1 = 185 };
+    if (!constrained) return;
     const C = layout.model.Constraint;
     const list = [_]C{
         .{ .a = .{ .object = ids[0], .feature = .top }, .b = .{ .object = hid, .feature = .origin_y }, .value = 12, .side = -1 },

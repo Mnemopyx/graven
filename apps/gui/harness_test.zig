@@ -2297,3 +2297,56 @@ test "File, Import figure: an SVG's drawing a figure in the Browser's Figures, i
     try std.testing.expectEqual(1, names.len);
     std.testing.allocator.free(names);
 }
+
+test "columns chosen, then K: W equal widths, G gaps, T tops from a construction line" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try api.loadColumns(false);
+    try r.frames(3);
+    const cols = [_][]const u8{ "Panel.Column1", "Panel.Column2", "Panel.Column3" };
+    try std.testing.expect(api.chooseAll(&cols));
+    try r.frames(2);
+    // W: the others as wide as the first (48 mm).
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.w, .none);
+    try r.frames(3);
+    try std.testing.expectEqual(2, api.constraintCount());
+    for (cols) |c| try std.testing.expectApproxEqAbs(48, api.boxAt(c).?.width(), 1e-6);
+    // G: 7 mm gaps, in order across.
+    try std.testing.expect(api.chooseAll(&cols));
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.g, .none);
+    try r.frames(2);
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText("7");
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(3);
+    try std.testing.expectEqual(4, api.constraintCount());
+    const b1 = api.boxAt(cols[0]).?;
+    const b2 = api.boxAt(cols[1]).?;
+    const b3 = api.boxAt(cols[2]).?;
+    try std.testing.expectApproxEqAbs(7, b2.x0 - b1.x1, 1e-6);
+    try std.testing.expectApproxEqAbs(7, b3.x0 - b2.x1, 1e-6);
+    // T, then the horizontal construction line (at 175 on the canvas; the
+    // panel's frame is 20 up): each top 12 mm below it.
+    try std.testing.expect(api.chooseAll(&cols));
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.t, .none);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(120, 175).?);
+    try r.frames(2);
+    try dvui.testing.pressKey(.a, .lcontrol);
+    try r.frames(1);
+    try dvui.testing.writeText("12");
+    try r.frames(1);
+    try r.key(.enter, .none);
+    try r.frames(3);
+    try std.testing.expectEqual(7, api.constraintCount());
+    for (cols) |c| try std.testing.expectApproxEqAbs(175 - 20 - 12, api.boxAt(c).?.y1, 1e-6);
+}

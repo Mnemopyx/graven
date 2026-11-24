@@ -42,6 +42,9 @@ pub const modes = [_]M{
     // The constraints for the object chosen (K with one chosen), while
     // their pop-up is open.
     .{ .name = "canvas.constrain-menu", .kind = .sub, .parent = "canvas", .allows = &.{"constrain-menu"} },
+    // The constraints for the containers chosen (K with them chosen),
+    // while their pop-up is open.
+    .{ .name = "canvas.constrain-objects", .kind = .sub, .parent = "canvas", .allows = &.{"constrain-objects"} },
     .{ .name = "canvas.flow", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.flow"} },
     .{ .name = "canvas.equation", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.equation"} },
     .{ .name = "canvas.equation.head", .kind = .sub, .parent = "canvas.equation", .allows = &.{"canvas.equation.head"} },
@@ -416,6 +419,14 @@ pub const binds = [_]B{
     .{ .mode = "canvas.constrain-menu", .chord = "v", .action = "constrain-menu.vertical" },
     .{ .mode = "canvas.constrain-menu", .chord = "d", .action = "constrain-menu.distance" },
     .{ .mode = "canvas.constrain-menu", .chord = "escape", .action = "constrain-menu.close" },
+    .{ .mode = "canvas.constrain-objects", .chord = "w", .action = "constrain-objects.equal-width" },
+    .{ .mode = "canvas.constrain-objects", .chord = "h", .action = "constrain-objects.equal-height" },
+    .{ .mode = "canvas.constrain-objects", .chord = "g", .action = "constrain-objects.gap" },
+    .{ .mode = "canvas.constrain-objects", .chord = "t", .action = "constrain-objects.top" },
+    .{ .mode = "canvas.constrain-objects", .chord = "b", .action = "constrain-objects.bottom" },
+    .{ .mode = "canvas.constrain-objects", .chord = "l", .action = "constrain-objects.left" },
+    .{ .mode = "canvas.constrain-objects", .chord = "r", .action = "constrain-objects.right" },
+    .{ .mode = "canvas.constrain-objects", .chord = "escape", .action = "constrain-objects.close" },
     .{ .mode = "canvas.selection", .chord = "shift+tab", .action = "canvas.selection.hunt", .arg = 1 },
     .{ .mode = "canvas.selection", .chord = "escape", .action = "canvas.selection.clear" },
 } ++ flowMoves() ++ [_]B{
