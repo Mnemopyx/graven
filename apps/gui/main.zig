@@ -2522,6 +2522,7 @@ fn frame() !dvui.App.Result {
     defer {
         digraphHint();
         caseHint();
+        caseOverlay();
         text_wanted = dvui.currentWindow().textInputRequested();
     }
 
@@ -21050,6 +21051,105 @@ fn insertSort(sort: layout.model.Sort) void {
         },
     }
     setFlowPos(.{ .index = index + 1 });
+}
+
+/// A sort as a key of the overlay shows it: text as it is, a tile or a
+/// blank by its length.
+fn sortLabel(a: std.mem.Allocator, sort: layout.model.Sort) []const u8 {
+    const num = struct {
+        fn f(al: std.mem.Allocator, mark: []const u8, v: f64) []const u8 {
+            var t = std.fmt.allocPrint(al, "{d:.2}", .{v}) catch return mark;
+            while (std.mem.indexOfScalar(u8, t, '.') != null and (t[t.len - 1] == '0' or t[t.len - 1] == '.')) t = t[0 .. t.len - 1];
+            return std.mem.concat(al, u8, &.{ mark, t }) catch mark;
+        }
+    }.f;
+    const c = track_cursor;
+    const pal = if (c) |cc| paletteFor(cc.parent, cc.region) else null;
+    return switch (sort) {
+        .text => |t| t,
+        .tile => |t| switch (t.size) {
+            .units => |u| num(a, "▭", u),
+            .step => |k| if (pal != null and k < pal.?.tile_count) num(a, "▭", pal.?.tiles[k]) else "▭",
+        },
+        .blank => |b| switch (b) {
+            .units => |u| num(a, "␣", u),
+            .step => |k| if (pal != null and k < pal.?.blanks.len) num(a, "␣", pal.?.blanks[k]) else "␣",
+        },
+    };
+}
+
+/// The active case on a keyboard, over the canvas's foot (the gray
+/// overlay back, 2026-11-24): each key labelled as the user's layout has
+/// it, its sort below, its upper case's above right. Keys the case leaves
+/// alone are faint.
+fn caseOverlay() void {
+    if (track_cursor == null or case_picker) return;
+    const ci = active_case orelse return;
+    const cs = caseAt(ci) orelse return;
+    const a = dvui.currentWindow().arena();
+    const kb = layout.keys;
+    // Each position's key of the case.
+    var at: [kb.count]?layout.model.CaseKey = @splat(null);
+    for (cs.keys) |k| if (k.key.on(&keymap.layout)) |p| if (kb.index(p)) |i| {
+        at[i] = k;
+    };
+    const rows = [_]struct { row: kb.Row, from: u8, to: u8, indent: f32 }{
+        .{ .row = .E, .from = 0, .to = 12, .indent = 0 },
+        .{ .row = .D, .from = 1, .to = 12, .indent = 1.5 },
+        .{ .row = .C, .from = 1, .to = 11, .indent = 1.75 },
+        .{ .row = .B, .from = 1, .to = 10, .indent = 2.25 },
+    };
+    const key_w: f32 = 56;
+    const key_h: f32 = 54;
+    const gap: f32 = 3;
+    const w: f32 = 13.5 * (key_w + gap) + 16;
+    const h: f32 = 4 * (key_h + gap) + 36;
+    const cr = canvas_rect;
+    if (cr.w < w * 0.5) return;
+    // Clear of the expression line and status bar at the window's foot.
+    const foot = @min(cr.y + cr.h, dvui.windowRect().h - 96);
+    const rect: dvui.Rect = .{ .x = cr.x + @max(0, (cr.w - w) / 2), .y = @max(cr.y, foot - h - 8), .w = @min(w, cr.w), .h = h };
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{ .mouse_events = false }, .{
+        .rect = rect,
+        .background = true,
+        .color_fill = .{ .color = dvui.Color.gray.opacity(palette_alpha) },
+        .corners = .all(8),
+        .padding = .all(6),
+    });
+    defer fw.deinit();
+    const small = ghost_pane.fieldFont().withSize(11);
+    const big = ghost_pane.fieldFont().withSize(22);
+    dvui.labelNoFmt(@src(), std.fmt.allocPrint(a, "Case: {s}   (Ctrl+Space: another)", .{cs.name}) catch "", .{}, .{ .font = small, .color_text = .{ .color = dvui.Color.white }, .padding = .{ .x = 2, .y = 0, .w = 2, .h = 4 } });
+    for (rows, 0..) |r, ri| {
+        var hb = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = ri, .margin = .{ .h = gap } });
+        defer hb.deinit();
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = r.indent * (key_w + gap), .h = 1 } });
+        var col = r.from;
+        while (col <= r.to) : (col += 1) {
+            const pos: kb.Position = .{ .row = r.row, .col = col };
+            const i = kb.index(pos) orelse continue;
+            const ck = at[i];
+            const used = ck != null and (ck.?.lower != null or ck.?.upper != null);
+            var kbx = dvui.overlay(@src(), .{
+                .id_extra = col,
+                .min_size_content = .{ .w = key_w, .h = key_h },
+                .max_size_content = .{ .w = key_w, .h = key_h },
+                .margin = .{ .w = gap },
+                .background = true,
+                .border = .all(1),
+                .corners = .all(4),
+                .color_fill = .{ .color = if (used) dvui.Color.black.opacity(0.35) else dvui.Color.black.opacity(0.12) },
+                .color_border = .{ .color = dvui.Color.white.opacity(if (used) 0.45 else 0.15) },
+            });
+            defer kbx.deinit();
+            // The key as the layout has it, top left; its upper sort top
+            // right; its sort below.
+            dvui.labelNoFmt(@src(), keymap.layout.typed(pos, false), .{}, .{ .font = small, .color_text = .{ .color = dvui.Color.white.opacity(0.55) }, .padding = .{ .x = 3, .y = 1 } });
+            if (ck) |k| if (k.upper) |u| dvui.labelNoFmt(@src(), sortLabel(a, u), .{}, .{ .font = small, .color_text = .{ .color = dvui.Color.white.opacity(0.85) }, .gravity_x = 1.0, .padding = .{ .w = 3, .y = 1 } });
+            if (ck) |k| if (k.lower) |l| dvui.labelNoFmt(@src(), sortLabel(a, l), .{}, .{ .font = if (l == .text) big else small, .color_text = .{ .color = dvui.Color.white }, .gravity_x = 0.5, .gravity_y = 1.0, .padding = .{ .h = 3 } });
+        }
+    }
 }
 
 /// By the caret while a case is active: its name; while one is chosen,
