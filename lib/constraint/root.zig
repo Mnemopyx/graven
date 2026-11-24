@@ -9,10 +9,12 @@ pub const dual = @import("dual.zig");
 pub const solve = @import("solve.zig");
 pub const expr = @import("expr.zig");
 pub const units = @import("units.zig");
+pub const dimension = @import("dimension.zig");
 
 test {
     _ = dual;
     _ = solve;
     _ = expr;
     _ = units;
+    _ = dimension;
 }

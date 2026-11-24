@@ -1099,6 +1099,8 @@ pub const SketchEdit = union(enum) {
     drag: struct { p: sketch_.PointRef, to: geom.Point },
     /// A dimension made reference (it reports) or driving again.
     reference: struct { c: sketch_.ConstraintId, on: bool },
+    /// Where a dimension is drawn.
+    place: struct { c: sketch_.ConstraintId, place: sketch_.constraint.dimension.Placement },
     /// A dimension's expression (empty: its plain value).
     expr: struct { c: sketch_.ConstraintId, text: []const u8 },
     /// A parameter added or changed.
@@ -4804,6 +4806,7 @@ pub const Model = struct {
             .unconstrain => |c| try sk.removeConstraint(c),
             .value => |e| try sk.setValue(e.c, e.value),
             .reference => |e| try sk.setDriving(e.c, !e.on),
+            .place => |e| try sk.setPlace(e.c, e.place),
             .expr => |e| try sk.setExpr(al, e.c, e.text),
             .param => |e| try sk.setParam(al, e.name, e.expr),
             .unparam => |name| try sk.removeParam(name),
