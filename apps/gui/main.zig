@@ -17651,6 +17651,24 @@ const button_handlers = [_]ButtonHandler{
             _ = skEdit(.{ .reference = .{ .c = @intCast(ci), .on = it.sketch.constraints.items[ci].driving } });
         }
     }.f),
+    handler("constraints.constraint", struct {
+        fn f(_: i32) void {}
+    }.f),
+    handler("constraints.constraint-object", struct {
+        fn f(arg: i32) void {
+            layFlashEnd(arg);
+        }
+    }.f),
+    handler("sketch-mode.constraint", struct {
+        fn f(arg: i32) void {
+            skPickConstraint(@intCast(arg));
+        }
+    }.f),
+    handler("sketch-mode.constraint-object", struct {
+        fn f(arg: i32) void {
+            skFlashRef(arg);
+        }
+    }.f),
     handler("sketch-mode.remove-constraint", struct {
         fn f(arg: i32) void {
             _ = skEdit(.{ .unconstrain = @intCast(arg) });
@@ -26403,6 +26421,7 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
         dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x - 2 * r, .y = q.y }, .{ .x = q.x + 2 * r, .y = q.y } } }, .{ .thickness = px, .color = ink });
         dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = q.y - 2 * r }, .{ .x = q.x, .y = q.y + 2 * r } } }, .{ .thickness = px, .color = ink });
     };
+    drawLayFlash(area);
     // While constraining: the first pick, and what is under the pointer.
     if (state.tool == .constrain) {
         if (constrain_first) |f| strokeFeature(area, f, colors.guide, 3);
@@ -26415,6 +26434,62 @@ fn strokeFeature(area: dvui.Rect.Physical, h: FeatureHit, colour: dvui.Color, wi
     dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, h.p0), state.view.toPx(area, h.p1) } }, .{ .thickness = width * px, .color = .{ .color = colour } });
 }
 
+/// A constraint's end picked in Properties, shown on the canvas while the
+/// context object stays the same.
+var lay_flash: ?struct { context: layout.model.ObjectId, c: layout.model.ObjectId, end: usize } = null;
+
+fn layConstraintIcon(c: layout.model.Constraint) icons.GIcon {
+    if (c.kind == .equal_size) return .con_equal;
+    if (c.driving and c.value == 0) return .con_coincident;
+    return if (c.a.feature.vertical()) .con_distance_y else .con_distance_x;
+}
+
+/// Showing (or no longer showing) one end of a container's constraint.
+fn layFlashEnd(arg: i32) void {
+    const id = contextObject() orelse return;
+    const ci: usize = @intCast(@divTrunc(arg, 2));
+    const e: usize = @intCast(@mod(arg, 2));
+    if (ci >= state.model.constraints.items.len) return;
+    const cid = state.model.constraints.items[ci].id;
+    if (lay_flash) |f| if (f.c == cid and f.end == e) {
+        lay_flash = null;
+        return;
+    };
+    lay_flash = .{ .context = id, .c = cid, .end = e };
+}
+
+/// The picked constraint end, drawn: a feature's line across its object
+/// (or its parent), or for a size the object's box.
+fn drawLayFlash(area: dvui.Rect.Physical) void {
+    const f = lay_flash orelse return;
+    const m = &state.model;
+    const c = for (m.constraints.items) |x| {
+        if (x.id == f.c) break x;
+    } else return;
+    const end = if (f.end == 0) c.a else c.b;
+    const other = if (f.end == 0) c.b else c.a;
+    const parent = constrain.parentOf(m, if (end.object != .none) end.object else other.object) orelse return;
+    const off = constrain.frameOffset(m, parent);
+    const far = 1e5;
+    const box: geom.Box = if (end.object != .none)
+        offsetBox(constrain.boxOf(m, end.object) orelse return, off)
+    else if (parent == .panel) offsetBox(m.panels.items[parent.panel].box(), off) else .{ .x0 = -far, .x1 = far, .y0 = -far, .y1 = far };
+    const px = dvui.windowNaturalScale();
+    if (c.kind == .equal_size) {
+        const pts = [_]geom.Point{ .{ .x = box.x0, .y = box.y0 }, .{ .x = box.x1, .y = box.y0 }, .{ .x = box.x1, .y = box.y1 }, .{ .x = box.x0, .y = box.y1 }, .{ .x = box.x0, .y = box.y0 } };
+        var q: [5]dvui.Point.Physical = undefined;
+        for (pts, &q) |p, *o| o.* = state.view.toPx(area, p);
+        dvui.Path.stroke(.{ .points = &q }, .{ .thickness = 8 * px, .color = .{ .color = flash_colour.opacity(0.35) } });
+        dvui.Path.stroke(.{ .points = &q }, .{ .thickness = 2.5 * px, .color = .{ .color = flash_colour } });
+        return;
+    }
+    const pos = (constrain.featureAt(m, parent, end) orelse return) + if (end.feature.vertical()) off.y else off.x;
+    const line = featureLine(end.feature, pos, box);
+    const h: FeatureHit = .{ .end = end, .parent = parent, .p0 = line[0], .p1 = line[1] };
+    strokeFeature(area, h, flash_colour.opacity(0.35), 9);
+    strokeFeature(area, h, flash_colour, 3);
+}
+
 /// The context object's origin and constraints, below its properties.
 fn constraintProperties() void {
     const saved_group = pushGroup("constraints");
@@ -26425,32 +26500,60 @@ fn constraintProperties() void {
     originPicker(id);
     var any = false;
     const k = docUnits().perMm();
+    if (lay_flash) |f| if (f.context != id) {
+        lay_flash = null;
+    };
     for (m.constraints.items, 0..) |c, ci| {
         if (c.a.object != id and c.b.object != id) continue;
         any = true;
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = ci, .margin = .{ .y = 2 } });
+        const flagged = constraintIssue(c.id);
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .id_extra = ci,
+            .margin = .{ .y = 1 },
+            .background = flagged != null,
+            .color_fill = if (flagged != null) .{ .color = colors.overflow.opacity(0.18) } else null,
+            .corners = .all(4),
+        });
         defer row.deinit();
-        if (icons.button(@src(), .trash, "Remove this constraint", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
-            act(.removeConstraint, .{c.id}) catch {};
-            return;
-        }
         var b1: [120]u8 = undefined;
         var b2: [120]u8 = undefined;
         var b3: [260]u8 = undefined;
         const what = if (c.kind == .equal_size)
-            std.fmt.bufPrint(&b3, "{s} size − {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch ""
+            std.fmt.bufPrint(&b3, "Equal size: {s} − {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch ""
         else
             std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
-        const flagged = constraintIssue(c.id);
-        dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged != null) .{ .color = colors.overflow } else null, .id_extra = ci });
+        const pad: dvui.Rect = .all(2);
+        keyIcon(@src(), "Constraint", icons.gravenAny(layConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = what } });
+        for ([2]ConstraintEnd{ c.a, c.b }, 0..) |e, ei| {
+            const on = if (lay_flash) |f| f.c == c.id and f.end == ei else false;
+            var nb: [120]u8 = undefined;
+            const tip = if (c.kind == .equal_size) (std.fmt.bufPrint(&nb, "{s} size", .{if (e.object == .none) "The parent's" else objectName(e.object)}) catch "") else endText(&nb, e, null);
+            keyIcon(@src(), "Constraint object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 2 + ei), .{
+                .id_extra = 1 + ei,
+                .gravity_y = 0.5,
+                .padding = pad,
+                .min_size_content = .{ .w = 22, .h = 22 },
+                .label = .{ .text = tip },
+                .background = true,
+                .color_fill = if (on) .{ .color = flash_colour.opacity(0.45) } else null,
+                .border = if (on) .all(1) else null,
+                .color_border = if (on) .{ .color = flash_colour } else null,
+            });
+        }
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (!c.driving) {
             var vb: [32]u8 = undefined;
             dvui.labelNoFmt(@src(), dimText(&vb, c), .{}, .{ .gravity_y = 0.5, .id_extra = ci });
-            continue;
+        } else {
+            const v0 = @round(c.value * k * 1000) / 1000;
+            accepted.label_unit = if (k == 1) .mm else .in;
+            if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| setConstraintValue(c.id, v / k);
         }
-        const v0 = @round(c.value * k * 1000) / 1000;
-        accepted.label_unit = if (k == 1) .mm else .in;
-        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| setConstraintValue(c.id, v / k);
+        if (icons.button(@src(), .trash, "Remove this constraint", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+            act(.removeConstraint, .{c.id}) catch {};
+            return;
+        }
     }
     if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     for (constraintIssues()) |i| {
@@ -27969,6 +28072,33 @@ fn skDashed(pts: []const dvui.Point.Physical, colour: dvui.Color, thick: f32) vo
     }
 }
 
+/// The primitive picked in Properties' constraint list: haloed.
+fn skDrawFlash(area: dvui.Rect.Physical, it: SkPlace) void {
+    const r = sk_flash orelse return;
+    const s = it.sketch;
+    const px = dvui.windowNaturalScale();
+    const hi = flash_colour;
+    switch (r) {
+        .geom => |g| {
+            if (g >= s.geometry.items.len or s.geometry.items[g].removed) return;
+            const geo = s.geometry.items[g];
+            skDrawGeometry(area, it, geo, hi.opacity(0.35), 9 * px, false);
+            skDrawGeometry(area, it, geo, hi, 3 * px, false);
+        },
+        .point => |pr| {
+            const p = s.point(pr) catch return;
+            const q = skPx(area, it, p);
+            // A curve's end or centre: the curve too, fainter, so a point
+            // shared by several (coincident) says whose it is.
+            if (pr.role != .point and pr.geom < s.geometry.items.len and !s.geometry.items[pr.geom].removed)
+                skDrawGeometry(area, it, s.geometry.items[pr.geom], hi.opacity(0.6), 2.5 * px, false);
+            skDot(q, 9 * px, hi.opacity(0.35));
+            skRing(q, 7 * px, hi, 2 * px);
+            skDot(q, 3.5 * px, hi);
+        },
+    }
+}
+
 fn skDot(c: dvui.Point.Physical, r: f32, colour: dvui.Color) void {
     var pts: [12]dvui.Point.Physical = undefined;
     for (&pts, 0..) |*p, k| {
@@ -28028,6 +28158,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             skDot(skPx(area, it, p), rad * px, if (sel) colors.select else colour);
         }
     }
+    skDrawFlash(area, it);
     // Constraint glyphs and values.
     for (s.constraints.items, 0..) |c, ci| {
         const anchor = skAnchor(s, c) orelse continue;
@@ -28530,39 +28661,211 @@ fn sketchModeProperties() void {
     heading("{s}", .{"Constrain the selection"}, 8199);
     sketchConstrainButtons();
     keyButton(@src(), "Finish sketch…  Enter", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
-    heading("{s}", .{"Constraints"}, 8200);
+    skConstraintList(it);
+    sketchPhysicalWhen(it);
+    sketchParameters(it);
+}
+
+/// A primitive a constraint names, picked in Properties to show it on the
+/// canvas (drawn highlighted until picked again or the selection changes).
+var sk_flash: ?skl.Ref = null;
+/// What a constraint's object picked in Properties is drawn in: a pigment
+/// of its own, apart from the selection's.
+const flash_colour: dvui.Color = .{ .r = canvas_theme.fluor_construction.r, .g = canvas_theme.fluor_construction.g, .b = canvas_theme.fluor_construction.b };
+var sk_flash_sel: usize = 0;
+
+/// The constraints of the selected geometry (all of them when nothing is
+/// selected), one a line: its kind's icon (choosing the constraint), then
+/// a button for each primitive it names, its icon the primitive's kind
+/// (showing it on the canvas), a dimension's value, drive or reference,
+/// and remove.
+fn skConstraintList(it: SkPlace) void {
+    const s = it.sketch;
+    // The selected geometry.
+    var picked: [32]skl.GeomId = undefined;
+    var np: usize = 0;
+    for (sk_sel.items) |p| {
+        const g: skl.GeomId = switch (p) {
+            .curve => |c| c,
+            .point => |r| r.geom,
+            .constraint => continue,
+        };
+        if (np < picked.len) {
+            picked[np] = g;
+            np += 1;
+        }
+    }
+    // A highlight lasts while the selection it was made for does.
+    if (sk_flash != null and sk_flash_sel != selHash()) sk_flash = null;
+    if (np == 0) heading("{s}", .{"Constraints"}, 8200) else heading("Constraints of the selection", .{}, 8200);
     const an = skAnalysis();
-    for (it.sketch.constraints.items, 0..) |c, ci| {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = ci });
-        defer row.deinit();
-        var colour = dvui.themeGet().color(.window, .text);
+    var shown: usize = 0;
+    for (s.constraints.items, 0..) |c, ci| {
+        if (np > 0) {
+            var hit = false;
+            for (picked[0..np]) |g| if (skl.refersTo(c, g)) {
+                hit = true;
+            };
+            if (!hit) continue;
+        }
+        shown += 1;
+        var flagged: ?dvui.Color = null;
         if (an) |x| {
             for (x.conflicting) |k| if (k == ci) {
-                colour = colors.overflow;
+                flagged = colors.overflow;
             };
             for (x.redundant) |k| if (k == ci) {
-                colour = colors.overflow.opacity(0.7);
+                flagged = colors.overflow.opacity(0.7);
             };
         }
         const sel = skSelected(.{ .constraint = @intCast(ci) });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .id_extra = ci,
+            .margin = .{ .y = 1 },
+            .background = sel or flagged != null,
+            .color_fill = if (sel) .{ .color = dvui.themeGet().focus.opacity(0.3) } else if (flagged) |f| .{ .color = f.opacity(0.18) } else null,
+            .corners = .all(4),
+        });
+        defer row.deinit();
         var tb: [96]u8 = undefined;
         const text = skConstraintText(&tb, c);
-        if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{ .expand = .horizontal, .color_text = .{ .color = colour }, .background = sel, .color_fill = if (sel) .{ .color = dvui.themeGet().focus.opacity(0.3) } else null })) {
-            skClickSelect(.{ .constraint = @intCast(ci) }, false);
-            // A dimension opens for its value.
-            if (skShownValue(c) != null) {
-                const at = skDimAnchor(canvasArea(), @intCast(ci)) orelse dvui.Point.Physical{ .x = 0, .y = 0 };
-                sk_dim = .{ .c = @intCast(ci), .at = at };
-            }
+        const pad: dvui.Rect = .all(2);
+        keyIcon(@src(), "Constraint", icons.gravenAny(skConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = text } });
+        var rb: [4]skl.Ref = undefined;
+        for (skl.refs(c, &rb), 0..) |r, k| {
+            var nb: [64]u8 = undefined;
+            const on = sk_flash != null and std.meta.eql(sk_flash.?, r);
+            keyIcon(@src(), "Constraint object", icons.gravenAny(skRefIcon(s, r)) orelse dvui.entypo.dot_single, @intCast(ci * 4 + k), .{
+                .id_extra = 1 + k,
+                .gravity_y = 0.5,
+                .padding = pad,
+                .min_size_content = .{ .w = 22, .h = 22 },
+                .label = .{ .text = skRefName(&nb, s, r) },
+                .color_fill = if (on) .{ .color = flash_colour.opacity(0.45) } else null,
+                .background = true,
+                .border = if (on) .all(1) else null,
+                .color_border = if (on) .{ .color = flash_colour } else null,
+            });
         }
+        // A dimension's value (in parentheses: reference only).
+        if (skShownValue(c)) |v| {
+            var vb: [48]u8 = undefined;
+            const u = if (c.kind == .angle) "°" else docUnits().symbol();
+            const vt = if (c.driving) std.fmt.bufPrint(&vb, "{d:.3}{s}", .{ @abs(v), u }) catch "" else std.fmt.bufPrint(&vb, "({d:.3}{s})", .{ @abs(v), u }) catch "";
+            dvui.labelNoFmt(@src(), vt, .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 6 }, .color_text = if (flagged) |f| .{ .color = f } else null });
+        }
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         // A dimension drives, or (in parentheses) only reports.
         if (c.isDimension()) {
             keyButton(@src(), if (c.driving) "drive" else "ref", @intCast(ci), .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } });
         }
         keyIcon(@src(), "Remove constraint", dvui.entypo.cross, @intCast(ci), .{ .gravity_y = 0.5 });
     }
-    sketchPhysicalWhen(it);
-    sketchParameters(it);
+    if (shown == 0) dvui.labelNoFmt(@src(), if (np == 0) "None yet." else "None on the selection.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
+}
+
+/// A hash of the selection, to tell when it changed.
+fn selHash() usize {
+    return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sk_sel.items));
+}
+
+/// Choosing a constraint from its icon: selected; a dimension opens for
+/// its value.
+fn skPickConstraint(ci: skl.ConstraintId) void {
+    const it = skItem() orelse return;
+    if (ci >= it.sketch.constraints.items.len) return;
+    const c = it.sketch.constraints.items[ci];
+    // Keep the geometry the list is for selected; the constraint joins it.
+    if (!skSelected(.{ .constraint = ci })) sk_sel.append(state.gpa, .{ .constraint = ci }) catch {};
+    sk_flash_sel = selHash();
+    if (skShownValue(c) != null) {
+        const at = skDimAnchor(canvasArea(), ci) orelse dvui.Point.Physical{ .x = 0, .y = 0 };
+        sk_dim = .{ .c = ci, .at = at };
+    }
+}
+
+/// Showing (or no longer showing) one primitive a constraint names.
+fn skFlashRef(arg: i32) void {
+    const it = skItem() orelse return;
+    const ci: usize = @intCast(@divTrunc(arg, 4));
+    const k: usize = @intCast(@mod(arg, 4));
+    if (ci >= it.sketch.constraints.items.len) return;
+    var rb: [4]skl.Ref = undefined;
+    const rs = skl.refs(it.sketch.constraints.items[ci], &rb);
+    if (k >= rs.len) return;
+    sk_flash = if (sk_flash != null and std.meta.eql(sk_flash.?, rs[k])) null else rs[k];
+    sk_flash_sel = selHash();
+}
+
+fn skConstraintIcon(c: skl.Constraint) icons.GIcon {
+    return switch (c.kind) {
+        .coincident => .con_coincident,
+        .horizontal => .con_horizontal,
+        .vertical => .con_vertical,
+        .point_on => .con_on_object,
+        .fixed => .con_locked,
+        .distance => .con_distance,
+        .distance_x => .con_distance_x,
+        .distance_y => .con_distance_y,
+        .line_distance => .con_line_distance,
+        .radius => .con_radius,
+        .angle => .con_angle,
+        .parallel => .con_parallel,
+        .perpendicular => .con_perpendicular,
+        .tangent => .con_tangent,
+        .equal => .con_equal,
+        .equal_distance => .con_equal_distance,
+        .symmetric => .con_symmetric,
+    };
+}
+
+fn skRefIcon(s: *const skl.Sketch, r: skl.Ref) icons.GIcon {
+    const g = switch (r) {
+        .point => return .geo_point,
+        .geom => |g| g,
+    };
+    if (g >= s.geometry.items.len) return .geo_point;
+    return switch (s.geometry.items[g].kind) {
+        .point, .affine => .geo_point,
+        .segment => .geo_segment,
+        .circle => .geo_circle,
+        .arc => .geo_arc,
+        .line => .geo_line,
+        .ray => .geo_ray,
+    };
+}
+
+/// "Segment 4", "End of segment 4", "Centre of circle 2": a primitive as
+/// its button's tooltip names it (numbered from 1, as drawn).
+fn skRefName(buf: []u8, s: *const skl.Sketch, r: skl.Ref) []const u8 {
+    const g: skl.GeomId = switch (r) {
+        .point => |p| p.geom,
+        .geom => |g| g,
+    };
+    if (g >= s.geometry.items.len) return "(removed)";
+    const geo = s.geometry.items[g];
+    const kind: []const u8 = if (geo.reference) (if (g == 0) "origin" else if (g == 1) "horizontal axis" else "vertical axis") else switch (geo.kind) {
+        .point, .affine => "point",
+        .segment => if (geo.construction) "construction segment" else "segment",
+        .circle => if (geo.construction) "construction circle" else "circle",
+        .arc => if (geo.construction) "construction arc" else "arc",
+        .line => "construction line",
+        .ray => "ray",
+    };
+    const role: []const u8 = switch (r) {
+        .geom => "",
+        .point => |p| switch (p.role) {
+            .point => "",
+            .start => "start of ",
+            .end => "end of ",
+            .centre => "centre of ",
+            .origin => "origin of ",
+        },
+    };
+    const text = if (geo.reference) std.fmt.bufPrint(buf, "{s}{s}", .{ role, kind }) catch kind else std.fmt.bufPrint(buf, "{s}{s} {d}", .{ role, kind, g }) catch kind;
+    if (text.len > 0) buf[0] = std.ascii.toUpper(buf[0]);
+    return text;
 }
 
 var sk_pw_text: [64]u8 = @splat(0);

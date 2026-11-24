@@ -221,6 +221,75 @@ pub const Store = struct {
     }
 };
 
+/// Something a constraint names: a point of a geometry, or a geometry as a
+/// whole (a curve, a line).
+pub const Ref = union(enum) {
+    point: PointRef,
+    geom: GeomId,
+};
+
+/// The primitives constraint `c` names, in its own order (at most 4), into
+/// `buf`: what Properties lists for it.
+pub fn refs(c: Constraint, buf: *[4]Ref) []const Ref {
+    var n: usize = 0;
+    const add = struct {
+        fn f(b: *[4]Ref, k: *usize, r: Ref) void {
+            if (k.* < b.len) {
+                b[k.*] = r;
+                k.* += 1;
+            }
+        }
+    }.f;
+    switch (c.kind) {
+        .coincident => |ps| {
+            add(buf, &n, .{ .point = ps[0] });
+            add(buf, &n, .{ .point = ps[1] });
+        },
+        .horizontal, .vertical => |l| switch (l) {
+            .geom => |g| add(buf, &n, .{ .geom = g }),
+            .points => |ps| {
+                add(buf, &n, .{ .point = ps[0] });
+                add(buf, &n, .{ .point = ps[1] });
+            },
+        },
+        .point_on => |po| {
+            add(buf, &n, .{ .point = po.p });
+            add(buf, &n, .{ .geom = po.on });
+        },
+        .fixed => |f| add(buf, &n, .{ .point = f.p }),
+        inline .distance, .distance_x, .distance_y => |d| {
+            add(buf, &n, .{ .point = d.a });
+            add(buf, &n, .{ .point = d.b });
+        },
+        .line_distance => |d| {
+            add(buf, &n, .{ .point = d.p });
+            add(buf, &n, .{ .geom = d.line });
+        },
+        .radius => |r| add(buf, &n, .{ .geom = r.g }),
+        inline .angle, .parallel, .perpendicular, .tangent, .equal => |an| {
+            add(buf, &n, .{ .geom = an.a });
+            add(buf, &n, .{ .geom = an.b });
+        },
+        .equal_distance => |e| for ([2]Span{ e.a, e.b }) |sp| switch (sp) {
+            .points, .x, .y => |ps| {
+                add(buf, &n, .{ .point = ps[0] });
+                add(buf, &n, .{ .point = ps[1] });
+            },
+            .to_line => |t| {
+                add(buf, &n, .{ .point = t.p });
+                add(buf, &n, .{ .geom = t.line });
+            },
+        },
+        .symmetric => |sy| {
+            add(buf, &n, .{ .point = sy.p });
+            add(buf, &n, .{ .point = sy.q });
+            if (sy.line) |l| add(buf, &n, .{ .geom = l });
+            if (sy.point) |q| add(buf, &n, .{ .point = q });
+        },
+    }
+    return buf[0..n];
+}
+
 /// Whether constraint `c` refers to geometry `g`.
 pub fn refersTo(c: Constraint, g: GeomId) bool {
     const lin = struct {

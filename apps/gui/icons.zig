@@ -78,6 +78,30 @@ pub const GIcon = enum {
     add_shape,
     constrain,
     text_style,
+    geo_point,
+    geo_segment,
+    geo_circle,
+    geo_arc,
+    geo_line,
+    geo_ray,
+    geo_edge,
+    con_coincident,
+    con_horizontal,
+    con_vertical,
+    con_on_object,
+    con_locked,
+    con_distance,
+    con_distance_x,
+    con_distance_y,
+    con_line_distance,
+    con_radius,
+    con_angle,
+    con_parallel,
+    con_perpendicular,
+    con_tangent,
+    con_equal,
+    con_equal_distance,
+    con_symmetric,
 
     fn svg(comptime g: GIcon) []const u8 {
         const name = comptime blk: {
@@ -99,6 +123,13 @@ pub fn graven(comptime g: GIcon) ?[]const u8 {
     const t = dvui.svgToTvg(dvui.currentWindow().gpa, g.svg()) catch return null;
     gcache[k] = t;
     return t;
+}
+
+/// `graven` for an icon chosen at run time.
+pub fn gravenAny(g: GIcon) ?[]const u8 {
+    return switch (g) {
+        inline else => |c| graven(c),
+    };
 }
 
 /// Graven icon `g`'s name in the icon files ("add-panel").

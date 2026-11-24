@@ -211,6 +211,16 @@ def dimension(a, b, off):
     return ext + arrow(a2[0], a2[1], b2[0], b2[1], 2.2) + arrow(b2[0], b2[1], a2[0], a2[1], 2.2)
 
 
+def ring(cx, cy, r, a0=0.0, a1=2 * math.pi, n=32):
+    """An unfilled circle or arc, as ink (angles clockwise on screen)."""
+    return [("ink", arc(cx, cy, r, a0, a1, n))]
+
+
+def dot(x, y, r=1.7):
+    """A sketch point."""
+    return circle(x, y, r, "drawn")
+
+
 ICONS = {
     # Containers made on the canvas.
     "add-panel": rect(2.5, 3, 15, 13, "container") + adds(),
@@ -233,6 +243,32 @@ ICONS = {
     # Text: a style (a line of text set in it, on its track).
     "text-style": rect(2.5, 9.5, 19, 6.5, "track", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
     "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "drawn") + circle(18, 9, 1.8, "drawn") + dimension((4, 15), (18, 9), 4.2),
+    # Sketch geometry, as Properties names a constraint's objects.
+    "geo-point": dot(12, 11, 2.6),
+    "geo-segment": line(5, 17, 19, 5) + dot(5, 17) + dot(19, 5),
+    "geo-circle": ring(12, 11, 7.5) + dot(12, 11, 1.3),
+    "geo-arc": ring(12, 13, 8, math.pi, 2 * math.pi, 16) + dot(4, 13) + dot(20, 13) + dot(12, 13, 1.3),
+    "geo-line": dashes([(2, 18), (22, 4)], 2.4, 1.6),
+    "geo-ray": dot(4, 16) + arrow(4, 16, 21, 5),
+    "geo-edge": [("fill", [(4, 4), (20, 4), (20, 18), (4, 18)], "container")] + line(4, 4, 4, 18) + dashes([(4, 4), (20, 4), (20, 18), (4, 18)], 2, 1.5),
+    # Constraint kinds.
+    "con-coincident": line(3, 17, 12, 10) + line(12, 10, 21, 15) + dot(12, 10, 2.4),
+    "con-horizontal": line(4, 12, 20, 12) + dot(4, 12) + dot(20, 12) + line(12, 5, 12, 8),
+    "con-vertical": line(12, 3, 12, 19) + dot(12, 3) + dot(12, 19) + line(5, 11, 8, 11),
+    "con-on-object": ring(12, 20, 13, math.pi * 1.15, math.pi * 1.85, 16) + dot(12, 7, 2.2),
+    "con-locked": rect(6, 10, 12, 9, "drawn", 1.0) + ring(12, 10, 4, math.pi, 2 * math.pi, 12) + line(12, 13.5, 12, 15.5),
+    "con-distance": dot(4, 16) + dot(20, 8) + dimension((4, 16), (20, 8), 3.5),
+    "con-distance-x": dot(4, 16) + dot(20, 16) + line(4, 14, 4, 6) + line(20, 14, 20, 6) + arrow(12, 8, 4, 8, 2.2) + arrow(12, 8, 20, 8, 2.2),
+    "con-distance-y": dot(6, 3.5) + dot(6, 18.5) + line(8, 3.5, 18, 3.5) + line(8, 18.5, 18, 18.5) + arrow(16, 11, 16, 3.5, 2.2) + arrow(16, 11, 16, 18.5, 2.2),
+    "con-line-distance": line(3, 18, 21, 18) + dot(12, 5) + arrow(12, 11.5, 12, 5.5, 2.2) + arrow(12, 11.5, 12, 18, 2.2),
+    "con-radius": ring(12, 11, 8) + dot(12, 11, 1.3) + arrow(12, 11, 17.6, 5.4, 2.4),
+    "con-angle": line(4, 18, 21, 18) + line(4, 18, 17, 5) + ring(4, 18, 10, -math.pi / 4, 0, 8),
+    "con-parallel": line(4, 14, 14, 4) + line(10, 20, 20, 10),
+    "con-perpendicular": line(4, 18, 20, 18) + line(12, 18, 12, 4) + polyline([(12, 14), (16, 14), (16, 18)]),
+    "con-tangent": ring(10, 12, 6.5) + line(3, 5.5, 21, 5.5) + dot(10, 5.5, 1.5),
+    "con-equal": line(3, 8, 13, 8) + line(11, 15, 21, 15) + line(8, 6, 8, 10) + line(16, 13, 16, 17),
+    "con-equal-distance": line(3, 12, 21, 12) + dot(3, 12) + dot(12, 12) + dot(21, 12) + line(6.5, 9.5, 8.5, 14.5) + line(15.5, 9.5, 17.5, 14.5),
+    "con-symmetric": dashes([(12, 2), (12, 20)], 2, 1.5) + dot(5, 11) + dot(19, 11) + arrow(9.5, 11, 6.5, 11, 2) + arrow(14.5, 11, 17.5, 11, 2),
 }
 
 # --- SVG -------------------------------------------------------------------

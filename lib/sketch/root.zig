@@ -44,6 +44,8 @@ pub const Linear = geometry.Linear;
 pub const Constraint = geometry.Constraint;
 pub const Local = geometry.Local;
 pub const refersTo = geometry.refersTo;
+pub const Ref = geometry.Ref;
+pub const refs = geometry.refs;
 
 /// A named parameter: an expression (often a plain number) other
 /// expressions may use by name.
