@@ -7629,6 +7629,7 @@ fn canvas(active: bool, view: u8) void {
     drawHover(area);
     drawEngagement(area);
     drawSnapGuides(area);
+    drawRingGrip(area);
 
     // Tracks being drawn out: the region they snap to, divided into them,
     // and their count and length.
@@ -13067,7 +13068,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
-                if (state.tool == .construction and me.button.pointer()) {
+                if (state.tool == .select and me.button.pointer() and ringStart(area, me.p)) {
+                    // On a chosen polar array's outer ring: it turns with
+                    // the pointer about its centre.
+                    state.press_consumed = true;
+                } else if (state.tool == .construction and me.button.pointer()) {
                     // Construction line: a drag from its first point, or a
                     // click there and a click at its second.
                     const at = snap(state.view.toMm(area, me.p));
@@ -13169,7 +13174,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 }
             },
             .motion => if (dvui.captured(box.data().id)) {
-                if (text_drag) {
+                if (ring_drag != null) {
+                    e.handle(@src(), box.data());
+                    ringMotion(state.view.toMm(area, me.p), me.mod.shift());
+                    dvui.refresh(null, @src(), box.data().id);
+                } else if (text_drag) {
                     e.handle(@src(), box.data());
                     textDragTo(state.view.toMm(area, me.p));
                     dvui.refresh(null, @src(), box.data().id);
@@ -13246,7 +13255,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                         guide_start = null;
                     } else guide_pending = true;
                 }
-                if (dim_drag != null) {
+                if (ring_drag != null) {
+                    ring_drag = null;
+                    state.press_consumed = false;
+                } else if (dim_drag != null) {
                     _ = dimRelease();
                 } else if (engage_drag != null) {
                     // A press on an engagement point that did not drag is
@@ -13429,6 +13441,7 @@ fn objectOfContext(c: Context) ?layout.model.ObjectId {
         .group => |g| g,
         .image => |im| if (imageAt(im.space, im.index)) |image| image.id else return null,
         .figure_place => |fc| if (figurePlaceAt(fc.space, fc.index)) |fp| fp.id else return null,
+        .grid => |g| if (state.model.hasParent(g.parent) and g.index < state.model.gridsIn(g.parent).len) state.model.gridsIn(g.parent)[g.index].id else return null,
         else => return null,
     };
     return if (id == .none) null else id;
@@ -14396,6 +14409,81 @@ fn drawArrayPlan(area: dvui.Rect.Physical, b: geom.Box) void {
         const y = b.y0 + (b.y1 - b.y0) * @as(f64, @floatFromInt(k)) / rows;
         strokeLine(area, .{ .x = b.x0, .y = y }, .{ .x = b.x1, .y = y }, colors.select.opacity(0.7), px);
     }
+}
+
+/// A polar array being turned: grabbed on its outer ring, it turns about
+/// its centre with the pointer (Shift: in 15° steps from where it was).
+var ring_drag: ?struct { parent: Parent, gi: usize, start0: f64, a0: f64, key: u64 } = null;
+
+/// The chosen polar grid (the context), if any.
+fn contextPolar() ?struct { parent: Parent, gi: usize } {
+    const g = switch (state.context) {
+        .grid => |g| g,
+        else => return null,
+    };
+    if (!state.model.hasParent(g.parent) or g.index >= state.model.gridsIn(g.parent).len) return null;
+    if (state.model.gridShape(g.parent, g.index).polar == null) return null;
+    return .{ .parent = g.parent, .gi = g.index };
+}
+
+/// A polar grid's centre and outer radius, sheet mm.
+fn polarRing(parent: Parent, gi: usize) struct { c: geom.Point, r: f64 } {
+    const b = onSheet(parent, state.model.gridExtent(parent, gi));
+    return .{ .c = .{ .x = (b.x0 + b.x1) / 2, .y = (b.y0 + b.y1) / 2 }, .r = (b.x1 - b.x0) / 2 };
+}
+
+/// Whether `p` (window pixels) is on the chosen polar array's outer ring;
+/// if so, a turn starts there.
+fn ringStart(area: dvui.Rect.Physical, p: dvui.Point.Physical) bool {
+    const pg = contextPolar() orelse return false;
+    const ring = polarRing(pg.parent, pg.gi);
+    const at = state.view.toMm(area, p);
+    const d = @sqrt((at.x - ring.c.x) * (at.x - ring.c.x) + (at.y - ring.c.y) * (at.y - ring.c.y));
+    const tol = 8 * dvui.windowNaturalScale() / state.view.ppm;
+    if (@abs(d - ring.r) > tol) return false;
+    drag_count += 1;
+    ring_drag = .{
+        .parent = pg.parent,
+        .gi = pg.gi,
+        .start0 = state.model.gridShape(pg.parent, pg.gi).polar.?.start,
+        .a0 = std.math.radiansToDegrees(std.math.atan2(at.y - ring.c.y, at.x - ring.c.x)),
+        .key = mergeKey(.{ "ring-turn", drag_count }),
+    };
+    return true;
+}
+
+fn ringMotion(at: geom.Point, steps: bool) void {
+    const rd = ring_drag orelse return;
+    if (!state.model.hasParent(rd.parent) or rd.gi >= state.model.gridsIn(rd.parent).len) return;
+    var sh = state.model.gridShape(rd.parent, rd.gi);
+    if (sh.polar == null) return;
+    const ring = polarRing(rd.parent, rd.gi);
+    var turn = std.math.radiansToDegrees(std.math.atan2(at.y - ring.c.y, at.x - ring.c.x)) - rd.a0;
+    if (steps) turn = @round(turn / 15) * 15;
+    // Kept within ±180° of where it started (no jump past the half turn).
+    var to = rd.start0 + turn;
+    to = @mod(to + 180, 360) - 180;
+    sh.polar.?.start = to;
+    actM(rd.key, .setGridShape, .{ rd.parent, rd.gi, sh, grid_dropped }) catch {};
+    // The status outlives the frame: not in the frame's arena.
+    const S = struct {
+        var buf: [64]u8 = undefined;
+    };
+    state.status = std.fmt.bufPrint(&S.buf, "Turned to {d:.1}° (Shift: 15° steps). ", .{to}) catch "";
+}
+
+/// The chosen polar array's grip: a ring on its outer edge where column
+/// 0 points, showing it can be turned there.
+fn drawRingGrip(area: dvui.Rect.Physical) void {
+    const pg = contextPolar() orelse return;
+    const px = dvui.windowNaturalScale();
+    const ring = polarRing(pg.parent, pg.gi);
+    const a = std.math.degreesToRadians(state.model.gridShape(pg.parent, pg.gi).polar.?.start);
+    const q = state.view.toPx(area, .{ .x = ring.c.x + ring.r * @cos(a), .y = ring.c.y + ring.r * @sin(a) });
+    const r: f32 = 5 * px;
+    const box: dvui.Rect.Physical = .{ .x = q.x - r, .y = q.y - r, .w = 2 * r, .h = 2 * r };
+    box.fill(.all(r), .{ .color = .{ .color = colors.select } });
+    box.inset(.all(1.5 * px)).fill(.all(r), .{ .color = .{ .color = dvui.Color.white } });
 }
 
 /// A polar array being dragged out from its centre `c` to its outer edge
@@ -16528,6 +16616,21 @@ const button_handlers = [_]ButtonHandler{
     handler("constrain-objects.right", struct {
         fn f(_: i32) void {
             edgesPick(.right);
+        }
+    }.f),
+    handler("constrain-objects.lock-centre", struct {
+        fn f(_: i32) void {
+            lockCentres();
+        }
+    }.f),
+    handler("constrain-objects.diameter", struct {
+        fn f(_: i32) void {
+            holdSpan(false);
+        }
+    }.f),
+    handler("constrain-objects.radius", struct {
+        fn f(_: i32) void {
+            holdSpan(true);
         }
     }.f),
     handler("constrain-objects.measure", struct {
@@ -25732,7 +25835,7 @@ fn objectsMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
     closeObjectsMenu();
 }
 
-const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right", "constrain-objects.measure" };
+const objects_menu_ids = .{ "constrain-objects.equal-width", "constrain-objects.equal-height", "constrain-objects.gap", "constrain-objects.top", "constrain-objects.bottom", "constrain-objects.left", "constrain-objects.right", "constrain-objects.lock-centre", "constrain-objects.diameter", "constrain-objects.radius", "constrain-objects.measure" };
 
 /// The objects' pop-up: each choice with its key; those needing two or
 /// more objects dimmed with one.
@@ -25770,6 +25873,42 @@ fn objectsMenu() void {
 
 /// Equal widths (or heights) for the chosen objects: each held equal to
 /// the first, one undo step.
+/// Lock centre: each chosen object's centre held where it is, from its
+/// parent's origin (two distances, across and up), one undo step.
+fn lockCentres() void {
+    const cb = constrain_batch orelse return;
+    closeObjectsMenu();
+    constrain_batch = null;
+    drag_count += 1;
+    const key = mergeKey(.{ "constrain-centre", drag_count });
+    for (cb.ids[0..cb.n]) |id| {
+        const parent = constrain.parentOf(&state.model, id) orelse continue;
+        inline for (.{ .{ Feature.centre_x, Feature.origin_x }, .{ Feature.centre_y, Feature.origin_y } }) |fs| {
+            const a: layout.model.ConstraintEnd = .{ .object = id, .feature = fs[0] };
+            const b: layout.model.ConstraintEnd = .{ .feature = fs[1] };
+            const at = (constrain.featureAt(&state.model, parent, a) orelse 0) - (constrain.featureAt(&state.model, parent, b) orelse 0);
+            _ = actM(key, .addConstraint, .{.{ .a = a, .b = b, .value = @abs(at), .side = if (at < 0) -1 else 1 }}) catch {};
+        }
+    }
+    state.status = "Centre locked. ";
+}
+
+/// Diameter (or radius): each chosen object's width held as it is (its
+/// right edge from its left, or from its centre), a dimension to change.
+fn holdSpan(radius: bool) void {
+    const cb = constrain_batch orelse return;
+    closeObjectsMenu();
+    constrain_batch = null;
+    drag_count += 1;
+    const key = mergeKey(.{ "constrain-span", drag_count });
+    for (cb.ids[0..cb.n]) |id| {
+        const b = constrain.boxOf(&state.model, id) orelse continue;
+        const w = b.width();
+        _ = actM(key, .addConstraint, .{.{ .a = .{ .object = id, .feature = .right }, .b = .{ .object = id, .feature = if (radius) .centre_x else .left }, .value = if (radius) w / 2 else w, .side = 1 }}) catch {};
+    }
+    state.status = if (radius) "Radius held: change its value to resize. " else "Diameter held: change its value to resize. ";
+}
+
 fn equalSizes(vertical: bool) void {
     const cb = constrain_batch orelse return;
     closeObjectsMenu();

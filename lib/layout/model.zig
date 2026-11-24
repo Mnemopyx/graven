@@ -3827,6 +3827,23 @@ pub const Model = struct {
         return .{ .x = g.origin.x + col * sh.stepX(), .y = g.origin.y - row * sh.stepY() };
     }
 
+    /// Grid `gi`'s extent, mm in its parent's frame: its cells' outer
+    /// borders, half a step past its outer points; a polar grid's, the
+    /// square round its outer ring.
+    pub fn gridExtent(m: *const Model, parent: Parent, gi: usize) geom.Box {
+        const g = m.gridsIn(parent)[gi];
+        const sh = m.gridShape(parent, gi);
+        if (sh.polar) |pol| {
+            const r = @max(0, pol.radius + (@as(f64, @floatFromInt(sh.rows)) - 0.5) * sh.stepY());
+            return .{ .x0 = g.origin.x - r, .x1 = g.origin.x + r, .y0 = g.origin.y - r, .y1 = g.origin.y + r };
+        }
+        const w = @as(f64, @floatFromInt(sh.cols)) * sh.stepX();
+        const h = @as(f64, @floatFromInt(sh.rows)) * sh.stepY();
+        const x0 = g.origin.x - sh.stepX() / 2;
+        const y1 = g.origin.y + sh.stepY() / 2;
+        return .{ .x0 = x0, .x1 = x0 + w, .y0 = y1 - h, .y1 = y1 };
+    }
+
     /// The stamp `id` of grid `gi`, by index.
     pub fn stampIndex(m: *const Model, parent: Parent, gi: usize, id: ObjectId) ?usize {
         for (m.gridsIn(parent)[gi].stamps.items, 0..) |st, i| if (st.id == id) return i;
