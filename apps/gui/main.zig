@@ -26884,17 +26884,14 @@ fn skDimEntry(area: dvui.Rect.Physical) void {
                 };
             };
         } else if (std.fmt.parseFloat(f64, text)) |v| {
-            if (c.expr.len > 0) _ = skEdit(.{ .expr = .{ .c = d.c, .text = "" } });
-            // Lengths keep their sign as made (a horizontal distance runs
-            // one way).
-            var val = skFromShown(c, v);
-            switch (c.kind) {
-                inline .distance_x, .distance_y => |dd| if (dd.value < 0) {
-                    val = -@abs(val);
-                },
-                else => {},
+            // No distance is negative (the owner, 2026-11-24); its side is
+            // the constraint's own.
+            if (v < 0 and c.kind != .angle) {
+                state.status = "A distance is never negative: the side is kept as drawn. ";
+            } else {
+                if (c.expr.len > 0) _ = skEdit(.{ .expr = .{ .c = d.c, .text = "" } });
+                _ = skEdit(.{ .value = .{ .c = d.c, .value = skFromShown(c, v) } });
             }
-            _ = skEdit(.{ .value = .{ .c = d.c, .value = val } });
         } else |_| state.status = "Not a number. ";
         close = true;
     }

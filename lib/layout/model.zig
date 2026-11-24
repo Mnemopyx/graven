@@ -1753,8 +1753,8 @@ fn buildShape(al: Allocator, gpa: Allocator, sk: *sketch_.Sketch, kind: ShapeSke
             _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = l } } });
             _ = try sk.addConstraint(al, .{ .kind = .{ .vertical = .{ .geom = rt } } });
             const corner: Ref = .{ .geom = b, .role = .start };
-            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = corner, .value = -w / 2 } }, "-w / 2");
-            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = corner, .value = -h / 2 } }, "-h / 2");
+            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = corner, .value = w / 2 } }, "w / 2");
+            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = corner, .value = h / 2 } }, "h / 2");
             try dim(al, sk, .{ .distance_x = .{ .a = corner, .b = .{ .geom = b, .role = .end }, .value = w } }, "w");
             try dim(al, sk, .{ .distance_y = .{ .a = .{ .geom = rt, .role = .start }, .b = .{ .geom = rt, .role = .end }, .value = h } }, "h");
         },
@@ -1797,8 +1797,8 @@ fn buildShape(al: Allocator, gpa: Allocator, sk: *sketch_.Sketch, kind: ShapeSke
             }
             for ([_]sketch_.GeomId{ tr, tl, bl }) |arc| _ = try sk.addConstraint(al, .{ .kind = .{ .equal = .{ .a = br, .b = arc } } });
             try dim(al, sk, .{ .radius = .{ .g = br, .value = r } }, "r");
-            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = .{ .geom = l, .role = .start }, .value = x0 } }, "-w / 2");
-            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = .{ .geom = b, .role = .start }, .value = y0 } }, "-h / 2");
+            try dim(al, sk, .{ .distance_x = .{ .a = o, .b = .{ .geom = l, .role = .start }, .value = -x0 } }, "w / 2");
+            try dim(al, sk, .{ .distance_y = .{ .a = o, .b = .{ .geom = b, .role = .start }, .value = -y0 } }, "h / 2");
             try dim(al, sk, .{ .distance_x = .{ .a = .{ .geom = l, .role = .start }, .b = .{ .geom = rt, .role = .start }, .value = w } }, "w");
             try dim(al, sk, .{ .distance_y = .{ .a = .{ .geom = b, .role = .start }, .b = .{ .geom = t, .role = .start }, .value = h } }, "h");
         },

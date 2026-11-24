@@ -60,7 +60,8 @@ pub const PointRef = struct {
 };
 
 /// A distance that can be held equal to another: between two points (straight,
-/// or along x or y: `b` less `a`), or from a point to a straight geometry.
+/// or along x or y), or from a point to a straight geometry. Never
+/// negative, whatever the order of its ends.
 pub const Span = union(enum) {
     points: [2]PointRef,
     x: [2]PointRef,
@@ -84,9 +85,13 @@ pub const Constraint = struct {
         point_on: struct { p: PointRef, on: GeomId },
         fixed: struct { p: PointRef, at: Point },
         distance: struct { a: PointRef, b: PointRef, value: f64 },
-        /// b.x - a.x, and b.y - a.y.
-        distance_x: struct { a: PointRef, b: PointRef, value: f64 },
-        distance_y: struct { a: PointRef, b: PointRef, value: f64 },
+        /// How far apart two points are across (along x), and up (along
+        /// y). A distance is never negative and has no start or end (the
+        /// owner, 2026-11-24): which of the two lies to the right (or
+        /// above) is kept as it was when the constraint was made (`side`,
+        /// set by `Sketch.addConstraint`), not by the value's sign.
+        distance_x: struct { a: PointRef, b: PointRef, value: f64, side: f64 = 1 },
+        distance_y: struct { a: PointRef, b: PointRef, value: f64, side: f64 = 1 },
         /// From a point to a straight geometry, on the side it was on when
         /// the constraint was made (`side`, set by `addConstraint`).
         line_distance: struct { p: PointRef, line: GeomId, value: f64, side: f64 = 1 },
@@ -213,6 +218,11 @@ pub fn refersTo(c: Constraint, g: GeomId) bool {
         .equal_distance => |e| spanRefers(e.a, g) or spanRefers(e.b, g),
         .symmetric => |sy| sy.p.geom == g or sy.q.geom == g or (sy.line != null and sy.line.? == g) or (sy.point != null and sy.point.?.geom == g),
     };
+}
+
+/// A length whatever the order of its ends.
+fn absD(d: D) D {
+    return if (d.v < 0) d.scale(-1) else d;
 }
 
 fn spanRefers(sp: Span, g: GeomId) bool {
@@ -343,12 +353,9 @@ pub const Local = struct {
     pub fn span(l: *Local, sp: Span) Error!D {
         return switch (sp) {
             .points => |ps| (try l.ref(ps[1])).sub(try l.ref(ps[0])).len(),
-            .x => |ps| (try l.ref(ps[1])).x.sub((try l.ref(ps[0])).x),
-            .y => |ps| (try l.ref(ps[1])).y.sub((try l.ref(ps[0])).y),
-            .to_line => |t| blk: {
-                const d = try l.signedDistance(t.p, t.line);
-                break :blk if (d.v < 0) d.scale(-1) else d;
-            },
+            .x => |ps| absD((try l.ref(ps[1])).x.sub((try l.ref(ps[0])).x)),
+            .y => |ps| absD((try l.ref(ps[1])).y.sub((try l.ref(ps[0])).y)),
+            .to_line => |t| absD(try l.signedDistance(t.p, t.line)),
         };
     }
 
@@ -383,8 +390,8 @@ pub const Local = struct {
                 return 2;
             },
             .distance => |d| out[0] = (try l.ref(d.b)).sub(try l.ref(d.a)).len().sub(D.c(d.value)),
-            .distance_x => |d| out[0] = (try l.ref(d.b)).x.sub((try l.ref(d.a)).x).sub(D.c(d.value)),
-            .distance_y => |d| out[0] = (try l.ref(d.b)).y.sub((try l.ref(d.a)).y).sub(D.c(d.value)),
+            .distance_x => |d| out[0] = (try l.ref(d.b)).x.sub((try l.ref(d.a)).x).scale(d.side).sub(D.c(d.value)),
+            .distance_y => |d| out[0] = (try l.ref(d.b)).y.sub((try l.ref(d.a)).y).scale(d.side).sub(D.c(d.value)),
             .line_distance => |d| out[0] = (try l.signedDistance(d.p, d.line)).scale(d.side).sub(D.c(d.value)),
             .radius => |r| out[0] = switch ((try l.geo(r.g)).kind) {
                 .circle => |ci| l.get(ci.r).sub(D.c(r.value)),

@@ -50,7 +50,7 @@ pub const Param = struct {
     expr: []const u8,
 };
 
-pub const Error = Allocator.Error || error{ NoSuchGeometry, NoSuchPoint, WrongKind, NotConstruction, NoSuchConstraint, BadName, NoSuchParameter };
+pub const Error = Allocator.Error || error{ NoSuchGeometry, NoSuchPoint, WrongKind, NotConstruction, NoSuchConstraint, BadName, NoSuchParameter, Negative };
 
 pub const origin: GeomId = 0;
 pub const h_axis: GeomId = 1;
@@ -244,7 +244,18 @@ pub const Sketch = struct {
         var c = c_in;
         try s.check(c);
         switch (c.kind) {
+            // No distance is negative (the owner, 2026-11-24): the side
+            // the points lie on is kept as they are now.
+            inline .distance_x, .distance_y => |*d, k| {
+                const pa = try s.point(d.a);
+                const pb = try s.point(d.b);
+                const run = if (k == .distance_x) pb.x - pa.x else pb.y - pa.y;
+                d.side = if (run < 0) -1 else 1;
+                d.value = @abs(d.value);
+            },
+            inline .distance, .radius => |*d| d.value = @abs(d.value),
             .line_distance => |*ld| {
+                ld.value = @abs(ld.value);
                 var local: Local = .{ .s = s.store() };
                 const d = try local.signedDistance(ld.p, ld.line);
                 ld.side = if (d.v < 0) -1 else 1;
@@ -276,8 +287,10 @@ pub const Sketch = struct {
     }
 
     /// Sets a dimension's value (distance, radius, angle).
+    /// Sets a dimension's value: a distance or radius is never negative.
     pub fn setValue(s: *Sketch, id: ConstraintId, value: f64) Error!void {
         if (id >= s.constraints.items.len) return error.NoSuchConstraint;
+        if (value < 0 and s.constraints.items[id].kind != .angle) return error.Negative;
         switch (s.constraints.items[id].kind) {
             inline .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => |*d| d.value = value,
             else => return error.WrongKind,
@@ -350,8 +363,35 @@ pub const Sketch = struct {
     pub fn exprError(s: *const Sketch, id: ConstraintId) ?expr.Error {
         const c = s.constraints.items[id];
         if (c.expr.len == 0) return null;
-        _ = s.evalExpr(c.expr) catch |e| return e;
+        const v = s.evalExpr(c.expr) catch |e| return e;
+        // A distance or radius that comes out negative is out of its
+        // domain: no distance is negative.
+        if (v < 0 and c.kind != .angle) return error.Domain;
         return null;
+    }
+
+    /// An older sketch's signed horizontal and vertical distances (a
+    /// negative value, or an expression that comes out negative, before
+    /// 2026-11-24) as distances that are never negative, their side kept.
+    pub fn upgradeSigns(s: *Sketch, a: Allocator) Allocator.Error!void {
+        for (s.constraints.items) |*c| switch (c.kind) {
+            inline .distance_x, .distance_y => |*d| {
+                const neg_expr = c.expr.len > 0 and if (s.evalExpr(c.expr)) |v| v < 0 else |_| false;
+                if (!neg_expr and d.value >= 0) continue;
+                d.value = @abs(d.value);
+                d.side = -d.side;
+                if (neg_expr) {
+                    // "-w / 2" as "w / 2"; otherwise its negation.
+                    const want = -(s.evalExpr(c.expr) catch unreachable);
+                    const stripped = std.mem.trimStart(u8, c.expr, " ");
+                    const rest = std.mem.trimStart(u8, stripped[1..], " ");
+                    if (stripped[0] == '-' and rest.len > 0 and if (s.evalExpr(rest)) |v| @abs(v - want) < 1e-9 else |_| false) {
+                        c.expr = try a.dupe(u8, rest);
+                    } else c.expr = try std.fmt.allocPrint(a, "-({s})", .{c.expr});
+                }
+            },
+            else => {},
+        };
     }
 
     /// Sets each driving dimension with an expression to its value (angles
@@ -360,6 +400,7 @@ pub const Sketch = struct {
         for (s.constraints.items) |*c| {
             if (c.expr.len == 0 or !c.driving) continue;
             const v = s.evalExpr(c.expr) catch continue;
+            if (v < 0 and c.kind != .angle) continue;
             switch (c.kind) {
                 .angle => |*an| an.value = v * std.math.pi / 180,
                 inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = v,
@@ -393,7 +434,8 @@ pub const Sketch = struct {
             if (c.driving) continue;
             const v = s.measure(c.*) orelse continue;
             switch (c.kind) {
-                inline .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => |*d| d.value = v,
+                .angle => |*d| d.value = v,
+                inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = @abs(v),
                 else => {},
             }
         }

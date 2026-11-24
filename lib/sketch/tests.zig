@@ -355,3 +355,33 @@ test "output joins into closed profiles; a parameter switches construction geome
     try testing.expectEqual(@as(usize, 3), p.contours.len);
     try testing.expectError(error.WrongKind, s.setPhysicalWhen(al, try s.addLine(al, pt(0, 0), 0), "homing"));
 }
+
+test "a distance is never negative and has no start or end: the side is kept as drawn" {
+    var arena: std.heap.ArenaAllocator = .init(ga);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var s = try Sketch.init(al);
+    const p = try s.addPoint(al, pt(-4, -3), false);
+    // From the point to the origin or from the origin to the point: the
+    // same distance, positive, and the point stays left of and below it.
+    const ab = try s.addConstraint(al, .{ .kind = .{ .distance_x = .{ .a = .{ .geom = sk.origin }, .b = .{ .geom = p }, .value = 10 } } });
+    const ba = try s.addConstraint(al, .{ .kind = .{ .distance_y = .{ .a = .{ .geom = p }, .b = .{ .geom = sk.origin }, .value = -6 } } });
+    try testing.expectEqual(6, s.constraints.items[ba].kind.distance_y.value);
+    _ = try s.solve(ga);
+    const q = try s.point(.{ .geom = p });
+    try testing.expectApproxEqAbs(@as(f64, -10), q.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -6), q.y, 1e-9);
+    // A negative value is refused.
+    try testing.expectError(error.Negative, s.setValue(ab, -2));
+    // An older sketch's signed distance and expression: made positive, the
+    // side kept.
+    try s.setParam(al, "w", "20");
+    s.constraints.items[ab].kind.distance_x.value = -10;
+    s.constraints.items[ab].kind.distance_x.side = 1;
+    s.constraints.items[ab].expr = "-w / 2";
+    try s.upgradeSigns(al);
+    try testing.expectEqualStrings("w / 2", s.constraints.items[ab].expr);
+    try testing.expectEqual(-1, s.constraints.items[ab].kind.distance_x.side);
+    _ = try s.solve(ga);
+    try testing.expectApproxEqAbs(@as(f64, -10), (try s.point(.{ .geom = p })).x, 1e-9);
+}

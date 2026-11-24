@@ -417,6 +417,8 @@ pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model 
     m.revision = 0;
     // An older document's rows or columns, as directions.
     m.upgradeOrientation();
+    // Its sketches' signed distances, as distances never negative.
+    for (m.sketches.items) |*it| try it.sketch.upgradeSigns(m.arena.allocator());
     m.upgradeProcesses() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},
