@@ -24191,14 +24191,14 @@ fn findEngagements(area: dvui.Rect.Physical, at: geom.Point) void {
     // Constraint dimensions: the value (a point) and the line.
     for (state.model.constraints.items) |c| {
         const g = dimGeom(c) orelse continue;
-        const lq = state.view.toPx(area, g.label);
+        const lq = state.view.toPx(area, g.d.text_at);
         const dl = @sqrt((lq.x - pp.x) * (lq.x - pp.x) + (lq.y - pp.y) * (lq.y - pp.y));
         var tb: [32]u8 = undefined;
         if (strokefont.hit(dimText(&tb, c), dimTextPlace(area, g), .{ .x = pp.x, .y = pp.y }, 4 * ns)) {
-            points.append(a, .{ .id = c.id, .kind = .dim_value, .edges = .{}, .at = g.label, .d = dl }) catch {};
+            points.append(a, .{ .id = c.id, .kind = .dim_value, .edges = .{}, .at = g.d.text_at, .d = dl }) catch {};
             continue;
         }
-        const dd = segDistPx(pp, state.view.toPx(area, g.p0), state.view.toPx(area, g.p1));
+        const dd = segDistPx(pp, state.view.toPx(area, g.d.line[0]), state.view.toPx(area, g.d.line[1]));
         if (dd <= edge_r) edges.append(a, .{ .id = c.id, .kind = .dim_line, .edges = .{}, .at = at, .d = dd }) catch {};
     }
     const by_d = struct {
@@ -24452,7 +24452,7 @@ fn drawEngagement(area: dvui.Rect.Physical) void {
             fn below(q: dvui.Point.Physical) dvui.Point.Physical {
                 return .{ .x = q.x, .y = q.y + 30 * dvui.windowNaturalScale() };
             }
-        }).below(state.view.toPx(area, g.label)), engageText(.{ .id = d.id, .kind = d.kind, .edges = .{}, .at = g.label, .d = 0 }));
+        }).below(state.view.toPx(area, g.d.text_at)), engageText(.{ .id = d.id, .kind = d.kind, .edges = .{}, .at = g.d.text_at, .d = 0 }));
         return;
     }
     const h = engageTarget() orelse return;
@@ -24941,30 +24941,22 @@ fn alongPlace(a: dvui.Point.Physical, b: dvui.Point.Physical, t: f32) strokefont
 // can be dragged (the line sideways; the value along the line and, with
 // it, the line); a click selects the constraint, Delete removes it.
 
-/// A dimension as drawn: its ends (canvas mm, reference first), where its
-/// value sits, whether it is vertical (it measures up and down), whether
-/// its features coincide (an alignment, drawn as a double bar).
-const DimGeom = struct { p0: geom.Point, p1: geom.Point, label: geom.Point, v: bool, aligned: bool };
+/// A layout dimension as drawn: what it measures and its drafting
+/// geometry (workspace mm, `graven_constraint.dimension`), and whether its
+/// features coincide on screen (an alignment, drawn as a double bar).
+const DimGeom = struct { ms: cdim.Measure, d: cdim.Drawn, aligned: bool };
 
 fn dimGeom(c: layout.model.Constraint) ?DimGeom {
-    if (c.kind != .offset) return null;
     const m = &state.model;
     const parent = constrain.parentOf(m, c.a.object) orelse return null;
     if (constrain.spaceOf(m, parent) != shown_space) return null;
-    const off = constrain.frameOffset(m, parent);
-    const v = c.a.feature.vertical();
-    const abox = offsetBox(constrain.boxOf(m, c.a.object) orelse return null, off);
-    // Each end in the workspace's coordinates: they may be in different
-    // frames (a column in a panel, a construction line on the canvas).
-    const pa = constrain.featureInSpace(m, parent, c.a) orelse return null;
-    const pb = constrain.featureInSpace(m, parent, c.b) orelse return null;
-    // Across the middle of the constrained object, moved as placed.
-    const across = (if (v) (abox.x0 + abox.x1) / 2 else (abox.y0 + abox.y1) / 2) + c.place.across;
-    const p0: geom.Point = if (v) .{ .x = across, .y = pb } else .{ .x = pb, .y = across };
-    const p1: geom.Point = if (v) .{ .x = across, .y = pa } else .{ .x = pa, .y = across };
-    const t = c.place.along;
-    const label: geom.Point = .{ .x = p0.x + (p1.x - p0.x) * t, .y = p0.y + (p1.y - p0.y) * t };
-    return .{ .p0 = p0, .p1 = p1, .label = label, .v = v, .aligned = @abs(pa - pb) * state.view.ppm < 2 };
+    const ms = constrain.dimensionOf(m, c) orelse return null;
+    var tb: [32]u8 = undefined;
+    const px = dvui.windowNaturalScale();
+    const w = strokefont.width(dimText(&tb, c)) * dim_cap * px;
+    const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, w / px));
+    const span = @abs((ms.p1.x - ms.p0.x) * ms.dir.x + (ms.p1.y - ms.p0.y) * ms.dir.y);
+    return .{ .ms = ms, .d = d, .aligned = span * state.view.ppm < 2 };
 }
 
 /// The constraint picked by a click on its dimension, while it is.
@@ -24977,6 +24969,7 @@ var dim_drag: ?struct {
     kind: EngageKind,
     place: layout.model.ConstraintPlace,
     pointer0: geom.Point,
+    /// What it measures (placing it moves nothing).
     g: DimGeom,
     moved: bool = false,
     key: u64,
@@ -24987,16 +24980,14 @@ fn dimText(buf: []u8, c: layout.model.Constraint) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{@round(@abs(c.value) * docUnits().perMm() * 100) / 100}) catch "";
 }
 
-/// Where a dimension's value is drawn: along its line, upright, at its
-/// place along it (device pixels).
+/// Where a dimension's value is drawn: on its line, upright (device
+/// pixels).
 fn dimTextPlace(area: dvui.Rect.Physical, g: DimGeom) strokefont.Place {
-    const q0 = state.view.toPx(area, g.p0);
-    const q1 = state.view.toPx(area, g.p1);
-    var p = alongPlace(q0, q1, 0.5);
-    const lq = state.view.toPx(area, g.label);
-    p.at = .{ .x = lq.x, .y = lq.y };
-    // A dimension too short to have a direction on screen: level.
-    if (@abs(q1.x - q0.x) + @abs(q1.y - q0.y) < 1) p.angle = if (g.v) -std.math.pi / 2.0 else 0;
+    const d = g.d;
+    const q0 = state.view.toPx(area, d.text_at);
+    const q1 = state.view.toPx(area, .{ .x = d.text_at.x + d.text_dir.x, .y = d.text_at.y + d.text_dir.y });
+    var p = alongPlace(q0, q1, 0);
+    p.at = .{ .x = q0.x, .y = q0.y };
     return p;
 }
 
@@ -25032,13 +25023,8 @@ fn dimMotion(at: geom.Point) void {
     const dy = at.y - d.pointer0.y;
     if (!d.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 3) return;
     d.moved = true;
-    var place = d.place;
-    // Sideways: up for a horizontal dimension, right for a vertical one.
-    place.across += if (d.g.v) dx else dy;
-    if (d.kind == .dim_value) {
-        const len = if (d.g.v) d.g.p1.y - d.g.p0.y else d.g.p1.x - d.g.p0.x;
-        if (@abs(len) > 1e-9) place.along += (if (d.g.v) dy else dx) / len;
-    }
+    // The line through the pointer; the value, taken, at it along the line.
+    const place = if (d.kind == .dim_value) cdim.textAt(d.g.ms, d.place, at) else cdim.offsetThrough(d.g.ms, d.place, at);
     _ = actM(d.key, .setConstraintPlace, .{ d.id, place }) catch {};
 }
 
@@ -25118,24 +25104,18 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
         switch (c.kind) {
             .offset => {
                 const g = dimGeom(c) orelse continue;
-                const q0 = state.view.toPx(area, g.p0);
-                const q1 = state.view.toPx(area, g.p1);
-                const t: f32 = 4 * px;
                 if (g.aligned) {
                     // Aligned: a small double bar across the shared line.
+                    const q0 = state.view.toPx(area, g.d.ends[0]);
+                    const t: f32 = 4 * px;
                     for ([_]f32{ -2, 2 }) |d| {
                         const pts: [2]dvui.Point.Physical = if (v) .{ .{ .x = q0.x + d * px, .y = q0.y - t }, .{ .x = q0.x + d * px, .y = q0.y + t } } else .{ .{ .x = q0.x - t, .y = q0.y + d * px }, .{ .x = q0.x + t, .y = q0.y + d * px } };
                         dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = px, .color = ink });
                     }
                     continue;
                 }
-                dvui.Path.stroke(.{ .points = &.{ q0, q1 } }, .{ .thickness = if (hot) 2 * px else px, .color = ink });
-                for ([_]dvui.Point.Physical{ q0, q1 }) |q| {
-                    const pts: [2]dvui.Point.Physical = if (v) .{ .{ .x = q.x - t, .y = q.y }, .{ .x = q.x + t, .y = q.y } } else .{ .{ .x = q.x, .y = q.y - t }, .{ .x = q.x, .y = q.y + t } };
-                    dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = 1.5 * px, .color = ink });
-                }
                 var buf: [32]u8 = undefined;
-                strokeText(dimText(&buf, c), dimTextPlace(area, g), colour);
+                drawDimension(area, .{ .x = 0, .y = 0 }, g.ms, c.place, dimText(&buf, c), colour, hot);
             },
             .equal_size => {
                 // "=" on each object's extent.
@@ -25573,7 +25553,7 @@ fn skLocal(it: SkPlace, p: geom.Point) geom.Point {
     return .{ .x = p.x - it.at.x, .y = p.y - it.at.y };
 }
 
-fn skPx(area: dvui.Rect.Physical, it: SkPlace, p: geom.Point) dvui.Point.Physical {
+fn skPx(area: dvui.Rect.Physical, it: anytype, p: geom.Point) dvui.Point.Physical {
     return state.view.toPx(area, .{ .x = p.x + it.at.x, .y = p.y + it.at.y });
 }
 
@@ -25636,11 +25616,11 @@ fn loadColumnsSample() !void {
         const id = try act(.addConstraint, .{c});
         // The dimensions off the columns: above them, or left of them.
         const across: f64 = switch (k) {
-            0 => -10,
+            0 => 33,
             1, 2, 3, 4 => -57,
             else => 0,
         };
-        if (across != 0) _ = act(.setConstraintPlace, .{ id, layout.model.ConstraintPlace{ .across = across } }) catch {};
+        if (across != 0) _ = act(.setConstraintPlace, .{ id, layout.model.ConstraintPlace{ .offset = across } }) catch {};
     }
     state.view.fit = .{ .x0 = 25, .y0 = 15, .x1 = 245, .y1 = 185 };
 }
@@ -26292,8 +26272,12 @@ fn skDimMeasure(s: *const skl.Sketch, c: skl.Constraint) ?cdim.Measure {
 
 /// A dimension drawn after drafting practice: extension lines, the
 /// dimension line, filled arrowheads and its value, in screen sizes.
-/// `toPx` maps the measure's frame to device pixels.
-fn drawDimension(area: dvui.Rect.Physical, it: SkPlace, ms: cdim.Measure, place: cdim.Placement, text: []const u8, colour: dvui.Color, hot: bool) void {
+/// The measure's frame is the workspace's moved by `at` (a sketch's
+/// origin; 0 for a layout's).
+fn drawDimension(area: dvui.Rect.Physical, at: geom.Point, ms: cdim.Measure, place: cdim.Placement, text: []const u8, colour: dvui.Color, hot: bool) void {
+    const it = struct {
+        at: geom.Point,
+    }{ .at = at };
     const px = dvui.windowNaturalScale();
     const w = strokefont.width(text) * dim_cap * px;
     const d = cdim.linear(ms, place, cdim.Style.screen(state.view.ppm / px, w / px));
@@ -26818,7 +26802,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
         switch (c.kind) {
             .distance, .distance_x, .distance_y => if (skDimMeasure(s, c)) |ms| {
                 if (c.place.hidden) continue;
-                drawDimension(area, it, ms, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
+                drawDimension(area, it.at, ms, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
                 continue;
             },
             .radius => |r| if (skRadiusLeader(s, r.g)) |ld| {

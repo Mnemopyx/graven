@@ -416,6 +416,68 @@ pub fn featureInSpace(m: *const Model, parent: Parent, end: model.ConstraintEnd)
     return (featureAt(m, own, end) orelse return null) + if (v) off.y else off.x;
 }
 
+/// What constraint `c`'s dimension measures, for drawing it after drafting
+/// practice (`graven_constraint.dimension`), in its workspace's
+/// coordinates: from end `b`'s feature to end `a`'s, each an edge with its
+/// extent across (a construction line's without end, a point's none).
+/// Null for equal sizes (drawn as marks) and for what cannot be measured.
+pub fn dimensionOf(m: *const Model, c: model.Constraint) ?gc.dimension.Measure {
+    if (c.kind != .offset) return null;
+    const parent = parentOf(m, c.a.object) orelse return null;
+    const v = c.a.feature.vertical();
+    var along: [2]f64 = undefined;
+    var ext: [2]?[2]f64 = undefined;
+    for ([_]model.ConstraintEnd{ c.b, c.a }, 0..) |end, i| {
+        along[i] = featureInSpace(m, parent, end) orelse return null;
+        ext[i] = acrossOf(m, parent, end.object, v);
+    }
+    // Each feature's point: the middle of its extent; a line without end
+    // takes the other's (or 0).
+    var mid: [2]?f64 = .{ null, null };
+    for (ext, &mid) |e, *x| if (e) |r| {
+        if (std.math.isFinite(r[0]) and std.math.isFinite(r[1])) x.* = (r[0] + r[1]) / 2;
+    };
+    const across = [2]f64{ mid[0] orelse mid[1] orelse 0, mid[1] orelse mid[0] orelse 0 };
+    const pt = struct {
+        fn f(vv: bool, al: f64, ac: f64) geom.Point {
+            return if (vv) .{ .x = ac, .y = al } else .{ .x = al, .y = ac };
+        }
+    }.f;
+    return .{
+        .p0 = pt(v, along[0], across[0]),
+        .p1 = pt(v, along[1], across[1]),
+        .dir = if (v) .{ .x = 0, .y = 1 } else .{ .x = 1, .y = 0 },
+        .normal = if (v) .{ .x = -1, .y = 0 } else .{ .x = 0, .y = 1 },
+        // Along the normal: for a vertical dimension it points left, so
+        // its extents across run the other way.
+        .extent = .{ alongNormal(ext[0], v), alongNormal(ext[1], v) },
+    };
+}
+
+fn alongNormal(e: ?[2]f64, vertical: bool) ?[2]f64 {
+    const r = e orelse return null;
+    return if (vertical) .{ -r[1], -r[0] } else r;
+}
+
+/// How far object `id` (or, `.none`, parent `parent`) runs across a
+/// feature on axis `vertical`, in workspace coordinates: a construction
+/// line without end; null for an unbounded workspace.
+fn acrossOf(m: *const Model, parent: Parent, id: ObjectId, vertical: bool) ?[2]f64 {
+    const inf = std.math.inf(f64);
+    if (id == .none) {
+        const lo = parentFeature(m, parent, if (vertical) .left else .bottom) orelse return null;
+        const hi = parentFeature(m, parent, if (vertical) .right else .top) orelse return null;
+        const off = frameOffset(m, parent);
+        const o = if (vertical) off.x else off.y;
+        return .{ lo + o, hi + o };
+    }
+    const loc = locate(m, id) orelse return null;
+    if (loc.kind == .guide) return .{ -inf, inf };
+    const b = boxOf(m, id) orelse return null;
+    const off = frameOffset(m, loc.parent);
+    return if (vertical) .{ b.x0 + off.x, b.x1 + off.x } else .{ b.y0 + off.y, b.y1 + off.y };
+}
+
 /// Solves every constraint, moving and resizing objects to meet them;
 /// appends what cannot be met to `issues` when given.
 ///
@@ -1026,17 +1088,18 @@ test "a dimension's place is kept, undone, and written with the file" {
     const a_id = m.panels.items[c].art.items[0].id;
     const b_id = m.panels.items[c].art.items[1].id;
     const k = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = b_id, .feature = .origin_x }, .b = .{ .object = a_id, .feature = .origin_x }, .value = 20 }});
-    try h.do(&m, .setConstraintPlace, .{ k, .{ .across = 7.5, .along = 0.8 } });
-    try testing.expectEqual(7.5, m.constraints.items[0].place.across);
+    try h.do(&m, .setConstraintPlace, .{ k, .{ .offset = 7.5, .text = 0.8, .outside = true } });
+    try testing.expectEqual(7.5, m.constraints.items[0].place.offset);
     // Placing it moves nothing.
     try testing.expectApproxEqAbs(@as(f64, 30), artAt(&m, c, 1).x, 1e-9);
     const bytes = try native.encode(gpa, &m);
     defer gpa.free(bytes);
     var back = try native.decode(gpa, bytes);
     defer back.deinit();
-    try testing.expectEqual(0.8, back.constraints.items[0].place.along);
+    try testing.expectEqual(0.8, back.constraints.items[0].place.text);
+    try testing.expect(back.constraints.items[0].place.outside);
     _ = try h.undo(&m);
-    try testing.expectEqual(0, m.constraints.items[0].place.across);
+    try testing.expectEqual(0, m.constraints.items[0].place.offset);
 }
 
 test "a column in a panel keeps to construction lines on the canvas; values are never negative" {

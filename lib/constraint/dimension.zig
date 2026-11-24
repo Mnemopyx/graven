@@ -46,6 +46,11 @@ pub const Measure = struct {
     p1: Point,
     dir: Point,
     normal: Point,
+    /// A feature that is an edge rather than a point: how far it runs
+    /// along `normal` (from, to; infinite for a line without end), its
+    /// point then its middle. Its extension line starts at its end nearest
+    /// the dimension line, and none is drawn when the line crosses it.
+    extent: [2]?[2]f64 = .{ null, null },
 };
 
 /// Sizes, in the caller's units.
@@ -131,8 +136,14 @@ pub fn linear(m: Measure, place: Placement, st: Style) Drawn {
     const c = dot(mid, m.normal) + place.offset;
     const q0 = add(m.p0, mul(m.normal, c - dot(m.p0, m.normal)));
     const q1 = add(m.p1, mul(m.normal, c - dot(m.p1, m.normal)));
+    // An edge's nearest end to the line: where its extension line starts.
+    var feat: [2]Point = .{ m.p0, m.p1 };
+    for (&feat, m.extent) |*p, e| if (e) |r| {
+        const at = std.math.clamp(c, @min(r[0], r[1]), @max(r[0], r[1]));
+        p.* = add(p.*, mul(m.normal, at - dot(p.*, m.normal)));
+    };
     var ext: [2]?[2]Point = .{ null, null };
-    for ([_]Point{ m.p0, m.p1 }, [_]Point{ q0, q1 }, 0..) |p, q, i| {
+    for (feat, [_]Point{ q0, q1 }, 0..) |p, q, i| {
         const d = c - dot(p, m.normal);
         if (@abs(d) <= st.gap) continue;
         const s: f64 = if (d > 0) 1 else -1;
@@ -247,4 +258,19 @@ test "too tight: arrows outside pointing in, the value past them" {
     // Upright: reads upwards; the value past end 1.
     try testing.expectEqual(@as(f64, 1), d.text_dir.y);
     try testing.expectEqual(@as(f64, 5 + 6 + 1 + 5), d.text_at.y);
+}
+
+test "edges: the extension line from the nearer end, none where the line crosses" {
+    // Two vertical edges, x 0 (y 0 to 20) and x 40 (y 5 to 15); the line
+    // at y 30: from each top. At y 10: across both, no extension lines.
+    const m: Measure = .{ .p0 = .{ .x = 0, .y = 10 }, .p1 = .{ .x = 40, .y = 10 }, .dir = .{ .x = 1, .y = 0 }, .normal = .{ .x = 0, .y = 1 }, .extent = .{ .{ 0, 20 }, .{ 5, 15 } } };
+    const d = linear(m, .{ .offset = 20 }, test_style);
+    try testing.expectEqual(@as(f64, 21), d.ext[0].?[0].y);
+    try testing.expectEqual(@as(f64, 16), d.ext[1].?[0].y);
+    const on = linear(m, .{}, test_style);
+    try testing.expect(on.ext[0] == null and on.ext[1] == null);
+    // An infinite line: never one.
+    var inf = m;
+    inf.extent[1] = .{ -std.math.inf(f64), std.math.inf(f64) };
+    try testing.expect(linear(inf, .{ .offset = 50 }, test_style).ext[1] == null);
 }

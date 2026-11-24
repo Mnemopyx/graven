@@ -132,15 +132,14 @@ pub const Constraint = struct {
     place: ConstraintPlace = .{},
 };
 
-/// Where a constraint's dimension is drawn: its line `across` mm from the
-/// middle of the constrained object (perpendicular to what it measures:
-/// up for a horizontal dimension, right for a vertical one), and its value
-/// at `along` of the way from the reference to the constrained feature (½:
-/// the middle). Placement only: it changes nothing the constraint holds.
-pub const ConstraintPlace = struct {
-    across: f64 = 0,
-    along: f64 = 0.5,
-};
+/// Where a constraint's dimension is drawn, after drafting practice
+/// (`graven_constraint.dimension.Placement`): its line `offset` mm from the
+/// middle of its features (up for a horizontal dimension, left for a
+/// vertical one), its value `text` mm along the line from its middle,
+/// arrows outside, hidden. Saved with it; placement only: it changes
+/// nothing the constraint holds. (An older file's `across` and `along`
+/// are not read: its dimensions come back on their features.)
+pub const ConstraintPlace = @import("graven_constraint").dimension.Placement;
 
 /// A paragraph style's index in `Model.paragraph_styles`.
 /// A paragraph style's ID: its own object ID.
@@ -5826,9 +5825,9 @@ pub const Model = struct {
 
     /// Places constraint `id`'s dimension (where it is drawn only).
     pub fn setConstraintPlace(m: *Model, id: ObjectId, at: ConstraintPlace) Error!void {
-        if (!std.math.isFinite(at.across) or !std.math.isFinite(at.along)) return error.BadConstraint;
+        if (!std.math.isFinite(at.offset) or !std.math.isFinite(at.text)) return error.BadConstraint;
         const i = m.constraintIndex(id) orelse return error.NoSuchObject;
-        m.constraints.items[i].place = .{ .across = at.across, .along = std.math.clamp(at.along, -1, 2) };
+        m.constraints.items[i].place = at;
         m.revision += 1;
     }
 
