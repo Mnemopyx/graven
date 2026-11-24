@@ -641,3 +641,7 @@ The owner: content in a line that reaches past the font's ascender or descender 
 - **Fixed spacing (may overlap)**: as before.
 
 Measured from each piece's ink (`Render.ink`), and only for runs whose ink passes their font's ascender or descender, so plain text never moves. Rows only so far (not column tracks). The keyboard and HP-15C SVGs are unchanged.
+
+### A quiet canvas while typing (2026-11-23)
+
+The owner: while content is edited, the centre line and container emphasis distract; a shaded band showing margin around the content region, no outline. While the flow cursor is in a track (`quietText`): each content layout is drawn as a soft tinted band around the area its content may take (half a row wide, 1 to 4 mm; a little deeper for the one typed in), with no track outlines, row lines, centre line (`drawTrackPath`) or origin ring; the current line's wash, the cursor and the selection stay. Holding Ctrl shows the full guides again (G was proposed, but G types a g). Arranging layouts (no cursor in text) shows everything as before.

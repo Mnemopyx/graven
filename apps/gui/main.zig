@@ -8021,8 +8021,13 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     const px = dvui.windowNaturalScale();
     const radius: f32 = @floatCast(1.0 * state.view.ppm);
     const o = panelOrigin(pi);
+    // While text is typed, the scaffolding steps back (the owner,
+    // 2026-11-23): each content layout is a soft band around where its
+    // content may go, with no outlines; holding Ctrl shows them again.
+    const quiet = quietText();
     // Every track's band, faintly, so empty tracks show where tiles go.
     for (placed.tracks) |t| {
+        if (quiet) break;
         // Past the panel's edge: in the warning colour.
         const outside = for (placed.issues) |i| {
             if (i.kind == .region_outside and i.region == t.region) break true;
@@ -8045,6 +8050,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: usize, placed: *const layout.place.Pl
     };
     for (0..state.model.panels.items[pi].regions.items.len) |ri| {
         const on = soft_region != null and soft_region.? == ri;
+        if (quiet) {
+            contentBand(area, pi, ri, on);
+            continue;
+        }
         guideOutline(area, trackOutline(pi, ri), colors.guide.opacity(if (on) 0.6 else 0.3), px);
     }
     // Flow marks are a view layer of their own; a document without spaces
@@ -22635,6 +22644,40 @@ fn guideOutline(area: dvui.Rect.Physical, pts: []const geom.Point, colour: dvui.
     dvui.Path.stroke(.{ .points = q }, .{ .thickness = px, .color = .{ .color = colour }, .closed = true });
 }
 
+/// Whether text is being typed (the flow cursor is in a track, not in an
+/// equation edited on the canvas) and Ctrl is not held: the canvas then
+/// shows content layouts as soft bands, without outlines, centre lines
+/// or origin marks.
+fn quietText() bool {
+    if (track_cursor == null or canvas_eq != null) return false;
+    return !primaryMod(dvui.currentWindow().modifiers);
+}
+
+/// Content layout `ri` of panel `pi` while text is typed: a soft band
+/// around the area its content may take (half a row wide, 1 to 4 mm),
+/// the area itself left clear; a little deeper for the one typed in.
+fn contentBand(area: dvui.Rect.Physical, pi: usize, ri: usize, on: bool) void {
+    const pts = trackOutline(pi, ri);
+    if (pts.len < 2) return;
+    var b: geom.Box = .{ .x0 = pts[0].x, .x1 = pts[0].x, .y0 = pts[0].y, .y1 = pts[0].y };
+    for (pts) |q| {
+        b.x0 = @min(b.x0, q.x);
+        b.x1 = @max(b.x1, q.x);
+        b.y0 = @min(b.y0, q.y);
+        b.y1 = @max(b.y1, q.y);
+    }
+    const r = state.model.panels.items[pi].regions.items[ri];
+    const w = std.math.clamp(0.5 * r.pitch, 1, 4);
+    const tint: dvui.Color = colors.guide.opacity(if (on) 0.16 else 0.09);
+    const sides = [_]geom.Box{
+        .{ .x0 = b.x0 - w, .x1 = b.x1 + w, .y0 = b.y1, .y1 = b.y1 + w },
+        .{ .x0 = b.x0 - w, .x1 = b.x1 + w, .y0 = b.y0 - w, .y1 = b.y0 },
+        .{ .x0 = b.x0 - w, .x1 = b.x0, .y0 = b.y0, .y1 = b.y1 },
+        .{ .x0 = b.x1, .x1 = b.x1 + w, .y0 = b.y0, .y1 = b.y1 },
+    };
+    for (sides) |sd| state.view.rect(area, sd).fill(.square, .{ .color = .{ .color = tint } });
+}
+
 /// What the flow holds that output leaves out, drawn faintly while editing:
 /// each hard break as a down-and-left arrow (a carriage return) at the end
 /// of its segment's content, each paragraph separator as a pilcrow, each
@@ -25002,8 +25045,9 @@ fn drawConstraintMarks(area: dvui.Rect.Physical) void {
             },
         }
     }
-    // The context object's origin: a ring with a cross.
-    if (contextObject()) |id| if (constrain.parentOf(m, id)) |parent| if (constrain.originOf(m, id)) |o| {
+    // The context object's origin: a ring with a cross (not while text is
+    // typed: `quietText`).
+    if (!quietText()) if (contextObject()) |id| if (constrain.parentOf(m, id)) |parent| if (constrain.originOf(m, id)) |o| {
         const off = constrain.frameOffset(m, parent);
         const q = state.view.toPx(area, .{ .x = o.x + off.x, .y = o.y + off.y });
         const r: f32 = 5 * px;
@@ -25223,6 +25267,7 @@ fn finishPathDrag() void {
 /// The context track's path, its control points (the selected one lit)
 /// and, while one is dragged, where it goes.
 fn drawTrackPath(area: dvui.Rect.Physical) void {
+    if (quietText()) return;
     const t = pathRegion() orelse {
         path_selected = null;
         return;
