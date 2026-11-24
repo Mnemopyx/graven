@@ -17659,6 +17659,16 @@ const button_handlers = [_]ButtonHandler{
             layFlashEnd(arg);
         }
     }.f),
+    handler("ink.ink-selection-i", struct {
+        fn f(_: i32) void {
+            skInk();
+        }
+    }.f),
+    handler("ink.new-stroke-style", struct {
+        fn f(_: i32) void {
+            newStrokeStyle();
+        }
+    }.f),
     handler("sketch-mode.add-caption", struct {
         fn f(_: i32) void {
             skAddCaption();
@@ -27087,6 +27097,93 @@ fn skAddCaption() void {
     state.expanded.put(state.gpa, Context.key(parentContext(cap.parent)), true) catch {};
 }
 
+/// The selected curves of the sketch being edited (points' curves are
+/// not: ink is drawn on lines and arcs).
+fn skInkable(buf: []skl.GeomId) []skl.GeomId {
+    var n: usize = 0;
+    for (sk_sel.items) |p| switch (p) {
+        .curve => |g| if (n < buf.len) {
+            buf[n] = g;
+            n += 1;
+        },
+        else => {},
+    };
+    return buf[0..n];
+}
+
+/// Whether geometry `g` of the sketch being edited is inked in the
+/// current stroke style.
+fn skInked(g: skl.GeomId) bool {
+    const r = sketch_edit orelse return false;
+    const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return false;
+    const cur = state.model.currentStroke() orelse return false;
+    for (state.model.figures.items[fi].inks) |k| if (k.geom == g and k.style == cur) return true;
+    return false;
+}
+
+/// Ink (I): the selected curves drawn in the current stroke style, the
+/// sketch's figure; when every one is inked in it already, the ink comes off.
+fn skInk() void {
+    const r = sketch_edit orelse return;
+    var buf: [256]skl.GeomId = undefined;
+    const gs = skInkable(&buf);
+    if (gs.len == 0) {
+        state.status = "Ink: select lines or arcs first. ";
+        return;
+    }
+    var all = true;
+    for (gs) |g| if (!skInked(g)) {
+        all = false;
+    };
+    const key = mergeKey(.{ "ink", r.sketch, state.model.revision });
+    for (gs) |g| _ = actM(key, .setInk, .{ r.sketch, g, !all }) catch {};
+    state.status = if (all) "Ink taken off. " else "Inked in the current stroke style. ";
+}
+
+/// Ink in sketch-mode Properties: inking the selection, and the stroke
+/// style it takes (chosen, its width, a new one).
+fn sketchInkProperties() void {
+    const saved_group = pushGroup("ink");
+    defer popGroup(saved_group);
+    heading("{s}", .{"Ink"}, 8195);
+    var buf: [256]skl.GeomId = undefined;
+    if (skInkable(&buf).len > 0) keyButton(@src(), "Ink selection  I", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    const m = &state.model;
+    if (m.stroke_styles.items.len > 0) {
+        const ar = dvui.currentWindow().arena();
+        const names = ar.alloc([]const u8, m.stroke_styles.items.len) catch return;
+        for (m.stroke_styles.items, 0..) |st, i| names[i] = st.name;
+        const cur = m.currentStroke().?;
+        var choice: usize = m.strokeStyleIndex(cur) orelse 0;
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8196 });
+            defer row.deinit();
+            propName("Stroke style");
+            if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 8196 })) actV(.setCurrentStroke, .{m.stroke_styles.items[choice].id});
+        }
+        const st = m.stroke_styles.items[choice];
+        if (numberProp("Width, mm", st.stroke.width, 0.01, 100, 8197)) |w| {
+            var next = st.stroke;
+            next.width = w;
+            _ = actM(mergeKey(.{ "stroke-width", st.id }), .setStrokeStyle, .{ st.id, st.name, next }) catch {};
+        }
+    } else propText("Pen", "{s}", .{"0.3 mm black, made with the first ink"}, 8196);
+    keyButton(@src(), "New stroke style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+}
+
+/// A new stroke style, like the current one (or a fine black pen), made
+/// current.
+fn newStrokeStyle() void {
+    const m = &state.model;
+    var stroke: layout.figure.Stroke = .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.3, .cap = .round, .join = .round };
+    if (m.currentStroke()) |id| stroke = m.stroke_styles.items[m.strokeStyleIndex(id).?].stroke;
+    var buf: [32]u8 = undefined;
+    const name = std.fmt.bufPrint(&buf, "Pen {d}", .{m.stroke_styles.items.len + 1}) catch "Pen";
+    const key = mergeKey(.{ "new-stroke", m.revision });
+    const id = actM(key, .addStrokeStyle, .{ name, stroke }) catch return;
+    _ = actM(key, .setCurrentStroke, .{id}) catch {};
+}
+
 fn leaveSketch() void {
     sketch_edit = null;
     sk_summary = false;
@@ -27845,6 +27942,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.constraint.angle") => skConstrain(.angle, area),
             kact("sketch.constraint.lock") => skConstrain(.fixed, area),
             kact("sketch.tool.next") => skCycleTool(),
+            kact("sketch.ink") => skInk(),
             else => used = false,
         }
         if (used) {
@@ -28065,12 +28163,23 @@ fn drawSketches(area: dvui.Rect.Physical) void {
             if (g.removed or g.reference or g.construction) continue;
             skDrawGeometry(area, it, g, colors.ink, 1.5 * px, false);
         }
+        drawSketchFigure(area, it, 1);
         const picked = switch (state.context) {
             .sketch => |sc| sc.space == ref.space and sc.index == ref.index,
             else => false,
         };
         if (picked) guideBox(area, b, colors.select, px);
     }
+}
+
+/// The figure drawn over a sketch, if it has one: its ink where the
+/// sketch is.
+fn drawSketchFigure(area: dvui.Rect.Physical, it: SkPlace, alpha: f32) void {
+    const fi = state.model.sketchFigure(it.item.id) orelse return;
+    const ft = figureTris(fi) orelse return;
+    const fb = ft.bounds;
+    if (fb.isEmpty()) return;
+    drawFigureInk(area, fi, .{ .x0 = fb.x0 + it.at.x, .x1 = fb.x1 + it.at.x, .y0 = fb.y0 + it.at.y, .y1 = fb.y1 + it.at.y }, alpha);
 }
 
 /// One geometry, stroked: infinite lines and rays across the view.
@@ -28182,6 +28291,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
     const s = it.sketch;
     const px = dvui.windowNaturalScale();
     area.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.72) } });
+    drawSketchFigure(area, it, 0.85);
     const an = skAnalysis();
     // Geometry the conflicting constraints touch.
     const conflicted = struct {
@@ -28722,6 +28832,7 @@ fn sketchModeProperties() void {
     // A point on a circle or an arc: a caption for it.
     if (skCaptionPoint() != null) keyButton(@src(), "Add caption", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     keyButton(@src(), "Finish sketch…  Enter", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+    sketchInkProperties();
     skConstraintList(it);
     sketchPhysicalWhen(it);
     sketchParameters(it);

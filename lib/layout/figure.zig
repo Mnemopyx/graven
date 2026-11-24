@@ -44,6 +44,14 @@ pub const Path = struct {
     stroke: ?Stroke = null,
 };
 
+/// A sketch's geometry inked: drawn as a stroke in a stroke style.
+pub const Ink = struct {
+    /// The geometry, in the figure's sketch.
+    geom: u32,
+    /// Its stroke style (`Model.stroke_styles`).
+    style: @import("model.zig").ObjectId,
+};
+
 pub const Figure = struct {
     id: @import("model.zig").ObjectId = .none,
     name: []const u8,
@@ -53,6 +61,12 @@ pub const Figure = struct {
     paths: []const Path,
     /// The file it was imported from, if any (its name only).
     source: []const u8 = "",
+    /// A figure drawn over a sketch: the sketch (its `SketchItem` ID),
+    /// whose geometry its `inks` stroke. Its `paths` are made from them
+    /// (`Model.syncSketchFigures`), in the sketch's own frame, and follow
+    /// the sketch; it is drawn where the sketch's views are.
+    sketch: @import("model.zig").ObjectId = .none,
+    inks: []const Ink = &.{},
 
     /// Its paths' bounds, strokes' widths included (a pen's reach, not
     /// its caps' or miters' exact extent).

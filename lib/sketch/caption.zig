@@ -2,7 +2,8 @@
 //! arc, a short segment on out along the radius, then one turned the
 //! shorter way to horizontal (right of the centre it runs right, left of
 //! it left), ending at the point a caption's text is held to. Both are
-//! output (drawn), held by ordinary constraints: the first's start on the
+//! construction (a figure over the sketch inks them), held by ordinary
+//! constraints: the first's start on the
 //! point and parallel to the radius through it, the second's start on the
 //! first's end and horizontal, each a dimension long, so they follow the
 //! curve when it turns or grows and their lengths can be changed.
@@ -98,8 +99,8 @@ pub fn addLeader(s: *Sketch, a: Allocator, p: PointRef, out: f64, across: f64) A
         _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = r, .role = .end }, p } } });
         break :blk r;
     };
-    const l1 = try s.addSegment(a, at, bend, false);
-    const l2 = try s.addSegment(a, bend, tip, false);
+    const l1 = try s.addSegment(a, at, bend, true);
+    const l2 = try s.addSegment(a, bend, tip, true);
     const l1a: PointRef = .{ .geom = l1, .role = .start };
     const l1b: PointRef = .{ .geom = l1, .role = .end };
     const l2a: PointRef = .{ .geom = l2, .role = .start };

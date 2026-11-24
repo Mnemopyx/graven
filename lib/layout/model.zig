@@ -3945,6 +3945,10 @@ pub const Model = struct {
         };
         _ = try sk.solve(m.arena.child_allocator);
         m.sketches.items[ski].version +%= 1;
+        // The leader is the sketch's construction, inked in the figure
+        // over it in the current stroke style.
+        try m.setInk(ski, lead.radial, true);
+        try m.setInk(ski, lead.across, true);
         const e = try sk.point(lead.end);
         const at: geom.Point = .{ .x = v.at.x + e.x, .y = v.at.y + e.y };
         // The panel it is over.
@@ -5269,6 +5273,7 @@ pub const Model = struct {
         defer for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) {
             m.syncSketchPanel(pi) catch {};
         };
+        defer m.syncSketchFigures(sid) catch {};
         const al = m.a();
         const gpa = m.arena.child_allocator;
         var out: u32 = 0;
@@ -6253,7 +6258,73 @@ pub const Model = struct {
         if (!std.math.isFinite(p.first)) return error.BadSize;
     }
 
-    /// A new paragraph style. Returns its ID.
+    /// The figure drawn over sketch `sketch` (its ID), if any.
+    pub fn sketchFigure(m: *const Model, sketch: ObjectId) ?usize {
+        if (sketch == .none) return null;
+        for (m.figures.items, 0..) |f, i| if (f.sketch == sketch) return i;
+        return null;
+    }
+
+    /// Makes the paths of the figures drawn over sketch `sketch` (all of
+    /// them when `.none`) from its geometry and their inks: each inked
+    /// geometry one path, stroked in its style. Ink whose geometry or
+    /// style is gone is left out.
+    pub fn syncSketchFigures(m: *Model, sketch: ObjectId) Error!void {
+        const al = m.a();
+        for (m.figures.items) |*f| {
+            if (f.sketch == .none or (sketch != .none and f.sketch != sketch)) continue;
+            const ski = m.sketchIndex(f.sketch) orelse continue;
+            const sk = &m.sketches.items[ski].sketch;
+            var paths: std.ArrayList(figure_.Path) = .empty;
+            for (f.inks) |ink| {
+                if (ink.geom >= sk.geometry.items.len) continue;
+                const g = sk.geometry.items[ink.geom];
+                if (g.removed) continue;
+                const si = m.strokeStyleIndex(ink.style) orelse continue;
+                var segs: std.ArrayList(geom.Segment) = .empty;
+                try sk.appendSegments(al, g, &segs);
+                if (segs.items.len == 0) continue;
+                const sub = try al.alloc(figure_.Subpath, 1);
+                sub[0] = .{ .segments = segs.items, .closed = g.kind == .circle };
+                try paths.append(al, .{ .subpaths = sub, .stroke = m.stroke_styles.items[si].stroke });
+            }
+            f.paths = paths.items;
+        }
+    }
+
+    /// The stroke style new ink takes, made (a fine black pen) when the
+    /// document has none.
+    fn inkStyle(m: *Model) Error!ObjectId {
+        if (m.currentStroke()) |id| return id;
+        const id = try m.addStrokeStyle("Pen", .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.3, .cap = .round, .join = .round });
+        m.current_stroke = id;
+        return id;
+    }
+
+    /// Inks geometry `g` of sketch `index` in the current stroke style
+    /// (`on`), or takes its ink off. The sketch's figure is made when it
+    /// has none.
+    pub fn setInk(m: *Model, index: usize, g: u32, on: bool) Error!void {
+        const item = try m.sketchAt(index);
+        if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
+        const fi = m.sketchFigure(item.id) orelse blk: {
+            if (!on) return;
+            var name_buf: [64]u8 = undefined;
+            const base = std.fmt.bufPrint(&name_buf, "{s} figure", .{item.name}) catch "Figure";
+            var buf2: [80]u8 = undefined;
+            const name = m.freshName(&buf2, .figures, base);
+            try m.figures.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .paths = &.{}, .sketch = item.id });
+            break :blk m.figures.items.len - 1;
+        };
+        const f = &m.figures.items[fi];
+        var inks: std.ArrayList(figure_.Ink) = .empty;
+        for (f.inks) |k| if (k.geom != g) try inks.append(m.a(), k);
+        if (on) try inks.append(m.a(), .{ .geom = g, .style = try m.inkStyle() });
+        f.inks = inks.items;
+        try m.syncSketchFigures(item.id);
+        m.revision += 1;
+    }
+
     pub fn strokeStyleIndex(m: *const Model, id: ObjectId) ?usize {
         for (m.stroke_styles.items, 0..) |st, i| if (st.id == id) return i;
         return null;
@@ -6277,6 +6348,7 @@ pub const Model = struct {
         const i = m.strokeStyleIndex(id) orelse return error.NoSuchStyle;
         try checkStroke(stroke);
         m.stroke_styles.items[i] = .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = stroke };
+        try m.syncSketchFigures(.none);
         m.revision += 1;
     }
 
@@ -6294,6 +6366,7 @@ pub const Model = struct {
         return if (m.stroke_styles.items.len > 0) m.stroke_styles.items[0].id else null;
     }
 
+    /// A new paragraph style. Returns its ID.
     pub fn addParagraphStyle(m: *Model, style: ParagraphStyle) Error!ParaId {
         try checkParagraph(style);
         var s = style;
