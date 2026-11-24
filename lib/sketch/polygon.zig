@@ -4,7 +4,8 @@
 //! other geometry.
 //!
 //! The constraints: every side equal to the first (n - 1), and the
-//! interior angle between consecutive sides at n - 3 corners. With all
+//! interior angle, (n - 2)·180°/n, between consecutive sides at every
+//! corner: driving at n - 3, reference at the other three. With all
 //! sides equal, those angles are the ones left free (an equilateral
 //! polygon of n sides has n - 3 shape freedoms); more would be redundant.
 //! The circle passes through three corners (any three fix a circle; the
@@ -56,7 +57,10 @@ pub fn addRegular(s: *Sketch, a: Allocator, c: Point, corner: Point, n: u32, con
         if (i > 0) _ = try s.addConstraint(a, .{ .kind = .{ .equal = .{ .a = sides.items[0], .b = g } } });
         // The interior angle at the corner between this side and the next
         // (from the next side's direction back to this one's).
-        if (i < n - 3) _ = try s.addConstraint(a, .{ .kind = .{ .angle = .{ .a = next, .b = g, .value = interior } } });
+        // The interior angle, (n - 2)·180°/n, at every corner: driving at
+        // n - 3 of them, reference (shown, not driving) at the last three,
+        // which follow from the rest (driving, they would be redundant).
+        _ = try s.addConstraint(a, .{ .kind = .{ .angle = .{ .a = next, .b = g, .value = interior } }, .driving = i < n - 3 });
         if (i < 3) _ = try s.addConstraint(a, .{ .kind = .{ .point_on = .{ .p = .{ .geom = g, .role = .start }, .on = circle } } });
     }
     return .{ .circle = circle, .first = sides.items[0], .sides = n };

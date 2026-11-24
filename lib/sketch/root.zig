@@ -443,7 +443,15 @@ pub const Sketch = struct {
             if (c.driving) continue;
             const v = s.measure(c.*) orelse continue;
             switch (c.kind) {
-                .angle => |*d| d.value = v,
+                // An angle between lines holds modulo a half turn: of the
+                // two readings, the one nearer the value it had (so an
+                // interior angle stays interior).
+                .angle => |*d| {
+                    var x = v;
+                    while (x - d.value > std.math.pi / 2.0) x -= std.math.pi;
+                    while (d.value - x > std.math.pi / 2.0) x += std.math.pi;
+                    d.value = x;
+                },
                 inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = @abs(v),
                 else => {},
             }
