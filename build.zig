@@ -80,12 +80,23 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_testdata", .module = testdata },
         },
     });
+    // Constraints, generic: unknowns, a least-change solver and its
+    // analysis, dimensions, units and expressions (sketches and layouts).
+    const constraint = b.addModule("graven_constraint", .{
+        .root_source_file = b.path("lib/constraint/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "graven_geom", .module = geom }},
+    });
     // Parametric sketches: geometry held by constraints, solved together.
     const sketch = b.addModule("graven_sketch", .{
         .root_source_file = b.path("lib/sketch/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "graven_geom", .module = geom }},
+        .imports = &.{
+            .{ .name = "graven_geom", .module = geom },
+            .{ .name = "graven_constraint", .module = constraint },
+        },
     });
 
     const layout = b.addModule("graven_layout", .{
@@ -98,6 +109,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_richtext", .module = richtext },
             .{ .name = "graven_testdata", .module = testdata },
             .{ .name = "graven_sketch", .module = sketch },
+            .{ .name = "graven_constraint", .module = constraint },
             .{ .name = "graven_glyphic", .module = glyphic },
         },
     });
@@ -302,7 +314,7 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
-    for ([_]*std.Build.Module{ geom, font, layout, config, fontsearch, richtext, sketch, fonts_local, fonts_folders, glyphic, platform }) |mod| {
+    for ([_]*std.Build.Module{ geom, font, layout, config, fontsearch, richtext, constraint, sketch, fonts_local, fonts_folders, glyphic, platform }) |mod| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).

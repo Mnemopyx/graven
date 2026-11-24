@@ -591,7 +591,7 @@ pub const FlowSource = struct {
 /// ("12pt", "5mm") or relative to the prevailing font size ("+2pt",
 /// "+3mm", "+10%", "120%").
 pub const Leading = units_.Quantity;
-const units_ = @import("units.zig");
+const units_ = @import("graven_constraint").units;
 
 pub const TileRegion = struct {
     id: ObjectId = .none,

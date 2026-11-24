@@ -19,9 +19,10 @@
 
 const std = @import("std");
 const geom = @import("graven_geom");
-pub const dual = @import("dual.zig");
+pub const constraint = @import("graven_constraint");
+pub const dual = constraint.dual;
 pub const solver = @import("solve.zig");
-pub const expr = @import("expr.zig");
+pub const expr = constraint.expr;
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
