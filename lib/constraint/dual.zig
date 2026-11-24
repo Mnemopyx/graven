@@ -4,7 +4,8 @@
 
 const std = @import("std");
 
-pub const n = 8;
+/// Enough for four segments (an equal angle: two corners' sides).
+pub const n = 16;
 
 pub const D = struct {
     v: f64,

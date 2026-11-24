@@ -125,6 +125,11 @@ pub const Constraint = struct {
         tangent: struct { a: GeomId, b: GeomId, side: f64 = 1, internal: bool = false },
         /// Two segments of one length, or two circles or arcs of one radius.
         equal: struct { a: GeomId, b: GeomId },
+        /// Two angles equal: from `a`'s direction to `b`'s, as from `c`'s
+        /// to `d`'s (straight geometries; a polygon's corners). No value:
+        /// what they come to follows from the rest (a closed polygon's
+        /// interior angles sum to (n - 2)·180°).
+        equal_angle: struct { a: GeomId, b: GeomId, c: GeomId, d: GeomId },
         /// Two distances equal (a gutter as wide as another), or (`value`
         /// not 0) one longer than the other by `value`: `a` the longer
         /// when `side` is 1, `b` when it is -1 (never a negative value).
@@ -270,6 +275,7 @@ pub fn refs(c: Constraint, buf: *[4]Ref) []const Ref {
             add(buf, &n, .{ .geom = an.a });
             add(buf, &n, .{ .geom = an.b });
         },
+        .equal_angle => |e| for ([_]GeomId{ e.a, e.b, e.c, e.d }) |g| add(buf, &n, .{ .geom = g }),
         .equal_distance => |e| for ([2]Span{ e.a, e.b }) |sp| switch (sp) {
             .points, .x, .y => |ps| {
                 add(buf, &n, .{ .point = ps[0] });
@@ -309,6 +315,7 @@ pub fn refersTo(c: Constraint, g: GeomId) bool {
         .line_distance => |d| d.p.geom == g or d.line == g,
         .radius => |r| r.g == g,
         inline .angle, .parallel, .perpendicular, .tangent, .equal => |an| an.a == g or an.b == g,
+        .equal_angle => |e| e.a == g or e.b == g or e.c == g or e.d == g,
         .equal_distance => |e| spanRefers(e.a, g) or spanRefers(e.b, g),
         .symmetric => |sy| sy.p.geom == g or sy.q.geom == g or (sy.line != null and sy.line.? == g) or (sy.point != null and sy.point.?.geom == g),
     };
@@ -535,6 +542,15 @@ pub const Local = struct {
                 } else out[0] = (try l.segLength(e.a)).sub(try l.segLength(e.b));
             },
             .equal_distance => |e| out[0] = (try l.span(e.a)).sub(try l.span(e.b)).scale(e.side).sub(D.c(e.value)),
+            .equal_angle => |e| {
+                // sin(phi1 - phi2), each phi from its first direction to
+                // its second (unit directions).
+                const da = try l.direction(e.a);
+                const db = try l.direction(e.b);
+                const dc = try l.direction(e.c);
+                const dd = try l.direction(e.d);
+                out[0] = da.cross(db).mul(dc.dot(dd)).sub(da.dot(db).mul(dc.cross(dd)));
+            },
             .symmetric => |sy| {
                 const pp = try l.ref(sy.p);
                 const q = try l.ref(sy.q);

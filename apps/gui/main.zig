@@ -27886,6 +27886,44 @@ fn skShownValue(c: skl.Constraint) ?f64 {
     };
 }
 
+/// Where an angle between two segments is marked: inside the corner
+/// where their nearest ends meet, a little way towards their middles.
+fn skCornerAnchor(s: *const skl.Sketch, a: skl.GeomId, b: skl.GeomId) ?geom.Point {
+    if (a >= s.geometry.items.len or b >= s.geometry.items.len) return null;
+    const sa = switch (s.geometry.items[a].kind) {
+        .segment => |sg| [2]geom.Point{ skVal(s, sg.a), skVal(s, sg.b) },
+        else => return null,
+    };
+    const sb = switch (s.geometry.items[b].kind) {
+        .segment => |sg| [2]geom.Point{ skVal(s, sg.a), skVal(s, sg.b) },
+        else => return null,
+    };
+    var q = skMid(sa[0], sb[0]);
+    var bd: f64 = std.math.inf(f64);
+    for (sa) |pa| for (sb) |pb| {
+        const d = skDist(pa, pb);
+        if (d < bd) {
+            bd = d;
+            q = skMid(pa, pb);
+        }
+    };
+    const m = skMid(skMid(sa[0], sa[1]), skMid(sb[0], sb[1]));
+    return .{ .x = q.x + 0.4 * (m.x - q.x), .y = q.y + 0.4 * (m.y - q.y) };
+}
+
+/// What equal angles come to now (degrees, 0 to 180): the second
+/// angle's reading, as lines (modulo a half turn).
+fn skEqualAngle(c: skl.Constraint) ?f64 {
+    const e = switch (c.kind) {
+        .equal_angle => |x| x,
+        else => return null,
+    };
+    const it = skItem() orelse return null;
+    var v = it.sketch.measure(.{ .kind = .{ .angle = .{ .a = e.c, .b = e.d, .value = 0 } } }) orelse return null;
+    if (v < 0) v += std.math.pi;
+    return v * 180 / std.math.pi;
+}
+
 fn skFromShown(c: skl.Constraint, v: f64) f64 {
     return switch (c.kind) {
         .angle => v * std.math.pi / 180,
@@ -27913,7 +27951,15 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .equal => "Equal",
         .symmetric => "Symmetric",
         .equal_distance => "Equal distance",
+        .equal_angle => "Equal angles",
     };
+    // Implied: shown, not solved (it follows from the rest).
+    if (!c.driving and !c.isDimension()) {
+        if (c.kind == .equal_angle) if (skEqualAngle(c)) |v| return std.fmt.bufPrint(buf, "{s}, implied ({d:.3}°)", .{ name, v }) catch name;
+        return std.fmt.bufPrint(buf, "{s}, implied", .{name}) catch name;
+    }
+    // Equal angles: what they come to, followed (in parentheses).
+    if (c.kind == .equal_angle) if (skEqualAngle(c)) |v| return std.fmt.bufPrint(buf, "{s} ({d:.3}°)", .{ name, v }) catch name;
     if (skShownValue(c)) |v| {
         const u = if (c.kind == .angle) "°" else unit;
         // A reference dimension in parentheses; an expression before what
@@ -28061,6 +28107,8 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
         .radius => |r| curveMid(s, r.g),
         .angle => |a| curveMid(s, a.b),
         inline .parallel, .perpendicular, .tangent, .equal => |a| curveMid(s, a.b),
+        // Within the corner of its second angle.
+        .equal_angle => |e| skCornerAnchor(s, e.c, e.d),
         .symmetric => |sy| skMid(s.point(sy.p) catch return null, s.point(sy.q) catch return null),
         .equal_distance => |e| switch (e.b) {
             .points, .x, .y => |ps| skMid(s.point(ps[0]) catch return null, s.point(ps[1]) catch return null),
@@ -28525,6 +28573,8 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 colour = colors.overflow.opacity(0.6);
             };
         }
+        // Implied (not solved: it follows from the rest), fainter.
+        if (!c.driving and !c.isDimension()) colour = colour.opacity(0.55);
         if (skSelected(.{ .constraint = @intCast(ci) })) colour = colors.select;
         var tb: [64]u8 = undefined;
         const text: []const u8 = switch (c.kind) {
@@ -28539,9 +28589,21 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             .parallel => "||",
             .perpendicular => "perp",
             .tangent => "tan",
-            .equal => "=",
+            // Equal sides: each its current length (in parentheses: it
+            // follows from the equality).
+            .equal => |e| blk: {
+                const g = s.geometry.items[e.b];
+                if (g.kind != .segment) break :blk "=";
+                const p0 = s.point(.{ .geom = e.b, .role = .start }) catch break :blk "=";
+                const p1 = s.point(.{ .geom = e.b, .role = .end }) catch break :blk "=";
+                break :blk std.fmt.bufPrint(&tb, "=({d:.2})", .{skDist(p0, p1) * docUnits().perMm()}) catch "=";
+            },
             .symmetric => "sym",
             .equal_distance => "=",
+            .equal_angle => blk: {
+                const v = skEqualAngle(c) orelse break :blk "∠=";
+                break :blk std.fmt.bufPrint(&tb, "∠=({d:.1}°)", .{v}) catch "∠=";
+            },
             .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
                 const v = skShownValue(c).?;
                 const u: []const u8 = if (c.kind == .angle) "°" else "";
@@ -29208,6 +29270,7 @@ fn skConstraintIcon(c: skl.Constraint) icons.GIcon {
         .perpendicular => .con_perpendicular,
         .tangent => .con_tangent,
         .equal => .con_equal,
+        .equal_angle => .con_angle,
         .equal_distance => .con_equal_distance,
         .symmetric => .con_symmetric,
     };
