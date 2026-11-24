@@ -676,3 +676,11 @@ Travis: "start with lib linenoise standard key combos"; in text they win over Gr
 - Ctrl+D delete forward; Ctrl+H delete back; Ctrl+W the word before; Ctrl+K to the line's end (at its end, the break after it); Ctrl+U the whole displayed line; Ctrl+T swap the characters before and at the cursor (plain text only).
 - Displaced: select all is Ctrl+Shift+A off macOS (Cmd+A on a Mac); a digraph is Ctrl+Shift+K in a flow. New file, new view and close view (Ctrl+N, E/T, W) work outside text.
 - How: an inner mode's binding now wins over `global`'s (`keymap.shadowed`), and a text editor's mode over the generic `text-entry` (`keymap.takenByEditor`). Motions are worked out once (`motionStop` in main.zig) for moving, selecting and deleting; to move into `lib/layout/caret.zig` with the rest of the proposal (https://claude.ai/artifact/BAvjtgzmK21F4RVpxVLgz2).
+
+## Sorts and cases (2026-11-24)
+
+Travis's terms: a **sort** is a unit typed into a flow and taken out whole (a glyph, a tile, a blank); a **case** puts sorts on the keyboard's keys while typing in a flow, Shift or Caps Lock giving the upper case.
+
+- Model (`lib/layout/model.zig`): `Sort` (text, tile of a prototype or the track's own, blank; a length in units or as the prototype's nth size, `SortSize`), `CaseKey` (a key's unshifted character, its lower and upper sorts), `Case`, `Model.cases` (saved with the document by reflection), `builtin_cases` (Graven's own: Tiles, the digits typing the track's first ten tile lengths and Shift with them blanks of one to ten steps: the keyboard tile entry of 2026-11-18 back). History: `addCase`, `setCaseKey`, `splitAt` (a run split where a sort goes in).
+- Keys (mode `canvas.flow`): Ctrl+Space, then a digit (0: plain text; 1…: Graven's cases, then the document's), or Space for the case before (so Ctrl+Space, Space switches between two), Esc to cancel; any other key ends the choosing. While a case is active a tag by the caret names it; characters it has no sort for type as text.
+- Not built yet: a window to make and edit a document's cases (a keyboard of lower and upper sorts, a tile or glyph put on a key); text sorts of several characters as one unit.

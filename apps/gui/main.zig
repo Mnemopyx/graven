@@ -2520,6 +2520,7 @@ fn frame() !dvui.App.Result {
     caret_mark = null;
     defer {
         digraphHint();
+        caseHint();
         text_wanted = dvui.currentWindow().textInputRequested();
     }
 
@@ -12287,6 +12288,7 @@ fn updateModeStack() void {
         if (constrain_menu != null) push(&st, &n, kmode("canvas.constrain-menu"));
         if (constrain_objects_menu) push(&st, &n, kmode("canvas.constrain-objects"));
         if (track_cursor != null) push(&st, &n, kmode("canvas.flow"));
+        if (track_cursor != null and case_picker) push(&st, &n, kmode("canvas.flow.case-picker"));
         if (canvas_eq) |q| {
             push(&st, &n, kmode("canvas.equation"));
             if (q.head != null) push(&st, &n, kmode("canvas.equation.head"));
@@ -12719,14 +12721,14 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
         }
         // Typing at the flow cursor goes into the flow.
-        if (e.evt == .text and !e.handled and track_cursor != null and !canvas_prompt and cursorKeysReach()) {
+        if (e.evt == .text and !e.handled and track_cursor != null and !case_picker and !canvas_prompt and cursorKeysReach()) {
             const txt = switch (e.evt.text.action) {
                 .value => |v| v.txt,
                 else => "",
             };
             if (txt.len > 0 and txt[0] >= ' ') {
                 e.handle(@src(), box.data());
-                typeIntoFlow(txt);
+                if (caseSort(txt)) |sort| insertSort(sort) else typeIntoFlow(txt);
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
             }
@@ -12785,7 +12787,21 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
         // The flow cursor's keys, while the canvas or the palette has the
         // keyboard: never from a text entry.
         if (track_cursor != null and cursorKeysReach()) {
-            if (if (keymap.match1(e, kmode("canvas.flow"))) |inv| flowAction(inv) else false) {
+            // Choosing a case: its keys first; any other key ends it.
+            const picker = [_]keymap.ModeId{ kmode("canvas.flow.case-picker"), kmode("canvas.flow") };
+            const in: []const keymap.ModeId = if (case_picker) &picker else picker[1..];
+            const inv = keymap.match(e, in);
+            // (A printable key's own key-down is left: its text follows;
+            // so are the modifiers.)
+            const ends = switch (e.evt) {
+                .text => true,
+                .key => |k| k.action == .down and !keymap.printable(k.code) and !isModifierKey(k.code),
+                else => false,
+            };
+            if (case_picker and !e.handled and ends) {
+                if (inv == null or !keymap.actionUnder(inv.?.action, "canvas.flow.case-picker")) case_picker = false;
+            }
+            if (if (inv) |v| flowAction(v) else false) {
                 e.handle(@src(), box.data());
                 dvui.refresh(null, @src(), box.data().id);
                 continue;
@@ -20762,6 +20778,17 @@ fn flowAction(inv: keymap.Invocation) bool {
             deleteFlowTo(c, .{ .index = from.index, .offset = from.offset });
         },
         kact("canvas.flow.transpose") => transposeChars(c),
+        kact("canvas.flow.choose-case") => case_picker = true,
+        kact("canvas.flow.case-picker.pick") => {
+            case_picker = false;
+            const n: usize = @intCast(inv.arg);
+            chooseCase(if (n == 0) null else if (caseAt(n - 1) != null) n - 1 else return true);
+        },
+        kact("canvas.flow.case-picker.previous") => {
+            case_picker = false;
+            chooseCase(prev_case);
+        },
+        kact("canvas.flow.case-picker.cancel") => case_picker = false,
         kact("canvas.flow.delete-forward") => {
             if (deleteFlowSelection()) return true;
             const to = charAfterCursor(c, len) orelse return true;
@@ -20818,6 +20845,138 @@ fn deleteFlowSelection() bool {
     const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, sel[0], sel[1] }) catch return true;
     setFlowPos(pos);
     return true;
+}
+
+// Cases of sorts ------------------------------------------------------------
+//
+// A case puts sorts on the keyboard's keys while typing in a flow (see
+// `layout.model.Case`): Ctrl+Space, then a digit, chooses one (0: plain
+// text); Space instead goes back to the case before, so Ctrl+Space, Space
+// switches between two.
+
+fn isModifierKey(k: dvui.enums.Key) bool {
+    return switch (k) {
+        .left_control, .right_control, .left_shift, .right_shift, .left_alt, .right_alt, .left_command, .right_command => true,
+        else => false,
+    };
+}
+
+/// The case the keys type from (an index into Graven's cases, then the
+/// document's), null for plain text; the one before it.
+var active_case: ?usize = null;
+var prev_case: ?usize = null;
+/// Whether Ctrl+Space was pressed and a case is being chosen.
+var case_picker = false;
+
+/// Case `i`: Graven's own first, then the document's.
+fn caseAt(i: usize) ?layout.model.Case {
+    const b = layout.model.builtin_cases;
+    if (i < b.len) return b[i];
+    const d = state.model.cases.items;
+    return if (i - b.len < d.len) d[i - b.len] else null;
+}
+
+fn caseCount() usize {
+    return layout.model.builtin_cases.len + state.model.cases.items.len;
+}
+
+fn chooseCase(i: ?usize) void {
+    if (i == active_case) return;
+    prev_case = active_case;
+    active_case = i;
+}
+
+/// The sort typed text `txt` stands for in the active case, if any.
+fn caseSort(txt: []const u8) ?layout.model.Sort {
+    const i = active_case orelse return null;
+    const c = caseAt(i) orelse return null;
+    if (txt.len != 1) return null;
+    return c.sortFor(txt[0]);
+}
+
+/// Puts `sort` in at the flow cursor (over the selection; a run it is in
+/// split there), the cursor after it.
+fn insertSort(sort: layout.model.Sort) void {
+    if (sort == .text) return typeIntoFlow(sort.text);
+    _ = deleteFlowSelection();
+    const c = track_cursor orelse return;
+    const pal = paletteFor(c.parent, c.region) orelse return;
+    const index = act(.splitAt, .{ c.parent, c.region, flowPos(c) }) catch return;
+    setFlowPos(.{ .index = index });
+    switch (sort) {
+        .text => unreachable,
+        .tile => |t| {
+            const proto = if (t.prototype) |p| (if (state.model.protoIndex(p) != null) p else pal.prototype) else pal.prototype;
+            const size = switch (t.size) {
+                .units => |u| u,
+                .step => |k| if (k < pal.tile_count) pal.tiles[k] else return,
+            };
+            _ = act(.insertTile, .{ c.parent, c.region, index, proto, size }) catch return;
+        },
+        .blank => |b| {
+            const size = switch (b) {
+                .units => |u| u,
+                .step => |k| if (k < pal.blanks.len) pal.blanks[k] else return,
+            };
+            const r = state.model.regionsIn(c.parent)[c.region];
+            const unit = state.model.proto(pal.prototype).unitIn(r.pitch);
+            _ = act(.insertBlank, .{ c.parent, c.region, index, size * unit / r.pitch }) catch return;
+        },
+    }
+    setFlowPos(.{ .index = index + 1 });
+}
+
+/// By the caret while a case is active: its name; while one is chosen,
+/// the cases with their digits.
+fn caseHint() void {
+    if (track_cursor == null) {
+        case_picker = false;
+        return;
+    }
+    if (!case_picker and active_case == null) return;
+    const S = struct {
+        var shown: u64 = 0;
+    };
+    const key: u64 = (if (case_picker) @as(u64, 1) else 0) | (@as(u64, active_case orelse 0xff) << 1) | (@as(u64, caseCount()) << 10);
+    if (key != S.shown) dvui.refresh(null, @src(), null);
+    S.shown = key;
+    const a = dvui.currentWindow().arena();
+    const font = ghost_pane.fieldFont();
+    var lines: std.ArrayList([]const u8) = .empty;
+    if (case_picker) {
+        lines.append(a, "Case: a digit, Space for the one before, Esc to cancel") catch {};
+        lines.append(a, if (active_case == null) "0  Text  (now)" else "0  Text") catch {};
+        for (0..@min(caseCount(), 9)) |i| {
+            const c = caseAt(i).?;
+            lines.append(a, std.fmt.allocPrint(a, "{d}  {s}{s}", .{ i + 1, c.name, if (active_case == i) "  (now)" else "" }) catch "") catch {};
+        }
+    } else {
+        const c = caseAt(active_case.?) orelse return;
+        lines.append(a, std.fmt.allocPrint(a, "Case: {s}", .{c.name}) catch "") catch {};
+    }
+    const line_h = font.textHeight() + 6;
+    var w: f32 = 0;
+    for (lines.items) |l| w = @max(w, font.textSize(l).w);
+    w += 24;
+    const h: f32 = 10 + line_h * @as(f32, @floatFromInt(lines.items.len));
+    const cm = caret_mark orelse return;
+    const ns = dvui.windowNaturalScale();
+    const win = dvui.windowRect();
+    // Above the caret (a digraph's hint goes below it).
+    const y = if (cm.y / ns - h - 8 >= 0) cm.y / ns - h - 8 else (cm.y + cm.h) / ns + 8;
+    const at: dvui.Rect.Natural = .{ .x = @min(@max(0, cm.x / ns - 16), @max(0, win.w - w)), .y = y, .w = w, .h = h };
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{ .stay_above_parent = false, .mouse_events = false }, .{
+        .rect = .{ .x = at.x, .y = at.y, .w = at.w, .h = at.h },
+        .background = true,
+        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
+        .border = .all(1),
+        .corners = .all(6),
+        .padding = .all(4),
+    });
+    defer fw.deinit();
+    dvui.raiseSubwindow(fw.data().id);
+    for (lines.items, 0..) |l, i| dvui.labelNoFmt(@src(), l, .{}, .{ .id_extra = i, .font = font, .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 } });
 }
 
 /// Deletes between the cursor and `to` (either side of it).

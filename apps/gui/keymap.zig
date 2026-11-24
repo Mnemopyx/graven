@@ -46,6 +46,9 @@ pub const modes = [_]M{
     // while their pop-up is open.
     .{ .name = "canvas.constrain-objects", .kind = .sub, .parent = "canvas", .allows = &.{"constrain-objects"} },
     .{ .name = "canvas.flow", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.flow"} },
+    // Choosing a case (Ctrl+Space in a flow): a digit picks one, Space goes
+    // back to the case before.
+    .{ .name = "canvas.flow.case-picker", .kind = .sub, .lifetime = .until_left, .parent = "canvas.flow", .takes_text = true, .allows = &.{"canvas.flow.case-picker"} },
     .{ .name = "canvas.equation", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.equation"} },
     .{ .name = "canvas.equation.head", .kind = .sub, .parent = "canvas.equation", .allows = &.{"canvas.equation.head"} },
     // The expression line under the canvas.
@@ -210,6 +213,10 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.flow.delete-line", .repeat = true },
     .{ .name = "canvas.flow.delete-word-back", .repeat = true },
     .{ .name = "canvas.flow.transpose", .repeat = true },
+    .{ .name = "canvas.flow.choose-case" },
+    .{ .name = "canvas.flow.case-picker.pick", .param = .int },
+    .{ .name = "canvas.flow.case-picker.previous" },
+    .{ .name = "canvas.flow.case-picker.cancel" },
     .{ .name = "canvas.flow.leave" },
 
     .{ .name = "canvas.equation.leave" },
@@ -461,6 +468,22 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow", .chord = "ctrl+n", .action = "canvas.flow.caret.line-down" },
     .{ .mode = "canvas.flow", .chord = "ctrl+k", .action = "canvas.flow.delete-line-end" },
     .{ .mode = "canvas.flow", .chord = "ctrl+t", .action = "canvas.flow.transpose" },
+    // Cases of sorts: Ctrl+Space, then a digit (0: plain text) or Space
+    // (the case before) or Esc.
+    .{ .mode = "canvas.flow", .chord = "ctrl+space", .action = "canvas.flow.choose-case" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "ctrl+space", .action = "canvas.flow.case-picker.previous" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char: ", .action = "canvas.flow.case-picker.previous" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "escape", .action = "canvas.flow.case-picker.cancel" },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:0", .action = "canvas.flow.case-picker.pick", .arg = 0 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:1", .action = "canvas.flow.case-picker.pick", .arg = 1 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:2", .action = "canvas.flow.case-picker.pick", .arg = 2 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:3", .action = "canvas.flow.case-picker.pick", .arg = 3 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:4", .action = "canvas.flow.case-picker.pick", .arg = 4 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:5", .action = "canvas.flow.case-picker.pick", .arg = 5 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:6", .action = "canvas.flow.case-picker.pick", .arg = 6 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:7", .action = "canvas.flow.case-picker.pick", .arg = 7 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:8", .action = "canvas.flow.case-picker.pick", .arg = 8 },
+    .{ .mode = "canvas.flow.case-picker", .chord = "char:9", .action = "canvas.flow.case-picker.pick", .arg = 9 },
     .{ .mode = "canvas.flow", .chord = "ctrl+w", .action = "canvas.flow.delete-word-back" },
     .{ .mode = "canvas.flow", .chord = "ctrl+b", .action = "canvas.flow.caret.char-left" },
     .{ .mode = "canvas.flow", .chord = "ctrl+f", .action = "canvas.flow.caret.char-right" },
@@ -559,6 +582,11 @@ pub const ActionId = R.ActionId;
 pub const ModeId = R.ModeId;
 
 /// The action named `name` (checked when built).
+/// Whether action `a`'s name is `prefix` or under it.
+pub fn actionUnder(a: ActionId, prefix: []const u8) bool {
+    return actions.under(R.actionName(a), prefix);
+}
+
 pub fn act(comptime name: []const u8) ActionId {
     return comptime R.action(name);
 }

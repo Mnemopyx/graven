@@ -179,6 +179,80 @@ pub const ParagraphAlign = enum { start, centre, end, justify };
 /// See `ParagraphStyle.tall`.
 pub const TallContent = enum { around, move, fixed };
 
+/// A sort: one unit typed into a flow and taken out of it whole, as a
+/// piece of hand-set type was (Travis, 2026-11-24). Sorts are kept in
+/// cases, a keyboard's worth each (see `Case`).
+pub const Sort = union(enum) {
+    /// Text, set as typed (a glyph, usually).
+    text: []const u8,
+    /// A tile of `prototype` (null: the track's own), as long along its
+    /// track as `size`.
+    tile: struct { prototype: ?PrototypeId = null, size: SortSize },
+    /// A blank (space between tiles), as long as `size`.
+    blank: SortSize,
+};
+
+/// A sort's length along its track: `units` of its prototype's unit, or
+/// the `step`th length its prototype offers (0: the first; for a blank,
+/// `step` + 1 of the prototype's steps), so one case serves every track.
+pub const SortSize = union(enum) {
+    units: f64,
+    step: u8,
+};
+
+/// One key of a case: the character the key types unshifted (`key`; a
+/// letter in lower case), its sort, and the sort its upper case (Shift or
+/// Caps Lock) types.
+pub const CaseKey = struct {
+    key: u8,
+    lower: ?Sort = null,
+    upper: ?Sort = null,
+};
+
+/// A case: sorts on the keys of the keyboard, chosen while typing in a
+/// flow so the keys type them. A document keeps its own; Graven has
+/// `builtin_cases`.
+pub const Case = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    keys: []const CaseKey = &.{},
+
+    /// The sort typed character `ch` stands for in this case, if any: a
+    /// key's lower sort for its own character, its upper one for the
+    /// character Shift makes of it (on a US keyboard) or a capital.
+    pub fn sortFor(c: Case, ch: u8) ?Sort {
+        for (c.keys) |k| {
+            if (k.key == ch) return k.lower;
+            if (shifted(k.key) == ch) return k.upper;
+        }
+        return null;
+    }
+
+    /// The character Shift makes of `ch` on a US keyboard.
+    pub fn shifted(ch: u8) u8 {
+        if (ch >= 'a' and ch <= 'z') return ch - 32;
+        const lower = "1234567890-=[]\\;',./`";
+        const upper = "!@#$%^&*()_+{}|:\"<>?~";
+        if (std.mem.indexOfScalar(u8, lower, ch)) |i| return upper[i];
+        return ch;
+    }
+};
+
+/// Graven's own cases. Tiles: the digits type the track's tiles, its
+/// first ten lengths; Shift and a digit, blanks of one to ten steps (the
+/// keyboard tile entry of before, 2026-11-18).
+pub const builtin_cases = [_]Case{.{ .name = "Tiles", .keys = &tiles_keys }};
+
+const tiles_keys = blk: {
+    var ks: [10]CaseKey = undefined;
+    for ("1234567890", 0..) |ch, i| ks[i] = .{
+        .key = ch,
+        .lower = .{ .tile = .{ .size = .{ .step = i } } },
+        .upper = .{ .blank = .{ .step = i } },
+    };
+    break :blk ks;
+};
+
 pub const ParagraphStyle = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -1870,6 +1944,9 @@ pub const Model = struct {
     /// Style templates, which new flows' styles are copied from (see
     /// `StyleTemplate`); the first is the Default.
     templates: std.ArrayList(StyleTemplate) = .empty,
+    /// The document's cases of sorts (see `Case`; Graven's own are
+    /// `builtin_cases`).
+    cases: std.ArrayList(Case) = .empty,
     /// The flows: content and the tracks it runs through (see `Flow`).
     flows: std.ArrayList(Flow) = .empty,
     /// Legend sheets: keypads' slot content as tables (see `LegendSheet`).
@@ -6459,6 +6536,56 @@ pub const Model = struct {
         const eff = here orelse f.paragraph_default orelse return here;
         const next = (m.paraStyle(eff) orelse return here).next orelse return here;
         return if (next == f.paragraph_default) null else next;
+    }
+
+    /// Adds an empty case named `name`; its ID.
+    pub fn addCase(m: *Model, name: []const u8) Error!ObjectId {
+        const id = m.newId();
+        try m.cases.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name) });
+        m.revision += 1;
+        return id;
+    }
+
+    /// Puts `sort` (null: none) on key `key` of case `id`, its lower or
+    /// upper case.
+    pub fn setCaseKey(m: *Model, id: ObjectId, key: u8, upper: bool, sort: ?Sort) Error!void {
+        const c = for (m.cases.items) |*c| {
+            if (c.id == id) break c;
+        } else return error.NoSuchObject;
+        var s = sort;
+        if (s) |*v| if (v.* == .text) {
+            v.text = try m.a().dupe(u8, v.text);
+        };
+        var keys = try m.a().alloc(CaseKey, c.keys.len + 1);
+        @memcpy(keys[0..c.keys.len], c.keys);
+        var n = c.keys.len;
+        const at = for (keys[0..n], 0..) |k, i| {
+            if (k.key == key) break i;
+        } else blk: {
+            keys[n] = .{ .key = key };
+            n += 1;
+            break :blk n - 1;
+        };
+        if (upper) keys[at].upper = s else keys[at].lower = s;
+        c.keys = keys[0..n];
+        m.revision += 1;
+    }
+
+    /// Splits the run at `at` when `at` is inside one: where an item put
+    /// in at `at` goes (the index after the run, or `at`'s own).
+    pub fn splitAt(m: *Model, parent: Parent, region: usize, at: FlowPos) Error!usize {
+        if (at.offset == 0) return at.index;
+        const r = m.runAt(parent, region, at.index) orelse return at.index;
+        if (at.offset < r.content.len) {
+            var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+            defer scratch.deinit();
+            if (try edit_.splitAt(scratch.allocator(), r.content, at.offset)) |parts| {
+                const style = r.style;
+                r.content = try m.a().dupe(u8, parts[0]);
+                try m.place(parent, region, at.index + 1, .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, parts[1]) } } });
+            }
+        }
+        return at.index + 1;
     }
 
     pub fn breakAt(m: *Model, parent: Parent, region: usize, at: FlowPos, paragraph: bool) Error!FlowPos {
