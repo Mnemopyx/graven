@@ -14555,7 +14555,7 @@ fn dispatchButtons() void {
 }
 
 /// The button actions `runButtonAction` handles in its own switch.
-const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-tiles", "panel.name-tiles", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel", "flow-style.reset-from-template", "flow-style.save-as-template" };
+const switch_handled = [_][]const u8{ "track.make-tracks", "track.remove", "track.name-tiles", "panel.name-tiles", "track.flow.show", "track.flow.join-after", "track.flow.take-out", "flows.new", "flow.remove", "panel.edit", "panel.release", "dialog.confirm", "dialog.cancel", "flow-style.update-style-for-all-flows", "flow-style.clear-overrides", "flow-style.save-as-template" };
 
 /// Whether a button's action has a handler (every one should: a test
 /// checks).
@@ -14602,7 +14602,8 @@ fn runButtonAction(inv: keymap.Invocation) bool {
             else => return false,
         },
         kact("panel.release") => panelRelease(),
-        kact("flow-style.reset-from-template") => flowStyleReset(),
+        kact("flow-style.update-style-for-all-flows") => flowStyleUpdateAll(),
+        kact("flow-style.clear-overrides") => flowStyleClear(),
         kact("flow-style.save-as-template") => flowStyleSaveTemplate(),
         kact("dialog.confirm"), kact("dialog.cancel") => dialog_answer = inv.action,
         else => {
@@ -17688,8 +17689,17 @@ fn propName(name: []const u8) void {
     // The unit its label names, if any: the field drawn next takes any
     // unit of that kind (see `units`, the one path for typed units).
     accepted.label_unit = layout.units.ofLabel(name);
-    dvui.labelNoFmt(@src(), name, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
+    // Marked as an override (FrameMaker's asterisk): its value differs
+    // from the style it overrides.
+    const marked = prop_marked;
+    prop_marked = false;
+    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{name}) catch name else name;
+    const col = if (marked) dvui.Color{ .r = 0xff, .g = 0xc0, .b = 0x60 } else dvui.themeGet().color(.control, .text).opacity(0.65);
+    dvui.labelNoFmt(@src(), shown, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = col } });
 }
+
+/// The next `propName` is marked as an override.
+var prop_marked = false;
 
 /// The worksheet's editable properties: its name (a short description for
 /// reference, separate from the file name), and its sheet as a
@@ -18356,11 +18366,12 @@ fn trackFlowProperties(pi: usize, ri: usize) !void {
 /// A paragraph style's settings as fields (alignment, indents, first
 /// line, space before and after, extra between lines), into `ps`; whether
 /// one changed. `n` sets them apart from another set in the same pane.
-fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize) bool {
+fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layout.model.ParagraphStyle) bool {
     var changed = false;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 904 + n });
         defer row.deinit();
+        prop_marked = if (ref) |r| r.alignment != ps.alignment else false;
         propName("Lines");
         const names = [_][]const u8{ "From the start", "Centred", "Back from the end", "Justified" };
         var choice: usize = @intFromEnum(ps.alignment);
@@ -18381,10 +18392,31 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize) bool {
     inline for (fields, 0..) |f, k| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 910 + k + n });
         defer row.deinit();
+        prop_marked = if (ref) |r| @abs(@field(r, f.field) - @field(ps, f.field)) > 1e-9 else false;
         propName(f.name);
         const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
         if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k + n })) |nv| {
             @field(ps, f.field) = nv / pt_per_mm;
+            changed = true;
+        }
+    }
+    // The style Enter gives the paragraph after (FrameMaker's Next ¶ Tag).
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 920 + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.next != ps.next else false;
+        propName("Next paragraph");
+        const styles = state.model.paragraph_styles.items;
+        const a = dvui.currentWindow().arena();
+        const names = a.alloc([]const u8, styles.len + 1) catch return changed;
+        names[0] = "The same";
+        var choice: usize = 0;
+        for (styles, names[1..], 1..) |st, *nm, k| {
+            nm.* = st.name;
+            if (ps.next == st.id) choice = k;
+        }
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 920 + n })) {
+            ps.next = if (choice == 0) null else styles[choice - 1].id;
             changed = true;
         }
     }
@@ -18434,7 +18466,7 @@ fn paragraphProperties(pi: usize, ri: usize) !void {
         _ = try actM(mergeKey(.{ "paragraph style", cid }), .setParagraphStyle, .{ cid, ps });
         return;
     };
-    const changed = paragraphFields(&ps, 0);
+    const changed = paragraphFields(&ps, 0, null);
     if (changed) {
         if (current) |cid| {
             _ = try actM(mergeKey(.{ "paragraph style", cid }), .setParagraphStyle, .{ cid, ps });
@@ -18661,27 +18693,31 @@ fn followLeading() void {
         if (state.model.styleIndex(sid) == null) continue;
         const fl = state.model.trackFlow(pi, ri);
         const flow_styled = if (fl) |f| f.style != .none else false;
-        if (flow_styled and fl.?.leading == null) {
+        const flow_lead = if (fl) |f| state.model.flowLeading(f) else null;
+        if (flow_styled and flow_lead == null) {
             // The flow style's leading is its font's own: auto.
             if (styleLinePitch(sid)) |lp| if (rg.leading != null or @abs(lp - rg.pitch) > 1e-6) {
                 _ = hist.join(&state.model, .setLeading, .{ pi, ri, null, lp }) catch {};
             };
             continue;
         }
-        const lead = if (flow_styled) fl.?.leading else rg.leading;
+        const lead = if (flow_styled) flow_lead else rg.leading;
         const want = if (lead) |l| (l.resolve(styleEmMm(sid)) orelse continue) else continue;
         if (!(want > 0.01) or @abs(want - rg.pitch) < 1e-9) continue;
         _ = hist.join(&state.model, .setLeading, .{ pi, ri, lead, want }) catch {};
     };
 }
 
-// Style templates and flow styles (decided 2026-11-23, the owner) --------
+// Style templates and flow styles (decided 2026-11-23, the owner; shared
+// styles with overrides, after FrameMaker's catalogs, the same evening) --
 //
-// Every new flow has a style copied from a style template; a document has a
-// Default one. A flow's style (its text style, the paragraph settings its
-// paragraphs in no style of their own take, its leading) is its own:
-// changing it re-sets the whole flow; changing a template later leaves the
-// flows made from it as they are.
+// A document has style templates, Default first. A template holds a text
+// style, a paragraph style and a leading: the document's own, shared by
+// every flow made from it, so changing them changes all those flows. A
+// flow may override them (Properties, Flow style: fields marked *): a text
+// style of its own based on the template's, a copy of its paragraph style,
+// a leading of its own. "Update style for all flows" puts a flow's
+// overrides into its template; "Clear overrides" drops them.
 
 /// The Default style template, made (in the step under way) when the
 /// document has none: the label style, a paragraph style of plain
@@ -18693,21 +18729,15 @@ fn defaultTemplate() !layout.model.ObjectId {
     return try hist.join(&state.model, .addStyleTemplate, .{ "Default", text, @as(?layout.model.ParaId, para), @as(?layout.model.Leading, null) });
 }
 
-/// Gives the flow of text layout `ri` of panel `pi` a style copied from
-/// template `tid` (null: the Default), joined to the step under way.
+/// Gives the flow of text layout `ri` of panel `pi` the styles of
+/// template `tid` (null: the Default), with no overrides, joined to the
+/// step under way.
 fn styleFlowFrom(pi: usize, ri: usize, tid: ?layout.model.ObjectId) !void {
     const m = &state.model;
-    const fl = m.trackFlow(pi, ri) orelse return;
-    const fid = fl.id;
-    var nb: [96]u8 = undefined;
-    const fname = std.fmt.bufPrint(&nb, "{s}", .{fl.name}) catch "Flow";
+    const fid = (m.trackFlow(pi, ri) orelse return).id;
     const id = tid orelse try defaultTemplate();
     const t = (m.styleTemplate(id) orelse return).*;
-    var b1: [128]u8 = undefined;
-    const text = try hist.join(m, .copyStyle, .{ t.text, std.fmt.bufPrint(&b1, "{s} text", .{fname}) catch "Flow text" });
-    var b2: [128]u8 = undefined;
-    const para: ?layout.model.ParaId = if (t.paragraph) |p| try hist.join(m, .copyParagraphStyle, .{ p, std.fmt.bufPrint(&b2, "{s} paragraph", .{fname}) catch "Flow paragraph" }) else null;
-    _ = try hist.join(m, .setFlowStyle, .{ fid, text, para, t.leading, id });
+    _ = try hist.join(m, .setFlowStyle, .{ fid, t.text, t.paragraph, @as(?layout.model.Leading, null), id });
 }
 
 fn styleNewFlow(pi: usize, ri: usize) !void {
@@ -18722,21 +18752,115 @@ fn flowStyled(pi: usize, ri: usize) ?*const layout.model.Flow {
     return fl;
 }
 
-/// A style template: its name, and what it holds (a text style, a
-/// paragraph style and a leading, copied into each flow made from it).
+/// The template flow `fl` takes its styles from, if it has one.
+fn flowTemplate(fl: *const layout.model.Flow) ?layout.model.StyleTemplate {
+    return if (state.model.styleTemplate(fl.template)) |t| t.* else null;
+}
+
+/// What a flow overrides of its template.
+const Overrides = struct {
+    size: bool = false,
+    paragraph: bool = false,
+    leading: bool = false,
+
+    fn any(o: Overrides) bool {
+        return o.size or o.paragraph or o.leading;
+    }
+};
+
+fn flowOverrides(fl: *const layout.model.Flow) Overrides {
+    const m = &state.model;
+    const t = flowTemplate(fl) orelse return .{};
+    const para = if (fl.paragraph_default == t.paragraph) false else if (fl.paragraph_default) |own| (if (t.paragraph) |tp| (if (m.paraStyle(own)) |a| (if (m.paraStyle(tp)) |b| !paraSame(a.*, b.*) else true) else false) else true) else true;
+    return .{
+        .size = fl.style != t.text and m.styleIndex(t.text) != null and @abs(styleEmMm(fl.style) - styleEmMm(t.text)) > 1e-6,
+        .paragraph = para,
+        .leading = fl.leading != null,
+    };
+}
+
+/// Whether two paragraph styles set the same (their names aside).
+fn paraSame(a: layout.model.ParagraphStyle, b: layout.model.ParagraphStyle) bool {
+    var x = a;
+    const y = b;
+    x.name = y.name;
+    x.id = y.id;
+    return std.meta.eql(x, y);
+}
+
+/// Flow `fid`'s own text style: made (based on its template's, joined to
+/// the step under way) when it takes the template's.
+fn flowOwnText(fid: layout.model.ObjectId) !layout.model.StyleId {
+    const m = &state.model;
+    const fl = &m.flows.items[m.flowIndex(fid) orelse return error.NoSuchObject];
+    const t = flowTemplate(fl) orelse return fl.style;
+    if (fl.style != t.text) return fl.style;
+    var nb: [128]u8 = undefined;
+    const name = std.fmt.bufPrint(&nb, "{s} text", .{fl.name}) catch "Flow text";
+    // One made for it before and since let go, else a new one.
+    const own = blk: {
+        for (m.styles.items) |st| if (st.base == t.text and std.mem.eql(u8, st.name, name)) break :blk st.id;
+        break :blk try hist.join(m, .deriveStyle, .{ t.text, name });
+    };
+    const f2 = m.flows.items[m.flowIndex(fid).?];
+    _ = try hist.join(m, .setFlowStyle, .{ fid, own, f2.paragraph_default, f2.leading, f2.template });
+    return own;
+}
+
+/// Flow `fid`'s own paragraph style: a copy of its template's, made
+/// (joined to the step under way) when it takes the template's.
+fn flowOwnParagraph(fid: layout.model.ObjectId) !?layout.model.ParaId {
+    const m = &state.model;
+    const fl = &m.flows.items[m.flowIndex(fid) orelse return error.NoSuchObject];
+    const t = flowTemplate(fl) orelse return fl.paragraph_default;
+    if (fl.paragraph_default != t.paragraph) return fl.paragraph_default;
+    const src = t.paragraph orelse return null;
+    var nb: [128]u8 = undefined;
+    const name = std.fmt.bufPrint(&nb, "{s} paragraph", .{fl.name}) catch "Flow paragraph";
+    const own = blk: {
+        for (m.paragraph_styles.items) |ps| if (std.mem.eql(u8, ps.name, name)) break :blk ps.id;
+        break :blk try hist.join(m, .copyParagraphStyle, .{ src, name });
+    };
+    const f2 = m.flows.items[m.flowIndex(fid).?];
+    _ = try hist.join(m, .setFlowStyle, .{ fid, f2.style, @as(?layout.model.ParaId, own), f2.leading, f2.template });
+    return own;
+}
+
+/// A style template: its name, its text size, its leading and its
+/// paragraph settings, shared by every flow made from it (those that
+/// override one keep their own).
 fn templateProperties(id: layout.model.ObjectId) !void {
     const m = &state.model;
     const t = (m.styleTemplate(id) orelse return).*;
     if (textProp("Name", t.name, 1)) |name| _ = try act(.renameStyleTemplate, .{ id, name });
     if (m.styleIndex(t.text)) |si| propText("Text style", "{s}", .{m.styles.items[si].name}, 2);
-    if (t.paragraph) |p| if (m.paraStyle(p)) |ps| propText("Paragraph style", "{s}", .{ps.name}, 3);
-    var buf: [48]u8 = undefined;
-    propText("Leading", "{s}", .{if (t.leading) |l| l.format(&buf) else "auto"}, 4);
+    if (m.styleIndex(t.text) != null) try styleSizeProps(t.text, false);
+    {
+        var buf: [48]u8 = undefined;
+        const shown = if (t.leading) |l| l.format(&buf) else "auto";
+        if (textProp("Leading", shown, 4)) |typed| {
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
+                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) });
+            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
+                if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
+                    _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
+                } else state.status = "That leading is too small: baselines must be apart. ";
+            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the font's own). ";
+        }
+    }
+    if (t.paragraph) |pid| if (m.paraStyle(pid)) |p| {
+        var ps = p.*;
+        if (paragraphFields(&ps, 2000, null)) _ = try actM(mergeKey(.{ "paragraph style", pid }), .setParagraphStyle, .{ pid, ps });
+    };
     var n: usize = 0;
-    for (m.flows.items) |f| {
-        if (f.template == id) n += 1;
+    var own: usize = 0;
+    for (m.flows.items) |*f| {
+        if (f.template != id) continue;
+        n += 1;
+        if (flowOverrides(f).any()) own += 1;
     }
     propText("Flows made from it", "{d}", .{n}, 5);
+    propText("Flows overriding it", "{d}", .{own}, 6);
 }
 
 /// The track the flow-style buttons act on: the context's, else the
@@ -18748,49 +18872,93 @@ fn flowStyleTrack() ?struct { usize, usize } {
     };
 }
 
-/// Copies the flow's template again (Default when it has none), as one
-/// step.
-fn flowStyleReset() void {
-    const t = flowStyleTrack() orelse return;
-    const fl = flowStyled(t[0], t[1]) orelse return;
-    const m = &state.model;
-    hist.beginStep();
-    styleFlowFrom(t[0], t[1], if (fl.template != .none and m.styleTemplate(fl.template) != null) fl.template else null) catch {
-        state.status = "The flow style was not reset. ";
+/// Drops the flow's overrides: it takes its template's styles again.
+fn flowStyleClear() void {
+    const tr = flowStyleTrack() orelse return;
+    const fl = flowStyled(tr[0], tr[1]) orelse return;
+    const t = flowTemplate(fl) orelse {
+        state.status = "This flow has no template: Save as template makes one. ";
+        return;
     };
+    if (!flowOverrides(fl).any() and fl.style == t.text and fl.paragraph_default == t.paragraph) {
+        state.status = "This flow overrides nothing of its template. ";
+        return;
+    }
+    act(.setFlowStyle, .{ fl.id, t.text, t.paragraph, @as(?layout.model.Leading, null), t.id }) catch {
+        state.status = "The overrides were not cleared. ";
+        return;
+    };
+    state.status = "Overrides cleared: the flow takes its template's styles. ";
 }
 
-/// A new style template from the flow's style; the flow then names it.
-fn flowStyleSaveTemplate() void {
-    const t = flowStyleTrack() orelse return;
-    const fl = flowStyled(t[0], t[1]) orelse return;
+/// Puts the flow's overrides into its template (FrameMaker's Update All):
+/// every flow made from it that does not override them follows.
+fn flowStyleUpdateAll() void {
+    const tr = flowStyleTrack() orelse return;
+    const fl = flowStyled(tr[0], tr[1]) orelse return;
+    const t = flowTemplate(fl) orelse {
+        state.status = "This flow has no template: Save as template makes one. ";
+        return;
+    };
+    if (!flowOverrides(fl).any()) {
+        state.status = "This flow overrides nothing of its template. ";
+        return;
+    }
+    updateTemplate(fl.id, t) catch {
+        state.status = "The template was not updated. ";
+        return;
+    };
+    state.status = "Template updated: every flow made from it follows. ";
+}
+
+fn updateTemplate(fid: layout.model.ObjectId, t: layout.model.StyleTemplate) !void {
     const m = &state.model;
-    saveTemplate(m, fl) catch {
+    const f = m.flows.items[m.flowIndex(fid) orelse return];
+    hist.beginStep();
+    if (f.style != t.text) {
+        const own = m.textStyle(f.style).*;
+        if (own.em_size) |em| try hist.join(m, .setEmSize, .{ t.text, em }) else try hist.join(m, .setCapHeight, .{ t.text, own.cap_height });
+    }
+    if (f.paragraph_default) |pid| if (t.paragraph) |tp| if (pid != tp) {
+        if (m.paraStyle(pid)) |own| if (m.paraStyle(tp)) |shared| {
+            var ps = own.*;
+            ps.name = shared.name;
+            _ = try hist.join(m, .setParagraphStyle, .{ tp, ps });
+        };
+    };
+    if (f.leading) |l| _ = try hist.join(m, .setTemplateLeading, .{ t.id, @as(?layout.model.Leading, l) });
+    _ = try hist.join(m, .setFlowStyle, .{ fid, t.text, t.paragraph, @as(?layout.model.Leading, null), t.id });
+}
+
+/// A new style template from the flow's style; the flow then takes it.
+fn flowStyleSaveTemplate() void {
+    const tr = flowStyleTrack() orelse return;
+    const fl = flowStyled(tr[0], tr[1]) orelse return;
+    saveTemplate(fl.id) catch {
         state.status = "The style template was not made. ";
         return;
     };
     state.status = "Saved as a style template: new flows can be made from it. ";
 }
 
-fn saveTemplate(m: *layout.model.Model, fl: *const layout.model.Flow) !void {
-    const fid = fl.id;
+fn saveTemplate(fid: layout.model.ObjectId) !void {
+    const m = &state.model;
+    const f = m.flows.items[m.flowIndex(fid) orelse return];
+    const lead = m.flowLeading(&f);
     var nb: [32]u8 = undefined;
     const tname = m.freshName(&nb, .flows, "Template");
     var b1: [64]u8 = undefined;
-    const text = try act(.copyStyle, .{ fl.style, std.fmt.bufPrint(&b1, "{s} text", .{tname}) catch "Template text" });
-    // The copy may have moved the flows: read it again by id.
-    const f2 = &m.flows.items[m.flowIndex(fid) orelse return];
+    const text = try act(.copyStyle, .{ f.style, std.fmt.bufPrint(&b1, "{s} text", .{tname}) catch "Template text" });
     var b2: [64]u8 = undefined;
-    const para: ?layout.model.ParaId = if (f2.paragraph_default) |p| try hist.join(m, .copyParagraphStyle, .{ p, std.fmt.bufPrint(&b2, "{s} paragraph", .{tname}) catch "Template paragraph" }) else null;
-    const f3 = &m.flows.items[m.flowIndex(fid) orelse return];
-    const tid = try hist.join(m, .addStyleTemplate, .{ tname, text, para, f3.leading });
-    const f4 = &m.flows.items[m.flowIndex(fid) orelse return];
-    _ = try hist.join(m, .setFlowStyle, .{ fid, f4.style, f4.paragraph_default, f4.leading, tid });
+    const para: ?layout.model.ParaId = if (f.paragraph_default) |p| try hist.join(m, .copyParagraphStyle, .{ p, std.fmt.bufPrint(&b2, "{s} paragraph", .{tname}) catch "Template paragraph" }) else null;
+    const tid = try hist.join(m, .addStyleTemplate, .{ tname, text, para, lead });
+    _ = try hist.join(m, .setFlowStyle, .{ fid, text, para, @as(?layout.model.Leading, null), tid });
 }
 
-/// The flow style: which template it came from (choosing another copies
-/// that one), its text size, its leading and the paragraph settings its
-/// paragraphs take; Save as template.
+/// The flow style: its template (choosing another takes that one's
+/// styles), and its text size, leading and paragraph settings, each the
+/// template's unless the flow overrides it (marked *); Update style for
+/// all flows, Clear overrides, Save as template.
 fn flowStyleProperties(pi: usize, ri: usize) !void {
     const fl = flowStyled(pi, ri) orelse return;
     const saved_group = pushGroup("flow-style");
@@ -18802,36 +18970,44 @@ fn flowStyleProperties(pi: usize, ri: usize) !void {
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = 3000 });
     defer box.deinit();
     const fid = fl.id;
-    // The template: choosing one (the same one too: Reset) copies it again.
+    const t = flowTemplate(fl);
+    const o = flowOverrides(fl);
     if (m.templates.items.len > 0) {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3001 });
         defer row.deinit();
+        prop_marked = o.any();
         propName("From template");
         const a = dvui.currentWindow().arena();
         const names = try a.alloc([]const u8, m.templates.items.len);
         var choice: usize = 0;
-        for (m.templates.items, names, 0..) |t, *n, k| {
-            n.* = t.name;
-            if (t.id == fl.template) choice = k;
+        for (m.templates.items, names, 0..) |tt, *n, k| {
+            n.* = tt.name;
+            if (tt.id == fl.template) choice = k;
         }
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 3001 })) {
-            hist.beginStep();
-            try styleFlowFrom(pi, ri, m.templates.items[choice].id);
+            const tt = m.templates.items[choice];
+            _ = try act(.setFlowStyle, .{ fid, tt.text, tt.paragraph, @as(?layout.model.Leading, null), tt.id });
+            return;
         }
     }
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 3002 });
-        defer row.deinit();
-        actionButton(@src(), "flow-style.reset-from-template", null, 0, .{ .expand = .horizontal, .id_extra = 3002 });
-        actionButton(@src(), "flow-style.save-as-template", null, 0, .{ .expand = .horizontal, .id_extra = 3003 });
+    if (t != null and o.any()) {
+        actionButton(@src(), "flow-style.update-style-for-all-flows", null, 0, .{ .expand = .horizontal, .id_extra = 3002 });
+        actionButton(@src(), "flow-style.clear-overrides", null, 0, .{ .expand = .horizontal, .id_extra = 3003 });
     }
-    // Its text: size (and cap height), as the style's own properties.
-    try styleSizeProps(fl.style, false);
-    // Its leading, kept as typed.
+    actionButton(@src(), "flow-style.save-as-template", null, 0, .{ .expand = .horizontal, .id_extra = 3006 });
+    // Its text size: an override makes it a text style of its own.
+    if (styleSizeFields(fl.style, false, o.size)) |e| {
+        hist.beginStep();
+        const own = try flowOwnText(fid);
+        try joinSize(own, e);
+        return;
+    }
+    // Its leading, kept as typed; "auto" takes the template's.
     {
         const em = styleEmMm(fl.style);
         var buf: [48]u8 = undefined;
-        const shown = if (fl.leading) |l| l.format(&buf) else "auto";
+        const shown = if (m.flowLeading(fl)) |l| l.format(&buf) else "auto";
+        prop_marked = o.leading;
         if (textProp(asElement("track.leading"), shown, 3004)) |typed| {
             if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
                 _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template });
@@ -18839,7 +19015,8 @@ fn flowStyleProperties(pi: usize, ri: usize) !void {
                 if ((l.resolve(em) orelse 0) > 0.01) {
                     _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, l), fl.template });
                 } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the font's own). ";
+            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the template's). ";
+            return;
         }
         const region = m.panels.items[pi].regions.items[ri];
         const pt = region.pitch / layout.model.mm_per_pt;
@@ -18848,10 +19025,16 @@ fn flowStyleProperties(pi: usize, ri: usize) !void {
         propText(asElement("track.baselines"), "{d:.2} mm ({d:.1} pt; size {d:.1} pt {s} {d:.1})", .{ region.pitch, pt, em_pt, if (extra >= 0) "+" else "−", @abs(extra) }, 3005);
     }
     // The paragraph settings its paragraphs take (each may have its own
-    // style instead: Paragraph, below).
+    // style instead: Paragraph, below); an override makes them a copy.
     if (fl.paragraph_default) |pid| if (m.paraStyle(pid)) |p| {
         var ps = p.*;
-        if (paragraphFields(&ps, 2000)) _ = try actM(mergeKey(.{ "paragraph style", pid }), .setParagraphStyle, .{ pid, ps });
+        const ref: ?*const layout.model.ParagraphStyle = if (t) |tt| (if (tt.paragraph) |tp| m.paraStyle(tp) else null) else null;
+        if (paragraphFields(&ps, 2000, ref)) {
+            hist.beginStep();
+            const own = (try flowOwnParagraph(fid)) orelse return;
+            ps.name = (m.paraStyle(own) orelse return).name;
+            _ = try hist.join(m, .setParagraphStyle, .{ own, ps });
+        }
     };
 }
 
@@ -18885,6 +19068,32 @@ fn leadingProps(pi: usize, ri: usize) void {
 /// resolves it. Typing either sets the style by that one; the one that
 /// sets it is shown plain, the other muted.
 fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
+    if (styleSizeFields(sid, default, null)) |e| applySize(sid, e);
+}
+
+/// A size typed into `styleSizeFields`.
+const SizeEdit = union(enum) { em: f64, cap: f64 };
+
+fn applySize(sid: layout.model.StyleId, e: SizeEdit) void {
+    switch (e) {
+        .em => |em| act(.setEmSize, .{ sid, em }) catch {},
+        .cap => |c| act(.setCapHeight, .{ sid, c }) catch {},
+    }
+    if (state.label_style == sid) state.label_style_set = true;
+}
+
+/// As `applySize`, joined to the step under way.
+fn joinSize(sid: layout.model.StyleId, e: SizeEdit) !void {
+    switch (e) {
+        .em => |em| try hist.join(&state.model, .setEmSize, .{ sid, em }),
+        .cap => |c| try hist.join(&state.model, .setCapHeight, .{ sid, c }),
+    }
+}
+
+/// The size fields of `styleSizeProps`; what was typed, not applied.
+/// `marked`: both shown as overrides.
+fn styleSizeFields(sid: layout.model.StyleId, default: bool, marked: ?bool) ?SizeEdit {
+    var edit: ?SizeEdit = null;
     const style = state.model.textStyle(sid).*;
     const ctx = if (state.labels) |*l| l.context(sid) else null;
     const cap = if (ctx) |c| c.cap_height else style.cap_height;
@@ -18894,25 +19103,22 @@ fn styleSizeProps(sid: layout.model.StyleId, default: bool) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 1 });
         defer row.deinit();
+        prop_marked = marked orelse false;
         propName("Size, pt");
         const pt0 = @round(em_mm / layout.model.mm_per_pt * 100) / 100;
         const opts: dvui.Options = .{ .expand = .horizontal, .font = styled(.theme(.body), default), .id_extra = 1 };
-        if (accepted.numberField(@src(), f64, pt0, 0.5, 2000, if (by_em) opts else opts.override(muted))) |pt| {
-            act(.setEmSize, .{ sid, pt * layout.model.mm_per_pt }) catch {};
-            if (state.label_style == sid) state.label_style_set = true;
-        }
+        if (accepted.numberField(@src(), f64, pt0, 0.5, 2000, if (by_em) opts else opts.override(muted))) |pt| edit = .{ .em = pt * layout.model.mm_per_pt };
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 2 });
         defer row.deinit();
+        prop_marked = marked orelse false;
         propName("Cap height, mm");
         const c0 = @round(cap * 1000) / 1000;
         const opts: dvui.Options = .{ .expand = .horizontal, .font = styled(.theme(.body), default), .id_extra = 2 };
-        if (accepted.numberField(@src(), f64, c0, 0.1, 200, if (by_em) opts.override(muted) else opts)) |c| {
-            act(.setCapHeight, .{ sid, c }) catch {};
-            if (state.label_style == sid) state.label_style_set = true;
-        }
+        if (accepted.numberField(@src(), f64, c0, 0.1, 200, if (by_em) opts.override(muted) else opts)) |c| edit = .{ .cap = c };
     }
+    return edit;
 }
 
 /// A new plain prototype with one track and keycap art, made the context.
@@ -20396,8 +20602,9 @@ fn insertAtCursor(kind: enum { tile, blank, run, hard_break, paragraph }, size: 
             return;
         },
         .paragraph => {
-            // The new paragraph takes the style of the one it splits.
-            const style = state.model.paragraphStyleAt(c.panel, c.region, c.index);
+            // The new paragraph takes the style of the one it splits; at
+            // its end, that style's next (FrameMaker's Next ¶ Tag).
+            const style = state.model.paragraphStyleAfter(c.panel, c.region, c.index);
             act(.insertParagraph, .{c.panel, c.region, c.index, style}) catch return;
         },
         .run => {

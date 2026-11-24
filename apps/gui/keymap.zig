@@ -68,7 +68,8 @@ pub const action_defs = [_]A{
     // Done by the properties pane's buttons (virtual keys: a button's id
     // is its action's name, see elements.zig), on the context.
     .{ .name = "track.make-tracks" },
-    .{ .name = "flow-style.reset-from-template" },
+    .{ .name = "flow-style.update-style-for-all-flows" },
+    .{ .name = "flow-style.clear-overrides" },
     .{ .name = "flow-style.save-as-template" },
     .{ .name = "track.remove" },
     .{ .name = "track.name-tiles" },

@@ -178,6 +178,9 @@ pub const ParagraphStyle = struct {
     space_before: f64 = 0,
     space_after: f64 = 0,
     line_gap: f64 = 0,
+    /// The style a new paragraph takes when Enter ends one in this style
+    /// (FrameMaker's Next ¶ Tag); null: this one.
+    next: ?ParaId = null,
 };
 
 /// Where a track lies on a tile's face.
@@ -531,11 +534,15 @@ pub const Flow = struct {
     items: std.ArrayList(Item) = .empty,
     /// Where text imported into it came from, in the order it came.
     sources: std.ArrayList(FlowSource) = .empty,
-    /// Its flow style (decided 2026-11-23, the owner), copied from a style
-    /// template when it is made: its own text style (what its runs are set
-    /// in unless one is given another), the paragraph settings a
+    /// Its flow style (decided 2026-11-23, the owner; shared, as
+    /// FrameMaker's catalog formats are, the same evening): the text style
+    /// its runs are set in unless given another, the paragraph settings a
     /// paragraph in no style of its own takes, and its leading (its
-    /// tracks' baselines). Changing it re-sets the whole flow.
+    /// tracks' baselines). A new flow takes its template's styles
+    /// themselves, shared with every flow made from it; a flow overrides
+    /// them with styles of its own (a text style based on the template's,
+    /// a copy of its paragraph style) and a leading of its own (null:
+    /// the template's).
     style: StyleId = .none,
     paragraph_default: ?ParaId = null,
     leading: ?Leading = null,
@@ -544,8 +551,9 @@ pub const Flow = struct {
 };
 
 /// A style template (decided 2026-11-23, the owner): what a new flow's
-/// style is copied from. A document has a Default one; flows made from a
-/// template keep their copy when the template changes later.
+/// style comes from. A document has a Default one. Its styles are shared
+/// by the flows made from it: changing them changes every such flow that
+/// does not override them.
 pub const StyleTemplate = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -5815,6 +5823,30 @@ pub const Model = struct {
         return id;
     }
 
+    /// A new text style based on `base` (its faces and rules come from
+    /// it) at its size, named `name`: an override of it.
+    pub fn deriveStyle(m: *Model, base: StyleId, name: []const u8) Error!StyleId {
+        const src = m.textStyle(base).*;
+        const nid = m.newId();
+        try m.styles.append(m.a(), .{ .id = nid, .name = try m.a().dupe(u8, name), .base = base, .cap_height = src.cap_height, .em_size = src.em_size, .line_pitch = src.line_pitch });
+        m.revision += 1;
+        return nid;
+    }
+
+    /// Sets style template `id`'s leading (null: its font's own).
+    pub fn setTemplateLeading(m: *Model, id: ObjectId, leading: ?Leading) Error!void {
+        const t = m.styleTemplate(id) orelse return error.NoSuchObject;
+        t.leading = leading;
+        m.revision += 1;
+    }
+
+    /// The leading flow `f` comes to: its own, else its template's.
+    pub fn flowLeading(m: *const Model, f: *const Flow) ?Leading {
+        if (f.leading) |l| return l;
+        if (m.styleTemplate(f.template)) |t| return t.leading;
+        return null;
+    }
+
     /// Renames style template `id`.
     pub fn renameStyleTemplate(m: *Model, id: ObjectId, name: []const u8) Error!void {
         const t = m.styleTemplate(id) orelse return error.NoSuchObject;
@@ -6291,6 +6323,20 @@ pub const Model = struct {
     /// it splits) or a line break. Inside a run the run is split, its
     /// markup kept whole; inside an equation's structure the break goes
     /// after the run. Returns the place after the break.
+    /// The style a paragraph begun at item `index` of a track takes: the
+    /// one it splits, or, begun at that one's end, its next (FrameMaker's
+    /// Next ¶ Tag); null for the flow's own.
+    pub fn paragraphStyleAfter(m: *Model, panel: usize, region: usize, index: usize) ?ParaId {
+        const here = m.paragraphStyleAt(panel, region, index);
+        const f = m.trackFlow(panel, region) orelse return here;
+        const items = f.items.items;
+        const at_end = index >= items.len or items[index].what == .paragraph;
+        if (!at_end) return here;
+        const eff = here orelse f.paragraph_default orelse return here;
+        const next = (m.paraStyle(eff) orelse return here).next orelse return here;
+        return if (next == f.paragraph_default) null else next;
+    }
+
     pub fn breakAt(m: *Model, panel: usize, region: usize, at: FlowPos, paragraph: bool) Error!FlowPos {
         var index = at.index;
         if (at.offset > 0) if (m.runAt(panel, region, at.index)) |r| {
@@ -6306,7 +6352,7 @@ pub const Model = struct {
             }
         };
         if (paragraph) {
-            const style = m.paragraphStyleAt(panel, region, index);
+            const style = m.paragraphStyleAfter(panel, region, index);
             try m.insertParagraph(panel, region, index, style);
             return .{ .index = index + 1 };
         }
