@@ -314,8 +314,12 @@ pub fn build(b: *std.Build) void {
 
     // Library tests.
     const test_step = b.step("test", "Run library tests");
+    // Only the library tests whose names hold this text
+    // (`-Dtest-filter=constraint`).
+    const test_filter = b.option([]const u8, "test-filter", "Run only the library tests whose names contain this");
+    const filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
     for ([_]*std.Build.Module{ geom, font, layout, config, fontsearch, richtext, constraint, sketch, fonts_local, fonts_folders, glyphic, platform }) |mod| {
-        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .filters = filters, .root_module = mod })).step);
     }
     // The GUI's window-free logic (hot edges' timing).
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{

@@ -118,6 +118,7 @@ pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) root.Error!Analysis {
         if (g.reference or g.removed) continue;
         const any = switch (g.kind) {
             .point => |p| free_var[p.x] or free_var[p.y],
+            .affine => false,
             .segment => |sg| free_var[sg.a.x] or free_var[sg.a.y] or free_var[sg.b.x] or free_var[sg.b.y],
             .circle => |ci| free_var[ci.c.x] or free_var[ci.c.y] or free_var[ci.r],
             .arc => |ar| free_var[ar.c.x] or free_var[ar.c.y] or free_var[ar.a.x] or free_var[ar.a.y] or free_var[ar.b.x] or free_var[ar.b.y],

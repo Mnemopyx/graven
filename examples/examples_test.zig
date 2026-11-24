@@ -30,7 +30,7 @@ test "the PC keyboard: 104 keys in 22.5 × 6.5 u, nothing overflowing, its legen
     const p = try panelNamed(m, "PC keyboard (ANSI 104)");
     var labels: layout.Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
-    var placed = try layout.solve(testing.allocator, m, p, &labels);
+    var placed = try layout.solve(testing.allocator, m, .{ .panel = p }, &labels);
     defer placed.deinit();
     try testing.expectEqual(104, placed.tiles.len);
     for (placed.issues) |i| try testing.expect(i.kind != .row_overflow and i.kind != .tile_size);
@@ -66,10 +66,10 @@ test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legen
     }
     try testing.expectEqual(39, holes);
     const caps = kg.stamps.items[0].id;
-    const a = m.instanceBox(keys, 0, m.instanceAt(keys, 0, caps, 3, 0).?).?;
-    const z = m.instanceBox(keys, 0, m.instanceAt(keys, 0, caps, 4, 0).?).?;
+    const a = m.instanceBox(.{ .panel = keys }, 0, m.instanceAt(.{ .panel = keys }, 0, caps, 3, 0).?).?;
+    const z = m.instanceBox(.{ .panel = keys }, 0, m.instanceAt(.{ .panel = keys }, 0, caps, 4, 0).?).?;
     try testing.expectApproxEqAbs(11.43, (z.x0 + z.x1) / 2 - (a.x0 + a.x1) / 2, 1e-9);
-    const enter = m.instanceBox(keys, 0, m.instanceAt(keys, 0, caps, 5, 3).?).?;
+    const enter = m.instanceBox(.{ .panel = keys }, 0, m.instanceAt(.{ .panel = keys }, 0, caps, 5, 3).?).?;
     try testing.expectApproxEqAbs(7.2 + 12.7, enter.height(), 1e-9);
     // Plate: black, holes cut, gold inlaid; keys: black, white and blue.
     try testing.expectEqual(3, m.panels.items[plate].fab.layers.len);
@@ -91,7 +91,7 @@ test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legen
     var labels: layout.Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
     for ([_]usize{ plate, keys }) |p| {
-        var placed = try layout.solve(testing.allocator, m, p, &labels);
+        var placed = try layout.solve(testing.allocator, m, .{ .panel = p }, &labels);
         defer placed.deinit();
         for (placed.issues) |i| try testing.expect(i.kind != .row_overflow);
     }
@@ -108,7 +108,7 @@ test "a key sized outside the key prototype's rules is flagged, not refused" {
     const tab = m.findTile("K38").?;
     for ([_]struct { w: f64, flagged: bool }{ .{ .w = 1.3, .flagged = true }, .{ .w = 1.25, .flagged = false } }) |c| {
         try m.setTileSize(tab, c.w, 1);
-        var placed = try layout.solve(testing.allocator, m, p, &labels);
+        var placed = try layout.solve(testing.allocator, m, .{ .panel = p }, &labels);
         defer placed.deinit();
         var flagged = false;
         for (placed.issues) |i| if (i.kind == .tile_size) {
@@ -131,11 +131,11 @@ test "the keyboard saved and read back lays out and exports exactly the same" {
     defer back.deinit();
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    var a = try layout.solve(gpa, m, p, &labels);
+    var a = try layout.solve(gpa, m, .{ .panel = p }, &labels);
     defer a.deinit();
     var labels2: layout.Labels = .init(gpa, &.{});
     defer labels2.deinit();
-    var b = try layout.solve(gpa, &back, p, &labels2);
+    var b = try layout.solve(gpa, &back, .{ .panel = p }, &labels2);
     defer b.deinit();
     try testing.expectEqual(a.tiles.len, b.tiles.len);
     const svg_a = try layout.output.panelSvg(gpa, &a, &.{}, .{});
@@ -191,7 +191,7 @@ test "a plan's colour is what the part is made in; one the process cannot give i
     try h.do(m, .setPlan, .{ plan.id, next });
     var labels: layout.Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
-    var placed = try layout.solve(testing.allocator, m, plate, &labels);
+    var placed = try layout.solve(testing.allocator, m, .{ .panel = plate }, &labels);
     defer placed.deinit();
     const steps = (try layout.fab.plan(a, m, plate, &placed, &.{})).steps;
     var grey = false;
@@ -285,7 +285,7 @@ test "an operation checked on its own: the plate waterjet cut, its outline and h
     const id = m.panels.items[plate].id;
     var labels: layout.Labels = .init(testing.allocator, &.{});
     defer labels.deinit();
-    var placed = try layout.solve(testing.allocator, m, plate, &labels);
+    var placed = try layout.solve(testing.allocator, m, .{ .panel = plate }, &labels);
     defer placed.deinit();
     const jet = layout.model.process.builtin("Generic waterjet").?;
     const r = try layout.check.runWith(a, m, plate, &placed, &.{}, null, .{
@@ -325,7 +325,7 @@ test "the keyboard is six tracks, one a row, laid out in advance, each its own f
         try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "Row{d}", .{k}), r.name);
         // A flow of its own: rows do not wrap into one another.
         for (regions[0 .. k - 1]) |q| try testing.expect(r.flow != q.flow);
-        try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "row {d}", .{k}), m.trackFlow(p, k - 1).?.name);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "row {d}", .{k}), m.trackFlow(.{ .panel = p }, k - 1).?.name);
     }
     // Its keys by name, within their row; named K1 to K104 across the
     // panel, so the legend sheet (over the panel) finds every one.
@@ -339,7 +339,7 @@ test "the keyboard is six tracks, one a row, laid out in advance, each its own f
     }
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    var b = try layout.solve(gpa, m, p, &labels);
+    var b = try layout.solve(gpa, m, .{ .panel = p }, &labels);
     defer b.deinit();
     try testing.expectEqual(104, b.tiles.len);
     // A row a track: each segment in a track of its own.
@@ -360,7 +360,7 @@ test "a track at an angle placement cannot set yet is flagged, and placed as the
     m.panels.items[p].regions.items[0].direction = -15;
     var labels: layout.Labels = .init(gpa, &.{});
     defer labels.deinit();
-    var placed = try layout.solve(gpa, m, p, &labels);
+    var placed = try layout.solve(gpa, m, .{ .panel = p }, &labels);
     defer placed.deinit();
     try testing.expectEqual(104, placed.tiles.len);
     var flagged = false;

@@ -169,6 +169,9 @@ pub const Sketch = struct {
     pub fn varsOf(_: *const Sketch, g: Geometry, buf: *[6]VarId) []VarId {
         const list: []const VarId = switch (g.kind) {
             .point => |p| &.{ p.x, p.y },
+            // Placed by others' unknowns (a document's boxes), never a
+            // sketch's own.
+            .affine => &.{},
             .segment => |sg| &.{ sg.a.x, sg.a.y, sg.b.x, sg.b.y },
             .circle => |c| &.{ c.c.x, c.c.y, c.r },
             .arc => |ar| &.{ ar.c.x, ar.c.y, ar.a.x, ar.a.y, ar.b.x, ar.b.y },
@@ -556,7 +559,7 @@ pub const Sketch = struct {
                 segs[segs.len - 1].conic.p[2] = p1;
                 try out.appendSlice(a, segs);
             },
-            .point, .line, .ray => {},
+            .point, .affine, .line, .ray => {},
         }
     }
 
@@ -574,7 +577,7 @@ pub const Sketch = struct {
             any = true;
             switch (g.kind) {
                 .point => |p| b = b.addPoint(s.val(p)),
-                .line, .ray => {},
+                .affine, .line, .ray => {},
                 else => {
                     var out: std.ArrayList(geom.Segment) = .empty;
                     defer out.deinit(a);

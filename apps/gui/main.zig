@@ -2451,7 +2451,7 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample();
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -23276,8 +23276,10 @@ var constrain_prompt: ?struct {
     a: ConstraintEnd,
     b: ConstraintEnd,
     equal: bool = false,
-    /// In the document's units.
+    /// In the document's units, never negative.
     value: f64,
+    /// Which way it runs, as measured (`Constraint.side`).
+    side: f64 = 1,
     new: bool = true,
 } = null;
 
@@ -24739,7 +24741,7 @@ fn constrainClick() void {
     if (constrain_first) |first| {
         const value = constrain.measure(&state.model, .{ .a = first.end, .b = hit.end }) orelse 0;
         const k = docUnits().perMm();
-        constrain_prompt = .{ .a = first.end, .b = hit.end, .value = @round(value * k * 10) / 10 };
+        constrain_prompt = .{ .a = first.end, .b = hit.end, .value = @round(@abs(value) * k * 10) / 10, .side = if (value < 0) -1 else 1 };
         constrain_first = null;
         constrain_hover = null;
         state.tool = .select;
@@ -24841,7 +24843,8 @@ fn constrainPromptWindow() void {
             pr.equal = choice == 1;
             const k = docUnits().perMm();
             const measured = constrain.measure(&state.model, .{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b }) orelse 0;
-            pr.value = if (pr.equal) 0 else @round(measured * k * 10) / 10;
+            pr.value = if (pr.equal) 0 else @round(@abs(measured) * k * 10) / 10;
+            pr.side = if (measured < 0) -1 else 1;
         }
     }
     {
@@ -24850,7 +24853,7 @@ fn constrainPromptWindow() void {
         var nb: [32]u8 = undefined;
         propName(std.fmt.bufPrint(&nb, "Value, {s}", .{docUnits().symbol()}) catch "Value");
         var twd: dvui.WidgetData = undefined;
-        const te = dvui.textEntryNumber(@src(), f64, .{ .value = &pr.value, .min = -100000, .max = 100000 }, .{ .expand = .horizontal, .data_out = &twd });
+        const te = dvui.textEntryNumber(@src(), f64, .{ .value = &pr.value, .min = 0, .max = 100000 }, .{ .expand = .horizontal, .data_out = &twd });
         if (pr.new) {
             dvui.focusSubwindow(fw.data().id, null);
             dvui.focusWidget(twd.id, fw.data().id, null);
@@ -24874,7 +24877,7 @@ fn constrainPromptWindow() void {
     }
     if (!go) return;
     const value_mm = pr.value / docUnits().perMm();
-    _ = act(.addConstraint, .{.{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b, .value = value_mm }}) catch {
+    _ = act(.addConstraint, .{.{ .kind = if (pr.equal) .equal_size else .offset, .a = pr.a, .b = pr.b, .value = @abs(value_mm), .side = pr.side }}) catch {
         state.status = "That constraint could not be added. ";
     };
     constrain_prompt = null;
@@ -24951,8 +24954,10 @@ fn dimGeom(c: layout.model.Constraint) ?DimGeom {
     const off = constrain.frameOffset(m, parent);
     const v = c.a.feature.vertical();
     const abox = offsetBox(constrain.boxOf(m, c.a.object) orelse return null, off);
-    const pa = (constrain.featureAt(m, parent, c.a) orelse return null) + if (v) off.y else off.x;
-    const pb = (constrain.featureAt(m, parent, c.b) orelse return null) + if (v) off.y else off.x;
+    // Each end in the workspace's coordinates: they may be in different
+    // frames (a column in a panel, a construction line on the canvas).
+    const pa = constrain.featureInSpace(m, parent, c.a) orelse return null;
+    const pb = constrain.featureInSpace(m, parent, c.b) orelse return null;
     // Across the middle of the constrained object, moved as placed.
     const across = (if (v) (abox.x0 + abox.x1) / 2 else (abox.y0 + abox.y1) / 2) + c.place.across;
     const p0: geom.Point = if (v) .{ .x = across, .y = pb } else .{ .x = pb, .y = across };
@@ -25077,7 +25082,7 @@ fn pickedConstraintProperties() bool {
         propName("Value");
         const v0 = @round(c.value * k * 1000) / 1000;
         accepted.label_unit = if (k == 1) .mm else .in;
-        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| _ = act(.setConstraintValue, .{ c.id, v / k }) catch {};
+        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| setConstraintValue(c.id, v / k);
     }
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
@@ -25086,6 +25091,16 @@ fn pickedConstraintProperties() bool {
         keyButton(@src(), "Remove", 0, .{});
     }
     return true;
+}
+
+/// A constraint's value as typed: never negative (its side stays as it
+/// was made).
+fn setConstraintValue(id: layout.model.ObjectId, mm: f64) void {
+    if (mm < 0) {
+        state.status = "A distance is never negative: the side is kept as drawn. ";
+        return;
+    }
+    _ = act(.setConstraintValue, .{ id, mm }) catch {};
 }
 
 fn drawConstraintMarks(area: dvui.Rect.Physical) void {
@@ -25193,14 +25208,14 @@ fn constraintProperties() void {
         dvui.labelNoFmt(@src(), what, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .color_text = if (flagged != null) .{ .color = colors.overflow } else null, .id_extra = ci });
         const v0 = @round(c.value * k * 1000) / 1000;
         accepted.label_unit = if (k == 1) .mm else .in;
-        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| _ = act(.setConstraintValue, .{ c.id, v / k }) catch {};
+        if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| setConstraintValue(c.id, v / k);
     }
     if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     for (constraintIssues()) |i| {
         for (m.constraints.items) |c| if (c.id == i.constraint and (c.a.object == id or c.b.object == id)) {
             propText("Issue", "{s}", .{switch (i.kind) {
                 .missing_object => "a constraint names something removed",
-                .cross_parent => "a constraint crosses parents",
+                .cross_parent => "a constraint crosses workspaces",
                 .no_parent_edge => "the parent has no edges to keep to",
                 .mixed_axes => "a constraint mixes axes",
                 .conflict => "a constraint contradicts others: left out",
@@ -25582,6 +25597,54 @@ fn enterSketch(ref: SketchRef) void {
 /// canvas, its width dimension moved below it (extension lines) and its
 /// value along, its height's to the right: dimensions after drafting
 /// practice, to look at.
+/// Three text columns in a panel, kept by constraints to two construction
+/// lines on the canvas (`GRAVEN_SAMPLE=columns`): the first column's top
+/// 12 mm below the horizontal line and its left 8 mm right of the
+/// vertical one (ends in different frames), its width 55 mm, gutters of
+/// 6 mm, the others as wide as it and level with it.
+fn loadColumnsSample() !void {
+    const m = &state.model;
+    const space = shown_space;
+    const style = try labelStyle();
+    const p = try m.placePanel(.{ .name = "Panel", .space = m.spaces.items[space].id, .origin = .{ .x = 30, .y = 20 }, .w = 210, .h = 150 });
+    var ids: [3]layout.model.ObjectId = undefined;
+    for ([_]f64{ 15, 80, 150 }, [_]f64{ 48, 60, 44 }, [_]f64{ 125, 118, 121 }, 0..) |x, w, top, k| {
+        var nb: [16]u8 = undefined;
+        const r = try m.addTracks(.{ .panel = p }, .{ .name = try std.fmt.bufPrint(&nb, "Column{d}", .{k + 1}), .origin = .{ .x = x, .y = top }, .style = style, .count = 16, .length = w / 6, .pitch = 6 });
+        ids[k] = m.panels.items[p].regions.items[r].id;
+    }
+    const hi = try m.addGuide(space, .{ .x = 0, .y = 175 }, 0);
+    m.spaces.items[space].guides.items[hi].lock = .horizontal;
+    const hid = m.spaces.items[space].guides.items[hi].id;
+    const vi = try m.addGuide(space, .{ .x = 40, .y = 0 }, 90);
+    m.spaces.items[space].guides.items[vi].lock = .vertical;
+    const vid = m.spaces.items[space].guides.items[vi].id;
+    try hist.snapshot(m);
+    const C = layout.model.Constraint;
+    const list = [_]C{
+        .{ .a = .{ .object = ids[0], .feature = .top }, .b = .{ .object = hid, .feature = .origin_y }, .value = 12, .side = -1 },
+        .{ .a = .{ .object = ids[0], .feature = .left }, .b = .{ .object = vid, .feature = .origin_x }, .value = 8 },
+        .{ .a = .{ .object = ids[0], .feature = .right }, .b = .{ .object = ids[0], .feature = .left }, .value = 55 },
+        .{ .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .right }, .value = 6 },
+        .{ .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[1], .feature = .right }, .value = 6 },
+        .{ .kind = .equal_size, .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } },
+        .{ .kind = .equal_size, .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } },
+        .{ .a = .{ .object = ids[1], .feature = .top }, .b = .{ .object = ids[0], .feature = .top } },
+        .{ .a = .{ .object = ids[2], .feature = .top }, .b = .{ .object = ids[0], .feature = .top } },
+    };
+    for (list, 0..) |c, k| {
+        const id = try act(.addConstraint, .{c});
+        // The dimensions off the columns: above them, or left of them.
+        const across: f64 = switch (k) {
+            0 => -10,
+            1, 2, 3, 4 => -57,
+            else => 0,
+        };
+        if (across != 0) _ = act(.setConstraintPlace, .{ id, layout.model.ConstraintPlace{ .across = across } }) catch {};
+    }
+    state.view.fit = .{ .x0 = 25, .y0 = 15, .x1 = 245, .y1 = 185 };
+}
+
 fn loadSketchSample() void {
     const index = act(.addShapeSketch, .{layout.model.ShapeSketch.rectangle}) catch return;
     enterSketchAt(index, shown_space, .{ .x = 0, .y = 0 });
@@ -25724,7 +25787,7 @@ fn skLineOf(s: *const skl.Sketch, g: skl.Geometry) ?struct { p: geom.Point, d: g
 /// The nearest place on geometry `g` to `q`, if it has one there.
 fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point {
     switch (g.kind) {
-        .point => return null,
+        .point, .affine => return null,
         .segment, .line, .ray => {
             const l = skLineOf(s, g) orelse return null;
             var t = (q.x - l.p.x) * l.d.x + (q.y - l.p.y) * l.d.y;
@@ -25760,7 +25823,7 @@ fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point
 /// The points of a geometry, with their roles.
 fn skPointsOf(g: skl.Geometry, buf: *[3]skl.PointRef, id: skl.GeomId) []skl.PointRef {
     const roles: []const @FieldType(skl.PointRef, "role") = switch (g.kind) {
-        .point => &.{.point},
+        .point, .affine => &.{.point},
         .segment => &.{ .start, .end },
         .circle => &.{.centre},
         .arc => &.{ .centre, .start, .end },
@@ -26270,6 +26333,7 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
                     break :blk .{ .x = rho * @cos(th), .y = rho * @sin(th) };
                 },
                 .point => |pp| skVal(sk_, pp),
+                .affine => .{ .x = 0, .y = 0 },
             };
         }
     }.f;
@@ -26589,6 +26653,7 @@ fn skDrawGeometry(area: dvui.Rect.Physical, it: SkPlace, g: skl.Geometry, colour
     const a = dvui.currentWindow().arena();
     switch (g.kind) {
         .point => |p| skDot(skPx(area, it, skVal(s, p)), 2.5 * dvui.windowNaturalScale(), colour),
+        .affine => {},
         .segment, .circle, .arc => {
             var segs: std.ArrayList(geom.Segment) = .empty;
             s.appendSegments(a, g, &segs) catch return;

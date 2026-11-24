@@ -419,6 +419,11 @@ pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model 
     m.upgradeOrientation();
     // Its sketches' signed distances, as distances never negative.
     for (m.sketches.items) |*it| try it.sketch.upgradeSigns(m.arena.allocator());
+    // Its constraints' signed values, likewise: the sign as the side.
+    for (m.constraints.items) |*c| if (c.value < 0) {
+        c.value = -c.value;
+        c.side = -c.side;
+    };
     m.upgradeProcesses() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},

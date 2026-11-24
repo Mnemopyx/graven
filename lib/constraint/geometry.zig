@@ -25,9 +25,26 @@ pub const ConstraintId = u32;
 /// A point's two unknowns.
 pub const Pt = struct { x: VarId, y: VarId };
 
+/// A coordinate that is a constant plus multiples of unknowns (at most
+/// two): where an edge of a box lies, its origin less a fraction of its
+/// size; a coordinate no unknown moves is its constant alone.
+pub const Affine = struct {
+    c: f64 = 0,
+    vars: [2]VarId = .{ 0, 0 },
+    k: [2]f64 = .{ 0, 0 },
+
+    pub fn at(a: Affine, vars: []const f64) f64 {
+        return a.c + a.k[0] * vars[a.vars[0]] + a.k[1] * vars[a.vars[1]];
+    }
+};
+
 pub const Geometry = struct {
     kind: union(enum) {
         point: Pt,
+        /// A point placed by unknowns that are not its own: each
+        /// coordinate an `Affine` of them (a corner or edge of a box whose
+        /// unknowns are its origin and size). Referred to as `.point`.
+        affine: struct { x: Affine, y: Affine },
         segment: struct { a: Pt, b: Pt },
         circle: struct { c: Pt, r: VarId },
         /// Counter-clockwise from `a` to `b` about `c`; its radius is
@@ -108,10 +125,12 @@ pub const Constraint = struct {
         tangent: struct { a: GeomId, b: GeomId, side: f64 = 1, internal: bool = false },
         /// Two segments of one length, or two circles or arcs of one radius.
         equal: struct { a: GeomId, b: GeomId },
-        /// Two distances equal (a gutter as wide as another): each a span
-        /// between two points, along x or y or straight, or from a point
-        /// to a straight geometry.
-        equal_distance: struct { a: Span, b: Span },
+        /// Two distances equal (a gutter as wide as another), or (`value`
+        /// not 0) one longer than the other by `value`: `a` the longer
+        /// when `side` is 1, `b` when it is -1 (never a negative value).
+        /// Each a span between two points, along x or y or straight, or
+        /// from a point to a straight geometry.
+        equal_distance: struct { a: Span, b: Span, value: f64 = 0, side: f64 = 1 },
         /// `p` and `q` mirrored about a straight geometry (`line`), or
         /// about a point (`point`): one of them.
         symmetric: struct { p: PointRef, q: PointRef, line: ?GeomId = null, point: ?PointRef = null },
@@ -150,6 +169,8 @@ pub const Store = struct {
         if (r.geom >= s.geometry.len or s.geometry[r.geom].removed) return error.NoSuchGeometry;
         return switch (s.geometry[r.geom].kind) {
             .point => |p| if (r.role == .point) p else error.NoSuchPoint,
+            // No unknowns of its own: see `point` and `Local.ref`.
+            .affine => error.NoSuchPoint,
             .segment => |sg| switch (r.role) {
                 .start => sg.a,
                 .end => sg.b,
@@ -169,6 +190,10 @@ pub const Store = struct {
 
     /// Where point `r` is now.
     pub fn point(s: Store, r: PointRef) Error!Point {
+        if (r.geom < s.geometry.len and !s.geometry[r.geom].removed) switch (s.geometry[r.geom].kind) {
+            .affine => |af| return if (r.role == .point) .{ .x = af.x.at(s.vars), .y = af.y.at(s.vars) } else error.NoSuchPoint,
+            else => {},
+        };
         const p = try s.pointOf(r);
         return .{ .x = s.vars[p.x], .y = s.vars[p.y] };
     }
@@ -260,7 +285,20 @@ pub const Local = struct {
     }
 
     pub fn ref(l: *Local, r: PointRef) Error!V {
+        if (r.geom < l.s.geometry.len and !l.s.geometry[r.geom].removed) switch (l.s.geometry[r.geom].kind) {
+            .affine => |af| return if (r.role == .point) .{ .x = l.coord(af.x), .y = l.coord(af.y) } else error.NoSuchPoint,
+            else => {},
+        };
         return l.p(try l.s.pointOf(r));
+    }
+
+    /// An affine coordinate as a dual over its unknowns.
+    pub fn coord(l: *Local, a: Affine) D {
+        var d = D.c(a.c);
+        for (a.vars, a.k) |v, k| if (k != 0) {
+            d = d.add(l.get(v).scale(k));
+        };
+        return d;
     }
 
     pub fn geo(l: *Local, g: GeomId) Error!Geometry {
@@ -380,7 +418,7 @@ pub const Local = struct {
                         const cc = l.p(ar.c);
                         break :blk (try l.ref(po.p)).sub(cc).len().sub(l.p(ar.a).sub(cc).len());
                     },
-                    .point => return error.WrongKind,
+                    .point, .affine => return error.WrongKind,
                 };
             },
             .fixed => |f| {
@@ -427,7 +465,7 @@ pub const Local = struct {
                     out[0] = (try l.round(e.a)).r.sub((try l.round(e.b)).r);
                 } else out[0] = (try l.segLength(e.a)).sub(try l.segLength(e.b));
             },
-            .equal_distance => |e| out[0] = (try l.span(e.a)).sub(try l.span(e.b)),
+            .equal_distance => |e| out[0] = (try l.span(e.a)).sub(try l.span(e.b)).scale(e.side).sub(D.c(e.value)),
             .symmetric => |sy| {
                 const pp = try l.ref(sy.p);
                 const q = try l.ref(sy.q);
@@ -494,4 +532,37 @@ test "two gutters held equal: a distance between edges, and an equal distance" {
     try testing.expect(res.solved);
     try testing.expectApproxEqAbs(@as(f64, 6), vars[2], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 26), vars[6], 1e-9);
+}
+
+test "boxes by their origin and size: edges as affine points, sizes giving less" {
+    // Box A at 0, 10 wide (fixed); box B's origin at its left (var 0) and
+    // its width (var 1), 20 at 4 wide. Its left kept 5 right of A's right,
+    // and its width equal to A's: it moves, then grows.
+    var vars = [_]f64{ 20, 4 };
+    const fixed = [_]bool{ false, false };
+    const give = [_]f64{ 1, 1e-3 };
+    const geo = [_]Geometry{
+        .{ .kind = .{ .affine = .{ .x = .{ .c = 0 }, .y = .{} } } },
+        .{ .kind = .{ .affine = .{ .x = .{ .c = 10 }, .y = .{} } } },
+        .{ .kind = .{ .affine = .{ .x = .{ .vars = .{ 0, 1 }, .k = .{ 1, 0 } }, .y = .{} } } },
+        .{ .kind = .{ .affine = .{ .x = .{ .vars = .{ 0, 1 }, .k = .{ 1, 1 } }, .y = .{} } } },
+    };
+    const pt = [_]PointRef{ .{ .geom = 0 }, .{ .geom = 1 }, .{ .geom = 2 }, .{ .geom = 3 } };
+    const cons = [_]Constraint{
+        .{ .kind = .{ .distance_x = .{ .a = pt[1], .b = pt[2], .value = 5 } } },
+        .{ .kind = .{ .equal_distance = .{ .a = .{ .x = .{ pt[2], pt[3] } }, .b = .{ .x = .{ pt[0], pt[1] } } } } },
+    };
+    const Ctx = struct {
+        st: Store,
+        cs: []const Constraint,
+        pub fn rows(c: @This(), out: *solve.Rows) !void {
+            try c.st.rows(c.cs, out);
+        }
+    };
+    const st: Store = .{ .vars = &vars, .fixed = &fixed, .geometry = &geo };
+    const res = try solve.solve(testing.allocator, .{ .vars = &vars, .fixed = &fixed, .give = &give }, Ctx{ .st = st, .cs = &cons });
+    try testing.expect(res.solved);
+    try testing.expectApproxEqAbs(@as(f64, 15), vars[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), vars[1], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 25), (try st.point(pt[3])).x, 1e-9);
 }

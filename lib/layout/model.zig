@@ -111,17 +111,22 @@ pub const ConstraintEnd = struct {
 pub const Constraint = struct {
     id: ObjectId = .none,
     kind: enum {
-        /// `a`'s feature lies `value` mm past `b`'s (right or up
-        /// positive); 0 aligns them. Two features of one object give it a
-        /// size (its right edge 40 mm past its left).
+        /// `a`'s feature and `b`'s lie `value` mm apart; 0 aligns them.
+        /// Two features of one object give it a size (its right edge 40
+        /// mm from its left).
         offset,
-        /// `a`'s size on the axis is `value` mm more than `b`'s; 0 makes
+        /// `a`'s size on the axis and `b`'s differ by `value` mm; 0 makes
         /// them equal.
         equal_size,
     } = .offset,
     a: ConstraintEnd,
     b: ConstraintEnd,
+    /// Never negative: a distance has no start or end (the owner,
+    /// 2026-11-24). Which way it runs is `side`.
     value: f64 = 0,
+    /// 1: `a`'s feature right of (or above) `b`'s, or `a` the larger; -1:
+    /// the other way. Kept as it was made, whatever the value.
+    side: f64 = 1,
     /// Where its dimension is drawn, relative to the constrained object
     /// (end `a`), so it moves with it.
     place: ConstraintPlace = .{},
@@ -5794,6 +5799,11 @@ pub const Model = struct {
         if (c.a.feature.vertical() != c.b.feature.vertical()) return error.BadConstraint;
         if (!std.math.isFinite(c.value)) return error.BadConstraint;
         var out = c;
+        // A signed value given: its sign is the side.
+        if (out.value < 0) {
+            out.value = -out.value;
+            out.side = -out.side;
+        }
         out.id = m.newId();
         try m.constraints.append(m.a(), out);
         m.revision += 1;
@@ -5806,8 +5816,9 @@ pub const Model = struct {
     }
 
     /// Sets constraint `id`'s value: what it constrains moves to match.
+    /// Never negative (its side stays as it is).
     pub fn setConstraintValue(m: *Model, id: ObjectId, value: f64) Error!void {
-        if (!std.math.isFinite(value)) return error.BadConstraint;
+        if (!std.math.isFinite(value) or value < 0) return error.BadConstraint;
         const i = m.constraintIndex(id) orelse return error.NoSuchObject;
         m.constraints.items[i].value = value;
         m.revision += 1;
