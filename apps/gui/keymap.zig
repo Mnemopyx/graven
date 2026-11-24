@@ -206,6 +206,10 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.flow.new-line", .repeat = true },
     .{ .name = "canvas.flow.delete-back", .repeat = true },
     .{ .name = "canvas.flow.delete-forward", .repeat = true },
+    .{ .name = "canvas.flow.delete-line-end", .repeat = true },
+    .{ .name = "canvas.flow.delete-line", .repeat = true },
+    .{ .name = "canvas.flow.delete-word-back", .repeat = true },
+    .{ .name = "canvas.flow.transpose", .repeat = true },
     .{ .name = "canvas.flow.leave" },
 
     .{ .name = "canvas.equation.leave" },
@@ -445,6 +449,14 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow", .chord = "backspace", .action = "canvas.flow.delete-back" },
     .{ .mode = "canvas.flow", .chord = "delete", .action = "canvas.flow.delete-forward" },
     .{ .mode = "canvas.flow", .chord = "escape", .action = "canvas.flow.leave" },
+    // linenoise's (readline's) keys, with Ctrl on every system. Ctrl+A,
+    // E, N, K, T and W keep Graven's meanings for now.
+    .{ .mode = "canvas.flow", .chord = "ctrl+b", .action = "canvas.flow.caret.char-left" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+f", .action = "canvas.flow.caret.char-right" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+p", .action = "canvas.flow.caret.line-up" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+d", .action = "canvas.flow.delete-forward" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+h", .action = "canvas.flow.delete-back" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+u", .action = "canvas.flow.delete-line" },
 
     .{ .mode = "canvas.equation", .chord = "primary+backslash", .action = "canvas.equation.leave" },
     .{ .mode = "canvas.equation", .chord = "escape", .action = "canvas.equation.leave" },

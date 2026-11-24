@@ -20474,27 +20474,17 @@ fn isWordChar(ch: ?u8) bool {
 /// Shift selecting. Whether it was one.
 /// A caret movement of the flow (`canvas.flow.caret.*`, or with Shift
 /// `canvas.flow.select.*`); whether `a` was one.
-fn flowMoveAction(a: keymap.ActionId) bool {
-    const c = track_cursor orelse return false;
-    const Move = enum { char_left, char_right, word_left, word_right, line_start, line_end, text_start, text_end, char_up, char_down };
-    const moves = [_]struct { name: []const u8, move: Move }{
-        .{ .name = "char-left", .move = .char_left },   .{ .name = "char-right", .move = .char_right },
-        .{ .name = "word-left", .move = .word_left },   .{ .name = "word-right", .move = .word_right },
-        .{ .name = "line-start", .move = .line_start }, .{ .name = "line-end", .move = .line_end },
-        .{ .name = "text-start", .move = .text_start }, .{ .name = "text-end", .move = .text_end },
-        .{ .name = "line-up", .move = .char_up },       .{ .name = "line-down", .move = .char_down },
-    };
-    var found: ?struct { move: Move, select: bool } = null;
-    inline for (moves) |m| {
-        if (a == kact("canvas.flow.caret." ++ m.name)) found = .{ .move = m.move, .select = false };
-        if (a == kact("canvas.flow.select." ++ m.name)) found = .{ .move = m.move, .select = true };
-    }
-    const f = found orelse return false;
+/// A caret motion through a flow's stops.
+const Move = enum { char_left, char_right, word_left, word_right, line_start, line_end, text_start, text_end, char_up, char_down };
+
+/// Where motion `move` takes the cursor `c`: the stop it lands on. The one
+/// place motions are worked out, for moving, selecting and deleting.
+fn motionStop(c: TrackCursor, move: Move) ?Stop {
     const stops = flowStops(c.parent, c.region);
-    const i = stopAt(stops, c.index, c.offset) orelse return true;
+    const i = stopAt(stops, c.index, c.offset) orelse return null;
     const here = stops[i];
     var j = i;
-    switch (f.move) {
+    switch (move) {
         .char_left => j = i -| 1,
         .char_right => j = @min(i + 1, stops.len - 1),
         .word_left => {
@@ -20515,7 +20505,7 @@ fn flowMoveAction(a: keymap.ActionId) bool {
         .text_end => j = stops.len - 1,
         .char_up, .char_down => {
             // The nearest stop on the line before or after.
-            const down = f.move == .char_down;
+            const down = move == .char_down;
             var target: ?usize = null;
             var best_seg: usize = 0;
             for (stops) |st| {
@@ -20542,11 +20532,30 @@ fn flowMoveAction(a: keymap.ActionId) bool {
             }
         },
     }
+    return stops[j];
+}
+
+fn flowMoveAction(a: keymap.ActionId) bool {
+    const c = track_cursor orelse return false;
+    const moves = [_]struct { name: []const u8, move: Move }{
+        .{ .name = "char-left", .move = .char_left },   .{ .name = "char-right", .move = .char_right },
+        .{ .name = "word-left", .move = .word_left },   .{ .name = "word-right", .move = .word_right },
+        .{ .name = "line-start", .move = .line_start }, .{ .name = "line-end", .move = .line_end },
+        .{ .name = "text-start", .move = .text_start }, .{ .name = "text-end", .move = .text_end },
+        .{ .name = "line-up", .move = .char_up },       .{ .name = "line-down", .move = .char_down },
+    };
+    var found: ?struct { move: Move, select: bool } = null;
+    inline for (moves) |m| {
+        if (a == kact("canvas.flow.caret." ++ m.name)) found = .{ .move = m.move, .select = false };
+        if (a == kact("canvas.flow.select." ++ m.name)) found = .{ .move = m.move, .select = true };
+    }
+    const f = found orelse return false;
+    const j = motionStop(c, f.move) orelse return true;
     if (f.select) {
         if (flow_anchor == null) flow_anchor = .{ .index = c.index, .offset = c.offset };
     } else flow_anchor = null;
-    track_cursor.?.index = stops[j].index;
-    track_cursor.?.offset = stops[j].offset;
+    track_cursor.?.index = j.index;
+    track_cursor.?.offset = j.offset;
     return true;
 }
 
@@ -20729,6 +20738,28 @@ fn flowAction(inv: keymap.Invocation) bool {
             const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, from, flowPos(c) }) catch return true;
             setFlowPos(pos);
         },
+        // linenoise's kills: to the line's end (at it, the break after
+        // it), the whole line, the word before; and swapping two
+        // characters.
+        kact("canvas.flow.delete-line-end") => {
+            if (deleteFlowSelection()) return true;
+            var to = motionStop(c, .line_end) orelse return true;
+            if (to.index == c.index and to.offset == c.offset) to = motionStop(c, .char_right) orelse return true;
+            deleteFlowTo(c, .{ .index = to.index, .offset = to.offset });
+        },
+        kact("canvas.flow.delete-line") => {
+            if (deleteFlowSelection()) return true;
+            const from = motionStop(c, .line_start) orelse return true;
+            const to = motionStop(c, .line_end) orelse return true;
+            const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, layout.model.FlowPos{ .index = from.index, .offset = from.offset }, layout.model.FlowPos{ .index = to.index, .offset = to.offset } }) catch return true;
+            setFlowPos(pos);
+        },
+        kact("canvas.flow.delete-word-back") => {
+            if (deleteFlowSelection()) return true;
+            const from = motionStop(c, .word_left) orelse return true;
+            deleteFlowTo(c, .{ .index = from.index, .offset = from.offset });
+        },
+        kact("canvas.flow.transpose") => transposeChars(c),
         kact("canvas.flow.delete-forward") => {
             if (deleteFlowSelection()) return true;
             const to = charAfterCursor(c, len) orelse return true;
@@ -20785,6 +20816,38 @@ fn deleteFlowSelection() bool {
     const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, sel[0], sel[1] }) catch return true;
     setFlowPos(pos);
     return true;
+}
+
+/// Deletes between the cursor and `to` (either side of it).
+fn deleteFlowTo(c: TrackCursor, to: layout.model.FlowPos) void {
+    const here = flowPos(c);
+    if (to.index == here.index and to.offset == here.offset) return;
+    const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, here, to }) catch return;
+    setFlowPos(pos);
+}
+
+/// Swaps the characters before and at the cursor, moving on past both (at
+/// a line's end, the two before it), as linenoise's Ctrl+T. Only plain
+/// characters of text: never a break, a tile or part of an equation.
+fn transposeChars(c: TrackCursor) void {
+    const stops = flowStops(c.parent, c.region);
+    var i = stopAt(stops, c.index, c.offset) orelse return;
+    if (i + 1 >= stops.len or stops[i + 1].segment != stops[i].segment or !stops[i + 1].parent.eql(stops[i].parent)) i -|= 1;
+    if (i == 0 or i + 1 >= stops.len) return;
+    const items = state.model.flowItems(c.parent, c.region);
+    for ([_]Stop{ stops[i - 1], stops[i] }) |st| {
+        if (st.index >= items.len or items[st.index].what != .run or items[st.index].what.run.equation) return;
+    }
+    const p0: layout.model.FlowPos = .{ .index = stops[i - 1].index, .offset = stops[i - 1].offset };
+    const p1: layout.model.FlowPos = .{ .index = stops[i].index, .offset = stops[i].offset };
+    const p2: layout.model.FlowPos = .{ .index = stops[i + 1].index, .offset = stops[i + 1].offset };
+    const a = dvui.currentWindow().arena();
+    const t0 = state.model.flowText(a, c.parent, c.region, p0, p1) catch return;
+    const t1 = state.model.flowText(a, c.parent, c.region, p1, p2) catch return;
+    if (t0.len == 0 or t1.len == 0 or std.mem.indexOfScalar(u8, t0, '\n') != null or std.mem.indexOfScalar(u8, t1, '\n') != null) return;
+    const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, p0, p2 }) catch return;
+    setFlowPos(pos);
+    typeIntoFlow(std.mem.concat(a, u8, &.{ t1, t0 }) catch return);
 }
 
 /// Types `text` in at the cursor, over the selection if there is one.
