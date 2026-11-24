@@ -1294,6 +1294,9 @@ pub const SketchEdit = union(enum) {
     /// rings over `sweep` degrees; or rectangular, `cols` × `rows` cells
     /// between corners `at` and `to`.
     array: struct { polar: bool, at: geom.Point, to: geom.Point, cols: u32, rows: u32, sweep: f64 = 360 },
+    /// A regular polygon (see `sketch_.polygon`) of `sides`, centred at
+    /// `c`, a corner at `corner`.
+    polygon: struct { c: geom.Point, corner: geom.Point, sides: u32, construction: bool = false },
     construction: struct { g: sketch_.GeomId, on: bool },
     remove: sketch_.GeomId,
     constrain: sketch_.Constraint,
@@ -5310,6 +5313,7 @@ pub const Model = struct {
                     .rect => |q| q.left,
                 };
             },
+            .polygon => |e| out = (try sketch_.polygon.addRegular(sk, al, e.c, e.corner, e.sides, e.construction)).first,
             .construction => |e| try sk.setConstruction(e.g, e.on),
             .remove => |g| try sk.removeGeometry(g),
             .constrain => |c| {

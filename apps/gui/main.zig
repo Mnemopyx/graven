@@ -17627,6 +17627,36 @@ const button_handlers = [_]ButtonHandler{
             skChooseTool(if (skToolAllowed(want)) want else sk_geo_tools[g][0]);
         }
     }.f),
+    handler("polygon.triangle", struct {
+        fn f(arg: i32) void {
+            if (arg >= 3) polygon_sides = @intCast(arg);
+        }
+    }.f),
+    handler("polygon.square", struct {
+        fn f(arg: i32) void {
+            if (arg >= 3) polygon_sides = @intCast(arg);
+        }
+    }.f),
+    handler("polygon.pentagon", struct {
+        fn f(arg: i32) void {
+            if (arg >= 3) polygon_sides = @intCast(arg);
+        }
+    }.f),
+    handler("polygon.hexagon", struct {
+        fn f(arg: i32) void {
+            if (arg >= 3) polygon_sides = @intCast(arg);
+        }
+    }.f),
+    handler("polygon.heptagon", struct {
+        fn f(arg: i32) void {
+            if (arg >= 3) polygon_sides = @intCast(arg);
+        }
+    }.f),
+    handler("polygon.octagon", struct {
+        fn f(arg: i32) void {
+            if (arg >= 3) polygon_sides = @intCast(arg);
+        }
+    }.f),
     handler("sketch.tool.*", struct {
         fn f(arg: i32) void {
             skChooseTool(@enumFromInt(@as(u8, @intCast(arg))));
@@ -26830,13 +26860,15 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at);
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_array, rect_array };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_array, rect_array, polygon };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
-const SkGeo = enum { point, line, polyline, arc, circle, array };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{ .polar_array, .rect_array } };
-var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polar_array };
+const SkGeo = enum { point, line, polyline, arc, circle, polygon, array };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_array, .rect_array } };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_array };
+/// The polygon tool's number of sides.
+var polygon_sides: u32 = 6;
 
 /// The geometry button tool `t` belongs to.
 fn skGeoOf(t: SkTool) ?SkGeo {
@@ -27578,7 +27610,7 @@ fn skToolClicks(t: SkTool) usize {
     return switch (t) {
         .none => 0,
         .point => 1,
-        .segment, .polyline, .circle, .line, .ray, .polar_array, .rect_array => 2,
+        .segment, .polyline, .circle, .line, .ray, .polar_array, .rect_array, .polygon => 2,
         .arc_centre, .arc_3pt, .circle_3pt => 3,
     };
 }
@@ -27612,6 +27644,10 @@ fn skToolClick(p: geom.Point) void {
         },
         .rect_array => if (@abs(c[0].x - c[1].x) > 1e-9 and @abs(c[0].y - c[1].y) > 1e-9) {
             _ = skEdit(.{ .array = .{ .polar = false, .at = c[0], .to = c[1], .cols = array_tool.cols, .rows = array_tool.rows } });
+        },
+        // A regular polygon: its centre, then a corner.
+        .polygon => if (skDist(c[0], c[1]) > 1e-9) {
+            _ = skEdit(.{ .polygon = .{ .c = c[0], .corner = c[1], .sides = polygon_sides, .construction = cons } });
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
             _ = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
@@ -28582,6 +28618,20 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 const segs = geom.arc(sk_clicks[0], r, 0, 2 * std.math.pi, &buf4);
                 skPreview(area, it, segs);
             },
+            .polygon => if (skDist(sk_clicks[0], p) > 1e-9) {
+                const c0 = sk_clicks[0];
+                const r = skDist(c0, p);
+                const t0 = std.math.atan2(p.y - c0.y, p.x - c0.x);
+                const n = polygon_sides;
+                const ar = dvui.currentWindow().arena();
+                const segs = ar.alloc(geom.Segment, n) catch return;
+                for (0..n) |i| {
+                    const ta = t0 + 2 * std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n));
+                    const tb = t0 + 2 * std.math.pi * @as(f64, @floatFromInt(i + 1)) / @as(f64, @floatFromInt(n));
+                    segs[i] = .{ .line = .{ .{ .x = c0.x + r * @cos(ta), .y = c0.y + r * @sin(ta) }, .{ .x = c0.x + r * @cos(tb), .y = c0.y + r * @sin(tb) } } };
+                }
+                skPreview(area, it, segs);
+            },
             else => dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
         }
         for (sk_clicks[0..sk_nclicks]) |c| skDot(skPx(area, it, c), 3 * px, colors.select);
@@ -28746,7 +28796,7 @@ fn sketchPalette() void {
         below = flex.data().borderRectScale().r;
         keyButton(@src(), "Select", 0, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null });
         keyButton(@src(), "Construction", 0, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null });
-        const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Array" };
+        const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Polygon", "Array" };
         for (names, 0..) |name, g| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == g else false;
             keyButton(@src(), name, @intCast(g), .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null });
@@ -28768,7 +28818,7 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
     // Floating over what is below the buttons, as tall as its rows.
     const fields: f32 = @floatFromInt(skStepFieldCount());
     const hint_rows: f32 = if (tools.len > 1) (if (g == .line and !sk_construction) 2 else 1) else 0;
-    const counts: f32 = if (g == .array) (if (sk_tool == .polar_array) 3 else 2) else 0;
+    const counts: f32 = if (g == .array) (if (sk_tool == .polar_array) 3 else 2) else if (g == .polygon) 3 else 0;
     const h: f32 = 20 + (if (tools.len > 1) @as(f32, 32) else 0) + hint_rows * 24 + 28 + (fields + counts) * 40;
     var fw: dvui.FloatingWidget = undefined;
     fw.init(@src(), .{}, .{
@@ -28803,6 +28853,7 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
     if (tools.len > 1) dvui.labelNoFmt(@src(), "M: next option", .{}, .{ .color_text = .{ .color = faint } });
     if (g == .line and !sk_construction) dvui.labelNoFmt(@src(), "Ray and line: construction only", .{}, .{ .color_text = .{ .color = faint } });
     if (g == .array) skArrayCounts();
+    if (g == .polygon) skPolygonSides();
     dvui.label(@src(), "{s}: point {d} of {d}", .{ skToolName(sk_tool), sk_nclicks + 1, skToolClicks(sk_tool) }, .{ .color_text = .{ .color = faint } });
     skStepFields();
 }
@@ -28827,6 +28878,26 @@ fn skArrayCounts() void {
     };
 }
 
+/// The polygon tool's sides: the common ones by name, or any number.
+const polygon_names = [_][]const u8{ "Triangle", "Square", "Pentagon", "Hexagon", "Heptagon", "Octagon" };
+fn skPolygonSides() void {
+    const saved = pushGroup("polygon");
+    defer popGroup(saved);
+    const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
+    {
+        var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+        defer flex.deinit();
+        for (polygon_names, 3..) |name, n| {
+            const on = polygon_sides == n;
+            keyButton(@src(), name, @intCast(n), .{ .id_extra = n, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+        }
+    }
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    propName("Sides");
+    if (accepted.numberField(@src(), f64, @floatFromInt(polygon_sides), 3, 360, .{ .expand = .horizontal })) |v| polygon_sides = @intFromFloat(@round(v));
+}
+
 fn skToolName(t: SkTool) []const u8 {
     return switch (t) {
         .none => "Select",
@@ -28841,6 +28912,7 @@ fn skToolName(t: SkTool) []const u8 {
         .circle_3pt => "3 points",
         .polar_array => "Polar",
         .rect_array => "Rectangular",
+        .polygon => "Polygon",
     };
 }
 

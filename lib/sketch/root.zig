@@ -25,6 +25,7 @@ pub const solver = @import("solve.zig");
 pub const expr = constraint.expr;
 /// Arrays (polar and rectangular) as plain geometry and constraints.
 pub const arrays = @import("arrays.zig");
+pub const polygon = @import("polygon.zig");
 pub const caption = @import("caption.zig");
 
 const Allocator = std.mem.Allocator;
@@ -655,5 +656,6 @@ test {
     _ = expr;
     _ = @import("tests.zig");
     _ = arrays;
+    _ = polygon;
     _ = caption;
 }
