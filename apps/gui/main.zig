@@ -20356,6 +20356,12 @@ fn flowMoveAction(a: keymap.ActionId) bool {
                     if (best == null or @abs(st.along - here.along) < @abs(stops[best.?].along - here.along)) best = n;
                 }
                 if (best) |b| j = b;
+            } else if (down) {
+                // On the last line, Down goes to its end; on the first,
+                // Up to its start.
+                while (j + 1 < stops.len and stops[j + 1].parent.eql(here.parent) and stops[j + 1].segment == here.segment) j += 1;
+            } else while (j > 0 and stops[j - 1].parent.eql(here.parent) and stops[j - 1].segment == here.segment) {
+                j -= 1;
             }
         },
     }
