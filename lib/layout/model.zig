@@ -241,7 +241,27 @@ pub const Case = struct {
 /// Graven's own cases. Tiles: the digits type the track's tiles, its
 /// first ten lengths; Shift and a digit, blanks of one to ten steps (the
 /// keyboard tile entry of before, 2026-11-18).
-pub const builtin_cases = [_]Case{.{ .name = "Tiles", .keys = &tiles_keys }};
+pub const builtin_cases = [_]Case{
+    .{ .name = "Tiles", .keys = &tiles_keys },
+    .{ .name = "Greek", .keys = &greek_keys },
+};
+
+/// Greek on the Latin letters as RFC 1345 pairs them (a α, h θ, c ξ, q ψ,
+/// w ω …); Shift gives the capital.
+const greek_keys = blk: {
+    const pairs = [_]struct { u8, []const u8, []const u8 }{
+        .{ 'a', "α", "Α" }, .{ 'b', "β", "Β" }, .{ 'g', "γ", "Γ" }, .{ 'd', "δ", "Δ" },
+        .{ 'e', "ε", "Ε" }, .{ 'z', "ζ", "Ζ" }, .{ 'y', "η", "Η" }, .{ 'h', "θ", "Θ" },
+        .{ 'i', "ι", "Ι" }, .{ 'k', "κ", "Κ" }, .{ 'l', "λ", "Λ" }, .{ 'm', "μ", "Μ" },
+        .{ 'n', "ν", "Ν" }, .{ 'c', "ξ", "Ξ" }, .{ 'o', "ο", "Ο" }, .{ 'p', "π", "Π" },
+        .{ 'r', "ρ", "Ρ" }, .{ 's', "σ", "Σ" }, .{ 't', "τ", "Τ" }, .{ 'u', "υ", "Υ" },
+        .{ 'f', "φ", "Φ" }, .{ 'x', "χ", "Χ" }, .{ 'q', "ψ", "Ψ" }, .{ 'w', "ω", "Ω" },
+        .{ 'j', "ς", "ϑ" }, .{ 'v', "ϕ", "ϖ" },
+    };
+    var ks: [pairs.len]CaseKey = undefined;
+    for (pairs, 0..) |p, i| ks[i] = .{ .key = p[0], .lower = .{ .text = p[1] }, .upper = .{ .text = p[2] } };
+    break :blk ks;
+};
 
 const tiles_keys = blk: {
     var ks: [10]CaseKey = undefined;
