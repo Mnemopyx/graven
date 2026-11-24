@@ -595,6 +595,7 @@ pub const all = [_]Element{
     .{ .id = "sheet.unused", .kind = .value, .label = "Unused" },
     .{ .id = "sheet.x", .kind = .value, .label = "" },
     .{ .id = "sheets.legend-sheets", .kind = .value, .label = "Legend sheets" },
+    .{ .id = "sketch-mode.add-caption", .kind = .button, .label = "Add caption" },
     .{ .id = "sketch-mode.conflicts", .kind = .value, .label = "Conflicts" },
     .{ .id = "sketch-mode.finish-sketch-enter", .kind = .button, .label = "Finish sketch…  Enter" },
     .{ .id = "sketch-mode.freedom", .kind = .value, .label = "Freedom" },

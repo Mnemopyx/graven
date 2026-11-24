@@ -103,6 +103,10 @@ pub const Feature = enum {
 pub const ConstraintEnd = struct {
     object: ObjectId = .none,
     feature: Feature,
+    /// With `object` a sketch view: the point of its sketch this end is
+    /// (its `origin_x` or `origin_y`, as a construction line's point). It
+    /// follows the sketch, and is never moved for the constraint.
+    point: ?sketch_.PointRef = null,
 };
 
 /// A parametric constraint: adding it, or changing its value, moves what
@@ -2047,7 +2051,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse, NotOnACurve } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -3897,6 +3901,69 @@ pub const Model = struct {
     /// `size.y`, degrees), over `sweep` degrees. Rectangular: its top-left
     /// cell's corner at `at`, `size` across and down. Returns the grid's
     /// index.
+    /// Where a caption was put: its track.
+    pub const Caption = struct { parent: Parent, region: usize };
+
+    /// A caption at point `p` (on a circle or an arc) of sketch view
+    /// `view`: the sketch gains a leader (`sketch_.caption`), and a single
+    /// track of text in `style` (`pitch` its line pitch, mm), `length` mm
+    /// long, is held by its left edge (the leader running right) or its
+    /// right edge, and its middle, to the leader's end, its text aligned
+    /// toward it. The track is in the panel the end is over, else straight
+    /// in the workspace.
+    pub fn addCaption(m: *Model, view: ObjectId, p: sketch_.PointRef, style: StyleId, pitch: f64, length: f64) Error!Caption {
+        if (!(pitch > 0) or !(length > 0)) return error.BadSize;
+        var space: ?usize = null;
+        var v: SketchView = undefined;
+        for (m.spaces.items, 0..) |sp, si| for (sp.sketch_views.items) |x| {
+            if (x.id == view) {
+                space = si;
+                v = x;
+            }
+        };
+        const si = space orelse return error.NoSuchItem;
+        const ski = m.sketchIndex(v.sketch) orelse return error.NoSuchItem;
+        const sk = &m.sketches.items[ski].sketch;
+        const lead = sketch_.caption.addLeader(sk, m.a(), p, 3, 4) catch |e| return switch (e) {
+            error.NotOnACurve => error.NotOnACurve,
+            else => |x| x,
+        };
+        _ = try sk.solve(m.arena.child_allocator);
+        m.sketches.items[ski].version +%= 1;
+        const e = try sk.point(lead.end);
+        const at: geom.Point = .{ .x = v.at.x + e.x, .y = v.at.y + e.y };
+        // The panel it is over.
+        var parent: Parent = .{ .space = si };
+        var off: geom.Point = .{ .x = 0, .y = 0 };
+        for (m.panels.items, 0..) |pn, pi| {
+            if (m.spaceOf(pi) != si) continue;
+            const b = pn.box();
+            if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) {
+                parent = .{ .panel = pi };
+                off = pn.origin;
+            }
+        }
+        var name_buf: [32]u8 = undefined;
+        const name = m.freshName(&name_buf, m.containerOf(parent), "Caption");
+        const x0 = if (lead.right) at.x else at.x - length;
+        const r = try m.addTracks(parent, .{
+            .name = name,
+            .origin = .{ .x = x0 - off.x, .y = at.y + pitch / 2 - off.y },
+            .kind = .track,
+            .style = style,
+            .count = 1,
+            .length = length / pitch,
+            .pitch = pitch,
+        });
+        const region = &m.regionsIn(parent)[r];
+        region.alignment = if (lead.right) .start else .end;
+        const rid = region.id;
+        _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = if (lead.right) .left else .right }, .b = .{ .object = view, .feature = .origin_x, .point = lead.end } });
+        _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = .centre_y }, .b = .{ .object = view, .feature = .origin_y, .point = lead.end } });
+        m.revision += 1;
+        return .{ .parent = parent, .region = r };
+    }
+
     pub fn addArray(m: *Model, parent: Parent, at: geom.Point, polar: bool, cols: u32, rows: u32, size: geom.Point, sweep: f64) Error!usize {
         if (!m.hasParent(parent)) return error.NoSuchItem;
         if (cols == 0 or rows == 0) return error.BadSize;

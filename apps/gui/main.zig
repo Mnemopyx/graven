@@ -17659,6 +17659,11 @@ const button_handlers = [_]ButtonHandler{
             layFlashEnd(arg);
         }
     }.f),
+    handler("sketch-mode.add-caption", struct {
+        fn f(_: i32) void {
+            skAddCaption();
+        }
+    }.f),
     handler("sketch-mode.constraint", struct {
         fn f(arg: i32) void {
             skPickConstraint(@intCast(arg));
@@ -27028,6 +27033,60 @@ fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     state.status = "Sketch mode: draw from the palette; Tab locks the pointer; Enter shows the summary. ";
 }
 
+/// The one selected point a caption may be added to (on a circle or an
+/// arc, which `addCaption` checks).
+fn skCaptionPoint() ?skl.PointRef {
+    if (sk_sel.items.len != 1) return null;
+    return switch (sk_sel.items[0]) {
+        .point => |r| r,
+        else => null,
+    };
+}
+
+/// The sketch view being edited, by ID.
+fn skViewId() ?layout.model.ObjectId {
+    const r = sketch_edit orelse return null;
+    if (r.space >= state.model.spaces.items.len) return null;
+    const sid = state.model.sketches.items[r.sketch].id;
+    for (state.model.spaces.items[r.space].sketch_views.items) |v| {
+        if (v.sketch == sid and v.at.x == r.at.x and v.at.y == r.at.y) return v.id;
+    }
+    return null;
+}
+
+/// Add caption: a leader from the selected point and a track of text held
+/// to its end; the sketch is left, the cursor waiting in the track.
+fn skAddCaption() void {
+    const p = skCaptionPoint() orelse return;
+    const view = skViewId() orelse {
+        state.status = "A caption needs the sketch placed on a canvas or panel: this one is only being defined. ";
+        return;
+    };
+    const key = mergeKey(.{ "caption", view, p.geom, @intFromEnum(p.role), state.model.revision });
+    const style = labelStyleIn(key) catch {
+        state.status = "Add caption: no text style for it. ";
+        return;
+    };
+    const pitch = styleLinePitch(style) orelse {
+        state.status = "Add caption: no text style for it. ";
+        return;
+    };
+    const cap = actM(key, .addCaption, .{ view, p, style, pitch, 30 }) catch |err| {
+        state.status = if (err == error.NotOnACurve) "A caption goes on a point of a circle or an arc. " else "The caption could not be added. ";
+        return;
+    };
+    // Its text in the caption's style, with no paragraph style, so the
+    // track's alignment (toward the leader) holds.
+    if (state.model.trackFlow(cap.parent, cap.region)) |fl| {
+        const tid = defaultTemplate() catch null;
+        if (tid) |t| _ = hist.join(&state.model, .setFlowStyle, .{ fl.id, style, @as(?layout.model.ParaId, null), @as(?layout.model.Leading, null), t }) catch {};
+    }
+    leaveSketch();
+    state.context = .{ .region = .{ .parent = cap.parent, .region = cap.region } };
+    track_cursor = .{ .parent = cap.parent, .region = cap.region, .index = 0 };
+    state.expanded.put(state.gpa, Context.key(parentContext(cap.parent)), true) catch {};
+}
+
 fn leaveSketch() void {
     sketch_edit = null;
     sk_summary = false;
@@ -28660,6 +28719,8 @@ fn sketchModeProperties() void {
     }
     heading("{s}", .{"Constrain the selection"}, 8199);
     sketchConstrainButtons();
+    // A point on a circle or an arc: a caption for it.
+    if (skCaptionPoint() != null) keyButton(@src(), "Add caption", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     keyButton(@src(), "Finish sketch…  Enter", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     skConstraintList(it);
     sketchPhysicalWhen(it);

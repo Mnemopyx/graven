@@ -61,7 +61,9 @@ pub const Issue = struct {
 /// Where an object is, and what it is.
 /// A construction line is placed by its point: a horizontal one's height
 /// and a vertical one's place across are what a constraint holds.
-const Kind = enum { panel, region, art, image, figure_place, control_point, guide };
+/// A sketch view's point (`ConstraintEnd.point`): where it is now, only
+/// referred to.
+const Kind = enum { panel, region, art, image, figure_place, control_point, guide, sketch_point };
 /// What an object sits in: a workspace (panels, content layouts set
 /// straight on it, images) or a panel (its content layouts, line art),
 /// whose frame its position is in.
@@ -77,6 +79,8 @@ const Loc = struct {
     index: usize = 0,
     /// A control point's index in its track's path.
     sub: usize = 0,
+    /// A sketch view's point (`locateEnd`).
+    point: ?model.sketch_.PointRef = null,
 };
 
 fn locate(m: *const Model, id: ObjectId) ?Loc {
@@ -96,8 +100,30 @@ fn locate(m: *const Model, id: ObjectId) ?Loc {
         for (s.images.items, 0..) |im, k| if (im.id == id) return .{ .kind = .image, .parent = .{ .space = si }, .holder = si, .index = k };
         for (s.figure_places.items, 0..) |fp, k| if (fp.id == id) return .{ .kind = .figure_place, .parent = .{ .space = si }, .holder = si, .index = k };
         for (s.guides.items, 0..) |g, k| if (g.id == id) return .{ .kind = .guide, .parent = .{ .space = si }, .holder = si, .index = k };
+        for (s.sketch_views.items, 0..) |v, k| if (v.id == id) return .{ .kind = .sketch_point, .parent = .{ .space = si }, .holder = si, .index = k };
     }
     return null;
+}
+
+/// Where constraint end `end`'s object is: `locate`, with a sketch view's
+/// point.
+fn locateEnd(m: *const Model, end: model.ConstraintEnd) ?Loc {
+    var loc = locate(m, end.object) orelse return null;
+    if (loc.kind == .sketch_point) {
+        loc.point = end.point;
+        // The point must still be there.
+        _ = sketchPointAt(m, loc) orelse return null;
+    }
+    return loc;
+}
+
+/// A sketch view's point (or, none named, its origin) in its space.
+fn sketchPointAt(m: *const Model, loc: Loc) ?geom.Point {
+    const v = m.spaces.items[loc.holder].sketch_views.items[loc.index];
+    const r = loc.point orelse return v.at;
+    const si = m.sketchIndex(v.sketch) orelse return null;
+    const p = m.sketches.items[si].sketch.point(r) catch return null;
+    return .{ .x = v.at.x + p.x, .y = v.at.y + p.y };
 }
 
 /// Whether constraint `c` names an object that is gone (removed since
@@ -157,6 +183,11 @@ fn shapeOf(m: *const Model, loc: Loc, vertical: bool) Shape {
         },
         .control_point => blk: {
             const at = controlPointAt(m.regionsIn(loc.parent)[loc.index], loc.sub);
+            const v = if (vertical) at.y else at.x;
+            break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
+        },
+        .sketch_point => blk: {
+            const at = sketchPointAt(m, loc) orelse geom.Point{ .x = 0, .y = 0 };
             const v = if (vertical) at.y else at.x;
             break :blk .{ .lo = v, .hi = v, .f = 0, .resizable = false };
         },
@@ -266,6 +297,8 @@ fn place(m: *Model, loc: Loc, vertical: bool, o: f64, s: f64) void {
             const g = &m.spaces.items[loc.holder].guides.items[loc.index];
             if (vertical) g.at.y = o else g.at.x = o;
         },
+        // Placed by its sketch, never by a constraint.
+        .sketch_point => {},
     }
 }
 
@@ -352,7 +385,7 @@ pub fn originOf(m: *const Model, id: ObjectId) ?geom.Point {
 /// (an object that is gone, an unbounded space's edge).
 pub fn featureAt(m: *const Model, parent: Parent, end: model.ConstraintEnd) ?f64 {
     if (end.object == .none) return parentFeature(m, parent, end.feature);
-    const loc = locate(m, end.object) orelse return null;
+    const loc = locateEnd(m, end) orelse return null;
     const sh = shapeOf(m, loc, end.feature.vertical());
     const size = sh.hi - sh.lo;
     const t = featureTerm(m, loc, end.feature, sh.f) orelse return null;
@@ -425,7 +458,7 @@ fn featureTerm(m: *const Model, loc: Loc, f: Feature, at: f64) ?Term {
 /// `featureAt`.
 pub fn featureInSpace(m: *const Model, parent: Parent, end: model.ConstraintEnd) ?f64 {
     const v = end.feature.vertical();
-    const own = if (end.object == .none) parent else (locate(m, end.object) orelse return null).parent;
+    const own = if (end.object == .none) parent else (locateEnd(m, end) orelse return null).parent;
     const off = frameOffset(m, own);
     return (featureAt(m, own, end) orelse return null) + if (v) off.y else off.x;
 }
@@ -443,7 +476,7 @@ pub fn dimensionOf(m: *const Model, c: model.Constraint) ?gc.dimension.Measure {
     var ext: [2]?[2]f64 = undefined;
     for ([_]model.ConstraintEnd{ c.b, c.a }, 0..) |end, i| {
         along[i] = featureInSpace(m, parent, end) orelse return null;
-        ext[i] = acrossOf(m, parent, end.object, v);
+        ext[i] = acrossOf(m, parent, end, v);
     }
     // Each feature's point: the middle of its extent; a line without end
     // takes the other's (or 0).
@@ -476,16 +509,19 @@ fn alongNormal(e: ?[2]f64, vertical: bool) ?[2]f64 {
 /// How far object `id` (or, `.none`, parent `parent`) runs across a
 /// feature on axis `vertical`, in workspace coordinates: a construction
 /// line without end; null for an unbounded workspace.
-fn acrossOf(m: *const Model, parent: Parent, id: ObjectId, vertical: bool) ?[2]f64 {
+fn acrossOf(m: *const Model, parent: Parent, end: model.ConstraintEnd, vertical: bool) ?[2]f64 {
     const inf = std.math.inf(f64);
     // A frame's own lines (its axes and edges) and construction lines run
     // on: a dimension needs no extension line along them (the owner,
     // 2026-11-24).
     _ = parent;
+    const id = end.object;
     if (id == .none) return .{ -inf, inf };
-    const loc = locate(m, id) orelse return null;
+    const loc = locateEnd(m, end) orelse return null;
     if (loc.kind == .guide) return .{ -inf, inf };
-    const b = boxOf(m, id) orelse return null;
+    const x = shapeOf(m, loc, false);
+    const y = shapeOf(m, loc, true);
+    const b: geom.Box = .{ .x0 = x.lo, .x1 = x.hi, .y0 = y.lo, .y1 = y.hi };
     const off = frameOffset(m, loc.parent);
     return if (vertical) .{ b.x0 + off.x, b.x1 + off.x } else .{ b.y0 + off.y, b.y1 + off.y };
 }
@@ -528,6 +564,11 @@ fn usable(m: *const Model, gpa: Allocator, issues: ?*std.ArrayList(Issue), c: mo
         try note(gpa, issues, c.id, .missing_object);
         return false;
     };
+    // A sketch's point follows its sketch: only referred to.
+    if (la.kind == .sketch_point) {
+        try note(gpa, issues, c.id, .no_feature);
+        return false;
+    }
     if (c.a.feature.vertical() != c.b.feature.vertical()) {
         try note(gpa, issues, c.id, .mixed_axes);
         return false;
@@ -535,14 +576,14 @@ fn usable(m: *const Model, gpa: Allocator, issues: ?*std.ArrayList(Issue), c: mo
     if (c.kind == .offset) {
         const fa = shapeOf(m, la, c.a.feature.vertical()).f;
         const lacks_a = featureTerm(m, la, c.a.feature, fa) == null;
-        const lacks_b = if (c.b.object == .none) c.b.feature == .baseline else if (locate(m, c.b.object)) |lb| featureTerm(m, lb, c.b.feature, shapeOf(m, lb, c.b.feature.vertical()).f) == null else false;
+        const lacks_b = if (c.b.object == .none) c.b.feature == .baseline else if (locateEnd(m, c.b)) |lb| featureTerm(m, lb, c.b.feature, shapeOf(m, lb, c.b.feature.vertical()).f) == null else false;
         if (lacks_a or lacks_b) {
             try note(gpa, issues, c.id, .no_feature);
             return false;
         }
     }
     if (c.b.object != .none) {
-        const lb = locate(m, c.b.object) orelse {
+        const lb = locateEnd(m, c.b) orelse {
             try note(gpa, issues, c.id, .missing_object);
             return false;
         };
@@ -601,7 +642,7 @@ fn endPoint(m: *const Model, a: Allocator, geo: *std.ArrayList(gc.geometry.Geome
         const off = frameOffset(m, parent);
         co.c = parentFeature(m, parent, end.feature).? + if (v) off.y else off.x;
     } else {
-        const loc = locate(m, end.object).?;
+        const loc = locateEnd(m, end).?;
         const off = frameOffset(m, loc.parent);
         const base = if (v) off.y else off.x;
         if (objIndex(objs, end.object)) |k| {
