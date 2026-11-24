@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const platform = @import("graven_platform");
 const dvui = @import("dvui");
 const actions = @import("actions.zig");
+const kb = @import("graven_keys");
 
 pub const Direction = actions.Direction;
 
@@ -275,10 +276,10 @@ pub const action_defs = [_]A{
     .{ .name = "digraph.back" },
 };
 
-const left: i32 = @intFromEnum(Direction.left);
-const right: i32 = @intFromEnum(Direction.right);
-const up: i32 = @intFromEnum(Direction.up);
-const down: i32 = @intFromEnum(Direction.down);
+const left: i32 = @backingInt(Direction.left);
+const right: i32 = @backingInt(Direction.right);
+const up: i32 = @backingInt(Direction.up);
+const down: i32 = @backingInt(Direction.down);
 
 /// The four arrows, bound to `action` in `mode`.
 fn arrows(comptime md: []const u8, comptime ac: []const u8) [4]B {
@@ -351,10 +352,12 @@ pub const binds = [_]B{
     .{ .mode = "view", .chord = "primary+alt+zero", .action = "view.zoom-all" },
     .{ .mode = "view", .chord = "primary+one", .action = "view.zoom-to", .arg = 100 },
     .{ .mode = "view", .chord = "primary+two", .action = "view.zoom-to", .arg = 200 },
-    .{ .mode = "view", .chord = "primary+equal", .action = "view.zoom-in" },
-    .{ .mode = "view", .chord = "primary+shift+equal", .action = "view.zoom-in" },
+    // By symbol: whichever keys type + = and - on the layout in use (on
+    // German, + has a key of its own and = is Shift+0).
+    .{ .mode = "view", .chord = "primary+'+'", .action = "view.zoom-in" },
+    .{ .mode = "view", .chord = "primary+'='", .action = "view.zoom-in" },
     .{ .mode = "view", .chord = "primary+kp_add", .action = "view.zoom-in" },
-    .{ .mode = "view", .chord = "primary+minus", .action = "view.zoom-out" },
+    .{ .mode = "view", .chord = "primary+'-'", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "primary+kp_subtract", .action = "view.zoom-out" },
     .{ .mode = "view", .chord = "space", .action = "view.pan-hold" },
     .{ .mode = "view", .chord = "z", .action = "view.zoom-hold", .arg = 0 },
@@ -604,7 +607,7 @@ pub const Invocation = struct {
     chorded: bool = true,
 
     pub fn dir(inv: Invocation) Direction {
-        return @enumFromInt(inv.arg);
+        return @fromBackingInt(@intCast(inv.arg));
     }
 };
 
@@ -634,10 +637,10 @@ fn maskedByText(m: ModeId) bool {
 }
 
 pub fn printable(k: dvui.enums.Key) bool {
-    const i = @intFromEnum(k);
-    return (i >= @intFromEnum(dvui.enums.Key.a) and i <= @intFromEnum(dvui.enums.Key.nine)) or
-        (i >= @intFromEnum(dvui.enums.Key.space) and i <= @intFromEnum(dvui.enums.Key.grave)) or
-        (i >= @intFromEnum(dvui.enums.Key.kp_divide) and i <= @intFromEnum(dvui.enums.Key.kp_equal));
+    const i = @backingInt(k);
+    return (i >= @backingInt(dvui.enums.Key.a) and i <= @backingInt(dvui.enums.Key.nine)) or
+        (i >= @backingInt(dvui.enums.Key.space) and i <= @backingInt(dvui.enums.Key.grave)) or
+        (i >= @backingInt(dvui.enums.Key.kp_divide) and i <= @backingInt(dvui.enums.Key.kp_equal));
 }
 
 /// The modifiers of key event `k`, or held now: a modifier pressed before
@@ -652,6 +655,170 @@ fn modsOf(k: dvui.Event.Key) actions.Mods {
         if (live & c.SDL_KMOD_GUI != 0) m.cmd = true;
     }
     return m;
+}
+
+// The keyboard: positions and the layout in use --------------------------
+
+/// What each key types on the layout in use (US English until the system
+/// says; under the testing backend, always). Bindings by symbol and cases
+/// of sorts resolve keys through it.
+pub var layout: kb.Layout = kb.us;
+var layout_stale = true;
+var watching = false;
+
+/// Each key event's SDL scancode, as SDL queued it: taken off in order as
+/// the same events reach DVUI (`assignScancodes`), which carry no
+/// scancode of their own.
+const Queued = struct { hid: u16, key: i32 };
+var queued: [64]Queued = undefined;
+var queued_head: usize = 0;
+var queued_len: usize = 0;
+
+/// DVUI's key events this frame, by event number (numbered afresh each
+/// frame), with the position each came from.
+const Placed = struct { num: u16, pos: ?kb.Position };
+var placed: [64]Placed = undefined;
+var placed_len: usize = 0;
+
+fn watch(_: ?*anyopaque, ev: [*c]dvui.backend.c.SDL_Event) callconv(.c) bool {
+    const c = dvui.backend.c;
+    const e = ev.*;
+    switch (e.type) {
+        c.SDL_EVENT_KEYMAP_CHANGED => layout_stale = true,
+        c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => {
+            if (queued_len == queued.len) {
+                queued_head = (queued_head + 1) % queued.len;
+                queued_len -= 1;
+            }
+            queued[(queued_head + queued_len) % queued.len] = .{ .hid = @intCast(e.key.scancode), .key = @intCast(e.key.key) };
+            queued_len += 1;
+        },
+        else => {},
+    }
+    return true;
+}
+
+/// At the start of a frame: watches SDL's events (once), reads the layout
+/// again if it changed, and gives this frame's key events their positions.
+pub fn beginFrame() void {
+    if (dvui.backend.kind != .sdl3) return;
+    const c = dvui.backend.c;
+    if (!watching) {
+        watching = c.SDL_AddEventWatch(watch, null);
+    }
+    if (layout_stale) {
+        layout_stale = false;
+        readLayout();
+    }
+    assignScancodes();
+}
+
+/// The layout from SDL: what each position types, without and with Shift.
+fn readLayout() void {
+    const c = dvui.backend.c;
+    var l: kb.Layout = .{};
+    for (kb.grid, 0..) |g, i| {
+        l.lower[i] = symOf(c.SDL_GetKeyFromScancode(g.hid, c.SDL_KMOD_NONE, false));
+        l.upper[i] = symOf(c.SDL_GetKeyFromScancode(g.hid, c.SDL_KMOD_SHIFT, false));
+    }
+    layout = l;
+    if (log) {
+        std.debug.print("keys: layout", .{});
+        for (kb.grid, 0..) |g, i| std.debug.print(" {s}={s}{s}", .{ &g.pos.name(), layout.lower[i].slice(), layout.upper[i].slice() });
+        std.debug.print("\n", .{});
+    }
+}
+
+fn symOf(key: u32) kb.Sym {
+    const c = dvui.backend.c;
+    if (key & c.SDLK_SCANCODE_MASK != 0 or key < 0x20 or key == 0x7f or key > 0x10ffff) return .{};
+    return .ofCodepoint(@intCast(key));
+}
+
+fn assignScancodes() void {
+    placed_len = 0;
+    for (dvui.events()) |*e| {
+        const k = switch (e.evt) {
+            .key => |k| k,
+            else => continue,
+        };
+        // The next queued key event that DVUI makes this key of (others,
+        // for another window, are dropped).
+        var pos: ?kb.Position = null;
+        while (queued_len > 0) {
+            const q = queued[queued_head];
+            queued_head = (queued_head + 1) % queued.len;
+            queued_len -= 1;
+            if (dvui.backend.SDL_keysym_to_dvui(q.key) == k.code) {
+                pos = kb.atHid(q.hid);
+                break;
+            }
+        }
+        if (log) std.debug.print("keys: event {d} {s} at {s}\n", .{ e.num, @tagName(k.code), if (pos) |p| &p.name() else "?" });
+        if (placed_len == placed.len) continue;
+        placed[placed_len] = .{ .num = e.num, .pos = pos };
+        placed_len += 1;
+    }
+}
+
+fn placedAt(num: u16) ?*Placed {
+    for (placed[0..placed_len]) |*p| if (p.num == num) return p;
+    return null;
+}
+
+/// Where key event `e` came from on the keyboard: from SDL's scancode, or
+/// (under the testing backend, or when it is not known) the US position
+/// of its key.
+pub fn positionOf(e: *const dvui.Event, k: dvui.Event.Key) ?kb.Position {
+    if (placedAt(e.num)) |p| if (p.pos) |pos| return pos;
+    return usPosition(k.code);
+}
+
+fn usPosition(code: dvui.enums.Key) ?kb.Position {
+    const name: []const u8 = switch (code) {
+        .zero => "0",
+        .one => "1",
+        .two => "2",
+        .three => "3",
+        .four => "4",
+        .five => "5",
+        .six => "6",
+        .seven => "7",
+        .eight => "8",
+        .nine => "9",
+        .equal => "=",
+        .minus => "-",
+        .left_bracket => "[",
+        .right_bracket => "]",
+        .backslash => "\\",
+        .semicolon => ";",
+        .apostrophe => "'",
+        .comma => ",",
+        .period => ".",
+        .slash => "/",
+        .grave => "`",
+        .space => " ",
+        else => blk: {
+            const t = @tagName(code);
+            break :blk if (t.len == 1) t else return null;
+        },
+    };
+    return (kb.us.find(name) orelse return null).pos;
+}
+
+/// Whether key event `e` (modifiers `mods`) is the key of `chord` by
+/// position or symbol, with its modifiers.
+fn hitsKey(e: *const dvui.Event, k: dvui.Event.Key, mods: actions.Mods, chord: R.KeyChord) bool {
+    switch (chord.what) {
+        .pos => |p| return chord.mods.eql(mods) and (positionOf(e, k) orelse return false).eql(p),
+        .sym => |s| {
+            const at = layout.find(s) orelse return false;
+            var want = chord.mods;
+            if (at.shift) want.shift = true;
+            return want.eql(mods) and (positionOf(e, k) orelse return false).eql(at.pos);
+        },
+        else => return false,
+    }
 }
 
 /// The action event `e` asks for in `in` (innermost first): the first
@@ -671,10 +838,15 @@ pub fn match(e: *const dvui.Event, in: []const ModeId) ?Invocation {
                     const hit = switch (b.chord.what) {
                         .code => |code| code == k.code and b.chord.mods.eql(mods) and
                             !(masked and !b.chord.mods.chorded() and printable(code)),
+                        .pos, .sym => hitsKey(e, k, mods, b.chord) and
+                            !(masked and !b.chord.mods.chorded() and printable(k.code)),
                         .bind => |name| k.matchBind(name),
                         .char => false,
                     };
-                    if (hit) return logged(.{ .action = b.action, .arg = b.arg, .chorded = b.chord.what != .code or b.chord.mods.chorded() }, m);
+                    if (hit) return logged(.{ .action = b.action, .arg = b.arg, .chorded = switch (b.chord.what) {
+                        .code, .pos, .sym => b.chord.mods.chorded(),
+                        else => true,
+                    } }, m);
                 }
             }
             return null;
@@ -751,6 +923,8 @@ pub fn released(e: *const dvui.Event, m: ModeId) ?ActionId {
     if (k.action != .up) return null;
     for (R.tables[m]) |b| switch (b.chord.what) {
         .code => |code| if (code == k.code) return b.action,
+        .pos => |p| if (positionOf(e, k)) |at| if (at.eql(p)) return b.action,
+        .sym => |sym| if (layout.find(sym)) |f| if (positionOf(e, k)) |at| if (at.eql(f.pos)) return b.action,
         else => {},
     };
     return null;
@@ -787,8 +961,13 @@ pub fn shortcutPreferring(buf: []u8, m: ModeId, a: ActionId, arg: i32, chorded: 
     if (b.chord.mods.alt) w.writeAll(kn.alt) catch return null;
     if (b.chord.mods.shift) w.writeAll(kn.shift) catch return null;
     switch (b.chord.what) {
-        .char => |c| w.writeAll(c) catch return null,
+        .char, .sym => |c| w.writeAll(c) catch return null,
         .code => |k| w.writeAll(keyName(k)) catch return null,
+        .pos => |p| {
+            // What the key types here, a letter as its capital.
+            const t = layout.typed(p, false);
+            if (t.len == 1 and std.ascii.isLower(t[0])) w.writeByte(std.ascii.toUpper(t[0])) catch return null else if (t.len > 0) w.writeAll(t) catch return null else w.writeAll(&p.name()) catch return null;
+        },
         .bind => unreachable,
     }
     return w.buffered();

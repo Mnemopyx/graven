@@ -6,6 +6,7 @@
 //! structure that can be dumped, diffed and tested.
 
 pub const model = @import("model.zig");
+pub const keys = @import("graven_keys");
 pub const units = @import("graven_constraint").units;
 pub const names = @import("names.zig");
 pub const place = @import("place.zig");

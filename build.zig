@@ -99,6 +99,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Keyboards: key positions (ISO 9995 grid) and layouts, where bindings
+    // and cases of sorts resolve keys named by position or symbol.
+    const keys = b.addModule("graven_keys", .{
+        .root_source_file = b.path("lib/keys/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const layout = b.addModule("graven_layout", .{
         .root_source_file = b.path("lib/layout/root.zig"),
         .target = target,
@@ -111,6 +119,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "graven_sketch", .module = sketch },
             .{ .name = "graven_constraint", .module = constraint },
             .{ .name = "graven_glyphic", .module = glyphic },
+            .{ .name = "graven_keys", .module = keys },
         },
     });
 
@@ -254,6 +263,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "graven_richtext", .module = richtext },
                     .{ .name = "graven_glyphic", .module = glyphic },
                     .{ .name = "graven_platform", .module = platform },
+                    .{ .name = "graven_keys", .module = keys },
                 },
             }),
         });
@@ -294,6 +304,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "graven_richtext", .module = richtext },
                 .{ .name = "graven_glyphic", .module = glyphic },
                 .{ .name = "graven_platform", .module = platform },
+                .{ .name = "graven_keys", .module = keys },
                 .{ .name = "graven_occt3d", .module = b.createModule(.{
                     .root_source_file = b.path("apps/gui/occt3d_stub.zig"),
                     .target = target,
@@ -338,7 +349,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("apps/gui/actions.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "graven_keys", .module = keys }},
     }) })).step);
+    // Keyboards: positions and layouts.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = keys })).step);
     // Pane layouts: names, built-ins, reading the config.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("apps/gui/layouts.zig"),

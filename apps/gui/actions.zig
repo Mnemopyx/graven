@@ -31,6 +31,7 @@
 //! tested on its own; `keymap.zig` instantiates it for DVUI's keys.
 
 const std = @import("std");
+const keys = @import("graven_keys");
 
 /// How a mode relates to the others.
 pub const Kind = enum {
@@ -93,10 +94,17 @@ pub const Os = enum { any, mac, not_mac };
 pub const BindDef = struct {
     mode: []const u8,
     /// `[mods+]key`: mods `ctrl`, `shift`, `alt`, `cmd`, `primary` (Cmd on
-    /// macOS, else Ctrl); key a key's name. Or `char:x`, the character
-    /// typed (whatever key and layout made it), or `bind:name`, a text
-    /// field binding of the toolkit's (word left, copy …), as the platform
-    /// has it.
+    /// macOS, else Ctrl); key one of
+    /// - a key's name (`z`: the key the layout calls Z);
+    /// - `@` and a position (`@D01`: the first key of the first letter row,
+    ///   whatever it types; see `graven_keys`);
+    /// - a symbol in quotes (`'>'`: the key that types `>` on the layout in
+    ///   use, with Shift added where typing it takes Shift). Alone, with no
+    ///   modifier, the same as `char:>`.
+    /// `^x` is short for `ctrl+'x'` and `^@D01` for `ctrl+@D01`. Or
+    /// `char:x`, the character typed (whatever key and layout made it), or
+    /// `bind:name`, a text field binding of the toolkit's (word left, copy
+    /// …), as the platform has it.
     chord: []const u8,
     action: []const u8,
     arg: i32 = 0,
@@ -126,6 +134,10 @@ pub fn Chord(comptime Key: type) type {
 
         pub const What = union(enum) {
             code: Key,
+            /// The key at a position on the keyboard.
+            pos: keys.Position,
+            /// The key that types this symbol (Shift added if it takes it).
+            sym: []const u8,
             char: []const u8,
             bind: []const u8,
         };
@@ -134,6 +146,8 @@ pub fn Chord(comptime Key: type) type {
             if (!a.mods.eql(b.mods)) return false;
             return switch (a.what) {
                 .code => |k| b.what == .code and b.what.code == k,
+                .pos => |p| b.what == .pos and b.what.pos.eql(p),
+                .sym => |s| b.what == .sym and std.mem.eql(u8, s, b.what.sym),
                 .char => |s| b.what == .char and std.mem.eql(u8, s, b.what.char),
                 .bind => |s| b.what == .bind and std.mem.eql(u8, s, b.what.bind),
             };
@@ -152,8 +166,20 @@ pub fn parseChord(comptime Key: type, comptime s: []const u8, comptime mac: bool
             if (s.len == 5) @compileError("empty binding name in chord \"" ++ s ++ "\"");
             break :parse .{ .what = .{ .bind = s[5..] } };
         }
+        if (s.len > 1 and s[0] == '^') {
+            const rest = s[1..];
+            break :parse .{ .what = keyPart(Key, s, rest) orelse symPart(Key, s, rest), .mods = .{ .ctrl = true } };
+        }
+        // A quoted symbol may be `+` itself: modifiers end before its quote.
         var mods: Mods = .{};
         var rest = s;
+        var key_from: ?usize = null;
+        for (s, 0..) |ch, i| if (ch == '\'' and (i == 0 or s[i - 1] == '+')) {
+            key_from = i;
+            break;
+        };
+        const mod_part = if (key_from) |i| s[0..i] else s;
+        if (key_from != null) rest = mod_part;
         while (std.mem.indexOfScalar(u8, rest, '+')) |i| {
             const m = rest[0..i];
             if (std.mem.eql(u8, m, "ctrl")) {
@@ -169,9 +195,31 @@ pub fn parseChord(comptime Key: type, comptime s: []const u8, comptime mac: bool
             } else @compileError("unknown modifier \"" ++ m ++ "\" in chord \"" ++ s ++ "\"");
             rest = rest[i + 1 ..];
         }
+        if (key_from) |i| {
+            const q = s[i..];
+            if (q.len < 3 or q[q.len - 1] != '\'') @compileError("unclosed symbol in chord \"" ++ s ++ "\"");
+            const sym = q[1 .. q.len - 1];
+            if (!mods.chorded() and !mods.shift) break :parse .{ .what = .{ .char = sym } };
+            break :parse .{ .what = .{ .sym = sym }, .mods = mods };
+        }
+        if (keyPart(Key, s, rest)) |w| break :parse .{ .what = w, .mods = mods };
         const key = std.meta.stringToEnum(Key, rest) orelse @compileError("unknown key \"" ++ rest ++ "\" in chord \"" ++ s ++ "\"");
         break :parse Chord(Key){ .what = .{ .code = key }, .mods = mods };
     };
+}
+
+/// A chord's key part when it is a position (`@D01`).
+fn keyPart(comptime Key: type, comptime s: []const u8, comptime rest: []const u8) ?Chord(Key).What {
+    if (rest.len == 0 or rest[0] != '@') return null;
+    const p = keys.Position.parse(rest[1..]) orelse @compileError("unknown position \"" ++ rest ++ "\" in chord \"" ++ s ++ "\"");
+    return .{ .pos = p };
+}
+
+/// `^x`'s symbol: one character.
+fn symPart(comptime Key: type, comptime s: []const u8, comptime rest: []const u8) Chord(Key).What {
+    const n = std.unicode.utf8ByteSequenceLength(rest[0]) catch @compileError("not UTF-8 in chord \"" ++ s ++ "\"");
+    if (n != rest.len) @compileError("\"^\" takes one character or a position, in chord \"" ++ s ++ "\"");
+    return .{ .sym = rest };
 }
 
 fn eqlStr(a: []const u8, b: []const u8) bool {
@@ -437,8 +485,8 @@ const test_binds = [_]BindDef{
     .{ .mode = "global", .chord = "primary+z", .action = "edit.undo" },
     .{ .mode = "global", .chord = "primary+shift+z", .action = "edit.redo" },
     .{ .mode = "global", .chord = "primary+y", .action = "edit.redo", .os = .not_mac },
-    .{ .mode = "canvas", .chord = "left", .action = "canvas.nudge", .arg = @intFromEnum(Direction.left) },
-    .{ .mode = "canvas", .chord = "right", .action = "canvas.nudge", .arg = @intFromEnum(Direction.right) },
+    .{ .mode = "canvas", .chord = "left", .action = "canvas.nudge", .arg = @backingInt(Direction.left) },
+    .{ .mode = "canvas", .chord = "right", .action = "canvas.nudge", .arg = @backingInt(Direction.right) },
     .{ .mode = "canvas.flow", .chord = "escape", .action = "canvas.flow.leave" },
     .{ .mode = "canvas.flow", .chord = "bind:word_left", .action = "canvas.flow.word-left" },
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
@@ -459,6 +507,21 @@ test "chords parse, primary follows the system" {
     try testing.expect(m.mods.cmd and !m.mods.ctrl);
     try testing.expectEqualStrings("+", parseChord(TestKey, "char:+", false).what.char);
     try testing.expectEqualStrings("copy", parseChord(TestKey, "bind:copy", false).what.bind);
+}
+
+test "chords by position and by symbol" {
+    const p = parseChord(TestKey, "ctrl+@D01", false);
+    try testing.expect(p.mods.ctrl and p.what.pos.eql(keys.Position.parse("D01").?));
+    const s = parseChord(TestKey, "^>", false);
+    try testing.expect(s.mods.ctrl and !s.mods.shift);
+    try testing.expectEqualStrings(">", s.what.sym);
+    try testing.expect(s.eql(parseChord(TestKey, "ctrl+'>'", false)));
+    try testing.expectEqualStrings("+", parseChord(TestKey, "alt+'+'", false).what.sym);
+    try testing.expectEqualStrings("+", parseChord(TestKey, "^+", false).what.sym);
+    try testing.expect(parseChord(TestKey, "^@E01", false).what.pos.eql(keys.Position.parse("E01").?));
+    // Unchorded, a symbol is the character typed.
+    try testing.expectEqualStrings("%", parseChord(TestKey, "'%'", false).what.char);
+    try testing.expectEqualStrings("é", parseChord(TestKey, "^é", false).what.sym);
 }
 
 test "names to IDs and back, at compile time and at run time" {

@@ -22,6 +22,7 @@ const glyphic = @import("graven_glyphic");
 
 const Allocator = std.mem.Allocator;
 const geom = @import("graven_geom");
+const keyboard = @import("graven_keys");
 const art_ = @import("art.zig");
 const figure_ = @import("figure.zig");
 pub const process = @import("process.zig");
@@ -200,11 +201,11 @@ pub const SortSize = union(enum) {
     step: u8,
 };
 
-/// One key of a case: the character the key types unshifted (`key`; a
-/// letter in lower case), its sort, and the sort its upper case (Shift or
-/// Caps Lock) types.
+/// One key of a case: where it is on the keyboard (`graven_keys`: the same
+/// key whatever the layout), its sort, and the sort its upper case (Shift
+/// or Caps Lock) types.
 pub const CaseKey = struct {
-    key: u8,
+    key: keyboard.Position,
     lower: ?Sort = null,
     upper: ?Sort = null,
 };
@@ -217,36 +218,26 @@ pub const Case = struct {
     name: []const u8,
     keys: []const CaseKey = &.{},
 
-    /// The sort typed character `ch` stands for in this case, if any: a
-    /// key's lower sort for its own character, its upper one for the
-    /// character Shift makes of it (on a US keyboard) or a capital.
-    pub fn sortFor(c: Case, ch: u8) ?Sort {
-        for (c.keys) |k| {
-            if (k.key == ch) return k.lower;
-            if (shifted(k.key) == ch) return k.upper;
-        }
+    /// The sort typed text `txt` stands for in this case, on keyboard
+    /// layout `on`: the key that types it there, its lower sort, or its
+    /// upper one where typing `txt` took Shift (or Caps Lock).
+    pub fn sortFor(c: Case, on: *const keyboard.Layout, txt: []const u8) ?Sort {
+        const at = on.find(txt) orelse return null;
+        for (c.keys) |k| if (k.key.eql(at.pos)) return if (at.shift) k.upper else k.lower;
         return null;
-    }
-
-    /// The character Shift makes of `ch` on a US keyboard.
-    pub fn shifted(ch: u8) u8 {
-        if (ch >= 'a' and ch <= 'z') return ch - 32;
-        const lower = "1234567890-=[]\\;',./`";
-        const upper = "!@#$%^&*()_+{}|:\"<>?~";
-        if (std.mem.indexOfScalar(u8, lower, ch)) |i| return upper[i];
-        return ch;
     }
 };
 
-/// Graven's own cases. Tiles: the digits type the track's tiles, its
-/// first ten lengths; Shift and a digit, blanks of one to ten steps (the
-/// keyboard tile entry of before, 2026-11-18).
+/// Graven's own cases. Tiles: the digit row's keys (E01 to E10, which type
+/// digits unshifted on most layouts, shifted on French) type the track's
+/// tiles, its first ten lengths; with Shift, blanks of one to ten steps
+/// (the keyboard tile entry of before, 2026-11-18).
 pub const builtin_cases = [_]Case{.{ .name = "Tiles", .keys = &tiles_keys }};
 
 const tiles_keys = blk: {
     var ks: [10]CaseKey = undefined;
-    for ("1234567890", 0..) |ch, i| ks[i] = .{
-        .key = ch,
+    for (0..10) |i| ks[i] = .{
+        .key = .{ .row = .E, .col = @intCast(i + 1) },
         .lower = .{ .tile = .{ .size = .{ .step = i } } },
         .upper = .{ .blank = .{ .step = i } },
     };
@@ -6548,7 +6539,7 @@ pub const Model = struct {
 
     /// Puts `sort` (null: none) on key `key` of case `id`, its lower or
     /// upper case.
-    pub fn setCaseKey(m: *Model, id: ObjectId, key: u8, upper: bool, sort: ?Sort) Error!void {
+    pub fn setCaseKey(m: *Model, id: ObjectId, key: keyboard.Position, upper: bool, sort: ?Sort) Error!void {
         const c = for (m.cases.items) |*c| {
             if (c.id == id) break c;
         } else return error.NoSuchObject;
@@ -6560,7 +6551,7 @@ pub const Model = struct {
         @memcpy(keys[0..c.keys.len], c.keys);
         var n = c.keys.len;
         const at = for (keys[0..n], 0..) |k, i| {
-            if (k.key == key) break i;
+            if (k.key.eql(key)) break i;
         } else blk: {
             keys[n] = .{ .key = key };
             n += 1;

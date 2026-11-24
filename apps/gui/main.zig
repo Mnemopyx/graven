@@ -2431,6 +2431,7 @@ fn frameAverage() struct { ms: f64, n: usize } {
 var elements_log_opened = false;
 
 fn frame() !dvui.App.Result {
+    keymap.beginFrame();
     if (!elements_log_opened) {
         elements_log_opened = true;
         if (platform.env("GRAVEN_ELEMENTS_LOG")) |path| elements_log = std.Io.Dir.cwd().createFile(dvui.io, path, .{}) catch null;
@@ -20890,8 +20891,7 @@ fn chooseCase(i: ?usize) void {
 fn caseSort(txt: []const u8) ?layout.model.Sort {
     const i = active_case orelse return null;
     const c = caseAt(i) orelse return null;
-    if (txt.len != 1) return null;
-    return c.sortFor(txt[0]);
+    return c.sortFor(&keymap.layout, txt);
 }
 
 /// Puts `sort` in at the flow cursor (over the selection; a run it is in
