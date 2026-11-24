@@ -15,10 +15,16 @@ pub const State = struct {
     /// The pane was activated by holding the pointer on its tab: only then
     /// does moving away return it to ghost.
     by_hover: bool = false,
+    /// A click on the tab took over, and the pointer has not left the tab
+    /// since: resting on it does not bring the pane in until it has left
+    /// and come back (a click that sends a pane out must not have it slide
+    /// straight back in under the still pointer).
+    await_leave: bool = false,
 
-    /// A click on the tab took over: the pane is the user's to close.
+    /// A click on the tab took over: the pane is the user's to close. The
+    /// pointer, on the tab, must leave it before hovering counts again.
     pub fn clicked(s: *State) void {
-        s.* = .{};
+        s.* = .{ .await_leave = true };
     }
 };
 
@@ -43,8 +49,10 @@ pub fn step(s: *State, in: Input) Action {
         s.by_hover = false;
         if (!in.on_tab) {
             s.on_since = null;
+            s.await_leave = false;
             return .none;
         }
+        if (s.await_leave) return .none;
         const since = s.on_since orelse in.now;
         s.on_since = since;
         if (in.now - since < in.on_delay) return .none;
@@ -117,6 +125,25 @@ test "a pane activated by a click stays active when the pointer leaves" {
     s.clicked();
     try testing.expectEqual(.none, step(&s, .{ .now = 0, .active = true, .on_tab = false, .on_pane = false, .editing = false }));
     try testing.expectEqual(.none, step(&s, .{ .now = 5000 * ms, .active = true, .on_tab = false, .on_pane = false, .editing = false }));
+}
+
+test "after a click sends a pane out, the pointer must leave the tab and come back" {
+    var s: State = .{};
+    s.clicked();
+    const on: Input = .{ .now = 0, .active = false, .on_tab = true, .on_pane = false, .editing = false };
+    try testing.expectEqual(.none, step(&s, on));
+    var later = on;
+    later.now = 5000 * ms;
+    try testing.expectEqual(.none, step(&s, later));
+    try testing.expectEqual(@as(?i128, null), wait(s, later.now, delay_ns));
+    var off = on;
+    off.on_tab = false;
+    off.now = 5100 * ms;
+    try testing.expectEqual(.none, step(&s, off));
+    later.now = 5200 * ms;
+    try testing.expectEqual(.none, step(&s, later));
+    later.now = 5600 * ms;
+    try testing.expectEqual(.activate, step(&s, later));
 }
 
 test "a shorter delay to activate, the same to return" {
