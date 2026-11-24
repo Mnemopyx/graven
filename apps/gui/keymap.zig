@@ -371,6 +371,7 @@ pub const binds = [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
     // Vim's digraph key (RFC 1345's mnemonics), where text is typed.
     .{ .mode = "text-entry", .chord = "ctrl+k", .action = "text.digraph" },
+    .{ .mode = "text-entry", .chord = "ctrl+shift+k", .action = "text.digraph" },
     .{ .mode = "digraph", .chord = "escape", .action = "digraph.cancel" },
     .{ .mode = "digraph", .chord = "backspace", .action = "digraph.back" },
     .{ .mode = "dialog.calibrate-size", .chord = "left", .action = "dialog.calibrate-size.grow", .arg = -1 },
@@ -438,7 +439,10 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow", .chord = "bind:copy", .action = "canvas.flow.copy" },
     .{ .mode = "canvas.flow", .chord = "bind:cut", .action = "canvas.flow.cut" },
     .{ .mode = "canvas.flow", .chord = "bind:paste", .action = "canvas.flow.paste" },
-    .{ .mode = "canvas.flow", .chord = "bind:select_all", .action = "canvas.flow.select.all" },
+    // Ctrl+A is linenoise's line start in text (Travis, 2026-11-24): select
+    // all is Cmd+A on a Mac, Ctrl+Shift+A elsewhere.
+    .{ .mode = "canvas.flow", .chord = "bind:select_all", .action = "canvas.flow.select.all", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+shift+a", .action = "canvas.flow.select.all", .os = .not_mac },
     .{ .mode = "canvas.flow", .chord = "primary+backslash", .action = "canvas.flow.edit-equation" },
     .{ .mode = "canvas.flow", .chord = "tab", .action = "canvas.flow.tab", .arg = 0 },
     .{ .mode = "canvas.flow", .chord = "shift+tab", .action = "canvas.flow.tab", .arg = 1 },
@@ -449,8 +453,15 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow", .chord = "backspace", .action = "canvas.flow.delete-back" },
     .{ .mode = "canvas.flow", .chord = "delete", .action = "canvas.flow.delete-forward" },
     .{ .mode = "canvas.flow", .chord = "escape", .action = "canvas.flow.leave" },
-    // linenoise's (readline's) keys, with Ctrl on every system. Ctrl+A,
-    // E, N, K, T and W keep Graven's meanings for now.
+    // linenoise's (readline's) keys, with Ctrl on every system; in text
+    // they win over Graven's own (Travis, 2026-11-24): new file, new and
+    // closed views work outside text, and the digraph key is Ctrl+Shift+K.
+    .{ .mode = "canvas.flow", .chord = "ctrl+a", .action = "canvas.flow.caret.line-start" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+e", .action = "canvas.flow.caret.line-end" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+n", .action = "canvas.flow.caret.line-down" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+k", .action = "canvas.flow.delete-line-end" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+t", .action = "canvas.flow.transpose" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+w", .action = "canvas.flow.delete-word-back" },
     .{ .mode = "canvas.flow", .chord = "ctrl+b", .action = "canvas.flow.caret.char-left" },
     .{ .mode = "canvas.flow", .chord = "ctrl+f", .action = "canvas.flow.caret.char-right" },
     .{ .mode = "canvas.flow", .chord = "ctrl+p", .action = "canvas.flow.caret.line-up" },
@@ -656,6 +667,36 @@ pub fn match(e: *const dvui.Event, in: []const ModeId) ?Invocation {
         },
         else => return null,
     }
+}
+
+/// Whether a mode inside `m` in the stack binds event `e`: then the inner
+/// mode's meaning wins (Ctrl+E is line end in text, a new view outside).
+pub fn shadowed(e: *const dvui.Event, m: ModeId) bool {
+    const s = stack();
+    const at = std.mem.indexOfScalar(ModeId, s, m) orelse return false;
+    var k = s.len;
+    while (k > at + 1) {
+        k -= 1;
+        const was = log;
+        log = false;
+        defer log = was;
+        if (match(e, s[k .. k + 1]) != null) return true;
+    }
+    return false;
+}
+
+/// Whether a mode in the stack that takes typed text, other than `m`, binds
+/// event `e`: the text's own editor's keys win over a generic text mode's
+/// (Ctrl+K kills to the line's end in a flow, starts a digraph elsewhere).
+pub fn takenByEditor(e: *const dvui.Event, m: ModeId) bool {
+    for (stack()) |o| {
+        if (o == m or !R.modeDef(o).takes_text) continue;
+        const was = log;
+        log = false;
+        defer log = was;
+        if (match(e, &.{o}) != null) return true;
+    }
+    return false;
 }
 
 /// GRAVEN_KEY_LOG: each action a key asks for, printed with the modes

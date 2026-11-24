@@ -3666,6 +3666,7 @@ fn mergeKey(parts: anytype) u64 {
 fn historyKeys(wd: *dvui.WidgetData) void {
     if (file_prompt != null or leave_prompt != null) return;
     for (dvui.events()) |*e| {
+        if (keymap.shadowed(e, kmode("global"))) continue;
         const inv = keymap.match1(e, kmode("global")) orelse continue;
         // Taken even where it does nothing (Ctrl+S with no document).
         _ = runAction(inv);
@@ -12357,6 +12358,7 @@ fn digraphEvents() void {
         if (e.handled) continue;
         if (!dg_entry.active()) {
             if (text_wanted == null) continue;
+            if (keymap.takenByEditor(e, kmode("text-entry"))) continue;
             const inv = keymap.match1(e, kmode("text-entry")) orelse continue;
             if (inv.action != kact("text.digraph")) continue;
             e.handled = true;

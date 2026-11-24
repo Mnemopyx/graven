@@ -159,6 +159,7 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
   - **The table** (420 pairs): RFC 1345's mnemonics, as Vim's: a letter then a mark for accented Latin (`e'` é, `a:` ä, `c,` ç, `o"` ő, `s<` š; every precomposed form, from Unicode's data), `a*` α for Greek, `->` → `!=` ≠ `=<` ≤ `+-` ± `*X` × `RT` √ `00` ∞, super- and subscript digits (`2S` ², `2s` ₂) and the rest. Graven's own over it: key symbols for keycaps (`SH` ⇧ `CM` ⌘ `OP` ⌥ `CT` ⌃ `RE` ⏎ `BS` ⌫ `DL` ⌦ `TB` ⇥ `ES` ⎋ `CL` ⇪ `HM` ⇱ `EN` ⇲ `PU` ⇞ `PD` ⇟ `PW` ⏻ `EJ` ⏏ `SP` ␣ `MN` ☰), `<=` ≤ (RFC 1345's ⇐), `~=` ≈, `oo` ∞, `*.` ⋅, `Dm` ⌀. A pair not found is tried reversed (`'e` is é).
   - **The user's pairs:** a `[digraphs]` table in either config file, `"->" = "⟶"`; any two characters (`"°C" = "℃"`); an empty value takes a built-in pair away. A bad entry is left out and the status bar says so.
   - **A hint** by the caret (on the canvas) or above the field (below it near the top of the window): "Digraph: type two characters", then the pairs the first character starts, each with its result, in the field font; "No digraph for qq" for a moment after a pair that stands for nothing (nothing is typed then). Esc cancels; Backspace takes the first character back; any other non-typing key (arrows, Enter, a chord) ends it and acts.
+  - **In a flow, Ctrl+Shift+K** (Ctrl+K is linenoise's kill to the line's end there, 2026-11-24); Ctrl+K elsewhere.
   - **Keys:** mode `text-entry` (minor; pushed while text is typed) binds `text.digraph`; mode `digraph` (while one is typed) binds `digraph.cancel` and `digraph.back`.
   - **Found on the way:** FreeType 2.14.1's autohinter overflows (an empty contour's LONG_MIN sentinel) on accented capitals and ā-like glyphs, which traps in Debug builds' C sanitizer: typing ā into any field crashed a Debug build. `build.zig` turns the C sanitizer off for DVUI's FreeType alone; release builds were never affected. Capital accents (Ā) render faint at the field font's small sizes.
 - **Trackpad-friendly navigation** (2026-11-18, at the owner's request; main.zig "View navigation"):
@@ -666,3 +667,12 @@ The owner: the hidden panel was a hack to accommodate a design change; the imple
 - **Checked:** layout tests; the HP-15C made in the GUI; the levels, Select boundaries, pointing, Browser, tabs and canvas GUI tests (three updated: the canvas's context is a space, its layouts on it); the keyboard and HP-15C SVG and 3MF exports byte-identical; by eye under Xvfb (the text sample straight on the canvas, no panel; the HP-15C).
 - **Not checked by the GUI tests:** the PC keyboard made in the GUI, and a region's rows made into tracks, stop where they press the content palette's keys: the insert palette is off (the owner, 2026-11-23), so those two tests fail before and after this change.
 
+
+## linenoise keys in text (2026-11-24)
+
+Travis: "start with lib linenoise standard key combos"; in text they win over Graven's own (his choice on 2026-11-24). Mode `canvas.flow`, Ctrl on every system:
+
+- Ctrl+A / E line start / end; Ctrl+B / F character back / forward; Ctrl+P / N line up / down.
+- Ctrl+D delete forward; Ctrl+H delete back; Ctrl+W the word before; Ctrl+K to the line's end (at its end, the break after it); Ctrl+U the whole displayed line; Ctrl+T swap the characters before and at the cursor (plain text only).
+- Displaced: select all is Ctrl+Shift+A off macOS (Cmd+A on a Mac); a digraph is Ctrl+Shift+K in a flow. New file, new view and close view (Ctrl+N, E/T, W) work outside text.
+- How: an inner mode's binding now wins over `global`'s (`keymap.shadowed`), and a text editor's mode over the generic `text-entry` (`keymap.takenByEditor`). Motions are worked out once (`motionStop` in main.zig) for moving, selecting and deleting; to move into `lib/layout/caret.zig` with the rest of the proposal (https://claude.ai/artifact/BAvjtgzmK21F4RVpxVLgz2).
