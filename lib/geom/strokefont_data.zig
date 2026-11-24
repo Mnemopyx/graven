@@ -119,5 +119,7 @@ pub const extra = [_]struct { cp: u21, g: []const u8 }{
     .{ .cp = 0x00B7, .g = "NVSPRRQQRPSP" },
     .{ .cp = 0x2220, .g = "F^[HI[\\[" },
     .{ .cp = 0x2245, .g = "E_ILKJNHQJSKVLYL[I RIP[P RIU[U" },
+    .{ .cp = 0xE000, .g = "CaFVFTGQHOJMLLNKQJSJVKXLZM\\O]Q^T^V REJ_J" },
+    .{ .cp = 0xE001, .g = "CaFYFWGTHRJPLONNQMSMVNXOZP\\R]T^W^Y RUMUNTPRPQPONOMOLPJRJTJUKUM RTMSNROQNPMQLRKSLTM RSMRNQMRLSM" },
     .{ .cp = 0x03B8, .g = "I[XPWUVXTZQ[OZMWLSLNMJOGQFTGVIWLXP RLPXP" },
 };

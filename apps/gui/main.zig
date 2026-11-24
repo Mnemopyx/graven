@@ -28759,11 +28759,13 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             },
             .horizontal => "H",
             .vertical => "V",
-            .point_on => "on",
+            // Marks drawn in the stroke font's private glyphs: a point on
+            // an arc, a line touching an arc (the owner's, 2026-11-24).
+            .point_on => "\u{E001}",
             .fixed => "lock",
             .parallel => "||",
             .perpendicular => "perp",
-            .tangent => "tan",
+            .tangent => "\u{E000}",
             // Equal sizes and angles: their sets are named and noted once
             // (`skDrawEqualSets`); a selected one shows its set's name.
             .equal, .equal_angle => blk: {
