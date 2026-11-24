@@ -26132,6 +26132,7 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .tangent => "Tangent",
         .equal => "Equal",
         .symmetric => "Symmetric",
+        .equal_distance => "Equal distance",
     };
     if (skShownValue(c)) |v| {
         const u = if (c.kind == .angle) "°" else unit;
@@ -26276,6 +26277,10 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
         .angle => |a| curveMid(s, a.b),
         inline .parallel, .perpendicular, .tangent, .equal => |a| curveMid(s, a.b),
         .symmetric => |sy| skMid(s.point(sy.p) catch return null, s.point(sy.q) catch return null),
+        .equal_distance => |e| switch (e.b) {
+            .points, .x, .y => |ps| skMid(s.point(ps[0]) catch return null, s.point(ps[1]) catch return null),
+            .to_line => |t| s.point(t.p) catch null,
+        },
     };
 }
 
@@ -26707,6 +26712,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             .tangent => "tan",
             .equal => "=",
             .symmetric => "sym",
+            .equal_distance => "=",
             .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
                 const v = skShownValue(c).?;
                 const u: []const u8 = if (c.kind == .angle) "°" else "";

@@ -10,6 +10,7 @@ pub const solve = @import("solve.zig");
 pub const expr = @import("expr.zig");
 pub const units = @import("units.zig");
 pub const dimension = @import("dimension.zig");
+pub const geometry = @import("geometry.zig");
 
 test {
     _ = dual;
@@ -17,4 +18,5 @@ test {
     _ = expr;
     _ = units;
     _ = dimension;
+    _ = geometry;
 }

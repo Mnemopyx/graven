@@ -36,23 +36,7 @@ const Rows = struct {
     s: *Sketch,
 
     pub fn rows(ctx: Rows, out: *cs.solve.Rows) !void {
-        const s = ctx.s;
-        for (s.geometry.items, 0..) |g, gi| if (!g.removed) switch (g.kind) {
-            .arc => |ar| {
-                var l: root.Local = .{ .s = s };
-                const d = l.arcResidual(ar);
-                try out.add(.{ .kind = cs.solve.Owner.internal, .index = @intCast(gi) }, d, l.ids[0..l.count]);
-            },
-            else => {},
-        };
-        for (s.constraints.items, 0..) |c, ci| {
-            // A reference dimension only reports.
-            if (!c.driving) continue;
-            var l: root.Local = .{ .s = s };
-            var res: [2]cs.dual.D = undefined;
-            const k = try l.residuals(c, &res);
-            for (res[0..k]) |d| try out.add(.{ .index = @intCast(ci) }, d, l.ids[0..l.count]);
-        }
+        try ctx.s.store().rows(ctx.s.constraints.items, out);
     }
 };
 
