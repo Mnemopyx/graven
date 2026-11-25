@@ -830,6 +830,10 @@ pub const TileRegion = struct {
     alignment: Align = .start,
     /// The flow it is assigned to (see `Flow`): the content it holds.
     flow: ObjectId = .none,
+    /// A use's track for a sketch's caption (`SketchCaption.id`): made
+    /// and kept at its leader's end, its text the caption's base text,
+    /// by `syncCaptions`. `.none` for every other track.
+    caption: ObjectId = .none,
     /// Older documents' orientation (read, never written): rows or
     /// columns, turned into a direction on loading (`upgradeOrientation`).
     old_major: Major = .row,
@@ -1258,6 +1262,26 @@ pub const Layer = struct {
 /// JPEG) is stored in the document.
 /// A sketch drawn in a space: its geometry and constraints (see
 /// `graven_sketch`), in its own frame, whose origin sits at `at`.
+/// A caption of a sketch (the owner, 2026-11-25: captions are the
+/// sketch's): its leader is the sketch's own geometry; the text is held
+/// at the leader's end, in a track made with it (its base: the text
+/// typed there is the base example every use shows) and in a track of
+/// each other use (a sketch panel's), made and kept there by
+/// `syncCaptions`.
+pub const SketchCaption = struct {
+    id: ObjectId = .none,
+    /// The leader's end, where the text is held.
+    end: sketch_.PointRef,
+    /// The leader runs right (the text's left edge on its end), else left.
+    right: bool,
+    style: StyleId,
+    /// Its track's line pitch and length, mm.
+    pitch: f64,
+    length: f64,
+    /// The track it was made with.
+    base: ObjectId,
+};
+
 pub const SketchItem = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -1280,6 +1304,9 @@ pub const SketchItem = struct {
     /// one of its ink contexts (the owner, 2026-11-25: several drawings
     /// over one sketch, often one per process). `.none`: its first.
     drawing: ObjectId = .none,
+    /// Its captions (Add caption): every use of the sketch shows each as
+    /// a track of its own (`syncCaptions`).
+    captions: std.ArrayList(SketchCaption) = .empty,
 
     /// What its uses read: the accepted sketch while a draft is pending,
     /// else the sketch itself.
@@ -4096,6 +4123,10 @@ pub const Model = struct {
         const region = &m.regionsIn(parent)[r];
         region.alignment = if (lead.right) .start else .end;
         const rid = region.id;
+        // The caption is the sketch's: each use shows it.
+        const cid = m.newId();
+        region.caption = cid;
+        try m.sketches.items[ski].captions.append(m.a(), .{ .id = cid, .end = lead.end, .right = lead.right, .style = style, .pitch = pitch, .length = length, .base = rid });
         _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = if (lead.right) .left else .right }, .b = .{ .object = view, .feature = .origin_x, .point = lead.end } });
         _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = .centre_y }, .b = .{ .object = view, .feature = .origin_y, .point = lead.end } });
         m.revision += 1;
@@ -5017,6 +5048,68 @@ pub const Model = struct {
         return null;
     }
 
+    /// The track (anywhere) whose ID is `id`.
+    fn regionWithId(m: *Model, id: ObjectId) ?*TileRegion {
+        for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| if (r.id == id) return r;
+        return null;
+    }
+
+    /// Shows every sketch's captions in its sketch panels: in each, a
+    /// track for each caption (made the first time), held at its leader's
+    /// end as the sketch stands, its text the caption's base track's.
+    /// Run after every action, with `syncSheets`.
+    pub fn syncCaptions(m: *Model) Error!void {
+        for (m.panels.items, 0..) |*p, pi| {
+            if (p.sketch == .none) continue;
+            const si = m.sketchIndex(p.sketch) orelse continue;
+            const item = &m.sketches.items[si];
+            if (item.captions.items.len == 0) continue;
+            const sk = item.used();
+            const parent: Parent = .{ .panel = pi };
+            for (item.captions.items) |sc| {
+                const e = sk.point(sc.end) catch continue;
+                const at: geom.Point = .{ .x = p.sketch_at.x - p.origin.x + e.x, .y = p.sketch_at.y - p.origin.y + e.y };
+                const origin: geom.Point = .{ .x = if (sc.right) at.x else at.x - sc.length, .y = at.y + sc.pitch / 2 };
+                const ri = for (m.regionsIn(parent), 0..) |r, k| {
+                    if (r.caption == sc.id) break k;
+                } else blk: {
+                    if (m.styleIndex(sc.style) == null) continue;
+                    var name_buf: [32]u8 = undefined;
+                    const name = m.freshName(&name_buf, m.containerOf(parent), "Caption");
+                    const k = try m.addTracks(parent, .{ .name = name, .origin = origin, .kind = .track, .style = sc.style, .count = 1, .length = sc.length / sc.pitch, .pitch = sc.pitch });
+                    const r = &m.regionsIn(parent)[k];
+                    r.caption = sc.id;
+                    r.alignment = if (sc.right) .start else .end;
+                    break :blk k;
+                };
+                const r = &m.regionsIn(parent)[ri];
+                if (r.origin.x != origin.x or r.origin.y != origin.y) r.origin = origin;
+                // Its text: the base track's (text and breaks; no tiles).
+                const base = m.regionWithId(sc.base) orelse continue;
+                const bfi = m.flowIndex(base.flow) orelse continue;
+                const fi = m.flowIndex(m.regionsIn(parent)[ri].flow) orelse continue;
+                if (bfi == fi) continue;
+                const bf = &m.flows.items[bfi];
+                const f = &m.flows.items[fi];
+                f.style = bf.style;
+                f.paragraph_default = bf.paragraph_default;
+                f.leading = bf.leading;
+                f.paragraph = bf.paragraph;
+                var same = true;
+                var n: usize = 0;
+                for (bf.items.items) |it| {
+                    if (it.what == .tile) continue;
+                    if (n >= f.items.items.len or !std.meta.eql(f.items.items[n], it)) same = false;
+                    n += 1;
+                }
+                if (same and n == f.items.items.len) continue;
+                f.items.clearRetainingCapacity();
+                for (bf.items.items) |it| if (it.what != .tile) try f.items.append(m.a(), it);
+                m.revision += 1;
+            }
+        }
+    }
+
     /// Writes every slot a sheet drives from its cell: for each row whose
     /// key is in its sheet's scope, each column's slot on the key and on
     /// the tiles beside it that have one of that name. A slot two sheets
@@ -5024,6 +5117,9 @@ pub const Model = struct {
     /// content. Run after every action (as constraints are solved), so
     /// the keys always show their sheets.
     pub fn syncSheets(m: *Model) Error!void {
+        // A sketch's captions in its uses: content driven from elsewhere,
+        // as a sheet's cells drive slots.
+        try m.syncCaptions();
         if (m.sheets.items.len == 0) return;
         const al = m.arena.child_allocator;
         var keys: std.ArrayList(TileId) = .empty;
@@ -9174,6 +9270,49 @@ test "a sketch in its own space: made there, then inserted on the canvas as a pa
     try std.testing.expectApproxEqAbs(20, m.panels.items[p].w, 1e-6);
     // Its own space keeps its view.
     try std.testing.expectEqual(1, m.spaces.items[home].sketch_views.items.len);
+}
+
+test "a sketch's caption shows in its panel: at its leader's end, with the base text, following both" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Dial");
+    const home = m.homeOf(m.sketches.items[si].id).?;
+    const g = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
+    const view = m.spaces.items[home].sketch_views.items[0].id;
+    const cap = try m.addCaption(view, .{ .curve = g }, style, 4, 30);
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 0 }, "Volume", style);
+    const p = try m.insertSketchPanel(0, si, .{ .x = 50, .y = 50 });
+    try m.syncCaptions();
+    const sc = m.sketches.items[si].captions.items[0];
+    var found: ?usize = null;
+    for (m.panels.items[p].regions.items, 0..) |r, k| {
+        if (r.caption == sc.id) found = k;
+    }
+    const k = found orelse return error.TestUnexpectedResult;
+    const r = m.panels.items[p].regions.items[k];
+    // At the leader's end (the sketch's 0,0 at 50,50).
+    const e = try m.sketches.items[si].sketch.point(sc.end);
+    try std.testing.expectApproxEqAbs(50 + e.x - m.panels.items[p].origin.x, r.origin.x, 1e-6);
+    // The base text.
+    const f = m.trackFlow(.{ .panel = p }, k).?;
+    try std.testing.expectEqual(1, f.items.items.len);
+    // The base text changed: the panel's follows; synced again, nothing new.
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 1 }, "\nLevel", style);
+    try m.syncCaptions();
+    const nb = m.trackFlow(cap.parent, cap.region).?.items.items.len;
+    try std.testing.expectEqual(nb, m.trackFlow(.{ .panel = p }, k).?.items.items.len);
+    const rev = m.revision;
+    try m.syncCaptions();
+    try std.testing.expectEqual(rev, m.revision);
+    try std.testing.expectEqual(1, blk: {
+        var n: usize = 0;
+        for (m.panels.items[p].regions.items) |x| {
+            if (x.caption == sc.id) n += 1;
+        }
+        break :blk n;
+    });
 }
 
 test "ink and fills changed in the editor wait for the sketch's update; discarded, they go" {

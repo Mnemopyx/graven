@@ -27337,9 +27337,17 @@ fn loadSketchPanelSample() void {
     } else |_| {}
     _ = act(.setInk, .{ index, ring, true }) catch {};
     _ = act(.setFill, .{ index, @as([]const u32, &.{hole}), true, true }) catch {};
+    const style = labelStyle() catch return;
+    // A caption on the ring, made in the sketch's own space: the panel
+    // shows it too.
+    if (act(.homeSpace, .{index})) |home| {
+        const view = state.model.spaces.items[home].sketch_views.items[0].id;
+        if (act(.addCaption, .{ view, layout.model.sketch_.caption.From{ .curve = ring }, style, 4.0, 20.0 })) |cap| {
+            _ = state.model.insertText(cap.parent, cap.region, .{ .index = 0 }, "Power", style) catch {};
+        } else |_| {}
+    } else |_| {}
     const pi = act(.insertSketchPanel, .{ shown_space, index, geom.Point{ .x = 0, .y = 0 } }) catch return;
     // Text across the panel, flowing round the ring.
-    const style = labelStyle() catch return;
     const pitch = 6.0;
     const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / pitch, .pitch = pitch }) catch return;
     state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "Text on a panel cut from a sketch flows round its ink." }) catch {};
