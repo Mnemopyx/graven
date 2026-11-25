@@ -110,6 +110,8 @@ pub const action_defs = [_]A{
     .{ .name = "panes.layout-save-as" },
     .{ .name = "panes.layout-reset" },
     .{ .name = "file.new" },
+    // A new drawing: a sketch in its own space (a canvas first, if none).
+    .{ .name = "file.new-drawing" },
     .{ .name = "file.open" },
     .{ .name = "file.save" },
     .{ .name = "file.save-as" },
@@ -156,6 +158,7 @@ pub const action_defs = [_]A{
     .{ .name = "start.new-canvas", .param = .int },
     .{ .name = "start.new-canvas-last" },
     .{ .name = "start.open" },
+    .{ .name = "start.new-drawing" },
     .{ .name = "start.display-correction" },
     // Which recent file, from 0.
     .{ .name = "start.open-recent", .param = .int },
@@ -334,6 +337,7 @@ fn flowMoves() [20]B {
 
 pub const binds = [_]B{
     .{ .mode = "global", .chord = "primary+n", .action = "file.new" },
+    .{ .mode = "global", .chord = "primary+shift+n", .action = "file.new-drawing" },
     .{ .mode = "global", .chord = "primary+tab", .action = "views.next", .arg = 0 },
     .{ .mode = "sheet", .chord = "up", .action = "sheet.move", .arg = 0 },
     .{ .mode = "sheet", .chord = "down", .action = "sheet.move", .arg = 1 },
@@ -398,6 +402,7 @@ pub const binds = [_]B{
     .{ .mode = "start", .chord = "m", .action = "start.new-canvas", .arg = 0 },
     .{ .mode = "start", .chord = "i", .action = "start.new-canvas", .arg = 1 },
     .{ .mode = "start", .chord = "o", .action = "start.open" },
+    .{ .mode = "start", .chord = "s", .action = "start.new-drawing" },
     .{ .mode = "start", .chord = "d", .action = "start.display-correction" },
 } ++ enters("start", "start.new-canvas-last") ++ recents() ++
     arrows("canvas", "canvas.object.nudge") ++ shiftArrows("canvas", "canvas.object.nudge-far") ++ [_]B{

@@ -1618,6 +1618,7 @@ fn startKeys(wd: *dvui.WidgetData) void {
         switch (inv.action) {
             kact("start.new-canvas") => createCanvas(if (inv.arg == 1) .inch else .mm),
             kact("start.open") => proceed(.open),
+            kact("start.new-drawing") => newDrawing(),
             kact("start.display-correction") => display_window = true,
             kact("start.open-recent") => openRecent(@intCast(inv.arg)),
             else => continue,
@@ -1726,6 +1727,7 @@ fn startChoices() void {
     dvui.labelNoFmt(@src(), "Start", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .h = 8 } });
     if (startRow(.file_plus, "New canvas, millimetres", "", "M", 1, false)) createCanvas(.mm);
     if (startRow(.file_plus, "New canvas, inches", "", "I", 2, false)) createCanvas(.inch);
+    if (startRow(.file_plus, "New drawing", "A sketch, in its own tab", "S", 5, false)) newDrawing();
     if (startRow(.folder_open, "Open file…", "", "O", 3, false)) proceed(.open);
     if (startRow(.monitor, "Display correction…", "If Graven looks too bright or washed out", "D", 4, false)) display_window = true;
     {
@@ -2491,6 +2493,11 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    if (new_drawing) {
+        new_drawing = false;
+        newSketchInOwnSpace();
+        followHome();
+    }
     if (sample_sketch_space) {
         sample_sketch_space = false;
         newSketchInOwnSpace();
@@ -3770,6 +3777,7 @@ fn runAction(inv: keymap.Invocation) bool {
         },
         kact("panes.layout-reset") => resetLayout(),
         kact("file.new") => leave(.new_canvas),
+        kact("file.new-drawing") => newDrawing(),
         kact("file.open") => leave(.open),
         kact("file.save"), kact("file.save-as"), kact("edit.undo"), kact("edit.redo") => {
             if (canvas_prompt) return false;
@@ -5228,6 +5236,7 @@ fn menu() ?dvui.App.Result {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
         if (menuAction("New canvas…", "global", kact("file.new"), 0, false, 1)) m.close();
+        if (menuAction("New drawing", "global", kact("file.new-drawing"), 0, false, 5)) m.close();
         if (menuAction("Open…", "global", kact("file.open"), 0, false, 2)) m.close();
         if (!canvas_prompt) {
             if (menuAction("Save", "global", kact("file.save"), 0, false, 3)) m.close();
@@ -27709,6 +27718,16 @@ fn skPending() bool {
 
 /// A new sketch in a space of its own, shown in a tab of the active
 /// window and edited there.
+/// File, New drawing: a sketch in its own space, in the document open (a
+/// canvas in the last units first, when there is none). Started at the
+/// next frame's start, not in the middle of drawing a menu or the canvas.
+fn newDrawing() void {
+    if (canvas_prompt) createCanvas(last_units);
+    new_drawing = true;
+    dvui.refresh(null, @src(), null);
+}
+var new_drawing = false;
+
 fn newSketchInOwnSpace() void {
     var buf: [32]u8 = undefined;
     const name = state.model.freshName(&buf, .sketches, "Sketch");
