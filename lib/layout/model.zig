@@ -158,6 +158,23 @@ pub const StrokeStyle = struct {
     stroke: figure_.Stroke,
 };
 
+/// What a connection's end is drawn with.
+pub const ConnectorEnd = enum { none, arrow, dot, bar };
+
+/// How connections (`sketch_.connector`) look: their path's stroke and
+/// what marks each end. A connection names one by its ID.
+pub const ConnectorStyle = struct {
+    id: ObjectId = .none,
+    name: []const u8,
+    /// Its path's stroke style (none: the one new ink takes).
+    stroke: ObjectId = .none,
+    /// At the attachment point, and at the end.
+    start: ConnectorEnd = .arrow,
+    end: ConnectorEnd = .none,
+    /// The marks' length (an arrow's), mm.
+    size: f64 = 1.2,
+};
+
 /// A named fill: a colour in a pattern (solid, or a hatch). `cutout`
 /// says what it means for manufacture: the area is cut out.
 pub const FillStyle = struct {
@@ -1300,6 +1317,8 @@ pub const SketchCaption = struct {
     length: f64,
     /// The track it was made with.
     base: ObjectId,
+    /// Its leader: a connection in the sketch (`Sketch.connectors`).
+    connector: u32 = 0,
 };
 
 pub const SketchItem = struct {
@@ -2132,6 +2151,7 @@ pub const Model = struct {
     paragraph_styles: std.ArrayList(ParagraphStyle) = .empty,
     /// Named pens (see `StrokeStyle`): what inked line art is drawn with.
     stroke_styles: std.ArrayList(StrokeStyle) = .empty,
+    connector_styles: std.ArrayList(ConnectorStyle) = .empty,
     /// Named fills (see `FillStyle`): what sketch areas are filled with.
     fill_styles: std.ArrayList(FillStyle) = .empty,
     /// The fill style new fills take.
@@ -4100,21 +4120,11 @@ pub const Model = struct {
         };
         _ = try sk.solve(m.arena.child_allocator);
         m.sketches.items[ski].version +%= 1;
-        // The leader is the sketch's construction, inked in the figure
-        // over it in the current stroke style.
-        try m.setInk(ski, lead.radial, true);
-        try m.setInk(ski, lead.across, true);
-        // Ink being edited (a draft): the leader is inked there too, so
-        // the editor shows it and accepting keeps it.
-        if (try m.sketchFigureFor(ski, true)) |fi| if (m.figures.items[fi].pending) |pd| {
-            var inks: std.ArrayList(figure_.Ink) = .empty;
-            try inks.appendSlice(m.a(), pd.inks);
-            const st = try m.inkStyle();
-            try inks.append(m.a(), .{ .geom = lead.radial, .style = st });
-            try inks.append(m.a(), .{ .geom = lead.across, .style = st });
-            m.figures.items[fi].pending = .{ .inks = inks.items, .fills = pd.fills };
-            try m.syncSketchFigures(m.sketches.items[ski].id);
-        };
+        // The leader is a connection, drawn in the sketch's figure in its
+        // style (the document's "Leader").
+        sk.connectors.items[lead.connector].style = @intFromEnum(try m.leaderStyle());
+        _ = try m.sketchFigureFor(ski, true);
+        try m.syncSketchFigures(m.sketches.items[ski].id);
         const e = try sk.point(lead.end);
         const at: geom.Point = .{ .x = v.at.x + e.x, .y = v.at.y + e.y };
         // The panel it is over.
@@ -4146,7 +4156,7 @@ pub const Model = struct {
         // The caption is the sketch's: each use shows it.
         const cid = m.newId();
         region.caption = cid;
-        try m.sketches.items[ski].captions.append(m.a(), .{ .id = cid, .name = region.name, .end = lead.end, .right = lead.right, .style = style, .pitch = pitch, .length = length, .base = rid });
+        try m.sketches.items[ski].captions.append(m.a(), .{ .id = cid, .name = region.name, .end = lead.end, .right = lead.right, .style = style, .pitch = pitch, .length = length, .base = rid, .connector = @intCast(lead.connector) });
         _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = if (lead.right) .left else .right }, .b = .{ .object = view, .feature = .origin_x, .point = lead.end } });
         _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = .centre_y }, .b = .{ .object = view, .feature = .origin_y, .point = lead.end } });
         m.revision += 1;
@@ -6841,7 +6851,124 @@ pub const Model = struct {
             for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
             try paths.append(al, .{ .subpaths = sub, .stroke = m.stroke_styles.items[si].stroke });
         }
+        try m.connectorPaths(sk, &paths);
         return paths.items;
+    }
+
+    /// Sketch `sk`'s connections, drawn in their styles: each path
+    /// stroked, and its ends marked.
+    fn connectorPaths(m: *Model, sk: *const sketch_.Sketch, paths: *std.ArrayList(figure_.Path)) Error!void {
+        const al = m.a();
+        for (sk.connectors.items, 0..) |c, ci| {
+            var segs: std.ArrayList(geom.Segment) = .empty;
+            const dirs = sketch_.connector.segments(sk, al, ci, &segs) catch continue;
+            if (segs.items.len == 0) continue;
+            const cs = m.connectorStyleOf(@enumFromInt(c.style));
+            const stroke: figure_.Stroke = if (m.strokeStyleIndex(cs.stroke)) |i| m.stroke_styles.items[i].stroke else if (m.currentStroke()) |id| m.stroke_styles.items[m.strokeStyleIndex(id).?].stroke else .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.3, .cap = .round, .join = .round };
+            const runs = try sketch_.Sketch.runs(al, segs.items);
+            const sub = try al.alloc(figure_.Subpath, runs.len);
+            for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
+            try paths.append(al, .{ .subpaths = sub, .stroke = stroke });
+            const ends = [2]struct { mark: ConnectorEnd, p: sketch_.PointRef, th: f64 }{
+                // Into the feature at the start, and on into the end.
+                .{ .mark = cs.start, .p = .{ .geom = c.start, .role = .point }, .th = dirs.leave + std.math.pi },
+                .{ .mark = cs.end, .p = .{ .geom = c.end, .role = .point }, .th = dirs.arrive },
+            };
+            for (ends) |e| {
+                if (e.mark == .none) continue;
+                const p = sk.point(e.p) catch continue;
+                if (try connectorMark(al, e.mark, p, e.th, cs.size, stroke)) |path| try paths.append(al, path);
+            }
+        }
+    }
+
+    /// A connection's end mark at `p`, pointing at angle `th` (radians).
+    fn connectorMark(al: std.mem.Allocator, mark: ConnectorEnd, p: geom.Point, th: f64, size: f64, stroke: figure_.Stroke) Error!?figure_.Path {
+        const d: geom.Point = .{ .x = @cos(th), .y = @sin(th) };
+        const n: geom.Point = .{ .x = -d.y, .y = d.x };
+        switch (mark) {
+            .none => return null,
+            .arrow => {
+                // A closed head, a third as wide as long, its tip on `p`.
+                const b: geom.Point = .{ .x = p.x - d.x * size, .y = p.y - d.y * size };
+                const w = size / 3;
+                const q = [3]geom.Point{ p, .{ .x = b.x + n.x * w, .y = b.y + n.y * w }, .{ .x = b.x - n.x * w, .y = b.y - n.y * w } };
+                const segs = try al.alloc(geom.Segment, 3);
+                for (0..3) |j| segs[j] = .{ .line = .{ q[j], q[(j + 1) % 3] } };
+                const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = true }});
+                return .{ .subpaths = sub, .fill = stroke.color };
+            },
+            .dot => {
+                var buf: [4]geom.Segment = undefined;
+                const segs = try al.dupe(geom.Segment, geom.arc(p, size / 3, 0, 2 * std.math.pi, &buf));
+                const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = true }});
+                return .{ .subpaths = sub, .fill = stroke.color };
+            },
+            .bar => {
+                const h = size / 2;
+                const segs = try al.dupe(geom.Segment, &.{.{ .line = .{ .{ .x = p.x + n.x * h, .y = p.y + n.y * h }, .{ .x = p.x - n.x * h, .y = p.y - n.y * h } } }});
+                const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = false }});
+                var st = stroke;
+                st.dash = &.{};
+                return .{ .subpaths = sub, .stroke = st };
+            },
+        }
+    }
+
+    pub fn connectorStyleIndex(m: *const Model, id: ObjectId) ?usize {
+        for (m.connector_styles.items, 0..) |st, i| if (st.id == id) return i;
+        return null;
+    }
+
+    /// Connector style `id`, or the default (a plain arrow at the start)
+    /// when there is none of that ID.
+    pub fn connectorStyleOf(m: *const Model, id: ObjectId) ConnectorStyle {
+        if (m.connectorStyleIndex(id)) |i| return m.connector_styles.items[i];
+        return .{ .name = "Leader" };
+    }
+
+    /// The connector style leaders take: the one named "Leader", made
+    /// (a solid pen, an arrow at the start) when there is none.
+    fn leaderStyle(m: *Model) Error!ObjectId {
+        for (m.connector_styles.items) |st| if (std.mem.eql(u8, st.name, "Leader")) return st.id;
+        // A solid pen: the first undashed stroke style, else one made.
+        var stroke: ObjectId = .none;
+        for (m.stroke_styles.items) |st| if (st.stroke.dash.len == 0) {
+            stroke = st.id;
+            break;
+        };
+        if (stroke == .none) stroke = try m.addStrokeStyle("Leader", .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.25, .cap = .round, .join = .round });
+        const id = m.newId();
+        try m.connector_styles.append(m.a(), .{ .id = id, .name = "Leader", .stroke = stroke });
+        return id;
+    }
+
+    /// Changes connector style `style.id`: the connections in it follow.
+    pub fn setConnectorStyle(m: *Model, style: ConnectorStyle) Error!void {
+        const i = m.connectorStyleIndex(style.id) orelse return error.NoSuchStyle;
+        if (!(style.size > 0) or !std.math.isFinite(style.size)) return error.BadValue;
+        if (style.stroke != .none and m.strokeStyleIndex(style.stroke) == null) return error.NoSuchStyle;
+        var st = style;
+        st.name = try m.a().dupe(u8, style.name);
+        m.connector_styles.items[i] = st;
+        try m.syncSketchFigures(.none);
+        m.revision += 1;
+    }
+
+    /// Makes connection `ci` of sketch `sketch` a path of kind `kind`
+    /// (joined segments, or a Dubins path); its ends stay where they are.
+    pub fn setConnectorKind(m: *Model, sketch: ObjectId, ci: u32, kind: sketch_.connector.Kind) Error!void {
+        const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
+        const sk = &m.sketches.items[ski].sketch;
+        if (ci >= sk.connectors.items.len) return error.NoSuchItem;
+        sketch_.connector.convert(sk, m.a(), ci, kind) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.BadValue,
+        };
+        _ = try sk.solve(m.arena.child_allocator);
+        m.sketches.items[ski].version +%= 1;
+        try m.syncSketchFigures(sketch);
+        m.revision += 1;
     }
 
     /// The area fill `fill` covers in sketch `sk`, in `pattern`: exact
@@ -9474,6 +9601,48 @@ test "a sketch's caption shows in its panel: at its leader's end, with the base 
         }
         break :blk n;
     });
+}
+
+test "a caption's leader is a connection: drawn in its style, an arrow at the start, converted to a Dubins path in place" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Dial");
+    const home = m.homeOf(m.sketches.items[si].id).?;
+    const g = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
+    const view = m.spaces.items[home].sketch_views.items[0].id;
+    _ = try m.addCaption(view, .{ .curve = g }, style, 4, 30);
+    const sid = m.sketches.items[si].id;
+    const sc = m.sketches.items[si].captions.items[0];
+    const fi = m.sketchFigure(sid).?;
+    const Count = struct {
+        fn of(ps: []const figure_.Path) [2]usize {
+            var n = [2]usize{ 0, 0 };
+            for (ps) |x| {
+                if (x.fill != null) n[0] += 1;
+                if (x.stroke != null) n[1] += 1;
+            }
+            return n;
+        }
+    };
+    // Drawn where the sketch is edited (its draft) and once accepted.
+    const draft = Count.of(if (m.figures.items[fi].draft.len > 0) m.figures.items[fi].draft else m.figures.items[fi].paths);
+    try std.testing.expectEqual(1, draft[0]);
+    try std.testing.expectEqual(1, draft[1]);
+    const e0 = try m.sketches.items[si].sketch.point(sc.end);
+    try m.setConnectorKind(sid, sc.connector, .dubins);
+    const sk = &m.sketches.items[si].sketch;
+    try std.testing.expectEqual(.dubins, sk.connectors.items[sc.connector].kind);
+    const e1 = try sk.point(sc.end);
+    try std.testing.expectApproxEqAbs(e0.x, e1.x, 1e-6);
+    try std.testing.expectApproxEqAbs(e0.y, e1.y, 1e-6);
+    // A dot at the end too.
+    var cs = m.connector_styles.items[0];
+    cs.end = .dot;
+    try m.setConnectorStyle(cs);
+    const both = Count.of(if (m.figures.items[fi].draft.len > 0) m.figures.items[fi].draft else m.figures.items[fi].paths);
+    try std.testing.expectEqual(2, both[0]);
 }
 
 test "a text sheet: a caption's text by its name, default and a language, edited in either" {

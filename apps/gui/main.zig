@@ -18867,6 +18867,7 @@ fn properties() !void {
             }
             actionButton(@src(), "track.remove", "Remove content layout", 0, .{ .expand = .horizontal, .id_extra = 135, .margin = .{ .y = 6 } });
             try trackFlowProperties(r.parent, r.region);
+            if (region.caption != .none) captionConnectorProperties(region.caption);
             try flowStyleProperties(head.parent, head.region);
             // The flow's paragraphs are its thread's.
             try paragraphProperties(head.parent, head.region);
@@ -19186,6 +19187,50 @@ fn protoUnit(p: layout.model.TilePrototype) f64 {
 
 /// How a track holds its content: alignment in each row or column, the
 /// indent after hard breaks, and the gap between rows the path makes.
+/// A caption's leader (a connection in its sketch): its path's kind,
+/// converted in place, and its connector style's end marks, which every
+/// connection in that style shares.
+fn captionConnectorProperties(caption: ObjectId) void {
+    const m = &state.model;
+    const saved_group = pushGroup("connector");
+    defer popGroup(saved_group);
+    for (m.sketches.items) |it| for (it.captions.items) |sc| {
+        if (sc.id != caption or sc.connector >= it.sketch.connectors.items.len) continue;
+        const c = it.sketch.connectors.items[sc.connector];
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 960 });
+            defer row.deinit();
+            propName(asElement("connector.path"));
+            const names = [_][]const u8{ "Joined segments", "Dubins path" };
+            var choice: usize = @intFromEnum(c.kind);
+            if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 960 }))
+                actV(.setConnectorKind, .{ it.id, sc.connector, @as(layout.model.sketch_.connector.Kind, @enumFromInt(choice)) });
+        }
+        const sid: ObjectId = @enumFromInt(c.style);
+        if (m.connectorStyleIndex(sid) == null) return;
+        var cs = m.connectorStyleOf(sid);
+        propText(asElement("connector.style"), "{s}", .{cs.name}, 961);
+        var changed = false;
+        const marks = [_][]const u8{ "Nothing", "Arrow", "Dot", "Bar" };
+        inline for (.{ "start", "end" }, 0..) |f, k| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 962 + k });
+            defer row.deinit();
+            propName(asElement("connector." ++ f));
+            var choice: usize = @intFromEnum(@field(cs, f));
+            if (tdropdown(@src(), &marks, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 962 + k })) {
+                @field(cs, f) = @enumFromInt(choice);
+                changed = true;
+            }
+        }
+        if (numberProp(asElement("connector.size"), cs.size, 0.05, 50, 964)) |v| {
+            cs.size = v;
+            changed = true;
+        }
+        if (changed) actV(.setConnectorStyle, .{cs});
+        return;
+    };
+}
+
 fn trackFlowProperties(pi: Parent, ri: usize) !void {
     const region = state.model.regionsIn(pi)[ri];
     var alignment = region.alignment;

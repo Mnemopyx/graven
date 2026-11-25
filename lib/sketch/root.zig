@@ -27,6 +27,7 @@ pub const expr = constraint.expr;
 pub const arrays = @import("arrays.zig");
 pub const polygon = @import("polygon.zig");
 pub const caption = @import("caption.zig");
+pub const connector = @import("connector.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -71,6 +72,9 @@ pub const Sketch = struct {
     geometry: std.ArrayList(Geometry) = .empty,
     constraints: std.ArrayList(Constraint) = .empty,
     params: std.ArrayList(Param) = .empty,
+    /// Its connections: logical objects over its geometry and
+    /// constraints (`connector.zig`).
+    connectors: std.ArrayList(@import("connector.zig").Connector) = .empty,
 
     pub fn init(a: Allocator) Error!Sketch {
         var s: Sketch = .{};
@@ -88,6 +92,8 @@ pub const Sketch = struct {
         s.geometry.deinit(a);
         s.constraints.deinit(a);
         s.params.deinit(a);
+        for (s.connectors.items) |*c| c.path.deinit(a);
+        s.connectors.deinit(a);
     }
 
     /// A copy in `a`, sharing nothing with this one (constraint names
@@ -104,6 +110,12 @@ pub const Sketch = struct {
         }
         for (s.params.items) |p| try c.params.append(a, .{ .name = try a.dupe(u8, p.name), .expr = try a.dupe(u8, p.expr) });
         for (c.geometry.items) |*g| g.physical_when = try a.dupe(u8, g.physical_when);
+        for (s.connectors.items) |k| {
+            var copy = k;
+            copy.path = .empty;
+            try copy.path.appendSlice(a, k.path.items);
+            try c.connectors.append(a, copy);
+        }
         return c;
     }
 
@@ -726,4 +738,5 @@ test {
     _ = arrays;
     _ = polygon;
     _ = caption;
+    _ = connector;
 }
