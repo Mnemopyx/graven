@@ -2551,7 +2551,7 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-space")) {
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
         }
@@ -9186,6 +9186,8 @@ fn gridProperties(pi: Parent, gi: usize) !void {
     var sh = state.model.gridShape(pi, gi);
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
     propText("On", "{s}", .{state.model.parentName(pi)}, 2);
+    // An array: its sketch, where its borders and captions are edited.
+    if (g.sketch != .none) keyButton(@src(), "Edit its sketch", 0, .{ .expand = .horizontal, .id_extra = 7 });
     // Its keys' legends as a sheet (theirs and those beside them).
     if (g.instances.items.len > 0) keyButton(@src(), "Make a legend sheet", 0, .{ .expand = .horizontal, .id_extra = 6 });
     if (state.model.findGrid(g.link)) |src| {
@@ -13817,14 +13819,50 @@ fn levelDownInner() bool {
 /// A plain click at canvas point `at` (device point `p`): picks, and
 /// selects the container picked, or (clicked again in the same place) the
 /// one it sits in.
+/// Edits the context grid's sketch (an array's), where it is placed.
+/// Whether there was one to edit.
+fn editGridSketch() bool {
+    const cg = contextGrid() orelse return false;
+    const g = state.model.gridsIn(cg.parent)[cg.index];
+    if (g.sketch == .none) return false;
+    const space = switch (cg.parent) {
+        .space => |si| si,
+        .panel => |pi| state.model.spaceOf(pi),
+    };
+    for (state.model.spaces.items[space].sketch_views.items, 0..) |v, k| if (v.sketch == g.sketch) {
+        enterSketch(.{ .space = space, .index = k });
+        return true;
+    };
+    state.status = "The array's sketch is not placed in this space. ";
+    return false;
+}
+
+/// When an array's grid was last clicked, to enter its sketch on a
+/// second click soon after (as a sketch's own view is).
+var grid_click_ns: i128 = 0;
+
 fn clickAt(at: geom.Point, p: dvui.Point.Physical) void {
     picked_constraint = null;
     const ns = dvui.windowNaturalScale();
     const again = if (last_click) |lc| @abs(lc.px.x - p.x) <= 4 * ns and @abs(lc.px.y - p.y) <= 4 * ns else false;
+    const was_grid = contextGrid();
     pick(at);
     if (track_cursor != null or sketch_edit != null) {
         last_click = null;
         return;
+    }
+    // An array's grid clicked twice: its sketch is edited (its borders,
+    // its captions).
+    if (contextGrid()) |cg| {
+        const now = dvui.frameTimeNS();
+        if (again and was_grid != null and std.meta.eql(was_grid.?, cg) and now - grid_click_ns < 500 * std.time.ns_per_ms) {
+            grid_click_ns = 0;
+            if (editGridSketch()) {
+                last_click = null;
+                return;
+            }
+        }
+        grid_click_ns = now;
     }
     // A tile is no container: clicked again, its track is the first one out.
     const tile_track: ?layout.model.ObjectId = switch (state.context) {
@@ -18053,6 +18091,11 @@ const button_handlers = [_]ButtonHandler{
             if (act(.removeSketch, .{index})) {
                 state.context = .sketches;
             } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+        }
+    }.f),
+    handler("grid.edit-its-sketch", struct {
+        fn f(_: i32) void {
+            _ = editGridSketch();
         }
     }.f),
     handler("sketch-panel.edit-its-sketch", struct {
@@ -27319,6 +27362,16 @@ fn loadSketchSample() void {
 /// GRAVEN_SAMPLE=sketch-panel: the ready-made rectangle, its edges and a
 /// circle inside inked, inserted onto the canvas as a panel (the circle a
 /// hole in it).
+/// A polar array of eight on the canvas (GRAVEN_SAMPLE=array), chosen.
+fn loadArraySample() void {
+    const gi = act(.addArray, .{ Parent{ .space = shown_space }, geom.Point{ .x = 0, .y = 0 }, true, @as(u32, 8), @as(u32, 1), geom.Point{ .x = 20, .y = 90 }, @as(f64, 360) }) catch return;
+    state.context = .{ .grid = .{ .parent = .{ .space = shown_space }, .index = gi } };
+    state.view.cx = 0;
+    state.view.cy = 0;
+    state.view.ppm = 12;
+    state.view.fit = null;
+}
+
 fn loadSketchPanelSample() void {
     const index = act(.addShapeSketch, .{layout.model.ShapeSketch.rectangle}) catch return;
     _ = act(.editSketch, .{ index, layout.model.SketchEdit{ .param = .{ .name = "w", .expr = "70" } } }) catch {};

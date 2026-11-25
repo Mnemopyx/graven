@@ -834,6 +834,12 @@ pub const TileRegion = struct {
     /// and kept at its leader's end, its text the caption's base text,
     /// by `syncCaptions`. `.none` for every other track.
     caption: ObjectId = .none,
+    /// A caption's track: the base text as last copied into it, to tell
+    /// an edit made in it (which gives it text of its own: the owner,
+    /// 2026-11-25) from a change to the base.
+    caption_copy: []const Item = &.{},
+    /// Its text is its own, not the base's: edited in place.
+    caption_own: bool = false,
     /// Older documents' orientation (read, never written): rows or
     /// columns, turned into a direction on loading (`upgradeOrientation`).
     old_major: Major = .row,
@@ -5048,6 +5054,12 @@ pub const Model = struct {
         return null;
     }
 
+    fn itemsEql(x_items: []const Item, y_items: []const Item) bool {
+        if (x_items.len != y_items.len) return false;
+        for (x_items, y_items) |x, y| if (!std.meta.eql(x, y)) return false;
+        return true;
+    }
+
     /// The track (anywhere) whose ID is `id`.
     fn regionWithId(m: *Model, id: ObjectId) ?*TileRegion {
         for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| if (r.id == id) return r;
@@ -5084,27 +5096,35 @@ pub const Model = struct {
                 };
                 const r = &m.regionsIn(parent)[ri];
                 if (r.origin.x != origin.x or r.origin.y != origin.y) r.origin = origin;
-                // Its text: the base track's (text and breaks; no tiles).
+                // Its text: the base track's (text and breaks; no tiles),
+                // unless edited here, which makes it its own; emptied, it
+                // follows the base again.
+                const fi = m.flowIndex(m.regionsIn(parent)[ri].flow) orelse continue;
+                const f = &m.flows.items[fi];
+                if (r.caption_own) {
+                    if (f.items.items.len > 0) continue;
+                    r.caption_own = false;
+                    r.caption_copy = &.{};
+                }
+                if (!itemsEql(f.items.items, r.caption_copy)) {
+                    r.caption_own = true;
+                    m.revision += 1;
+                    continue;
+                }
                 const base = m.regionWithId(sc.base) orelse continue;
                 const bfi = m.flowIndex(base.flow) orelse continue;
-                const fi = m.flowIndex(m.regionsIn(parent)[ri].flow) orelse continue;
                 if (bfi == fi) continue;
                 const bf = &m.flows.items[bfi];
-                const f = &m.flows.items[fi];
                 f.style = bf.style;
                 f.paragraph_default = bf.paragraph_default;
                 f.leading = bf.leading;
                 f.paragraph = bf.paragraph;
-                var same = true;
-                var n: usize = 0;
-                for (bf.items.items) |it| {
-                    if (it.what == .tile) continue;
-                    if (n >= f.items.items.len or !std.meta.eql(f.items.items[n], it)) same = false;
-                    n += 1;
-                }
-                if (same and n == f.items.items.len) continue;
+                var text: std.ArrayList(Item) = .empty;
+                for (bf.items.items) |it| if (it.what != .tile) try text.append(m.a(), it);
+                if (itemsEql(f.items.items, text.items)) continue;
                 f.items.clearRetainingCapacity();
-                for (bf.items.items) |it| if (it.what != .tile) try f.items.append(m.a(), it);
+                try f.items.appendSlice(m.a(), text.items);
+                m.regionsIn(parent)[ri].caption_copy = text.items;
                 m.revision += 1;
             }
         }
@@ -9306,6 +9326,19 @@ test "a sketch's caption shows in its panel: at its leader's end, with the base 
     const rev = m.revision;
     try m.syncCaptions();
     try std.testing.expectEqual(rev, m.revision);
+    // Edited in place: its own text, the base's changes no longer reach it.
+    _ = try m.insertText(.{ .panel = p }, k, .{ .index = 0 }, "Lautstärke ", style);
+    try m.syncCaptions();
+    const own = m.trackFlow(.{ .panel = p }, k).?.items.items.len;
+    try std.testing.expect(m.panels.items[p].regions.items[k].caption_own);
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 0 }, "Master ", style);
+    try m.syncCaptions();
+    try std.testing.expectEqual(own, m.trackFlow(.{ .panel = p }, k).?.items.items.len);
+    // Emptied, it follows the base again.
+    m.flows.items[m.trackFlowIndex(.{ .panel = p }, k).?].items.clearRetainingCapacity();
+    try m.syncCaptions();
+    try std.testing.expect(!m.panels.items[p].regions.items[k].caption_own);
+    try std.testing.expectEqual(m.trackFlow(cap.parent, cap.region).?.items.items.len, m.trackFlow(.{ .panel = p }, k).?.items.items.len);
     try std.testing.expectEqual(1, blk: {
         var n: usize = 0;
         for (m.panels.items[p].regions.items) |x| {
