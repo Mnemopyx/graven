@@ -665,6 +665,7 @@ pub const all = [_]Element{
     .{ .id = "sketch.parameters.set", .kind = .button, .label = "Set" },
     .{ .id = "sketch.physical.set", .kind = .button, .label = "Set" },
     .{ .id = "sketch.place-a-view-here", .kind = .button, .label = "Place a view here" },
+    .{ .id = "sketch.insert-as-a-panel-here", .kind = .button, .label = "Insert as a panel here" },
     .{ .id = "sketch.step.angle", .kind = .field, .label = "Angle, °" },
     .{ .id = "sketch.step.end-angle", .kind = .field, .label = "End angle, °" },
     .{ .id = "sketch.step.length", .kind = .field, .label = "Length, mm" },

@@ -3806,6 +3806,17 @@ pub const Model = struct {
     /// outline encloses (content layouts) moves onto the panel, keeping
     /// where it is. Refused unless the sketch's output has exactly one
     /// outermost closed outline. Returns the panel's index.
+    /// Inserts sketch `index` into space `space` as a panel, its origin at
+    /// `at` (a view placed and made a panel at once; see
+    /// `makeSketchPanel`). Refused, changing nothing, unless the sketch is
+    /// enclosed. Returns the panel's index.
+    pub fn insertSketchPanel(m: *Model, space: usize, index: usize, at: geom.Point) Error!usize {
+        const it = try m.sketchAt(index);
+        _ = (try m.sketchEdge(it.used(), true)) orelse return error.NotEnclosed;
+        const vi = try m.addSketchView(space, index, at);
+        return m.makeSketchPanel(space, vi);
+    }
+
     pub fn makeSketchPanel(m: *Model, space: usize, view: usize) Error!usize {
         const v = (try m.sketchView(space, view)).*;
         const si = m.sketchIndex(v.sketch) orelse return error.NoSuchItem;
@@ -3822,7 +3833,7 @@ pub const Model = struct {
             .sketch_at = v.at,
             .layer = v.layer,
         };
-        const edge = (try m.sketchEdge(&m.sketches.items[si].sketch, true)) orelse return error.NotEnclosed;
+        const edge = (try m.sketchEdge(m.sketches.items[si].used(), true)) orelse return error.NotEnclosed;
         p.origin = .{ .x = v.at.x + edge.min.x, .y = v.at.y + edge.min.y };
         p.w = edge.w;
         p.h = edge.h;

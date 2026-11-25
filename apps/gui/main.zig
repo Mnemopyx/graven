@@ -2531,7 +2531,7 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -8775,6 +8775,14 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
             } else if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
         }
         if (pl) |q| drawPanel(area, .{ .panel = pi }, q);
+        // A sketch's panel carries its sketch's drawing: the ink and fills
+        // over it, as last accepted.
+        const pn = state.model.panels.items[pi];
+        if (pn.sketch != .none) if (state.model.sketchIndex(pn.sketch)) |ski| if (SkPlace.of(ski, pn.sketch_at)) |sp0| {
+            var sp = sp0;
+            sp.sketch = sp.item.used();
+            drawSketchFigure(area, sp, 1);
+        };
     }
 }
 
@@ -17827,6 +17835,22 @@ const button_handlers = [_]ButtonHandler{
             if (act(.makeSketchPanel, .{ v.space, v.index })) |pi| {
                 state.context = .{ .panel = pi };
                 state.status = "A panel, made from the sketch's outlines: it follows the sketch. ";
+            } else |err| state.status = switch (err) {
+                error.NotEnclosed => "Only an enclosed sketch makes a panel: one outermost closed outline. ",
+                else => "The panel was not made. ",
+            };
+        }
+    }.f),
+    handler("sketch.insert-as-a-panel-here", struct {
+        fn f(_: i32) void {
+            const index = switch (state.context) {
+                .sketch_def => |i| i,
+                else => return,
+            };
+            const at: geom.Point = .{ .x = @round(state.view.cx), .y = @round(state.view.cy) };
+            if (act(.insertSketchPanel, .{ shown_space, index, at })) |pi| {
+                state.context = .{ .panel = pi };
+                state.status = "The sketch inserted as a panel: its edge follows the sketch. ";
             } else |err| state.status = switch (err) {
                 error.NotEnclosed => "Only an enclosed sketch makes a panel: one outermost closed outline. ",
                 else => "The panel was not made. ",
@@ -27190,6 +27214,26 @@ fn loadSketchSample() void {
     state.view.fit = null;
 }
 
+/// GRAVEN_SAMPLE=sketch-panel: the ready-made rectangle, its edges and a
+/// circle inside inked, inserted onto the canvas as a panel (the circle a
+/// hole in it).
+fn loadSketchPanelSample() void {
+    const index = act(.addShapeSketch, .{layout.model.ShapeSketch.rectangle}) catch return;
+    const c = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 2, .y = 0 }, .r = 1.5 } } }) catch return;
+    const sk = &state.model.sketches.items[index].sketch;
+    for (sk.geometry.items, 0..) |g, gi| {
+        if (g.removed or g.reference or g.construction) continue;
+        if (g.kind == .segment) _ = act(.setInk, .{ index, @as(u32, @intCast(gi)), true }) catch {};
+    }
+    _ = act(.setInk, .{ index, c, true }) catch {};
+    const pi = act(.insertSketchPanel, .{ shown_space, index, geom.Point{ .x = 0, .y = 0 } }) catch return;
+    state.context = .{ .panel = pi };
+    state.view.cx = 0;
+    state.view.cy = 0;
+    state.view.ppm = 60;
+    state.view.fit = null;
+}
+
 /// Edits sketch `index` with its origin at `at` in space `space`.
 fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sketch_edit = .{ .sketch = index, .space = space, .at = at };
@@ -29817,6 +29861,8 @@ fn sketchDefProperties(index: usize) void {
     } else |_| {}
     // A view of it at the middle of what is shown.
     keyButton(@src(), "Place a view here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    // An enclosed sketch, as a panel: its edge the sketch's outlines.
+    keyButton(@src(), "Insert as a panel here", 0, .{ .expand = .horizontal, .margin = .{ .y = 2, .h = 8 } });
     keyButton(@src(), "Delete sketch", 0, .{ .expand = .horizontal });
 }
 
