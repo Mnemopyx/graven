@@ -6374,16 +6374,27 @@ pub const Model = struct {
             for (region.contours, sub) |c, *sp| sp.* = .{ .segments = c.segments, .closed = true };
             try paths.append(al, .{ .subpaths = sub, .fill = st.color, .fill_rule = .evenodd });
         }
+        // Each style's ink joined into runs (`Sketch.runs`), so a pen's
+        // joins fall at the corners and its caps only at true ends.
+        var styles: std.ArrayList(ObjectId) = .empty;
         for (f.inks) |ink| {
-            if (ink.geom >= sk.geometry.items.len) continue;
-            const g = sk.geometry.items[ink.geom];
-            if (g.removed) continue;
-            const si = m.strokeStyleIndex(ink.style) orelse continue;
+            for (styles.items) |st| {
+                if (st == ink.style) break;
+            } else try styles.append(al, ink.style);
+        }
+        for (styles.items) |style| {
+            const si = m.strokeStyleIndex(style) orelse continue;
             var segs: std.ArrayList(geom.Segment) = .empty;
-            try sk.appendSegments(al, g, &segs);
+            for (f.inks) |ink| {
+                if (ink.style != style or ink.geom >= sk.geometry.items.len) continue;
+                const g = sk.geometry.items[ink.geom];
+                if (g.removed) continue;
+                try sk.appendSegments(al, g, &segs);
+            }
             if (segs.items.len == 0) continue;
-            const sub = try al.alloc(figure_.Subpath, 1);
-            sub[0] = .{ .segments = segs.items, .closed = g.kind == .circle };
+            const runs = try sketch_.Sketch.runs(al, segs.items);
+            const sub = try al.alloc(figure_.Subpath, runs.len);
+            for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
             try paths.append(al, .{ .subpaths = sub, .stroke = m.stroke_styles.items[si].stroke });
         }
         return paths.items;

@@ -556,6 +556,66 @@ pub const Sketch = struct {
         return .{ .contours = contours.items, .open = open };
     }
 
+    /// A run of segments joined end to end, to be stroked as one path.
+    pub const Run = struct { segments: []geom.Segment, closed: bool };
+
+    /// `segs` joined end to end into runs to be stroked as single paths, so
+    /// a pen's joins fall at their corners and its caps only at their true
+    /// ends: a run goes on through a point where exactly two pieces meet
+    /// and stops where one, three or more do; what closes on itself is a
+    /// closed run. Pieces are turned round as they need to be. Allocated
+    /// from `a`.
+    pub fn runs(a: Allocator, segs: []const geom.Segment) Allocator.Error![]Run {
+        const near = struct {
+            fn f(p: Point, q: Point) bool {
+                return @abs(p.x - q.x) < 1e-9 and @abs(p.y - q.y) < 1e-9;
+            }
+        }.f;
+        const degree = struct {
+            fn f(all: []const geom.Segment, p: Point) usize {
+                var n: usize = 0;
+                for (all) |sg| {
+                    if (near(sg.start(), p)) n += 1;
+                    if (near(sg.end(), p)) n += 1;
+                }
+                return n;
+            }
+        }.f;
+        const used = try a.alloc(bool, segs.len);
+        @memset(used, false);
+        var out: std.ArrayList(Run) = .empty;
+        // First the runs with ends (from a point that is not mid-run), then
+        // what is left: loops.
+        for ([_]bool{ false, true }) |loops| for (segs, 0..) |sg, i| {
+            if (used[i]) continue;
+            var first = sg;
+            if (!loops) {
+                if (degree(segs, sg.start()) != 2) {} else if (degree(segs, sg.end()) != 2) first = sg.reversed() else continue;
+            }
+            used[i] = true;
+            var pieces: std.ArrayList(geom.Segment) = .empty;
+            try pieces.append(a, first);
+            var closed = near(first.end(), first.start());
+            while (!closed) {
+                const end = pieces.items[pieces.items.len - 1].end();
+                if (degree(segs, end) != 2) break;
+                const next = for (segs, 0..) |cand, k| {
+                    if (used[k]) continue;
+                    if (near(cand.start(), end)) break .{ k, cand };
+                    if (near(cand.end(), end)) break .{ k, cand.reversed() };
+                } else null;
+                const nx = next orelse break;
+                used[nx[0]] = true;
+                try pieces.append(a, nx[1]);
+                closed = near(nx[1].end(), pieces.items[0].start());
+            }
+            for (pieces.items[1..], 1..) |*p, k| setStart(p, pieces.items[k - 1].end());
+            if (closed) setEnd(&pieces.items[pieces.items.len - 1], pieces.items[0].start());
+            try out.append(a, .{ .segments = pieces.items, .closed = closed });
+        };
+        return out.items;
+    }
+
     pub fn setStart(sg: *geom.Segment, p: Point) void {
         switch (sg.*) {
             .conic => |*c| c.p[0] = p,

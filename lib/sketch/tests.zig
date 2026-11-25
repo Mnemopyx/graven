@@ -385,3 +385,27 @@ test "a distance is never negative and has no start or end: the side is kept as 
     _ = try s.solve(ga);
     try testing.expectApproxEqAbs(@as(f64, -10), (try s.point(.{ .geom = p })).x, 1e-9);
 }
+
+test "runs: a path through two-way points is one run, a loop closes, a three-way point ends runs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const L = struct {
+        fn f(x0: f64, y0: f64, x1: f64, y1: f64) geom.Segment {
+            return .{ .line = .{ .{ .x = x0, .y = y0 }, .{ .x = x1, .y = y1 } } };
+        }
+    }.f;
+    // An L, its second piece given backwards: one open run of two.
+    const l = try Sketch.runs(al, &.{ L(0, 0, 10, 0), L(10, 10, 10, 0) });
+    try std.testing.expectEqual(1, l.len);
+    try std.testing.expectEqual(2, l[0].segments.len);
+    try std.testing.expect(!l[0].closed);
+    // A square: one closed run of four.
+    const sq = try Sketch.runs(al, &.{ L(0, 0, 10, 0), L(10, 0, 10, 10), L(10, 10, 0, 10), L(0, 10, 0, 0) });
+    try std.testing.expectEqual(1, sq.len);
+    try std.testing.expect(sq[0].closed);
+    try std.testing.expectEqual(4, sq[0].segments.len);
+    // A T: three runs, each ending at the junction.
+    const t = try Sketch.runs(al, &.{ L(-5, 0, 0, 0), L(0, 0, 5, 0), L(0, 0, 0, 5) });
+    try std.testing.expectEqual(3, t.len);
+}
