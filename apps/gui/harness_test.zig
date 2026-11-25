@@ -1577,10 +1577,21 @@ test "Select boundaries: a mode toggled by its button or B, kept through Esc; th
     try r.press("tool.select-boundaries");
     try std.testing.expect(api.boundaryMode());
     try std.testing.expectEqualStrings("select", api.toolName());
-    // Inside the key, well away from its outline: still the key's boundary
-    // (no content in this mode); a click selects the key, not its text.
-    const c = api.tileCenter("R1C3").?;
+    // On the key's text: text is text in this mode too (as in a text
+    // track), so a click there edits it.
+    const g = api.slotRect("R1C3", "g").?;
+    const on_text: dvui.Point.Physical = .{ .x = g.x + g.w / 2, .y = g.y + g.h / 2 };
     const cw = dvui.currentWindow();
+    _ = try cw.addEventMouseMotion(.{ .pt = on_text });
+    try r.frames(2);
+    try std.testing.expectEqualStrings("slot", api.hoverKind().?);
+    try r.clickAt(on_text);
+    try std.testing.expect(api.eqEditing());
+    try r.key(.escape, .none);
+    try r.key(.escape, .none);
+    // Inside the key off its text: the key's boundary (the nearest); a
+    // click selects the key.
+    const c = api.tileEdge("R1C3").?;
     _ = try cw.addEventMouseMotion(.{ .pt = c });
     try r.frames(2);
     try std.testing.expectEqualStrings("tile", api.hoverKind().?);
@@ -2403,4 +2414,56 @@ test "a removed column takes its constraints with it, in the same step; undo bri
     try r.frames(2);
     try std.testing.expect(api.boxAt("Panel.Column2") != null);
     try std.testing.expectEqual(9, api.constraintCount());
+}
+
+test "a click on a tile's text in a text flow edits that text, the caret where pressed (no Ctrl+> needed)" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    // The keyboard's key prototype, for tiles; the text sample's track,
+    // set in a text style, the cursor in it.
+    try openExample(&r, "PC keyboard");
+    const o = try api.loadTextSample();
+    try r.frames(2);
+    // The cursor put at the first row's start by a click.
+    try r.clickAt(api.screenOf(o.x + 0.5, o.y - 3).?);
+    try std.testing.expect(api.flowCursor());
+    // A tile typed at the cursor through the Tiles case, then text put in
+    // its slot: the tile selected by its outline, Ctrl+> into its text.
+    try chooseCase(&r, "Tiles");
+    try typeTile(&r, 1);
+    const tile = try std.testing.allocator.dupe(u8, api.lastTile().?);
+    defer std.testing.allocator.free(tile);
+    try r.key(.escape, .none);
+    try r.clickAt(api.tileEdge(tile).?);
+    try std.testing.expectEqualStrings(tile, api.contextTile().?);
+    try r.key(.period, .lcontrol);
+    try std.testing.expect(api.eqEditing());
+    try dvui.testing.writeText("AB");
+    try r.frames(2);
+    // Out (Esc), and elsewhere: the text's track.
+    try r.key(.escape, .none);
+    try r.key(.escape, .none);
+    try r.frames(2);
+    try std.testing.expect(!api.eqEditing());
+    // A plain click on its text, at its end: the slot's text edited, the
+    // caret after B.
+    const g = api.anySlotRect(tile).?;
+    try r.clickAt(.{ .x = g.x + g.w - 1, .y = g.y + g.h / 2 });
+    try std.testing.expect(api.eqEditing());
+    try dvui.testing.writeText("C");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("ABC", api.eqText().?);
+    // The same in Select boundaries, at its start.
+    try r.key(.escape, .none);
+    try r.key(.escape, .none);
+    api.setBoundaryMode(true);
+    defer api.setBoundaryMode(false);
+    try r.frames(2);
+    const g2 = api.anySlotRect(tile).?;
+    try r.clickAt(.{ .x = g2.x + 1, .y = g2.y + g2.h / 2 });
+    try std.testing.expect(api.eqEditing());
+    try dvui.testing.writeText("Z");
+    try r.frames(2);
+    try std.testing.expectEqualStrings("ZABC", api.eqText().?);
 }

@@ -253,6 +253,15 @@ pub const testing_api = struct {
             else => null,
         };
     }
+    /// The last tile in the document not removed: its designator.
+    pub fn lastTile() ?[]const u8 {
+        var i = state.model.tiles.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (!state.model.tiles.items[i].removed) return state.model.tiles.items[i].designator;
+        }
+        return null;
+    }
     pub fn contextRegionName() ?[]const u8 {
         return switch (state.context) {
             .region => |r| state.model.regionsIn(r.parent)[r.region].name,
@@ -281,6 +290,18 @@ pub const testing_api = struct {
         const f = findTile(id) orelse return null;
         const b = onSheet(f.parent, f.tile.body);
         return toScreen(.{ .x = b.x0 + 0.3 * edgeMm(), .y = (b.y0 + b.y1) / 2 });
+    }
+    /// The screen box of tile `designator`'s first slot text set.
+    pub fn anySlotRect(designator: []const u8) ?dvui.Rect.Physical {
+        const id = state.model.findTile(designator) orelse return null;
+        for (state.solved.items, 0..) |placed, pk| for (placed.labels) |l| {
+            if (l.tile == null or l.tile.? != id) continue;
+            const b = labelBox(state.model.parentAt(pk), l);
+            const p0 = toScreen(.{ .x = b.x0, .y = b.y1 }) orelse return null;
+            const p1 = toScreen(.{ .x = b.x1, .y = b.y0 }) orelse return null;
+            return .{ .x = @min(p0.x, p1.x), .y = @min(p0.y, p1.y), .w = @abs(p1.x - p0.x), .h = @abs(p1.y - p0.y) };
+        };
+        return null;
     }
     /// The screen box of tile `designator`'s slot `slot`'s text.
     pub fn slotRect(designator: []const u8, slot: []const u8) ?dvui.Rect.Physical {
@@ -20658,6 +20679,15 @@ var text_drag = false;
 /// drag from here selecting). With `extend` (Shift), the selection runs
 /// from the cursor that was to here, in the same flow. Whether it was one.
 fn textPress(at: geom.Point, extend: bool) bool {
+    // The innermost text first: a slot's text in a tile (a sort in this
+    // flow, or a key anywhere) edited where pressed. While an expression
+    // is edited, its own objects and caret places come first (hoverPress).
+    if (!extend) if (slotTextAt(at)) |x| {
+        const in_edited = if (canvas_eq != null) if (hoverTargetAt(at)) |h| h == .eq_object or h == .eq_caret else false else false;
+        if (!in_edited) return slotPress(x);
+    };
+    // A tile's body elsewhere is the tile's: not the flow's text.
+    if (tileBodyAt(at)) return false;
     const t = textSegmentAt(at) orelse return false;
     const head = state.model.threadHead(t.parent, t.region);
     if (extend) {
@@ -23335,7 +23365,8 @@ fn drawHover(area: dvui.Rect.Physical) void {
     if (state.drag != null or panel_edit != null or sketch_edit != null or canvas_prompt or engagingPoint()) return;
     const m = state.mouse orelse return;
     const hit: ?BoundaryHit = if (boundary_mode) nearestBoundary(m) else null;
-    const t = (if (boundary_mode) (if (hit) |h| h.target else null) else hoverTargetAt(m)) orelse return;
+    const over_text: ?HoverTarget = if (boundary_mode and canvas_eq == null) (if (slotTextAt(m)) |x| HoverTarget{ .slot = x } else null) else null;
+    const t = over_text orelse (if (boundary_mode) (if (hit) |h| h.target else null) else hoverTargetAt(m)) orelse return;
     hover_target = t;
     const px = dvui.windowNaturalScale();
     const hover = colors.select.opacity(0.75);
@@ -23347,7 +23378,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
     const halo_ok = boundary_mode and selection.items.len == 0 and canvas_eq == null and track_cursor == null;
     // Select boundaries: the picked object's whole boundary haloed, and
     // the point on it nearest the pointer marked.
-    if (hit) |h| if (halo_ok) {
+    if (over_text == null) if (hit) |h| if (halo_ok) {
         haloBoundary(area, h.boundary, colors.select);
         const c = state.view.toPx(area, h.at);
         skRing(c, 3 * px, colors.select, 1.5 * px);
@@ -23418,24 +23449,7 @@ fn hoverPress(p: geom.Point) bool {
             // The container is the selection: its drag points show.
             if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
         },
-        .slot => |x| {
-            // The slot's text edited, the caret where pressed.
-            const l = (placedOf(x.parent) orelse return false).labels[x.label];
-            const k = l.slot;
-            const tracks = state.model.prototypeOf(x.tile).tracks;
-            if (k >= tracks.len) return false;
-            if (canvas_eq != null) leaveCanvasEquation();
-            track_cursor = null;
-            levelSet(.{ .tile = x.tile });
-            expr_track = tracks[k].id;
-            enterTileTrack(x.tile);
-            if (canvas_eq == null) return true;
-            // The caret: the press's place in this piece, past what comes
-            // before the piece in the slot's text.
-            const base: u32 = if (eqPiece(x.parent, l)) |pc| pc.base else 0;
-            canvas_eq_seq += 1;
-            eqMove(base + x.offset, null);
-        },
+        .slot => |x| return slotPress(x),
         .eq_object => |x| {
             canvas_eq_seq += 1;
             eqPick(x.start, x.end);
@@ -23447,6 +23461,73 @@ fn hoverPress(p: geom.Point) bool {
     }
     dvui.refresh(null, @src(), null);
     return true;
+}
+
+const SlotHit = @FieldType(HoverTarget, "slot");
+
+/// A press on a slot's text: that slot's text edited, the caret where
+/// pressed. Whether it took the press.
+fn slotPress(x: SlotHit) bool {
+    const l = (placedOf(x.parent) orelse return false).labels[x.label];
+    const k = l.slot;
+    const tracks = state.model.prototypeOf(x.tile).tracks;
+    if (k >= tracks.len) return false;
+    if (canvas_eq != null) leaveCanvasEquation();
+    track_cursor = null;
+    flow_anchor = null;
+    levelSet(.{ .tile = x.tile });
+    expr_track = tracks[k].id;
+    enterTileTrack(x.tile);
+    if (canvas_eq == null) return true;
+    // The caret: the press's place in this piece, past what comes before
+    // the piece in the slot's text.
+    const base: u32 = if (eqPiece(x.parent, l)) |pc| pc.base else 0;
+    canvas_eq_seq += 1;
+    eqMove(base + x.offset, null);
+    dvui.refresh(null, @src(), null);
+    return true;
+}
+
+/// The slot text clearly under worksheet point `p`: inside a tile, away
+/// from its outline (that is the tile's), within the box of one of its
+/// slots' text (the smallest, where they overlap). Text is text wherever
+/// it sits: a press on it edits it, in Select boundaries too.
+fn slotTextAt(p: geom.Point) ?SlotHit {
+    const tol = edgeMm();
+    var best: ?SlotHit = null;
+    var best_area: f64 = std.math.inf(f64);
+    for (state.solved.items, 0..) |placed, pk| {
+        const pi = state.model.parentAt(pk);
+        if (!shownIn(pi) or !parentLayerOpen(pi)) continue;
+        for (placed.tiles) |t| {
+            if (t.spacer) continue;
+            const body = onSheet(pi, t.body);
+            if (!contains(body, p) or outlineDistance(body, p) <= tol) continue;
+            for (placed.labels, 0..) |l, k| {
+                if (l.tile == null or l.tile.? != t.id) continue;
+                const lb = labelBox(pi, l);
+                if (!contains(lb, p)) continue;
+                const ar = lb.width() * lb.height();
+                if (ar >= best_area) continue;
+                best_area = ar;
+                best = .{ .tile = t.id, .parent = pi, .label = k, .box = lb, .offset = nearestCaret(pi, l, p, renderEnd(l)) };
+            }
+        }
+    }
+    return best;
+}
+
+/// Whether worksheet point `p` is on a tile's body (a sort in a flow is
+/// the tile's to take, not the flow's text).
+fn tileBodyAt(p: geom.Point) bool {
+    for (state.solved.items, 0..) |placed, pk| {
+        const pi = state.model.parentAt(pk);
+        if (!shownIn(pi) or !parentLayerOpen(pi)) continue;
+        for (placed.tiles) |t| {
+            if (!t.spacer and contains(onSheet(pi, t.body), p)) return true;
+        }
+    }
+    return false;
 }
 
 /// A press at worksheet point `p` while an expression is edited on the
