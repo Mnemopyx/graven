@@ -104,7 +104,7 @@ Four panes on the window's edges, each with a tab. Panes lie over the canvas and
 The canvas has sub-modes entered from the properties pane, each with its own way out:
 
 - **Panel editing:** placing and spanning grid instances by clicking and dragging. Entered with Edit panel; left with Leave panel editing.
-- **Sketch mode:** drawing and constraining a sketch, with its own toolbar of geometry and constraint tools, dimensions, parameters and expressions. Entered with Edit sketch, Edit its sketch or New sketch; left with Finish sketch… (Enter), Accept and leave, or Back to sketching.
+- **Sketch mode:** drawing and constraining a sketch, with its own toolbar of geometry and constraint tools, dimensions, parameters and expressions. Entered with Edit sketch, Edit its sketch or New sketch; left with Finish sketch… (Enter), Accept and leave, or Back to sketching. Planned (2026-11-25, design in the blueprint's "Drawing in sketches"): the sketch's tools move from this button row into the ribbon, in groups: Geometry, Constrain, Ink (Ink selection I, Fill F, Pick area, Select path, Select by style, the current styles) and Show (construction, ink only). One editor, not separate sketch and ink modes.
 - **Manufacture mode:** agreed, not built (each part's layer stack; design-rule checks).
 
 ## Separate windows and prompts

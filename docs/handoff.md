@@ -146,3 +146,7 @@ Built: the style rules and seven icons (`scripts/icons.py`); the icon-file forma
 4. **Pull-downs in the light theme;** the Alt-held fade not yet seen under Xvfb; hold-to-open not tested by a GUI test.
 5. **The blueprint** has the icon-file design ("Icon files: a full-colour ground and one ink as a distance field", recorded 2026-11-23); `docs/status.md` has the build detail.
 6. Leaks at exit from the element registry's records and the old TinyVG cache (not from `iconfile.zig`).
+
+## Drawing in sketches: geometry and ink (2026-11-25, design only)
+
+Design written, nothing built: blueprint section "Drawing in sketches: geometry and ink in one editor", a note in the constraints design doc ("Ink and constraints"), and `docs/status.md`'s section of the same name. **Next:** the owner's answers to the three open questions (live or snapshot placement; ink with its own geometry; several drawings from one sketch), then build step 1, chaining inked geometry into paths so joins and caps come out right, with dashes in stroke styles.
