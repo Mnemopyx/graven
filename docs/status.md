@@ -726,6 +726,10 @@ The owner's model (design in the blueprint, "Drawing in sketches: geometry and i
 - **Keys:** sketch keys now come before the view's in the canvas's key handling (U and C were the view's canvas theme and checks).
 - **Not yet:** Discard changes; Update/Finish as one undo step; ink and fill changes gated by accept.
 
+## Several drawings per sketch; a panel's drawing (2026-11-25, built)
+
+A sketch can carry several drawings (ink contexts, figures over it): `Model.addDrawing` makes one and makes it current (`SketchItem.drawing`, the one the editor inks and fills in; `.none`: the first), `setSketchDrawing` switches. In the ribbon's Ink group: New drawing, and (with two or more) a drop-down of the sketch's drawings. A sketch panel carries one drawing (`Panel.drawing`, set to the editor's current one when made; `.none`: the sketch's first), chosen in its properties (Drawing; `setPanelDrawing`), so the editor switching drawings never changes a panel. Not yet: other drawings shown faint in the editor; renaming a drawing from the ribbon (Figures in the Browser renames).
+
 ## Sketch drafts: Discard, and ink held in the draft (2026-11-25, built)
 
 Discard (X, the ribbon's end group between Update and Finish; faint with nothing pending) drops the sketch's draft: geometry, constraints, ink and fills, back to the sketch as last accepted (`Model.discardSketchDraft`). Ink and fills changed in the editor are now drafts too (`setInkDraft`, `setFillDraft`, `Figure.pending`): the editor shows them, the drawing's uses (panels, placements) get them only on Update or Finish. Update and Finish are one undo step each (`acceptSketch`): undone, the draft is pending again, ink included (history test). A document saved mid-draft keeps the draft and the accepted sketch (same test).

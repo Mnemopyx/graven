@@ -17757,6 +17757,21 @@ const button_handlers = [_]ButtonHandler{
             if (sketch_edit) |r| skAccept(r.sketch);
         }
     }.f),
+    handler("ink.new-drawing", struct {
+        fn f(_: i32) void {
+            const r = sketch_edit orelse return;
+            const it = state.model.sketches.items[r.sketch];
+            var nb: [96]u8 = undefined;
+            const base = std.fmt.bufPrint(&nb, "{s} drawing", .{it.name}) catch "Drawing";
+            var buf: [112]u8 = undefined;
+            const name = state.model.freshName(&buf, .figures, base);
+            _ = act(.addDrawing, .{ r.sketch, name }) catch {
+                state.status = "The drawing was not made. ";
+                return;
+            };
+            state.status = "A new drawing: ink and fills go into it now. ";
+        }
+    }.f),
     handler("sketch.end.discard", struct {
         fn f(_: i32) void {
             skDiscard();
@@ -29450,6 +29465,7 @@ fn sketchInkKeys() void {
     const gs = skInkable(&buf);
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
     defer row.deinit();
+    skDrawingChoice();
     {
         const saved_group = pushGroup("ink");
         defer popGroup(saved_group);
@@ -29470,6 +29486,37 @@ fn sketchInkKeys() void {
         keyIcon(@src(), "Fill selection  F", dvui.entypo.drop, 0, .{ .data_out = &wd });
         dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off", .{}, .{});
     }
+}
+
+/// The Ink group's drawing: which of the sketch's drawings (ink
+/// contexts) ink and fills go into, and New drawing.
+fn skDrawingChoice() void {
+    const r = sketch_edit orelse return;
+    const saved_group = pushGroup("ink");
+    defer popGroup(saved_group);
+    const ar = dvui.currentWindow().arena();
+    const sid = state.model.sketches.items[r.sketch].id;
+    var names: std.ArrayList([]const u8) = .empty;
+    var ids: std.ArrayList(layout.model.ObjectId) = .empty;
+    for (state.model.figures.items) |f| if (f.sketch == sid) {
+        names.append(ar, f.name) catch return;
+        ids.append(ar, f.id) catch return;
+    };
+    if (names.items.len > 1) {
+        var col = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 130 } });
+        defer col.deinit();
+        tagParent("Drawing");
+        var choice: usize = 0;
+        if (state.model.sketchFigure(sid)) |fi| for (ids.items, 0..) |id, k| {
+            if (id == state.model.figures.items[fi].id) choice = k;
+        };
+        if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .gravity_y = 0.5 })) {
+            actV(.setSketchDrawing, .{ r.sketch, ids.items[choice] });
+        }
+    }
+    var wd: dvui.WidgetData = undefined;
+    keyIcon(@src(), "New drawing", dvui.entypo.add_to_list, 0, .{ .data_out = &wd });
+    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "New drawing: another ink context over this sketch (its own ink and fills), made the one ink goes into", .{}, .{});
 }
 
 /// The overlay below the geometry buttons for the active one: its
@@ -30219,6 +30266,26 @@ fn sketchPanelProperties(pi: usize) void {
     const pn = state.model.panels.items[pi];
     const si = state.model.sketchIndex(pn.sketch) orelse return;
     propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
+    // Which of the sketch's drawings it carries.
+    {
+        const ar = dvui.currentWindow().arena();
+        var names: std.ArrayList([]const u8) = .empty;
+        var ids: std.ArrayList(layout.model.ObjectId) = .empty;
+        for (state.model.figures.items) |f| if (f.sketch == pn.sketch) {
+            names.append(ar, f.name) catch return;
+            ids.append(ar, f.id) catch return;
+        };
+        if (names.items.len > 0) {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 73 });
+            defer row.deinit();
+            propName("Drawing");
+            var choice: usize = 0;
+            if (state.model.panelDrawing(pi)) |fi| for (ids.items, 0..) |id, k| {
+                if (id == state.model.figures.items[fi].id) choice = k;
+            };
+            if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 73 })) actV(.setPanelDrawing, .{ pi, ids.items[choice] });
+        }
+    }
     var islands = pn.islands;
     if (tcheckbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
     keyButton(@src(), "Edit its sketch", 0, .{ .expand = .horizontal, .id_extra = 72 });

@@ -1276,6 +1276,10 @@ pub const SketchItem = struct {
     /// uses only when accepted (`acceptSketch`: Update, Finish), so the
     /// user controls when they propagate (the owner, 2026-11-25).
     accepted: ?sketch_.Sketch = null,
+    /// The drawing (a figure over it) the sketch editor inks and fills in:
+    /// one of its ink contexts (the owner, 2026-11-25: several drawings
+    /// over one sketch, often one per process). `.none`: its first.
+    drawing: ObjectId = .none,
 
     /// What its uses read: the accepted sketch while a draft is pending,
     /// else the sketch itself.
@@ -1652,6 +1656,9 @@ pub const Panel = struct {
     /// sketch.
     sketch: ObjectId = .none,
     sketch_at: geom.Point = .{ .x = 0, .y = 0 },
+    /// Which of its sketch's drawings the panel carries (its ink, its
+    /// cutouts); `.none`: the sketch's first.
+    drawing: ObjectId = .none,
     /// Cuts by nesting, counting the outlines inward: between an odd and
     /// the even one inside it is cut, so inside a hole is an island, and so
     /// on. Without islands only the holes in the outermost outline are cut.
@@ -3881,6 +3888,8 @@ pub const Model = struct {
             .sketch = v.sketch,
             .sketch_at = v.at,
             .layer = v.layer,
+            // The drawing being worked on now, kept when another is chosen.
+            .drawing = if (m.sketchFigure(v.sketch)) |fi| m.figures.items[fi].id else .none,
         };
         const edge = (try m.sketchEdge(m.sketches.items[si].used(), true, m.sketchFigure(v.sketch) != null)) orelse return error.NotEnclosed;
         p.origin = .{ .x = v.at.x + edge.min.x, .y = v.at.y + edge.min.y };
@@ -5392,8 +5401,9 @@ pub const Model = struct {
         }
         const at: geom.Point = .{ .x = p.sketch_at.x - p.origin.x, .y = p.sketch_at.y - p.origin.y };
         var made: std.ArrayList(PanelArt) = .empty;
-        for (m.figures.items) |f| {
-            if (f.sketch != p.sketch) continue;
+        const chosen = m.panelDrawing(panel);
+        for (m.figures.items, 0..) |f, k_fig| {
+            if (f.sketch != p.sketch or k_fig != chosen) continue;
             // Cutout fills cut the panel; the rest are its drawing's ink.
             var kept: std.ArrayList(figure_.Fill) = .empty;
             for (f.fills) |fill| {
@@ -6456,8 +6466,58 @@ pub const Model = struct {
     /// The figure drawn over sketch `sketch` (its ID), if any.
     pub fn sketchFigure(m: *const Model, sketch: ObjectId) ?usize {
         if (sketch == .none) return null;
+        // The drawing the editor works in, when it names one still there.
+        if (m.sketchIndex(sketch)) |si| if (m.figureIndex(m.sketches.items[si].drawing)) |fi| {
+            if (m.figures.items[fi].sketch == sketch) return fi;
+        };
+        return m.firstDrawing(sketch);
+    }
+
+    /// Sketch `sketch`'s first drawing (the one made first), if any.
+    pub fn firstDrawing(m: *const Model, sketch: ObjectId) ?usize {
+        if (sketch == .none) return null;
         for (m.figures.items, 0..) |f, i| if (f.sketch == sketch) return i;
         return null;
+    }
+
+    /// The drawing panel `panel` carries: its own choice, else its sketch's
+    /// first.
+    pub fn panelDrawing(m: *const Model, panel: usize) ?usize {
+        const p = m.panels.items[panel];
+        if (m.figureIndex(p.drawing)) |fi| if (m.figures.items[fi].sketch == p.sketch) return fi;
+        return m.firstDrawing(p.sketch);
+    }
+
+    /// A new drawing over sketch `index` (empty), named `name`, made the
+    /// one the editor inks in. Its index among the figures.
+    pub fn addDrawing(m: *Model, index: usize, name: []const u8) Error!usize {
+        const it = try m.sketchAt(index);
+        const id = m.newId();
+        try m.figures.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .paths = &.{}, .sketch = it.id });
+        it.drawing = id;
+        m.revision += 1;
+        return m.figures.items.len - 1;
+    }
+
+    /// Makes drawing `drawing` (one over sketch `index`) the one the editor
+    /// inks in.
+    pub fn setSketchDrawing(m: *Model, index: usize, drawing: ObjectId) Error!void {
+        const it = try m.sketchAt(index);
+        const fi = m.figureIndex(drawing) orelse return error.NoSuchItem;
+        if (m.figures.items[fi].sketch != it.id) return error.NoSuchItem;
+        it.drawing = drawing;
+        m.revision += 1;
+    }
+
+    /// Chooses which of its sketch's drawings panel `panel` carries.
+    pub fn setPanelDrawing(m: *Model, panel: usize, drawing: ObjectId) Error!void {
+        if (panel >= m.panels.items.len) return error.NoSuchItem;
+        const p = &m.panels.items[panel];
+        const fi = m.figureIndex(drawing) orelse return error.NoSuchItem;
+        if (m.figures.items[fi].sketch != p.sketch) return error.NoSuchItem;
+        p.drawing = drawing;
+        try m.syncSketchPanelInk(panel);
+        m.revision += 1;
     }
 
     /// Makes the paths of the figures drawn over sketch `sketch` (all of
@@ -9119,4 +9179,38 @@ test "ink and fills changed in the editor wait for the sketch's update; discarde
     try std.testing.expectEqual(0, m.figures.items[fi].fills.len);
     try std.testing.expect(m.figures.items[fi].pending == null);
     try std.testing.expectEqual(1, m.figures.items[fi].inks.len);
+}
+
+test "several drawings over one sketch: the editor inks in the current one, a panel carries its own" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Plate");
+    const c = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const dot = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 2 } });
+    try m.setInk(si, c, true);
+    const first = m.sketchFigure(m.sketches.items[si].id).?;
+    // A second drawing: the dot inked there only.
+    const second = try m.addDrawing(si, "Engraved");
+    try std.testing.expectEqual(second, m.sketchFigure(m.sketches.items[si].id).?);
+    try m.setInk(si, dot, true);
+    try std.testing.expectEqual(1, m.figures.items[first].inks.len);
+    try std.testing.expectEqual(1, m.figures.items[second].inks.len);
+    // A panel made now carries the current drawing (the dot's).
+    const p = try m.insertSketchPanel(0, si, .{ .x = 0, .y = 0 });
+    var ink_w: f64 = 0;
+    for (m.panels.items[p].art.items) |x| if (x.sketch_ink) {
+        ink_w = x.box().width();
+    };
+    try std.testing.expectApproxEqAbs(4.3, ink_w, 0.05);
+    // Switched to the first: the ring.
+    try m.setPanelDrawing(p, m.figures.items[first].id);
+    for (m.panels.items[p].art.items) |x| if (x.sketch_ink) {
+        ink_w = x.box().width();
+    };
+    try std.testing.expectApproxEqAbs(20.3, ink_w, 0.05);
+    // The editor's drawing changed back: the panel keeps its own.
+    try m.setSketchDrawing(si, m.figures.items[second].id);
+    try m.setInk(si, dot, false);
+    try std.testing.expectApproxEqAbs(20.3, m.panels.items[p].art.items[0].box().width(), 0.05);
 }
