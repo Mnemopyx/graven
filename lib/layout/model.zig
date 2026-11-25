@@ -6874,13 +6874,22 @@ pub const Model = struct {
 
     fn checkStroke(st: figure_.Stroke) Error!void {
         if (!(st.width > 0) or !std.math.isFinite(st.width) or !(st.miter_limit >= 1)) return error.BadValue;
+        for (st.dash) |d| if (!(d >= 0) or !std.math.isFinite(d)) return error.BadValue;
+        if (!std.math.isFinite(st.dash_offset)) return error.BadValue;
+    }
+
+    /// A stroke with its dash pattern in the model's memory.
+    fn ownStroke(m: *Model, st: figure_.Stroke) Error!figure_.Stroke {
+        var o = st;
+        o.dash = try m.a().dupe(f64, st.dash);
+        return o;
     }
 
     /// Adds a stroke style; returns its ID.
     pub fn addStrokeStyle(m: *Model, name: []const u8, stroke: figure_.Stroke) Error!ObjectId {
         try checkStroke(stroke);
         const id = m.newId();
-        try m.stroke_styles.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = stroke });
+        try m.stroke_styles.append(m.a(), .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = try m.ownStroke(stroke) });
         m.revision += 1;
         return id;
     }
@@ -6889,7 +6898,7 @@ pub const Model = struct {
     pub fn setStrokeStyle(m: *Model, id: ObjectId, name: []const u8, stroke: figure_.Stroke) Error!void {
         const i = m.strokeStyleIndex(id) orelse return error.NoSuchStyle;
         try checkStroke(stroke);
-        m.stroke_styles.items[i] = .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = stroke };
+        m.stroke_styles.items[i] = .{ .id = id, .name = try m.a().dupe(u8, name), .stroke = try m.ownStroke(stroke) };
         try m.syncSketchFigures(.none);
         m.revision += 1;
     }

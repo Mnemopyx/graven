@@ -661,6 +661,8 @@ pub const all = [_]Element{
     .{ .id = "sketch.end.update", .kind = .button, .label = "Update" },
     .{ .id = "sketch.end.discard", .kind = .button, .label = "Discard" },
     .{ .id = "ink.new-drawing", .kind = .button, .label = "New drawing" },
+    .{ .id = "ink.dashes", .kind = .choice, .label = "Dashes" },
+    .{ .id = "ink.dash-pattern", .kind = .field, .label = "Dash pattern, mm" },
     .{ .id = "ink.drawing", .kind = .choice, .label = "Drawing" },
     .{ .id = "sketch.palette.construction", .kind = .button, .label = "Construction" },
     .{ .id = "sketch.palette.select", .kind = .button, .label = "Select" },

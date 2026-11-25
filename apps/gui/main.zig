@@ -27305,6 +27305,10 @@ fn loadSketchPanelSample() void {
         if (g.removed or g.reference or g.construction) continue;
         if (g.kind == .segment) _ = act(.setInk, .{ index, @as(u32, @intCast(gi)), true }) catch {};
     }
+    // The ring in a dashed pen.
+    if (act(.addStrokeStyle, .{ "Dashed", layout.figure.Stroke{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.4, .cap = .round, .join = .round, .dash = &.{ 1.2, 1.2 } } })) |id| {
+        _ = act(.setCurrentStroke, .{id}) catch {};
+    } else |_| {}
     _ = act(.setInk, .{ index, ring, true }) catch {};
     _ = act(.setFill, .{ index, @as([]const u32, &.{hole}), true, true }) catch {};
     const pi = act(.insertSketchPanel, .{ shown_space, index, geom.Point{ .x = 0, .y = 0 } }) catch return;
@@ -27462,8 +27466,72 @@ fn sketchInkProperties() void {
             next.width = w;
             _ = actM(mergeKey(.{ "stroke-width", st.id }), .setStrokeStyle, .{ st.id, st.name, next }) catch {};
         }
+        strokeDashProps(st);
     } else propText("Pen", "{s}", .{"0.3 mm black, made with the first ink"}, 8196);
     keyButton(@src(), "New stroke style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+}
+
+/// The dash presets, as multiples of the pen's width (on, off, …), for
+/// round or square caps (which reach half a width past each dash's ends)
+/// and for butt caps.
+const dash_presets = [_]struct { name: []const u8, capped: []const f64, butt: []const f64 }{
+    .{ .name = "Solid", .capped = &.{}, .butt = &.{} },
+    .{ .name = "Dashed", .capped = &.{ 3, 3 }, .butt = &.{ 4, 2 } },
+    .{ .name = "Dotted", .capped = &.{ 0, 2.5 }, .butt = &.{ 1, 1.5 } },
+    .{ .name = "Dash-dot", .capped = &.{ 4, 2.5, 0, 2.5 }, .butt = &.{ 5, 1.5, 1, 1.5 } },
+};
+
+/// A stroke style's dashes: a preset (scaled to its width), or the
+/// pattern typed in mm ("2 1"; "solid" for none).
+fn strokeDashProps(st: layout.model.StrokeStyle) void {
+    const ar = dvui.currentWindow().arena();
+    const w = st.stroke.width;
+    const capped = st.stroke.cap != .butt;
+    var names: [dash_presets.len + 1][]const u8 = undefined;
+    for (dash_presets, 0..) |d, i| names[i] = d.name;
+    names[dash_presets.len] = "Custom";
+    var choice: usize = dash_presets.len;
+    for (dash_presets, 0..) |d, i| {
+        const want = if (capped) d.capped else d.butt;
+        if (want.len != st.stroke.dash.len) continue;
+        var same = true;
+        for (want, st.stroke.dash) |x, y| if (@abs(x * w - y) > 1e-6) {
+            same = false;
+        };
+        if (same) choice = i;
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8198 });
+        defer row.deinit();
+        propName("Dashes");
+        const shown = if (choice == dash_presets.len) names[0..] else names[0..dash_presets.len];
+        if (tdropdown(@src(), shown, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 8198 })) if (choice < dash_presets.len) {
+            const want = if (capped) dash_presets[choice].capped else dash_presets[choice].butt;
+            const dash = ar.alloc(f64, want.len) catch return;
+            for (want, dash) |x, *o| o.* = x * w;
+            var next = st.stroke;
+            next.dash = dash;
+            actV(.setStrokeStyle, .{ st.id, st.name, next });
+        };
+    }
+    var text: std.ArrayList(u8) = .empty;
+    if (st.stroke.dash.len == 0) text.appendSlice(ar, "solid") catch {};
+    for (st.stroke.dash, 0..) |d, i| text.print(ar, "{s}{d}", .{ if (i > 0) " " else "", @round(d * 1000) / 1000 }) catch {};
+    if (textProp("Dash pattern, mm", text.items, 8199)) |v| {
+        var dash: std.ArrayList(f64) = .empty;
+        var it = std.mem.tokenizeAny(u8, v, " ,");
+        while (it.next()) |tok| {
+            if (std.ascii.eqlIgnoreCase(tok, "solid")) continue;
+            const x = std.fmt.parseFloat(f64, tok) catch {
+                state.status = "Dashes: lengths in mm, on and off in turn (2 1), or solid. ";
+                return;
+            };
+            dash.append(ar, x) catch return;
+        }
+        var next = st.stroke;
+        next.dash = dash.items;
+        actV(.setStrokeStyle, .{ st.id, st.name, next });
+    }
 }
 
 /// A new stroke style, like the current one (or a fine black pen), made

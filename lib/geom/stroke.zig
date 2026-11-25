@@ -39,6 +39,82 @@ pub const Polyline = struct {
     closed: bool = false,
 };
 
+/// Polyline `line` cut into its dashes (`pattern`: lengths on and off in
+/// turn, mm; an odd count repeats twice over; `offset` into it where the
+/// line starts), each an open polyline appended to `out`. A dash of length
+/// 0 is a point's worth of line (a dot, under a round or square cap). A
+/// pattern with no length at all leaves the line whole.
+pub fn dashed(a: Allocator, line: Polyline, pattern: []const f64, offset: f64, out: *std.ArrayList(Polyline)) Allocator.Error!void {
+    var period: f64 = 0;
+    for (pattern) |d| period += @max(0, d);
+    const reps: usize = if (pattern.len % 2 == 1) 2 else 1;
+    period *= @floatFromInt(reps);
+    if (!(period > 0) or line.pts.len < 2) return out.append(a, line);
+    const n = pattern.len * reps;
+    // The points round, a closed line's first again at its end.
+    var pts: std.ArrayList(Point) = .empty;
+    try pts.appendSlice(a, line.pts);
+    if (line.closed) try pts.append(a, line.pts[0]);
+    // Where in the pattern the line starts.
+    var k: usize = 0;
+    var left = @mod(offset, period);
+    while (left > 0) {
+        const d = @max(0, pattern[k % pattern.len]);
+        if (left < d) break;
+        left -= d;
+        k = (k + 1) % n;
+    }
+    var remain = @max(0, pattern[k % pattern.len]) - left;
+    var on = k % 2 == 0;
+    var cur: std.ArrayList(Point) = .empty;
+    if (on) try cur.append(a, pts.items[0]);
+    const dot = 1e-4;
+    for (pts.items[0 .. pts.items.len - 1], pts.items[1..]) |p, q| {
+        const len = std.math.hypot(q.x - p.x, q.y - p.y);
+        if (!(len > 0)) continue;
+        var t: f64 = 0;
+        while (len - t > remain) {
+            t += remain;
+            const at: Point = .{ .x = p.x + (q.x - p.x) * t / len, .y = p.y + (q.y - p.y) * t / len };
+            if (on) {
+                try cur.append(a, at);
+                if (cur.items.len == 1 or (cur.items.len == 2 and cur.items[0].x == at.x and cur.items[0].y == at.y)) {
+                    // A dot: a point's worth of line along the path.
+                    cur.items.len = 1;
+                    try cur.append(a, .{ .x = at.x + (q.x - p.x) * dot / len, .y = at.y + (q.y - p.y) * dot / len });
+                }
+                try out.append(a, .{ .pts = try cur.toOwnedSlice(a) });
+            } else {
+                cur.clearRetainingCapacity();
+                try cur.append(a, at);
+            }
+            on = !on;
+            k = (k + 1) % n;
+            remain = @max(0, pattern[k % pattern.len]);
+        }
+        remain -= len - t;
+        if (on) try cur.append(a, q);
+    }
+    if (on and cur.items.len >= 2) try out.append(a, .{ .pts = try cur.toOwnedSlice(a) });
+}
+
+test "dashes: a 10 mm line in 2 on, 1 off is four dashes and a short one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: std.ArrayList(Polyline) = .empty;
+    try dashed(a, .{ .pts = &.{ .{ .x = 0, .y = 0 }, .{ .x = 4, .y = 0 }, .{ .x = 10, .y = 0 } } }, &.{ 2, 1 }, 0, &out);
+    try std.testing.expectEqual(4, out.items.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 9), out.items[3].pts[0].x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), out.items[3].pts[out.items[3].pts.len - 1].x, 1e-9);
+    // The second dash runs through the corner point at 4.
+    try std.testing.expectEqual(3, out.items[1].pts.len);
+    // Dots: 0 on, 1 off.
+    out.clearRetainingCapacity();
+    try dashed(a, .{ .pts = &.{ .{ .x = 0, .y = 0 }, .{ .x = 3.5, .y = 0 } } }, &.{ 0, 1 }, 0, &out);
+    try std.testing.expectEqual(4, out.items.len);
+}
+
 /// The stroke of `lines` in `style` as an outline of simple loops (outer
 /// counter-clockwise, holes clockwise), round parts within `tol`.
 pub fn stroke(a: Allocator, lines: []const Polyline, style: Style, tol: f64) Allocator.Error!Outline {

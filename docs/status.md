@@ -726,6 +726,10 @@ The owner's model (design in the blueprint, "Drawing in sketches: geometry and i
 - **Keys:** sketch keys now come before the view's in the canvas's key handling (U and C were the view's canvas theme and checks).
 - **Not yet:** Discard changes; Update/Finish as one undo step; ink and fill changes gated by accept.
 
+## Dashes in stroke styles (2026-11-25, built)
+
+A stroke style has a dash pattern (`Stroke.dash`, mm, on and off in turn, SVG's stroke-dasharray; `dash_offset`): each run is cut into dashes (`geom.stroke.dashed`) before it is outlined, so every dash takes the pen's caps; an on length of 0 under a round or square cap is a dot. In the sketch editor's Ink properties: Dashes (Solid, Dashed, Dotted, Dash-dot, as multiples of the width, allowing for the caps; Custom when typed) and Dash pattern, mm ("2 1", or solid). `GRAVEN_SAMPLE=sketch-panel`'s ring is dashed. Not yet: SVG import reading stroke-dasharray; dashes aligned to a closed path's corners.
+
 ## Several drawings per sketch; a panel's drawing (2026-11-25, built)
 
 A sketch can carry several drawings (ink contexts, figures over it): `Model.addDrawing` makes one and makes it current (`SketchItem.drawing`, the one the editor inks and fills in; `.none`: the first), `setSketchDrawing` switches. In the ribbon's Ink group: New drawing, and (with two or more) a drop-down of the sketch's drawings. A sketch panel carries one drawing (`Panel.drawing`, set to the editor's current one when made; `.none`: the sketch's first), chosen in its properties (Drawing; `setPanelDrawing`), so the editor switching drawings never changes a panel. Not yet: other drawings shown faint in the editor; renaming a drawing from the ribbon (Figures in the Browser renames).

@@ -35,6 +35,12 @@ pub const Stroke = struct {
     cap: geom.stroke.Cap = .butt,
     join: geom.stroke.Join = .miter,
     miter_limit: f64 = 4,
+    /// Dashes: lengths along the path, mm, on and off in turn (SVG's
+    /// stroke-dasharray; an odd count repeats twice over); empty is solid.
+    /// An on length of 0 with round or square caps is a dot.
+    dash: []const f64 = &.{},
+    /// How far into the pattern the path starts, mm.
+    dash_offset: f64 = 0,
 };
 
 pub const Path = struct {
@@ -166,7 +172,8 @@ pub fn ink(a: Allocator, f: Figure, tol: f64) Allocator.Error![]const art.Shape 
             var lines: std.ArrayList(geom.stroke.Polyline) = .empty;
             for (p.subpaths) |sp| {
                 if (sp.segments.len == 0) continue;
-                try lines.append(a, .{ .pts = try flatten(a, sp.segments, tol), .closed = sp.closed });
+                const line: geom.stroke.Polyline = .{ .pts = try flatten(a, sp.segments, tol), .closed = sp.closed };
+                if (st.dash.len == 0) try lines.append(a, line) else try geom.stroke.dashed(a, line, st.dash, st.dash_offset, &lines);
             }
             const o = try geom.stroke.stroke(a, lines.items, .{ .width = st.width, .cap = st.cap, .join = st.join, .miter_limit = st.miter_limit }, tol);
             if (o.contours.len > 0) try out.append(a, .{ .name = "stroke", .outline = o, .paint = .{ .fill = .{ .solid = st.color } } });
