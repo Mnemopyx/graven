@@ -12807,10 +12807,16 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 continue;
             }
         };
-        // Sketch mode takes the canvas's events.
+        // Sketch mode takes the canvas's events, but for a click on a
+        // track: the sketch is accepted and left, and the click is the
+        // canvas's own (selects the track, or puts the cursor in its
+        // text), as anywhere else.
         if (sketch_edit != null) {
-            sketchEvent(e, box, area);
-            continue;
+            if (!sketchLetsGo(e, area)) {
+                sketchEvent(e, box, area);
+                continue;
+            }
+            leaveSketch();
         }
         if (panel_edit != null) {
             panelEditEvent(e, box, area);
@@ -28756,6 +28762,16 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
 }
 
 // Events ----------------------------------------------------------------------------
+
+/// A press with Select on, nothing of the sketch under the pointer, and a
+/// track there: the sketch editor lets it go to the canvas.
+fn sketchLetsGo(e: *const dvui.Event, area: dvui.Rect.Physical) bool {
+    if (e.handled or e.evt != .mouse) return false;
+    const me = e.evt.mouse;
+    if (me.action != .press or !me.button.pointer() or !area.contains(me.p)) return false;
+    if (sk_tool != .none or sk_summary or sk_dim != null or skTarget() != null) return false;
+    return trackUnder(state.view.toMm(area, me.p)) != null;
+}
 
 /// Takes every canvas event while sketch mode is on.
 fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
