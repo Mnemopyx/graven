@@ -306,3 +306,28 @@ test "a panel's process profile is kept through a save (for the manufacture stag
     try testing.expectEqualStrings("Generic FDM, 0.2 mm nozzle", pr.name);
     try near(0.22, pr.limits().stroke.pass);
 }
+
+test "a sketch panel's ink closes stretches of its tracks" {
+    const gpa = testing.allocator;
+    var m: model.Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
+    const si = try m.addShapeSketch(.rectangle);
+    _ = try m.editSketch(si, .{ .param = .{ .name = "w", .expr = "70" } });
+    _ = try m.editSketch(si, .{ .param = .{ .name = "h", .expr = "30" } });
+    const ring = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 22, .y = 0 }, .r = 7 } });
+    try m.setInk(si, ring, true);
+    const hole = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 22, .y = 0 }, .r = 3.5 } });
+    try m.setFill(si, &.{hole}, true, true);
+    const p = try m.insertSketchPanel(c, si, .{ .x = 0, .y = 0 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / 6.0, .pitch = 6 });
+    var labels: place.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    const g = try TrackGround.init(gpa, &m, &labels, .{ .panel = p }, r, null);
+    defer g.deinit();
+    const piece = g.ground().piece(0, 0).?;
+    // The ring (50 to 64 mm across the panel, its stroke 0.3 mm) and 1 mm clear.
+    try testing.expectEqual(@as(usize, 2), piece.open.len);
+    try testing.expect(piece.open[0].hi < 46 and piece.open[1].lo > 60);
+}

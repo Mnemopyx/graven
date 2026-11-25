@@ -1627,7 +1627,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                 // line before's.
                 var grow: Grow = .{};
                 var pos: f64 = line.lo;
-                for (items[leg_lo..], leg_lo..) |item, index| {
+                items: for (items[leg_lo..], leg_lo..) |item, index| {
                     // Entering after a wrap upstream: what a wrap drops at a
                     // line's start is dropped here too.
                     if (drop_first) {
@@ -1697,6 +1697,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                     var group_end = index;
                     if (!in_group) {
                         while (group_end + 1 < items.len and m.bound(items, group_end)) : (group_end += 1) need += items[group_end + 1].gap * region.pitch + sizes[group_end + 1];
+                        // A word set in pieces goes where the whole of it is
+                        // clear of what closes the line, not just its first.
+                        if (need > size) start = Flow.clear(closed.items, pos + gap, need);
                         // Ending at a soft hyphen: unless the rest of the word fits
                         // too, the line would end here, with a hyphen.
                         if (endsIn(cuts.items, group_end, .hyphen)) {
@@ -1714,7 +1717,11 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                     const forced_break = forcing != null and in_group and start + size > line.hi + tol and in_seg > 0;
                     // It does not fit: on to the next segment, made as needed, if
                     // this one holds something already.
-                    if (((!in_group and start + need > line.hi + tol and in_seg > 0) or forced_break) and seg + 1 < max_segments) {
+                    // A line closed from here to its end (art across all of
+                    // it) is passed over, even before anything is on it.
+                    var shut = !in_group and start >= line.hi - tol;
+                    var breaking = ((!in_group and start + need > line.hi + tol and (in_seg > 0 or shut)) or forced_break) and seg + 1 < max_segments;
+                    while (breaking) {
                         line.soft = true;
                         if (rows) try grow.line(a, labels, items, cuts.items, renders, flow, &path, style, seg, first_in_seg, index);
                         try flow.leave(a, &path, &shifts, &tall, out_issues, seg, first_in_seg, index, closed.items.len > 0, line);
@@ -1726,13 +1733,13 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                             try out_exits.append(a, .{ .track = m.regionsIn(more.?.parent)[more.?.region].id, .piece = index, .segment = seg0 + seg, .paragraph = style_id, .first_line = false, .soft = true });
                             leg_hi = index;
                             exited = true;
-                            break;
+                            break :items;
                         }
                         try flow.enter(a, &path, seg, tall.items, up_keep.items, &closed);
                         line = lineIn(style, false, segLength(&path, rows, seg));
                         pos = line.lo;
                         in_seg = 0;
-                        start = Flow.clear(closed.items, pos + gap, size);
+                        start = Flow.clear(closed.items, pos + gap, if (in_group) size else need);
                         // Landing at the start after a soft break, a tile whose
                         // prototype says so, or a space between words, is dropped.
                         const drops = if (item.tileOf()) |id| m.proto(m.tileConst(id).prototype).at_soft_break == .drop else isSpace(cuts.items, index);
@@ -1741,8 +1748,11 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                             segs_of[index] = seg;
                             spans[index] = .{ pos, pos };
                             dropped[index] = true;
-                            continue;
+                            continue :items;
                         }
+                        // Landing on a line art closes to its end: on again.
+                        shut = !in_group and start >= line.hi - tol;
+                        breaking = shut and start + need > line.hi + tol and seg + 1 < max_segments;
                     }
                     // A word that does not fit even a line of its own is cut
                     // between its glyphs, where it must.
@@ -2792,4 +2802,41 @@ test "a grid stamp drawn from a ready-made sketch: each hole is the sketch solve
         len.* = longest;
     }
     try testing.expectApproxEqAbs(@as(f64, 4), lens[0] - lens[1], 1e-6);
+}
+
+test "text on a sketch's panel flows round the sketch's ink" {
+    const gpa = testing.allocator;
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*font.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    const c = try m.startCanvas(.mm);
+    const style = try m.addStyle("label", .{ .cap_height = 3 });
+    const si = try m.addShapeSketch(.rectangle);
+    _ = try m.editSketch(si, .{ .param = .{ .name = "w", .expr = "70" } });
+    _ = try m.editSketch(si, .{ .param = .{ .name = "h", .expr = "30" } });
+    const ring = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 22, .y = 0 }, .r = 7 } });
+    try m.setInk(si, ring, true);
+    const hole = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 22, .y = 0 }, .r = 3.5 } });
+    try m.setFill(si, &.{hole}, true, true);
+    const p = try m.insertSketchPanel(c, si, .{ .x = 0, .y = 0 });
+    const r = try m.addTracks(.{ .panel = p }, .{ .name = "text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / 6.0, .pitch = 6 });
+    try m.insertRun(.{ .panel = p }, r, 0, .{ .style = style, .content = "Power, gain and level: text on a panel cut from a sketch, flowing round its ink." });
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    var s = try solve(gpa, &m, .{ .panel = p }, &labels);
+    defer s.deinit();
+    // The ring is 50 to 64 mm across the panel (45.5 to 60.5 mm along
+    // the track, its stroke and 1 mm clear): no word in it, and the
+    // switch's hole in it is cut out of the panel's body.
+    var n: usize = 0;
+    for (s.items) |it| {
+        if (it.span[1] - it.span[0] < 1e-9) continue;
+        n += 1;
+        try testing.expect(it.span[1] <= 45.6 or it.span[0] >= 60.4);
+    }
+    try testing.expect(n > 0);
+    try testing.expectEqual(@as(usize, 2), s.body.?.contours.len);
+    try testing.expectApproxEqAbs(@as(f64, 53.5), s.body.?.contours[1].bounds().x0, 0.01);
 }

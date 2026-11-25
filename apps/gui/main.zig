@@ -8774,15 +8774,8 @@ fn drawSpacePanels(area: dvui.Rect.Physical, space: ?usize, layer: ?layout.model
                 if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness);
             } else if (is_context and !off) marchingBox(area, panelBox(pi), edge, thickness) else outline.stroke(.square, .{ .thickness = thickness, .color = .{ .color = edge } });
         }
+        // A sketch's panel's drawing is its art (`sketch_ink`), drawn with it.
         if (pl) |q| drawPanel(area, .{ .panel = pi }, q);
-        // A sketch's panel carries its sketch's drawing: the ink and fills
-        // over it, as last accepted.
-        const pn = state.model.panels.items[pi];
-        if (pn.sketch != .none) if (state.model.sketchIndex(pn.sketch)) |ski| if (SkPlace.of(ski, pn.sketch_at)) |sp0| {
-            var sp = sp0;
-            sp.sketch = sp.item.used();
-            drawSketchFigure(area, sp, 1);
-        };
     }
 }
 
@@ -27219,18 +27212,28 @@ fn loadSketchSample() void {
 /// hole in it).
 fn loadSketchPanelSample() void {
     const index = act(.addShapeSketch, .{layout.model.ShapeSketch.rectangle}) catch return;
-    const c = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 2, .y = 0 }, .r = 1.5 } } }) catch return;
+    _ = act(.editSketch, .{ index, layout.model.SketchEdit{ .param = .{ .name = "w", .expr = "70" } } }) catch {};
+    _ = act(.editSketch, .{ index, layout.model.SketchEdit{ .param = .{ .name = "h", .expr = "30" } } }) catch {};
+    // A ring round a switch's hole (a cutout fill), right of the text.
+    const ring = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 22, .y = 0 }, .r = 7 } } }) catch return;
+    const hole = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 22, .y = 0 }, .r = 3.5 } } }) catch return;
     const sk = &state.model.sketches.items[index].sketch;
     for (sk.geometry.items, 0..) |g, gi| {
         if (g.removed or g.reference or g.construction) continue;
         if (g.kind == .segment) _ = act(.setInk, .{ index, @as(u32, @intCast(gi)), true }) catch {};
     }
-    _ = act(.setInk, .{ index, c, true }) catch {};
+    _ = act(.setInk, .{ index, ring, true }) catch {};
+    _ = act(.setFill, .{ index, @as([]const u32, &.{hole}), true, true }) catch {};
     const pi = act(.insertSketchPanel, .{ shown_space, index, geom.Point{ .x = 0, .y = 0 } }) catch return;
+    // Text across the panel, flowing round the ring.
+    const style = labelStyle() catch return;
+    const pitch = 6.0;
+    const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / pitch, .pitch = pitch }) catch return;
+    state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "Text on a panel cut from a sketch flows round its ink." }) catch {};
     state.context = .{ .panel = pi };
     state.view.cx = 0;
     state.view.cy = 0;
-    state.view.ppm = 60;
+    state.view.ppm = 14;
     state.view.fit = null;
 }
 

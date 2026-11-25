@@ -1022,6 +1022,10 @@ pub const PanelArt = struct {
     figure: ObjectId = .none,
     /// A figure's placement's border (its margin is the clearance).
     border: FigureBorder = .{},
+    /// Made from its panel's sketch (`Panel.sketch`): the sketch's ink, or
+    /// a cutout from one of its cutout fills. Made again whenever the
+    /// sketch is accepted or its drawing changes; never edited by hand.
+    sketch_ink: bool = false,
 
     /// Its outline, if it is one closed path (one shape, one contour):
     /// what Make panel can take as a panel's edge.
@@ -3766,7 +3770,7 @@ pub const Model = struct {
             }
         };
         for (m.panels.items) |*p| for (p.art.items) |*x| {
-            if (x.figure != f.id) continue;
+            if (x.figure != f.id or x.sketch_ink) continue;
             const w = x.box().width();
             x.shapes = try m.figureShapes(index, if (w > 0) w else 10);
             if (x.border.kind == .dubins) {
@@ -3812,7 +3816,7 @@ pub const Model = struct {
     /// enclosed. Returns the panel's index.
     pub fn insertSketchPanel(m: *Model, space: usize, index: usize, at: geom.Point) Error!usize {
         const it = try m.sketchAt(index);
-        _ = (try m.sketchEdge(it.used(), true)) orelse return error.NotEnclosed;
+        _ = (try m.sketchEdge(it.used(), true, true)) orelse return error.NotEnclosed;
         const vi = try m.addSketchView(space, index, at);
         return m.makeSketchPanel(space, vi);
     }
@@ -3833,7 +3837,7 @@ pub const Model = struct {
             .sketch_at = v.at,
             .layer = v.layer,
         };
-        const edge = (try m.sketchEdge(m.sketches.items[si].used(), true)) orelse return error.NotEnclosed;
+        const edge = (try m.sketchEdge(m.sketches.items[si].used(), true, m.sketchFigure(v.sketch) != null)) orelse return error.NotEnclosed;
         p.origin = .{ .x = v.at.x + edge.min.x, .y = v.at.y + edge.min.y };
         p.w = edge.w;
         p.h = edge.h;
@@ -3865,6 +3869,7 @@ pub const Model = struct {
         for (p.regions.items) |x| m.forget(x.id);
         _ = m.spaces.items[space].sketch_views.orderedRemove(view);
         try m.panels.append(m.a(), p);
+        try m.syncSketchPanelInk(m.panels.items.len - 1);
         m.revision += 1;
         return m.panels.items.len - 1;
     }
@@ -5251,8 +5256,10 @@ pub const Model = struct {
     /// outermost first, as one outline whose even-odd fill is the cut by
     /// nesting (without `islands`, only the outermost and the holes in it),
     /// moved so the outermost's box starts at (0, 0). Null unless there is
-    /// exactly one outermost outline.
-    fn sketchEdge(m: *Model, sk: *const sketch_.Sketch, islands: bool) Error!?SketchEdge {
+    /// exactly one outermost outline. A `drawn` sketch (one with a drawing)
+    /// gives only its outermost: its holes are its cutout fills, so a ring
+    /// it inks is not cut.
+    fn sketchEdge(m: *Model, sk: *const sketch_.Sketch, islands: bool, drawn: bool) Error!?SketchEdge {
         var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
         defer scratch.deinit();
         const sa = scratch.allocator();
@@ -5278,7 +5285,7 @@ pub const Model = struct {
         const move = geom.Affine.translate(-b.x0, -b.y0);
         var kept: std.ArrayList(geom.Contour) = .empty;
         for (prof.contours, depth, 0..) |c, dp, i| {
-            if (i != oi and dp != 0 and !(islands or dp == 1)) continue;
+            if (i != oi and (drawn or (dp != 0 and !(islands or dp == 1)))) continue;
             const segs = try m.a().alloc(geom.Segment, c.segments.len);
             for (c.segments, segs) |sg, *o| o.* = sg.transformed(move);
             const item: geom.Contour = .{ .segments = segs };
@@ -5301,7 +5308,7 @@ pub const Model = struct {
         if (p.sketch == .none) return;
         const si = m.sketchIndex(p.sketch) orelse return;
         // A sketch that no longer encloses leaves the edge as it was.
-        const edge = (try m.sketchEdge(m.sketches.items[si].used(), p.islands)) orelse return;
+        const edge = (try m.sketchEdge(m.sketches.items[si].used(), p.islands, m.sketchFigure(p.sketch) != null)) orelse return;
         const origin: geom.Point = .{ .x = p.sketch_at.x + edge.min.x, .y = p.sketch_at.y + edge.min.y };
         const d: geom.Point = .{ .x = p.origin.x - origin.x, .y = p.origin.y - origin.y };
         for (p.regions.items) |*rg| rg.origin = .{ .x = rg.origin.x + d.x, .y = rg.origin.y + d.y };
@@ -5310,6 +5317,61 @@ pub const Model = struct {
         p.w = edge.w;
         p.h = edge.h;
         p.edge = edge.art;
+        try m.syncSketchPanelInk(panel);
+    }
+
+    /// Makes a sketch panel's art from its sketch's drawings again: each
+    /// drawing's ink as one piece of line art, set where the sketch is,
+    /// that the panel's tracks flow round (at its clearance); each fill in
+    /// a cutout style a cutout through the panel. The art made before is
+    /// dropped; a clearance or wrap changed on it is kept.
+    fn syncSketchPanelInk(m: *Model, panel: usize) Error!void {
+        const p = &m.panels.items[panel];
+        if (p.sketch == .none) return;
+        const si = m.sketchIndex(p.sketch) orelse return;
+        const sk = m.sketches.items[si].used();
+        const al = m.a();
+        var wrap: Wrap = .ink;
+        var clearance: f64 = 1;
+        var i = p.art.items.len;
+        var at_index: usize = p.art.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (!p.art.items[i].sketch_ink) continue;
+            const old = p.art.orderedRemove(i);
+            if (!old.cutout) {
+                wrap = old.wrap;
+                clearance = old.clearance;
+            }
+            at_index = i;
+        }
+        const at: geom.Point = .{ .x = p.sketch_at.x - p.origin.x, .y = p.sketch_at.y - p.origin.y };
+        var made: std.ArrayList(PanelArt) = .empty;
+        for (m.figures.items) |f| {
+            if (f.sketch != p.sketch) continue;
+            // Cutout fills cut the panel; the rest are its drawing's ink.
+            var kept: std.ArrayList(figure_.Fill) = .empty;
+            for (f.fills) |fill| {
+                const fi = m.fillStyleIndex(fill.style) orelse continue;
+                const st = m.fill_styles.items[fi];
+                if (!st.cutout) {
+                    try kept.append(al, fill);
+                    continue;
+                }
+                const region = try fillRegion(al, sk, fill, .solid);
+                if (region.contours.len == 0) continue;
+                const shapes = try al.alloc(art_.Shape, 1);
+                shapes[0] = .{ .name = "cutout", .outline = region, .paint = .{} };
+                try made.append(al, .{ .id = m.newId(), .name = try al.dupe(u8, st.name), .at = at, .shapes = shapes, .cutout = true, .wrap = .ink, .clearance = clearance, .figure = f.id, .sketch_ink = true });
+            }
+            var g = f;
+            g.fills = kept.items;
+            g.paths = try m.figurePathsFrom(sk, g);
+            const shapes = try figure_.ink(al, g, figure_tolerance);
+            if (shapes.len == 0) continue;
+            try made.insert(al, 0, .{ .id = m.newId(), .name = try al.dupe(u8, f.name), .at = at, .shapes = shapes, .wrap = wrap, .clearance = clearance, .figure = f.id, .sketch_ink = true });
+        }
+        try p.art.insertSlice(al, @min(at_index, p.art.items.len), made.items);
     }
 
     /// `editSketch` as a draft: the sketch as it stands is kept as the
@@ -5329,8 +5391,8 @@ pub const Model = struct {
         it.accepted = null;
         it.version +%= 1;
         const sid = it.id;
-        for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) try m.syncSketchPanel(pi);
         try m.syncSketchFigures(sid);
+        for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) try m.syncSketchPanel(pi);
     }
 
     /// Drops sketch `index`'s draft: back to the sketch as last accepted.
@@ -6357,6 +6419,10 @@ pub const Model = struct {
             f.paths = try m.figurePathsFrom(item.used(), f.*);
             // The sketch editor's view of a pending draft.
             f.draft = if (item.accepted != null) try m.figurePathsFrom(&item.sketch, f.*) else &.{};
+        }
+        for (m.panels.items, 0..) |pn, pi| {
+            if (pn.sketch == .none or (sketch != .none and pn.sketch != sketch)) continue;
+            try m.syncSketchPanelInk(pi);
         }
     }
 
