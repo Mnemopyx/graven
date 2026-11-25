@@ -5465,7 +5465,14 @@ fn treeContent() void {
         for (state.model.materials.items) |mt| _ = treeNode(.{ .material = mt.id }, mt.material.name, 2, false, false);
     }
     if (state.model.sketches.items.len > 0) if (treeNode(.sketches, "Sketches", 1, true, false)) {
-        for (state.model.sketches.items, 0..) |sk, i| _ = treeNode(.{ .sketch_def = i }, sk.name, 2, false, sk.default_name);
+        for (state.model.sketches.items, 0..) |sk, i| {
+            // What its own space holds (a caption's track) is listed
+            // under it: whatever is made can be chosen again.
+            const home = state.model.homeOf(sk.id);
+            const pi: Parent = .{ .space = home orelse 0 };
+            const holds = home != null and (state.model.regionsIn(pi).len > 0 or state.model.gridsIn(pi).len > 0);
+            if (treeNode(.{ .sketch_def = i }, sk.name, 2, holds, sk.default_name) and holds) parentChildren(pi, 3);
+        }
     };
     // Always listed: where figures are imported into.
     if (treeNode(.figures, "Figures", 1, state.model.figures.items.len > 0, false)) {
@@ -17842,7 +17849,7 @@ const button_handlers = [_]ButtonHandler{
             newStrokeStyle();
         }
     }.f),
-    handler("sketch-mode.add-caption", struct {
+    handler("caption.add-caption-n", struct {
         fn f(_: i32) void {
             skAddCaption();
         }
@@ -27355,12 +27362,21 @@ fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     state.status = "Sketch mode: draw from the palette; Tab locks the pointer; Enter shows the summary. ";
 }
 
-/// The one selected point a caption may be added to (on a circle or an
-/// arc, which `addCaption` checks).
-fn skCaptionPoint() ?skl.PointRef {
+/// What a caption may be added to: the one selected point (on a side, a
+/// circle or an arc), or the one selected side or curve (which
+/// `addCaption` checks).
+fn skCaptionFrom() ?skl.caption.From {
     if (sk_sel.items.len != 1) return null;
     return switch (sk_sel.items[0]) {
-        .point => |r| r,
+        .point => |r| .{ .point = r },
+        .curve => |g| blk: {
+            const it = skItem() orelse break :blk null;
+            if (g >= it.sketch.geometry.items.len) break :blk null;
+            break :blk switch (it.sketch.geometry.items[g].kind) {
+                .segment, .circle, .arc => .{ .curve = g },
+                else => null,
+            };
+        },
         else => null,
     };
 }
@@ -27379,22 +27395,27 @@ fn skViewId() ?layout.model.ObjectId {
 /// Add caption: a leader from the selected point and a track of text held
 /// to its end; the sketch is left, the cursor waiting in the track.
 fn skAddCaption() void {
-    const p = skCaptionPoint() orelse return;
+    const p = skCaptionFrom() orelse {
+        state.status = "Add caption: select a point on a side or curve, or a side or curve. ";
+        return;
+    };
     const view = skViewId() orelse {
         state.status = "A caption needs the sketch placed on a canvas or panel: this one is only being defined. ";
         return;
     };
-    const key = mergeKey(.{ "caption", view, p.geom, @intFromEnum(p.role), state.model.revision });
+    const key = mergeKey(.{ "caption", view, std.meta.activeTag(p), state.model.revision });
     const style = labelStyleIn(key) catch {
         state.status = "Add caption: no text style for it. ";
         return;
     };
-    const pitch = styleLinePitch(style) orelse {
+    // A style just made is not set up until the next frame: the face's
+    // pitch at the Label style's 3 mm caps meanwhile.
+    const pitch = styleLinePitch(style) orelse styleLinePitch(null) orelse {
         state.status = "Add caption: no text style for it. ";
         return;
     };
     const cap = actM(key, .addCaption, .{ view, p, style, pitch, 30 }) catch |err| {
-        state.status = if (err == error.NotOnACurve) "A caption goes on a point of a circle or an arc. " else "The caption could not be added. ";
+        state.status = if (err == error.NotOnACurve) "A caption goes on a side, a circle or an arc, or a point on one. " else "The caption could not be added. ";
         return;
     };
     // Its text in the caption's style, with no paragraph style, so the
@@ -27789,6 +27810,8 @@ fn followHome() void {
     if (state.model.isHome(shown_space)) {
         if (sketch_edit) |r| if (r.space == shown_space) return;
         if (sketch_edit != null) leaveSketch();
+        // Its caption's text being typed: the sketch waits.
+        if (state.context == .region) return;
         const ski = state.model.sketchIndex(state.model.spaces.items[shown_space].home) orelse return;
         enterSketchAt(ski, shown_space, .{ .x = 0, .y = 0 });
         state.status = "The sketch in its own space: draw from the ribbon; U updates its uses. ";
@@ -28790,6 +28813,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.tool.next") => skCycleTool(),
             kact("sketch.ink") => skInk(),
             kact("sketch.fill") => skFill(),
+            kact("sketch.caption") => skAddCaption(),
             kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
             kact("sketch.end.discard") => skDiscard(),
             else => used = false,
@@ -29604,6 +29628,16 @@ fn sketchInkKeys() void {
         keyIcon(@src(), "Fill selection  F", dvui.entypo.drop, 0, .{ .data_out = &wd });
         dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off", .{}, .{});
     }
+    {
+        const saved_group = pushGroup("caption");
+        defer popGroup(saved_group);
+        const prev_a = faintUnless(skCaptionFrom() != null);
+        defer dvui.alphaSet(prev_a);
+        ribbon_next_badge = "N";
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Add caption  N", dvui.entypo.message, 0, .{ .data_out = &wd });
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Add caption: a leader out square to the selected side or curve (or from the selected point on one), jogged level, and a track of text held to its end (N)", .{}, .{});
+    }
 }
 
 /// The Ink group's drawing: which of the sketch's drawings (ink
@@ -29844,8 +29878,6 @@ fn sketchModeProperties() void {
         if (x.conflicting.len > 0) propText("Conflicts", "{d}", .{x.conflicting.len}, 3);
         if (x.redundant.len > 0) propText("Redundant", "{d}", .{x.redundant.len}, 4);
     }
-    // A point on a circle or an arc: a caption for it.
-    if (skCaptionPoint() != null) keyButton(@src(), "Add caption", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     sketchInkProperties();
     sketchFillProperties();
     skConstraintList(it);

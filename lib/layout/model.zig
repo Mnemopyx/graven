@@ -4026,14 +4026,15 @@ pub const Model = struct {
     /// Where a caption was put: its track.
     pub const Caption = struct { parent: Parent, region: usize };
 
-    /// A caption at point `p` (on a circle or an arc) of sketch view
-    /// `view`: the sketch gains a leader (`sketch_.caption`), and a single
+    /// A caption from `from` (a point on a side, circle or arc, or one of
+    /// those itself) of sketch view `view`: the sketch gains a leader
+    /// (`sketch_.caption`), and a single
     /// track of text in `style` (`pitch` its line pitch, mm), `length` mm
     /// long, is held by its left edge (the leader running right) or its
     /// right edge, and its middle, to the leader's end, its text aligned
     /// toward it. The track is in the panel the end is over, else straight
     /// in the workspace.
-    pub fn addCaption(m: *Model, view: ObjectId, p: sketch_.PointRef, style: StyleId, pitch: f64, length: f64) Error!Caption {
+    pub fn addCaption(m: *Model, view: ObjectId, from: sketch_.caption.From, style: StyleId, pitch: f64, length: f64) Error!Caption {
         if (!(pitch > 0) or !(length > 0)) return error.BadSize;
         var space: ?usize = null;
         var v: SketchView = undefined;
@@ -4046,7 +4047,7 @@ pub const Model = struct {
         const si = space orelse return error.NoSuchItem;
         const ski = m.sketchIndex(v.sketch) orelse return error.NoSuchItem;
         const sk = &m.sketches.items[ski].sketch;
-        const lead = sketch_.caption.addLeader(sk, m.a(), p, 3, 4) catch |e| return switch (e) {
+        const lead = sketch_.caption.addLeaderFrom(sk, m.a(), from, 3, 4) catch |e| return switch (e) {
             error.NotOnACurve => error.NotOnACurve,
             else => |x| x,
         };
@@ -4056,6 +4057,17 @@ pub const Model = struct {
         // over it in the current stroke style.
         try m.setInk(ski, lead.radial, true);
         try m.setInk(ski, lead.across, true);
+        // Ink being edited (a draft): the leader is inked there too, so
+        // the editor shows it and accepting keeps it.
+        if (try m.sketchFigureFor(ski, true)) |fi| if (m.figures.items[fi].pending) |pd| {
+            var inks: std.ArrayList(figure_.Ink) = .empty;
+            try inks.appendSlice(m.a(), pd.inks);
+            const st = try m.inkStyle();
+            try inks.append(m.a(), .{ .geom = lead.radial, .style = st });
+            try inks.append(m.a(), .{ .geom = lead.across, .style = st });
+            m.figures.items[fi].pending = .{ .inks = inks.items, .fills = pd.fills };
+            try m.syncSketchFigures(m.sketches.items[ski].id);
+        };
         const e = try sk.point(lead.end);
         const at: geom.Point = .{ .x = v.at.x + e.x, .y = v.at.y + e.y };
         // The panel it is over.
