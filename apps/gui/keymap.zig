@@ -569,6 +569,7 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "l", .action = "sketch.constraint.lock" },
     .{ .mode = "sketch", .chord = "m", .action = "sketch.tool.next" },
     .{ .mode = "sketch", .chord = "u", .action = "sketch.end.update" },
+    .{ .mode = "sketch", .chord = "x", .action = "sketch.end.discard" },
     .{ .mode = "sketch", .chord = "i", .action = "sketch.ink" },
     .{ .mode = "sketch", .chord = "f", .action = "sketch.fill" },
 } ++ enters("sketch.summary", "sketch.summary.leave") ++ [_]B{

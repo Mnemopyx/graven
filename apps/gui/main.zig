@@ -17757,6 +17757,11 @@ const button_handlers = [_]ButtonHandler{
             if (sketch_edit) |r| skAccept(r.sketch);
         }
     }.f),
+    handler("sketch.end.discard", struct {
+        fn f(_: i32) void {
+            skDiscard();
+        }
+    }.f),
     handler("sketch.end.finish", struct {
         fn f(_: i32) void {
             leaveSketch();
@@ -27392,7 +27397,7 @@ fn skInked(g: skl.GeomId) bool {
     const r = sketch_edit orelse return false;
     const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return false;
     const cur = state.model.currentStroke() orelse return false;
-    for (state.model.figures.items[fi].inks) |k| if (k.geom == g and k.style == cur) return true;
+    for (skMarks(fi).inks) |k| if (k.geom == g and k.style == cur) return true;
     return false;
 }
 
@@ -27411,7 +27416,7 @@ fn skInk() void {
         all = false;
     };
     const key = mergeKey(.{ "ink", r.sketch, state.model.revision });
-    for (gs) |g| _ = actM(key, .setInk, .{ r.sketch, g, !all }) catch {};
+    for (gs) |g| _ = actM(key, .setInkDraft, .{ r.sketch, g, !all }) catch {};
     state.status = if (all) "Ink taken off. " else "Inked in the current stroke style. ";
 }
 
@@ -27468,7 +27473,7 @@ var fill_enclosed = false;
 fn skFillOf(gs: []const skl.GeomId) ?usize {
     const r = sketch_edit orelse return null;
     const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return null;
-    for (state.model.figures.items[fi].fills, 0..) |f, i| {
+    for (skMarks(fi).fills, 0..) |f, i| {
         if (f.geoms.len != gs.len) continue;
         var all = true;
         for (gs) |g| if (std.mem.indexOfScalar(u32, f.geoms, g) == null) {
@@ -27491,7 +27496,7 @@ fn skFill() void {
         return;
     }
     const on = skFillOf(gs) == null;
-    act(.setFill, .{ r.sketch, gs, fill_enclosed, on }) catch |err| {
+    act(.setFillDraft, .{ r.sketch, gs, fill_enclosed, on }) catch |err| {
         state.status = if (err == error.NotEnclosed) "Fill: the selection must close a path (end to end, round to its start). " else "The fill could not be made. ";
         return;
     };
@@ -27513,10 +27518,10 @@ fn sketchFillProperties() void {
     if (own) |k| {
         const r = sketch_edit.?;
         const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id).?;
-        var on = state.model.figures.items[fi].fills[k].enclosed;
+        var on = skMarks(fi).fills[k].enclosed;
         if (tcheckbox(@src(), &on, "Fill enclosed paths", .{ .id_extra = 8181 })) {
             fill_enclosed = on;
-            actV(.setFill, .{ r.sketch, gs, on, true });
+            actV(.setFillDraft, .{ r.sketch, gs, on, true });
         }
     } else _ = tcheckbox(@src(), &fill_enclosed, "Fill enclosed paths", .{ .id_extra = 8181 });
     const m = &state.model;
@@ -27655,6 +27660,31 @@ fn followHome() void {
         enterSketchAt(ski, shown_space, .{ .x = 0, .y = 0 });
         state.status = "The sketch in its own space: draw from the ribbon; U updates its uses. ";
     } else if (sketch_edit) |r| if (state.model.isHome(r.space)) leaveSketch();
+}
+
+/// Figure `fi`'s marks as the sketch editor shows them: pending, else
+/// its own.
+fn skMarks(fi: usize) layout.figure.Marks {
+    const f = state.model.figures.items[fi];
+    return f.pending orelse .{ .inks = f.inks, .fills = f.fills };
+}
+
+/// Drops the sketch being edited's draft (geometry, constraints, ink and
+/// fills): back to the sketch as last accepted.
+fn skDiscard() void {
+    const r = sketch_edit orelse return;
+    if (!skPending()) {
+        state.status = "Nothing to discard. ";
+        return;
+    }
+    _ = act(.discardSketchDraft, .{r.sketch}) catch {
+        state.status = "The sketch's changes were not discarded. ";
+        return;
+    };
+    sk_sel.clearRetainingCapacity();
+    sk_drag = null;
+    sk_dim_drag = null;
+    state.status = "The sketch's changes since the last update are discarded. ";
 }
 
 /// A new sketch in the shown space, its origin at `at`, then edited.
@@ -28628,6 +28658,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.ink") => skInk(),
             kact("sketch.fill") => skFill(),
             kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
+            kact("sketch.end.discard") => skDiscard(),
             else => used = false,
         }
         if (used) {
@@ -29346,6 +29377,15 @@ fn sketchPalette() void {
             ribbon_next_badge = "U";
             keyIcon(@src(), "Update", dvui.entypo.cycle, 0, .{ .data_out = &uwd, .color_fill = if (pending) .{ .color = colors.overflow.opacity(0.25) } else null });
             dvui.tooltip(@src(), .{ .active_rect = uwd.borderRectScale().r }, "{s}", .{if (pending) "Update: accept the changes so far, so what uses the sketch follows them, and keep editing (U)" else "Update: nothing to accept; what uses the sketch shows it as it is (U)"}, .{});
+        }
+        {
+            const pending = skPending();
+            const prev_a = faintUnless(pending);
+            defer dvui.alphaSet(prev_a);
+            var dwd: dvui.WidgetData = undefined;
+            ribbon_next_badge = "X";
+            keyIcon(@src(), "Discard", dvui.entypo.back_in_time, 0, .{ .data_out = &dwd });
+            dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "{s}", .{if (pending) "Discard: drop the changes since the last update, back to the sketch as its uses see it (X)" else "Discard: no changes to drop (X)"}, .{});
         }
         ribbon_next_badge = "\u{21B5}";
         var fwd: dvui.WidgetData = undefined;

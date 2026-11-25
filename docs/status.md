@@ -726,6 +726,10 @@ The owner's model (design in the blueprint, "Drawing in sketches: geometry and i
 - **Keys:** sketch keys now come before the view's in the canvas's key handling (U and C were the view's canvas theme and checks).
 - **Not yet:** Discard changes; Update/Finish as one undo step; ink and fill changes gated by accept.
 
+## Sketch drafts: Discard, and ink held in the draft (2026-11-25, built)
+
+Discard (X, the ribbon's end group between Update and Finish; faint with nothing pending) drops the sketch's draft: geometry, constraints, ink and fills, back to the sketch as last accepted (`Model.discardSketchDraft`). Ink and fills changed in the editor are now drafts too (`setInkDraft`, `setFillDraft`, `Figure.pending`): the editor shows them, the drawing's uses (panels, placements) get them only on Update or Finish. Update and Finish are one undo step each (`acceptSketch`): undone, the draft is pending again, ink included (history test). A document saved mid-draft keeps the draft and the accepted sketch (same test).
+
 ## A sketch in its own space (2026-11-25, the owner's ask; built)
 
 Blueprint "A sketch in its own space". A sketch can start in a workspace of its own (`Space.home`, the sketch's ID: one view of it at the origin, nothing else; not a frame, not listed with them, not a move target), made by `Model.addSketchSpace`, or given to an existing sketch by `Model.homeSpace`. GUI: New sketch in the Sketches properties and at the foot of the tab + menu (`views.new-sketch`) opens it in a tab, "Sketch: name", and edits it; Edit in its own space in a sketch's properties. Showing that tab edits the sketch (`followHome`); showing another accepts and leaves. The + menu lists sketches' own spaces under Sketches. Use it from a canvas or frame tab: the sketch in the Browser, then Insert as a panel here. `GRAVEN_SAMPLE=sketch-space`. Not yet: removing a sketch leaves its own space unlisted, not removed; the Browser shows no own spaces (they are the sketches').

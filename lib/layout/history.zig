@@ -49,7 +49,7 @@ pub const actions = [_][:0]const u8{
     "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
     "setEmSize",         "addConstraint",      "setConstraintValue",  "setConstraintPlace",  "setConstraintDriving", "removeConstraint",   "setObjectOrigin",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
-    "addSketch", "addSketchSpace", "homeSpace", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "editSketchDraft", "acceptSketch", "discardSketchDraft", "makeSketchPanel", "insertSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
+    "addSketch", "addSketchSpace", "homeSpace", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "editSketchDraft", "acceptSketch", "discardSketchDraft", "setInkDraft", "setFillDraft", "makeSketchPanel", "insertSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addArray", "addCaption", "addStrokeStyle", "setStrokeStyle", "setCurrentStroke", "setInk", "addFillStyle", "setFillStyle", "setCurrentFill", "setFill", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
     "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLeading", "copyStyle", "copyParagraphStyle", "addStyleTemplate", "renameStyleTemplate", "deriveStyle", "setTemplateLeading", "addCase", "setCaseKey", "splitAt", "setFlowStyle", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess", "addMaterial", "setMaterial", "removeMaterial", "addPlan", "setPlan", "removePlan", "setActivePlan",
@@ -1684,4 +1684,32 @@ test "materials, plans and the active plan: saved with their steps, reopened, un
     try testing.expectEqual(plan, o.model.active_plan);
     _ = try o.history.undo(&o.model);
     try testing.expectEqual(1, o.model.plans.items.len);
+}
+
+test "a sketch's Update is one step: undone, the draft is pending again, its ink with it" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const si = try h.do(&m, .addSketch, .{ 0, "Sketch 1", .{ .x = 0, .y = 0 } });
+    const seg = try h.do(&m, .editSketchDraft, .{ si, .{ .segment = .{ .a = .{ .x = 0, .y = 0 }, .b = .{ .x = 9, .y = 0 } } } });
+    try h.do(&m, .setInkDraft, .{ si, seg, true });
+    try h.do(&m, .acceptSketch, .{si});
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    try testing.expectEqual(1, m.figures.items[fi].inks.len);
+    try testing.expect(m.sketches.items[si].accepted == null);
+    try testing.expect(try h.undo(&m));
+    try testing.expect(m.sketches.items[si].accepted != null);
+    try testing.expectEqual(0, m.figures.items[fi].inks.len);
+    try testing.expectEqual(1, m.figures.items[fi].pending.?.inks.len);
+    // Saved mid-draft and read back: the draft and the accepted sketch both kept.
+    const bytes = try native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try native.decode(gpa, bytes);
+    defer back.deinit();
+    try testing.expect(back.sketches.items[si].accepted != null);
+    try testing.expectEqual(1, back.figures.items[fi].pending.?.inks.len);
 }

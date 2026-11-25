@@ -5436,6 +5436,11 @@ pub const Model = struct {
         it.accepted = null;
         it.version +%= 1;
         const sid = it.id;
+        for (m.figures.items) |*f| if (f.sketch == sid) if (f.pending) |p| {
+            f.inks = p.inks;
+            f.fills = p.fills;
+            f.pending = null;
+        };
         try m.syncSketchFigures(sid);
         for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) try m.syncSketchPanel(pi);
     }
@@ -5447,6 +5452,9 @@ pub const Model = struct {
         it.sketch = back;
         it.accepted = null;
         it.version +%= 1;
+        for (m.figures.items) |*f| if (f.sketch == it.id) {
+            f.pending = null;
+        };
         try m.syncSketchFigures(it.id);
     }
 
@@ -6463,7 +6471,16 @@ pub const Model = struct {
             const item = &m.sketches.items[ski];
             f.paths = try m.figurePathsFrom(item.used(), f.*);
             // The sketch editor's view of a pending draft.
-            f.draft = if (item.accepted != null) try m.figurePathsFrom(&item.sketch, f.*) else &.{};
+            // The editor's view of a pending draft: the draft sketch, with
+            // its pending marks.
+            if (item.accepted != null or f.pending != null) {
+                var d = f.*;
+                if (f.pending) |p| {
+                    d.inks = p.inks;
+                    d.fills = p.fills;
+                }
+                f.draft = try m.figurePathsFrom(&item.sketch, d);
+            } else f.draft = &.{};
         }
         for (m.panels.items, 0..) |pn, pi| {
             if (pn.sketch == .none or (sketch != .none and pn.sketch != sketch)) continue;
@@ -6659,6 +6676,61 @@ pub const Model = struct {
         const id = try m.addFillStyle(.{ .name = "Hatch 45°", .color = .{ .r = 0, .g = 0, .b = 0 }, .pattern = .{ .hatch = .{} }, .cutout = true });
         m.current_fill = id;
         return id;
+    }
+
+    /// `setInk` as a draft (the sketch editor's): the change shows in the
+    /// editor, and reaches the drawing's uses only when the sketch is
+    /// accepted (`acceptSketch`); discarded with its draft.
+    pub fn setInkDraft(m: *Model, index: usize, g: u32, on: bool) Error!void {
+        const fi = try m.beginMarksDraft(index);
+        const kept = m.swapMarks(fi);
+        errdefer _ = m.swapMarks(fi);
+        try m.setInk(index, g, on);
+        m.endMarksDraft(fi, kept);
+        try m.syncSketchFigures(m.sketches.items[index].id);
+    }
+
+    /// `setFill` as a draft (see `setInkDraft`).
+    pub fn setFillDraft(m: *Model, index: usize, geoms: []const u32, enclosed: bool, on: bool) Error!void {
+        const fi = try m.beginMarksDraft(index);
+        const kept = m.swapMarks(fi);
+        errdefer _ = m.swapMarks(fi);
+        try m.setFill(index, geoms, enclosed, on);
+        m.endMarksDraft(fi, kept);
+        try m.syncSketchFigures(m.sketches.items[index].id);
+    }
+
+    /// Opens sketch `index`'s draft for its drawing's marks: the sketch
+    /// kept as accepted (as `editSketchDraft` does), the drawing made if
+    /// it has none, its pending marks started from its own. The figure's
+    /// index.
+    fn beginMarksDraft(m: *Model, index: usize) Error!usize {
+        const it = try m.sketchAt(index);
+        if (it.accepted == null) it.accepted = try it.sketch.clone(m.a());
+        const fi = (try m.sketchFigureFor(index, true)).?;
+        const f = &m.figures.items[fi];
+        if (f.pending == null) f.pending = .{ .inks = f.inks, .fills = f.fills };
+        return fi;
+    }
+
+    /// Puts figure `fi`'s pending marks in its own place, for the plain
+    /// edit to work on; returns the marks it had (to put back).
+    fn swapMarks(m: *Model, fi: usize) figure_.Marks {
+        const f = &m.figures.items[fi];
+        const own: figure_.Marks = .{ .inks = f.inks, .fills = f.fills };
+        const p = f.pending orelse return own;
+        f.inks = p.inks;
+        f.fills = p.fills;
+        f.pending = own;
+        return own;
+    }
+
+    /// After the plain edit: its result pending, the figure's own marks back.
+    fn endMarksDraft(m: *Model, fi: usize, kept: figure_.Marks) void {
+        const f = &m.figures.items[fi];
+        f.pending = .{ .inks = f.inks, .fills = f.fills };
+        f.inks = kept.inks;
+        f.fills = kept.fills;
     }
 
     /// Fills the area geometry `geoms` of sketch `index` closes, in the
@@ -9021,4 +9093,30 @@ test "a sketch in its own space: made there, then inserted on the canvas as a pa
     try std.testing.expectApproxEqAbs(20, m.panels.items[p].w, 1e-6);
     // Its own space keeps its view.
     try std.testing.expectEqual(1, m.spaces.items[home].sketch_views.items.len);
+}
+
+test "ink and fills changed in the editor wait for the sketch's update; discarded, they go" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketch(0, "Drawn", .{ .x = 0, .y = 0 });
+    const g = try m.editSketch(si, .{ .segment = .{ .a = .{ .x = 0, .y = 0 }, .b = .{ .x = 10, .y = 0 } } });
+    const c = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 20, .y = 0 }, .r = 3 } });
+    try m.setInkDraft(si, g, true);
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    // Pending: the editor shows it, the drawing does not have it yet.
+    try std.testing.expectEqual(0, m.figures.items[fi].inks.len);
+    try std.testing.expectEqual(0, m.figures.items[fi].paths.len);
+    try std.testing.expect(m.figures.items[fi].draft.len > 0);
+    try std.testing.expect(m.sketches.items[si].accepted != null);
+    try m.acceptSketch(si);
+    try std.testing.expectEqual(1, m.figures.items[fi].inks.len);
+    try std.testing.expect(m.figures.items[fi].pending == null);
+    // A fill, then discarded: the drawing as it was.
+    try m.setFillDraft(si, &.{c}, true, true);
+    try std.testing.expectEqual(0, m.figures.items[fi].fills.len);
+    try m.discardSketchDraft(si);
+    try std.testing.expectEqual(0, m.figures.items[fi].fills.len);
+    try std.testing.expect(m.figures.items[fi].pending == null);
+    try std.testing.expectEqual(1, m.figures.items[fi].inks.len);
 }

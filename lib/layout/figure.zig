@@ -77,6 +77,12 @@ pub const Ink = struct {
     style: @import("model.zig").ObjectId,
 };
 
+/// A drawing's marks over its sketch: what is inked, and what filled.
+pub const Marks = struct {
+    inks: []const Ink = &.{},
+    fills: []const Fill = &.{},
+};
+
 pub const Figure = struct {
     id: @import("model.zig").ObjectId = .none,
     name: []const u8,
@@ -98,6 +104,10 @@ pub const Figure = struct {
     /// make them, for the sketch editor (not saved; `paths` are what its
     /// uses see until the draft is accepted).
     draft: []const Path = &.{},
+    /// Ink and fills changed in the sketch editor, not yet accepted: what
+    /// `inks` and `fills` become when the sketch's draft is accepted
+    /// (dropped when it is discarded). Null when none are pending.
+    pending: ?Marks = null,
 
     /// Its paths' bounds, strokes' widths included (a pen's reach, not
     /// its caps' or miters' exact extent).
