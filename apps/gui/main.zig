@@ -2493,6 +2493,10 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    if (close_home) |h| {
+        close_home = null;
+        closeSpaceViews(h);
+    }
     if (new_drawing) {
         new_drawing = false;
         newSketchInOwnSpace();
@@ -17694,7 +17698,7 @@ const button_handlers = [_]ButtonHandler{
     // The sketch editor.
     handler("sketch.summary.accept-and-leave", struct {
         fn f(_: i32) void {
-            leaveSketch();
+            finishSketch();
         }
     }.f),
     handler("sketch.summary.back-to-sketching", struct {
@@ -17788,7 +17792,7 @@ const button_handlers = [_]ButtonHandler{
     }.f),
     handler("sketch.end.finish", struct {
         fn f(_: i32) void {
-            leaveSketch();
+            finishSketch();
         }
     }.f),
     handler("sketch-mode.finish-sketch-enter", struct {
@@ -27687,6 +27691,33 @@ fn newFillStyle() void {
     _ = actM(key, .setCurrentFill, .{id}) catch {};
 }
 
+/// Finish (accept and leave): the sketch's changes accepted and its
+/// editing left; edited in its own space, that space's tab closes too
+/// (at the next frame's start) and the next tab comes up.
+fn finishSketch() void {
+    const home: ?usize = if (sketch_edit) |r| (if (state.model.isHome(r.space)) r.space else null) else null;
+    leaveSketch();
+    if (home) |h| close_home = h;
+}
+/// A sketch's own space whose tabs close at the next frame's start.
+var close_home: ?usize = null;
+
+/// Closes every tab showing space `space`; a last tab shows the canvas.
+fn closeSpaceViews(space: usize) void {
+    for (0..docviews.max_views) |k| {
+        const j: u8 = @intCast(k);
+        if (!vl.open[j] or vl.views[j].kind != .canvas or viewSpace(j) != space) continue;
+        closeView(j);
+        if (vl.open[j] and viewSpace(j) == space) {
+            // The only view: it shows the canvas instead.
+            if (j == canvas_owner) shown_space = 0 else view_slots[j].space = 0;
+            if (j == canvas_owner) state.view.fit = canvas_view;
+        }
+    }
+    // The context follows the view now active, not the sketch left.
+    if (vl.views[vl.active].kind == .canvas) state.context = .{ .space = viewSpace(vl.active) };
+}
+
 fn leaveSketch() void {
     if (sketch_edit) |r| skAccept(r.sketch);
     sketch_edit = null;
@@ -28717,7 +28748,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
         if (sk_summary) {
             const inv = keymap.match1(e, kmode("sketch.summary")) orelse return;
             switch (inv.action) {
-                kact("sketch.summary.leave") => leaveSketch(),
+                kact("sketch.summary.leave") => finishSketch(),
                 kact("sketch.summary.back") => sk_summary = false,
                 else => return,
             }
