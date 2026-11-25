@@ -17932,6 +17932,11 @@ const button_handlers = [_]ButtonHandler{
             skAddCaption();
         }
     }.f),
+    handler("caption.connect-j", struct {
+        fn f(_: i32) void {
+            skConnect();
+        }
+    }.f),
     handler("sketch-mode.constraint", struct {
         fn f(arg: i32) void {
             skPickConstraint(@intCast(arg));
@@ -19187,48 +19192,126 @@ fn protoUnit(p: layout.model.TilePrototype) f64 {
 
 /// How a track holds its content: alignment in each row or column, the
 /// indent after hard breaks, and the gap between rows the path makes.
-/// A caption's leader (a connection in its sketch): its path's kind,
-/// converted in place, and its connector style's end marks, which every
-/// connection in that style shares.
+/// A caption's leader: its connection's properties.
 fn captionConnectorProperties(caption: ObjectId) void {
+    for (state.model.sketches.items, 0..) |it, ski| for (it.captions.items) |sc| {
+        if (sc.id == caption) return connectionProperties(ski, sc.connector);
+    };
+}
+
+/// Connection `ci` of sketch `ski`: its path's kind (converted in place)
+/// and its own bend radius and leads; then its connector style's stroke
+/// (none: annotation) and end marks, which every connection in that style
+/// shares.
+fn connectionProperties(ski: usize, ci: u32) void {
     const m = &state.model;
     const saved_group = pushGroup("connector");
     defer popGroup(saved_group);
-    for (m.sketches.items) |it| for (it.captions.items) |sc| {
-        if (sc.id != caption or sc.connector >= it.sketch.connectors.items.len) continue;
-        const c = it.sketch.connectors.items[sc.connector];
-        {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 960 });
-            defer row.deinit();
-            propName(asElement("connector.path"));
-            const names = [_][]const u8{ "Joined segments", "Dubins path" };
-            var choice: usize = @intFromEnum(c.kind);
-            if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 960 }))
-                actV(.setConnectorKind, .{ it.id, sc.connector, @as(layout.model.sketch_.connector.Kind, @enumFromInt(choice)) });
+    if (ski >= m.sketches.items.len) return;
+    const it = m.sketches.items[ski];
+    if (ci >= it.sketch.connectors.items.len) return;
+    const c = it.sketch.connectors.items[ci];
+    heading("{s}", .{"Connection"}, 959);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 960 });
+        defer row.deinit();
+        propName(asElement("connector.path"));
+        const names = [_][]const u8{ "Joined segments", "Dubins path" };
+        var choice: usize = @intFromEnum(c.kind);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 960 }))
+            actV(.setConnectorKind, .{ it.id, ci, @as(layout.model.sketch_.connector.Kind, @enumFromInt(choice)) });
+    }
+    if (c.kind == .dubins) {
+        if (numberProp(asElement("connector.radius"), c.radius, 0.05, 1000, 965)) |v| actV(.setConnectorShape, .{ it.id, ci, v, c.lead });
+        if (numberProp(asElement("connector.lead"), c.lead, 0, 1000, 966)) |v| actV(.setConnectorShape, .{ it.id, ci, c.radius, v });
+    }
+    const sid: ObjectId = @enumFromInt(c.style);
+    if (m.connectorStyleIndex(sid) == null) return;
+    var cs = m.connectorStyleOf(sid);
+    propText(asElement("connector.style"), "{s}", .{cs.name}, 961);
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 967 });
+        defer row.deinit();
+        propName(asElement("connector.stroke"));
+        const styles = m.stroke_styles.items;
+        const a = dvui.currentWindow().arena();
+        const names = a.alloc([]const u8, styles.len + 1) catch return;
+        names[0] = "None: annotation";
+        var choice: usize = 0;
+        for (styles, names[1..], 1..) |st, *nm, k| {
+            nm.* = st.name;
+            if (cs.stroke == st.id) choice = k;
         }
-        const sid: ObjectId = @enumFromInt(c.style);
-        if (m.connectorStyleIndex(sid) == null) return;
-        var cs = m.connectorStyleOf(sid);
-        propText(asElement("connector.style"), "{s}", .{cs.name}, 961);
-        var changed = false;
-        const marks = [_][]const u8{ "Nothing", "Arrow", "Dot", "Bar" };
-        inline for (.{ "start", "end" }, 0..) |f, k| {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 962 + k });
-            defer row.deinit();
-            propName(asElement("connector." ++ f));
-            var choice: usize = @intFromEnum(@field(cs, f));
-            if (tdropdown(@src(), &marks, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 962 + k })) {
-                @field(cs, f) = @enumFromInt(choice);
-                changed = true;
-            }
-        }
-        if (numberProp(asElement("connector.size"), cs.size, 0.05, 50, 964)) |v| {
-            cs.size = v;
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 967 })) {
+            cs.stroke = if (choice == 0) .none else styles[choice - 1].id;
             changed = true;
         }
-        if (changed) actV(.setConnectorStyle, .{cs});
+    }
+    const marks = [_][]const u8{ "Nothing", "Arrow", "Dot", "Bar" };
+    inline for (.{ "start", "end" }, 0..) |f, k| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 962 + k });
+        defer row.deinit();
+        propName(asElement("connector." ++ f));
+        var choice: usize = @intFromEnum(@field(cs, f));
+        if (tdropdown(@src(), &marks, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 962 + k })) {
+            @field(cs, f) = @enumFromInt(choice);
+            changed = true;
+        }
+    }
+    if (numberProp(asElement("connector.size"), cs.size, 0.05, 50, 964)) |v| {
+        cs.size = v;
+        changed = true;
+    }
+    if (changed) actV(.setConnectorStyle, .{cs});
+}
+
+/// The connection the sketch selection is part of (its path, or one of
+/// its two points), if any.
+fn skSelectedConnection(it: SkPlace) ?u32 {
+    for (sk_sel.items) |p| {
+        const g: skl.GeomId = switch (p) {
+            .curve => |c| c,
+            .point => |r| r.geom,
+            .constraint => continue,
+        };
+        for (it.sketch.connectors.items, 0..) |c, ci| {
+            if (c.start == g or c.end == g or std.mem.indexOfScalar(skl.GeomId, c.path.items, g) != null) return @intCast(ci);
+        }
+    }
+    return null;
+}
+
+/// Connect (J): a connection from the first selected point, side or
+/// curve (nowhere: from the sketch's origin), reaching the second
+/// selected point if there is one.
+fn skConnect() void {
+    const it = skItem() orelse return;
+    const ski = sketch_edit.?.sketch;
+    const From = layout.model.sketch_.connector.From;
+    var from: From = .{ .free = .{ .at = .{ .x = 0, .y = 0 }, .angle = std.math.pi / 4.0 } };
+    var to: ?skl.PointRef = null;
+    if (sk_sel.items.len >= 1) {
+        switch (sk_sel.items[0]) {
+            .point => |r| from = .{ .point = r },
+            .curve => |g| from = .{ .curve = g },
+            .constraint => {},
+        }
+    }
+    if (sk_sel.items.len >= 2) switch (sk_sel.items[1]) {
+        .point => |r| to = r,
+        else => {},
+    };
+    const key = mergeKey(.{ "connect", ski, state.model.revision });
+    const ci = actM(key, .addConnection, .{ it.item.id, from, to, layout.model.sketch_.connector.Kind.segments }) catch |err| {
+        state.status = if (err == error.NotOnACurve) "Connect: from a point, a side, a circle or an arc (or nothing selected: from nowhere). " else "The connection could not be made. ";
         return;
     };
+    // The new connection selected: its path's first piece.
+    const c = state.model.sketches.items[ski].sketch.connectors.items[ci];
+    sk_sel.clearRetainingCapacity();
+    if (c.path.items.len > 0) sk_sel.append(state.gpa, .{ .curve = c.path.items[0] }) catch {};
+    state.status = "Connection made: its kind, marks and style in Properties. ";
 }
 
 fn trackFlowProperties(pi: Parent, ri: usize) !void {
@@ -28977,6 +29060,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.ink") => skInk(),
             kact("sketch.fill") => skFill(),
             kact("sketch.caption") => skAddCaption(),
+            kact("sketch.connect") => skConnect(),
             kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
             kact("sketch.end.discard") => skDiscard(),
             else => used = false,
@@ -29800,6 +29884,11 @@ fn sketchInkKeys() void {
         var wd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Add caption  N", dvui.entypo.message, 0, .{ .data_out = &wd });
         dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Add caption: a leader out square to the selected side or curve (or from the selected point on one), jogged level, and a track of text held to its end (N)", .{}, .{});
+        dvui.alphaSet(prev_a);
+        ribbon_next_badge = "J";
+        var wj: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Connect  J", dvui.entypo.flow_line, 0, .{ .data_out = &wj });
+        dvui.tooltip(@src(), .{ .active_rect = wj.borderRectScale().r }, "Connect: a connection from the selected point, side or curve (or from nowhere), to the second selected point if there is one (J)", .{}, .{});
     }
 }
 
@@ -30041,6 +30130,7 @@ fn sketchModeProperties() void {
         if (x.conflicting.len > 0) propText("Conflicts", "{d}", .{x.conflicting.len}, 3);
         if (x.redundant.len > 0) propText("Redundant", "{d}", .{x.redundant.len}, 4);
     }
+    if (skSelectedConnection(it)) |ci| connectionProperties(sketch_edit.?.sketch, ci);
     sketchInkProperties();
     sketchFillProperties();
     skConstraintList(it);

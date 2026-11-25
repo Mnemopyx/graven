@@ -166,13 +166,20 @@ pub const ConnectorEnd = enum { none, arrow, dot, bar };
 pub const ConnectorStyle = struct {
     id: ObjectId = .none,
     name: []const u8,
-    /// Its path's stroke style (none: the one new ink takes).
+    /// Its path's stroke style. With one, its connections are
+    /// manufactured: drawn in the sketch's figure, so in panels and
+    /// output. With none, they are annotation: seen only as the sketch's
+    /// construction (the owner, 2026-11-25).
     stroke: ObjectId = .none,
     /// At the attachment point, and at the end.
     start: ConnectorEnd = .arrow,
     end: ConnectorEnd = .none,
     /// The marks' length (an arrow's), mm.
     size: f64 = 1.2,
+    /// A Dubins path's bend radius and straight leads, mm: where a new
+    /// connection starts; each may then change its own.
+    radius: f64 = 2,
+    lead: f64 = 1,
 };
 
 /// A named fill: a colour in a pattern (solid, or a hatch). `cutout`
@@ -4122,7 +4129,7 @@ pub const Model = struct {
         m.sketches.items[ski].version +%= 1;
         // The leader is a connection, drawn in the sketch's figure in its
         // style (the document's "Leader").
-        sk.connectors.items[lead.connector].style = @intFromEnum(try m.leaderStyle());
+        m.styleConnector(sk, lead.connector, try m.leaderStyle());
         _ = try m.sketchFigureFor(ski, true);
         try m.syncSketchFigures(m.sketches.items[ski].id);
         const e = try sk.point(lead.end);
@@ -6861,10 +6868,12 @@ pub const Model = struct {
         const al = m.a();
         for (sk.connectors.items, 0..) |c, ci| {
             var segs: std.ArrayList(geom.Segment) = .empty;
+            if (m.strokeStyleIndex(m.connectorStyleOf(@enumFromInt(c.style)).stroke) == null) continue;
             const dirs = sketch_.connector.segments(sk, al, ci, &segs) catch continue;
             if (segs.items.len == 0) continue;
             const cs = m.connectorStyleOf(@enumFromInt(c.style));
-            const stroke: figure_.Stroke = if (m.strokeStyleIndex(cs.stroke)) |i| m.stroke_styles.items[i].stroke else if (m.currentStroke()) |id| m.stroke_styles.items[m.strokeStyleIndex(id).?].stroke else .{ .color = .{ .r = 0, .g = 0, .b = 0 }, .width = 0.3, .cap = .round, .join = .round };
+            // Annotation (no stroke): not drawn.
+            const stroke: figure_.Stroke = if (m.strokeStyleIndex(cs.stroke)) |i| m.stroke_styles.items[i].stroke else continue;
             const runs = try sketch_.Sketch.runs(al, segs.items);
             const sub = try al.alloc(figure_.Subpath, runs.len);
             for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
@@ -6947,11 +6956,67 @@ pub const Model = struct {
     pub fn setConnectorStyle(m: *Model, style: ConnectorStyle) Error!void {
         const i = m.connectorStyleIndex(style.id) orelse return error.NoSuchStyle;
         if (!(style.size > 0) or !std.math.isFinite(style.size)) return error.BadValue;
+        if (!(style.radius > 0) or !(style.lead >= 0) or !std.math.isFinite(style.radius) or !std.math.isFinite(style.lead)) return error.BadValue;
         if (style.stroke != .none and m.strokeStyleIndex(style.stroke) == null) return error.NoSuchStyle;
         var st = style;
         st.name = try m.a().dupe(u8, style.name);
         m.connector_styles.items[i] = st;
         try m.syncSketchFigures(.none);
+        m.revision += 1;
+    }
+
+    /// Gives connection `ci` of `sk` connector style `id`, and the style's
+    /// bend radius and leads to start from.
+    fn styleConnector(m: *Model, sk: *sketch_.Sketch, ci: usize, id: ObjectId) void {
+        const cs = m.connectorStyleOf(id);
+        const c = &sk.connectors.items[ci];
+        c.style = @intFromEnum(id);
+        c.radius = cs.radius;
+        c.lead = cs.lead;
+    }
+
+    /// Adds a connection to sketch `sketch` from `from` (a point, a side or
+    /// curve, or nowhere), of kind `kind`, in the leaders' style; with
+    /// `to`, made to reach that point (a Dubins path). Returns its index.
+    pub fn addConnection(m: *Model, sketch: ObjectId, from: sketch_.connector.From, to: ?sketch_.PointRef, kind: sketch_.connector.Kind) Error!u32 {
+        const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
+        const style = try m.leaderStyle();
+        const sk = &m.sketches.items[ski].sketch;
+        const ci = sketch_.connector.add(sk, m.a(), from, .segments, 3, 6) catch |e| return switch (e) {
+            error.NotOnACurve => error.NotOnACurve,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.NoSuchItem,
+        };
+        m.styleConnector(sk, ci, style);
+        if (to) |p| {
+            sketch_.connector.reach(sk, m.a(), ci, p) catch |e| return switch (e) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.NoSuchItem,
+            };
+        } else if (kind == .dubins) sketch_.connector.convert(sk, m.a(), ci, .dubins) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.NoSuchItem,
+        };
+        _ = try sk.solve(m.arena.child_allocator);
+        m.sketches.items[ski].version +%= 1;
+        _ = try m.sketchFigureFor(ski, true);
+        try m.syncSketchFigures(sketch);
+        m.revision += 1;
+        return @intCast(ci);
+    }
+
+    /// Sets connection `ci`'s own bend radius and leads (a Dubins path's).
+    pub fn setConnectorShape(m: *Model, sketch: ObjectId, ci: u32, radius: f64, lead: f64) Error!void {
+        const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
+        const sk = &m.sketches.items[ski].sketch;
+        if (ci >= sk.connectors.items.len) return error.NoSuchItem;
+        sketch_.connector.setShape(sk, m.a(), ci, radius, lead) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.BadValue,
+        };
+        _ = try sk.solve(m.arena.child_allocator);
+        m.sketches.items[ski].version +%= 1;
+        try m.syncSketchFigures(sketch);
         m.revision += 1;
     }
 
@@ -9643,6 +9708,17 @@ test "a caption's leader is a connection: drawn in its style, an arrow at the st
     try m.setConnectorStyle(cs);
     const both = Count.of(if (m.figures.items[fi].draft.len > 0) m.figures.items[fi].draft else m.figures.items[fi].paths);
     try std.testing.expectEqual(2, both[0]);
+    // No stroke style: annotation, not drawn.
+    cs.stroke = .none;
+    try m.setConnectorStyle(cs);
+    const none = Count.of(if (m.figures.items[fi].draft.len > 0) m.figures.items[fi].draft else m.figures.items[fi].paths);
+    try std.testing.expectEqual(0, none[0] + none[1]);
+    // A free connection, made to reach the caption's end: in the style.
+    const sk2 = &m.sketches.items[si].sketch;
+    const k = try m.addConnection(sid, .{ .free = .{ .at = .{ .x = -20, .y = -5 } } }, sc.end, .segments);
+    try std.testing.expectEqual(.dubins, m.sketches.items[si].sketch.connectors.items[k].kind);
+    try m.setConnectorShape(sid, k, 3, 0.5);
+    try std.testing.expectEqual(3, sk2.connectors.items[k].radius);
 }
 
 test "a text sheet: a caption's text by its name, default and a language, edited in either" {

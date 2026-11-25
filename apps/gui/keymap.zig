@@ -62,7 +62,7 @@ pub const modes = [_]M{
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
-    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.end" } },
+    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end" } },
     .{ .name = "sketch.summary", .kind = .sub, .parent = "sketch", .allows = &.{"sketch.summary"} },
     // Text being typed somewhere, the canvas or a field (whatever asked
     // for text input last frame): the digraph key, and the two characters
@@ -277,6 +277,7 @@ pub const action_defs = [_]A{
     .{ .name = "sketch.ink", .repeat = true },
     .{ .name = "sketch.fill", .repeat = true },
     .{ .name = "sketch.caption" },
+    .{ .name = "sketch.connect" },
     .{ .name = "sketch.summary.leave", .repeat = true },
     .{ .name = "sketch.summary.back", .repeat = true },
 
@@ -579,6 +580,7 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "i", .action = "sketch.ink" },
     .{ .mode = "sketch", .chord = "f", .action = "sketch.fill" },
     .{ .mode = "sketch", .chord = "n", .action = "sketch.caption" },
+    .{ .mode = "sketch", .chord = "j", .action = "sketch.connect" },
 } ++ enters("sketch.summary", "sketch.summary.leave") ++ [_]B{
     .{ .mode = "sketch.summary", .chord = "escape", .action = "sketch.summary.back" },
 };
