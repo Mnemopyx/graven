@@ -2491,6 +2491,15 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    if (sample_sketch_space) {
+        sample_sketch_space = false;
+        newSketchInOwnSpace();
+        followHome();
+        if (sketch_edit != null) {
+            _ = skEdit(.{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 12 } });
+            _ = skEdit(.{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 5 } });
+        }
+    }
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
     defer {
@@ -2531,7 +2540,9 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-space")) {
+                sample_sketch_space = true;
+            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -5537,6 +5548,8 @@ fn worksheetTree() void {
     if (state.model.spaces.items.len > 0) {
         var tb: [64]u8 = undefined;
         for (state.model.spaces.items, 0..) |sp, si| {
+            // A sketch's own space is the sketch's, under Sketches.
+            if (sp.home != .none) continue;
             const title = if (si == 0) std.fmt.bufPrint(&tb, "Canvas, {s}", .{state.model.units.symbol()}) catch "Canvas" else sp.name;
             if (!treeNode(.{ .space = si }, title, 1, true, sp.default_name)) continue;
             for (sp.groups.items) |g| {
@@ -6472,7 +6485,9 @@ fn openInWindow(leaf: u8, view: docviews.View, space: usize, preview: bool) ?u8 
         return null;
     };
     vl.active = from;
-    if (view.kind == .canvas) view_slots[nv] = .{ .view = .{ .fit = if (space == 0) canvas_view else null }, .space = space };
+    // A sketch's own space opens on its origin, 100 mm across.
+    const home_fit: geom.Box = .{ .x0 = -50, .y0 = -35, .x1 = 50, .y1 = 35 };
+    if (view.kind == .canvas) view_slots[nv] = .{ .view = .{ .fit = if (space == 0) canvas_view else if (state.model.isHome(space)) home_fit else null }, .space = space };
     view_preview[nv] = preview;
     // What was done to open it is not work in it.
     preview_steps = hist.stepCount();
@@ -6568,6 +6583,10 @@ fn viewLabel(buf: []u8, i: u8) []const u8 {
     const space = viewSpace(i);
     var name: []const u8 = "Canvas";
     if (space < state.model.spaces.items.len) name = if (space == 0) "Canvas" else state.model.spaces.items[space].name;
+    // A sketch's own space: the sketch's name.
+    if (space < state.model.spaces.items.len) if (state.model.sketchIndex(state.model.spaces.items[space].home)) |ski| {
+        return std.fmt.bufPrint(buf, "Sketch: {s}", .{state.model.sketches.items[ski].name}) catch "Sketch";
+    };
     if (state.model.spaces.items.len == 0) name = "Worksheet";
     // Its number among the views of the same space.
     var nth: usize = 0;
@@ -6972,7 +6991,7 @@ var tab_add_from: [docviews.max_nodes]dvui.Rect.Natural = @splat(.{});
 /// pop-up (0 canvas and frames, 1 legend sheets, 2 manufacturing plans).
 const ViewContext = struct { view: docviews.View, space: usize = 0, name: []const u8, group: u2 };
 
-const context_groups = [_][]const u8{ "Canvas and frames", "Legend sheets", "Manufacturing plans" };
+const context_groups = [_][]const u8{ "Canvas and frames", "Legend sheets", "Manufacturing plans", "Sketches" };
 
 /// The document's contexts, in the pop-up's order.
 fn viewContexts(out: []ViewContext) []ViewContext {
@@ -6983,6 +7002,7 @@ fn viewContexts(out: []ViewContext) []ViewContext {
         n = 1;
     } else for (spaces, 0..) |sp, i| {
         if (n == out.len) break;
+        if (sp.home != .none) continue;
         out[n] = .{ .view = .{ .target = @intFromEnum(sp.id) }, .space = i, .name = if (i == 0) "Canvas" else sp.name, .group = 0 };
         n += 1;
     }
@@ -6994,6 +7014,14 @@ fn viewContexts(out: []ViewContext) []ViewContext {
     for (state.model.plans.items) |pl| {
         if (n == out.len) break;
         out[n] = .{ .view = .{ .kind = .manufacture, .target = @intFromEnum(pl.id) }, .name = pl.name, .group = 2 };
+        n += 1;
+    }
+    // Sketches' own spaces (`Space.home`).
+    for (spaces, 0..) |sp, i| {
+        if (n == out.len) break;
+        const ski = state.model.sketchIndex(sp.home) orelse continue;
+        const name = std.fmt.allocPrint(dvui.currentWindow().arena(), "Sketch: {s}", .{state.model.sketches.items[ski].name}) catch continue;
+        out[n] = .{ .view = .{ .target = @intFromEnum(sp.id) }, .space = i, .name = name, .group = 3 };
         n += 1;
     }
     return out[0..n];
@@ -7099,6 +7127,12 @@ fn tabAddPopup(leaf: u8) void {
         bw.deinit();
     }
     if (first == null) dvui.labelNoFmt(@src(), "Nothing by that name", .{}, .{ .margin = .{ .x = 4, .y = 4 } });
+    if (state.model.spaces.items.len > 0) {
+        const saved_group = pushGroup("views");
+        defer popGroup(saved_group);
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = 4, .h = 2 }, .id_extra = 2002 });
+        keyButton(@src(), "New sketch, in its own space", 0, .{ .expand = .horizontal });
+    }
     if (enter) {
         if (first_tab != null and filter.len > 0) {
             tab_add_leaf = null;
@@ -7544,7 +7578,12 @@ var status_name_buf: [64]u8 = undefined;
 /// Wheel zooms about the pointer and dragging pans. With the select tool a
 /// click makes a tile, panel or the worksheet the context; with the add
 /// panel tool a drag draws out a new panel. The context is outlined.
+/// `GRAVEN_SAMPLE=sketch-space`: a new sketch in its own space, made on
+/// the first frame (once the views are set up).
+var sample_sketch_space = false;
+
 fn canvas(active: bool, view: u8) void {
+    if (active) followHome();
     var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.desk }, .id_extra = view });
     defer box.deinit();
     const area = box.data().contentRectScale().r;
@@ -7788,7 +7827,7 @@ fn selectionProperties() !void {
     keyButton(@src(), "Move to a new frame", 0, .{ .expand = .horizontal });
     keyButton(@src(), "Copy to a new frame", 0, .{ .expand = .horizontal });
     for (state.model.spaces.items, 0..) |sp, si| {
-        if (si == shown_space) continue;
+        if (si == shown_space or sp.home != .none) continue;
         var buf: [96]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "Move to {s}", .{if (si == 0) "the canvas" else sp.name}) catch "Move";
         keyButton(@src(), text, @intCast(si), .{ .expand = .horizontal, .id_extra = si });
@@ -17850,6 +17889,30 @@ const button_handlers = [_]ButtonHandler{
             };
         }
     }.f),
+    handler("sketches.new-sketch", struct {
+        fn f(_: i32) void {
+            newSketchInOwnSpace();
+        }
+    }.f),
+    handler("views.new-sketch", struct {
+        fn f(_: i32) void {
+            tab_add_leaf = null;
+            newSketchInOwnSpace();
+        }
+    }.f),
+    handler("sketch.edit-in-its-own-space", struct {
+        fn f(_: i32) void {
+            const index = switch (state.context) {
+                .sketch_def => |i| i,
+                else => return,
+            };
+            const home = act(.homeSpace, .{index}) catch {
+                state.status = "The sketch's own space was not made. ";
+                return;
+            };
+            openHome(home);
+        }
+    }.f),
     handler("sketch.place-a-view-here", struct {
         fn f(_: i32) void {
             const index = switch (state.context) {
@@ -18717,7 +18780,7 @@ fn properties() !void {
         .figure_place => |c| figurePlaceProperties(c.space, c.index),
         .guide => |g| guideProperties(g.space, g.index),
         .sketch => |sc| sketchProperties(sc.space, sc.index),
-        .sketches => propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1),
+        .sketches => sketchesProperties(),
         .sketch_def => |i| sketchDefProperties(i),
         .figures => figuresProperties(),
         .figure_def => |i| figureProperties(i),
@@ -27556,6 +27619,44 @@ fn skPending() bool {
     return r.sketch < state.model.sketches.items.len and state.model.sketches.items[r.sketch].accepted != null;
 }
 
+/// A new sketch in a space of its own, shown in a tab of the active
+/// window and edited there.
+fn newSketchInOwnSpace() void {
+    var buf: [32]u8 = undefined;
+    const name = state.model.freshName(&buf, .sketches, "Sketch");
+    const idx = act(.addSketchSpace, .{name}) catch {
+        state.status = "The sketch was not started. ";
+        return;
+    };
+    state.model.sketches.items[idx].default_name = true;
+    const home = state.model.homeOf(state.model.sketches.items[idx].id) orelse return;
+    openHome(home);
+}
+
+/// Shows sketch space `home` in the active window (its tab, or a new
+/// one); showing it starts editing its sketch (`followHome`).
+fn openHome(home: usize) void {
+    if (sketch_edit != null) leaveSketch();
+    const leaf = vl.leafOf(vl.active) orelse return;
+    _ = openInWindow(leaf, .{ .target = spaceTarget(home) }, home, false);
+    // The context the sketch: the shown space follows the context, and
+    // the canvas's would take it back.
+    if (state.model.sketchIndex(state.model.spaces.items[home].home)) |ski| state.context = .{ .sketch_def = ski };
+}
+
+/// A sketch's own space is only for editing it: shown (in the active
+/// view), its sketch is being edited; another space shown, an edit
+/// begun there is accepted and left.
+fn followHome() void {
+    if (state.model.isHome(shown_space)) {
+        if (sketch_edit) |r| if (r.space == shown_space) return;
+        if (sketch_edit != null) leaveSketch();
+        const ski = state.model.sketchIndex(state.model.spaces.items[shown_space].home) orelse return;
+        enterSketchAt(ski, shown_space, .{ .x = 0, .y = 0 });
+        state.status = "The sketch in its own space: draw from the ribbon; U updates its uses. ";
+    } else if (sketch_edit) |r| if (state.model.isHome(r.space)) leaveSketch();
+}
+
 /// A new sketch in the shown space, its origin at `at`, then edited.
 fn newSketchAt(at: geom.Point) void {
     var buf: [32]u8 = undefined;
@@ -29842,6 +29943,14 @@ fn sketchProperties(space: usize, index: usize) void {
 
 /// A sketch of the document (from the tree): its views, and where to place
 /// one.
+/// The document's sketches: how many, and New sketch (in its own space).
+fn sketchesProperties() void {
+    const saved_group = pushGroup("sketches");
+    defer popGroup(saved_group);
+    propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1);
+    keyButton(@src(), "New sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+}
+
 fn sketchDefProperties(index: usize) void {
     const saved_group = pushGroup("sketch");
     defer popGroup(saved_group);
@@ -29862,10 +29971,13 @@ fn sketchDefProperties(index: usize) void {
     if (sk.sketch.analyse(state.gpa, arena.allocator())) |x| {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
-    // A view of it at the middle of what is shown.
-    keyButton(@src(), "Place a view here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    // An enclosed sketch, as a panel: its edge the sketch's outlines.
-    keyButton(@src(), "Insert as a panel here", 0, .{ .expand = .horizontal, .margin = .{ .y = 2, .h = 8 } });
+    // Shown in a canvas or a frame: a view of it at the middle of what is
+    // shown, or (enclosed) a panel there, its edge the sketch's outline.
+    if (!state.model.isHome(shown_space)) {
+        keyButton(@src(), "Place a view here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "Insert as a panel here", 0, .{ .expand = .horizontal, .margin = .{ .y = 2 } });
+        keyButton(@src(), "Edit in its own space", 0, .{ .expand = .horizontal, .margin = .{ .y = 2, .h = 8 } });
+    }
     keyButton(@src(), "Delete sketch", 0, .{ .expand = .horizontal });
 }
 

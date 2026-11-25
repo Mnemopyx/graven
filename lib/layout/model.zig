@@ -1084,6 +1084,11 @@ pub const Space = struct {
     /// attachment, never drawn as output (a canvas or a frame holds no
     /// drawing of its own).
     guides: std.ArrayList(Guide) = .empty,
+    /// A sketch's own space (the owner, 2026-11-25): the sketch's ID. It
+    /// holds that sketch's one view, at its origin, and nothing else; it is
+    /// not a frame (never listed with them, never output, never a place to
+    /// move to). Kept, unlisted, if the sketch is removed.
+    home: ObjectId = .none,
     /// The layers the editor draws besides the document's (the grid, the
     /// axes, the check results, the construction lines, the flow marks):
     /// in the space's stack, so the document's (the owner, 2026-11-22):
@@ -3585,6 +3590,46 @@ pub const Model = struct {
         try m.spaces.items[space].sketch_views.append(m.a(), .{ .id = m.newId(), .sketch = id, .at = at });
         m.revision += 1;
         return m.sketches.items.len - 1;
+    }
+
+    /// Starts a new sketch in a space of its own (see `Space.home`), its
+    /// origin at the space's. Returns the sketch's index; its space is the
+    /// last.
+    pub fn addSketchSpace(m: *Model, name: []const u8) Error!usize {
+        if (m.spaces.items.len == 0) return error.NoRoom;
+        const id = m.newId();
+        try m.sketches.append(m.a(), .{
+            .id = id,
+            .name = try m.a().dupe(u8, name),
+            .sketch = try sketch_.Sketch.init(m.a()),
+        });
+        _ = try m.homeSpace(m.sketches.items.len - 1);
+        return m.sketches.items.len - 1;
+    }
+
+    /// Sketch `index`'s own space, made (with its view) if it has none yet.
+    pub fn homeSpace(m: *Model, index: usize) Error!usize {
+        const sk = try m.sketchAt(index);
+        if (m.homeOf(sk.id)) |si| return si;
+        const sid = m.spaces.items.len;
+        try m.spaces.append(m.a(), .{ .id = m.newId(), .name = try m.a().dupe(u8, sk.name), .home = sk.id });
+        try m.addBaseLayer(sid);
+        try m.spaces.items[sid].sketch_views.append(m.a(), .{ .id = m.newId(), .sketch = sk.id, .at = .{ .x = 0, .y = 0 } });
+        m.revision += 1;
+        return sid;
+    }
+
+    /// The own space of the sketch with ID `sketch`, if it has one.
+    pub fn homeOf(m: *const Model, sketch: ObjectId) ?usize {
+        if (sketch == .none) return null;
+        for (m.spaces.items, 0..) |sp, i| if (sp.home == sketch) return i;
+        return null;
+    }
+
+    /// Whether space `space` is a sketch's own space (not the canvas or a
+    /// frame).
+    pub fn isHome(m: *const Model, space: usize) bool {
+        return space < m.spaces.items.len and m.spaces.items[space].home != .none;
     }
 
     /// Places another view of sketch `index` in space `space`. Returns the
@@ -8957,4 +9002,23 @@ test "a sketch's draft reaches its drawing only when accepted; discarded, it goe
     try m.discardSketchDraft(si);
     try std.testing.expectApproxEqAbs(20, end(m.figures.items[fi].paths), 1e-9);
     try std.testing.expectApproxEqAbs(20, (try m.sketches.items[si].sketch.point(.{ .geom = g, .role = .end })).x, 1e-9);
+}
+
+test "a sketch in its own space: made there, then inserted on the canvas as a panel" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Plate");
+    const home = m.homeOf(m.sketches.items[si].id).?;
+    try std.testing.expect(m.isHome(home) and !m.isHome(0));
+    try std.testing.expectEqual(1, m.spaces.items[home].sketch_views.items.len);
+    // Asked again, the same space.
+    try std.testing.expectEqual(home, try m.homeSpace(si));
+    try std.testing.expectEqual(2, m.spaces.items.len);
+    _ = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const p = try m.insertSketchPanel(0, si, .{ .x = 50, .y = 50 });
+    try std.testing.expectEqual(m.spaces.items[0].id, m.panels.items[p].space);
+    try std.testing.expectApproxEqAbs(20, m.panels.items[p].w, 1e-6);
+    // Its own space keeps its view.
+    try std.testing.expectEqual(1, m.spaces.items[home].sketch_views.items.len);
 }
