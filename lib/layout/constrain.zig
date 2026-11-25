@@ -122,7 +122,7 @@ fn sketchPointAt(m: *const Model, loc: Loc) ?geom.Point {
     const v = m.spaces.items[loc.holder].sketch_views.items[loc.index];
     const r = loc.point orelse return v.at;
     const si = m.sketchIndex(v.sketch) orelse return null;
-    const p = m.sketches.items[si].sketch.point(r) catch return null;
+    const p = m.sketches.items[si].usedConst().point(r) catch return null;
     return .{ .x = v.at.x + p.x, .y = v.at.y + p.y };
 }
 

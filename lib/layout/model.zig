@@ -1260,6 +1260,25 @@ pub const SketchItem = struct {
     version: u32 = 0,
     /// The ready-made shape it was made as (it may have been edited since).
     shape: ?ShapeSketch = null,
+    /// While a draft is being edited (the sketch editor's changes not yet
+    /// accepted): the sketch as last accepted, which every use reads (its
+    /// drawings and their placements, panels, stamps, layout constraints
+    /// naming its points). Null when nothing is pending. Changes reach the
+    /// uses only when accepted (`acceptSketch`: Update, Finish), so the
+    /// user controls when they propagate (the owner, 2026-11-25).
+    accepted: ?sketch_.Sketch = null,
+
+    /// What its uses read: the accepted sketch while a draft is pending,
+    /// else the sketch itself.
+    pub fn used(it: *SketchItem) *sketch_.Sketch {
+        if (it.accepted) |*a| return a;
+        return &it.sketch;
+    }
+
+    pub fn usedConst(it: *const SketchItem) *const sketch_.Sketch {
+        if (it.accepted) |*a| return a;
+        return &it.sketch;
+    }
 };
 
 /// The sketches Graven offers ready-made (see `Model.addShapeSketch`):
@@ -3898,7 +3917,7 @@ pub const Model = struct {
             const po = m.panels.items[parent.panel].origin;
             o = .{ .x = o.x - po.x, .y = o.y - po.y };
         }
-        const cells = sketch_.arrays.cells(&m.sketches.items[si].sketch, refs) catch return null;
+        const cells = sketch_.arrays.cells(m.sketches.items[si].usedConst(), refs) catch return null;
         const cols: f64 = @floatFromInt(@max(1, g.shape.cols));
         const rows: f64 = @floatFromInt(@max(1, g.shape.rows));
         var sh = g.shape;
@@ -5271,7 +5290,7 @@ pub const Model = struct {
         if (p.sketch == .none) return;
         const si = m.sketchIndex(p.sketch) orelse return;
         // A sketch that no longer encloses leaves the edge as it was.
-        const edge = (try m.sketchEdge(&m.sketches.items[si].sketch, p.islands)) orelse return;
+        const edge = (try m.sketchEdge(m.sketches.items[si].used(), p.islands)) orelse return;
         const origin: geom.Point = .{ .x = p.sketch_at.x + edge.min.x, .y = p.sketch_at.y + edge.min.y };
         const d: geom.Point = .{ .x = p.origin.x - origin.x, .y = p.origin.y - origin.y };
         for (p.regions.items) |*rg| rg.origin = .{ .x = rg.origin.x + d.x, .y = rg.origin.y + d.y };
@@ -5280,6 +5299,37 @@ pub const Model = struct {
         p.w = edge.w;
         p.h = edge.h;
         p.edge = edge.art;
+    }
+
+    /// `editSketch` as a draft: the sketch as it stands is kept as the
+    /// accepted one (when no draft is pending yet), so the change shows
+    /// in the sketch editor but reaches no use until `acceptSketch`.
+    pub fn editSketchDraft(m: *Model, index: usize, edit: SketchEdit) Error!u32 {
+        const it = try m.sketchAt(index);
+        if (it.accepted == null) it.accepted = try it.sketch.clone(m.a());
+        return m.editSketch(index, edit);
+    }
+
+    /// Accepts sketch `index`'s draft: its uses follow it now (its panels'
+    /// edges, its drawings, what is solved from it).
+    pub fn acceptSketch(m: *Model, index: usize) Error!void {
+        const it = try m.sketchAt(index);
+        if (it.accepted == null) return;
+        it.accepted = null;
+        it.version +%= 1;
+        const sid = it.id;
+        for (m.panels.items, 0..) |pn, pi| if (pn.sketch == sid) try m.syncSketchPanel(pi);
+        try m.syncSketchFigures(sid);
+    }
+
+    /// Drops sketch `index`'s draft: back to the sketch as last accepted.
+    pub fn discardSketchDraft(m: *Model, index: usize) Error!void {
+        const it = try m.sketchAt(index);
+        const back = it.accepted orelse return;
+        it.sketch = back;
+        it.accepted = null;
+        it.version +%= 1;
+        try m.syncSketchFigures(it.id);
     }
 
     /// Changes a sketch (see `SketchEdit`) and solves it again. Returns the
@@ -6289,35 +6339,43 @@ pub const Model = struct {
     /// geometry one path, stroked in its style. Ink whose geometry or
     /// style is gone is left out.
     pub fn syncSketchFigures(m: *Model, sketch: ObjectId) Error!void {
-        const al = m.a();
         for (m.figures.items) |*f| {
             if (f.sketch == .none or (sketch != .none and f.sketch != sketch)) continue;
             const ski = m.sketchIndex(f.sketch) orelse continue;
-            const sk = &m.sketches.items[ski].sketch;
-            var paths: std.ArrayList(figure_.Path) = .empty;
-            for (f.fills) |fill| {
-                const si = m.fillStyleIndex(fill.style) orelse continue;
-                const st = m.fill_styles.items[si];
-                const region = try fillRegion(al, sk, fill, st.pattern);
-                if (region.contours.len == 0) continue;
-                const sub = try al.alloc(figure_.Subpath, region.contours.len);
-                for (region.contours, sub) |c, *sp| sp.* = .{ .segments = c.segments, .closed = true };
-                try paths.append(al, .{ .subpaths = sub, .fill = st.color, .fill_rule = .evenodd });
-            }
-            for (f.inks) |ink| {
-                if (ink.geom >= sk.geometry.items.len) continue;
-                const g = sk.geometry.items[ink.geom];
-                if (g.removed) continue;
-                const si = m.strokeStyleIndex(ink.style) orelse continue;
-                var segs: std.ArrayList(geom.Segment) = .empty;
-                try sk.appendSegments(al, g, &segs);
-                if (segs.items.len == 0) continue;
-                const sub = try al.alloc(figure_.Subpath, 1);
-                sub[0] = .{ .segments = segs.items, .closed = g.kind == .circle };
-                try paths.append(al, .{ .subpaths = sub, .stroke = m.stroke_styles.items[si].stroke });
-            }
-            f.paths = paths.items;
+            const item = &m.sketches.items[ski];
+            f.paths = try m.figurePathsFrom(item.used(), f.*);
+            // The sketch editor's view of a pending draft.
+            f.draft = if (item.accepted != null) try m.figurePathsFrom(&item.sketch, f.*) else &.{};
         }
+    }
+
+    /// The paths of figure `f`, drawn over sketch `sk`: its fills, then each
+    /// inked geometry one path, stroked in its style.
+    fn figurePathsFrom(m: *Model, sk: *const sketch_.Sketch, f: figure_.Figure) Error![]const figure_.Path {
+        const al = m.a();
+        var paths: std.ArrayList(figure_.Path) = .empty;
+        for (f.fills) |fill| {
+            const si = m.fillStyleIndex(fill.style) orelse continue;
+            const st = m.fill_styles.items[si];
+            const region = try fillRegion(al, sk, fill, st.pattern);
+            if (region.contours.len == 0) continue;
+            const sub = try al.alloc(figure_.Subpath, region.contours.len);
+            for (region.contours, sub) |c, *sp| sp.* = .{ .segments = c.segments, .closed = true };
+            try paths.append(al, .{ .subpaths = sub, .fill = st.color, .fill_rule = .evenodd });
+        }
+        for (f.inks) |ink| {
+            if (ink.geom >= sk.geometry.items.len) continue;
+            const g = sk.geometry.items[ink.geom];
+            if (g.removed) continue;
+            const si = m.strokeStyleIndex(ink.style) orelse continue;
+            var segs: std.ArrayList(geom.Segment) = .empty;
+            try sk.appendSegments(al, g, &segs);
+            if (segs.items.len == 0) continue;
+            const sub = try al.alloc(figure_.Subpath, 1);
+            sub[0] = .{ .segments = segs.items, .closed = g.kind == .circle };
+            try paths.append(al, .{ .subpaths = sub, .stroke = m.stroke_styles.items[si].stroke });
+        }
+        return paths.items;
     }
 
     /// The area fill `fill` covers in sketch `sk`, in `pattern`: exact
@@ -8781,4 +8839,34 @@ test "a sketch's area filled: a hatch inside a circle, an enclosed circle left o
     // Off.
     try m.setFill(si, &.{outer}, false, false);
     try std.testing.expectEqual(@as(usize, 0), m.figures.items[fi].fills.len);
+}
+
+test "a sketch's draft reaches its drawing only when accepted; discarded, it goes back" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketch(0, "Drawn", .{ .x = 0, .y = 0 });
+    const g = try m.editSketch(si, .{ .segment = .{ .a = .{ .x = 0, .y = 0 }, .b = .{ .x = 10, .y = 0 } } });
+    try m.setInk(si, g, true);
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    const end = struct {
+        fn x(paths: []const figure_.Path) f64 {
+            return paths[0].subpaths[0].segments[0].end().x;
+        }
+    }.x;
+    try std.testing.expectApproxEqAbs(10, end(m.figures.items[fi].paths), 1e-9);
+    // A draft: the line made longer shows in the draft's paths only.
+    _ = try m.editSketchDraft(si, .{ .drag = .{ .p = .{ .geom = g, .role = .end }, .to = .{ .x = 20, .y = 0 } } });
+    try std.testing.expect(m.sketches.items[si].accepted != null);
+    try std.testing.expectApproxEqAbs(10, end(m.figures.items[fi].paths), 1e-9);
+    try std.testing.expectApproxEqAbs(20, end(m.figures.items[fi].draft), 1e-9);
+    // Accepted: the drawing follows.
+    try m.acceptSketch(si);
+    try std.testing.expect(m.sketches.items[si].accepted == null);
+    try std.testing.expectApproxEqAbs(20, end(m.figures.items[fi].paths), 1e-9);
+    // Another draft, discarded: back to 20.
+    _ = try m.editSketchDraft(si, .{ .drag = .{ .p = .{ .geom = g, .role = .end }, .to = .{ .x = 30, .y = 0 } } });
+    try m.discardSketchDraft(si);
+    try std.testing.expectApproxEqAbs(20, end(m.figures.items[fi].paths), 1e-9);
+    try std.testing.expectApproxEqAbs(20, (try m.sketches.items[si].sketch.point(.{ .geom = g, .role = .end })).x, 1e-9);
 }

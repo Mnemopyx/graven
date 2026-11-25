@@ -94,6 +94,10 @@ pub const Figure = struct {
     inks: []const Ink = &.{},
     /// Areas of the sketch filled (drawn under its ink).
     fills: []const Fill = &.{},
+    /// While its sketch has a draft pending: its paths as the draft would
+    /// make them, for the sketch editor (not saved; `paths` are what its
+    /// uses see until the draft is accepted).
+    draft: []const Path = &.{},
 
     /// Its paths' bounds, strokes' widths included (a pen's reach, not
     /// its caps' or miters' exact extent).

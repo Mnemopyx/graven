@@ -9635,6 +9635,23 @@ var figure_tris_arena: ?std.heap.ArenaAllocator = null;
 fn figureTris(fi: usize) ?FigureTris {
     const f = state.model.figures.items[fi];
     if (figure_tris.get(f.id)) |t| if (t.paths == f.paths.ptr) return t;
+    const out = trisOfFigure(f) orelse return null;
+    figure_tris.put(state.gpa, f.id, out) catch {};
+    return out;
+}
+
+/// `figureTris` for a figure's draft paths (its sketch being edited).
+var figure_draft_tris: std.AutoHashMapUnmanaged(layout.model.ObjectId, FigureTris) = .empty;
+fn figureDraftTris(fi: usize) ?FigureTris {
+    var f = state.model.figures.items[fi];
+    if (figure_draft_tris.get(f.id)) |t| if (t.paths == f.draft.ptr) return t;
+    f.paths = f.draft;
+    const out = trisOfFigure(f) orelse return null;
+    figure_draft_tris.put(state.gpa, f.id, out) catch {};
+    return out;
+}
+
+fn trisOfFigure(f: layout.figure.Figure) ?FigureTris {
     if (figure_tris_arena == null) figure_tris_arena = .init(state.gpa);
     const a = figure_tris_arena.?.allocator();
     const shapes = layout.figure.ink(a, f, figure_tol) catch return null;
@@ -9657,14 +9674,15 @@ fn figureTris(fi: usize) ?FigureTris {
         };
         t.* = region.triangles;
     }
-    const out: FigureTris = .{ .paths = f.paths.ptr, .bounds = layout.figure.inkBounds(shapes), .colors = colors_, .tris = tris };
-    figure_tris.put(state.gpa, f.id, out) catch {};
-    return out;
+    return .{ .paths = f.paths.ptr, .bounds = layout.figure.inkBounds(shapes), .colors = colors_, .tris = tris };
 }
 
 /// Figure `fi`'s ink drawn into `ink` (mm in the shown space), at `alpha`.
 fn drawFigureInk(area: dvui.Rect.Physical, fi: usize, ink: geom.Box, alpha: f32) void {
-    const ft = figureTris(fi) orelse return;
+    drawFigureTris(area, figureTris(fi) orelse return, ink, alpha);
+}
+
+fn drawFigureTris(area: dvui.Rect.Physical, ft: FigureTris, ink: geom.Box, alpha: f32) void {
     const fb = ft.bounds;
     if (fb.isEmpty() or !(fb.width() > 0) or !(fb.height() > 0)) return;
     const sx = ink.width() / fb.width();
@@ -12641,8 +12659,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             continue;
         }
         // The view's keys (zoom), in any mode the canvas is in; an
-        // unchorded one only while no text field has the keyboard.
-        if (keymap.match1(e, kmode("view"))) |inv| {
+        // unchorded one only while no text field has the keyboard. The
+        // sketch editor's own keys come first (C, U).
+        const sketch_key = sketch_edit != null and keymap.match1(e, kmode("sketch")) != null;
+        if (!sketch_key) if (keymap.match1(e, kmode("view"))) |inv| {
             if (inv.action == kact("view.pan-hold")) {
                 if (cursorKeysReach()) {
                     space_pan = true;
@@ -12661,7 +12681,7 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                 e.handle(@src(), box.data());
                 continue;
             }
-        }
+        };
         if (space_pan and keymap.released(e, kmode("view")) == kact("view.pan-hold")) {
             space_pan = false;
             e.handle(@src(), box.data());
@@ -15419,7 +15439,8 @@ fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, a
     // In the ribbon: a larger button, its icon in the upper part, its key
     // in a fade across the bottom.
     var kb: [48]u8 = undefined;
-    const badge = if (in_ribbon) badgeText(&kb, tag, arg) else null;
+    const badge = if (in_ribbon) (ribbon_next_badge orelse badgeText(&kb, tag, arg)) else null;
+    ribbon_next_badge = null;
     const drop = if (in_ribbon) ribbon_next_drop else null;
     ribbon_next_drop = null;
     if (in_ribbon) {
@@ -15784,6 +15805,9 @@ const Drop = enum {
 
 /// The next ribbon button's drop (set just before drawing it).
 var ribbon_next_drop: ?Drop = null;
+/// The next ribbon key's key text, when it is not found from its action
+/// (a mode's own keys, as the sketch editor's).
+var ribbon_next_badge: ?[]const u8 = null;
 /// The drop open, where it hangs from (natural), and when it was opened
 /// (its first frame is the next: the click that opened it would close it).
 var drop_open: ?Drop = null;
@@ -17686,6 +17710,16 @@ const button_handlers = [_]ButtonHandler{
     handler("sketch.constrain.*", struct {
         fn f(arg: i32) void {
             skConstrain(@enumFromInt(@as(u8, @intCast(arg))), canvasArea());
+        }
+    }.f),
+    handler("sketch.end.update", struct {
+        fn f(_: i32) void {
+            if (sketch_edit) |r| skAccept(r.sketch);
+        }
+    }.f),
+    handler("sketch.end.finish", struct {
+        fn f(_: i32) void {
+            leaveSketch();
         }
     }.f),
     handler("sketch-mode.finish-sketch-enter", struct {
@@ -26938,7 +26972,10 @@ const SkPlace = struct {
 /// A sketch view's sketch, placed.
 fn viewPlace(space: usize, view: usize) ?SkPlace {
     const v = state.model.sketchView(space, view) catch return null;
-    return SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at);
+    var p = SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at) orelse return null;
+    // A view is a use: it shows the sketch as last accepted.
+    p.sketch = p.item.used();
+    return p;
 }
 
 const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_array, rect_array, polygon };
@@ -27275,7 +27312,7 @@ fn sketchInkProperties() void {
     defer popGroup(saved_group);
     heading("{s}", .{"Ink"}, 8195);
     var buf: [256]skl.GeomId = undefined;
-    if (skInkable(&buf).len > 0) keyButton(@src(), "Ink selection  I", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    _ = &buf;
     const m = &state.model;
     if (m.stroke_styles.items.len > 0) {
         const ar = dvui.currentWindow().arena();
@@ -27360,7 +27397,6 @@ fn sketchFillProperties() void {
     heading("{s}", .{"Fill"}, 8180);
     var buf: [256]skl.GeomId = undefined;
     const gs = skInkable(&buf);
-    if (gs.len > 0) keyButton(@src(), if (skFillOf(gs) != null) "Take off fill  F" else "Fill selection  F", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
     // The selection's own fill's setting, when it has one; else the one
     // new fills take.
     const own: ?usize = if (gs.len > 0) skFillOf(gs) else null;
@@ -27445,6 +27481,7 @@ fn newFillStyle() void {
 }
 
 fn leaveSketch() void {
+    if (sketch_edit) |r| skAccept(r.sketch);
     sketch_edit = null;
     sk_summary = false;
     sk_dim = null;
@@ -27454,6 +27491,22 @@ fn leaveSketch() void {
     sk_box = null;
     sk_sel.clearRetainingCapacity();
     state.status = "";
+}
+
+/// Accepts sketch `index`'s draft, if one is pending: its uses follow it.
+fn skAccept(index: usize) void {
+    if (index >= state.model.sketches.items.len or state.model.sketches.items[index].accepted == null) return;
+    _ = act(.acceptSketch, .{index}) catch {
+        state.status = "The sketch's changes were not accepted. ";
+        return;
+    };
+    state.status = "The sketch's changes are accepted: what uses it follows them. ";
+}
+
+/// Whether the sketch being edited has changes not yet accepted.
+fn skPending() bool {
+    const r = sketch_edit orelse return false;
+    return r.sketch < state.model.sketches.items.len and state.model.sketches.items[r.sketch].accepted != null;
 }
 
 /// A new sketch in the shown space, its origin at `at`, then edited.
@@ -27471,7 +27524,7 @@ fn newSketchAt(at: geom.Point) void {
 
 fn skEdit(edit: layout.model.SketchEdit) ?u32 {
     const r = sketch_edit orelse return null;
-    return act(.editSketch, .{ r.sketch, edit }) catch |err| {
+    return act(.editSketchDraft, .{ r.sketch, edit }) catch |err| {
         state.status = switch (err) {
             error.NotConstruction => "Infinite lines and rays are construction only. ",
             error.WrongKind, error.NoSuchPoint => "That constraint does not fit what is selected. ",
@@ -28426,6 +28479,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.tool.next") => skCycleTool(),
             kact("sketch.ink") => skInk(),
             kact("sketch.fill") => skFill(),
+            kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
             else => used = false,
         }
         if (used) {
@@ -28493,7 +28547,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 if (d.moved or moved_px > 3) {
                     d.moved = true;
                     const r = sketch_edit.?;
-                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketch, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
+                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketchDraft, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
                 }
             } else if (sk_dim_drag) |*d| {
                 const moved_px = skDist(d.start, q) * state.view.ppm;
@@ -28502,7 +28556,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                     const c = it.sketch.constraints.items[d.c];
                     if (skDimMeasure(it.sketch, c)) |ms| {
                         const r = sketch_edit.?;
-                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketch, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach()) } } }) catch {};
+                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketchDraft, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach()) } } }) catch {};
                     }
                 }
             } else if (sk_box) |*b| {
@@ -28659,10 +28713,12 @@ fn drawSketches(area: dvui.Rect.Physical) void {
 /// sketch is.
 fn drawSketchFigure(area: dvui.Rect.Physical, it: SkPlace, alpha: f32) void {
     const fi = state.model.sketchFigure(it.item.id) orelse return;
-    const ft = figureTris(fi) orelse return;
+    // The editor shows the draft's ink; views, the accepted ink.
+    const draft = it.sketch == &it.item.sketch and it.item.accepted != null;
+    const ft = (if (draft) figureDraftTris(fi) else figureTris(fi)) orelse return;
     const fb = ft.bounds;
     if (fb.isEmpty()) return;
-    drawFigureInk(area, fi, .{ .x0 = fb.x0 + it.at.x, .x1 = fb.x1 + it.at.x, .y0 = fb.y0 + it.at.y, .y1 = fb.y1 + it.at.y }, alpha);
+    drawFigureTris(area, ft, .{ .x0 = fb.x0 + it.at.x, .x1 = fb.x1 + it.at.x, .y0 = fb.y0 + it.at.y, .y1 = fb.y1 + it.at.y }, alpha);
 }
 
 /// One geometry, stroked: infinite lines and rays across the view.
@@ -29096,27 +29152,136 @@ fn skSummary(area: dvui.Rect.Physical) void {
 // Palette and properties ----------------------------------------------------------
 
 fn sketchPalette() void {
-    const saved_group = pushGroup("sketch.palette");
-    defer popGroup(saved_group);
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(4) });
-    defer col.deinit();
-    const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
+    // The sketch editor's ribbon, in groups (the owner, 2026-11-25: one
+    // editor, its tools in the ribbon): Geometry, Constrain, Ink; Update
+    // and Finish at the far right.
     const on_fill = dvui.themeGet().focus.opacity(0.35);
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 2, .w = 2 }, .gravity_y = 0.5 });
+    defer bar.deinit();
     var below: dvui.Rect.Physical = undefined;
     {
-        var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
-        defer flex.deinit();
-        below = flex.data().borderRectScale().r;
-        keyButton(@src(), "Select", 0, .{ .id_extra = 0, .margin = .all(1), .padding = pad, .color_fill = if (sk_tool == .none) .{ .color = on_fill } else null });
-        keyButton(@src(), "Construction", 0, .{ .id_extra = 1, .margin = .all(1), .padding = pad, .color_fill = if (sk_construction) .{ .color = on_fill } else null });
+        const saved_group = pushGroup("sketch.palette");
+        defer popGroup(saved_group);
+        var geo = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+        defer geo.deinit();
+        skPaletteKey(@src(), "Select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none, "Select: pick geometry and constraints; drag points");
+        skPaletteKey(@src(), "Construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction, "Construction: what is drawn next is construction geometry (dashed)");
         const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Polygon", "Array" };
-        for (names, 0..) |name, g| {
-            const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == g else false;
-            keyButton(@src(), name, @intCast(g), .{ .id_extra = 10 + g, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = on_fill } else null });
+        const tvgs = [_][]const u8{
+            icons.graven(.geo_point) orelse dvui.entypo.dot_single,
+            icons.graven(.geo_segment) orelse dvui.entypo.flow_line,
+            dvui.entypo.line_graph,
+            icons.graven(.geo_arc) orelse dvui.entypo.circle,
+            icons.graven(.geo_circle) orelse dvui.entypo.circle,
+            dvui.entypo.triangle_up,
+            dvui.entypo.grid,
+        };
+        for (names, tvgs, 0..) |name, tvg, gi| {
+            const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
+            skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on, name);
         }
+        below = geo.data().borderRectScale().r;
     }
+    ribbonGap(1);
+    sketchConstrainKeys();
+    ribbonGap(2);
+    sketchInkKeys();
+    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    {
+        const saved_group = pushGroup("sketch.end");
+        defer popGroup(saved_group);
+        {
+            const pending = skPending();
+            const prev_a = faintUnless(pending);
+            defer dvui.alphaSet(prev_a);
+            var uwd: dvui.WidgetData = undefined;
+            ribbon_next_badge = "U";
+            keyIcon(@src(), "Update", dvui.entypo.cycle, 0, .{ .data_out = &uwd, .color_fill = if (pending) .{ .color = colors.overflow.opacity(0.25) } else null });
+            dvui.tooltip(@src(), .{ .active_rect = uwd.borderRectScale().r }, "{s}", .{if (pending) "Update: accept the changes so far, so what uses the sketch follows them, and keep editing (U)" else "Update: nothing to accept; what uses the sketch shows it as it is (U)"}, .{});
+        }
+        ribbon_next_badge = "\u{21B5}";
+        var fwd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Finish", dvui.entypo.check, 0, .{ .data_out = &fwd });
+        dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Finish: accept the sketch and leave (Enter shows its summary first)", .{}, .{});
+    }
+    _ = on_fill;
     const g = skGeoOf(sk_tool) orelse return;
     skToolOverlay(g, below);
+}
+
+/// A key of the sketch ribbon's Geometry group, tinted while on.
+fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool, tip: []const u8) void {
+    // Its own parent, so its tooltip's ID is its own.
+    var b = dvui.box(src, .{}, .{ .id_extra = id_extra, .gravity_y = 0.5 });
+    defer b.deinit();
+    var wd: dvui.WidgetData = undefined;
+    keyIcon(@src(), name, tvg, arg, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{tip}, .{});
+}
+
+/// The sketch ribbon's Constrain group: a key for each kind, its single
+/// key in its fade, faint where the selection does not suit it.
+fn sketchConstrainKeys() void {
+    const saved_group = pushGroup("sketch.constrain");
+    defer popGroup(saved_group);
+    const kinds = [_]struct { k: SkKind, name: []const u8, key: ?[]const u8 = null, icon: icons.GIcon }{
+        .{ .k = .coincident, .name = "Coincident", .key = "C", .icon = .con_coincident },
+        .{ .k = .horizontal, .name = "Horizontal", .key = "H", .icon = .con_horizontal },
+        .{ .k = .vertical, .name = "Vertical", .key = "V", .icon = .con_vertical },
+        .{ .k = .point_on, .name = "On object", .key = "O", .icon = .con_on_object },
+        .{ .k = .tangent, .name = "Tangent", .key = "T", .icon = .con_tangent },
+        .{ .k = .perpendicular, .name = "Perpendicular", .key = "P", .icon = .con_perpendicular },
+        .{ .k = .parallel, .name = "Parallel", .icon = .con_parallel },
+        .{ .k = .equal, .name = "Equal", .key = "E", .icon = .con_equal },
+        .{ .k = .symmetric, .name = "Symmetric", .icon = .con_symmetric },
+        .{ .k = .distance, .name = "Distance", .key = "D", .icon = .con_distance },
+        .{ .k = .distance_x, .name = "Horizontal distance", .icon = .con_distance_x },
+        .{ .k = .distance_y, .name = "Vertical distance", .icon = .con_distance_y },
+        .{ .k = .radius, .name = "Radius", .key = "R", .icon = .con_radius },
+        .{ .k = .angle, .name = "Angle", .key = "A", .icon = .con_angle },
+        .{ .k = .fixed, .name = "Lock", .key = "L", .icon = .con_locked },
+    };
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    defer row.deinit();
+    for (kinds, 0..) |k, i| {
+        var buf: [8]skl.Constraint = undefined;
+        const fits = skConstraintsFor(k.k, &buf) > 0;
+        const prev_a = faintUnless(fits);
+        defer dvui.alphaSet(prev_a);
+        ribbon_next_badge = k.key;
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), k.name, icons.gravenAny(k.icon) orelse dvui.entypo.link, @intFromEnum(k.k), .{ .id_extra = 100 + i, .data_out = &wd });
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}: constrain the selection", .{k.name}, .{ .id_extra = 100 + i });
+    }
+}
+
+/// The sketch ribbon's Ink group: ink the selection in the current stroke
+/// style, fill the area it closes in the current fill style.
+fn sketchInkKeys() void {
+    var buf: [256]skl.GeomId = undefined;
+    const gs = skInkable(&buf);
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    defer row.deinit();
+    {
+        const saved_group = pushGroup("ink");
+        defer popGroup(saved_group);
+        const prev_a = faintUnless(gs.len > 0);
+        defer dvui.alphaSet(prev_a);
+        ribbon_next_badge = "I";
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Ink selection  I", dvui.entypo.brush, 0, .{ .data_out = &wd });
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Ink: stroke the selected lines and arcs in the current stroke style, or take their ink off", .{}, .{});
+    }
+    {
+        const saved_group = pushGroup("fill");
+        defer popGroup(saved_group);
+        const prev_a = faintUnless(gs.len > 0);
+        defer dvui.alphaSet(prev_a);
+        ribbon_next_badge = "F";
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Fill selection  F", dvui.entypo.drop, 0, .{ .data_out = &wd });
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off", .{}, .{});
+    }
 }
 
 /// The overlay below the geometry buttons for the active one: its
@@ -29308,40 +29473,6 @@ fn skStepFields() void {
     skToolClick(target);
 }
 
-/// The constrain buttons: those that fit the selection, live.
-fn sketchConstrainButtons() void {
-    const saved_group = pushGroup("sketch.constrain");
-    defer popGroup(saved_group);
-    const kinds = [_]struct { k: SkKind, name: []const u8 }{
-        .{ .k = .coincident, .name = "Coincident C" },
-        .{ .k = .horizontal, .name = "Horizontal H" },
-        .{ .k = .vertical, .name = "Vertical V" },
-        .{ .k = .point_on, .name = "On object O" },
-        .{ .k = .distance, .name = "Distance D" },
-        .{ .k = .distance_x, .name = "Horizontal distance" },
-        .{ .k = .distance_y, .name = "Vertical distance" },
-        .{ .k = .radius, .name = "Radius R" },
-        .{ .k = .angle, .name = "Angle A" },
-        .{ .k = .fixed, .name = "Lock L" },
-        .{ .k = .tangent, .name = "Tangent T" },
-        .{ .k = .perpendicular, .name = "Perpendicular P" },
-        .{ .k = .parallel, .name = "Parallel" },
-        .{ .k = .equal, .name = "Equal E" },
-        .{ .k = .symmetric, .name = "Symmetric" },
-    };
-    var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
-    defer flex.deinit();
-    for (kinds, 0..) |k, i| {
-        var buf: [8]skl.Constraint = undefined;
-        const fits = skConstraintsFor(k.k, &buf) > 0;
-        const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
-        if (fits) {
-            keyButton(@src(), k.name, @intFromEnum(k.k), .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad });
-        } else {
-            dvui.labelNoFmt(@src(), k.name, .{}, .{ .id_extra = 100 + i, .margin = .all(1), .padding = pad, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.35) } });
-        }
-    }
-}
 
 /// The canvas area in physical pixels, from the last frame.
 fn canvasArea() dvui.Rect.Physical {
@@ -29360,11 +29491,8 @@ fn sketchModeProperties() void {
         if (x.conflicting.len > 0) propText("Conflicts", "{d}", .{x.conflicting.len}, 3);
         if (x.redundant.len > 0) propText("Redundant", "{d}", .{x.redundant.len}, 4);
     }
-    heading("{s}", .{"Constrain the selection"}, 8199);
-    sketchConstrainButtons();
     // A point on a circle or an arc: a caption for it.
     if (skCaptionPoint() != null) keyButton(@src(), "Add caption", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
-    keyButton(@src(), "Finish sketch…  Enter", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
     sketchInkProperties();
     sketchFillProperties();
     skConstraintList(it);

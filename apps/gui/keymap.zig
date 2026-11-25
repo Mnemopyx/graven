@@ -62,7 +62,7 @@ pub const modes = [_]M{
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
-    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill" } },
+    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.end" } },
     .{ .name = "sketch.summary", .kind = .sub, .parent = "sketch", .allows = &.{"sketch.summary"} },
     // Text being typed somewhere, the canvas or a field (whatever asked
     // for text input last frame): the digraph key, and the two characters
@@ -568,6 +568,7 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "a", .action = "sketch.constraint.angle" },
     .{ .mode = "sketch", .chord = "l", .action = "sketch.constraint.lock" },
     .{ .mode = "sketch", .chord = "m", .action = "sketch.tool.next" },
+    .{ .mode = "sketch", .chord = "u", .action = "sketch.end.update" },
     .{ .mode = "sketch", .chord = "i", .action = "sketch.ink" },
     .{ .mode = "sketch", .chord = "f", .action = "sketch.fill" },
 } ++ enters("sketch.summary", "sketch.summary.leave") ++ [_]B{

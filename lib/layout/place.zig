@@ -1333,7 +1333,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                 // tile's.
                 const stamp_sketch: ?model.PrototypeSketch = if (st.sketch != .none) if (m.sketchIndex(st.sketch)) |ski| s: {
                     const item = m.sketches.items[ski];
-                    break :s .{ .id = item.id, .from = item.id, .sketch = item.sketch, .width_param = "w", .height_param = "h", .offset = .{ .x = box.width() / 2, .y = box.height() / 2 }, .version = item.version };
+                    break :s .{ .id = item.id, .from = item.id, .sketch = item.accepted orelse item.sketch, .width_param = "w", .height_param = "h", .offset = .{ .x = box.width() / 2, .y = box.height() / 2 }, .version = item.version };
                 } else null else null;
                 const params: []const model.TileParam = if (stamp_sketch != null and st.params.len > 0) p: {
                     const both = try a.alloc(model.TileParam, st.params.len + t.params.items.len);
