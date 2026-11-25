@@ -2493,6 +2493,10 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    if (open_texts_sheet) |id| {
+        open_texts_sheet = null;
+        openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+    }
     if (close_home) |h| {
         close_home = null;
         closeSpaceViews(h);
@@ -2551,7 +2555,10 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
+                sample_texts = true;
+                loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
         }
@@ -5541,6 +5548,20 @@ fn sheetProperties(id: layout.model.ObjectId) void {
     }
     propText("Columns", "name, {s}", .{cb[0..n]}, 2);
     propText("Rows", "{d}", .{sh.rows.items.len}, 3);
+    if (sh.texts) {
+        // A text sheet: which column its text holders show.
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7 });
+            defer row.deinit();
+            propName("Shown");
+            var choice: usize = sh.shown;
+            if (tdropdown(@src(), sh.columns.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7 })) actV(.setSheetShown, .{ id, choice });
+        }
+        propText("", "Each row names a text holder (a caption, or a track of that name). They show the column chosen; an empty cell shows the default. Editing the text edits its cell.", .{}, 6);
+        keyButton(@src(), "Open it beside the canvas", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "Remove sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        return;
+    }
     const a = dvui.currentWindow().arena();
     var rows: std.ArrayList(usize) = .empty;
     var cols: std.ArrayList(usize) = .empty;
@@ -7601,6 +7622,8 @@ var status_name_buf: [64]u8 = undefined;
 /// `GRAVEN_SAMPLE=sketch-space`: a new sketch in its own space, made on
 /// the first frame (once the views are set up).
 var sample_sketch_space = false;
+var sample_texts = false;
+var open_texts_sheet: ?layout.model.ObjectId = null;
 
 fn canvas(active: bool, view: u8) void {
     if (active) followHome();
@@ -16890,6 +16913,17 @@ const button_handlers = [_]ButtonHandler{
         }
     }.f),
     // A grid.
+    handler("sketches.make-a-text-sheet", struct {
+        fn f(_: i32) void {
+            var nb: [96]u8 = undefined;
+            const name = state.model.freshName(&nb, .sheets, "Texts");
+            if (act(.makeTextSheet, .{ name, @as([]const []const u8, &.{ "de", "fr" }) })) |id| {
+                state.context = .{ .sheet = id };
+                openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+                state.status = "Text sheet made, open beside the canvas: a row a caption, its default text, then a column a language (rename them in the sheet). ";
+            } else |_| state.status = "The sheet was not made. ";
+        }
+    }.f),
     handler("grid.make-a-legend-sheet", struct {
         fn f(_: i32) void {
             const g = contextGrid() orelse return;
@@ -27405,6 +27439,13 @@ fn loadSketchPanelSample() void {
     const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / pitch, .pitch = pitch }) catch return;
     state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "Text on a panel cut from a sketch flows round its ink." }) catch {};
     state.context = .{ .panel = pi };
+    // GRAVEN_SAMPLE=sketch-texts: its caption's text from a text sheet,
+    // German shown, the sheet open beside the canvas.
+    if (sample_texts) if (act(.makeTextSheet, .{ "Texts", @as([]const []const u8, &.{ "de", "fr" }) })) |id| {
+        _ = act(.setSheetCell, .{ id, @as(usize, 0), @as(usize, 2), @as([]const u8, "Ein/Aus") }) catch {};
+        _ = act(.setSheetShown, .{ id, @as(usize, 1) }) catch {};
+        open_texts_sheet = id;
+    } else |_| {};
     state.view.cx = 0;
     state.view.cy = 0;
     state.view.ppm = 14;
@@ -30263,6 +30304,11 @@ fn sketchesProperties() void {
     defer popGroup(saved_group);
     propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1);
     keyButton(@src(), "New sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    // Their captions' texts as a sheet: a row a caption, by name; the
+    // default text, then a column a language.
+    var captions: usize = 0;
+    for (state.model.sketches.items) |it| captions += it.captions.items.len;
+    if (captions > 0) keyButton(@src(), "Make a text sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 fn sketchDefProperties(index: usize) void {

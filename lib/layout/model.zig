@@ -524,6 +524,13 @@ pub const LegendSheet = struct {
     rows: std.ArrayList(SheetRow) = .empty,
     /// Where it was imported from, if it was.
     sources: std.ArrayList(FlowSource) = .empty,
+    /// A text sheet (the owner, 2026-11-25): each row a named text holder
+    /// (a caption, or any track, by name), its first column the default
+    /// text, each other column a language. Its scope is `.none`.
+    texts: bool = false,
+    /// A text sheet's column shown in its text holders (0: the default);
+    /// an empty cell shows the default.
+    shown: usize = 0,
 };
 
 /// A key's row: its name, and a cell for each column (markup; missing
@@ -840,6 +847,10 @@ pub const TileRegion = struct {
     caption_copy: []const Item = &.{},
     /// Its text is its own, not the base's: edited in place.
     caption_own: bool = false,
+    /// A track a text sheet drives: the text it last wrote there, to tell
+    /// an edit made in the track (which goes into the cell shown) from a
+    /// change to the sheet. Null while no sheet drives it.
+    sheet_copy: ?[]const u8 = null,
     /// Older documents' orientation (read, never written): rows or
     /// columns, turned into a direction on loading (`upgradeOrientation`).
     old_major: Major = .row,
@@ -1276,6 +1287,9 @@ pub const Layer = struct {
 /// `syncCaptions`.
 pub const SketchCaption = struct {
     id: ObjectId = .none,
+    /// Its name, which a text sheet's row finds it by (its base track's
+    /// when made: Caption1).
+    name: []const u8 = "",
     /// The leader's end, where the text is held.
     end: sketch_.PointRef,
     /// The leader runs right (the text's left edge on its end), else left.
@@ -4132,7 +4146,7 @@ pub const Model = struct {
         // The caption is the sketch's: each use shows it.
         const cid = m.newId();
         region.caption = cid;
-        try m.sketches.items[ski].captions.append(m.a(), .{ .id = cid, .end = lead.end, .right = lead.right, .style = style, .pitch = pitch, .length = length, .base = rid });
+        try m.sketches.items[ski].captions.append(m.a(), .{ .id = cid, .name = region.name, .end = lead.end, .right = lead.right, .style = style, .pitch = pitch, .length = length, .base = rid });
         _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = if (lead.right) .left else .right }, .b = .{ .object = view, .feature = .origin_x, .point = lead.end } });
         _ = try m.addConstraint(.{ .a = .{ .object = rid, .feature = .centre_y }, .b = .{ .object = view, .feature = .origin_y, .point = lead.end } });
         m.revision += 1;
@@ -4602,14 +4616,34 @@ pub const Model = struct {
     /// `setTileTrackText` takes it: its runs, a newline for each hard
     /// break. Allocated with `al`.
     pub fn tileTrackText(m: *const Model, al: Allocator, tile_id: TileId, track: ObjectId) Allocator.Error![]u8 {
+        const f = m.tileFlow(tile_id, track) orelse return al.alloc(u8, 0);
+        return itemsText(al, f.items.items);
+    }
+
+    /// Content as plain text: its runs' markup, a newline for each break
+    /// (tiles left out). The one reading of a slot or a text holder.
+    pub fn itemsText(al: Allocator, items: []const Item) Allocator.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
-        const f = m.tileFlow(tile_id, track) orelse return out.toOwnedSlice(al);
-        for (f.items.items) |it| switch (it.what) {
+        for (items) |it| switch (it.what) {
             .run => |r| try out.appendSlice(al, r.content),
             .hard_break, .paragraph => try out.append(al, '\n'),
             .tile => {},
         };
         return out.toOwnedSlice(al);
+    }
+
+    /// `items` made `text`: runs in `style`, a hard break at each newline.
+    /// The one writing of a slot or a text holder.
+    fn setItemsText(m: *Model, items: *std.ArrayList(Item), style: StyleId, text: []const u8) Error!void {
+        items.* = .empty;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        var first = true;
+        while (lines.next()) |line| {
+            if (!first) try items.append(m.a(), .{ .what = .hard_break });
+            first = false;
+            if (line.len > 0) try items.append(m.a(), .{ .what = .{ .run = .{ .style = style, .content = try m.a().dupe(u8, line) } } });
+        }
+        m.revision += 1;
     }
 
     /// Sets tile `tile_id`'s content in its prototype's track `track` to
@@ -4639,15 +4673,7 @@ pub const Model = struct {
             try t.flows.append(m.a(), .{ .id = m.newId(), .track = track });
             break :blk &t.flows.items[t.flows.items.len - 1];
         };
-        f.items = .empty;
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        var first = true;
-        while (lines.next()) |line| {
-            if (!first) try f.items.append(m.a(), .{ .what = .hard_break });
-            first = false;
-            if (line.len > 0) try f.items.append(m.a(), .{ .what = .{ .run = .{ .style = tt.style, .content = try m.a().dupe(u8, line) } } });
-        }
-        m.revision += 1;
+        try m.setItemsText(&f.items, tt.style, text);
     }
 
     // Process profiles ---------------------------------------------------
@@ -5037,6 +5063,7 @@ pub const Model = struct {
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         for (m.sheets.items, 0..) |sh, si| {
+            if (sh.texts) continue;
             const col = for (sh.columns.items, 0..) |c, k| {
                 if (std.mem.eql(u8, c, slot)) break k;
             } else continue;
@@ -5130,6 +5157,92 @@ pub const Model = struct {
         }
     }
 
+    /// The name a text sheet finds track `r` by: its caption's, else its own.
+    pub fn textHolderName(m: *const Model, r: *const TileRegion) []const u8 {
+        if (r.caption != .none) for (m.sketches.items) |it| for (it.captions.items) |sc| {
+            if (sc.id == r.caption) return sc.name;
+        };
+        return r.name;
+    }
+
+    /// Whether track `r` is a use's copy of a caption (which follows its
+    /// base, not a sheet).
+    fn isCaptionCopy(m: *const Model, r: *const TileRegion) bool {
+        if (r.caption == .none) return false;
+        for (m.sketches.items) |it| for (it.captions.items) |sc| {
+            if (sc.id == r.caption) return sc.base != r.id;
+        };
+        return false;
+    }
+
+    /// Writes each text sheet's cells into its text holders: for each
+    /// row, the tracks of that name (a caption's base by its caption's
+    /// name) get the cell of the column shown, or the default when that
+    /// is empty. A holder edited since (its text not what was last
+    /// written) puts its text into that cell first: the sheet and the
+    /// text holders are one text, edited in either.
+    pub fn syncTextSheets(m: *Model) Error!void {
+        const al = m.arena.child_allocator;
+        for (m.sheets.items) |*sh| {
+            if (!sh.texts) continue;
+            for (sh.rows.items) |*row| {
+                while (row.cells.items.len < sh.columns.items.len) try row.cells.append(m.a(), "");
+                for (0..m.parentCount()) |k| {
+                    const pi = m.parentAt(k);
+                    for (m.regionsIn(pi)) |*r| {
+                        if (!std.mem.eql(u8, m.textHolderName(r), row.key) or m.isCaptionCopy(r)) continue;
+                        const fi = m.flowIndex(r.flow) orelse continue;
+                        const f = &m.flows.items[fi];
+                        const now = try itemsText(al, f.items.items);
+                        defer al.free(now);
+                        const col = @min(sh.shown, sh.columns.items.len -| 1);
+                        if (r.sheet_copy) |last| if (!std.mem.eql(u8, now, last)) {
+                            // Edited in the track: into the cell shown.
+                            row.cells.items[col] = try m.a().dupe(u8, now);
+                        };
+                        const cell = row.cells.items[col];
+                        const text = if (cell.len == 0) row.cells.items[0] else cell;
+                        if (!std.mem.eql(u8, now, text)) try m.setItemsText(&f.items, if (r.style) |st| st else f.style, text);
+                        if (r.sheet_copy == null or !std.mem.eql(u8, r.sheet_copy.?, text)) r.sheet_copy = try m.a().dupe(u8, text);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A text sheet named `name`: a row for each caption (by its name),
+    /// its default text what the caption's base shows now, and a column
+    /// for each of `languages` after the default. Returns its ID.
+    pub fn makeTextSheet(m: *Model, name: []const u8, languages: []const []const u8) Error!ObjectId {
+        const al = m.arena.child_allocator;
+        var sh: LegendSheet = .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .scope = .none, .texts = true };
+        try sh.columns.append(m.a(), "Default");
+        for (languages) |l| try sh.columns.append(m.a(), try m.a().dupe(u8, l));
+        for (m.sketches.items) |it| for (it.captions.items) |sc| {
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, sc.name) };
+            const base = m.regionWithId(sc.base);
+            const text = if (base) |b| if (m.flowIndex(b.flow)) |fi| try itemsText(al, m.flows.items[fi].items.items) else try al.alloc(u8, 0) else try al.alloc(u8, 0);
+            defer al.free(text);
+            try row.cells.append(m.a(), try m.a().dupe(u8, text));
+            for (languages) |_| try row.cells.append(m.a(), "");
+            try sh.rows.append(m.a(), row);
+        };
+        try m.sheets.append(m.a(), sh);
+        m.revision += 1;
+        try m.syncSheets();
+        return sh.id;
+    }
+
+    /// Which of text sheet `id`'s columns its text holders show (0: the
+    /// default).
+    pub fn setSheetShown(m: *Model, id: ObjectId, col: usize) Error!void {
+        const sh = try m.sheetById(id);
+        if (!sh.texts or col >= sh.columns.items.len) return error.NoSuchItem;
+        sh.shown = col;
+        m.revision += 1;
+        try m.syncSheets();
+    }
+
     /// Writes every slot a sheet drives from its cell: for each row whose
     /// key is in its sheet's scope, each column's slot on the key and on
     /// the tiles beside it that have one of that name. A slot two sheets
@@ -5137,8 +5250,10 @@ pub const Model = struct {
     /// content. Run after every action (as constraints are solved), so
     /// the keys always show their sheets.
     pub fn syncSheets(m: *Model) Error!void {
-        // A sketch's captions in its uses: content driven from elsewhere,
-        // as a sheet's cells drive slots.
+        // Text sheets' cells in their text holders (a caption's base
+        // among them), then a sketch's captions in its uses: content
+        // driven from elsewhere, as a sheet's cells drive slots.
+        try m.syncTextSheets();
         try m.syncCaptions();
         if (m.sheets.items.len == 0) return;
         const al = m.arena.child_allocator;
@@ -5149,6 +5264,7 @@ pub const Model = struct {
         var done: std.AutoHashMapUnmanaged([2]u32, void) = .empty;
         defer done.deinit(al);
         for (m.sheets.items) |sh| {
+            if (sh.texts) continue;
             keys.clearRetainingCapacity();
             try m.scopeTiles(al, sh.scope, &keys);
             for (sh.rows.items) |row| {
@@ -5349,6 +5465,18 @@ pub const Model = struct {
     pub fn sheetProblems(m: *const Model, al: Allocator, id: ObjectId, rows: *std.ArrayList(usize), cols: *std.ArrayList(usize)) Allocator.Error!void {
         const si = m.sheetIndex(id) orelse return;
         const sh = m.sheets.items[si];
+        if (sh.texts) {
+            // A text sheet: rows naming no text holder; its columns are
+            // languages, none unused.
+            for (sh.rows.items, 0..) |row, ri| {
+                var found = false;
+                for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| {
+                    if (std.mem.eql(u8, m.textHolderName(r), row.key)) found = true;
+                };
+                if (!found) try rows.append(al, ri);
+            }
+            return;
+        }
         var keys: std.ArrayList(TileId) = .empty;
         defer keys.deinit(al);
         try m.scopeTiles(al, sh.scope, &keys);
@@ -9346,6 +9474,49 @@ test "a sketch's caption shows in its panel: at its leader's end, with the base 
         }
         break :blk n;
     });
+}
+
+test "a text sheet: a caption's text by its name, default and a language, edited in either" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Dial");
+    const home = m.homeOf(m.sketches.items[si].id).?;
+    const g = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
+    const view = m.spaces.items[home].sketch_views.items[0].id;
+    const cap = try m.addCaption(view, .{ .curve = g }, style, 4, 30);
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 0 }, "Volume", style);
+    const p = try m.insertSketchPanel(0, si, .{ .x = 50, .y = 50 });
+    const id = try m.makeTextSheet("Texts", &.{ "de", "fr" });
+    const sh = m.sheets.items[m.sheetIndex(id).?];
+    try std.testing.expectEqualStrings("Caption1", sh.rows.items[0].key);
+    try std.testing.expectEqualStrings("Volume", sh.rows.items[0].cells.items[0]);
+    try m.setSheetCell(id, 0, 2, "Lautstärke");
+    // German shown: the base and the panel's copy say it.
+    try m.setSheetShown(id, 1);
+    try m.syncSheets();
+    const al = std.testing.allocator;
+    const base_text = try Model.itemsText(al, m.trackFlow(cap.parent, cap.region).?.items.items);
+    defer al.free(base_text);
+    try std.testing.expectEqualStrings("Lautstärke", base_text);
+    var k: usize = 0;
+    for (m.panels.items[p].regions.items, 0..) |r, ri| {
+        if (r.caption != .none) k = ri;
+    }
+    const copy_text = try Model.itemsText(al, m.trackFlow(.{ .panel = p }, k).?.items.items);
+    defer al.free(copy_text);
+    try std.testing.expectEqualStrings("Lautstärke", copy_text);
+    // French empty: the default.
+    try m.setSheetShown(id, 2);
+    const fr = try Model.itemsText(al, m.trackFlow(cap.parent, cap.region).?.items.items);
+    defer al.free(fr);
+    try std.testing.expectEqualStrings("Volume", fr);
+    // Typed in the caption: into the cell shown.
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 0 }, "Le ", style);
+    try m.syncSheets();
+    try std.testing.expectEqualStrings("Le Volume", m.sheets.items[m.sheetIndex(id).?].rows.items[0].cells.items[2]);
+    try std.testing.expectEqualStrings("Volume", m.sheets.items[m.sheetIndex(id).?].rows.items[0].cells.items[0]);
 }
 
 test "ink and fills changed in the editor wait for the sketch's update; discarded, they go" {
