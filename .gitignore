@@ -3,3 +3,4 @@ zig-out/
 *.step
 zig-pkg/
 fonts/
+__pycache__/
