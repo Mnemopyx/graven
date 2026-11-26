@@ -2560,3 +2560,37 @@ test "fab ink: a sketch panel's ink and solid fills are layers' sources, made in
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = scratch ++ "/sketch-fab.3mf", .data = made });
     try saveAs(&r, scratch ++ "/sketch-fab.graven");
 }
+
+test "paragraph rules: a heading given a rule above and below in Properties, drawn as its pens' ink" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    const o = try api.loadTextSample();
+    try r.frames(2);
+    // A heading typed before the text, ended by Enter; the cursor put back in it.
+    try r.clickAt(api.screenOf(o.x + 0.5, o.y - 3).?);
+    try dvui.testing.writeText("Paragraph rules");
+    try r.key(.enter, .none);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(o.x + 0.5, o.y - 3).?);
+    try r.choose("paragraph.rule-above", "New solid pen");
+    try r.field("paragraph.rule-above-weight", "1.5pt");
+    try r.choose("paragraph.rule-below", "New dashed pen");
+    try r.choose("paragraph.rule-below-length", "Under the text");
+    try r.field("paragraph.rule-below-offset", "1mm");
+    try r.field("paragraph.space-after", "6");
+    try r.frames(3);
+    const m = api.model();
+    var ruled: ?layout.model.ParagraphStyle = null;
+    for (m.paragraph_styles.items) |ps| if (ps.rule_above.on()) {
+        ruled = ps;
+    };
+    const ps = ruled orelse return error.NoRuledStyle;
+    try std.testing.expect(ps.rule_below.on());
+    try std.testing.expectEqual(layout.model.RuleLength.text, ps.rule_below.length);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("1.5pt", ps.rule_above.weight.?.format(&buf));
+    try std.testing.expectEqualStrings("1mm", ps.rule_below.offset.format(&buf));
+    try std.testing.expectEqual(@as(usize, 2), api.placedRules());
+    try saveAs(&r, scratch ++ "/rules.graven");
+}

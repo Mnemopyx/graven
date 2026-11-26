@@ -261,6 +261,31 @@ pub const ParagraphAlign = enum { start, centre, end, justify };
 /// See `ParagraphStyle.tall`.
 pub const TallContent = enum { around, move, fixed };
 
+/// How far a paragraph rule runs along its line: the whole segment (the
+/// column), between the paragraph's indents, or under the line's text.
+pub const RuleLength = enum { column, indents, text };
+
+/// A rule drawn above a paragraph (over its first line) or below it
+/// (under its last), as FrameMaker's frames above and below: a line
+/// drawn with a pen (a stroke style: colour, width, caps, dashes; ink
+/// that takes it follows when it changes). Sizes keep the units typed.
+pub const ParagraphRule = struct {
+    /// Its pen; none: no rule.
+    pen: ObjectId = .none,
+    /// Its weight, as typed (relative forms to the pen's width); null:
+    /// the pen's own width.
+    weight: ?units_.Quantity = null,
+    /// The gap between the rule's middle and its line's band (above the
+    /// first line's top, below the last line's bottom), as typed; relative
+    /// forms to the line pitch.
+    offset: units_.Quantity = .{ .value = 2, .unit = .pt },
+    length: RuleLength = .indents,
+
+    pub fn on(r: ParagraphRule) bool {
+        return r.pen != .none;
+    }
+};
+
 /// A sort: one unit typed into a flow and taken out of it whole, as a
 /// piece of hand-set type was (Travis, 2026-11-24). Sorts are kept in
 /// cases, a keyboard's worth each (see `Case`).
@@ -412,6 +437,9 @@ pub const ParagraphStyle = struct {
     /// The style a new paragraph takes when Enter ends one in this style
     /// (FrameMaker's Next ¶ Tag); null: this one.
     next: ?ParaId = null,
+    /// Rules over its first line and under its last (none by default).
+    rule_above: ParagraphRule = .{},
+    rule_below: ParagraphRule = .{},
 };
 
 /// Where a track lies on a tile's face.
@@ -7113,6 +7141,10 @@ pub const Model = struct {
     fn checkParagraph(p: ParagraphStyle) Error!void {
         for ([_]f64{ p.indent_start, p.indent_end, p.space_before, p.space_after, p.line_gap }) |v| if (!(v >= 0)) return error.BadSize;
         if (!std.math.isFinite(p.first)) return error.BadSize;
+        for ([_]ParagraphRule{ p.rule_above, p.rule_below }) |r| {
+            if (!std.math.isFinite(r.offset.value)) return error.BadSize;
+            if (r.weight) |w| if (!(w.value > 0) or !std.math.isFinite(w.value)) return error.BadSize;
+        }
     }
 
     /// The figure drawn over sketch `sketch` (its ID), if any.

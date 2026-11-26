@@ -105,6 +105,8 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     var shapes: std.ArrayList(art.Shape) = .empty;
     for (placed.tiles) |t| if (t.grid != .hole) try shapes.appendSlice(a, t.shapes);
     for (placed.art) |pa| if (!pa.cutout) try shapes.appendSlice(a, pa.shapes);
+    // Paragraph rules, in their pens' colours.
+    for (placed.rules) |r| try shapes.appendSlice(a, r.shapes);
     for (shapes.items) |s| {
         if (s.outline.contours.len == 0) continue;
         var fill_buf: [32]u8 = undefined;

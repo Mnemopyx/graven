@@ -177,6 +177,36 @@ pub const PlacedArt = struct {
     cutout: bool = false,
 };
 
+/// A paragraph's rule as placed (`model.ParagraphRule`): its pen's ink,
+/// in the panel frame, with the flow it rules.
+pub const PlacedRule = struct {
+    region: usize,
+    flow_parent: model.Parent,
+    /// The paragraph's first piece in the flow (an item index there).
+    item: usize,
+    above: bool,
+    box: Box,
+    shapes: []const art.Shape,
+};
+
+/// A rule's ink: a line from `x0` to `x1` at height `y`, drawn with its
+/// pen (made exact by `geom.stroke`); null with no pen or no length.
+fn ruleInk(a: Allocator, m: *const Model, rule: model.ParagraphRule, y: f64, x0: f64, x1: f64) Allocator.Error!?struct { box: Box, shapes: []const art.Shape } {
+    const i = m.strokeStyleIndex(rule.pen) orelse return null;
+    const pen = m.stroke_styles.items[i].stroke;
+    const width = if (rule.weight) |w| w.resolve(pen.width) orelse pen.width else pen.width;
+    if (!(x1 > x0) or !(width > 0)) return null;
+    const pts = try a.dupe(Point, &.{ .{ .x = x0, .y = y }, .{ .x = x1, .y = y } });
+    var lines: std.ArrayList(geom.stroke.Polyline) = .empty;
+    const line: geom.stroke.Polyline = .{ .pts = pts, .closed = false };
+    if (pen.dash.len == 0) try lines.append(a, line) else try geom.stroke.dashed(a, line, pen.dash, pen.dash_offset, &lines);
+    const o = try geom.stroke.stroke(a, lines.items, .{ .width = width, .cap = pen.cap, .join = pen.join, .miter_limit = pen.miter_limit }, model.figure_tolerance);
+    if (o.contours.len == 0) return null;
+    const shapes = try a.alloc(art.Shape, 1);
+    shapes[0] = .{ .name = "rule", .outline = o, .paint = .{ .fill = .{ .solid = pen.color }, .pen = true } };
+    return .{ .box = o.bounds(), .shapes = shapes };
+}
+
 /// What a region's flow needs: the length, u, that would set its longest
 /// paragraph (the items between hard breaks) in one segment.
 pub const PlacedFlow = struct {
@@ -230,6 +260,8 @@ pub const Placed = struct {
     items: []const PlacedItem = &.{},
     /// The panel's line art, in the panel frame.
     art: []const PlacedArt = &.{},
+    /// Paragraph rules, in the panel frame (drawn with the text).
+    rules: []const PlacedRule = &.{},
     flows: []const PlacedFlow = &.{},
     labels: []const PlacedLabel,
     issues: []const Issue,
@@ -1309,6 +1341,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
     var keepouts: std.ArrayList(KeepOut) = .empty;
     var label_keepouts: std.ArrayList(KeepOut) = .empty;
     var placed_art: std.ArrayList(PlacedArt) = .empty;
+    var placed_rules: std.ArrayList(PlacedRule) = .empty;
     for (m.artIn(parent), 0..) |pa, ai| {
         try placed_art.append(a, .{ .index = ai, .box = pa.box(), .shapes = try art.dupeShapes(a, pa.shapes, pa.at), .cutout = pa.cutout });
         bounds = bounds.join(pa.box());
@@ -1779,6 +1812,10 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
 
             // Last, each item where it landed. The pieces of a word that were
             // not wrapped between are set as one.
+            // Each segment's text, from where it starts to where it ends
+            // along (for rules as long as their line's text).
+            const text_span = try a.alloc([2]f64, path.boxes.items.len);
+            @memset(text_span, .{ std.math.inf(f64), -std.math.inf(f64) });
             var chain: ?usize = null;
             for (items[leg_lo..leg_hi], leg_lo..) |item, index| {
                 const sg = segs_of[index];
@@ -1793,6 +1830,9 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                 const end = spans[index][1] + sh;
                 try out_placed_items.append(a, .{ .region = fri, .flow_parent = fpi, .index = item_of.items[index], .segment = seg0 + sg, .span = .{ start, end } });
                 if (dropped[index] or dup[index]) continue;
+                if (item.what != .paragraph and item.what != .hard_break and !isSpace(cuts.items, index) and end > start and sg < text_span.len) {
+                    text_span[sg] = .{ @min(text_span[sg][0], start), @max(text_span[sg][1], end) };
+                }
                 const band = path.boxes.items[sg];
                 // A line ending inside a word: at a soft hyphen, a hyphen is
                 // drawn; at a cut, the wrap is recorded.
@@ -1896,6 +1936,48 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                     .hard_break, .paragraph => {},
                 }
             }
+            // Its paragraphs' rules: above a paragraph that starts in this
+            // leg, over its first line; below one that ends in it, under
+            // its last.
+            if (rows and leg_hi > leg_lo) {
+                var ps_id: ?model.ParaId = if (entry) |e| e.paragraph else null;
+                var starts = if (entry) |e| e.first_line else true;
+                var p_first: usize = leg_lo;
+                var k: usize = leg_lo;
+                while (k <= leg_hi) : (k += 1) {
+                    if (k < leg_hi and items[k].what != .paragraph) continue;
+                    const segs: ?[2]usize = if (p_first < leg_hi)
+                        .{ segs_of[p_first], segs_of[if (k < leg_hi) k else leg_hi - 1] }
+                    else if (!exited and p_first > leg_lo and segs_of[leg_hi - 1] + 1 < path.boxes.items.len)
+                        .{ segs_of[leg_hi - 1] + 1, segs_of[leg_hi - 1] + 1 }
+                    else
+                        null;
+                    const ends = k < leg_hi or !exited;
+                    if (segs) |sp| if (ps_id) |pid| if (m.paraStyle(pid)) |ps| {
+                        const which = [2]struct { model.ParagraphRule, bool, usize }{ .{ ps.rule_above, starts, sp[0] }, .{ ps.rule_below, ends, sp[1] } };
+                        for (which, 0..) |w, side| {
+                            if (!w[0].on() or !w[1] or w[2] >= path.boxes.items.len) continue;
+                            const band = path.boxes.items[w[2]];
+                            const along: [2]f64 = switch (w[0].length) {
+                                .column => .{ band.x0, band.x1 },
+                                .indents => .{ band.x0 + ps.indent_start, band.x1 - ps.indent_end },
+                                .text => if (text_span[w[2]][0] <= text_span[w[2]][1]) .{ band.x0 + text_span[w[2]][0], band.x0 + text_span[w[2]][1] } else .{ band.x0 + ps.indent_start, band.x1 - ps.indent_end },
+                            };
+                            const off = w[0].offset.resolve(region.pitch) orelse 0;
+                            const y = if (side == 0) band.y1 + off else band.y0 - off;
+                            if (try ruleInk(a, m, w[0], y, along[0], along[1])) |r| {
+                                try placed_rules.append(a, .{ .region = fri, .flow_parent = fpi, .item = item_of.items[@min(p_first, items.len - 1)], .above = side == 0, .box = r.box, .shapes = r.shapes });
+                                bounds = bounds.join(r.box);
+                            }
+                        }
+                    };
+                    if (k < leg_hi) {
+                        ps_id = items[k].what.paragraph orelse flow_default;
+                        starts = true;
+                        p_first = k + 1;
+                    }
+                }
+            }
             try out_flows.append(a, .{ .region = fri, .flow_parent = fpi, .natural = natural / region.pitch, .segments = seg0 + path.origins.items.len, .waiting = entry == null });
             for (path.reach.items, 0..) |r_, t| {
                 const len_t = segLength(&path, rows, t);
@@ -1978,6 +2060,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
         .tracks = try tracks.toOwnedSlice(a),
         .items = try placed_items.toOwnedSlice(a),
         .art = try placed_art.toOwnedSlice(a),
+        .rules = try placed_rules.toOwnedSlice(a),
         .flows = try flows.toOwnedSlice(a),
         .labels = try placed_labels.toOwnedSlice(a),
         .issues = try issues.toOwnedSlice(a),

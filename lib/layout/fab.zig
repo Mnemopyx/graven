@@ -190,13 +190,17 @@ fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const plac
         .parts => for (placed.tiles) |t| if (t.grid == .part) {
             if (largest(t.shapes)) |sh| try out.append(a, sh.outline);
         },
-        .text => |track| for (placed.labels) |l| {
-            if (!takes(m, track, l)) continue;
-            const glyphs = try l.render.outlines(a, faces);
-            for (glyphs) |g| {
-                if (g.contours.len == 0) continue;
-                try out.append(a, try g.transformed(a, .translate(l.origin.x, l.origin.y)));
+        .text => |track| {
+            for (placed.labels) |l| {
+                if (!takes(m, track, l)) continue;
+                const glyphs = try l.render.outlines(a, faces);
+                for (glyphs) |g| {
+                    if (g.contours.len == 0) continue;
+                    try out.append(a, try g.transformed(a, .translate(l.origin.x, l.origin.y)));
+                }
             }
+            // Paragraph rules are the text's ink too (not a tile track's).
+            if (track.len == 0) for (placed.rules) |r| for (r.shapes) |sh| try out.append(a, sh.outline);
         },
         .ink, .fills => |name| {
             const list = m.panels.items[panel].art.items;

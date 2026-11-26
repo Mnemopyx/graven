@@ -399,6 +399,11 @@ pub const testing_api = struct {
     }
     /// Adds the text sample (a track of three rows, two holding content)
     /// on the shown canvas, as GRAVEN_SAMPLE=text does; where it starts.
+    /// The paragraph rules placed in the parent shown.
+    pub fn placedRules() usize {
+        const p = shownParent() orelse return 0;
+        return if (placedOf(p)) |pl| pl.rules.len else 0;
+    }
     pub fn loadTextSample() !geom.Point {
         return loadText();
     }
@@ -8497,6 +8502,11 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
             else => false,
         };
         if (sel) marchingBox(area, onSheet(pi, pa.box), colors.select, 1.5 * px);
+    }
+    // Paragraph rules, in their pens' ink.
+    for (placed.rules) |r| {
+        const pieces = flatTile(&state.flat, r.shapes) catch &.{};
+        for (pieces) |piece| if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
     }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
@@ -19637,6 +19647,10 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
             changed = true;
         }
     }
+    // Rules above and below: a pen each (none for no rule), then, with
+    // one, its weight, its offset from the text and its length.
+    if (ruleFields("Rule above", &ps.rule_above, n, 940, if (ref) |r| &r.rule_above else null)) changed = true;
+    if (ruleFields("Rule below", &ps.rule_below, n, 950, if (ref) |r| &r.rule_below else null)) changed = true;
     // The style Enter gives the paragraph after (FrameMaker's Next ¶ Tag).
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 920 + n });
@@ -19654,6 +19668,87 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
         }
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 920 + n })) {
             ps.next = if (choice == 0) null else styles[choice - 1].id;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/// A paragraph rule's fields (`label`: "Rule above" or "Rule below"), into
+/// `rule`: its pen, chosen from the document's stroke styles (or a new
+/// solid or dashed one), and with a pen its weight (as typed; "pen": the
+/// pen's own width), its offset from the text (as typed) and its length.
+/// Whether one changed.
+fn ruleFields(comptime label: []const u8, rule: *layout.model.ParagraphRule, n: usize, base: usize, ref: ?*const layout.model.ParagraphRule) bool {
+    const m = &state.model;
+    const a = dvui.currentWindow().arena();
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = base + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.pen != rule.pen else false;
+        propName(label);
+        const pens = m.stroke_styles.items;
+        const names = a.alloc([]const u8, pens.len + 3) catch return false;
+        names[0] = "None";
+        var choice: usize = 0;
+        for (pens, names[1 .. pens.len + 1], 1..) |st, *nm, k| {
+            nm.* = st.name;
+            if (rule.pen == st.id) choice = k;
+        }
+        names[pens.len + 1] = "New solid pen";
+        names[pens.len + 2] = "New dashed pen";
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = base + n })) {
+            const black: layout.art.Color = .{ .r = 0, .g = 0, .b = 0 };
+            const pt = layout.units.mm_per_pt;
+            if (choice == 0) {
+                rule.pen = .none;
+            } else if (choice <= pens.len) {
+                rule.pen = pens[choice - 1].id;
+            } else if (choice == pens.len + 1) {
+                rule.pen = act(.addStrokeStyle, .{ "Rule", layout.figure.Stroke{ .color = black, .width = 0.5 * pt } }) catch return false;
+            } else {
+                rule.pen = act(.addStrokeStyle, .{ "Dashed rule", layout.figure.Stroke{ .color = black, .width = 0.5 * pt, .dash = &.{ 2, 1 } } }) catch return false;
+            }
+            changed = true;
+        }
+    }
+    if (!rule.on()) return changed;
+    var buf: [48]u8 = undefined;
+    {
+        prop_marked = if (ref) |r| !std.meta.eql(r.weight, rule.weight) else false;
+        const shown = if (rule.weight) |w| w.format(&buf) else "pen";
+        if (textProp(label ++ " weight", shown, base + 1 + n)) |typed| {
+            const t = std.mem.trim(u8, typed, " ");
+            if (std.ascii.eqlIgnoreCase(t, "pen") or std.ascii.eqlIgnoreCase(t, "auto")) {
+                rule.weight = null;
+                changed = true;
+            } else if (layout.units.Quantity.parse(t, .pt)) |q| {
+                if (q.needsReference() or q.value > 0) {
+                    rule.weight = q;
+                    changed = true;
+                } else state.status = "A rule's weight is more than nothing. ";
+            } else state.status = "Weight reads as 0.5pt, 0.2mm, +1pt, 200% or pen (the pen's own). ";
+        }
+    }
+    {
+        prop_marked = if (ref) |r| !std.meta.eql(r.offset, rule.offset) else false;
+        if (textProp(label ++ " offset", rule.offset.format(&buf), base + 2 + n)) |typed| {
+            if (layout.units.Quantity.parse(typed, .pt)) |q| {
+                rule.offset = q;
+                changed = true;
+            } else state.status = "Offset reads as 2pt, 1mm, -1pt or 50% (of the line pitch). ";
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = base + 3 + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.length != rule.length else false;
+        propName(label ++ " length");
+        const names = [_][]const u8{ "The column", "Between the indents", "Under the text" };
+        var choice: usize = @intFromEnum(rule.length);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = base + 3 + n })) {
+            rule.length = @enumFromInt(choice);
             changed = true;
         }
     }
