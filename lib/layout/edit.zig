@@ -12,6 +12,7 @@
 const std = @import("std");
 const glyphic = @import("graven_glyphic");
 const rt = @import("graven_richtext");
+const graphemes = @import("graven_font").graphemes;
 
 const Allocator = std.mem.Allocator;
 const Id = glyphic.Id;
@@ -72,11 +73,12 @@ fn walk(a: Allocator, p: *const Parsed, src: []const u8, id: Id, out: *std.Array
         .soft_hyphen => try out.append(a, .{ .start = sp.start, .end = sp.end, .text = "" }),
         .space => for (sp.start..sp.end) |i| try out.append(a, .{ .start = @intCast(i), .end = @intCast(i + 1), .text = " " }),
         else => if (glyphic.entry.isText(e, id) or std.mem.eql(u8, src[sp.start..sp.end], n.text)) {
-            // Text as it stands in the source: a character at a time, an
+            // Text as it stands in the source: a grapheme cluster at a
+            // time (a letter and its accents, an emoji sequence), an
             // escape (\%) or a named character (\textbackslash) as one.
             var i: u32 = sp.start;
             while (i < sp.end) {
-                const end = @min(sourceEnd(src, i), sp.end);
+                const end: u32 = if (src[i] == '\\') @min(sourceEnd(src, i), sp.end) else @intCast(@min(graphemes.clusterEnd(src[0..sp.end], i), sp.end));
                 try out.append(a, .{ .start = i, .end = end, .text = readsAs(src[i..end]) });
                 i = end;
             }
@@ -289,6 +291,22 @@ test "characters map to their source bytes, escapes and commands apart" {
     try testing.expectEqualStrings("%", cs[1].text);
     try testing.expectEqualStrings("b", cs[2].text);
     try testing.expectEqual(@as(u32, 11), cs[2].start);
+}
+
+test "a letter and its accent are one character: the caret and Delete step over both" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // "e" + combining acute (2 bytes), then "x".
+    const src = "e\u{301}x";
+    const cs = try chars(a, src, false);
+    try testing.expectEqual(2, cs.len);
+    try testing.expectEqual(@as(u32, 3), cs[0].end);
+    try testing.expectEqual(@as(?u32, 0), try charBefore(a, src, 3, false));
+    try testing.expectEqual(@as(?u32, 3), try charAfter(a, src, 0, false));
+    try testing.expectEqualStrings("x", try deleteChars(a, src, 0, 3, false));
+    // In bold too, and an escape after it stays apart.
+    try testing.expectEqual(3, (try chars(a, "\\textbf{a\u{308}}\\%b", false)).len);
 }
 
 test "deleting removes characters only, leaving commands whole" {
