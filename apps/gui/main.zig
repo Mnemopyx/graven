@@ -28944,7 +28944,7 @@ fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sk_tool = .none;
     sk_nclicks = 0;
     sk_sel.clearRetainingCapacity();
-    sk_pieces.clearRetainingCapacity();
+    sk_clicked.clearRetainingCapacity();
     sk_inside = null;
     sk_lock = null;
     sk_summary = false;
@@ -30158,16 +30158,16 @@ fn skPruneSelection() void {
         };
         if (!keep) _ = sk_sel.orderedRemove(i);
     }
-    if (sk_sel.items.len == 0) sk_pieces.clearRetainingCapacity();
-    var k: usize = sk_pieces.items.len;
+    if (sk_sel.items.len == 0) sk_clicked.clearRetainingCapacity();
+    var k: usize = sk_clicked.items.len;
     while (k > 0) {
         k -= 1;
-        const g = switch (sk_pieces.items[k].pick) {
+        const g = switch (sk_clicked.items[k].pick) {
             .curve => |c| c,
             .point => |r| r.geom,
-            .constraint => continue,
+            .constraint, .crossing, .piece => continue,
         };
-        if (g >= s.geometry.items.len or s.geometry.items[g].removed) _ = sk_pieces.orderedRemove(k);
+        if (g >= s.geometry.items.len or s.geometry.items[g].removed) _ = sk_clicked.orderedRemove(k);
     }
     if (sk_inside) |in| if (in >= s.groups.list.items.len or s.groups.list.items[in].removed or !s.groups.list.items[in].sealed) {
         sk_inside = null;
@@ -31084,8 +31084,8 @@ var sk_inside: ?skl.GroupId = null;
 /// the object where one piece is wanted (a constraint to geometry outside
 /// it, a caption, a connection), so a vertex or centre can be held from
 /// outside without first going inside.
-const SkPiece = struct { obj: skl.GroupId, pick: SkPick };
-var sk_pieces: std.ArrayList(SkPiece) = .empty;
+const SkClicked = struct { obj: skl.GroupId, pick: SkPick };
+var sk_clicked: std.ArrayList(SkClicked) = .empty;
 
 /// The selection with each object chosen whole standing as the piece
 /// clicked to choose it (at the place of its first member). An object
@@ -31099,7 +31099,7 @@ fn skEffective(a: std.mem.Allocator) []const SkPick {
             out.append(a, p) catch return sk_sel.items;
             continue;
         };
-        const piece = for (sk_pieces.items) |x| {
+        const piece = for (sk_clicked.items) |x| {
             if (x.obj == o) break x.pick;
         } else null;
         if (piece == null) {
@@ -31151,8 +31151,8 @@ fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool, piece: ?Sk
     const all_in = for (picks.items) |q| {
         if (!skSelected(q)) break false;
     } else true;
-    for (sk_pieces.items, 0..) |x, i| if (x.obj == o) {
-        _ = sk_pieces.orderedRemove(i);
+    for (sk_clicked.items, 0..) |x, i| if (x.obj == o) {
+        _ = sk_clicked.orderedRemove(i);
         break;
     };
     if (toggle and all_in) {
@@ -31164,10 +31164,10 @@ fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool, piece: ?Sk
     }
     if (!toggle) {
         sk_sel.clearRetainingCapacity();
-        sk_pieces.clearRetainingCapacity();
+        sk_clicked.clearRetainingCapacity();
     }
     for (picks.items) |q| if (!skSelected(q)) sk_sel.append(state.gpa, q) catch {};
-    if (piece) |pc| sk_pieces.append(state.gpa, .{ .obj = o, .pick = pc }) catch {};
+    if (piece) |pc| sk_clicked.append(state.gpa, .{ .obj = o, .pick = pc }) catch {};
 }
 
 /// Whether object `o` is chosen whole, and nothing else.
