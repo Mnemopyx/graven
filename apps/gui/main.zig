@@ -28406,7 +28406,8 @@ var sk_note_until: i128 = 0;
 
 fn skEdit(edit: layout.model.SketchEdit) ?u32 {
     const r = sketch_edit orelse return null;
-    return act(.editSketchDraft, .{ r.sketch, edit }) catch |err| {
+    const done = if (sk_edit_merge) |k| actM(k, .editSketchDraft, .{ r.sketch, edit }) else act(.editSketchDraft, .{ r.sketch, edit });
+    return done catch |err| {
         defer {
             sk_note = state.status;
             sk_note_until = platform.monotonicNs() + 5 * std.time.ns_per_s;
@@ -28626,7 +28627,51 @@ fn skTarget() ?SkHit {
 /// pointer.
 fn skClickPoint() ?geom.Point {
     if (sk_lock) |l| return l.at;
-    return sk_pointer;
+    const p = sk_pointer orelse return null;
+    return skTypedTarget(skSnap(p));
+}
+
+/// Sketch point `p` (in the sketch's frame) on the grid, when drags snap
+/// to it (View › Snap to grid, the grid shown, Alt not held): the grid of
+/// the space the sketch is placed in.
+fn skSnap(p: geom.Point) geom.Point {
+    const st = snapStep() orelse return p;
+    const it = skItem() orelse return p;
+    return .{
+        .x = @round((p.x + it.at.x) / st) * st - it.at.x,
+        .y = @round((p.y + it.at.y) / st) * st - it.at.y,
+    };
+}
+
+/// What the step being placed measures from: the click before (or, for
+/// an arc's end, its centre), and which typed values it has.
+const SkStepBase = struct { base: ?geom.Point, from_prev: bool, arc_end: bool };
+
+fn skStepBase() SkStepBase {
+    const n = sk_nclicks;
+    const arc_end = sk_tool == .arc_centre and n == 2;
+    const from_prev = n > 0 and switch (sk_tool) {
+        .segment, .ray, .line, .polyline, .circle => true,
+        .arc_centre => n == 1,
+        else => false,
+    };
+    const base: ?geom.Point = if (arc_end) sk_clicks[0] else if (n > 0) sk_clicks[n - 1] else null;
+    return .{ .base = base, .from_prev = from_prev, .arc_end = arc_end };
+}
+
+/// Point `p` as the values typed for the step being placed have it: a
+/// typed length or angle (from the click before) wins over a typed x or
+/// y; what is not typed follows `p`.
+fn skTypedTarget(p: geom.Point) geom.Point {
+    if (sk_step_of.tool != sk_tool or sk_step_of.n != sk_nclicks) return p;
+    const t = sk_step_typed;
+    const sb = skStepBase();
+    if ((sb.from_prev or sb.arc_end) and (t[2] != null or t[3] != null)) if (sb.base) |b| {
+        const r = if (sb.arc_end) skDist(sk_clicks[0], sk_clicks[1]) else t[2] orelse skDist(b, p);
+        const a = if (t[3]) |deg| deg * std.math.pi / 180 else std.math.atan2(p.y - b.y, p.x - b.x);
+        return .{ .x = b.x + r * @cos(a), .y = b.y + r * @sin(a) };
+    };
+    return .{ .x = t[0] orelse p.x, .y = t[1] orelse p.y };
 }
 
 // Drawing tools -----------------------------------------------------------------
@@ -28640,27 +28685,54 @@ fn skToolClicks(t: SkTool) usize {
     };
 }
 
+/// What a drawing tool's click was given beyond where it is: the values
+/// typed for it (x, y, length or radius, angle; see `skStepFields`), and
+/// what it was locked onto (a point or a curve).
+const SkClickGiven = struct { typed: [4]?f64 = .{ null, null, null, null }, on: ?SkPick = null };
+var sk_given: [3]SkClickGiven = .{ .{}, .{}, .{} };
+/// Each drawing tool's geometry and the constraints its clicks give it
+/// are one undo step.
+var sk_tool_seq: u64 = 0;
+var sk_edit_merge: ?u64 = null;
+
 /// A click of the drawing tool at `p`: geometry once it has its clicks.
-fn skToolClick(p: geom.Point) void {
+/// What was typed for a click, or what it was locked onto, constrains the
+/// geometry made (`skClickConstraints`).
+fn skToolClick(p: geom.Point, given: SkClickGiven) void {
     sk_clicks[sk_nclicks] = p;
+    sk_given[sk_nclicks] = given;
     sk_nclicks += 1;
     if (sk_nclicks < skToolClicks(sk_tool)) return;
     const c = sk_clicks;
     const cons = sk_construction;
+    sk_tool_seq += 1;
+    sk_edit_merge = mergeKey(.{ "sktool", sk_tool_seq });
+    defer sk_edit_merge = null;
+    // Each click's part of the geometry made: one of its points, or a
+    // point on it.
+    var roles = [3]SkClickRole{ .none, .none, .none };
+    var made: ?u32 = null;
     switch (sk_tool) {
         .none => {},
-        .point => _ = skEdit(.{ .point = .{ .at = c[0], .construction = cons } }),
+        .point => {
+            made = skEdit(.{ .point = .{ .at = c[0], .construction = cons } });
+            roles[0] = .{ .point = .point };
+        },
         .segment, .polyline => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .segment = .{ .a = c[0], .b = c[1], .construction = cons } });
+            made = skEdit(.{ .segment = .{ .a = c[0], .b = c[1], .construction = cons } });
+            roles = .{ .{ .point = .start }, .{ .point = .end }, .none };
         },
         .circle => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .circle = .{ .c = c[0], .r = skDist(c[0], c[1]), .construction = cons } });
+            made = skEdit(.{ .circle = .{ .c = c[0], .r = skDist(c[0], c[1]), .construction = cons } });
+            roles = .{ .{ .point = .centre }, .on, .none };
         },
         .line => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .line = .{ .through = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            made = skEdit(.{ .line = .{ .through = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            roles = .{ .on, .on, .none };
         },
         .ray => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .ray = .{ .o = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            made = skEdit(.{ .ray = .{ .o = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            roles = .{ .{ .point = .origin }, .on, .none };
         },
         // An array: its centre then its edge (its first border there), or
         // two corners; its counts from the array tool's.
@@ -28675,10 +28747,12 @@ fn skToolClick(p: geom.Point) void {
             _ = skEdit(.{ .polygon = .{ .c = c[0], .corner = c[1], .sides = polygon_sides, .construction = cons } });
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+            made = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+            roles = .{ .{ .point = .centre }, .{ .point = .start }, .none };
         },
         .circle_3pt => if (circleThrough(c[0], c[1], c[2])) |centre| {
-            _ = skEdit(.{ .circle = .{ .c = centre, .r = skDist(centre, c[0]), .construction = cons } });
+            made = skEdit(.{ .circle = .{ .c = centre, .r = skDist(centre, c[0]), .construction = cons } });
+            roles = .{ .on, .on, .on };
         } else {
             state.status = "The three points are in line: no circle passes through them. ";
         },
@@ -28689,17 +28763,111 @@ fn skToolClick(p: geom.Point) void {
             const sweep = normAngle(std.math.atan2(c[1].y - centre.y, c[1].x - centre.x) - a0);
             const through = normAngle(std.math.atan2(c[2].y - centre.y, c[2].x - centre.x) - a0);
             if (through < sweep) {
-                _ = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons } });
-            } else _ = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons } });
+                made = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons } });
+                roles = .{ .{ .point = .start }, .{ .point = .end }, .on };
+            } else {
+                made = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons } });
+                roles = .{ .{ .point = .end }, .{ .point = .start }, .on };
+            }
         } else {
             state.status = "The three points are in line: no arc passes through them. ";
         },
     }
-    // A polyline goes on from its last point; other tools start again.
+    if (made) |g| skClickConstraints(g, roles);
+    // A polyline goes on from its last point (joined to it); other tools
+    // start again.
     if (sk_tool == .polyline) {
         sk_clicks[0] = c[1];
+        sk_given[0] = .{};
+        if (made) |g| sk_given[0].on = .{ .point = .{ .geom = g, .role = .end } };
         sk_nclicks = 1;
     } else sk_nclicks = 0;
+}
+
+/// A drawing tool click's part of the geometry it made.
+const SkClickRole = union(enum) {
+    none,
+    /// One of its points.
+    point: @FieldType(skl.PointRef, "role"),
+    /// A point on it.
+    on,
+};
+
+/// The constraints the clicks that made geometry `g` give it (the owner,
+/// 2026-11-26: typed values make constraints, not only places):
+/// - a click locked onto a point: its point there coincident with it (or
+///   the point on it, where the click is a point on it); onto a curve:
+///   its point on the curve;
+/// - a typed x or y: its point that far across or up from the sketch's
+///   origin (on an axis when 0);
+/// - a typed length: a segment's length, a circle's or arc's radius;
+/// - a typed angle: a segment's, ray's or line's direction (horizontal or
+///   vertical when it is one).
+fn skClickConstraints(g: skl.GeomId, roles: [3]SkClickRole) void {
+    const it = skItem() orelse return;
+    const kind = it.sketch.geometry.items[g].kind;
+    const origin: skl.PointRef = .{ .geom = 0, .role = .point };
+    const x_axis: skl.GeomId = 1;
+    const y_axis: skl.GeomId = 2;
+    for (roles, 0..) |role, i| {
+        if (i >= skToolClicks(sk_tool)) break;
+        const gv = sk_given[i];
+        const own: ?skl.PointRef = switch (role) {
+            .point => |r| .{ .geom = g, .role = r },
+            else => null,
+        };
+        // Locked onto something: there, whatever was typed.
+        if (gv.on) |on| {
+            switch (on) {
+                .point => |q| if (q.geom != g) {
+                    if (own) |r| {
+                        _ = skEdit(.{ .constrain = .{ .kind = .{ .coincident = .{ r, q } } } });
+                    } else if (role == .on) {
+                        _ = skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = q, .on = g } } } });
+                    }
+                },
+                .curve => |cv| if (own) |r| if (cv != g) {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = cv } } } });
+                },
+                .constraint => {},
+            }
+            continue;
+        }
+        if (own) |r| {
+            if (gv.typed[0]) |x| _ = if (@abs(x) < 1e-9)
+                skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = y_axis } } } })
+            else
+                skEdit(.{ .constrain = .{ .kind = .{ .distance_x = .{ .a = origin, .b = r, .value = @abs(x) } } } });
+            if (gv.typed[1]) |y| _ = if (@abs(y) < 1e-9)
+                skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = x_axis } } } })
+            else
+                skEdit(.{ .constrain = .{ .kind = .{ .distance_y = .{ .a = origin, .b = r, .value = @abs(y) } } } });
+        }
+        if (i == 0) continue;
+        // From the click before: a length (or radius) and an angle.
+        if (gv.typed[2]) |len| if (len > 1e-9) switch (kind) {
+            .segment => _ = skEdit(.{ .constrain = .{ .kind = .{ .distance = .{ .a = .{ .geom = g, .role = .start }, .b = .{ .geom = g, .role = .end }, .value = len } } } }),
+            .circle, .arc => if (sk_tool == .circle or (sk_tool == .arc_centre and i == 1)) {
+                _ = skEdit(.{ .constrain = .{ .kind = .{ .radius = .{ .g = g, .value = len } } } });
+            },
+            else => {},
+        };
+        if (gv.typed[3]) |deg| switch (kind) {
+            .segment, .ray, .line => {
+                const m = @mod(deg, 180);
+                if (@abs(m) < 1e-9 or @abs(m - 180) < 1e-9) {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .horizontal = .{ .geom = g } } } });
+                } else if (@abs(m - 90) < 1e-9) {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .vertical = .{ .geom = g } } } });
+                } else {
+                    // From the x axis (its direction points left, at
+                    // 180°, but an angle holds a half turn either way).
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .angle = .{ .a = x_axis, .b = g, .value = deg * std.math.pi / 180 } } } });
+                }
+            },
+            else => {},
+        };
+    }
 }
 
 /// The centre of the circle through three points; null when they are in
@@ -29451,7 +29619,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             }
             if (!me.button.pointer() or sk_summary) return;
             if (sk_tool != .none) {
-                if (skClickPoint()) |p| skToolClick(p);
+                if (skClickPoint()) |p| skToolClick(p, skGivenNow(true));
                 sk_lock = null;
                 return;
             }
@@ -29472,7 +29640,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 if (d.moved or moved_px > 3) {
                     d.moved = true;
                     const r = sketch_edit.?;
-                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketchDraft, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
+                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketchDraft, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = skSnap(q) } } }) catch {};
                 }
             } else if (sk_dim_drag) |*d| {
                 const moved_px = skDist(d.start, q) * state.view.ppm;
@@ -30028,6 +30196,36 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 const segs = geom.arc(sk_clicks[0], r, 0, 2 * std.math.pi, &buf4);
                 skPreview(area, it, segs);
             },
+            // Three points: the circle (or arc) through the two clicks
+            // and the pointer, before the third click.
+            .circle_3pt, .arc_3pt => if (sk_nclicks == 2) {
+                const c = sk_clicks;
+                if (circleThrough(c[0], c[1], p)) |centre| {
+                    const r = skDist(centre, c[0]);
+                    var buf4: [4]geom.Segment = undefined;
+                    if (sk_tool == .circle_3pt) {
+                        skPreview(area, it, geom.arc(centre, r, 0, 2 * std.math.pi, &buf4));
+                    } else {
+                        // From the first click to the second, the way
+                        // round that passes the pointer.
+                        const a0 = std.math.atan2(c[0].y - centre.y, c[0].x - centre.x);
+                        const sweep = normAngle(std.math.atan2(c[1].y - centre.y, c[1].x - centre.x) - a0);
+                        const through = normAngle(std.math.atan2(p.y - centre.y, p.x - centre.x) - a0);
+                        skPreview(area, it, geom.arc(centre, r, a0, if (through < sweep) sweep else sweep - 2 * std.math.pi, &buf4));
+                    }
+                } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c[0]), skPx(area, it, c[1]) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
+            // An arc about its centre: from its start to the pointer's
+            // angle, counter-clockwise.
+            .arc_centre => if (sk_nclicks == 2) {
+                const c0 = sk_clicks[0];
+                const r = skDist(c0, sk_clicks[1]);
+                const a0 = std.math.atan2(sk_clicks[1].y - c0.y, sk_clicks[1].x - c0.x);
+                const sweep = normAngle(std.math.atan2(p.y - c0.y, p.x - c0.x) - a0);
+                var buf4: [4]geom.Segment = undefined;
+                if (r > 1e-9 and sweep > 1e-9) skPreview(area, it, geom.arc(c0, r, a0, sweep, &buf4));
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c0), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
             .polygon => if (skDist(sk_clicks[0], p) > 1e-9) {
                 const c0 = sk_clicks[0];
                 const r = skDist(c0, p);
@@ -30553,7 +30751,8 @@ fn skStepFields() void {
     const live_ang = std.math.atan2(p.y - base.y, p.x - base.x) * 180 / std.math.pi;
     const radius_word = sk_tool == .circle or sk_tool == .arc_centre;
     // A new step (or tool) forgets what was typed for the last.
-    if (sk_step_of.tool != sk_tool or sk_step_of.n != n) {
+    const new_step = sk_step_of.tool != sk_tool or sk_step_of.n != n;
+    if (new_step) {
         sk_step_typed = .{ null, null, null, null };
         sk_step_of = .{ .tool = sk_tool, .n = n };
     }
@@ -30573,8 +30772,10 @@ fn skStepFields() void {
         // Typed values are drawn bold: they hold until the step is placed.
         var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal, .id_extra = 7700 + k, .font = if (sk_step_typed[k] != null) dvui.Font.theme(.body).withWeight(.bold) else null });
         const focused = te.data().id == dvui.focusedWidgetId();
-        if (!focused and sk_step_typed[k] == null and !std.mem.eql(u8, te.textGet(), live)) te.textSet(live, false);
-        if (te.text_changed and focused) {
+        // A new step shows its live values, the field with the keyboard
+        // too (what was typed went to the step placed).
+        if ((new_step or !focused) and sk_step_typed[k] == null and !std.mem.eql(u8, te.textGet(), live)) te.textSet(live, new_step and focused);
+        if (te.text_changed and focused and !new_step) {
             sk_step_typed[k] = std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " ")) catch null;
         }
         if (std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " "))) |v| vals[k] = v else |_| {}
@@ -30590,7 +30791,18 @@ fn skStepFields() void {
             break :blk .{ .x = base.x + r * @cos(a), .y = base.y + r * @sin(a) };
         },
     };
-    skToolClick(target);
+    skToolClick(target, skGivenNow(false));
+}
+
+/// What the step being placed is given now: the values typed for it, and
+/// (`locked`: placed by a click) what the pointer is locked onto.
+fn skGivenNow(locked: bool) SkClickGiven {
+    var g: SkClickGiven = .{};
+    if (sk_step_of.tool == sk_tool and sk_step_of.n == sk_nclicks) g.typed = sk_step_typed;
+    if (locked) if (sk_lock) |l| {
+        g.on = l.pick;
+    };
+    return g;
 }
 
 
