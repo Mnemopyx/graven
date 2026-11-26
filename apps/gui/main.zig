@@ -747,6 +747,9 @@ var tracks_tool: struct {
     /// A region (rows or columns added as content needs them) or one
     /// track laid out in advance, running the way it is drawn.
     kind: layout.model.TileRegion.Kind = .region,
+    /// The style template a new text layout's flow starts from (`.none`,
+    /// or one since removed: the Default).
+    template: layout.model.ObjectId = .none,
 } = .{};
 
 /// What new tracks are sized to: a tile prototype's smallest tile, or a
@@ -14542,6 +14545,27 @@ fn tracksToolOptions() !void {
             if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
         }
     }
+    // Text: the style template its flow starts from (the Default until
+    // another is chosen). Choosing one sizes the tracks to its text style.
+    if (tracks_tool.size_to == .style) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9004 });
+        defer row.deinit();
+        propName("Template");
+        const templates = state.model.templates.items;
+        const arena = dvui.currentWindow().arena();
+        const names = try arena.alloc([]const u8, @max(1, templates.len));
+        if (templates.len == 0) names[0] = "Default";
+        var choice: usize = 0;
+        for (templates, 0..) |t, k| {
+            names[k] = t.name;
+            if (t.id == tracks_tool.template) choice = k;
+        }
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice < templates.len) {
+            const t = templates[choice];
+            tracks_tool.template = t.id;
+            if (state.model.styleIndex(t.text) != null) tracks_tool.size_to = .{ .style = t.text };
+        }
+    }
     var buf: [96]u8 = undefined;
     switch (tracks_tool.size_to) {
         .prototype => |pid| if (state.model.protoIndex(pid)) |pidx| {
@@ -14850,8 +14874,8 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         state.status = "The tracks were not added. ";
         return;
     };
-    // A text layout's new flow: its style copied from the Default
-    // template, in the same undo step.
+    // A text layout's new flow: the styles of the template chosen in the
+    // tool's options (the Default), in the same undo step.
     if (tracks_tool.size_to == .style) styleNewFlow(plan.parent, r) catch {};
     // Empty tracks, the user fills them: the cursor waits at the start.
     state.context = .{ .region = .{ .parent = plan.parent, .region = r } };
@@ -19978,8 +20002,11 @@ fn styleFlowFrom(pi: Parent, ri: usize, tid: ?layout.model.ObjectId) !void {
     _ = try hist.join(m, .setFlowStyle, .{ fid, t.text, t.paragraph, @as(?layout.model.Leading, null), id });
 }
 
+/// A new text layout's flow: the styles of the template chosen in the
+/// Add tracks tool's options (the Default when none is, or it is gone).
 fn styleNewFlow(pi: Parent, ri: usize) !void {
-    try styleFlowFrom(pi, ri, null);
+    const tid = tracks_tool.template;
+    try styleFlowFrom(pi, ri, if (state.model.styleTemplate(tid) != null) tid else null);
 }
 
 /// The flow of track `ri` of panel `pi`, when it has a flow style.
