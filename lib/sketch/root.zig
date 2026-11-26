@@ -288,7 +288,7 @@ pub const Sketch = struct {
                 d.side = if (run < 0) -1 else 1;
                 d.value = @abs(d.value);
             },
-            inline .distance, .radius => |*d| d.value = @abs(d.value),
+            inline .distance, .radius, .diameter => |*d| d.value = @abs(d.value),
             .line_distance => |*ld| {
                 ld.value = @abs(ld.value);
                 var local: Local = .{ .s = s.store() };
@@ -354,7 +354,7 @@ pub const Sketch = struct {
         if (id >= s.constraints.items.len) return error.NoSuchConstraint;
         if (value < 0 and s.constraints.items[id].kind != .angle) return error.Negative;
         switch (s.constraints.items[id].kind) {
-            inline .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => |*d| d.value = value,
+            inline .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => |*d| d.value = value,
             else => return error.WrongKind,
         }
     }
@@ -465,7 +465,7 @@ pub const Sketch = struct {
             if (v < 0 and c.kind != .angle) continue;
             switch (c.kind) {
                 .angle => |*an| an.value = v * std.math.pi / 180,
-                inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = v,
+                inline .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter => |*d| d.value = v,
                 else => {},
             }
         }
@@ -482,7 +482,7 @@ pub const Sketch = struct {
                 const db = l.direction(an.b) catch return null;
                 return std.math.atan2(da.cross(db).v, da.dot(db).v);
             },
-            inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = 0,
+            inline .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter => |*d| d.value = 0,
             else => return null,
         }
         var out: [2]D = undefined;
@@ -505,7 +505,7 @@ pub const Sketch = struct {
                     while (d.value - x > std.math.pi / 2.0) x += std.math.pi;
                     d.value = x;
                 },
-                inline .distance, .distance_x, .distance_y, .line_distance, .radius => |*d| d.value = @abs(v),
+                inline .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter => |*d| d.value = @abs(v),
                 else => {},
             }
         }

@@ -585,7 +585,7 @@
   },
   {
    "index": 31,
-   "icon": "con-angle",
+   "icon": "con-diameter",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -602,7 +602,7 @@
   },
   {
    "index": 32,
-   "icon": "con-parallel",
+   "icon": "con-angle",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -619,7 +619,7 @@
   },
   {
    "index": 33,
-   "icon": "con-perpendicular",
+   "icon": "con-parallel",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -636,7 +636,7 @@
   },
   {
    "index": 34,
-   "icon": "con-tangent",
+   "icon": "con-perpendicular",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -653,7 +653,7 @@
   },
   {
    "index": 35,
-   "icon": "con-equal",
+   "icon": "con-tangent",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -670,7 +670,7 @@
   },
   {
    "index": 36,
-   "icon": "con-equal-distance",
+   "icon": "con-equal",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -687,7 +687,7 @@
   },
   {
    "index": 37,
-   "icon": "con-symmetric",
+   "icon": "con-equal-distance",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -699,6 +699,23 @@
     "left": 364,
     "top": 292,
     "right": 428,
+    "bottom": 356
+   }
+  },
+  {
+   "index": 38,
+   "icon": "con-symmetric",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 292,
+    "right": 500,
     "bottom": 356
    }
   }

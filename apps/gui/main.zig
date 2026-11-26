@@ -2587,7 +2587,7 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "diameters")) loadDiametersSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
                 sample_texts = true;
                 loadSketchPanelSample();
             } else if (std.mem.eql(u8, which, "connections")) {
@@ -27827,6 +27827,27 @@ fn loadSketchSample() void {
     state.view.fit = null;
 }
 
+/// GRAVEN_SAMPLE=diameters: the rectangle sketch with circles and an arc
+/// beside it, dimensioned across: a driving diameter turned to 30° with
+/// its value beyond the circle, a small circle's reference diameter
+/// (arrows outside), an arc's diameter, a circle's radius.
+fn loadDiametersSample() void {
+    loadSketchSample();
+    const big = skEdit(.{ .circle = .{ .c = .{ .x = -12, .y = 0 }, .r = 3 } }) orelse return;
+    const small = skEdit(.{ .circle = .{ .c = .{ .x = 17, .y = 5 }, .r = 0.6 } }) orelse return;
+    const arc = skEdit(.{ .arc = .{ .c = .{ .x = 11, .y = -4 }, .a = .{ .x = 13, .y = -4 }, .b = .{ .x = 9, .y = -4 } } }) orelse return;
+    const ring = skEdit(.{ .circle = .{ .c = .{ .x = 0, .y = 9 }, .r = 2 } }) orelse return;
+    const d0 = skEdit(.{ .constrain = .{ .kind = .{ .diameter = .{ .g = big, .value = 6 } } } }) orelse return;
+    _ = skEdit(.{ .place = .{ .c = d0, .place = .{ .angle = std.math.pi / 6.0, .text = 5.5 } } });
+    const d1 = skEdit(.{ .constrain = .{ .kind = .{ .diameter = .{ .g = small, .value = 1.2 } } } }) orelse return;
+    _ = skEdit(.{ .reference = .{ .c = d1, .on = true } });
+    _ = skEdit(.{ .constrain = .{ .kind = .{ .diameter = .{ .g = arc, .value = 4 } } } });
+    _ = skEdit(.{ .constrain = .{ .kind = .{ .radius = .{ .g = ring, .value = 2 } } } });
+    state.view.cx = 0;
+    state.view.cy = 1;
+    state.view.ppm = 28;
+}
+
 /// GRAVEN_SAMPLE=sketch-panel: the ready-made rectangle, its edges and a
 /// circle inside inked, inserted onto the canvas as a panel (the circle a
 /// hole in it).
@@ -28661,11 +28682,20 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64, hidden: Tags) vo
     for (s.constraints.items, 0..) |c, ci| {
         if (sk_nhits >= sk_hits.len) break;
         if (c.place.hidden or !hidden.showsTag(.dimensions)) continue;
-        const ms = skDimMeasure(s, c) orelse continue;
-        const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, 0));
-        const near = @min(skDist(d.text_at, q), segPointDist(d.line[0], d.line[1], q));
+        const text_at: geom.Point, const near = if (skDimMeasure(s, c)) |ms| blk: {
+            const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, 0));
+            break :blk .{ d.text_at, @min(skDist(d.text_at, q), segPointDist(d.line[0], d.line[1], q)) };
+        } else if (skRound(s, c)) |m| blk: {
+            var tb: [64]u8 = undefined;
+            const w = strokefont.width(skDimLabel(&tb, c)) * dim_cap;
+            const d = cdim.radial(m, c.place, cdim.Style.screen(state.view.ppm / px, w));
+            // The value sits above its line: its middle there picks it too.
+            const lift = dim_cap / 2 / state.view.ppm;
+            const mid: geom.Point = .{ .x = d.text_at.x - d.text_dir.y * lift, .y = d.text_at.y + d.text_dir.x * lift };
+            break :blk .{ d.text_at, @min(@min(skDist(d.text_at, q), skDist(mid, q)), segPointDist(d.line[0], d.line[1], q)) };
+        } else continue;
         if (near > radius) continue;
-        sk_hits[sk_nhits] = .{ .pick = .{ .constraint = @intCast(ci) }, .at = d.text_at };
+        sk_hits[sk_nhits] = .{ .pick = .{ .constraint = @intCast(ci) }, .at = text_at };
         sk_nhits += 1;
     }
     for (curves[0..ncurves]) |c| {
@@ -28957,7 +28987,7 @@ fn circleThrough(a: geom.Point, b: geom.Point, c: geom.Point) ?geom.Point {
 
 // Constraints from the selection --------------------------------------------------
 
-const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, angle, fixed, parallel, perpendicular, tangent, equal, symmetric };
+const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, diameter, angle, fixed, parallel, perpendicular, tangent, equal, symmetric };
 
 const SkSelParts = struct {
     points: [8]skl.PointRef = undefined,
@@ -29102,6 +29132,9 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
             } else if (p.np == 0 and p.nc == 1 and s.geometry.items[p.curves[0]].kind == .segment) {
                 a = .{ .geom = p.curves[0], .role = .start };
                 b = .{ .geom = p.curves[0], .role = .end };
+            } else if (kind == .distance and p.np == 0 and p.nc > 0 and skIsRound(s, p.curves[0])) {
+                // A circle or arc: its diameter (D across it).
+                return skConstraintsFor(.diameter, out);
             } else if (kind == .distance and p.np == 1 and p.nc == 1 and skIsStraight(s, p.curves[0])) {
                 const q = skPartPoint(s, p.points[0]) orelse return 0;
                 const l = skLineOf(s, s.geometry.items[p.curves[0]]) orelse return 0;
@@ -29118,7 +29151,7 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
             };
             n = 1;
         },
-        .radius => if (p.np == 0 and p.nc > 0) {
+        .radius, .diameter => if (p.np == 0 and p.nc > 0) {
             for (p.curves[0..p.nc]) |g| {
                 if (!skIsRound(s, g)) return 0;
                 const r = switch (s.geometry.items[g].kind) {
@@ -29126,7 +29159,7 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
                     .arc => |ar| skDist(skVal(s, ar.a), skVal(s, ar.c)),
                     else => unreachable,
                 };
-                out[n] = .{ .kind = .{ .radius = .{ .g = g, .value = r } } };
+                out[n] = if (kind == .diameter) .{ .kind = .{ .diameter = .{ .g = g, .value = 2 * r } } } else .{ .kind = .{ .radius = .{ .g = g, .value = r } } };
                 n += 1;
             }
         },
@@ -29204,12 +29237,41 @@ fn skConstrain(kind: SkKind, area: dvui.Rect.Physical) void {
     for (buf[0..n]) |c| last = skEdit(.{ .constrain = c });
     sk_sel.clearRetainingCapacity();
     if (last) |id| switch (kind) {
-        .distance, .distance_x, .distance_y, .radius, .angle => {
+        .distance, .distance_x, .distance_y, .radius, .diameter, .angle => {
+            skTurnClearOfOthers(id);
             const at = skDimAnchor(area, id) orelse dvui.Point.Physical{ .x = area.x + area.w / 2, .y = area.y + area.h / 2 };
             sk_dim = .{ .c = id, .at = at };
         },
         else => {},
     };
+}
+
+/// A new radius or diameter on a curve that has one already: turned a
+/// quarter turn from it, so the two do not lie on one another.
+fn skTurnClearOfOthers(id: skl.ConstraintId) void {
+    const it = skItem() orelse return;
+    const s = it.sketch;
+    if (id >= s.constraints.items.len) return;
+    const c = s.constraints.items[id];
+    const m = skRound(s, c) orelse return;
+    const g = switch (c.kind) {
+        inline .radius, .diameter => |r| r.g,
+        else => return,
+    };
+    var n: f64 = 0;
+    for (s.constraints.items, 0..) |o, oi| {
+        if (oi == id) continue;
+        switch (o.kind) {
+            inline .radius, .diameter => |r| if (r.g == g) {
+                n += 1;
+            },
+            else => {},
+        }
+    }
+    if (n == 0) return;
+    var pl = c.place;
+    pl.angle = m.default_angle - n * std.math.pi / 2.0;
+    _ = skEdit(.{ .place = .{ .c = id, .place = pl } });
 }
 
 /// A constraint's value as shown: lengths in the document's units, angles
@@ -29218,7 +29280,7 @@ fn skShownValue(c: skl.Constraint) ?f64 {
     return switch (c.kind) {
         inline .distance, .distance_x, .distance_y => |d| d.value * docUnits().perMm(),
         .line_distance => |d| d.value * docUnits().perMm(),
-        .radius => |r| r.value * docUnits().perMm(),
+        inline .radius, .diameter => |r| r.value * docUnits().perMm(),
         .angle => |a| a.value * 180 / std.math.pi,
         else => null,
     };
@@ -29452,6 +29514,7 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .distance_y => "Vertical distance",
         .line_distance => "Distance to line",
         .radius => "Radius",
+        .diameter => "Diameter",
         .angle => "Angle",
         .parallel => "Parallel",
         .perpendicular => "Perpendicular",
@@ -29521,6 +29584,79 @@ fn skArcMid(c: geom.Point, a: geom.Point, b: geom.Point) geom.Point {
 }
 
 const cdim = skl.constraint.dimension;
+
+/// What a radius or diameter measures: its circle, and the way its line
+/// points by default (a circle's 45°, an arc's middle).
+fn skRound(s: *const skl.Sketch, c: skl.Constraint) ?cdim.Round {
+    const g, const full = switch (c.kind) {
+        .radius => |r| .{ r.g, false },
+        .diameter => |r| .{ r.g, true },
+        else => return null,
+    };
+    const ld = skRadiusLeader(s, g) orelse return null;
+    const r = skDist(ld.centre, ld.on);
+    const sweep: ?[2]f64 = switch (s.geometry.items[g].kind) {
+        .arc => |ar| blk: {
+            const cc = skVal(s, ar.c);
+            const pa = skVal(s, ar.a);
+            const pb = skVal(s, ar.b);
+            const t0 = std.math.atan2(pa.y - cc.y, pa.x - cc.x);
+            var sw = std.math.atan2(pb.y - cc.y, pb.x - cc.x) - t0;
+            if (sw <= 0) sw += 2 * std.math.pi;
+            break :blk .{ t0, sw };
+        },
+        else => null,
+    };
+    return .{ .centre = ld.centre, .r = r, .diameter = full, .default_angle = std.math.atan2(ld.on.y - ld.centre.y, ld.on.x - ld.centre.x), .sweep = sweep };
+}
+
+/// Whether a dimension is drawn after drafting practice, and so is placed
+/// by dragging it (a distance, radius or diameter).
+fn skDimPlaceable(s: *const skl.Sketch, c: skl.Constraint) bool {
+    return skDimMeasure(s, c) != null or skRound(s, c) != null;
+}
+
+/// A dimension's value as drawn: R or ⌀ before a radius or diameter, a
+/// reference's in parentheses, an expression before what it comes to.
+fn skDimLabel(tb: []u8, c: skl.Constraint) []const u8 {
+    const v = skShownValue(c) orelse return "";
+    const u: []const u8 = if (c.kind == .angle) "°" else "";
+    const pre: []const u8 = switch (c.kind) {
+        .radius => "R",
+        .diameter => "⌀",
+        .distance_x => "↔",
+        .distance_y => "↕",
+        else => "",
+    };
+    if (!c.driving) return std.fmt.bufPrint(tb, "({s}{d:.2}{s})", .{ pre, @abs(v), u }) catch "";
+    if (c.expr.len > 0) return std.fmt.bufPrint(tb, "{s}{s} = {d:.2}{s}", .{ pre, c.expr, @abs(v), u }) catch "";
+    return std.fmt.bufPrint(tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
+}
+
+/// A radius or diameter drawn after drafting practice
+/// (`graven_constraint`'s `radial`), in screen sizes: its line through or
+/// from the centre, arrowheads on the curve, the value along it.
+fn drawRound(area: dvui.Rect.Physical, at: geom.Point, m: cdim.Round, place: cdim.Placement, text: []const u8, colour: dvui.Color, hot: bool) void {
+    const it = struct {
+        at: geom.Point,
+    }{ .at = at };
+    const px = dvui.windowNaturalScale();
+    const w = strokefont.width(text) * dim_cap * px;
+    const d = cdim.radial(m, place, cdim.Style.screen(state.view.ppm / px, w / px));
+    const thin: dvui.ColorOrGradient = .{ .color = colour.opacity(0.7) };
+    dvui.Path.stroke(.{ .points = &.{ skPx(area, it, d.line[0]), skPx(area, it, d.line[1]) } }, .{ .thickness = if (hot) 2 * px else px, .color = thin });
+    // A diameter's centre marked where its line crosses it.
+    if (m.diameter) skRing(skPx(area, it, m.centre), 1.5 * px, colour, px);
+    for (d.arrows) |ao| if (ao) |a| {
+        const pts = [_]dvui.Point.Physical{ skPx(area, it, a.tip), skPx(area, it, a.wings[0]), skPx(area, it, a.wings[1]) };
+        dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
+    };
+    const q0 = skPx(area, it, d.text_at);
+    const q1 = skPx(area, it, .{ .x = d.text_at.x + d.text_dir.x, .y = d.text_at.y + d.text_dir.y });
+    var pl = alongPlace(q0, q1, 0);
+    pl.at = .{ .x = q0.x, .y = q0.y };
+    strokeText(text, pl, colour);
+}
 
 /// What a sketch distance measures, for drawing it after drafting practice
 /// (`graven_constraint`'s dimensions): a horizontal or vertical distance
@@ -29612,7 +29748,12 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
             break :blk d.text_at;
         },
         .line_distance => |d| s.point(d.p) catch null,
-        .radius => |r| curveMid(s, r.g),
+        .radius, .diameter => blk: {
+            const m = skRound(s, c) orelse break :blk null;
+            var tb: [64]u8 = undefined;
+            const w = strokefont.width(skDimLabel(&tb, c)) * dim_cap;
+            break :blk cdim.radial(m, c.place, cdim.Style.screen(state.view.ppm / dvui.windowNaturalScale(), w)).text_at;
+        },
         .angle => |a| curveMid(s, a.b),
         inline .parallel, .perpendicular, .tangent, .equal => |a| curveMid(s, a.b),
         // Within the corner of its second angle.
@@ -29760,7 +29901,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             } else if (target != null and target.?.pick == .point and !sk_press_ctrl) {
                 sk_drag = .{ .p = target.?.pick.point, .moved = false, .start = q };
                 sk_drag_seq += 1;
-            } else if (target != null and target.?.pick == .constraint and !sk_press_ctrl and target.?.pick.constraint < it.sketch.constraints.items.len and skDimMeasure(it.sketch, it.sketch.constraints.items[target.?.pick.constraint]) != null) {
+            } else if (target != null and target.?.pick == .constraint and !sk_press_ctrl and target.?.pick.constraint < it.sketch.constraints.items.len and skDimPlaceable(it.sketch, it.sketch.constraints.items[target.?.pick.constraint])) {
                 sk_drag_seq += 1;
                 sk_dim_drag = .{ .c = target.?.pick.constraint, .moved = false, .start = q, .seq = sk_drag_seq };
             } else sk_box = .{ .start = q, .at = q };
@@ -29779,9 +29920,15 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 if (d.moved or moved_px > 3) {
                     d.moved = true;
                     const c = it.sketch.constraints.items[d.c];
-                    if (skDimMeasure(it.sketch, c)) |ms| {
+                    const place: ?cdim.Placement = if (skDimMeasure(it.sketch, c)) |ms|
+                        cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach())
+                    else if (skRound(it.sketch, c)) |m|
+                        cdim.radialWithinReach(m, cdim.radialTextAt(m, c.place, q), dimReach())
+                    else
+                        null;
+                    if (place) |pl| {
                         const r = sketch_edit.?;
-                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketchDraft, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach()) } } }) catch {};
+                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketchDraft, .{ r.sketch, .{ .place = .{ .c = d.c, .place = pl } } }) catch {};
                     }
                 }
             } else if (sk_box) |*b| {
@@ -30273,7 +30420,7 @@ fn skRing(c: dvui.Point.Physical, r: f32, colour: dvui.Color, thick: f32) void {
 /// A constraint's tag: a dimension's (its value shown) or a mark's.
 fn skConstraintTag(c: skl.Constraint) layout.tags.Tag {
     return switch (c.kind) {
-        .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => .dimensions,
+        .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => .dimensions,
         else => .constraints,
     };
 }
@@ -30375,22 +30522,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             },
             .symmetric => "sym",
             .equal_distance => "=",
-            .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
-                const v = skShownValue(c).?;
-                const u: []const u8 = if (c.kind == .angle) "°" else "";
-                const pre: []const u8 = switch (c.kind) {
-                    .radius => "R",
-                    .distance_x => "↔",
-                    .distance_y => "↕",
-                    else => "",
-                };
+            .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => blk: {
                 // A reference dimension in parentheses, fainter.
-                if (!c.driving) {
-                    colour = colour.opacity(0.55);
-                    break :blk std.fmt.bufPrint(&tb, "({s}{d:.2}{s})", .{ pre, @abs(v), u }) catch "";
-                }
-                if (c.expr.len > 0) break :blk std.fmt.bufPrint(&tb, "{s}{s} = {d:.2}{s}", .{ pre, c.expr, @abs(v), u }) catch "";
-                break :blk std.fmt.bufPrint(&tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
+                if (!c.driving) colour = colour.opacity(0.55);
+                break :blk skDimLabel(&tb, c);
             },
         };
         // A distance draws its line, its value along it; a radius a leader
@@ -30402,31 +30537,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 drawDimension(area, it.at, ms, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
                 continue;
             },
-            .radius => |r| if (skRadiusLeader(s, r.g)) |ld| {
-                const qc = skPx(area, it, ld.centre);
-                const qr = skPx(area, it, ld.on);
-                const len = @sqrt((qr.x - qc.x) * (qr.x - qc.x) + (qr.y - qc.y) * (qr.y - qc.y));
-                if (len >= 1) {
-                    // Out past the curve far enough for the value.
-                    const ux = (qr.x - qc.x) / len;
-                    const uy = (qr.y - qc.y) / len;
-                    const w: f32 = @floatCast(strokefont.width(text) * dim_cap * px);
-                    const out = 6 * px + w + 4 * px;
-                    const qo: dvui.Point.Physical = .{ .x = qr.x + ux * out, .y = qr.y + uy * out };
-                    dvui.Path.stroke(.{ .points = &.{ qc, qo } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
-                    // An arrowhead on the curve, pointing out.
-                    const h = 7 * px;
-                    const ah = 2.5 * px;
-                    dvui.Path.stroke(.{ .points = &.{
-                        .{ .x = qr.x - ux * h - uy * ah, .y = qr.y - uy * h + ux * ah },
-                        qr,
-                        .{ .x = qr.x - ux * h + uy * ah, .y = qr.y - uy * h - ux * ah },
-                    } }, .{ .thickness = px, .color = .{ .color = colour } });
-                    // The value over the leader's part beyond the curve.
-                    const beyond: dvui.Point.Physical = .{ .x = qr.x + ux * 6 * px, .y = qr.y + uy * 6 * px };
-                    strokeText(text, alongPlace(beyond, qo, 0.5), colour);
-                    continue;
-                }
+            .radius, .diameter => if (skRound(s, c)) |m| {
+                if (c.place.hidden) continue;
+                drawRound(area, it.at, m, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
+                continue;
             },
             else => {},
         }
@@ -30745,6 +30859,7 @@ fn sketchConstrainKeys() void {
         .{ .k = .distance_x, .name = "Horizontal distance", .icon = .con_distance_x },
         .{ .k = .distance_y, .name = "Vertical distance", .icon = .con_distance_y },
         .{ .k = .radius, .name = "Radius", .key = "R", .icon = .con_radius },
+        .{ .k = .diameter, .name = "Diameter", .icon = .con_diameter },
         .{ .k = .angle, .name = "Angle", .key = "A", .icon = .con_angle },
         .{ .k = .fixed, .name = "Lock", .key = "L", .icon = .con_locked },
     };
@@ -31233,6 +31348,7 @@ fn skConstraintIcon(c: skl.Constraint) icons.GIcon {
         .distance_y => .con_distance_y,
         .line_distance => .con_line_distance,
         .radius => .con_radius,
+        .diameter => .con_diameter,
         .angle => .con_angle,
         .parallel => .con_parallel,
         .perpendicular => .con_perpendicular,
