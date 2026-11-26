@@ -19410,6 +19410,7 @@ fn skSelectedObject(it: SkPlace) ?skl.GroupId {
             .point => |r| r.geom,
             .constraint => continue,
             .piece => |f| f.geom,
+            .crossing => continue,
         };
         if (skl.composite.objectOf(it.sketch, g)) |o| return o;
     }
@@ -19461,6 +19462,7 @@ fn skSelectedConnection(it: SkPlace) ?u32 {
             .point => |r| r.geom,
             .constraint => continue,
             .piece => |f| f.geom,
+            .crossing => continue,
         };
         for (it.sketch.connectors.items, 0..) |c, ci| {
             if (c.start == g or c.end == g or std.mem.indexOfScalar(skl.GeomId, c.path.items, g) != null) return @intCast(ci);
@@ -19484,6 +19486,7 @@ fn skConnect() void {
             .curve => |g| from = .{ .curve = g },
             .constraint => {},
             .piece => |f| from = .{ .curve = f.geom },
+            .crossing => {},
         }
     }
     if (sk_sel.items.len >= 2) switch (sk_sel.items[1]) {
@@ -27606,6 +27609,7 @@ fn skSetConstruction(on: bool) void {
         },
         .constraint => {},
         .piece => {},
+        .crossing => {},
     };
     if (!on and (sk_tool == .ray or sk_tool == .line)) skChooseTool(.segment);
     if (!on) sk_geo_last[@intFromEnum(SkGeo.line)] = .segment;
@@ -27626,6 +27630,10 @@ const SkPick = union(enum) {
     /// Part of a curve between its cuts (Shift+click): its ends, points
     /// on it, crossings (`skl.pieces`).
     piece: skl.pieces.Found,
+    /// Where two curves cross (no point there yet): a constraint tool
+    /// makes a point there, held on both, and constrains that (the owner,
+    /// 2026-11-26).
+    crossing: skl.pieces.Crossing,
 };
 var sk_sel: std.ArrayList(SkPick) = .empty;
 
@@ -28587,6 +28595,21 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64, hidden: Tags) vo
             ncurves += 1;
         }
     }
+    // Where curves cross (no point there yet), among the points: a
+    // constraint's target, made a point when one names it.
+    var xs: [8]skl.pieces.Crossing = undefined;
+    for (xs[0..skl.pieces.crossingsNear(s, q, radius, &xs)]) |x| {
+        if (sk_nhits >= sk_hits.len) break;
+        const d = skDist(x.at, q);
+        var k = sk_nhits;
+        while (k > 0 and pdist[k - 1] > d) : (k -= 1) {
+            sk_hits[k] = sk_hits[k - 1];
+            pdist[k] = pdist[k - 1];
+        }
+        sk_hits[k] = .{ .pick = .{ .crossing = x }, .at = x.at };
+        pdist[k] = d;
+        sk_nhits += 1;
+    }
     // Dimensions, by their value or their line (after points, before
     // curves): pressed and dragged, they are placed.
     const px = dvui.windowNaturalScale();
@@ -28830,6 +28853,9 @@ fn skClickConstraints(g: skl.GeomId, roles: [3]SkClickRole) void {
                     _ = skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = cv } } } });
                 },
                 .constraint, .piece => {},
+                .crossing => |x| if (own) |r| if (skEdit(.{ .crossing = x })) |id| {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .coincident = .{ r, .{ .geom = id, .role = .point } } } } });
+                },
             }
             continue;
         }
@@ -28911,8 +28937,50 @@ fn skParts() SkSelParts {
             out.curves[out.nc] = f.geom;
             out.nc += 1;
         },
+        // A stand-in, made a point when the constraint is (`skMakeCrossings`).
+        .crossing => |x| if (out.np < 8) {
+            out.points[out.np] = skCrossingRef(x);
+            out.np += 1;
+        },
     };
     return out;
+}
+
+/// A selected crossing's stand-in point reference, until it is made a
+/// point: an ID past any geometry.
+fn skCrossingRef(x: skl.pieces.Crossing) skl.PointRef {
+    for (sk_sel.items, 0..) |p, i| switch (p) {
+        .crossing => |y| if (std.meta.eql(x, y)) return .{ .geom = std.math.maxInt(u32) - @as(u32, @intCast(i)), .role = .point },
+        else => {},
+    };
+    return .{ .geom = std.math.maxInt(u32), .role = .point };
+}
+
+/// Where point `r` is: a selected crossing's stand-in, or a point of the
+/// sketch.
+fn skPartPoint(s: *const skl.Sketch, r: skl.PointRef) ?geom.Point {
+    if (r.geom >= std.math.maxInt(u32) - 64) {
+        const i = std.math.maxInt(u32) - r.geom;
+        if (i < sk_sel.items.len) switch (sk_sel.items[i]) {
+            .crossing => |x| return x.at,
+            else => {},
+        };
+        return null;
+    }
+    return s.point(r) catch null;
+}
+
+/// The selected crossings made points (each held on both its curves),
+/// put in the selection in their place: what a constraint tool does
+/// before it constrains.
+fn skMakeCrossings() void {
+    for (sk_sel.items) |*p| switch (p.*) {
+        .crossing => |x| {
+            const id = skEdit(.{ .crossing = x }) orelse continue;
+            p.* = .{ .point = .{ .geom = id, .role = .point } };
+        },
+        else => {},
+    };
 }
 
 /// The sketch selection keeps only what the sketch still has: an undo, or
@@ -28928,6 +28996,7 @@ fn skPruneSelection() void {
             .point => |r| r.geom < s.geometry.items.len and !s.geometry.items[r.geom].removed,
             .constraint => |c| c < s.constraints.items.len,
             .piece => |f| f.geom < s.geometry.items.len and !s.geometry.items[f.geom].removed,
+            .crossing => |x| x.a < s.geometry.items.len and !s.geometry.items[x.a].removed and x.b < s.geometry.items.len and !s.geometry.items[x.b].removed,
         };
         if (!keep) _ = sk_sel.orderedRemove(i);
     }
@@ -28989,14 +29058,14 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
                 a = .{ .geom = p.curves[0], .role = .start };
                 b = .{ .geom = p.curves[0], .role = .end };
             } else if (kind == .distance and p.np == 1 and p.nc == 1 and skIsStraight(s, p.curves[0])) {
-                const q = s.point(p.points[0]) catch return 0;
+                const q = skPartPoint(s, p.points[0]) orelse return 0;
                 const l = skLineOf(s, s.geometry.items[p.curves[0]]) orelse return 0;
                 const d = @abs((q.x - l.p.x) * l.d.y - (q.y - l.p.y) * l.d.x);
                 out[0] = .{ .kind = .{ .line_distance = .{ .p = p.points[0], .line = p.curves[0], .value = d } } };
                 return 1;
             } else return 0;
-            const pa = s.point(a) catch return 0;
-            const pb = s.point(b) catch return 0;
+            const pa = skPartPoint(s, a) orelse return 0;
+            const pb = skPartPoint(s, b) orelse return 0;
             out[0] = switch (kind) {
                 .distance => .{ .kind = .{ .distance = .{ .a = a, .b = b, .value = skDist(pa, pb) } } },
                 .distance_x => .{ .kind = .{ .distance_x = .{ .a = a, .b = b, .value = pb.x - pa.x } } },
@@ -29028,7 +29097,7 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
         },
         .fixed => if (p.np > 0 and p.nc == 0) {
             for (p.points[0..p.np]) |r| {
-                out[n] = .{ .kind = .{ .fixed = .{ .p = r, .at = s.point(r) catch return 0 } } };
+                out[n] = .{ .kind = .{ .fixed = .{ .p = r, .at = skPartPoint(s, r) orelse return 0 } } };
                 n += 1;
             }
         },
@@ -29075,6 +29144,12 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
 /// opens for its value.
 fn skConstrain(kind: SkKind, area: dvui.Rect.Physical) void {
     var buf: [8]skl.Constraint = undefined;
+    if (skConstraintsFor(kind, &buf) == 0) {
+        state.status = "That constraint does not fit what is selected. ";
+        return;
+    }
+    // Crossings chosen become points first, then the constraint names them.
+    skMakeCrossings();
     const n = skConstraintsFor(kind, &buf);
     if (n == 0) {
         state.status = "That constraint does not fit what is selected. ";
@@ -29726,6 +29801,7 @@ fn skPickObject(s: *const skl.Sketch, p: SkPick) ?skl.GroupId {
         .curve => |c| c,
         .point => |r| r.geom,
         .constraint => return null,
+        .crossing => return null,
         // A piece is always the geometry's own (ink inside an object).
         .piece => return null,
     };
@@ -29799,6 +29875,7 @@ fn skClickSelect(p: SkPick, toggle: bool) void {
                 .curve => |c| c,
                 .point => |r| r.geom,
                 .constraint => null,
+                .crossing => null,
                 .piece => |f| f.geom,
             };
             const o = if (g) |x| skl.composite.objectOf(s, x) else null;
@@ -29933,6 +30010,7 @@ fn skDeleteSelection() void {
             .curve => |g| geos.append(state.gpa, g) catch {},
             .point => |r| if (r.role == .point) geos.append(state.gpa, r.geom) catch {},
             .piece => {},
+            .crossing => {},
         }
     }
     // Constraints last first, so the indices hold.
@@ -30065,6 +30143,11 @@ fn skDrawPieces(area: dvui.Rect.Physical, it: SkPlace) void {
     const ar = dvui.currentWindow().arena();
     for (sk_sel.items) |p| switch (p) {
         .piece => |f| skDrawFound(area, it, f, colors.select, 3 * px),
+        .crossing => |x| {
+            const q = skPx(area, it, x.at);
+            skRing(q, 6 * px, colors.select, 2 * px);
+            skDot(q, 3 * px, colors.select);
+        },
         else => {},
     };
     if (!sk_shift or sk_tool != .none or sk_box != null) return;
@@ -30983,6 +31066,7 @@ fn skConstraintList(it: SkPlace) void {
             .point => |r| r.geom,
             .constraint => continue,
             .piece => |f| f.geom,
+            .crossing => continue,
         };
         if (np < picked.len) {
             picked[np] = g;
@@ -31177,6 +31261,7 @@ fn sketchPhysicalWhen(it: SkPlace) void {
         .point => |r| if (r.role == .point) r.geom else return,
         .constraint => return,
         .piece => return,
+        .crossing => return,
     };
     const geo = it.sketch.geometry.items[g];
     if (!geo.construction or geo.kind == .line or geo.kind == .ray) return;
