@@ -1895,6 +1895,20 @@ fn loadText() !geom.Point {
     return at;
 }
 
+/// GRAVEN_SAMPLE=typography: two tracks of the same words, ligatures off
+/// and on, on the shown canvas; the cursor in the second, after "cafe" and
+/// its accent.
+fn loadTypography() !void {
+    const pi = shownParent() orelse return error.NoCanvas;
+    const at: geom.Point = .{ .x = 0, .y = 10 };
+    const rs = try text_sample.buildTypography(&state.model, pi, at);
+    try hist.snapshot(&state.model);
+    state.context = .{ .region = .{ .parent = pi, .region = rs[1] } };
+    // "office affluent fjord: cafe" then U+0301 (2 bytes).
+    track_cursor = .{ .parent = pi, .region = rs[1], .index = 0, .offset = 29 };
+    state.view.fit = .{ .x0 = at.x - 5, .y0 = at.y - 30, .x1 = at.x + 145, .y1 = at.y + 26 };
+}
+
 /// Where prototype `id` is in the document's list, for dropdowns; 0 when
 /// it is none of them.
 /// The ID of space `si` (by position); `.none` without spaces (a
@@ -2615,7 +2629,7 @@ fn frame() !dvui.App.Result {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
-            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
+            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -19884,6 +19898,11 @@ fn styleRuleProperties(sid: layout.model.StyleId) !void {
     if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
     if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
     for (st.faces.items, 0..) |f, k| propText(faceItem("expression.style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
+    {
+        var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = 4540 });
+        defer box.deinit();
+        styleFeatureProps(sid);
+    }
     try styleRules(sid);
 }
 
@@ -20775,7 +20794,51 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         propText(faceItem("style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
     keyButton(@src(), "Fonts… (every face, and searching the installed fonts)", 0, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } });
+    styleFeatureProps(sid);
     try styleRules(sid);
+}
+
+/// A style's value for `p`: its own rule for every object, else its
+/// base's, else glyphic's default; and whether it is its own.
+fn styleParam(sid: layout.model.StyleId, p: glyphic.Param) struct { value: glyphic.Value, own: bool } {
+    var at = sid;
+    var depth: usize = 0;
+    while (state.model.styleIndex(at)) |i| : (depth += 1) {
+        const st = state.model.styles.items[i];
+        for (st.rules.items) |r| if (r.kind == null and r.param == p) return .{ .value = r.value, .own = at == sid };
+        if (st.base == .none or depth > 32) break;
+        at = st.base;
+    }
+    return .{ .value = glyphic.param.def(p).default, .own = false };
+}
+
+/// A text style's OpenType features: ligatures on or off (off unless set),
+/// and any others by tag. Each is a rule of the style, for every object.
+fn styleFeatureProps(sid: layout.model.StyleId) void {
+    const saved_group = pushGroup("typography");
+    defer popGroup(saved_group);
+    heading("Typography", .{}, 40);
+    {
+        const lig = styleParam(sid, .ligatures);
+        var on = lig.value.flag;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 41 });
+        defer row.deinit();
+        if (tcheckbox(@src(), &on, "Ligatures", .{ .id_extra = 41 })) {
+            act(.setStyleRule, .{ sid, @as(?glyphic.Kind, null), glyphic.Param.ligatures, @as(?glyphic.Value, .{ .flag = on }) }) catch {};
+        }
+    }
+    {
+        const ft = styleParam(sid, .features);
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 42 });
+        defer row.deinit();
+        propName("OpenType features");
+        var te = dvui.textEntry(@src(), .{ .text_initial = ft.value.name, .placeholder = "smcp onum ss01 -kern" }, .{ .expand = .horizontal, .id_extra = 42, .font = styled(.theme(.body), !ft.own) });
+        defer te.deinit();
+        if (accepted.accept(te, ft.value.name)) |typed| {
+            const t = std.mem.trim(u8, typed, " ");
+            act(.setStyleRule, .{ sid, @as(?glyphic.Kind, null), glyphic.Param.features, @as(?glyphic.Value, if (t.len == 0) null else .{ .name = t }) }) catch {};
+        }
+    }
 }
 
 /// Edits how an art layer is painted: its fill's colours (one, or a
@@ -21441,14 +21504,23 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
                     lst.append(al, s0) catch {};
                 }
             }.f;
+            // Its characters (grapheme clusters: a letter and its accents
+            // are one), for text: no stop inside one, and one at each
+            // start, inside a ligature too.
+            const cs: []const layout.edit.Char = if (items[r.item].what.run.equation) &.{} else layout.edit.chars(a, content, false) catch &.{};
             for (l.render.items) |ri| switch (ri) {
                 .glyph => |g| {
                     if (g.source < r.from or g.source >= r.from + r.len) continue;
+                    if (insideChar(cs, g.source)) continue;
                     add(&list, a, r.item, g.source, content.len, pi, t.track, l.origin.x + g.transform.e - t.box.x0);
                 },
                 else => {},
             };
             const piece_end = r.from + r.len;
+            for (cs) |ch| {
+                if (ch.start < r.from or ch.start >= piece_end) continue;
+                if (l.render.caret(ch.start)) |cr| add(&list, a, r.item, ch.start, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
+            }
             if (l.render.caret(piece_end)) |cr| add(&list, a, r.item, piece_end, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
             // An equation's anchor points, where Tab puts the cursor (an
             // empty slot has no glyph to stop at).
@@ -21479,6 +21551,16 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
         w += 1;
     }
     return list.items[0..w];
+}
+
+/// Whether source byte `at` falls inside one of characters `cs`, past its
+/// start (an accent on its letter).
+fn insideChar(cs: []const layout.edit.Char, at: u32) bool {
+    for (cs) |c| {
+        if (c.start < at and at < c.end) return true;
+        if (c.start >= at) break;
+    }
+    return false;
 }
 
 /// The placed segment of the flow of track `fr` of panel `fp` on panel
