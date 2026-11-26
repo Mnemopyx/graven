@@ -1815,6 +1815,14 @@ pub const FabSource = union(enum) {
     /// Its text: the labels in tiles' tracks of this name, or every label
     /// (runs in its tracks too) when empty.
     text: []const u8,
+    /// Its line art's stroked ink: a drawing's strokes (connections
+    /// included) and line art's edges, each the exact area its pen covers
+    /// (`art.inkRegions`); of the art of this name (a drawing's, a
+    /// figure's), or all of it when empty. Cutouts are not ink.
+    ink: []const u8,
+    /// Its line art's fills (solid or hatched, not cutouts): the regions
+    /// they fill, of the art of this name, or all of it when empty.
+    fills: []const u8,
 };
 
 pub const FabOp = union(enum) {
@@ -5566,6 +5574,8 @@ pub const Model = struct {
             o.name = try m.a().dupe(u8, l.name);
             o.source = switch (l.source) {
                 .text => |t| .{ .text = try m.a().dupe(u8, t) },
+                .ink => |t| .{ .ink = try m.a().dupe(u8, t) },
+                .fills => |t| .{ .fills = try m.a().dupe(u8, t) },
                 else => l.source,
             };
             o.op = switch (l.op) {
@@ -6965,13 +6975,13 @@ pub const Model = struct {
                 const segs = try al.alloc(geom.Segment, 3);
                 for (0..3) |j| segs[j] = .{ .line = .{ q[j], q[(j + 1) % 3] } };
                 const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = true }});
-                return .{ .subpaths = sub, .fill = stroke.color };
+                return .{ .subpaths = sub, .fill = stroke.color, .pen = true };
             },
             .dot => {
                 var buf: [4]geom.Segment = undefined;
                 const segs = try al.dupe(geom.Segment, geom.arc(p, size / 3, 0, 2 * std.math.pi, &buf));
                 const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = true }});
-                return .{ .subpaths = sub, .fill = stroke.color };
+                return .{ .subpaths = sub, .fill = stroke.color, .pen = true };
             },
             .bar => {
                 const h = size / 2;

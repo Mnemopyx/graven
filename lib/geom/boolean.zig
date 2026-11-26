@@ -446,18 +446,29 @@ pub fn combineMany(a: Allocator, inputs: []const Outline, rules: []const Rule) E
     const exact = try sa.alloc(YIndex, inputs.len);
     const boxes = try sa.alloc(Box, inputs.len);
     var total = Box.empty;
+    // Lines shorter than the joining tolerance (a pen's stroke flattened
+    // finely has thousands) are merged into the segment after them: below
+    // it, pieces cannot be told apart, and one would be taken for another.
+    var span = Box.empty;
+    for (inputs) |o| for (o.contours) |c| for (c.segments) |s| {
+        span = span.addPoint(s.start()).addPoint(s.end());
+    };
+    const merge_tol = 1e-6 * @max(1.0, @max(span.width(), span.height()));
     for (inputs, 0..) |o, k| {
         var bs: std.ArrayList(Bounded) = .empty;
         var b = Box.empty;
-        for (o.contours) |c| for (c.segments) |s| {
-            if (s == .line and s.start().eql(s.end())) continue;
-            const f = try Flat.of(sa, s);
-            try segs.append(sa, .{ .s = s, .flat = f, .from = k });
-            const sb = s.bounds();
-            try bs.append(sa, .{ .s = s, .box = sb });
-            b = b.join(sb);
-            total = total.join(f.box);
-        };
+        for (o.contours) |c0| {
+            const c = try merged(sa, c0, merge_tol);
+            for (c.segments) |s| {
+                if (s == .line and s.start().eql(s.end())) continue;
+                const f = try Flat.of(sa, s);
+                try segs.append(sa, .{ .s = s, .flat = f, .from = k });
+                const sb = s.bounds();
+                try bs.append(sa, .{ .s = s, .box = sb });
+                b = b.join(sb);
+                total = total.join(f.box);
+            }
+        }
         exact[k] = try YIndex.of(sa, bs.items, b);
         boxes[k] = b;
     }
@@ -660,6 +671,46 @@ const Region = struct {
     }
 };
 
+/// Contour `c` with its lines shorter than `tol` (by the sum of their
+/// sides) merged into the segment after them, which starts where the short
+/// ones did; `c` itself when it has none, or is nothing but short lines.
+fn merged(a: Allocator, c: Contour, tol: f64) Allocator.Error!Contour {
+    const short = struct {
+        fn f(s: Segment, t: f64) bool {
+            return s == .line and near(s.start(), s.end(), t);
+        }
+    }.f;
+    var n: usize = 0;
+    for (c.segments) |s| {
+        if (!short(s, tol)) n += 1;
+    }
+    if (n == c.segments.len or n == 0) return c;
+    const out = try a.alloc(Segment, n);
+    var k: usize = 0;
+    // From the first long segment round, so a run of short ones before it
+    // (at the contour's start) is merged too.
+    const first = for (c.segments, 0..) |s, i| {
+        if (!short(s, tol)) break i;
+    } else unreachable;
+    var start: ?Point = null;
+    for (0..c.segments.len) |j| {
+        const s = c.segments[(first + j) % c.segments.len];
+        if (short(s, tol)) {
+            if (start == null) start = s.start();
+            continue;
+        }
+        var t = s;
+        if (start) |p| setEnds(&t, p, s.end());
+        start = null;
+        out[k] = t;
+        k += 1;
+    }
+    // A short run at the end (back round to the first long one): the
+    // first starts where it began.
+    if (start) |p| setEnds(&out[0], p, out[0].end());
+    return .{ .segments = out };
+}
+
 fn cell(v: f64, size: f64) i64 {
     return @intFromFloat(@floor(v / size));
 }
@@ -769,4 +820,38 @@ test "a hole touching the edge along a side leaves a notch, no sliver" {
     const body = try cut(a, plate, &cutters);
     try testing.expectEqual(@as(usize, 1), body.contours.len);
     try testing.expectApproxEqAbs(@as(f64, 200 - 12), body.signedArea(), 1e-9);
+}
+
+test "lines shorter than the joining tolerance are merged: a dashed ring's fine stroke, its scale widened by an outline far off, still joins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const stroke = @import("stroke.zig");
+    // The ring's centreline flattened as a figure's is (within 0.002 mm),
+    // dashed and stroked with round caps and joins: thousands of lines a
+    // few micrometres long, as the sketch panel sample's ring has.
+    var buf: [4]Segment = undefined;
+    const ring = root.arc(.{ .x = 57, .y = 15 }, 7, 0, 2 * std.math.pi, &buf);
+    var pts: std.ArrayList(Point) = .empty;
+    try pts.append(a, ring[0].start());
+    for (ring) |sg| {
+        const n: usize = 60;
+        for (1..n + 1) |i| try pts.append(a, sg.at(@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n))));
+    }
+    var lines: std.ArrayList(stroke.Polyline) = .empty;
+    try stroke.dashed(a, .{ .pts = pts.items, .closed = true }, &.{ 1.2, 1.2 }, 0, &lines);
+    const ink = try stroke.stroke(a, lines.items, .{ .width = 0.4, .cap = .round, .join = .round }, 0.002);
+    var short: usize = 0;
+    for (ink.contours) |c| for (c.segments) |sg| {
+        if (near(sg.start(), sg.end(), 1e-4)) short += 1;
+    };
+    try testing.expect(short > 100);
+    const border = try rect(a, 0, 0, 70, 30);
+    const far = try rect(a, 82, 20, 83.5, 23);
+    const R = struct {
+        fn inside(_: *const anyopaque, in: []const bool) bool {
+            return in[1] and !in[0];
+        }
+    };
+    _ = try combine(a, &.{ border, ink, far }, .{ .ctx = undefined, .inside = R.inside });
 }

@@ -404,6 +404,18 @@ pub const testing_api = struct {
     }
     /// The columns sample (GRAVEN_SAMPLE=columns): three text columns in
     /// a panel and two construction lines, constrained or not.
+    /// The sketch panel sample made as a plate (GRAVEN_SAMPLE=sketch-fab):
+    /// its ring's ink, a solid fill round its hole, and fabrication layers
+    /// taking them; the panel's index.
+    pub fn loadSketchFab() ?usize {
+        sample_fab = true;
+        defer sample_fab = false;
+        loadSketchPanelSample();
+        return switch (state.context) {
+            .panel => |pi| pi,
+            else => null,
+        };
+    }
     pub fn loadColumns(constrained: bool) !void {
         return loadColumnsSampleWith(constrained);
     }
@@ -2587,6 +2599,9 @@ fn frame() !dvui.App.Result {
             // repository's root), opened as untitled copies.
             if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
                 sample_texts = true;
+                loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "sketch-fab")) {
+                sample_fab = true;
                 loadSketchPanelSample();
             } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
@@ -7657,6 +7672,8 @@ var status_name_buf: [64]u8 = undefined;
 var sample_sketch_space = false;
 var sample_objects = false;
 var sample_texts = false;
+/// GRAVEN_SAMPLE=sketch-fab: the sketch panel with a solid fill and fabrication layers.
+var sample_fab = false;
 var open_texts_sheet: ?layout.model.ObjectId = null;
 
 fn canvas(active: bool, view: u8) void {
@@ -9035,17 +9052,50 @@ fn panelFab(pi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 2 });
             defer row.deinit();
             propName("From");
-            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text" };
+            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text", "line art's ink", "line art's fills" };
             var choice: usize = @intFromEnum(std.meta.activeTag(l.source));
             if (tdropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.source))) {
                 l.source = switch (choice) {
                     0 => .edge,
                     1 => .cutouts,
                     2 => .parts,
-                    else => .{ .text = "" },
+                    3 => .{ .text = "" },
+                    4 => .{ .ink = "" },
+                    else => .{ .fills = "" },
                 };
                 changed = true;
             }
+        }
+        // Ink and fills: of every piece of line art, or of one by name (a
+        // drawing's, a figure's).
+        switch (l.source) {
+            .ink, .fills => |name| {
+                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 5 });
+                defer row.deinit();
+                propName("Line art");
+                var names: std.ArrayList([]const u8) = .empty;
+                try names.append(ar, "all of it");
+                for (state.model.panels.items[pi].art.items) |pa| {
+                    if (pa.cutout) continue;
+                    for (names.items[1..]) |have| {
+                        if (std.mem.eql(u8, have, pa.name)) break;
+                    } else try names.append(ar, pa.name);
+                }
+                var choice: usize = 0;
+                for (names.items[1..], 1..) |nm, k| {
+                    if (std.mem.eql(u8, nm, name)) choice = k;
+                }
+                if (name.len > 0 and choice == 0) {
+                    try names.append(ar, name);
+                    choice = names.items.len - 1;
+                }
+                if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+                    const picked: []const u8 = if (choice == 0) "" else names.items[choice];
+                    l.source = if (l.source == .ink) .{ .ink = picked } else .{ .fills = picked };
+                    changed = true;
+                }
+            },
+            else => {},
         }
         if (l.source == .text) {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
@@ -27641,6 +27691,11 @@ fn loadSketchPanelSample() void {
     } else |_| {}
     _ = act(.setInk, .{ index, ring, true }) catch {};
     _ = act(.setFill, .{ index, @as([]const u32, &.{hole}), true, true }) catch {};
+    // GRAVEN_SAMPLE=sketch-fab: the ring filled red round the hole.
+    if (sample_fab) if (act(.addFillStyle, .{layout.model.FillStyle{ .name = "Red", .color = .hex("#d03030"), .pattern = .solid }})) |id| {
+        _ = act(.setCurrentFill, .{id}) catch {};
+        _ = act(.setFill, .{ index, @as([]const u32, &.{ring}), false, true }) catch {};
+    } else |_| {};
     const style = labelStyle() catch return;
     // A caption on the ring, made in the sketch's own space: the panel
     // shows it too.
@@ -27656,6 +27711,16 @@ fn loadSketchPanelSample() void {
     const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / pitch, .pitch = pitch }) catch return;
     state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "Text on a panel cut from a sketch flows round its ink." }) catch {};
     state.context = .{ .panel = pi };
+    // GRAVEN_SAMPLE=sketch-fab: made as a plate, its fills and then its
+    // ink (over them, as drawn) inlaid in their colours, its hole cut
+    // through.
+    if (sample_fab) _ = act(.setPanelFab, .{ pi, layout.model.Fab{ .thickness = 2, .layers = &.{
+        .{ .name = "Plate", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = 2, .op = .{ .add = .{ .name = "white", .color = .hex("#f2f2f2") } } },
+        .{ .name = "Hole", .source = .cutouts, .op = .subtract },
+        .{ .name = "Fills", .source = .{ .fills = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "red", .color = .hex("#d03030") } } },
+        .{ .name = "Ink", .source = .{ .ink = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#1e1e1e") } } },
+        .{ .name = "Text", .source = .{ .text = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#1e1e1e") } } },
+    } } }) catch {};
     // GRAVEN_SAMPLE=sketch-texts: its caption's text from a text sheet,
     // German shown, the sheet open beside the canvas.
     if (sample_texts) if (act(.makeTextSheet, .{ "Texts", @as([]const []const u8, &.{ "de", "fr" }) })) |id| {

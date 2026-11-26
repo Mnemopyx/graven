@@ -48,6 +48,9 @@ pub const Path = struct {
     fill: ?art.Color = null,
     fill_rule: FillRule = .nonzero,
     stroke: ?Stroke = null,
+    /// Its fill is a pen's mark (a connection's arrowhead or dot): ink,
+    /// made with the strokes, not a fill.
+    pen: bool = false,
 };
 
 /// What fills an area: solid, or a hatch of parallel lines.
@@ -166,7 +169,7 @@ pub fn ink(a: Allocator, f: Figure, tol: f64) Allocator.Error![]const art.Shape 
                 };
                 o = geom.boolean.combine(a, &.{o}, .{ .ctx = undefined, .inside = R.inside }) catch o;
             }
-            if (o.contours.len > 0) try out.append(a, .{ .name = "fill", .outline = o, .paint = .{ .fill = .{ .solid = c } } });
+            if (o.contours.len > 0) try out.append(a, .{ .name = if (p.pen) "mark" else "fill", .outline = o, .paint = .{ .fill = .{ .solid = c }, .pen = p.pen } });
         }
         if (p.stroke) |st| {
             var lines: std.ArrayList(geom.stroke.Polyline) = .empty;
@@ -176,7 +179,7 @@ pub fn ink(a: Allocator, f: Figure, tol: f64) Allocator.Error![]const art.Shape 
                 if (st.dash.len == 0) try lines.append(a, line) else try geom.stroke.dashed(a, line, st.dash, st.dash_offset, &lines);
             }
             const o = try geom.stroke.stroke(a, lines.items, .{ .width = st.width, .cap = st.cap, .join = st.join, .miter_limit = st.miter_limit }, tol);
-            if (o.contours.len > 0) try out.append(a, .{ .name = "stroke", .outline = o, .paint = .{ .fill = .{ .solid = st.color } } });
+            if (o.contours.len > 0) try out.append(a, .{ .name = "stroke", .outline = o, .paint = .{ .fill = .{ .solid = st.color }, .pen = true } });
         }
     }
     return out.items;
