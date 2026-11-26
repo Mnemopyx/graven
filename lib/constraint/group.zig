@@ -253,6 +253,39 @@ pub const Groups = struct {
         return id;
     }
 
+    /// Puts geometry `geoms` (wherever they are) directly in group `id`,
+    /// and every constraint naming them where it now belongs: how a
+    /// composite object is filled again when rebuilt.
+    pub fn adopt(gs: *Groups, a: Allocator, geo: []Geometry, cons: []Constraint, id: GroupId, geoms: []const GeomId) Error!void {
+        _ = try gs.get(id);
+        for (geoms) |g| {
+            if (gs.listOf(geo[g].group)) |p| take(&p.geometry, g);
+            geo[g].group = id;
+            try gs.list.items[id].geometry.append(a, g);
+        }
+        for (cons, 0..) |*c, ci| {
+            var touches = false;
+            for (geoms) |g| if (geometry.refersTo(c.*, g)) {
+                touches = true;
+                break;
+            };
+            if (!touches) continue;
+            const h = gs.home(geo, c.*);
+            if (h == c.group) continue;
+            if (gs.listOf(c.group)) |p| take(&p.constraints, @as(ConstraintId, @intCast(ci)));
+            c.group = h;
+            if (gs.listOf(h)) |p| try p.constraints.append(a, @intCast(ci));
+        }
+    }
+
+    /// Takes group `id`'s own geometry out of it, into no group (before
+    /// it is removed and made again).
+    pub fn release(gs: *Groups, geo: []Geometry, id: GroupId) Error!void {
+        const g = try gs.get(id);
+        for (g.geometry.items) |m| geo[m].group = none;
+        g.geometry.clearRetainingCapacity();
+    }
+
     /// Removes group `id`: its geometry, constraints and groups join its
     /// parent. Its ID stays taken.
     pub fn ungroup(gs: *Groups, a: Allocator, geo: []Geometry, cons: []Constraint, id: GroupId) Error!void {

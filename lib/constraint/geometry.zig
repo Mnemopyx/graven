@@ -304,6 +304,48 @@ pub fn refs(c: Constraint, buf: *[4]Ref) []const Ref {
     return buf[0..n];
 }
 
+/// Puts `map(g)` for every geometry `c` names (`map` returns null for
+/// geometry that has no counterpart: then `c` is left part-changed and
+/// false is returned).
+pub fn mapGeoms(c: *Constraint, ctx: anytype, comptime map: fn (@TypeOf(ctx), GeomId) ?GeomId) bool {
+    const M = struct {
+        fn g(x: *GeomId, cx: @TypeOf(ctx)) bool {
+            x.* = map(cx, x.*) orelse return false;
+            return true;
+        }
+        fn p(x: *PointRef, cx: @TypeOf(ctx)) bool {
+            return g(&x.geom, cx);
+        }
+        fn lin(l: *Linear, cx: @TypeOf(ctx)) bool {
+            return switch (l.*) {
+                .geom => |*x| g(x, cx),
+                .points => |*ps| p(&ps[0], cx) and p(&ps[1], cx),
+            };
+        }
+        fn span(sp: *Span, cx: @TypeOf(ctx)) bool {
+            return switch (sp.*) {
+                inline .points, .x, .y => |*ps| p(&ps[0], cx) and p(&ps[1], cx),
+                .to_line => |*t| p(&t.p, cx) and g(&t.line, cx),
+            };
+        }
+    };
+    return switch (c.kind) {
+        .coincident => |*ps| M.p(&ps[0], ctx) and M.p(&ps[1], ctx),
+        .horizontal, .vertical => |*l| M.lin(l, ctx),
+        .point_on => |*po| M.p(&po.p, ctx) and M.g(&po.on, ctx),
+        .fixed => |*f| M.p(&f.p, ctx),
+        inline .distance, .distance_x, .distance_y => |*d| M.p(&d.a, ctx) and M.p(&d.b, ctx),
+        .line_distance => |*d| M.p(&d.p, ctx) and M.g(&d.line, ctx),
+        .radius => |*r| M.g(&r.g, ctx),
+        inline .angle, .parallel, .perpendicular, .tangent, .equal => |*an| M.g(&an.a, ctx) and M.g(&an.b, ctx),
+        .equal_angle => |*e| M.g(&e.a, ctx) and M.g(&e.b, ctx) and M.g(&e.c, ctx) and M.g(&e.d, ctx),
+        .equal_distance => |*e| M.span(&e.a, ctx) and M.span(&e.b, ctx),
+        .symmetric => |*sy| M.p(&sy.p, ctx) and M.p(&sy.q, ctx) and
+            (if (sy.line) |*l| M.g(l, ctx) else true) and
+            (if (sy.point) |*q| M.p(q, ctx) else true),
+    };
+}
+
 /// Whether constraint `c` refers to geometry `g`.
 pub fn refersTo(c: Constraint, g: GeomId) bool {
     const lin = struct {

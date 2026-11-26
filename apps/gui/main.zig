@@ -2515,6 +2515,36 @@ fn frame() !dvui.App.Result {
             _ = skEdit(.{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 5 } });
         }
     }
+    if (sample_objects) {
+        // GRAVEN_SAMPLE=objects: a pentagon and a polar array as composite
+        // objects in a new sketch; a side of the pentagon selected, so
+        // Properties shows the object (GRAVEN_OBJECT_SIDES: its sides then
+        // changed, as from Properties).
+        sample_objects = false;
+        newSketchInOwnSpace();
+        followHome();
+        if (sketch_edit != null) {
+            if (skEdit(.{ .polygon = .{ .c = .{ .x = -18, .y = 0 }, .corner = .{ .x = -18, .y = 12 }, .sides = 5 } })) |side| {
+                sk_sel.clearRetainingCapacity();
+                sk_sel.append(state.gpa, .{ .curve = side }) catch {};
+            }
+            _ = skEdit(.{ .array = .{ .polar = true, .at = .{ .x = 18, .y = 0 }, .to = .{ .x = 18, .y = 12 }, .cols = 8, .rows = 2 } });
+            if (platform.env("GRAVEN_OBJECT_SIDES")) |v| {
+                const n = std.fmt.parseFloat(f64, v) catch 5;
+                if (skItem()) |it| if (skSelectedObject(it)) |obj| {
+                    _ = skEdit(.{ .object_prop = .{ .object = obj, .name = "sides", .value = n } });
+                };
+                sk_sel.clearRetainingCapacity();
+                if (skItem()) |it| for (it.sketch.geometry.items, 0..) |g, gi| {
+                    if (!g.removed and g.kind == .segment and !g.construction and skl.composite.objectOf(it.sketch, @intCast(gi)) != null) {
+                        sk_sel.append(state.gpa, .{ .curve = @intCast(gi) }) catch {};
+                        break;
+                    }
+                };
+            }
+        }
+    }
+    skPruneSelection();
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
     defer {
@@ -2560,6 +2590,8 @@ fn frame() !dvui.App.Result {
                 loadSketchPanelSample();
             } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
+            } else if (std.mem.eql(u8, which, "objects")) {
+                sample_objects = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
@@ -3872,6 +3904,7 @@ fn redo() void {
 /// the context, the selection and the flow cursor fall back to what still
 /// exists.
 fn afterHistory() void {
+    skPruneSelection();
     selection.clearRetainingCapacity();
     track_cursor = null;
     state.moving = null;
@@ -7622,6 +7655,7 @@ var status_name_buf: [64]u8 = undefined;
 /// `GRAVEN_SAMPLE=sketch-space`: a new sketch in its own space, made on
 /// the first frame (once the views are set up).
 var sample_sketch_space = false;
+var sample_objects = false;
 var sample_texts = false;
 var open_texts_sheet: ?layout.model.ObjectId = null;
 
@@ -8878,7 +8912,7 @@ fn drawGrids(area: dvui.Rect.Physical, pi: Parent) void {
     for (state.model.gridsIn(pi), 0..) |grid, gi| {
         // An array's borders are its sketch's geometry, drawn as the
         // sketch.
-        if (grid.array != null) continue;
+        if (grid.array != null or grid.object != null) continue;
         const sh = state.model.gridShape(pi, gi);
         const sel = switch (state.context) {
             .grid => |g| g.parent.eql(pi) and g.index == gi,
@@ -19268,6 +19302,61 @@ fn connectionProperties(ski: usize, ci: u32) void {
 
 /// The connection the sketch selection is part of (its path, or one of
 /// its two points), if any.
+/// The composite object (a polygon, an array) a selected piece of the
+/// sketch belongs to, if any.
+fn skSelectedObject(it: SkPlace) ?skl.GroupId {
+    for (sk_sel.items) |p| {
+        const g: skl.GeomId = switch (p) {
+            .curve => |c| c,
+            .point => |r| r.geom,
+            .constraint => continue,
+        };
+        if (skl.composite.objectOf(it.sketch, g)) |o| return o;
+    }
+    return null;
+}
+
+/// A composite object's kind and construction properties: changing one
+/// makes it again where it is, one undo step.
+fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
+    const saved_group = pushGroup("object");
+    defer popGroup(saved_group);
+    const g = it.sketch.groups.get(obj) catch return;
+    const kind_name = switch (g.kind) {
+        .regular_polygon => "Regular polygon",
+        .rect_array => "Rectangular array",
+        .polar_array => "Polar array",
+        .connection => "Connection",
+        .caption => "Caption",
+        .plain => "Group",
+    };
+    propText(asElement("object.kind"), "{s}", .{kind_name}, 9700);
+    const Field = struct { id: []const u8, label: []const u8, prop: []const u8, min: f64 };
+    const fields = [_]Field{
+        .{ .id = "object.sides", .label = comptime elements.get("object.sides").label, .prop = "sides", .min = 3 },
+        .{ .id = "object.columns", .label = comptime elements.get("object.columns").label, .prop = "columns", .min = 1 },
+        .{ .id = "object.rows", .label = comptime elements.get("object.rows").label, .prop = "rows", .min = 1 },
+        .{ .id = "object.rings", .label = comptime elements.get("object.rings").label, .prop = "rings", .min = 1 },
+    };
+    inline for (fields, 0..) |f, k| {
+        if (g.prop(f.prop)) |v| {
+            next_element = f.id;
+            if (numberProp(f.label, v, f.min, 256, 9701 + k)) |nv| {
+                const n = @round(nv);
+                if (n != v) if (skEdit(.{ .object_prop = .{ .object = obj, .name = f.prop, .value = n } }) != null) {
+                    // Made again: its old pieces are gone, so one of its
+                    // new ones is chosen, keeping it in Properties.
+                    sk_sel.clearRetainingCapacity();
+                    if (skItem()) |now| {
+                        const gg = now.sketch.groups.get(obj) catch null;
+                        if (gg) |x| if (x.geometry.items.len > 1) sk_sel.append(state.gpa, .{ .curve = x.geometry.items[1] }) catch {};
+                    }
+                };
+            }
+        }
+    }
+}
+
 fn skSelectedConnection(it: SkPlace) ?u32 {
     for (sk_sel.items) |p| {
         const g: skl.GeomId = switch (p) {
@@ -28422,6 +28511,23 @@ fn skParts() SkSelParts {
     return out;
 }
 
+/// The sketch selection keeps only what the sketch still has: an undo, or
+/// an object made again, can take pieces away under it.
+fn skPruneSelection() void {
+    const it = skItem() orelse return;
+    const s = it.sketch;
+    var i: usize = sk_sel.items.len;
+    while (i > 0) {
+        i -= 1;
+        const keep = switch (sk_sel.items[i]) {
+            .curve => |g| g < s.geometry.items.len and !s.geometry.items[g].removed,
+            .point => |r| r.geom < s.geometry.items.len and !s.geometry.items[r.geom].removed,
+            .constraint => |c| c < s.constraints.items.len,
+        };
+        if (!keep) _ = sk_sel.orderedRemove(i);
+    }
+}
+
 fn skIsStraight(s: *const skl.Sketch, g: skl.GeomId) bool {
     return switch (s.geometry.items[g].kind) {
         .segment, .line, .ray => true,
@@ -30131,6 +30237,7 @@ fn sketchModeProperties() void {
         if (x.redundant.len > 0) propText("Redundant", "{d}", .{x.redundant.len}, 4);
     }
     if (skSelectedConnection(it)) |ci| connectionProperties(sketch_edit.?.sketch, ci);
+    if (skSelectedObject(it)) |obj| objectProperties(it, obj);
     sketchInkProperties();
     sketchFillProperties();
     skConstraintList(it);

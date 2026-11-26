@@ -28,6 +28,8 @@ pub const arrays = @import("arrays.zig");
 pub const polygon = @import("polygon.zig");
 pub const caption = @import("caption.zig");
 pub const connector = @import("connector.zig");
+/// Polygons and arrays as composite objects (sealed groups).
+pub const composite = @import("composite.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -775,4 +777,5 @@ test {
     _ = polygon;
     _ = caption;
     _ = connector;
+    _ = composite;
 }

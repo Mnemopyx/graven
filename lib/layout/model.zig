@@ -1402,6 +1402,10 @@ pub const SketchEdit = union(enum) {
     /// A regular polygon (see `sketch_.polygon`) of `sides`, centred at
     /// `c`, a corner at `corner`.
     polygon: struct { c: geom.Point, corner: geom.Point, sides: u32, construction: bool = false },
+    /// A composite object's construction property set (sides, columns,
+    /// rings, rows): the object made again where it is
+    /// (`sketch_.composite.setProp`).
+    object_prop: struct { object: sketch_.GroupId, name: []const u8, value: f64 },
     construction: struct { g: sketch_.GeomId, on: bool },
     remove: sketch_.GeomId,
     constrain: sketch_.Constraint,
@@ -1689,6 +1693,10 @@ pub const Grid = struct {
     /// puts it; its counts are its own (`shape.cols`, `shape.rows`).
     sketch: ObjectId = .none,
     array: ?sketch_.arrays.Refs = null,
+    /// The array object (a composite in that sketch) whose parts it
+    /// reads: found by its group, so it survives the object being made
+    /// again. Older documents name the parts by `array` instead.
+    object: ?sketch_.GroupId = null,
     stamps: std.ArrayList(Stamp) = .empty,
     instances: std.ArrayList(GridInstance) = .empty,
 };
@@ -4044,8 +4052,8 @@ pub const Model = struct {
     /// sketch or view is gone.
     pub fn arrayLayout(m: *const Model, parent: Parent, gi: usize) ?struct { shape: GridShape, origin: geom.Point } {
         const g = m.gridsIn(parent)[gi];
-        const refs = g.array orelse return null;
         const si = m.sketchIndex(g.sketch) orelse return null;
+        const refs = if (g.object) |o| (sketch_.composite.arrayRefs(m.sketches.items[si].usedConst(), o) catch return null) else g.array orelse return null;
         const space = switch (parent) {
             .space => |i| i,
             .panel => |pi| m.spaceOf(pi),
@@ -4181,17 +4189,17 @@ pub const Model = struct {
         var name_buf: [32]u8 = undefined;
         const sk_name = m.freshName(&name_buf, .sketches, "Array");
         var sk = try sketch_.Sketch.init(m.a());
-        const refs = (if (polar)
-            sketch_.arrays.addPolar(&sk, m.a(), .{ .x = 0, .y = 0 }, size.x, std.math.degreesToRadians(size.y), std.math.degreesToRadians(sweep), cols, rows)
+        const obj = (if (polar)
+            sketch_.composite.addPolar(&sk, m.a(), .{ .x = 0, .y = 0 }, size.x, std.math.degreesToRadians(size.y), std.math.degreesToRadians(sweep), cols, rows)
         else
-            sketch_.arrays.addRect(&sk, m.a(), .{ .x0 = 0, .y0 = -size.y, .x1 = size.x, .y1 = 0 }, cols, rows)) catch return error.BadSize;
+            sketch_.composite.addRect(&sk, m.a(), .{ .x0 = 0, .y0 = -size.y, .x1 = size.x, .y1 = 0 }, cols, rows)) catch return error.BadSize;
         const sid = m.newId();
         try m.sketches.append(m.a(), .{ .id = sid, .name = try m.a().dupe(u8, sk_name), .default_name = true, .sketch = sk });
         try m.spaces.items[space].sketch_views.append(m.a(), .{ .id = m.newId(), .sketch = sid, .at = at });
         const gi = try m.addGrid(parent, .{ .x = 0, .y = 0 }, .{ .cols = cols, .rows = rows, .pitch_x = 1, .pitch_y = 1 });
         const g = &m.gridsIn(parent)[gi];
         g.sketch = sid;
-        g.array = refs;
+        g.object = obj;
         m.revision += 1;
         return gi;
     }
@@ -5741,6 +5749,45 @@ pub const Model = struct {
         try m.syncSketchFigures(it.id);
     }
 
+    /// A grid shaped by object `obj` of sketch `sid` takes its counts.
+    fn gridCounts(_: *Model, g: *Grid, sid: ObjectId, id: sketch_.GroupId, obj: *const sketch_.group.Group) void {
+        if (g.sketch != sid or g.object == null or g.object.? != id) return;
+        const n = struct {
+            fn f(o: *const sketch_.group.Group, name: []const u8) ?u32 {
+                const v = o.prop(name) orelse return null;
+                return @intFromFloat(@max(1, @round(v)));
+            }
+        }.f;
+        if (n(obj, "columns")) |c| g.shape.cols = c;
+        if (n(obj, "rows") orelse n(obj, "rings")) |r| g.shape.rows = r;
+    }
+
+    /// What uses sketch `index`'s geometry by ID follows an object made
+    /// again (`remap`): its drawings' inks and fills (their pending marks
+    /// while a draft is open, so the accepted drawing stays as it was).
+    fn followRemap(m: *Model, index: usize, remap: *const sketch_.composite.Remap) Error!void {
+        const it = &m.sketches.items[index];
+        const drafting = it.accepted != null;
+        for (m.figures.items) |*f| if (f.sketch == it.id) {
+            var marks: figure_.Marks = if (drafting) (f.pending orelse .{ .inks = f.inks, .fills = f.fills }) else .{ .inks = f.inks, .fills = f.fills };
+            var inks: std.ArrayList(figure_.Ink) = .empty;
+            for (marks.inks) |ink| if (remap.get(ink.geom)) |g| try inks.append(m.a(), .{ .geom = g, .style = ink.style });
+            var fills: std.ArrayList(figure_.Fill) = .empty;
+            fill: for (marks.fills) |fl| {
+                const gs = try m.a().alloc(u32, fl.geoms.len);
+                for (fl.geoms, gs) |g, *to| to.* = remap.get(g) orelse continue :fill;
+                var copy = fl;
+                copy.geoms = gs;
+                try fills.append(m.a(), copy);
+            }
+            marks = .{ .inks = inks.items, .fills = fills.items };
+            if (drafting) f.pending = marks else {
+                f.inks = marks.inks;
+                f.fills = marks.fills;
+            }
+        };
+    }
+
     /// Changes a sketch (see `SketchEdit`) and solves it again. Returns the
     /// new geometry's or constraint's ID, where the edit makes one (else 0).
     pub fn editSketch(m: *Model, index: usize, edit: SketchEdit) Error!u32 {
@@ -5763,16 +5810,29 @@ pub const Model = struct {
             .ray => |e| out = try sk.addRay(al, e.o, e.angle),
             .array => |e| {
                 const r = @sqrt((e.to.x - e.at.x) * (e.to.x - e.at.x) + (e.to.y - e.at.y) * (e.to.y - e.at.y));
-                const refs = if (e.polar)
-                    try sketch_.arrays.addPolar(sk, al, e.at, r, std.math.atan2(e.to.y - e.at.y, e.to.x - e.at.x), std.math.degreesToRadians(e.sweep), e.cols, e.rows)
+                const obj = (if (e.polar)
+                    sketch_.composite.addPolar(sk, al, e.at, r, std.math.atan2(e.to.y - e.at.y, e.to.x - e.at.x), std.math.degreesToRadians(e.sweep), e.cols, e.rows)
                 else
-                    try sketch_.arrays.addRect(sk, al, .{ .x0 = @min(e.at.x, e.to.x), .y0 = @min(e.at.y, e.to.y), .x1 = @max(e.at.x, e.to.x), .y1 = @max(e.at.y, e.to.y) }, e.cols, e.rows);
-                out = switch (refs) {
+                    sketch_.composite.addRect(sk, al, .{ .x0 = @min(e.at.x, e.to.x), .y0 = @min(e.at.y, e.to.y), .x1 = @max(e.at.x, e.to.x), .y1 = @max(e.at.y, e.to.y) }, e.cols, e.rows)) catch |err| return compositeError(err);
+                out = switch (sketch_.composite.arrayRefs(sk, obj) catch return error.BadSize) {
                     .polar => |p| p.centre,
                     .rect => |q| q.left,
                 };
             },
-            .polygon => |e| out = (try sketch_.polygon.addRegular(sk, al, e.c, e.corner, e.sides, e.construction)).first,
+            .polygon => |e| {
+                const obj = sketch_.composite.addPolygon(sk, al, e.c, e.corner, e.sides, e.construction) catch |err| return compositeError(err);
+                out = (sk.groups.get(obj) catch return error.BadSize).geometry.items[1];
+            },
+            .object_prop => |e| {
+                // The sketch's own allocator: what it makes lives in it.
+                var remap: sketch_.composite.Remap = .{};
+                sketch_.composite.setProp(sk, al, e.object, e.name, e.value, &remap) catch |err| return compositeError(err);
+                try m.followRemap(index, &remap);
+                // Its array grids take its counts.
+                const obj = sk.groups.get(e.object) catch return error.BadSize;
+                for (m.panels.items) |*pn| for (pn.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
+                for (m.spaces.items) |*sp| for (sp.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
+            },
             .construction => |e| try sk.setConstruction(e.g, e.on),
             .remove => |g| try sk.removeGeometry(g),
             .constrain => |c| {
@@ -9822,4 +9882,13 @@ test "several drawings over one sketch: the editor inks in the current one, a pa
     try m.setSketchDrawing(si, m.figures.items[second].id);
     try m.setInk(si, dot, false);
     try std.testing.expectApproxEqAbs(20.3, m.panels.items[p].art.items[0].box().width(), 0.05);
+}
+
+/// A composite object's error, as a model's.
+fn compositeError(err: sketch_.composite.Error) Model.Error {
+    return switch (err) {
+        error.NoSuchGroup, error.NotAnObject => error.NoSuchItem,
+        error.NotSiblings, error.Sealed => error.BadValue,
+        else => |e| e,
+    };
 }
