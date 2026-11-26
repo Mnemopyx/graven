@@ -85,6 +85,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 | `GRAVEN_DISPLAY=gamma,white` | display correction for the run (e.g. `1.5,0.85`) |
 | `GRAVEN_KEY_LOG=1` | each action a key asks for printed, with the active modes |
 | `GRAVEN_DRAWN_SPARK=1` | a point standing in for the pointer is drawn on the canvas (25 frames a second), not made the animated cursor |
+| `GRAVEN_SKETCH_EDIT=1` | with `GRAVEN_SAMPLE=sketch-panel`: its sketch opened in the editor, in its own space (tag visibility, Ink only: W) |
 | `GRAVEN_FIGURE=file.svg` | that SVG drawing imported as a figure at start (File, Import figure), made the context |
 
 `graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.

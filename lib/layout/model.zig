@@ -30,6 +30,7 @@ pub const manufacture = @import("manufacture.zig");
 pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
 const edit_ = @import("edit.zig");
+pub const tags_ = @import("tags.zig");
 
 /// A tile's ID: its own object ID.
 pub const TileId = ObjectId;
@@ -1297,6 +1298,9 @@ pub const Layer = struct {
     opacity: f64 = 1,
     blend: Blend = .normal,
     output: Output = .print,
+    /// The kinds of thing on it that are not drawn (construction, ink,
+    /// dimensions …: `tags.Tag`); the view's, output is not changed.
+    hidden: tags_.Tags = .{},
 };
 
 /// A raster image placed in a space at a physical size. Its file (PNG or

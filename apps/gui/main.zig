@@ -2506,6 +2506,11 @@ fn frame() !dvui.App.Result {
         newSketchInOwnSpace();
         followHome();
     }
+    if (sample_edit_home) |home| {
+        sample_edit_home = null;
+        openHome(home);
+        followHome();
+    }
     if (sample_sketch_space) {
         sample_sketch_space = false;
         newSketchInOwnSpace();
@@ -11743,6 +11748,39 @@ fn layerProperties(space: usize, li: usize) !void {
             changed = true;
         }
     }
+    // What kinds of thing on it are drawn (`layout.tags`): a choice of
+    // the presets, then each kind.
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 10 });
+        defer row.deinit();
+        propName("Show");
+        const presets = comptime std.enums.values(layout.tags.Preset);
+        var names: [presets.len + 1][]const u8 = undefined;
+        for (presets, 0..) |pr, k| names[k] = pr.label();
+        names[presets.len] = "Some kinds (below)";
+        var choice: usize = presets.len;
+        if (layout.tags.Preset.of(l.hidden)) |pr| choice = @intFromEnum(pr);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 10 })) {
+            if (choice < presets.len) {
+                l.hidden = presets[choice].hidden();
+                changed = true;
+            }
+        }
+    }
+    {
+        const g2 = pushGroup("layer.drawn");
+        defer popGroup(g2);
+        inline for (comptime std.enums.values(layout.tags.Tag), 0..) |t, k| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 20 + k });
+            defer row.deinit();
+            propName(if (k == 0) "Drawn" else " ");
+            var on = !l.hidden.has(t);
+            if (tcheckbox(@src(), &on, t.label(), .{ .id_extra = 20 + k })) {
+                l.hidden = l.hidden.toggled(t);
+                changed = true;
+            }
+        }
+    }
     if (changed) try act(.setLayer, .{space, li, l});
     propText("New objects", "{s}", .{if (l.id == newObjectLayer()) "go on this layer" else "go elsewhere"}, 8);
     layerFlags(space, li, 9);
@@ -17882,6 +17920,11 @@ const button_handlers = [_]ButtonHandler{
     handler("sketch.constrain.*", struct {
         fn f(arg: i32) void {
             skConstrain(@enumFromInt(@as(u8, @intCast(arg))), canvasArea());
+        }
+    }.f),
+    handler("sketch.show.ink-only", struct {
+        fn f(_: i32) void {
+            skToggleInkOnly();
         }
     }.f),
     handler("sketch.end.update", struct {
@@ -27381,13 +27424,65 @@ const SkPlace = struct {
     sketch: *skl.Sketch,
     name: []const u8,
     at: geom.Point,
+    /// The kinds of thing its layer does not draw (`layout.tags`).
+    hidden: Tags = .{},
 
     fn of(index: usize, at: geom.Point) ?SkPlace {
         if (index >= state.model.sketches.items.len) return null;
         const it = &state.model.sketches.items[index];
         return .{ .item = it, .sketch = &it.sketch, .name = it.name, .at = at };
     }
+
+    /// Whether things tagged `t` are drawn.
+    fn shows(p: SkPlace, t: layout.tags.Tag) bool {
+        return p.hidden.showsTag(t);
+    }
 };
+
+const Tags = layout.tags.Tags;
+
+/// The layer (its index in space `space`) that sketch `sketch` drawn at
+/// `at` is on: its view's, else the space's base layer.
+fn sketchLayer(space: usize, sketch: usize, at: geom.Point) ?usize {
+    if (space >= state.model.spaces.items.len) return null;
+    const sp = state.model.spaces.items[space];
+    for (sp.sketch_views.items) |v| {
+        if (state.model.sketchIndex(v.sketch) == sketch and v.at.x == at.x and v.at.y == at.y) return sp.layerIndex(v.layer);
+    }
+    return sp.layerIndex(.none);
+}
+
+/// What layer `li` of space `space` does not draw.
+fn layerHidden(space: usize, li: ?usize) Tags {
+    const i = li orelse return .{};
+    if (space >= state.model.spaces.items.len or i >= state.model.spaces.items[space].layers.items.len) return .{};
+    return state.model.spaces.items[space].layers.items[i].hidden;
+}
+
+/// Layer `li` of space `space` hides `hidden`: one step of the document's.
+fn setLayerHidden(space: usize, li: usize, hidden: Tags) void {
+    if (space >= state.model.spaces.items.len or li >= state.model.spaces.items[space].layers.items.len) return;
+    var l = state.model.spaces.items[space].layers.items[li];
+    if (l.hidden.eql(hidden)) return;
+    l.hidden = hidden;
+    act(.setLayer, .{ space, li, l }) catch {};
+}
+
+/// The layer of the sketch being edited.
+fn skEditLayer() ?struct { space: usize, li: usize } {
+    const r = sketch_edit orelse return null;
+    return .{ .space = r.space, .li = sketchLayer(r.space, r.sketch, r.at) orelse return null };
+}
+
+/// The sketch editor's Ink only: its layer shows the ink alone, or,
+/// showing it alone already, everything.
+fn skToggleInkOnly() void {
+    const l = skEditLayer() orelse return;
+    const ink_only = layout.tags.Preset.ink_only.hidden();
+    const now = layerHidden(l.space, l.li);
+    setLayerHidden(l.space, l.li, if (now.eql(ink_only)) Tags.none else ink_only);
+    state.status = if (now.eql(ink_only)) "Everything shown again (W). " else "Ink only: the drawing as it will be output; W shows everything again. ";
+}
 
 /// A sketch view's sketch, placed.
 fn viewPlace(space: usize, view: usize) ?SkPlace {
@@ -27395,6 +27490,7 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     var p = SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at) orelse return null;
     // A view is a use: it shows the sketch as last accepted.
     p.sketch = p.item.used();
+    p.hidden = layerHidden(space, state.model.spaces.items[space].layerIndex(v.layer));
     return p;
 }
 
@@ -27511,7 +27607,9 @@ var sk_last_pick: ?struct { ref: SketchRef, ns: i128 } = null;
 
 fn skItem() ?SkPlace {
     const r = sketch_edit orelse return null;
-    return SkPlace.of(r.sketch, r.at);
+    var p = SkPlace.of(r.sketch, r.at) orelse return null;
+    p.hidden = layerHidden(r.space, sketchLayer(r.space, r.sketch, r.at));
+    return p;
 }
 
 fn skLocal(it: SkPlace, p: geom.Point) geom.Point {
@@ -27667,7 +27765,12 @@ fn loadSketchPanelSample() void {
     state.view.cy = 0;
     state.view.ppm = 14;
     state.view.fit = null;
+    // GRAVEN_SKETCH_EDIT=1: its sketch being edited, in its own space.
+    if (platform.env("GRAVEN_SKETCH_EDIT") != null) sample_edit_home = state.model.homeOf(state.model.sketches.items[index].id);
 }
+
+/// A sample's sketch space to open and edit at the next frame.
+var sample_edit_home: ?usize = null;
 
 /// Edits sketch `index` with its origin at `at` in space `space`.
 fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
@@ -28315,7 +28418,8 @@ fn skPointsOf(g: skl.Geometry, buf: *[3]skl.PointRef, id: skl.GeomId) []skl.Poin
 
 /// The points of interest within `radius` of `q`: points first, nearest
 /// first, then curves.
-fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
+/// Only what is drawn is hit: nothing of a kind `hidden` hides.
+fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64, hidden: Tags) void {
     sk_nhits = 0;
     var curves: [24]SkHit = undefined;
     var ncurves: usize = 0;
@@ -28323,8 +28427,11 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
     var cdist: [24]f64 = undefined;
     for (s.geometry.items, 0..) |g, gi| {
         if (g.removed) continue;
+        const tags = layout.tags.ofGeometry(g);
+        if (!hidden.shows(tags)) continue;
         var buf: [3]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, @intCast(gi))) |r| {
+            if (!hidden.showsTag(.points) and !g.reference) break;
             const p = s.point(r) catch continue;
             const d0 = skDist(p, q);
             if (d0 > radius or sk_nhits >= sk_hits.len) continue;
@@ -28359,7 +28466,7 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
     const px = dvui.windowNaturalScale();
     for (s.constraints.items, 0..) |c, ci| {
         if (sk_nhits >= sk_hits.len) break;
-        if (c.place.hidden) continue;
+        if (c.place.hidden or !hidden.showsTag(.dimensions)) continue;
         const ms = skDimMeasure(s, c) orelse continue;
         const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, 0));
         const near = @min(skDist(d.text_at, q), segPointDist(d.line[0], d.line[1], q));
@@ -29169,6 +29276,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.connect") => skConnect(),
             kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
             kact("sketch.end.discard") => skDiscard(),
+            kact("sketch.show.ink-only") => skToggleInkOnly(),
             else => used = false,
         }
         if (used) {
@@ -29196,7 +29304,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             state.mouse = at_space;
             sk_pointer = q;
             const radius = 10 * dvui.windowNaturalScale() / state.view.ppm;
-            skFindHits(it.sketch, q, radius);
+            skFindHits(it.sketch, q, radius, it.hidden);
             // A lock lets go when the pointer goes well away.
             if (sk_lock != null) {
                 const dx = me.p.x - sk_lock_px.x;
@@ -29381,15 +29489,15 @@ fn drawSketches(area: dvui.Rect.Physical) void {
             const clip = dvui.clip(r);
             defer dvui.clipSet(clip);
             for (it.sketch.geometry.items) |g| {
-                if (g.removed or g.reference or !g.construction) continue;
+                if (g.removed or g.reference or !g.construction or !it.hidden.shows(layout.tags.ofGeometry(g))) continue;
                 skDrawGeometry(area, it, g, colors.guide.opacity(0.35), px, true);
             }
         }
         for (it.sketch.geometry.items) |g| {
-            if (g.removed or g.reference or g.construction) continue;
+            if (g.removed or g.reference or g.construction or !it.hidden.shows(layout.tags.ofGeometry(g))) continue;
             skDrawGeometry(area, it, g, colors.ink, 1.5 * px, false);
         }
-        drawSketchFigure(area, it, 1);
+        if (it.shows(.ink)) drawSketchFigure(area, it, 1);
         const picked = switch (state.context) {
             .sketch => |sc| sc.space == ref.space and sc.index == ref.index,
             else => false,
@@ -29513,13 +29621,23 @@ fn skRing(c: dvui.Point.Physical, r: f32, colour: dvui.Color, thick: f32) void {
     dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = thick, .color = .{ .color = colour }, .closed = true });
 }
 
+/// A constraint's tag: a dimension's (its value shown) or a mark's.
+fn skConstraintTag(c: skl.Constraint) layout.tags.Tag {
+    return switch (c.kind) {
+        .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => .dimensions,
+        else => .constraints,
+    };
+}
+
 /// The sketch being edited, over the dimmed canvas.
 fn drawSketchMode(area: dvui.Rect.Physical) void {
     const it = skItem() orelse return;
     const s = it.sketch;
     const px = dvui.windowNaturalScale();
     area.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.72) } });
-    drawSketchFigure(area, it, 0.85);
+    // The ink alone (Ink only), at full strength: as it will be output.
+    const ink_alone = it.hidden.eql(layout.tags.Preset.ink_only.hidden());
+    if (it.shows(.ink)) drawSketchFigure(area, it, if (ink_alone) 1 else 0.85);
     const an = skAnalysis();
     // Geometry the conflicting constraints touch.
     const conflicted = struct {
@@ -29536,17 +29654,22 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             return false;
         }
     }.f;
-    // The origin and axes, faintly.
-    for (s.geometry.items[0..3]) |g| skDrawGeometry(area, it, g, colors.guide.opacity(0.4), px, true);
-    // The box.
-    if (sketchBox(it)) |b| guideBox(area, b, colors.guide.opacity(0.6), px);
+    // The origin and axes, faintly; the box.
+    if (it.shows(.frame)) {
+        for (s.geometry.items[0..3]) |g| skDrawGeometry(area, it, g, colors.guide.opacity(0.4), px, true);
+        if (sketchBox(it)) |b| guideBox(area, b, colors.guide.opacity(0.6), px);
+    }
     for (s.geometry.items, 0..) |g, gi| {
         if (g.removed or g.reference) continue;
+        // Each kind of thing drawn as its layer says (`layout.tags`).
+        const tags = layout.tags.ofGeometry(g);
+        if (!it.hidden.shows(tags)) continue;
         const id: skl.GeomId = @intCast(gi);
         var colour = if (isFree(an, id)) colors.ink else colors.guide;
         if (conflicted(an, s, id)) colour = colors.overflow;
         if (skSelected(.{ .curve = id })) colour = colors.select;
         skDrawGeometry(area, it, g, if (g.construction) colour.opacity(0.75) else colour, if (g.construction) px else 2 * px, g.construction);
+        if (!it.shows(.points)) continue;
         var buf: [3]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, id)) |r| {
             const p = s.point(r) catch continue;
@@ -29560,9 +29683,11 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
     // set's name, the set's value noted once.
     var eq_sets: EqualSets = .{};
     eq_sets.build(dvui.currentWindow().arena(), s);
-    skDrawEqualSets(area, it, &eq_sets);
-    // Constraint glyphs and values.
+    if (it.shows(.constraints)) skDrawEqualSets(area, it, &eq_sets);
+    // Constraint glyphs and values: marks and dimensions, each as the
+    // layer says.
     for (s.constraints.items, 0..) |c, ci| {
+        if (!it.shows(skConstraintTag(c))) continue;
         const anchor = skAnchor(s, c) orelse continue;
         const q = skPx(area, it, anchor);
         var colour = colors.guide;
@@ -29995,6 +30120,17 @@ fn sketchInkKeys() void {
         var wj: dvui.WidgetData = undefined;
         keyIcon(@src(), "Connect  J", dvui.entypo.flow_line, 0, .{ .data_out = &wj });
         dvui.tooltip(@src(), .{ .active_rect = wj.borderRectScale().r }, "Connect: a connection from the selected point, side or curve (or from nowhere), to the second selected point if there is one (J)", .{}, .{});
+    }
+    {
+        // Ink only: the sketch's layer shows its ink alone (`layout.tags`),
+        // tinted while it does.
+        const saved_group = pushGroup("sketch.show");
+        defer popGroup(saved_group);
+        const on = if (skItem()) |it| it.hidden.eql(layout.tags.Preset.ink_only.hidden()) else false;
+        ribbon_next_badge = "W";
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Ink only", dvui.entypo.eye, 0, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{if (on) "Ink only: on. Everything else on the sketch's layer is hidden; W shows it all again (the Layers panel sets each kind)" else "Ink only: show the drawing alone, as it will be output, hiding construction, points, constraints and dimensions (W)"}, .{});
     }
 }
 
