@@ -19358,7 +19358,7 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
                     // Made again: its old pieces are gone, so one of its
                     // new ones is chosen, keeping it in Properties.
                     sk_sel.clearRetainingCapacity();
-                    if (skItem()) |now| skSelectObject(now.sketch, obj, false);
+                    if (skItem()) |now| skSelectObject(now.sketch, obj, false, null);
                 };
             }
         }
@@ -19388,14 +19388,15 @@ fn skConnect() void {
     const From = layout.model.sketch_.connector.From;
     var from: From = .{ .free = .{ .at = .{ .x = 0, .y = 0 }, .angle = std.math.pi / 4.0 } };
     var to: ?skl.PointRef = null;
-    if (sk_sel.items.len >= 1) {
-        switch (sk_sel.items[0]) {
+    const picks = skEffective(dvui.currentWindow().arena());
+    if (picks.len >= 1) {
+        switch (picks[0]) {
             .point => |r| from = .{ .point = r },
             .curve => |g| from = .{ .curve = g },
             .constraint => {},
         }
     }
-    if (sk_sel.items.len >= 2) switch (sk_sel.items[1]) {
+    if (picks.len >= 2) switch (picks[1]) {
         .point => |r| to = r,
         else => {},
     };
@@ -27685,6 +27686,7 @@ fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sk_tool = .none;
     sk_nclicks = 0;
     sk_sel.clearRetainingCapacity();
+    sk_pieces.clearRetainingCapacity();
     sk_inside = null;
     sk_lock = null;
     sk_summary = false;
@@ -27700,8 +27702,9 @@ fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
 /// circle or an arc), or the one selected side or curve (which
 /// `addCaption` checks).
 fn skCaptionFrom() ?skl.caption.From {
-    if (sk_sel.items.len != 1) return null;
-    return switch (sk_sel.items[0]) {
+    const picks = skEffective(dvui.currentWindow().arena());
+    if (picks.len != 1) return null;
+    return switch (picks[0]) {
         .point => |r| .{ .point = r },
         .curve => |g| blk: {
             const it = skItem() orelse break :blk null;
@@ -28516,7 +28519,7 @@ const SkSelParts = struct {
 
 fn skParts() SkSelParts {
     var out: SkSelParts = .{};
-    for (sk_sel.items) |p| switch (p) {
+    for (skEffective(dvui.currentWindow().arena())) |p| switch (p) {
         .point => |r| if (out.np < 8) {
             out.points[out.np] = r;
             out.np += 1;
@@ -28544,6 +28547,17 @@ fn skPruneSelection() void {
             .constraint => |c| c < s.constraints.items.len,
         };
         if (!keep) _ = sk_sel.orderedRemove(i);
+    }
+    if (sk_sel.items.len == 0) sk_pieces.clearRetainingCapacity();
+    var k: usize = sk_pieces.items.len;
+    while (k > 0) {
+        k -= 1;
+        const g = switch (sk_pieces.items[k].pick) {
+            .curve => |c| c,
+            .point => |r| r.geom,
+            .constraint => continue,
+        };
+        if (g >= s.geometry.items.len or s.geometry.items[g].removed) _ = sk_pieces.orderedRemove(k);
     }
     if (sk_inside) |in| if (in >= s.groups.list.items.len or s.groups.list.items[in].removed or !s.groups.list.items[in].sealed) {
         sk_inside = null;
@@ -29323,6 +29337,39 @@ fn skTab(area: dvui.Rect.Physical, back: bool) void {
 /// 2026-11-26).
 var sk_inside: ?skl.GroupId = null;
 
+/// The piece clicked to choose each object chosen whole: it stands for
+/// the object where one piece is wanted (a constraint to geometry outside
+/// it, a caption, a connection), so a vertex or centre can be held from
+/// outside without first going inside.
+const SkPiece = struct { obj: skl.GroupId, pick: SkPick };
+var sk_pieces: std.ArrayList(SkPiece) = .empty;
+
+/// The selection with each object chosen whole standing as the piece
+/// clicked to choose it (at the place of its first member). An object
+/// chosen with no piece known stays whole.
+fn skEffective(a: std.mem.Allocator) []const SkPick {
+    const it = skItem() orelse return sk_sel.items;
+    var out: std.ArrayList(SkPick) = .empty;
+    var done: std.ArrayList(skl.GroupId) = .empty;
+    for (sk_sel.items) |p| {
+        const o = skPickObject(it.sketch, p) orelse {
+            out.append(a, p) catch return sk_sel.items;
+            continue;
+        };
+        const piece = for (sk_pieces.items) |x| {
+            if (x.obj == o) break x.pick;
+        } else null;
+        if (piece == null) {
+            out.append(a, p) catch return sk_sel.items;
+            continue;
+        }
+        if (std.mem.indexOfScalar(skl.GroupId, done.items, o) != null) continue;
+        done.append(a, o) catch return sk_sel.items;
+        out.append(a, piece.?) catch return sk_sel.items;
+    }
+    return out.items;
+}
+
 /// The object a click on `p` picks whole: the object round its geometry,
 /// unless the editor is inside that object.
 fn skPickObject(s: *const skl.Sketch, p: SkPick) ?skl.GroupId {
@@ -29348,8 +29395,9 @@ fn skObjectPicks(s: *const skl.Sketch, o: skl.GroupId, out: *std.ArrayList(SkPic
     }
 }
 
-/// Object `o` chosen whole (or with `toggle`, put in or taken out whole).
-fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool) void {
+/// Object `o` chosen whole (or with `toggle`, put in or taken out whole),
+/// `piece` (when known) the piece clicked to choose it.
+fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool, piece: ?SkPick) void {
     var picks: std.ArrayList(SkPick) = .empty;
     defer picks.deinit(state.gpa);
     skObjectPicks(s, o, &picks);
@@ -29357,6 +29405,10 @@ fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool) void {
     const all_in = for (picks.items) |q| {
         if (!skSelected(q)) break false;
     } else true;
+    for (sk_pieces.items, 0..) |x, i| if (x.obj == o) {
+        _ = sk_pieces.orderedRemove(i);
+        break;
+    };
     if (toggle and all_in) {
         for (picks.items) |q| for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, q)) {
             _ = sk_sel.orderedRemove(i);
@@ -29364,8 +29416,12 @@ fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool) void {
         };
         return;
     }
-    if (!toggle) sk_sel.clearRetainingCapacity();
+    if (!toggle) {
+        sk_sel.clearRetainingCapacity();
+        sk_pieces.clearRetainingCapacity();
+    }
     for (picks.items) |q| if (!skSelected(q)) sk_sel.append(state.gpa, q) catch {};
+    if (piece) |pc| sk_pieces.append(state.gpa, .{ .obj = o, .pick = pc }) catch {};
 }
 
 /// Whether object `o` is chosen whole, and nothing else.
@@ -29391,7 +29447,7 @@ fn skClickSelect(p: SkPick, toggle: bool) void {
                 sk_sel.append(state.gpa, p) catch {};
             } else {
                 if (!toggle) sk_inside = null;
-                skSelectObject(s, o, toggle);
+                skSelectObject(s, o, toggle, p);
             }
             return;
         }
