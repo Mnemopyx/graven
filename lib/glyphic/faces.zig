@@ -136,6 +136,25 @@ pub fn resolution(fs: FaceSet, t: fontspec.Treatment) Resolution {
     };
 }
 
+/// How much heavier `face` is drawn so its strokes match the text's, as
+/// a stroke increase in cap heights (grown by half of it on each side):
+/// its stroke relative to its cap height against the reference face's.
+/// Letters, numbers and words compare I's stem; operators, relations and
+/// other symbols the minus sign's bar. The reference is the text face (its
+/// bold for bold); the family's own faces (text, italic, bold, bold italic)
+/// keep the weight their designer gave them, and a face heavier than the
+/// reference is never thinned. 0 when either stroke cannot be measured.
+pub fn matchWeight(fs: FaceSet, face: *Face, kind: Kind, bold: bool) f64 {
+    for ([_][]const u8{ "text", "italic", "bold", "bold_italic" }) |n| if (fs.get(n) == face) return 0;
+    const text = fs.get("text") orelse (if (fs.members.len > 0) fs.members[0].face else return 0);
+    if (text == face) return 0;
+    const ref = if (bold) fs.get("bold") orelse text else text;
+    const which: Face.WeightRef = if (mathKind(kind)) .bar else .stem;
+    const want = (ref.weightOf(which) catch null) orelse return 0;
+    const have = (face.weightOf(which) catch null) orelse return 0;
+    return @max(0, want / capUnits(ref) - have / capUnits(face));
+}
+
 /// A face's cap height, font units (measured from H; 0.7 em without one).
 pub fn capUnits(f: *Face) f64 {
     return (f.capHeight() catch null) orelse 0.7 * @as(f64, @floatFromInt(f.upem));

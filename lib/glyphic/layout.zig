@@ -270,7 +270,10 @@ pub const Layout = struct {
             }
             const same = if (run_face) |rf| (choice != null and rf.face == choice.?.face and rf.slanted == choice.?.slanted) else false;
             if (run.items.len > 0 and (!same or cp_opt == null)) {
-                x = try l.setRun(&out, run_face.?, run.items, run_src.items, x, cap, grow, slant, id);
+                // A face from another family drawn as heavy as the text,
+                // and spaced by the growth so its ink keeps its sidebearings.
+                const matched = faces_mod.matchWeight(fs, run_face.?.face, kind, variant.isBold()) * cap / 2;
+                x = try l.setRun(&out, run_face.?, run.items, run_src.items, x, cap, grow, matched, slant, id);
                 run.clearRetainingCapacity();
                 run_src.clearRetainingCapacity();
             }
@@ -295,21 +298,28 @@ pub const Layout = struct {
         return out;
     }
 
-    fn setRun(l: *Layout, out: *Laid, c: faces_mod.Choice, text: []const u8, src: []const u32, x0: f64, cap: f64, grow: f64, slant_deg: f64, id: Id) !f64 {
+    /// A run in one face from `x0`, its strokes grown by `grow0` (the
+    /// object's weight) and `matched` (matching the text's), the latter
+    /// also widening each glyph's advance by its growth on both sides.
+    fn setRun(l: *Layout, out: *Laid, c: faces_mod.Choice, text: []const u8, src: []const u32, x0: f64, cap: f64, grow0: f64, matched: f64, slant_deg: f64, id: Id) !f64 {
+        const grow = grow0 + matched;
         const k = cap / faces_mod.capUnits(c.face);
         const slant = (slant_deg + if (c.slanted) @as(f64, 12) else 0) * std.math.pi / 180;
         const shear: Affine = .{ .c = @tan(slant) };
         const shaped = try c.face.shape(l.a, text, .{ .ligatures = l.get(id, .ligatures).flag, .extra = l.get(id, .features).name });
         var x = x0;
         for (shaped) |g| {
-            const m = Affine.scale(k).then(shear).then(Affine.translate(x + @as(f64, @floatFromInt(g.x_offset)) * k, @as(f64, @floatFromInt(g.y_offset)) * k));
+            // A mark (no advance) keeps its place on its base, which the
+            // growth moved right by `matched`.
+            const lead = if (g.advance != 0) matched else -matched;
+            const m = Affine.scale(k).then(shear).then(Affine.translate(x + lead + @as(f64, @floatFromInt(g.x_offset)) * k, @as(f64, @floatFromInt(g.y_offset)) * k));
             try out.items.append(l.a, .{ .glyph = .{ .face = c.face, .gid = g.gid, .m = m, .grow = grow, .object = id, .cluster = if (g.cluster < src.len) src[g.cluster] else 0 } });
             const b = (try c.face.outline(g.gid)).bounds();
             if (!b.isEmpty()) {
                 const ib = boundsOf(corners(rect(b.x0, b.y0, b.x1, b.y1), m));
                 out.ink = out.ink.join(.{ .x0 = ib.x0 - grow, .y0 = ib.y0 - grow, .x1 = ib.x1 + grow, .y1 = ib.y1 + grow });
             }
-            x += @as(f64, @floatFromInt(g.advance)) * k;
+            x += @as(f64, @floatFromInt(g.advance)) * k + if (g.advance != 0) 2 * matched else 0;
         }
         return x;
     }
