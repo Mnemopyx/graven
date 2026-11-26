@@ -2329,12 +2329,12 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     const cols = [_][]const u8{ "Panel.Column1", "Panel.Column2", "Panel.Column3" };
     try std.testing.expect(api.chooseAll(&cols));
     try r.frames(2);
-    // W: the others as wide as the first (48 mm).
+    // W: one set of peers, as wide as the first chosen (48 mm).
     try r.key(.k, .none);
     try r.frames(2);
     try r.key(.w, .none);
     try r.frames(3);
-    try std.testing.expectEqual(2, api.constraintCount());
+    try std.testing.expectEqual(1, api.constraintCount());
     for (cols) |c| try std.testing.expectApproxEqAbs(48, api.boxAt(c).?.width(), 1e-6);
     // G: 7 mm gaps, in order across.
     try std.testing.expect(api.chooseAll(&cols));
@@ -2348,7 +2348,7 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     try r.frames(1);
     try r.key(.enter, .none);
     try r.frames(3);
-    try std.testing.expectEqual(4, api.constraintCount());
+    try std.testing.expectEqual(3, api.constraintCount());
     const b1 = api.boxAt(cols[0]).?;
     const b2 = api.boxAt(cols[1]).?;
     const b3 = api.boxAt(cols[2]).?;
@@ -2369,8 +2369,44 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     try r.frames(1);
     try r.key(.enter, .none);
     try r.frames(3);
-    try std.testing.expectEqual(7, api.constraintCount());
+    try std.testing.expectEqual(6, api.constraintCount());
     for (cols) |c| try std.testing.expectApproxEqAbs(175 - 20 - 12, api.boxAt(c).?.y1, 1e-6);
+}
+
+test "equal widths are peers: the first chosen sets the width, then whichever is changed leads" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try api.loadColumns(false);
+    try r.frames(3);
+    const cols = [_][]const u8{ "Panel.Column2", "Panel.Column1", "Panel.Column3" };
+    const w2 = api.boxAt(cols[0]).?.width();
+    try std.testing.expect(api.chooseAll(&cols));
+    try r.frames(2);
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.w, .none);
+    try r.frames(3);
+    try std.testing.expectEqual(1, api.constraintCount());
+    for (cols) |c| try std.testing.expectApproxEqAbs(w2, api.boxAt(c).?.width(), 1e-6);
+    // Column3's width typed: the others follow; then Column1's.
+    for ([_][]const u8{ "Panel.Column3", "Panel.Column1" }, [_][]const u8{ "40", "33" }, [_]f64{ 40, 33 }) |c, typed, w| {
+        const left = api.boxAt(c).?.x0;
+        try r.select(c);
+        try r.field("track.length", typed);
+        try r.frames(2);
+        for (cols) |o| try std.testing.expectApproxEqAbs(w, api.boxAt(o).?.width(), 1e-6);
+        // Resized about its origin (its left edge).
+        try std.testing.expectApproxEqAbs(left, api.boxAt(c).?.x0, 1e-6);
+    }
+    // Column2 removed: Column1 and Column3 still follow each other.
+    try r.select("Panel.Column2");
+    try r.press("track.remove");
+    try std.testing.expectEqual(1, api.constraintCount());
+    try r.select("Panel.Column3");
+    try r.field("track.length", "50");
+    try r.frames(2);
+    try std.testing.expectApproxEqAbs(50, api.boxAt("Panel.Column1").?.width(), 1e-6);
 }
 
 test "K, M on a column: a reference dimension that follows and moves nothing" {
@@ -2403,9 +2439,9 @@ test "a removed column takes its constraints with it, in the same step; undo bri
     try r.key(.m, .none);
     try api.loadColumns(true);
     try r.frames(3);
-    try std.testing.expectEqual(9, api.constraintCount());
-    // Column2: its gap to Column1, Column3's gap to it, its equal width and
-    // its top go; the rest stay.
+    try std.testing.expectEqual(8, api.constraintCount());
+    // Column2: its gap to Column1, Column3's gap to it and its top go; the
+    // equal widths stay, Column1 and Column3 still peers.
     try r.select("Panel.Column2");
     try r.press("track.remove");
     try std.testing.expect(api.boxAt("Panel.Column2") == null);
@@ -2413,7 +2449,7 @@ test "a removed column takes its constraints with it, in the same step; undo bri
     try r.run("edit.undo");
     try r.frames(2);
     try std.testing.expect(api.boxAt("Panel.Column2") != null);
-    try std.testing.expectEqual(9, api.constraintCount());
+    try std.testing.expectEqual(8, api.constraintCount());
 }
 
 test "a click on a tile's text in a text flow edits that text, the caret where pressed (no Ctrl+> needed)" {

@@ -47,7 +47,7 @@ pub const actions = [_][:0]const u8{
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
     "renameStyle",       "setStyleBase",       "setStyleFace",        "setStyleRule",
     "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
-    "setEmSize",         "addConstraint",      "setConstraintValue",  "setConstraintPlace",  "setConstraintDriving", "removeConstraint",   "setObjectOrigin",
+    "setEmSize",         "addConstraint",      "setConstraintValue",  "setConstraintPlace",  "setConstraintDriving", "removeConstraint",   "setObjectOrigin", "addEqualSet", "removeConstraintMember",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
     "addSketch", "addSketchSpace", "homeSpace", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "editSketchDraft", "acceptSketch", "discardSketchDraft", "setInkDraft", "setFillDraft", "addDrawing", "setSketchDrawing", "setPanelDrawing", "makeSketchPanel", "insertSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
     "addGrid", "addArray", "addCaption", "addStrokeStyle", "setStrokeStyle", "setConnectorStyle", "setConnectorKind", "addConnection", "setConnectorShape", "setCurrentStroke", "setInk", "addFillStyle", "setFillStyle", "setCurrentFill", "setFill", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",

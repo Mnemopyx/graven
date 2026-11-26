@@ -139,6 +139,41 @@ pub const Constraint = struct {
     /// Where its dimension is drawn, relative to the constrained object
     /// (end `a`), so it moves with it.
     place: ConstraintPlace = .{},
+    /// Equal sizes as peers (the owner, 2026-11-24): with two or more,
+    /// this `equal_size` is one constraint over the set, every member's
+    /// size on the axis of `a.feature` held equal, and no member a
+    /// reference: whichever member changes (dragged, a width typed) is
+    /// held, and the others follow it. Its ends name no object (their
+    /// features give the axis). A member removed leaves the rest equal.
+    /// (A pair kept in `a` and `b`, as older files have them, holds `a`
+    /// to `b`; reading a file folds those into sets: `foldEqualSets`.)
+    peers: std.ArrayList(ObjectId) = .empty,
+    /// A set's size as last solved, which its members shared: a member
+    /// whose size now differs has been changed, and leads. Below 0 before
+    /// the first solve: then the first member leads, so the first chosen
+    /// sets the starting size (the owner, 2026-11-26).
+    shared: f64 = -1,
+
+    /// Whether this is a set of equal sizes (`peers`).
+    pub fn isSet(c: Constraint) bool {
+        return c.kind == .equal_size and c.peers.items.len > 0;
+    }
+
+    /// The objects it names: a set's members, or its ends' objects.
+    pub fn objects(c: *const Constraint, buf: *[2]ObjectId) []const ObjectId {
+        if (c.isSet()) return c.peers.items;
+        buf[0] = c.a.object;
+        if (c.b.object == .none or c.b.object == c.a.object) return buf[0..1];
+        buf[1] = c.b.object;
+        return buf[0..2];
+    }
+
+    /// Whether it names object `id`.
+    pub fn names(c: *const Constraint, id: ObjectId) bool {
+        if (id == .none) return false;
+        var buf: [2]ObjectId = undefined;
+        return std.mem.indexOfScalar(ObjectId, c.objects(&buf), id) != null;
+    }
 };
 
 /// Where a constraint's dimension is drawn, after drafting practice
@@ -3002,6 +3037,22 @@ pub const Model = struct {
         while (grew) {
             grew = false;
             for (m.constraints.items) |c| {
+                // A set of peers: any member going takes them all.
+                if (c.isSet()) {
+                    const any = for (c.peers.items) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) break true;
+                    } else false;
+                    if (!any) continue;
+                    for (c.peers.items) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) continue;
+                        if (m.spaceOfId(x) != from) continue;
+                        const top = m.topLevel(x);
+                        try all.append(m.a(), top);
+                        try m.constrainedLeaves(top, &going);
+                        grew = true;
+                    }
+                    continue;
+                }
                 if (c.b.object == .none or std.mem.indexOfScalar(ObjectId, going.items, c.b.object) == null) continue;
                 if (std.mem.indexOfScalar(ObjectId, going.items, c.a.object) != null) continue;
                 if (m.spaceOfId(c.a.object) != from) continue;
@@ -3024,6 +3075,17 @@ pub const Model = struct {
             const n = m.constraints.items.len;
             for (0..n) |ci| {
                 const c = m.constraints.items[ci];
+                // A set: its copied members, as a set of their own.
+                if (c.isSet()) {
+                    var peers: std.ArrayList(ObjectId) = .empty;
+                    for (c.peers.items) |x| if (pairOf(pairs.items, x)) |nx| try peers.append(m.a(), nx);
+                    if (peers.items.len < 2) continue;
+                    var cc = c;
+                    cc.id = m.newId();
+                    cc.peers = peers;
+                    try m.constraints.append(m.a(), cc);
+                    continue;
+                }
                 const na = pairOf(pairs.items, c.a.object) orelse continue;
                 const nb: ObjectId = if (c.b.object == .none) .none else pairOf(pairs.items, c.b.object) orelse continue;
                 var cc = c;
@@ -3038,6 +3100,31 @@ pub const Model = struct {
             var k: usize = 0;
             while (k < m.constraints.items.len) {
                 const c = m.constraints.items[k];
+                // A set: members left behind leave it (with fewer than two
+                // going, or staying, it holds nothing and goes).
+                if (c.isSet()) {
+                    var gone: usize = 0;
+                    for (c.peers.items) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) gone += 1;
+                    }
+                    if (gone == 0 or gone == c.peers.items.len) {
+                        k += 1;
+                        continue;
+                    }
+                    if (gone < 2) {
+                        _ = m.constraints.orderedRemove(k);
+                        continue;
+                    }
+                    const set = &m.constraints.items[k];
+                    var w: usize = 0;
+                    for (set.peers.items) |x| if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) {
+                        set.peers.items[w] = x;
+                        w += 1;
+                    };
+                    set.peers.shrinkRetainingCapacity(w);
+                    k += 1;
+                    continue;
+                }
                 const a_goes = std.mem.indexOfScalar(ObjectId, going.items, c.a.object) != null;
                 const b_goes = c.b.object == .none or std.mem.indexOfScalar(ObjectId, going.items, c.b.object) != null;
                 if (a_goes != b_goes and !(c.b.object == .none and !a_goes)) {
@@ -6794,6 +6881,9 @@ pub const Model = struct {
         if (c.a.object == .none) return error.BadConstraint;
         if (c.a.feature.vertical() != c.b.feature.vertical()) return error.BadConstraint;
         if (!std.math.isFinite(c.value)) return error.BadConstraint;
+        // Equal sizes with no difference: peers, as a set (`addEqualSet`).
+        if (c.kind == .equal_size and c.value == 0 and c.driving and c.b.object != .none and c.b.object != c.a.object and c.peers.items.len == 0)
+            return m.addEqualSet(&.{ c.b.object, c.a.object }, c.a.feature.vertical());
         var out = c;
         // A signed value given: its sign is the side.
         if (out.value < 0) {
@@ -6846,6 +6936,119 @@ pub const Model = struct {
         const i = m.constraintIndex(id) orelse return error.NoSuchObject;
         _ = m.constraints.orderedRemove(i);
         m.revision += 1;
+    }
+
+    /// Holds the sizes of `members` (two or more objects) equal on one
+    /// axis (heights when `vertical`), as peers: one constraint over them
+    /// all, no member a reference (see `Constraint.peers`). The first
+    /// member sets the starting size (the owner, 2026-11-26). A set on
+    /// that axis sharing a member, or an equal pair, joins it, so a
+    /// member is in one set per axis. Returns the set's ID.
+    pub fn addEqualSet(m: *Model, members: []const ObjectId, vertical: bool) Error!ObjectId {
+        var list: std.ArrayList(ObjectId) = .empty;
+        for (members) |id| {
+            if (id == .none) return error.BadConstraint;
+            if (std.mem.indexOfScalar(ObjectId, list.items, id) == null) try list.append(m.a(), id);
+        }
+        if (list.items.len < 2) return error.BadConstraint;
+        const f: Feature = if (vertical) .bottom else .left;
+        const id = m.newId();
+        try m.constraints.append(m.a(), .{ .id = id, .kind = .equal_size, .a = .{ .feature = f }, .b = .{ .feature = f }, .peers = list });
+        _ = try m.foldEqualSets();
+        m.revision += 1;
+        // The set it was folded into (the first among those it met): its
+        // size set again by the first chosen.
+        for (m.constraints.items) |*c| if (c.isSet() and c.a.feature.vertical() == vertical and c.names(members[0])) {
+            const k = std.mem.indexOfScalar(ObjectId, c.peers.items, members[0]).?;
+            std.mem.rotate(ObjectId, c.peers.items[0 .. k + 1], k);
+            c.shared = -1;
+            return c.id;
+        };
+        return id;
+    }
+
+    /// Takes object `object` out of set `id` of equal sizes: the rest stay
+    /// equal (with one left, the set goes).
+    pub fn removeConstraintMember(m: *Model, id: ObjectId, object: ObjectId) Error!void {
+        const i = m.constraintIndex(id) orelse return error.NoSuchObject;
+        const c = &m.constraints.items[i];
+        if (!c.isSet()) return error.BadConstraint;
+        const k = std.mem.indexOfScalar(ObjectId, c.peers.items, object) orelse return error.NoSuchObject;
+        _ = c.peers.orderedRemove(k);
+        // Members removed before are dropped with it.
+        var w: usize = 0;
+        for (c.peers.items) |x| if (m.spaceOfId(x) != null) {
+            c.peers.items[w] = x;
+            w += 1;
+        };
+        c.peers.shrinkRetainingCapacity(w);
+        if (c.peers.items.len < 2) _ = m.constraints.orderedRemove(i);
+        m.revision += 1;
+    }
+
+    /// Equal sizes as sets of peers: each driving equal pair (an older
+    /// file's, held to a reference with no difference) and each set
+    /// sharing a member with another on its axis made one set, in the
+    /// place of the first, its members in the order met (so the first
+    /// chosen stays first). A pair with a difference stays a pair.
+    /// Whether anything was folded.
+    pub fn foldEqualSets(m: *Model) Allocator.Error!bool {
+        var folded = false;
+        const foldable = struct {
+            fn f(c: Constraint) bool {
+                if (c.kind != .equal_size or !c.driving) return false;
+                if (c.isSet()) return true;
+                return c.value == 0 and c.a.object != .none and c.b.object != .none and c.a.object != c.b.object;
+            }
+        }.f;
+        var i: usize = 0;
+        while (i < m.constraints.items.len) : (i += 1) {
+            if (!foldable(m.constraints.items[i])) continue;
+            const v = m.constraints.items[i].a.feature.vertical();
+            // Made a set: a pair's reference first, as it set the size.
+            if (!m.constraints.items[i].isSet()) {
+                folded = true;
+                const c = &m.constraints.items[i];
+                try c.peers.append(m.a(), c.b.object);
+                try c.peers.append(m.a(), c.a.object);
+                const f: Feature = if (v) .bottom else .left;
+                c.a = .{ .feature = f };
+                c.b = .{ .feature = f };
+                c.value = 0;
+                c.side = 1;
+            }
+            // Whatever shares a member joins it, until nothing more does.
+            var grew = true;
+            while (grew) {
+                grew = false;
+                var j: usize = i + 1;
+                while (j < m.constraints.items.len) {
+                    const o = m.constraints.items[j];
+                    if (!foldable(o) or o.a.feature.vertical() != v) {
+                        j += 1;
+                        continue;
+                    }
+                    var buf: [2]ObjectId = undefined;
+                    const theirs: []const ObjectId = if (o.isSet()) o.peers.items else blk: {
+                        buf = .{ o.b.object, o.a.object };
+                        break :blk &buf;
+                    };
+                    const set = &m.constraints.items[i];
+                    const meets = for (theirs) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, set.peers.items, x) != null) break true;
+                    } else false;
+                    if (!meets) {
+                        j += 1;
+                        continue;
+                    }
+                    for (theirs) |x| if (std.mem.indexOfScalar(ObjectId, set.peers.items, x) == null) try set.peers.append(m.a(), x);
+                    _ = m.constraints.orderedRemove(j);
+                    grew = true;
+                    folded = true;
+                }
+            }
+        }
+        return folded;
     }
 
     /// Designates object `id`'s object origin. Nothing moves.

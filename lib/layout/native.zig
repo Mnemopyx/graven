@@ -433,6 +433,9 @@ pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model 
         c.value = -c.value;
         c.side = -c.side;
     };
+    // Its equal sizes held to a reference, as sets of peers, solved once
+    // so each knows the size its members share (the reference's).
+    if (try m.foldEqualSets()) try @import("constrain.zig").solve(&m, gpa, null);
     m.upgradeProcesses() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},

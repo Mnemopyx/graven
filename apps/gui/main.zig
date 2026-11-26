@@ -26421,8 +26421,9 @@ fn objectsMenu() void {
     }
 }
 
-/// Equal widths (or heights) for the chosen objects: each held equal to
-/// the first, one undo step.
+/// Equal widths (or heights) for the chosen objects: one set of peers
+/// (no member a reference; the owner, 2026-11-24), the first chosen
+/// setting the starting size (2026-11-26), one undo step.
 fn equalSizes(vertical: bool) void {
     const cb = constrain_batch orelse return;
     closeObjectsMenu();
@@ -26433,8 +26434,10 @@ fn equalSizes(vertical: bool) void {
     }
     drag_count += 1;
     const key = mergeKey(.{ "constrain-equal", drag_count });
-    const f: Feature = if (vertical) .bottom else .left;
-    for (cb.ids[1..cb.n]) |id| _ = actM(key, .addConstraint, .{.{ .kind = .equal_size, .a = .{ .object = id, .feature = f }, .b = .{ .object = cb.ids[0], .feature = f } }}) catch {};
+    _ = actM(key, .addEqualSet, .{ cb.ids[0..cb.n], vertical }) catch {
+        state.status = "Those sizes could not be held equal. ";
+        return;
+    };
     state.status = if (vertical) "Equal heights. " else "Equal widths. ";
 }
 
@@ -26865,7 +26868,9 @@ fn pickedConstraintProperties() bool {
     var b1: [120]u8 = undefined;
     var b2: [120]u8 = undefined;
     var b3: [260]u8 = undefined;
-    const what = if (c.kind == .equal_size)
+    const what = if (c.isSet())
+        setText(&b3, c)
+    else if (c.kind == .equal_size)
         std.fmt.bufPrint(&b3, "{s} size − {s}", .{ endText(&b1, c.a, null), endText(&b2, c.b, c.a.object) }) catch ""
     else
         std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, null), endText(&b2, c.b, c.a.object) }) catch "";
@@ -26875,7 +26880,9 @@ fn pickedConstraintProperties() bool {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         propName("Value");
-        if (c.driving) {
+        if (c.isSet()) {
+            dvui.labelNoFmt(@src(), "Equal: whichever member changes, the others follow", .{}, .{ .gravity_y = 0.5, .id_extra = 9585 });
+        } else if (c.driving) {
             const v0 = @round(c.value * k * 1000) / 1000;
             accepted.label_unit = if (k == 1) .mm else .in;
             if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| setConstraintValue(c.id, v / k);
@@ -26902,6 +26909,10 @@ fn constraintText(buf: []u8, c: layout.model.Constraint) []const u8 {
     var b2: [120]u8 = undefined;
     var vb: [32]u8 = undefined;
     const gone = constrain.abandoned(&state.model, c);
+    if (c.isSet()) {
+        var sb: [260]u8 = undefined;
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ if (gone) "Abandoned: " else "", setText(&sb, c) }) catch "";
+    }
     const rel = if (c.kind == .equal_size) "size equal to" else "from";
     const what = if (c.kind == .equal_size) std.fmt.bufPrint(&b2, "{s}'s", .{objectName(c.b.object)}) catch "" else endText(&b2, c.b, c.a.object);
     return std.fmt.bufPrint(buf, "{s}{s} {s} {s}{s}{s}", .{
@@ -26912,6 +26923,21 @@ fn constraintText(buf: []u8, c: layout.model.Constraint) []const u8 {
         if (c.kind == .equal_size) "" else ", ",
         if (c.kind == .equal_size or gone) "" else dimText(&vb, c),
     }) catch "";
+}
+
+/// "Equal widths: Column1, Column2, Column3", a set of peers (its members
+/// still there).
+fn setText(buf: []u8, c: layout.model.Constraint) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll(if (c.a.feature.vertical()) "Equal heights: " else "Equal widths: ") catch return buf[0..0];
+    var n: usize = 0;
+    for (c.peers.items) |id| {
+        if (constrain.parentOf(&state.model, id) == null) continue;
+        if (n > 0) w.writeAll(", ") catch break;
+        w.writeAll(objectName(id)) catch break;
+        n += 1;
+    }
+    return w.buffered();
 }
 
 /// The document's constraints: how many, the abandoned ones (an object
@@ -26987,7 +27013,7 @@ fn drawConstraintsLayer(area: dvui.Rect.Physical, space: usize) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
     for (m.constraints.items) |c| {
-        const parent = constrain.parentOf(m, c.a.object) orelse continue;
+        const parent = constrain.constraintParent(m, c) orelse continue;
         if (constrain.spaceOf(m, parent) != space) continue;
         const off = constrain.frameOffset(m, parent);
         const hot = (picked_constraint != null and picked_constraint.? == c.id) or (if (engageTarget()) |h| isDimKind(h.kind) and h.id == c.id else false) or (dim_drag != null and dim_drag.?.id == c.id);
@@ -27014,11 +27040,11 @@ fn drawConstraintsLayer(area: dvui.Rect.Physical, space: usize) void {
                 drawDimension(area, .{ .x = 0, .y = 0 }, g.ms, c.place, dimText(&buf, c), colour, hot);
             },
             .equal_size => {
-                // "=" on each object's extent.
-                const eoff = constrain.frameOffset(m, parent);
-                for ([_]layout.model.ObjectId{ c.a.object, c.b.object }) |id| {
-                    if (id == .none) continue;
-                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, eoff);
+                // "=" on each object's extent (each member's, of a set).
+                var ob: [2]layout.model.ObjectId = undefined;
+                for (c.objects(&ob)) |id| {
+                    const ep = constrain.parentOf(m, id) orelse continue;
+                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, constrain.frameOffset(m, ep));
                     const at: geom.Point = if (v) .{ .x = b.x1, .y = (b.y0 + b.y1) / 2 } else .{ .x = (b.x0 + b.x1) / 2, .y = b.y1 };
                     const q = state.view.toPx(area, at);
                     strokeText("=", .{ .at = .{ .x = q.x + 3 * px, .y = q.y + 2 * px }, .size = dim_cap * px, .y_down = true, .align_y = 1 }, colour);
@@ -27075,8 +27101,8 @@ fn layConstraintIcon(c: layout.model.Constraint) icons.GIcon {
 /// Showing (or no longer showing) one end of a container's constraint.
 fn layFlashEnd(arg: i32) void {
     const id = contextObject() orelse return;
-    const ci: usize = @intCast(@divTrunc(arg, 2));
-    const e: usize = @intCast(@mod(arg, 2));
+    const ci: usize = @intCast(@divTrunc(arg, 256));
+    const e: usize = @intCast(@mod(arg, 256));
     if (ci >= state.model.constraints.items.len) return;
     const cid = state.model.constraints.items[ci].id;
     if (lay_flash) |f| if (f.c == cid and f.end == e) {
@@ -27094,8 +27120,11 @@ fn drawLayFlash(area: dvui.Rect.Physical) void {
     const c = for (m.constraints.items) |x| {
         if (x.id == f.c) break x;
     } else return;
-    const end = if (f.end == 0) c.a else c.b;
-    const other = if (f.end == 0) c.b else c.a;
+    // A set's member: its box.
+    const end: ConstraintEnd = if (c.isSet())
+        .{ .object = if (f.end < c.peers.items.len) c.peers.items[f.end] else return, .feature = c.a.feature }
+    else if (f.end == 0) c.a else c.b;
+    const other = if (c.isSet()) end else if (f.end == 0) c.b else c.a;
     const parent = constrain.parentOf(m, if (end.object != .none) end.object else other.object) orelse return;
     const off = constrain.frameOffset(m, parent);
     const far = 1e5;
@@ -27132,7 +27161,7 @@ fn constraintProperties() void {
         lay_flash = null;
     };
     for (m.constraints.items, 0..) |c, ci| {
-        if (c.a.object != id and c.b.object != id) continue;
+        if (!c.names(id)) continue;
         any = true;
         const flagged = constraintIssue(c.id);
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -27147,17 +27176,24 @@ fn constraintProperties() void {
         var b1: [120]u8 = undefined;
         var b2: [120]u8 = undefined;
         var b3: [260]u8 = undefined;
-        const what = if (c.kind == .equal_size)
+        const what = if (c.isSet())
+            setText(&b3, c)
+        else if (c.kind == .equal_size)
             std.fmt.bufPrint(&b3, "Equal size: {s} − {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch ""
         else
             std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
         const pad: dvui.Rect = .all(2);
         keyIcon(@src(), "Constraint", icons.gravenAny(layConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = what } });
-        for ([2]ConstraintEnd{ c.a, c.b }, 0..) |e, ei| {
+        // A set: each member; else the two ends.
+        const eb: [2]ConstraintEnd = .{ c.a, c.b };
+        const n_ends = if (c.isSet()) @min(c.peers.items.len, 255) else 2;
+        for (0..n_ends) |ei| {
+            if (c.isSet() and constrain.parentOf(m, c.peers.items[ei]) == null) continue;
+            const e: ConstraintEnd = if (c.isSet()) .{ .object = c.peers.items[ei], .feature = c.a.feature } else eb[ei];
             const on = if (lay_flash) |f| f.c == c.id and f.end == ei else false;
             var nb: [120]u8 = undefined;
             const tip = if (c.kind == .equal_size) (std.fmt.bufPrint(&nb, "{s} size", .{if (e.object == .none) "The parent's" else objectName(e.object)}) catch "") else endText(&nb, e, null);
-            keyIcon(@src(), "Constraint object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 2 + ei), .{
+            keyIcon(@src(), "Constraint object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 256 + ei), .{
                 .id_extra = 1 + ei,
                 .gravity_y = 0.5,
                 .padding = pad,
@@ -27170,6 +27206,14 @@ fn constraintProperties() void {
             });
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (c.isSet()) {
+            // Taking this object out: the rest stay equal.
+            if (icons.button(@src(), .trash, "Take this out of the set (the rest stay equal)", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+                act(.removeConstraintMember, .{ c.id, id }) catch {};
+                return;
+            }
+            continue;
+        }
         if (!c.driving) {
             var vb: [32]u8 = undefined;
             dvui.labelNoFmt(@src(), dimText(&vb, c), .{}, .{ .gravity_y = 0.5, .id_extra = ci });
@@ -27185,7 +27229,7 @@ fn constraintProperties() void {
     }
     if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     for (constraintIssues()) |i| {
-        for (m.constraints.items) |c| if (c.id == i.constraint and (c.a.object == id or c.b.object == id)) {
+        for (m.constraints.items) |c| if (c.id == i.constraint and c.names(id)) {
             propText("Issue", "{s}", .{switch (i.kind) {
                 .missing_object => "a constraint names something removed",
                 .cross_parent => "a constraint crosses workspaces",
@@ -27612,6 +27656,7 @@ fn loadColumnsSampleWith(constrained: bool) !void {
         .{ .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .right }, .value = 6 },
         .{ .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[1], .feature = .right }, .value = 6 },
         .{ .kind = .equal_size, .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } },
+        // Joins the first: one set of the three (`addConstraint`).
         .{ .kind = .equal_size, .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } },
         .{ .a = .{ .object = ids[1], .feature = .top }, .b = .{ .object = ids[0], .feature = .top } },
         .{ .a = .{ .object = ids[2], .feature = .top }, .b = .{ .object = ids[0], .feature = .top } },
