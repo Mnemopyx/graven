@@ -28829,7 +28829,7 @@ fn skClickConstraints(g: skl.GeomId, roles: [3]SkClickRole) void {
                 .curve => |cv| if (own) |r| if (cv != g) {
                     _ = skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = cv } } } });
                 },
-                .constraint => {},
+                .constraint, .piece => {},
             }
             continue;
         }
