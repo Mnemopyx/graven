@@ -142,6 +142,9 @@ pub const action_defs = [_]A{
     .{ .name = "view.zoom-out", .repeat = true },
     // Drags snap to the grid, or not.
     .{ .name = "view.snap-grid" },
+    // Drags snap to other objects' edges and centres and to construction
+    // lines (smart guides), or not.
+    .{ .name = "view.snap-objects" },
     // The canvas theme (canvas_theme.zig): arg its index, -1 the next one.
     .{ .name = "view.canvas-theme", .param = .int },
     // The fabrication checks (DRC) and the process's simulation, run on
