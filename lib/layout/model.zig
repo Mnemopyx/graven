@@ -5765,19 +5765,31 @@ pub const Model = struct {
     /// What uses sketch `index`'s geometry by ID follows an object made
     /// again (`remap`): its drawings' inks and fills (their pending marks
     /// while a draft is open, so the accepted drawing stays as it was).
+    /// Piece `p` with its geometry and points remapped; null when any is gone.
+    fn remapPiece(remap: *const sketch_.composite.Remap, p: figure_.Piece) ?figure_.Piece {
+        var o = p;
+        o.geom = remap.get(p.geom) orelse return null;
+        if (p.from) |r| o.from = .{ .geom = remap.get(r.geom) orelse return null, .role = r.role };
+        if (p.to) |r| o.to = .{ .geom = remap.get(r.geom) orelse return null, .role = r.role };
+        return o;
+    }
+
     fn followRemap(m: *Model, index: usize, remap: *const sketch_.composite.Remap) Error!void {
         const it = &m.sketches.items[index];
         const drafting = it.accepted != null;
         for (m.figures.items) |*f| if (f.sketch == it.id) {
             var marks: figure_.Marks = if (drafting) (f.pending orelse .{ .inks = f.inks, .fills = f.fills }) else .{ .inks = f.inks, .fills = f.fills };
             var inks: std.ArrayList(figure_.Ink) = .empty;
-            for (marks.inks) |ink| if (remap.get(ink.geom)) |g| try inks.append(m.a(), .{ .geom = g, .style = ink.style });
+            for (marks.inks) |ink| if (remapPiece(remap, ink.piece())) |p| try inks.append(m.a(), .{ .geom = p.geom, .from = p.from, .to = p.to, .style = ink.style });
             var fills: std.ArrayList(figure_.Fill) = .empty;
             fill: for (marks.fills) |fl| {
                 const gs = try m.a().alloc(u32, fl.geoms.len);
                 for (fl.geoms, gs) |g, *to| to.* = remap.get(g) orelse continue :fill;
+                const ps = try m.a().alloc(figure_.Piece, fl.pieces.len);
+                for (fl.pieces, ps) |p, *to| to.* = remapPiece(remap, p) orelse continue :fill;
                 var copy = fl;
                 copy.geoms = gs;
+                copy.pieces = ps;
                 try fills.append(m.a(), copy);
             }
             marks = .{ .inks = inks.items, .fills = fills.items };
@@ -6908,9 +6920,7 @@ pub const Model = struct {
             var segs: std.ArrayList(geom.Segment) = .empty;
             for (f.inks) |ink| {
                 if (ink.style != style or ink.geom >= sk.geometry.items.len) continue;
-                const g = sk.geometry.items[ink.geom];
-                if (g.removed) continue;
-                try sk.appendSegments(al, g, &segs);
+                try sketch_.pieces.appendSegments(sk, al, ink.piece(), &segs);
             }
             if (segs.items.len == 0) continue;
             const runs = try sketch_.Sketch.runs(al, segs.items);
@@ -7098,9 +7108,18 @@ pub const Model = struct {
 
     /// The area fill `fill` covers in sketch `sk`, in `pattern`: exact
     /// contours (a hatch's lines as thin areas cut to it).
+    /// The segments of fill `fill`'s boundary: its whole curves and its
+    /// pieces.
+    fn fillBoundary(al: std.mem.Allocator, sk: *const sketch_.Sketch, fill: figure_.Fill) Error![]geom.Segment {
+        var segs: std.ArrayList(geom.Segment) = .empty;
+        try segs.appendSlice(al, try sk.segmentsOf(al, fill.geoms));
+        for (fill.pieces) |pc| try sketch_.pieces.appendSegments(sk, al, pc, &segs);
+        return segs.items;
+    }
+
     fn fillRegion(al: std.mem.Allocator, sk: *const sketch_.Sketch, fill: figure_.Fill, pattern: figure_.Pattern) Error!geom.Outline {
         const Sk = sketch_.Sketch;
-        const edge = try Sk.chain(al, try sk.segmentsOf(al, fill.geoms));
+        const edge = try Sk.chain(al, try fillBoundary(al, sk, fill));
         if (edge.contours.len == 0) return .blank;
         var inputs: std.ArrayList(geom.Outline) = .empty;
         try inputs.append(al, .{ .contours = edge.contours });
@@ -7113,6 +7132,9 @@ pub const Model = struct {
             for (sk.geometry.items, 0..) |g, gi| {
                 if (g.removed or g.reference) continue;
                 if (std.mem.indexOfScalar(u32, fill.geoms, @intCast(gi)) != null) continue;
+                if (for (fill.pieces) |pc| {
+                    if (pc.geom == gi) break true;
+                } else false) continue;
                 if (g.kind == .circle) {
                     var one: std.ArrayList(geom.Segment) = .empty;
                     try sk.appendSegments(al, g, &one);
@@ -7306,32 +7328,39 @@ pub const Model = struct {
     /// (`enclosed`); with `on` false, takes off the fill of that boundary.
     /// A fill of the same boundary is replaced.
     pub fn setFill(m: *Model, index: usize, geoms: []const u32, enclosed: bool, on: bool) Error!void {
+        return m.setFillPieces(index, geoms, &.{}, enclosed, on);
+    }
+
+    /// `setFill` of a boundary of whole curves `geoms` and pieces `ps`.
+    fn setFillPieces(m: *Model, index: usize, geoms: []const u32, ps: []const figure_.Piece, enclosed: bool, on: bool) Error!void {
         const item = try m.sketchAt(index);
-        if (geoms.len == 0) return error.NoSuchItem;
+        if (geoms.len + ps.len == 0) return error.NoSuchItem;
         for (geoms) |g| if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
+        for (ps) |p| if (p.geom >= item.sketch.geometry.items.len or item.sketch.geometry.items[p.geom].removed) return error.NoSuchItem;
+        const sorted = try m.a().dupe(u32, geoms);
+        std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
+        const own_ps = try m.a().dupe(figure_.Piece, ps);
         // The boundary must close.
         {
             var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
             defer scratch.deinit();
-            const ch = try sketch_.Sketch.chain(scratch.allocator(), try item.sketch.segmentsOf(scratch.allocator(), geoms));
+            const ch = try sketch_.Sketch.chain(scratch.allocator(), try fillBoundary(scratch.allocator(), &item.sketch, .{ .geoms = sorted, .pieces = own_ps, .style = .none }));
             if (on and (ch.contours.len == 0 or ch.open > 0)) return error.NotEnclosed;
         }
-        const sorted = try m.a().dupe(u32, geoms);
-        std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
         const fi = try m.sketchFigureFor(index, on) orelse return;
         const f = &m.figures.items[fi];
         var fills: std.ArrayList(figure_.Fill) = .empty;
         var replaced = false;
         for (f.fills) |k| {
-            if (!std.mem.eql(u32, k.geoms, sorted)) {
+            if (!sameBoundary(k, sorted, own_ps)) {
                 try fills.append(m.a(), k);
             } else if (on) {
                 // In its place, the current style taken.
-                try fills.append(m.a(), .{ .geoms = sorted, .style = try m.fillStyleForNew(), .enclosed = enclosed });
+                try fills.append(m.a(), .{ .geoms = sorted, .pieces = own_ps, .style = try m.fillStyleForNew(), .enclosed = enclosed });
                 replaced = true;
             }
         }
-        if (on and !replaced) try fills.append(m.a(), .{ .geoms = sorted, .style = try m.fillStyleForNew(), .enclosed = enclosed });
+        if (on and !replaced) try fills.append(m.a(), .{ .geoms = sorted, .pieces = own_ps, .style = try m.fillStyleForNew(), .enclosed = enclosed });
         f.fills = fills.items;
         try m.syncSketchFigures(item.id);
         m.revision += 1;
@@ -7363,16 +7392,120 @@ pub const Model = struct {
     /// (`on`), or takes its ink off. The sketch's figure is made when it
     /// has none.
     pub fn setInk(m: *Model, index: usize, g: u32, on: bool) Error!void {
+        return m.setInkPiece(index, .{ .geom = g }, on);
+    }
+
+    /// Inks piece `p` of sketch `index`'s geometry (see `setInk`).
+    fn setInkPiece(m: *Model, index: usize, p: figure_.Piece, on: bool) Error!void {
         const item = try m.sketchAt(index);
-        if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
+        if (p.geom >= item.sketch.geometry.items.len or item.sketch.geometry.items[p.geom].removed) return error.NoSuchItem;
         const fi = try m.sketchFigureFor(index, on) orelse return;
         const f = &m.figures.items[fi];
         var inks: std.ArrayList(figure_.Ink) = .empty;
-        for (f.inks) |k| if (k.geom != g) try inks.append(m.a(), k);
-        if (on) try inks.append(m.a(), .{ .geom = g, .style = try m.inkStyle() });
+        for (f.inks) |k| if (!k.piece().eql(p)) try inks.append(m.a(), k);
+        if (on) try inks.append(m.a(), .{ .geom = p.geom, .from = p.from, .to = p.to, .style = try m.inkStyle() });
         f.inks = inks.items;
         try m.syncSketchFigures(item.id);
         m.revision += 1;
+    }
+
+    /// Inks the chosen pieces `found` of sketch `index` (whole curves or
+    /// pieces between their cuts) in the current stroke style, or takes
+    /// their ink off: a draft, as `setInkDraft`. Inking makes each piece
+    /// lasting first (`sketch.pieces.attach`): points where curves cross
+    /// it, held on both by constraints, in the sketch's draft.
+    pub fn inkPiecesDraft(m: *Model, index: usize, found: []const sketch_.pieces.Found, on: bool) Error!void {
+        const fi = try m.beginMarksDraft(index);
+        const it = &m.sketches.items[index];
+        var made = false;
+        var ps: std.ArrayList(figure_.Piece) = .empty;
+        for (found) |f| {
+            const n = it.sketch.constraints.items.len;
+            const p = (try sketch_.pieces.attach(&it.sketch, m.a(), f, on)) orelse continue;
+            made = made or it.sketch.constraints.items.len != n;
+            try ps.append(m.a(), p);
+        }
+        if (made) {
+            it.version +%= 1;
+            _ = try it.sketch.solve(m.arena.child_allocator);
+        }
+        const kept = m.swapMarks(fi);
+        errdefer _ = m.swapMarks(fi);
+        for (ps.items) |p| try m.setInkPiece(index, p, on);
+        m.endMarksDraft(fi, kept);
+        try m.syncSketchFigures(it.id);
+        for (m.panels.items, 0..) |pn, pi| if (pn.sketch == it.id) try m.syncSketchPanel(pi);
+        m.revision += 1;
+    }
+
+    /// Whether the chosen piece `f` of sketch `index` is inked in the
+    /// current stroke style in its drawing (as the editor shows it).
+    pub fn pieceInked(m: *Model, index: usize, f: sketch_.pieces.Found) bool {
+        const it = m.sketchAt(index) catch return false;
+        const fi = m.sketchFigure(it.id) orelse return false;
+        const cur = m.currentStroke() orelse return false;
+        const p = (sketch_.pieces.attach(&it.sketch, m.a(), f, false) catch return false) orelse return false;
+        const fig = m.figures.items[fi];
+        const inks = if (fig.pending) |pd| pd.inks else fig.inks;
+        for (inks) |k| if (k.style == cur and k.piece().eql(p)) return true;
+        return false;
+    }
+
+    /// Fills the area the chosen pieces `found` of sketch `index` close
+    /// (whole curves, or pieces between their cuts), as `setFillDraft`;
+    /// the pieces made lasting first, as `inkPiecesDraft` does.
+    pub fn fillPiecesDraft(m: *Model, index: usize, found: []const sketch_.pieces.Found, enclosed: bool, on: bool) Error!void {
+        const fi = try m.beginMarksDraft(index);
+        const it = &m.sketches.items[index];
+        var made = false;
+        var geoms: std.ArrayList(u32) = .empty;
+        var ps: std.ArrayList(figure_.Piece) = .empty;
+        for (found) |f| {
+            const n = it.sketch.constraints.items.len;
+            const p = (try sketch_.pieces.attach(&it.sketch, m.a(), f, on)) orelse return if (on) error.NoSuchItem else {};
+            made = made or it.sketch.constraints.items.len != n;
+            if (p.whole()) try geoms.append(m.a(), p.geom) else try ps.append(m.a(), p);
+        }
+        if (made) {
+            it.version +%= 1;
+            _ = try it.sketch.solve(m.arena.child_allocator);
+        }
+        const kept = m.swapMarks(fi);
+        errdefer _ = m.swapMarks(fi);
+        try m.setFillPieces(index, geoms.items, ps.items, enclosed, on);
+        m.endMarksDraft(fi, kept);
+        try m.syncSketchFigures(it.id);
+        m.revision += 1;
+    }
+
+    /// The fill of sketch `index`'s drawing (as the editor shows it) whose
+    /// boundary is exactly the chosen pieces `found`, if one is: its index.
+    pub fn piecesFill(m: *Model, index: usize, found: []const sketch_.pieces.Found) ?usize {
+        const it = m.sketchAt(index) catch return null;
+        const fi = m.sketchFigure(it.id) orelse return null;
+        var geoms: std.ArrayList(u32) = .empty;
+        var ps: std.ArrayList(figure_.Piece) = .empty;
+        for (found) |f| {
+            const p = (sketch_.pieces.attach(&it.sketch, m.a(), f, false) catch return null) orelse return null;
+            if (p.whole()) geoms.append(m.a(), p.geom) catch return null else ps.append(m.a(), p) catch return null;
+        }
+        const fig = m.figures.items[fi];
+        const fills = if (fig.pending) |pd| pd.fills else fig.fills;
+        for (fills, 0..) |fl, i| if (sameBoundary(fl, geoms.items, ps.items)) return i;
+        return null;
+    }
+
+    /// Whether fill `fl`'s boundary is whole curves `geoms` and pieces
+    /// `ps` (any order).
+    fn sameBoundary(fl: figure_.Fill, geoms: []const u32, ps: []const figure_.Piece) bool {
+        if (fl.geoms.len != geoms.len or fl.pieces.len != ps.len) return false;
+        for (geoms) |g| if (std.mem.indexOfScalar(u32, fl.geoms, g) == null) return false;
+        for (ps) |p| {
+            if (for (fl.pieces) |q| {
+                if (q.eql(p)) break false;
+            } else true) return false;
+        }
+        return true;
     }
 
     pub fn strokeStyleIndex(m: *const Model, id: ObjectId) ?usize {

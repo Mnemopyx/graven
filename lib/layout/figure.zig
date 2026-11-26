@@ -69,18 +69,33 @@ pub const Pattern = union(enum) {
 /// its geometry `geoms` makes; with `enclosed` off, the closed paths of
 /// the sketch's other geometry inside it are left out (holes).
 pub const Fill = struct {
+    /// Whole curves of its boundary.
     geoms: []const u32,
+    /// Pieces of curves in its boundary (between their cuts:
+    /// `sketch.pieces`).
+    pieces: []const Piece = &.{},
     /// Its fill style (`Model.fill_styles`).
     style: @import("model.zig").ObjectId,
     enclosed: bool = false,
 };
 
+/// Part of a sketch's curve, between two points on it (`sketch.pieces`).
+pub const Piece = @import("graven_sketch").pieces.Piece;
+
 /// A sketch's geometry inked: drawn as a stroke in a stroke style.
 pub const Ink = struct {
     /// The geometry, in the figure's sketch.
     geom: u32,
+    /// The piece of it inked, between these points on it (both null:
+    /// the whole of it).
+    from: ?@import("graven_sketch").PointRef = null,
+    to: ?@import("graven_sketch").PointRef = null,
     /// Its stroke style (`Model.stroke_styles`).
     style: @import("model.zig").ObjectId,
+
+    pub fn piece(k: Ink) Piece {
+        return .{ .geom = k.geom, .from = k.from, .to = k.to };
+    }
 };
 
 /// A drawing's marks over its sketch: what is inked, and what filled.

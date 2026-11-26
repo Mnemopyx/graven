@@ -19324,6 +19324,7 @@ fn skSelectedObject(it: SkPlace) ?skl.GroupId {
             .curve => |c| c,
             .point => |r| r.geom,
             .constraint => continue,
+            .piece => |f| f.geom,
         };
         if (skl.composite.objectOf(it.sketch, g)) |o| return o;
     }
@@ -19377,6 +19378,7 @@ fn skSelectedConnection(it: SkPlace) ?u32 {
             .curve => |c| c,
             .point => |r| r.geom,
             .constraint => continue,
+            .piece => |f| f.geom,
         };
         for (it.sketch.connectors.items, 0..) |c, ci| {
             if (c.start == g or c.end == g or std.mem.indexOfScalar(skl.GeomId, c.path.items, g) != null) return @intCast(ci);
@@ -19399,6 +19401,7 @@ fn skConnect() void {
             .point => |r| from = .{ .point = r },
             .curve => |g| from = .{ .curve = g },
             .constraint => {},
+            .piece => |f| from = .{ .curve = f.geom },
         }
     }
     if (sk_sel.items.len >= 2) switch (sk_sel.items[1]) {
@@ -27467,6 +27470,7 @@ fn skSetConstruction(on: bool) void {
             _ = skEdit(.{ .construction = .{ .g = r.geom, .on = on } });
         },
         .constraint => {},
+        .piece => {},
     };
     if (!on and (sk_tool == .ray or sk_tool == .line)) skChooseTool(.segment);
     if (!on) sk_geo_last[@intFromEnum(SkGeo.line)] = .segment;
@@ -27484,6 +27488,9 @@ const SkPick = union(enum) {
     point: skl.PointRef,
     curve: skl.GeomId,
     constraint: skl.ConstraintId,
+    /// Part of a curve between its cuts (Shift+click): its ends, points
+    /// on it, crossings (`skl.pieces`).
+    piece: skl.pieces.Found,
 };
 var sk_sel: std.ArrayList(SkPick) = .empty;
 
@@ -27509,6 +27516,12 @@ var sk_drag_seq: u64 = 0;
 /// A selection box being dragged out on empty space.
 var sk_box: ?struct { start: geom.Point, at: geom.Point } = null;
 var sk_press_ctrl = false;
+/// Shift held at the press: a piece of a curve, or the path round an
+/// area, is chosen (`skPieceSelect`).
+var sk_press_shift = false;
+/// Shift held at the last pointer event: the piece under the pointer
+/// shown.
+var sk_shift = false;
 var sk_summary = false;
 /// A dimension's value being entered.
 var sk_dim: ?struct { c: skl.ConstraintId, at: dvui.Point.Physical, fresh: bool = true, focus_tries: u8 = 6 } = null;
@@ -27769,46 +27782,42 @@ fn skAddCaption() void {
     state.expanded.put(state.gpa, Context.key(parentContext(cap.parent)), true) catch {};
 }
 
-/// The selected curves of the sketch being edited (points' curves are
-/// not: ink is drawn on lines and arcs).
-fn skInkable(buf: []skl.GeomId) []skl.GeomId {
+/// The selected curves and pieces of curves, as chosen pieces (a curve
+/// whole), for ink and fills.
+fn skFound(buf: []skl.pieces.Found) []skl.pieces.Found {
     var n: usize = 0;
-    for (sk_sel.items) |p| switch (p) {
-        .curve => |g| if (n < buf.len) {
-            buf[n] = g;
+    for (sk_sel.items) |p| {
+        const f: skl.pieces.Found = switch (p) {
+            .curve => |g| .{ .geom = g },
+            .piece => |f| f,
+            else => continue,
+        };
+        if (n < buf.len) {
+            buf[n] = f;
             n += 1;
-        },
-        else => {},
-    };
+        }
+    }
     return buf[0..n];
 }
 
-/// Whether geometry `g` of the sketch being edited is inked in the
-/// current stroke style.
-fn skInked(g: skl.GeomId) bool {
-    const r = sketch_edit orelse return false;
-    const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return false;
-    const cur = state.model.currentStroke() orelse return false;
-    for (skMarks(fi).inks) |k| if (k.geom == g and k.style == cur) return true;
-    return false;
-}
-
-/// Ink (I): the selected curves drawn in the current stroke style, the
-/// sketch's figure; when every one is inked in it already, the ink comes off.
+/// Ink (I): the selected curves and pieces of curves drawn in the current
+/// stroke style, the sketch's drawing; when every one is inked in it
+/// already, the ink comes off. A piece ending where curves cross gets a
+/// point there, held on both.
 fn skInk() void {
     const r = sketch_edit orelse return;
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
-    if (gs.len == 0) {
-        state.status = "Ink: select lines or arcs first. ";
+    var buf: [256]skl.pieces.Found = undefined;
+    const fs = skFound(&buf);
+    if (fs.len == 0) {
+        state.status = "Ink: select lines or arcs, or pieces of them (Shift+click), first. ";
         return;
     }
     var all = true;
-    for (gs) |g| if (!skInked(g)) {
+    for (fs) |f| if (!state.model.pieceInked(r.sketch, f)) {
         all = false;
     };
     const key = mergeKey(.{ "ink", r.sketch, state.model.revision });
-    for (gs) |g| _ = actM(key, .setInkDraft, .{ r.sketch, g, !all }) catch {};
+    _ = actM(key, .inkPiecesDraft, .{ r.sketch, fs, !all }) catch {};
     state.status = if (all) "Ink taken off. " else "Inked in the current stroke style. ";
 }
 
@@ -27924,20 +27933,11 @@ fn newStrokeStyle() void {
 /// (otherwise they are left out, holes).
 var fill_enclosed = false;
 
-/// The figure fill of the sketch being edited whose boundary is exactly
-/// `gs` (any order), if any.
-fn skFillOf(gs: []const skl.GeomId) ?usize {
+/// The drawing's fill in the sketch being edited whose boundary is
+/// exactly the chosen pieces `fs` (any order), if any.
+fn skFillOf(fs: []const skl.pieces.Found) ?usize {
     const r = sketch_edit orelse return null;
-    const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return null;
-    for (skMarks(fi).fills, 0..) |f, i| {
-        if (f.geoms.len != gs.len) continue;
-        var all = true;
-        for (gs) |g| if (std.mem.indexOfScalar(u32, f.geoms, g) == null) {
-            all = false;
-        };
-        if (all) return i;
-    }
-    return null;
+    return state.model.piecesFill(r.sketch, fs);
 }
 
 /// Fill (F): the area the selected curves close filled in the current
@@ -27945,14 +27945,14 @@ fn skFillOf(gs: []const skl.GeomId) ?usize {
 /// a boundary filled already has its fill taken off.
 fn skFill() void {
     const r = sketch_edit orelse return;
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
-    if (gs.len == 0) {
-        state.status = "Fill: select the lines and arcs (or the circle) around the area first. ";
+    var buf: [256]skl.pieces.Found = undefined;
+    const fs = skFound(&buf);
+    if (fs.len == 0) {
+        state.status = "Fill: select the lines and arcs (or the circle) around the area first, or Shift+click inside it. ";
         return;
     }
-    const on = skFillOf(gs) == null;
-    act(.setFillDraft, .{ r.sketch, gs, fill_enclosed, on }) catch |err| {
+    const on = skFillOf(fs) == null;
+    act(.fillPiecesDraft, .{ r.sketch, fs, fill_enclosed, on }) catch |err| {
         state.status = if (err == error.NotEnclosed) "Fill: the selection must close a path (end to end, round to its start). " else "The fill could not be made. ";
         return;
     };
@@ -27966,8 +27966,8 @@ fn sketchFillProperties() void {
     const saved_group = pushGroup("fill");
     defer popGroup(saved_group);
     heading("{s}", .{"Fill"}, 8180);
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
+    var buf: [256]skl.pieces.Found = undefined;
+    const gs = skFound(&buf);
     // The selection's own fill's setting, when it has one; else the one
     // new fills take.
     const own: ?usize = if (gs.len > 0) skFillOf(gs) else null;
@@ -27977,7 +27977,7 @@ fn sketchFillProperties() void {
         var on = skMarks(fi).fills[k].enclosed;
         if (tcheckbox(@src(), &on, "Fill enclosed paths", .{ .id_extra = 8181 })) {
             fill_enclosed = on;
-            actV(.setFillDraft, .{ r.sketch, gs, on, true });
+            actV(.fillPiecesDraft, .{ r.sketch, gs, on, true });
         }
     } else _ = tcheckbox(@src(), &fill_enclosed, "Fill enclosed paths", .{ .id_extra = 8181 });
     const m = &state.model;
@@ -28521,6 +28521,10 @@ fn skParts() SkSelParts {
             out.nc += 1;
         },
         .constraint => {},
+        .piece => |f| if (out.nc < 8) {
+            out.curves[out.nc] = f.geom;
+            out.nc += 1;
+        },
     };
     return out;
 }
@@ -28537,6 +28541,7 @@ fn skPruneSelection() void {
             .curve => |g| g < s.geometry.items.len and !s.geometry.items[g].removed,
             .point => |r| r.geom < s.geometry.items.len and !s.geometry.items[r.geom].removed,
             .constraint => |c| c < s.constraints.items.len,
+            .piece => |f| f.geom < s.geometry.items.len and !s.geometry.items[f.geom].removed,
         };
         if (!keep) _ = sk_sel.orderedRemove(i);
     }
@@ -29207,6 +29212,10 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             // pointer has moved.
             const moved = me.p.x != sk_last_px.x or me.p.y != sk_last_px.y;
             sk_last_px = me.p;
+            if (me.mod.shift() != sk_shift) {
+                sk_shift = me.mod.shift();
+                dvui.refresh(null, @src(), box.data().id);
+            }
             state.mouse = at_space;
             sk_pointer = q;
             const radius = 10 * dvui.windowNaturalScale() / state.view.ppm;
@@ -29234,8 +29243,11 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 return;
             }
             sk_press_ctrl = primaryMod(me.mod);
+            sk_press_shift = me.mod.shift();
             const target = skTarget();
-            if (target != null and target.?.pick == .point and !sk_press_ctrl) {
+            if (sk_press_shift) {
+                sk_box = .{ .start = q, .at = q };
+            } else if (target != null and target.?.pick == .point and !sk_press_ctrl) {
                 sk_drag = .{ .p = target.?.pick.point, .moved = false, .start = q };
                 sk_drag_seq += 1;
             } else if (target != null and target.?.pick == .constraint and !sk_press_ctrl and target.?.pick.constraint < it.sketch.constraints.items.len and skDimMeasure(it.sketch, it.sketch.constraints.items[target.?.pick.constraint]) != null) {
@@ -29282,7 +29294,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             } else if (sk_box) |b| {
                 sk_box = null;
                 if (skDist(b.start, b.at) * state.view.ppm < 4) {
-                    if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
+                    if (sk_press_shift) {
+                        skPieceSelect(it.sketch, b.start);
+                    } else if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
                 } else skBoxSelect(it.sketch, b.start, b.at, sk_press_ctrl);
             }
             sk_lock = null;
@@ -29316,6 +29330,63 @@ fn skClickSelect(p: SkPick, toggle: bool) void {
     };
     if (!toggle) sk_sel.clearRetainingCapacity();
     sk_sel.append(state.gpa, p) catch {};
+}
+
+/// The curve nearest the pointer, among the hits (within reach), and
+/// where on it.
+fn skCurveHit() ?struct { g: skl.GeomId, at: geom.Point } {
+    if (sk_lock) |l| if (l.pick == .curve) return .{ .g = l.pick.curve, .at = l.at };
+    for (sk_hits[0..sk_nhits]) |h| switch (h.pick) {
+        .curve => |g| return .{ .g = g, .at = h.at },
+        else => {},
+    };
+    return null;
+}
+
+/// The piece under the pointer (Shift held): of the nearest curve,
+/// between its cuts either side.
+fn skHoverPiece(s: *const skl.Sketch) ?skl.pieces.Found {
+    const h = skCurveHit() orelse return null;
+    return skl.pieces.pieceAt(s, dvui.currentWindow().arena(), h.g, h.at) catch null;
+}
+
+/// Shift+click at `q`: on a curve, the piece of it between its cuts
+/// (its ends, points on it, where other curves cross it) goes in or out
+/// of the selection; off every curve, the pieces of the smallest closed
+/// path round `q` (a fill's boundary) go in, or out when all are in.
+fn skPieceSelect(s: *const skl.Sketch, q: geom.Point) void {
+    const ar = dvui.currentWindow().arena();
+    if (skCurveHit()) |h| {
+        const f = skl.pieces.pieceAt(s, ar, h.g, h.at) catch |err| {
+            state.status = if (err == error.Unbounded) "That part of the line has no end: it needs a crossing or a point on it each side. " else "Not a piece of a curve. ";
+            return;
+        };
+        skClickSelect(skFoundPick(f), true);
+        return;
+    }
+    const loop = (skl.pieces.loopAround(s, ar, q) catch null) orelse {
+        state.status = "No closed path round that place. ";
+        return;
+    };
+    var all = true;
+    for (loop) |f| if (!skSelected(skFoundPick(f))) {
+        all = false;
+    };
+    for (loop) |f| {
+        const p = skFoundPick(f);
+        if (all) {
+            for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, p)) {
+                _ = sk_sel.orderedRemove(i);
+                break;
+            };
+        } else if (!skSelected(p)) sk_sel.append(state.gpa, p) catch {};
+    }
+    state.status = if (all) "Path taken out of the selection. " else "Path round the area selected: F fills it, I inks it. ";
+}
+
+/// A chosen piece as a pick: a whole curve as the curve itself.
+fn skFoundPick(f: skl.pieces.Found) SkPick {
+    return if (f.whole()) .{ .curve = f.geom } else .{ .piece = f };
 }
 
 /// Selects every point and whole curve inside the box.
@@ -29361,6 +29432,7 @@ fn skDeleteSelection() void {
         .constraint => |c| cons.append(state.gpa, c) catch {},
         .curve => |g| geos.append(state.gpa, g) catch {},
         .point => |r| if (r.role == .point) geos.append(state.gpa, r.geom) catch {},
+        .piece => {},
     };
     // Constraints last first, so the indices hold.
     std.mem.sort(skl.ConstraintId, cons.items, {}, std.sort.desc(skl.ConstraintId));
@@ -29482,6 +29554,47 @@ fn skDashed(pts: []const dvui.Point.Physical, colour: dvui.Color, thick: f32) vo
     }
 }
 
+/// The selected pieces of curves, and with Shift held (no tool), what a
+/// click would choose: the piece under the pointer, or the path round
+/// the area it is in.
+fn skDrawPieces(area: dvui.Rect.Physical, it: SkPlace) void {
+    const s = it.sketch;
+    const px = dvui.windowNaturalScale();
+    const ar = dvui.currentWindow().arena();
+    for (sk_sel.items) |p| switch (p) {
+        .piece => |f| skDrawFound(area, it, f, colors.select, 3 * px),
+        else => {},
+    };
+    if (!sk_shift or sk_tool != .none or sk_box != null) return;
+    if (skHoverPiece(s)) |f| {
+        skDrawFound(area, it, f, colors.select.opacity(0.3), 9 * px);
+        skDrawFound(area, it, f, colors.select.opacity(0.8), 2 * px);
+        for ([_]?skl.pieces.Cut{ f.from, f.to }) |c| {
+            const cut = c orelse continue;
+            const q = skl.pieces.cutPoint(s, cut) orelse continue;
+            skRing(skPx(area, it, q), 5 * px, colors.select, 1.5 * px);
+        }
+    } else if (skCurveHit() == null) {
+        const q = sk_pointer orelse return;
+        const loop = (skl.pieces.loopAround(s, ar, q) catch null) orelse return;
+        for (loop) |f| skDrawFound(area, it, f, colors.select.opacity(0.5), 4 * px);
+    }
+}
+
+/// A chosen piece of a curve, stroked on the screen.
+fn skDrawFound(area: dvui.Rect.Physical, it: SkPlace, f: skl.pieces.Found, colour: dvui.Color, thick: f32) void {
+    const a = dvui.currentWindow().arena();
+    var segs: std.ArrayList(geom.Segment) = .empty;
+    skl.pieces.foundSegments(it.sketch, a, f, &segs) catch return;
+    if (segs.items.len == 0) return;
+    var pts: std.ArrayList(geom.Point) = .empty;
+    pts.append(a, segs.items[0].start()) catch return;
+    for (segs.items) |seg| flatten(a, &pts, seg, 0.5 / state.view.ppm) catch return;
+    const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+    for (pts.items, phys) |p, *o| o.* = skPx(area, it, p);
+    dvui.Path.stroke(.{ .points = phys }, .{ .thickness = thick, .color = .{ .color = colour } });
+}
+
 /// The primitive picked in Properties' constraint list: haloed.
 fn skDrawFlash(area: dvui.Rect.Physical, it: SkPlace) void {
     const r = sk_flash orelse return;
@@ -29569,6 +29682,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             skDot(skPx(area, it, p), rad * px, if (sel) colors.select else colour);
         }
     }
+    skDrawPieces(area, it);
     skDrawFlash(area, it);
     // Equal sizes and angles in named sets: each member marked with its
     // set's name, the set's value noted once.
@@ -29970,8 +30084,8 @@ fn sketchConstrainKeys() void {
 /// The sketch ribbon's Ink group: ink the selection in the current stroke
 /// style, fill the area it closes in the current fill style.
 fn sketchInkKeys() void {
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
+    var buf: [256]skl.pieces.Found = undefined;
+    const gs = skFound(&buf);
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
     defer row.deinit();
     skDrawingChoice();
@@ -29983,7 +30097,7 @@ fn sketchInkKeys() void {
         ribbon_next_badge = "I";
         var wd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Ink selection  I", dvui.entypo.brush, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Ink: stroke the selected lines and arcs in the current stroke style, or take their ink off", .{}, .{});
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Ink: stroke the selected lines and arcs, or pieces of them (Shift+click one between its crossings), in the current stroke style, or take their ink off", .{}, .{});
     }
     {
         const saved_group = pushGroup("fill");
@@ -29993,7 +30107,7 @@ fn sketchInkKeys() void {
         ribbon_next_badge = "F";
         var wd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Fill selection  F", dvui.entypo.drop, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off", .{}, .{});
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off (Shift+click inside an area selects the path round it)", .{}, .{});
     }
     {
         const saved_group = pushGroup("caption");
@@ -30282,6 +30396,7 @@ fn skConstraintList(it: SkPlace) void {
             .curve => |c| c,
             .point => |r| r.geom,
             .constraint => continue,
+            .piece => |f| f.geom,
         };
         if (np < picked.len) {
             picked[np] = g;
@@ -30475,6 +30590,7 @@ fn sketchPhysicalWhen(it: SkPlace) void {
         .curve => |c| c,
         .point => |r| if (r.role == .point) r.geom else return,
         .constraint => return,
+        .piece => return,
     };
     const geo = it.sketch.geometry.items[g];
     if (!geo.construction or geo.kind == .line or geo.kind == .ray) return;
