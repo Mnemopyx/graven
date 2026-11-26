@@ -8,6 +8,8 @@
 const face = @import("face.zig");
 /// Containers: sfnt kinds and outlines, WOFF and WOFF2 unwrapped.
 pub const container = @import("container.zig");
+/// Grapheme clusters: what a reader takes for one character.
+pub const graphemes = @import("graphemes.zig");
 
 pub const Face = face.Face;
 pub const faceCount = face.faceCount;
@@ -18,6 +20,7 @@ test {
     @import("std").testing.refAllDecls(@This());
     _ = face;
     _ = container;
+    _ = graphemes;
 }
 
 test "x-height is measured from x's outline" {
