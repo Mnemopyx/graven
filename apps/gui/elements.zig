@@ -663,6 +663,7 @@ pub const all = [_]Element{
     .{ .id = "figure-place.remove-figure", .kind = .button, .label = "Remove figure" },
     .{ .id = "figure-place.show-figure", .kind = .button, .label = "Show figure" },
     .{ .id = "figure-place.width", .kind = .field, .label = "Width, mm" },
+    .{ .id = "figure.drawing-over", .kind = .value, .label = "Drawing over" },
     .{ .id = "figure.from", .kind = .value, .label = "From" },
     .{ .id = "figure.name", .kind = .field, .label = "Name" },
     .{ .id = "figure.paths", .kind = .value, .label = "Paths" },

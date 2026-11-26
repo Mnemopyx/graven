@@ -5510,8 +5510,22 @@ fn treeContent() void {
             // under it: whatever is made can be chosen again.
             const home = state.model.homeOf(sk.id);
             const pi: Parent = .{ .space = home orelse 0 };
-            const holds = home != null and (state.model.regionsIn(pi).len > 0 or state.model.gridsIn(pi).len > 0);
-            if (treeNode(.{ .sketch_def = i }, sk.name, 2, holds, sk.default_name) and holds) parentChildren(pi, 3);
+            const in_home = home != null and (state.model.regionsIn(pi).len > 0 or state.model.gridsIn(pi).len > 0);
+            // Its drawings (figures over it) too: chosen here, they are
+            // what Insert figure places. Also listed under Figures.
+            var drawings: usize = 0;
+            for (state.model.figures.items) |f| {
+                if (f.sketch == sk.id) drawings += 1;
+            }
+            const holds = in_home or drawings > 0;
+            if (treeNode(.{ .sketch_def = i }, sk.name, 2, holds, sk.default_name) and holds) {
+                for (state.model.figures.items, 0..) |f, fi| {
+                    if (f.sketch != sk.id) continue;
+                    // Salted: the same drawing also has a row under Figures.
+                    _ = treeNodeSalted(.{ .figure_def = fi }, f.name, 3, false, f.default_name, 0x5f20);
+                }
+                if (in_home) parentChildren(pi, 3);
+            }
         }
     };
     // Always listed: where figures are imported into.
@@ -30600,6 +30614,9 @@ fn figureProperties(index: usize) void {
     const f = state.model.figures.items[index];
     if (textProp("Name", f.name, 1)) |v| act(.renameFigure, .{ index, v }) catch {};
     if (f.source.len > 0) propText("From", "{s}", .{f.source}, 2);
+    // A drawing over a sketch: its ink follows the sketch, never a file.
+    const over = state.model.sketchIndex(f.sketch);
+    if (over) |ski| propText("Drawing over", "{s}", .{state.model.sketches.items[ski].name}, 7);
     const ink = figureInk(index) orelse return;
     const b = layout.figure.inkBounds(ink);
     if (b.isEmpty()) propText("Size", "{s}", .{"no ink"}, 3) else propText("Size", "{d:.2} × {d:.2} mm", .{ b.width(), b.height() }, 3);
@@ -30616,7 +30633,7 @@ fn figureProperties(index: usize) void {
         defer box.deinit();
         drawInk(box.data().contentRectScale().r, index, ink, b);
     }
-    keyButton(@src(), "Replace from SVG…", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    if (over == null) keyButton(@src(), "Replace from SVG…", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
