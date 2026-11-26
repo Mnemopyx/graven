@@ -611,6 +611,7 @@ pub const all = [_]Element{
     .{ .id = "object.rows", .kind = .field, .label = "Rows" },
     .{ .id = "object.rings", .kind = .field, .label = "Rings" },
     .{ .id = "connector.path", .kind = .choice, .label = "Path" },
+    .{ .id = "connector.arrive", .kind = .choice, .label = "Arrives" },
     .{ .id = "connector.radius", .kind = .field, .label = "Bend radius, mm" },
     .{ .id = "connector.lead", .kind = .field, .label = "Straight leads, mm" },
     .{ .id = "connector.stroke", .kind = .choice, .label = "Stroke (manufactured)" },

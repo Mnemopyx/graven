@@ -6939,21 +6939,41 @@ pub const Model = struct {
             const cs = m.connectorStyleOf(@enumFromInt(c.style));
             // Annotation (no stroke): not drawn.
             const stroke: figure_.Stroke = if (m.strokeStyleIndex(cs.stroke)) |i| m.stroke_styles.items[i].stroke else continue;
-            const runs = try sketch_.Sketch.runs(al, segs.items);
-            const sub = try al.alloc(figure_.Subpath, runs.len);
-            for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
-            try paths.append(al, .{ .subpaths = sub, .stroke = stroke });
-            const ends = [2]struct { mark: ConnectorEnd, p: sketch_.PointRef, th: f64 }{
-                // Into the feature at the start, and on into the end.
-                .{ .mark = cs.start, .p = .{ .geom = c.start, .role = .point }, .th = dirs.leave + std.math.pi },
-                .{ .mark = cs.end, .p = .{ .geom = c.end, .role = .point }, .th = dirs.arrive },
+            // The line stops where each end's mark begins, so the two do
+            // not overlap (a pen's cap poking past an arrow's tip).
+            var line: std.ArrayList(geom.Segment) = .empty;
+            try geom.trim.trimmed(al, segs.items, connectorMarkDepth(cs.start, cs.size, stroke), connectorMarkDepth(cs.end, cs.size, stroke), &line);
+            if (line.items.len > 0) {
+                const runs = try sketch_.Sketch.runs(al, line.items);
+                const sub = try al.alloc(figure_.Subpath, runs.len);
+                for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
+                try paths.append(al, .{ .subpaths = sub, .stroke = stroke });
+            }
+            const ends = [2]struct { mark: ConnectorEnd, p: geom.Point, th: f64 }{
+                // Into the feature at the start, and on into the end, as
+                // the path runs there.
+                .{ .mark = cs.start, .p = segs.items[0].start(), .th = dirs.leave + std.math.pi },
+                .{ .mark = cs.end, .p = segs.items[segs.items.len - 1].end(), .th = dirs.arrive },
             };
             for (ends) |e| {
                 if (e.mark == .none) continue;
-                const p = sk.point(e.p) catch continue;
-                if (try connectorMark(al, e.mark, p, e.th, cs.size, stroke)) |path| try paths.append(al, path);
+                if (try connectorMark(al, e.mark, e.p, e.th, cs.size, stroke)) |path| try paths.append(al, path);
             }
         }
+    }
+
+    /// How far back along its path from its end a connection's line stops
+    /// for end mark `mark`: an arrow's base or a dot's edge, less half the
+    /// pen so the line's end is under the mark (whatever its cap); half
+    /// the pen for a bar, so a round or square cap stays within it.
+    fn connectorMarkDepth(mark: ConnectorEnd, size: f64, stroke: figure_.Stroke) f64 {
+        const half = stroke.width / 2;
+        return switch (mark) {
+            .none => 0,
+            .arrow => size - @min(half, size / 4),
+            .dot => size / 3 - @min(half, size / 6),
+            .bar => half,
+        };
     }
 
     /// A connection's end mark at `p`, pointing at angle `th` (radians).
@@ -7047,7 +7067,7 @@ pub const Model = struct {
         const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
         const style = try m.leaderStyle();
         const sk = &m.sketches.items[ski].sketch;
-        const ci = sketch_.connector.add(sk, m.a(), from, .segments, 3, 6) catch |e| return switch (e) {
+        const ci = sketch_.connector.add(sk, m.a(), from, .segments, 3, 6, false) catch |e| return switch (e) {
             error.NotOnACurve => error.NotOnACurve,
             error.OutOfMemory => error.OutOfMemory,
             else => error.NoSuchItem,
@@ -7076,6 +7096,23 @@ pub const Model = struct {
         const sk = &m.sketches.items[ski].sketch;
         if (ci >= sk.connectors.items.len) return error.NoSuchItem;
         sketch_.connector.setShape(sk, m.a(), ci, radius, lead) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.BadValue,
+        };
+        _ = try sk.solve(m.arena.child_allocator);
+        m.sketches.items[ski].version +%= 1;
+        try m.syncSketchFigures(sketch);
+        m.revision += 1;
+    }
+
+    /// Holds connection `ci` of sketch `sketch`'s end level, or frees its
+    /// direction (a caption's leader stays level).
+    pub fn setConnectorLevel(m: *Model, sketch: ObjectId, ci: u32, level: bool) Error!void {
+        const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
+        const sk = &m.sketches.items[ski].sketch;
+        if (ci >= sk.connectors.items.len) return error.NoSuchItem;
+        if (!level) for (m.sketches.items[ski].captions.items) |sc| if (sc.connector == ci) return error.BadValue;
+        sketch_.connector.setLevel(sk, m.a(), ci, level) catch |e| return switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.BadValue,
         };

@@ -1,5 +1,6 @@
 //! A caption's leader: a connection (`connector.zig`) of segments, out
-//! square to a side or along a curve's radius, then a level jog, ending at
+//! square to a side or along a curve's radius, then a level jog (held
+//! level: the caption reads along it), ending at
 //! the point a caption's text is held to. Its geometry is ordinary
 //! constrained construction geometry, so it follows the side or curve
 //! when it moves, turns or grows, and its lengths are dimensions.
@@ -38,7 +39,7 @@ pub fn addLeader(s: *Sketch, a: Allocator, p: PointRef, out: f64, across: f64) A
 /// Adds a caption's leader from `from`: `out` along the normal, then
 /// `across` (mm).
 pub fn addLeaderFrom(s: *Sketch, a: Allocator, from: From, out: f64, across: f64) AddError!Leader {
-    const ci = try connector.add(s, a, from, .segments, out, across);
+    const ci = try connector.add(s, a, from, .segments, out, across, true);
     const c = s.connectors.items[ci];
     return .{ .connector = ci, .radial = c.path.items[0], .across = c.path.items[1], .end = .{ .geom = c.end, .role = .point }, .right = c.right };
 }

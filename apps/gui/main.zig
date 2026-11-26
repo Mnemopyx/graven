@@ -2585,6 +2585,9 @@ fn frame() !dvui.App.Result {
             if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
                 sample_texts = true;
                 loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "connections")) {
+                sample_connections = true;
+                loadSketchPanelSample();
             } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
@@ -7668,6 +7671,9 @@ var status_name_buf: [64]u8 = undefined;
 var sample_sketch_space = false;
 var sample_objects = false;
 var sample_texts = false;
+/// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
+/// connection, its end free, a dot at its end.
+var sample_connections = false;
 var open_texts_sheet: ?layout.model.ObjectId = null;
 
 fn canvas(active: bool, view: u8) void {
@@ -19266,6 +19272,20 @@ fn connectionProperties(ski: usize, ci: u32) void {
         if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 960 }))
             actV(.setConnectorKind, .{ it.id, ci, @as(layout.model.sketch_.connector.Kind, @enumFromInt(choice)) });
     }
+    // How it arrives at its end: level, or as its path runs (a caption's
+    // leader is always level: its text reads along it).
+    const leader = for (it.captions.items) |sc| {
+        if (sc.connector == ci) break true;
+    } else false;
+    if (!leader) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 968 });
+        defer row.deinit();
+        propName(asElement("connector.arrive"));
+        const names = [_][]const u8{ "As its path runs", "Level" };
+        var choice: usize = @intFromBool(c.level);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 968 }))
+            actV(.setConnectorLevel, .{ it.id, ci, choice == 1 });
+    }
     if (c.kind == .dubins) {
         if (numberProp(asElement("connector.radius"), c.radius, 0.05, 1000, 965)) |v| actV(.setConnectorShape, .{ it.id, ci, v, c.lead });
         if (numberProp(asElement("connector.lead"), c.lead, 0, 1000, 966)) |v| actV(.setConnectorShape, .{ it.id, ci, c.radius, v });
@@ -27658,6 +27678,24 @@ fn loadSketchPanelSample() void {
             _ = state.model.insertText(cap.parent, cap.region, .{ .index = 0 }, "Power", style) catch {};
         } else |_| {}
     } else |_| {}
+    // GRAVEN_SAMPLE=connections: a Dubins path from the ring's lower right
+    // to a point below and right of it, arriving as it runs (not level),
+    // the style's end a dot: both ends' marks with the line stopping at
+    // them.
+    if (sample_connections) connections: {
+        const al = state.model.arena.allocator();
+        const th = -std.math.pi / 3.0;
+        const id = state.model.sketches.items[index].id;
+        const to = sk.addPoint(al, .{ .x = 31, .y = -11 }, true) catch break :connections;
+        _ = sk.addConstraint(al, .{ .kind = .{ .fixed = .{ .p = .{ .geom = to, .role = .point }, .at = .{ .x = 31, .y = -11 } } } }) catch break :connections;
+        const from: layout.model.sketch_.connector.From = .{ .free = .{ .at = .{ .x = 22 + 7 * @cos(th), .y = 7 * @sin(th) }, .angle = th } };
+        _ = act(.addConnection, .{ id, from, @as(?layout.model.sketch_.PointRef, .{ .geom = to, .role = .point }), layout.model.sketch_.connector.Kind.dubins }) catch break :connections;
+        const sk_c = &state.model.sketches.items[index].sketch;
+        const k = sk_c.connectors.items[sk_c.connectors.items.len - 1];
+        var cs = state.model.connectorStyleOf(@enumFromInt(k.style));
+        cs.end = .dot;
+        _ = act(.setConnectorStyle, .{cs}) catch {};
+    }
     const pi = act(.insertSketchPanel, .{ shown_space, index, geom.Point{ .x = 0, .y = 0 } }) catch return;
     // Text across the panel, flowing round the ring.
     const pitch = 6.0;
