@@ -824,3 +824,13 @@ Not yet: deleting or trimming a piece; a piece whose cut point is deleted is dro
 ### Crossings as constraint targets (2026-11-26, the owner's item 21; built)
 
 Where two curves cross is a point of interest in the sketch editor, like a point: the pointer rings it, Tab locks onto it, a click selects it (Ctrl adds). A constraint tool on a selection holding crossings first makes each a construction point held on both curves (`SketchEdit.crossing`, `pieces.attachCrossing`: the same point ink pieces use, one already there reused), then constrains that point. A drawing tool's click locked onto a crossing makes the new geometry's point coincident with it. Crossings where a point already is are not offered (the point is). Shown: a distance between two spoke-ring crossings of a polar array set to 7 mm drives the ring (`screens/ink-pieces/crossing-distance.png`).
+
+## Ligatures, OpenType features, and grapheme-aware editing (2026-11-26)
+
+Built (release gap item 32, the owner: Do now):
+
+- **OpenType features per text style.** Two glyphic parameters, set as rules of a style: `ligatures` (flag, **off by default**: standard and contextual ligatures, liga and clig) and `features` (any others as HarfBuzz reads them, apart by spaces or commas: `smcp onum ss01 -kern salt=2 dlig`). `Face.shape` takes them (`Face.Features`); HarfBuzz's own default has ligatures on, so text shaped before this change could differ only where a font had ligatures and the text had them (the keyboard and HP-15C SVGs are byte-identical). The Text style panel (Y) shows a **Typography** section with a Ligatures check box and an OpenType features field; the expression's Text style section in Properties shows the same.
+- **Grapheme clusters.** `lib/font/graphemes.zig`: Unicode's extended grapheme cluster rules (UAX #29) over HarfBuzz's character data (combining marks, ZWJ emoji sequences, skin tones, flags, Hangul jamo, CR LF). `layout.edit.chars` returns one character per cluster, so Backspace, Delete, word deletes and transposing take a letter with its accents whole. The flow caret has no stop inside a cluster, and has one at each character inside a ligature: `Render.caret` places it that far through the ligature glyph (by source bytes).
+- Sample: `GRAVEN_SAMPLE=typography` (two tracks in STIX Two Text, ligatures off and on, words with combining accents, the cursor after "café").
+
+Not yet: the expression line (DVUI's text entry) still steps by code point; caret stops inside a ligature are placed by proportion, not by the font's GDEF ligature carets; right-to-left text.

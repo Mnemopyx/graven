@@ -241,7 +241,42 @@ pub const Render = struct {
             const x = if (e.face == null) e.ink.x1 else e.origin.x + e.advance;
             consider(&best, &best_source, &best_start, .at(e, x), e.end, false, offset);
         }
+        // Inside a glyph that sets more than one character (a ligature,
+        // fi): the caret goes that far through it, by its source bytes.
+        if (best != null and best_start and best_source < offset) if (self.within(offset)) |x| {
+            best.?.x = x;
+        };
         return best;
+    }
+
+    /// Where offset `offset` falls inside a text glyph whose cluster holds
+    /// it past its start (a ligature): that share of the way from its start
+    /// to the next glyph's (or its element's end); null when no glyph's
+    /// cluster holds it so.
+    fn within(self: Render, offset: u32) ?f64 {
+        for (self.items, 0..) |item, k| {
+            const g = switch (item) {
+                .glyph => |g| g,
+                else => continue,
+            };
+            if (g.source >= offset) continue;
+            const e = self.elements[g.element];
+            if (e.face == null) continue;
+            // The glyph that follows in its element, else the element's end.
+            var next_source: u32 = e.end;
+            var next_x: f64 = e.origin.x + e.advance;
+            if (k + 1 < self.items.len) switch (self.items[k + 1]) {
+                .glyph => |n| if (n.element == g.element) {
+                    next_source = n.source;
+                    next_x = n.transform.e;
+                },
+                else => {},
+            };
+            if (next_source <= g.source or offset >= next_source) continue;
+            const t = @as(f64, @floatFromInt(offset - g.source)) / @as(f64, @floatFromInt(next_source - g.source));
+            return g.transform.e + (next_x - g.transform.e) * t;
+        }
+        return null;
     }
 
     pub fn deinit(self: *Render) void {
@@ -491,7 +526,7 @@ pub fn run(gpa: Allocator, faces: []const *Face, face_id: FaceId, text: []const 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     var ink = Box.empty;
     var pen: f64 = 0;
-    for (try face.shape(a, text)) |g| {
+    for (try face.shape(a, text, .{})) |g| {
         if (g.gid == 0) try diagnostics.append(a, .{ .kind = .missing_glyph, .offset = g.cluster });
         const x: f64 = pen + @as(f64, @floatFromInt(g.x_offset));
         const y: f64 = @floatFromInt(g.y_offset);

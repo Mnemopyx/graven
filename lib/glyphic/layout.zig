@@ -299,7 +299,7 @@ pub const Layout = struct {
         const k = cap / faces_mod.capUnits(c.face);
         const slant = (slant_deg + if (c.slanted) @as(f64, 12) else 0) * std.math.pi / 180;
         const shear: Affine = .{ .c = @tan(slant) };
-        const shaped = try c.face.shape(l.a, text);
+        const shaped = try c.face.shape(l.a, text, .{ .ligatures = l.get(id, .ligatures).flag, .extra = l.get(id, .features).name });
         var x = x0;
         for (shaped) |g| {
             const m = Affine.scale(k).then(shear).then(Affine.translate(x + @as(f64, @floatFromInt(g.x_offset)) * k, @as(f64, @floatFromInt(g.y_offset)) * k));
