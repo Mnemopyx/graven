@@ -38,6 +38,8 @@ pub const Face = struct {
     /// Outlines by glyph ID, in font units, owned by `arena`.
     outlines: std.AutoHashMapUnmanaged(u32, Outline) = .empty,
     arena: std.heap.ArenaAllocator,
+    /// `weightOf`'s measures, by `WeightRef`, once measured.
+    weights: [2]??f64 = .{ null, null },
 
     /// Loads face `index` from a copy of `bytes`; the caller keeps its own.
     /// WOFF and WOFF2 are unwrapped to sfnt first (HarfBuzz reads sfnt only).
@@ -214,6 +216,24 @@ pub const Face = struct {
     }
 
     pub const Stroke = enum { vertical, horizontal };
+
+    /// What a face's weight is measured by: its capital I's stem, or its
+    /// minus sign's bar (math fonts draw operators' strokes thinner than
+    /// their letters'; a face without a minus gives its stem).
+    pub const WeightRef = enum { stem, bar };
+
+    /// The stroke `r` measures, font units, measured once. Null when the
+    /// face has neither glyph.
+    pub fn weightOf(self: *Face, r: WeightRef) Error!?f64 {
+        const i = @intFromEnum(r);
+        if (self.weights[i]) |w| return w;
+        const w = switch (r) {
+            .stem => try self.stem(),
+            .bar => (try self.stroke(0x2212, .horizontal)) orelse try self.stem(),
+        };
+        self.weights[i] = w;
+        return w;
+    }
 
     /// The thickness of `cp`'s stroke through its middle, font units: a
     /// vertical stroke's (an I's stem) across a horizontal line at half its

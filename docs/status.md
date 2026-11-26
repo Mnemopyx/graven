@@ -17,7 +17,8 @@ v1 (`lib/engine`) was deleted on 2026-11-16 (step 5 of the route onto v2); glyph
 - **Structures:** scripts, fractions (stacked, slashed, diagonal), radicals with indexes, large operators with limits, fences, accents, relative rotation; TeX atom-class spacing.
 - **Styles:** contexts with faces by role and parameter rules, bases; math font packages (`stix-two`, `libertinus`) as faces and rules.
 - **Setting:** on straight or curved tracks, rows or columns (a character at a time, upright), broken at spaces, soft hyphens, relations and binary operators.
-- **Against v1, still missing:** weight matching of faces (v1 grew a math face's strokes to the text's), spacing by ink (contact profiles), drawn arrows, math alphabets (\mathbb…), a member's coverage ranges and size matching, the Greek mapping, underline and strikethrough, MATH size variants.
+- **Weight matching (2026-11-26):** a character set from a face outside the text's family (the math face, a fallback) is grown to the text's weight, measured: its stroke against the text face's (the bold's, for bold), each relative to its cap height; I's stem for letters, numbers and variables, the minus sign's bar for operators, relations and symbols. Never thinned; the family's own faces keep their weights; the growth also widens the advance, so sidebearings keep. On top of an object's `weight`. Not yet matched: fraction and radical rules (their own thickness parameters).
+- **Against v1, still missing:** spacing by ink (contact profiles), drawn arrows, math alphabets (\mathbb…), a member's coverage ranges and size matching, the Greek mapping, underline and strikethrough, MATH size variants.
 
 ### Fonts (`lib/fontsearch`, `apps/fonts`)
 
