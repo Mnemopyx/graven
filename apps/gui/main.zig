@@ -186,13 +186,19 @@ pub const testing_api = struct {
         return tab_add_leaf != null;
     }
     /// The dropdown in the row tagged `tag` takes entry `label` next frame.
+    /// A measurement's unit pop-up ("panel.width:unit") takes the unit
+    /// written `label` ("in").
     pub fn choose(tag: []const u8, label: []const u8) void {
+        if (std.mem.endsWith(u8, tag, ":unit")) {
+            if (!accepted.setScriptedUnit(tag[0 .. tag.len - 5], label)) test_choice = .{ .tag = tag, .label = label };
+            return;
+        }
         test_choice = .{ .tag = tag, .label = label };
     }
     /// Whether a choice asked for is still waiting (its row not drawn, or
     /// no such entry).
     pub fn choicePending() bool {
-        return test_choice != null;
+        return test_choice != null or accepted.script_unit != null;
     }
     /// Canvas point `p` (mm) on the screen (physical pixels), while the
     /// canvas is shown.
@@ -2492,6 +2498,8 @@ fn frame() !dvui.App.Result {
     base_group = "";
     // A press away from a field being edited ends the edit first.
     accepted.on_accept = newFieldStep;
+    accepted.measure_unit_get = measureUnitGet;
+    accepted.measure_unit_set = measureUnitSet;
     accepted.beginFrame();
     if (leave_field) {
         leave_field = false;
@@ -10479,6 +10487,7 @@ fn planCopy(p: manufacture.Plan) manufacture.Plan {
 fn choiceRow(label: []const u8, names: []const []const u8, current: usize, n: usize) ?usize {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(label);
     var choice = current;
     if (!tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == current) return null;
@@ -14469,6 +14478,7 @@ fn propertiesBody() !void {
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
     defer body.deinit();
     setTagScope("{s}", .{"properties"});
+    accepted.u_mm = null;
     if (state.tool == .add_tracks) try tracksToolOptions();
     try properties();
 }
@@ -18710,16 +18720,81 @@ fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: an
 fn propName(name: []const u8) void {
     tagParent(name);
     // The unit its label names, if any: the field drawn next takes any
-    // unit of that kind (see `units`, the one path for typed units).
-    accepted.label_unit = layout.units.ofLabel(name);
+    // unit of that kind (see `units`, the one path for typed units), and
+    // is a measurement with its own unit, shown in a pop-up beside it.
+    accepted.label_unit = if (prop_plain) null else layout.units.ofLabel(name);
+    prop_plain = false;
+    accepted.measure_id = if (accepted.label_unit != null) accepted.current_id else null;
     // Marked as an override (FrameMaker's asterisk): its value differs
     // from the style it overrides.
     const marked = prop_marked;
     prop_marked = false;
-    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{name}) catch name else name;
+    // A measurement's unit is its pop-up's, not its label's.
+    const label = if (accepted.measure_id != null) std.mem.trim(u8, name[0 .. std.mem.lastIndexOfScalar(u8, name, ',') orelse name.len], " ") else name;
+    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{label}) catch label else label;
     const col = if (marked) dvui.Color{ .r = 0xff, .g = 0xc0, .b = 0x60 } else dvui.themeGet().color(.control, .text).opacity(0.65);
     dvui.labelNoFmt(@src(), shown, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = col } });
 }
+
+/// The object whose properties are shown (its measurements' units are
+/// kept by its ID); `.none` for what has none.
+fn measureOwner() layout.model.ObjectId {
+    const m = &state.model;
+    const sp = m.spaces.items;
+    return switch (state.context) {
+        .panel => |pi| if (pi < m.panels.items.len) m.panels.items[pi].id else .none,
+        .region => |r| if (m.hasParent(r.parent) and r.region < m.regionsIn(r.parent).len) m.regionsIn(r.parent)[r.region].id else .none,
+        .grid => |g| if (m.hasParent(g.parent) and g.index < m.gridsIn(g.parent).len) m.gridsIn(g.parent)[g.index].id else .none,
+        .tile, .group, .prototype, .flow, .sheet, .style, .template, .process, .plan, .material, .constraint => |id| id,
+        .space => |si| if (si < sp.len) sp[si].id else .none,
+        .view => |v| itemId(sp, v.space, "views", v.index),
+        .layer => |v| itemId(sp, v.space, "layers", v.index),
+        .image => |v| itemId(sp, v.space, "images", v.index),
+        .figure_place => |v| itemId(sp, v.space, "figure_places", v.index),
+        .guide => |v| itemId(sp, v.space, "guides", v.index),
+        .sketch => |v| itemId(sp, v.space, "sketch_views", v.index),
+        .art => |l| if (l.panel < m.panels.items.len) idAt(m.panels.items[l.panel].art.items, l.index) else .none,
+        .sketch_def => |i| idAt(m.sketches.items, i),
+        .figure_def => |i| idAt(m.figures.items, i),
+        else => .none,
+    };
+}
+
+fn itemId(spaces: []const layout.model.Space, si: usize, comptime list: []const u8, i: usize) layout.model.ObjectId {
+    if (si >= spaces.len) return .none;
+    return idAt(@field(spaces[si], list).items, i);
+}
+
+fn idAt(items: anytype, i: usize) layout.model.ObjectId {
+    if (i >= items.len) return .none;
+    if (!@hasField(@TypeOf(items[0]), "id")) return .none;
+    return items[i].id;
+}
+
+/// The document's key for measurement `id` (an element id) of the object
+/// shown: "<object ID>/<id>", or `id` alone for what has no ID.
+fn measureKey(buf: []u8, id: []const u8) []const u8 {
+    // A repeat's "#n" is the same measurement.
+    const base = if (std.mem.indexOfScalar(u8, id, '#')) |k| id[0..k] else id;
+    const owner = measureOwner();
+    if (owner == .none) return base;
+    return std.fmt.bufPrint(buf, "{d}/{s}", .{ @intFromEnum(owner), base }) catch base;
+}
+
+fn measureUnitGet(id: []const u8) ?layout.units.Unit {
+    var buf: [256]u8 = undefined;
+    return state.model.measureUnit(measureKey(&buf, id));
+}
+
+/// A measurement's unit picked or typed: one undo step of its own.
+fn measureUnitSet(id: []const u8, unit: layout.units.Unit) void {
+    var buf: [256]u8 = undefined;
+    act(.setMeasureUnit, .{ measureKey(&buf, id), unit }) catch {};
+}
+
+/// The next `propName` is a plain label, whatever unit it names: what
+/// follows is not one measurement (a list of sizes).
+var prop_plain = false;
 
 /// The next `propName` is marked as an override.
 var prop_marked = false;
@@ -19113,6 +19188,15 @@ fn tileProperties(id: TileId) !void {
     defer popGroup(saved_group);
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
+    // Its u, for its measurements in u: its prototype's, in its track.
+    accepted.u_mm = blk: {
+        const pidx = state.model.protoIndex(t.prototype) orelse break :blk null;
+        const at = flowPosOf(id) orelse break :blk state.model.prototypes.items[pidx].unit;
+        const rs = state.model.regionsIn(at.parent);
+        if (at.region >= rs.len) break :blk null;
+        break :blk state.model.prototypes.items[pidx].unitIn(rs[at.region].pitch);
+    };
+    defer accepted.u_mm = null;
     const on_grid = state.model.gridInstanceOf(id);
     if (on_grid) |at| try instanceProperties(at.parent, at.grid, at.index);
     if (on_grid == null) {
@@ -19616,7 +19700,7 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
         defer row.deinit();
         prop_marked = if (ref) |r| @abs(@field(r, f.field) - @field(ps, f.field)) > 1e-9 else false;
         propName(f.name);
-        const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
+        const v: f64 = @field(ps, f.field) * pt_per_mm;
         if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k + n })) |nv| {
             @field(ps, f.field) = nv / pt_per_mm;
             changed = true;
@@ -20074,17 +20158,14 @@ fn templateProperties(id: layout.model.ObjectId) !void {
     if (m.styleIndex(t.text)) |si| propText("Text style", "{s}", .{m.styles.items[si].name}, 2);
     if (m.styleIndex(t.text) != null) try styleSizeProps(t.text, false);
     {
-        var buf: [48]u8 = undefined;
-        const shown = if (t.leading) |l| l.format(&buf) else "auto";
-        if (textProp("Leading", shown, 4)) |typed| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) });
-            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-                if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
-                    _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
-                } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the font's own). ";
-        }
+        if (leadingProp("Leading", t.leading, styleEmMm(t.text), 4)) |edit| switch (edit) {
+            .auto => _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) }),
+            .quantity => |l| if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
+                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
+            } else {
+                state.status = "That leading is too small: baselines must be apart. ";
+            },
+        };
     }
     if (t.paragraph) |pid| if (m.paraStyle(pid)) |p| {
         var ps = p.*;
@@ -20243,17 +20324,16 @@ fn flowStyleProperties(pi: Parent, ri: usize) !void {
     // Its leading, kept as typed; "auto" takes the template's.
     {
         const em = styleEmMm(fl.style);
-        var buf: [48]u8 = undefined;
-        const shown = if (m.flowLeading(fl)) |l| l.format(&buf) else "auto";
         prop_marked = o.leading;
-        if (textProp(asElement("track.leading"), shown, 3004)) |typed| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-                _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template });
-            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-                if ((l.resolve(em) orelse 0) > 0.01) {
+        if (leadingProp(asElement("track.leading"), m.flowLeading(fl), em, 3004)) |edit| {
+            switch (edit) {
+                .auto => _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template }),
+                .quantity => |l| if ((l.resolve(em) orelse 0) > 0.01) {
                     _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, l), fl.template });
-                } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the template's). ";
+                } else {
+                    state.status = "That leading is too small: baselines must be apart. ";
+                },
+            }
             return;
         }
         const region = m.regionsIn(pi)[ri];
@@ -20284,17 +20364,12 @@ fn leadingProps(pi: Parent, ri: usize) void {
     const sid = region.style orelse return;
     if (state.model.styleIndex(sid) == null) return;
     const em = styleEmMm(sid);
-    var buf: [48]u8 = undefined;
-    const shown = if (region.leading) |l| l.format(&buf) else "auto";
-    if (textProp(asElement("track.leading"), shown, 4)) |typed| {
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-            if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {};
-        } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-            act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
-                state.status = "That leading is too small: baselines must be apart. ";
-            };
-        } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the style's own). ";
-    }
+    if (leadingProp(asElement("track.leading"), region.leading, em, 4)) |edit| switch (edit) {
+        .auto => if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {},
+        .quantity => |l| act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
+            state.status = "That leading is too small: baselines must be apart. ";
+        },
+    };
     const pt = region.pitch / layout.model.mm_per_pt;
     const em_pt = em / layout.model.mm_per_pt;
     const extra = pt - em_pt;
@@ -20387,6 +20462,17 @@ fn duplicatePrototype(id: layout.model.PrototypeId) !void {
 
 /// An editable text property. Returns the new text once accepted (Enter,
 /// or leaving the field), not empty; the model copies it.
+/// A leading row: kept as typed, its unit in a pop-up beside it (see
+/// `accepted.quantityField`); "auto" for none of its own. `em` is the font
+/// size its relative values are of.
+fn leadingProp(name: []const u8, lead: ?layout.model.Leading, em: ?f64, n: usize) ?accepted.QuantityEdit {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    accepted.measure_id = accepted.current_id;
+    return accepted.quantityField(@src(), lead, .pt, em, .{ .expand = .horizontal, .id_extra = n });
+}
+
 fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
@@ -20399,6 +20485,7 @@ fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
 fn sizesProp(name: []const u8, shown: []const u8, n: usize) ?[]const f64 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     // Shown without the unit, as typed.
     const value = if (std.mem.eql(u8, shown, "any")) "" else std.mem.trimEnd(u8, shown, " u");
@@ -20847,6 +20934,7 @@ fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
 fn colourEntry(name: []const u8, colour: ?layout.art.Color, allow_none: bool, n: usize) ??layout.art.Color {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     var swatch = dvui.box(@src(), .{}, .{
         .min_size_content = .{ .w = 16, .h = 16 },
@@ -20918,6 +21006,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
     }
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     var picked = choice.?;
     if (tdropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
@@ -26758,6 +26847,7 @@ fn constrainPromptWindow() void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         var nb: [32]u8 = undefined;
+        prop_plain = true;
         propName(std.fmt.bufPrint(&nb, "Value, {s}", .{docUnits().symbol()}) catch "Value");
         var twd: dvui.WidgetData = undefined;
         const te = dvui.textEntryNumber(@src(), f64, .{ .value = &pr.value, .min = 0, .max = 100000 }, .{ .expand = .horizontal, .data_out = &twd });
@@ -31087,6 +31177,7 @@ fn skStepFields() void {
         if (k == 3 and !from_prev and !arc_end) continue;
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = k });
         defer row.deinit();
+        prop_plain = true;
         propName(labels[k]);
         const live = std.fmt.bufPrint(&sk_step_text[k], "{d:.2}", .{vals[k]}) catch "";
         // Typed values are drawn bold: they hold until the step is placed.
@@ -31755,6 +31846,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         for ([_][]const u8{ "Preview width, u", "Preview height, u" }, 0..) |label, k| {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8405 + k * 10 });
             defer row.deinit();
+            prop_plain = true;
             propName(label);
             _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_preview[k], .min = 0.25, .max = 20 }, .{ .expand = .horizontal });
         }

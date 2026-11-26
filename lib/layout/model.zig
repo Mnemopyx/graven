@@ -851,6 +851,18 @@ pub const FlowSource = struct {
 /// ("12pt", "5mm") or relative to the prevailing font size ("+2pt",
 /// "+3mm", "+10%", "120%").
 pub const Leading = units_.Quantity;
+
+/// The unit a measurement is shown and typed in (the owner, 2026-11-26:
+/// every measurement carries its unit; Properties shows it as a pop-up
+/// beside the value, and picking another converts the value). The value
+/// itself stays in base units (mm, degrees, or the property's own), so
+/// geometry reads it unchanged; its unit is kept here, by `key`: the
+/// object's ID and the property's element id ("12/panel.width"), or the
+/// property's id alone for one that belongs to no object.
+pub const MeasureUnit = struct {
+    key: []const u8,
+    unit: units_.Unit,
+};
 const units_ = @import("graven_constraint").units;
 
 pub const TileRegion = struct {
@@ -2254,6 +2266,9 @@ pub const Model = struct {
     active_plan: ObjectId = .none,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
+    /// The unit each measurement is shown and typed in, where a person
+    /// chose one (see `MeasureUnit`); others show their label's.
+    measure_units: std.ArrayList(MeasureUnit) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
@@ -3409,6 +3424,25 @@ pub const Model = struct {
     }
 
     /// Renames panel `panel`.
+    /// The unit measurement `key` was given (see `MeasureUnit`), if any.
+    pub fn measureUnit(m: *const Model, key: []const u8) ?units_.Unit {
+        for (m.measure_units.items) |mu| if (std.mem.eql(u8, mu.key, key)) return mu.unit;
+        return null;
+    }
+
+    /// Shows and takes measurement `key` in `unit` from now on (its value
+    /// is unchanged: only how it reads).
+    pub fn setMeasureUnit(m: *Model, key: []const u8, unit: units_.Unit) Error!void {
+        if (key.len == 0) return error.BadValue;
+        for (m.measure_units.items) |*mu| if (std.mem.eql(u8, mu.key, key)) {
+            mu.unit = unit;
+            m.revision += 1;
+            return;
+        };
+        try m.measure_units.append(m.a(), .{ .key = try m.a().dupe(u8, key), .unit = unit });
+        m.revision += 1;
+    }
+
     pub fn renamePanel(m: *Model, panel: usize, name: []const u8) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         if (name.len == 0) return error.BadValue;

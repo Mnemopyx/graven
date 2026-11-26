@@ -1261,6 +1261,39 @@ test "a field changes nothing while typed; leaving it or Enter accepts, one undo
     try std.testing.expect(panelNamed("Front") != null);
 }
 
+test "a measurement keeps its own unit: typed with one, picked from its pop-up, the value converted; relative forms add to it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("tool.add-panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    const t = std.testing;
+    const m = api.model();
+    const pi = panelNamed("Panel1").?;
+    var buf: [64]u8 = undefined;
+    const key = try std.fmt.bufPrint(&buf, "{d}/panel.width", .{@intFromEnum(m.panels.items[pi].id)});
+    // Typed in inches: the value converted, inches its unit now.
+    try r.field("panel.width", "2in");
+    try t.expectApproxEqAbs(50.8, m.panels.items[pi].w, 1e-9);
+    try t.expectEqual(layout.units.Unit.in, m.measureUnit(key).?);
+    // A bare number is in its unit.
+    try r.field("panel.width", "3");
+    try t.expectApproxEqAbs(76.2, m.panels.items[pi].w, 1e-9);
+    // Picked from the pop-up: shown in points, the value unchanged.
+    try r.choose("panel.width:unit", "pt");
+    try t.expectEqual(layout.units.Unit.pt, m.measureUnit(key).?);
+    try t.expectApproxEqAbs(76.2, m.panels.items[pi].w, 1e-9);
+    try r.field("panel.width", "+36");
+    try t.expectApproxEqAbs(76.2 + 12.7, m.panels.items[pi].w, 1e-9);
+    try r.field("panel.width", "50%");
+    try t.expectApproxEqAbs((76.2 + 12.7) / 2.0, m.panels.items[pi].w, 1e-9);
+    // Its height keeps the label's unit.
+    var hb: [64]u8 = undefined;
+    try t.expect(m.measureUnit(try std.fmt.bufPrint(&hb, "{d}/panel.height", .{@intFromEnum(m.panels.items[pi].id)})) == null);
+}
+
 test "a field given what it cannot take, or left by Esc, goes back to how it was" {
     var r = try Run.start();
     defer r.stop();

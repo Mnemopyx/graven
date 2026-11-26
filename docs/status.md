@@ -629,6 +629,8 @@ The owner, 2026-11-23: leading sets the distance between baselines, flexible in 
 
 Decided the same day, to build generally: Properties' size values keep the unit they were typed in (the value and its unit stored, converted when needed, not once on entry). Leading is the first.
 
+**Built 2026-11-26: every measurement carries its unit** (the owner: a pop-up beside each value shows its unit; picking another converts the value). One widget for all (`fields.unitNumberField`, `fields.quantityField` for leading); each measurement's unit kept in the document by object and element id (`Model.measure_units`, `setMeasureUnit`); a unit typed after a number becomes the measurement's; relative forms (+2pt, +10%, 50%) work in every field, against its own value; `u` (where a tile has one) and `mil` added. Paragraph fields now take every unit too. See `docs/units.md`. GUI test: `a measurement keeps its own unit…`.
+
 To do: what a line taller than the leading does (exact with a clash flagged, or the line pushed down; asked); space between paragraphs; Indent and Row gap still in u.
 
 ### Space before and after paragraphs (2026-11-23)
