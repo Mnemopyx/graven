@@ -409,3 +409,32 @@ test "runs: a path through two-way points is one run, a loop closes, a three-way
     const t = try Sketch.runs(al, &.{ L(-5, 0, 0, 0), L(0, 0, 5, 0), L(0, 0, 0, 5) });
     try std.testing.expectEqual(3, t.len);
 }
+
+test "a group of sketch geometry: constraints inside it are its own, and stay right as geometry goes" {
+    var s = try Sketch.init(ga);
+    defer s.deinit(ga);
+    const segs = try rectangle(&s, 20, 10);
+    const obj = try s.makeGroup(ga, &segs, &.{}, .plain, true);
+    const g = try s.groups.get(obj);
+    // Its corners, sides and dimensions are internal; its hold on the
+    // origin (reference geometry, in no group) is outside.
+    for (s.constraints.items, 0..) |c, ci| {
+        const to_origin = sk.refersTo(c, sk.origin);
+        try testing.expectEqual(to_origin, c.group == sk.group.none);
+        if (!to_origin) try testing.expect(std.mem.indexOfScalar(u32, g.constraints.items, @intCast(ci)) != null);
+    }
+    // A constraint added between two members joins the group.
+    const c = try s.addConstraint(ga, .{ .kind = .{ .equal = .{ .a = segs[0], .b = segs[2] } } });
+    try testing.expectEqual(obj, s.constraints.items[c].group);
+    // Removing a side drops its constraints, and the group's IDs follow.
+    try s.removeGeometry(segs[1]);
+    for ((try s.groups.get(obj)).constraints.items) |k| try testing.expectEqual(obj, s.constraints.items[k].group);
+    // A copy (in an arena: a sketch's names live as long as its document).
+    var arena: std.heap.ArenaAllocator = .init(ga);
+    defer arena.deinit();
+    const copy = try s.clone(arena.allocator());
+    try testing.expectEqual((try s.groups.get(obj)).constraints.items.len, (try copy.groups.get(obj)).constraints.items.len);
+    _ = try s.solve(ga);
+    try s.ungroup(ga, obj);
+    for (s.constraints.items) |k| try testing.expectEqual(sk.group.none, k.group);
+}

@@ -144,8 +144,12 @@ const Writer = struct {
 
 /// Fields that are not part of a document: the model's allocator, and its
 /// revision counter (a session's change count).
+/// A type may name fields of its own made again on reading (`unsaved`).
 fn skipped(comptime T: type, comptime field: []const u8) bool {
     if (T == model.Model) return std.mem.eql(u8, field, "arena") or std.mem.eql(u8, field, "revision");
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "unsaved")) {
+        inline for (T.unsaved) |name| if (std.mem.eql(u8, name, field)) return true;
+    }
     return false;
 }
 
@@ -419,6 +423,11 @@ pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model 
     m.upgradeOrientation();
     // Its sketches' signed distances, as distances never negative.
     for (m.sketches.items) |*it| try it.sketch.upgradeSigns(m.arena.allocator());
+    // Its sketches' groups' member lists, from their members.
+    for (m.sketches.items) |*it| {
+        try it.sketch.rebuildGroups(m.arena.allocator());
+        if (it.accepted) |*acc| try acc.rebuildGroups(m.arena.allocator());
+    }
     // Its constraints' signed values, likewise: the sign as the side.
     for (m.constraints.items) |*c| if (c.value < 0) {
         c.value = -c.value;
@@ -612,6 +621,15 @@ test "a model writes and reads back to the same bytes, with its content" {
     const ski = try m.addShapeSketch(.rectangle);
     const dim_c: u32 = @intCast(m.sketches.items[ski].sketch.constraints.items.len - 1);
     _ = try m.editSketch(ski, .{ .place = .{ .c = dim_c, .place = .{ .offset = -12.5, .text = 3, .outside = true } } });
+    // Its rectangle made an object: the group is saved by its members.
+    const sk0 = &m.sketches.items[ski].sketch;
+    var members: std.ArrayList(u32) = .empty;
+    defer members.deinit(gpa);
+    for (sk0.geometry.items, 0..) |g, gi_| if (!g.reference) try members.append(gpa, @intCast(gi_));
+    const obj = try sk0.makeGroup(m.arena.allocator(), members.items, &.{}, .plain, true);
+    try sk0.groups.setProp(m.arena.allocator(), obj, "corners", 4);
+    const inside = sk0.groups.list.items[obj].constraints.items.len;
+    try testing.expect(inside > 0 and inside < sk0.constraints.items.len);
 
     const bytes = try encode(gpa, &m);
     defer gpa.free(bytes);
@@ -642,6 +660,11 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqual(-12.5, pl.offset);
     try testing.expectEqual(3, pl.text);
     try testing.expect(pl.outside);
+    const gb = &back.sketches.items[ski].sketch.groups.list.items[obj];
+    try testing.expect(gb.sealed);
+    try testing.expectEqual(@as(?f64, 4), gb.prop("corners"));
+    try testing.expectEqualSlices(u32, members.items, gb.geometry.items);
+    try testing.expectEqual(inside, gb.constraints.items.len);
     try testing.expectEqual(m.next_id, back.next_id);
     // It goes on being edited like any model.
     try back.insertRun(c, r, 0, .{ .style = style, .content = "more" });

@@ -11,6 +11,7 @@ pub const expr = @import("expr.zig");
 pub const units = @import("units.zig");
 pub const dimension = @import("dimension.zig");
 pub const geometry = @import("geometry.zig");
+pub const group = @import("group.zig");
 
 test {
     _ = dual;
@@ -19,4 +20,5 @@ test {
     _ = units;
     _ = dimension;
     _ = geometry;
+    _ = group;
 }

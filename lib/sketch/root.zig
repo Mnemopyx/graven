@@ -49,6 +49,9 @@ pub const Local = geometry.Local;
 pub const refersTo = geometry.refersTo;
 pub const Ref = geometry.Ref;
 pub const refs = geometry.refs;
+/// Groups and composite objects over its geometry and constraints.
+pub const group = constraint.group;
+pub const GroupId = group.GroupId;
 
 /// A named parameter: an expression (often a plain number) other
 /// expressions may use by name.
@@ -75,6 +78,10 @@ pub const Sketch = struct {
     /// Its connections: logical objects over its geometry and
     /// constraints (`connector.zig`).
     connectors: std.ArrayList(@import("connector.zig").Connector) = .empty,
+    /// Its groups and composite objects (`lib/constraint/group.zig`): each
+    /// geometry and constraint names its innermost group, and each group
+    /// lists its members, rebuilt from those (`rebuildGroups`) on reading.
+    groups: group.Groups = .{},
 
     pub fn init(a: Allocator) Error!Sketch {
         var s: Sketch = .{};
@@ -94,6 +101,7 @@ pub const Sketch = struct {
         s.params.deinit(a);
         for (s.connectors.items) |*c| c.path.deinit(a);
         s.connectors.deinit(a);
+        s.groups.deinit(a);
     }
 
     /// A copy in `a`, sharing nothing with this one (constraint names
@@ -116,6 +124,7 @@ pub const Sketch = struct {
             try copy.path.appendSlice(a, k.path.items);
             try c.connectors.append(a, copy);
         }
+        c.groups = try s.groups.clone(a);
         return c;
     }
 
@@ -179,7 +188,7 @@ pub const Sketch = struct {
         var i: usize = s.constraints.items.len;
         while (i > 0) {
             i -= 1;
-            if (refersTo(s.constraints.items[i], g)) _ = s.constraints.orderedRemove(i);
+            if (refersTo(s.constraints.items[i], g)) s.dropConstraint(@intCast(i));
         }
     }
 
@@ -298,13 +307,40 @@ pub const Sketch = struct {
             },
             else => {},
         }
+        c.group = group.none;
         try s.constraints.append(a, c);
-        return @intCast(s.constraints.items.len - 1);
+        const id: ConstraintId = @intCast(s.constraints.items.len - 1);
+        try s.groups.constraintAdded(a, s.geometry.items, s.constraints.items, id);
+        return id;
     }
 
     pub fn removeConstraint(s: *Sketch, id: ConstraintId) Error!void {
         if (id >= s.constraints.items.len) return error.NoSuchConstraint;
+        s.dropConstraint(id);
+    }
+
+    /// Takes constraint `id` out of the list and out of its group.
+    pub fn dropConstraint(s: *Sketch, id: ConstraintId) void {
+        s.groups.constraintRemoved(s.constraints.items[id].group, id);
         _ = s.constraints.orderedRemove(id);
+    }
+
+    /// Its groups' member lists, made again from its geometry's and
+    /// constraints' groups (after reading a file).
+    pub fn rebuildGroups(s: *Sketch, a: Allocator) Allocator.Error!void {
+        try s.groups.rebuild(a, s.geometry.items, s.constraints.items);
+    }
+
+    /// Makes a group (a composite object when `kind` is not plain and
+    /// `sealed`) of geometry `geoms` and groups `groups`, all directly in
+    /// one group or none.
+    pub fn makeGroup(s: *Sketch, a: Allocator, geoms: []const GeomId, groups: []const GroupId, kind: group.Kind, sealed: bool) group.Error!GroupId {
+        return s.groups.make(a, s.geometry.items, s.constraints.items, geoms, groups, kind, sealed);
+    }
+
+    /// Removes group `id`; its members join its parent.
+    pub fn ungroup(s: *Sketch, a: Allocator, id: GroupId) group.Error!void {
+        return s.groups.ungroup(a, s.geometry.items, s.constraints.items, id);
     }
 
     /// Sets a dimension's value (distance, radius, angle).

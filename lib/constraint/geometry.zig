@@ -21,6 +21,9 @@ pub const Error = error{ NoSuchGeometry, NoSuchPoint, WrongKind };
 pub const VarId = u32;
 pub const GeomId = u32;
 pub const ConstraintId = u32;
+/// A group (`group.zig`); `no_group`: in none.
+pub const GroupId = u32;
+pub const no_group: GroupId = std.math.maxInt(u32);
 
 /// A point's two unknowns.
 pub const Pt = struct { x: VarId, y: VarId };
@@ -67,6 +70,8 @@ pub const Geometry = struct {
     /// sets the parameter: a homing bump drawn as construction, made
     /// physical on the keys that ask for it.
     physical_when: []const u8 = "",
+    /// The innermost group holding it (`group.zig`), or none.
+    group: GroupId = no_group,
 };
 
 /// A point of a geometry: a point itself, a segment's or arc's start or
@@ -151,6 +156,9 @@ pub const Constraint = struct {
     /// Where its dimension is drawn (a dimension only): saved with it, so
     /// it reopens where it was left.
     place: dimension.Placement = .{},
+    /// The innermost group holding all the geometry it names
+    /// (`group.zig`), or none: kept there by the group code.
+    group: GroupId = no_group,
 
     /// Whether it has a value (a dimension).
     pub fn isDimension(c: Constraint) bool {

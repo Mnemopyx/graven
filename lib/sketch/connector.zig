@@ -468,7 +468,7 @@ fn rebuild(s: *Sketch, a: Allocator, ci: usize, kind: Kind) Error!void {
         i -= 1;
         switch (s.constraints.items[i].kind) {
             inline .distance_x, .distance_y => |d| if ((d.a.geom == c.start and d.b.geom == c.end) or (d.a.geom == c.end and d.b.geom == c.start)) {
-                _ = s.constraints.orderedRemove(i);
+                s.dropConstraint(@intCast(i));
             },
             else => {},
         }
