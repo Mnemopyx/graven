@@ -208,6 +208,40 @@ pub fn objectOf(s: *const Sketch, g: GeomId) ?GroupId {
     return if (at == group.none) null else at;
 }
 
+// Sealing (the owner, 2026-11-26): an object's members and its own
+// constraints are not edited one by one; only its properties, the
+// transforms it leaves free, and constraints from its parts to what is
+// outside it. These say what that rule refuses; the editor applies it.
+
+/// Geometry `g` is a member of an object (directly or deeper).
+pub fn sealedGeometry(s: *const Sketch, g: GeomId) bool {
+    return objectOf(s, g) != null;
+}
+
+/// Constraint `c` is internal to an object.
+pub fn sealedConstraint(s: *const Sketch, c: root.ConstraintId) bool {
+    if (c >= s.constraints.items.len) return false;
+    return s.groups.objectOf(s.constraints.items[c].group) != group.none;
+}
+
+/// Constraint `c`, added, would be internal to an object: everything it
+/// names is in one. One naming something outside too is external.
+pub fn sealsConstraint(s: *const Sketch, c: Constraint) bool {
+    return s.groups.objectOf(s.groups.home(s.geometry.items, c)) != group.none;
+}
+
+/// Removes object (or group) `id` whole: every member, the constraints on
+/// them (its own and outside ones), and the group with those inside it.
+pub fn removeObject(s: *Sketch, a: Allocator, id: GroupId) Error!void {
+    var geoms: std.ArrayList(GeomId) = .empty;
+    defer geoms.deinit(a);
+    try s.groups.internalGeometry(a, id, &geoms);
+    for (geoms.items) |g| {
+        if (g < s.geometry.items.len and !s.geometry.items[g].removed and !s.geometry.items[g].reference) try s.removeGeometry(g);
+    }
+    try s.groups.remove(a, id);
+}
+
 /// Sets construction property `name` of object `id` to `value` and makes
 /// it again, where it is (see the file's comment). What became of its old
 /// geometry goes in `remap`. `a` is the sketch's own allocator (its lists
@@ -358,4 +392,28 @@ test "arrays as objects: counts changed in place, their parts found again" {
     try testing.expectApproxEqAbs(30, cq.rect.x1 - cq.rect.x0, 1e-6);
     try testing.expectApproxEqAbs(20, cq.rect.y1 - cq.rect.y0, 1e-6);
     try testing.expectEqual(@as(?f64, 4), (try s.groups.get(q)).prop("rows"));
+}
+
+test "a sealed object: its members and own constraints refused one by one, removed whole" {
+    const a = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var s = try Sketch.init(al);
+    const id = try addPolygon(&s, al, .{ .x = 5, .y = 5 }, .{ .x = 15, .y = 5 }, 5, false);
+    const g = try s.groups.get(id);
+    const side = g.geometry.items[1];
+    const other = g.geometry.items[2];
+    try testing.expect(sealedGeometry(&s, side));
+    try testing.expect(sealedConstraint(&s, g.constraints.items[0]));
+    // Inside it: refused. To the origin: external.
+    try testing.expect(sealsConstraint(&s, .{ .kind = .{ .parallel = .{ .a = side, .b = other } } }));
+    try testing.expect(!sealsConstraint(&s, .{ .kind = .{ .coincident = .{ .{ .geom = side, .role = .start }, .{ .geom = root.origin } } } }));
+    _ = try s.addConstraint(al, .{ .kind = .{ .coincident = .{ .{ .geom = side, .role = .start }, .{ .geom = root.origin } } } });
+    const before = s.constraints.items.len;
+    try removeObject(&s, al, id);
+    for (s.geometry.items[side..]) |x| try testing.expect(x.removed);
+    try testing.expect(s.constraints.items.len < before);
+    try testing.expectError(error.NoSuchGroup, s.groups.get(id));
+    try testing.expect(!sealedGeometry(&s, side));
 }

@@ -2524,10 +2524,7 @@ fn frame() !dvui.App.Result {
         newSketchInOwnSpace();
         followHome();
         if (sketch_edit != null) {
-            if (skEdit(.{ .polygon = .{ .c = .{ .x = -18, .y = 0 }, .corner = .{ .x = -18, .y = 12 }, .sides = 5 } })) |side| {
-                sk_sel.clearRetainingCapacity();
-                sk_sel.append(state.gpa, .{ .curve = side }) catch {};
-            }
+            if (skEdit(.{ .polygon = .{ .c = .{ .x = -18, .y = 0 }, .corner = .{ .x = -18, .y = 12 }, .sides = 5 } })) |side| skClickSelect(.{ .curve = side }, false);
             _ = skEdit(.{ .array = .{ .polar = true, .at = .{ .x = 18, .y = 0 }, .to = .{ .x = 18, .y = 12 }, .cols = 8, .rows = 2 } });
             if (platform.env("GRAVEN_OBJECT_SIDES")) |v| {
                 const n = std.fmt.parseFloat(f64, v) catch 5;
@@ -2537,7 +2534,7 @@ fn frame() !dvui.App.Result {
                 sk_sel.clearRetainingCapacity();
                 if (skItem()) |it| for (it.sketch.geometry.items, 0..) |g, gi| {
                     if (!g.removed and g.kind == .segment and !g.construction and skl.composite.objectOf(it.sketch, @intCast(gi)) != null) {
-                        sk_sel.append(state.gpa, .{ .curve = @intCast(gi) }) catch {};
+                        skClickSelect(.{ .curve = @intCast(gi) }, false);
                         break;
                     }
                 };
@@ -19361,10 +19358,7 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
                     // Made again: its old pieces are gone, so one of its
                     // new ones is chosen, keeping it in Properties.
                     sk_sel.clearRetainingCapacity();
-                    if (skItem()) |now| {
-                        const gg = now.sketch.groups.get(obj) catch null;
-                        if (gg) |x| if (x.geometry.items.len > 1) sk_sel.append(state.gpa, .{ .curve = x.geometry.items[1] }) catch {};
-                    }
+                    if (skItem()) |now| skSelectObject(now.sketch, obj, false);
                 };
             }
         }
@@ -27512,7 +27506,7 @@ var sk_press_ctrl = false;
 var sk_summary = false;
 /// A dimension's value being entered.
 var sk_dim: ?struct { c: skl.ConstraintId, at: dvui.Point.Physical, fresh: bool = true, focus_tries: u8 = 6 } = null;
-var sk_status_buf: [160]u8 = undefined;
+var sk_status_buf: [320]u8 = undefined;
 var sk_dim_id: ?dvui.Id = null;
 
 /// The analysis of the sketch being edited, kept until the model changes.
@@ -27691,6 +27685,7 @@ fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sk_tool = .none;
     sk_nclicks = 0;
     sk_sel.clearRetainingCapacity();
+    sk_inside = null;
     sk_lock = null;
     sk_summary = false;
     sk_dim = null;
@@ -28195,12 +28190,22 @@ fn newSketchAt(at: geom.Point) void {
     enterSketch(.{ .space = shown_space, .index = state.model.spaces.items[shown_space].sketch_views.items.len - 1 });
 }
 
+/// Why the last sketch edit was refused, shown before the sketch's
+/// readout (which is written every frame) until `sk_note_until`.
+var sk_note: []const u8 = "";
+var sk_note_until: i128 = 0;
+
 fn skEdit(edit: layout.model.SketchEdit) ?u32 {
     const r = sketch_edit orelse return null;
     return act(.editSketchDraft, .{ r.sketch, edit }) catch |err| {
+        defer {
+            sk_note = state.status;
+            sk_note_until = platform.monotonicNs() + 5 * std.time.ns_per_s;
+        }
         state.status = switch (err) {
             error.NotConstruction => "Infinite lines and rays are construction only. ",
             error.WrongKind, error.NoSuchPoint => "That constraint does not fit what is selected. ",
+            error.Sealed => "Part of an object: change it in its properties, or constrain it to geometry outside it. ",
             else => "That change could not be made. ",
         };
         return null;
@@ -28540,6 +28545,9 @@ fn skPruneSelection() void {
         };
         if (!keep) _ = sk_sel.orderedRemove(i);
     }
+    if (sk_inside) |in| if (in >= s.groups.list.items.len or s.groups.list.items[in].removed or !s.groups.list.items[in].sealed) {
+        sk_inside = null;
+    };
 }
 
 fn skIsStraight(s: *const skl.Sketch, g: skl.GeomId) bool {
@@ -29308,8 +29316,96 @@ fn skTab(area: dvui.Rect.Physical, back: bool) void {
     sk_lock_px = skPx(area, it, sk_lock.?.at);
 }
 
+/// The composite object the sketch editor is working inside (entered by
+/// a second click on one already chosen): its pieces are picked one by
+/// one, to constrain them to what is outside it. Elsewhere a click on a
+/// piece of an object picks the object whole (sealing, the owner,
+/// 2026-11-26).
+var sk_inside: ?skl.GroupId = null;
+
+/// The object a click on `p` picks whole: the object round its geometry,
+/// unless the editor is inside that object.
+fn skPickObject(s: *const skl.Sketch, p: SkPick) ?skl.GroupId {
+    const g: skl.GeomId = switch (p) {
+        .curve => |c| c,
+        .point => |r| r.geom,
+        .constraint => return null,
+    };
+    const o = skl.composite.objectOf(s, g) orelse return null;
+    if (sk_inside) |in| if (in == o) return null;
+    return o;
+}
+
+/// Object `o`'s pieces as picks: its curves, and its lone points.
+fn skObjectPicks(s: *const skl.Sketch, o: skl.GroupId, out: *std.ArrayList(SkPick)) void {
+    var geoms: std.ArrayList(skl.GeomId) = .empty;
+    defer geoms.deinit(state.gpa);
+    s.groups.internalGeometry(state.gpa, o, &geoms) catch return;
+    for (geoms.items) |g| {
+        if (g >= s.geometry.items.len or s.geometry.items[g].removed) continue;
+        const q: SkPick = if (s.geometry.items[g].kind == .point) .{ .point = .{ .geom = g, .role = .point } } else .{ .curve = g };
+        out.append(state.gpa, q) catch {};
+    }
+}
+
+/// Object `o` chosen whole (or with `toggle`, put in or taken out whole).
+fn skSelectObject(s: *const skl.Sketch, o: skl.GroupId, toggle: bool) void {
+    var picks: std.ArrayList(SkPick) = .empty;
+    defer picks.deinit(state.gpa);
+    skObjectPicks(s, o, &picks);
+    if (picks.items.len == 0) return;
+    const all_in = for (picks.items) |q| {
+        if (!skSelected(q)) break false;
+    } else true;
+    if (toggle and all_in) {
+        for (picks.items) |q| for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, q)) {
+            _ = sk_sel.orderedRemove(i);
+            break;
+        };
+        return;
+    }
+    if (!toggle) sk_sel.clearRetainingCapacity();
+    for (picks.items) |q| if (!skSelected(q)) sk_sel.append(state.gpa, q) catch {};
+}
+
+/// Whether object `o` is chosen whole, and nothing else.
+fn skObjectChosen(s: *const skl.Sketch, o: skl.GroupId) bool {
+    var picks: std.ArrayList(SkPick) = .empty;
+    defer picks.deinit(state.gpa);
+    skObjectPicks(s, o, &picks);
+    if (picks.items.len == 0 or picks.items.len != sk_sel.items.len) return false;
+    for (picks.items) |q| if (!skSelected(q)) return false;
+    return true;
+}
+
 /// A click on `p`: it alone is selected, or with Ctrl it goes in or out.
+/// A piece of a composite object picks the object; a second click on an
+/// object already chosen goes inside it, picking the piece.
 fn skClickSelect(p: SkPick, toggle: bool) void {
+    if (skItem()) |it| {
+        const s = it.sketch;
+        if (skPickObject(s, p)) |o| {
+            if (!toggle and skObjectChosen(s, o)) {
+                sk_inside = o;
+                sk_sel.clearRetainingCapacity();
+                sk_sel.append(state.gpa, p) catch {};
+            } else {
+                if (!toggle) sk_inside = null;
+                skSelectObject(s, o, toggle);
+            }
+            return;
+        }
+        // Outside the object worked in: out of it.
+        if (!toggle) if (sk_inside) |in| {
+            const g: ?skl.GeomId = switch (p) {
+                .curve => |c| c,
+                .point => |r| r.geom,
+                .constraint => null,
+            };
+            const o = if (g) |x| skl.composite.objectOf(s, x) else null;
+            if (o == null or o.? != in) sk_inside = null;
+        };
+    }
     for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, p)) {
         if (toggle) _ = sk_sel.orderedRemove(i);
         return;
@@ -29357,17 +29453,28 @@ fn skDeleteSelection() void {
     defer cons.deinit(state.gpa);
     var geos: std.ArrayList(skl.GeomId) = .empty;
     defer geos.deinit(state.gpa);
-    for (sk_sel.items) |p| switch (p) {
-        .constraint => |c| cons.append(state.gpa, c) catch {},
-        .curve => |g| geos.append(state.gpa, g) catch {},
-        .point => |r| if (r.role == .point) geos.append(state.gpa, r.geom) catch {},
-    };
+    // Objects chosen (not worked inside) go whole: a caption, an array,
+    // a polygon is removed with everything of it.
+    var objs: std.ArrayList(skl.GroupId) = .empty;
+    defer objs.deinit(state.gpa);
+    for (sk_sel.items) |p| {
+        if (skPickObject(it.sketch, p)) |o| {
+            if (std.mem.indexOfScalar(skl.GroupId, objs.items, o) == null) objs.append(state.gpa, o) catch {};
+            continue;
+        }
+        switch (p) {
+            .constraint => |c| cons.append(state.gpa, c) catch {},
+            .curve => |g| geos.append(state.gpa, g) catch {},
+            .point => |r| if (r.role == .point) geos.append(state.gpa, r.geom) catch {},
+        }
+    }
     // Constraints last first, so the indices hold.
     std.mem.sort(skl.ConstraintId, cons.items, {}, std.sort.desc(skl.ConstraintId));
     for (cons.items) |c| _ = skEdit(.{ .unconstrain = c });
     for (geos.items) |g| {
         if (g < it.sketch.geometry.items.len and !it.sketch.geometry.items[g].reference and !it.sketch.geometry.items[g].removed) _ = skEdit(.{ .remove = g });
     }
+    for (objs.items) |o| _ = skEdit(.{ .remove_object = o });
     sk_sel.clearRetainingCapacity();
 }
 
@@ -29721,6 +29828,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             std.fmt.bufPrint(&sk_status_buf, "{s}: fully constrained · Enter for the summary ", .{it.name}) catch ""
         else
             std.fmt.bufPrint(&sk_status_buf, "{s}: {d} degree{s} of freedom left · Enter for the summary ", .{ it.name, x.dof, if (x.dof == 1) "" else "s" }) catch "";
+        if (sk_note.len > 0 and platform.monotonicNs() < sk_note_until) {
+            const readout = dvui.currentWindow().arena().dupe(u8, state.status) catch "";
+            state.status = std.fmt.bufPrint(&sk_status_buf, "{s}· {s}", .{ sk_note, readout }) catch state.status;
+        }
     }
     skDimEntry(area);
     if (sk_summary) skSummary(area);

@@ -1406,6 +1406,9 @@ pub const SketchEdit = union(enum) {
     /// rings, rows): the object made again where it is
     /// (`sketch_.composite.setProp`).
     object_prop: struct { object: sketch_.GroupId, name: []const u8, value: f64 },
+    /// A composite object (or group) removed whole: its members, the
+    /// constraints on them, the group.
+    remove_object: sketch_.GroupId,
     construction: struct { g: sketch_.GeomId, on: bool },
     remove: sketch_.GeomId,
     constrain: sketch_.Constraint,
@@ -2197,7 +2200,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse, NotOnACurve } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse, NotOnACurve, Sealed } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -5800,6 +5803,7 @@ pub const Model = struct {
         defer m.syncSketchFigures(sid) catch {};
         const al = m.a();
         const gpa = m.arena.child_allocator;
+        try sealedEdit(sk, edit);
         var out: u32 = 0;
         switch (edit) {
             .point => |e| out = try sk.addPoint(al, e.at, e.construction),
@@ -5833,6 +5837,7 @@ pub const Model = struct {
                 for (m.panels.items) |*pn| for (pn.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
                 for (m.spaces.items) |*sp| for (sp.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
             },
+            .remove_object => |id| sketch_.composite.removeObject(sk, al, id) catch |err| return compositeError(err),
             .construction => |e| try sk.setConstruction(e.g, e.on),
             .remove => |g| try sk.removeGeometry(g),
             .constrain => |c| {
@@ -9885,6 +9890,27 @@ test "several drawings over one sketch: the editor inks in the current one, a pa
 }
 
 /// A composite object's error, as a model's.
+/// Sealing as an editing rule (the owner, 2026-11-26): an object's members
+/// and its own constraints are changed only through its properties and
+/// the transforms it leaves free; constraints from its parts to geometry
+/// outside it are made and edited as any others. Dragging is a transform
+/// and goes through; where a dimension is drawn is not a change to it.
+fn sealedEdit(sk: *const sketch_.Sketch, edit: SketchEdit) Model.Error!void {
+    const c_ = sketch_.composite;
+    const refused = switch (edit) {
+        .remove => |g| c_.sealedGeometry(sk, g),
+        .construction => |e| c_.sealedGeometry(sk, e.g),
+        .physical_when => |e| c_.sealedGeometry(sk, e.g),
+        .constrain => |c| c_.sealsConstraint(sk, c),
+        .unconstrain => |c| c_.sealedConstraint(sk, c),
+        .value => |e| c_.sealedConstraint(sk, e.c),
+        .expr => |e| c_.sealedConstraint(sk, e.c),
+        .reference => |e| c_.sealedConstraint(sk, e.c),
+        else => false,
+    };
+    if (refused) return error.Sealed;
+}
+
 fn compositeError(err: sketch_.composite.Error) Model.Error {
     return switch (err) {
         error.NoSuchGroup, error.NotAnObject => error.NoSuchItem,
