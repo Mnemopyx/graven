@@ -2397,12 +2397,11 @@ fn panelOrigin(pi: usize) geom.Point {
     // It may be dragged past the sheet's edge, but keeps a grip on it.
     if (state.moving) |mv| if (mv.panel == pi) {
         // Its origin on the grid when snapping; else wherever it is taken.
-        var sx = mv.at.x - mv.start.x;
-        var sy = mv.at.y - mv.start.y;
-        if (snapStep()) |st| {
-            sx = snapShift(o.x, sx, st, &snap_guide.x);
-            sy = snapShift(o.y, sy, st, &snap_guide.y);
-        } else snap_guide = .{};
+        // Or its edges and centre on another object's or a line.
+        const p = state.model.panels.items[pi];
+        const sh = snapMove(.{ .x0 = o.x, .y0 = o.y, .x1 = o.x + p.w, .y1 = o.y + p.h }, mv.at.x - mv.start.x, mv.at.y - mv.start.y, 0, 0, &.{p.id});
+        const sx = sh.x;
+        const sy = sh.y;
         return state.model.clampOnSheet(pi, .{ .x = o.x + sx, .y = o.y + sy });
     };
     return o;
@@ -2543,6 +2542,11 @@ fn frame() !dvui.App.Result {
         close_home = null;
         closeSpaceViews(h);
     }
+    if (delete_sketch != .none) {
+        const id = delete_sketch;
+        delete_sketch = .none;
+        deleteSketchNow(id);
+    }
     if (new_drawing) {
         new_drawing = false;
         newSketchInOwnSpace();
@@ -2638,7 +2642,7 @@ fn frame() !dvui.App.Result {
             } else if (std.mem.eql(u8, which, "sketch-fab")) {
                 sample_fab = true;
                 loadSketchPanelSample();
-            } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
+            } else if (std.mem.eql(u8, which, "drawing-panel")) loadDrawingPanelSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
@@ -3963,6 +3967,11 @@ fn runAction(inv: keymap.Invocation) bool {
             return true;
         },
         kact("view.canvas-theme") => setCanvasTheme(if (inv.arg < 0 or inv.arg >= canvas_theme.all.len) canvas_theme.current.next() else @enumFromInt(inv.arg)),
+        kact("view.snap-objects") => {
+            snap_objects = !snap_objects;
+            state.status = if (snap_objects) "Drags snap to other objects' edges and centres and to construction lines (Alt held lets go). " else "Drags no longer snap to other objects. ";
+            return true;
+        },
         kact("view.snap-grid") => {
             snap_grid = !snap_grid;
             state.status = if (snap_grid) "Drags snap to the grid (Alt held lets go). " else "Drags no longer snap to the grid. ";
@@ -4095,6 +4104,7 @@ const Prefs = struct {
     show_construction: bool,
     grid: bg_grid.Mode,
     snap_grid: bool,
+    snap_objects: bool,
     boundary_mode: bool,
     canvas_theme: canvas_theme.Theme,
     scroll: ScrollMode,
@@ -4120,7 +4130,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .snap_objects = snap_objects, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -4150,6 +4160,9 @@ fn loadPrefs() void {
     };
     if (ps.get("view.snap_grid")) |v| if (v == .boolean) {
         snap_grid = v.boolean;
+    };
+    if (ps.get("view.snap_objects")) |v| if (v == .boolean) {
+        snap_objects = v.boolean;
     };
     if (ps.get("ribbon.size")) |v| if (v == .string) if (std.meta.stringToEnum(RibbonSize, v.string)) |z| {
         ribbon_size = z;
@@ -4293,6 +4306,7 @@ fn savePrefsIfChanged() void {
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
     ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
     ps.put("view.snap_grid", .{ .boolean = now.snap_grid }, .shared);
+    ps.put("view.snap_objects", .{ .boolean = now.snap_objects }, .shared);
     ps.put("view.boundary_mode", .{ .boolean = now.boundary_mode }, .shared);
     ps.put("view.canvas_theme", .{ .string = @tagName(now.canvas_theme) }, .shared);
     ps.put("view.scrolling", .{ .string = @tagName(now.scroll) }, .local);
@@ -5547,6 +5561,7 @@ fn menu() ?dvui.App.Result {
             }
         }
         if (menuAction(if (snap_grid) "•  Snap to grid" else "    Snap to grid", "view", kact("view.snap-grid"), 0, false, 9)) m.close();
+        if (menuAction(if (snap_objects) "•  Snap to objects" else "    Snap to objects", "view", kact("view.snap-objects"), 0, false, 10)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 94 });
         inline for (canvas_theme.all, 0..) |t, ti| {
             const text = if (canvas_theme.current == t) "•  " ++ comptime t.label() else "    " ++ comptime t.label();
@@ -6431,6 +6446,9 @@ const Palette = struct {
     select: dvui.Color = .{ .r = 0x1f, .g = 0x6f, .b = 0xe0 },
     /// Construction lines: guides, never output.
     construction: dvui.Color = .{ .r = 0x8a, .g = 0x4f, .b = 0xd8 },
+    /// Snap guides to other objects and lines while dragging (smart
+    /// guides): a magenta apart from the selection and construction hues.
+    snap: dvui.Color = .{ .r = 0xd8, .g = 0x2f, .b = 0x8c },
     /// What fails a check: overflow, past an edge, ink in a margin.
     overflow: dvui.Color = .{ .r = 0xf3, .g = 0x46, .b = 0x00 },
     /// The background grid's ink: a cool neutral, laid on at low opacity
@@ -7926,6 +7944,7 @@ fn canvas(active: bool, view: u8) void {
     }
     if (sketch_edit != null) {
         drawSketchMode(area);
+        drawSnapGuides(area);
         return;
     }
     if (panel_edit != null) {
@@ -12636,15 +12655,18 @@ fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick
 
 /// Whether drags snap to the grid.
 var snap_grid: bool = true;
+/// Whether drags snap to other objects' edges and centres, to
+/// construction lines and their crossings (smart guides).
+var snap_objects: bool = true;
 /// Select boundaries (a persistent mode, toggled by its button or B, kept
 /// in the settings): with the select tool, the boundary nearest the
 /// pointer is highlighted and a click selects its container, never its
 /// content; the selection's drag points are haloed.
 var boundary_mode = false;
 
-/// The grid lines the drag in hand is on (canvas mm), for its guides;
-/// cleared when the drag ends.
-var snap_guide: struct { x: ?f64 = null, y: ?f64 = null } = .{};
+/// What the drag in hand snapped to (canvas mm), for its guides; cleared
+/// when the drag ends.
+var snap_guide: geom.snap.Result = .{};
 
 fn altHeld() bool {
     if (dvui.backend.kind != .sdl3) return false;
@@ -12659,55 +12681,136 @@ fn snapStep() ?f64 {
     return if (st > 0 and std.math.isFinite(st)) st else null;
 }
 
-/// Canvas coordinate `v` on the nearest grid line, the guide `g` set.
-fn snapAxis(v: f64, st: f64, g: *?f64) f64 {
-    const out = @round(v / st) * st;
-    g.* = out;
-    return out;
+/// How near a target pulls (canvas mm): 8 px at the zoom.
+fn snapTol() f64 {
+    return if (state.view.ppm > 0) 8 / state.view.ppm else 0;
 }
 
-/// Point `p` (canvas mm) on the grid along the axes given.
+/// The snapper for this frame, built once a frame for what is moving.
+var snap_cache: struct { frame: i128 = -1, key: layout.model.ObjectId = .none, s: geom.snap.Snapper = .{} } = .{};
+
+/// Whether `id` is one of `moving`, or inside one of them (it moves with
+/// it, so is no target).
+fn movesWith(id: layout.model.ObjectId, moving: []const layout.model.ObjectId) bool {
+    var at = id;
+    var n: usize = 0;
+    while (n < 64) : (n += 1) {
+        for (moving) |mv| if (mv == at) return true;
+        const parent = constrain.parentOf(&state.model, at) orelse return false;
+        switch (parent) {
+            .space => return false,
+            .panel => |pi| at = state.model.panels.items[pi].id,
+        }
+    }
+    return false;
+}
+
+/// What a drag of `moving` snaps to (the one shared snapper,
+/// `geom.snap`): in the shown space, every other container's edges and
+/// centre lines, the frame's boundary, the construction lines shown and
+/// their crossings; the grid's step where nothing is near. Alt held: none.
+fn dragSnapper(moving: []const layout.model.ObjectId) *const geom.snap.Snapper {
+    const now_frame = dvui.frameTimeNS();
+    const key: layout.model.ObjectId = if (moving.len > 0) moving[0] else .none;
+    if (snap_cache.frame == now_frame and snap_cache.key == key) return &snap_cache.s;
+    const a = dvui.currentWindow().arena();
+    var s: geom.snap.Snapper = .{ .grid = snapStep() };
+    if (snap_objects and !altHeld() and state.view.ppm > 0) {
+        for (constrainables(a)) |id| {
+            if (isControlPoint(id) or movesWith(id, moving)) continue;
+            const b = containerBox(id) orelse continue;
+            s.addBox(a, b) catch {};
+        }
+        if (shown_space < state.model.spaces.items.len) {
+            const sp = state.model.spaces.items[shown_space];
+            if (sp.bound) |b| s.addBox(a, b) catch {};
+            if (ViewLayer.guides.shown()) for (sp.guides.items) |g| s.addLine(a, g.at, g.dir()) catch {};
+            s.addCrossings(a) catch {};
+        }
+    }
+    snap_cache = .{ .frame = now_frame, .key = key, .s = s };
+    return &snap_cache.s;
+}
+
+/// Point `p` (canvas mm) snapped along the axes given, nothing moving
+/// with it but `moving`: onto line crossings, other objects' edges and
+/// centres, construction lines, else the grid.
+fn snapPointOf(p: geom.Point, along_x: bool, along_y: bool, moving: []const layout.model.ObjectId) geom.Point {
+    const r = dragSnapper(moving).point(p, along_x, along_y, snapTol());
+    snap_guide = r;
+    return .{ .x = p.x + r.dx, .y = p.y + r.dy };
+}
+
 fn snapPoint(p: geom.Point, along_x: bool, along_y: bool) geom.Point {
-    const st = snapStep() orelse {
-        snap_guide = .{};
-        return p;
-    };
-    var out = p;
-    snap_guide = .{};
-    if (along_x) out.x = snapAxis(p.x, st, &snap_guide.x);
-    if (along_y) out.y = snapAxis(p.y, st, &snap_guide.y);
-    return out;
+    return snapPointOf(p, along_x, along_y, &.{});
 }
 
-/// A shift (canvas mm, along one axis) changed so that `ref` + it is on
-/// the grid.
-fn snapShift(ref: f64, shift: f64, st: f64, g: *?f64) f64 {
-    return snapAxis(ref + shift, st, g) - ref;
+/// A box (canvas mm) moved by (dx, dy), snapped: the shift it takes. Where
+/// nothing is near, its corner (x0, y0 feature `gx`, `gy`) goes to the
+/// grid.
+fn snapMove(b: geom.Box, dx: f64, dy: f64, gx: usize, gy: usize, moving: []const layout.model.ObjectId) geom.Point {
+    const r = dragSnapper(moving).moveBox(b, dx, dy, gx, gy, snapTol());
+    snap_guide = r;
+    return .{ .x = r.dx, .y = r.dy };
 }
 
-/// A point drawn on the canvas (a new panel's corner): on the grid when
-/// snapping.
+/// One edge (canvas mm) along an axis, snapped: where it goes. The guide
+/// for that axis set.
+fn snapEdge(v: f64, vertical: bool, span: [2]f64, moving: []const layout.model.ObjectId) f64 {
+    const h = dragSnapper(moving).axisOrGrid(vertical, &.{v}, 0, span, snapTol()) orelse return v;
+    if (vertical) snap_guide.y = h.guide else snap_guide.x = h.guide;
+    return v + h.shift;
+}
+
+/// A point drawn on the canvas (a new panel's corner): snapped.
 fn snap(p: geom.Point) geom.Point {
     return snapPoint(p, true, true);
 }
 
-/// The guides of the drag in hand: a line across the canvas at each grid
-/// line it is on.
+/// The guides of the drag in hand: to another object, a line from it to
+/// what is dragged, through the edges or centres that meet; to a
+/// construction line, along it; to a crossing or a point, a ring; to the
+/// grid, a line across the canvas.
 fn drawSnapGuides(area: dvui.Rect.Physical) void {
-    const dragging = engage_drag != null or resize_drag != null or (sel_press != null and sel_press.?.moved) or state.moving != null or (state.drag != null and !band_drag);
+    const dragging = engage_drag != null or resize_drag != null or (sel_press != null and sel_press.?.moved) or state.moving != null or (state.drag != null and !band_drag) or (sk_drag != null and sk_drag.?.moved);
     if (!dragging) {
         snap_guide = .{};
         return;
     }
-    const ink: dvui.ColorOrGradient = .{ .color = colors.select.opacity(0.55) };
     const t = dvui.windowNaturalScale();
-    if (snap_guide.x) |x| {
-        const q = state.view.toPx(area, .{ .x = x, .y = 0 });
-        dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = area.y }, .{ .x = q.x, .y = area.y + area.h } } }, .{ .thickness = t, .color = ink });
-    }
-    if (snap_guide.y) |y| {
-        const q = state.view.toPx(area, .{ .x = 0, .y = y });
-        dvui.Path.stroke(.{ .points = &.{ .{ .x = area.x, .y = q.y }, .{ .x = area.x + area.w, .y = q.y } } }, .{ .thickness = t, .color = ink });
+    const grid_ink: dvui.ColorOrGradient = .{ .color = colors.select.opacity(0.55) };
+    const ink: dvui.ColorOrGradient = .{ .color = colors.snap };
+    const Draw = struct {
+        fn guide(ar: dvui.Rect.Physical, g: geom.snap.Target, vertical: bool, th: f32, gi: dvui.ColorOrGradient, oi: dvui.ColorOrGradient) void {
+            const full = !std.math.isFinite(g.lo);
+            const a0: geom.Point = if (vertical) .{ .x = g.lo, .y = g.at } else .{ .x = g.at, .y = g.lo };
+            const a1: geom.Point = if (vertical) .{ .x = g.hi, .y = g.at } else .{ .x = g.at, .y = g.hi };
+            if (full) {
+                const q = state.view.toPx(ar, .{ .x = g.at, .y = g.at });
+                const pts: [2]dvui.Point.Physical = if (vertical) .{ .{ .x = ar.x, .y = q.y }, .{ .x = ar.x + ar.w, .y = q.y } } else .{ .{ .x = q.x, .y = ar.y }, .{ .x = q.x, .y = ar.y + ar.h } };
+                dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = th, .color = if (g.kind == .grid) gi else oi });
+                return;
+            }
+            const p0 = state.view.toPx(ar, a0);
+            const p1 = state.view.toPx(ar, a1);
+            dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = th, .color = oi });
+            // Small crosses at its ends, as smart guides mark them.
+            const r = 3 * th;
+            for ([_]dvui.Point.Physical{ p0, p1 }) |c| {
+                dvui.Path.stroke(.{ .points = &.{ .{ .x = c.x - r, .y = c.y - r }, .{ .x = c.x + r, .y = c.y + r } } }, .{ .thickness = th, .color = oi });
+                dvui.Path.stroke(.{ .points = &.{ .{ .x = c.x - r, .y = c.y + r }, .{ .x = c.x + r, .y = c.y - r } } }, .{ .thickness = th, .color = oi });
+            }
+        }
+    };
+    if (snap_guide.x) |g| Draw.guide(area, g, false, t, grid_ink, ink);
+    if (snap_guide.y) |g| Draw.guide(area, g, true, t, grid_ink, ink);
+    switch (snap_guide.extra) {
+        .none => {},
+        .line => |l| {
+            const g: layout.model.Guide = .{ .at = l.at, .angle = std.math.atan2(l.dir.y, l.dir.x) * 180 / std.math.pi };
+            if (g.clip(guideClipBox(area, shown_space))) |seg| dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, seg[0]), state.view.toPx(area, seg[1]) } }, .{ .thickness = 1.5 * t, .color = ink });
+        },
+        .point => |p| skRing(state.view.toPx(area, p), 5 * t, colors.snap, 1.5 * t),
     }
 }
 
@@ -18436,9 +18539,15 @@ const button_handlers = [_]ButtonHandler{
                 .sketch_def => |i| i,
                 else => return,
             };
-            if (act(.removeSketch, .{index})) {
-                state.context = .sketches;
-            } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+            if (index >= state.model.sketches.items.len) return;
+            const id = state.model.sketches.items[index].id;
+            for (state.model.panels.items) |pn| if (pn.sketch == id) {
+                state.status = "A panel is made from this sketch: release it first. ";
+                return;
+            };
+            // At the next frame's start: its own space's tabs close first.
+            delete_sketch = id;
+            dvui.refresh(null, @src(), null);
         }
     }.f),
     handler("grid.edit-its-sketch", struct {
@@ -26289,14 +26398,18 @@ fn selectionDrag(at: geom.Point) void {
         if (r.edges.top) b.y1 = @max(b.y1 + dy, b.y0 + min);
         // The edges it moves on the grid (the canvas's, so in the frame's
         // offset).
+        // And onto other objects' edges and centres, lines, the grid.
         snap_guide = .{};
-        if (snapStep()) |st| if (constrain.parentOf(&state.model, r.id)) |parent| {
+        if (constrain.parentOf(&state.model, r.id)) |parent| {
             const off = constrain.frameOffset(&state.model, parent);
-            if (r.edges.left) b.x0 = @min(snapAxis(b.x0 + off.x, st, &snap_guide.x) - off.x, b.x1 - min);
-            if (r.edges.right) b.x1 = @max(snapAxis(b.x1 + off.x, st, &snap_guide.x) - off.x, b.x0 + min);
-            if (r.edges.bottom) b.y0 = @min(snapAxis(b.y0 + off.y, st, &snap_guide.y) - off.y, b.y1 - min);
-            if (r.edges.top) b.y1 = @max(snapAxis(b.y1 + off.y, st, &snap_guide.y) - off.y, b.y0 + min);
-        };
+            const mv = &[_]layout.model.ObjectId{r.id};
+            const sx: [2]f64 = .{ b.y0 + off.y, b.y1 + off.y };
+            const sy: [2]f64 = .{ b.x0 + off.x, b.x1 + off.x };
+            if (r.edges.left) b.x0 = @min(snapEdge(b.x0 + off.x, false, sx, mv) - off.x, b.x1 - min);
+            if (r.edges.right) b.x1 = @max(snapEdge(b.x1 + off.x, false, sx, mv) - off.x, b.x0 + min);
+            if (r.edges.bottom) b.y0 = @min(snapEdge(b.y0 + off.y, true, sy, mv) - off.y, b.y1 - min);
+            if (r.edges.top) b.y1 = @max(snapEdge(b.y1 + off.y, true, sy, mv) - off.y, b.y0 + min);
+        }
         if (figureProportions(r.id)) |pr| b = keepFigureProportions(pr, r.box, b, r.edges);
         _ = actM(r.key, .placeObjects, .{ &[_]layout.model.ObjectId{r.id}, &[_]geom.Box{b} }) catch {};
         return;
@@ -26308,15 +26421,20 @@ fn selectionDrag(at: geom.Point) void {
     // A few pixels before it is a drag, not a click.
     if (!sp.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 4) return;
     sp.moved = true;
-    // The first one's origin (its top-left) on the grid; the rest with it.
+    // Their box together snapped: its edges or centre onto another
+    // object's or a line, else its top-left on the grid; all move alike.
     var mx = dx;
     var my = dy;
     snap_guide = .{};
-    if (snapStep()) |st| if (sp.ids.len > 0) if (constrain.parentOf(&state.model, sp.ids[0])) |parent| {
-        const off = constrain.frameOffset(&state.model, parent);
-        mx = snapShift(sp.boxes[0].x0 + off.x, dx, st, &snap_guide.x);
-        my = snapShift(sp.boxes[0].y1 + off.y, dy, st, &snap_guide.y);
+    var all = geom.Box.empty;
+    for (sp.ids, sp.boxes) |id, b| if (constrain.parentOf(&state.model, id)) |parent| {
+        all = all.join(offsetBox(b, constrain.frameOffset(&state.model, parent)));
     };
+    if (!all.isEmpty()) {
+        const sh = snapMove(all, dx, dy, 0, 2, sp.ids);
+        mx = sh.x;
+        my = sh.y;
+    }
     const a = dvui.currentWindow().arena();
     const boxes = a.alloc(geom.Box, sp.boxes.len) catch return;
     for (sp.boxes, boxes) |b, *o| o.* = .{ .x0 = b.x0 + mx, .x1 = b.x1 + mx, .y0 = b.y0 + my, .y1 = b.y1 + my };
@@ -26708,7 +26826,28 @@ fn engageMotion(at: geom.Point) void {
     const fr0 = engageFreedom(d.hit);
     const free_x = if (engageMoves(d.hit.kind)) fr0.x else (fr0.edges.left or fr0.edges.right);
     const free_y = if (engageMoves(d.hit.kind)) fr0.y else (fr0.edges.bottom or fr0.edges.top);
-    const p = snapPoint(.{ .x = d.hit.at.x + (if (free_x) dx else 0), .y = d.hit.at.y + (if (free_y) dy else 0) }, free_x, free_y);
+    const mv = &[_]layout.model.ObjectId{d.hit.id};
+    const raw: geom.Point = .{ .x = d.hit.at.x + (if (free_x) dx else 0), .y = d.hit.at.y + (if (free_y) dy else 0) };
+    // A move snaps its whole box (edges and centre onto other objects'
+    // and lines), else the point on the grid; a resize snaps the point.
+    var p = raw;
+    if (engageMoves(d.hit.kind)) {
+        const sn = dragSnapper(mv);
+        const tol = snapTol();
+        const b0: geom.Box = .{ .x0 = d.box.x0 + d.offset.x, .x1 = d.box.x1 + d.offset.x, .y0 = d.box.y0 + d.offset.y, .y1 = d.box.y1 + d.offset.y };
+        const sx = raw.x - d.hit.at.x;
+        const sy = raw.y - d.hit.at.y;
+        const m: geom.Box = .{ .x0 = b0.x0 + sx, .x1 = b0.x1 + sx, .y0 = b0.y0 + sy, .y1 = b0.y1 + sy };
+        snap_guide = .{};
+        if (free_x) if (sn.axis(false, &.{ m.x0, (m.x0 + m.x1) / 2, m.x1 }, .{ m.y0, m.y1 }, tol) orelse sn.gridAxis(raw.x)) |h| {
+            p.x += h.shift;
+            snap_guide.x = h.guide;
+        };
+        if (free_y) if (sn.axis(true, &.{ m.y0, (m.y0 + m.y1) / 2, m.y1 }, .{ m.x0, m.x1 }, tol) orelse sn.gridAxis(raw.y)) |h| {
+            p.y += h.shift;
+            snap_guide.y = h.guide;
+        };
+    } else p = snapPointOf(raw, free_x, free_y, mv);
     d.now = p;
     // The point in the container's parent's frame.
     const q: geom.Point = .{ .x = p.x - d.offset.x, .y = p.y - d.offset.y };
@@ -28668,6 +28807,31 @@ fn loadSketchPanelSample() void {
 /// A sample's sketch space to open and edit at the next frame.
 var sample_edit_home: ?usize = null;
 
+/// GRAVEN_SAMPLE=drawing-panel: a sketch in its own space with a drawing
+/// (a ring and a cross inked), and a plain panel on the canvas with text;
+/// Insert figure ready with that drawing, to drag onto the panel.
+fn loadDrawingPanelSample() void {
+    const index = act(.addSketchSpace, .{@as([]const u8, "Badge")}) catch return;
+    const ring = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } } }) catch return;
+    const a = act(.editSketch, .{ index, layout.model.SketchEdit{ .segment = .{ .a = .{ .x = -6, .y = -6 }, .b = .{ .x = 6, .y = 6 } } } }) catch return;
+    const b = act(.editSketch, .{ index, layout.model.SketchEdit{ .segment = .{ .a = .{ .x = -6, .y = 6 }, .b = .{ .x = 6, .y = -6 } } } }) catch return;
+    for ([_]u32{ ring, a, b }) |g| _ = act(.setInk, .{ index, g, true }) catch {};
+    const pi = state.model.addPanel("Plate", 90, 50) catch return;
+    const style = labelStyle() catch return;
+    const pitch = 6.0;
+    const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 44 }, .style = style, .count = 6, .length = 82.0 / pitch, .pitch = pitch }) catch return;
+    state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "A drawing from a sketch, placed on a plain panel as its art: the text flows round it, and it follows the sketch when the sketch's changes are accepted." }) catch {};
+    if (state.model.sketchFigure(state.model.sketches.items[index].id)) |fi| {
+        insert_figure = state.model.figures.items[fi].id;
+        state.tool = .insert_figure;
+    }
+    state.context = .{ .panel = pi };
+    state.view.cx = 45;
+    state.view.cy = 25;
+    state.view.ppm = 9;
+    state.view.fit = null;
+}
+
 /// Edits sketch `index` with its origin at `at` in space `space`.
 fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sketch_edit = .{ .sketch = index, .space = space, .at = at };
@@ -29077,6 +29241,20 @@ fn finishSketch() void {
 }
 /// A sketch's own space whose tabs close at the next frame's start.
 var close_home: ?usize = null;
+/// A sketch (its ID) Delete sketch removes at the next frame's start.
+var delete_sketch: layout.model.ObjectId = .none;
+
+/// Removes sketch `id` with its own space and drawings: its editing left
+/// and its space's tabs closed first.
+fn deleteSketchNow(id: layout.model.ObjectId) void {
+    if (sketch_edit) |r| if (r.sketch < state.model.sketches.items.len and state.model.sketches.items[r.sketch].id == id) leaveSketch();
+    if (state.model.homeOf(id)) |h| closeSpaceViews(h);
+    const index = state.model.sketchIndex(id) orelse return;
+    if (act(.removeSketch, .{index})) {
+        state.context = .sketches;
+        state.status = "The sketch is deleted, with its own space and its drawings. ";
+    } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+}
 
 /// Closes every tab showing space `space`; a last tab shows the canvas.
 fn closeSpaceViews(space: usize) void {
@@ -29467,16 +29645,77 @@ fn skClickPoint() ?geom.Point {
     return skTypedTarget(skSnap(p));
 }
 
-/// Sketch point `p` (in the sketch's frame) on the grid, when drags snap
-/// to it (View › Snap to grid, the grid shown, Alt not held): the grid of
-/// the space the sketch is placed in.
+/// Sketch point `p` (in the sketch's frame) snapped, through the shared
+/// snapper (`geom.snap`, as the canvas's drags): onto the sketch's other
+/// points (and lined up with them across either axis), segments'
+/// midpoints, its infinite lines and their crossings; else the grid of the
+/// space the sketch is placed in. Alt held: free. `moving`: the point
+/// being dragged (it and what lies on it are no targets).
 fn skSnap(p: geom.Point) geom.Point {
-    const st = snapStep() orelse return p;
     const it = skItem() orelse return p;
-    return .{
-        .x = @round((p.x + it.at.x) / st) * st - it.at.x,
-        .y = @round((p.y + it.at.y) / st) * st - it.at.y,
-    };
+    const moving: ?geom.Point = if (sk_drag) |d| (it.sketch.point(d.p) catch null) else null;
+    const s = skSnapper(it, moving);
+    const r = s.point(.{ .x = p.x + it.at.x, .y = p.y + it.at.y }, true, true, snapTol());
+    snap_guide = r;
+    return .{ .x = p.x + r.dx, .y = p.y + r.dy };
+}
+
+var sk_snap_cache: struct { frame: i128 = -1, s: geom.snap.Snapper = .{} } = .{};
+
+fn skSnapper(it: SkPlace, moving: ?geom.Point) *const geom.snap.Snapper {
+    const now_frame = dvui.frameTimeNS();
+    if (sk_snap_cache.frame == now_frame) return &sk_snap_cache.s;
+    const a = dvui.currentWindow().arena();
+    var s: geom.snap.Snapper = .{ .grid = snapStep() };
+    if (snap_objects and !altHeld() and state.view.ppm > 0) {
+        const sk = it.sketch;
+        const o = it.at;
+        const Add = struct {
+            fn pt(sn: *geom.snap.Snapper, al: std.mem.Allocator, q: geom.Point, off: geom.Point, mv: ?geom.Point) void {
+                if (mv) |m| if (@abs(m.x - q.x) < 1e-9 and @abs(m.y - q.y) < 1e-9) return;
+                sn.addAligned(al, .{ .x = q.x + off.x, .y = q.y + off.y }) catch {};
+            }
+        };
+        for (sk.geometry.items, 0..) |g, gi| {
+            if (g.removed) continue;
+            const id: skl.GeomId = @intCast(gi);
+            const P = struct {
+                fn at(skk: *const skl.Sketch, gid: skl.GeomId, role: @FieldType(skl.PointRef, "role")) ?geom.Point {
+                    return skk.point(.{ .geom = gid, .role = role }) catch null;
+                }
+            };
+            switch (g.kind) {
+                .point, .affine => if (P.at(sk, id, .point)) |q| Add.pt(&s, a, q, o, moving),
+                .segment => {
+                    const p0 = P.at(sk, id, .start);
+                    const p1 = P.at(sk, id, .end);
+                    if (p0) |q| Add.pt(&s, a, q, o, moving);
+                    if (p1) |q| Add.pt(&s, a, q, o, moving);
+                    if (p0 != null and p1 != null) {
+                        const mid: geom.Point = .{ .x = (p0.?.x + p1.?.x) / 2, .y = (p0.?.y + p1.?.y) / 2 };
+                        if (moving == null or (skDist(moving.?, p0.?) > 1e-9 and skDist(moving.?, p1.?) > 1e-9)) s.addPoint(a, .{ .x = mid.x + o.x, .y = mid.y + o.y }) catch {};
+                    }
+                },
+                .circle => if (P.at(sk, id, .centre)) |q| Add.pt(&s, a, q, o, moving),
+                .arc => for ([_]@FieldType(skl.PointRef, "role"){ .centre, .start, .end }) |role| {
+                    if (P.at(sk, id, role)) |q| Add.pt(&s, a, q, o, moving);
+                },
+                .ray => |r| if (P.at(sk, id, .origin)) |q| {
+                    Add.pt(&s, a, q, o, moving);
+                    const ang = sk.vars.items[r.angle];
+                    s.addLine(a, .{ .x = q.x + o.x, .y = q.y + o.y }, .{ .x = @cos(ang), .y = @sin(ang) }) catch {};
+                },
+                .line => |l| {
+                    const th = sk.vars.items[l.theta];
+                    const rho = sk.vars.items[l.rho];
+                    s.addLine(a, .{ .x = rho * @cos(th) + o.x, .y = rho * @sin(th) + o.y }, .{ .x = -@sin(th), .y = @cos(th) }) catch {};
+                },
+            }
+        }
+        s.addCrossings(a) catch {};
+    }
+    sk_snap_cache = .{ .frame = now_frame, .s = s };
+    return &sk_snap_cache.s;
 }
 
 /// What the step being placed measures from: the click before (or, for

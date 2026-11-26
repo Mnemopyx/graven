@@ -1215,7 +1215,7 @@ pub const Space = struct {
     /// A sketch's own space (the owner, 2026-11-25): the sketch's ID. It
     /// holds that sketch's one view, at its origin, and nothing else; it is
     /// not a frame (never listed with them, never output, never a place to
-    /// move to). Kept, unlisted, if the sketch is removed.
+    /// move to). Removed with the sketch.
     home: ObjectId = .none,
     /// The layers the editor draws besides the document's (the grid, the
     /// axes, the check results, the construction lines, the flow marks):
@@ -2834,7 +2834,8 @@ pub const Model = struct {
 
     fn resolveFirst(m: *const Model, name: []const u8) ?Ref {
         const eq = std.mem.eql;
-        for (m.spaces.items, 0..) |sp, i| if (eq(u8, sp.name, name)) return .{ .space = i };
+        // A sketch's own space goes by its sketch's name, not its own.
+        for (m.spaces.items, 0..) |sp, i| if (sp.home == .none and eq(u8, sp.name, name)) return .{ .space = i };
         for (m.panels.items, 0..) |p, i| if (eq(u8, p.name, name)) return .{ .panel = i };
         for (collection_names) |c| if (eq(u8, c[0], name)) return .{ .collection = c[1] };
         for (collection_names) |c| if (m.resolveIn(.{ .collection = c[1] }, name)) |r| return r;
@@ -3917,11 +3918,20 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Removes sketch `index` and its views. Refused while a panel is made
-    /// from it.
+    /// Removes sketch `index` with all that is its own: its views, its own
+    /// space (`Space.home`, and the views of that space placed elsewhere)
+    /// and its drawings (with their placements). Refused while a panel is
+    /// made from it.
     pub fn removeSketch(m: *Model, index: usize) Error!void {
         const id = (try m.sketchAt(index)).id;
         for (m.panels.items) |pn| if (pn.sketch == id) return error.SketchInUse;
+        // Its drawings, each removed as a figure is (its placements too).
+        var f = m.figures.items.len;
+        while (f > 0) {
+            f -= 1;
+            if (m.figures.items[f].sketch == id) try m.removeFigure(f);
+        }
+        if (m.homeOf(id)) |hi| try m.removeSpace(hi);
         for (m.spaces.items) |*sp| {
             var k = sp.sketch_views.items.len;
             while (k > 0) {
@@ -3930,6 +3940,30 @@ pub const Model = struct {
             }
         }
         _ = m.sketches.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// Removes space `index` (never the canvas) with what it holds: its
+    /// panels, its content layouts (their flows tidied), and every view of
+    /// it placed in another space.
+    pub fn removeSpace(m: *Model, index: usize) Error!void {
+        if (index == 0 or index >= m.spaces.items.len) return error.NoSuchItem;
+        const sid = m.spaces.items[index].id;
+        var p = m.panels.items.len;
+        while (p > 0) {
+            p -= 1;
+            if (m.panels.items[p].space == sid) m.removePanel(p);
+        }
+        for (m.spaces.items[index].regions.items) |r| m.forget(r.id);
+        _ = m.spaces.orderedRemove(index);
+        for (m.spaces.items) |*sp| {
+            var k = sp.views.items.len;
+            while (k > 0) {
+                k -= 1;
+                if (sp.views.items[k].source == sid) _ = sp.views.orderedRemove(k);
+            }
+        }
+        m.tidyFlows();
         m.revision += 1;
     }
 
@@ -7247,7 +7281,12 @@ pub const Model = struct {
             if (f.sketch == .none or (sketch != .none and f.sketch != sketch)) continue;
             const ski = m.sketchIndex(f.sketch) orelse continue;
             const item = &m.sketches.items[ski];
+            // Its placements follow what is accepted, so not while a draft
+            // is open (its paths stay as they are then).
+            const follow = item.accepted == null and m.figurePlaced(f.id);
+            const was: Placed = if (follow) try m.placedBounds(f.*) else .{};
             f.paths = try m.figurePathsFrom(item.used(), f.*);
+            if (follow) try m.followFigure(f.*, was);
             // The sketch editor's view of a pending draft.
             // The editor's view of a pending draft: the draft sketch, with
             // its pending marks.
@@ -7264,6 +7303,59 @@ pub const Model = struct {
             if (pn.sketch == .none or (sketch != .none and pn.sketch != sketch)) continue;
             try m.syncSketchPanelInk(pi);
         }
+    }
+
+    /// A figure's bounds and its ink's, as its placements were made from.
+    const Placed = struct { bounds: geom.Box = .empty, ink: geom.Box = .empty };
+
+    fn placedBounds(m: *Model, f: figure_.Figure) Error!Placed {
+        return .{ .bounds = f.bounds(), .ink = figure_.inkBounds(try figure_.ink(m.a(), f, figure_tolerance)) };
+    }
+
+    /// Whether figure `id` is placed anywhere (in a space or on a panel).
+    fn figurePlaced(m: *const Model, id: ObjectId) bool {
+        for (m.spaces.items) |sp| for (sp.figure_places.items) |fp| {
+            if (fp.figure == id) return true;
+        };
+        for (m.panels.items) |p| for (p.art.items) |x| {
+            if (x.figure == id) return true;
+        };
+        return false;
+    }
+
+    /// Figure `f`'s placements made again after its drawing changed (a
+    /// sketch's drawing, accepted): each keeps its scale, and what was at a
+    /// point of the drawing stays where it was, so a sketch drawn in mm
+    /// placed 1:1 stays 1:1 however its geometry grows or shrinks.
+    fn followFigure(m: *Model, f: figure_.Figure, was: Placed) Error!void {
+        const fi = m.figureIndex(f.id) orelse return;
+        const now = try m.placedBounds(f);
+        for (m.panels.items) |*p| for (p.art.items) |*x| {
+            if (x.figure != f.id) continue;
+            if (was.ink.isEmpty() or !(was.ink.width() > 0)) continue;
+            var ab: geom.Box = .empty;
+            for (x.shapes) |sh| ab = ab.join(sh.outline.bounds());
+            const k = if (ab.isEmpty()) 1 else ab.width() / was.ink.width();
+            if (now.ink.isEmpty() or !(now.ink.width() > 0)) {
+                x.shapes = &.{};
+                continue;
+            }
+            x.shapes = try m.figureShapes(fi, now.ink.width() * k);
+            x.at = .{ .x = x.at.x + (now.ink.x0 - was.ink.x0) * k, .y = x.at.y + (now.ink.y0 - was.ink.y0) * k };
+        };
+        for (m.spaces.items) |*sp| for (sp.figure_places.items) |*fp| {
+            if (fp.figure != f.id) continue;
+            if (was.bounds.isEmpty() or !(was.bounds.width() > 0) or now.bounds.isEmpty()) continue;
+            const k = fp.w / was.bounds.width();
+            fp.at = .{ .x = fp.at.x + (now.bounds.x0 - was.bounds.x0) * k, .y = fp.at.y + (now.bounds.y0 - was.bounds.y0) * k };
+            fp.w = @max(1e-6, now.bounds.width() * k);
+            fp.h = now.bounds.height() * k;
+            if (fp.border.kind == .dubins) {
+                fp.border.path = try m.figureWrap(fi, fp.w, fp.margin, fp.border.radius);
+                fp.border.made_w = fp.w;
+            }
+        };
+        m.revision += 1;
     }
 
     /// The paths of figure `f`, drawn over sketch `sk`: its fills, then each
@@ -10504,4 +10596,46 @@ fn compositeError(err: sketch_.composite.Error) Model.Error {
         error.NotSiblings, error.Sealed => error.BadValue,
         else => |e| e,
     };
+}
+
+test "a sketch's drawing placed on a panel follows the sketch when accepted, at its scale" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Badge");
+    const c = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    try m.setInk(si, c, true);
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    const p = try m.addPanel("plate", 100, 60);
+    const ai = try m.placeFigureOnPanel(p, fi, .{ .x = 30, .y = 20 }, 40.6);
+    try std.testing.expectApproxEqAbs(40.6, m.panels.items[p].art.items[ai].box().width(), 1e-6);
+    // A bigger ring drawn and inked in a draft: the panel waits.
+    const big = try m.editSketchDraft(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 20 } });
+    try m.setInkDraft(si, big, true);
+    try std.testing.expectApproxEqAbs(40.6, m.panels.items[p].art.items[ai].box().width(), 1e-6);
+    // Accepted: twice the size at the same scale (2:1), the centre kept.
+    try m.acceptSketch(si);
+    const x = m.panels.items[p].art.items[ai];
+    try std.testing.expectApproxEqAbs(80.6, x.box().width(), 0.05);
+    try std.testing.expectApproxEqAbs(10, x.box().x0, 0.05);
+}
+
+test "removing a sketch removes its own space and its drawings, with their placements" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Badge");
+    const sid = m.sketches.items[si].id;
+    const c = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    try m.setInk(si, c, true);
+    const fi = m.sketchFigure(sid).?;
+    _ = try m.addDrawing(si, "Second");
+    const p = try m.addPanel("plate", 100, 60);
+    _ = try m.placeFigureOnPanel(p, fi, .{ .x = 30, .y = 20 }, 20);
+    try std.testing.expectEqual(2, m.spaces.items.len);
+    try m.removeSketch(si);
+    try std.testing.expectEqual(1, m.spaces.items.len);
+    try std.testing.expectEqual(null, m.homeOf(sid));
+    try std.testing.expectEqual(0, m.figures.items.len);
+    try std.testing.expectEqual(0, m.panels.items[p].art.items.len);
 }
