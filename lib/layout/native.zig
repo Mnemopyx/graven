@@ -428,11 +428,21 @@ pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model 
         try it.sketch.rebuildGroups(m.arena.allocator());
         if (it.accepted) |*acc| try acc.rebuildGroups(m.arena.allocator());
     }
+    // Its captions' leaders end level (connections were all level then).
+    for (m.sketches.items) |*it| for (it.captions.items) |sc| {
+        if (sc.connector < it.sketch.connectors.items.len) it.sketch.connectors.items[sc.connector].level = true;
+        if (it.accepted) |*acc| if (sc.connector < acc.connectors.items.len) {
+            acc.connectors.items[sc.connector].level = true;
+        };
+    };
     // Its constraints' signed values, likewise: the sign as the side.
     for (m.constraints.items) |*c| if (c.value < 0) {
         c.value = -c.value;
         c.side = -c.side;
     };
+    // Its equal sizes held to a reference, as sets of peers, solved once
+    // so each knows the size its members share (the reference's).
+    if (try m.foldEqualSets()) try @import("constrain.zig").solve(&m, gpa, null);
     m.upgradeProcesses() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},
@@ -620,7 +630,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     // A sketch dimension placed off its geometry (its placement is saved).
     const ski = try m.addShapeSketch(.rectangle);
     const dim_c: u32 = @intCast(m.sketches.items[ski].sketch.constraints.items.len - 1);
-    _ = try m.editSketch(ski, .{ .place = .{ .c = dim_c, .place = .{ .offset = -12.5, .text = 3, .outside = true } } });
+    _ = try m.editSketch(ski, .{ .place = .{ .c = dim_c, .place = .{ .offset = -12.5, .text = 3, .outside = true, .angle = 0.5 } } });
     // Its rectangle made an object: the group is saved by its members.
     const sk0 = &m.sketches.items[ski].sketch;
     var members: std.ArrayList(u32) = .empty;
@@ -660,6 +670,7 @@ test "a model writes and reads back to the same bytes, with its content" {
     try testing.expectEqual(-12.5, pl.offset);
     try testing.expectEqual(3, pl.text);
     try testing.expect(pl.outside);
+    try testing.expectEqual(@as(?f64, 0.5), pl.angle);
     const gb = &back.sketches.items[ski].sketch.groups.list.items[obj];
     try testing.expect(gb.sealed);
     try testing.expectEqual(@as(?f64, 4), gb.prop("corners"));

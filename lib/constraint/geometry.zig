@@ -118,6 +118,8 @@ pub const Constraint = struct {
         /// the constraint was made (`side`, set by `addConstraint`).
         line_distance: struct { p: PointRef, line: GeomId, value: f64, side: f64 = 1 },
         radius: struct { g: GeomId, value: f64 },
+        /// A circle's or arc's diameter: twice its radius.
+        diameter: struct { g: GeomId, value: f64 },
         /// From `a`'s direction to `b`'s, counter-clockwise.
         angle: struct { a: GeomId, b: GeomId, value: f64 },
         /// Two straight geometries.
@@ -163,7 +165,7 @@ pub const Constraint = struct {
     /// Whether it has a value (a dimension).
     pub fn isDimension(c: Constraint) bool {
         return switch (c.kind) {
-            .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => true,
+            .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => true,
             else => false,
         };
     }
@@ -278,7 +280,7 @@ pub fn refs(c: Constraint, buf: *[4]Ref) []const Ref {
             add(buf, &n, .{ .point = d.p });
             add(buf, &n, .{ .geom = d.line });
         },
-        .radius => |r| add(buf, &n, .{ .geom = r.g }),
+        inline .radius, .diameter => |r| add(buf, &n, .{ .geom = r.g }),
         inline .angle, .parallel, .perpendicular, .tangent, .equal => |an| {
             add(buf, &n, .{ .geom = an.a });
             add(buf, &n, .{ .geom = an.b });
@@ -336,7 +338,7 @@ pub fn mapGeoms(c: *Constraint, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ge
         .fixed => |*f| M.p(&f.p, ctx),
         inline .distance, .distance_x, .distance_y => |*d| M.p(&d.a, ctx) and M.p(&d.b, ctx),
         .line_distance => |*d| M.p(&d.p, ctx) and M.g(&d.line, ctx),
-        .radius => |*r| M.g(&r.g, ctx),
+        inline .radius, .diameter => |*r| M.g(&r.g, ctx),
         inline .angle, .parallel, .perpendicular, .tangent, .equal => |*an| M.g(&an.a, ctx) and M.g(&an.b, ctx),
         .equal_angle => |*e| M.g(&e.a, ctx) and M.g(&e.b, ctx) and M.g(&e.c, ctx) and M.g(&e.d, ctx),
         .equal_distance => |*e| M.span(&e.a, ctx) and M.span(&e.b, ctx),
@@ -363,7 +365,7 @@ pub fn refersTo(c: Constraint, g: GeomId) bool {
         .fixed => |f| f.p.geom == g,
         inline .distance, .distance_x, .distance_y => |d| d.a.geom == g or d.b.geom == g,
         .line_distance => |d| d.p.geom == g or d.line == g,
-        .radius => |r| r.g == g,
+        inline .radius, .diameter => |r| r.g == g,
         inline .angle, .parallel, .perpendicular, .tangent, .equal => |an| an.a == g or an.b == g,
         .equal_angle => |e| e.a == g or e.b == g or e.c == g or e.d == g,
         .equal_distance => |e| spanRefers(e.a, g) or spanRefers(e.b, g),
@@ -560,6 +562,11 @@ pub const Local = struct {
             .radius => |r| out[0] = switch ((try l.geo(r.g)).kind) {
                 .circle => |ci| l.get(ci.r).sub(D.c(r.value)),
                 .arc => |ar| l.p(ar.a).sub(l.p(ar.c)).len().sub(D.c(r.value)),
+                else => return error.WrongKind,
+            },
+            .diameter => |r| out[0] = switch ((try l.geo(r.g)).kind) {
+                .circle => |ci| l.get(ci.r).scale(2).sub(D.c(r.value)),
+                .arc => |ar| l.p(ar.a).sub(l.p(ar.c)).len().scale(2).sub(D.c(r.value)),
                 else => return error.WrongKind,
             },
             .angle => |an| {

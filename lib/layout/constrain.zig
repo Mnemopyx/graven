@@ -129,8 +129,37 @@ fn sketchPointAt(m: *const Model, loc: Loc) ?geom.Point {
 /// Whether constraint `c` names an object that is gone (removed since
 /// it was made): abandoned, it constrains nothing.
 pub fn abandoned(m: *const Model, c: model.Constraint) bool {
+    // A set of peers: abandoned when fewer than two of its members are
+    // left (a member removed leaves the rest equal).
+    if (c.isSet()) return liveMembers(m, c, null) < 2;
     if (locate(m, c.a.object) == null) return true;
     return c.b.object != .none and locate(m, c.b.object) == null;
+}
+
+/// How many of set `c`'s members are still there; the first, in `first`.
+pub fn liveMembers(m: *const Model, c: model.Constraint, first: ?*ObjectId) usize {
+    var n: usize = 0;
+    for (c.peers.items) |id| if (locate(m, id) != null) {
+        if (n == 0) if (first) |f| {
+            f.* = id;
+        };
+        n += 1;
+    };
+    return n;
+}
+
+/// The object whose parent constraint `c` is solved and drawn in: its
+/// constrained end's, or a set's first member still there.
+pub fn anchorOf(m: *const Model, c: model.Constraint) ObjectId {
+    if (!c.isSet()) return c.a.object;
+    var first: ObjectId = .none;
+    _ = liveMembers(m, c, &first);
+    return first;
+}
+
+/// The parent constraint `c` is in (`anchorOf`'s).
+pub fn constraintParent(m: *const Model, c: model.Constraint) ?Parent {
+    return parentOf(m, anchorOf(m, c));
 }
 
 fn parentEql(a: Parent, b: Parent) bool {
@@ -403,6 +432,19 @@ pub fn shownValue(m: *const Model, c: model.Constraint) f64 {
 /// the value it would keep, its sign the side): an offset between its
 /// features, or a difference of sizes.
 pub fn measure(m: *const Model, c: model.Constraint) ?f64 {
+    // A set: how far apart its largest and smallest members are.
+    if (c.isSet()) {
+        const v = c.a.feature.vertical();
+        var lo = std.math.inf(f64);
+        var hi = -std.math.inf(f64);
+        for (c.peers.items) |id| {
+            const b = boxOf(m, id) orelse continue;
+            const sz = if (v) b.height() else b.width();
+            lo = @min(lo, sz);
+            hi = @max(hi, sz);
+        }
+        return if (hi >= lo) hi - lo else null;
+    }
     const parent = parentOf(m, c.a.object) orelse return null;
     switch (c.kind) {
         .offset => return (featureInSpace(m, parent, c.a) orelse return null) - (featureInSpace(m, parent, c.b) orelse return null),
@@ -560,6 +602,29 @@ fn note(gpa: Allocator, issues: ?*std.ArrayList(Issue), id: ObjectId, kind: @Fie
 fn usable(m: *const Model, gpa: Allocator, issues: ?*std.ArrayList(Issue), c: model.Constraint) Allocator.Error!bool {
     // A reference dimension only reports what is there.
     if (!c.driving) return false;
+    if (c.isSet()) {
+        var first: ObjectId = .none;
+        if (liveMembers(m, c, &first) < 2) {
+            try note(gpa, issues, c.id, .missing_object);
+            return false;
+        }
+        const space = spaceOf(m, locate(m, first).?.parent);
+        const at_space = locate(m, first).?.parent == .space;
+        for (c.peers.items) |id| {
+            const l = locate(m, id) orelse continue;
+            if (l.kind == .sketch_point) {
+                try note(gpa, issues, c.id, .no_feature);
+                return false;
+            }
+            // One workspace, and solved in one pass (all straight in it,
+            // or all in panels).
+            if (spaceOf(m, l.parent) != space or (l.parent == .space) != at_space) {
+                try note(gpa, issues, c.id, .cross_parent);
+                return false;
+            }
+        }
+        return true;
+    }
     const la = locate(m, c.a.object) orelse {
         try note(gpa, issues, c.id, .missing_object);
         return false;
@@ -605,6 +670,9 @@ const Obj = struct {
     loc: Loc,
     shape: [2]Shape,
     used: [2]bool = .{ false, false },
+    /// On each axis, whether it is a constraint's constrained end (not
+    /// only a member of a set of peers).
+    driven: [2]bool = .{ false, false },
     o: [2]u32,
     s: [2]u32,
 };
@@ -661,7 +729,7 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
     var cons: std.ArrayList(usize) = .empty;
     for (m.constraints.items, ok, 0..) |c, good, ci| {
         if (!good) continue;
-        if ((locate(m, c.a.object).?.parent == .space) != spaces) continue;
+        if ((locate(m, anchorOf(m, c)).?.parent == .space) != spaces) continue;
         try cons.append(a, ci);
     }
     if (cons.items.len == 0) return;
@@ -674,12 +742,13 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
     var vars: std.ArrayList(f64) = .empty;
     var fixed: std.ArrayList(bool) = .empty;
     var give: std.ArrayList(f64) = .empty;
-    for (cons.items) |ci| {
+    for (cons.items) |ci| for (constrainedIds(&m.constraints.items[ci])) |cid| {
+        if (cid == .none or locate(m, cid) == null) continue;
         const c = m.constraints.items[ci];
         const ax = @intFromBool(c.a.feature.vertical());
-        const k = objIndex(objs.items, c.a.object) orelse blk: {
-            const loc = locate(m, c.a.object).?;
-            var o: Obj = .{ .id = c.a.object, .loc = loc, .shape = undefined, .o = undefined, .s = undefined };
+        const k = objIndex(objs.items, cid) orelse blk: {
+            const loc = locate(m, cid).?;
+            var o: Obj = .{ .id = cid, .loc = loc, .shape = undefined, .o = undefined, .s = undefined };
             for (0..2) |axis| {
                 const sh = shapeOf(m, loc, axis == 1);
                 const size = sh.hi - sh.lo;
@@ -696,10 +765,46 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
             break :blk objs.items.len - 1;
         };
         const o = &objs.items[k];
+        if (!c.isSet()) o.driven[ax] = true;
         if (!o.used[ax]) {
             o.used[ax] = true;
             fixed.items[o.o[ax]] = false;
             fixed.items[o.s[ax]] = !o.shape[ax].resizable;
+        }
+    };
+
+    // A set of peers: the member changed since it was last solved (its
+    // size no longer the one they shared) leads, held stiffly, and the
+    // others follow it; none changed, none leads. Before its first solve
+    // the first member leads (it set the starting size). Its size is held
+    // exactly when the rest allow it, and else gives least.
+    var leaders: std.ArrayList(u32) = .empty;
+    for (cons.items) |ci| {
+        const c = m.constraints.items[ci];
+        if (!c.isSet()) continue;
+        const ax = @intFromBool(c.a.feature.vertical());
+        // A member only in sets is only referred to by anything else: it
+        // keeps its place, resizing about its origin, unless that cannot be.
+        for (c.peers.items) |id| {
+            const k = objIndex(objs.items, id) orelse continue;
+            const o = objs.items[k];
+            if (o.driven[ax] or fixed.items[o.o[ax]]) continue;
+            give.items[o.o[ax]] = 1e-6;
+            fixed.items[o.o[ax]] = true;
+            try leaders.append(a, o.o[ax]);
+        }
+        const lead: ?ObjectId = for (c.peers.items) |id| {
+            const k = objIndex(objs.items, id) orelse continue;
+            if (c.shared < 0) break id;
+            if (@abs(vars.items[objs.items[k].s[ax]] - c.shared) > 1e-7) break id;
+        } else null;
+        const k = objIndex(objs.items, lead orelse continue).?;
+        const o = objs.items[k];
+        give.items[o.o[ax]] = @min(give.items[o.o[ax]], 1e-3);
+        give.items[o.s[ax]] = 1e-9;
+        if (!fixed.items[o.s[ax]]) {
+            fixed.items[o.s[ax]] = true;
+            try leaders.append(a, o.s[ax]);
         }
     }
 
@@ -707,10 +812,13 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
     // distance along its axis, equal sizes as an equal distance.
     var geo: std.ArrayList(gc.geometry.Geometry) = .empty;
     var lc: std.ArrayList(gc.geometry.Constraint) = .empty;
-    for (cons.items) |ci| {
+    // Which of `cons` each library constraint is for (a set makes several).
+    var owner: std.ArrayList(usize) = .empty;
+    for (cons.items, 0..) |ci, own| {
+        defer owner.appendNTimes(a, own, lc.items.len - owner.items.len) catch {};
         const c = m.constraints.items[ci];
         const v = c.a.feature.vertical();
-        const parent = locate(m, c.a.object).?.parent;
+        const parent = locate(m, anchorOf(m, c)).?.parent;
         switch (c.kind) {
             .offset => {
                 const pa = try endPoint(m, a, &geo, objs.items, parent, c.a);
@@ -724,15 +832,23 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
             .equal_size => {
                 const lo: Feature = if (v) .bottom else .left;
                 const hi: Feature = if (v) .top else .right;
-                var spans: [2]gc.geometry.Span = undefined;
-                for ([_]ObjectId{ c.a.object, c.b.object }, &spans) |id, *sp| {
+                // A pair's two spans, or a set's members still there: the
+                // first's span equal to each other's.
+                var pair = [2]ObjectId{ c.a.object, c.b.object };
+                const ids: []const ObjectId = if (c.isSet()) c.peers.items else &pair;
+                var first: ?gc.geometry.Span = null;
+                for (ids) |id| {
+                    if (c.isSet() and locate(m, id) == null) continue;
                     const ends = [2]gc.geometry.PointRef{
                         try endPoint(m, a, &geo, objs.items, parent, .{ .object = id, .feature = lo }),
                         try endPoint(m, a, &geo, objs.items, parent, .{ .object = id, .feature = hi }),
                     };
-                    sp.* = if (v) .{ .y = ends } else .{ .x = ends };
+                    const sp: gc.geometry.Span = if (v) .{ .y = ends } else .{ .x = ends };
+                    if (first) |f|
+                        try lc.append(a, .{ .kind = .{ .equal_distance = .{ .a = sp, .b = f, .value = c.value, .side = c.side } } })
+                    else
+                        first = sp;
                 }
-                try lc.append(a, .{ .kind = .{ .equal_distance = .{ .a = spans[0], .b = spans[1], .value = c.value, .side = c.side } } });
             },
         }
     }
@@ -740,15 +856,26 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
     const v0 = try a.dupe(f64, vars.items);
     const p: gc.solve.Problem = .{ .vars = vars.items, .fixed = fixed.items, .give = give.items };
     const ctx: ConstraintCtx = .{ .st = .{ .vars = vars.items, .fixed = fixed.items, .geometry = geo.items }, .cs = lc.items };
-    if (!try run(gpa, p, ctx)) {
+    var solved = false;
+    if (leaders.items.len > 0) {
+        solved = try run(gpa, p, ctx);
+        if (!solved) {
+            // The leaders cannot all hold: they give, least.
+            @memcpy(vars.items, v0);
+            for (leaders.items) |l| fixed.items[l] = false;
+        }
+    }
+    if (!solved and !try run(gpa, p, ctx)) {
         // Not all can hold: in order, each that contradicts those before
         // it is left out and flagged; the rest are solved from the start.
         for (lc.items) |*k| k.driving = false;
-        for (lc.items, cons.items) |*k, ci| {
-            k.driving = true;
+        var at: usize = 0;
+        for (cons.items, 0..) |ci, own| {
+            const start = at;
+            while (at < lc.items.len and owner.items[at] == own) : (at += 1) lc.items[at].driving = true;
             @memcpy(vars.items, v0);
             if (!try run(gpa, p, ctx)) {
-                k.driving = false;
+                for (lc.items[start..at]) |*k| k.driving = false;
                 try note(gpa, issues, m.constraints.items[ci].id, .conflict);
             }
         }
@@ -759,12 +886,35 @@ fn solvePass(m: *Model, gpa: Allocator, a: Allocator, issues: ?*std.ArrayList(Is
     for (objs.items) |o| for (0..2) |ax| {
         if (!o.used[ax]) continue;
         const s = vars.items[o.s[ax]];
-        if (s < -1e-9) for (cons.items, lc.items) |ci, k| {
-            const c = m.constraints.items[ci];
-            if (k.driving and (c.a.object == o.id or c.b.object == o.id)) try note(gpa, issues, c.id, .inverted);
+        if (s < -1e-9) for (lc.items, owner.items) |k, own| {
+            const c = m.constraints.items[cons.items[own]];
+            if (k.driving and c.names(o.id)) try note(gpa, issues, c.id, .inverted);
         };
         place(m, o.loc, ax == 1, vars.items[o.o[ax]], s);
     };
+
+    // Each set held: the size its members now share, so the next change
+    // to one of them is seen.
+    for (cons.items, 0..) |ci, own| {
+        const c = &m.constraints.items[ci];
+        if (!c.isSet()) continue;
+        const held = for (lc.items, owner.items) |k, ow| {
+            if (ow == own and !k.driving) break false;
+        } else true;
+        if (!held) continue;
+        for (c.peers.items) |id| {
+            const k = objIndex(objs.items, id) orelse continue;
+            c.shared = vars.items[objs.items[k].s[@intFromBool(c.a.feature.vertical())]];
+            break;
+        }
+    }
+}
+
+/// The objects constraint `c` may move: its constrained end's, or every
+/// member of a set (none is a reference).
+fn constrainedIds(c: *const model.Constraint) []const ObjectId {
+    if (c.isSet()) return c.peers.items;
+    return (&c.a.object)[0..1];
 }
 
 /// Puts object `id` at `box` (in its parent's frame): moved there, and
@@ -938,7 +1088,115 @@ test "sizes change about the origin, follow a resized parent, and conflicts are 
     try testing.expect(more[0].kind == .no_parent_edge or more[1].kind == .no_parent_edge);
 }
 
-test "peers: equal sizes, and the reference stays" {
+test "peers: an equal set, led by whichever member changes" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const sp = m.spaces.items[0].id;
+    _ = try m.placePanel(.{ .name = "A", .space = sp, .origin = .{ .x = 0, .y = 0 }, .w = 50, .h = 30 });
+    _ = try m.placePanel(.{ .name = "B", .space = sp, .origin = .{ .x = 70, .y = 3 }, .w = 41, .h = 22 });
+    _ = try m.placePanel(.{ .name = "C", .space = sp, .origin = .{ .x = 130, .y = 5 }, .w = 30, .h = 10 });
+    try h.reset(&m);
+    const ids = [_]ObjectId{ m.panels.items[1].id, m.panels.items[0].id, m.panels.items[2].id };
+    const width = struct {
+        fn f(mm: *const Model, i: usize) f64 {
+            return mm.panels.items[i].w;
+        }
+    }.f;
+    // Chosen B, A, C: the first chosen sets the starting width.
+    const set = try h.do(&m, .addEqualSet, .{ &ids, false });
+    try testing.expectEqual(1, m.constraints.items.len);
+    for (0..3) |i| try testing.expectApproxEqAbs(@as(f64, 41), width(&m, i), 1e-9);
+    // Heights are not touched.
+    try testing.expectApproxEqAbs(@as(f64, 30), m.panels.items[0].h, 1e-9);
+    // C made 70 wide: C holds, and the others follow it, origins kept.
+    try h.do(&m, .setPanelSize, .{ 2, 70, 10 });
+    for (0..3) |i| try testing.expectApproxEqAbs(@as(f64, 70), width(&m, i), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 70), m.panels.items[1].origin.x, 1e-9);
+    // Then A, the middle one chosen, 25: all follow it.
+    try h.do(&m, .setPanelSize, .{ 0, 25, 30 });
+    for (0..3) |i| try testing.expectApproxEqAbs(@as(f64, 25), width(&m, i), 1e-9);
+    // Choosing A and another again joins the set, A's width leading.
+    try h.do(&m, .setPanelSize, .{ 0, 25, 30 });
+    // B removed: A and C stay equal, and still follow each other.
+    m.removePanel(1);
+    try h.reset(&m);
+    try testing.expect(!abandoned(&m, m.constraints.items[0]));
+    try h.do(&m, .setPanelSize, .{ 1, 33, 10 });
+    try testing.expectApproxEqAbs(@as(f64, 33), width(&m, 0), 1e-9);
+    // C taken out of the set: one left, the set goes.
+    try h.do(&m, .removeConstraintMember, .{ set, ids[2] });
+    try testing.expectEqual(0, m.constraints.items.len);
+}
+
+test "peers: a set held by a typed width refuses a drag; sets meeting merge" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    _ = try m.startCanvas(.mm);
+    const sp = m.spaces.items[0].id;
+    for (0..4) |i| _ = try m.placePanel(.{ .name = "P", .space = sp, .origin = .{ .x = @as(f64, @floatFromInt(i)) * 60, .y = 0 }, .w = 20 + @as(f64, @floatFromInt(i)), .h = 10 });
+    try h.reset(&m);
+    var ids: [4]ObjectId = undefined;
+    for (&ids, 0..) |*id, i| id.* = m.panels.items[i].id;
+    _ = try h.do(&m, .addEqualSet, .{ ids[0..2], false });
+    _ = try h.do(&m, .addEqualSet, .{ ids[2..4], false });
+    try testing.expectEqual(2, m.constraints.items.len);
+    // A set naming a member of each: one set of all four, its first
+    // chosen (the third panel) setting the width.
+    const both = [_]ObjectId{ ids[2], ids[1] };
+    _ = try h.do(&m, .addEqualSet, .{ &both, false });
+    try testing.expectEqual(1, m.constraints.items.len);
+    try testing.expectEqual(4, m.constraints.items[0].peers.items.len);
+    for (0..4) |i| try testing.expectApproxEqAbs(@as(f64, 22), m.panels.items[i].w, 1e-9);
+    // The first panel's width typed as 30 mm: all follow; a drag of
+    // another is then held back.
+    _ = try h.do(&m, .addConstraint, .{.{ .a = .{ .object = ids[0], .feature = .right }, .b = .{ .object = ids[0], .feature = .left }, .value = 30 }});
+    for (0..4) |i| try testing.expectApproxEqAbs(@as(f64, 30), m.panels.items[i].w, 1e-9);
+    try h.do(&m, .setPanelSize, .{ 3, 45, 10 });
+    for (0..4) |i| try testing.expectApproxEqAbs(@as(f64, 30), m.panels.items[i].w, 1e-9);
+    const issues = try check(&m, gpa);
+    defer gpa.free(issues);
+    try testing.expectEqual(0, issues.len);
+}
+
+test "peers: an older file's equal pairs are read as one set" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const sp = m.spaces.items[0].id;
+    for (0..3) |i| _ = try m.placePanel(.{ .name = "P", .space = sp, .origin = .{ .x = @as(f64, @floatFromInt(i)) * 60, .y = 0 }, .w = 20, .h = 10 });
+    const ids = [_]ObjectId{ m.panels.items[0].id, m.panels.items[1].id, m.panels.items[2].id };
+    // Each held to the first, as the editor made them (written as an
+    // older version did, not through `addConstraint`).
+    try m.constraints.append(m.arena.allocator(), .{ .id = m.newId(), .kind = .equal_size, .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } });
+    try m.constraints.append(m.arena.allocator(), .{ .id = m.newId(), .kind = .equal_size, .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } });
+    // A difference stays a pair.
+    _ = try m.addConstraint(.{ .kind = .equal_size, .a = .{ .object = ids[2], .feature = .bottom }, .b = .{ .object = ids[0], .feature = .bottom }, .value = 4 });
+    const bytes = try native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try native.decode(gpa, bytes);
+    defer back.deinit();
+    try testing.expectEqual(2, back.constraints.items.len);
+    const set = back.constraints.items[0];
+    try testing.expect(set.isSet());
+    try testing.expectEqualSlices(ObjectId, &ids, set.peers.items);
+    try testing.expect(!back.constraints.items[1].isSet());
+    // Now a peer: the last made wider, the others follow.
+    var h: history.History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&back);
+    try h.do(&back, .setPanelSize, .{ 2, 35, 10 });
+    for (0..3) |i| try testing.expectApproxEqAbs(@as(f64, 35), back.panels.items[i].w, 1e-9);
+}
+
+test "peers: an equal pair made is a set, the first chosen setting the size" {
     const gpa = testing.allocator;
     var m: Model = .init(gpa);
     defer m.deinit();
@@ -960,7 +1218,8 @@ test "peers: equal sizes, and the reference stays" {
     try testing.expectApproxEqAbs(@as(f64, 0), pb.origin.y, 1e-6);
     // Its origin (bottom-left) stayed: it grew up and right.
     try testing.expectApproxEqAbs(@as(f64, 70), pb.origin.x, 1e-6);
-    // A, the reference, is as it was.
+    // A, chosen first, is as it was; the two are one set.
+    try testing.expect(m.constraints.items[0].isSet());
     try testing.expectApproxEqAbs(@as(f64, 50), m.panels.items[p1].w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), m.panels.items[p1].origin.y, 1e-9);
 }

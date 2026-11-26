@@ -127,6 +127,9 @@ pub const Param = enum {
     slant,
     shape,
     face,
+    // OpenType features its text is shaped with.
+    ligatures,
+    features,
     // Rotation relative to the parent's frame (the ground's path frame
     // comes on top, at layout).
     rotate,
@@ -200,6 +203,8 @@ pub const defs: std.enums.EnumArray(Param, Def) = .init(.{
     .rotate_pivot = el(choice(Pivot, .ink_centre, "What it turns about: its box's centre, its ink's centre, its start, or where its baseline starts.")),
     .rotate_space = el(choice(RotateSpace, .box, "Whether its neighbours make room for its rotated extent, or it turns in its unrotated place.")),
     .face = .{ .type = .name, .default = .{ .name = "" }, .doc = "The composed font member that sets it (empty: the one its kind and style choose)." },
+    .ligatures = flag(false, "Letters the font joins (fi, fl, ffi) set as its ligatures: standard and contextual ligatures on (off: each letter on its own)."),
+    .features = .{ .type = .name, .default = .{ .name = "" }, .doc = "More OpenType features, as HarfBuzz reads them, apart by spaces or commas: smcp, onum, tnum, dlig, ss01, -kern, salt=2 (empty: the font's defaults)." },
     .thin_space = number(.cap, 0, 2, 0.24, "The thin space: after a large operator, around punctuation."),
     .medium_space = number(.cap, 0, 2, 0.32, "The medium space: around a binary operator (not in scripts)."),
     .thick_space = number(.cap, 0, 2, 0.40, "The thick space: around a relation (not in scripts)."),

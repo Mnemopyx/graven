@@ -62,7 +62,7 @@ pub const modes = [_]M{
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
-    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end" } },
+    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end", "sketch.show" } },
     .{ .name = "sketch.summary", .kind = .sub, .parent = "sketch", .allows = &.{"sketch.summary"} },
     // Text being typed somewhere, the canvas or a field (whatever asked
     // for text input last frame): the digraph key, and the two characters
@@ -232,6 +232,14 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.equation.caret.right", .repeat = true },
     .{ .name = "canvas.equation.caret.start", .repeat = true },
     .{ .name = "canvas.equation.caret.end", .repeat = true },
+    .{ .name = "canvas.equation.select.left", .repeat = true },
+    .{ .name = "canvas.equation.select.right", .repeat = true },
+    .{ .name = "canvas.equation.select.start", .repeat = true },
+    .{ .name = "canvas.equation.select.end", .repeat = true },
+    .{ .name = "canvas.equation.select.all" },
+    .{ .name = "canvas.equation.copy" },
+    .{ .name = "canvas.equation.cut" },
+    .{ .name = "canvas.equation.paste" },
     .{ .name = "canvas.equation.delete-back", .repeat = true },
     .{ .name = "canvas.equation.delete-forward", .repeat = true },
     .{ .name = "canvas.equation.choose" },
@@ -247,6 +255,7 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.equation.head.slot-index" },
     .{ .name = "canvas.equation.head.slot-upper" },
     .{ .name = "canvas.equation.head.slot-lower" },
+    .{ .name = "canvas.equation.head.limits" },
 
     .{ .name = "expression-line.tab", .repeat = true, .param = .int },
     .{ .name = "expression-line.completion.previous", .repeat = true },
@@ -526,6 +535,15 @@ pub const binds = [_]B{
     .{ .mode = "canvas.equation", .chord = "right", .action = "canvas.equation.caret.right" },
     .{ .mode = "canvas.equation", .chord = "home", .action = "canvas.equation.caret.start" },
     .{ .mode = "canvas.equation", .chord = "end", .action = "canvas.equation.caret.end" },
+    .{ .mode = "canvas.equation", .chord = "shift+left", .action = "canvas.equation.select.left" },
+    .{ .mode = "canvas.equation", .chord = "shift+right", .action = "canvas.equation.select.right" },
+    .{ .mode = "canvas.equation", .chord = "shift+home", .action = "canvas.equation.select.start" },
+    .{ .mode = "canvas.equation", .chord = "shift+end", .action = "canvas.equation.select.end" },
+    .{ .mode = "canvas.equation", .chord = "bind:copy", .action = "canvas.equation.copy" },
+    .{ .mode = "canvas.equation", .chord = "bind:cut", .action = "canvas.equation.cut" },
+    .{ .mode = "canvas.equation", .chord = "bind:paste", .action = "canvas.equation.paste" },
+    .{ .mode = "canvas.equation", .chord = "bind:select_all", .action = "canvas.equation.select.all", .os = .mac },
+    .{ .mode = "canvas.equation", .chord = "ctrl+shift+a", .action = "canvas.equation.select.all", .os = .not_mac },
     .{ .mode = "canvas.equation", .chord = "backspace", .action = "canvas.equation.delete-back" },
     .{ .mode = "canvas.equation", .chord = "delete", .action = "canvas.equation.delete-forward" },
 } ++ arrows("canvas.equation.head", "canvas.equation.head.nudge") ++ [_]B{
@@ -542,6 +560,7 @@ pub const binds = [_]B{
     .{ .mode = "canvas.equation.head", .chord = "char:i", .action = "canvas.equation.head.slot-index" },
     .{ .mode = "canvas.equation.head", .chord = "char:u", .action = "canvas.equation.head.slot-upper" },
     .{ .mode = "canvas.equation.head", .chord = "char:b", .action = "canvas.equation.head.slot-lower" },
+    .{ .mode = "canvas.equation.head", .chord = "char:l", .action = "canvas.equation.head.limits" },
 
     .{ .mode = "expression-line", .chord = "tab", .action = "expression-line.tab", .arg = 0 },
     .{ .mode = "expression-line", .chord = "shift+tab", .action = "expression-line.tab", .arg = 1 },
@@ -577,6 +596,7 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "m", .action = "sketch.tool.next" },
     .{ .mode = "sketch", .chord = "u", .action = "sketch.end.update" },
     .{ .mode = "sketch", .chord = "x", .action = "sketch.end.discard" },
+    .{ .mode = "sketch", .chord = "w", .action = "sketch.show.ink-only" },
     .{ .mode = "sketch", .chord = "i", .action = "sketch.ink" },
     .{ .mode = "sketch", .chord = "f", .action = "sketch.fill" },
     .{ .mode = "sketch", .chord = "n", .action = "sketch.caption" },

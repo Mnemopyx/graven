@@ -38,6 +38,8 @@ pub const Face = struct {
     /// Outlines by glyph ID, in font units, owned by `arena`.
     outlines: std.AutoHashMapUnmanaged(u32, Outline) = .empty,
     arena: std.heap.ArenaAllocator,
+    /// `weightOf`'s measures, by `WeightRef`, once measured.
+    weights: [2]??f64 = .{ null, null },
 
     /// Loads face `index` from a copy of `bytes`; the caller keeps its own.
     /// WOFF and WOFF2 are unwrapped to sfnt first (HarfBuzz reads sfnt only).
@@ -142,14 +144,46 @@ pub const Face = struct {
     /// text, and its advance and offset, font units.
     pub const Shaped = struct { gid: u32, cluster: u32, advance: i32, x_offset: i32, y_offset: i32 };
 
-    /// UTF-8 `text` shaped in this face (left to right), from `a`.
-    pub fn shape(self: *Face, a: Allocator, text: []const u8) Error![]Shaped {
+    /// The OpenType features text is shaped with. Ligatures are off unless
+    /// asked for (HarfBuzz's own default has them on); required ones (rlig)
+    /// and the font's other defaults (kerning, marks) stay.
+    pub const Features = struct {
+        /// Standard and contextual ligatures (liga, clig).
+        ligatures: bool = false,
+        /// More, as HarfBuzz reads them ("smcp", "-kern", "ss01", "salt=2",
+        /// "dlig"), apart by spaces or commas; those it cannot read are
+        /// skipped. Later ones win.
+        extra: []const u8 = "",
+
+        const max = 32;
+
+        /// As HarfBuzz takes them, into `out`; how many.
+        fn list(f: Features, out: *[max]hb.hb_feature_t) usize {
+            var n: usize = 0;
+            for ([_][]const u8{ "liga", "clig" }) |tag| {
+                out[n] = .{ .tag = hb.hb_tag_from_string(tag.ptr, 4), .value = @intFromBool(f.ligatures), .start = hb.HB_FEATURE_GLOBAL_START, .end = hb.HB_FEATURE_GLOBAL_END };
+                n += 1;
+            }
+            var it = std.mem.tokenizeAny(u8, f.extra, " ,;\t");
+            while (it.next()) |word| {
+                if (n == max) break;
+                if (hb.hb_feature_from_string(word.ptr, @intCast(word.len), &out[n]) != 0) n += 1;
+            }
+            return n;
+        }
+    };
+
+    /// UTF-8 `text` shaped in this face (left to right) with `features`,
+    /// from `a`.
+    pub fn shape(self: *Face, a: Allocator, text: []const u8, features: Features) Error![]Shaped {
         const buf = hb.hb_buffer_create() orelse return error.OutOfMemory;
         defer hb.hb_buffer_destroy(buf);
         hb.hb_buffer_add_utf8(buf, text.ptr, @intCast(text.len), 0, @intCast(text.len));
         hb.hb_buffer_set_direction(buf, hb.HB_DIRECTION_LTR);
         hb.hb_buffer_guess_segment_properties(buf);
-        hb.hb_shape(self.font, buf, null, 0);
+        var feats: [Features.max]hb.hb_feature_t = undefined;
+        const nf = features.list(&feats);
+        hb.hb_shape(self.font, buf, &feats, @intCast(nf));
         if (hb.hb_buffer_allocation_successful(buf) == 0) return error.OutOfMemory;
         var n: c_uint = 0;
         const infos = hb.hb_buffer_get_glyph_infos(buf, &n);
@@ -214,6 +248,24 @@ pub const Face = struct {
     }
 
     pub const Stroke = enum { vertical, horizontal };
+
+    /// What a face's weight is measured by: its capital I's stem, or its
+    /// minus sign's bar (math fonts draw operators' strokes thinner than
+    /// their letters'; a face without a minus gives its stem).
+    pub const WeightRef = enum { stem, bar };
+
+    /// The stroke `r` measures, font units, measured once. Null when the
+    /// face has neither glyph.
+    pub fn weightOf(self: *Face, r: WeightRef) Error!?f64 {
+        const i = @intFromEnum(r);
+        if (self.weights[i]) |w| return w;
+        const w = switch (r) {
+            .stem => try self.stem(),
+            .bar => (try self.stroke(0x2212, .horizontal)) orelse try self.stem(),
+        };
+        self.weights[i] = w;
+        return w;
+    }
 
     /// The thickness of `cp`'s stroke through its middle, font units: a
     /// vertical stroke's (an I's stem) across a horizontal line at half its

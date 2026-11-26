@@ -1261,6 +1261,39 @@ test "a field changes nothing while typed; leaving it or Enter accepts, one undo
     try std.testing.expect(panelNamed("Front") != null);
 }
 
+test "a measurement keeps its own unit: typed with one, picked from its pop-up, the value converted; relative forms add to it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("tool.add-panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    const t = std.testing;
+    const m = api.model();
+    const pi = panelNamed("Panel1").?;
+    var buf: [64]u8 = undefined;
+    const key = try std.fmt.bufPrint(&buf, "{d}/panel.width", .{@intFromEnum(m.panels.items[pi].id)});
+    // Typed in inches: the value converted, inches its unit now.
+    try r.field("panel.width", "2in");
+    try t.expectApproxEqAbs(50.8, m.panels.items[pi].w, 1e-9);
+    try t.expectEqual(layout.units.Unit.in, m.measureUnit(key).?);
+    // A bare number is in its unit.
+    try r.field("panel.width", "3");
+    try t.expectApproxEqAbs(76.2, m.panels.items[pi].w, 1e-9);
+    // Picked from the pop-up: shown in points, the value unchanged.
+    try r.choose("panel.width:unit", "pt");
+    try t.expectEqual(layout.units.Unit.pt, m.measureUnit(key).?);
+    try t.expectApproxEqAbs(76.2, m.panels.items[pi].w, 1e-9);
+    try r.field("panel.width", "+36");
+    try t.expectApproxEqAbs(76.2 + 12.7, m.panels.items[pi].w, 1e-9);
+    try r.field("panel.width", "50%");
+    try t.expectApproxEqAbs((76.2 + 12.7) / 2.0, m.panels.items[pi].w, 1e-9);
+    // Its height keeps the label's unit.
+    var hb: [64]u8 = undefined;
+    try t.expect(m.measureUnit(try std.fmt.bufPrint(&hb, "{d}/panel.height", .{@intFromEnum(m.panels.items[pi].id)})) == null);
+}
+
 test "a field given what it cannot take, or left by Esc, goes back to how it was" {
     var r = try Run.start();
     defer r.stop();
@@ -2329,12 +2362,12 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     const cols = [_][]const u8{ "Panel.Column1", "Panel.Column2", "Panel.Column3" };
     try std.testing.expect(api.chooseAll(&cols));
     try r.frames(2);
-    // W: the others as wide as the first (48 mm).
+    // W: one set of peers, as wide as the first chosen (48 mm).
     try r.key(.k, .none);
     try r.frames(2);
     try r.key(.w, .none);
     try r.frames(3);
-    try std.testing.expectEqual(2, api.constraintCount());
+    try std.testing.expectEqual(1, api.constraintCount());
     for (cols) |c| try std.testing.expectApproxEqAbs(48, api.boxAt(c).?.width(), 1e-6);
     // G: 7 mm gaps, in order across.
     try std.testing.expect(api.chooseAll(&cols));
@@ -2348,7 +2381,7 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     try r.frames(1);
     try r.key(.enter, .none);
     try r.frames(3);
-    try std.testing.expectEqual(4, api.constraintCount());
+    try std.testing.expectEqual(3, api.constraintCount());
     const b1 = api.boxAt(cols[0]).?;
     const b2 = api.boxAt(cols[1]).?;
     const b3 = api.boxAt(cols[2]).?;
@@ -2369,8 +2402,44 @@ test "columns chosen, then K: W equal widths, G gaps, T tops from a construction
     try r.frames(1);
     try r.key(.enter, .none);
     try r.frames(3);
-    try std.testing.expectEqual(7, api.constraintCount());
+    try std.testing.expectEqual(6, api.constraintCount());
     for (cols) |c| try std.testing.expectApproxEqAbs(175 - 20 - 12, api.boxAt(c).?.y1, 1e-6);
+}
+
+test "equal widths are peers: the first chosen sets the width, then whichever is changed leads" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try api.loadColumns(false);
+    try r.frames(3);
+    const cols = [_][]const u8{ "Panel.Column2", "Panel.Column1", "Panel.Column3" };
+    const w2 = api.boxAt(cols[0]).?.width();
+    try std.testing.expect(api.chooseAll(&cols));
+    try r.frames(2);
+    try r.key(.k, .none);
+    try r.frames(2);
+    try r.key(.w, .none);
+    try r.frames(3);
+    try std.testing.expectEqual(1, api.constraintCount());
+    for (cols) |c| try std.testing.expectApproxEqAbs(w2, api.boxAt(c).?.width(), 1e-6);
+    // Column3's width typed: the others follow; then Column1's.
+    for ([_][]const u8{ "Panel.Column3", "Panel.Column1" }, [_][]const u8{ "40", "33" }, [_]f64{ 40, 33 }) |c, typed, w| {
+        const left = api.boxAt(c).?.x0;
+        try r.select(c);
+        try r.field("track.length", typed);
+        try r.frames(2);
+        for (cols) |o| try std.testing.expectApproxEqAbs(w, api.boxAt(o).?.width(), 1e-6);
+        // Resized about its origin (its left edge).
+        try std.testing.expectApproxEqAbs(left, api.boxAt(c).?.x0, 1e-6);
+    }
+    // Column2 removed: Column1 and Column3 still follow each other.
+    try r.select("Panel.Column2");
+    try r.press("track.remove");
+    try std.testing.expectEqual(1, api.constraintCount());
+    try r.select("Panel.Column3");
+    try r.field("track.length", "50");
+    try r.frames(2);
+    try std.testing.expectApproxEqAbs(50, api.boxAt("Panel.Column1").?.width(), 1e-6);
 }
 
 test "K, M on a column: a reference dimension that follows and moves nothing" {
@@ -2403,9 +2472,9 @@ test "a removed column takes its constraints with it, in the same step; undo bri
     try r.key(.m, .none);
     try api.loadColumns(true);
     try r.frames(3);
-    try std.testing.expectEqual(9, api.constraintCount());
-    // Column2: its gap to Column1, Column3's gap to it, its equal width and
-    // its top go; the rest stay.
+    try std.testing.expectEqual(8, api.constraintCount());
+    // Column2: its gap to Column1, Column3's gap to it and its top go; the
+    // equal widths stay, Column1 and Column3 still peers.
     try r.select("Panel.Column2");
     try r.press("track.remove");
     try std.testing.expect(api.boxAt("Panel.Column2") == null);
@@ -2413,7 +2482,7 @@ test "a removed column takes its constraints with it, in the same step; undo bri
     try r.run("edit.undo");
     try r.frames(2);
     try std.testing.expect(api.boxAt("Panel.Column2") != null);
-    try std.testing.expectEqual(9, api.constraintCount());
+    try std.testing.expectEqual(8, api.constraintCount());
 }
 
 test "a click on a tile's text in a text flow edits that text, the caret where pressed (no Ctrl+> needed)" {
@@ -2493,4 +2562,129 @@ test "Delete sketch: a new drawing's sketch removed with its own space, its tab 
     try r.run("edit.undo");
     try std.testing.expectEqual(2, m.spaces.items.len);
     try std.testing.expectEqual(1, m.sketches.items.len);
+}
+
+test "fab ink: a sketch panel's ink and solid fills are layers' sources, made in 3MF; chosen in its Fabrication layers" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    const pi = api.loadSketchFab() orelse return error.NoPanel;
+    try r.frames(3);
+    const m = api.model();
+    const name = m.panels.items[pi].name;
+    var path_buf: [256]u8 = undefined;
+    try r.select(try std.fmt.bufPrint(&path_buf, "\"{s}\"", .{name}));
+    try r.frames(2);
+    // The ink layer (the fourth) taken from text and back, then from one
+    // drawing.
+    try r.choose("panel.fab.layer.4.from", "text");
+    try std.testing.expect(m.panels.items[pi].fab.layers[3].source == .text);
+    try r.choose("panel.fab.layer.4.from", "line art's ink");
+    try std.testing.expect(m.panels.items[pi].fab.layers[3].source == .ink);
+    const drawing = for (m.panels.items[pi].art.items) |pa| {
+        if (pa.sketch_ink and !pa.cutout) break pa.name;
+    } else return error.NoInk;
+    try r.choose("panel.fab.layer.4.line-art", drawing);
+    try std.testing.expectEqualStrings(drawing, m.panels.items[pi].fab.layers[3].source.ink);
+
+    // The plan: the ring's dashes and edges inlaid black, the red fill round
+    // the hole inlaid red.
+    const a = std.heap.c_allocator;
+    const io = std.testing.io;
+    const font = try std.Io.Dir.cwd().readFileAlloc(io, "examples/fonts/Inter-Medium.otf", a, .limited(64 << 20));
+    defer a.free(font);
+    const face = try layout.Face.init(a, font, 0);
+    defer face.deinit();
+    const faces = [_]*layout.Face{face};
+    var labels: layout.Labels = .init(a, &faces);
+    defer labels.deinit();
+    var placed = try layout.solve(a, m, .{ .panel = pi }, &labels);
+    defer placed.deinit();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const plan = try layout.fab.plan(arena.allocator(), m, pi, &placed, &faces);
+    var ink_pieces: usize = 0;
+    var fill_area: f64 = 0;
+    for (plan.steps) |st| if (st.op == .add) {
+        const src = m.panels.items[pi].fab.layers[st.layer].source;
+        if (src == .ink) ink_pieces += st.pieces.len;
+        if (src == .fills) for (st.pieces) |pc| {
+            fill_area += @abs(pc.signedArea());
+        };
+    };
+    try std.testing.expect(ink_pieces > 0);
+    // The ring (r 7) less the hole (r 3.5): π (49 - 12.25).
+    try std.testing.expectApproxEqAbs(std.math.pi * (49.0 - 12.25), fill_area, 0.01);
+    const made = (try panel3mf(a, m, name, face)) orelse return error.NoLayers;
+    defer a.free(made);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = scratch ++ "/sketch-fab.3mf", .data = made });
+    try saveAs(&r, scratch ++ "/sketch-fab.graven");
+}
+
+test "paragraph rules: a heading given a rule above and below in Properties, drawn as its pens' ink" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    const o = try api.loadTextSample();
+    try r.frames(2);
+    // A heading typed before the text, ended by Enter; the cursor put back in it.
+    try r.clickAt(api.screenOf(o.x + 0.5, o.y - 3).?);
+    try dvui.testing.writeText("Paragraph rules");
+    try r.key(.enter, .none);
+    try r.frames(2);
+    try r.clickAt(api.screenOf(o.x + 0.5, o.y - 3).?);
+    try r.choose("paragraph.rule-above", "New solid pen");
+    try r.field("paragraph.rule-above-weight", "1.5pt");
+    try r.choose("paragraph.rule-below", "New dashed pen");
+    try r.choose("paragraph.rule-below-length", "Under the text");
+    try r.field("paragraph.rule-below-offset", "1mm");
+    try r.field("paragraph.space-after", "6");
+    try r.frames(3);
+    const m = api.model();
+    var ruled: ?layout.model.ParagraphStyle = null;
+    for (m.paragraph_styles.items) |ps| if (ps.rule_above.on()) {
+        ruled = ps;
+    };
+    const ps = ruled orelse return error.NoRuledStyle;
+    try std.testing.expect(ps.rule_below.on());
+    try std.testing.expectEqual(layout.model.RuleLength.text, ps.rule_below.length);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("1.5pt", ps.rule_above.weight.?.format(&buf));
+    try std.testing.expectEqualStrings("1mm", ps.rule_below.offset.format(&buf));
+    try std.testing.expectEqual(@as(usize, 2), api.placedRules());
+    try saveAs(&r, scratch ++ "/rules.graven");
+}
+
+test "a new text layout's flow starts from the template chosen in the Add tracks options" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    const m = api.model();
+    // The first text layout: the Default template, made with it.
+    try r.press("tool.layout-single-track");
+    try r.drag(api.screenOf(20, 120).?, api.screenOf(140, 121).?);
+    try r.frames(2);
+    try std.testing.expectEqual(1, m.templates.items.len);
+    // Its flow at 18 pt, saved as a template of its own.
+    try r.field("flow-style.size", "18");
+    try r.press("flow-style.save-as-template");
+    try r.frames(2);
+    try std.testing.expectEqual(2, m.templates.items.len);
+    const saved = m.templates.items[1];
+    // The next one made from it, chosen in the tool's options.
+    try r.key(.escape, .none);
+    try r.press("tool.layout-single-track");
+    try r.frames(2);
+    try r.choose("tool.add-tracks.template", saved.name);
+    try r.drag(api.screenOf(20, 80).?, api.screenOf(140, 81).?);
+    try r.frames(2);
+    const fl = m.flows.items[m.flows.items.len - 1];
+    try std.testing.expect(fl.template == saved.id);
+    try std.testing.expect(fl.style == saved.text);
+    // And the tool remembers it for the next.
+    try r.key(.escape, .none);
+    try r.press("tool.layout-single-track");
+    try r.drag(api.screenOf(20, 40).?, api.screenOf(140, 41).?);
+    try r.frames(2);
+    try std.testing.expect(m.flows.items[m.flows.items.len - 1].template == saved.id);
 }

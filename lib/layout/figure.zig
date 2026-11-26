@@ -48,6 +48,9 @@ pub const Path = struct {
     fill: ?art.Color = null,
     fill_rule: FillRule = .nonzero,
     stroke: ?Stroke = null,
+    /// Its fill is a pen's mark (a connection's arrowhead or dot): ink,
+    /// made with the strokes, not a fill.
+    pen: bool = false,
 };
 
 /// What fills an area: solid, or a hatch of parallel lines.
@@ -69,18 +72,33 @@ pub const Pattern = union(enum) {
 /// its geometry `geoms` makes; with `enclosed` off, the closed paths of
 /// the sketch's other geometry inside it are left out (holes).
 pub const Fill = struct {
+    /// Whole curves of its boundary.
     geoms: []const u32,
+    /// Pieces of curves in its boundary (between their cuts:
+    /// `sketch.pieces`).
+    pieces: []const Piece = &.{},
     /// Its fill style (`Model.fill_styles`).
     style: @import("model.zig").ObjectId,
     enclosed: bool = false,
 };
 
+/// Part of a sketch's curve, between two points on it (`sketch.pieces`).
+pub const Piece = @import("graven_sketch").pieces.Piece;
+
 /// A sketch's geometry inked: drawn as a stroke in a stroke style.
 pub const Ink = struct {
     /// The geometry, in the figure's sketch.
     geom: u32,
+    /// The piece of it inked, between these points on it (both null:
+    /// the whole of it).
+    from: ?@import("graven_sketch").PointRef = null,
+    to: ?@import("graven_sketch").PointRef = null,
     /// Its stroke style (`Model.stroke_styles`).
     style: @import("model.zig").ObjectId,
+
+    pub fn piece(k: Ink) Piece {
+        return .{ .geom = k.geom, .from = k.from, .to = k.to };
+    }
 };
 
 /// A drawing's marks over its sketch: what is inked, and what filled.
@@ -166,7 +184,7 @@ pub fn ink(a: Allocator, f: Figure, tol: f64) Allocator.Error![]const art.Shape 
                 };
                 o = geom.boolean.combine(a, &.{o}, .{ .ctx = undefined, .inside = R.inside }) catch o;
             }
-            if (o.contours.len > 0) try out.append(a, .{ .name = "fill", .outline = o, .paint = .{ .fill = .{ .solid = c } } });
+            if (o.contours.len > 0) try out.append(a, .{ .name = if (p.pen) "mark" else "fill", .outline = o, .paint = .{ .fill = .{ .solid = c }, .pen = p.pen } });
         }
         if (p.stroke) |st| {
             var lines: std.ArrayList(geom.stroke.Polyline) = .empty;
@@ -176,7 +194,7 @@ pub fn ink(a: Allocator, f: Figure, tol: f64) Allocator.Error![]const art.Shape 
                 if (st.dash.len == 0) try lines.append(a, line) else try geom.stroke.dashed(a, line, st.dash, st.dash_offset, &lines);
             }
             const o = try geom.stroke.stroke(a, lines.items, .{ .width = st.width, .cap = st.cap, .join = st.join, .miter_limit = st.miter_limit }, tol);
-            if (o.contours.len > 0) try out.append(a, .{ .name = "stroke", .outline = o, .paint = .{ .fill = .{ .solid = st.color } } });
+            if (o.contours.len > 0) try out.append(a, .{ .name = "stroke", .outline = o, .paint = .{ .fill = .{ .solid = st.color }, .pen = true } });
         }
     }
     return out.items;
