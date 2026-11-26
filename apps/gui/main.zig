@@ -5569,8 +5569,8 @@ fn sheetCovers(id: layout.model.ObjectId, t: layout.model.TileId) bool {
     const m = &state.model;
     const si = m.sheetIndex(id) orelse return false;
     const a = dvui.currentWindow().arena();
-    for (m.sheets.items[si].rows.items) |row| {
-        const key = (m.keyInScope(a, m.sheets.items[si].scope, row.key) catch return false) orelse continue;
+    for (0..m.sheets.items[si].rows.items.len) |r| {
+        const key = sheetRowKey(si, r) orelse continue;
         var near: std.ArrayList(layout.model.TileId) = .empty;
         m.companions(a, key, &near) catch return false;
         if (std.mem.indexOfScalar(layout.model.TileId, near.items, t) != null) return true;
@@ -7389,9 +7389,16 @@ const sheet_col_w: f32 = 150;
 
 /// The key of row `row` of sheet `si`, in its scope.
 fn sheetRowKey(si: usize, row: usize) ?TileId {
-    const sh = state.model.sheets.items[si];
+    const id = sheetRowLink(si, row) orelse return null;
+    return if (state.model.tileIndex(id) != null) id else null;
+}
+
+/// What row `row` of sheet `si` is linked to (a key, a caption or a
+/// track), by its ID.
+fn sheetRowLink(si: usize, row: usize) ?layout.model.ObjectId {
+    const sh = &state.model.sheets.items[si];
     if (row >= sh.rows.items.len) return null;
-    return state.model.keyInScope(dvui.currentWindow().arena(), sh.scope, sh.rows.items[row].key) catch null;
+    return state.model.sheetRowLink(dvui.currentWindow().arena(), sh, &sh.rows.items[row]) catch null;
 }
 
 /// The tile and slot the selected cell drives (its key, or a legend
@@ -7518,7 +7525,12 @@ fn sheetView(v: u8) void {
         dvui.labelNoFmt(@src(), "name", .{}, .{ .min_size_content = .{ .w = sheet_name_w }, .max_size_content = .width(sheet_name_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 } });
         for (sh.columns.items, 0..) |c, ci| {
             const unused = std.mem.indexOfScalar(usize, bad_cols.items, ci) != null;
-            dvui.labelNoFmt(@src(), c, .{}, .{ .min_size_content = .{ .w = sheet_col_w }, .max_size_content = .width(sheet_col_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 }, .color_text = if (unused) .{ .color = colors.overflow } else null, .border = .{ .x = 1 }, .color_border = .{ .color = colors.edge.opacity(0.3) }, .id_extra = ci });
+            // A text sheet's column its text holders show: marked, on
+            // the focus colour.
+            const shown = sh.texts and ci == @min(sh.shown, sh.columns.items.len -| 1);
+            var hb: [80]u8 = undefined;
+            const label = if (shown) std.fmt.bufPrint(&hb, "{s} \u{2022} shown", .{c}) catch c else c;
+            dvui.labelNoFmt(@src(), label, .{}, .{ .min_size_content = .{ .w = sheet_col_w }, .max_size_content = .width(sheet_col_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 }, .color_text = if (unused) .{ .color = colors.overflow } else if (shown) .{ .color = colors.paper } else null, .background = shown, .color_fill = .{ .color = if (shown) dvui.themeGet().focus else colors.titlebar.opacity(0) }, .border = .{ .x = 1 }, .color_border = .{ .color = colors.edge.opacity(0.3) }, .id_extra = ci });
         }
     }
     var scroll = dvui.scrollArea(@src(), .{ .horizontal = .auto }, .{ .expand = .both, .background = false });
@@ -7574,7 +7586,7 @@ fn sheetView(v: u8) void {
                     // The row's highlight shows through; the name column
                     // a shade apart.
                     .background = true,
-                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else colors.paper.opacity(0) },
+                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
                     .border = .{ .x = if (c == 0) 0 else 1 },
                     .color_border = .{ .color = colors.edge.opacity(0.15) },
                     .id_extra = (r << 8) + c,
@@ -7602,17 +7614,30 @@ fn sheetViewProperties() void {
     if (sheet_sel.row < sh.rows.items.len) {
         const row = sh.rows.items[sheet_sel.row];
         propText("Row", "{d} of {d}", .{ sheet_sel.row + 1, sh.rows.items.len }, 9701);
-        if (sheetRowKey(si, sheet_sel.row)) |key| {
+        if (sh.texts) {
+            // A text holder: a caption or a track, held by its ID.
+            const link = sheetRowLink(si, sheet_sel.row);
+            if (link) |l| {
+                const what = if (m.trackWithId(l) != null) "track" else "caption";
+                propText("Linked to", "{s} {s}", .{ what, m.linkedName(l) orelse row.key }, 9702);
+            } else propText("Linked to", "nothing named {s}", .{row.key}, 9702);
+            if (sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
+                const shown = sheet_sel.col - 1 == @min(sh.shown, sh.columns.items.len -| 1);
+                propText("Language", "{s}{s}", .{ sh.columns.items[sheet_sel.col - 1], if (shown) " (shown)" else "" }, 9703);
+            }
+        } else if (sheetRowKey(si, sheet_sel.row)) |key| {
             const t = m.tileConst(key);
             propText("Tile", "{s} ({s})", .{ t.designator, m.prototypeOf(key).name }, 9702);
         } else propText("Tile", "none named {s} here", .{row.key}, 9702);
-        if (sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
+        if (!sh.texts and sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
             const slot = sh.columns.items[sheet_sel.col - 1];
             propText("Slot", "{s}{s}", .{ slot, if (sheetCellTarget() == null) " (not on this key)" else "" }, 9703);
         }
     }
-    keyButton(@src(), "Name tiles by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    keyButton(@src(), "Name tiles by their first legend", 0, .{ .expand = .horizontal });
+    if (!sh.texts) {
+        keyButton(@src(), "Name tiles by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "Name tiles by their first legend", 0, .{ .expand = .horizontal });
+    }
     keyButton(@src(), "Add a row", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     if (sh.rows.items.len > 0) keyButton(@src(), "Remove this row", 0, .{ .expand = .horizontal });
 }
