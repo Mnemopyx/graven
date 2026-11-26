@@ -2467,3 +2467,30 @@ test "a click on a tile's text in a text flow edits that text, the caret where p
     try r.frames(2);
     try std.testing.expectEqualStrings("ZABC", api.eqText().?);
 }
+
+test "Delete sketch: a new drawing's sketch removed with its own space, its tab closed" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.run("file.new-drawing");
+    try r.frames(4);
+    const m = api.model();
+    try std.testing.expectEqual(2, m.spaces.items.len);
+    try std.testing.expectEqual(1, m.sketches.items.len);
+    try std.testing.expectEqual(1, api.shownSpace());
+    // The canvas's tab shown (the sketch's left open behind it), the
+    // sketch chosen as in the Browser.
+    try r.run("views.next");
+    try r.frames(2);
+    try std.testing.expectEqual(0, api.shownSpace());
+    try r.select(m.sketches.items[0].name);
+    try r.press("sketch.delete-sketch");
+    try r.frames(4);
+    try std.testing.expectEqual(1, m.spaces.items.len);
+    try std.testing.expectEqual(0, m.sketches.items.len);
+    try std.testing.expectEqual(0, api.shownSpace());
+    // Undone: the sketch and its space are back.
+    try r.run("edit.undo");
+    try std.testing.expectEqual(2, m.spaces.items.len);
+    try std.testing.expectEqual(1, m.sketches.items.len);
+}

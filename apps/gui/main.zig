@@ -2501,6 +2501,11 @@ fn frame() !dvui.App.Result {
         close_home = null;
         closeSpaceViews(h);
     }
+    if (delete_sketch != .none) {
+        const id = delete_sketch;
+        delete_sketch = .none;
+        deleteSketchNow(id);
+    }
     if (new_drawing) {
         new_drawing = false;
         newSketchInOwnSpace();
@@ -2588,7 +2593,7 @@ fn frame() !dvui.App.Result {
             if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
                 sample_texts = true;
                 loadSketchPanelSample();
-            } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
+            } else if (std.mem.eql(u8, which, "drawing-panel")) loadDrawingPanelSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
@@ -18175,9 +18180,15 @@ const button_handlers = [_]ButtonHandler{
                 .sketch_def => |i| i,
                 else => return,
             };
-            if (act(.removeSketch, .{index})) {
-                state.context = .sketches;
-            } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+            if (index >= state.model.sketches.items.len) return;
+            const id = state.model.sketches.items[index].id;
+            for (state.model.panels.items) |pn| if (pn.sketch == id) {
+                state.status = "A panel is made from this sketch: release it first. ";
+                return;
+            };
+            // At the next frame's start: its own space's tabs close first.
+            delete_sketch = id;
+            dvui.refresh(null, @src(), null);
         }
     }.f),
     handler("grid.edit-its-sketch", struct {
@@ -27683,6 +27694,31 @@ fn loadSketchPanelSample() void {
     state.view.fit = null;
 }
 
+/// GRAVEN_SAMPLE=drawing-panel: a sketch in its own space with a drawing
+/// (a ring and a cross inked), and a plain panel on the canvas with text;
+/// Insert figure ready with that drawing, to drag onto the panel.
+fn loadDrawingPanelSample() void {
+    const index = act(.addSketchSpace, .{@as([]const u8, "Badge")}) catch return;
+    const ring = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } } }) catch return;
+    const a = act(.editSketch, .{ index, layout.model.SketchEdit{ .segment = .{ .a = .{ .x = -6, .y = -6 }, .b = .{ .x = 6, .y = 6 } } } }) catch return;
+    const b = act(.editSketch, .{ index, layout.model.SketchEdit{ .segment = .{ .a = .{ .x = -6, .y = 6 }, .b = .{ .x = 6, .y = -6 } } } }) catch return;
+    for ([_]u32{ ring, a, b }) |g| _ = act(.setInk, .{ index, g, true }) catch {};
+    const pi = state.model.addPanel("Plate", 90, 50) catch return;
+    const style = labelStyle() catch return;
+    const pitch = 6.0;
+    const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 44 }, .style = style, .count = 6, .length = 82.0 / pitch, .pitch = pitch }) catch return;
+    state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "A drawing from a sketch, placed on a plain panel as its art: the text flows round it, and it follows the sketch when the sketch's changes are accepted." }) catch {};
+    if (state.model.sketchFigure(state.model.sketches.items[index].id)) |fi| {
+        insert_figure = state.model.figures.items[fi].id;
+        state.tool = .insert_figure;
+    }
+    state.context = .{ .panel = pi };
+    state.view.cx = 45;
+    state.view.cy = 25;
+    state.view.ppm = 9;
+    state.view.fit = null;
+}
+
 /// Edits sketch `index` with its origin at `at` in space `space`.
 fn enterSketchAt(index: usize, space: usize, at: geom.Point) void {
     sketch_edit = .{ .sketch = index, .space = space, .at = at };
@@ -28061,6 +28097,20 @@ fn finishSketch() void {
 }
 /// A sketch's own space whose tabs close at the next frame's start.
 var close_home: ?usize = null;
+/// A sketch (its ID) Delete sketch removes at the next frame's start.
+var delete_sketch: layout.model.ObjectId = .none;
+
+/// Removes sketch `id` with its own space and drawings: its editing left
+/// and its space's tabs closed first.
+fn deleteSketchNow(id: layout.model.ObjectId) void {
+    if (sketch_edit) |r| if (r.sketch < state.model.sketches.items.len and state.model.sketches.items[r.sketch].id == id) leaveSketch();
+    if (state.model.homeOf(id)) |h| closeSpaceViews(h);
+    const index = state.model.sketchIndex(id) orelse return;
+    if (act(.removeSketch, .{index})) {
+        state.context = .sketches;
+        state.status = "The sketch is deleted, with its own space and its drawings. ";
+    } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+}
 
 /// Closes every tab showing space `space`; a last tab shows the canvas.
 fn closeSpaceViews(space: usize) void {
