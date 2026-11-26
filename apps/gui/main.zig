@@ -11419,6 +11419,7 @@ fn manufactureView(v: u8) void {
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
                 text_drag = false;
+                eq_drag = false;
 
                 dvui.captureMouse(null, e.num);
             },
@@ -21470,6 +21471,23 @@ var text_drag = false;
 /// drag from here selecting). With `extend` (Shift), the selection runs
 /// from the cursor that was to here, in the same flow. Whether it was one.
 fn textPress(at: geom.Point, extend: bool) bool {
+    // In an expression edited on the canvas: inside its text, the caret
+    // there (with Shift, the selection to there), a drag selecting on.
+    if (canvas_eq != null) if (hoverTargetAt(at)) |h| switch (h) {
+        .eq_caret => |x| {
+            if (extend) eqExtend(x.offset) else {
+                canvas_eq_seq += 1;
+                eqMove(x.offset, null);
+            }
+            text_drag = true;
+            eq_drag = true;
+            last_click = null;
+            return true;
+        },
+        // Near an object's box: the object chosen (hoverPress).
+        .eq_object => return false,
+        else => {},
+    };
     // The innermost text first: a slot's text in a tile (a sort in this
     // flow, or a key anywhere) edited where pressed. While an expression
     // is edited, its own objects and caret places come first (hoverPress).
@@ -21505,10 +21523,19 @@ fn textPress(at: geom.Point, extend: bool) bool {
     return true;
 }
 var text_drag_parent: Parent = .{ .space = 0 };
+/// The text drag is in an expression edited on the canvas.
+var eq_drag = false;
 
 /// The pointer at `at` in a text drag: the cursor follows it, the anchor
 /// staying where the drag began.
 fn textDragTo(at: geom.Point) void {
+    if (eq_drag) {
+        if (canvas_eq != null) if (hoverTargetAt(at)) |h| switch (h) {
+            .eq_caret => |x| if (x.offset != canvas_eq.?.offset) eqExtend(x.offset),
+            else => {},
+        };
+        return;
+    }
     const c = track_cursor orelse return;
     const pos = flowPlaceAt(text_drag_parent, .{ .parent = c.parent, .region = c.region }, at, true) orelse return;
     if (pos.index == c.index and pos.offset == c.offset) return;
@@ -22659,6 +22686,10 @@ const CanvasEq = struct {
     /// start at the same byte: d² and d).
     head: ?u32 = null,
     head_end: ?u32 = null,
+    /// The selection's other end, while there is one: what lies between
+    /// it and the caret is selected (Shift with the caret keys, a drag,
+    /// Shift+click).
+    anchor: ?u32 = null,
 };
 
 var canvas_eq: ?CanvasEq = null;
@@ -22767,7 +22798,115 @@ fn eqMove(offset: u32, head: ?u32) void {
     canvas_eq.?.offset = offset;
     canvas_eq.?.head = head;
     canvas_eq.?.head_end = null;
+    canvas_eq.?.anchor = null;
     expr_inspect = .{ .key = canvas_eq.?.target.key(), .offset = offset };
+}
+
+/// Moves the caret to `offset`, extending the selection (its anchor where
+/// the caret was, when there was none).
+fn eqExtend(offset: u32) void {
+    const q = canvas_eq orelse return;
+    const anchor = q.anchor orelse q.offset;
+    eqMove(offset, null);
+    if (anchor != offset) canvas_eq.?.anchor = anchor;
+}
+
+/// The selection in `q`'s source, [start, end), when there is one.
+fn eqSelection(q: CanvasEq) ?[2]u32 {
+    const an = q.anchor orelse return null;
+    if (q.head != null or an == q.offset) return null;
+    return .{ @min(an, q.offset), @max(an, q.offset) };
+}
+
+/// `src` without selection `sel`: the objects wholly inside it go with
+/// their source (a fraction, its braces and all), and of what is left in
+/// it, the characters (a structure partly selected keeps its command and
+/// braces, as Backspace leaves them). Allocated from `a`.
+fn eqDeleteRange(a: std.mem.Allocator, src: []const u8, sel: [2]u32, math: bool) ?[]u8 {
+    var cut: std.ArrayList([2]u32) = .empty;
+    if (eqParse(a, src, math)) |p| {
+        // Outermost first: eqStops puts what holds others before them.
+        for (eqStops(a, &p)) |x| {
+            if (x.field or x.start < sel[0] or x.end > sel[1] or x.start == x.end) continue;
+            const inside = for (cut.items) |c| {
+                if (x.start >= c[0] and x.end <= c[1]) break true;
+            } else false;
+            if (!inside) cut.append(a, .{ x.start, x.end }) catch return null;
+        }
+    }
+    for (layout.edit.chars(a, src, math) catch return null) |c| {
+        if (c.start < sel[0] or c.start >= sel[1]) continue;
+        const inside = for (cut.items) |k| {
+            if (c.start >= k[0] and c.start < k[1]) break true;
+        } else false;
+        if (!inside) cut.append(a, .{ c.start, c.end }) catch return null;
+    }
+    std.mem.sort([2]u32, cut.items, {}, struct {
+        fn lt(_: void, x: [2]u32, y: [2]u32) bool {
+            return x[0] < y[0];
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    var at: u32 = 0;
+    for (cut.items) |c| {
+        if (c[0] < at) {
+            at = @max(at, c[1]);
+            continue;
+        }
+        out.appendSlice(a, src[at..c[0]]) catch return null;
+        at = c[1];
+    }
+    out.appendSlice(a, src[@min(at, src.len)..]) catch return null;
+    return out.items;
+}
+
+/// Deletes the selection, the caret where it began. Whether there was one.
+fn eqDeleteSelection() bool {
+    const q = canvas_eq orelse return false;
+    const sel = eqSelection(q) orelse return false;
+    const src = eqContent(q) orelse return false;
+    const next = eqDeleteRange(dvui.currentWindow().arena(), src, sel, q.math) orelse return false;
+    eqStore(q, next);
+    eqMove(sel[0], null);
+    return true;
+}
+
+/// Whether `s`'s braces pair up (none left open or closed too soon).
+fn bracesBalanced(s: []const u8) bool {
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) switch (s[i]) {
+        '\\' => i += 1,
+        '{' => depth += 1,
+        '}' => {
+            depth -= 1;
+            if (depth < 0) return false;
+        },
+        else => {},
+    };
+    return depth == 0;
+}
+
+/// Copies the selection (with `cut`, deletes it too): its source, as
+/// typed, when that stands on its own (its braces pair up); else what its
+/// characters read as.
+fn eqCopy(cut: bool) void {
+    const q = canvas_eq orelse return;
+    const sel = eqSelection(q) orelse return;
+    const src = eqContent(q) orelse return;
+    const a = dvui.currentWindow().arena();
+    const piece = src[sel[0]..sel[1]];
+    if (bracesBalanced(piece)) {
+        dvui.clipboardTextSet(piece);
+    } else {
+        var out: std.ArrayList(u8) = .empty;
+        layout.edit.plainText(a, src, sel[0], sel[1], q.math, &out) catch return;
+        dvui.clipboardTextSet(out.items);
+    }
+    if (cut) {
+        canvas_eq_seq += 1;
+        _ = eqDeleteSelection();
+    }
 }
 
 /// Every place in `src` the caret can stop, in order: its ends, each
@@ -22832,7 +22971,7 @@ fn enterEquation() void {
             canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
             canvas_eq_seq += 1;
             eqMove(at.offset, null);
-            state.status = "Inline math: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+            state.status = "Inline math: type into it; Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
             return;
         }
     }
@@ -22849,7 +22988,7 @@ fn enterEquation() void {
     canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = item } }, .math = true, .offset = offset };
     canvas_eq_seq += 1;
     eqMove(offset, null);
-    state.status = "Equation: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+    state.status = "Equation: type into it; Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
 }
 
 /// Ctrl+\ on a selected tile: its track's text (the expression line's
@@ -22864,7 +23003,7 @@ fn enterTileTrack(id: TileId) void {
     };
     canvas_eq_seq += 1;
     eqMove(@intCast(src.len), null);
-    state.status = "Tile text: type into it ($ starts math); Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+    state.status = "Tile text: type into it ($ starts math); Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
 }
 
 /// Leaves the equation: one with nothing in it goes; the flow cursor goes
@@ -22913,6 +23052,11 @@ fn leaveCanvasEquation() void {
 
 /// Text typed into the equation (or, on a head, a head's key).
 fn eqType(txt: []const u8) void {
+    if (canvas_eq) |q0| if (eqSelection(q0) != null) {
+        // Over a selection: it goes, the typing in its place (one undo
+        // step with it).
+        if (!eqDeleteSelection()) return;
+    };
     const q = canvas_eq orelse return;
     const src = eqContent(q) orelse {
         canvas_eq = null;
@@ -23050,6 +23194,10 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
         eqMove(o.at + o.caret, null);
         return;
     }
+    if (ch == 'l') {
+        eqLimits(a, src, &p, id);
+        return;
+    }
     switch (ch) {
         '=', '+' => p.e.set(id, .scale, glyphic.param.num(num.round(@min(10, num.f(&p.e, id, .scale) * 1.1)))) catch {},
         '-' => p.e.set(id, .scale, glyphic.param.num(num.round(@max(0.1, num.f(&p.e, id, .scale) / 1.1)))) catch {},
@@ -23089,6 +23237,73 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
     eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
 }
 
+/// L on a large operator's head: its limits round the three ways, auto
+/// (above and below in display style, beside in text), above and below
+/// (`\limits`), beside (`\nolimits`), written after its symbol as LaTeX
+/// has them. The head stays chosen.
+fn eqLimits(a: std.mem.Allocator, src: []const u8, p: *const EqParse, id: glyphic.Id) void {
+    const q = canvas_eq orelse return;
+    const head = q.head orelse return;
+    if (p.e.node(id).kind != .large_op) {
+        state.status = "Only a large operator (Σ, ∏, ∫ …) has limits to place. ";
+        return;
+    }
+    const sp = p.spans.get(id);
+    // Its symbol: past a call wrapped round it, a command or a character.
+    var i: usize = sp.start;
+    if (std.mem.startsWith(u8, src[i..sp.end], "\\set(")) {
+        var quoted = false;
+        i += "\\set(".len;
+        while (i < sp.end and (quoted or src[i] != ')')) : (i += 1) {
+            if (src[i] == '"') quoted = !quoted;
+        }
+        i += 1;
+        if (i < sp.end and src[i] == '{') i += 1;
+    }
+    if (i >= sp.end) return;
+    if (src[i] == '\\') {
+        i += 1;
+        while (i < sp.end and std.ascii.isAlphabetic(src[i])) i += 1;
+    } else i += std.unicode.utf8ByteSequenceLength(src[i]) catch 1;
+    const sym_end = i;
+    // What it says now, and where that is written.
+    var j = sym_end;
+    while (j < sp.end and src[j] == ' ') j += 1;
+    const word = struct {
+        fn at(s: []const u8, k: usize, w: []const u8) bool {
+            return std.mem.startsWith(u8, s[k..], w) and (k + w.len >= s.len or !std.ascii.isAlphabetic(s[k + w.len]));
+        }
+    };
+    var now: glyphic.param.Limits = .auto;
+    var old_end = sym_end;
+    if (word.at(src, j, "\\limits")) {
+        now = .stacked;
+        old_end = j + "\\limits".len;
+    } else if (word.at(src, j, "\\nolimits")) {
+        now = .side;
+        old_end = j + "\\nolimits".len;
+    }
+    const next_mode: glyphic.param.Limits = switch (now) {
+        .auto => .stacked,
+        .stacked => .side,
+        .side => .auto,
+    };
+    const text: []const u8 = switch (next_mode) {
+        .auto => "",
+        .stacked => "\\limits",
+        .side => "\\nolimits",
+    };
+    const next = std.mem.concat(a, u8, &.{ src[0..sym_end], text, src[old_end..] }) catch return;
+    eqStore(q, next);
+    state.status = switch (next_mode) {
+        .auto => "Limits: automatic (above and below in display style, beside in text). ",
+        .stacked => "Limits: above and below. ",
+        .side => "Limits: beside. ",
+    };
+    const grown: i64 = @as(i64, @intCast(next.len)) - @as(i64, @intCast(src.len));
+    eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
+}
+
 /// A key while editing an equation on the canvas; whether it was one.
 /// An action of mode `canvas.equation` (or, on a head,
 /// `canvas.equation.head`); whether it was done.
@@ -23106,6 +23321,7 @@ fn eqAction(inv: keymap.Invocation) bool {
         .{ .name = "turn-left", .ch = '[' },  .{ .name = "turn-right", .ch = ']' },
         .{ .name = "reset", .ch = '0' },      .{ .name = "slot-index", .ch = 'i' },
         .{ .name = "slot-upper", .ch = 'u' }, .{ .name = "slot-lower", .ch = 'b' },
+        .{ .name = "limits", .ch = 'l' },
     };
     inline for (head_chars) |hc| if (inv.action == kact("canvas.equation.head." ++ hc.name)) {
         if (q.head == null) return false;
@@ -23171,13 +23387,44 @@ fn eqAction(inv: keymap.Invocation) bool {
             eqMove(off, if (to == .head) off else null);
             return true;
         },
-        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end") => {
+        kact("canvas.equation.select.all") => {
+            canvas_eq_seq += 1;
+            eqMove(@intCast(src.len), null);
+            if (src.len > 0) canvas_eq.?.anchor = 0;
+            return true;
+        },
+        kact("canvas.equation.copy"), kact("canvas.equation.cut") => {
+            eqCopy(inv.action == kact("canvas.equation.cut"));
+            return true;
+        },
+        kact("canvas.equation.paste") => {
+            const text = dvui.clipboardText();
+            // One line: a break in what is pasted ends it.
+            const line = text[0 .. std.mem.indexOfAny(u8, text, "\r\n") orelse text.len];
+            canvas_eq_seq += 1;
+            if (line.len > 0) eqType(line);
+            return true;
+        },
+        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end"), kact("canvas.equation.select.left"), kact("canvas.equation.select.right"), kact("canvas.equation.select.start"), kact("canvas.equation.select.end") => {
             const places = eqPlaces(a, src, q.math);
+            const select = switch (inv.action) {
+                kact("canvas.equation.select.left"), kact("canvas.equation.select.right"), kact("canvas.equation.select.start"), kact("canvas.equation.select.end") => true,
+                else => false,
+            };
+            // Left or Right with a selection: the caret to its edge.
+            if (!select) if (eqSelection(q)) |sel| switch (inv.action) {
+                kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right") => {
+                    canvas_eq_seq += 1;
+                    eqMove(if (inv.action == kact("canvas.equation.caret.left")) sel[0] else sel[1], null);
+                    return true;
+                },
+                else => {},
+            };
             var to = q.offset;
             switch (inv.action) {
-                kact("canvas.equation.caret.start") => to = 0,
-                kact("canvas.equation.caret.end") => to = @intCast(src.len),
-                kact("canvas.equation.caret.left") => {
+                kact("canvas.equation.caret.start"), kact("canvas.equation.select.start") => to = 0,
+                kact("canvas.equation.caret.end"), kact("canvas.equation.select.end") => to = @intCast(src.len),
+                kact("canvas.equation.caret.left"), kact("canvas.equation.select.left") => {
                     var i = places.len;
                     while (i > 0) : (i -= 1) if (places[i - 1] < q.offset) {
                         to = places[i - 1];
@@ -23190,7 +23437,7 @@ fn eqAction(inv: keymap.Invocation) bool {
                 },
             }
             canvas_eq_seq += 1;
-            eqMove(to, null);
+            if (select) eqExtend(to) else eqMove(to, null);
             return true;
         },
         kact("canvas.equation.delete-back"), kact("canvas.equation.delete-forward") => {
@@ -23199,6 +23446,7 @@ fn eqAction(inv: keymap.Invocation) bool {
                 eqMove(q.offset, null);
                 return true;
             }
+            if (eqDeleteSelection()) return true;
             const cs = layout.edit.chars(a, src, q.math) catch return true;
             var hit: ?layout.edit.Char = null;
             if (backspace) {
@@ -23407,6 +23655,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabe
             if (changed) dvui.refresh(null, @src(), null);
         }
     }
+    if (eqSelection(q)) |sel| drawEqSelection(area, r, piece, sel, at);
     if (q.head != null) return;
     if (q.offset < piece.base) return;
     const local = q.offset - piece.base;
@@ -23416,6 +23665,55 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabe
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     markCaret(p0, p1);
     speckleCaret(p0, p1);
+}
+
+/// The selection in an expression edited on the canvas, over what piece
+/// `piece` (render `r`, drawn at `at`) draws: each object wholly inside it
+/// (the outermost), and a leaf partly inside it (some of a word's
+/// letters) from caret to caret.
+fn drawEqSelection(area: dvui.Rect.Physical, r: *const layout.render.Render, piece: EqPiece, sel: [2]u32, at: geom.Point) void {
+    if (sel[1] <= piece.base) return;
+    const lo = if (sel[0] > piece.base) sel[0] - piece.base else 0;
+    const hi = sel[1] - piece.base;
+    const tint = colors.select.opacity(0.28);
+    const a = dvui.currentWindow().arena();
+    var whole: std.ArrayList([2]u32) = .empty;
+    // Outermost objects first, so their parts are not drawn twice.
+    var order: std.ArrayList(usize) = .empty;
+    for (r.boxes, 0..) |b, k| if (b.kind != .field) order.append(a, k) catch return;
+    std.mem.sort(usize, order.items, r, struct {
+        fn lt(rr: *const layout.render.Render, x: usize, y: usize) bool {
+            return rr.boxes[x].nest < rr.boxes[y].nest;
+        }
+    }.lt);
+    for (order.items) |k| {
+        const b = r.boxes[k];
+        const inside = for (whole.items) |w| {
+            if (b.start >= w[0] and b.end <= w[1]) break true;
+        } else false;
+        if (inside) continue;
+        if (b.start >= lo and b.end <= hi and b.start < b.end) {
+            whole.append(a, .{ b.start, b.end }) catch return;
+            fillQuad(area, b.corners, at, tint);
+            continue;
+        }
+        // A leaf partly selected: between the carets at the selection's
+        // ends within its characters.
+        if (b.kind != .leaf or b.inner_end <= lo or b.inner_start >= hi) continue;
+        const c0 = caretAt(r, @max(lo, b.inner_start)) orelse continue;
+        const c1 = caretAt(r, @min(hi, b.inner_end)) orelse continue;
+        const bb = boxBounds(b);
+        const x0 = @min(c0.x, c1.x);
+        const x1 = @max(c0.x, c1.x);
+        if (x1 <= x0) continue;
+        fillQuad(area, .{ .{ .x = x0, .y = bb.y0 }, .{ .x = x1, .y = bb.y0 }, .{ .x = x1, .y = bb.y1 }, .{ .x = x0, .y = bb.y1 } }, at, tint);
+    }
+}
+
+fn fillQuad(area: dvui.Rect.Physical, c: [4]geom.Point, at: geom.Point, colour: dvui.Color) void {
+    var pts: [4]dvui.Point.Physical = undefined;
+    for (c, &pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+    dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
 }
 
 // Pointing (decided 2026-11-20): near a container's outline the
