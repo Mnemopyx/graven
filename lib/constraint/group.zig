@@ -309,6 +309,22 @@ pub const Groups = struct {
         at.* = .{ .parent = none, .removed = true };
     }
 
+    /// Removes group `id` and every group inside it (their geometry is
+    /// the caller's to remove). Their IDs stay taken.
+    pub fn remove(gs: *Groups, a: Allocator, id: GroupId) Error!void {
+        const g = try gs.get(id);
+        if (gs.listOf(g.parent)) |p| take(&p.children, id);
+        gs.drop(a, id);
+    }
+
+    fn drop(gs: *Groups, a: Allocator, id: GroupId) void {
+        const kids = gs.list.items[id].children.items;
+        for (kids) |c| gs.drop(a, c);
+        const at = &gs.list.items[id];
+        freeGroup(at, a);
+        at.* = .{ .parent = none, .removed = true };
+    }
+
     /// Deconstructs object `id`: its members become editable, still
     /// together; its kind and properties are kept as what it was made as.
     pub fn open(gs: *Groups, id: GroupId) Error!void {
