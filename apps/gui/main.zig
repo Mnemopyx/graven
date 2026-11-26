@@ -186,13 +186,19 @@ pub const testing_api = struct {
         return tab_add_leaf != null;
     }
     /// The dropdown in the row tagged `tag` takes entry `label` next frame.
+    /// A measurement's unit pop-up ("panel.width:unit") takes the unit
+    /// written `label` ("in").
     pub fn choose(tag: []const u8, label: []const u8) void {
+        if (std.mem.endsWith(u8, tag, ":unit")) {
+            if (!accepted.setScriptedUnit(tag[0 .. tag.len - 5], label)) test_choice = .{ .tag = tag, .label = label };
+            return;
+        }
         test_choice = .{ .tag = tag, .label = label };
     }
     /// Whether a choice asked for is still waiting (its row not drawn, or
     /// no such entry).
     pub fn choicePending() bool {
-        return test_choice != null;
+        return test_choice != null or accepted.script_unit != null;
     }
     /// Canvas point `p` (mm) on the screen (physical pixels), while the
     /// canvas is shown.
@@ -399,11 +405,28 @@ pub const testing_api = struct {
     }
     /// Adds the text sample (a track of three rows, two holding content)
     /// on the shown canvas, as GRAVEN_SAMPLE=text does; where it starts.
+    /// The paragraph rules placed in the parent shown.
+    pub fn placedRules() usize {
+        const p = shownParent() orelse return 0;
+        return if (placedOf(p)) |pl| pl.rules.len else 0;
+    }
     pub fn loadTextSample() !geom.Point {
         return loadText();
     }
     /// The columns sample (GRAVEN_SAMPLE=columns): three text columns in
     /// a panel and two construction lines, constrained or not.
+    /// The sketch panel sample made as a plate (GRAVEN_SAMPLE=sketch-fab):
+    /// its ring's ink, a solid fill round its hole, and fabrication layers
+    /// taking them; the panel's index.
+    pub fn loadSketchFab() ?usize {
+        sample_fab = true;
+        defer sample_fab = false;
+        loadSketchPanelSample();
+        return switch (state.context) {
+            .panel => |pi| pi,
+            else => null,
+        };
+    }
     pub fn loadColumns(constrained: bool) !void {
         return loadColumnsSampleWith(constrained);
     }
@@ -735,6 +758,9 @@ var tracks_tool: struct {
     /// A region (rows or columns added as content needs them) or one
     /// track laid out in advance, running the way it is drawn.
     kind: layout.model.TileRegion.Kind = .region,
+    /// The style template a new text layout's flow starts from (`.none`,
+    /// or one since removed: the Default).
+    template: layout.model.ObjectId = .none,
 } = .{};
 
 /// What new tracks are sized to: a tile prototype's smallest tile, or a
@@ -1880,6 +1906,20 @@ fn loadText() !geom.Point {
     return at;
 }
 
+/// GRAVEN_SAMPLE=typography: two tracks of the same words, ligatures off
+/// and on, on the shown canvas; the cursor in the second, after "cafe" and
+/// its accent.
+fn loadTypography() !void {
+    const pi = shownParent() orelse return error.NoCanvas;
+    const at: geom.Point = .{ .x = 0, .y = 10 };
+    const rs = try text_sample.buildTypography(&state.model, pi, at);
+    try hist.snapshot(&state.model);
+    state.context = .{ .region = .{ .parent = pi, .region = rs[1] } };
+    // "office affluent fjord: cafe" then U+0301 (2 bytes).
+    track_cursor = .{ .parent = pi, .region = rs[1], .index = 0, .offset = 29 };
+    state.view.fit = .{ .x0 = at.x - 5, .y0 = at.y - 30, .x1 = at.x + 145, .y1 = at.y + 26 };
+}
+
 /// Where prototype `id` is in the document's list, for dropdowns; 0 when
 /// it is none of them.
 /// The ID of space `si` (by position); `.none` without spaces (a
@@ -2480,6 +2520,8 @@ fn frame() !dvui.App.Result {
     base_group = "";
     // A press away from a field being edited ends the edit first.
     accepted.on_accept = newFieldStep;
+    accepted.measure_unit_get = measureUnitGet;
+    accepted.measure_unit_set = measureUnitSet;
     accepted.beginFrame();
     if (leave_field) {
         leave_field = false;
@@ -2593,11 +2635,14 @@ fn frame() !dvui.App.Result {
             } else if (std.mem.eql(u8, which, "connections")) {
                 sample_connections = true;
                 loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "sketch-fab")) {
+                sample_fab = true;
+                loadSketchPanelSample();
             } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
-            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
+            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -7704,6 +7749,8 @@ var sample_texts = false;
 /// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
 /// connection, its end free, a dot at its end.
 var sample_connections = false;
+/// GRAVEN_SAMPLE=sketch-fab: the sketch panel with a solid fill and fabrication layers.
+var sample_fab = false;
 var open_texts_sheet: ?layout.model.ObjectId = null;
 
 fn canvas(active: bool, view: u8) void {
@@ -8481,6 +8528,11 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
         };
         if (sel) marchingBox(area, onSheet(pi, pa.box), colors.select, 1.5 * px);
     }
+    // Paragraph rules, in their pens' ink.
+    for (placed.rules) |r| {
+        const pieces = flatTile(&state.flat, r.shapes) catch &.{};
+        for (pieces) |piece| if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
+    }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
         // Ink in the sheet's margins is drawn in the warning colour.
@@ -9082,17 +9134,50 @@ fn panelFab(pi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 2 });
             defer row.deinit();
             propName("From");
-            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text" };
+            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text", "line art's ink", "line art's fills" };
             var choice: usize = @intFromEnum(std.meta.activeTag(l.source));
             if (tdropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.source))) {
                 l.source = switch (choice) {
                     0 => .edge,
                     1 => .cutouts,
                     2 => .parts,
-                    else => .{ .text = "" },
+                    3 => .{ .text = "" },
+                    4 => .{ .ink = "" },
+                    else => .{ .fills = "" },
                 };
                 changed = true;
             }
+        }
+        // Ink and fills: of every piece of line art, or of one by name (a
+        // drawing's, a figure's).
+        switch (l.source) {
+            .ink, .fills => |name| {
+                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 5 });
+                defer row.deinit();
+                propName("Line art");
+                var names: std.ArrayList([]const u8) = .empty;
+                try names.append(ar, "all of it");
+                for (state.model.panels.items[pi].art.items) |pa| {
+                    if (pa.cutout) continue;
+                    for (names.items[1..]) |have| {
+                        if (std.mem.eql(u8, have, pa.name)) break;
+                    } else try names.append(ar, pa.name);
+                }
+                var choice: usize = 0;
+                for (names.items[1..], 1..) |nm, k| {
+                    if (std.mem.eql(u8, nm, name)) choice = k;
+                }
+                if (name.len > 0 and choice == 0) {
+                    try names.append(ar, name);
+                    choice = names.items.len - 1;
+                }
+                if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+                    const picked: []const u8 = if (choice == 0) "" else names.items[choice];
+                    l.source = if (l.source == .ink) .{ .ink = picked } else .{ .fills = picked };
+                    changed = true;
+                }
+            },
+            else => {},
         }
         if (l.source == .text) {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
@@ -10429,6 +10514,7 @@ fn planCopy(p: manufacture.Plan) manufacture.Plan {
 fn choiceRow(label: []const u8, names: []const []const u8, current: usize, n: usize) ?usize {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(label);
     var choice = current;
     if (!tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == current) return null;
@@ -11342,6 +11428,7 @@ fn manufactureView(v: u8) void {
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
                 text_drag = false;
+                eq_drag = false;
 
                 dvui.captureMouse(null, e.num);
             },
@@ -14419,6 +14506,7 @@ fn propertiesBody() !void {
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
     defer body.deinit();
     setTagScope("{s}", .{"properties"});
+    accepted.u_mm = null;
     if (state.tool == .add_tracks) try tracksToolOptions();
     try properties();
 }
@@ -14490,6 +14578,27 @@ fn tracksToolOptions() !void {
             const names = [_][]const u8{ "Rows (column of rows)", "Columns (row of columns)" };
             var choice: usize = @backingInt(tracks_tool.major);
             if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
+        }
+    }
+    // Text: the style template its flow starts from (the Default until
+    // another is chosen). Choosing one sizes the tracks to its text style.
+    if (tracks_tool.size_to == .style) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9004 });
+        defer row.deinit();
+        propName("Template");
+        const templates = state.model.templates.items;
+        const arena = dvui.currentWindow().arena();
+        const names = try arena.alloc([]const u8, @max(1, templates.len));
+        if (templates.len == 0) names[0] = "Default";
+        var choice: usize = 0;
+        for (templates, 0..) |t, k| {
+            names[k] = t.name;
+            if (t.id == tracks_tool.template) choice = k;
+        }
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice < templates.len) {
+            const t = templates[choice];
+            tracks_tool.template = t.id;
+            if (state.model.styleIndex(t.text) != null) tracks_tool.size_to = .{ .style = t.text };
         }
     }
     var buf: [96]u8 = undefined;
@@ -14800,8 +14909,8 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         state.status = "The tracks were not added. ";
         return;
     };
-    // A text layout's new flow: its style copied from the Default
-    // template, in the same undo step.
+    // A text layout's new flow: the styles of the template chosen in the
+    // tool's options (the Default), in the same undo step.
     if (tracks_tool.size_to == .style) styleNewFlow(plan.parent, r) catch {};
     // Empty tracks, the user fills them: the cursor waits at the start.
     state.context = .{ .region = .{ .parent = plan.parent, .region = r } };
@@ -18660,16 +18769,81 @@ fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: an
 fn propName(name: []const u8) void {
     tagParent(name);
     // The unit its label names, if any: the field drawn next takes any
-    // unit of that kind (see `units`, the one path for typed units).
-    accepted.label_unit = layout.units.ofLabel(name);
+    // unit of that kind (see `units`, the one path for typed units), and
+    // is a measurement with its own unit, shown in a pop-up beside it.
+    accepted.label_unit = if (prop_plain) null else layout.units.ofLabel(name);
+    prop_plain = false;
+    accepted.measure_id = if (accepted.label_unit != null) accepted.current_id else null;
     // Marked as an override (FrameMaker's asterisk): its value differs
     // from the style it overrides.
     const marked = prop_marked;
     prop_marked = false;
-    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{name}) catch name else name;
+    // A measurement's unit is its pop-up's, not its label's.
+    const label = if (accepted.measure_id != null) std.mem.trim(u8, name[0 .. std.mem.lastIndexOfScalar(u8, name, ',') orelse name.len], " ") else name;
+    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{label}) catch label else label;
     const col = if (marked) dvui.Color{ .r = 0xff, .g = 0xc0, .b = 0x60 } else dvui.themeGet().color(.control, .text).opacity(0.65);
     dvui.labelNoFmt(@src(), shown, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = col } });
 }
+
+/// The object whose properties are shown (its measurements' units are
+/// kept by its ID); `.none` for what has none.
+fn measureOwner() layout.model.ObjectId {
+    const m = &state.model;
+    const sp = m.spaces.items;
+    return switch (state.context) {
+        .panel => |pi| if (pi < m.panels.items.len) m.panels.items[pi].id else .none,
+        .region => |r| if (m.hasParent(r.parent) and r.region < m.regionsIn(r.parent).len) m.regionsIn(r.parent)[r.region].id else .none,
+        .grid => |g| if (m.hasParent(g.parent) and g.index < m.gridsIn(g.parent).len) m.gridsIn(g.parent)[g.index].id else .none,
+        .tile, .group, .prototype, .flow, .sheet, .style, .template, .process, .plan, .material, .constraint => |id| id,
+        .space => |si| if (si < sp.len) sp[si].id else .none,
+        .view => |v| itemId(sp, v.space, "views", v.index),
+        .layer => |v| itemId(sp, v.space, "layers", v.index),
+        .image => |v| itemId(sp, v.space, "images", v.index),
+        .figure_place => |v| itemId(sp, v.space, "figure_places", v.index),
+        .guide => |v| itemId(sp, v.space, "guides", v.index),
+        .sketch => |v| itemId(sp, v.space, "sketch_views", v.index),
+        .art => |l| if (l.panel < m.panels.items.len) idAt(m.panels.items[l.panel].art.items, l.index) else .none,
+        .sketch_def => |i| idAt(m.sketches.items, i),
+        .figure_def => |i| idAt(m.figures.items, i),
+        else => .none,
+    };
+}
+
+fn itemId(spaces: []const layout.model.Space, si: usize, comptime list: []const u8, i: usize) layout.model.ObjectId {
+    if (si >= spaces.len) return .none;
+    return idAt(@field(spaces[si], list).items, i);
+}
+
+fn idAt(items: anytype, i: usize) layout.model.ObjectId {
+    if (i >= items.len) return .none;
+    if (!@hasField(@TypeOf(items[0]), "id")) return .none;
+    return items[i].id;
+}
+
+/// The document's key for measurement `id` (an element id) of the object
+/// shown: "<object ID>/<id>", or `id` alone for what has no ID.
+fn measureKey(buf: []u8, id: []const u8) []const u8 {
+    // A repeat's "#n" is the same measurement.
+    const base = if (std.mem.indexOfScalar(u8, id, '#')) |k| id[0..k] else id;
+    const owner = measureOwner();
+    if (owner == .none) return base;
+    return std.fmt.bufPrint(buf, "{d}/{s}", .{ @intFromEnum(owner), base }) catch base;
+}
+
+fn measureUnitGet(id: []const u8) ?layout.units.Unit {
+    var buf: [256]u8 = undefined;
+    return state.model.measureUnit(measureKey(&buf, id));
+}
+
+/// A measurement's unit picked or typed: one undo step of its own.
+fn measureUnitSet(id: []const u8, unit: layout.units.Unit) void {
+    var buf: [256]u8 = undefined;
+    act(.setMeasureUnit, .{ measureKey(&buf, id), unit }) catch {};
+}
+
+/// The next `propName` is a plain label, whatever unit it names: what
+/// follows is not one measurement (a list of sizes).
+var prop_plain = false;
 
 /// The next `propName` is marked as an override.
 var prop_marked = false;
@@ -19063,6 +19237,15 @@ fn tileProperties(id: TileId) !void {
     defer popGroup(saved_group);
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
+    // Its u, for its measurements in u: its prototype's, in its track.
+    accepted.u_mm = blk: {
+        const pidx = state.model.protoIndex(t.prototype) orelse break :blk null;
+        const at = flowPosOf(id) orelse break :blk state.model.prototypes.items[pidx].unit;
+        const rs = state.model.regionsIn(at.parent);
+        if (at.region >= rs.len) break :blk null;
+        break :blk state.model.prototypes.items[pidx].unitIn(rs[at.region].pitch);
+    };
+    defer accepted.u_mm = null;
     const on_grid = state.model.gridInstanceOf(id);
     if (on_grid) |at| try instanceProperties(at.parent, at.grid, at.index);
     if (on_grid == null) {
@@ -19566,7 +19749,7 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
         defer row.deinit();
         prop_marked = if (ref) |r| @abs(@field(r, f.field) - @field(ps, f.field)) > 1e-9 else false;
         propName(f.name);
-        const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
+        const v: f64 = @field(ps, f.field) * pt_per_mm;
         if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k + n })) |nv| {
             @field(ps, f.field) = nv / pt_per_mm;
             changed = true;
@@ -19587,6 +19770,10 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
             changed = true;
         }
     }
+    // Rules above and below: a pen each (none for no rule), then, with
+    // one, its weight, its offset from the text and its length.
+    if (ruleFields("Rule above", &ps.rule_above, n, 940, if (ref) |r| &r.rule_above else null)) changed = true;
+    if (ruleFields("Rule below", &ps.rule_below, n, 950, if (ref) |r| &r.rule_below else null)) changed = true;
     // The style Enter gives the paragraph after (FrameMaker's Next ¶ Tag).
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 920 + n });
@@ -19604,6 +19791,87 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
         }
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 920 + n })) {
             ps.next = if (choice == 0) null else styles[choice - 1].id;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/// A paragraph rule's fields (`label`: "Rule above" or "Rule below"), into
+/// `rule`: its pen, chosen from the document's stroke styles (or a new
+/// solid or dashed one), and with a pen its weight (as typed; "pen": the
+/// pen's own width), its offset from the text (as typed) and its length.
+/// Whether one changed.
+fn ruleFields(comptime label: []const u8, rule: *layout.model.ParagraphRule, n: usize, base: usize, ref: ?*const layout.model.ParagraphRule) bool {
+    const m = &state.model;
+    const a = dvui.currentWindow().arena();
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = base + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.pen != rule.pen else false;
+        propName(label);
+        const pens = m.stroke_styles.items;
+        const names = a.alloc([]const u8, pens.len + 3) catch return false;
+        names[0] = "None";
+        var choice: usize = 0;
+        for (pens, names[1 .. pens.len + 1], 1..) |st, *nm, k| {
+            nm.* = st.name;
+            if (rule.pen == st.id) choice = k;
+        }
+        names[pens.len + 1] = "New solid pen";
+        names[pens.len + 2] = "New dashed pen";
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = base + n })) {
+            const black: layout.art.Color = .{ .r = 0, .g = 0, .b = 0 };
+            const pt = layout.units.mm_per_pt;
+            if (choice == 0) {
+                rule.pen = .none;
+            } else if (choice <= pens.len) {
+                rule.pen = pens[choice - 1].id;
+            } else if (choice == pens.len + 1) {
+                rule.pen = act(.addStrokeStyle, .{ "Rule", layout.figure.Stroke{ .color = black, .width = 0.5 * pt } }) catch return false;
+            } else {
+                rule.pen = act(.addStrokeStyle, .{ "Dashed rule", layout.figure.Stroke{ .color = black, .width = 0.5 * pt, .dash = &.{ 2, 1 } } }) catch return false;
+            }
+            changed = true;
+        }
+    }
+    if (!rule.on()) return changed;
+    var buf: [48]u8 = undefined;
+    {
+        prop_marked = if (ref) |r| !std.meta.eql(r.weight, rule.weight) else false;
+        const shown = if (rule.weight) |w| w.format(&buf) else "pen";
+        if (textProp(label ++ " weight", shown, base + 1 + n)) |typed| {
+            const t = std.mem.trim(u8, typed, " ");
+            if (std.ascii.eqlIgnoreCase(t, "pen") or std.ascii.eqlIgnoreCase(t, "auto")) {
+                rule.weight = null;
+                changed = true;
+            } else if (layout.units.Quantity.parse(t, .pt)) |q| {
+                if (q.needsReference() or q.value > 0) {
+                    rule.weight = q;
+                    changed = true;
+                } else state.status = "A rule's weight is more than nothing. ";
+            } else state.status = "Weight reads as 0.5pt, 0.2mm, +1pt, 200% or pen (the pen's own). ";
+        }
+    }
+    {
+        prop_marked = if (ref) |r| !std.meta.eql(r.offset, rule.offset) else false;
+        if (textProp(label ++ " offset", rule.offset.format(&buf), base + 2 + n)) |typed| {
+            if (layout.units.Quantity.parse(typed, .pt)) |q| {
+                rule.offset = q;
+                changed = true;
+            } else state.status = "Offset reads as 2pt, 1mm, -1pt or 50% (of the line pitch). ";
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = base + 3 + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.length != rule.length else false;
+        propName(label ++ " length");
+        const names = [_][]const u8{ "The column", "Between the indents", "Under the text" };
+        var choice: usize = @intFromEnum(rule.length);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = base + 3 + n })) {
+            rule.length = @enumFromInt(choice);
             changed = true;
         }
     }
@@ -19809,6 +20077,11 @@ fn styleRuleProperties(sid: layout.model.StyleId) !void {
     if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
     if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
     for (st.faces.items, 0..) |f, k| propText(faceItem("expression.style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
+    {
+        var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = 4540 });
+        defer box.deinit();
+        styleFeatureProps(sid);
+    }
     try styleRules(sid);
 }
 
@@ -19928,8 +20201,11 @@ fn styleFlowFrom(pi: Parent, ri: usize, tid: ?layout.model.ObjectId) !void {
     _ = try hist.join(m, .setFlowStyle, .{ fid, t.text, t.paragraph, @as(?layout.model.Leading, null), id });
 }
 
+/// A new text layout's flow: the styles of the template chosen in the
+/// Add tracks tool's options (the Default when none is, or it is gone).
 fn styleNewFlow(pi: Parent, ri: usize) !void {
-    try styleFlowFrom(pi, ri, null);
+    const tid = tracks_tool.template;
+    try styleFlowFrom(pi, ri, if (state.model.styleTemplate(tid) != null) tid else null);
 }
 
 /// The flow of track `ri` of panel `pi`, when it has a flow style.
@@ -20024,17 +20300,14 @@ fn templateProperties(id: layout.model.ObjectId) !void {
     if (m.styleIndex(t.text)) |si| propText("Text style", "{s}", .{m.styles.items[si].name}, 2);
     if (m.styleIndex(t.text) != null) try styleSizeProps(t.text, false);
     {
-        var buf: [48]u8 = undefined;
-        const shown = if (t.leading) |l| l.format(&buf) else "auto";
-        if (textProp("Leading", shown, 4)) |typed| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) });
-            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-                if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
-                    _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
-                } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the font's own). ";
-        }
+        if (leadingProp("Leading", t.leading, styleEmMm(t.text), 4)) |edit| switch (edit) {
+            .auto => _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) }),
+            .quantity => |l| if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
+                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
+            } else {
+                state.status = "That leading is too small: baselines must be apart. ";
+            },
+        };
     }
     if (t.paragraph) |pid| if (m.paraStyle(pid)) |p| {
         var ps = p.*;
@@ -20193,17 +20466,16 @@ fn flowStyleProperties(pi: Parent, ri: usize) !void {
     // Its leading, kept as typed; "auto" takes the template's.
     {
         const em = styleEmMm(fl.style);
-        var buf: [48]u8 = undefined;
-        const shown = if (m.flowLeading(fl)) |l| l.format(&buf) else "auto";
         prop_marked = o.leading;
-        if (textProp(asElement("track.leading"), shown, 3004)) |typed| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-                _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template });
-            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-                if ((l.resolve(em) orelse 0) > 0.01) {
+        if (leadingProp(asElement("track.leading"), m.flowLeading(fl), em, 3004)) |edit| {
+            switch (edit) {
+                .auto => _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template }),
+                .quantity => |l| if ((l.resolve(em) orelse 0) > 0.01) {
                     _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, l), fl.template });
-                } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the template's). ";
+                } else {
+                    state.status = "That leading is too small: baselines must be apart. ";
+                },
+            }
             return;
         }
         const region = m.regionsIn(pi)[ri];
@@ -20234,17 +20506,12 @@ fn leadingProps(pi: Parent, ri: usize) void {
     const sid = region.style orelse return;
     if (state.model.styleIndex(sid) == null) return;
     const em = styleEmMm(sid);
-    var buf: [48]u8 = undefined;
-    const shown = if (region.leading) |l| l.format(&buf) else "auto";
-    if (textProp(asElement("track.leading"), shown, 4)) |typed| {
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-            if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {};
-        } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-            act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
-                state.status = "That leading is too small: baselines must be apart. ";
-            };
-        } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the style's own). ";
-    }
+    if (leadingProp(asElement("track.leading"), region.leading, em, 4)) |edit| switch (edit) {
+        .auto => if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {},
+        .quantity => |l| act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
+            state.status = "That leading is too small: baselines must be apart. ";
+        },
+    };
     const pt = region.pitch / layout.model.mm_per_pt;
     const em_pt = em / layout.model.mm_per_pt;
     const extra = pt - em_pt;
@@ -20337,6 +20604,17 @@ fn duplicatePrototype(id: layout.model.PrototypeId) !void {
 
 /// An editable text property. Returns the new text once accepted (Enter,
 /// or leaving the field), not empty; the model copies it.
+/// A leading row: kept as typed, its unit in a pop-up beside it (see
+/// `accepted.quantityField`); "auto" for none of its own. `em` is the font
+/// size its relative values are of.
+fn leadingProp(name: []const u8, lead: ?layout.model.Leading, em: ?f64, n: usize) ?accepted.QuantityEdit {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    accepted.measure_id = accepted.current_id;
+    return accepted.quantityField(@src(), lead, .pt, em, .{ .expand = .horizontal, .id_extra = n });
+}
+
 fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
@@ -20349,6 +20627,7 @@ fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
 fn sizesProp(name: []const u8, shown: []const u8, n: usize) ?[]const f64 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     // Shown without the unit, as typed.
     const value = if (std.mem.eql(u8, shown, "any")) "" else std.mem.trimEnd(u8, shown, " u");
@@ -20697,7 +20976,51 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         propText(faceItem("style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
     keyButton(@src(), "Fonts… (every face, and searching the installed fonts)", 0, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } });
+    styleFeatureProps(sid);
     try styleRules(sid);
+}
+
+/// A style's value for `p`: its own rule for every object, else its
+/// base's, else glyphic's default; and whether it is its own.
+fn styleParam(sid: layout.model.StyleId, p: glyphic.Param) struct { value: glyphic.Value, own: bool } {
+    var at = sid;
+    var depth: usize = 0;
+    while (state.model.styleIndex(at)) |i| : (depth += 1) {
+        const st = state.model.styles.items[i];
+        for (st.rules.items) |r| if (r.kind == null and r.param == p) return .{ .value = r.value, .own = at == sid };
+        if (st.base == .none or depth > 32) break;
+        at = st.base;
+    }
+    return .{ .value = glyphic.param.def(p).default, .own = false };
+}
+
+/// A text style's OpenType features: ligatures on or off (off unless set),
+/// and any others by tag. Each is a rule of the style, for every object.
+fn styleFeatureProps(sid: layout.model.StyleId) void {
+    const saved_group = pushGroup("typography");
+    defer popGroup(saved_group);
+    heading("Typography", .{}, 40);
+    {
+        const lig = styleParam(sid, .ligatures);
+        var on = lig.value.flag;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 41 });
+        defer row.deinit();
+        if (tcheckbox(@src(), &on, "Ligatures", .{ .id_extra = 41 })) {
+            act(.setStyleRule, .{ sid, @as(?glyphic.Kind, null), glyphic.Param.ligatures, @as(?glyphic.Value, .{ .flag = on }) }) catch {};
+        }
+    }
+    {
+        const ft = styleParam(sid, .features);
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 42 });
+        defer row.deinit();
+        propName("OpenType features");
+        var te = dvui.textEntry(@src(), .{ .text_initial = ft.value.name, .placeholder = "smcp onum ss01 -kern" }, .{ .expand = .horizontal, .id_extra = 42, .font = styled(.theme(.body), !ft.own) });
+        defer te.deinit();
+        if (accepted.accept(te, ft.value.name)) |typed| {
+            const t = std.mem.trim(u8, typed, " ");
+            act(.setStyleRule, .{ sid, @as(?glyphic.Kind, null), glyphic.Param.features, @as(?glyphic.Value, if (t.len == 0) null else .{ .name = t }) }) catch {};
+        }
+    }
 }
 
 /// Edits how an art layer is painted: its fill's colours (one, or a
@@ -20797,6 +21120,7 @@ fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
 fn colourEntry(name: []const u8, colour: ?layout.art.Color, allow_none: bool, n: usize) ??layout.art.Color {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     var swatch = dvui.box(@src(), .{}, .{
         .min_size_content = .{ .w = 16, .h = 16 },
@@ -20868,6 +21192,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
     }
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     var picked = choice.?;
     if (tdropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
@@ -21235,6 +21560,23 @@ var text_drag = false;
 /// drag from here selecting). With `extend` (Shift), the selection runs
 /// from the cursor that was to here, in the same flow. Whether it was one.
 fn textPress(at: geom.Point, extend: bool) bool {
+    // In an expression edited on the canvas: inside its text, the caret
+    // there (with Shift, the selection to there), a drag selecting on.
+    if (canvas_eq != null) if (hoverTargetAt(at)) |h| switch (h) {
+        .eq_caret => |x| {
+            if (extend) eqExtend(x.offset) else {
+                canvas_eq_seq += 1;
+                eqMove(x.offset, null);
+            }
+            text_drag = true;
+            eq_drag = true;
+            last_click = null;
+            return true;
+        },
+        // Near an object's box: the object chosen (hoverPress).
+        .eq_object => return false,
+        else => {},
+    };
     // The innermost text first: a slot's text in a tile (a sort in this
     // flow, or a key anywhere) edited where pressed. While an expression
     // is edited, its own objects and caret places come first (hoverPress).
@@ -21270,10 +21612,19 @@ fn textPress(at: geom.Point, extend: bool) bool {
     return true;
 }
 var text_drag_parent: Parent = .{ .space = 0 };
+/// The text drag is in an expression edited on the canvas.
+var eq_drag = false;
 
 /// The pointer at `at` in a text drag: the cursor follows it, the anchor
 /// staying where the drag began.
 fn textDragTo(at: geom.Point) void {
+    if (eq_drag) {
+        if (canvas_eq != null) if (hoverTargetAt(at)) |h| switch (h) {
+            .eq_caret => |x| if (x.offset != canvas_eq.?.offset) eqExtend(x.offset),
+            else => {},
+        };
+        return;
+    }
     const c = track_cursor orelse return;
     const pos = flowPlaceAt(text_drag_parent, .{ .parent = c.parent, .region = c.region }, at, true) orelse return;
     if (pos.index == c.index and pos.offset == c.offset) return;
@@ -21337,14 +21688,23 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
                     lst.append(al, s0) catch {};
                 }
             }.f;
+            // Its characters (grapheme clusters: a letter and its accents
+            // are one), for text: no stop inside one, and one at each
+            // start, inside a ligature too.
+            const cs: []const layout.edit.Char = if (items[r.item].what.run.equation) &.{} else layout.edit.chars(a, content, false) catch &.{};
             for (l.render.items) |ri| switch (ri) {
                 .glyph => |g| {
                     if (g.source < r.from or g.source >= r.from + r.len) continue;
+                    if (insideChar(cs, g.source)) continue;
                     add(&list, a, r.item, g.source, content.len, pi, t.track, l.origin.x + g.transform.e - t.box.x0);
                 },
                 else => {},
             };
             const piece_end = r.from + r.len;
+            for (cs) |ch| {
+                if (ch.start < r.from or ch.start >= piece_end) continue;
+                if (l.render.caret(ch.start)) |cr| add(&list, a, r.item, ch.start, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
+            }
             if (l.render.caret(piece_end)) |cr| add(&list, a, r.item, piece_end, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
             // An equation's anchor points, where Tab puts the cursor (an
             // empty slot has no glyph to stop at).
@@ -21375,6 +21735,16 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
         w += 1;
     }
     return list.items[0..w];
+}
+
+/// Whether source byte `at` falls inside one of characters `cs`, past its
+/// start (an accent on its letter).
+fn insideChar(cs: []const layout.edit.Char, at: u32) bool {
+    for (cs) |c| {
+        if (c.start < at and at < c.end) return true;
+        if (c.start >= at) break;
+    }
+    return false;
 }
 
 /// The placed segment of the flow of track `fr` of panel `fp` on panel
@@ -22405,6 +22775,10 @@ const CanvasEq = struct {
     /// start at the same byte: d² and d).
     head: ?u32 = null,
     head_end: ?u32 = null,
+    /// The selection's other end, while there is one: what lies between
+    /// it and the caret is selected (Shift with the caret keys, a drag,
+    /// Shift+click).
+    anchor: ?u32 = null,
 };
 
 var canvas_eq: ?CanvasEq = null;
@@ -22513,7 +22887,115 @@ fn eqMove(offset: u32, head: ?u32) void {
     canvas_eq.?.offset = offset;
     canvas_eq.?.head = head;
     canvas_eq.?.head_end = null;
+    canvas_eq.?.anchor = null;
     expr_inspect = .{ .key = canvas_eq.?.target.key(), .offset = offset };
+}
+
+/// Moves the caret to `offset`, extending the selection (its anchor where
+/// the caret was, when there was none).
+fn eqExtend(offset: u32) void {
+    const q = canvas_eq orelse return;
+    const anchor = q.anchor orelse q.offset;
+    eqMove(offset, null);
+    if (anchor != offset) canvas_eq.?.anchor = anchor;
+}
+
+/// The selection in `q`'s source, [start, end), when there is one.
+fn eqSelection(q: CanvasEq) ?[2]u32 {
+    const an = q.anchor orelse return null;
+    if (q.head != null or an == q.offset) return null;
+    return .{ @min(an, q.offset), @max(an, q.offset) };
+}
+
+/// `src` without selection `sel`: the objects wholly inside it go with
+/// their source (a fraction, its braces and all), and of what is left in
+/// it, the characters (a structure partly selected keeps its command and
+/// braces, as Backspace leaves them). Allocated from `a`.
+fn eqDeleteRange(a: std.mem.Allocator, src: []const u8, sel: [2]u32, math: bool) ?[]u8 {
+    var cut: std.ArrayList([2]u32) = .empty;
+    if (eqParse(a, src, math)) |p| {
+        // Outermost first: eqStops puts what holds others before them.
+        for (eqStops(a, &p)) |x| {
+            if (x.field or x.start < sel[0] or x.end > sel[1] or x.start == x.end) continue;
+            const inside = for (cut.items) |c| {
+                if (x.start >= c[0] and x.end <= c[1]) break true;
+            } else false;
+            if (!inside) cut.append(a, .{ x.start, x.end }) catch return null;
+        }
+    }
+    for (layout.edit.chars(a, src, math) catch return null) |c| {
+        if (c.start < sel[0] or c.start >= sel[1]) continue;
+        const inside = for (cut.items) |k| {
+            if (c.start >= k[0] and c.start < k[1]) break true;
+        } else false;
+        if (!inside) cut.append(a, .{ c.start, c.end }) catch return null;
+    }
+    std.mem.sort([2]u32, cut.items, {}, struct {
+        fn lt(_: void, x: [2]u32, y: [2]u32) bool {
+            return x[0] < y[0];
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    var at: u32 = 0;
+    for (cut.items) |c| {
+        if (c[0] < at) {
+            at = @max(at, c[1]);
+            continue;
+        }
+        out.appendSlice(a, src[at..c[0]]) catch return null;
+        at = c[1];
+    }
+    out.appendSlice(a, src[@min(at, src.len)..]) catch return null;
+    return out.items;
+}
+
+/// Deletes the selection, the caret where it began. Whether there was one.
+fn eqDeleteSelection() bool {
+    const q = canvas_eq orelse return false;
+    const sel = eqSelection(q) orelse return false;
+    const src = eqContent(q) orelse return false;
+    const next = eqDeleteRange(dvui.currentWindow().arena(), src, sel, q.math) orelse return false;
+    eqStore(q, next);
+    eqMove(sel[0], null);
+    return true;
+}
+
+/// Whether `s`'s braces pair up (none left open or closed too soon).
+fn bracesBalanced(s: []const u8) bool {
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) switch (s[i]) {
+        '\\' => i += 1,
+        '{' => depth += 1,
+        '}' => {
+            depth -= 1;
+            if (depth < 0) return false;
+        },
+        else => {},
+    };
+    return depth == 0;
+}
+
+/// Copies the selection (with `cut`, deletes it too): its source, as
+/// typed, when that stands on its own (its braces pair up); else what its
+/// characters read as.
+fn eqCopy(cut: bool) void {
+    const q = canvas_eq orelse return;
+    const sel = eqSelection(q) orelse return;
+    const src = eqContent(q) orelse return;
+    const a = dvui.currentWindow().arena();
+    const piece = src[sel[0]..sel[1]];
+    if (bracesBalanced(piece)) {
+        dvui.clipboardTextSet(piece);
+    } else {
+        var out: std.ArrayList(u8) = .empty;
+        layout.edit.plainText(a, src, sel[0], sel[1], q.math, &out) catch return;
+        dvui.clipboardTextSet(out.items);
+    }
+    if (cut) {
+        canvas_eq_seq += 1;
+        _ = eqDeleteSelection();
+    }
 }
 
 /// Every place in `src` the caret can stop, in order: its ends, each
@@ -22578,7 +23060,7 @@ fn enterEquation() void {
             canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
             canvas_eq_seq += 1;
             eqMove(at.offset, null);
-            state.status = "Inline math: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+            state.status = "Inline math: type into it; Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
             return;
         }
     }
@@ -22595,7 +23077,7 @@ fn enterEquation() void {
     canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = item } }, .math = true, .offset = offset };
     canvas_eq_seq += 1;
     eqMove(offset, null);
-    state.status = "Equation: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+    state.status = "Equation: type into it; Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
 }
 
 /// Ctrl+\ on a selected tile: its track's text (the expression line's
@@ -22610,7 +23092,7 @@ fn enterTileTrack(id: TileId) void {
     };
     canvas_eq_seq += 1;
     eqMove(@intCast(src.len), null);
-    state.status = "Tile text: type into it ($ starts math); Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+    state.status = "Tile text: type into it ($ starts math); Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
 }
 
 /// Leaves the equation: one with nothing in it goes; the flow cursor goes
@@ -22659,6 +23141,11 @@ fn leaveCanvasEquation() void {
 
 /// Text typed into the equation (or, on a head, a head's key).
 fn eqType(txt: []const u8) void {
+    if (canvas_eq) |q0| if (eqSelection(q0) != null) {
+        // Over a selection: it goes, the typing in its place (one undo
+        // step with it).
+        if (!eqDeleteSelection()) return;
+    };
     const q = canvas_eq orelse return;
     const src = eqContent(q) orelse {
         canvas_eq = null;
@@ -22796,6 +23283,10 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
         eqMove(o.at + o.caret, null);
         return;
     }
+    if (ch == 'l') {
+        eqLimits(a, src, &p, id);
+        return;
+    }
     switch (ch) {
         '=', '+' => p.e.set(id, .scale, glyphic.param.num(num.round(@min(10, num.f(&p.e, id, .scale) * 1.1)))) catch {},
         '-' => p.e.set(id, .scale, glyphic.param.num(num.round(@max(0.1, num.f(&p.e, id, .scale) / 1.1)))) catch {},
@@ -22835,6 +23326,73 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
     eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
 }
 
+/// L on a large operator's head: its limits round the three ways, auto
+/// (above and below in display style, beside in text), above and below
+/// (`\limits`), beside (`\nolimits`), written after its symbol as LaTeX
+/// has them. The head stays chosen.
+fn eqLimits(a: std.mem.Allocator, src: []const u8, p: *const EqParse, id: glyphic.Id) void {
+    const q = canvas_eq orelse return;
+    const head = q.head orelse return;
+    if (p.e.node(id).kind != .large_op) {
+        state.status = "Only a large operator (Σ, ∏, ∫ …) has limits to place. ";
+        return;
+    }
+    const sp = p.spans.get(id);
+    // Its symbol: past a call wrapped round it, a command or a character.
+    var i: usize = sp.start;
+    if (std.mem.startsWith(u8, src[i..sp.end], "\\set(")) {
+        var quoted = false;
+        i += "\\set(".len;
+        while (i < sp.end and (quoted or src[i] != ')')) : (i += 1) {
+            if (src[i] == '"') quoted = !quoted;
+        }
+        i += 1;
+        if (i < sp.end and src[i] == '{') i += 1;
+    }
+    if (i >= sp.end) return;
+    if (src[i] == '\\') {
+        i += 1;
+        while (i < sp.end and std.ascii.isAlphabetic(src[i])) i += 1;
+    } else i += std.unicode.utf8ByteSequenceLength(src[i]) catch 1;
+    const sym_end = i;
+    // What it says now, and where that is written.
+    var j = sym_end;
+    while (j < sp.end and src[j] == ' ') j += 1;
+    const word = struct {
+        fn at(s: []const u8, k: usize, w: []const u8) bool {
+            return std.mem.startsWith(u8, s[k..], w) and (k + w.len >= s.len or !std.ascii.isAlphabetic(s[k + w.len]));
+        }
+    };
+    var now: glyphic.param.Limits = .auto;
+    var old_end = sym_end;
+    if (word.at(src, j, "\\limits")) {
+        now = .stacked;
+        old_end = j + "\\limits".len;
+    } else if (word.at(src, j, "\\nolimits")) {
+        now = .side;
+        old_end = j + "\\nolimits".len;
+    }
+    const next_mode: glyphic.param.Limits = switch (now) {
+        .auto => .stacked,
+        .stacked => .side,
+        .side => .auto,
+    };
+    const text: []const u8 = switch (next_mode) {
+        .auto => "",
+        .stacked => "\\limits",
+        .side => "\\nolimits",
+    };
+    const next = std.mem.concat(a, u8, &.{ src[0..sym_end], text, src[old_end..] }) catch return;
+    eqStore(q, next);
+    state.status = switch (next_mode) {
+        .auto => "Limits: automatic (above and below in display style, beside in text). ",
+        .stacked => "Limits: above and below. ",
+        .side => "Limits: beside. ",
+    };
+    const grown: i64 = @as(i64, @intCast(next.len)) - @as(i64, @intCast(src.len));
+    eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
+}
+
 /// A key while editing an equation on the canvas; whether it was one.
 /// An action of mode `canvas.equation` (or, on a head,
 /// `canvas.equation.head`); whether it was done.
@@ -22852,6 +23410,7 @@ fn eqAction(inv: keymap.Invocation) bool {
         .{ .name = "turn-left", .ch = '[' },  .{ .name = "turn-right", .ch = ']' },
         .{ .name = "reset", .ch = '0' },      .{ .name = "slot-index", .ch = 'i' },
         .{ .name = "slot-upper", .ch = 'u' }, .{ .name = "slot-lower", .ch = 'b' },
+        .{ .name = "limits", .ch = 'l' },
     };
     inline for (head_chars) |hc| if (inv.action == kact("canvas.equation.head." ++ hc.name)) {
         if (q.head == null) return false;
@@ -22917,13 +23476,44 @@ fn eqAction(inv: keymap.Invocation) bool {
             eqMove(off, if (to == .head) off else null);
             return true;
         },
-        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end") => {
+        kact("canvas.equation.select.all") => {
+            canvas_eq_seq += 1;
+            eqMove(@intCast(src.len), null);
+            if (src.len > 0) canvas_eq.?.anchor = 0;
+            return true;
+        },
+        kact("canvas.equation.copy"), kact("canvas.equation.cut") => {
+            eqCopy(inv.action == kact("canvas.equation.cut"));
+            return true;
+        },
+        kact("canvas.equation.paste") => {
+            const text = dvui.clipboardText();
+            // One line: a break in what is pasted ends it.
+            const line = text[0 .. std.mem.indexOfAny(u8, text, "\r\n") orelse text.len];
+            canvas_eq_seq += 1;
+            if (line.len > 0) eqType(line);
+            return true;
+        },
+        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end"), kact("canvas.equation.select.left"), kact("canvas.equation.select.right"), kact("canvas.equation.select.start"), kact("canvas.equation.select.end") => {
             const places = eqPlaces(a, src, q.math);
+            const select = switch (inv.action) {
+                kact("canvas.equation.select.left"), kact("canvas.equation.select.right"), kact("canvas.equation.select.start"), kact("canvas.equation.select.end") => true,
+                else => false,
+            };
+            // Left or Right with a selection: the caret to its edge.
+            if (!select) if (eqSelection(q)) |sel| switch (inv.action) {
+                kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right") => {
+                    canvas_eq_seq += 1;
+                    eqMove(if (inv.action == kact("canvas.equation.caret.left")) sel[0] else sel[1], null);
+                    return true;
+                },
+                else => {},
+            };
             var to = q.offset;
             switch (inv.action) {
-                kact("canvas.equation.caret.start") => to = 0,
-                kact("canvas.equation.caret.end") => to = @intCast(src.len),
-                kact("canvas.equation.caret.left") => {
+                kact("canvas.equation.caret.start"), kact("canvas.equation.select.start") => to = 0,
+                kact("canvas.equation.caret.end"), kact("canvas.equation.select.end") => to = @intCast(src.len),
+                kact("canvas.equation.caret.left"), kact("canvas.equation.select.left") => {
                     var i = places.len;
                     while (i > 0) : (i -= 1) if (places[i - 1] < q.offset) {
                         to = places[i - 1];
@@ -22936,7 +23526,7 @@ fn eqAction(inv: keymap.Invocation) bool {
                 },
             }
             canvas_eq_seq += 1;
-            eqMove(to, null);
+            if (select) eqExtend(to) else eqMove(to, null);
             return true;
         },
         kact("canvas.equation.delete-back"), kact("canvas.equation.delete-forward") => {
@@ -22945,6 +23535,7 @@ fn eqAction(inv: keymap.Invocation) bool {
                 eqMove(q.offset, null);
                 return true;
             }
+            if (eqDeleteSelection()) return true;
             const cs = layout.edit.chars(a, src, q.math) catch return true;
             var hit: ?layout.edit.Char = null;
             if (backspace) {
@@ -23153,6 +23744,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabe
             if (changed) dvui.refresh(null, @src(), null);
         }
     }
+    if (eqSelection(q)) |sel| drawEqSelection(area, r, piece, sel, at);
     if (q.head != null) return;
     if (q.offset < piece.base) return;
     const local = q.offset - piece.base;
@@ -23162,6 +23754,55 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabe
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     markCaret(p0, p1);
     speckleCaret(p0, p1);
+}
+
+/// The selection in an expression edited on the canvas, over what piece
+/// `piece` (render `r`, drawn at `at`) draws: each object wholly inside it
+/// (the outermost), and a leaf partly inside it (some of a word's
+/// letters) from caret to caret.
+fn drawEqSelection(area: dvui.Rect.Physical, r: *const layout.render.Render, piece: EqPiece, sel: [2]u32, at: geom.Point) void {
+    if (sel[1] <= piece.base) return;
+    const lo = if (sel[0] > piece.base) sel[0] - piece.base else 0;
+    const hi = sel[1] - piece.base;
+    const tint = colors.select.opacity(0.28);
+    const a = dvui.currentWindow().arena();
+    var whole: std.ArrayList([2]u32) = .empty;
+    // Outermost objects first, so their parts are not drawn twice.
+    var order: std.ArrayList(usize) = .empty;
+    for (r.boxes, 0..) |b, k| if (b.kind != .field) order.append(a, k) catch return;
+    std.mem.sort(usize, order.items, r, struct {
+        fn lt(rr: *const layout.render.Render, x: usize, y: usize) bool {
+            return rr.boxes[x].nest < rr.boxes[y].nest;
+        }
+    }.lt);
+    for (order.items) |k| {
+        const b = r.boxes[k];
+        const inside = for (whole.items) |w| {
+            if (b.start >= w[0] and b.end <= w[1]) break true;
+        } else false;
+        if (inside) continue;
+        if (b.start >= lo and b.end <= hi and b.start < b.end) {
+            whole.append(a, .{ b.start, b.end }) catch return;
+            fillQuad(area, b.corners, at, tint);
+            continue;
+        }
+        // A leaf partly selected: between the carets at the selection's
+        // ends within its characters.
+        if (b.kind != .leaf or b.inner_end <= lo or b.inner_start >= hi) continue;
+        const c0 = caretAt(r, @max(lo, b.inner_start)) orelse continue;
+        const c1 = caretAt(r, @min(hi, b.inner_end)) orelse continue;
+        const bb = boxBounds(b);
+        const x0 = @min(c0.x, c1.x);
+        const x1 = @max(c0.x, c1.x);
+        if (x1 <= x0) continue;
+        fillQuad(area, .{ .{ .x = x0, .y = bb.y0 }, .{ .x = x1, .y = bb.y0 }, .{ .x = x1, .y = bb.y1 }, .{ .x = x0, .y = bb.y1 } }, at, tint);
+    }
+}
+
+fn fillQuad(area: dvui.Rect.Physical, c: [4]geom.Point, at: geom.Point, colour: dvui.Color) void {
+    var pts: [4]dvui.Point.Physical = undefined;
+    for (c, &pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+    dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
 }
 
 // Pointing (decided 2026-11-20): near a container's outline the
@@ -26708,6 +27349,7 @@ fn constrainPromptWindow() void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         var nb: [32]u8 = undefined;
+        prop_plain = true;
         propName(std.fmt.bufPrint(&nb, "Value, {s}", .{docUnits().symbol()}) catch "Value");
         var twd: dvui.WidgetData = undefined;
         const te = dvui.textEntryNumber(@src(), f64, .{ .value = &pr.value, .min = 0, .max = 100000 }, .{ .expand = .horizontal, .data_out = &twd });
@@ -27879,6 +28521,11 @@ fn loadSketchPanelSample() void {
     } else |_| {}
     _ = act(.setInk, .{ index, ring, true }) catch {};
     _ = act(.setFill, .{ index, @as([]const u32, &.{hole}), true, true }) catch {};
+    // GRAVEN_SAMPLE=sketch-fab: the ring filled red round the hole.
+    if (sample_fab) if (act(.addFillStyle, .{layout.model.FillStyle{ .name = "Red", .color = .hex("#d03030"), .pattern = .solid }})) |id| {
+        _ = act(.setCurrentFill, .{id}) catch {};
+        _ = act(.setFill, .{ index, @as([]const u32, &.{ring}), false, true }) catch {};
+    } else |_| {};
     const style = labelStyle() catch return;
     // A caption on the ring, made in the sketch's own space: the panel
     // shows it too.
@@ -27912,6 +28559,16 @@ fn loadSketchPanelSample() void {
     const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / pitch, .pitch = pitch }) catch return;
     state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "Text on a panel cut from a sketch flows round its ink." }) catch {};
     state.context = .{ .panel = pi };
+    // GRAVEN_SAMPLE=sketch-fab: made as a plate, its fills and then its
+    // ink (over them, as drawn) inlaid in their colours, its hole cut
+    // through.
+    if (sample_fab) _ = act(.setPanelFab, .{ pi, layout.model.Fab{ .thickness = 2, .layers = &.{
+        .{ .name = "Plate", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = 2, .op = .{ .add = .{ .name = "white", .color = .hex("#f2f2f2") } } },
+        .{ .name = "Hole", .source = .cutouts, .op = .subtract },
+        .{ .name = "Fills", .source = .{ .fills = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "red", .color = .hex("#d03030") } } },
+        .{ .name = "Ink", .source = .{ .ink = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#1e1e1e") } } },
+        .{ .name = "Text", .source = .{ .text = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#1e1e1e") } } },
+    } } }) catch {};
     // GRAVEN_SAMPLE=sketch-texts: its caption's text from a text sheet,
     // German shown, the sheet open beside the canvas.
     if (sample_texts) if (act(.makeTextSheet, .{ "Texts", @as([]const []const u8, &.{ "de", "fr" }) })) |id| {
@@ -31137,6 +31794,7 @@ fn skStepFields() void {
         if (k == 3 and !from_prev and !arc_end) continue;
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = k });
         defer row.deinit();
+        prop_plain = true;
         propName(labels[k]);
         const live = std.fmt.bufPrint(&sk_step_text[k], "{d:.2}", .{vals[k]}) catch "";
         // Typed values are drawn bold: they hold until the step is placed.
@@ -31806,6 +32464,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         for ([_][]const u8{ "Preview width, u", "Preview height, u" }, 0..) |label, k| {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8405 + k * 10 });
             defer row.deinit();
+            prop_plain = true;
             propName(label);
             _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_preview[k], .min = 0.25, .max = 20 }, .{ .expand = .horizontal });
         }

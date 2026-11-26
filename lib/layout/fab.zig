@@ -190,12 +190,28 @@ fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const plac
         .parts => for (placed.tiles) |t| if (t.grid == .part) {
             if (largest(t.shapes)) |sh| try out.append(a, sh.outline);
         },
-        .text => |track| for (placed.labels) |l| {
-            if (!takes(m, track, l)) continue;
-            const glyphs = try l.render.outlines(a, faces);
-            for (glyphs) |g| {
-                if (g.contours.len == 0) continue;
-                try out.append(a, try g.transformed(a, .translate(l.origin.x, l.origin.y)));
+        .text => |track| {
+            for (placed.labels) |l| {
+                if (!takes(m, track, l)) continue;
+                const glyphs = try l.render.outlines(a, faces);
+                for (glyphs) |g| {
+                    if (g.contours.len == 0) continue;
+                    try out.append(a, try g.transformed(a, .translate(l.origin.x, l.origin.y)));
+                }
+            }
+            // Paragraph rules are the text's ink too (not a tile track's).
+            if (track.len == 0) for (placed.rules) |r| for (r.shapes) |sh| try out.append(a, sh.outline);
+        },
+        .ink, .fills => |name| {
+            const list = m.panels.items[panel].art.items;
+            for (placed.art) |pa| {
+                if (pa.cutout or pa.index >= list.len) continue;
+                if (name.len > 0 and !std.mem.eql(u8, list[pa.index].name, name)) continue;
+                for (pa.shapes) |sh| {
+                    const ink = try art.inkRegions(a, sh, model.figure_tolerance);
+                    const take = if (src == .ink) [2]?geom.Outline{ ink.stroke, ink.edge } else [2]?geom.Outline{ ink.fill, null };
+                    for (take) |o| if (o) |x| try out.append(a, x);
+                }
             }
         },
     }
@@ -302,4 +318,64 @@ test "a plate's stack: base, holes through, an inlaid legend; heights from its s
     try testing.expectEqualStrings("gold", sl[1].regions[1].colour.name);
     try testing.expect(gold_area > 1);
     try testing.expectApproxEqAbs(solid, black + gold_area, 1e-6);
+}
+
+test "line art's ink and fills are sources: edges stroked exactly, fills as filled" {
+    const gpa = testing.allocator;
+    var m: model.Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const plate = try m.placePanel(.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 40, .h = 20 });
+    var shape_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer shape_arena.deinit();
+    const square = try art.primitive(shape_arena.allocator(), "square", .{ .rect = .{ .w = 10, .h = 10 } }, .{});
+    const patch = try art.primitive(shape_arena.allocator(), "patch", .{ .rect = .{ .w = 10, .h = 5 } }, .{});
+    // A square drawn with a 0.5 mm pen, a patch filled red.
+    const shapes = [_]art.Shape{
+        .{ .name = "square", .outline = square[0].outline, .paint = .{ .edge = .hex("#000000"), .edge_width = 0.5 } },
+        .{ .name = "patch", .outline = patch[0].outline, .paint = .{ .fill = .{ .solid = .hex("#ff0000") } } },
+    };
+    _ = try m.addArt(plate, .{ .name = "Drawing", .at = .{ .x = 5, .y = 5 }, .shapes = &shapes, .wrap = .none });
+    const red: model.FabColour = .{ .name = "red", .color = .hex("#ff0000") };
+    try m.setPanelFab(plate, .{ .thickness = 2, .layers = &.{
+        .{ .name = "Base", .source = .edge, .op = .{ .add = .{ .name = "white", .color = .hex("#ffffff") } } },
+        .{ .name = "Ink", .source = .{ .ink = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#000000") } } },
+        .{ .name = "Fills", .source = .{ .fills = "Drawing" }, .depth = 0.4, .op = .{ .inlay = red } },
+        .{ .name = "None", .source = .{ .fills = "Other" }, .depth = 0.4, .op = .{ .inlay = red } },
+    } });
+    var labels: place.Labels = .init(gpa, &.{});
+    defer labels.deinit();
+    var placed = try place.solve(gpa, &m, .{ .panel = plate }, &labels);
+    defer placed.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const p = try plan(arena.allocator(), &m, plate, &placed, &.{});
+    // Base; the ink's cut and fill; the fills' cut and fill; none named Other.
+    try testing.expectEqual(@as(usize, 5), p.steps.len);
+    // The square's pen: 10.5² less 9.5² (mitred corners).
+    const ink = p.steps[2];
+    try testing.expectEqualStrings("black", ink.op.add.name);
+    try testing.expectEqual(@as(usize, 1), ink.pieces.len);
+    var ink_area: f64 = 0;
+    for (ink.pieces[0].contours) |c| ink_area += (geom.Outline{ .contours = &.{c} }).signedArea();
+    try testing.expectApproxEqAbs(@as(f64, 20), @abs(ink_area), 1e-6);
+    const ib = ink.pieces[0].bounds();
+    try testing.expectApproxEqAbs(@as(f64, 4.75), ib.x0, 1e-9);
+    // The patch: its own region, red.
+    const fl = p.steps[4];
+    try testing.expectEqualStrings("red", fl.op.add.name);
+    try testing.expectApproxEqAbs(@as(f64, 50), @abs(fl.pieces[0].signedArea()), 1e-9);
+}
+
+test "a drawing's ink is stroked, so it is ink and not fill" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const figure = @import("figure.zig");
+    const segs = [_]geom.Segment{.{ .line = .{ .{ .x = 0, .y = 0 }, .{ .x = 10, .y = 0 } } }};
+    const f: figure.Figure = .{ .name = "L", .paths = &.{.{ .subpaths = &.{.{ .segments = &segs }}, .stroke = .{ .color = .hex("#000000"), .width = 1 } }} };
+    const shapes = try figure.ink(a, f, 1e-3);
+    const ink = try art.inkRegions(a, shapes[0], 1e-3);
+    try testing.expect(ink.fill == null and ink.edge == null);
+    try testing.expectApproxEqAbs(@as(f64, 10), @abs(ink.stroke.?.signedArea()), 1e-9);
 }
