@@ -28,6 +28,7 @@ const icons = @import("icons.zig");
 const iconfile = @import("iconfile.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
+const screen_profile = @import("screen_profile.zig");
 const canvas_theme = @import("canvas_theme.zig");
 const spark = @import("cursor.zig");
 const layouts = @import("layouts.zig");
@@ -186,13 +187,19 @@ pub const testing_api = struct {
         return tab_add_leaf != null;
     }
     /// The dropdown in the row tagged `tag` takes entry `label` next frame.
+    /// A measurement's unit pop-up ("panel.width:unit") takes the unit
+    /// written `label` ("in").
     pub fn choose(tag: []const u8, label: []const u8) void {
+        if (std.mem.endsWith(u8, tag, ":unit")) {
+            if (!accepted.setScriptedUnit(tag[0 .. tag.len - 5], label)) test_choice = .{ .tag = tag, .label = label };
+            return;
+        }
         test_choice = .{ .tag = tag, .label = label };
     }
     /// Whether a choice asked for is still waiting (its row not drawn, or
     /// no such entry).
     pub fn choicePending() bool {
-        return test_choice != null;
+        return test_choice != null or accepted.script_unit != null;
     }
     /// Canvas point `p` (mm) on the screen (physical pixels), while the
     /// canvas is shown.
@@ -399,11 +406,28 @@ pub const testing_api = struct {
     }
     /// Adds the text sample (a track of three rows, two holding content)
     /// on the shown canvas, as GRAVEN_SAMPLE=text does; where it starts.
+    /// The paragraph rules placed in the parent shown.
+    pub fn placedRules() usize {
+        const p = shownParent() orelse return 0;
+        return if (placedOf(p)) |pl| pl.rules.len else 0;
+    }
     pub fn loadTextSample() !geom.Point {
         return loadText();
     }
     /// The columns sample (GRAVEN_SAMPLE=columns): three text columns in
     /// a panel and two construction lines, constrained or not.
+    /// The sketch panel sample made as a plate (GRAVEN_SAMPLE=sketch-fab):
+    /// its ring's ink, a solid fill round its hole, and fabrication layers
+    /// taking them; the panel's index.
+    pub fn loadSketchFab() ?usize {
+        sample_fab = true;
+        defer sample_fab = false;
+        loadSketchPanelSample();
+        return switch (state.context) {
+            .panel => |pi| pi,
+            else => null,
+        };
+    }
     pub fn loadColumns(constrained: bool) !void {
         return loadColumnsSampleWith(constrained);
     }
@@ -735,6 +759,9 @@ var tracks_tool: struct {
     /// A region (rows or columns added as content needs them) or one
     /// track laid out in advance, running the way it is drawn.
     kind: layout.model.TileRegion.Kind = .region,
+    /// The style template a new text layout's flow starts from (`.none`,
+    /// or one since removed: the Default).
+    template: layout.model.ObjectId = .none,
 } = .{};
 
 /// What new tracks are sized to: a tile prototype's smallest tile, or a
@@ -1094,7 +1121,12 @@ fn init(win: *dvui.Window) !void {
     }
     state.font_choice = defaultFont(state.fonts);
     loadPrefs();
-    // The display correction the config (or GRAVEN_DISPLAY) sets.
+    // The screen's colour profile, then the display correction the config
+    // (or GRAVEN_DISPLAY) sets.
+    if (dvui.backend.kind == .sdl3) {
+        screen_profile.load(win.backend.impl.window);
+        screen_profile.startWatching();
+    }
     applyDesktop(win, desk);
     // This version's news for the start screen: the cache at once, a
     // fetch (at most daily) on a thread of its own.
@@ -1353,6 +1385,7 @@ fn startPaneOptions(id: usize, r: dvui.Rect) dvui.Options {
 
 /// View › Display correction… (or D on the start screen) is open.
 var display_window = false;
+var display_window_shown = false;
 
 /// The display correction window: midtones (gamma) and the brightest the
 /// interface gets (white), live, with a gauge to judge them by. Esc or
@@ -1360,12 +1393,20 @@ var display_window = false;
 fn displayWindow() void {
     const saved_group = pushGroup("dialog.display");
     defer popGroup(saved_group);
-    if (!display_window) return;
+    if (!display_window) {
+        display_window_shown = false;
+        return;
+    }
+    // The profile files on this machine, looked for as it opens.
+    if (!display_window_shown) {
+        display_window_shown = true;
+        findScreenProfiles();
+    }
     const win = dvui.currentWindow();
     const ws = win.rect_pixels;
     const ns = dvui.windowNaturalScale();
-    const w: f32 = 440;
-    const h: f32 = 340;
+    const w: f32 = 480;
+    const h: f32 = 430;
     var r: dvui.Rect = .{ .x = (ws.w / ns - w) / 2, .y = (ws.h / ns - h) / 2, .w = w, .h = h };
     // Opaque: the gauge is judged against nothing showing through.
     var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(14).override(.{ .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } }));
@@ -1376,7 +1417,7 @@ fn displayWindow() void {
     const ink = dvui.themeGet().color(.window, .text);
     {
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 4, .h = 8 } });
-        tl.addText("For a screen that shows Graven too bright or washed out. Midtones above 1 darken greys and deepen colour; Brightest lowers white. Kept for this machine; exports are not affected.", .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.75) } });
+        tl.addText("For a screen that shows Graven too bright or washed out. The screen's colour profile converts every colour first; Midtones above 1 then darken greys and deepen colour, and Brightest lowers white. Kept for this machine; exports are not affected.", .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.75) } });
         tl.deinit();
     }
     var close = false;
@@ -1388,6 +1429,7 @@ fn displayWindow() void {
     }
     var dc = display.get();
     const before = dc;
+    screenProfileChoice();
     displayGauge();
     displaySlider("Midtones", &dc.gamma, display.gamma_min, display.gamma_max, 1);
     displaySlider("Brightest", &dc.white, display.white_min, display.white_max, 2);
@@ -1407,6 +1449,74 @@ fn displayWindow() void {
         display_window = false;
         dvui.refresh(null, @src(), null);
     }
+}
+
+/// Loads the chosen screen profile again and redraws every colour by it.
+fn reloadScreenProfile() void {
+    if (dvui.backend.kind != .sdl3) return;
+    const win = dvui.currentWindow();
+    screen_profile.load(win.backend.impl.window);
+    applyDesktop(win, desk);
+    dvui.refresh(null, @src(), null);
+}
+
+/// The profile files found on this machine, for the Display correction
+/// window: looked for when it opens.
+var found_profiles: []const screen_profile.Found = &.{};
+var found_profiles_arena: ?std.heap.ArenaAllocator = null;
+
+fn findScreenProfiles() void {
+    if (found_profiles_arena) |*ar| ar.deinit();
+    found_profiles_arena = std.heap.ArenaAllocator.init(state.gpa);
+    found_profiles = screen_profile.findProfiles(found_profiles_arena.?.allocator());
+}
+
+/// The screen profile choice: the system's, none, a file found on this
+/// machine, or another file (the file prompt).
+fn screenProfileChoice() void {
+    const a = dvui.currentWindow().arena();
+    var names: std.ArrayList([]const u8) = .empty;
+    names.append(a, "The system's") catch return;
+    names.append(a, "None (an sRGB screen)") catch return;
+    var choice: usize = switch (screen_profile.get()) {
+        .system => 0,
+        .none => 1,
+        .file => 0,
+    };
+    var chosen_listed = false;
+    for (found_profiles, 0..) |f, i| {
+        names.append(a, std.fmt.allocPrint(a, "{s} ({s})", .{ f.name, std.fs.path.basename(f.path) }) catch f.name) catch return;
+        if (screen_profile.get() == .file and std.mem.eql(u8, f.path, screen_profile.file())) {
+            choice = 2 + i;
+            chosen_listed = true;
+        }
+    }
+    // A file chosen that is not among those found: shown as it is.
+    if (screen_profile.get() == .file and !chosen_listed) {
+        choice = names.items.len;
+        names.append(a, std.fs.path.basename(screen_profile.file())) catch return;
+    }
+    const other = names.items.len;
+    names.append(a, "Other file…") catch return;
+    const before = choice;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        propName(asElement("dialog.display.profile"));
+        _ = tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal });
+    }
+    {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 2, .h = 4 } });
+        tl.addText(screen_profile.status(), .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.75) } });
+        tl.deinit();
+    }
+    if (choice == before) return;
+    if (choice == other) {
+        askForFile(.open_profile);
+        return;
+    }
+    if (choice == 0) screen_profile.set(.system, "") else if (choice == 1) screen_profile.set(.none, "") else if (choice - 2 < found_profiles.len) screen_profile.set(.file, found_profiles[choice - 2].path) else return;
+    reloadScreenProfile();
 }
 
 /// A slider from `lo` to `hi` with its value beside it.
@@ -1880,6 +1990,20 @@ fn loadText() !geom.Point {
     return at;
 }
 
+/// GRAVEN_SAMPLE=typography: two tracks of the same words, ligatures off
+/// and on, on the shown canvas; the cursor in the second, after "cafe" and
+/// its accent.
+fn loadTypography() !void {
+    const pi = shownParent() orelse return error.NoCanvas;
+    const at: geom.Point = .{ .x = 0, .y = 10 };
+    const rs = try text_sample.buildTypography(&state.model, pi, at);
+    try hist.snapshot(&state.model);
+    state.context = .{ .region = .{ .parent = pi, .region = rs[1] } };
+    // "office affluent fjord: cafe" then U+0301 (2 bytes).
+    track_cursor = .{ .parent = pi, .region = rs[1], .index = 0, .offset = 29 };
+    state.view.fit = .{ .x0 = at.x - 5, .y0 = at.y - 30, .x1 = at.x + 145, .y1 = at.y + 26 };
+}
+
 /// Where prototype `id` is in the document's list, for dropdowns; 0 when
 /// it is none of them.
 /// The ID of space `si` (by position); `.none` without spaces (a
@@ -1894,6 +2018,7 @@ fn protoPos(id: layout.model.PrototypeId) usize {
 
 fn deinit(_: *dvui.Window) void {
     motd.deinit();
+    if (found_profiles_arena) |*ar| ar.deinit();
     for (recent_files.items) |f| state.gpa.free(f);
     recent_files.deinit(state.gpa);
     recent_files = .empty;
@@ -2357,12 +2482,11 @@ fn panelOrigin(pi: usize) geom.Point {
     // It may be dragged past the sheet's edge, but keeps a grip on it.
     if (state.moving) |mv| if (mv.panel == pi) {
         // Its origin on the grid when snapping; else wherever it is taken.
-        var sx = mv.at.x - mv.start.x;
-        var sy = mv.at.y - mv.start.y;
-        if (snapStep()) |st| {
-            sx = snapShift(o.x, sx, st, &snap_guide.x);
-            sy = snapShift(o.y, sy, st, &snap_guide.y);
-        } else snap_guide = .{};
+        // Or its edges and centre on another object's or a line.
+        const p = state.model.panels.items[pi];
+        const sh = snapMove(.{ .x0 = o.x, .y0 = o.y, .x1 = o.x + p.w, .y1 = o.y + p.h }, mv.at.x - mv.start.x, mv.at.y - mv.start.y, 0, 0, &.{p.id});
+        const sx = sh.x;
+        const sy = sh.y;
         return state.model.clampOnSheet(pi, .{ .x = o.x + sx, .y = o.y + sy });
     };
     return o;
@@ -2471,6 +2595,10 @@ var elements_log_opened = false;
 
 fn frame() !dvui.App.Result {
     keymap.beginFrame();
+    // The screen's profile changed, or the window went to another screen.
+    if (dvui.backend.kind == .sdl3) if (screen_profile.takeChanged()) {
+        reloadScreenProfile();
+    };
     if (!elements_log_opened) {
         elements_log_opened = true;
         if (platform.env("GRAVEN_ELEMENTS_LOG")) |path| elements_log = std.Io.Dir.cwd().createFile(dvui.io, path, .{}) catch null;
@@ -2480,6 +2608,8 @@ fn frame() !dvui.App.Result {
     base_group = "";
     // A press away from a field being edited ends the edit first.
     accepted.on_accept = newFieldStep;
+    accepted.measure_unit_get = measureUnitGet;
+    accepted.measure_unit_set = measureUnitSet;
     accepted.beginFrame();
     if (leave_field) {
         leave_field = false;
@@ -2501,9 +2631,19 @@ fn frame() !dvui.App.Result {
         close_home = null;
         closeSpaceViews(h);
     }
+    if (delete_sketch != .none) {
+        const id = delete_sketch;
+        delete_sketch = .none;
+        deleteSketchNow(id);
+    }
     if (new_drawing) {
         new_drawing = false;
         newSketchInOwnSpace();
+        followHome();
+    }
+    if (sample_edit_home) |home| {
+        sample_edit_home = null;
+        openHome(home);
         followHome();
     }
     if (sample_sketch_space) {
@@ -2582,14 +2722,20 @@ fn frame() !dvui.App.Result {
             if (canvas_prompt) createCanvas(.mm);
             // The two keyboards are example files (examples/, from the
             // repository's root), opened as untitled copies.
-            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
+            if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "diameters")) loadDiametersSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
                 sample_texts = true;
                 loadSketchPanelSample();
-            } else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
+            } else if (std.mem.eql(u8, which, "connections")) {
+                sample_connections = true;
+                loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "sketch-fab")) {
+                sample_fab = true;
+                loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "drawing-panel")) loadDrawingPanelSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
-            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {};
+            } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
         // the context.
@@ -2722,7 +2868,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf, export_drawing, export_drawing_outlined, open_profile };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -3182,6 +3328,72 @@ fn exportThreeMf(path: []const u8) void {
     state.status = std.fmt.bufPrint(&import_status_buf, "Exported {s} as 3MF ({d} KB). ", .{ std.fs.path.basename(path), zip.len / 1024 }) catch "Exported. ";
 }
 
+/// The drawing exported as SVG: the one the sketch editor inks in, else
+/// the chosen sketch's, panel's, placed figure's or figure's.
+fn drawingToExport() ?usize {
+    const m = &state.model;
+    if (sketch_edit) |r| if (r.sketch < m.sketches.items.len) return m.sketchFigure(m.sketches.items[r.sketch].id);
+    return switch (state.context) {
+        .figure_def => |fi| if (fi < m.figures.items.len) fi else null,
+        .sketch_def => |si| if (si < m.sketches.items.len) m.sketchFigure(m.sketches.items[si].id) else null,
+        .sketch => |sc| if (sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len)
+            m.sketchFigure(m.spaces.items[sc.space].sketch_views.items[sc.index].sketch)
+        else
+            null,
+        .figure_place => |fc| if (figurePlaceAt(fc.space, fc.index)) |fp| m.figureIndex(fp.figure) else null,
+        .panel => |pi| if (pi < m.panels.items.len and m.panels.items[pi].sketch != .none) m.panelDrawing(pi) else null,
+        else => null,
+    };
+}
+
+fn askForDrawingSvg(outlined: bool) void {
+    const fi = drawingToExport() orelse {
+        state.status = "Choose a drawing first (a sketch, its panel or a figure), or open a sketch: its drawing is what is exported. ";
+        return;
+    };
+    if (state.model.figures.items[fi].paths.len == 0) {
+        state.status = "This drawing has no ink yet (or none accepted): there is nothing to export. ";
+        return;
+    }
+    askForFile(if (outlined) .export_drawing_outlined else .export_drawing);
+}
+
+var drawing_svg_name: [600]u8 = undefined;
+fn drawingSvgName() []const u8 {
+    const fi = drawingToExport() orelse return "";
+    const name = state.model.figures.items[fi].name;
+    const dir: []const u8 = if (file_path) |fp| (std.fs.path.dirname(fp) orelse "") else "";
+    return (if (dir.len > 0)
+        std.fmt.bufPrint(&drawing_svg_name, "{s}/{s}.svg", .{ dir, name })
+    else
+        std.fmt.bufPrint(&drawing_svg_name, "{s}.svg", .{name})) catch "drawing.svg";
+}
+
+/// Writes the drawing to export as SVG at `path`: its ink only, strokes
+/// as centrelines with their attributes or, `outlined`, as outlines.
+fn exportDrawingSvg(path: []const u8, outlined: bool) void {
+    const fi = drawingToExport() orelse return;
+    const f = state.model.figures.items[fi];
+    const data = layout.output.figureSvg(state.gpa, f, .{ .outline_strokes = outlined }) catch {
+        state.status = "The SVG could not be made. ";
+        return;
+    };
+    defer state.gpa.free(data);
+    std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = data }) catch {
+        state.status = "That file could not be written. ";
+        return;
+    };
+    // While the sketch has changes not yet accepted, what is written is
+    // what its uses see: the accepted drawing.
+    const pending = f.pending != null or (if (state.model.sketchIndex(f.sketch)) |si| state.model.sketches.items[si].accepted != null else false);
+    state.status = std.fmt.bufPrint(&import_status_buf, "Exported {s} as SVG, strokes {s} ({d} KB){s}. ", .{
+        std.fs.path.basename(path),
+        if (outlined) "outlined" else "as centrelines",
+        (data.len + 1023) / 1024,
+        if (pending) "; changes not yet accepted (Update) are left out" else "",
+    }) catch "Exported. ";
+}
+
 /// Writes the sheet to export as CSV at `path`.
 fn exportSheet(path: []const u8) void {
     const id = sheetToExport() orelse return;
@@ -3476,9 +3688,12 @@ fn systemFileChoice(a: std.mem.Allocator, kind: FilePromptKind) ?[:0]const u8 {
         .import_sheet => dvui.dialogNativeFileOpen(a, .{ .title = "Import a legend sheet", .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .import_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Import a figure", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
         .replace_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Replace the figure's drawing", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
+        .open_profile => dvui.dialogNativeFileOpen(a, .{ .title = "The screen's colour profile", .filters = &.{ "*.icc", "*.icm" }, .filter_description = "ICC profiles" }) catch null,
         .save_as => dvui.dialogNativeFileSave(a, .{ .title = "Save the document as", .path = file_path orelse "untitled" ++ doc_ext, .filters = &.{"*" ++ doc_ext}, .filter_description = "Graven documents" }) catch null,
         .export_sheet => dvui.dialogNativeFileSave(a, .{ .title = "Export the legend sheet", .path = sheetExportName(), .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .export_3mf => dvui.dialogNativeFileSave(a, .{ .title = "Export the panel as 3MF", .path = threeMfName(), .filters = &.{"*.3mf"}, .filter_description = "3MF files" }) catch null,
+        .export_drawing => dvui.dialogNativeFileSave(a, .{ .title = "Export the drawing as SVG (centrelines)", .path = drawingSvgName(), .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
+        .export_drawing_outlined => dvui.dialogNativeFileSave(a, .{ .title = "Export the drawing as SVG (strokes outlined)", .path = drawingSvgName(), .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
     };
 }
 
@@ -3490,8 +3705,14 @@ fn fileChosen(kind: FilePromptKind, path: []const u8) void {
         .import_sheet => importSheet(path),
         .import_figure => importFigure(path),
         .replace_figure => replaceFigureFrom(path),
+        .open_profile => {
+            screen_profile.set(.file, path);
+            reloadScreenProfile();
+        },
         .export_sheet => exportSheet(path),
         .export_3mf => exportThreeMf(path),
+        .export_drawing => exportDrawingSvg(path, false),
+        .export_drawing_outlined => exportDrawingSvg(path, true),
         .save_as => {
             // A name without an extension takes Graven's.
             const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
@@ -3543,8 +3764,11 @@ fn filePrompt(kind: FilePromptKind) void {
         .import_sheet => sheetImportTitle(),
         .import_figure => "Import a figure from an SVG file",
         .replace_figure => "Replace the figure's drawing from an SVG file",
+        .open_profile => "The screen's colour profile (an ICC file)",
         .export_sheet => "Export the legend sheet as CSV",
         .export_3mf => "Export the panel as 3MF (its fabrication layers)",
+        .export_drawing => "Export the drawing as SVG (centrelines)",
+        .export_drawing_outlined => "Export the drawing as SVG (strokes outlined)",
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -3566,6 +3790,7 @@ fn filePrompt(kind: FilePromptKind) void {
             .save_as => file_path orelse "untitled" ++ doc_ext,
             .export_sheet => sheetExportName(),
             .export_3mf => threeMfName(),
+            .export_drawing, .export_drawing_outlined => drawingSvgName(),
             else => "",
         };
         var te = dvui.textEntry(@src(), .{ .text_initial = initial }, .{ .expand = .horizontal, .id_extra = @intFromEnum(kind) });
@@ -3587,7 +3812,8 @@ fn filePrompt(kind: FilePromptKind) void {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet, .import_figure, .replace_figure => "Import",
-            .export_sheet, .export_3mf => "Export",
+            .open_profile => "Use",
+            .export_sheet, .export_3mf, .export_drawing, .export_drawing_outlined => "Export",
         }, 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
@@ -3837,6 +4063,11 @@ fn runAction(inv: keymap.Invocation) bool {
             return true;
         },
         kact("view.canvas-theme") => setCanvasTheme(if (inv.arg < 0 or inv.arg >= canvas_theme.all.len) canvas_theme.current.next() else @enumFromInt(inv.arg)),
+        kact("view.snap-objects") => {
+            snap_objects = !snap_objects;
+            state.status = if (snap_objects) "Drags snap to other objects' edges and centres and to construction lines (Alt held lets go). " else "Drags no longer snap to other objects. ";
+            return true;
+        },
         kact("view.snap-grid") => {
             snap_grid = !snap_grid;
             state.status = if (snap_grid) "Drags snap to the grid (Alt held lets go). " else "Drags no longer snap to the grid. ";
@@ -3969,11 +4200,14 @@ const Prefs = struct {
     show_construction: bool,
     grid: bg_grid.Mode,
     snap_grid: bool,
+    snap_objects: bool,
     boundary_mode: bool,
     canvas_theme: canvas_theme.Theme,
     scroll: ScrollMode,
     ribbon: RibbonSize,
     display: display.Correction,
+    /// The screen profile chosen (`screen_profile.configValue`), hashed.
+    profile: u64,
     px_per_mm: ?f32,
     /// The pane layout in use: its name and how the panes are now.
     layout_name: [40]u8,
@@ -3994,7 +4228,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .snap_objects = snap_objects, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .profile = std.hash.Wyhash.hash(0, screen_profile.configValue()), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -4025,6 +4259,9 @@ fn loadPrefs() void {
     if (ps.get("view.snap_grid")) |v| if (v == .boolean) {
         snap_grid = v.boolean;
     };
+    if (ps.get("view.snap_objects")) |v| if (v == .boolean) {
+        snap_objects = v.boolean;
+    };
     if (ps.get("ribbon.size")) |v| if (v == .string) if (std.meta.stringToEnum(RibbonSize, v.string)) |z| {
         ribbon_size = z;
     };
@@ -4052,6 +4289,10 @@ fn loadPrefs() void {
         };
         display.set(dc);
         if (ps.get("display.px_per_mm")) |v| display.setPxPerMm(tomlFloat(v));
+        // The screen's profile: "system", "none" or a file; GRAVEN_ICC
+        // overrides it for a run.
+        if (ps.get("display.profile")) |v| if (v == .string) screen_profile.fromConfig(v.string);
+        if (platform.env("GRAVEN_ICC")) |e| screen_profile.fromConfig(e);
     }
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
@@ -4167,6 +4408,7 @@ fn savePrefsIfChanged() void {
     ps.put("view.show_text_construction", .{ .boolean = now.show_construction }, .shared);
     ps.put("view.grid", .{ .string = @tagName(now.grid) }, .shared);
     ps.put("view.snap_grid", .{ .boolean = now.snap_grid }, .shared);
+    ps.put("view.snap_objects", .{ .boolean = now.snap_objects }, .shared);
     ps.put("view.boundary_mode", .{ .boolean = now.boundary_mode }, .shared);
     ps.put("view.canvas_theme", .{ .string = @tagName(now.canvas_theme) }, .shared);
     ps.put("view.scrolling", .{ .string = @tagName(now.scroll) }, .local);
@@ -4175,6 +4417,7 @@ fn savePrefsIfChanged() void {
     // The screen's correction belongs to this machine.
     ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
     ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
+    ps.put("display.profile", .{ .string = screen_profile.configValue() }, .local);
     // Measured, else the estimate (written as 0: not measured).
     ps.put("display.px_per_mm", .{ .float = if (now.px_per_mm) |v| roundTo(v, 10000) else 0 }, .local);
     // The layout in use is this machine's; what has been changed by hand
@@ -5309,6 +5552,14 @@ fn menu() ?dvui.App.Result {
                 }
             } else state.status = "Choose a panel first: it is what is exported. ";
         };
+        if (!canvas_prompt) if (tmenu(@src(), "Export drawing as SVG…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            askForDrawingSvg(false);
+        };
+        if (!canvas_prompt) if (tmenu(@src(), "Export drawing as SVG, strokes outlined…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            askForDrawingSvg(true);
+        };
         if (!canvas_prompt) if (menuAction("Check fabrication", "view", kact("fab.check"), 0, false, 40)) {
             m.close();
             runChecks(checkTarget());
@@ -5413,6 +5664,7 @@ fn menu() ?dvui.App.Result {
             }
         }
         if (menuAction(if (snap_grid) "•  Snap to grid" else "    Snap to grid", "view", kact("view.snap-grid"), 0, false, 9)) m.close();
+        if (menuAction(if (snap_objects) "•  Snap to objects" else "    Snap to objects", "view", kact("view.snap-objects"), 0, false, 10)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 94 });
         inline for (canvas_theme.all, 0..) |t, ti| {
             const text = if (canvas_theme.current == t) "•  " ++ comptime t.label() else "    " ++ comptime t.label();
@@ -5566,8 +5818,8 @@ fn sheetCovers(id: layout.model.ObjectId, t: layout.model.TileId) bool {
     const m = &state.model;
     const si = m.sheetIndex(id) orelse return false;
     const a = dvui.currentWindow().arena();
-    for (m.sheets.items[si].rows.items) |row| {
-        const key = (m.keyInScope(a, m.sheets.items[si].scope, row.key) catch return false) orelse continue;
+    for (0..m.sheets.items[si].rows.items.len) |r| {
+        const key = sheetRowKey(si, r) orelse continue;
         var near: std.ArrayList(layout.model.TileId) = .empty;
         m.companions(a, key, &near) catch return false;
         if (std.mem.indexOfScalar(layout.model.TileId, near.items, t) != null) return true;
@@ -6297,6 +6549,9 @@ const Palette = struct {
     select: dvui.Color = .{ .r = 0x1f, .g = 0x6f, .b = 0xe0 },
     /// Construction lines: guides, never output.
     construction: dvui.Color = .{ .r = 0x8a, .g = 0x4f, .b = 0xd8 },
+    /// Snap guides to other objects and lines while dragging (smart
+    /// guides): a magenta apart from the selection and construction hues.
+    snap: dvui.Color = .{ .r = 0xd8, .g = 0x2f, .b = 0x8c },
     /// What fails a check: overflow, past an edge, ink in a margin.
     overflow: dvui.Color = .{ .r = 0xf3, .g = 0x46, .b = 0x00 },
     /// The background grid's ink: a cool neutral, laid on at low opacity
@@ -7386,9 +7641,16 @@ const sheet_col_w: f32 = 150;
 
 /// The key of row `row` of sheet `si`, in its scope.
 fn sheetRowKey(si: usize, row: usize) ?TileId {
-    const sh = state.model.sheets.items[si];
+    const id = sheetRowLink(si, row) orelse return null;
+    return if (state.model.tileIndex(id) != null) id else null;
+}
+
+/// What row `row` of sheet `si` is linked to (a key, a caption or a
+/// track), by its ID.
+fn sheetRowLink(si: usize, row: usize) ?layout.model.ObjectId {
+    const sh = &state.model.sheets.items[si];
     if (row >= sh.rows.items.len) return null;
-    return state.model.keyInScope(dvui.currentWindow().arena(), sh.scope, sh.rows.items[row].key) catch null;
+    return state.model.sheetRowLink(dvui.currentWindow().arena(), sh, &sh.rows.items[row]) catch null;
 }
 
 /// The tile and slot the selected cell drives (its key, or a legend
@@ -7515,7 +7777,12 @@ fn sheetView(v: u8) void {
         dvui.labelNoFmt(@src(), "name", .{}, .{ .min_size_content = .{ .w = sheet_name_w }, .max_size_content = .width(sheet_name_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 } });
         for (sh.columns.items, 0..) |c, ci| {
             const unused = std.mem.indexOfScalar(usize, bad_cols.items, ci) != null;
-            dvui.labelNoFmt(@src(), c, .{}, .{ .min_size_content = .{ .w = sheet_col_w }, .max_size_content = .width(sheet_col_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 }, .color_text = if (unused) .{ .color = colors.overflow } else null, .border = .{ .x = 1 }, .color_border = .{ .color = colors.edge.opacity(0.3) }, .id_extra = ci });
+            // A text sheet's column its text holders show: marked, on
+            // the focus colour.
+            const shown = sh.texts and ci == @min(sh.shown, sh.columns.items.len -| 1);
+            var hb: [80]u8 = undefined;
+            const label = if (shown) std.fmt.bufPrint(&hb, "{s} \u{2022} shown", .{c}) catch c else c;
+            dvui.labelNoFmt(@src(), label, .{}, .{ .min_size_content = .{ .w = sheet_col_w }, .max_size_content = .width(sheet_col_w), .font = head_font, .padding = .{ .x = 6, .y = 3, .h = 3 }, .color_text = if (unused) .{ .color = colors.overflow } else if (shown) .{ .color = colors.paper } else null, .background = shown, .color_fill = .{ .color = if (shown) dvui.themeGet().focus else colors.titlebar.opacity(0) }, .border = .{ .x = 1 }, .color_border = .{ .color = colors.edge.opacity(0.3) }, .id_extra = ci });
         }
     }
     var scroll = dvui.scrollArea(@src(), .{ .horizontal = .auto }, .{ .expand = .both, .background = false });
@@ -7571,7 +7838,7 @@ fn sheetView(v: u8) void {
                     // The row's highlight shows through; the name column
                     // a shade apart.
                     .background = true,
-                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else colors.paper.opacity(0) },
+                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
                     .border = .{ .x = if (c == 0) 0 else 1 },
                     .color_border = .{ .color = colors.edge.opacity(0.15) },
                     .id_extra = (r << 8) + c,
@@ -7599,17 +7866,30 @@ fn sheetViewProperties() void {
     if (sheet_sel.row < sh.rows.items.len) {
         const row = sh.rows.items[sheet_sel.row];
         propText("Row", "{d} of {d}", .{ sheet_sel.row + 1, sh.rows.items.len }, 9701);
-        if (sheetRowKey(si, sheet_sel.row)) |key| {
+        if (sh.texts) {
+            // A text holder: a caption or a track, held by its ID.
+            const link = sheetRowLink(si, sheet_sel.row);
+            if (link) |l| {
+                const what = if (m.trackWithId(l) != null) "track" else "caption";
+                propText("Linked to", "{s} {s}", .{ what, m.linkedName(l) orelse row.key }, 9702);
+            } else propText("Linked to", "nothing named {s}", .{row.key}, 9702);
+            if (sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
+                const shown = sheet_sel.col - 1 == @min(sh.shown, sh.columns.items.len -| 1);
+                propText("Language", "{s}{s}", .{ sh.columns.items[sheet_sel.col - 1], if (shown) " (shown)" else "" }, 9703);
+            }
+        } else if (sheetRowKey(si, sheet_sel.row)) |key| {
             const t = m.tileConst(key);
             propText("Tile", "{s} ({s})", .{ t.designator, m.prototypeOf(key).name }, 9702);
         } else propText("Tile", "none named {s} here", .{row.key}, 9702);
-        if (sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
+        if (!sh.texts and sheet_sel.col > 0 and sheet_sel.col <= sh.columns.items.len) {
             const slot = sh.columns.items[sheet_sel.col - 1];
             propText("Slot", "{s}{s}", .{ slot, if (sheetCellTarget() == null) " (not on this key)" else "" }, 9703);
         }
     }
-    keyButton(@src(), "Name tiles by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    keyButton(@src(), "Name tiles by their first legend", 0, .{ .expand = .horizontal });
+    if (!sh.texts) {
+        keyButton(@src(), "Name tiles by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "Name tiles by their first legend", 0, .{ .expand = .horizontal });
+    }
     keyButton(@src(), "Add a row", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     if (sh.rows.items.len > 0) keyButton(@src(), "Remove this row", 0, .{ .expand = .horizontal });
 }
@@ -7668,6 +7948,11 @@ var status_name_buf: [64]u8 = undefined;
 var sample_sketch_space = false;
 var sample_objects = false;
 var sample_texts = false;
+/// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
+/// connection, its end free, a dot at its end.
+var sample_connections = false;
+/// GRAVEN_SAMPLE=sketch-fab: the sketch panel with a solid fill and fabrication layers.
+var sample_fab = false;
 var open_texts_sheet: ?layout.model.ObjectId = null;
 
 fn canvas(active: bool, view: u8) void {
@@ -7762,6 +8047,7 @@ fn canvas(active: bool, view: u8) void {
     }
     if (sketch_edit != null) {
         drawSketchMode(area);
+        drawSnapGuides(area);
         return;
     }
     if (panel_edit != null) {
@@ -8445,6 +8731,11 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
         };
         if (sel) marchingBox(area, onSheet(pi, pa.box), colors.select, 1.5 * px);
     }
+    // Paragraph rules, in their pens' ink.
+    for (placed.rules) |r| {
+        const pieces = flatTile(&state.flat, r.shapes) catch &.{};
+        for (pieces) |piece| if (piece.shape.paint.fill != .none) fillRegion(area, piece.region, o, .{ .art = piece.shape.paint.fill });
+    }
     const lifo = dvui.currentWindow().lifo();
     for (placed.labels) |l| {
         // Ink in the sheet's margins is drawn in the warning colour.
@@ -9046,17 +9337,50 @@ fn panelFab(pi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 2 });
             defer row.deinit();
             propName("From");
-            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text" };
+            const kinds = [_][]const u8{ "the outline", "holes and cutouts", "grid parts", "text", "line art's ink", "line art's fills" };
             var choice: usize = @intFromEnum(std.meta.activeTag(l.source));
             if (tdropdown(@src(), &kinds, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice != @intFromEnum(std.meta.activeTag(l.source))) {
                 l.source = switch (choice) {
                     0 => .edge,
                     1 => .cutouts,
                     2 => .parts,
-                    else => .{ .text = "" },
+                    3 => .{ .text = "" },
+                    4 => .{ .ink = "" },
+                    else => .{ .fills = "" },
                 };
                 changed = true;
             }
+        }
+        // Ink and fills: of every piece of line art, or of one by name (a
+        // drawing's, a figure's).
+        switch (l.source) {
+            .ink, .fills => |name| {
+                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 5 });
+                defer row.deinit();
+                propName("Line art");
+                var names: std.ArrayList([]const u8) = .empty;
+                try names.append(ar, "all of it");
+                for (state.model.panels.items[pi].art.items) |pa| {
+                    if (pa.cutout) continue;
+                    for (names.items[1..]) |have| {
+                        if (std.mem.eql(u8, have, pa.name)) break;
+                    } else try names.append(ar, pa.name);
+                }
+                var choice: usize = 0;
+                for (names.items[1..], 1..) |nm, k| {
+                    if (std.mem.eql(u8, nm, name)) choice = k;
+                }
+                if (name.len > 0 and choice == 0) {
+                    try names.append(ar, name);
+                    choice = names.items.len - 1;
+                }
+                if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
+                    const picked: []const u8 = if (choice == 0) "" else names.items[choice];
+                    l.source = if (l.source == .ink) .{ .ink = picked } else .{ .fills = picked };
+                    changed = true;
+                }
+            },
+            else => {},
         }
         if (l.source == .text) {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 3 });
@@ -10393,6 +10717,7 @@ fn planCopy(p: manufacture.Plan) manufacture.Plan {
 fn choiceRow(label: []const u8, names: []const []const u8, current: usize, n: usize) ?usize {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(label);
     var choice = current;
     if (!tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = n }) or choice == current) return null;
@@ -11306,6 +11631,7 @@ fn manufactureView(v: u8) void {
             .release => if (dvui.captured(box.data().id)) {
                 e.handle(@src(), box.data());
                 text_drag = false;
+                eq_drag = false;
 
                 dvui.captureMouse(null, e.num);
             },
@@ -11752,6 +12078,39 @@ fn layerProperties(space: usize, li: usize) !void {
         if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7 })) {
             l.output = @enumFromInt(choice);
             changed = true;
+        }
+    }
+    // What kinds of thing on it are drawn (`layout.tags`): a choice of
+    // the presets, then each kind.
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 10 });
+        defer row.deinit();
+        propName("Show");
+        const presets = comptime std.enums.values(layout.tags.Preset);
+        var names: [presets.len + 1][]const u8 = undefined;
+        for (presets, 0..) |pr, k| names[k] = pr.label();
+        names[presets.len] = "Some kinds (below)";
+        var choice: usize = presets.len;
+        if (layout.tags.Preset.of(l.hidden)) |pr| choice = @intFromEnum(pr);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 10 })) {
+            if (choice < presets.len) {
+                l.hidden = presets[choice].hidden();
+                changed = true;
+            }
+        }
+    }
+    {
+        const g2 = pushGroup("layer.drawn");
+        defer popGroup(g2);
+        inline for (comptime std.enums.values(layout.tags.Tag), 0..) |t, k| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 20 + k });
+            defer row.deinit();
+            propName(if (k == 0) "Drawn" else " ");
+            var on = !l.hidden.has(t);
+            if (tcheckbox(@src(), &on, t.label(), .{ .id_extra = 20 + k })) {
+                l.hidden = l.hidden.toggled(t);
+                changed = true;
+            }
         }
     }
     if (changed) try act(.setLayer, .{space, li, l});
@@ -12399,15 +12758,18 @@ fn rulerAxis(r: dvui.Rect.Physical, area: dvui.Rect.Physical, list: []const Tick
 
 /// Whether drags snap to the grid.
 var snap_grid: bool = true;
+/// Whether drags snap to other objects' edges and centres, to
+/// construction lines and their crossings (smart guides).
+var snap_objects: bool = true;
 /// Select boundaries (a persistent mode, toggled by its button or B, kept
 /// in the settings): with the select tool, the boundary nearest the
 /// pointer is highlighted and a click selects its container, never its
 /// content; the selection's drag points are haloed.
 var boundary_mode = false;
 
-/// The grid lines the drag in hand is on (canvas mm), for its guides;
-/// cleared when the drag ends.
-var snap_guide: struct { x: ?f64 = null, y: ?f64 = null } = .{};
+/// What the drag in hand snapped to (canvas mm), for its guides; cleared
+/// when the drag ends.
+var snap_guide: geom.snap.Result = .{};
 
 fn altHeld() bool {
     if (dvui.backend.kind != .sdl3) return false;
@@ -12422,55 +12784,136 @@ fn snapStep() ?f64 {
     return if (st > 0 and std.math.isFinite(st)) st else null;
 }
 
-/// Canvas coordinate `v` on the nearest grid line, the guide `g` set.
-fn snapAxis(v: f64, st: f64, g: *?f64) f64 {
-    const out = @round(v / st) * st;
-    g.* = out;
-    return out;
+/// How near a target pulls (canvas mm): 8 px at the zoom.
+fn snapTol() f64 {
+    return if (state.view.ppm > 0) 8 / state.view.ppm else 0;
 }
 
-/// Point `p` (canvas mm) on the grid along the axes given.
+/// The snapper for this frame, built once a frame for what is moving.
+var snap_cache: struct { frame: i128 = -1, key: layout.model.ObjectId = .none, s: geom.snap.Snapper = .{} } = .{};
+
+/// Whether `id` is one of `moving`, or inside one of them (it moves with
+/// it, so is no target).
+fn movesWith(id: layout.model.ObjectId, moving: []const layout.model.ObjectId) bool {
+    var at = id;
+    var n: usize = 0;
+    while (n < 64) : (n += 1) {
+        for (moving) |mv| if (mv == at) return true;
+        const parent = constrain.parentOf(&state.model, at) orelse return false;
+        switch (parent) {
+            .space => return false,
+            .panel => |pi| at = state.model.panels.items[pi].id,
+        }
+    }
+    return false;
+}
+
+/// What a drag of `moving` snaps to (the one shared snapper,
+/// `geom.snap`): in the shown space, every other container's edges and
+/// centre lines, the frame's boundary, the construction lines shown and
+/// their crossings; the grid's step where nothing is near. Alt held: none.
+fn dragSnapper(moving: []const layout.model.ObjectId) *const geom.snap.Snapper {
+    const now_frame = dvui.frameTimeNS();
+    const key: layout.model.ObjectId = if (moving.len > 0) moving[0] else .none;
+    if (snap_cache.frame == now_frame and snap_cache.key == key) return &snap_cache.s;
+    const a = dvui.currentWindow().arena();
+    var s: geom.snap.Snapper = .{ .grid = snapStep() };
+    if (snap_objects and !altHeld() and state.view.ppm > 0) {
+        for (constrainables(a)) |id| {
+            if (isControlPoint(id) or movesWith(id, moving)) continue;
+            const b = containerBox(id) orelse continue;
+            s.addBox(a, b) catch {};
+        }
+        if (shown_space < state.model.spaces.items.len) {
+            const sp = state.model.spaces.items[shown_space];
+            if (sp.bound) |b| s.addBox(a, b) catch {};
+            if (ViewLayer.guides.shown()) for (sp.guides.items) |g| s.addLine(a, g.at, g.dir()) catch {};
+            s.addCrossings(a) catch {};
+        }
+    }
+    snap_cache = .{ .frame = now_frame, .key = key, .s = s };
+    return &snap_cache.s;
+}
+
+/// Point `p` (canvas mm) snapped along the axes given, nothing moving
+/// with it but `moving`: onto line crossings, other objects' edges and
+/// centres, construction lines, else the grid.
+fn snapPointOf(p: geom.Point, along_x: bool, along_y: bool, moving: []const layout.model.ObjectId) geom.Point {
+    const r = dragSnapper(moving).point(p, along_x, along_y, snapTol());
+    snap_guide = r;
+    return .{ .x = p.x + r.dx, .y = p.y + r.dy };
+}
+
 fn snapPoint(p: geom.Point, along_x: bool, along_y: bool) geom.Point {
-    const st = snapStep() orelse {
-        snap_guide = .{};
-        return p;
-    };
-    var out = p;
-    snap_guide = .{};
-    if (along_x) out.x = snapAxis(p.x, st, &snap_guide.x);
-    if (along_y) out.y = snapAxis(p.y, st, &snap_guide.y);
-    return out;
+    return snapPointOf(p, along_x, along_y, &.{});
 }
 
-/// A shift (canvas mm, along one axis) changed so that `ref` + it is on
-/// the grid.
-fn snapShift(ref: f64, shift: f64, st: f64, g: *?f64) f64 {
-    return snapAxis(ref + shift, st, g) - ref;
+/// A box (canvas mm) moved by (dx, dy), snapped: the shift it takes. Where
+/// nothing is near, its corner (x0, y0 feature `gx`, `gy`) goes to the
+/// grid.
+fn snapMove(b: geom.Box, dx: f64, dy: f64, gx: usize, gy: usize, moving: []const layout.model.ObjectId) geom.Point {
+    const r = dragSnapper(moving).moveBox(b, dx, dy, gx, gy, snapTol());
+    snap_guide = r;
+    return .{ .x = r.dx, .y = r.dy };
 }
 
-/// A point drawn on the canvas (a new panel's corner): on the grid when
-/// snapping.
+/// One edge (canvas mm) along an axis, snapped: where it goes. The guide
+/// for that axis set.
+fn snapEdge(v: f64, vertical: bool, span: [2]f64, moving: []const layout.model.ObjectId) f64 {
+    const h = dragSnapper(moving).axisOrGrid(vertical, &.{v}, 0, span, snapTol()) orelse return v;
+    if (vertical) snap_guide.y = h.guide else snap_guide.x = h.guide;
+    return v + h.shift;
+}
+
+/// A point drawn on the canvas (a new panel's corner): snapped.
 fn snap(p: geom.Point) geom.Point {
     return snapPoint(p, true, true);
 }
 
-/// The guides of the drag in hand: a line across the canvas at each grid
-/// line it is on.
+/// The guides of the drag in hand: to another object, a line from it to
+/// what is dragged, through the edges or centres that meet; to a
+/// construction line, along it; to a crossing or a point, a ring; to the
+/// grid, a line across the canvas.
 fn drawSnapGuides(area: dvui.Rect.Physical) void {
-    const dragging = engage_drag != null or resize_drag != null or (sel_press != null and sel_press.?.moved) or state.moving != null or (state.drag != null and !band_drag);
+    const dragging = engage_drag != null or resize_drag != null or (sel_press != null and sel_press.?.moved) or state.moving != null or (state.drag != null and !band_drag) or (sk_drag != null and sk_drag.?.moved);
     if (!dragging) {
         snap_guide = .{};
         return;
     }
-    const ink: dvui.ColorOrGradient = .{ .color = colors.select.opacity(0.55) };
     const t = dvui.windowNaturalScale();
-    if (snap_guide.x) |x| {
-        const q = state.view.toPx(area, .{ .x = x, .y = 0 });
-        dvui.Path.stroke(.{ .points = &.{ .{ .x = q.x, .y = area.y }, .{ .x = q.x, .y = area.y + area.h } } }, .{ .thickness = t, .color = ink });
-    }
-    if (snap_guide.y) |y| {
-        const q = state.view.toPx(area, .{ .x = 0, .y = y });
-        dvui.Path.stroke(.{ .points = &.{ .{ .x = area.x, .y = q.y }, .{ .x = area.x + area.w, .y = q.y } } }, .{ .thickness = t, .color = ink });
+    const grid_ink: dvui.ColorOrGradient = .{ .color = colors.select.opacity(0.55) };
+    const ink: dvui.ColorOrGradient = .{ .color = colors.snap };
+    const Draw = struct {
+        fn guide(ar: dvui.Rect.Physical, g: geom.snap.Target, vertical: bool, th: f32, gi: dvui.ColorOrGradient, oi: dvui.ColorOrGradient) void {
+            const full = !std.math.isFinite(g.lo);
+            const a0: geom.Point = if (vertical) .{ .x = g.lo, .y = g.at } else .{ .x = g.at, .y = g.lo };
+            const a1: geom.Point = if (vertical) .{ .x = g.hi, .y = g.at } else .{ .x = g.at, .y = g.hi };
+            if (full) {
+                const q = state.view.toPx(ar, .{ .x = g.at, .y = g.at });
+                const pts: [2]dvui.Point.Physical = if (vertical) .{ .{ .x = ar.x, .y = q.y }, .{ .x = ar.x + ar.w, .y = q.y } } else .{ .{ .x = q.x, .y = ar.y }, .{ .x = q.x, .y = ar.y + ar.h } };
+                dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = th, .color = if (g.kind == .grid) gi else oi });
+                return;
+            }
+            const p0 = state.view.toPx(ar, a0);
+            const p1 = state.view.toPx(ar, a1);
+            dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = th, .color = oi });
+            // Small crosses at its ends, as smart guides mark them.
+            const r = 3 * th;
+            for ([_]dvui.Point.Physical{ p0, p1 }) |c| {
+                dvui.Path.stroke(.{ .points = &.{ .{ .x = c.x - r, .y = c.y - r }, .{ .x = c.x + r, .y = c.y + r } } }, .{ .thickness = th, .color = oi });
+                dvui.Path.stroke(.{ .points = &.{ .{ .x = c.x - r, .y = c.y + r }, .{ .x = c.x + r, .y = c.y - r } } }, .{ .thickness = th, .color = oi });
+            }
+        }
+    };
+    if (snap_guide.x) |g| Draw.guide(area, g, false, t, grid_ink, ink);
+    if (snap_guide.y) |g| Draw.guide(area, g, true, t, grid_ink, ink);
+    switch (snap_guide.extra) {
+        .none => {},
+        .line => |l| {
+            const g: layout.model.Guide = .{ .at = l.at, .angle = std.math.atan2(l.dir.y, l.dir.x) * 180 / std.math.pi };
+            if (g.clip(guideClipBox(area, shown_space))) |seg| dvui.Path.stroke(.{ .points = &.{ state.view.toPx(area, seg[0]), state.view.toPx(area, seg[1]) } }, .{ .thickness = 1.5 * t, .color = ink });
+        },
+        .point => |p| skRing(state.view.toPx(area, p), 5 * t, colors.snap, 1.5 * t),
     }
 }
 
@@ -14350,6 +14793,7 @@ fn propertiesBody() !void {
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .padding = .all(8) });
     defer body.deinit();
     setTagScope("{s}", .{"properties"});
+    accepted.u_mm = null;
     if (state.tool == .add_tracks) try tracksToolOptions();
     try properties();
 }
@@ -14421,6 +14865,27 @@ fn tracksToolOptions() !void {
             const names = [_][]const u8{ "Rows (column of rows)", "Columns (row of columns)" };
             var choice: usize = @backingInt(tracks_tool.major);
             if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) tracks_tool.major = @fromBackingInt(@intCast(choice));
+        }
+    }
+    // Text: the style template its flow starts from (the Default until
+    // another is chosen). Choosing one sizes the tracks to its text style.
+    if (tracks_tool.size_to == .style) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9004 });
+        defer row.deinit();
+        propName("Template");
+        const templates = state.model.templates.items;
+        const arena = dvui.currentWindow().arena();
+        const names = try arena.alloc([]const u8, @max(1, templates.len));
+        if (templates.len == 0) names[0] = "Default";
+        var choice: usize = 0;
+        for (templates, 0..) |t, k| {
+            names[k] = t.name;
+            if (t.id == tracks_tool.template) choice = k;
+        }
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal }) and choice < templates.len) {
+            const t = templates[choice];
+            tracks_tool.template = t.id;
+            if (state.model.styleIndex(t.text) != null) tracks_tool.size_to = .{ .style = t.text };
         }
     }
     var buf: [96]u8 = undefined;
@@ -14731,8 +15196,8 @@ fn addTracksFromDrag(from: geom.Point, at: geom.Point) void {
         state.status = "The tracks were not added. ";
         return;
     };
-    // A text layout's new flow: its style copied from the Default
-    // template, in the same undo step.
+    // A text layout's new flow: the styles of the template chosen in the
+    // tool's options (the Default), in the same undo step.
     if (tracks_tool.size_to == .style) styleNewFlow(plan.parent, r) catch {};
     // Empty tracks, the user fills them: the cursor waits at the start.
     state.context = .{ .region = .{ .parent = plan.parent, .region = r } };
@@ -17895,6 +18360,11 @@ const button_handlers = [_]ButtonHandler{
             skConstrain(@enumFromInt(@as(u8, @intCast(arg))), canvasArea());
         }
     }.f),
+    handler("sketch.show.ink-only", struct {
+        fn f(_: i32) void {
+            skToggleInkOnly();
+        }
+    }.f),
     handler("sketch.end.update", struct {
         fn f(_: i32) void {
             if (sketch_edit) |r| skAccept(r.sketch);
@@ -18172,9 +18642,15 @@ const button_handlers = [_]ButtonHandler{
                 .sketch_def => |i| i,
                 else => return,
             };
-            if (act(.removeSketch, .{index})) {
-                state.context = .sketches;
-            } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+            if (index >= state.model.sketches.items.len) return;
+            const id = state.model.sketches.items[index].id;
+            for (state.model.panels.items) |pn| if (pn.sketch == id) {
+                state.status = "A panel is made from this sketch: release it first. ";
+                return;
+            };
+            // At the next frame's start: its own space's tabs close first.
+            delete_sketch = id;
+            dvui.refresh(null, @src(), null);
         }
     }.f),
     handler("grid.edit-its-sketch", struct {
@@ -18586,16 +19062,81 @@ fn propValue(name: []const u8, default: bool, comptime fmt: []const u8, args: an
 fn propName(name: []const u8) void {
     tagParent(name);
     // The unit its label names, if any: the field drawn next takes any
-    // unit of that kind (see `units`, the one path for typed units).
-    accepted.label_unit = layout.units.ofLabel(name);
+    // unit of that kind (see `units`, the one path for typed units), and
+    // is a measurement with its own unit, shown in a pop-up beside it.
+    accepted.label_unit = if (prop_plain) null else layout.units.ofLabel(name);
+    prop_plain = false;
+    accepted.measure_id = if (accepted.label_unit != null) accepted.current_id else null;
     // Marked as an override (FrameMaker's asterisk): its value differs
     // from the style it overrides.
     const marked = prop_marked;
     prop_marked = false;
-    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{name}) catch name else name;
+    // A measurement's unit is its pop-up's, not its label's.
+    const label = if (accepted.measure_id != null) std.mem.trim(u8, name[0 .. std.mem.lastIndexOfScalar(u8, name, ',') orelse name.len], " ") else name;
+    const shown = if (marked) std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} *", .{label}) catch label else label;
     const col = if (marked) dvui.Color{ .r = 0xff, .g = 0xc0, .b = 0x60 } else dvui.themeGet().color(.control, .text).opacity(0.65);
     dvui.labelNoFmt(@src(), shown, .{}, .{ .min_size_content = .{ .w = label_width }, .gravity_y = 0.5, .color_text = .{ .color = col } });
 }
+
+/// The object whose properties are shown (its measurements' units are
+/// kept by its ID); `.none` for what has none.
+fn measureOwner() layout.model.ObjectId {
+    const m = &state.model;
+    const sp = m.spaces.items;
+    return switch (state.context) {
+        .panel => |pi| if (pi < m.panels.items.len) m.panels.items[pi].id else .none,
+        .region => |r| if (m.hasParent(r.parent) and r.region < m.regionsIn(r.parent).len) m.regionsIn(r.parent)[r.region].id else .none,
+        .grid => |g| if (m.hasParent(g.parent) and g.index < m.gridsIn(g.parent).len) m.gridsIn(g.parent)[g.index].id else .none,
+        .tile, .group, .prototype, .flow, .sheet, .style, .template, .process, .plan, .material, .constraint => |id| id,
+        .space => |si| if (si < sp.len) sp[si].id else .none,
+        .view => |v| itemId(sp, v.space, "views", v.index),
+        .layer => |v| itemId(sp, v.space, "layers", v.index),
+        .image => |v| itemId(sp, v.space, "images", v.index),
+        .figure_place => |v| itemId(sp, v.space, "figure_places", v.index),
+        .guide => |v| itemId(sp, v.space, "guides", v.index),
+        .sketch => |v| itemId(sp, v.space, "sketch_views", v.index),
+        .art => |l| if (l.panel < m.panels.items.len) idAt(m.panels.items[l.panel].art.items, l.index) else .none,
+        .sketch_def => |i| idAt(m.sketches.items, i),
+        .figure_def => |i| idAt(m.figures.items, i),
+        else => .none,
+    };
+}
+
+fn itemId(spaces: []const layout.model.Space, si: usize, comptime list: []const u8, i: usize) layout.model.ObjectId {
+    if (si >= spaces.len) return .none;
+    return idAt(@field(spaces[si], list).items, i);
+}
+
+fn idAt(items: anytype, i: usize) layout.model.ObjectId {
+    if (i >= items.len) return .none;
+    if (!@hasField(@TypeOf(items[0]), "id")) return .none;
+    return items[i].id;
+}
+
+/// The document's key for measurement `id` (an element id) of the object
+/// shown: "<object ID>/<id>", or `id` alone for what has no ID.
+fn measureKey(buf: []u8, id: []const u8) []const u8 {
+    // A repeat's "#n" is the same measurement.
+    const base = if (std.mem.indexOfScalar(u8, id, '#')) |k| id[0..k] else id;
+    const owner = measureOwner();
+    if (owner == .none) return base;
+    return std.fmt.bufPrint(buf, "{d}/{s}", .{ @intFromEnum(owner), base }) catch base;
+}
+
+fn measureUnitGet(id: []const u8) ?layout.units.Unit {
+    var buf: [256]u8 = undefined;
+    return state.model.measureUnit(measureKey(&buf, id));
+}
+
+/// A measurement's unit picked or typed: one undo step of its own.
+fn measureUnitSet(id: []const u8, unit: layout.units.Unit) void {
+    var buf: [256]u8 = undefined;
+    act(.setMeasureUnit, .{ measureKey(&buf, id), unit }) catch {};
+}
+
+/// The next `propName` is a plain label, whatever unit it names: what
+/// follows is not one measurement (a list of sizes).
+var prop_plain = false;
 
 /// The next `propName` is marked as an override.
 var prop_marked = false;
@@ -18989,6 +19530,15 @@ fn tileProperties(id: TileId) !void {
     defer popGroup(saved_group);
     const t = state.model.tileConst(id);
     propText("Designator", "{s}", .{t.designator}, 1);
+    // Its u, for its measurements in u: its prototype's, in its track.
+    accepted.u_mm = blk: {
+        const pidx = state.model.protoIndex(t.prototype) orelse break :blk null;
+        const at = flowPosOf(id) orelse break :blk state.model.prototypes.items[pidx].unit;
+        const rs = state.model.regionsIn(at.parent);
+        if (at.region >= rs.len) break :blk null;
+        break :blk state.model.prototypes.items[pidx].unitIn(rs[at.region].pitch);
+    };
+    defer accepted.u_mm = null;
     const on_grid = state.model.gridInstanceOf(id);
     if (on_grid) |at| try instanceProperties(at.parent, at.grid, at.index);
     if (on_grid == null) {
@@ -19266,6 +19816,20 @@ fn connectionProperties(ski: usize, ci: u32) void {
         if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 960 }))
             actV(.setConnectorKind, .{ it.id, ci, @as(layout.model.sketch_.connector.Kind, @enumFromInt(choice)) });
     }
+    // How it arrives at its end: level, or as its path runs (a caption's
+    // leader is always level: its text reads along it).
+    const leader = for (it.captions.items) |sc| {
+        if (sc.connector == ci) break true;
+    } else false;
+    if (!leader) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 968 });
+        defer row.deinit();
+        propName(asElement("connector.arrive"));
+        const names = [_][]const u8{ "As its path runs", "Level" };
+        var choice: usize = @intFromBool(c.level);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 968 }))
+            actV(.setConnectorLevel, .{ it.id, ci, choice == 1 });
+    }
     if (c.kind == .dubins) {
         if (numberProp(asElement("connector.radius"), c.radius, 0.05, 1000, 965)) |v| actV(.setConnectorShape, .{ it.id, ci, v, c.lead });
         if (numberProp(asElement("connector.lead"), c.lead, 0, 1000, 966)) |v| actV(.setConnectorShape, .{ it.id, ci, c.radius, v });
@@ -19321,6 +19885,8 @@ fn skSelectedObject(it: SkPlace) ?skl.GroupId {
             .curve => |c| c,
             .point => |r| r.geom,
             .constraint => continue,
+            .piece => |f| f.geom,
+            .crossing => continue,
         };
         if (skl.composite.objectOf(it.sketch, g)) |o| return o;
     }
@@ -19371,6 +19937,8 @@ fn skSelectedConnection(it: SkPlace) ?u32 {
             .curve => |c| c,
             .point => |r| r.geom,
             .constraint => continue,
+            .piece => |f| f.geom,
+            .crossing => continue,
         };
         for (it.sketch.connectors.items, 0..) |c, ci| {
             if (c.start == g or c.end == g or std.mem.indexOfScalar(skl.GeomId, c.path.items, g) != null) return @intCast(ci);
@@ -19394,6 +19962,8 @@ fn skConnect() void {
             .point => |r| from = .{ .point = r },
             .curve => |g| from = .{ .curve = g },
             .constraint => {},
+            .piece => |f| from = .{ .curve = f.geom },
+            .crossing => {},
         }
     }
     if (picks.len >= 2) switch (picks[1]) {
@@ -19473,7 +20043,7 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
         defer row.deinit();
         prop_marked = if (ref) |r| @abs(@field(r, f.field) - @field(ps, f.field)) > 1e-9 else false;
         propName(f.name);
-        const v: f64 = @round(@field(ps, f.field) * pt_per_mm * 100) / 100;
+        const v: f64 = @field(ps, f.field) * pt_per_mm;
         if (accepted.numberField(@src(), f64, v, f.min, 1000, .{ .expand = .horizontal, .id_extra = 910 + k + n })) |nv| {
             @field(ps, f.field) = nv / pt_per_mm;
             changed = true;
@@ -19494,6 +20064,10 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
             changed = true;
         }
     }
+    // Rules above and below: a pen each (none for no rule), then, with
+    // one, its weight, its offset from the text and its length.
+    if (ruleFields("Rule above", &ps.rule_above, n, 940, if (ref) |r| &r.rule_above else null)) changed = true;
+    if (ruleFields("Rule below", &ps.rule_below, n, 950, if (ref) |r| &r.rule_below else null)) changed = true;
     // The style Enter gives the paragraph after (FrameMaker's Next ¶ Tag).
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 920 + n });
@@ -19511,6 +20085,87 @@ fn paragraphFields(ps: *layout.model.ParagraphStyle, n: usize, ref: ?*const layo
         }
         if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 920 + n })) {
             ps.next = if (choice == 0) null else styles[choice - 1].id;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/// A paragraph rule's fields (`label`: "Rule above" or "Rule below"), into
+/// `rule`: its pen, chosen from the document's stroke styles (or a new
+/// solid or dashed one), and with a pen its weight (as typed; "pen": the
+/// pen's own width), its offset from the text (as typed) and its length.
+/// Whether one changed.
+fn ruleFields(comptime label: []const u8, rule: *layout.model.ParagraphRule, n: usize, base: usize, ref: ?*const layout.model.ParagraphRule) bool {
+    const m = &state.model;
+    const a = dvui.currentWindow().arena();
+    var changed = false;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = base + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.pen != rule.pen else false;
+        propName(label);
+        const pens = m.stroke_styles.items;
+        const names = a.alloc([]const u8, pens.len + 3) catch return false;
+        names[0] = "None";
+        var choice: usize = 0;
+        for (pens, names[1 .. pens.len + 1], 1..) |st, *nm, k| {
+            nm.* = st.name;
+            if (rule.pen == st.id) choice = k;
+        }
+        names[pens.len + 1] = "New solid pen";
+        names[pens.len + 2] = "New dashed pen";
+        if (tdropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = base + n })) {
+            const black: layout.art.Color = .{ .r = 0, .g = 0, .b = 0 };
+            const pt = layout.units.mm_per_pt;
+            if (choice == 0) {
+                rule.pen = .none;
+            } else if (choice <= pens.len) {
+                rule.pen = pens[choice - 1].id;
+            } else if (choice == pens.len + 1) {
+                rule.pen = act(.addStrokeStyle, .{ "Rule", layout.figure.Stroke{ .color = black, .width = 0.5 * pt } }) catch return false;
+            } else {
+                rule.pen = act(.addStrokeStyle, .{ "Dashed rule", layout.figure.Stroke{ .color = black, .width = 0.5 * pt, .dash = &.{ 2, 1 } } }) catch return false;
+            }
+            changed = true;
+        }
+    }
+    if (!rule.on()) return changed;
+    var buf: [48]u8 = undefined;
+    {
+        prop_marked = if (ref) |r| !std.meta.eql(r.weight, rule.weight) else false;
+        const shown = if (rule.weight) |w| w.format(&buf) else "pen";
+        if (textProp(label ++ " weight", shown, base + 1 + n)) |typed| {
+            const t = std.mem.trim(u8, typed, " ");
+            if (std.ascii.eqlIgnoreCase(t, "pen") or std.ascii.eqlIgnoreCase(t, "auto")) {
+                rule.weight = null;
+                changed = true;
+            } else if (layout.units.Quantity.parse(t, .pt)) |q| {
+                if (q.needsReference() or q.value > 0) {
+                    rule.weight = q;
+                    changed = true;
+                } else state.status = "A rule's weight is more than nothing. ";
+            } else state.status = "Weight reads as 0.5pt, 0.2mm, +1pt, 200% or pen (the pen's own). ";
+        }
+    }
+    {
+        prop_marked = if (ref) |r| !std.meta.eql(r.offset, rule.offset) else false;
+        if (textProp(label ++ " offset", rule.offset.format(&buf), base + 2 + n)) |typed| {
+            if (layout.units.Quantity.parse(typed, .pt)) |q| {
+                rule.offset = q;
+                changed = true;
+            } else state.status = "Offset reads as 2pt, 1mm, -1pt or 50% (of the line pitch). ";
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = base + 3 + n });
+        defer row.deinit();
+        prop_marked = if (ref) |r| r.length != rule.length else false;
+        propName(label ++ " length");
+        const names = [_][]const u8{ "The column", "Between the indents", "Under the text" };
+        var choice: usize = @intFromEnum(rule.length);
+        if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = base + 3 + n })) {
+            rule.length = @enumFromInt(choice);
             changed = true;
         }
     }
@@ -19716,6 +20371,11 @@ fn styleRuleProperties(sid: layout.model.StyleId) !void {
     if (st.base != .none) if (state.model.styleIndex(st.base)) |bi| propText("Based on", "{s}", .{state.model.styles.items[bi].name}, 4501);
     if (st.faces.items.len == 0) propValue("Faces", true, "{s}", .{if (st.base != .none) "its base's" else "the default face"}, 4502);
     for (st.faces.items, 0..) |f, k| propText(faceItem("expression.style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, @as(usize, 4503) + @min(k, 30));
+    {
+        var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = 4540 });
+        defer box.deinit();
+        styleFeatureProps(sid);
+    }
     try styleRules(sid);
 }
 
@@ -19835,8 +20495,11 @@ fn styleFlowFrom(pi: Parent, ri: usize, tid: ?layout.model.ObjectId) !void {
     _ = try hist.join(m, .setFlowStyle, .{ fid, t.text, t.paragraph, @as(?layout.model.Leading, null), id });
 }
 
+/// A new text layout's flow: the styles of the template chosen in the
+/// Add tracks tool's options (the Default when none is, or it is gone).
 fn styleNewFlow(pi: Parent, ri: usize) !void {
-    try styleFlowFrom(pi, ri, null);
+    const tid = tracks_tool.template;
+    try styleFlowFrom(pi, ri, if (state.model.styleTemplate(tid) != null) tid else null);
 }
 
 /// The flow of track `ri` of panel `pi`, when it has a flow style.
@@ -19931,17 +20594,14 @@ fn templateProperties(id: layout.model.ObjectId) !void {
     if (m.styleIndex(t.text)) |si| propText("Text style", "{s}", .{m.styles.items[si].name}, 2);
     if (m.styleIndex(t.text) != null) try styleSizeProps(t.text, false);
     {
-        var buf: [48]u8 = undefined;
-        const shown = if (t.leading) |l| l.format(&buf) else "auto";
-        if (textProp("Leading", shown, 4)) |typed| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) });
-            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-                if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
-                    _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
-                } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the font's own). ";
-        }
+        if (leadingProp("Leading", t.leading, styleEmMm(t.text), 4)) |edit| switch (edit) {
+            .auto => _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, null) }),
+            .quantity => |l| if ((l.resolve(styleEmMm(t.text)) orelse 0) > 0.01) {
+                _ = try act(.setTemplateLeading, .{ id, @as(?layout.model.Leading, l) });
+            } else {
+                state.status = "That leading is too small: baselines must be apart. ";
+            },
+        };
     }
     if (t.paragraph) |pid| if (m.paraStyle(pid)) |p| {
         var ps = p.*;
@@ -20100,17 +20760,16 @@ fn flowStyleProperties(pi: Parent, ri: usize) !void {
     // Its leading, kept as typed; "auto" takes the template's.
     {
         const em = styleEmMm(fl.style);
-        var buf: [48]u8 = undefined;
-        const shown = if (m.flowLeading(fl)) |l| l.format(&buf) else "auto";
         prop_marked = o.leading;
-        if (textProp(asElement("track.leading"), shown, 3004)) |typed| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-                _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template });
-            } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-                if ((l.resolve(em) orelse 0) > 0.01) {
+        if (leadingProp(asElement("track.leading"), m.flowLeading(fl), em, 3004)) |edit| {
+            switch (edit) {
+                .auto => _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, null), fl.template }),
+                .quantity => |l| if ((l.resolve(em) orelse 0) > 0.01) {
                     _ = try act(.setFlowStyle, .{ fid, fl.style, fl.paragraph_default, @as(?layout.model.Leading, l), fl.template });
-                } else state.status = "That leading is too small: baselines must be apart. ";
-            } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the template's). ";
+                } else {
+                    state.status = "That leading is too small: baselines must be apart. ";
+                },
+            }
             return;
         }
         const region = m.regionsIn(pi)[ri];
@@ -20141,17 +20800,12 @@ fn leadingProps(pi: Parent, ri: usize) void {
     const sid = region.style orelse return;
     if (state.model.styleIndex(sid) == null) return;
     const em = styleEmMm(sid);
-    var buf: [48]u8 = undefined;
-    const shown = if (region.leading) |l| l.format(&buf) else "auto";
-    if (textProp(asElement("track.leading"), shown, 4)) |typed| {
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, typed, " "), "auto")) {
-            if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {};
-        } else if (layout.units.Quantity.parse(typed, .pt)) |l| {
-            act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
-                state.status = "That leading is too small: baselines must be apart. ";
-            };
-        } else state.status = "Leading reads as 12pt, 5mm, +2pt, +3mm, +10% or 120% (auto: the style's own). ";
-    }
+    if (leadingProp(asElement("track.leading"), region.leading, em, 4)) |edit| switch (edit) {
+        .auto => if (styleLinePitch(sid)) |p| act(.setLeading, .{ pi, ri, null, p }) catch {},
+        .quantity => |l| act(.setLeading, .{ pi, ri, l, l.resolve(em) orelse 0 }) catch {
+            state.status = "That leading is too small: baselines must be apart. ";
+        },
+    };
     const pt = region.pitch / layout.model.mm_per_pt;
     const em_pt = em / layout.model.mm_per_pt;
     const extra = pt - em_pt;
@@ -20244,6 +20898,17 @@ fn duplicatePrototype(id: layout.model.PrototypeId) !void {
 
 /// An editable text property. Returns the new text once accepted (Enter,
 /// or leaving the field), not empty; the model copies it.
+/// A leading row: kept as typed, its unit in a pop-up beside it (see
+/// `accepted.quantityField`); "auto" for none of its own. `em` is the font
+/// size its relative values are of.
+fn leadingProp(name: []const u8, lead: ?layout.model.Leading, em: ?f64, n: usize) ?accepted.QuantityEdit {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
+    defer row.deinit();
+    propName(name);
+    accepted.measure_id = accepted.current_id;
+    return accepted.quantityField(@src(), lead, .pt, em, .{ .expand = .horizontal, .id_extra = n });
+}
+
 fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
@@ -20256,6 +20921,7 @@ fn textProp(name: []const u8, value: []const u8, n: usize) ?[]const u8 {
 fn sizesProp(name: []const u8, shown: []const u8, n: usize) ?[]const f64 {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     // Shown without the unit, as typed.
     const value = if (std.mem.eql(u8, shown, "any")) "" else std.mem.trimEnd(u8, shown, " u");
@@ -20604,7 +21270,51 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         propText(faceItem("style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
     keyButton(@src(), "Fonts… (every face, and searching the installed fonts)", 0, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } });
+    styleFeatureProps(sid);
     try styleRules(sid);
+}
+
+/// A style's value for `p`: its own rule for every object, else its
+/// base's, else glyphic's default; and whether it is its own.
+fn styleParam(sid: layout.model.StyleId, p: glyphic.Param) struct { value: glyphic.Value, own: bool } {
+    var at = sid;
+    var depth: usize = 0;
+    while (state.model.styleIndex(at)) |i| : (depth += 1) {
+        const st = state.model.styles.items[i];
+        for (st.rules.items) |r| if (r.kind == null and r.param == p) return .{ .value = r.value, .own = at == sid };
+        if (st.base == .none or depth > 32) break;
+        at = st.base;
+    }
+    return .{ .value = glyphic.param.def(p).default, .own = false };
+}
+
+/// A text style's OpenType features: ligatures on or off (off unless set),
+/// and any others by tag. Each is a rule of the style, for every object.
+fn styleFeatureProps(sid: layout.model.StyleId) void {
+    const saved_group = pushGroup("typography");
+    defer popGroup(saved_group);
+    heading("Typography", .{}, 40);
+    {
+        const lig = styleParam(sid, .ligatures);
+        var on = lig.value.flag;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 41 });
+        defer row.deinit();
+        if (tcheckbox(@src(), &on, "Ligatures", .{ .id_extra = 41 })) {
+            act(.setStyleRule, .{ sid, @as(?glyphic.Kind, null), glyphic.Param.ligatures, @as(?glyphic.Value, .{ .flag = on }) }) catch {};
+        }
+    }
+    {
+        const ft = styleParam(sid, .features);
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 42 });
+        defer row.deinit();
+        propName("OpenType features");
+        var te = dvui.textEntry(@src(), .{ .text_initial = ft.value.name, .placeholder = "smcp onum ss01 -kern" }, .{ .expand = .horizontal, .id_extra = 42, .font = styled(.theme(.body), !ft.own) });
+        defer te.deinit();
+        if (accepted.accept(te, ft.value.name)) |typed| {
+            const t = std.mem.trim(u8, typed, " ");
+            act(.setStyleRule, .{ sid, @as(?glyphic.Kind, null), glyphic.Param.features, @as(?glyphic.Value, if (t.len == 0) null else .{ .name = t }) }) catch {};
+        }
+    }
 }
 
 /// Edits how an art layer is painted: its fill's colours (one, or a
@@ -20704,6 +21414,7 @@ fn paintEditor(paint: layout.art.Paint, n: usize) ?layout.art.Paint {
 fn colourEntry(name: []const u8, colour: ?layout.art.Color, allow_none: bool, n: usize) ??layout.art.Color {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     var swatch = dvui.box(@src(), .{}, .{
         .min_size_content = .{ .w = 16, .h = 16 },
@@ -20775,6 +21486,7 @@ fn sizeProperty(id: TileId, axis: enum { horizontal, vertical }) !void {
     }
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n });
     defer row.deinit();
+    prop_plain = true;
     propName(name);
     var picked = choice.?;
     if (tdropdown(@src(), names[0..listed], .{ .choice = &picked }, .{}, .{ .expand = .horizontal }) and picked < sizes.len) {
@@ -21142,6 +21854,23 @@ var text_drag = false;
 /// drag from here selecting). With `extend` (Shift), the selection runs
 /// from the cursor that was to here, in the same flow. Whether it was one.
 fn textPress(at: geom.Point, extend: bool) bool {
+    // In an expression edited on the canvas: inside its text, the caret
+    // there (with Shift, the selection to there), a drag selecting on.
+    if (canvas_eq != null) if (hoverTargetAt(at)) |h| switch (h) {
+        .eq_caret => |x| {
+            if (extend) eqExtend(x.offset) else {
+                canvas_eq_seq += 1;
+                eqMove(x.offset, null);
+            }
+            text_drag = true;
+            eq_drag = true;
+            last_click = null;
+            return true;
+        },
+        // Near an object's box: the object chosen (hoverPress).
+        .eq_object => return false,
+        else => {},
+    };
     // The innermost text first: a slot's text in a tile (a sort in this
     // flow, or a key anywhere) edited where pressed. While an expression
     // is edited, its own objects and caret places come first (hoverPress).
@@ -21177,10 +21906,19 @@ fn textPress(at: geom.Point, extend: bool) bool {
     return true;
 }
 var text_drag_parent: Parent = .{ .space = 0 };
+/// The text drag is in an expression edited on the canvas.
+var eq_drag = false;
 
 /// The pointer at `at` in a text drag: the cursor follows it, the anchor
 /// staying where the drag began.
 fn textDragTo(at: geom.Point) void {
+    if (eq_drag) {
+        if (canvas_eq != null) if (hoverTargetAt(at)) |h| switch (h) {
+            .eq_caret => |x| if (x.offset != canvas_eq.?.offset) eqExtend(x.offset),
+            else => {},
+        };
+        return;
+    }
     const c = track_cursor orelse return;
     const pos = flowPlaceAt(text_drag_parent, .{ .parent = c.parent, .region = c.region }, at, true) orelse return;
     if (pos.index == c.index and pos.offset == c.offset) return;
@@ -21244,14 +21982,23 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
                     lst.append(al, s0) catch {};
                 }
             }.f;
+            // Its characters (grapheme clusters: a letter and its accents
+            // are one), for text: no stop inside one, and one at each
+            // start, inside a ligature too.
+            const cs: []const layout.edit.Char = if (items[r.item].what.run.equation) &.{} else layout.edit.chars(a, content, false) catch &.{};
             for (l.render.items) |ri| switch (ri) {
                 .glyph => |g| {
                     if (g.source < r.from or g.source >= r.from + r.len) continue;
+                    if (insideChar(cs, g.source)) continue;
                     add(&list, a, r.item, g.source, content.len, pi, t.track, l.origin.x + g.transform.e - t.box.x0);
                 },
                 else => {},
             };
             const piece_end = r.from + r.len;
+            for (cs) |ch| {
+                if (ch.start < r.from or ch.start >= piece_end) continue;
+                if (l.render.caret(ch.start)) |cr| add(&list, a, r.item, ch.start, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
+            }
             if (l.render.caret(piece_end)) |cr| add(&list, a, r.item, piece_end, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
             // An equation's anchor points, where Tab puts the cursor (an
             // empty slot has no glyph to stop at).
@@ -21282,6 +22029,16 @@ fn flowStops(fp: Parent, fr: usize) []Stop {
         w += 1;
     }
     return list.items[0..w];
+}
+
+/// Whether source byte `at` falls inside one of characters `cs`, past its
+/// start (an accent on its letter).
+fn insideChar(cs: []const layout.edit.Char, at: u32) bool {
+    for (cs) |c| {
+        if (c.start < at and at < c.end) return true;
+        if (c.start >= at) break;
+    }
+    return false;
 }
 
 /// The placed segment of the flow of track `fr` of panel `fp` on panel
@@ -22312,6 +23069,10 @@ const CanvasEq = struct {
     /// start at the same byte: d² and d).
     head: ?u32 = null,
     head_end: ?u32 = null,
+    /// The selection's other end, while there is one: what lies between
+    /// it and the caret is selected (Shift with the caret keys, a drag,
+    /// Shift+click).
+    anchor: ?u32 = null,
 };
 
 var canvas_eq: ?CanvasEq = null;
@@ -22420,7 +23181,115 @@ fn eqMove(offset: u32, head: ?u32) void {
     canvas_eq.?.offset = offset;
     canvas_eq.?.head = head;
     canvas_eq.?.head_end = null;
+    canvas_eq.?.anchor = null;
     expr_inspect = .{ .key = canvas_eq.?.target.key(), .offset = offset };
+}
+
+/// Moves the caret to `offset`, extending the selection (its anchor where
+/// the caret was, when there was none).
+fn eqExtend(offset: u32) void {
+    const q = canvas_eq orelse return;
+    const anchor = q.anchor orelse q.offset;
+    eqMove(offset, null);
+    if (anchor != offset) canvas_eq.?.anchor = anchor;
+}
+
+/// The selection in `q`'s source, [start, end), when there is one.
+fn eqSelection(q: CanvasEq) ?[2]u32 {
+    const an = q.anchor orelse return null;
+    if (q.head != null or an == q.offset) return null;
+    return .{ @min(an, q.offset), @max(an, q.offset) };
+}
+
+/// `src` without selection `sel`: the objects wholly inside it go with
+/// their source (a fraction, its braces and all), and of what is left in
+/// it, the characters (a structure partly selected keeps its command and
+/// braces, as Backspace leaves them). Allocated from `a`.
+fn eqDeleteRange(a: std.mem.Allocator, src: []const u8, sel: [2]u32, math: bool) ?[]u8 {
+    var cut: std.ArrayList([2]u32) = .empty;
+    if (eqParse(a, src, math)) |p| {
+        // Outermost first: eqStops puts what holds others before them.
+        for (eqStops(a, &p)) |x| {
+            if (x.field or x.start < sel[0] or x.end > sel[1] or x.start == x.end) continue;
+            const inside = for (cut.items) |c| {
+                if (x.start >= c[0] and x.end <= c[1]) break true;
+            } else false;
+            if (!inside) cut.append(a, .{ x.start, x.end }) catch return null;
+        }
+    }
+    for (layout.edit.chars(a, src, math) catch return null) |c| {
+        if (c.start < sel[0] or c.start >= sel[1]) continue;
+        const inside = for (cut.items) |k| {
+            if (c.start >= k[0] and c.start < k[1]) break true;
+        } else false;
+        if (!inside) cut.append(a, .{ c.start, c.end }) catch return null;
+    }
+    std.mem.sort([2]u32, cut.items, {}, struct {
+        fn lt(_: void, x: [2]u32, y: [2]u32) bool {
+            return x[0] < y[0];
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    var at: u32 = 0;
+    for (cut.items) |c| {
+        if (c[0] < at) {
+            at = @max(at, c[1]);
+            continue;
+        }
+        out.appendSlice(a, src[at..c[0]]) catch return null;
+        at = c[1];
+    }
+    out.appendSlice(a, src[@min(at, src.len)..]) catch return null;
+    return out.items;
+}
+
+/// Deletes the selection, the caret where it began. Whether there was one.
+fn eqDeleteSelection() bool {
+    const q = canvas_eq orelse return false;
+    const sel = eqSelection(q) orelse return false;
+    const src = eqContent(q) orelse return false;
+    const next = eqDeleteRange(dvui.currentWindow().arena(), src, sel, q.math) orelse return false;
+    eqStore(q, next);
+    eqMove(sel[0], null);
+    return true;
+}
+
+/// Whether `s`'s braces pair up (none left open or closed too soon).
+fn bracesBalanced(s: []const u8) bool {
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) switch (s[i]) {
+        '\\' => i += 1,
+        '{' => depth += 1,
+        '}' => {
+            depth -= 1;
+            if (depth < 0) return false;
+        },
+        else => {},
+    };
+    return depth == 0;
+}
+
+/// Copies the selection (with `cut`, deletes it too): its source, as
+/// typed, when that stands on its own (its braces pair up); else what its
+/// characters read as.
+fn eqCopy(cut: bool) void {
+    const q = canvas_eq orelse return;
+    const sel = eqSelection(q) orelse return;
+    const src = eqContent(q) orelse return;
+    const a = dvui.currentWindow().arena();
+    const piece = src[sel[0]..sel[1]];
+    if (bracesBalanced(piece)) {
+        dvui.clipboardTextSet(piece);
+    } else {
+        var out: std.ArrayList(u8) = .empty;
+        layout.edit.plainText(a, src, sel[0], sel[1], q.math, &out) catch return;
+        dvui.clipboardTextSet(out.items);
+    }
+    if (cut) {
+        canvas_eq_seq += 1;
+        _ = eqDeleteSelection();
+    }
 }
 
 /// Every place in `src` the caret can stop, in order: its ends, each
@@ -22485,7 +23354,7 @@ fn enterEquation() void {
             canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = at.item } }, .math = false, .offset = at.offset };
             canvas_eq_seq += 1;
             eqMove(at.offset, null);
-            state.status = "Inline math: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+            state.status = "Inline math: type into it; Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
             return;
         }
     }
@@ -22502,7 +23371,7 @@ fn enterEquation() void {
     canvas_eq = .{ .target = .{ .run = .{ .parent = c.parent, .region = c.region, .item = item } }, .math = true, .offset = offset };
     canvas_eq_seq += 1;
     eqMove(offset, null);
-    state.status = "Equation: type into it; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+    state.status = "Equation: type into it; Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
 }
 
 /// Ctrl+\ on a selected tile: its track's text (the expression line's
@@ -22517,7 +23386,7 @@ fn enterTileTrack(id: TileId) void {
     };
     canvas_eq_seq += 1;
     eqMove(@intCast(src.len), null);
-    state.status = "Tile text: type into it ($ starts math); Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, Esc back to typing; Esc leaves. ";
+    state.status = "Tile text: type into it ($ starts math); Shift+arrows or a drag select; Tab: heads and fields; Up or a click chooses an object: arrows nudge it, Tab the next, o out, = - [ ] 0 i u b style it, l a large operator's limits, Esc back to typing; Esc leaves. ";
 }
 
 /// Leaves the equation: one with nothing in it goes; the flow cursor goes
@@ -22566,6 +23435,11 @@ fn leaveCanvasEquation() void {
 
 /// Text typed into the equation (or, on a head, a head's key).
 fn eqType(txt: []const u8) void {
+    if (canvas_eq) |q0| if (eqSelection(q0) != null) {
+        // Over a selection: it goes, the typing in its place (one undo
+        // step with it).
+        if (!eqDeleteSelection()) return;
+    };
     const q = canvas_eq orelse return;
     const src = eqContent(q) orelse {
         canvas_eq = null;
@@ -22703,6 +23577,10 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
         eqMove(o.at + o.caret, null);
         return;
     }
+    if (ch == 'l') {
+        eqLimits(a, src, &p, id);
+        return;
+    }
     switch (ch) {
         '=', '+' => p.e.set(id, .scale, glyphic.param.num(num.round(@min(10, num.f(&p.e, id, .scale) * 1.1)))) catch {},
         '-' => p.e.set(id, .scale, glyphic.param.num(num.round(@max(0.1, num.f(&p.e, id, .scale) / 1.1)))) catch {},
@@ -22742,6 +23620,73 @@ fn eqHeadKey(ch: u8, dx: f32, dy: f32) void {
     eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
 }
 
+/// L on a large operator's head: its limits round the three ways, auto
+/// (above and below in display style, beside in text), above and below
+/// (`\limits`), beside (`\nolimits`), written after its symbol as LaTeX
+/// has them. The head stays chosen.
+fn eqLimits(a: std.mem.Allocator, src: []const u8, p: *const EqParse, id: glyphic.Id) void {
+    const q = canvas_eq orelse return;
+    const head = q.head orelse return;
+    if (p.e.node(id).kind != .large_op) {
+        state.status = "Only a large operator (Σ, ∏, ∫ …) has limits to place. ";
+        return;
+    }
+    const sp = p.spans.get(id);
+    // Its symbol: past a call wrapped round it, a command or a character.
+    var i: usize = sp.start;
+    if (std.mem.startsWith(u8, src[i..sp.end], "\\set(")) {
+        var quoted = false;
+        i += "\\set(".len;
+        while (i < sp.end and (quoted or src[i] != ')')) : (i += 1) {
+            if (src[i] == '"') quoted = !quoted;
+        }
+        i += 1;
+        if (i < sp.end and src[i] == '{') i += 1;
+    }
+    if (i >= sp.end) return;
+    if (src[i] == '\\') {
+        i += 1;
+        while (i < sp.end and std.ascii.isAlphabetic(src[i])) i += 1;
+    } else i += std.unicode.utf8ByteSequenceLength(src[i]) catch 1;
+    const sym_end = i;
+    // What it says now, and where that is written.
+    var j = sym_end;
+    while (j < sp.end and src[j] == ' ') j += 1;
+    const word = struct {
+        fn at(s: []const u8, k: usize, w: []const u8) bool {
+            return std.mem.startsWith(u8, s[k..], w) and (k + w.len >= s.len or !std.ascii.isAlphabetic(s[k + w.len]));
+        }
+    };
+    var now: glyphic.param.Limits = .auto;
+    var old_end = sym_end;
+    if (word.at(src, j, "\\limits")) {
+        now = .stacked;
+        old_end = j + "\\limits".len;
+    } else if (word.at(src, j, "\\nolimits")) {
+        now = .side;
+        old_end = j + "\\nolimits".len;
+    }
+    const next_mode: glyphic.param.Limits = switch (now) {
+        .auto => .stacked,
+        .stacked => .side,
+        .side => .auto,
+    };
+    const text: []const u8 = switch (next_mode) {
+        .auto => "",
+        .stacked => "\\limits",
+        .side => "\\nolimits",
+    };
+    const next = std.mem.concat(a, u8, &.{ src[0..sym_end], text, src[old_end..] }) catch return;
+    eqStore(q, next);
+    state.status = switch (next_mode) {
+        .auto => "Limits: automatic (above and below in display style, beside in text). ",
+        .stacked => "Limits: above and below. ",
+        .side => "Limits: beside. ",
+    };
+    const grown: i64 = @as(i64, @intCast(next.len)) - @as(i64, @intCast(src.len));
+    eqPick(head, @intCast(@as(i64, @intCast(sp.end)) + grown));
+}
+
 /// A key while editing an equation on the canvas; whether it was one.
 /// An action of mode `canvas.equation` (or, on a head,
 /// `canvas.equation.head`); whether it was done.
@@ -22759,6 +23704,7 @@ fn eqAction(inv: keymap.Invocation) bool {
         .{ .name = "turn-left", .ch = '[' },  .{ .name = "turn-right", .ch = ']' },
         .{ .name = "reset", .ch = '0' },      .{ .name = "slot-index", .ch = 'i' },
         .{ .name = "slot-upper", .ch = 'u' }, .{ .name = "slot-lower", .ch = 'b' },
+        .{ .name = "limits", .ch = 'l' },
     };
     inline for (head_chars) |hc| if (inv.action == kact("canvas.equation.head." ++ hc.name)) {
         if (q.head == null) return false;
@@ -22824,13 +23770,44 @@ fn eqAction(inv: keymap.Invocation) bool {
             eqMove(off, if (to == .head) off else null);
             return true;
         },
-        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end") => {
+        kact("canvas.equation.select.all") => {
+            canvas_eq_seq += 1;
+            eqMove(@intCast(src.len), null);
+            if (src.len > 0) canvas_eq.?.anchor = 0;
+            return true;
+        },
+        kact("canvas.equation.copy"), kact("canvas.equation.cut") => {
+            eqCopy(inv.action == kact("canvas.equation.cut"));
+            return true;
+        },
+        kact("canvas.equation.paste") => {
+            const text = dvui.clipboardText();
+            // One line: a break in what is pasted ends it.
+            const line = text[0 .. std.mem.indexOfAny(u8, text, "\r\n") orelse text.len];
+            canvas_eq_seq += 1;
+            if (line.len > 0) eqType(line);
+            return true;
+        },
+        kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right"), kact("canvas.equation.caret.start"), kact("canvas.equation.caret.end"), kact("canvas.equation.select.left"), kact("canvas.equation.select.right"), kact("canvas.equation.select.start"), kact("canvas.equation.select.end") => {
             const places = eqPlaces(a, src, q.math);
+            const select = switch (inv.action) {
+                kact("canvas.equation.select.left"), kact("canvas.equation.select.right"), kact("canvas.equation.select.start"), kact("canvas.equation.select.end") => true,
+                else => false,
+            };
+            // Left or Right with a selection: the caret to its edge.
+            if (!select) if (eqSelection(q)) |sel| switch (inv.action) {
+                kact("canvas.equation.caret.left"), kact("canvas.equation.caret.right") => {
+                    canvas_eq_seq += 1;
+                    eqMove(if (inv.action == kact("canvas.equation.caret.left")) sel[0] else sel[1], null);
+                    return true;
+                },
+                else => {},
+            };
             var to = q.offset;
             switch (inv.action) {
-                kact("canvas.equation.caret.start") => to = 0,
-                kact("canvas.equation.caret.end") => to = @intCast(src.len),
-                kact("canvas.equation.caret.left") => {
+                kact("canvas.equation.caret.start"), kact("canvas.equation.select.start") => to = 0,
+                kact("canvas.equation.caret.end"), kact("canvas.equation.select.end") => to = @intCast(src.len),
+                kact("canvas.equation.caret.left"), kact("canvas.equation.select.left") => {
                     var i = places.len;
                     while (i > 0) : (i -= 1) if (places[i - 1] < q.offset) {
                         to = places[i - 1];
@@ -22843,7 +23820,7 @@ fn eqAction(inv: keymap.Invocation) bool {
                 },
             }
             canvas_eq_seq += 1;
-            eqMove(to, null);
+            if (select) eqExtend(to) else eqMove(to, null);
             return true;
         },
         kact("canvas.equation.delete-back"), kact("canvas.equation.delete-forward") => {
@@ -22852,6 +23829,7 @@ fn eqAction(inv: keymap.Invocation) bool {
                 eqMove(q.offset, null);
                 return true;
             }
+            if (eqDeleteSelection()) return true;
             const cs = layout.edit.chars(a, src, q.math) catch return true;
             var hit: ?layout.edit.Char = null;
             if (backspace) {
@@ -23060,6 +24038,7 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabe
             if (changed) dvui.refresh(null, @src(), null);
         }
     }
+    if (eqSelection(q)) |sel| drawEqSelection(area, r, piece, sel, at);
     if (q.head != null) return;
     if (q.offset < piece.base) return;
     const local = q.offset - piece.base;
@@ -23069,6 +24048,55 @@ fn drawCanvasEq(area: dvui.Rect.Physical, pi: Parent, l: layout.place.PlacedLabe
     const p1 = state.view.toPx(area, .{ .x = at.x + c.x, .y = at.y + c.y1 });
     markCaret(p0, p1);
     speckleCaret(p0, p1);
+}
+
+/// The selection in an expression edited on the canvas, over what piece
+/// `piece` (render `r`, drawn at `at`) draws: each object wholly inside it
+/// (the outermost), and a leaf partly inside it (some of a word's
+/// letters) from caret to caret.
+fn drawEqSelection(area: dvui.Rect.Physical, r: *const layout.render.Render, piece: EqPiece, sel: [2]u32, at: geom.Point) void {
+    if (sel[1] <= piece.base) return;
+    const lo = if (sel[0] > piece.base) sel[0] - piece.base else 0;
+    const hi = sel[1] - piece.base;
+    const tint = colors.select.opacity(0.28);
+    const a = dvui.currentWindow().arena();
+    var whole: std.ArrayList([2]u32) = .empty;
+    // Outermost objects first, so their parts are not drawn twice.
+    var order: std.ArrayList(usize) = .empty;
+    for (r.boxes, 0..) |b, k| if (b.kind != .field) order.append(a, k) catch return;
+    std.mem.sort(usize, order.items, r, struct {
+        fn lt(rr: *const layout.render.Render, x: usize, y: usize) bool {
+            return rr.boxes[x].nest < rr.boxes[y].nest;
+        }
+    }.lt);
+    for (order.items) |k| {
+        const b = r.boxes[k];
+        const inside = for (whole.items) |w| {
+            if (b.start >= w[0] and b.end <= w[1]) break true;
+        } else false;
+        if (inside) continue;
+        if (b.start >= lo and b.end <= hi and b.start < b.end) {
+            whole.append(a, .{ b.start, b.end }) catch return;
+            fillQuad(area, b.corners, at, tint);
+            continue;
+        }
+        // A leaf partly selected: between the carets at the selection's
+        // ends within its characters.
+        if (b.kind != .leaf or b.inner_end <= lo or b.inner_start >= hi) continue;
+        const c0 = caretAt(r, @max(lo, b.inner_start)) orelse continue;
+        const c1 = caretAt(r, @min(hi, b.inner_end)) orelse continue;
+        const bb = boxBounds(b);
+        const x0 = @min(c0.x, c1.x);
+        const x1 = @max(c0.x, c1.x);
+        if (x1 <= x0) continue;
+        fillQuad(area, .{ .{ .x = x0, .y = bb.y0 }, .{ .x = x1, .y = bb.y0 }, .{ .x = x1, .y = bb.y1 }, .{ .x = x0, .y = bb.y1 } }, at, tint);
+    }
+}
+
+fn fillQuad(area: dvui.Rect.Physical, c: [4]geom.Point, at: geom.Point, colour: dvui.Color) void {
+    var pts: [4]dvui.Point.Physical = undefined;
+    for (c, &pts) |q, *o| o.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+    dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
 }
 
 // Pointing (decided 2026-11-20): near a container's outline the
@@ -25474,14 +26502,18 @@ fn selectionDrag(at: geom.Point) void {
         if (r.edges.top) b.y1 = @max(b.y1 + dy, b.y0 + min);
         // The edges it moves on the grid (the canvas's, so in the frame's
         // offset).
+        // And onto other objects' edges and centres, lines, the grid.
         snap_guide = .{};
-        if (snapStep()) |st| if (constrain.parentOf(&state.model, r.id)) |parent| {
+        if (constrain.parentOf(&state.model, r.id)) |parent| {
             const off = constrain.frameOffset(&state.model, parent);
-            if (r.edges.left) b.x0 = @min(snapAxis(b.x0 + off.x, st, &snap_guide.x) - off.x, b.x1 - min);
-            if (r.edges.right) b.x1 = @max(snapAxis(b.x1 + off.x, st, &snap_guide.x) - off.x, b.x0 + min);
-            if (r.edges.bottom) b.y0 = @min(snapAxis(b.y0 + off.y, st, &snap_guide.y) - off.y, b.y1 - min);
-            if (r.edges.top) b.y1 = @max(snapAxis(b.y1 + off.y, st, &snap_guide.y) - off.y, b.y0 + min);
-        };
+            const mv = &[_]layout.model.ObjectId{r.id};
+            const sx: [2]f64 = .{ b.y0 + off.y, b.y1 + off.y };
+            const sy: [2]f64 = .{ b.x0 + off.x, b.x1 + off.x };
+            if (r.edges.left) b.x0 = @min(snapEdge(b.x0 + off.x, false, sx, mv) - off.x, b.x1 - min);
+            if (r.edges.right) b.x1 = @max(snapEdge(b.x1 + off.x, false, sx, mv) - off.x, b.x0 + min);
+            if (r.edges.bottom) b.y0 = @min(snapEdge(b.y0 + off.y, true, sy, mv) - off.y, b.y1 - min);
+            if (r.edges.top) b.y1 = @max(snapEdge(b.y1 + off.y, true, sy, mv) - off.y, b.y0 + min);
+        }
         if (figureProportions(r.id)) |pr| b = keepFigureProportions(pr, r.box, b, r.edges);
         _ = actM(r.key, .placeObjects, .{ &[_]layout.model.ObjectId{r.id}, &[_]geom.Box{b} }) catch {};
         return;
@@ -25493,15 +26525,20 @@ fn selectionDrag(at: geom.Point) void {
     // A few pixels before it is a drag, not a click.
     if (!sp.moved and @sqrt(dx * dx + dy * dy) * state.view.ppm < 4) return;
     sp.moved = true;
-    // The first one's origin (its top-left) on the grid; the rest with it.
+    // Their box together snapped: its edges or centre onto another
+    // object's or a line, else its top-left on the grid; all move alike.
     var mx = dx;
     var my = dy;
     snap_guide = .{};
-    if (snapStep()) |st| if (sp.ids.len > 0) if (constrain.parentOf(&state.model, sp.ids[0])) |parent| {
-        const off = constrain.frameOffset(&state.model, parent);
-        mx = snapShift(sp.boxes[0].x0 + off.x, dx, st, &snap_guide.x);
-        my = snapShift(sp.boxes[0].y1 + off.y, dy, st, &snap_guide.y);
+    var all = geom.Box.empty;
+    for (sp.ids, sp.boxes) |id, b| if (constrain.parentOf(&state.model, id)) |parent| {
+        all = all.join(offsetBox(b, constrain.frameOffset(&state.model, parent)));
     };
+    if (!all.isEmpty()) {
+        const sh = snapMove(all, dx, dy, 0, 2, sp.ids);
+        mx = sh.x;
+        my = sh.y;
+    }
     const a = dvui.currentWindow().arena();
     const boxes = a.alloc(geom.Box, sp.boxes.len) catch return;
     for (sp.boxes, boxes) |b, *o| o.* = .{ .x0 = b.x0 + mx, .x1 = b.x1 + mx, .y0 = b.y0 + my, .y1 = b.y1 + my };
@@ -25893,7 +26930,28 @@ fn engageMotion(at: geom.Point) void {
     const fr0 = engageFreedom(d.hit);
     const free_x = if (engageMoves(d.hit.kind)) fr0.x else (fr0.edges.left or fr0.edges.right);
     const free_y = if (engageMoves(d.hit.kind)) fr0.y else (fr0.edges.bottom or fr0.edges.top);
-    const p = snapPoint(.{ .x = d.hit.at.x + (if (free_x) dx else 0), .y = d.hit.at.y + (if (free_y) dy else 0) }, free_x, free_y);
+    const mv = &[_]layout.model.ObjectId{d.hit.id};
+    const raw: geom.Point = .{ .x = d.hit.at.x + (if (free_x) dx else 0), .y = d.hit.at.y + (if (free_y) dy else 0) };
+    // A move snaps its whole box (edges and centre onto other objects'
+    // and lines), else the point on the grid; a resize snaps the point.
+    var p = raw;
+    if (engageMoves(d.hit.kind)) {
+        const sn = dragSnapper(mv);
+        const tol = snapTol();
+        const b0: geom.Box = .{ .x0 = d.box.x0 + d.offset.x, .x1 = d.box.x1 + d.offset.x, .y0 = d.box.y0 + d.offset.y, .y1 = d.box.y1 + d.offset.y };
+        const sx = raw.x - d.hit.at.x;
+        const sy = raw.y - d.hit.at.y;
+        const m: geom.Box = .{ .x0 = b0.x0 + sx, .x1 = b0.x1 + sx, .y0 = b0.y0 + sy, .y1 = b0.y1 + sy };
+        snap_guide = .{};
+        if (free_x) if (sn.axis(false, &.{ m.x0, (m.x0 + m.x1) / 2, m.x1 }, .{ m.y0, m.y1 }, tol) orelse sn.gridAxis(raw.x)) |h| {
+            p.x += h.shift;
+            snap_guide.x = h.guide;
+        };
+        if (free_y) if (sn.axis(true, &.{ m.y0, (m.y0 + m.y1) / 2, m.y1 }, .{ m.x0, m.x1 }, tol) orelse sn.gridAxis(raw.y)) |h| {
+            p.y += h.shift;
+            snap_guide.y = h.guide;
+        };
+    } else p = snapPointOf(raw, free_x, free_y, mv);
     d.now = p;
     // The point in the container's parent's frame.
     const q: geom.Point = .{ .x = p.x - d.offset.x, .y = p.y - d.offset.y };
@@ -26397,8 +27455,9 @@ fn objectsMenu() void {
     }
 }
 
-/// Equal widths (or heights) for the chosen objects: each held equal to
-/// the first, one undo step.
+/// Equal widths (or heights) for the chosen objects: one set of peers
+/// (no member a reference; the owner, 2026-11-24), the first chosen
+/// setting the starting size (2026-11-26), one undo step.
 fn equalSizes(vertical: bool) void {
     const cb = constrain_batch orelse return;
     closeObjectsMenu();
@@ -26409,8 +27468,10 @@ fn equalSizes(vertical: bool) void {
     }
     drag_count += 1;
     const key = mergeKey(.{ "constrain-equal", drag_count });
-    const f: Feature = if (vertical) .bottom else .left;
-    for (cb.ids[1..cb.n]) |id| _ = actM(key, .addConstraint, .{.{ .kind = .equal_size, .a = .{ .object = id, .feature = f }, .b = .{ .object = cb.ids[0], .feature = f } }}) catch {};
+    _ = actM(key, .addEqualSet, .{ cb.ids[0..cb.n], vertical }) catch {
+        state.status = "Those sizes could not be held equal. ";
+        return;
+    };
     state.status = if (vertical) "Equal heights. " else "Equal widths. ";
 }
 
@@ -26612,6 +27673,7 @@ fn constrainPromptWindow() void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         var nb: [32]u8 = undefined;
+        prop_plain = true;
         propName(std.fmt.bufPrint(&nb, "Value, {s}", .{docUnits().symbol()}) catch "Value");
         var twd: dvui.WidgetData = undefined;
         const te = dvui.textEntryNumber(@src(), f64, .{ .value = &pr.value, .min = 0, .max = 100000 }, .{ .expand = .horizontal, .data_out = &twd });
@@ -26841,7 +27903,9 @@ fn pickedConstraintProperties() bool {
     var b1: [120]u8 = undefined;
     var b2: [120]u8 = undefined;
     var b3: [260]u8 = undefined;
-    const what = if (c.kind == .equal_size)
+    const what = if (c.isSet())
+        setText(&b3, c)
+    else if (c.kind == .equal_size)
         std.fmt.bufPrint(&b3, "{s} size − {s}", .{ endText(&b1, c.a, null), endText(&b2, c.b, c.a.object) }) catch ""
     else
         std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, null), endText(&b2, c.b, c.a.object) }) catch "";
@@ -26851,7 +27915,9 @@ fn pickedConstraintProperties() bool {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
         propName("Value");
-        if (c.driving) {
+        if (c.isSet()) {
+            dvui.labelNoFmt(@src(), "Equal: whichever member changes, the others follow", .{}, .{ .gravity_y = 0.5, .id_extra = 9585 });
+        } else if (c.driving) {
             const v0 = @round(c.value * k * 1000) / 1000;
             accepted.label_unit = if (k == 1) .mm else .in;
             if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = 9582 })) |v| setConstraintValue(c.id, v / k);
@@ -26878,6 +27944,10 @@ fn constraintText(buf: []u8, c: layout.model.Constraint) []const u8 {
     var b2: [120]u8 = undefined;
     var vb: [32]u8 = undefined;
     const gone = constrain.abandoned(&state.model, c);
+    if (c.isSet()) {
+        var sb: [260]u8 = undefined;
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ if (gone) "Abandoned: " else "", setText(&sb, c) }) catch "";
+    }
     const rel = if (c.kind == .equal_size) "size equal to" else "from";
     const what = if (c.kind == .equal_size) std.fmt.bufPrint(&b2, "{s}'s", .{objectName(c.b.object)}) catch "" else endText(&b2, c.b, c.a.object);
     return std.fmt.bufPrint(buf, "{s}{s} {s} {s}{s}{s}", .{
@@ -26888,6 +27958,21 @@ fn constraintText(buf: []u8, c: layout.model.Constraint) []const u8 {
         if (c.kind == .equal_size) "" else ", ",
         if (c.kind == .equal_size or gone) "" else dimText(&vb, c),
     }) catch "";
+}
+
+/// "Equal widths: Column1, Column2, Column3", a set of peers (its members
+/// still there).
+fn setText(buf: []u8, c: layout.model.Constraint) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll(if (c.a.feature.vertical()) "Equal heights: " else "Equal widths: ") catch return buf[0..0];
+    var n: usize = 0;
+    for (c.peers.items) |id| {
+        if (constrain.parentOf(&state.model, id) == null) continue;
+        if (n > 0) w.writeAll(", ") catch break;
+        w.writeAll(objectName(id)) catch break;
+        n += 1;
+    }
+    return w.buffered();
 }
 
 /// The document's constraints: how many, the abandoned ones (an object
@@ -26963,7 +28048,7 @@ fn drawConstraintsLayer(area: dvui.Rect.Physical, space: usize) void {
     const m = &state.model;
     const px = dvui.windowNaturalScale();
     for (m.constraints.items) |c| {
-        const parent = constrain.parentOf(m, c.a.object) orelse continue;
+        const parent = constrain.constraintParent(m, c) orelse continue;
         if (constrain.spaceOf(m, parent) != space) continue;
         const off = constrain.frameOffset(m, parent);
         const hot = (picked_constraint != null and picked_constraint.? == c.id) or (if (engageTarget()) |h| isDimKind(h.kind) and h.id == c.id else false) or (dim_drag != null and dim_drag.?.id == c.id);
@@ -26990,11 +28075,11 @@ fn drawConstraintsLayer(area: dvui.Rect.Physical, space: usize) void {
                 drawDimension(area, .{ .x = 0, .y = 0 }, g.ms, c.place, dimText(&buf, c), colour, hot);
             },
             .equal_size => {
-                // "=" on each object's extent.
-                const eoff = constrain.frameOffset(m, parent);
-                for ([_]layout.model.ObjectId{ c.a.object, c.b.object }) |id| {
-                    if (id == .none) continue;
-                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, eoff);
+                // "=" on each object's extent (each member's, of a set).
+                var ob: [2]layout.model.ObjectId = undefined;
+                for (c.objects(&ob)) |id| {
+                    const ep = constrain.parentOf(m, id) orelse continue;
+                    const b = offsetBox(constrain.boxOf(m, id) orelse continue, constrain.frameOffset(m, ep));
                     const at: geom.Point = if (v) .{ .x = b.x1, .y = (b.y0 + b.y1) / 2 } else .{ .x = (b.x0 + b.x1) / 2, .y = b.y1 };
                     const q = state.view.toPx(area, at);
                     strokeText("=", .{ .at = .{ .x = q.x + 3 * px, .y = q.y + 2 * px }, .size = dim_cap * px, .y_down = true, .align_y = 1 }, colour);
@@ -27051,8 +28136,8 @@ fn layConstraintIcon(c: layout.model.Constraint) icons.GIcon {
 /// Showing (or no longer showing) one end of a container's constraint.
 fn layFlashEnd(arg: i32) void {
     const id = contextObject() orelse return;
-    const ci: usize = @intCast(@divTrunc(arg, 2));
-    const e: usize = @intCast(@mod(arg, 2));
+    const ci: usize = @intCast(@divTrunc(arg, 256));
+    const e: usize = @intCast(@mod(arg, 256));
     if (ci >= state.model.constraints.items.len) return;
     const cid = state.model.constraints.items[ci].id;
     if (lay_flash) |f| if (f.c == cid and f.end == e) {
@@ -27070,8 +28155,11 @@ fn drawLayFlash(area: dvui.Rect.Physical) void {
     const c = for (m.constraints.items) |x| {
         if (x.id == f.c) break x;
     } else return;
-    const end = if (f.end == 0) c.a else c.b;
-    const other = if (f.end == 0) c.b else c.a;
+    // A set's member: its box.
+    const end: ConstraintEnd = if (c.isSet())
+        .{ .object = if (f.end < c.peers.items.len) c.peers.items[f.end] else return, .feature = c.a.feature }
+    else if (f.end == 0) c.a else c.b;
+    const other = if (c.isSet()) end else if (f.end == 0) c.b else c.a;
     const parent = constrain.parentOf(m, if (end.object != .none) end.object else other.object) orelse return;
     const off = constrain.frameOffset(m, parent);
     const far = 1e5;
@@ -27108,7 +28196,7 @@ fn constraintProperties() void {
         lay_flash = null;
     };
     for (m.constraints.items, 0..) |c, ci| {
-        if (c.a.object != id and c.b.object != id) continue;
+        if (!c.names(id)) continue;
         any = true;
         const flagged = constraintIssue(c.id);
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -27123,17 +28211,24 @@ fn constraintProperties() void {
         var b1: [120]u8 = undefined;
         var b2: [120]u8 = undefined;
         var b3: [260]u8 = undefined;
-        const what = if (c.kind == .equal_size)
+        const what = if (c.isSet())
+            setText(&b3, c)
+        else if (c.kind == .equal_size)
             std.fmt.bufPrint(&b3, "Equal size: {s} − {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch ""
         else
             std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
         const pad: dvui.Rect = .all(2);
         keyIcon(@src(), "Constraint", icons.gravenAny(layConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = what } });
-        for ([2]ConstraintEnd{ c.a, c.b }, 0..) |e, ei| {
+        // A set: each member; else the two ends.
+        const eb: [2]ConstraintEnd = .{ c.a, c.b };
+        const n_ends = if (c.isSet()) @min(c.peers.items.len, 255) else 2;
+        for (0..n_ends) |ei| {
+            if (c.isSet() and constrain.parentOf(m, c.peers.items[ei]) == null) continue;
+            const e: ConstraintEnd = if (c.isSet()) .{ .object = c.peers.items[ei], .feature = c.a.feature } else eb[ei];
             const on = if (lay_flash) |f| f.c == c.id and f.end == ei else false;
             var nb: [120]u8 = undefined;
             const tip = if (c.kind == .equal_size) (std.fmt.bufPrint(&nb, "{s} size", .{if (e.object == .none) "The parent's" else objectName(e.object)}) catch "") else endText(&nb, e, null);
-            keyIcon(@src(), "Constraint object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 2 + ei), .{
+            keyIcon(@src(), "Constraint object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 256 + ei), .{
                 .id_extra = 1 + ei,
                 .gravity_y = 0.5,
                 .padding = pad,
@@ -27146,6 +28241,14 @@ fn constraintProperties() void {
             });
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (c.isSet()) {
+            // Taking this object out: the rest stay equal.
+            if (icons.button(@src(), .trash, "Take this out of the set (the rest stay equal)", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+                act(.removeConstraintMember, .{ c.id, id }) catch {};
+                return;
+            }
+            continue;
+        }
         if (!c.driving) {
             var vb: [32]u8 = undefined;
             dvui.labelNoFmt(@src(), dimText(&vb, c), .{}, .{ .gravity_y = 0.5, .id_extra = ci });
@@ -27161,7 +28264,7 @@ fn constraintProperties() void {
     }
     if (!any) dvui.labelNoFmt(@src(), "None. Constrain (in the tools) picks a feature, then another.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     for (constraintIssues()) |i| {
-        for (m.constraints.items) |c| if (c.id == i.constraint and (c.a.object == id or c.b.object == id)) {
+        for (m.constraints.items) |c| if (c.id == i.constraint and c.names(id)) {
             propText("Issue", "{s}", .{switch (i.kind) {
                 .missing_object => "a constraint names something removed",
                 .cross_parent => "a constraint crosses workspaces",
@@ -27390,13 +28493,65 @@ const SkPlace = struct {
     sketch: *skl.Sketch,
     name: []const u8,
     at: geom.Point,
+    /// The kinds of thing its layer does not draw (`layout.tags`).
+    hidden: Tags = .{},
 
     fn of(index: usize, at: geom.Point) ?SkPlace {
         if (index >= state.model.sketches.items.len) return null;
         const it = &state.model.sketches.items[index];
         return .{ .item = it, .sketch = &it.sketch, .name = it.name, .at = at };
     }
+
+    /// Whether things tagged `t` are drawn.
+    fn shows(p: SkPlace, t: layout.tags.Tag) bool {
+        return p.hidden.showsTag(t);
+    }
 };
+
+const Tags = layout.tags.Tags;
+
+/// The layer (its index in space `space`) that sketch `sketch` drawn at
+/// `at` is on: its view's, else the space's base layer.
+fn sketchLayer(space: usize, sketch: usize, at: geom.Point) ?usize {
+    if (space >= state.model.spaces.items.len) return null;
+    const sp = state.model.spaces.items[space];
+    for (sp.sketch_views.items) |v| {
+        if (state.model.sketchIndex(v.sketch) == sketch and v.at.x == at.x and v.at.y == at.y) return sp.layerIndex(v.layer);
+    }
+    return sp.layerIndex(.none);
+}
+
+/// What layer `li` of space `space` does not draw.
+fn layerHidden(space: usize, li: ?usize) Tags {
+    const i = li orelse return .{};
+    if (space >= state.model.spaces.items.len or i >= state.model.spaces.items[space].layers.items.len) return .{};
+    return state.model.spaces.items[space].layers.items[i].hidden;
+}
+
+/// Layer `li` of space `space` hides `hidden`: one step of the document's.
+fn setLayerHidden(space: usize, li: usize, hidden: Tags) void {
+    if (space >= state.model.spaces.items.len or li >= state.model.spaces.items[space].layers.items.len) return;
+    var l = state.model.spaces.items[space].layers.items[li];
+    if (l.hidden.eql(hidden)) return;
+    l.hidden = hidden;
+    act(.setLayer, .{ space, li, l }) catch {};
+}
+
+/// The layer of the sketch being edited.
+fn skEditLayer() ?struct { space: usize, li: usize } {
+    const r = sketch_edit orelse return null;
+    return .{ .space = r.space, .li = sketchLayer(r.space, r.sketch, r.at) orelse return null };
+}
+
+/// The sketch editor's Ink only: its layer shows the ink alone, or,
+/// showing it alone already, everything.
+fn skToggleInkOnly() void {
+    const l = skEditLayer() orelse return;
+    const ink_only = layout.tags.Preset.ink_only.hidden();
+    const now = layerHidden(l.space, l.li);
+    setLayerHidden(l.space, l.li, if (now.eql(ink_only)) Tags.none else ink_only);
+    state.status = if (now.eql(ink_only)) "Everything shown again (W). " else "Ink only: the drawing as it will be output; W shows everything again. ";
+}
 
 /// A sketch view's sketch, placed.
 fn viewPlace(space: usize, view: usize) ?SkPlace {
@@ -27404,6 +28559,7 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     var p = SkPlace.of(state.model.sketchIndex(v.sketch) orelse return null, v.at) orelse return null;
     // A view is a use: it shows the sketch as last accepted.
     p.sketch = p.item.used();
+    p.hidden = layerHidden(space, state.model.spaces.items[space].layerIndex(v.layer));
     return p;
 }
 
@@ -27462,6 +28618,8 @@ fn skSetConstruction(on: bool) void {
             _ = skEdit(.{ .construction = .{ .g = r.geom, .on = on } });
         },
         .constraint => {},
+        .piece => {},
+        .crossing => {},
     };
     if (!on and (sk_tool == .ray or sk_tool == .line)) skChooseTool(.segment);
     if (!on) sk_geo_last[@intFromEnum(SkGeo.line)] = .segment;
@@ -27479,6 +28637,13 @@ const SkPick = union(enum) {
     point: skl.PointRef,
     curve: skl.GeomId,
     constraint: skl.ConstraintId,
+    /// Part of a curve between its cuts (Shift+click): its ends, points
+    /// on it, crossings (`skl.pieces`).
+    piece: skl.pieces.Found,
+    /// Where two curves cross (no point there yet): a constraint tool
+    /// makes a point there, held on both, and constrains that (the owner,
+    /// 2026-11-26).
+    crossing: skl.pieces.Crossing,
 };
 var sk_sel: std.ArrayList(SkPick) = .empty;
 
@@ -27504,6 +28669,12 @@ var sk_drag_seq: u64 = 0;
 /// A selection box being dragged out on empty space.
 var sk_box: ?struct { start: geom.Point, at: geom.Point } = null;
 var sk_press_ctrl = false;
+/// Shift held at the press: a piece of a curve, or the path round an
+/// area, is chosen (`skPieceSelect`).
+var sk_press_shift = false;
+/// Shift held at the last pointer event: the piece under the pointer
+/// shown.
+var sk_shift = false;
 var sk_summary = false;
 /// A dimension's value being entered.
 var sk_dim: ?struct { c: skl.ConstraintId, at: dvui.Point.Physical, fresh: bool = true, focus_tries: u8 = 6 } = null;
@@ -27520,7 +28691,9 @@ var sk_last_pick: ?struct { ref: SketchRef, ns: i128 } = null;
 
 fn skItem() ?SkPlace {
     const r = sketch_edit orelse return null;
-    return SkPlace.of(r.sketch, r.at);
+    var p = SkPlace.of(r.sketch, r.at) orelse return null;
+    p.hidden = layerHidden(r.space, sketchLayer(r.space, r.sketch, r.at));
+    return p;
 }
 
 fn skLocal(it: SkPlace, p: geom.Point) geom.Point {
@@ -27588,6 +28761,7 @@ fn loadColumnsSampleWith(constrained: bool) !void {
         .{ .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .right }, .value = 6 },
         .{ .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[1], .feature = .right }, .value = 6 },
         .{ .kind = .equal_size, .a = .{ .object = ids[1], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } },
+        // Joins the first: one set of the three (`addConstraint`).
         .{ .kind = .equal_size, .a = .{ .object = ids[2], .feature = .left }, .b = .{ .object = ids[0], .feature = .left } },
         .{ .a = .{ .object = ids[1], .feature = .top }, .b = .{ .object = ids[0], .feature = .top } },
         .{ .a = .{ .object = ids[2], .feature = .top }, .b = .{ .object = ids[0], .feature = .top } },
@@ -27617,6 +28791,27 @@ fn loadSketchSample() void {
     state.view.cy = -3;
     state.view.ppm = 40;
     state.view.fit = null;
+}
+
+/// GRAVEN_SAMPLE=diameters: the rectangle sketch with circles and an arc
+/// beside it, dimensioned across: a driving diameter turned to 30° with
+/// its value beyond the circle, a small circle's reference diameter
+/// (arrows outside), an arc's diameter, a circle's radius.
+fn loadDiametersSample() void {
+    loadSketchSample();
+    const big = skEdit(.{ .circle = .{ .c = .{ .x = -12, .y = 0 }, .r = 3 } }) orelse return;
+    const small = skEdit(.{ .circle = .{ .c = .{ .x = 17, .y = 5 }, .r = 0.6 } }) orelse return;
+    const arc = skEdit(.{ .arc = .{ .c = .{ .x = 11, .y = -4 }, .a = .{ .x = 13, .y = -4 }, .b = .{ .x = 9, .y = -4 } } }) orelse return;
+    const ring = skEdit(.{ .circle = .{ .c = .{ .x = 0, .y = 9 }, .r = 2 } }) orelse return;
+    const d0 = skEdit(.{ .constrain = .{ .kind = .{ .diameter = .{ .g = big, .value = 6 } } } }) orelse return;
+    _ = skEdit(.{ .place = .{ .c = d0, .place = .{ .angle = std.math.pi / 6.0, .text = 5.5 } } });
+    const d1 = skEdit(.{ .constrain = .{ .kind = .{ .diameter = .{ .g = small, .value = 1.2 } } } }) orelse return;
+    _ = skEdit(.{ .reference = .{ .c = d1, .on = true } });
+    _ = skEdit(.{ .constrain = .{ .kind = .{ .diameter = .{ .g = arc, .value = 4 } } } });
+    _ = skEdit(.{ .constrain = .{ .kind = .{ .radius = .{ .g = ring, .value = 2 } } } });
+    state.view.cx = 0;
+    state.view.cy = 1;
+    state.view.ppm = 28;
 }
 
 /// GRAVEN_SAMPLE=sketch-panel: the ready-made rectangle, its edges and a
@@ -27650,6 +28845,11 @@ fn loadSketchPanelSample() void {
     } else |_| {}
     _ = act(.setInk, .{ index, ring, true }) catch {};
     _ = act(.setFill, .{ index, @as([]const u32, &.{hole}), true, true }) catch {};
+    // GRAVEN_SAMPLE=sketch-fab: the ring filled red round the hole.
+    if (sample_fab) if (act(.addFillStyle, .{layout.model.FillStyle{ .name = "Red", .color = .hex("#d03030"), .pattern = .solid }})) |id| {
+        _ = act(.setCurrentFill, .{id}) catch {};
+        _ = act(.setFill, .{ index, @as([]const u32, &.{ring}), false, true }) catch {};
+    } else |_| {};
     const style = labelStyle() catch return;
     // A caption on the ring, made in the sketch's own space: the panel
     // shows it too.
@@ -27659,12 +28859,40 @@ fn loadSketchPanelSample() void {
             _ = state.model.insertText(cap.parent, cap.region, .{ .index = 0 }, "Power", style) catch {};
         } else |_| {}
     } else |_| {}
+    // GRAVEN_SAMPLE=connections: a Dubins path from the ring's lower right
+    // to a point below and right of it, arriving as it runs (not level),
+    // the style's end a dot: both ends' marks with the line stopping at
+    // them.
+    if (sample_connections) connections: {
+        const al = state.model.arena.allocator();
+        const th = -std.math.pi / 3.0;
+        const id = state.model.sketches.items[index].id;
+        const to = sk.addPoint(al, .{ .x = 31, .y = -11 }, true) catch break :connections;
+        _ = sk.addConstraint(al, .{ .kind = .{ .fixed = .{ .p = .{ .geom = to, .role = .point }, .at = .{ .x = 31, .y = -11 } } } }) catch break :connections;
+        const from: layout.model.sketch_.connector.From = .{ .free = .{ .at = .{ .x = 22 + 7 * @cos(th), .y = 7 * @sin(th) }, .angle = th } };
+        _ = act(.addConnection, .{ id, from, @as(?layout.model.sketch_.PointRef, .{ .geom = to, .role = .point }), layout.model.sketch_.connector.Kind.dubins }) catch break :connections;
+        const sk_c = &state.model.sketches.items[index].sketch;
+        const k = sk_c.connectors.items[sk_c.connectors.items.len - 1];
+        var cs = state.model.connectorStyleOf(@enumFromInt(k.style));
+        cs.end = .dot;
+        _ = act(.setConnectorStyle, .{cs}) catch {};
+    }
     const pi = act(.insertSketchPanel, .{ shown_space, index, geom.Point{ .x = 0, .y = 0 } }) catch return;
     // Text across the panel, flowing round the ring.
     const pitch = 6.0;
     const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 25 }, .style = style, .count = 3, .length = 62.0 / pitch, .pitch = pitch }) catch return;
     state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "Text on a panel cut from a sketch flows round its ink." }) catch {};
     state.context = .{ .panel = pi };
+    // GRAVEN_SAMPLE=sketch-fab: made as a plate, its fills and then its
+    // ink (over them, as drawn) inlaid in their colours, its hole cut
+    // through.
+    if (sample_fab) _ = act(.setPanelFab, .{ pi, layout.model.Fab{ .thickness = 2, .layers = &.{
+        .{ .name = "Plate", .source = .edge, .surface = .base_bottom, .dir = .up, .depth = 2, .op = .{ .add = .{ .name = "white", .color = .hex("#f2f2f2") } } },
+        .{ .name = "Hole", .source = .cutouts, .op = .subtract },
+        .{ .name = "Fills", .source = .{ .fills = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "red", .color = .hex("#d03030") } } },
+        .{ .name = "Ink", .source = .{ .ink = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#1e1e1e") } } },
+        .{ .name = "Text", .source = .{ .text = "" }, .depth = 0.4, .op = .{ .inlay = .{ .name = "black", .color = .hex("#1e1e1e") } } },
+    } } }) catch {};
     // GRAVEN_SAMPLE=sketch-texts: its caption's text from a text sheet,
     // German shown, the sheet open beside the canvas.
     if (sample_texts) if (act(.makeTextSheet, .{ "Texts", @as([]const []const u8, &.{ "de", "fr" }) })) |id| {
@@ -27675,6 +28903,36 @@ fn loadSketchPanelSample() void {
     state.view.cx = 0;
     state.view.cy = 0;
     state.view.ppm = 14;
+    state.view.fit = null;
+    // GRAVEN_SKETCH_EDIT=1: its sketch being edited, in its own space.
+    if (platform.env("GRAVEN_SKETCH_EDIT") != null) sample_edit_home = state.model.homeOf(state.model.sketches.items[index].id);
+}
+
+/// A sample's sketch space to open and edit at the next frame.
+var sample_edit_home: ?usize = null;
+
+/// GRAVEN_SAMPLE=drawing-panel: a sketch in its own space with a drawing
+/// (a ring and a cross inked), and a plain panel on the canvas with text;
+/// Insert figure ready with that drawing, to drag onto the panel.
+fn loadDrawingPanelSample() void {
+    const index = act(.addSketchSpace, .{@as([]const u8, "Badge")}) catch return;
+    const ring = act(.editSketch, .{ index, layout.model.SketchEdit{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } } }) catch return;
+    const a = act(.editSketch, .{ index, layout.model.SketchEdit{ .segment = .{ .a = .{ .x = -6, .y = -6 }, .b = .{ .x = 6, .y = 6 } } } }) catch return;
+    const b = act(.editSketch, .{ index, layout.model.SketchEdit{ .segment = .{ .a = .{ .x = -6, .y = 6 }, .b = .{ .x = 6, .y = -6 } } } }) catch return;
+    for ([_]u32{ ring, a, b }) |g| _ = act(.setInk, .{ index, g, true }) catch {};
+    const pi = state.model.addPanel("Plate", 90, 50) catch return;
+    const style = labelStyle() catch return;
+    const pitch = 6.0;
+    const r = state.model.addTracks(.{ .panel = pi }, .{ .name = "Text", .origin = .{ .x = 4, .y = 44 }, .style = style, .count = 6, .length = 82.0 / pitch, .pitch = pitch }) catch return;
+    state.model.insertRun(.{ .panel = pi }, r, 0, .{ .style = style, .content = "A drawing from a sketch, placed on a plain panel as its art: the text flows round it, and it follows the sketch when the sketch's changes are accepted." }) catch {};
+    if (state.model.sketchFigure(state.model.sketches.items[index].id)) |fi| {
+        insert_figure = state.model.figures.items[fi].id;
+        state.tool = .insert_figure;
+    }
+    state.context = .{ .panel = pi };
+    state.view.cx = 45;
+    state.view.cy = 25;
+    state.view.ppm = 9;
     state.view.fit = null;
 }
 
@@ -27767,46 +29025,42 @@ fn skAddCaption() void {
     state.expanded.put(state.gpa, Context.key(parentContext(cap.parent)), true) catch {};
 }
 
-/// The selected curves of the sketch being edited (points' curves are
-/// not: ink is drawn on lines and arcs).
-fn skInkable(buf: []skl.GeomId) []skl.GeomId {
+/// The selected curves and pieces of curves, as chosen pieces (a curve
+/// whole), for ink and fills.
+fn skFound(buf: []skl.pieces.Found) []skl.pieces.Found {
     var n: usize = 0;
-    for (sk_sel.items) |p| switch (p) {
-        .curve => |g| if (n < buf.len) {
-            buf[n] = g;
+    for (sk_sel.items) |p| {
+        const f: skl.pieces.Found = switch (p) {
+            .curve => |g| .{ .geom = g },
+            .piece => |f| f,
+            else => continue,
+        };
+        if (n < buf.len) {
+            buf[n] = f;
             n += 1;
-        },
-        else => {},
-    };
+        }
+    }
     return buf[0..n];
 }
 
-/// Whether geometry `g` of the sketch being edited is inked in the
-/// current stroke style.
-fn skInked(g: skl.GeomId) bool {
-    const r = sketch_edit orelse return false;
-    const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return false;
-    const cur = state.model.currentStroke() orelse return false;
-    for (skMarks(fi).inks) |k| if (k.geom == g and k.style == cur) return true;
-    return false;
-}
-
-/// Ink (I): the selected curves drawn in the current stroke style, the
-/// sketch's figure; when every one is inked in it already, the ink comes off.
+/// Ink (I): the selected curves and pieces of curves drawn in the current
+/// stroke style, the sketch's drawing; when every one is inked in it
+/// already, the ink comes off. A piece ending where curves cross gets a
+/// point there, held on both.
 fn skInk() void {
     const r = sketch_edit orelse return;
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
-    if (gs.len == 0) {
-        state.status = "Ink: select lines or arcs first. ";
+    var buf: [256]skl.pieces.Found = undefined;
+    const fs = skFound(&buf);
+    if (fs.len == 0) {
+        state.status = "Ink: select lines or arcs, or pieces of them (Shift+click), first. ";
         return;
     }
     var all = true;
-    for (gs) |g| if (!skInked(g)) {
+    for (fs) |f| if (!state.model.pieceInked(r.sketch, f)) {
         all = false;
     };
     const key = mergeKey(.{ "ink", r.sketch, state.model.revision });
-    for (gs) |g| _ = actM(key, .setInkDraft, .{ r.sketch, g, !all }) catch {};
+    _ = actM(key, .inkPiecesDraft, .{ r.sketch, fs, !all }) catch {};
     state.status = if (all) "Ink taken off. " else "Inked in the current stroke style. ";
 }
 
@@ -27837,6 +29091,43 @@ fn sketchInkProperties() void {
             next.width = w;
             _ = actM(mergeKey(.{ "stroke-width", st.id }), .setStrokeStyle, .{ st.id, st.name, next }) catch {};
         }
+        if (colourEntry("Colour", st.stroke.color, false, 8200)) |c| {
+            var next = st.stroke;
+            next.color = c.?;
+            actV(.setStrokeStyle, .{ st.id, st.name, next });
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8201 });
+            defer row.deinit();
+            propName("Cap");
+            const caps = [_][]const u8{ "Butt", "Round", "Square" };
+            var cap: usize = @intFromEnum(st.stroke.cap);
+            if (tdropdown(@src(), &caps, .{ .choice = &cap }, .{}, .{ .expand = .horizontal, .id_extra = 8201 })) {
+                var next = st.stroke;
+                next.cap = @enumFromInt(cap);
+                // A preset's dashes stay that preset (its lengths for the
+                // new caps, which reach past a dash's ends or don't).
+                if (dashPreset(st.stroke)) |d| if (d > 0) {
+                    const want = if (next.cap != .butt) dash_presets[d].capped else dash_presets[d].butt;
+                    const dash = dvui.currentWindow().arena().alloc(f64, want.len) catch return;
+                    for (want, dash) |x, *o| o.* = x * next.width;
+                    next.dash = dash;
+                };
+                actV(.setStrokeStyle, .{ st.id, st.name, next });
+            }
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8202 });
+            defer row.deinit();
+            propName("Join");
+            const joins = [_][]const u8{ "Miter", "Round", "Bevel" };
+            var join: usize = @intFromEnum(st.stroke.join);
+            if (tdropdown(@src(), &joins, .{ .choice = &join }, .{}, .{ .expand = .horizontal, .id_extra = 8202 })) {
+                var next = st.stroke;
+                next.join = @enumFromInt(join);
+                actV(.setStrokeStyle, .{ st.id, st.name, next });
+            }
+        }
         strokeDashProps(st);
     } else propText("Pen", "{s}", .{"0.3 mm black, made with the first ink"}, 8196);
     keyButton(@src(), "New stroke style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
@@ -27852,6 +29143,21 @@ const dash_presets = [_]struct { name: []const u8, capped: []const f64, butt: []
     .{ .name = "Dash-dot", .capped = &.{ 4, 2.5, 0, 2.5 }, .butt = &.{ 5, 1.5, 1, 1.5 } },
 };
 
+/// Which of `dash_presets` a stroke's dashes are, for its width and caps.
+fn dashPreset(stroke: layout.figure.Stroke) ?usize {
+    const capped = stroke.cap != .butt;
+    for (dash_presets, 0..) |d, i| {
+        const want = if (capped) d.capped else d.butt;
+        if (want.len != stroke.dash.len) continue;
+        var same = true;
+        for (want, stroke.dash) |x, y| if (@abs(x * stroke.width - y) > 1e-6) {
+            same = false;
+        };
+        if (same) return i;
+    }
+    return null;
+}
+
 /// A stroke style's dashes: a preset (scaled to its width), or the
 /// pattern typed in mm ("2 1"; "solid" for none).
 fn strokeDashProps(st: layout.model.StrokeStyle) void {
@@ -27861,16 +29167,7 @@ fn strokeDashProps(st: layout.model.StrokeStyle) void {
     var names: [dash_presets.len + 1][]const u8 = undefined;
     for (dash_presets, 0..) |d, i| names[i] = d.name;
     names[dash_presets.len] = "Custom";
-    var choice: usize = dash_presets.len;
-    for (dash_presets, 0..) |d, i| {
-        const want = if (capped) d.capped else d.butt;
-        if (want.len != st.stroke.dash.len) continue;
-        var same = true;
-        for (want, st.stroke.dash) |x, y| if (@abs(x * w - y) > 1e-6) {
-            same = false;
-        };
-        if (same) choice = i;
-    }
+    var choice: usize = dashPreset(st.stroke) orelse dash_presets.len;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8198 });
         defer row.deinit();
@@ -27922,20 +29219,11 @@ fn newStrokeStyle() void {
 /// (otherwise they are left out, holes).
 var fill_enclosed = false;
 
-/// The figure fill of the sketch being edited whose boundary is exactly
-/// `gs` (any order), if any.
-fn skFillOf(gs: []const skl.GeomId) ?usize {
+/// The drawing's fill in the sketch being edited whose boundary is
+/// exactly the chosen pieces `fs` (any order), if any.
+fn skFillOf(fs: []const skl.pieces.Found) ?usize {
     const r = sketch_edit orelse return null;
-    const fi = state.model.sketchFigure(state.model.sketches.items[r.sketch].id) orelse return null;
-    for (skMarks(fi).fills, 0..) |f, i| {
-        if (f.geoms.len != gs.len) continue;
-        var all = true;
-        for (gs) |g| if (std.mem.indexOfScalar(u32, f.geoms, g) == null) {
-            all = false;
-        };
-        if (all) return i;
-    }
-    return null;
+    return state.model.piecesFill(r.sketch, fs);
 }
 
 /// Fill (F): the area the selected curves close filled in the current
@@ -27943,14 +29231,14 @@ fn skFillOf(gs: []const skl.GeomId) ?usize {
 /// a boundary filled already has its fill taken off.
 fn skFill() void {
     const r = sketch_edit orelse return;
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
-    if (gs.len == 0) {
-        state.status = "Fill: select the lines and arcs (or the circle) around the area first. ";
+    var buf: [256]skl.pieces.Found = undefined;
+    const fs = skFound(&buf);
+    if (fs.len == 0) {
+        state.status = "Fill: select the lines and arcs (or the circle) around the area first, or Shift+click inside it. ";
         return;
     }
-    const on = skFillOf(gs) == null;
-    act(.setFillDraft, .{ r.sketch, gs, fill_enclosed, on }) catch |err| {
+    const on = skFillOf(fs) == null;
+    act(.fillPiecesDraft, .{ r.sketch, fs, fill_enclosed, on }) catch |err| {
         state.status = if (err == error.NotEnclosed) "Fill: the selection must close a path (end to end, round to its start). " else "The fill could not be made. ";
         return;
     };
@@ -27964,8 +29252,8 @@ fn sketchFillProperties() void {
     const saved_group = pushGroup("fill");
     defer popGroup(saved_group);
     heading("{s}", .{"Fill"}, 8180);
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
+    var buf: [256]skl.pieces.Found = undefined;
+    const gs = skFound(&buf);
     // The selection's own fill's setting, when it has one; else the one
     // new fills take.
     const own: ?usize = if (gs.len > 0) skFillOf(gs) else null;
@@ -27975,7 +29263,7 @@ fn sketchFillProperties() void {
         var on = skMarks(fi).fills[k].enclosed;
         if (tcheckbox(@src(), &on, "Fill enclosed paths", .{ .id_extra = 8181 })) {
             fill_enclosed = on;
-            actV(.setFillDraft, .{ r.sketch, gs, on, true });
+            actV(.fillPiecesDraft, .{ r.sketch, gs, on, true });
         }
     } else _ = tcheckbox(@src(), &fill_enclosed, "Fill enclosed paths", .{ .id_extra = 8181 });
     const m = &state.model;
@@ -28059,6 +29347,20 @@ fn finishSketch() void {
 }
 /// A sketch's own space whose tabs close at the next frame's start.
 var close_home: ?usize = null;
+/// A sketch (its ID) Delete sketch removes at the next frame's start.
+var delete_sketch: layout.model.ObjectId = .none;
+
+/// Removes sketch `id` with its own space and drawings: its editing left
+/// and its space's tabs closed first.
+fn deleteSketchNow(id: layout.model.ObjectId) void {
+    if (sketch_edit) |r| if (r.sketch < state.model.sketches.items.len and state.model.sketches.items[r.sketch].id == id) leaveSketch();
+    if (state.model.homeOf(id)) |h| closeSpaceViews(h);
+    const index = state.model.sketchIndex(id) orelse return;
+    if (act(.removeSketch, .{index})) {
+        state.context = .sketches;
+        state.status = "The sketch is deleted, with its own space and its drawings. ";
+    } else |err| state.status = if (err == error.SketchInUse) "A panel is made from this sketch: release it first. " else "The sketch was not deleted. ";
+}
 
 /// Closes every tab showing space `space`; a last tab shows the canvas.
 fn closeSpaceViews(space: usize) void {
@@ -28200,7 +29502,8 @@ var sk_note_until: i128 = 0;
 
 fn skEdit(edit: layout.model.SketchEdit) ?u32 {
     const r = sketch_edit orelse return null;
-    return act(.editSketchDraft, .{ r.sketch, edit }) catch |err| {
+    const done = if (sk_edit_merge) |k| actM(k, .editSketchDraft, .{ r.sketch, edit }) else act(.editSketchDraft, .{ r.sketch, edit });
+    return done catch |err| {
         defer {
             sk_note = state.status;
             sk_note_until = platform.monotonicNs() + 5 * std.time.ns_per_s;
@@ -28337,7 +29640,8 @@ fn skPointsOf(g: skl.Geometry, buf: *[3]skl.PointRef, id: skl.GeomId) []skl.Poin
 
 /// The points of interest within `radius` of `q`: points first, nearest
 /// first, then curves.
-fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
+/// Only what is drawn is hit: nothing of a kind `hidden` hides.
+fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64, hidden: Tags) void {
     sk_nhits = 0;
     var curves: [24]SkHit = undefined;
     var ncurves: usize = 0;
@@ -28345,8 +29649,11 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
     var cdist: [24]f64 = undefined;
     for (s.geometry.items, 0..) |g, gi| {
         if (g.removed) continue;
+        const tags = layout.tags.ofGeometry(g);
+        if (!hidden.shows(tags)) continue;
         var buf: [3]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, @intCast(gi))) |r| {
+            if (!hidden.showsTag(.points) and !g.reference) break;
             const p = s.point(r) catch continue;
             const d0 = skDist(p, q);
             if (d0 > radius or sk_nhits >= sk_hits.len) continue;
@@ -28376,17 +29683,41 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64) void {
             ncurves += 1;
         }
     }
+    // Where curves cross (no point there yet), among the points: a
+    // constraint's target, made a point when one names it.
+    var xs: [8]skl.pieces.Crossing = undefined;
+    for (xs[0..skl.pieces.crossingsNear(s, q, radius, &xs)]) |x| {
+        if (sk_nhits >= sk_hits.len) break;
+        const d = skDist(x.at, q);
+        var k = sk_nhits;
+        while (k > 0 and pdist[k - 1] > d) : (k -= 1) {
+            sk_hits[k] = sk_hits[k - 1];
+            pdist[k] = pdist[k - 1];
+        }
+        sk_hits[k] = .{ .pick = .{ .crossing = x }, .at = x.at };
+        pdist[k] = d;
+        sk_nhits += 1;
+    }
     // Dimensions, by their value or their line (after points, before
     // curves): pressed and dragged, they are placed.
     const px = dvui.windowNaturalScale();
     for (s.constraints.items, 0..) |c, ci| {
         if (sk_nhits >= sk_hits.len) break;
-        if (c.place.hidden) continue;
-        const ms = skDimMeasure(s, c) orelse continue;
-        const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, 0));
-        const near = @min(skDist(d.text_at, q), segPointDist(d.line[0], d.line[1], q));
+        if (c.place.hidden or !hidden.showsTag(.dimensions)) continue;
+        const text_at: geom.Point, const near = if (skDimMeasure(s, c)) |ms| blk: {
+            const d = cdim.linear(ms, c.place, cdim.Style.screen(state.view.ppm / px, 0));
+            break :blk .{ d.text_at, @min(skDist(d.text_at, q), segPointDist(d.line[0], d.line[1], q)) };
+        } else if (skRound(s, c)) |m| blk: {
+            var tb: [64]u8 = undefined;
+            const w = strokefont.width(skDimLabel(&tb, c)) * dim_cap;
+            const d = cdim.radial(m, c.place, cdim.Style.screen(state.view.ppm / px, w));
+            // The value sits above its line: its middle there picks it too.
+            const lift = dim_cap / 2 / state.view.ppm;
+            const mid: geom.Point = .{ .x = d.text_at.x - d.text_dir.y * lift, .y = d.text_at.y + d.text_dir.x * lift };
+            break :blk .{ d.text_at, @min(@min(skDist(d.text_at, q), skDist(mid, q)), segPointDist(d.line[0], d.line[1], q)) };
+        } else continue;
         if (near > radius) continue;
-        sk_hits[sk_nhits] = .{ .pick = .{ .constraint = @intCast(ci) }, .at = d.text_at };
+        sk_hits[sk_nhits] = .{ .pick = .{ .constraint = @intCast(ci) }, .at = text_at };
         sk_nhits += 1;
     }
     for (curves[0..ncurves]) |c| {
@@ -28416,7 +29747,112 @@ fn skTarget() ?SkHit {
 /// pointer.
 fn skClickPoint() ?geom.Point {
     if (sk_lock) |l| return l.at;
-    return sk_pointer;
+    const p = sk_pointer orelse return null;
+    return skTypedTarget(skSnap(p));
+}
+
+/// Sketch point `p` (in the sketch's frame) snapped, through the shared
+/// snapper (`geom.snap`, as the canvas's drags): onto the sketch's other
+/// points (and lined up with them across either axis), segments'
+/// midpoints, its infinite lines and their crossings; else the grid of the
+/// space the sketch is placed in. Alt held: free. `moving`: the point
+/// being dragged (it and what lies on it are no targets).
+fn skSnap(p: geom.Point) geom.Point {
+    const it = skItem() orelse return p;
+    const moving: ?geom.Point = if (sk_drag) |d| (it.sketch.point(d.p) catch null) else null;
+    const s = skSnapper(it, moving);
+    const r = s.point(.{ .x = p.x + it.at.x, .y = p.y + it.at.y }, true, true, snapTol());
+    snap_guide = r;
+    return .{ .x = p.x + r.dx, .y = p.y + r.dy };
+}
+
+var sk_snap_cache: struct { frame: i128 = -1, s: geom.snap.Snapper = .{} } = .{};
+
+fn skSnapper(it: SkPlace, moving: ?geom.Point) *const geom.snap.Snapper {
+    const now_frame = dvui.frameTimeNS();
+    if (sk_snap_cache.frame == now_frame) return &sk_snap_cache.s;
+    const a = dvui.currentWindow().arena();
+    var s: geom.snap.Snapper = .{ .grid = snapStep() };
+    if (snap_objects and !altHeld() and state.view.ppm > 0) {
+        const sk = it.sketch;
+        const o = it.at;
+        const Add = struct {
+            fn pt(sn: *geom.snap.Snapper, al: std.mem.Allocator, q: geom.Point, off: geom.Point, mv: ?geom.Point) void {
+                if (mv) |m| if (@abs(m.x - q.x) < 1e-9 and @abs(m.y - q.y) < 1e-9) return;
+                sn.addAligned(al, .{ .x = q.x + off.x, .y = q.y + off.y }) catch {};
+            }
+        };
+        for (sk.geometry.items, 0..) |g, gi| {
+            if (g.removed) continue;
+            const id: skl.GeomId = @intCast(gi);
+            const P = struct {
+                fn at(skk: *const skl.Sketch, gid: skl.GeomId, role: @FieldType(skl.PointRef, "role")) ?geom.Point {
+                    return skk.point(.{ .geom = gid, .role = role }) catch null;
+                }
+            };
+            switch (g.kind) {
+                .point, .affine => if (P.at(sk, id, .point)) |q| Add.pt(&s, a, q, o, moving),
+                .segment => {
+                    const p0 = P.at(sk, id, .start);
+                    const p1 = P.at(sk, id, .end);
+                    if (p0) |q| Add.pt(&s, a, q, o, moving);
+                    if (p1) |q| Add.pt(&s, a, q, o, moving);
+                    if (p0 != null and p1 != null) {
+                        const mid: geom.Point = .{ .x = (p0.?.x + p1.?.x) / 2, .y = (p0.?.y + p1.?.y) / 2 };
+                        if (moving == null or (skDist(moving.?, p0.?) > 1e-9 and skDist(moving.?, p1.?) > 1e-9)) s.addPoint(a, .{ .x = mid.x + o.x, .y = mid.y + o.y }) catch {};
+                    }
+                },
+                .circle => if (P.at(sk, id, .centre)) |q| Add.pt(&s, a, q, o, moving),
+                .arc => for ([_]@FieldType(skl.PointRef, "role"){ .centre, .start, .end }) |role| {
+                    if (P.at(sk, id, role)) |q| Add.pt(&s, a, q, o, moving);
+                },
+                .ray => |r| if (P.at(sk, id, .origin)) |q| {
+                    Add.pt(&s, a, q, o, moving);
+                    const ang = sk.vars.items[r.angle];
+                    s.addLine(a, .{ .x = q.x + o.x, .y = q.y + o.y }, .{ .x = @cos(ang), .y = @sin(ang) }) catch {};
+                },
+                .line => |l| {
+                    const th = sk.vars.items[l.theta];
+                    const rho = sk.vars.items[l.rho];
+                    s.addLine(a, .{ .x = rho * @cos(th) + o.x, .y = rho * @sin(th) + o.y }, .{ .x = -@sin(th), .y = @cos(th) }) catch {};
+                },
+            }
+        }
+        s.addCrossings(a) catch {};
+    }
+    sk_snap_cache = .{ .frame = now_frame, .s = s };
+    return &sk_snap_cache.s;
+}
+
+/// What the step being placed measures from: the click before (or, for
+/// an arc's end, its centre), and which typed values it has.
+const SkStepBase = struct { base: ?geom.Point, from_prev: bool, arc_end: bool };
+
+fn skStepBase() SkStepBase {
+    const n = sk_nclicks;
+    const arc_end = sk_tool == .arc_centre and n == 2;
+    const from_prev = n > 0 and switch (sk_tool) {
+        .segment, .ray, .line, .polyline, .circle => true,
+        .arc_centre => n == 1,
+        else => false,
+    };
+    const base: ?geom.Point = if (arc_end) sk_clicks[0] else if (n > 0) sk_clicks[n - 1] else null;
+    return .{ .base = base, .from_prev = from_prev, .arc_end = arc_end };
+}
+
+/// Point `p` as the values typed for the step being placed have it: a
+/// typed length or angle (from the click before) wins over a typed x or
+/// y; what is not typed follows `p`.
+fn skTypedTarget(p: geom.Point) geom.Point {
+    if (sk_step_of.tool != sk_tool or sk_step_of.n != sk_nclicks) return p;
+    const t = sk_step_typed;
+    const sb = skStepBase();
+    if ((sb.from_prev or sb.arc_end) and (t[2] != null or t[3] != null)) if (sb.base) |b| {
+        const r = if (sb.arc_end) skDist(sk_clicks[0], sk_clicks[1]) else t[2] orelse skDist(b, p);
+        const a = if (t[3]) |deg| deg * std.math.pi / 180 else std.math.atan2(p.y - b.y, p.x - b.x);
+        return .{ .x = b.x + r * @cos(a), .y = b.y + r * @sin(a) };
+    };
+    return .{ .x = t[0] orelse p.x, .y = t[1] orelse p.y };
 }
 
 // Drawing tools -----------------------------------------------------------------
@@ -28430,27 +29866,54 @@ fn skToolClicks(t: SkTool) usize {
     };
 }
 
+/// What a drawing tool's click was given beyond where it is: the values
+/// typed for it (x, y, length or radius, angle; see `skStepFields`), and
+/// what it was locked onto (a point or a curve).
+const SkClickGiven = struct { typed: [4]?f64 = .{ null, null, null, null }, on: ?SkPick = null };
+var sk_given: [3]SkClickGiven = .{ .{}, .{}, .{} };
+/// Each drawing tool's geometry and the constraints its clicks give it
+/// are one undo step.
+var sk_tool_seq: u64 = 0;
+var sk_edit_merge: ?u64 = null;
+
 /// A click of the drawing tool at `p`: geometry once it has its clicks.
-fn skToolClick(p: geom.Point) void {
+/// What was typed for a click, or what it was locked onto, constrains the
+/// geometry made (`skClickConstraints`).
+fn skToolClick(p: geom.Point, given: SkClickGiven) void {
     sk_clicks[sk_nclicks] = p;
+    sk_given[sk_nclicks] = given;
     sk_nclicks += 1;
     if (sk_nclicks < skToolClicks(sk_tool)) return;
     const c = sk_clicks;
     const cons = sk_construction;
+    sk_tool_seq += 1;
+    sk_edit_merge = mergeKey(.{ "sktool", sk_tool_seq });
+    defer sk_edit_merge = null;
+    // Each click's part of the geometry made: one of its points, or a
+    // point on it.
+    var roles = [3]SkClickRole{ .none, .none, .none };
+    var made: ?u32 = null;
     switch (sk_tool) {
         .none => {},
-        .point => _ = skEdit(.{ .point = .{ .at = c[0], .construction = cons } }),
+        .point => {
+            made = skEdit(.{ .point = .{ .at = c[0], .construction = cons } });
+            roles[0] = .{ .point = .point };
+        },
         .segment, .polyline => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .segment = .{ .a = c[0], .b = c[1], .construction = cons } });
+            made = skEdit(.{ .segment = .{ .a = c[0], .b = c[1], .construction = cons } });
+            roles = .{ .{ .point = .start }, .{ .point = .end }, .none };
         },
         .circle => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .circle = .{ .c = c[0], .r = skDist(c[0], c[1]), .construction = cons } });
+            made = skEdit(.{ .circle = .{ .c = c[0], .r = skDist(c[0], c[1]), .construction = cons } });
+            roles = .{ .{ .point = .centre }, .on, .none };
         },
         .line => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .line = .{ .through = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            made = skEdit(.{ .line = .{ .through = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            roles = .{ .on, .on, .none };
         },
         .ray => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .ray = .{ .o = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            made = skEdit(.{ .ray = .{ .o = c[0], .angle = std.math.atan2(c[1].y - c[0].y, c[1].x - c[0].x) } });
+            roles = .{ .{ .point = .origin }, .on, .none };
         },
         // An array: its centre then its edge (its first border there), or
         // two corners; its counts from the array tool's.
@@ -28465,10 +29928,12 @@ fn skToolClick(p: geom.Point) void {
             _ = skEdit(.{ .polygon = .{ .c = c[0], .corner = c[1], .sides = polygon_sides, .construction = cons } });
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+            made = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+            roles = .{ .{ .point = .centre }, .{ .point = .start }, .none };
         },
         .circle_3pt => if (circleThrough(c[0], c[1], c[2])) |centre| {
-            _ = skEdit(.{ .circle = .{ .c = centre, .r = skDist(centre, c[0]), .construction = cons } });
+            made = skEdit(.{ .circle = .{ .c = centre, .r = skDist(centre, c[0]), .construction = cons } });
+            roles = .{ .on, .on, .on };
         } else {
             state.status = "The three points are in line: no circle passes through them. ";
         },
@@ -28479,17 +29944,114 @@ fn skToolClick(p: geom.Point) void {
             const sweep = normAngle(std.math.atan2(c[1].y - centre.y, c[1].x - centre.x) - a0);
             const through = normAngle(std.math.atan2(c[2].y - centre.y, c[2].x - centre.x) - a0);
             if (through < sweep) {
-                _ = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons } });
-            } else _ = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons } });
+                made = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons } });
+                roles = .{ .{ .point = .start }, .{ .point = .end }, .on };
+            } else {
+                made = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons } });
+                roles = .{ .{ .point = .end }, .{ .point = .start }, .on };
+            }
         } else {
             state.status = "The three points are in line: no arc passes through them. ";
         },
     }
-    // A polyline goes on from its last point; other tools start again.
+    if (made) |g| skClickConstraints(g, roles);
+    // A polyline goes on from its last point (joined to it); other tools
+    // start again.
     if (sk_tool == .polyline) {
         sk_clicks[0] = c[1];
+        sk_given[0] = .{};
+        if (made) |g| sk_given[0].on = .{ .point = .{ .geom = g, .role = .end } };
         sk_nclicks = 1;
     } else sk_nclicks = 0;
+}
+
+/// A drawing tool click's part of the geometry it made.
+const SkClickRole = union(enum) {
+    none,
+    /// One of its points.
+    point: @FieldType(skl.PointRef, "role"),
+    /// A point on it.
+    on,
+};
+
+/// The constraints the clicks that made geometry `g` give it (the owner,
+/// 2026-11-26: typed values make constraints, not only places):
+/// - a click locked onto a point: its point there coincident with it (or
+///   the point on it, where the click is a point on it); onto a curve:
+///   its point on the curve;
+/// - a typed x or y: its point that far across or up from the sketch's
+///   origin (on an axis when 0);
+/// - a typed length: a segment's length, a circle's or arc's radius;
+/// - a typed angle: a segment's, ray's or line's direction (horizontal or
+///   vertical when it is one).
+fn skClickConstraints(g: skl.GeomId, roles: [3]SkClickRole) void {
+    const it = skItem() orelse return;
+    const kind = it.sketch.geometry.items[g].kind;
+    const origin: skl.PointRef = .{ .geom = 0, .role = .point };
+    const x_axis: skl.GeomId = 1;
+    const y_axis: skl.GeomId = 2;
+    for (roles, 0..) |role, i| {
+        if (i >= skToolClicks(sk_tool)) break;
+        const gv = sk_given[i];
+        const own: ?skl.PointRef = switch (role) {
+            .point => |r| .{ .geom = g, .role = r },
+            else => null,
+        };
+        // Locked onto something: there, whatever was typed.
+        if (gv.on) |on| {
+            switch (on) {
+                .point => |q| if (q.geom != g) {
+                    if (own) |r| {
+                        _ = skEdit(.{ .constrain = .{ .kind = .{ .coincident = .{ r, q } } } });
+                    } else if (role == .on) {
+                        _ = skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = q, .on = g } } } });
+                    }
+                },
+                .curve => |cv| if (own) |r| if (cv != g) {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = cv } } } });
+                },
+                .constraint, .piece => {},
+                .crossing => |x| if (own) |r| if (skEdit(.{ .crossing = x })) |id| {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .coincident = .{ r, .{ .geom = id, .role = .point } } } } });
+                },
+            }
+            continue;
+        }
+        if (own) |r| {
+            if (gv.typed[0]) |x| _ = if (@abs(x) < 1e-9)
+                skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = y_axis } } } })
+            else
+                skEdit(.{ .constrain = .{ .kind = .{ .distance_x = .{ .a = origin, .b = r, .value = @abs(x) } } } });
+            if (gv.typed[1]) |y| _ = if (@abs(y) < 1e-9)
+                skEdit(.{ .constrain = .{ .kind = .{ .point_on = .{ .p = r, .on = x_axis } } } })
+            else
+                skEdit(.{ .constrain = .{ .kind = .{ .distance_y = .{ .a = origin, .b = r, .value = @abs(y) } } } });
+        }
+        if (i == 0) continue;
+        // From the click before: a length (or radius) and an angle.
+        if (gv.typed[2]) |len| if (len > 1e-9) switch (kind) {
+            .segment => _ = skEdit(.{ .constrain = .{ .kind = .{ .distance = .{ .a = .{ .geom = g, .role = .start }, .b = .{ .geom = g, .role = .end }, .value = len } } } }),
+            .circle, .arc => if (sk_tool == .circle or (sk_tool == .arc_centre and i == 1)) {
+                _ = skEdit(.{ .constrain = .{ .kind = .{ .radius = .{ .g = g, .value = len } } } });
+            },
+            else => {},
+        };
+        if (gv.typed[3]) |deg| switch (kind) {
+            .segment, .ray, .line => {
+                const m = @mod(deg, 180);
+                if (@abs(m) < 1e-9 or @abs(m - 180) < 1e-9) {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .horizontal = .{ .geom = g } } } });
+                } else if (@abs(m - 90) < 1e-9) {
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .vertical = .{ .geom = g } } } });
+                } else {
+                    // From the x axis (its direction points left, at
+                    // 180°, but an angle holds a half turn either way).
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .angle = .{ .a = x_axis, .b = g, .value = deg * std.math.pi / 180 } } } });
+                }
+            },
+            else => {},
+        };
+    }
 }
 
 /// The centre of the circle through three points; null when they are in
@@ -28508,7 +30070,7 @@ fn circleThrough(a: geom.Point, b: geom.Point, c: geom.Point) ?geom.Point {
 
 // Constraints from the selection --------------------------------------------------
 
-const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, angle, fixed, parallel, perpendicular, tangent, equal, symmetric };
+const SkKind = enum { coincident, horizontal, vertical, point_on, distance, distance_x, distance_y, radius, diameter, angle, fixed, parallel, perpendicular, tangent, equal, symmetric };
 
 const SkSelParts = struct {
     points: [8]skl.PointRef = undefined,
@@ -28529,8 +30091,54 @@ fn skParts() SkSelParts {
             out.nc += 1;
         },
         .constraint => {},
+        .piece => |f| if (out.nc < 8) {
+            out.curves[out.nc] = f.geom;
+            out.nc += 1;
+        },
+        // A stand-in, made a point when the constraint is (`skMakeCrossings`).
+        .crossing => |x| if (out.np < 8) {
+            out.points[out.np] = skCrossingRef(x);
+            out.np += 1;
+        },
     };
     return out;
+}
+
+/// A selected crossing's stand-in point reference, until it is made a
+/// point: an ID past any geometry.
+fn skCrossingRef(x: skl.pieces.Crossing) skl.PointRef {
+    for (sk_sel.items, 0..) |p, i| switch (p) {
+        .crossing => |y| if (std.meta.eql(x, y)) return .{ .geom = std.math.maxInt(u32) - @as(u32, @intCast(i)), .role = .point },
+        else => {},
+    };
+    return .{ .geom = std.math.maxInt(u32), .role = .point };
+}
+
+/// Where point `r` is: a selected crossing's stand-in, or a point of the
+/// sketch.
+fn skPartPoint(s: *const skl.Sketch, r: skl.PointRef) ?geom.Point {
+    if (r.geom >= std.math.maxInt(u32) - 64) {
+        const i = std.math.maxInt(u32) - r.geom;
+        if (i < sk_sel.items.len) switch (sk_sel.items[i]) {
+            .crossing => |x| return x.at,
+            else => {},
+        };
+        return null;
+    }
+    return s.point(r) catch null;
+}
+
+/// The selected crossings made points (each held on both its curves),
+/// put in the selection in their place: what a constraint tool does
+/// before it constrains.
+fn skMakeCrossings() void {
+    for (sk_sel.items) |*p| switch (p.*) {
+        .crossing => |x| {
+            const id = skEdit(.{ .crossing = x }) orelse continue;
+            p.* = .{ .point = .{ .geom = id, .role = .point } };
+        },
+        else => {},
+    };
 }
 
 /// The sketch selection keeps only what the sketch still has: an undo, or
@@ -28545,6 +30153,8 @@ fn skPruneSelection() void {
             .curve => |g| g < s.geometry.items.len and !s.geometry.items[g].removed,
             .point => |r| r.geom < s.geometry.items.len and !s.geometry.items[r.geom].removed,
             .constraint => |c| c < s.constraints.items.len,
+            .piece => |f| f.geom < s.geometry.items.len and !s.geometry.items[f.geom].removed,
+            .crossing => |x| x.a < s.geometry.items.len and !s.geometry.items[x.a].removed and x.b < s.geometry.items.len and !s.geometry.items[x.b].removed,
         };
         if (!keep) _ = sk_sel.orderedRemove(i);
     }
@@ -28616,15 +30226,18 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
             } else if (p.np == 0 and p.nc == 1 and s.geometry.items[p.curves[0]].kind == .segment) {
                 a = .{ .geom = p.curves[0], .role = .start };
                 b = .{ .geom = p.curves[0], .role = .end };
+            } else if (kind == .distance and p.np == 0 and p.nc > 0 and skIsRound(s, p.curves[0])) {
+                // A circle or arc: its diameter (D across it).
+                return skConstraintsFor(.diameter, out);
             } else if (kind == .distance and p.np == 1 and p.nc == 1 and skIsStraight(s, p.curves[0])) {
-                const q = s.point(p.points[0]) catch return 0;
+                const q = skPartPoint(s, p.points[0]) orelse return 0;
                 const l = skLineOf(s, s.geometry.items[p.curves[0]]) orelse return 0;
                 const d = @abs((q.x - l.p.x) * l.d.y - (q.y - l.p.y) * l.d.x);
                 out[0] = .{ .kind = .{ .line_distance = .{ .p = p.points[0], .line = p.curves[0], .value = d } } };
                 return 1;
             } else return 0;
-            const pa = s.point(a) catch return 0;
-            const pb = s.point(b) catch return 0;
+            const pa = skPartPoint(s, a) orelse return 0;
+            const pb = skPartPoint(s, b) orelse return 0;
             out[0] = switch (kind) {
                 .distance => .{ .kind = .{ .distance = .{ .a = a, .b = b, .value = skDist(pa, pb) } } },
                 .distance_x => .{ .kind = .{ .distance_x = .{ .a = a, .b = b, .value = pb.x - pa.x } } },
@@ -28632,7 +30245,7 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
             };
             n = 1;
         },
-        .radius => if (p.np == 0 and p.nc > 0) {
+        .radius, .diameter => if (p.np == 0 and p.nc > 0) {
             for (p.curves[0..p.nc]) |g| {
                 if (!skIsRound(s, g)) return 0;
                 const r = switch (s.geometry.items[g].kind) {
@@ -28640,7 +30253,7 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
                     .arc => |ar| skDist(skVal(s, ar.a), skVal(s, ar.c)),
                     else => unreachable,
                 };
-                out[n] = .{ .kind = .{ .radius = .{ .g = g, .value = r } } };
+                out[n] = if (kind == .diameter) .{ .kind = .{ .diameter = .{ .g = g, .value = 2 * r } } } else .{ .kind = .{ .radius = .{ .g = g, .value = r } } };
                 n += 1;
             }
         },
@@ -28656,7 +30269,7 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
         },
         .fixed => if (p.np > 0 and p.nc == 0) {
             for (p.points[0..p.np]) |r| {
-                out[n] = .{ .kind = .{ .fixed = .{ .p = r, .at = s.point(r) catch return 0 } } };
+                out[n] = .{ .kind = .{ .fixed = .{ .p = r, .at = skPartPoint(s, r) orelse return 0 } } };
                 n += 1;
             }
         },
@@ -28703,6 +30316,12 @@ fn skConstraintsFor(kind: SkKind, out: []skl.Constraint) usize {
 /// opens for its value.
 fn skConstrain(kind: SkKind, area: dvui.Rect.Physical) void {
     var buf: [8]skl.Constraint = undefined;
+    if (skConstraintsFor(kind, &buf) == 0) {
+        state.status = "That constraint does not fit what is selected. ";
+        return;
+    }
+    // Crossings chosen become points first, then the constraint names them.
+    skMakeCrossings();
     const n = skConstraintsFor(kind, &buf);
     if (n == 0) {
         state.status = "That constraint does not fit what is selected. ";
@@ -28712,12 +30331,41 @@ fn skConstrain(kind: SkKind, area: dvui.Rect.Physical) void {
     for (buf[0..n]) |c| last = skEdit(.{ .constrain = c });
     sk_sel.clearRetainingCapacity();
     if (last) |id| switch (kind) {
-        .distance, .distance_x, .distance_y, .radius, .angle => {
+        .distance, .distance_x, .distance_y, .radius, .diameter, .angle => {
+            skTurnClearOfOthers(id);
             const at = skDimAnchor(area, id) orelse dvui.Point.Physical{ .x = area.x + area.w / 2, .y = area.y + area.h / 2 };
             sk_dim = .{ .c = id, .at = at };
         },
         else => {},
     };
+}
+
+/// A new radius or diameter on a curve that has one already: turned a
+/// quarter turn from it, so the two do not lie on one another.
+fn skTurnClearOfOthers(id: skl.ConstraintId) void {
+    const it = skItem() orelse return;
+    const s = it.sketch;
+    if (id >= s.constraints.items.len) return;
+    const c = s.constraints.items[id];
+    const m = skRound(s, c) orelse return;
+    const g = switch (c.kind) {
+        inline .radius, .diameter => |r| r.g,
+        else => return,
+    };
+    var n: f64 = 0;
+    for (s.constraints.items, 0..) |o, oi| {
+        if (oi == id) continue;
+        switch (o.kind) {
+            inline .radius, .diameter => |r| if (r.g == g) {
+                n += 1;
+            },
+            else => {},
+        }
+    }
+    if (n == 0) return;
+    var pl = c.place;
+    pl.angle = m.default_angle - n * std.math.pi / 2.0;
+    _ = skEdit(.{ .place = .{ .c = id, .place = pl } });
 }
 
 /// A constraint's value as shown: lengths in the document's units, angles
@@ -28726,7 +30374,7 @@ fn skShownValue(c: skl.Constraint) ?f64 {
     return switch (c.kind) {
         inline .distance, .distance_x, .distance_y => |d| d.value * docUnits().perMm(),
         .line_distance => |d| d.value * docUnits().perMm(),
-        .radius => |r| r.value * docUnits().perMm(),
+        inline .radius, .diameter => |r| r.value * docUnits().perMm(),
         .angle => |a| a.value * 180 / std.math.pi,
         else => null,
     };
@@ -28960,6 +30608,7 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .distance_y => "Vertical distance",
         .line_distance => "Distance to line",
         .radius => "Radius",
+        .diameter => "Diameter",
         .angle => "Angle",
         .parallel => "Parallel",
         .perpendicular => "Perpendicular",
@@ -29029,6 +30678,79 @@ fn skArcMid(c: geom.Point, a: geom.Point, b: geom.Point) geom.Point {
 }
 
 const cdim = skl.constraint.dimension;
+
+/// What a radius or diameter measures: its circle, and the way its line
+/// points by default (a circle's 45°, an arc's middle).
+fn skRound(s: *const skl.Sketch, c: skl.Constraint) ?cdim.Round {
+    const g, const full = switch (c.kind) {
+        .radius => |r| .{ r.g, false },
+        .diameter => |r| .{ r.g, true },
+        else => return null,
+    };
+    const ld = skRadiusLeader(s, g) orelse return null;
+    const r = skDist(ld.centre, ld.on);
+    const sweep: ?[2]f64 = switch (s.geometry.items[g].kind) {
+        .arc => |ar| blk: {
+            const cc = skVal(s, ar.c);
+            const pa = skVal(s, ar.a);
+            const pb = skVal(s, ar.b);
+            const t0 = std.math.atan2(pa.y - cc.y, pa.x - cc.x);
+            var sw = std.math.atan2(pb.y - cc.y, pb.x - cc.x) - t0;
+            if (sw <= 0) sw += 2 * std.math.pi;
+            break :blk .{ t0, sw };
+        },
+        else => null,
+    };
+    return .{ .centre = ld.centre, .r = r, .diameter = full, .default_angle = std.math.atan2(ld.on.y - ld.centre.y, ld.on.x - ld.centre.x), .sweep = sweep };
+}
+
+/// Whether a dimension is drawn after drafting practice, and so is placed
+/// by dragging it (a distance, radius or diameter).
+fn skDimPlaceable(s: *const skl.Sketch, c: skl.Constraint) bool {
+    return skDimMeasure(s, c) != null or skRound(s, c) != null;
+}
+
+/// A dimension's value as drawn: R or ⌀ before a radius or diameter, a
+/// reference's in parentheses, an expression before what it comes to.
+fn skDimLabel(tb: []u8, c: skl.Constraint) []const u8 {
+    const v = skShownValue(c) orelse return "";
+    const u: []const u8 = if (c.kind == .angle) "°" else "";
+    const pre: []const u8 = switch (c.kind) {
+        .radius => "R",
+        .diameter => "⌀",
+        .distance_x => "↔",
+        .distance_y => "↕",
+        else => "",
+    };
+    if (!c.driving) return std.fmt.bufPrint(tb, "({s}{d:.2}{s})", .{ pre, @abs(v), u }) catch "";
+    if (c.expr.len > 0) return std.fmt.bufPrint(tb, "{s}{s} = {d:.2}{s}", .{ pre, c.expr, @abs(v), u }) catch "";
+    return std.fmt.bufPrint(tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
+}
+
+/// A radius or diameter drawn after drafting practice
+/// (`graven_constraint`'s `radial`), in screen sizes: its line through or
+/// from the centre, arrowheads on the curve, the value along it.
+fn drawRound(area: dvui.Rect.Physical, at: geom.Point, m: cdim.Round, place: cdim.Placement, text: []const u8, colour: dvui.Color, hot: bool) void {
+    const it = struct {
+        at: geom.Point,
+    }{ .at = at };
+    const px = dvui.windowNaturalScale();
+    const w = strokefont.width(text) * dim_cap * px;
+    const d = cdim.radial(m, place, cdim.Style.screen(state.view.ppm / px, w / px));
+    const thin: dvui.ColorOrGradient = .{ .color = colour.opacity(0.7) };
+    dvui.Path.stroke(.{ .points = &.{ skPx(area, it, d.line[0]), skPx(area, it, d.line[1]) } }, .{ .thickness = if (hot) 2 * px else px, .color = thin });
+    // A diameter's centre marked where its line crosses it.
+    if (m.diameter) skRing(skPx(area, it, m.centre), 1.5 * px, colour, px);
+    for (d.arrows) |ao| if (ao) |a| {
+        const pts = [_]dvui.Point.Physical{ skPx(area, it, a.tip), skPx(area, it, a.wings[0]), skPx(area, it, a.wings[1]) };
+        dvui.Path.fillConvex(.{ .points = &pts }, .{ .color = .{ .color = colour } });
+    };
+    const q0 = skPx(area, it, d.text_at);
+    const q1 = skPx(area, it, .{ .x = d.text_at.x + d.text_dir.x, .y = d.text_at.y + d.text_dir.y });
+    var pl = alongPlace(q0, q1, 0);
+    pl.at = .{ .x = q0.x, .y = q0.y };
+    strokeText(text, pl, colour);
+}
 
 /// What a sketch distance measures, for drawing it after drafting practice
 /// (`graven_constraint`'s dimensions): a horizontal or vertical distance
@@ -29120,7 +30842,12 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
             break :blk d.text_at;
         },
         .line_distance => |d| s.point(d.p) catch null,
-        .radius => |r| curveMid(s, r.g),
+        .radius, .diameter => blk: {
+            const m = skRound(s, c) orelse break :blk null;
+            var tb: [64]u8 = undefined;
+            const w = strokefont.width(skDimLabel(&tb, c)) * dim_cap;
+            break :blk cdim.radial(m, c.place, cdim.Style.screen(state.view.ppm / dvui.windowNaturalScale(), w)).text_at;
+        },
         .angle => |a| curveMid(s, a.b),
         inline .parallel, .perpendicular, .tangent, .equal => |a| curveMid(s, a.b),
         // Within the corner of its second angle.
@@ -29205,6 +30932,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.connect") => skConnect(),
             kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
             kact("sketch.end.discard") => skDiscard(),
+            kact("sketch.show.ink-only") => skToggleInkOnly(),
             else => used = false,
         }
         if (used) {
@@ -29229,10 +30957,14 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             // pointer has moved.
             const moved = me.p.x != sk_last_px.x or me.p.y != sk_last_px.y;
             sk_last_px = me.p;
+            if (me.mod.shift() != sk_shift) {
+                sk_shift = me.mod.shift();
+                dvui.refresh(null, @src(), box.data().id);
+            }
             state.mouse = at_space;
             sk_pointer = q;
             const radius = 10 * dvui.windowNaturalScale() / state.view.ppm;
-            skFindHits(it.sketch, q, radius);
+            skFindHits(it.sketch, q, radius, it.hidden);
             // A lock lets go when the pointer goes well away.
             if (sk_lock != null) {
                 const dx = me.p.x - sk_lock_px.x;
@@ -29251,16 +30983,19 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             }
             if (!me.button.pointer() or sk_summary) return;
             if (sk_tool != .none) {
-                if (skClickPoint()) |p| skToolClick(p);
+                if (skClickPoint()) |p| skToolClick(p, skGivenNow(true));
                 sk_lock = null;
                 return;
             }
             sk_press_ctrl = primaryMod(me.mod);
+            sk_press_shift = me.mod.shift();
             const target = skTarget();
-            if (target != null and target.?.pick == .point and !sk_press_ctrl) {
+            if (sk_press_shift) {
+                sk_box = .{ .start = q, .at = q };
+            } else if (target != null and target.?.pick == .point and !sk_press_ctrl) {
                 sk_drag = .{ .p = target.?.pick.point, .moved = false, .start = q };
                 sk_drag_seq += 1;
-            } else if (target != null and target.?.pick == .constraint and !sk_press_ctrl and target.?.pick.constraint < it.sketch.constraints.items.len and skDimMeasure(it.sketch, it.sketch.constraints.items[target.?.pick.constraint]) != null) {
+            } else if (target != null and target.?.pick == .constraint and !sk_press_ctrl and target.?.pick.constraint < it.sketch.constraints.items.len and skDimPlaceable(it.sketch, it.sketch.constraints.items[target.?.pick.constraint])) {
                 sk_drag_seq += 1;
                 sk_dim_drag = .{ .c = target.?.pick.constraint, .moved = false, .start = q, .seq = sk_drag_seq };
             } else sk_box = .{ .start = q, .at = q };
@@ -29272,16 +31007,22 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                 if (d.moved or moved_px > 3) {
                     d.moved = true;
                     const r = sketch_edit.?;
-                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketchDraft, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = q } } }) catch {};
+                    _ = actM(mergeKey(.{ "skdrag", sk_drag_seq }), .editSketchDraft, .{ r.sketch, .{ .drag = .{ .p = d.p, .to = skSnap(q) } } }) catch {};
                 }
             } else if (sk_dim_drag) |*d| {
                 const moved_px = skDist(d.start, q) * state.view.ppm;
                 if (d.moved or moved_px > 3) {
                     d.moved = true;
                     const c = it.sketch.constraints.items[d.c];
-                    if (skDimMeasure(it.sketch, c)) |ms| {
+                    const place: ?cdim.Placement = if (skDimMeasure(it.sketch, c)) |ms|
+                        cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach())
+                    else if (skRound(it.sketch, c)) |m|
+                        cdim.radialWithinReach(m, cdim.radialTextAt(m, c.place, q), dimReach())
+                    else
+                        null;
+                    if (place) |pl| {
                         const r = sketch_edit.?;
-                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketchDraft, .{ r.sketch, .{ .place = .{ .c = d.c, .place = cdim.withinReach(ms, cdim.textAt(ms, c.place, q), dimReach()) } } }) catch {};
+                        _ = actM(mergeKey(.{ "skdim", d.seq }), .editSketchDraft, .{ r.sketch, .{ .place = .{ .c = d.c, .place = pl } } }) catch {};
                     }
                 }
             } else if (sk_box) |*b| {
@@ -29304,7 +31045,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             } else if (sk_box) |b| {
                 sk_box = null;
                 if (skDist(b.start, b.at) * state.view.ppm < 4) {
-                    if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
+                    if (sk_press_shift) {
+                        skPieceSelect(it.sketch, b.start);
+                    } else if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
                 } else skBoxSelect(it.sketch, b.start, b.at, sk_press_ctrl);
             }
             sk_lock = null;
@@ -29377,6 +31120,9 @@ fn skPickObject(s: *const skl.Sketch, p: SkPick) ?skl.GroupId {
         .curve => |c| c,
         .point => |r| r.geom,
         .constraint => return null,
+        .crossing => return null,
+        // A piece is always the geometry's own (ink inside an object).
+        .piece => return null,
     };
     const o = skl.composite.objectOf(s, g) orelse return null;
     if (sk_inside) |in| if (in == o) return null;
@@ -29457,6 +31203,8 @@ fn skClickSelect(p: SkPick, toggle: bool) void {
                 .curve => |c| c,
                 .point => |r| r.geom,
                 .constraint => null,
+                .crossing => null,
+                .piece => |f| f.geom,
             };
             const o = if (g) |x| skl.composite.objectOf(s, x) else null;
             if (o == null or o.? != in) sk_inside = null;
@@ -29468,6 +31216,73 @@ fn skClickSelect(p: SkPick, toggle: bool) void {
     };
     if (!toggle) sk_sel.clearRetainingCapacity();
     sk_sel.append(state.gpa, p) catch {};
+}
+
+/// The curve nearest the pointer, among the hits (within reach), and
+/// where on it.
+fn skCurveHit() ?struct { g: skl.GeomId, at: geom.Point } {
+    if (sk_lock) |l| if (l.pick == .curve) return .{ .g = l.pick.curve, .at = l.at };
+    for (sk_hits[0..sk_nhits]) |h| switch (h.pick) {
+        .curve => |g| return .{ .g = g, .at = h.at },
+        else => {},
+    };
+    return null;
+}
+
+/// The piece under the pointer (Shift held): of the nearest curve,
+/// between its cuts either side.
+fn skHoverPiece(s: *const skl.Sketch) ?skl.pieces.Found {
+    const h = skCurveHit() orelse return null;
+    return skl.pieces.pieceAt(s, dvui.currentWindow().arena(), h.g, h.at) catch null;
+}
+
+/// Shift+click at `q`: on a curve, the piece of it between its cuts
+/// (its ends, points on it, where other curves cross it) goes in or out
+/// of the selection; off every curve, the pieces of the smallest closed
+/// path round `q` (a fill's boundary) go in, or out when all are in.
+fn skPieceSelect(s: *const skl.Sketch, q: geom.Point) void {
+    const ar = dvui.currentWindow().arena();
+    if (skCurveHit()) |h| {
+        const f = skl.pieces.pieceAt(s, ar, h.g, h.at) catch |err| {
+            state.status = if (err == error.Unbounded) "That part of the line has no end: it needs a crossing or a point on it each side. " else "Not a piece of a curve. ";
+            return;
+        };
+        skTogglePick(skFoundPick(f));
+        return;
+    }
+    const loop = (skl.pieces.loopAround(s, ar, q) catch null) orelse {
+        state.status = "No closed path round that place. ";
+        return;
+    };
+    var all = true;
+    for (loop) |f| if (!skSelected(skFoundPick(f))) {
+        all = false;
+    };
+    for (loop) |f| {
+        const p = skFoundPick(f);
+        if (all) {
+            for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, p)) {
+                _ = sk_sel.orderedRemove(i);
+                break;
+            };
+        } else if (!skSelected(p)) sk_sel.append(state.gpa, p) catch {};
+    }
+    state.status = if (all) "Path taken out of the selection. " else "Path round the area selected: F fills it, I inks it. ";
+}
+
+/// `p` in or out of the selection as it is (never widened to an object:
+/// pieces and paths are the geometry's own).
+fn skTogglePick(p: SkPick) void {
+    for (sk_sel.items, 0..) |x, i| if (std.meta.eql(x, p)) {
+        _ = sk_sel.orderedRemove(i);
+        return;
+    };
+    sk_sel.append(state.gpa, p) catch {};
+}
+
+/// A chosen piece as a pick: a whole curve as the curve itself.
+fn skFoundPick(f: skl.pieces.Found) SkPick {
+    return if (f.whole()) .{ .curve = f.geom } else .{ .piece = f };
 }
 
 /// Selects every point and whole curve inside the box.
@@ -29522,6 +31337,8 @@ fn skDeleteSelection() void {
             .constraint => |c| cons.append(state.gpa, c) catch {},
             .curve => |g| geos.append(state.gpa, g) catch {},
             .point => |r| if (r.role == .point) geos.append(state.gpa, r.geom) catch {},
+            .piece => {},
+            .crossing => {},
         }
     }
     // Constraints last first, so the indices hold.
@@ -29558,15 +31375,15 @@ fn drawSketches(area: dvui.Rect.Physical) void {
             const clip = dvui.clip(r);
             defer dvui.clipSet(clip);
             for (it.sketch.geometry.items) |g| {
-                if (g.removed or g.reference or !g.construction) continue;
+                if (g.removed or g.reference or !g.construction or !it.hidden.shows(layout.tags.ofGeometry(g))) continue;
                 skDrawGeometry(area, it, g, colors.guide.opacity(0.35), px, true);
             }
         }
         for (it.sketch.geometry.items) |g| {
-            if (g.removed or g.reference or g.construction) continue;
+            if (g.removed or g.reference or g.construction or !it.hidden.shows(layout.tags.ofGeometry(g))) continue;
             skDrawGeometry(area, it, g, colors.ink, 1.5 * px, false);
         }
-        drawSketchFigure(area, it, 1);
+        if (it.shows(.ink)) drawSketchFigure(area, it, 1);
         const picked = switch (state.context) {
             .sketch => |sc| sc.space == ref.space and sc.index == ref.index,
             else => false,
@@ -29645,6 +31462,52 @@ fn skDashed(pts: []const dvui.Point.Physical, colour: dvui.Color, thick: f32) vo
     }
 }
 
+/// The selected pieces of curves, and with Shift held (no tool), what a
+/// click would choose: the piece under the pointer, or the path round
+/// the area it is in.
+fn skDrawPieces(area: dvui.Rect.Physical, it: SkPlace) void {
+    const s = it.sketch;
+    const px = dvui.windowNaturalScale();
+    const ar = dvui.currentWindow().arena();
+    for (sk_sel.items) |p| switch (p) {
+        .piece => |f| skDrawFound(area, it, f, colors.select, 3 * px),
+        .crossing => |x| {
+            const q = skPx(area, it, x.at);
+            skRing(q, 6 * px, colors.select, 2 * px);
+            skDot(q, 3 * px, colors.select);
+        },
+        else => {},
+    };
+    if (!sk_shift or sk_tool != .none or sk_box != null) return;
+    if (skHoverPiece(s)) |f| {
+        skDrawFound(area, it, f, colors.select.opacity(0.3), 9 * px);
+        skDrawFound(area, it, f, colors.select.opacity(0.8), 2 * px);
+        for ([_]?skl.pieces.Cut{ f.from, f.to }) |c| {
+            const cut = c orelse continue;
+            const q = skl.pieces.cutPoint(s, cut) orelse continue;
+            skRing(skPx(area, it, q), 5 * px, colors.select, 1.5 * px);
+        }
+    } else if (skCurveHit() == null) {
+        const q = sk_pointer orelse return;
+        const loop = (skl.pieces.loopAround(s, ar, q) catch null) orelse return;
+        for (loop) |f| skDrawFound(area, it, f, colors.select.opacity(0.5), 4 * px);
+    }
+}
+
+/// A chosen piece of a curve, stroked on the screen.
+fn skDrawFound(area: dvui.Rect.Physical, it: SkPlace, f: skl.pieces.Found, colour: dvui.Color, thick: f32) void {
+    const a = dvui.currentWindow().arena();
+    var segs: std.ArrayList(geom.Segment) = .empty;
+    skl.pieces.foundSegments(it.sketch, a, f, &segs) catch return;
+    if (segs.items.len == 0) return;
+    var pts: std.ArrayList(geom.Point) = .empty;
+    pts.append(a, segs.items[0].start()) catch return;
+    for (segs.items) |seg| flatten(a, &pts, seg, 0.5 / state.view.ppm) catch return;
+    const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+    for (pts.items, phys) |p, *o| o.* = skPx(area, it, p);
+    dvui.Path.stroke(.{ .points = phys }, .{ .thickness = thick, .color = .{ .color = colour } });
+}
+
 /// The primitive picked in Properties' constraint list: haloed.
 fn skDrawFlash(area: dvui.Rect.Physical, it: SkPlace) void {
     const r = sk_flash orelse return;
@@ -29690,13 +31553,23 @@ fn skRing(c: dvui.Point.Physical, r: f32, colour: dvui.Color, thick: f32) void {
     dvui.Path.stroke(.{ .points = &pts }, .{ .thickness = thick, .color = .{ .color = colour }, .closed = true });
 }
 
+/// A constraint's tag: a dimension's (its value shown) or a mark's.
+fn skConstraintTag(c: skl.Constraint) layout.tags.Tag {
+    return switch (c.kind) {
+        .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => .dimensions,
+        else => .constraints,
+    };
+}
+
 /// The sketch being edited, over the dimmed canvas.
 fn drawSketchMode(area: dvui.Rect.Physical) void {
     const it = skItem() orelse return;
     const s = it.sketch;
     const px = dvui.windowNaturalScale();
     area.fill(.square, .{ .color = .{ .color = colors.paper.opacity(0.72) } });
-    drawSketchFigure(area, it, 0.85);
+    // The ink alone (Ink only), at full strength: as it will be output.
+    const ink_alone = it.hidden.eql(layout.tags.Preset.ink_only.hidden());
+    if (it.shows(.ink)) drawSketchFigure(area, it, if (ink_alone) 1 else 0.85);
     const an = skAnalysis();
     // Geometry the conflicting constraints touch.
     const conflicted = struct {
@@ -29713,17 +31586,22 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             return false;
         }
     }.f;
-    // The origin and axes, faintly.
-    for (s.geometry.items[0..3]) |g| skDrawGeometry(area, it, g, colors.guide.opacity(0.4), px, true);
-    // The box.
-    if (sketchBox(it)) |b| guideBox(area, b, colors.guide.opacity(0.6), px);
+    // The origin and axes, faintly; the box.
+    if (it.shows(.frame)) {
+        for (s.geometry.items[0..3]) |g| skDrawGeometry(area, it, g, colors.guide.opacity(0.4), px, true);
+        if (sketchBox(it)) |b| guideBox(area, b, colors.guide.opacity(0.6), px);
+    }
     for (s.geometry.items, 0..) |g, gi| {
         if (g.removed or g.reference) continue;
+        // Each kind of thing drawn as its layer says (`layout.tags`).
+        const tags = layout.tags.ofGeometry(g);
+        if (!it.hidden.shows(tags)) continue;
         const id: skl.GeomId = @intCast(gi);
         var colour = if (isFree(an, id)) colors.ink else colors.guide;
         if (conflicted(an, s, id)) colour = colors.overflow;
         if (skSelected(.{ .curve = id })) colour = colors.select;
         skDrawGeometry(area, it, g, if (g.construction) colour.opacity(0.75) else colour, if (g.construction) px else 2 * px, g.construction);
+        if (!it.shows(.points)) continue;
         var buf: [3]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, id)) |r| {
             const p = s.point(r) catch continue;
@@ -29732,14 +31610,17 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             skDot(skPx(area, it, p), rad * px, if (sel) colors.select else colour);
         }
     }
+    skDrawPieces(area, it);
     skDrawFlash(area, it);
     // Equal sizes and angles in named sets: each member marked with its
     // set's name, the set's value noted once.
     var eq_sets: EqualSets = .{};
     eq_sets.build(dvui.currentWindow().arena(), s);
-    skDrawEqualSets(area, it, &eq_sets);
-    // Constraint glyphs and values.
+    if (it.shows(.constraints)) skDrawEqualSets(area, it, &eq_sets);
+    // Constraint glyphs and values: marks and dimensions, each as the
+    // layer says.
     for (s.constraints.items, 0..) |c, ci| {
+        if (!it.shows(skConstraintTag(c))) continue;
         const anchor = skAnchor(s, c) orelse continue;
         const q = skPx(area, it, anchor);
         var colour = colors.guide;
@@ -29777,22 +31658,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             },
             .symmetric => "sym",
             .equal_distance => "=",
-            .distance, .distance_x, .distance_y, .line_distance, .radius, .angle => blk: {
-                const v = skShownValue(c).?;
-                const u: []const u8 = if (c.kind == .angle) "°" else "";
-                const pre: []const u8 = switch (c.kind) {
-                    .radius => "R",
-                    .distance_x => "↔",
-                    .distance_y => "↕",
-                    else => "",
-                };
+            .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => blk: {
                 // A reference dimension in parentheses, fainter.
-                if (!c.driving) {
-                    colour = colour.opacity(0.55);
-                    break :blk std.fmt.bufPrint(&tb, "({s}{d:.2}{s})", .{ pre, @abs(v), u }) catch "";
-                }
-                if (c.expr.len > 0) break :blk std.fmt.bufPrint(&tb, "{s}{s} = {d:.2}{s}", .{ pre, c.expr, @abs(v), u }) catch "";
-                break :blk std.fmt.bufPrint(&tb, "{s}{d:.2}{s}", .{ pre, @abs(v), u }) catch "";
+                if (!c.driving) colour = colour.opacity(0.55);
+                break :blk skDimLabel(&tb, c);
             },
         };
         // A distance draws its line, its value along it; a radius a leader
@@ -29804,31 +31673,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 drawDimension(area, it.at, ms, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
                 continue;
             },
-            .radius => |r| if (skRadiusLeader(s, r.g)) |ld| {
-                const qc = skPx(area, it, ld.centre);
-                const qr = skPx(area, it, ld.on);
-                const len = @sqrt((qr.x - qc.x) * (qr.x - qc.x) + (qr.y - qc.y) * (qr.y - qc.y));
-                if (len >= 1) {
-                    // Out past the curve far enough for the value.
-                    const ux = (qr.x - qc.x) / len;
-                    const uy = (qr.y - qc.y) / len;
-                    const w: f32 = @floatCast(strokefont.width(text) * dim_cap * px);
-                    const out = 6 * px + w + 4 * px;
-                    const qo: dvui.Point.Physical = .{ .x = qr.x + ux * out, .y = qr.y + uy * out };
-                    dvui.Path.stroke(.{ .points = &.{ qc, qo } }, .{ .thickness = px, .color = .{ .color = colour.opacity(0.7) } });
-                    // An arrowhead on the curve, pointing out.
-                    const h = 7 * px;
-                    const ah = 2.5 * px;
-                    dvui.Path.stroke(.{ .points = &.{
-                        .{ .x = qr.x - ux * h - uy * ah, .y = qr.y - uy * h + ux * ah },
-                        qr,
-                        .{ .x = qr.x - ux * h + uy * ah, .y = qr.y - uy * h - ux * ah },
-                    } }, .{ .thickness = px, .color = .{ .color = colour } });
-                    // The value over the leader's part beyond the curve.
-                    const beyond: dvui.Point.Physical = .{ .x = qr.x + ux * 6 * px, .y = qr.y + uy * 6 * px };
-                    strokeText(text, alongPlace(beyond, qo, 0.5), colour);
-                    continue;
-                }
+            .radius, .diameter => if (skRound(s, c)) |m| {
+                if (c.place.hidden) continue;
+                drawRound(area, it.at, m, c.place, text, colour, sk_dim_drag != null and sk_dim_drag.?.c == ci);
+                continue;
             },
             else => {},
         }
@@ -29853,6 +31701,36 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 const segs = geom.arc(sk_clicks[0], r, 0, 2 * std.math.pi, &buf4);
                 skPreview(area, it, segs);
             },
+            // Three points: the circle (or arc) through the two clicks
+            // and the pointer, before the third click.
+            .circle_3pt, .arc_3pt => if (sk_nclicks == 2) {
+                const c = sk_clicks;
+                if (circleThrough(c[0], c[1], p)) |centre| {
+                    const r = skDist(centre, c[0]);
+                    var buf4: [4]geom.Segment = undefined;
+                    if (sk_tool == .circle_3pt) {
+                        skPreview(area, it, geom.arc(centre, r, 0, 2 * std.math.pi, &buf4));
+                    } else {
+                        // From the first click to the second, the way
+                        // round that passes the pointer.
+                        const a0 = std.math.atan2(c[0].y - centre.y, c[0].x - centre.x);
+                        const sweep = normAngle(std.math.atan2(c[1].y - centre.y, c[1].x - centre.x) - a0);
+                        const through = normAngle(std.math.atan2(p.y - centre.y, p.x - centre.x) - a0);
+                        skPreview(area, it, geom.arc(centre, r, a0, if (through < sweep) sweep else sweep - 2 * std.math.pi, &buf4));
+                    }
+                } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c[0]), skPx(area, it, c[1]) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
+            // An arc about its centre: from its start to the pointer's
+            // angle, counter-clockwise.
+            .arc_centre => if (sk_nclicks == 2) {
+                const c0 = sk_clicks[0];
+                const r = skDist(c0, sk_clicks[1]);
+                const a0 = std.math.atan2(sk_clicks[1].y - c0.y, sk_clicks[1].x - c0.x);
+                const sweep = normAngle(std.math.atan2(p.y - c0.y, p.x - c0.x) - a0);
+                var buf4: [4]geom.Segment = undefined;
+                if (r > 1e-9 and sweep > 1e-9) skPreview(area, it, geom.arc(c0, r, a0, sweep, &buf4));
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c0), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
             .polygon => if (skDist(sk_clicks[0], p) > 1e-9) {
                 const c0 = sk_clicks[0];
                 const r = skDist(c0, p);
@@ -30117,6 +31995,7 @@ fn sketchConstrainKeys() void {
         .{ .k = .distance_x, .name = "Horizontal distance", .icon = .con_distance_x },
         .{ .k = .distance_y, .name = "Vertical distance", .icon = .con_distance_y },
         .{ .k = .radius, .name = "Radius", .key = "R", .icon = .con_radius },
+        .{ .k = .diameter, .name = "Diameter", .icon = .con_diameter },
         .{ .k = .angle, .name = "Angle", .key = "A", .icon = .con_angle },
         .{ .k = .fixed, .name = "Lock", .key = "L", .icon = .con_locked },
     };
@@ -30137,8 +32016,8 @@ fn sketchConstrainKeys() void {
 /// The sketch ribbon's Ink group: ink the selection in the current stroke
 /// style, fill the area it closes in the current fill style.
 fn sketchInkKeys() void {
-    var buf: [256]skl.GeomId = undefined;
-    const gs = skInkable(&buf);
+    var buf: [256]skl.pieces.Found = undefined;
+    const gs = skFound(&buf);
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
     defer row.deinit();
     skDrawingChoice();
@@ -30150,7 +32029,7 @@ fn sketchInkKeys() void {
         ribbon_next_badge = "I";
         var wd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Ink selection  I", dvui.entypo.brush, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Ink: stroke the selected lines and arcs in the current stroke style, or take their ink off", .{}, .{});
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Ink: stroke the selected lines and arcs, or pieces of them (Shift+click one between its crossings), in the current stroke style, or take their ink off", .{}, .{});
     }
     {
         const saved_group = pushGroup("fill");
@@ -30160,7 +32039,7 @@ fn sketchInkKeys() void {
         ribbon_next_badge = "F";
         var wd: dvui.WidgetData = undefined;
         keyIcon(@src(), "Fill selection  F", dvui.entypo.drop, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off", .{}, .{});
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off (Shift+click inside an area selects the path round it)", .{}, .{});
     }
     {
         const saved_group = pushGroup("caption");
@@ -30177,11 +32056,30 @@ fn sketchInkKeys() void {
         keyIcon(@src(), "Connect  J", dvui.entypo.flow_line, 0, .{ .data_out = &wj });
         dvui.tooltip(@src(), .{ .active_rect = wj.borderRectScale().r }, "Connect: a connection from the selected point, side or curve (or from nowhere), to the second selected point if there is one (J)", .{}, .{});
     }
+    {
+        // Ink only: the sketch's layer shows its ink alone (`layout.tags`),
+        // tinted while it does.
+        const saved_group = pushGroup("sketch.show");
+        defer popGroup(saved_group);
+        const on = if (skItem()) |it| it.hidden.eql(layout.tags.Preset.ink_only.hidden()) else false;
+        ribbon_next_badge = "W";
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "Ink only", dvui.entypo.eye, 0, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{if (on) "Ink only: on. Everything else on the sketch's layer is hidden; W shows it all again (the Layers panel sets each kind)" else "Ink only: show the drawing alone, as it will be output, hiding construction, points, constraints and dimensions (W)"}, .{});
+    }
 }
+
+/// Several drawings (ink contexts) over one sketch, in the interface: off
+/// for the first release (Travis, 2026-11-26), one drawing per sketch shown.
+/// The model and library keep several (`addDrawing`, `Panel.drawing`), and
+/// documents holding several still open and draw; only the Ink group's New
+/// drawing and drawing choice, and a sketch panel's Drawing, are hidden.
+const several_drawings_ui = false;
 
 /// The Ink group's drawing: which of the sketch's drawings (ink
 /// contexts) ink and fills go into, and New drawing.
 fn skDrawingChoice() void {
+    if (!several_drawings_ui) return;
     const r = sketch_edit orelse return;
     const saved_group = pushGroup("ink");
     defer popGroup(saved_group);
@@ -30359,7 +32257,8 @@ fn skStepFields() void {
     const live_ang = std.math.atan2(p.y - base.y, p.x - base.x) * 180 / std.math.pi;
     const radius_word = sk_tool == .circle or sk_tool == .arc_centre;
     // A new step (or tool) forgets what was typed for the last.
-    if (sk_step_of.tool != sk_tool or sk_step_of.n != n) {
+    const new_step = sk_step_of.tool != sk_tool or sk_step_of.n != n;
+    if (new_step) {
         sk_step_typed = .{ null, null, null, null };
         sk_step_of = .{ .tool = sk_tool, .n = n };
     }
@@ -30374,13 +32273,16 @@ fn skStepFields() void {
         if (k == 3 and !from_prev and !arc_end) continue;
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = k });
         defer row.deinit();
+        prop_plain = true;
         propName(labels[k]);
         const live = std.fmt.bufPrint(&sk_step_text[k], "{d:.2}", .{vals[k]}) catch "";
         // Typed values are drawn bold: they hold until the step is placed.
         var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal, .id_extra = 7700 + k, .font = if (sk_step_typed[k] != null) dvui.Font.theme(.body).withWeight(.bold) else null });
         const focused = te.data().id == dvui.focusedWidgetId();
-        if (!focused and sk_step_typed[k] == null and !std.mem.eql(u8, te.textGet(), live)) te.textSet(live, false);
-        if (te.text_changed and focused) {
+        // A new step shows its live values, the field with the keyboard
+        // too (what was typed went to the step placed).
+        if ((new_step or !focused) and sk_step_typed[k] == null and !std.mem.eql(u8, te.textGet(), live)) te.textSet(live, new_step and focused);
+        if (te.text_changed and focused and !new_step) {
             sk_step_typed[k] = std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " ")) catch null;
         }
         if (std.fmt.parseFloat(f64, std.mem.trim(u8, te.textGet(), " "))) |v| vals[k] = v else |_| {}
@@ -30396,7 +32298,18 @@ fn skStepFields() void {
             break :blk .{ .x = base.x + r * @cos(a), .y = base.y + r * @sin(a) };
         },
     };
-    skToolClick(target);
+    skToolClick(target, skGivenNow(false));
+}
+
+/// What the step being placed is given now: the values typed for it, and
+/// (`locked`: placed by a click) what the pointer is locked onto.
+fn skGivenNow(locked: bool) SkClickGiven {
+    var g: SkClickGiven = .{};
+    if (sk_step_of.tool == sk_tool and sk_step_of.n == sk_nclicks) g.typed = sk_step_typed;
+    if (locked) if (sk_lock) |l| {
+        g.on = l.pick;
+    };
+    return g;
 }
 
 
@@ -30449,6 +32362,8 @@ fn skConstraintList(it: SkPlace) void {
             .curve => |c| c,
             .point => |r| r.geom,
             .constraint => continue,
+            .piece => |f| f.geom,
+            .crossing => continue,
         };
         if (np < picked.len) {
             picked[np] = g;
@@ -30570,6 +32485,7 @@ fn skConstraintIcon(c: skl.Constraint) icons.GIcon {
         .distance_y => .con_distance_y,
         .line_distance => .con_line_distance,
         .radius => .con_radius,
+        .diameter => .con_diameter,
         .angle => .con_angle,
         .parallel => .con_parallel,
         .perpendicular => .con_perpendicular,
@@ -30642,6 +32558,8 @@ fn sketchPhysicalWhen(it: SkPlace) void {
         .curve => |c| c,
         .point => |r| if (r.role == .point) r.geom else return,
         .constraint => return,
+        .piece => return,
+        .crossing => return,
     };
     const geo = it.sketch.geometry.items[g];
     if (!geo.construction or geo.kind == .line or geo.kind == .ray) return;
@@ -30966,7 +32884,7 @@ fn sketchPanelProperties(pi: usize) void {
     const si = state.model.sketchIndex(pn.sketch) orelse return;
     propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
     // Which of the sketch's drawings it carries.
-    {
+    if (several_drawings_ui) {
         const ar = dvui.currentWindow().arena();
         var names: std.ArrayList([]const u8) = .empty;
         var ids: std.ArrayList(layout.model.ObjectId) = .empty;
@@ -31025,6 +32943,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         for ([_][]const u8{ "Preview width, u", "Preview height, u" }, 0..) |label, k| {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8405 + k * 10 });
             defer row.deinit();
+            prop_plain = true;
             propName(label);
             _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_preview[k], .min = 0.25, .max = 20 }, .{ .expand = .horizontal });
         }

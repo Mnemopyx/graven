@@ -95,6 +95,7 @@ pub const GIcon = enum {
     con_distance_y,
     con_line_distance,
     con_radius,
+    con_diameter,
     con_angle,
     con_parallel,
     con_perpendicular,

@@ -21,8 +21,39 @@
 //! Kept per machine (`display.gamma`, `display.white` in the local config,
 //! since it belongs to the screen, not to the user's way of working);
 //! `GRAVEN_DISPLAY=gamma,white` overrides it for a run.
+//!
+//! The screen's colour profile comes first: with one in use (`setProfile`;
+//! the system's, or an ICC file chosen for the machine), every colour is
+//! converted from sRGB to the screen's own values (`icc.zig`) before the
+//! gamma and white above, which then only fine-tune.
 
 const std = @import("std");
+const icc = @import("icc.zig");
+
+/// Where the profile in use came from.
+pub const ProfileSource = enum { system, file };
+
+/// The screen's profile, as a transform from sRGB; null: colours are sent
+/// as they are (the screen taken to be sRGB).
+var profile: ?icc.Transform = null;
+var profile_name_buf: [96]u8 = undefined;
+var profile_name_len: usize = 0;
+var profile_source: ProfileSource = .system;
+
+/// Puts profile `t` in use (null: none), named `name`, from `source`.
+pub fn setProfile(t: ?icc.Transform, name: []const u8, source: ProfileSource) void {
+    profile = t;
+    const n = @min(name.len, profile_name_buf.len);
+    @memcpy(profile_name_buf[0..n], name[0..n]);
+    profile_name_len = n;
+    profile_source = source;
+}
+
+/// The profile in use: its name and where it came from; null if none.
+pub fn profileInUse() ?struct { name: []const u8, source: ProfileSource } {
+    if (profile == null) return null;
+    return .{ .name = profile_name_buf[0..profile_name_len], .source = profile_source };
+}
 
 pub const gamma_min: f32 = 0.6;
 pub const gamma_max: f32 = 2.4;
@@ -91,9 +122,11 @@ pub fn channel(v: u8) u8 {
 /// other field as they were.
 pub fn fix(c: anytype) @TypeOf(c) {
     var out = c;
-    out.r = table[c.r];
-    out.g = table[c.g];
-    out.b = table[c.b];
+    var v = [3]u8{ c.r, c.g, c.b };
+    if (profile) |*p| v = p.apply(v);
+    out.r = table[v[0]];
+    out.g = table[v[1]];
+    out.b = table[v[2]];
     return out;
 }
 
@@ -229,6 +262,21 @@ test "white lowers the brightest; alpha is kept" {
     const c = fix(Rgb{ .r = 255, .g = 255, .b = 255, .a = 40 });
     try testing.expectEqual(204, c.r);
     try testing.expectEqual(40, c.a);
+}
+
+test "a profile converts colours before the correction" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A screen with sRGB's primaries and a plain gamma of 2.2.
+    const p = try icc.parse(a, try icc.build(a, "gamma 2.2", icc.srgb_to_d50, 2.2, null));
+    setProfile(icc.Transform.init(p, .{}).?, p.name, .file);
+    defer setProfile(null, "", .system);
+    try testing.expectEqualStrings("gamma 2.2", profileInUse().?.name);
+    const c = fix(Rgb{ .r = 32, .g = 32, .b = 32, .a = 9 });
+    // sRGB's dark grey re-encoded for gamma 2.2: a little lighter.
+    try testing.expect(c.r > 32 and c.r == c.g and c.g == c.b);
+    try testing.expectEqual(9, c.a);
 }
 
 test "parse and clamp" {

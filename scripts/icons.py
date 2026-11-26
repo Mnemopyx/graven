@@ -262,6 +262,7 @@ ICONS = {
     "con-distance-y": dot(6, 3.5) + dot(6, 18.5) + line(8, 3.5, 18, 3.5) + line(8, 18.5, 18, 18.5) + arrow(16, 11, 16, 3.5, 2.2) + arrow(16, 11, 16, 18.5, 2.2),
     "con-line-distance": line(3, 18, 21, 18) + dot(12, 5) + arrow(12, 11.5, 12, 5.5, 2.2) + arrow(12, 11.5, 12, 18, 2.2),
     "con-radius": ring(12, 11, 8) + dot(12, 11, 1.3) + arrow(12, 11, 17.6, 5.4, 2.4),
+    "con-diameter": ring(12, 11, 8) + arrow(12, 11, 17.6, 5.4, 2.4) + arrow(12, 11, 6.4, 16.6, 2.4),
     "con-angle": line(4, 18, 21, 18) + line(4, 18, 17, 5) + ring(4, 18, 10, -math.pi / 4, 0, 8),
     "con-parallel": line(4, 14, 14, 4) + line(10, 20, 20, 10),
     "con-perpendicular": line(4, 18, 20, 18) + line(12, 18, 12, 4) + polyline([(12, 14), (16, 14), (16, 18)]),

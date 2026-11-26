@@ -47,16 +47,17 @@ pub const actions = [_][:0]const u8{
     "moveLayer",         "removeLayer",        "addImage",            "setImage",           "removeImage",
     "renameStyle",       "setStyleBase",       "setStyleFace",        "setStyleRule",
     "addParagraphStyle",  "setParagraphStyle",   "insertParagraph",    "setParagraphAt",
-    "setEmSize",         "addConstraint",      "setConstraintValue",  "setConstraintPlace",  "setConstraintDriving", "removeConstraint",   "setObjectOrigin",
+    "setEmSize",         "addConstraint",      "setConstraintValue",  "setConstraintPlace",  "setConstraintDriving", "removeConstraint",   "setObjectOrigin", "addEqualSet", "removeConstraintMember",
     "addControlPoint",   "bendPath",           "moveControlPoint",    "removeControlPoint", "joinTracks", "unjoinTrack", "threadTracks", "placeObjects", "insertText", "deleteRange", "breakAt", "insertEquation",
-    "addSketch", "addSketchSpace", "homeSpace", "removeSketch", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "editSketchDraft", "acceptSketch", "discardSketchDraft", "setInkDraft", "setFillDraft", "addDrawing", "setSketchDrawing", "setPanelDrawing", "makeSketchPanel", "insertSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
-    "addGrid", "addArray", "addCaption", "addStrokeStyle", "setStrokeStyle", "setConnectorStyle", "setConnectorKind", "addConnection", "setConnectorShape", "setCurrentStroke", "setInk", "addFillStyle", "setFillStyle", "setCurrentFill", "setFill", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
+    "addSketch", "addSketchSpace", "homeSpace", "removeSketch", "removeSpace", "addSketchView", "moveSketchView", "removeSketchView", "renameSketch", "editSketch", "editSketchDraft", "acceptSketch", "discardSketchDraft", "setInkDraft", "setFillDraft", "inkPiecesDraft", "fillPiecesDraft", "addDrawing", "setSketchDrawing", "setPanelDrawing", "makeSketchPanel", "insertSketchPanel", "setPanelIslands", "applySketch", "setPrototypeSketchOffset", "removePrototypeSketch", "setTileParam",
+    "addGrid", "addArray", "addCaption", "addStrokeStyle", "setStrokeStyle", "setConnectorStyle", "setConnectorKind", "setConnectorLevel", "addConnection", "setConnectorShape", "setCurrentStroke", "setInk", "addFillStyle", "setFillStyle", "setCurrentFill", "setFill", "addLinkedGrid", "setGridShape", "moveGrid", "removeGrid", "addStamp", "setStamp", "removeStamp", "addInstance", "fillGrid", "placeInstance", "setInstanceSpan", "bindInstance", "removeInstance",
     "addPrototypeTrack", "setPrototypeTrack", "removePrototypeTrack", "setTileTrackText", "setTrackText", "addShapeSketch", "setPanelFab",
     "addFlow", "renameFlow", "assignTrack", "detachTrack", "removeFlow", "addFlowSource", "placeInFlow", "insertBreakIn", "setParagraphAtIn", "addSheet", "makeSheet", "makeTextSheet", "setSheetShown", "setSheetCell", "addSheetRow", "removeSheetRow", "addSheetColumn", "removeSheetColumn", "renameSheet", "removeSheet", "renameTile", "addSheetSource", "setPanelSize", "moveRegion", "setRegionSize", "setLeading", "copyStyle", "copyParagraphStyle", "addStyleTemplate", "renameStyleTemplate", "deriveStyle", "setTemplateLeading", "addCase", "setCaseKey", "splitAt", "setFlowStyle", "setLinePitch", "setItemGap", "renameRegion", "nameKeysInOrder", "renamePanel", "addProcess", "setProcess", "removeProcess", "setPanelProcess", "addMaterial", "setMaterial", "removeMaterial", "addPlan", "setPlan", "removePlan", "setActivePlan",
     "removeRegion", "setOrientation", "splitIntoTracks",
     "addGuide", "setGuide", "removeGuide",
     "nameKeysInPanel", "setOverlay", "setGridSpacing",
     "addFigure", "placeFigure", "placeFigureOnPanel", "setFigureArtWidth", "replaceFigure", "setPlaceBorder", "setArtBorder", "setFigurePlace", "removeFigurePlace", "renameFigure", "removeFigure",
+    "setMeasureUnit",
 };
 
 fn Fn(comptime name: []const u8) type {
@@ -1712,4 +1713,37 @@ test "a sketch's Update is one step: undone, the draft is pending again, its ink
     defer back.deinit();
     try testing.expect(back.sketches.items[si].accepted != null);
     try testing.expectEqual(1, back.figures.items[fi].pending.?.inks.len);
+}
+
+test "ink on a piece between crossings: a point made where they cross; undone, gone; saved, kept" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const si = try h.do(&m, .addSketch, .{ 0, "Sketch 1", .{ .x = 0, .y = 0 } });
+    const seg = try h.do(&m, .editSketchDraft, .{ si, .{ .segment = .{ .a = .{ .x = 0, .y = 0 }, .b = .{ .x = 10, .y = 0 } } } });
+    _ = try h.do(&m, .editSketchDraft, .{ si, .{ .segment = .{ .a = .{ .x = 4, .y = -5 }, .b = .{ .x = 4, .y = 5 }, .construction = true } } });
+    const pieces = model.sketch_.pieces;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const f = try pieces.pieceAt(&m.sketches.items[si].sketch, arena.allocator(), seg, .{ .x = 8, .y = 0 });
+    const n = m.sketches.items[si].sketch.geometry.items.len;
+    try h.do(&m, .inkPiecesDraft, .{ si, &[_]pieces.Found{f}, true });
+    try testing.expectEqual(n + 1, m.sketches.items[si].sketch.geometry.items.len);
+    try testing.expect(m.pieceInked(si, f));
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    try testing.expectEqual(1, m.figures.items[fi].pending.?.inks.len);
+    try testing.expect(m.figures.items[fi].pending.?.inks[0].from != null);
+    // Saved and read back.
+    const bytes = try native.encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try native.decode(gpa, bytes);
+    defer back.deinit();
+    try testing.expect(back.figures.items[fi].pending.?.inks[0].from != null);
+    try testing.expect(try h.undo(&m));
+    try testing.expectEqual(n, m.sketches.items[si].sketch.geometry.items.len);
+    try testing.expect(!m.pieceInked(si, f));
 }

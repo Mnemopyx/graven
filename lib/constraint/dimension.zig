@@ -31,9 +31,14 @@ pub const Placement = struct {
     outside: bool = false,
     /// Not drawn.
     hidden: bool = false,
+    /// A radius's or diameter's line: its direction from the centre,
+    /// radians anticlockwise from +x (`radial`); null for its default (a
+    /// circle's 45°, an arc's middle). For them `text` is the value's
+    /// distance from the centre along it (0: its default place).
+    angle: ?f64 = null,
 
     pub fn eql(a: Placement, b: Placement) bool {
-        return a.offset == b.offset and a.text == b.text and a.outside == b.outside and a.hidden == b.hidden;
+        return a.offset == b.offset and a.text == b.text and a.outside == b.outside and a.hidden == b.hidden and std.meta.eql(a.angle, b.angle);
     }
 };
 
@@ -226,6 +231,123 @@ pub fn withinReach(m: Measure, place: Placement, reach: f64) Placement {
     return p;
 }
 
+/// What a radius or diameter measures: a circle (or an arc's circle).
+pub const Round = struct {
+    centre: Point,
+    r: f64,
+    /// Across the whole circle, through the centre (arrows at both ends);
+    /// otherwise from the centre to the curve (one arrow).
+    diameter: bool,
+    /// The line's direction when its placement has none (radians).
+    default_angle: f64,
+    /// An arc's: where it starts and how far it sweeps anticlockwise
+    /// (radians). A diameter whose far end misses the arc ends a little
+    /// past the centre, with no arrow there (ISO 129-1).
+    sweep: ?[2]f64 = null,
+
+    /// Whether the curve passes the direction `a` (radians) from the centre.
+    pub fn covers(m: Round, a: f64) bool {
+        const sw = m.sweep orelse return true;
+        const tau = 2 * std.math.pi;
+        const d = @mod(a - sw[0], tau);
+        return d <= sw[1] + 1e-9 or d >= tau - 1e-9;
+    }
+};
+
+/// A radius's or diameter's geometry to stroke.
+pub const RoundDrawn = struct {
+    /// The dimension line, end to end: through the centre for a diameter,
+    /// from it for a radius; past the curve as a leader under a value
+    /// placed outside, and past the arrows when they are outside.
+    line: [2]Point,
+    /// Where the line meets the curve: end 1 on the line's direction,
+    /// end 0 opposite (a diameter) or the centre (a radius).
+    ends: [2]Point,
+    /// An arrowhead on the curve at each end; a radius has none at the
+    /// centre.
+    arrows: [2]?Arrow,
+    text_at: Point,
+    text_dir: Point,
+    /// The line's direction (unit), from the centre.
+    dir: Point,
+    outside: bool,
+};
+
+fn upright(u: Point) Point {
+    return if (u.x > 1e-12 or (@abs(u.x) <= 1e-12 and u.y > 0)) u else mul(u, -1);
+}
+
+/// A radius or diameter after drafting practice (ISO 129-1): its line
+/// through (or from) the centre at the placed angle, ending in arrowheads
+/// on the curve; the value along it, upright, centred on the line when it
+/// fits, else past the curve on the line carried out as a leader. Arrows
+/// go outside, pointing in, when there is no room for them inside (or the
+/// user put them there).
+pub fn radial(m: Round, place: Placement, st: Style) RoundDrawn {
+    const a = place.angle orelse m.default_angle;
+    const u: Point = .{ .x = @cos(a), .y = @sin(a) };
+    const r = @abs(m.r);
+    const e1 = add(m.centre, mul(u, r));
+    // A diameter across an arc that does not reach round to its other end:
+    // one arrow, the line a little past the centre.
+    const half = m.diameter and !m.covers(a + std.math.pi);
+    const both = m.diameter and !half;
+    const e0 = if (m.diameter) sub(m.centre, mul(u, r)) else m.centre;
+    const span = if (both) 2 * r else r;
+    const heads: f64 = if (both) 2 else 1;
+    const room_arrows = heads * st.arrow + st.text_clear;
+    const outside = place.outside or span < room_arrows;
+    // Where the value sits, from the centre along u.
+    var t = place.text;
+    if (t == 0) {
+        const fits = !outside and span >= room_arrows + st.text_width + 2 * st.text_clear;
+        t = if (fits) (if (both) 0 else r / 2) else r + (if (outside) 2 * st.arrow else 0) + st.text_clear + st.text_width / 2;
+    }
+    const text_dir = upright(u);
+    // The line runs on under a value placed past the curve, and past
+    // outside arrows by a stub.
+    var far = r;
+    if (outside) far = r + 2 * st.arrow;
+    if (t + st.text_width / 2 > far) far = t + st.text_width / 2;
+    var near: f64 = if (both) -r else if (half) -@min(r / 2, 4 * st.arrow) else 0;
+    if (both and outside) near = -r - 2 * st.arrow;
+    if (both and t - st.text_width / 2 < near) near = t - st.text_width / 2;
+    const nrm: Point = .{ .x = -u.y, .y = u.x };
+    const arrows: [2]?Arrow = if (outside)
+        .{ if (both) arrowAt(e0, u, nrm, st) else null, arrowAt(e1, mul(u, -1), nrm, st) }
+    else
+        .{ if (both) arrowAt(e0, mul(u, -1), nrm, st) else null, arrowAt(e1, u, nrm, st) };
+    return .{
+        .line = .{ add(m.centre, mul(u, near)), add(m.centre, mul(u, far)) },
+        .ends = .{ e0, e1 },
+        .arrows = arrows,
+        .text_at = add(m.centre, mul(u, t)),
+        .text_dir = text_dir,
+        .dir = u,
+        .outside = outside,
+    };
+}
+
+/// The placement that puts a radius's or diameter's value at `at` (a drag
+/// of it): the line turned to point there, the value that far out.
+pub fn radialTextAt(m: Round, place: Placement, at: Point) Placement {
+    var p = place;
+    const v = sub(at, m.centre);
+    const d = @sqrt(dot(v, v));
+    if (d < 1e-9) return p;
+    p.angle = std.math.atan2(v.y, v.x);
+    p.text = d;
+    return p;
+}
+
+/// `place` with a radius's or diameter's value no further than `reach`
+/// (mm) beyond its curve.
+pub fn radialWithinReach(m: Round, place: Placement, reach: f64) Placement {
+    var p = place;
+    p.text = @min(p.text, @abs(m.r) + reach);
+    return p;
+}
+
 const testing = std.testing;
 
 test "within reach: the line and the value kept near the features" {
@@ -299,4 +421,58 @@ test "edges: the extension line from the nearer end, none where the line crosses
     var inf = m;
     inf.extent[1] = .{ -std.math.inf(f64), std.math.inf(f64) };
     try testing.expect(linear(inf, .{ .offset = 50 }, test_style).ext[1] == null);
+}
+
+test "a diameter: through the centre, arrows on the circle pointing out" {
+    const m: Round = .{ .centre = .{ .x = 0, .y = 0 }, .r = 20, .diameter = true, .default_angle = 0 };
+    const d = radial(m, .{}, test_style);
+    try testing.expect(!d.outside);
+    try testing.expectEqual(@as(f64, -20), d.ends[0].x);
+    try testing.expectEqual(@as(f64, 20), d.ends[1].x);
+    // Arrow at end 1 points out (+x): its wings behind the tip.
+    try testing.expectEqual(@as(f64, 17), d.arrows[1].?.wings[0].x);
+    try testing.expectEqual(@as(f64, -17), d.arrows[0].?.wings[0].x);
+    // The value centred on the line.
+    try testing.expectEqual(@as(f64, 0), d.text_at.x);
+    try testing.expectEqual(@as(f64, -20), d.line[0].x);
+    try testing.expectEqual(@as(f64, 20), d.line[1].x);
+}
+
+test "a small diameter: arrows outside pointing in, the value past them" {
+    const m: Round = .{ .centre = .{ .x = 0, .y = 0 }, .r = 2, .diameter = true, .default_angle = 0 };
+    const d = radial(m, .{}, test_style);
+    try testing.expect(d.outside);
+    // At end 1 (x 2) pointing in: wings beyond it.
+    try testing.expectEqual(@as(f64, 5), d.arrows[1].?.wings[0].x);
+    try testing.expectEqual(@as(f64, -5), d.arrows[0].?.wings[0].x);
+    try testing.expectEqual(@as(f64, 2 + 6 + 1 + 5), d.text_at.x);
+    // The line runs under the value.
+    try testing.expectEqual(@as(f64, 2 + 6 + 1 + 10), d.line[1].x);
+}
+
+test "a radius: one arrow, the value halfway; dragged, the line turns" {
+    const m: Round = .{ .centre = .{ .x = 10, .y = 0 }, .r = 20, .diameter = false, .default_angle = 0 };
+    const d = radial(m, .{}, test_style);
+    try testing.expect(d.arrows[0] == null);
+    try testing.expectEqual(@as(f64, 10), d.line[0].x);
+    try testing.expectEqual(@as(f64, 20), d.text_at.x);
+    // The value dragged up past the curve: the line points up, carried out
+    // under it.
+    const p = radialTextAt(m, .{}, .{ .x = 10, .y = 30 });
+    try testing.expectApproxEqAbs(std.math.pi / 2.0, p.angle.?, 1e-12);
+    try testing.expectEqual(@as(f64, 30), p.text);
+    const up = radial(m, p, test_style);
+    try testing.expectApproxEqAbs(@as(f64, 35), up.line[1].y, 1e-12);
+    try testing.expectEqual(@as(f64, 25), radialWithinReach(m, p, 5).text);
+}
+
+test "an arc's diameter: one arrow, past the centre, when the far side has no arc" {
+    // The upper half of a circle of radius 20.
+    const m: Round = .{ .centre = .{ .x = 0, .y = 0 }, .r = 20, .diameter = true, .default_angle = std.math.pi / 2.0, .sweep = .{ 0, std.math.pi } };
+    const d = radial(m, .{}, test_style);
+    try testing.expect(d.arrows[0] == null and d.arrows[1] != null);
+    try testing.expectApproxEqAbs(@as(f64, -10), d.line[0].y, 1e-12);
+    // Turned to lie along its ends: both on the arc, both arrows.
+    const across = radial(m, .{ .angle = 0 }, test_style);
+    try testing.expect(across.arrows[0] != null);
 }

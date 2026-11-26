@@ -11,6 +11,9 @@
 //! - relative lengths, where the property has a reference (a text
 //!   spacing's is its font size): "+2pt" or "-1mm" (added to it), "+10%"
 //!   (added as a share of it), "120%" (a share of it);
+//! - u, the unit of a layout or a tile prototype (its pitch), where the
+//!   property has one (`Context.u`);
+//! - mil, a thousandth of an inch;
 //! - angles: deg (also °).
 //! A bare number is in the field's own unit (the one its label names).
 
@@ -24,6 +27,10 @@ pub const Unit = enum {
     in,
     pt,
     pc,
+    mil,
+    /// A layout's or a tile prototype's unit: its size comes from the
+    /// property's context (`Context.u`).
+    u,
     percent,
     deg,
 
@@ -45,9 +52,32 @@ pub const UnitDef = struct {
     /// What it may be typed as (the first is how it is written).
     symbols: []const []const u8,
     /// Base units (mm, degrees) in one of it; for a share, the reference
-    /// in one: 1/100.
+    /// in one: 1/100. Zero for `u`, whose size is the context's.
     base: f64,
 };
+
+/// What a value is measured against, where the property has it: the
+/// reference a relative or percent value is taken from (base units), and
+/// the size of its `u` (mm).
+pub const Context = struct {
+    reference: ?f64 = null,
+    u: ?f64 = null,
+};
+
+/// Base units (mm, degrees) in one `unit`, in `ctx` (`u` needs its size).
+pub fn baseIn(unit: Unit, ctx: Context) ?f64 {
+    if (unit == .u) return ctx.u;
+    return unit.def().base;
+}
+
+/// The units of `dim` a measurement may be shown in, in the order a
+/// unit pop-up lists them (`u` last: offered where the context has one).
+pub fn ofDimension(dim: Dimension) []const Unit {
+    return switch (dim) {
+        .length => &.{ .mm, .cm, .in, .pt, .pc, .mil, .u },
+        .angle => &.{.deg},
+    };
+}
 
 pub const mm_per_in = 25.4;
 pub const mm_per_pt = mm_per_in / 72.0;
@@ -60,6 +90,8 @@ pub const table = [_]UnitDef{
     .{ .unit = .in, .dimension = .length, .symbols = &.{ "in", "″", "\"" }, .base = mm_per_in },
     .{ .unit = .pt, .dimension = .length, .symbols = &.{"pt"}, .base = mm_per_pt },
     .{ .unit = .pc, .dimension = .length, .symbols = &.{"pc"}, .base = 12 * mm_per_pt },
+    .{ .unit = .mil, .dimension = .length, .symbols = &.{"mil"}, .base = mm_per_in / 1000.0 },
+    .{ .unit = .u, .dimension = .length, .symbols = &.{"u"}, .base = 0 },
     .{ .unit = .percent, .dimension = null, .symbols = &.{"%"}, .base = 0.01 },
     .{ .unit = .deg, .dimension = .angle, .symbols = &.{ "deg", "°" }, .base = 1 },
 };
@@ -72,7 +104,8 @@ pub fn ofLabel(label: []const u8) ?Unit {
     return bySymbol(sym);
 }
 
-fn bySymbol(sym: []const u8) ?Unit {
+/// The unit written `sym` (any of its symbols).
+pub fn bySymbol(sym: []const u8) ?Unit {
     for (table) |d| for (d.symbols) |s| if (std.ascii.eqlIgnoreCase(s, sym)) return d.unit;
     return null;
 }
@@ -118,9 +151,16 @@ pub const Quantity = struct {
     /// relative or percent value; null when it needs one and there is
     /// none.
     pub fn resolve(q: Quantity, reference: ?f64) ?f64 {
+        return q.resolveIn(.{ .reference = reference });
+    }
+
+    /// In base units, in `ctx`: its reference for a relative or percent
+    /// value, its `u` for a value in u; null when it needs what `ctx`
+    /// lacks.
+    pub fn resolveIn(q: Quantity, ctx: Context) ?f64 {
         const d = q.unit.def();
-        const amount = if (d.dimension == null) (reference orelse return null) * q.value * d.base else q.value * d.base;
-        if (q.relative) return (reference orelse return null) + amount;
+        const amount = if (d.dimension == null) (ctx.reference orelse return null) * q.value * d.base else q.value * (baseIn(q.unit, ctx) orelse return null);
+        if (q.relative) return (ctx.reference orelse return null) + amount;
         return amount;
     }
 
@@ -131,9 +171,17 @@ pub const Quantity = struct {
     }
 };
 
-/// `base` (mm, degrees) in `unit`.
+/// `base` (mm, degrees) in `unit` (not `u`: see `fromBaseIn`).
 pub fn fromBase(base: f64, unit: Unit) f64 {
     return base / unit.def().base;
+}
+
+/// `base` (mm, degrees) in `unit`, in `ctx`; null for `u` without its
+/// size.
+pub fn fromBaseIn(base: f64, unit: Unit, ctx: Context) ?f64 {
+    const b = baseIn(unit, ctx) orelse return null;
+    if (b == 0) return null;
+    return base / b;
 }
 
 test "quantities: units, relative values and shares" {
@@ -157,4 +205,10 @@ test "quantities: units, relative values and shares" {
     try t.expectEqual(Unit.mm, ofLabel("Width, mm").?);
     try t.expectEqual(Unit.deg, ofLabel("Angle, °").?);
     try t.expect(ofLabel("Rows") == null);
+    // u: a layout's unit, where the context has one.
+    try t.expectApproxEqAbs(28.575, Quantity.parse("1.5u", .mm).?.resolveIn(.{ .u = 19.05 }).?, 1e-12);
+    try t.expect(Quantity.parse("1.5u", .mm).?.resolve(null) == null);
+    try t.expectApproxEqAbs(2.0, fromBaseIn(38.1, .u, .{ .u = 19.05 }).?, 1e-12);
+    try t.expectEqual(Unit.u, ofLabel("Gap before, u").?);
+    try t.expectApproxEqAbs(0.0254, Quantity.parse("1mil", .mm).?.resolve(null).?, 1e-12);
 }

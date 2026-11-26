@@ -26,6 +26,12 @@ pub const path = @import("path.zig");
 /// Strokes: a path's ink at a pen width, with caps and joins.
 pub const stroke = @import("stroke.zig");
 pub const wrap = @import("wrap.zig");
+/// An open path shortened at its ends by lengths along it, and its end
+/// directions (a connection stopping at its end marks).
+pub const trim = @import("trim.zig");
+/// Snapping drags to targets (edges, centres, lines, points, the grid),
+/// with the guides that show it.
+pub const snap = @import("snap.zig");
 
 pub const Point = struct {
     x: f64,
@@ -537,5 +543,7 @@ test {
     _ = strokefont;
     _ = path;
     _ = stroke;
+    _ = trim;
     _ = wrap;
+    _ = snap;
 }

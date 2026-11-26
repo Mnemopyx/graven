@@ -30,6 +30,7 @@ pub const manufacture = @import("manufacture.zig");
 pub const sketch_ = @import("graven_sketch");
 const constrain_ = @import("constrain.zig");
 const edit_ = @import("edit.zig");
+pub const tags_ = @import("tags.zig");
 
 /// A tile's ID: its own object ID.
 pub const TileId = ObjectId;
@@ -139,6 +140,41 @@ pub const Constraint = struct {
     /// Where its dimension is drawn, relative to the constrained object
     /// (end `a`), so it moves with it.
     place: ConstraintPlace = .{},
+    /// Equal sizes as peers (the owner, 2026-11-24): with two or more,
+    /// this `equal_size` is one constraint over the set, every member's
+    /// size on the axis of `a.feature` held equal, and no member a
+    /// reference: whichever member changes (dragged, a width typed) is
+    /// held, and the others follow it. Its ends name no object (their
+    /// features give the axis). A member removed leaves the rest equal.
+    /// (A pair kept in `a` and `b`, as older files have them, holds `a`
+    /// to `b`; reading a file folds those into sets: `foldEqualSets`.)
+    peers: std.ArrayList(ObjectId) = .empty,
+    /// A set's size as last solved, which its members shared: a member
+    /// whose size now differs has been changed, and leads. Below 0 before
+    /// the first solve: then the first member leads, so the first chosen
+    /// sets the starting size (the owner, 2026-11-26).
+    shared: f64 = -1,
+
+    /// Whether this is a set of equal sizes (`peers`).
+    pub fn isSet(c: Constraint) bool {
+        return c.kind == .equal_size and c.peers.items.len > 0;
+    }
+
+    /// The objects it names: a set's members, or its ends' objects.
+    pub fn objects(c: *const Constraint, buf: *[2]ObjectId) []const ObjectId {
+        if (c.isSet()) return c.peers.items;
+        buf[0] = c.a.object;
+        if (c.b.object == .none or c.b.object == c.a.object) return buf[0..1];
+        buf[1] = c.b.object;
+        return buf[0..2];
+    }
+
+    /// Whether it names object `id`.
+    pub fn names(c: *const Constraint, id: ObjectId) bool {
+        if (id == .none) return false;
+        var buf: [2]ObjectId = undefined;
+        return std.mem.indexOfScalar(ObjectId, c.objects(&buf), id) != null;
+    }
 };
 
 /// Where a constraint's dimension is drawn, after drafting practice
@@ -224,6 +260,31 @@ pub const ParagraphAlign = enum { start, centre, end, justify };
 /// segments go along the track's path.
 /// See `ParagraphStyle.tall`.
 pub const TallContent = enum { around, move, fixed };
+
+/// How far a paragraph rule runs along its line: the whole segment (the
+/// column), between the paragraph's indents, or under the line's text.
+pub const RuleLength = enum { column, indents, text };
+
+/// A rule drawn above a paragraph (over its first line) or below it
+/// (under its last), as FrameMaker's frames above and below: a line
+/// drawn with a pen (a stroke style: colour, width, caps, dashes; ink
+/// that takes it follows when it changes). Sizes keep the units typed.
+pub const ParagraphRule = struct {
+    /// Its pen; none: no rule.
+    pen: ObjectId = .none,
+    /// Its weight, as typed (relative forms to the pen's width); null:
+    /// the pen's own width.
+    weight: ?units_.Quantity = null,
+    /// The gap between the rule's middle and its line's band (above the
+    /// first line's top, below the last line's bottom), as typed; relative
+    /// forms to the line pitch.
+    offset: units_.Quantity = .{ .value = 2, .unit = .pt },
+    length: RuleLength = .indents,
+
+    pub fn on(r: ParagraphRule) bool {
+        return r.pen != .none;
+    }
+};
 
 /// A sort: one unit typed into a flow and taken out of it whole, as a
 /// piece of hand-set type was (Travis, 2026-11-24). Sorts are kept in
@@ -376,6 +437,9 @@ pub const ParagraphStyle = struct {
     /// The style a new paragraph takes when Enter ends one in this style
     /// (FrameMaker's Next ¶ Tag); null: this one.
     next: ?ParaId = null,
+    /// Rules over its first line and under its last (none by default).
+    rule_above: ParagraphRule = .{},
+    rule_below: ParagraphRule = .{},
 };
 
 /// Where a track lies on a tile's face.
@@ -560,7 +624,14 @@ pub const LegendSheet = struct {
 /// A key's row: its name, and a cell for each column (markup; missing
 /// ones are empty).
 pub const SheetRow = struct {
+    /// The name of what it is linked to, as last seen: kept equal to the
+    /// object's own name (`linkSheetRows`), so a rename in either place
+    /// is seen in both.
     key: []const u8,
+    /// What it is linked to (a key; a caption or a track for a text
+    /// sheet): found by its name once, when the link is made, then held
+    /// by its ID (the owner, 2026-11-26). `.none` until it names one.
+    target: ObjectId = .none,
     cells: std.ArrayList([]const u8) = .empty,
 };
 
@@ -808,6 +879,18 @@ pub const FlowSource = struct {
 /// ("12pt", "5mm") or relative to the prevailing font size ("+2pt",
 /// "+3mm", "+10%", "120%").
 pub const Leading = units_.Quantity;
+
+/// The unit a measurement is shown and typed in (the owner, 2026-11-26:
+/// every measurement carries its unit; Properties shows it as a pop-up
+/// beside the value, and picking another converts the value). The value
+/// itself stays in base units (mm, degrees, or the property's own), so
+/// geometry reads it unchanged; its unit is kept here, by `key`: the
+/// object's ID and the property's element id ("12/panel.width"), or the
+/// property's id alone for one that belongs to no object.
+pub const MeasureUnit = struct {
+    key: []const u8,
+    unit: units_.Unit,
+};
 const units_ = @import("graven_constraint").units;
 
 pub const TileRegion = struct {
@@ -1132,7 +1215,7 @@ pub const Space = struct {
     /// A sketch's own space (the owner, 2026-11-25): the sketch's ID. It
     /// holds that sketch's one view, at its origin, and nothing else; it is
     /// not a frame (never listed with them, never output, never a place to
-    /// move to). Kept, unlisted, if the sketch is removed.
+    /// move to). Removed with the sketch.
     home: ObjectId = .none,
     /// The layers the editor draws besides the document's (the grid, the
     /// axes, the check results, the construction lines, the flow marks):
@@ -1297,6 +1380,9 @@ pub const Layer = struct {
     opacity: f64 = 1,
     blend: Blend = .normal,
     output: Output = .print,
+    /// The kinds of thing on it that are not drawn (construction, ink,
+    /// dimensions …: `tags.Tag`); the view's, output is not changed.
+    hidden: tags_.Tags = .{},
 };
 
 /// A raster image placed in a space at a physical size. Its file (PNG or
@@ -1428,6 +1514,9 @@ pub const SketchEdit = union(enum) {
     /// Construction geometry output while a parameter is not 0 (empty name:
     /// never).
     physical_when: struct { g: sketch_.GeomId, param: []const u8 },
+    /// Where two curves cross, made a point held on both (one already
+    /// there is used): a constraint's target. Returns the point's ID.
+    crossing: sketch_.pieces.Crossing,
 };
 
 pub const Image = struct {
@@ -1818,6 +1907,14 @@ pub const FabSource = union(enum) {
     /// Its text: the labels in tiles' tracks of this name, or every label
     /// (runs in its tracks too) when empty.
     text: []const u8,
+    /// Its line art's stroked ink: a drawing's strokes (connections
+    /// included) and line art's edges, each the exact area its pen covers
+    /// (`art.inkRegions`); of the art of this name (a drawing's, a
+    /// figure's), or all of it when empty. Cutouts are not ink.
+    ink: []const u8,
+    /// Its line art's fills (solid or hatched, not cutouts): the regions
+    /// they fill, of the art of this name, or all of it when empty.
+    fills: []const u8,
 };
 
 pub const FabOp = union(enum) {
@@ -2197,6 +2294,9 @@ pub const Model = struct {
     active_plan: ObjectId = .none,
     /// Parametric constraints on objects' features (see `constrain`).
     constraints: std.ArrayList(Constraint) = .empty,
+    /// The unit each measurement is shown and typed in, where a person
+    /// chose one (see `MeasureUnit`); others show their label's.
+    measure_units: std.ArrayList(MeasureUnit) = .empty,
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
@@ -2734,7 +2834,8 @@ pub const Model = struct {
 
     fn resolveFirst(m: *const Model, name: []const u8) ?Ref {
         const eq = std.mem.eql;
-        for (m.spaces.items, 0..) |sp, i| if (eq(u8, sp.name, name)) return .{ .space = i };
+        // A sketch's own space goes by its sketch's name, not its own.
+        for (m.spaces.items, 0..) |sp, i| if (sp.home == .none and eq(u8, sp.name, name)) return .{ .space = i };
         for (m.panels.items, 0..) |p, i| if (eq(u8, p.name, name)) return .{ .panel = i };
         for (collection_names) |c| if (eq(u8, c[0], name)) return .{ .collection = c[1] };
         for (collection_names) |c| if (m.resolveIn(.{ .collection = c[1] }, name)) |r| return r;
@@ -2995,6 +3096,22 @@ pub const Model = struct {
         while (grew) {
             grew = false;
             for (m.constraints.items) |c| {
+                // A set of peers: any member going takes them all.
+                if (c.isSet()) {
+                    const any = for (c.peers.items) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) break true;
+                    } else false;
+                    if (!any) continue;
+                    for (c.peers.items) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) continue;
+                        if (m.spaceOfId(x) != from) continue;
+                        const top = m.topLevel(x);
+                        try all.append(m.a(), top);
+                        try m.constrainedLeaves(top, &going);
+                        grew = true;
+                    }
+                    continue;
+                }
                 if (c.b.object == .none or std.mem.indexOfScalar(ObjectId, going.items, c.b.object) == null) continue;
                 if (std.mem.indexOfScalar(ObjectId, going.items, c.a.object) != null) continue;
                 if (m.spaceOfId(c.a.object) != from) continue;
@@ -3017,6 +3134,17 @@ pub const Model = struct {
             const n = m.constraints.items.len;
             for (0..n) |ci| {
                 const c = m.constraints.items[ci];
+                // A set: its copied members, as a set of their own.
+                if (c.isSet()) {
+                    var peers: std.ArrayList(ObjectId) = .empty;
+                    for (c.peers.items) |x| if (pairOf(pairs.items, x)) |nx| try peers.append(m.a(), nx);
+                    if (peers.items.len < 2) continue;
+                    var cc = c;
+                    cc.id = m.newId();
+                    cc.peers = peers;
+                    try m.constraints.append(m.a(), cc);
+                    continue;
+                }
                 const na = pairOf(pairs.items, c.a.object) orelse continue;
                 const nb: ObjectId = if (c.b.object == .none) .none else pairOf(pairs.items, c.b.object) orelse continue;
                 var cc = c;
@@ -3031,6 +3159,31 @@ pub const Model = struct {
             var k: usize = 0;
             while (k < m.constraints.items.len) {
                 const c = m.constraints.items[k];
+                // A set: members left behind leave it (with fewer than two
+                // going, or staying, it holds nothing and goes).
+                if (c.isSet()) {
+                    var gone: usize = 0;
+                    for (c.peers.items) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) gone += 1;
+                    }
+                    if (gone == 0 or gone == c.peers.items.len) {
+                        k += 1;
+                        continue;
+                    }
+                    if (gone < 2) {
+                        _ = m.constraints.orderedRemove(k);
+                        continue;
+                    }
+                    const set = &m.constraints.items[k];
+                    var w: usize = 0;
+                    for (set.peers.items) |x| if (std.mem.indexOfScalar(ObjectId, going.items, x) != null) {
+                        set.peers.items[w] = x;
+                        w += 1;
+                    };
+                    set.peers.shrinkRetainingCapacity(w);
+                    k += 1;
+                    continue;
+                }
                 const a_goes = std.mem.indexOfScalar(ObjectId, going.items, c.a.object) != null;
                 const b_goes = c.b.object == .none or std.mem.indexOfScalar(ObjectId, going.items, c.b.object) != null;
                 if (a_goes != b_goes and !(c.b.object == .none and !a_goes)) {
@@ -3300,6 +3453,25 @@ pub const Model = struct {
     }
 
     /// Renames panel `panel`.
+    /// The unit measurement `key` was given (see `MeasureUnit`), if any.
+    pub fn measureUnit(m: *const Model, key: []const u8) ?units_.Unit {
+        for (m.measure_units.items) |mu| if (std.mem.eql(u8, mu.key, key)) return mu.unit;
+        return null;
+    }
+
+    /// Shows and takes measurement `key` in `unit` from now on (its value
+    /// is unchanged: only how it reads).
+    pub fn setMeasureUnit(m: *Model, key: []const u8, unit: units_.Unit) Error!void {
+        if (key.len == 0) return error.BadValue;
+        for (m.measure_units.items) |*mu| if (std.mem.eql(u8, mu.key, key)) {
+            mu.unit = unit;
+            m.revision += 1;
+            return;
+        };
+        try m.measure_units.append(m.a(), .{ .key = try m.a().dupe(u8, key), .unit = unit });
+        m.revision += 1;
+    }
+
     pub fn renamePanel(m: *Model, panel: usize, name: []const u8) Error!void {
         if (panel >= m.panels.items.len) return error.NoSuchItem;
         if (name.len == 0) return error.BadValue;
@@ -3746,11 +3918,20 @@ pub const Model = struct {
         m.revision += 1;
     }
 
-    /// Removes sketch `index` and its views. Refused while a panel is made
-    /// from it.
+    /// Removes sketch `index` with all that is its own: its views, its own
+    /// space (`Space.home`, and the views of that space placed elsewhere)
+    /// and its drawings (with their placements). Refused while a panel is
+    /// made from it.
     pub fn removeSketch(m: *Model, index: usize) Error!void {
         const id = (try m.sketchAt(index)).id;
         for (m.panels.items) |pn| if (pn.sketch == id) return error.SketchInUse;
+        // Its drawings, each removed as a figure is (its placements too).
+        var f = m.figures.items.len;
+        while (f > 0) {
+            f -= 1;
+            if (m.figures.items[f].sketch == id) try m.removeFigure(f);
+        }
+        if (m.homeOf(id)) |hi| try m.removeSpace(hi);
         for (m.spaces.items) |*sp| {
             var k = sp.sketch_views.items.len;
             while (k > 0) {
@@ -3759,6 +3940,30 @@ pub const Model = struct {
             }
         }
         _ = m.sketches.orderedRemove(index);
+        m.revision += 1;
+    }
+
+    /// Removes space `index` (never the canvas) with what it holds: its
+    /// panels, its content layouts (their flows tidied), and every view of
+    /// it placed in another space.
+    pub fn removeSpace(m: *Model, index: usize) Error!void {
+        if (index == 0 or index >= m.spaces.items.len) return error.NoSuchItem;
+        const sid = m.spaces.items[index].id;
+        var p = m.panels.items.len;
+        while (p > 0) {
+            p -= 1;
+            if (m.panels.items[p].space == sid) m.removePanel(p);
+        }
+        for (m.spaces.items[index].regions.items) |r| m.forget(r.id);
+        _ = m.spaces.orderedRemove(index);
+        for (m.spaces.items) |*sp| {
+            var k = sp.views.items.len;
+            while (k > 0) {
+                k -= 1;
+                if (sp.views.items[k].source == sid) _ = sp.views.orderedRemove(k);
+            }
+        }
+        m.tidyFlows();
         m.revision += 1;
     }
 
@@ -5086,8 +5291,6 @@ pub const Model = struct {
     /// column of that name.
     pub fn sheetCellOf(m: *const Model, t: TileId, slot: []const u8) ?struct { sheet: usize, row: usize, col: usize } {
         const al = m.arena.child_allocator;
-        var keys: std.ArrayList(TileId) = .empty;
-        defer keys.deinit(al);
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         for (m.sheets.items, 0..) |sh, si| {
@@ -5095,12 +5298,9 @@ pub const Model = struct {
             const col = for (sh.columns.items, 0..) |c, k| {
                 if (std.mem.eql(u8, c, slot)) break k;
             } else continue;
-            keys.clearRetainingCapacity();
-            m.scopeTiles(al, sh.scope, &keys) catch return null;
-            for (sh.rows.items, 0..) |row, ri| {
-                const key = for (keys.items) |k| {
-                    if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
-                } else continue;
+            for (sh.rows.items, 0..) |*row, ri| {
+                const key = (m.sheetRowLink(al, &sh, row) catch return null) orelse continue;
+                if (m.tileIndex(key) == null) continue;
                 near.clearRetainingCapacity();
                 m.companions(al, key, &near) catch return null;
                 if (std.mem.indexOfScalar(TileId, near.items, t) != null) return .{ .sheet = si, .row = ri, .col = col };
@@ -5119,6 +5319,99 @@ pub const Model = struct {
     fn regionWithId(m: *Model, id: ObjectId) ?*TileRegion {
         for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| if (r.id == id) return r;
         return null;
+    }
+
+    /// The track whose ID is `id`, by its parent and index.
+    pub fn trackWithId(m: *const Model, id: ObjectId) ?TrackRef {
+        if (id == .none) return null;
+        for (0..m.parentCount()) |k| {
+            const pi = m.parentAt(k);
+            for (m.regionsIn(pi), 0..) |r, ri| if (r.id == id) return .{ .parent = pi, .region = ri };
+        }
+        return null;
+    }
+
+    /// The caption whose ID is `id`.
+    fn captionWithId(m: *Model, id: ObjectId) ?*SketchCaption {
+        if (id == .none) return null;
+        for (m.sketches.items) |*it| for (it.captions.items) |*sc| if (sc.id == id) return sc;
+        return null;
+    }
+
+    // Name links ---------------------------------------------------------
+    //
+    // A reference by name (a sheet's row to its key, caption or track) is
+    // looked up by the name once, when the link is made, and held by the
+    // object's ID from then on (the owner, 2026-11-26): renaming the
+    // object or the reference renames both. These are the shared pieces.
+
+    /// The name of linkable object `id` (a key, a caption or a track),
+    /// or null when there is none (removed, or never was).
+    pub fn linkedName(m: *const Model, id: ObjectId) ?[]const u8 {
+        if (id == .none) return null;
+        if (m.tileIndex(id)) |i| return if (m.tiles.items[i].removed) null else m.tiles.items[i].designator;
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (sc.id == id) return sc.name;
+        if (m.trackWithId(id)) |t| return m.regionsIn(t.parent)[t.region].name;
+        return null;
+    }
+
+    /// Renames linkable object `id` (a key, a caption or a track).
+    pub fn renameLinked(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        if (m.tileIndex(id) != null) return m.renameTile(id, name);
+        if (m.captionWithId(id) != null) return m.renameCaption(id, name);
+        if (m.trackWithId(id)) |t| return m.renameRegion(t.parent, t.region, name);
+        return error.NoSuchObject;
+    }
+
+    /// Renames caption `id`, and its tracks with it (its base and its
+    /// uses' copies): they are the caption.
+    pub fn renameCaption(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        if (name.len == 0) return error.BadValue;
+        const sc = m.captionWithId(id) orelse return error.NoSuchObject;
+        const owned = try m.a().dupe(u8, name);
+        sc.name = owned;
+        for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| {
+            if (r.caption == id) r.name = owned;
+        };
+        m.revision += 1;
+    }
+
+    /// The object a sheet's row names, looked up by `name`: a key in its
+    /// scope; for a text sheet, a caption, else a track, of that name.
+    fn sheetLookup(m: *const Model, al: Allocator, sh: *const LegendSheet, name: []const u8) Allocator.Error!?ObjectId {
+        if (!sh.texts) return m.keyInScope(al, sh.scope, name);
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (std.mem.eql(u8, sc.name, name)) return sc.id;
+        for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |r| {
+            if (r.caption == .none and std.mem.eql(u8, r.name, name)) return r.id;
+        };
+        return null;
+    }
+
+    /// What row `row` of sheet `sh` is linked to: its held ID while that
+    /// object is there, else what its name finds (the link being made).
+    pub fn sheetRowLink(m: *const Model, al: Allocator, sh: *const LegendSheet, row: *const SheetRow) Allocator.Error!?ObjectId {
+        if (m.linkedName(row.target) != null) return row.target;
+        return m.sheetLookup(al, sh, row.key);
+    }
+
+    /// Makes and keeps every sheet row's link: a row not yet linked (or
+    /// whose object is gone) is linked by its name; a linked row takes
+    /// its object's name, renamed since. Run first in `syncSheets`.
+    fn linkSheetRows(m: *Model) Error!void {
+        const al = m.arena.child_allocator;
+        for (m.sheets.items) |*sh| for (sh.rows.items) |*row| {
+            if (m.linkedName(row.target)) |name| {
+                if (!std.mem.eql(u8, name, row.key)) {
+                    row.key = try m.a().dupe(u8, name);
+                    m.revision += 1;
+                }
+                continue;
+            }
+            if (try m.sheetLookup(al, sh, row.key)) |id| if (id != row.target) {
+                row.target = id;
+                m.revision += 1;
+            };
+        };
     }
 
     /// Shows every sketch's captions in its sketch panels: in each, a
@@ -5185,14 +5478,6 @@ pub const Model = struct {
         }
     }
 
-    /// The name a text sheet finds track `r` by: its caption's, else its own.
-    pub fn textHolderName(m: *const Model, r: *const TileRegion) []const u8 {
-        if (r.caption != .none) for (m.sketches.items) |it| for (it.captions.items) |sc| {
-            if (sc.id == r.caption) return sc.name;
-        };
-        return r.name;
-    }
-
     /// Whether track `r` is a use's copy of a caption (which follows its
     /// base, not a sheet).
     fn isCaptionCopy(m: *const Model, r: *const TileRegion) bool {
@@ -5204,8 +5489,8 @@ pub const Model = struct {
     }
 
     /// Writes each text sheet's cells into its text holders: for each
-    /// row, the tracks of that name (a caption's base by its caption's
-    /// name) get the cell of the column shown, or the default when that
+    /// row, the track it is linked to (a caption's base, for a caption)
+    /// gets the cell of the column shown, or the default when that
     /// is empty. A holder edited since (its text not what was last
     /// written) puts its text into that cell first: the sheet and the
     /// text holders are one text, edited in either.
@@ -5215,10 +5500,14 @@ pub const Model = struct {
             if (!sh.texts) continue;
             for (sh.rows.items) |*row| {
                 while (row.cells.items.len < sh.columns.items.len) try row.cells.append(m.a(), "");
+                // Its holder, by the ID it is linked to: a caption's base
+                // (its uses follow it), or a track.
+                const link = row.target;
+                if (m.linkedName(link) == null) continue;
                 for (0..m.parentCount()) |k| {
                     const pi = m.parentAt(k);
                     for (m.regionsIn(pi)) |*r| {
-                        if (!std.mem.eql(u8, m.textHolderName(r), row.key) or m.isCaptionCopy(r)) continue;
+                        if (!(r.id == link or (r.caption == link and !m.isCaptionCopy(r)))) continue;
                         const fi = m.flowIndex(r.flow) orelse continue;
                         const f = &m.flows.items[fi];
                         const now = try itemsText(al, f.items.items);
@@ -5247,7 +5536,7 @@ pub const Model = struct {
         try sh.columns.append(m.a(), "Default");
         for (languages) |l| try sh.columns.append(m.a(), try m.a().dupe(u8, l));
         for (m.sketches.items) |it| for (it.captions.items) |sc| {
-            var row: SheetRow = .{ .key = try m.a().dupe(u8, sc.name) };
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, sc.name), .target = sc.id };
             const base = m.regionWithId(sc.base);
             const text = if (base) |b| if (m.flowIndex(b.flow)) |fi| try itemsText(al, m.flows.items[fi].items.items) else try al.alloc(u8, 0) else try al.alloc(u8, 0);
             defer al.free(text);
@@ -5281,24 +5570,21 @@ pub const Model = struct {
         // Text sheets' cells in their text holders (a caption's base
         // among them), then a sketch's captions in its uses: content
         // driven from elsewhere, as a sheet's cells drive slots.
+        try m.linkSheetRows();
         try m.syncTextSheets();
         try m.syncCaptions();
         if (m.sheets.items.len == 0) return;
         const al = m.arena.child_allocator;
-        var keys: std.ArrayList(TileId) = .empty;
-        defer keys.deinit(al);
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         var done: std.AutoHashMapUnmanaged([2]u32, void) = .empty;
         defer done.deinit(al);
         for (m.sheets.items) |sh| {
             if (sh.texts) continue;
-            keys.clearRetainingCapacity();
-            try m.scopeTiles(al, sh.scope, &keys);
             for (sh.rows.items) |row| {
-                const key = for (keys.items) |k| {
-                    if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
-                } else continue;
+                // Its key, by the ID it is linked to.
+                const key = row.target;
+                if (m.tileIndex(key) == null or m.linkedName(key) == null) continue;
                 near.clearRetainingCapacity();
                 try m.companions(al, key, &near);
                 for (sh.columns.items, 0..) |col, ci| {
@@ -5355,7 +5641,7 @@ pub const Model = struct {
         const id = try m.addSheet(name, scope, cols.items);
         const sh = &m.sheets.items[m.sheetIndex(id).?];
         for (keys.items) |k| {
-            var row: SheetRow = .{ .key = try m.a().dupe(u8, m.tileConst(k).designator) };
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, m.tileConst(k).designator), .target = k };
             near.clearRetainingCapacity();
             try m.companions(al, k, &near);
             for (sh.columns.items) |c| {
@@ -5376,16 +5662,18 @@ pub const Model = struct {
     }
 
     /// Sets the cell of sheet `id` at row `row`, column `col`: column 0
-    /// is the key's name (renaming the key too, when there is one), the
+    /// is the row's name (renaming what it is linked to too), the
     /// others the columns' slots, which follow.
     pub fn setSheetCell(m: *Model, id: ObjectId, row: usize, col: usize, text: []const u8) Error!void {
         const sh = try m.sheetById(id);
         if (row >= sh.rows.items.len or col > sh.columns.items.len) return error.NoSuchItem;
         const r = &sh.rows.items[row];
         if (col == 0) {
+            // The name: the object it is linked to is renamed with it
+            // (a row not yet linked looks its new name up).
             if (std.mem.eql(u8, r.key, text)) return;
             const al = m.arena.child_allocator;
-            if (try m.keyInScope(al, sh.scope, r.key)) |t| try m.renameTile(t, text);
+            if (try m.sheetRowLink(al, sh, r)) |t| try m.renameLinked(t, text);
             m.sheets.items[m.sheetIndex(id).?].rows.items[row].key = try m.a().dupe(u8, text);
         } else {
             while (r.cells.items.len < sh.columns.items.len) try r.cells.append(m.a(), "");
@@ -5496,27 +5784,18 @@ pub const Model = struct {
         if (sh.texts) {
             // A text sheet: rows naming no text holder; its columns are
             // languages, none unused.
-            for (sh.rows.items, 0..) |row, ri| {
-                var found = false;
-                for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| {
-                    if (std.mem.eql(u8, m.textHolderName(r), row.key)) found = true;
-                };
-                if (!found) try rows.append(al, ri);
+            for (sh.rows.items, 0..) |*row, ri| {
+                if (try m.sheetRowLink(al, &sh, row) == null) try rows.append(al, ri);
             }
             return;
         }
-        var keys: std.ArrayList(TileId) = .empty;
-        defer keys.deinit(al);
-        try m.scopeTiles(al, sh.scope, &keys);
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         var used = try al.alloc(bool, sh.columns.items.len);
         defer al.free(used);
         @memset(used, false);
-        for (sh.rows.items, 0..) |row, ri| {
-            const key = for (keys.items) |k| {
-                if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
-            } else {
+        for (sh.rows.items, 0..) |*row, ri| {
+            const key = (try m.sheetRowLink(al, &sh, row)) orelse {
                 try rows.append(al, ri);
                 continue;
             };
@@ -5569,6 +5848,8 @@ pub const Model = struct {
             o.name = try m.a().dupe(u8, l.name);
             o.source = switch (l.source) {
                 .text => |t| .{ .text = try m.a().dupe(u8, t) },
+                .ink => |t| .{ .ink = try m.a().dupe(u8, t) },
+                .fills => |t| .{ .fills = try m.a().dupe(u8, t) },
                 else => l.source,
             };
             o.op = switch (l.op) {
@@ -5768,19 +6049,31 @@ pub const Model = struct {
     /// What uses sketch `index`'s geometry by ID follows an object made
     /// again (`remap`): its drawings' inks and fills (their pending marks
     /// while a draft is open, so the accepted drawing stays as it was).
+    /// Piece `p` with its geometry and points remapped; null when any is gone.
+    fn remapPiece(remap: *const sketch_.composite.Remap, p: figure_.Piece) ?figure_.Piece {
+        var o = p;
+        o.geom = remap.get(p.geom) orelse return null;
+        if (p.from) |r| o.from = .{ .geom = remap.get(r.geom) orelse return null, .role = r.role };
+        if (p.to) |r| o.to = .{ .geom = remap.get(r.geom) orelse return null, .role = r.role };
+        return o;
+    }
+
     fn followRemap(m: *Model, index: usize, remap: *const sketch_.composite.Remap) Error!void {
         const it = &m.sketches.items[index];
         const drafting = it.accepted != null;
         for (m.figures.items) |*f| if (f.sketch == it.id) {
             var marks: figure_.Marks = if (drafting) (f.pending orelse .{ .inks = f.inks, .fills = f.fills }) else .{ .inks = f.inks, .fills = f.fills };
             var inks: std.ArrayList(figure_.Ink) = .empty;
-            for (marks.inks) |ink| if (remap.get(ink.geom)) |g| try inks.append(m.a(), .{ .geom = g, .style = ink.style });
+            for (marks.inks) |ink| if (remapPiece(remap, ink.piece())) |p| try inks.append(m.a(), .{ .geom = p.geom, .from = p.from, .to = p.to, .style = ink.style });
             var fills: std.ArrayList(figure_.Fill) = .empty;
             fill: for (marks.fills) |fl| {
                 const gs = try m.a().alloc(u32, fl.geoms.len);
                 for (fl.geoms, gs) |g, *to| to.* = remap.get(g) orelse continue :fill;
+                const ps = try m.a().alloc(figure_.Piece, fl.pieces.len);
+                for (fl.pieces, ps) |p, *to| to.* = remapPiece(remap, p) orelse continue :fill;
                 var copy = fl;
                 copy.geoms = gs;
+                copy.pieces = ps;
                 try fills.append(m.a(), copy);
             }
             marks = .{ .inks = inks.items, .fills = fills.items };
@@ -5853,6 +6146,7 @@ pub const Model = struct {
             .param => |e| try sk.setParam(al, e.name, e.expr),
             .unparam => |name| try sk.removeParam(name),
             .physical_when => |e| try sk.setPhysicalWhen(al, e.g, e.param),
+            .crossing => |x| out = ((try sketch_.pieces.attachCrossing(sk, al, x, true)) orelse return error.NoSuchItem).geom,
             .drag => |e| {
                 _ = try sk.drag(al, gpa, e.p, e.to);
                 m.revision += 1;
@@ -6713,6 +7007,9 @@ pub const Model = struct {
         if (c.a.object == .none) return error.BadConstraint;
         if (c.a.feature.vertical() != c.b.feature.vertical()) return error.BadConstraint;
         if (!std.math.isFinite(c.value)) return error.BadConstraint;
+        // Equal sizes with no difference: peers, as a set (`addEqualSet`).
+        if (c.kind == .equal_size and c.value == 0 and c.driving and c.b.object != .none and c.b.object != c.a.object and c.peers.items.len == 0)
+            return m.addEqualSet(&.{ c.b.object, c.a.object }, c.a.feature.vertical());
         var out = c;
         // A signed value given: its sign is the side.
         if (out.value < 0) {
@@ -6767,6 +7064,119 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Holds the sizes of `members` (two or more objects) equal on one
+    /// axis (heights when `vertical`), as peers: one constraint over them
+    /// all, no member a reference (see `Constraint.peers`). The first
+    /// member sets the starting size (the owner, 2026-11-26). A set on
+    /// that axis sharing a member, or an equal pair, joins it, so a
+    /// member is in one set per axis. Returns the set's ID.
+    pub fn addEqualSet(m: *Model, members: []const ObjectId, vertical: bool) Error!ObjectId {
+        var list: std.ArrayList(ObjectId) = .empty;
+        for (members) |id| {
+            if (id == .none) return error.BadConstraint;
+            if (std.mem.indexOfScalar(ObjectId, list.items, id) == null) try list.append(m.a(), id);
+        }
+        if (list.items.len < 2) return error.BadConstraint;
+        const f: Feature = if (vertical) .bottom else .left;
+        const id = m.newId();
+        try m.constraints.append(m.a(), .{ .id = id, .kind = .equal_size, .a = .{ .feature = f }, .b = .{ .feature = f }, .peers = list });
+        _ = try m.foldEqualSets();
+        m.revision += 1;
+        // The set it was folded into (the first among those it met): its
+        // size set again by the first chosen.
+        for (m.constraints.items) |*c| if (c.isSet() and c.a.feature.vertical() == vertical and c.names(members[0])) {
+            const k = std.mem.indexOfScalar(ObjectId, c.peers.items, members[0]).?;
+            std.mem.rotate(ObjectId, c.peers.items[0 .. k + 1], k);
+            c.shared = -1;
+            return c.id;
+        };
+        return id;
+    }
+
+    /// Takes object `object` out of set `id` of equal sizes: the rest stay
+    /// equal (with one left, the set goes).
+    pub fn removeConstraintMember(m: *Model, id: ObjectId, object: ObjectId) Error!void {
+        const i = m.constraintIndex(id) orelse return error.NoSuchObject;
+        const c = &m.constraints.items[i];
+        if (!c.isSet()) return error.BadConstraint;
+        const k = std.mem.indexOfScalar(ObjectId, c.peers.items, object) orelse return error.NoSuchObject;
+        _ = c.peers.orderedRemove(k);
+        // Members removed before are dropped with it.
+        var w: usize = 0;
+        for (c.peers.items) |x| if (m.spaceOfId(x) != null) {
+            c.peers.items[w] = x;
+            w += 1;
+        };
+        c.peers.shrinkRetainingCapacity(w);
+        if (c.peers.items.len < 2) _ = m.constraints.orderedRemove(i);
+        m.revision += 1;
+    }
+
+    /// Equal sizes as sets of peers: each driving equal pair (an older
+    /// file's, held to a reference with no difference) and each set
+    /// sharing a member with another on its axis made one set, in the
+    /// place of the first, its members in the order met (so the first
+    /// chosen stays first). A pair with a difference stays a pair.
+    /// Whether anything was folded.
+    pub fn foldEqualSets(m: *Model) Allocator.Error!bool {
+        var folded = false;
+        const foldable = struct {
+            fn f(c: Constraint) bool {
+                if (c.kind != .equal_size or !c.driving) return false;
+                if (c.isSet()) return true;
+                return c.value == 0 and c.a.object != .none and c.b.object != .none and c.a.object != c.b.object;
+            }
+        }.f;
+        var i: usize = 0;
+        while (i < m.constraints.items.len) : (i += 1) {
+            if (!foldable(m.constraints.items[i])) continue;
+            const v = m.constraints.items[i].a.feature.vertical();
+            // Made a set: a pair's reference first, as it set the size.
+            if (!m.constraints.items[i].isSet()) {
+                folded = true;
+                const c = &m.constraints.items[i];
+                try c.peers.append(m.a(), c.b.object);
+                try c.peers.append(m.a(), c.a.object);
+                const f: Feature = if (v) .bottom else .left;
+                c.a = .{ .feature = f };
+                c.b = .{ .feature = f };
+                c.value = 0;
+                c.side = 1;
+            }
+            // Whatever shares a member joins it, until nothing more does.
+            var grew = true;
+            while (grew) {
+                grew = false;
+                var j: usize = i + 1;
+                while (j < m.constraints.items.len) {
+                    const o = m.constraints.items[j];
+                    if (!foldable(o) or o.a.feature.vertical() != v) {
+                        j += 1;
+                        continue;
+                    }
+                    var buf: [2]ObjectId = undefined;
+                    const theirs: []const ObjectId = if (o.isSet()) o.peers.items else blk: {
+                        buf = .{ o.b.object, o.a.object };
+                        break :blk &buf;
+                    };
+                    const set = &m.constraints.items[i];
+                    const meets = for (theirs) |x| {
+                        if (std.mem.indexOfScalar(ObjectId, set.peers.items, x) != null) break true;
+                    } else false;
+                    if (!meets) {
+                        j += 1;
+                        continue;
+                    }
+                    for (theirs) |x| if (std.mem.indexOfScalar(ObjectId, set.peers.items, x) == null) try set.peers.append(m.a(), x);
+                    _ = m.constraints.orderedRemove(j);
+                    grew = true;
+                    folded = true;
+                }
+            }
+        }
+        return folded;
+    }
+
     /// Designates object `id`'s object origin. Nothing moves.
     pub fn setObjectOrigin(m: *Model, id: ObjectId, at: OriginPoint) Error!void {
         for (m.panels.items) |*p| {
@@ -6799,6 +7209,10 @@ pub const Model = struct {
     fn checkParagraph(p: ParagraphStyle) Error!void {
         for ([_]f64{ p.indent_start, p.indent_end, p.space_before, p.space_after, p.line_gap }) |v| if (!(v >= 0)) return error.BadSize;
         if (!std.math.isFinite(p.first)) return error.BadSize;
+        for ([_]ParagraphRule{ p.rule_above, p.rule_below }) |r| {
+            if (!std.math.isFinite(r.offset.value)) return error.BadSize;
+            if (r.weight) |w| if (!(w.value > 0) or !std.math.isFinite(w.value)) return error.BadSize;
+        }
     }
 
     /// The figure drawn over sketch `sketch` (its ID), if any.
@@ -6867,7 +7281,12 @@ pub const Model = struct {
             if (f.sketch == .none or (sketch != .none and f.sketch != sketch)) continue;
             const ski = m.sketchIndex(f.sketch) orelse continue;
             const item = &m.sketches.items[ski];
+            // Its placements follow what is accepted, so not while a draft
+            // is open (its paths stay as they are then).
+            const follow = item.accepted == null and m.figurePlaced(f.id);
+            const was: Placed = if (follow) try m.placedBounds(f.*) else .{};
             f.paths = try m.figurePathsFrom(item.used(), f.*);
+            if (follow) try m.followFigure(f.*, was);
             // The sketch editor's view of a pending draft.
             // The editor's view of a pending draft: the draft sketch, with
             // its pending marks.
@@ -6884,6 +7303,59 @@ pub const Model = struct {
             if (pn.sketch == .none or (sketch != .none and pn.sketch != sketch)) continue;
             try m.syncSketchPanelInk(pi);
         }
+    }
+
+    /// A figure's bounds and its ink's, as its placements were made from.
+    const Placed = struct { bounds: geom.Box = .empty, ink: geom.Box = .empty };
+
+    fn placedBounds(m: *Model, f: figure_.Figure) Error!Placed {
+        return .{ .bounds = f.bounds(), .ink = figure_.inkBounds(try figure_.ink(m.a(), f, figure_tolerance)) };
+    }
+
+    /// Whether figure `id` is placed anywhere (in a space or on a panel).
+    fn figurePlaced(m: *const Model, id: ObjectId) bool {
+        for (m.spaces.items) |sp| for (sp.figure_places.items) |fp| {
+            if (fp.figure == id) return true;
+        };
+        for (m.panels.items) |p| for (p.art.items) |x| {
+            if (x.figure == id) return true;
+        };
+        return false;
+    }
+
+    /// Figure `f`'s placements made again after its drawing changed (a
+    /// sketch's drawing, accepted): each keeps its scale, and what was at a
+    /// point of the drawing stays where it was, so a sketch drawn in mm
+    /// placed 1:1 stays 1:1 however its geometry grows or shrinks.
+    fn followFigure(m: *Model, f: figure_.Figure, was: Placed) Error!void {
+        const fi = m.figureIndex(f.id) orelse return;
+        const now = try m.placedBounds(f);
+        for (m.panels.items) |*p| for (p.art.items) |*x| {
+            if (x.figure != f.id) continue;
+            if (was.ink.isEmpty() or !(was.ink.width() > 0)) continue;
+            var ab: geom.Box = .empty;
+            for (x.shapes) |sh| ab = ab.join(sh.outline.bounds());
+            const k = if (ab.isEmpty()) 1 else ab.width() / was.ink.width();
+            if (now.ink.isEmpty() or !(now.ink.width() > 0)) {
+                x.shapes = &.{};
+                continue;
+            }
+            x.shapes = try m.figureShapes(fi, now.ink.width() * k);
+            x.at = .{ .x = x.at.x + (now.ink.x0 - was.ink.x0) * k, .y = x.at.y + (now.ink.y0 - was.ink.y0) * k };
+        };
+        for (m.spaces.items) |*sp| for (sp.figure_places.items) |*fp| {
+            if (fp.figure != f.id) continue;
+            if (was.bounds.isEmpty() or !(was.bounds.width() > 0) or now.bounds.isEmpty()) continue;
+            const k = fp.w / was.bounds.width();
+            fp.at = .{ .x = fp.at.x + (now.bounds.x0 - was.bounds.x0) * k, .y = fp.at.y + (now.bounds.y0 - was.bounds.y0) * k };
+            fp.w = @max(1e-6, now.bounds.width() * k);
+            fp.h = now.bounds.height() * k;
+            if (fp.border.kind == .dubins) {
+                fp.border.path = try m.figureWrap(fi, fp.w, fp.margin, fp.border.radius);
+                fp.border.made_w = fp.w;
+            }
+        };
+        m.revision += 1;
     }
 
     /// The paths of figure `f`, drawn over sketch `sk`: its fills, then each
@@ -6913,9 +7385,7 @@ pub const Model = struct {
             var segs: std.ArrayList(geom.Segment) = .empty;
             for (f.inks) |ink| {
                 if (ink.style != style or ink.geom >= sk.geometry.items.len) continue;
-                const g = sk.geometry.items[ink.geom];
-                if (g.removed) continue;
-                try sk.appendSegments(al, g, &segs);
+                try sketch_.pieces.appendSegments(sk, al, ink.piece(), &segs);
             }
             if (segs.items.len == 0) continue;
             const runs = try sketch_.Sketch.runs(al, segs.items);
@@ -6939,21 +7409,41 @@ pub const Model = struct {
             const cs = m.connectorStyleOf(@enumFromInt(c.style));
             // Annotation (no stroke): not drawn.
             const stroke: figure_.Stroke = if (m.strokeStyleIndex(cs.stroke)) |i| m.stroke_styles.items[i].stroke else continue;
-            const runs = try sketch_.Sketch.runs(al, segs.items);
-            const sub = try al.alloc(figure_.Subpath, runs.len);
-            for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
-            try paths.append(al, .{ .subpaths = sub, .stroke = stroke });
-            const ends = [2]struct { mark: ConnectorEnd, p: sketch_.PointRef, th: f64 }{
-                // Into the feature at the start, and on into the end.
-                .{ .mark = cs.start, .p = .{ .geom = c.start, .role = .point }, .th = dirs.leave + std.math.pi },
-                .{ .mark = cs.end, .p = .{ .geom = c.end, .role = .point }, .th = dirs.arrive },
+            // The line stops where each end's mark begins, so the two do
+            // not overlap (a pen's cap poking past an arrow's tip).
+            var line: std.ArrayList(geom.Segment) = .empty;
+            try geom.trim.trimmed(al, segs.items, connectorMarkDepth(cs.start, cs.size, stroke), connectorMarkDepth(cs.end, cs.size, stroke), &line);
+            if (line.items.len > 0) {
+                const runs = try sketch_.Sketch.runs(al, line.items);
+                const sub = try al.alloc(figure_.Subpath, runs.len);
+                for (runs, sub) |r, *sp| sp.* = .{ .segments = r.segments, .closed = r.closed };
+                try paths.append(al, .{ .subpaths = sub, .stroke = stroke });
+            }
+            const ends = [2]struct { mark: ConnectorEnd, p: geom.Point, th: f64 }{
+                // Into the feature at the start, and on into the end, as
+                // the path runs there.
+                .{ .mark = cs.start, .p = segs.items[0].start(), .th = dirs.leave + std.math.pi },
+                .{ .mark = cs.end, .p = segs.items[segs.items.len - 1].end(), .th = dirs.arrive },
             };
             for (ends) |e| {
                 if (e.mark == .none) continue;
-                const p = sk.point(e.p) catch continue;
-                if (try connectorMark(al, e.mark, p, e.th, cs.size, stroke)) |path| try paths.append(al, path);
+                if (try connectorMark(al, e.mark, e.p, e.th, cs.size, stroke)) |path| try paths.append(al, path);
             }
         }
+    }
+
+    /// How far back along its path from its end a connection's line stops
+    /// for end mark `mark`: an arrow's base or a dot's edge, less half the
+    /// pen so the line's end is under the mark (whatever its cap); half
+    /// the pen for a bar, so a round or square cap stays within it.
+    fn connectorMarkDepth(mark: ConnectorEnd, size: f64, stroke: figure_.Stroke) f64 {
+        const half = stroke.width / 2;
+        return switch (mark) {
+            .none => 0,
+            .arrow => size - @min(half, size / 4),
+            .dot => size / 3 - @min(half, size / 6),
+            .bar => half,
+        };
     }
 
     /// A connection's end mark at `p`, pointing at angle `th` (radians).
@@ -6970,13 +7460,13 @@ pub const Model = struct {
                 const segs = try al.alloc(geom.Segment, 3);
                 for (0..3) |j| segs[j] = .{ .line = .{ q[j], q[(j + 1) % 3] } };
                 const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = true }});
-                return .{ .subpaths = sub, .fill = stroke.color };
+                return .{ .subpaths = sub, .fill = stroke.color, .pen = true };
             },
             .dot => {
                 var buf: [4]geom.Segment = undefined;
                 const segs = try al.dupe(geom.Segment, geom.arc(p, size / 3, 0, 2 * std.math.pi, &buf));
                 const sub = try al.dupe(figure_.Subpath, &.{.{ .segments = segs, .closed = true }});
-                return .{ .subpaths = sub, .fill = stroke.color };
+                return .{ .subpaths = sub, .fill = stroke.color, .pen = true };
             },
             .bar => {
                 const h = size / 2;
@@ -7047,7 +7537,7 @@ pub const Model = struct {
         const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
         const style = try m.leaderStyle();
         const sk = &m.sketches.items[ski].sketch;
-        const ci = sketch_.connector.add(sk, m.a(), from, .segments, 3, 6) catch |e| return switch (e) {
+        const ci = sketch_.connector.add(sk, m.a(), from, .segments, 3, 6, false) catch |e| return switch (e) {
             error.NotOnACurve => error.NotOnACurve,
             error.OutOfMemory => error.OutOfMemory,
             else => error.NoSuchItem,
@@ -7085,6 +7575,23 @@ pub const Model = struct {
         m.revision += 1;
     }
 
+    /// Holds connection `ci` of sketch `sketch`'s end level, or frees its
+    /// direction (a caption's leader stays level).
+    pub fn setConnectorLevel(m: *Model, sketch: ObjectId, ci: u32, level: bool) Error!void {
+        const ski = m.sketchIndex(sketch) orelse return error.NoSuchItem;
+        const sk = &m.sketches.items[ski].sketch;
+        if (ci >= sk.connectors.items.len) return error.NoSuchItem;
+        if (!level) for (m.sketches.items[ski].captions.items) |sc| if (sc.connector == ci) return error.BadValue;
+        sketch_.connector.setLevel(sk, m.a(), ci, level) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.BadValue,
+        };
+        _ = try sk.solve(m.arena.child_allocator);
+        m.sketches.items[ski].version +%= 1;
+        try m.syncSketchFigures(sketch);
+        m.revision += 1;
+    }
+
     /// Makes connection `ci` of sketch `sketch` a path of kind `kind`
     /// (joined segments, or a Dubins path); its ends stay where they are.
     pub fn setConnectorKind(m: *Model, sketch: ObjectId, ci: u32, kind: sketch_.connector.Kind) Error!void {
@@ -7103,9 +7610,18 @@ pub const Model = struct {
 
     /// The area fill `fill` covers in sketch `sk`, in `pattern`: exact
     /// contours (a hatch's lines as thin areas cut to it).
+    /// The segments of fill `fill`'s boundary: its whole curves and its
+    /// pieces.
+    fn fillBoundary(al: std.mem.Allocator, sk: *const sketch_.Sketch, fill: figure_.Fill) Error![]geom.Segment {
+        var segs: std.ArrayList(geom.Segment) = .empty;
+        try segs.appendSlice(al, try sk.segmentsOf(al, fill.geoms));
+        for (fill.pieces) |pc| try sketch_.pieces.appendSegments(sk, al, pc, &segs);
+        return segs.items;
+    }
+
     fn fillRegion(al: std.mem.Allocator, sk: *const sketch_.Sketch, fill: figure_.Fill, pattern: figure_.Pattern) Error!geom.Outline {
         const Sk = sketch_.Sketch;
-        const edge = try Sk.chain(al, try sk.segmentsOf(al, fill.geoms));
+        const edge = try Sk.chain(al, try fillBoundary(al, sk, fill));
         if (edge.contours.len == 0) return .blank;
         var inputs: std.ArrayList(geom.Outline) = .empty;
         try inputs.append(al, .{ .contours = edge.contours });
@@ -7118,6 +7634,9 @@ pub const Model = struct {
             for (sk.geometry.items, 0..) |g, gi| {
                 if (g.removed or g.reference) continue;
                 if (std.mem.indexOfScalar(u32, fill.geoms, @intCast(gi)) != null) continue;
+                if (for (fill.pieces) |pc| {
+                    if (pc.geom == gi) break true;
+                } else false) continue;
                 if (g.kind == .circle) {
                     var one: std.ArrayList(geom.Segment) = .empty;
                     try sk.appendSegments(al, g, &one);
@@ -7311,32 +7830,39 @@ pub const Model = struct {
     /// (`enclosed`); with `on` false, takes off the fill of that boundary.
     /// A fill of the same boundary is replaced.
     pub fn setFill(m: *Model, index: usize, geoms: []const u32, enclosed: bool, on: bool) Error!void {
+        return m.setFillPieces(index, geoms, &.{}, enclosed, on);
+    }
+
+    /// `setFill` of a boundary of whole curves `geoms` and pieces `ps`.
+    fn setFillPieces(m: *Model, index: usize, geoms: []const u32, ps: []const figure_.Piece, enclosed: bool, on: bool) Error!void {
         const item = try m.sketchAt(index);
-        if (geoms.len == 0) return error.NoSuchItem;
+        if (geoms.len + ps.len == 0) return error.NoSuchItem;
         for (geoms) |g| if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
+        for (ps) |p| if (p.geom >= item.sketch.geometry.items.len or item.sketch.geometry.items[p.geom].removed) return error.NoSuchItem;
+        const sorted = try m.a().dupe(u32, geoms);
+        std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
+        const own_ps = try m.a().dupe(figure_.Piece, ps);
         // The boundary must close.
         {
             var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
             defer scratch.deinit();
-            const ch = try sketch_.Sketch.chain(scratch.allocator(), try item.sketch.segmentsOf(scratch.allocator(), geoms));
+            const ch = try sketch_.Sketch.chain(scratch.allocator(), try fillBoundary(scratch.allocator(), &item.sketch, .{ .geoms = sorted, .pieces = own_ps, .style = .none }));
             if (on and (ch.contours.len == 0 or ch.open > 0)) return error.NotEnclosed;
         }
-        const sorted = try m.a().dupe(u32, geoms);
-        std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
         const fi = try m.sketchFigureFor(index, on) orelse return;
         const f = &m.figures.items[fi];
         var fills: std.ArrayList(figure_.Fill) = .empty;
         var replaced = false;
         for (f.fills) |k| {
-            if (!std.mem.eql(u32, k.geoms, sorted)) {
+            if (!sameBoundary(k, sorted, own_ps)) {
                 try fills.append(m.a(), k);
             } else if (on) {
                 // In its place, the current style taken.
-                try fills.append(m.a(), .{ .geoms = sorted, .style = try m.fillStyleForNew(), .enclosed = enclosed });
+                try fills.append(m.a(), .{ .geoms = sorted, .pieces = own_ps, .style = try m.fillStyleForNew(), .enclosed = enclosed });
                 replaced = true;
             }
         }
-        if (on and !replaced) try fills.append(m.a(), .{ .geoms = sorted, .style = try m.fillStyleForNew(), .enclosed = enclosed });
+        if (on and !replaced) try fills.append(m.a(), .{ .geoms = sorted, .pieces = own_ps, .style = try m.fillStyleForNew(), .enclosed = enclosed });
         f.fills = fills.items;
         try m.syncSketchFigures(item.id);
         m.revision += 1;
@@ -7368,16 +7894,120 @@ pub const Model = struct {
     /// (`on`), or takes its ink off. The sketch's figure is made when it
     /// has none.
     pub fn setInk(m: *Model, index: usize, g: u32, on: bool) Error!void {
+        return m.setInkPiece(index, .{ .geom = g }, on);
+    }
+
+    /// Inks piece `p` of sketch `index`'s geometry (see `setInk`).
+    fn setInkPiece(m: *Model, index: usize, p: figure_.Piece, on: bool) Error!void {
         const item = try m.sketchAt(index);
-        if (g >= item.sketch.geometry.items.len or item.sketch.geometry.items[g].removed) return error.NoSuchItem;
+        if (p.geom >= item.sketch.geometry.items.len or item.sketch.geometry.items[p.geom].removed) return error.NoSuchItem;
         const fi = try m.sketchFigureFor(index, on) orelse return;
         const f = &m.figures.items[fi];
         var inks: std.ArrayList(figure_.Ink) = .empty;
-        for (f.inks) |k| if (k.geom != g) try inks.append(m.a(), k);
-        if (on) try inks.append(m.a(), .{ .geom = g, .style = try m.inkStyle() });
+        for (f.inks) |k| if (!k.piece().eql(p)) try inks.append(m.a(), k);
+        if (on) try inks.append(m.a(), .{ .geom = p.geom, .from = p.from, .to = p.to, .style = try m.inkStyle() });
         f.inks = inks.items;
         try m.syncSketchFigures(item.id);
         m.revision += 1;
+    }
+
+    /// Inks the chosen pieces `found` of sketch `index` (whole curves or
+    /// pieces between their cuts) in the current stroke style, or takes
+    /// their ink off: a draft, as `setInkDraft`. Inking makes each piece
+    /// lasting first (`sketch.pieces.attach`): points where curves cross
+    /// it, held on both by constraints, in the sketch's draft.
+    pub fn inkPiecesDraft(m: *Model, index: usize, found: []const sketch_.pieces.Found, on: bool) Error!void {
+        const fi = try m.beginMarksDraft(index);
+        const it = &m.sketches.items[index];
+        var made = false;
+        var ps: std.ArrayList(figure_.Piece) = .empty;
+        for (found) |f| {
+            const n = it.sketch.constraints.items.len;
+            const p = (try sketch_.pieces.attach(&it.sketch, m.a(), f, on)) orelse continue;
+            made = made or it.sketch.constraints.items.len != n;
+            try ps.append(m.a(), p);
+        }
+        if (made) {
+            it.version +%= 1;
+            _ = try it.sketch.solve(m.arena.child_allocator);
+        }
+        const kept = m.swapMarks(fi);
+        errdefer _ = m.swapMarks(fi);
+        for (ps.items) |p| try m.setInkPiece(index, p, on);
+        m.endMarksDraft(fi, kept);
+        try m.syncSketchFigures(it.id);
+        for (m.panels.items, 0..) |pn, pi| if (pn.sketch == it.id) try m.syncSketchPanel(pi);
+        m.revision += 1;
+    }
+
+    /// Whether the chosen piece `f` of sketch `index` is inked in the
+    /// current stroke style in its drawing (as the editor shows it).
+    pub fn pieceInked(m: *Model, index: usize, f: sketch_.pieces.Found) bool {
+        const it = m.sketchAt(index) catch return false;
+        const fi = m.sketchFigure(it.id) orelse return false;
+        const cur = m.currentStroke() orelse return false;
+        const p = (sketch_.pieces.attach(&it.sketch, m.a(), f, false) catch return false) orelse return false;
+        const fig = m.figures.items[fi];
+        const inks = if (fig.pending) |pd| pd.inks else fig.inks;
+        for (inks) |k| if (k.style == cur and k.piece().eql(p)) return true;
+        return false;
+    }
+
+    /// Fills the area the chosen pieces `found` of sketch `index` close
+    /// (whole curves, or pieces between their cuts), as `setFillDraft`;
+    /// the pieces made lasting first, as `inkPiecesDraft` does.
+    pub fn fillPiecesDraft(m: *Model, index: usize, found: []const sketch_.pieces.Found, enclosed: bool, on: bool) Error!void {
+        const fi = try m.beginMarksDraft(index);
+        const it = &m.sketches.items[index];
+        var made = false;
+        var geoms: std.ArrayList(u32) = .empty;
+        var ps: std.ArrayList(figure_.Piece) = .empty;
+        for (found) |f| {
+            const n = it.sketch.constraints.items.len;
+            const p = (try sketch_.pieces.attach(&it.sketch, m.a(), f, on)) orelse return if (on) error.NoSuchItem else {};
+            made = made or it.sketch.constraints.items.len != n;
+            if (p.whole()) try geoms.append(m.a(), p.geom) else try ps.append(m.a(), p);
+        }
+        if (made) {
+            it.version +%= 1;
+            _ = try it.sketch.solve(m.arena.child_allocator);
+        }
+        const kept = m.swapMarks(fi);
+        errdefer _ = m.swapMarks(fi);
+        try m.setFillPieces(index, geoms.items, ps.items, enclosed, on);
+        m.endMarksDraft(fi, kept);
+        try m.syncSketchFigures(it.id);
+        m.revision += 1;
+    }
+
+    /// The fill of sketch `index`'s drawing (as the editor shows it) whose
+    /// boundary is exactly the chosen pieces `found`, if one is: its index.
+    pub fn piecesFill(m: *Model, index: usize, found: []const sketch_.pieces.Found) ?usize {
+        const it = m.sketchAt(index) catch return null;
+        const fi = m.sketchFigure(it.id) orelse return null;
+        var geoms: std.ArrayList(u32) = .empty;
+        var ps: std.ArrayList(figure_.Piece) = .empty;
+        for (found) |f| {
+            const p = (sketch_.pieces.attach(&it.sketch, m.a(), f, false) catch return null) orelse return null;
+            if (p.whole()) geoms.append(m.a(), p.geom) catch return null else ps.append(m.a(), p) catch return null;
+        }
+        const fig = m.figures.items[fi];
+        const fills = if (fig.pending) |pd| pd.fills else fig.fills;
+        for (fills, 0..) |fl, i| if (sameBoundary(fl, geoms.items, ps.items)) return i;
+        return null;
+    }
+
+    /// Whether fill `fl`'s boundary is whole curves `geoms` and pieces
+    /// `ps` (any order).
+    fn sameBoundary(fl: figure_.Fill, geoms: []const u32, ps: []const figure_.Piece) bool {
+        if (fl.geoms.len != geoms.len or fl.pieces.len != ps.len) return false;
+        for (geoms) |g| if (std.mem.indexOfScalar(u32, fl.geoms, g) == null) return false;
+        for (ps) |p| {
+            if (for (fl.pieces) |q| {
+                if (q.eql(p)) break false;
+            } else true) return false;
+        }
+        return true;
     }
 
     pub fn strokeStyleIndex(m: *const Model, id: ObjectId) ?usize {
@@ -7613,6 +8243,9 @@ pub const Model = struct {
     pub fn renameRegion(m: *Model, parent: Parent, region: usize, name: []const u8) Error!void {
         if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchItem;
         if (name.len == 0) return error.BadValue;
+        // A caption's track is the caption: renamed with it.
+        const cap = m.regionsIn(parent)[region].caption;
+        if (cap != .none and m.captionWithId(cap) != null) return m.renameCaption(cap, name);
         m.regionsIn(parent)[region].name = try m.a().dupe(u8, name);
         m.revision += 1;
     }
@@ -9462,6 +10095,15 @@ test "the sheet drives the slots: a cell sets them, an edit on the key sets the 
     try m.setSheetCell(id, 0, 0, "sin");
     try std.testing.expectEqualStrings("sin", m.tileConst(fx.a).designator);
     try std.testing.expectError(error.DuplicateDesignator, m.setSheetCell(id, 0, 0, "COS"));
+    // Renamed on the key: the row follows it, held by its ID, and still
+    // drives it.
+    try m.renameTile(fx.a, "SINE");
+    try m.syncSheets();
+    try std.testing.expectEqualStrings("SINE", m.sheets.items[si].rows.items[0].key);
+    try m.setSheetCell(id, 0, 1, "asin");
+    const t4 = try slotText(&m, fx.a, "top");
+    defer std.testing.allocator.free(t4);
+    try std.testing.expectEqualStrings("asin", t4);
     // A column removed: its slots keep what they show, no longer driven.
     try m.removeSheetColumn(id, 0);
     try m.setTileTrackText(fx.b, m.tileTrackNamed(fx.b, "top").?, "own");
@@ -9829,6 +10471,43 @@ test "a text sheet: a caption's text by its name, default and a language, edited
     try std.testing.expectEqualStrings("Volume", m.sheets.items[m.sheetIndex(id).?].rows.items[0].cells.items[0]);
 }
 
+test "a sheet's rows are linked by ID: renamed on the object or in the sheet, both follow" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Dial");
+    const home = m.homeOf(m.sketches.items[si].id).?;
+    const g = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
+    const view = m.spaces.items[home].sketch_views.items[0].id;
+    const cap = try m.addCaption(view, .{ .curve = g }, style, 4, 30);
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 0 }, "Volume", style);
+    _ = try m.insertSketchPanel(0, si, .{ .x = 50, .y = 50 });
+    const id = try m.makeTextSheet("Texts", &.{"de"});
+    const cid = m.sketches.items[si].captions.items[0].id;
+    try std.testing.expectEqual(cid, m.sheets.items[0].rows.items[0].target);
+    // Renamed on the object (its track): the sheet's row follows.
+    try m.renameRegion(cap.parent, cap.region, "Knob");
+    try m.syncSheets();
+    try std.testing.expectEqualStrings("Knob", m.sheets.items[0].rows.items[0].key);
+    try std.testing.expectEqualStrings("Knob", m.sketches.items[si].captions.items[0].name);
+    // Renamed in the sheet: the caption and its tracks follow.
+    try m.setSheetCell(id, 0, 0, "Gain");
+    try std.testing.expectEqualStrings("Gain", m.sketches.items[si].captions.items[0].name);
+    try std.testing.expectEqualStrings("Gain", m.regionsIn(cap.parent)[cap.region].name);
+    // Still driven: German in the cell, shown.
+    try m.setSheetCell(id, 0, 2, "Pegel");
+    try m.setSheetShown(id, 1);
+    const al = std.testing.allocator;
+    const text = try Model.itemsText(al, m.trackFlow(cap.parent, cap.region).?.items.items);
+    defer al.free(text);
+    try std.testing.expectEqualStrings("Pegel", text);
+    // A track of the old name made later does not take the link.
+    _ = try m.addTracks(.{ .panel = 0 }, .{ .name = "Knob", .origin = .{ .x = 0, .y = 0 }, .kind = .track, .style = style, .count = 1, .length = 5, .pitch = 4 });
+    try m.syncSheets();
+    try std.testing.expectEqual(cid, m.sheets.items[0].rows.items[0].target);
+}
+
 test "ink and fills changed in the editor wait for the sketch's update; discarded, they go" {
     var m: Model = .init(std.testing.allocator);
     defer m.deinit();
@@ -9917,4 +10596,46 @@ fn compositeError(err: sketch_.composite.Error) Model.Error {
         error.NotSiblings, error.Sealed => error.BadValue,
         else => |e| e,
     };
+}
+
+test "a sketch's drawing placed on a panel follows the sketch when accepted, at its scale" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Badge");
+    const c = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    try m.setInk(si, c, true);
+    const fi = m.sketchFigure(m.sketches.items[si].id).?;
+    const p = try m.addPanel("plate", 100, 60);
+    const ai = try m.placeFigureOnPanel(p, fi, .{ .x = 30, .y = 20 }, 40.6);
+    try std.testing.expectApproxEqAbs(40.6, m.panels.items[p].art.items[ai].box().width(), 1e-6);
+    // A bigger ring drawn and inked in a draft: the panel waits.
+    const big = try m.editSketchDraft(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 20 } });
+    try m.setInkDraft(si, big, true);
+    try std.testing.expectApproxEqAbs(40.6, m.panels.items[p].art.items[ai].box().width(), 1e-6);
+    // Accepted: twice the size at the same scale (2:1), the centre kept.
+    try m.acceptSketch(si);
+    const x = m.panels.items[p].art.items[ai];
+    try std.testing.expectApproxEqAbs(80.6, x.box().width(), 0.05);
+    try std.testing.expectApproxEqAbs(10, x.box().x0, 0.05);
+}
+
+test "removing a sketch removes its own space and its drawings, with their placements" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Badge");
+    const sid = m.sketches.items[si].id;
+    const c = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    try m.setInk(si, c, true);
+    const fi = m.sketchFigure(sid).?;
+    _ = try m.addDrawing(si, "Second");
+    const p = try m.addPanel("plate", 100, 60);
+    _ = try m.placeFigureOnPanel(p, fi, .{ .x = 30, .y = 20 }, 20);
+    try std.testing.expectEqual(2, m.spaces.items.len);
+    try m.removeSketch(si);
+    try std.testing.expectEqual(1, m.spaces.items.len);
+    try std.testing.expectEqual(null, m.homeOf(sid));
+    try std.testing.expectEqual(0, m.figures.items.len);
+    try std.testing.expectEqual(0, m.panels.items[p].art.items.len);
 }
