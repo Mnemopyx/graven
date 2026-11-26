@@ -83,6 +83,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 | `GRAVEN_DUMP_OUTLINES=file.svg` | exact glyph outlines in window pixels, for `scripts/text-overlay.py` |
 | `GRAVEN_FONTS_WINDOW=1` | the Fonts window opens at start |
 | `GRAVEN_DISPLAY=gamma,white` | display correction for the run (e.g. `1.5,0.85`) |
+| `GRAVEN_ICC=system`, `none` or a file | the screen's colour profile for the run (`icc.zig`); under Xvfb, start it with `-noreset` and set `_ICC_PROFILE` on the root window to test the system's |
 | `GRAVEN_KEY_LOG=1` | each action a key asks for printed, with the active modes |
 | `GRAVEN_DRAWN_SPARK=1` | a point standing in for the pointer is drawn on the canvas (25 frames a second), not made the animated cursor |
 | `GRAVEN_SKETCH_EDIT=1` | with `GRAVEN_SAMPLE=sketch-panel`: its sketch opened in the editor, in its own space (tag visibility, Ink only: W) |

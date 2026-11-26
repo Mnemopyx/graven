@@ -293,6 +293,8 @@ pub const all = [_]Element{
     .{ .id = "dialog.contention.overwrite-with-mine", .kind = .button, .label = "Overwrite with mine" },
     .{ .id = "dialog.contention.save-mine-as", .kind = .button, .label = "Save mine as…" },
     .{ .id = "dialog.display.close", .kind = .button, .label = "Close" },
+    .{ .id = "dialog.display.profile", .kind = .choice, .label = "Colour profile" },
+    .{ .id = "dialog.display.profile-status", .kind = .value, .label = "In use" },
     .{ .id = "dialog.display.reset", .kind = .button, .label = "Reset" },
     .{ .id = "dialog.display.screen-size", .kind = .button, .label = "Screen size…" },
     .{ .id = "dialog.export.cancel", .kind = .button, .label = "Cancel", .action = "dialog.cancel" },
@@ -1000,7 +1002,7 @@ fn groupDeclared(id: []const u8) bool {
 }
 
 comptime {
-    @setEvalBranchQuota(1_000_000);
+    @setEvalBranchQuota(4_000_000);
     for (groups) |g| {
         if (!validId(g.id)) @compileError("malformed group id: " ++ g.id);
         if (std.mem.lastIndexOfScalar(u8, g.id, '.')) |k| if (!groupDeclared(g.id[0..k])) @compileError("group " ++ g.id ++ " in an undeclared group");

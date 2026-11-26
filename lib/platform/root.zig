@@ -166,6 +166,26 @@ pub fn fontDirs(a: Allocator) ![]const FontDir {
     return dirs.items;
 }
 
+/// The folders colour (ICC) profiles are kept in on this system, the
+/// user's own first: where calibration tools and the system put a
+/// screen's profile.
+pub fn colourProfileDirs(a: Allocator) ![]const []const u8 {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    if (is_windows) {
+        try dirs.append(a, try std.fs.path.join(a, &.{ env("WINDIR") orelse "C:\\Windows", "System32", "spool", "drivers", "color" }));
+    } else if (is_macos) {
+        if (home()) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, "Library", "ColorSync", "Profiles" }));
+        try dirs.append(a, "/Library/ColorSync/Profiles");
+    } else {
+        if (env("XDG_DATA_HOME")) |x| try dirs.append(a, try std.fs.path.join(a, &.{ x, "icc" })) else if (home()) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, ".local", "share", "icc" }));
+        if (home()) |h| try dirs.append(a, try std.fs.path.join(a, &.{ h, ".color", "icc" }));
+        try dirs.append(a, "/var/lib/colord/icc");
+        try dirs.append(a, "/usr/share/color/icc");
+        try dirs.append(a, "/usr/local/share/color/icc");
+    }
+    return dirs.items;
+}
+
 /// Whether the font file at `path` is in one of the user's font folders
 /// (by its path alone; nothing is read).
 pub fn isUserFontPath(path: []const u8) bool {

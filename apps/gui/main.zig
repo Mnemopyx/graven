@@ -28,6 +28,7 @@ const icons = @import("icons.zig");
 const iconfile = @import("iconfile.zig");
 const motd = @import("motd.zig");
 const display = @import("display.zig");
+const screen_profile = @import("screen_profile.zig");
 const canvas_theme = @import("canvas_theme.zig");
 const spark = @import("cursor.zig");
 const layouts = @import("layouts.zig");
@@ -1120,7 +1121,12 @@ fn init(win: *dvui.Window) !void {
     }
     state.font_choice = defaultFont(state.fonts);
     loadPrefs();
-    // The display correction the config (or GRAVEN_DISPLAY) sets.
+    // The screen's colour profile, then the display correction the config
+    // (or GRAVEN_DISPLAY) sets.
+    if (dvui.backend.kind == .sdl3) {
+        screen_profile.load(win.backend.impl.window);
+        screen_profile.startWatching();
+    }
     applyDesktop(win, desk);
     // This version's news for the start screen: the cache at once, a
     // fetch (at most daily) on a thread of its own.
@@ -1379,6 +1385,7 @@ fn startPaneOptions(id: usize, r: dvui.Rect) dvui.Options {
 
 /// View › Display correction… (or D on the start screen) is open.
 var display_window = false;
+var display_window_shown = false;
 
 /// The display correction window: midtones (gamma) and the brightest the
 /// interface gets (white), live, with a gauge to judge them by. Esc or
@@ -1386,12 +1393,20 @@ var display_window = false;
 fn displayWindow() void {
     const saved_group = pushGroup("dialog.display");
     defer popGroup(saved_group);
-    if (!display_window) return;
+    if (!display_window) {
+        display_window_shown = false;
+        return;
+    }
+    // The profile files on this machine, looked for as it opens.
+    if (!display_window_shown) {
+        display_window_shown = true;
+        findScreenProfiles();
+    }
     const win = dvui.currentWindow();
     const ws = win.rect_pixels;
     const ns = dvui.windowNaturalScale();
-    const w: f32 = 440;
-    const h: f32 = 340;
+    const w: f32 = 480;
+    const h: f32 = 430;
     var r: dvui.Rect = .{ .x = (ws.w / ns - w) / 2, .y = (ws.h / ns - h) / 2, .w = w, .h = h };
     // Opaque: the gauge is judged against nothing showing through.
     var fw = dvui.floatingWindow(@src(), .{ .rect = &r, .resize = .none }, overlayOptions(14).override(.{ .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) } }));
@@ -1402,7 +1417,7 @@ fn displayWindow() void {
     const ink = dvui.themeGet().color(.window, .text);
     {
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 4, .h = 8 } });
-        tl.addText("For a screen that shows Graven too bright or washed out. Midtones above 1 darken greys and deepen colour; Brightest lowers white. Kept for this machine; exports are not affected.", .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.75) } });
+        tl.addText("For a screen that shows Graven too bright or washed out. The screen's colour profile converts every colour first; Midtones above 1 then darken greys and deepen colour, and Brightest lowers white. Kept for this machine; exports are not affected.", .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = ink.opacity(0.75) } });
         tl.deinit();
     }
     var close = false;
@@ -1414,6 +1429,7 @@ fn displayWindow() void {
     }
     var dc = display.get();
     const before = dc;
+    screenProfileChoice();
     displayGauge();
     displaySlider("Midtones", &dc.gamma, display.gamma_min, display.gamma_max, 1);
     displaySlider("Brightest", &dc.white, display.white_min, display.white_max, 2);
@@ -1433,6 +1449,74 @@ fn displayWindow() void {
         display_window = false;
         dvui.refresh(null, @src(), null);
     }
+}
+
+/// Loads the chosen screen profile again and redraws every colour by it.
+fn reloadScreenProfile() void {
+    if (dvui.backend.kind != .sdl3) return;
+    const win = dvui.currentWindow();
+    screen_profile.load(win.backend.impl.window);
+    applyDesktop(win, desk);
+    dvui.refresh(null, @src(), null);
+}
+
+/// The profile files found on this machine, for the Display correction
+/// window: looked for when it opens.
+var found_profiles: []const screen_profile.Found = &.{};
+var found_profiles_arena: ?std.heap.ArenaAllocator = null;
+
+fn findScreenProfiles() void {
+    if (found_profiles_arena) |*ar| ar.deinit();
+    found_profiles_arena = std.heap.ArenaAllocator.init(state.gpa);
+    found_profiles = screen_profile.findProfiles(found_profiles_arena.?.allocator());
+}
+
+/// The screen profile choice: the system's, none, a file found on this
+/// machine, or another file (the file prompt).
+fn screenProfileChoice() void {
+    const a = dvui.currentWindow().arena();
+    var names: std.ArrayList([]const u8) = .empty;
+    names.append(a, "The system's") catch return;
+    names.append(a, "None (an sRGB screen)") catch return;
+    var choice: usize = switch (screen_profile.get()) {
+        .system => 0,
+        .none => 1,
+        .file => 0,
+    };
+    var chosen_listed = false;
+    for (found_profiles, 0..) |f, i| {
+        names.append(a, std.fmt.allocPrint(a, "{s} ({s})", .{ f.name, std.fs.path.basename(f.path) }) catch f.name) catch return;
+        if (screen_profile.get() == .file and std.mem.eql(u8, f.path, screen_profile.file())) {
+            choice = 2 + i;
+            chosen_listed = true;
+        }
+    }
+    // A file chosen that is not among those found: shown as it is.
+    if (screen_profile.get() == .file and !chosen_listed) {
+        choice = names.items.len;
+        names.append(a, std.fs.path.basename(screen_profile.file())) catch return;
+    }
+    const other = names.items.len;
+    names.append(a, "Other file…") catch return;
+    const before = choice;
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        defer row.deinit();
+        propName(asElement("dialog.display.profile"));
+        _ = tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal });
+    }
+    {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 2, .h = 4 } });
+        tl.addText(screen_profile.status(), .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.75) } });
+        tl.deinit();
+    }
+    if (choice == before) return;
+    if (choice == other) {
+        askForFile(.open_profile);
+        return;
+    }
+    if (choice == 0) screen_profile.set(.system, "") else if (choice == 1) screen_profile.set(.none, "") else if (choice - 2 < found_profiles.len) screen_profile.set(.file, found_profiles[choice - 2].path) else return;
+    reloadScreenProfile();
 }
 
 /// A slider from `lo` to `hi` with its value beside it.
@@ -1934,6 +2018,7 @@ fn protoPos(id: layout.model.PrototypeId) usize {
 
 fn deinit(_: *dvui.Window) void {
     motd.deinit();
+    if (found_profiles_arena) |*ar| ar.deinit();
     for (recent_files.items) |f| state.gpa.free(f);
     recent_files.deinit(state.gpa);
     recent_files = .empty;
@@ -2510,6 +2595,10 @@ var elements_log_opened = false;
 
 fn frame() !dvui.App.Result {
     keymap.beginFrame();
+    // The screen's profile changed, or the window went to another screen.
+    if (dvui.backend.kind == .sdl3) if (screen_profile.takeChanged()) {
+        reloadScreenProfile();
+    };
     if (!elements_log_opened) {
         elements_log_opened = true;
         if (platform.env("GRAVEN_ELEMENTS_LOG")) |path| elements_log = std.Io.Dir.cwd().createFile(dvui.io, path, .{}) catch null;
@@ -2779,7 +2868,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf, export_drawing, export_drawing_outlined };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf, export_drawing, export_drawing_outlined, open_profile };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -3599,6 +3688,7 @@ fn systemFileChoice(a: std.mem.Allocator, kind: FilePromptKind) ?[:0]const u8 {
         .import_sheet => dvui.dialogNativeFileOpen(a, .{ .title = "Import a legend sheet", .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .import_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Import a figure", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
         .replace_figure => dvui.dialogNativeFileOpen(a, .{ .title = "Replace the figure's drawing", .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
+        .open_profile => dvui.dialogNativeFileOpen(a, .{ .title = "The screen's colour profile", .filters = &.{ "*.icc", "*.icm" }, .filter_description = "ICC profiles" }) catch null,
         .save_as => dvui.dialogNativeFileSave(a, .{ .title = "Save the document as", .path = file_path orelse "untitled" ++ doc_ext, .filters = &.{"*" ++ doc_ext}, .filter_description = "Graven documents" }) catch null,
         .export_sheet => dvui.dialogNativeFileSave(a, .{ .title = "Export the legend sheet", .path = sheetExportName(), .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .export_3mf => dvui.dialogNativeFileSave(a, .{ .title = "Export the panel as 3MF", .path = threeMfName(), .filters = &.{"*.3mf"}, .filter_description = "3MF files" }) catch null,
@@ -3615,6 +3705,10 @@ fn fileChosen(kind: FilePromptKind, path: []const u8) void {
         .import_sheet => importSheet(path),
         .import_figure => importFigure(path),
         .replace_figure => replaceFigureFrom(path),
+        .open_profile => {
+            screen_profile.set(.file, path);
+            reloadScreenProfile();
+        },
         .export_sheet => exportSheet(path),
         .export_3mf => exportThreeMf(path),
         .export_drawing => exportDrawingSvg(path, false),
@@ -3670,6 +3764,7 @@ fn filePrompt(kind: FilePromptKind) void {
         .import_sheet => sheetImportTitle(),
         .import_figure => "Import a figure from an SVG file",
         .replace_figure => "Replace the figure's drawing from an SVG file",
+        .open_profile => "The screen's colour profile (an ICC file)",
         .export_sheet => "Export the legend sheet as CSV",
         .export_3mf => "Export the panel as 3MF (its fabrication layers)",
         .export_drawing => "Export the drawing as SVG (centrelines)",
@@ -3717,6 +3812,7 @@ fn filePrompt(kind: FilePromptKind) void {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet, .import_figure, .replace_figure => "Import",
+            .open_profile => "Use",
             .export_sheet, .export_3mf, .export_drawing, .export_drawing_outlined => "Export",
         }, 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
@@ -4110,6 +4206,8 @@ const Prefs = struct {
     scroll: ScrollMode,
     ribbon: RibbonSize,
     display: display.Correction,
+    /// The screen profile chosen (`screen_profile.configValue`), hashed.
+    profile: u64,
     px_per_mm: ?f32,
     /// The pane layout in use: its name and how the panes are now.
     layout_name: [40]u8,
@@ -4130,7 +4228,7 @@ var saved_prefs: ?Prefs = null;
 fn currentPrefs() Prefs {
     var name: [40]u8 = @splat(0);
     @memcpy(name[0..layout_name.len], layout_name);
-    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .snap_objects = snap_objects, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
+    return .{ .units = last_units, .show_construction = show_construction, .grid = grid_mode, .snap_grid = snap_grid, .snap_objects = snap_objects, .boundary_mode = boundary_mode, .canvas_theme = canvas_theme.current, .scroll = scroll_mode, .ribbon = ribbon_size, .display = display.get(), .profile = std.hash.Wyhash.hash(0, screen_profile.configValue()), .px_per_mm = display.measuredPxPerMm(), .layout_name = name, .layout_name_len = layout_name.len, .layout = currentLayout() };
 }
 
 /// Reads the config files and applies what they set; what they leave out
@@ -4191,6 +4289,10 @@ fn loadPrefs() void {
         };
         display.set(dc);
         if (ps.get("display.px_per_mm")) |v| display.setPxPerMm(tomlFloat(v));
+        // The screen's profile: "system", "none" or a file; GRAVEN_ICC
+        // overrides it for a run.
+        if (ps.get("display.profile")) |v| if (v == .string) screen_profile.fromConfig(v.string);
+        if (platform.env("GRAVEN_ICC")) |e| screen_profile.fromConfig(e);
     }
     if (ps.get("view.show_text_construction")) |v| if (v == .boolean) {
         show_construction = v.boolean;
@@ -4315,6 +4417,7 @@ fn savePrefsIfChanged() void {
     // The screen's correction belongs to this machine.
     ps.put("display.gamma", .{ .float = roundTo(now.display.gamma, 100) }, .local);
     ps.put("display.white", .{ .float = roundTo(now.display.white, 100) }, .local);
+    ps.put("display.profile", .{ .string = screen_profile.configValue() }, .local);
     // Measured, else the estimate (written as 0: not measured).
     ps.put("display.px_per_mm", .{ .float = if (now.px_per_mm) |v| roundTo(v, 10000) else 0 }, .local);
     // The layout in use is this machine's; what has been changed by hand
