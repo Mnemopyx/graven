@@ -30,6 +30,9 @@ pub const caption = @import("caption.zig");
 pub const connector = @import("connector.zig");
 /// Polygons and arrays as composite objects (sealed groups).
 pub const composite = @import("composite.zig");
+/// Pieces of curves between their cuts (ends, points on them, crossings),
+/// chosen for ink and fills.
+pub const pieces = @import("pieces.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -564,7 +567,7 @@ pub const Sketch = struct {
     pub const Chained = struct { contours: []geom.Contour, open: usize };
 
     /// `segs` joined end to end into closed contours (pieces turned round
-    /// as they need to be), and how many pieces were left that close no
+    /// as they need to be), and how many parts were left that close no
     /// contour. Allocated from `a`.
     pub fn chain(a: Allocator, segs: []const geom.Segment) Allocator.Error!Chained {
         const used = try a.alloc(bool, segs.len);
@@ -579,11 +582,11 @@ pub const Sketch = struct {
         for (segs, 0..) |first, i| {
             if (used[i]) continue;
             used[i] = true;
-            var pieces: std.ArrayList(geom.Segment) = .empty;
-            try pieces.append(a, first);
+            var parts: std.ArrayList(geom.Segment) = .empty;
+            try parts.append(a, first);
             var closed = near(first.end(), first.start());
             while (!closed) {
-                const end = pieces.items[pieces.items.len - 1].end();
+                const end = parts.items[parts.items.len - 1].end();
                 const next = for (segs, 0..) |sg, k| {
                     if (used[k]) continue;
                     if (near(sg.start(), end)) break .{ k, sg };
@@ -591,17 +594,17 @@ pub const Sketch = struct {
                 } else null;
                 const nx = next orelse break;
                 used[nx[0]] = true;
-                try pieces.append(a, nx[1]);
-                closed = near(nx[1].end(), pieces.items[0].start());
+                try parts.append(a, nx[1]);
+                closed = near(nx[1].end(), parts.items[0].start());
             }
             if (!closed) {
-                open += pieces.items.len;
+                open += parts.items.len;
                 continue;
             }
             // Exactly closed: each piece starts where the last ended.
-            for (pieces.items[1..], 1..) |*sg, k| setStart(sg, pieces.items[k - 1].end());
-            setEnd(&pieces.items[pieces.items.len - 1], pieces.items[0].start());
-            try contours.append(a, .{ .segments = pieces.items });
+            for (parts.items[1..], 1..) |*sg, k| setStart(sg, parts.items[k - 1].end());
+            setEnd(&parts.items[parts.items.len - 1], parts.items[0].start());
+            try contours.append(a, .{ .segments = parts.items });
         }
         return .{ .contours = contours.items, .open = open };
     }
@@ -611,7 +614,7 @@ pub const Sketch = struct {
 
     /// `segs` joined end to end into runs to be stroked as single paths, so
     /// a pen's joins fall at their corners and its caps only at their true
-    /// ends: a run goes on through a point where exactly two pieces meet
+    /// ends: a run goes on through a point where exactly two parts meet
     /// and stops where one, three or more do; what closes on itself is a
     /// closed run. Pieces are turned round as they need to be. Allocated
     /// from `a`.
@@ -643,11 +646,11 @@ pub const Sketch = struct {
                 if (degree(segs, sg.start()) != 2) {} else if (degree(segs, sg.end()) != 2) first = sg.reversed() else continue;
             }
             used[i] = true;
-            var pieces: std.ArrayList(geom.Segment) = .empty;
-            try pieces.append(a, first);
+            var parts: std.ArrayList(geom.Segment) = .empty;
+            try parts.append(a, first);
             var closed = near(first.end(), first.start());
             while (!closed) {
-                const end = pieces.items[pieces.items.len - 1].end();
+                const end = parts.items[parts.items.len - 1].end();
                 if (degree(segs, end) != 2) break;
                 const next = for (segs, 0..) |cand, k| {
                     if (used[k]) continue;
@@ -656,12 +659,12 @@ pub const Sketch = struct {
                 } else null;
                 const nx = next orelse break;
                 used[nx[0]] = true;
-                try pieces.append(a, nx[1]);
-                closed = near(nx[1].end(), pieces.items[0].start());
+                try parts.append(a, nx[1]);
+                closed = near(nx[1].end(), parts.items[0].start());
             }
-            for (pieces.items[1..], 1..) |*p, k| setStart(p, pieces.items[k - 1].end());
-            if (closed) setEnd(&pieces.items[pieces.items.len - 1], pieces.items[0].start());
-            try out.append(a, .{ .segments = pieces.items, .closed = closed });
+            for (parts.items[1..], 1..) |*p, k| setStart(p, parts.items[k - 1].end());
+            if (closed) setEnd(&parts.items[parts.items.len - 1], parts.items[0].start());
+            try out.append(a, .{ .segments = parts.items, .closed = closed });
         };
         return out.items;
     }
@@ -778,4 +781,5 @@ test {
     _ = caption;
     _ = connector;
     _ = composite;
+    _ = pieces;
 }
