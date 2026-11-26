@@ -27825,6 +27825,43 @@ fn sketchInkProperties() void {
             next.width = w;
             _ = actM(mergeKey(.{ "stroke-width", st.id }), .setStrokeStyle, .{ st.id, st.name, next }) catch {};
         }
+        if (colourEntry("Colour", st.stroke.color, false, 8200)) |c| {
+            var next = st.stroke;
+            next.color = c.?;
+            actV(.setStrokeStyle, .{ st.id, st.name, next });
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8201 });
+            defer row.deinit();
+            propName("Cap");
+            const caps = [_][]const u8{ "Butt", "Round", "Square" };
+            var cap: usize = @intFromEnum(st.stroke.cap);
+            if (tdropdown(@src(), &caps, .{ .choice = &cap }, .{}, .{ .expand = .horizontal, .id_extra = 8201 })) {
+                var next = st.stroke;
+                next.cap = @enumFromInt(cap);
+                // A preset's dashes stay that preset (its lengths for the
+                // new caps, which reach past a dash's ends or don't).
+                if (dashPreset(st.stroke)) |d| if (d > 0) {
+                    const want = if (next.cap != .butt) dash_presets[d].capped else dash_presets[d].butt;
+                    const dash = dvui.currentWindow().arena().alloc(f64, want.len) catch return;
+                    for (want, dash) |x, *o| o.* = x * next.width;
+                    next.dash = dash;
+                };
+                actV(.setStrokeStyle, .{ st.id, st.name, next });
+            }
+        }
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8202 });
+            defer row.deinit();
+            propName("Join");
+            const joins = [_][]const u8{ "Miter", "Round", "Bevel" };
+            var join: usize = @intFromEnum(st.stroke.join);
+            if (tdropdown(@src(), &joins, .{ .choice = &join }, .{}, .{ .expand = .horizontal, .id_extra = 8202 })) {
+                var next = st.stroke;
+                next.join = @enumFromInt(join);
+                actV(.setStrokeStyle, .{ st.id, st.name, next });
+            }
+        }
         strokeDashProps(st);
     } else propText("Pen", "{s}", .{"0.3 mm black, made with the first ink"}, 8196);
     keyButton(@src(), "New stroke style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
@@ -27840,6 +27877,21 @@ const dash_presets = [_]struct { name: []const u8, capped: []const f64, butt: []
     .{ .name = "Dash-dot", .capped = &.{ 4, 2.5, 0, 2.5 }, .butt = &.{ 5, 1.5, 1, 1.5 } },
 };
 
+/// Which of `dash_presets` a stroke's dashes are, for its width and caps.
+fn dashPreset(stroke: layout.figure.Stroke) ?usize {
+    const capped = stroke.cap != .butt;
+    for (dash_presets, 0..) |d, i| {
+        const want = if (capped) d.capped else d.butt;
+        if (want.len != stroke.dash.len) continue;
+        var same = true;
+        for (want, stroke.dash) |x, y| if (@abs(x * stroke.width - y) > 1e-6) {
+            same = false;
+        };
+        if (same) return i;
+    }
+    return null;
+}
+
 /// A stroke style's dashes: a preset (scaled to its width), or the
 /// pattern typed in mm ("2 1"; "solid" for none).
 fn strokeDashProps(st: layout.model.StrokeStyle) void {
@@ -27849,16 +27901,7 @@ fn strokeDashProps(st: layout.model.StrokeStyle) void {
     var names: [dash_presets.len + 1][]const u8 = undefined;
     for (dash_presets, 0..) |d, i| names[i] = d.name;
     names[dash_presets.len] = "Custom";
-    var choice: usize = dash_presets.len;
-    for (dash_presets, 0..) |d, i| {
-        const want = if (capped) d.capped else d.butt;
-        if (want.len != st.stroke.dash.len) continue;
-        var same = true;
-        for (want, st.stroke.dash) |x, y| if (@abs(x * w - y) > 1e-6) {
-            same = false;
-        };
-        if (same) choice = i;
-    }
+    var choice: usize = dashPreset(st.stroke) orelse dash_presets.len;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8198 });
         defer row.deinit();
@@ -29998,9 +30041,17 @@ fn sketchInkKeys() void {
     }
 }
 
+/// Several drawings (ink contexts) over one sketch, in the interface: off
+/// for the first release (Travis, 2026-11-26), one drawing per sketch shown.
+/// The model and library keep several (`addDrawing`, `Panel.drawing`), and
+/// documents holding several still open and draw; only the Ink group's New
+/// drawing and drawing choice, and a sketch panel's Drawing, are hidden.
+const several_drawings_ui = false;
+
 /// The Ink group's drawing: which of the sketch's drawings (ink
 /// contexts) ink and fills go into, and New drawing.
 fn skDrawingChoice() void {
+    if (!several_drawings_ui) return;
     const r = sketch_edit orelse return;
     const saved_group = pushGroup("ink");
     defer popGroup(saved_group);
@@ -30782,7 +30833,7 @@ fn sketchPanelProperties(pi: usize) void {
     const si = state.model.sketchIndex(pn.sketch) orelse return;
     propText("Outline from", "{s}", .{state.model.sketches.items[si].name}, 70);
     // Which of the sketch's drawings it carries.
-    {
+    if (several_drawings_ui) {
         const ar = dvui.currentWindow().arena();
         var names: std.ArrayList([]const u8) = .empty;
         var ids: std.ArrayList(layout.model.ObjectId) = .empty;
