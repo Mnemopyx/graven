@@ -428,6 +428,13 @@ pub fn decodeModelBlockKeepingRoots(gpa: Allocator, b: Block) Error!model.Model 
         try it.sketch.rebuildGroups(m.arena.allocator());
         if (it.accepted) |*acc| try acc.rebuildGroups(m.arena.allocator());
     }
+    // Its captions' leaders end level (connections were all level then).
+    for (m.sketches.items) |*it| for (it.captions.items) |sc| {
+        if (sc.connector < it.sketch.connectors.items.len) it.sketch.connectors.items[sc.connector].level = true;
+        if (it.accepted) |*acc| if (sc.connector < acc.connectors.items.len) {
+            acc.connectors.items[sc.connector].level = true;
+        };
+    };
     // Its constraints' signed values, likewise: the sign as the side.
     for (m.constraints.items) |*c| if (c.value < 0) {
         c.value = -c.value;
