@@ -39,6 +39,10 @@ const usage =
     \\         gives one part per colour, bands one per colour and height band; --bed
     \\         bottom (the default) stands each part on its lowest face, top on its top.
     \\         The examples: graven export examples/hp15c.graven hp15c.3mf
+    \\       graven export --drawing <name> [--outline-strokes] <document> <out.svg>
+    \\         Writes one drawing (a sketch's inked geometry, or a figure) as SVG, its ink
+    \\         only: strokes as centrelines with stroke attributes (colour, width, caps,
+    \\         joins, dashes), or with --outline-strokes as the filled outlines they make.
     \\       graven check [--font f] [--panel name] [--svg out.svg] <document>
     \\         Checks each panel made with a process profile against its limits (stroke,
     \\         gap, cap height, depths, colours, size): pass, marginal or fail, and where.
@@ -68,12 +72,24 @@ pub fn main(init: std.process.Init) !void {
                 opts.svg = args[k + 1];
             } else if (std.mem.eql(u8, args[k], "--panel")) {
                 opts.panel = args[k + 1];
+            } else if (std.mem.eql(u8, args[k], "--drawing")) {
+                opts.drawing = args[k + 1];
+            } else if (std.mem.eql(u8, args[k], "--outline-strokes")) {
+                // A flag: no value after it.
+                opts.outline_strokes = true;
+                k -= 1;
             } else if (std.mem.eql(u8, args[k], "--parts")) {
                 opts.threemf.grouping = std.meta.stringToEnum(layout.threemf.Grouping, args[k + 1]) orelse break;
             } else if (std.mem.eql(u8, args[k], "--bed")) {
                 opts.threemf.bed = std.meta.stringToEnum(layout.threemf.Bed, args[k + 1]) orelse break;
             } else break;
         }
+        // A lone flag last before the files (the loop wants a pair).
+        if (k < args.len and std.mem.eql(u8, args[k], "--outline-strokes")) {
+            opts.outline_strokes = true;
+            k += 1;
+        }
+        if (!checking and opts.drawing != null and args.len - k == 2) return exportDrawing(init, args[k], args[k + 1], opts);
         if (!checking and args.len - k == 2) return exportDocument(init, args[k], args[k + 1], opts);
         if (checking and args.len - k == 1) return exportDocument(init, args[k], "", opts);
     }
@@ -587,6 +603,11 @@ const InstalledFonts = struct {
 const ExportOptions = struct {
     font: ?[]const u8 = null,
     panel: ?[]const u8 = null,
+    /// A drawing (a figure: a sketch's ink context, or imported line art)
+    /// written alone as SVG, in place of the panels.
+    drawing: ?[]const u8 = null,
+    /// With `drawing`: strokes as filled outlines, not centrelines.
+    outline_strokes: bool = false,
     threemf: ThreeMfOptions = .{},
     /// graven check: the panels checked, nothing written; with `svg`, each
     /// panel drawn with its findings over it.
@@ -683,6 +704,33 @@ fn printChecks(init: std.process.Init, m: *const layout.Model, pi: usize, placed
         }
         std.debug.print("\n", .{});
     }
+}
+
+/// graven export --drawing: one drawing as SVG, its ink only (see
+/// `layout.output.figureSvg`).
+fn exportDrawing(init: std.process.Init, doc_path: []const u8, out_path: []const u8, opts: ExportOptions) !void {
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.extension(out_path), ".svg")) {
+        std.debug.print("{s}: a drawing is exported as SVG: the output must end in .svg\n", .{out_path});
+        std.process.exit(2);
+    }
+    var doc = try openDocument(init, doc_path);
+    defer init.gpa.free(doc.bytes);
+    defer doc.opened.model.deinit();
+    defer doc.opened.history.deinit();
+    const m = &doc.opened.model;
+    try m.syncSketchFigures(.none);
+    const want = opts.drawing.?;
+    const f = for (m.figures.items) |f| {
+        if (std.mem.eql(u8, f.name, want)) break f;
+    } else {
+        std.debug.print("{s}: no drawing named {s}; there are:\n", .{ doc_path, want });
+        for (m.figures.items) |f| std.debug.print("  {s}\n", .{f.name});
+        std.process.exit(1);
+    };
+    const data = try layout.output.figureSvg(init.gpa, f, .{ .outline_strokes = opts.outline_strokes });
+    defer init.gpa.free(data);
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = data });
+    std.debug.print("{s}: {s}, {d} paths, strokes as {s}, {d} bytes\n", .{ out_path, f.name, f.paths.len, if (opts.outline_strokes) "outlines" else "centrelines", data.len });
 }
 
 fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []const u8, opts: ExportOptions) !void {

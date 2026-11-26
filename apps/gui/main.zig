@@ -2775,7 +2775,7 @@ const all_panes = [_]*ghost_pane.Pane{ &tree_pane, &tools_pane, &props_pane, &bo
 /// The document's file, once saved or opened (owned).
 var file_path: ?[]u8 = null;
 
-const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf };
+const FilePromptKind = enum { open, save_as, import_text, import_sheet, import_figure, replace_figure, export_sheet, export_3mf, export_drawing, export_drawing_outlined };
 /// A file name is being asked for.
 var file_prompt: ?FilePromptKind = null;
 var file_prompt_new = false;
@@ -3235,6 +3235,72 @@ fn exportThreeMf(path: []const u8) void {
     state.status = std.fmt.bufPrint(&import_status_buf, "Exported {s} as 3MF ({d} KB). ", .{ std.fs.path.basename(path), zip.len / 1024 }) catch "Exported. ";
 }
 
+/// The drawing exported as SVG: the one the sketch editor inks in, else
+/// the chosen sketch's, panel's, placed figure's or figure's.
+fn drawingToExport() ?usize {
+    const m = &state.model;
+    if (sketch_edit) |r| if (r.sketch < m.sketches.items.len) return m.sketchFigure(m.sketches.items[r.sketch].id);
+    return switch (state.context) {
+        .figure_def => |fi| if (fi < m.figures.items.len) fi else null,
+        .sketch_def => |si| if (si < m.sketches.items.len) m.sketchFigure(m.sketches.items[si].id) else null,
+        .sketch => |sc| if (sc.space < m.spaces.items.len and sc.index < m.spaces.items[sc.space].sketch_views.items.len)
+            m.sketchFigure(m.spaces.items[sc.space].sketch_views.items[sc.index].sketch)
+        else
+            null,
+        .figure_place => |fc| if (figurePlaceAt(fc.space, fc.index)) |fp| m.figureIndex(fp.figure) else null,
+        .panel => |pi| if (pi < m.panels.items.len and m.panels.items[pi].sketch != .none) m.panelDrawing(pi) else null,
+        else => null,
+    };
+}
+
+fn askForDrawingSvg(outlined: bool) void {
+    const fi = drawingToExport() orelse {
+        state.status = "Choose a drawing first (a sketch, its panel or a figure), or open a sketch: its drawing is what is exported. ";
+        return;
+    };
+    if (state.model.figures.items[fi].paths.len == 0) {
+        state.status = "This drawing has no ink yet (or none accepted): there is nothing to export. ";
+        return;
+    }
+    askForFile(if (outlined) .export_drawing_outlined else .export_drawing);
+}
+
+var drawing_svg_name: [600]u8 = undefined;
+fn drawingSvgName() []const u8 {
+    const fi = drawingToExport() orelse return "";
+    const name = state.model.figures.items[fi].name;
+    const dir: []const u8 = if (file_path) |fp| (std.fs.path.dirname(fp) orelse "") else "";
+    return (if (dir.len > 0)
+        std.fmt.bufPrint(&drawing_svg_name, "{s}/{s}.svg", .{ dir, name })
+    else
+        std.fmt.bufPrint(&drawing_svg_name, "{s}.svg", .{name})) catch "drawing.svg";
+}
+
+/// Writes the drawing to export as SVG at `path`: its ink only, strokes
+/// as centrelines with their attributes or, `outlined`, as outlines.
+fn exportDrawingSvg(path: []const u8, outlined: bool) void {
+    const fi = drawingToExport() orelse return;
+    const f = state.model.figures.items[fi];
+    const data = layout.output.figureSvg(state.gpa, f, .{ .outline_strokes = outlined }) catch {
+        state.status = "The SVG could not be made. ";
+        return;
+    };
+    defer state.gpa.free(data);
+    std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = data }) catch {
+        state.status = "That file could not be written. ";
+        return;
+    };
+    // While the sketch has changes not yet accepted, what is written is
+    // what its uses see: the accepted drawing.
+    const pending = f.pending != null or (if (state.model.sketchIndex(f.sketch)) |si| state.model.sketches.items[si].accepted != null else false);
+    state.status = std.fmt.bufPrint(&import_status_buf, "Exported {s} as SVG, strokes {s} ({d} KB){s}. ", .{
+        std.fs.path.basename(path),
+        if (outlined) "outlined" else "as centrelines",
+        (data.len + 1023) / 1024,
+        if (pending) "; changes not yet accepted (Update) are left out" else "",
+    }) catch "Exported. ";
+}
+
 /// Writes the sheet to export as CSV at `path`.
 fn exportSheet(path: []const u8) void {
     const id = sheetToExport() orelse return;
@@ -3532,6 +3598,8 @@ fn systemFileChoice(a: std.mem.Allocator, kind: FilePromptKind) ?[:0]const u8 {
         .save_as => dvui.dialogNativeFileSave(a, .{ .title = "Save the document as", .path = file_path orelse "untitled" ++ doc_ext, .filters = &.{"*" ++ doc_ext}, .filter_description = "Graven documents" }) catch null,
         .export_sheet => dvui.dialogNativeFileSave(a, .{ .title = "Export the legend sheet", .path = sheetExportName(), .filters = &.{"*.csv"}, .filter_description = "CSV files" }) catch null,
         .export_3mf => dvui.dialogNativeFileSave(a, .{ .title = "Export the panel as 3MF", .path = threeMfName(), .filters = &.{"*.3mf"}, .filter_description = "3MF files" }) catch null,
+        .export_drawing => dvui.dialogNativeFileSave(a, .{ .title = "Export the drawing as SVG (centrelines)", .path = drawingSvgName(), .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
+        .export_drawing_outlined => dvui.dialogNativeFileSave(a, .{ .title = "Export the drawing as SVG (strokes outlined)", .path = drawingSvgName(), .filters = &.{"*.svg"}, .filter_description = "SVG drawings" }) catch null,
     };
 }
 
@@ -3545,6 +3613,8 @@ fn fileChosen(kind: FilePromptKind, path: []const u8) void {
         .replace_figure => replaceFigureFrom(path),
         .export_sheet => exportSheet(path),
         .export_3mf => exportThreeMf(path),
+        .export_drawing => exportDrawingSvg(path, false),
+        .export_drawing_outlined => exportDrawingSvg(path, true),
         .save_as => {
             // A name without an extension takes Graven's.
             const full = if (std.fs.path.extension(path).len == 0) (std.mem.concat(dvui.currentWindow().arena(), u8, &.{ path, doc_ext }) catch path) else path;
@@ -3598,6 +3668,8 @@ fn filePrompt(kind: FilePromptKind) void {
         .replace_figure => "Replace the figure's drawing from an SVG file",
         .export_sheet => "Export the legend sheet as CSV",
         .export_3mf => "Export the panel as 3MF (its fabrication layers)",
+        .export_drawing => "Export the drawing as SVG (centrelines)",
+        .export_drawing_outlined => "Export the drawing as SVG (strokes outlined)",
     }, .{}, .{ .font = dvui.Font.theme(.heading) });
     var go = false;
     var cancel = false;
@@ -3619,6 +3691,7 @@ fn filePrompt(kind: FilePromptKind) void {
             .save_as => file_path orelse "untitled" ++ doc_ext,
             .export_sheet => sheetExportName(),
             .export_3mf => threeMfName(),
+            .export_drawing, .export_drawing_outlined => drawingSvgName(),
             else => "",
         };
         var te = dvui.textEntry(@src(), .{ .text_initial = initial }, .{ .expand = .horizontal, .id_extra = @intFromEnum(kind) });
@@ -3640,7 +3713,7 @@ fn filePrompt(kind: FilePromptKind) void {
             .open => "Open",
             .save_as => "Save",
             .import_text, .import_sheet, .import_figure, .replace_figure => "Import",
-            .export_sheet, .export_3mf => "Export",
+            .export_sheet, .export_3mf, .export_drawing, .export_drawing_outlined => "Export",
         }, 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
@@ -5361,6 +5434,14 @@ fn menu() ?dvui.App.Result {
                     askForFile(.export_3mf);
                 }
             } else state.status = "Choose a panel first: it is what is exported. ";
+        };
+        if (!canvas_prompt) if (tmenu(@src(), "Export drawing as SVG…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            askForDrawingSvg(false);
+        };
+        if (!canvas_prompt) if (tmenu(@src(), "Export drawing as SVG, strokes outlined…", .{}, .{ .expand = .horizontal }) != null) {
+            m.close();
+            askForDrawingSvg(true);
         };
         if (!canvas_prompt) if (menuAction("Check fabrication", "view", kact("fab.check"), 0, false, 40)) {
             m.close();
