@@ -770,6 +770,7 @@ pub const all = [_]Element{
     .{ .id = "tool.add-tracks.runs", .kind = .choice, .label = "Runs" },
     .{ .id = "tool.add-tracks.size-to", .kind = .choice, .label = "Size to" },
     .{ .id = "tool.add-tracks.snaps-to", .kind = .value, .label = "Snaps to" },
+    .{ .id = "tool.add-tracks.template", .kind = .choice, .label = "Template" },
     .{ .id = "tool.add-tracks.tracks", .kind = .choice, .label = "Tracks" },
     .{ .id = "tool.constrain", .kind = .button, .label = "Constrain" },
     .{ .id = "tool.delete-prototype", .kind = .button, .label = "Delete prototype" },
