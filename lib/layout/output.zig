@@ -4,6 +4,7 @@ const std = @import("std");
 const font = @import("graven_font");
 const place = @import("place.zig");
 const art = @import("art.zig");
+const figure = @import("figure.zig");
 
 const geom = @import("graven_geom");
 
@@ -143,6 +144,118 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     return out.toOwnedSlice();
 }
 
+pub const FigureSvgOptions = struct {
+    /// Margin round the drawing, mm.
+    margin: f64 = 1,
+    /// Strokes written as the outlines of the area their pens cover
+    /// (`figure.ink`: caps, joins and dashes made into filled shapes), for
+    /// a cutter or a tool that ignores stroke attributes; off, as their
+    /// centrelines with SVG stroke attributes.
+    outline_strokes: bool = false,
+    /// How closely flattened curves follow the true ones when outlining,
+    /// mm.
+    tol: f64 = 0.002,
+};
+
+/// A drawing (a figure, mm, y up) as SVG: only its ink, back to front, in
+/// a page sized to it. By default each stroked path is its centreline,
+/// exact (lines, Q, C, arcs as A), with the stroke's colour, width, cap,
+/// join, miter limit and dashes as SVG attributes; fills are filled paths
+/// (even-odd as kept). With `outline_strokes`, every mark is a filled
+/// outline instead, made by the shared stroker (`figure.ink`).
+pub fn figureSvg(gpa: std.mem.Allocator, f: figure.Figure, opts: FigureSvgOptions) ![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    const shapes: []const art.Shape = if (opts.outline_strokes) try figure.ink(a, f, opts.tol) else &.{};
+    var box: geom.Box = .empty;
+    if (opts.outline_strokes) {
+        for (shapes) |s| box = box.join(s.outline.bounds());
+    } else box = f.bounds();
+    if (box.isEmpty()) box = .{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
+    const x0 = box.x0 - opts.margin;
+    const y1 = box.y1 + opts.margin;
+    const width = box.width() + 2 * opts.margin;
+    const height = box.height() + 2 * opts.margin;
+    try w.print(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{d}mm\" height=\"{d}mm\" viewBox=\"0 0 {d} {d}\">\n",
+        .{ width, height, width, height },
+    );
+    try w.writeAll("<title>");
+    try xmlText(w, f.name);
+    try w.writeAll("</title>\n");
+    // Flip y: SVG's y points down.
+    try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\">\n", .{ -x0, y1 });
+    var b0: [32]u8 = undefined;
+    if (opts.outline_strokes) {
+        for (shapes) |s| {
+            if (s.outline.contours.len == 0) continue;
+            const c = switch (s.paint.fill) {
+                .solid => |c| c,
+                else => continue,
+            };
+            try w.print("<path fill=\"{s}\" fill-rule=\"nonzero\" d=\"", .{try colour(&b0, c)});
+            try pathData(w, s.outline);
+            try w.writeAll("\"/>\n");
+        }
+    } else for (f.paths) |p| {
+        if (p.fill) |c| {
+            try w.print("<path fill=\"{s}\" fill-rule=\"{s}\" d=\"", .{ try colour(&b0, c), @tagName(p.fill_rule) });
+            try subpathsData(w, p.subpaths, true);
+            try w.writeAll("\"/>\n");
+        }
+        if (p.stroke) |st| {
+            if (!(st.width > 0)) continue;
+            try w.print("<path fill=\"none\" stroke=\"{s}\" stroke-width=\"{d}\" stroke-linecap=\"{s}\" stroke-linejoin=\"{s}\"", .{ try colour(&b0, st.color), st.width, @tagName(st.cap), @tagName(st.join) });
+            if (st.join == .miter) try w.print(" stroke-miterlimit=\"{d}\"", .{st.miter_limit});
+            if (st.dash.len > 0) {
+                try w.writeAll(" stroke-dasharray=\"");
+                for (st.dash, 0..) |d, i| try w.print("{s}{d}", .{ if (i == 0) "" else " ", @max(0, d) });
+                try w.writeAll("\"");
+                if (st.dash_offset != 0) try w.print(" stroke-dashoffset=\"{d}\"", .{st.dash_offset});
+            }
+            try w.writeAll(" d=\"");
+            try subpathsData(w, p.subpaths, false);
+            try w.writeAll("\"/>\n");
+        }
+    }
+    try w.writeAll("</g>\n</svg>\n");
+    return out.toOwnedSlice();
+}
+
+/// Subpaths as path data, exactly; a closed one (or, with `close_all`,
+/// every one: a fill closes an open one with a line) ends in Z.
+fn subpathsData(w: *std.Io.Writer, subs: []const figure.Subpath, close_all: bool) !void {
+    for (subs) |sp| {
+        if (sp.segments.len == 0) continue;
+        try segmentsData(w, sp.segments);
+        if (sp.closed or close_all) try w.writeAll("Z");
+    }
+}
+
+fn segmentsData(w: *std.Io.Writer, segs: []const geom.Segment) !void {
+    const s0 = segs[0].start();
+    try w.print("M{d} {d}", .{ s0.x, s0.y });
+    for (segs) |s| switch (s) {
+        .line => |p| try w.print("L{d} {d}", .{ p[1].x, p[1].y }),
+        .quad => |p| try w.print("Q{d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y }),
+        .cubic => |p| try w.print("C{d} {d} {d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y, p[3].x, p[3].y }),
+        .conic => |k| try conicData(w, k),
+    };
+}
+
+fn xmlText(w: *std.Io.Writer, s: []const u8) !void {
+    for (s) |ch| switch (ch) {
+        '<' => try w.writeAll("&lt;"),
+        '>' => try w.writeAll("&gt;"),
+        '&' => try w.writeAll("&amp;"),
+        else => try w.writeByte(ch),
+    };
+}
+
 /// "#rrggbb", with "rgba(…)" only for a translucent colour.
 fn colour(buf: []u8, c: art.Color) ![]const u8 {
     if (c.a == 255) return std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ c.r, c.g, c.b });
@@ -190,14 +303,8 @@ fn path(w: *std.Io.Writer, o: geom.Outline) !void {
 
 fn pathData(w: *std.Io.Writer, o: geom.Outline) !void {
     for (o.contours) |c| {
-        const s0 = c.segments[0].start();
-        try w.print("M{d} {d}", .{ s0.x, s0.y });
-        for (c.segments) |s| switch (s) {
-            .line => |p| try w.print("L{d} {d}", .{ p[1].x, p[1].y }),
-            .quad => |p| try w.print("Q{d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y }),
-            .cubic => |p| try w.print("C{d} {d} {d} {d} {d} {d}", .{ p[1].x, p[1].y, p[2].x, p[2].y, p[3].x, p[3].y }),
-            .conic => |k| try conicData(w, k),
-        };
+        if (c.segments.len == 0) continue;
+        try segmentsData(w, c.segments);
         try w.writeAll("Z");
     }
 }
@@ -243,4 +350,24 @@ test "svg writes arcs exactly, as elliptical arcs" {
     const ry = try std.fmt.parseFloat(f64, it.next().?);
     try testing.expectApproxEqAbs(@as(f64, 4), rx, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 1), ry, 1e-9);
+}
+
+test "figureSvg: centrelines carry the pen; outlined, the pen's area" {
+    const testing = std.testing;
+    const segs = [_]geom.Segment{.{ .line = .{ .{ .x = 0, .y = 0 }, .{ .x = 10, .y = 0 } } }};
+    const subs = [_]figure.Subpath{.{ .segments = &segs }};
+    const paths = [_]figure.Path{.{ .subpaths = &subs, .stroke = .{ .color = .{ .r = 255, .g = 0, .b = 0 }, .width = 0.5, .cap = .round, .dash = &.{ 2, 1 } } }};
+    const f: figure.Figure = .{ .name = "a<b", .paths = &paths };
+    const c = try figureSvg(testing.allocator, f, .{});
+    defer testing.allocator.free(c);
+    try testing.expect(std.mem.indexOf(u8, c, "stroke=\"#ff0000\" stroke-width=\"0.5\" stroke-linecap=\"round\"") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "stroke-dasharray=\"2 1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "d=\"M0 0L10 0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "<title>a&lt;b</title>") != null);
+    const o = try figureSvg(testing.allocator, f, .{ .outline_strokes = true });
+    defer testing.allocator.free(o);
+    try testing.expect(std.mem.indexOf(u8, o, "stroke=") == null);
+    // Four dashes, each its own filled outline, in one path.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, o, "<path fill=\"#ff0000\""));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, o, "Z"));
 }
