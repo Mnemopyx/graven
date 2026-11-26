@@ -560,7 +560,14 @@ pub const LegendSheet = struct {
 /// A key's row: its name, and a cell for each column (markup; missing
 /// ones are empty).
 pub const SheetRow = struct {
+    /// The name of what it is linked to, as last seen: kept equal to the
+    /// object's own name (`linkSheetRows`), so a rename in either place
+    /// is seen in both.
     key: []const u8,
+    /// What it is linked to (a key; a caption or a track for a text
+    /// sheet): found by its name once, when the link is made, then held
+    /// by its ID (the owner, 2026-11-26). `.none` until it names one.
+    target: ObjectId = .none,
     cells: std.ArrayList([]const u8) = .empty,
 };
 
@@ -5086,8 +5093,6 @@ pub const Model = struct {
     /// column of that name.
     pub fn sheetCellOf(m: *const Model, t: TileId, slot: []const u8) ?struct { sheet: usize, row: usize, col: usize } {
         const al = m.arena.child_allocator;
-        var keys: std.ArrayList(TileId) = .empty;
-        defer keys.deinit(al);
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         for (m.sheets.items, 0..) |sh, si| {
@@ -5095,12 +5100,9 @@ pub const Model = struct {
             const col = for (sh.columns.items, 0..) |c, k| {
                 if (std.mem.eql(u8, c, slot)) break k;
             } else continue;
-            keys.clearRetainingCapacity();
-            m.scopeTiles(al, sh.scope, &keys) catch return null;
-            for (sh.rows.items, 0..) |row, ri| {
-                const key = for (keys.items) |k| {
-                    if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
-                } else continue;
+            for (sh.rows.items, 0..) |*row, ri| {
+                const key = (m.sheetRowLink(al, &sh, row) catch return null) orelse continue;
+                if (m.tileIndex(key) == null) continue;
                 near.clearRetainingCapacity();
                 m.companions(al, key, &near) catch return null;
                 if (std.mem.indexOfScalar(TileId, near.items, t) != null) return .{ .sheet = si, .row = ri, .col = col };
@@ -5119,6 +5121,99 @@ pub const Model = struct {
     fn regionWithId(m: *Model, id: ObjectId) ?*TileRegion {
         for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| if (r.id == id) return r;
         return null;
+    }
+
+    /// The track whose ID is `id`, by its parent and index.
+    pub fn trackWithId(m: *const Model, id: ObjectId) ?TrackRef {
+        if (id == .none) return null;
+        for (0..m.parentCount()) |k| {
+            const pi = m.parentAt(k);
+            for (m.regionsIn(pi), 0..) |r, ri| if (r.id == id) return .{ .parent = pi, .region = ri };
+        }
+        return null;
+    }
+
+    /// The caption whose ID is `id`.
+    fn captionWithId(m: *Model, id: ObjectId) ?*SketchCaption {
+        if (id == .none) return null;
+        for (m.sketches.items) |*it| for (it.captions.items) |*sc| if (sc.id == id) return sc;
+        return null;
+    }
+
+    // Name links ---------------------------------------------------------
+    //
+    // A reference by name (a sheet's row to its key, caption or track) is
+    // looked up by the name once, when the link is made, and held by the
+    // object's ID from then on (the owner, 2026-11-26): renaming the
+    // object or the reference renames both. These are the shared pieces.
+
+    /// The name of linkable object `id` (a key, a caption or a track),
+    /// or null when there is none (removed, or never was).
+    pub fn linkedName(m: *const Model, id: ObjectId) ?[]const u8 {
+        if (id == .none) return null;
+        if (m.tileIndex(id)) |i| return if (m.tiles.items[i].removed) null else m.tiles.items[i].designator;
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (sc.id == id) return sc.name;
+        if (m.trackWithId(id)) |t| return m.regionsIn(t.parent)[t.region].name;
+        return null;
+    }
+
+    /// Renames linkable object `id` (a key, a caption or a track).
+    pub fn renameLinked(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        if (m.tileIndex(id) != null) return m.renameTile(id, name);
+        if (m.captionWithId(id) != null) return m.renameCaption(id, name);
+        if (m.trackWithId(id)) |t| return m.renameRegion(t.parent, t.region, name);
+        return error.NoSuchObject;
+    }
+
+    /// Renames caption `id`, and its tracks with it (its base and its
+    /// uses' copies): they are the caption.
+    pub fn renameCaption(m: *Model, id: ObjectId, name: []const u8) Error!void {
+        if (name.len == 0) return error.BadValue;
+        const sc = m.captionWithId(id) orelse return error.NoSuchObject;
+        const owned = try m.a().dupe(u8, name);
+        sc.name = owned;
+        for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| {
+            if (r.caption == id) r.name = owned;
+        };
+        m.revision += 1;
+    }
+
+    /// The object a sheet's row names, looked up by `name`: a key in its
+    /// scope; for a text sheet, a caption, else a track, of that name.
+    fn sheetLookup(m: *const Model, al: Allocator, sh: *const LegendSheet, name: []const u8) Allocator.Error!?ObjectId {
+        if (!sh.texts) return m.keyInScope(al, sh.scope, name);
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (std.mem.eql(u8, sc.name, name)) return sc.id;
+        for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |r| {
+            if (r.caption == .none and std.mem.eql(u8, r.name, name)) return r.id;
+        };
+        return null;
+    }
+
+    /// What row `row` of sheet `sh` is linked to: its held ID while that
+    /// object is there, else what its name finds (the link being made).
+    pub fn sheetRowLink(m: *const Model, al: Allocator, sh: *const LegendSheet, row: *const SheetRow) Allocator.Error!?ObjectId {
+        if (m.linkedName(row.target) != null) return row.target;
+        return m.sheetLookup(al, sh, row.key);
+    }
+
+    /// Makes and keeps every sheet row's link: a row not yet linked (or
+    /// whose object is gone) is linked by its name; a linked row takes
+    /// its object's name, renamed since. Run first in `syncSheets`.
+    fn linkSheetRows(m: *Model) Error!void {
+        const al = m.arena.child_allocator;
+        for (m.sheets.items) |*sh| for (sh.rows.items) |*row| {
+            if (m.linkedName(row.target)) |name| {
+                if (!std.mem.eql(u8, name, row.key)) {
+                    row.key = try m.a().dupe(u8, name);
+                    m.revision += 1;
+                }
+                continue;
+            }
+            if (try m.sheetLookup(al, sh, row.key)) |id| if (id != row.target) {
+                row.target = id;
+                m.revision += 1;
+            };
+        };
     }
 
     /// Shows every sketch's captions in its sketch panels: in each, a
@@ -5185,14 +5280,6 @@ pub const Model = struct {
         }
     }
 
-    /// The name a text sheet finds track `r` by: its caption's, else its own.
-    pub fn textHolderName(m: *const Model, r: *const TileRegion) []const u8 {
-        if (r.caption != .none) for (m.sketches.items) |it| for (it.captions.items) |sc| {
-            if (sc.id == r.caption) return sc.name;
-        };
-        return r.name;
-    }
-
     /// Whether track `r` is a use's copy of a caption (which follows its
     /// base, not a sheet).
     fn isCaptionCopy(m: *const Model, r: *const TileRegion) bool {
@@ -5204,8 +5291,8 @@ pub const Model = struct {
     }
 
     /// Writes each text sheet's cells into its text holders: for each
-    /// row, the tracks of that name (a caption's base by its caption's
-    /// name) get the cell of the column shown, or the default when that
+    /// row, the track it is linked to (a caption's base, for a caption)
+    /// gets the cell of the column shown, or the default when that
     /// is empty. A holder edited since (its text not what was last
     /// written) puts its text into that cell first: the sheet and the
     /// text holders are one text, edited in either.
@@ -5215,10 +5302,14 @@ pub const Model = struct {
             if (!sh.texts) continue;
             for (sh.rows.items) |*row| {
                 while (row.cells.items.len < sh.columns.items.len) try row.cells.append(m.a(), "");
+                // Its holder, by the ID it is linked to: a caption's base
+                // (its uses follow it), or a track.
+                const link = row.target;
+                if (m.linkedName(link) == null) continue;
                 for (0..m.parentCount()) |k| {
                     const pi = m.parentAt(k);
                     for (m.regionsIn(pi)) |*r| {
-                        if (!std.mem.eql(u8, m.textHolderName(r), row.key) or m.isCaptionCopy(r)) continue;
+                        if (!(r.id == link or (r.caption == link and !m.isCaptionCopy(r)))) continue;
                         const fi = m.flowIndex(r.flow) orelse continue;
                         const f = &m.flows.items[fi];
                         const now = try itemsText(al, f.items.items);
@@ -5247,7 +5338,7 @@ pub const Model = struct {
         try sh.columns.append(m.a(), "Default");
         for (languages) |l| try sh.columns.append(m.a(), try m.a().dupe(u8, l));
         for (m.sketches.items) |it| for (it.captions.items) |sc| {
-            var row: SheetRow = .{ .key = try m.a().dupe(u8, sc.name) };
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, sc.name), .target = sc.id };
             const base = m.regionWithId(sc.base);
             const text = if (base) |b| if (m.flowIndex(b.flow)) |fi| try itemsText(al, m.flows.items[fi].items.items) else try al.alloc(u8, 0) else try al.alloc(u8, 0);
             defer al.free(text);
@@ -5281,24 +5372,21 @@ pub const Model = struct {
         // Text sheets' cells in their text holders (a caption's base
         // among them), then a sketch's captions in its uses: content
         // driven from elsewhere, as a sheet's cells drive slots.
+        try m.linkSheetRows();
         try m.syncTextSheets();
         try m.syncCaptions();
         if (m.sheets.items.len == 0) return;
         const al = m.arena.child_allocator;
-        var keys: std.ArrayList(TileId) = .empty;
-        defer keys.deinit(al);
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         var done: std.AutoHashMapUnmanaged([2]u32, void) = .empty;
         defer done.deinit(al);
         for (m.sheets.items) |sh| {
             if (sh.texts) continue;
-            keys.clearRetainingCapacity();
-            try m.scopeTiles(al, sh.scope, &keys);
             for (sh.rows.items) |row| {
-                const key = for (keys.items) |k| {
-                    if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
-                } else continue;
+                // Its key, by the ID it is linked to.
+                const key = row.target;
+                if (m.tileIndex(key) == null or m.linkedName(key) == null) continue;
                 near.clearRetainingCapacity();
                 try m.companions(al, key, &near);
                 for (sh.columns.items, 0..) |col, ci| {
@@ -5355,7 +5443,7 @@ pub const Model = struct {
         const id = try m.addSheet(name, scope, cols.items);
         const sh = &m.sheets.items[m.sheetIndex(id).?];
         for (keys.items) |k| {
-            var row: SheetRow = .{ .key = try m.a().dupe(u8, m.tileConst(k).designator) };
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, m.tileConst(k).designator), .target = k };
             near.clearRetainingCapacity();
             try m.companions(al, k, &near);
             for (sh.columns.items) |c| {
@@ -5376,16 +5464,18 @@ pub const Model = struct {
     }
 
     /// Sets the cell of sheet `id` at row `row`, column `col`: column 0
-    /// is the key's name (renaming the key too, when there is one), the
+    /// is the row's name (renaming what it is linked to too), the
     /// others the columns' slots, which follow.
     pub fn setSheetCell(m: *Model, id: ObjectId, row: usize, col: usize, text: []const u8) Error!void {
         const sh = try m.sheetById(id);
         if (row >= sh.rows.items.len or col > sh.columns.items.len) return error.NoSuchItem;
         const r = &sh.rows.items[row];
         if (col == 0) {
+            // The name: the object it is linked to is renamed with it
+            // (a row not yet linked looks its new name up).
             if (std.mem.eql(u8, r.key, text)) return;
             const al = m.arena.child_allocator;
-            if (try m.keyInScope(al, sh.scope, r.key)) |t| try m.renameTile(t, text);
+            if (try m.sheetRowLink(al, sh, r)) |t| try m.renameLinked(t, text);
             m.sheets.items[m.sheetIndex(id).?].rows.items[row].key = try m.a().dupe(u8, text);
         } else {
             while (r.cells.items.len < sh.columns.items.len) try r.cells.append(m.a(), "");
@@ -5496,27 +5586,18 @@ pub const Model = struct {
         if (sh.texts) {
             // A text sheet: rows naming no text holder; its columns are
             // languages, none unused.
-            for (sh.rows.items, 0..) |row, ri| {
-                var found = false;
-                for (0..m.parentCount()) |k| for (m.regionsIn(m.parentAt(k))) |*r| {
-                    if (std.mem.eql(u8, m.textHolderName(r), row.key)) found = true;
-                };
-                if (!found) try rows.append(al, ri);
+            for (sh.rows.items, 0..) |*row, ri| {
+                if (try m.sheetRowLink(al, &sh, row) == null) try rows.append(al, ri);
             }
             return;
         }
-        var keys: std.ArrayList(TileId) = .empty;
-        defer keys.deinit(al);
-        try m.scopeTiles(al, sh.scope, &keys);
         var near: std.ArrayList(TileId) = .empty;
         defer near.deinit(al);
         var used = try al.alloc(bool, sh.columns.items.len);
         defer al.free(used);
         @memset(used, false);
-        for (sh.rows.items, 0..) |row, ri| {
-            const key = for (keys.items) |k| {
-                if (std.mem.eql(u8, m.tileConst(k).designator, row.key)) break k;
-            } else {
+        for (sh.rows.items, 0..) |*row, ri| {
+            const key = (try m.sheetRowLink(al, &sh, row)) orelse {
                 try rows.append(al, ri);
                 continue;
             };
@@ -7650,6 +7731,9 @@ pub const Model = struct {
     pub fn renameRegion(m: *Model, parent: Parent, region: usize, name: []const u8) Error!void {
         if (!m.hasParent(parent) or region >= m.regionsIn(parent).len) return error.NoSuchItem;
         if (name.len == 0) return error.BadValue;
+        // A caption's track is the caption: renamed with it.
+        const cap = m.regionsIn(parent)[region].caption;
+        if (cap != .none and m.captionWithId(cap) != null) return m.renameCaption(cap, name);
         m.regionsIn(parent)[region].name = try m.a().dupe(u8, name);
         m.revision += 1;
     }
@@ -9499,6 +9583,15 @@ test "the sheet drives the slots: a cell sets them, an edit on the key sets the 
     try m.setSheetCell(id, 0, 0, "sin");
     try std.testing.expectEqualStrings("sin", m.tileConst(fx.a).designator);
     try std.testing.expectError(error.DuplicateDesignator, m.setSheetCell(id, 0, 0, "COS"));
+    // Renamed on the key: the row follows it, held by its ID, and still
+    // drives it.
+    try m.renameTile(fx.a, "SINE");
+    try m.syncSheets();
+    try std.testing.expectEqualStrings("SINE", m.sheets.items[si].rows.items[0].key);
+    try m.setSheetCell(id, 0, 1, "asin");
+    const t4 = try slotText(&m, fx.a, "top");
+    defer std.testing.allocator.free(t4);
+    try std.testing.expectEqualStrings("asin", t4);
     // A column removed: its slots keep what they show, no longer driven.
     try m.removeSheetColumn(id, 0);
     try m.setTileTrackText(fx.b, m.tileTrackNamed(fx.b, "top").?, "own");
@@ -9864,6 +9957,43 @@ test "a text sheet: a caption's text by its name, default and a language, edited
     try m.syncSheets();
     try std.testing.expectEqualStrings("Le Volume", m.sheets.items[m.sheetIndex(id).?].rows.items[0].cells.items[2]);
     try std.testing.expectEqualStrings("Volume", m.sheets.items[m.sheetIndex(id).?].rows.items[0].cells.items[0]);
+}
+
+test "a sheet's rows are linked by ID: renamed on the object or in the sheet, both follow" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Dial");
+    const home = m.homeOf(m.sketches.items[si].id).?;
+    const g = try m.editSketch(si, .{ .circle = .{ .c = .{ .x = 0, .y = 0 }, .r = 10 } });
+    const style = try m.addStyle("Label", .{ .cap_height = 3 });
+    const view = m.spaces.items[home].sketch_views.items[0].id;
+    const cap = try m.addCaption(view, .{ .curve = g }, style, 4, 30);
+    _ = try m.insertText(cap.parent, cap.region, .{ .index = 0 }, "Volume", style);
+    _ = try m.insertSketchPanel(0, si, .{ .x = 50, .y = 50 });
+    const id = try m.makeTextSheet("Texts", &.{"de"});
+    const cid = m.sketches.items[si].captions.items[0].id;
+    try std.testing.expectEqual(cid, m.sheets.items[0].rows.items[0].target);
+    // Renamed on the object (its track): the sheet's row follows.
+    try m.renameRegion(cap.parent, cap.region, "Knob");
+    try m.syncSheets();
+    try std.testing.expectEqualStrings("Knob", m.sheets.items[0].rows.items[0].key);
+    try std.testing.expectEqualStrings("Knob", m.sketches.items[si].captions.items[0].name);
+    // Renamed in the sheet: the caption and its tracks follow.
+    try m.setSheetCell(id, 0, 0, "Gain");
+    try std.testing.expectEqualStrings("Gain", m.sketches.items[si].captions.items[0].name);
+    try std.testing.expectEqualStrings("Gain", m.regionsIn(cap.parent)[cap.region].name);
+    // Still driven: German in the cell, shown.
+    try m.setSheetCell(id, 0, 2, "Pegel");
+    try m.setSheetShown(id, 1);
+    const al = std.testing.allocator;
+    const text = try Model.itemsText(al, m.trackFlow(cap.parent, cap.region).?.items.items);
+    defer al.free(text);
+    try std.testing.expectEqualStrings("Pegel", text);
+    // A track of the old name made later does not take the link.
+    _ = try m.addTracks(.{ .panel = 0 }, .{ .name = "Knob", .origin = .{ .x = 0, .y = 0 }, .kind = .track, .style = style, .count = 1, .length = 5, .pitch = 4 });
+    try m.syncSheets();
+    try std.testing.expectEqual(cid, m.sheets.items[0].rows.items[0].target);
 }
 
 test "ink and fills changed in the editor wait for the sketch's update; discarded, they go" {
