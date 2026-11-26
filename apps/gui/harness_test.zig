@@ -2594,3 +2594,37 @@ test "paragraph rules: a heading given a rule above and below in Properties, dra
     try std.testing.expectEqual(@as(usize, 2), api.placedRules());
     try saveAs(&r, scratch ++ "/rules.graven");
 }
+
+test "a new text layout's flow starts from the template chosen in the Add tracks options" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    const m = api.model();
+    // The first text layout: the Default template, made with it.
+    try r.press("tool.layout-single-track");
+    try r.drag(api.screenOf(20, 120).?, api.screenOf(140, 121).?);
+    try r.frames(2);
+    try std.testing.expectEqual(1, m.templates.items.len);
+    // Its flow at 18 pt, saved as a template of its own.
+    try r.field("flow-style.size", "18");
+    try r.press("flow-style.save-as-template");
+    try r.frames(2);
+    try std.testing.expectEqual(2, m.templates.items.len);
+    const saved = m.templates.items[1];
+    // The next one made from it, chosen in the tool's options.
+    try r.key(.escape, .none);
+    try r.press("tool.layout-single-track");
+    try r.frames(2);
+    try r.choose("tool.add-tracks.template", saved.name);
+    try r.drag(api.screenOf(20, 80).?, api.screenOf(140, 81).?);
+    try r.frames(2);
+    const fl = m.flows.items[m.flows.items.len - 1];
+    try std.testing.expect(fl.template == saved.id);
+    try std.testing.expect(fl.style == saved.text);
+    // And the tool remembers it for the next.
+    try r.key(.escape, .none);
+    try r.press("tool.layout-single-track");
+    try r.drag(api.screenOf(20, 40).?, api.screenOf(140, 41).?);
+    try r.frames(2);
+    try std.testing.expect(m.flows.items[m.flows.items.len - 1].template == saved.id);
+}
