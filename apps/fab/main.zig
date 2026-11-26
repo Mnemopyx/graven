@@ -108,7 +108,7 @@ fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var placed = try layout.solve(gpa, m, panel, labels);
+    var placed = try layout.solve(gpa, m, .{ .panel = panel }, labels);
     defer placed.deinit();
     const p = try layout.fab.plan(a, m, panel, &placed, faces);
     const stack = m.panels.items[panel].fab;

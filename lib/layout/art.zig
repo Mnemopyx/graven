@@ -106,7 +106,51 @@ pub const Paint = struct {
     /// The outline drawn over the fill, if any, and its width, mm.
     edge: ?Color = null,
     edge_width: f64 = 0.15,
+    /// Its fill is a pen's ink, not an area filled: the area a pen covers
+    /// along a path (a stroke made exact by `geom.stroke`), or a mark the
+    /// pen makes (a connection's arrowhead or dot).
+    pen: bool = false,
 };
+
+/// What a shape puts down, as exact regions: `fill`, the area it fills
+/// (none when it fills nothing, or its fill is a pen's ink); `stroke`, a
+/// pen's shape's own outline (a drawing's strokes and end marks); `edge`, its edge
+/// (`Paint.edge`) stroked at `edge_width` along its contours
+/// (`geom.stroke`, miter joins, as SVG draws it), curves flattened to `tol`
+/// mm. Fabrication takes these, so the ink made is the ink drawn.
+pub const Ink = struct {
+    fill: ?geom.Outline = null,
+    stroke: ?geom.Outline = null,
+    edge: ?geom.Outline = null,
+};
+
+pub fn inkRegions(a: Allocator, s: Shape, tol: f64) Allocator.Error!Ink {
+    var out: Ink = .{};
+    if (s.outline.contours.len == 0) return out;
+    if (s.paint.pen) {
+        out.stroke = s.outline;
+    } else if (s.paint.fill != .none) {
+        out.fill = s.outline;
+    }
+    if (s.paint.edge != null and s.paint.edge_width > 0) {
+        var lines: std.ArrayList(geom.stroke.Polyline) = .empty;
+        for (s.outline.contours) |c| {
+            if (c.segments.len == 0) continue;
+            try lines.append(a, .{ .pts = try flattenRun(a, c.segments, tol), .closed = true });
+        }
+        const o = try geom.stroke.stroke(a, lines.items, .{ .width = s.paint.edge_width }, tol);
+        if (o.contours.len > 0) out.edge = o;
+    }
+    return out;
+}
+
+/// A closed run of segments as points within `tol` of it (`figure.flatten`),
+/// its end dropped where it is its start again.
+fn flattenRun(a: Allocator, segs: []const Segment, tol: f64) Allocator.Error![]const Point {
+    const pts = try @import("figure.zig").flatten(a, segs, tol);
+    if (pts.len > 1 and pts[pts.len - 1].eql(pts[0])) return pts[0 .. pts.len - 1];
+    return pts;
+}
 
 pub const Layer = struct {
     name: []const u8,

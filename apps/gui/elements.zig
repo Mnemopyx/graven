@@ -447,6 +447,7 @@ pub const all = [_]Element{
     .{ .id = "panel.fab.layer.*.from", .kind = .choice, .label = "From" },
     .{ .id = "panel.fab.layer.*.goes", .kind = .choice, .label = "Goes" },
     .{ .id = "panel.fab.layer.*.later", .kind = .button, .label = "Later" },
+    .{ .id = "panel.fab.layer.*.line-art", .kind = .choice, .label = "Line art" },
     .{ .id = "panel.fab.layer.*.makes", .kind = .choice, .label = "Makes" },
     .{ .id = "panel.fab.layer.*.name", .kind = .field, .label = "Name" },
     .{ .id = "panel.fab.layer.*.offset", .kind = .field, .label = "Offset, mm" },

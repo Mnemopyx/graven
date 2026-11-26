@@ -268,7 +268,12 @@ const Grid = struct {
 };
 
 /// Appends `t`, split wherever a vertex lies on one of its edges.
+/// A triangle with no area (its corners in a line) is dropped: it covers
+/// nothing, and each of its corners lies on its opposite edge, so splitting
+/// it would only make more of the same (two at every level, without end:
+/// a pen's dashes, flattened finely, gave such slivers).
 fn splitAt(a: Allocator, out: *std.ArrayList([3]geom.Point), g: *const Grid, t: [3]geom.Point, depth: usize) Allocator.Error!void {
+    if (flat(t)) return;
     if (depth < 64) for (0..3) |k| {
         const p = t[k];
         const q = t[(k + 1) % 3];
@@ -280,6 +285,19 @@ fn splitAt(a: Allocator, out: *std.ArrayList([3]geom.Point), g: *const Grid, t: 
         }
     };
     try out.append(a, t);
+}
+
+/// Whether triangle `t` has no area, to rounding: twice its area within
+/// 1e-12 of its longest edge's square.
+fn flat(t: [3]geom.Point) bool {
+    const cross = (t[1].x - t[0].x) * (t[2].y - t[0].y) - (t[1].y - t[0].y) * (t[2].x - t[0].x);
+    var l2: f64 = 0;
+    for (0..3) |k| {
+        const dx = t[(k + 1) % 3].x - t[k].x;
+        const dy = t[(k + 1) % 3].y - t[k].y;
+        l2 = @max(l2, dx * dx + dy * dy);
+    }
+    return @abs(cross) <= 1e-12 * l2;
 }
 
 fn near(p: geom.Point, q: geom.Point) bool {

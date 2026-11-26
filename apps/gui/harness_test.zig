@@ -2503,3 +2503,60 @@ test "a click on a tile's text in a text flow edits that text, the caret where p
     try r.frames(2);
     try std.testing.expectEqualStrings("ZABC", api.eqText().?);
 }
+
+test "fab ink: a sketch panel's ink and solid fills are layers' sources, made in 3MF; chosen in its Fabrication layers" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    const pi = api.loadSketchFab() orelse return error.NoPanel;
+    try r.frames(3);
+    const m = api.model();
+    const name = m.panels.items[pi].name;
+    var path_buf: [256]u8 = undefined;
+    try r.select(try std.fmt.bufPrint(&path_buf, "\"{s}\"", .{name}));
+    try r.frames(2);
+    // The ink layer (the fourth) taken from text and back, then from one
+    // drawing.
+    try r.choose("panel.fab.layer.4.from", "text");
+    try std.testing.expect(m.panels.items[pi].fab.layers[3].source == .text);
+    try r.choose("panel.fab.layer.4.from", "line art's ink");
+    try std.testing.expect(m.panels.items[pi].fab.layers[3].source == .ink);
+    const drawing = for (m.panels.items[pi].art.items) |pa| {
+        if (pa.sketch_ink and !pa.cutout) break pa.name;
+    } else return error.NoInk;
+    try r.choose("panel.fab.layer.4.line-art", drawing);
+    try std.testing.expectEqualStrings(drawing, m.panels.items[pi].fab.layers[3].source.ink);
+
+    // The plan: the ring's dashes and edges inlaid black, the red fill round
+    // the hole inlaid red.
+    const a = std.heap.c_allocator;
+    const io = std.testing.io;
+    const font = try std.Io.Dir.cwd().readFileAlloc(io, "examples/fonts/Inter-Medium.otf", a, .limited(64 << 20));
+    defer a.free(font);
+    const face = try layout.Face.init(a, font, 0);
+    defer face.deinit();
+    const faces = [_]*layout.Face{face};
+    var labels: layout.Labels = .init(a, &faces);
+    defer labels.deinit();
+    var placed = try layout.solve(a, m, .{ .panel = pi }, &labels);
+    defer placed.deinit();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const plan = try layout.fab.plan(arena.allocator(), m, pi, &placed, &faces);
+    var ink_pieces: usize = 0;
+    var fill_area: f64 = 0;
+    for (plan.steps) |st| if (st.op == .add) {
+        const src = m.panels.items[pi].fab.layers[st.layer].source;
+        if (src == .ink) ink_pieces += st.pieces.len;
+        if (src == .fills) for (st.pieces) |pc| {
+            fill_area += @abs(pc.signedArea());
+        };
+    };
+    try std.testing.expect(ink_pieces > 0);
+    // The ring (r 7) less the hole (r 3.5): π (49 - 12.25).
+    try std.testing.expectApproxEqAbs(std.math.pi * (49.0 - 12.25), fill_area, 0.01);
+    const made = (try panel3mf(a, m, name, face)) orelse return error.NoLayers;
+    defer a.free(made);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = scratch ++ "/sketch-fab.3mf", .data = made });
+    try saveAs(&r, scratch ++ "/sketch-fab.graven");
+}
