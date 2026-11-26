@@ -819,3 +819,7 @@ Model: `figure.Ink` has `from`/`to` (both null: the whole curve, as before); `fi
 Sketch editor: **Shift+click** on a curve adds the piece under the pointer to the selection (or takes it out); **Shift+click inside an area** adds the pieces of the closed path round it. With Shift held, the piece or path a click would take is shown (piece with rings at its cuts). I inks and F fills the selection, whole curves and pieces alike. A piece also counts as its curve for the constraint tools, objects and connections. Screens: project files `screens/ink-pieces/`.
 
 Not yet: deleting or trimming a piece; a piece whose cut point is deleted is dropped from the drawing silently (not flagged); Shift+click inside a circle cut once returns the whole circle.
+
+### Crossings as constraint targets (2026-11-26, the owner's item 21; built)
+
+Where two curves cross is a point of interest in the sketch editor, like a point: the pointer rings it, Tab locks onto it, a click selects it (Ctrl adds). A constraint tool on a selection holding crossings first makes each a construction point held on both curves (`SketchEdit.crossing`, `pieces.attachCrossing`: the same point ink pieces use, one already there reused), then constrains that point. A drawing tool's click locked onto a crossing makes the new geometry's point coincident with it. Crossings where a point already is are not offered (the point is). Shown: a distance between two spoke-ring crossings of a polar array set to 7 mm drives the ring (`screens/ink-pieces/crossing-distance.png`).

@@ -1474,6 +1474,9 @@ pub const SketchEdit = union(enum) {
     /// Construction geometry output while a parameter is not 0 (empty name:
     /// never).
     physical_when: struct { g: sketch_.GeomId, param: []const u8 },
+    /// Where two curves cross, made a point held on both (one already
+    /// there is used): a constraint's target. Returns the point's ID.
+    crossing: sketch_.pieces.Crossing,
 };
 
 pub const Image = struct {
@@ -6037,6 +6040,7 @@ pub const Model = struct {
             .param => |e| try sk.setParam(al, e.name, e.expr),
             .unparam => |name| try sk.removeParam(name),
             .physical_when => |e| try sk.setPhysicalWhen(al, e.g, e.param),
+            .crossing => |x| out = ((try sketch_.pieces.attachCrossing(sk, al, x, true)) orelse return error.NoSuchItem).geom,
             .drag => |e| {
                 _ = try sk.drag(al, gpa, e.p, e.to);
                 m.revision += 1;
