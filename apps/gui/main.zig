@@ -15226,20 +15226,10 @@ fn toolPalette() void {
     const saved_group = pushGroup("tool");
     defer popGroup(saved_group);
     if (sketch_edit != null) return sketchPalette();
-    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    var col = keyRow(@src(), .{ .gravity_y = 0.5 });
     defer col.deinit();
+    // (The shape to draw is chosen in Add shape's drop, not here.)
     toolBar();
-    if (state.tool != .add_art) return;
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = 260 }, .padding = .{ .x = 8, .w = 8 }, .gravity_y = 0.5 });
-    defer row.deinit();
-    propName("Shape");
-    const names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "Ellipse", "Slot", "Polygon" };
-    var choice: usize = @intFromEnum(shape_kind);
-    if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
-        shape_kind = @enumFromInt(choice);
-        polygon_pts.clearRetainingCapacity();
-        state.drag = null;
-    }
 }
 
 fn toolBar() void {
@@ -15247,7 +15237,7 @@ fn toolBar() void {
     defer popGroup(saved_group);
     // In the ribbon, the keys fill its height: no padding above or below.
     const pad_y: f32 = if (in_ribbon) 0 else 3;
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
     keyIcon(@src(), "Zoom to context", icons.graven(.zoom_to_context) orelse dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
@@ -16345,8 +16335,10 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
         b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
         dvui.renderTriangles(b.build_unowned(), null) catch {};
     }
-    // On, hovered, pressed: tints over the shade.
+    // On, hovered, pressed: tints over the shade; its drop open, the
+    // panel's tint.
     if (o.color_fill) |cf| r.fill(.all(2 * s), .{ .color = cf });
+    if (drop != null and drop_open == drop) r.fill(.all(2 * s), .{ .color = .{ .color = openKeyTint() } });
     if (bw.pressed()) {
         r.fill(.all(2 * s), .{ .color = .{ .color = dvui.Color.black.opacity(0.10) } });
     } else if (bw.hovered()) r.fill(.all(2 * s), .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.12) } });
@@ -16481,16 +16473,15 @@ fn openDrop(d: ?Drop) void {
         drop_open = null;
         return;
     }
+    // The keyboard's place, to give back when it goes (not while another
+    // drop had it).
+    if (drop_open == null) drop_focus_back = .{ .widget = dvui.focusedWidgetId(), .sub = dvui.focusedSubwindowId() };
     drop_open = d;
     drop_frame = dvui.frameTimeNS();
     drop_focus = true;
     drop_entered = false;
     if (d) |x| drop_from = drop_anchor.get(x);
     dvui.refresh(null, @src(), null);
-}
-
-fn dropClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
-    drop_open = null;
 }
 
 /// The ▾ after a ribbon button: its drop's button. Returns its rect.
@@ -16523,8 +16514,8 @@ fn dropCorner(d: Drop, cz: dvui.Rect.Physical, key: dvui.Rect.Physical, id_extra
     for (p) |q| tb.appendVertex(.{ .pos = q, .col = col });
     tb.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
     dvui.renderTriangles(tb.build_unowned(), null) catch {};
-    // The drop hangs below the key (a pop-up opens at its anchor's top).
-    drop_anchor.set(d, (dvui.Rect.Physical{ .x = key.x, .y = key.y + key.h, .w = key.w, .h = 0 }).toNatural());
+    // The drop hangs from the key.
+    drop_anchor.set(d, key.toNatural());
 }
 
 /// A ribbon key's drop corner's side, logical.
@@ -16532,7 +16523,9 @@ fn dropCorner_() f32 {
     return 12 * ribbonScale();
 }
 
-/// Each frame: a key held long enough opens its drop; the drop open drawn.
+/// Each frame: a key held long enough opens its drop; the drop open drawn
+/// (a hanging panel, as every drop is); a drop just closed gives the
+/// keyboard back.
 fn ribbonDrops() void {
     if (key_hold) |*h| if (!h.opened) {
         const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
@@ -16541,79 +16534,135 @@ fn ribbonDrops() void {
             if (Drop.heldBy(h.inv.action)) |d| if (drop_open != d) openDrop(d);
         } else dvui.timer(dvui.currentWindow().data().id, @intCast((hold_ms - (now - h.t0)) * 1000));
     };
-    const d = drop_open orelse return;
-    if (d.panel() and activeKind() != .canvas) {
-        drop_open = null;
+    if (drop_open != null and activeKind() != .canvas) drop_open = null;
+    const d = drop_open orelse {
+        dropGiveBack();
         return;
-    }
+    };
     // From the frame after it was asked for.
     if (drop_frame == dvui.frameTimeNS()) {
         dvui.refresh(null, @src(), null);
         return;
     }
-    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&drop_open), .close = dropClosed });
-    defer _ = dvui.MenuWidget.Root.set(prev_root);
-    if (d.panel()) {
-        // The window's width, under the ribbon, dark as the panes. A plain
-        // floating window, not a pop-up: a row dragged in it floats in a
-        // window of its own, which would close a pop-up. It closes itself:
-        // Esc, a press outside it, the pointer leaving.
-        const win = dvui.windowRect();
-        const prev = dvui.themeGet();
-        dvui.themeSet(ghost_pane.darkTheme(prev));
-        defer dvui.themeSet(prev);
-        const S = struct {
-            var rect: dvui.Rect = .{};
-        };
-        const first = drop_focus;
-        S.rect.x = 0;
-        S.rect.y = ribbon_bottom;
-        // Its key joined to it (drawn here, over the strips under the
-        // ribbon; the panel covers the bridge's foot).
-        dropBridge(drop_anchor.get(d).scale(dvui.windowNaturalScale(), dvui.Rect.Physical), dvui.themeGet().color(.window, .fill).opacity(0.97));
-        S.rect.w = win.w;
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &S.rect, .resize = .none }, .{ .id_extra = @intFromEnum(d), .min_size_content = .{ .w = win.w - 2 }, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.97) }, .border = .{ .h = 1 }, .corners = .all(0), .box_shadow = null });
-        defer fw.deinit();
-        // Its height follows its content (layers added while it is open).
-        _ = first;
-        fw.autoSize();
-        dropFocus(fw.data().id);
-        const r = fw.data().borderRectScale().r;
-        drop_rect = r;
-        for (dvui.events()) |*e| switch (e.evt) {
-            .key => |k| if (k.action == .down and k.code == .escape and !e.handled) {
-                e.handle(@src(), fw.data());
-                drop_open = null;
-            },
-            .mouse => |m| if (m.action == .press and !r.contains(m.p) and !drop_from.scale(dvui.windowNaturalScale(), dvui.Rect.Physical).contains(m.p)) {
-                drop_open = null;
-            },
-            else => {},
-        };
-        dropLeave(r);
-        switch (d) {
-            .layers => layersPanel(),
-            .styles => stylesPanel(),
-            else => {},
-        }
-    } else {
-        var fm = dvui.floatingMenu(@src(), .{ .from = drop_from, .style = .popup }, .{ .id_extra = @intFromEnum(d) });
-        defer fm.deinit();
-        dropFocus(fm.data().id);
-        dropLeave(fm.data().borderRectScale().r);
-        switch (d) {
-            .shape => shapeMenu(),
-            .tracks => tracksMenu(),
-            .array => arrayMenu(),
-            else => {},
-        }
+    var hp = hangBegin(@src(), drop_anchor.get(d).scale(dvui.windowNaturalScale(), dvui.Rect.Physical), @intFromEnum(d), true);
+    defer hp.end();
+    drop_rect = hp.rect;
+    drop_win = hp.fw.data().id;
+    dropFocus(hp.fw.data().id);
+    // It closes itself: Esc, a press outside it (its key's own press
+    // toggles it), the pointer leaving once it has been in.
+    for (dvui.events()) |*e| switch (e.evt) {
+        .key => |k| if (k.action == .down and k.code == .escape and !e.handled) {
+            e.handle(@src(), hp.fw.data());
+            drop_open = null;
+        },
+        .mouse => |m| if (m.action == .press and !hp.rect.contains(m.p) and !drop_from.scale(dvui.windowNaturalScale(), dvui.Rect.Physical).contains(m.p)) {
+            drop_open = null;
+        },
+        else => {},
+    };
+    dropLeave(hp.rect);
+    switch (d) {
+        .layers => layersPanel(),
+        .styles => stylesPanel(),
+        .shape => shapeMenu(),
+        .tracks => tracksMenu(),
+        .array => arrayMenu(),
     }
+}
+
+/// The drop's window, while it is drawn (its keyboard given back when it
+/// goes), and where the keyboard was when it opened.
+var drop_win: ?dvui.Id = null;
+var drop_focus_back: struct { widget: ?dvui.Id = null, sub: ?dvui.Id = null } = .{};
+
+/// A drop gone: the keyboard back where it was, unless something else has
+/// taken it since (a click into a pane).
+fn dropGiveBack() void {
+    const w = drop_win orelse return;
+    drop_win = null;
+    if (dvui.focusedSubwindowId() != w) return;
+    dvui.focusSubwindow(drop_focus_back.sub, null);
+    dvui.focusWidget(drop_focus_back.widget, drop_focus_back.sub, null);
+    dvui.refresh(null, @src(), null);
 }
 
 fn dropFocus(id: dvui.Id) void {
     if (!drop_focus) return;
     drop_focus = false;
     dvui.focusSubwindow(id, null);
+}
+
+// Hanging panels ----------------------------------------------------------------
+//
+// What hangs from the ribbon is drawn one way (the owner, 2026-11-27:
+// drop panels to behave consistently): a panel as dark as the panes, its
+// top under its key, as wide as its content (the window's top edge
+// stays free beside it), its left edge under the key it hangs from (moved
+// in to stay on the window), the key carried down into it by the bridge.
+// Not moved, not resized; its height follows its content. Every drop is
+// one (Layers, Text style, Add shape, Add rows, Add array: opened by the
+// ▾, the key held or the key itself, gone on Esc, a press outside or the
+// pointer leaving), and so are the sketch tools' options, which stay
+// while their tool is on.
+
+/// Where each hanging panel was (its size, from its content).
+var hang_rects: [8]dvui.Rect = @splat(.{});
+/// The sketch tools' options' slot (the drops' are their `Drop` value).
+const hang_sketch_tool = 7;
+
+const Hanging = struct {
+    fw: *dvui.FloatingWindowWidget,
+    prev_theme: dvui.Theme,
+    /// Its border rect, physical.
+    rect: dvui.Rect.Physical,
+
+    fn end(h: *Hanging) void {
+        h.fw.deinit();
+        dvui.themeSet(h.prev_theme);
+    }
+};
+
+/// A panel hanging from ribbon key `key` (physical), slot `slot`: drawn
+/// into until `end`.
+/// A floating window takes the keyboard when it first shows: a drop keeps
+/// it (`take_focus`), the sketch tools' options give it straight back (the
+/// canvas's keys go on working); a click into it takes it, as any window.
+fn hangBegin(src: std.builtin.SourceLocation, key: dvui.Rect.Physical, slot: usize, take_focus: bool) Hanging {
+    const ns = dvui.windowNaturalScale();
+    const had_sub = dvui.focusedSubwindowId();
+    const had_widget = dvui.focusedWidgetId();
+    const prev = dvui.themeGet();
+    dvui.themeSet(ghost_pane.darkTheme(prev));
+    const fill = dvui.themeGet().color(.window, .fill).opacity(0.97);
+    // Under its own key, not the whole ribbon (whose keys may run to more
+    // rows; the owner, 2026-11-27): a hair below the key, as the ribbon's
+    // border is below a key in its last row.
+    const top = (key.y + key.h) / ns + 1;
+    // Its key joined to it (drawn first: the panel covers the bridge's foot).
+    dropBridge(key, top, fill);
+    const win = dvui.windowRect();
+    const r = &hang_rects[slot];
+    r.y = top;
+    r.x = @max(0, @min(key.x / ns, win.w - r.w));
+    const fw = dvui.floatingWindow(src, .{ .rect = r, .resize = .none }, .{
+        .id_extra = slot,
+        .min_size_content = .{ .w = key.w / ns },
+        .background = true,
+        .color_fill = .{ .color = fill },
+        .border = .{ .x = 1, .w = 1, .h = 1 },
+        .color_border = .{ .color = dvui.Color.black.opacity(0.5) },
+        .corners = .{ .bl = .theme(5), .br = .theme(5) },
+        .box_shadow = null,
+    });
+    fw.autoSize();
+    if (!take_focus and dvui.focusedSubwindowId() == fw.data().id and had_sub != fw.data().id) {
+        if (dvui.firstFrame(fw.data().id)) {
+            dvui.focusSubwindow(had_sub, null);
+            dvui.focusWidget(had_widget, had_sub, null);
+        }
+    }
+    return .{ .fw = fw, .prev_theme = prev, .rect = fw.data().borderRectScale().r };
 }
 
 /// Once the pointer has been in the drop (`r`) and is away from it and
@@ -16875,7 +16924,10 @@ fn keyBadge(r: dvui.Rect.Physical, text: []const u8) void {
 /// The ribbon: under the menu bar, the window's width, the active view's
 /// tools (a canvas view's today), each with its key.
 fn ribbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbonH() }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
+    // Its keys flow into more rows when one is full (the owner, 2026-11-27):
+    // the rows of keys are the ribbon's own, not boxes of their own
+    // (`keyRow`), so they wrap key by key.
+    var bar = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbonH() }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
     defer bar.deinit();
     {
         const br = bar.data().borderRectScale();
@@ -16906,7 +16958,7 @@ fn ribbon() void {
     toolPalette();
     // The palettes, as drop panels.
     if (state.model.spaces.items.len > 0) {
-        _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 } });
+        ribbonGap(90);
         var lwd: dvui.WidgetData = undefined;
         const r = keyIconData(@src(), "Layers", icons.graven(.layers) orelse dvui.entypo.layers, &lwd, "ribbon.layers");
         drop_anchor.set(.layers, r.toNatural());
@@ -16925,7 +16977,7 @@ fn ribbon() void {
 /// shows it, in the key's fade) running into the panel's `colour`, and
 /// flaring into the panel with concave fillets at the sides, so the key and
 /// its panel read as one (a folder tab's join; the owner, 2026-11-22).
-fn dropBridge(key: dvui.Rect.Physical, colour: dvui.Color) void {
+fn dropBridge(key: dvui.Rect.Physical, panel_top: f32, colour: dvui.Color) void {
     const s = dvui.windowNaturalScale();
     // The key's foot: its lower shade tinted as an open key is, under the
     // fade's ink at its strength there.
@@ -16937,8 +16989,8 @@ fn dropBridge(key: dvui.Rect.Physical, colour: dvui.Color) void {
     const x0 = key.x + 1 * s;
     const x1 = key.x + key.w - 1 * s;
     const top = key.y + key.h - 1 * s;
-    // Across the panel's 2 logical inset below the ribbon, a hair into it.
-    const bottom = ribbon_bottom * s + 2.5 * s;
+    // Down to the panel's top (`panel_top`, logical), a hair into it.
+    const bottom = panel_top * s + 1.5 * s;
     if (bottom <= top) return;
     const f = @max(1, @min(4 * s, bottom - top));
     const at = struct {
@@ -17003,14 +17055,30 @@ fn ribbonButton(src: std.builtin.SourceLocation, comptime id: []const u8, tvg: [
     dvui.tooltip(src, .{ .active_rect = wd.borderRectScale().r }, "{s}", .{e.label}, .{ .id_extra = id_extra });
 }
 
+/// A divider between groups of keys: a key's height (in the ribbon's
+/// flow, nothing stretches it).
 fn ribbonGap(id_extra: usize) void {
-    _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 }, .id_extra = id_extra });
+    _ = dvui.separator(@src(), .{ .expand = .vertical, .min_size_content = .{ .h = ribbonPitch() - 8 }, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 }, .id_extra = id_extra });
+}
+
+/// A row of keys: in the ribbon, nothing of its own (its keys go straight
+/// into the ribbon's flow, so they wrap one by one); elsewhere a
+/// horizontal box with options `opts`.
+const KeyRow = struct {
+    box: ?*dvui.BoxWidget,
+    fn deinit(r: *KeyRow) void {
+        if (r.box) |b| b.deinit();
+    }
+};
+fn keyRow(src: std.builtin.SourceLocation, opts: dvui.Options) KeyRow {
+    if (in_ribbon) return .{ .box = null };
+    return .{ .box = dvui.box(src, .{ .dir = .horizontal }, opts) };
 }
 
 /// A legend sheet view's ribbon: its rows, its keys' names, and the canvas
 /// beside it. (No single keys: letters type into the cells.)
 fn sheetRibbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
     defer bar.deinit();
     ribbonButton(@src(), "sheet.cell.add-a-row", dvui.entypo.add_to_list, 1);
     ribbonButton(@src(), "sheet.cell.remove-this-row", dvui.entypo.circle_with_minus, 2);
@@ -17028,7 +17096,7 @@ fn sheetRibbon() void {
 /// A manufacturing view's ribbon: its plan's operations, checks and export.
 /// The buttons act on the view's plan (pressed with it as the context).
 fn planRibbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
     defer bar.deinit();
     const prev = state.context;
     defer state.context = prev;
@@ -17046,8 +17114,14 @@ fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u
     _ = comptime elements.get(id);
     // Open: tinted with its panel's colour, which the bridge carries down.
     const open = if (drop_open) |d| std.mem.eql(u8, d.id(), id) else false;
-    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (open) .{ .color = ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3) } else null });
+    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (open) .{ .color = openKeyTint() } else null });
     return wd.borderRectScale().r;
+}
+
+/// A key whose drop is open: tinted with its panel's colour, which the
+/// bridge carries down.
+fn openKeyTint() dvui.Color {
+    return ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3);
 }
 
 /// The ribbon's height, logical: its keys' and no more (the owner,
@@ -31845,16 +31919,17 @@ fn sketchPalette() void {
     // editor, its tools in the ribbon): Geometry, Constrain, Ink; Update
     // and Finish at the far right.
     const on_fill = dvui.themeGet().focus.opacity(0.35);
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 2, .w = 2 }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .expand = .horizontal, .padding = .{ .x = 2, .w = 2 }, .gravity_y = 0.5 });
     defer bar.deinit();
-    var below: dvui.Rect.Physical = undefined;
+    // The key the tool's options hang from.
+    var below: dvui.Rect.Physical = .{};
     {
         const saved_group = pushGroup("sketch.palette");
         defer popGroup(saved_group);
-        var geo = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+        var geo = keyRow(@src(), .{ .gravity_y = 0.5 });
         defer geo.deinit();
-        skPaletteKey(@src(), "Select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none, "Select: pick geometry and constraints; drag points");
-        skPaletteKey(@src(), "Construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction, "Construction: what is drawn next is construction geometry (dashed)");
+        _ = skPaletteKey(@src(), "Select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none, "Select: pick geometry and constraints; drag points");
+        _ = skPaletteKey(@src(), "Construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction, "Construction: what is drawn next is construction geometry (dashed)");
         const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Polygon", "Array" };
         const tvgs = [_][]const u8{
             icons.graven(.geo_point) orelse dvui.entypo.dot_single,
@@ -31867,9 +31942,9 @@ fn sketchPalette() void {
         };
         for (names, tvgs, 0..) |name, tvg, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
-            skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on, name);
+            const kr = skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on, name);
+            if (on) below = kr;
         }
-        below = geo.data().borderRectScale().r;
     }
     ribbonGap(1);
     sketchConstrainKeys();
@@ -31908,13 +31983,15 @@ fn sketchPalette() void {
 }
 
 /// A key of the sketch ribbon's Geometry group, tinted while on.
-fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool, tip: []const u8) void {
+fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool, tip: []const u8) dvui.Rect.Physical {
     // Its own parent, so its tooltip's ID is its own.
     var b = dvui.box(src, .{}, .{ .id_extra = id_extra, .gravity_y = 0.5 });
     defer b.deinit();
     var wd: dvui.WidgetData = undefined;
     keyIcon(@src(), name, tvg, arg, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
-    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{tip}, .{});
+    const r = wd.borderRectScale().r;
+    dvui.tooltip(@src(), .{ .active_rect = r }, "{s}", .{tip}, .{});
+    return r;
 }
 
 /// The sketch ribbon's Constrain group: a key for each kind, its single
@@ -31940,7 +32017,7 @@ fn sketchConstrainKeys() void {
         .{ .k = .angle, .name = "Angle", .key = "A", .icon = .con_angle },
         .{ .k = .fixed, .name = "Lock", .key = "L", .icon = .con_locked },
     };
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    var row = keyRow(@src(), .{ .gravity_y = 0.5 });
     defer row.deinit();
     for (kinds, 0..) |k, i| {
         var buf: [8]skl.Constraint = undefined;
@@ -31959,7 +32036,7 @@ fn sketchConstrainKeys() void {
 fn sketchInkKeys() void {
     var buf: [256]skl.pieces.Found = undefined;
     const gs = skFound(&buf);
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    var row = keyRow(@src(), .{ .gravity_y = 0.5 });
     defer row.deinit();
     skDrawingChoice();
     {
@@ -32052,33 +32129,17 @@ fn skDrawingChoice() void {
 /// The overlay below the geometry buttons for the active one: its
 /// sub-options first (M goes to the next), then the step being placed,
 /// with typed values for it.
-fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
+fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
     const saved_group = pushGroup("sketch.tool");
     defer popGroup(saved_group);
-    const ns = dvui.windowNaturalScale();
     const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
     const tools = sk_geo_tools[@intFromEnum(g)];
-    // Floating over what is below the buttons, as tall as its rows.
-    const fields: f32 = @floatFromInt(skStepFieldCount());
-    const hint_rows: f32 = if (tools.len > 1) (if (g == .line and !sk_construction) 2 else 1) else 0;
-    const counts: f32 = if (g == .array) (if (sk_tool == .polar_array) 3 else 2) else if (g == .polygon) 3 else 0;
-    const h: f32 = 20 + (if (tools.len > 1) @as(f32, 32) else 0) + hint_rows * 24 + 28 + (fields + counts) * 40;
-    var fw: dvui.FloatingWidget = undefined;
-    fw.init(@src(), .{}, .{
-        .rect = .{ .x = buttons.x / ns, .y = (buttons.y + buttons.h) / ns + 4, .w = buttons.w / ns, .h = h },
-        .background = true,
-        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
-        .border = .all(1),
-        .corners = .all(6),
-        .padding = .all(6),
-    });
-    defer fw.deinit();
-    // Clicked, it takes the keyboard (a floating widget's own fields get
-    // keys only while its subwindow has focus), as floating windows do.
-    for (dvui.events()) |*e| {
-        if (!dvui.eventMatch(e, .{ .id = fw.data().id, .r = fw.data().rectScale().r })) continue;
-        if (e.evt == .mouse and e.evt.mouse.action == .focus) dvui.focusSubwindow(fw.data().id, e.num);
-    }
+    // Hanging from the tool's key, as every drop does; it stays while the
+    // tool is on.
+    var hp = hangBegin(@src(), key, hang_sketch_tool, false);
+    defer hp.end();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 300 }, .padding = .all(6) });
+    defer body.deinit();
     if (tools.len > 1) {
         var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
         defer flex.deinit();
