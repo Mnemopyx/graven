@@ -24998,9 +24998,25 @@ fn drawCursor(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.
         // The segment, faintly, then the bar a little past its edges.
         state.view.rect(area, b).fill(.square, .{ .color = .{ .color = focus.opacity(0.06) } });
         const over = 1.0;
-        const p0: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y0 - over } else .{ .x = b.x0 - over, .y = b.y1 - pos };
-        const p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
-        speckleCaret(state.view.toPx(area, p0), state.view.toPx(area, p1));
+        var p0: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y0 - over } else .{ .x = b.x0 - over, .y = b.y1 - pos };
+        var p1: geom.Point = if (t.major == .row) .{ .x = b.x0 + pos, .y = b.y1 + over } else .{ .x = b.x1 + over, .y = b.y1 - pos };
+        // What typing here takes, shown by the caret: wider for bold,
+        // slanted (12°, about its middle) for italic.
+        const ar = dvui.currentWindow().arena();
+        const here = flowPos(c);
+        const bold = state.model.emphasisOver(ar, c.parent, c.region, here, here, .bold) catch false;
+        const italic = state.model.emphasisOver(ar, c.parent, c.region, here, here, .italic) catch false;
+        if (italic) {
+            const lean = std.math.tan(12.0 * std.math.pi / 180.0) * (if (t.major == .row) p1.y - p0.y else p1.x - p0.x) / 2;
+            if (t.major == .row) {
+                p0.x -= lean;
+                p1.x += lean;
+            } else {
+                p0.y += lean;
+                p1.y -= lean;
+            }
+        }
+        speckleCaretWide(state.view.toPx(area, p0), state.view.toPx(area, p1), if (bold) 2.5 else 1);
         markCaret(state.view.toPx(area, p0), state.view.toPx(area, p1));
         return;
     }
@@ -25052,6 +25068,11 @@ const laser: dvui.Color = .{ .r = 0xff, .g = 0x1f, .b = 0x2d };
 /// dim, a few blazing: I = −ln U), peaked across the bar, the pattern
 /// re-drawn 25 times a second so it boils as a laser spot does.
 fn speckleCaret(p0: dvui.Point.Physical, p1: dvui.Point.Physical) void {
+    speckleCaretWide(p0, p1, 1);
+}
+
+/// The caret `wide` times its usual width (a bold caret: 2.5).
+fn speckleCaretWide(p0: dvui.Point.Physical, p1: dvui.Point.Physical, wide: f32) void {
     const Index = dvui.Vertex.Index;
     animate();
     const ns: f32 = dvui.windowNaturalScale();
@@ -25062,11 +25083,11 @@ fn speckleCaret(p0: dvui.Point.Physical, p1: dvui.Point.Physical) void {
     const u: [2]f32 = .{ dx / len, dy / len };
     const nrm: [2]f32 = .{ -u[1], u[0] };
     // The core: where the caret is, always legible.
-    dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 1.2 * ns, .color = .{ .color = laser.opacity(0.55) } });
+    dvui.Path.stroke(.{ .points = &.{ p0, p1 } }, .{ .thickness = 1.2 * ns * wide, .color = .{ .color = laser.opacity(0.55) } });
     const cell: f32 = 1.3 * ns;
     const along: usize = @intFromFloat(@ceil(len / cell));
-    const across = 5;
-    const sigma: f32 = 1.4 * ns;
+    const across: usize = if (wide > 1) 9 else 5;
+    const sigma: f32 = 1.4 * ns * wide;
     // The pattern: one per 40 ms, the same within a frame.
     const tick: u64 = @intCast(@divTrunc(@max(0, platform.monotonicNs()), 40 * std.time.ns_per_ms));
     var prng = std.Random.DefaultPrng.init(tick *% 0x9E3779B97F4A7C15 +% @as(u64, @intFromFloat(@abs(p0.x) * 7 + @abs(p0.y))));
@@ -25077,7 +25098,7 @@ fn speckleCaret(p0: dvui.Point.Physical, p1: dvui.Point.Physical) void {
     defer tb.deinit(lifo);
     var k: usize = 0;
     for (0..along) |i| for (0..across) |jj| {
-        const j: f32 = @as(f32, @floatFromInt(jj)) - (across - 1) / 2.0;
+        const j: f32 = @as(f32, @floatFromInt(jj)) - @as(f32, @floatFromInt(across - 1)) / 2.0;
         const off = j * cell * 0.8;
         const env = @exp(-(off * off) / (2 * sigma * sigma));
         const intensity: f32 = -@log(1 - rnd.float(f32) * 0.999);
