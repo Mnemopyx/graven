@@ -1521,6 +1521,8 @@ test "the discovery path: a track's groups and elements, and which are shown now
 test {
     // The element registry's own tests (ids, the discovery walk).
     _ = @import("elements.zig");
+    // The glyph atlas's own tests (eviction).
+    _ = @import("glyphs.zig");
 }
 
 test "every button in the registry is an action with a handler" {
@@ -2135,6 +2137,33 @@ test "reveal: a choice in the Browser brings it into view, moving only as much a
     try r.run("view.reveal");
     try r.frames(2);
     try std.testing.expect(inside(api.contextOnScreen().?));
+}
+
+test "reveal: a manufacturing view stays when the Browser chooses what it shows, and reveals it there" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    try r.select("Plans.Plan1");
+    try r.press("plan.open-in-a-manufacturing-view");
+    try r.frames(2);
+    try std.testing.expectEqual(.manufacture, api.activeView().kind);
+    const v0 = api.activeView();
+    // Looking far off: the keys' panel, chosen in the Browser, is brought
+    // in, the zoom kept, the plan's view still the one shown.
+    api.setActiveLook(v0.cx + 3000, v0.cy, v0.ppm);
+    try r.frames(2);
+    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
+    try r.frames(3);
+    const v1 = api.activeView();
+    try std.testing.expectEqual(.manufacture, v1.kind);
+    try std.testing.expect(v1.ppm == v0.ppm);
+    try std.testing.expect(@abs(v1.cx - v0.cx) < 1000);
+    // Chosen again, already in view: nothing moves.
+    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
+    try r.frames(3);
+    const v2 = api.activeView();
+    try std.testing.expect(v2.cx == v1.cx and v2.cy == v1.cy and v2.ppm == v1.ppm);
 }
 
 test "reveal: a Browser choice brings up the view that shows it, forwarding the window's tab for it" {

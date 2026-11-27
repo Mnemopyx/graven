@@ -27,6 +27,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const display = @import("display.zig");
+const iconfile = @import("iconfile.zig");
 pub const dwell = @import("dwell.zig");
 
 pub const Edge = enum { left, right, top, bottom };
@@ -322,8 +323,14 @@ pub fn themePop(prev: dvui.Theme) void {
 pub const Open = struct {
     fw: *dvui.FloatingWindowWidget,
     prev_theme: dvui.Theme,
+    /// A bottom or top pane's row (its heading at the left), and the column
+    /// its content goes in (below the heading in a side pane).
+    row: ?*dvui.BoxWidget = null,
+    col: ?*dvui.BoxWidget = null,
 
     pub fn end(o: *Open) void {
+        if (o.col) |b| b.deinit();
+        if (o.row) |b| b.deinit();
         o.fw.deinit();
         dvui.themeSet(o.prev_theme);
         fieldsFollowTheme();
@@ -354,7 +361,77 @@ pub fn begin(p: *Pane, r: dvui.Rect, id_extra: usize) Open {
     p.rect_px = fw.data().borderRectScale().r;
     // Sliding out, it lets the pointer through.
     if (dvui.currentWindow().subwindows.get(id)) |sw| sw.mouse_events = p.interactive();
-    return .{ .fw = fw, .prev_theme = prev_theme };
+    var o: Open = .{ .fw = fw, .prev_theme = prev_theme };
+    // Its heading: its icon and name, so it is known at a glance wherever
+    // it lies. Across the top of a side pane; at the left of a bottom or
+    // top one, its content beside it.
+    switch (p.edge) {
+        .left, .right => {
+            // A floating window lays its children over each other: a box
+            // stacks the heading and the content.
+            o.col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+            heading(p, false);
+        },
+        .top, .bottom => {
+            o.row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+            heading(p, true);
+            o.col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+        },
+    }
+    return o;
+}
+
+/// A pane's icon in the icon files: "pane-" and its official name.
+pub fn iconName(p: *const Pane, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "pane-{s}", .{p.id}) catch "";
+}
+
+/// The heading's icon's side, logical pixels (before the pane's text scale).
+pub const heading_icon: f32 = 20;
+
+/// Draws pane `p`'s icon (from the icon files) filling `r`: on the dark
+/// pane (`on_dark`) in its file's dark scheme, on its lighter tab in the
+/// file's own colours; nothing if no file has it.
+pub fn drawIcon(p: *const Pane, r: dvui.Rect.Physical, on_dark: bool) void {
+    var buf: [64]u8 = undefined;
+    const name = iconName(p, &buf);
+    const white = display.fix(dvui.Color.white);
+    const c = iconfile.get(name) orelse return;
+    const scheme: iconfile.Scheme = if (on_dark) .dark else .own;
+    // The file's ink for the scheme; on the dark pane, failing that, the
+    // pane's text colour.
+    const ink = iconfile.schemeInk(c, scheme) orelse oklch(dark.text, 0.012, p.look.hue, 1);
+    _ = iconfile.drawIn(name, r, display.fix(ink), white, scheme);
+}
+
+/// Pane `p`'s heading: its icon and name, in a row across the pane's top
+/// with a line below (`beside` false), or a cell at the pane's left with a
+/// line at its right.
+fn heading(p: *const Pane, beside: bool) void {
+    const t = dvui.themeGet();
+    const k = p.text_scale;
+    const side = @round(heading_icon * k);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = if (beside) .vertical else .horizontal,
+            .padding = .{ .x = 6, .y = 3, .w = 8, .h = 3 },
+            // Beside the content, centred across the pane; above it, at
+            // the top (a centred child of a column takes its middle).
+            .gravity_y = if (beside) 0.5 else 0,
+        });
+        defer row.deinit();
+        var ic = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = side, .h = side }, .max_size_content = .size(.{ .w = side, .h = side }), .gravity_y = 0.5 });
+        drawIcon(p, ic.data().contentRectScale().r, true);
+        ic.deinit();
+        var f = dvui.Font.theme(.heading);
+        f.size = dvui.Font.theme(.body).size;
+        dvui.labelNoFmt(@src(), p.name, .{}, .{ .font = f, .gravity_y = 0.5, .padding = .{ .x = 5 }, .color_text = .{ .color = t.text.opacity(0.85) } });
+    }
+    if (beside) {
+        _ = dvui.separator(@src(), .{ .expand = .vertical, .min_size_content = .{ .w = 1 } });
+    } else {
+        _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    }
 }
 
 /// What a click on a tab asked for.
@@ -377,6 +454,12 @@ pub fn tab(p: *Pane, r: dvui.Rect, id_extra: usize) TabResult {
     });
     defer tb.deinit();
     p.tab_px = tb.data().borderRectScale().r;
+    {
+        // Its icon at the tab's start, to know the pane by while it is out.
+        const cr = tb.data().contentRectScale().r;
+        const d = @min(cr.w, cr.h);
+        if (d > 0) drawIcon(p, .{ .x = cr.x, .y = cr.y + (if (vertical) 2 * tb.data().contentRectScale().s else 0), .w = d, .h = d }, false);
+    }
     var result: TabResult = .none;
     _ = dvui.spacer(@src(), .{ .expand = if (vertical) .vertical else .horizontal });
     // A click on the tab (the hot edge) pins the pane in, shown over the

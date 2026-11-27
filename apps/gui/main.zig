@@ -660,6 +660,12 @@ pub const testing_api = struct {
         const cf = canvas_free orelse return null;
         return state.view.rect(cf.area, b);
     }
+    /// Where the active view (a manufacturing view) looks.
+    pub fn setActiveLook(cx: f64, cy: f64, ppm: f64) void {
+        vl.views[vl.active].cx = cx;
+        vl.views[vl.active].cy = cy;
+        vl.views[vl.active].ppm = ppm;
+    }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
         state.view.cy = cy;
@@ -2640,6 +2646,12 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    // GRAVEN_SHEET=1: the document's first sheet opened beside the canvas,
+    // once (for looking at sheets under a test display).
+    if (!env_sheet_opened and state.model.sheets.items.len > 0) {
+        env_sheet_opened = true;
+        if (platform.env("GRAVEN_SHEET") != null) open_texts_sheet = state.model.sheets.items[0].id;
+    }
     if (open_texts_sheet) |id| {
         open_texts_sheet = null;
         openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
@@ -2704,10 +2716,15 @@ fn frame() !dvui.App.Result {
     defer {
         const end: std.Io.Timestamp = .now(dvui.io, .awake);
         recordFrame(end.nanoseconds, frame_start.durationTo(end).nanoseconds);
-        if (frame_log) std.debug.print("frame {d:.2} ms\n", .{@as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6});
+        if (frame_log) {
+            const ms = @as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6;
+            if (atlas) |*ga| {
+                std.debug.print("frame {d:.2} ms  atlas: {d} pages ({d} emptied), {d} rasters, {d} fields ({d:.1} MB, {d} forgotten); raster {d:.1} ms, upload {d:.1} ms\n", .{ ms, ga.pages.items.len, ga.evicted_pages, ga.made_rasters, ga.fields.count(), @as(f64, @floatFromInt(ga.field_bytes)) / (1 << 20), ga.evicted_fields, @as(f64, @floatFromInt(ga.raster_ns)) / 1e6, @as(f64, @floatFromInt(ga.upload_ns)) / 1e6 });
+            } else std.debug.print("frame {d:.2} ms\n", .{ms});
+        }
     }
     // Glyph fields made since the last frame.
-    if (atlas) |*ga| _ = ga.collect();
+    if (atlas) |*ga| _ = ga.beginFrame();
     if (dump_path) |p| {
         dump_frame += 1;
         if (dump_svg.items.len > 0) {
@@ -4046,9 +4063,17 @@ fn runAction(inv: keymap.Invocation) bool {
                 .pan => "Scrolling pans; Ctrl and scrolling zooms. ",
             };
         },
-        kact("views.split-across"), kact("views.split-down"), kact("views.close"), kact("views.maximize"), kact("views.next") => {
+        kact("views.split-across"), kact("views.split-down"), kact("views.close"), kact("views.maximize"), kact("views.next"), kact("views.tab-next"), kact("views.move-tab") => {
             if (canvas_prompt) return false;
             switch (inv.action) {
+                kact("views.tab-next") => {
+                    const to = vl.tabAlong(vl.active, if (inv.arg < 0) -1 else 1);
+                    if (to != vl.active) activateView(to);
+                },
+                kact("views.move-tab") => {
+                    // After the views are drawn: they are being drawn now.
+                    tab_move_key = inv.arg == 1;
+                },
                 kact("views.split-across") => splitView(.across),
                 kact("views.split-down") => splitView(.down),
                 kact("views.close") => if (vl.open[vl.active]) closeView(vl.active),
@@ -6519,32 +6544,67 @@ fn revealContext() void {
 /// says.
 fn revealNow(b: geom.Box, area: dvui.Rect.Physical) void {
     const cf = canvas_free orelse return;
-    if (!(state.view.ppm > 0)) return;
     const free = cf.free;
-    // The clear part less the rulers (top and left) and the margin.
-    const m: f64 = reveal_margin * @min(free.w, free.h);
-    const x0: f64 = free.x + cf.rw + m;
-    const y0: f64 = free.y + cf.rw + m;
-    const x1: f64 = free.x + free.w - m;
-    const y1: f64 = free.y + free.h - m;
-    if (x1 <= x0 or y1 <= y0) return;
+    // The clear part less the rulers (top and left).
+    const clear: dvui.Rect.Physical = .{ .x = free.x + cf.rw, .y = free.y + cf.rw, .w = free.w - cf.rw, .h = free.h - cf.rw };
+    if (revealIn(&state.view, b, area, clear, @min(free.w, free.h))) dvui.refresh(null, @src(), null);
+}
+
+/// Box `b` (worksheet mm) brought inside `clear` (physical pixels, within
+/// `area`) by view `look`, less the margin (`reveal_margin` of `side`):
+/// nothing when it is inside already; else the least pan, zooming out
+/// only when it cannot fit, just enough. Whether the view moved. Shared by
+/// canvas views and manufacturing views (both look at worksheet mm).
+fn revealIn(look: *View, b: geom.Box, area: dvui.Rect.Physical, clear: dvui.Rect.Physical, side: f32) bool {
+    if (!(look.ppm > 0)) return false;
+    const m: f64 = reveal_margin * side;
+    const x0: f64 = clear.x + m;
+    const y0: f64 = clear.y + m;
+    const x1: f64 = clear.x + clear.w - m;
+    const y1: f64 = clear.y + clear.h - m;
+    if (x1 <= x0 or y1 <= y0) return false;
     // Too big at this zoom: out just enough.
     const need = @min((x1 - x0) / @max(b.width(), 1e-9), (y1 - y0) / @max(b.height(), 1e-9));
-    if (need < state.view.ppm) state.view.ppm = need;
-    const r = state.view.rect(area, b);
+    const zoomed = need < look.ppm;
+    if (zoomed) look.ppm = need;
+    const r = look.rect(area, b);
     const rx0: f64 = r.x;
     const ry0: f64 = r.y;
     const rx1: f64 = r.x + r.w;
     const ry1: f64 = r.y + r.h;
     // The least shift, in pixels, that brings it inside.
-    const sx: f64 = if (rx0 < x0) x0 - rx0 else if (rx1 > x1) x1 - rx1 else 0;
-    const sy: f64 = if (ry0 < y0) y0 - ry0 else if (ry1 > y1) y1 - ry1 else 0;
-    if (sx == 0 and sy == 0 and need >= state.view.ppm) return;
+    // Within half a pixel counts as inside (what a reveal left at the
+    // margin, rounded).
+    const sx: f64 = if (rx0 < x0 - 0.5) x0 - rx0 else if (rx1 > x1 + 0.5) x1 - rx1 else 0;
+    const sy: f64 = if (ry0 < y0 - 0.5) y0 - ry0 else if (ry1 > y1 + 0.5) y1 - ry1 else 0;
+    if (sx == 0 and sy == 0 and !zoomed) return false;
     // A fit still in force would undo it next frame.
-    state.view.fit = null;
-    state.view.cx -= sx / state.view.ppm;
-    state.view.cy += sy / state.view.ppm;
-    dvui.refresh(null, @src(), null);
+    look.fit = null;
+    look.cx -= sx / look.ppm;
+    look.cy += sy / look.ppm;
+    return true;
+}
+
+/// A reveal waiting for a manufacturing view's next frame: the view, and
+/// what (worksheet mm).
+var mfg_reveal: ?struct { view: u8, box: geom.Box } = null;
+
+/// What of context `ctx` (the context now) manufacturing view `v` shows:
+/// its box, when it lies on one of the plan's parts (a part, or what a
+/// part holds); else null.
+fn planShows(v: u8, ctx: Context) ?geom.Box {
+    const m = &state.model;
+    if (vl.views[v].kind != .manufacture) return null;
+    const pidx = m.planIndex(@enumFromInt(vl.views[v].target)) orelse return null;
+    const b = revealBox() orelse return null;
+    const sp = spaceOfContext(ctx);
+    for (m.plans.items[pidx].parts) |pt| {
+        const pi = m.panelIndex(pt.panel) orelse continue;
+        if (!std.meta.eql(spaceOfContext(.{ .panel = pi }), sp)) continue;
+        const pb = panelBox(pi);
+        if (b.x0 < pb.x1 and b.x1 > pb.x0 and b.y0 < pb.y1 and b.y1 > pb.y0) return b;
+    }
+    return null;
 }
 
 /// The space a context lives in, when it lives in one.
@@ -6578,6 +6638,12 @@ fn spaceOfContext(ctx: Context) ?usize {
 /// (a flow, a style) is revealed in the active view if that is a canvas.
 fn bringUpContext(ctx: Context) void {
     const leaf = vl.leafOf(vl.active) orelse return;
+    // A manufacturing view that shows it stays, and reveals it there.
+    if (planShows(vl.active, ctx)) |b| {
+        mfg_reveal = .{ .view = vl.active, .box = b };
+        dvui.refresh(null, @src(), null);
+        return;
+    }
     const want: ?struct { view: docviews.View, space: usize } = switch (ctx) {
         .sheet => |id| .{ .view = .{ .kind = .sheet, .target = @intFromEnum(id) }, .space = 0 },
         .plan => |id| .{ .view = .{ .kind = .manufacture, .target = @intFromEnum(id) }, .space = 0 },
@@ -7037,13 +7103,201 @@ fn viewArea() void {
         const r = box.data().contentRectScale().r;
         region_rect = .{ .x = r.x / ns, .y = r.y / ns + tab_strip_h, .w = r.w / ns, .h = @max(0, r.h / ns - tab_strip_h) };
     }
+    tab_hit_n = 0;
+    leaf_drawn = @splat(false);
     if (vl.maximized != docviews.none) {
         if (vl.leafOf(vl.maximized)) |leaf| viewLeaf(leaf, vl.maximized);
     } else viewNode(vl.root);
+    tabDrag();
+    if (tab_move_key) |back| {
+        tab_move_key = null;
+        const v = vl.active;
+        if (vl.moveToNextWindow(v, back)) movedView(v);
+        dvui.refresh(null, @src(), null);
+    }
     if (view_to_activate) |v| {
         view_to_activate = null;
         if (v < docviews.max_views and vl.open[v]) activateView(v);
     }
+}
+
+/// A tab as drawn this frame: its view, its window (a leaf), where.
+const TabHit = struct { view: u8, leaf: u8, r: dvui.Rect.Physical };
+var tab_hits: [docviews.max_views]TabHit = undefined;
+var tab_hit_n: usize = 0;
+/// Each window drawn this frame: its tab strip and its body.
+var leaf_drawn: [docviews.max_nodes]bool = @splat(false);
+var leaf_strip: [docviews.max_nodes]dvui.Rect.Physical = @splat(.{});
+var leaf_body: [docviews.max_nodes]dvui.Rect.Physical = @splat(.{});
+
+fn tabHit(v: u8, leaf: u8, r: dvui.Rect.Physical) void {
+    if (tab_hit_n == tab_hits.len) return;
+    tab_hits[tab_hit_n] = .{ .view = v, .leaf = leaf, .r = r };
+    tab_hit_n += 1;
+}
+
+/// A tab pressed, and once it has moved far enough, dragged: its view,
+/// where the press was, where the pointer is.
+var tab_drag: struct { view: u8 = docviews.none, start: dvui.Point.Physical = .{}, at: dvui.Point.Physical = .{}, moving: bool = false } = .{};
+
+/// Where a dragged tab would go: among a window's tabs (before `before`,
+/// or last), or to one side of a window, splitting it.
+const TabDrop = union(enum) {
+    tabs: struct { leaf: u8, before: u8 },
+    side: struct { leaf: u8, dir: docviews.Dir, first: bool },
+
+    fn leafOf(d: TabDrop) u8 {
+        return switch (d) {
+            inline else => |x| x.leaf,
+        };
+    }
+};
+
+/// The drop for a tab let go at `p`: over a strip, among its tabs; over
+/// a window's body, its outer quarter by the nearest edge a split, its
+/// middle among its tabs. Null outside every window, and where nothing
+/// would change.
+fn tabDropAt(p: dvui.Point.Physical, v: u8) ?TabDrop {
+    const src = vl.leafOf(v) orelse return null;
+    for (0..docviews.max_nodes) |k| {
+        if (!leaf_drawn[k]) continue;
+        const leaf: u8 = @intCast(k);
+        if (leaf_strip[k].contains(p)) {
+            var before: u8 = docviews.none;
+            for (tab_hits[0..tab_hit_n]) |h| if (h.leaf == leaf and h.r.contains(p)) {
+                before = h.view;
+            };
+            if (before == v) return null;
+            return .{ .tabs = .{ .leaf = leaf, .before = before } };
+        }
+        const b = leaf_body[k];
+        if (!b.contains(p) or b.w <= 0 or b.h <= 0) continue;
+        const fx = (p.x - b.x) / b.w;
+        const fy = (p.y - b.y) / b.h;
+        const edge = @min(@min(fx, 1 - fx), @min(fy, 1 - fy));
+        if (edge < 0.25 and !(leaf == src and vl.nodes[leaf].tab_count == 1)) {
+            if (edge == fx) return .{ .side = .{ .leaf = leaf, .dir = .across, .first = true } };
+            if (edge == 1 - fx) return .{ .side = .{ .leaf = leaf, .dir = .across, .first = false } };
+            if (edge == fy) return .{ .side = .{ .leaf = leaf, .dir = .down, .first = true } };
+            return .{ .side = .{ .leaf = leaf, .dir = .down, .first = false } };
+        }
+        if (leaf == src) return null;
+        return .{ .tabs = .{ .leaf = leaf, .before = docviews.none } };
+    }
+    return null;
+}
+
+/// Where a drop would land, to show it: a window's body, or its half.
+fn tabDropRect(d: TabDrop) dvui.Rect.Physical {
+    const k = d.leafOf();
+    const b = leaf_body[k];
+    return switch (d) {
+        .tabs => |t| blk: {
+            // Over the strip: a bar where the tab goes.
+            const s = dvui.windowNaturalScale();
+            const st = leaf_strip[k];
+            if (t.before != docviews.none) for (tab_hits[0..tab_hit_n]) |h| if (h.view == t.before) break :blk .{ .x = h.r.x - 2 * s, .y = st.y, .w = 3 * s, .h = st.h };
+            if (leaf_strip[k].contains(tab_drag.at)) {
+                var right = st.x;
+                for (tab_hits[0..tab_hit_n]) |h| if (h.leaf == k) {
+                    right = @max(right, h.r.x + h.r.w);
+                };
+                break :blk .{ .x = right + 2 * s, .y = st.y, .w = 3 * s, .h = st.h };
+            }
+            break :blk b;
+        },
+        .side => |sd| if (sd.dir == .across)
+            .{ .x = if (sd.first) b.x else b.x + b.w / 2, .y = b.y, .w = b.w / 2, .h = b.h }
+        else
+            .{ .x = b.x, .y = if (sd.first) b.y else b.y + b.h / 2, .w = b.w, .h = b.h / 2 },
+    };
+}
+
+/// Moves view `v` as drop `d` says, and makes it active.
+fn dropTab(v: u8, d: TabDrop) void {
+    const at = vl.currentOf(d.leafOf());
+    const moved = switch (d) {
+        .tabs => |t| vl.moveTab(v, at, t.before),
+        .side => |sd| vl.moveToSplit(v, at, sd.dir, sd.first),
+    };
+    if (moved) movedView(v);
+}
+
+/// After view `v` has moved to another window: kept (no longer a
+/// preview), active, and the keys its (the canvas's widget is made anew
+/// there, so focused when next drawn).
+fn movedView(v: u8) void {
+    view_preview[v] = false;
+    activateView(v);
+    if (vl.views[v].kind == .canvas) canvas_focus_next = true else dvui.focusWidget(null, null, null);
+}
+
+/// The canvas takes the keys when next drawn.
+var canvas_focus_next = false;
+/// The active view's tab to go to the next window (false) or the one
+/// before (true), once the views are drawn (Shift+] and Shift+[).
+var tab_move_key: ?bool = null;
+
+/// A tab dragged: pressed on its label and moved, to another window's
+/// tabs, or to a window's side to split it there (Escape: left where it
+/// was). Drawn over the views: where it would go, and the tab's name by
+/// the pointer.
+fn tabDrag() void {
+    const s = dvui.windowNaturalScale();
+    for (dvui.events()) |*e| switch (e.evt) {
+        .mouse => |m| switch (m.action) {
+            .press => if (m.button.pointer()) {
+                tab_drag = .{};
+                for (tab_hits[0..tab_hit_n]) |h| if (h.r.contains(m.p)) {
+                    tab_drag = .{ .view = h.view, .start = m.p, .at = m.p };
+                };
+            },
+            .motion => if (tab_drag.view != docviews.none) {
+                tab_drag.at = m.p;
+                if (!tab_drag.moving and @abs(m.p.x - tab_drag.start.x) + @abs(m.p.y - tab_drag.start.y) > 6 * s) tab_drag.moving = true;
+            },
+            .release => if (m.button.pointer() and tab_drag.view != docviews.none) {
+                const v = tab_drag.view;
+                const was_moving = tab_drag.moving;
+                tab_drag = .{};
+                if (was_moving and v < docviews.max_views and vl.open[v]) {
+                    if (tabDropAt(m.p, v)) |d| dropTab(v, d);
+                    e.handle(@src(), dvui.currentWindow().data());
+                }
+            },
+            else => {},
+        },
+        .key => |ke| if (tab_drag.moving and ke.code == .escape and ke.action == .down) {
+            tab_drag = .{};
+            e.handle(@src(), dvui.currentWindow().data());
+        },
+        else => {},
+    };
+    if (!tab_drag.moving) return;
+    const v = tab_drag.view;
+    if (v >= docviews.max_views or !vl.open[v]) {
+        tab_drag = .{};
+        return;
+    }
+    dvui.cursorSet(.hand);
+    const prev_clip = dvui.clipGet();
+    dvui.clipSet(dvui.windowRectPixels());
+    defer dvui.clipSet(prev_clip);
+    if (tabDropAt(tab_drag.at, v)) |d| {
+        const r = tabDropRect(d);
+        r.fill(.all(3 * s), .{ .color = .{ .color = colors.select.opacity(0.18) } });
+        r.stroke(.all(3 * s), .{ .thickness = 1.5 * s, .color = .{ .color = colors.select.opacity(0.8) } });
+    }
+    // The tab's name by the pointer.
+    var lb: [96]u8 = undefined;
+    const label = viewLabel(&lb, v);
+    const font = dvui.Font.theme(.body).larger(-2);
+    const size = font.textSize(label);
+    const box: dvui.Rect.Physical = .{ .x = tab_drag.at.x + 12 * s, .y = tab_drag.at.y + 8 * s, .w = (size.w + 12) * s, .h = (size.h + 6) * s };
+    box.fill(.all(4 * s), .{ .color = .{ .color = colors.titlebar.opacity(0.95) } });
+    box.stroke(.all(4 * s), .{ .thickness = s, .color = .{ .color = colors.edge.opacity(0.6) } });
+    dvui.renderText(.{ .font = font, .text = label, .rs = .{ .r = box, .s = s }, .p = .{ .x = box.x + 6 * s, .y = box.y + 3 * s }, .color = dvui.themeGet().color(.window, .text) }) catch {};
+    dvui.refresh(null, @src(), null);
 }
 
 fn viewNode(n: u8) void {
@@ -7280,6 +7534,8 @@ fn viewLeaf(leaf: u8, shown: u8) void {
         var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = tab_strip_h - 1 }, .max_size_content = .{ .w = dvui.max_float_safe, .h = tab_strip_h - 1 }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) } });
         defer strip.deinit();
         const n = vl.nodes[leaf];
+        leaf_strip[leaf] = strip.data().borderRectScale().r;
+        leaf_drawn[leaf] = true;
         const at_left = strip.data().rect.x <= 0.5 and @abs(strip.data().borderRectScale().r.x / dvui.windowNaturalScale() - region_rect.x) < 1;
         const tab_font = dvui.Font.theme(.body).larger(-2);
         // The window's tab shown, a folder's tab joined to its view: its
@@ -7292,6 +7548,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             });
             defer tab.deinit();
             if (vl.open[shown]) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[shown].kind);
+            tabHit(shown, leaf, tab.data().borderRectScale().r);
             var lb: [96]u8 = undefined;
             const label = if (vl.open[shown]) viewLabel(&lb, shown) else "";
             // Room for descenders: no margin, a little padding below.
@@ -7314,7 +7571,10 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             var lb: [96]u8 = undefined;
             const label = viewLabel(&lb, v);
             const f = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font;
-            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = f, .id_extra = k, .gravity_y = 0.5, .margin = .{ .x = 6 }, .padding = .{ .x = 2, .w = 2, .y = 1, .h = 3 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } })) {
+            var other = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .gravity_y = 0.5, .margin = .{ .x = 6 } });
+            defer other.deinit();
+            tabHit(v, leaf, other.data().borderRectScale().r);
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = f, .id_extra = k, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 1, .h = 3 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } })) {
                 if (v != vl.active) view_to_activate = v else vl.select(v);
             }
         }
@@ -7322,6 +7582,11 @@ fn viewLeaf(leaf: u8, shown: u8) void {
         stripIcon(@src(), .square_split_horizontal, "views.split-across", "Split (Alt: stacked)", @as(i32, shown) + 1, leaf, null);
     }
     if (tab_add_leaf == leaf) tabAddPopup(leaf);
+    {
+        const whole = col.data().borderRectScale().r;
+        const top = leaf_strip[leaf].y + leaf_strip[leaf].h;
+        leaf_body[leaf] = .{ .x = whole.x, .y = top, .w = whole.w, .h = @max(0, whole.y + whole.h - top) };
+    }
     if (!vl.open[shown]) return;
     switch (vl.views[shown].kind) {
         .canvas => canvasView(shown),
@@ -7703,6 +7968,14 @@ var sheet_focus_for: u64 = 0;
 /// The selected cell's editor, as last drawn: the sheet's keys act while
 /// it has the keyboard.
 var sheet_editor_id: ?dvui.Id = null;
+/// Whether GRAVEN_SHEET has been looked at (see `frame`).
+var env_sheet_opened = false;
+/// Whether the selected cell is in edit mode (its markup in an editor)
+/// rather than display mode (the glyphics it sets).
+var sheet_editing: bool = false;
+/// `sheet_focus_for`'s value once the sheet itself has the keyboard
+/// (display mode).
+const sheet_display_focus: u64 = std.math.maxInt(u64);
 /// A name being typed, kept until done.
 var sheet_name_edit: ?struct { sheet: layout.model.ObjectId, row: usize, text: [128]u8 = undefined, len: usize = 0 } = null;
 
@@ -7746,6 +8019,7 @@ fn sheetMove(dir: i32) void {
     const rows = sh.rows.items.len;
     const cols = sh.columns.items.len + 1;
     if (rows == 0) return;
+    if (sheet_editing) sheetEdit(false);
     commitSheetName();
     switch (dir) {
         0 => if (sheet_sel.row > 0) {
@@ -7796,7 +8070,10 @@ fn sheetView(v: u8) void {
     const si = state.model.sheetIndex(id) orelse return;
     const active = v == vl.active;
     if (!active) sheet_focus_for = 0;
-    if (sheet_sel.sheet != id) sheet_sel = .{ .sheet = id };
+    if (sheet_sel.sheet != id) {
+        sheet_sel = .{ .sheet = id };
+        sheet_editing = false;
+    }
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper }, .id_extra = v });
     defer box.deinit();
     // A press activates it (cells take their own clicks too).
@@ -7824,16 +8101,49 @@ fn sheetView(v: u8) void {
             }
         }
     }
-    // Its keys: the moves between cells, while its cell has the keyboard
-    // (not a dialog's field, a menu or a pane's).
-    const editing = if (sheet_editor_id) |eid| dvui.focusedWidgetId() == eid else false;
-    if (active and editing) for (dvui.events()) |*e| {
-        const inv = keymap.match1(e, kmode("sheet")) orelse continue;
+    // Its keys, while it or its cell's editor has the keyboard (not a
+    // dialog's field, a menu or a pane's). Showing (mode `sheet`): the
+    // moves between cells; Enter or F2 edits the cell, and typing edits it
+    // anew with what is typed. Editing (`sheet.edit`): the moves (which
+    // end the edit) and Escape, which ends it where it is.
+    const focused = dvui.focusedWidgetId();
+    const in_editor = if (sheet_editor_id) |eid| focused == eid else false;
+    const on_sheet = focused == box.data().id;
+    if (active and !sheet_editing and sheet_focus_for != sheet_display_focus) {
+        // The keyboard, once (not every frame, which would take it from
+        // a menu or a field elsewhere).
+        sheet_focus_for = sheet_display_focus;
+        dvui.focusWidget(box.data().id, null, null);
+    }
+    if (active and on_sheet and !sheet_editing) {
+        const rs = box.data().contentRectScale();
+        dvui.wantTextInput(rs.r.toNatural());
+    }
+    if (active and (in_editor or on_sheet)) for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        if (on_sheet and !sheet_editing and e.evt == .text and e.target_widgetId == box.data().id) {
+            switch (e.evt.text.action) {
+                .value => |tv| if (tv.txt.len > 0) {
+                    e.handle(@src(), box.data());
+                    sheetEditWith(tv.txt);
+                    dvui.refresh(null, @src(), box.data().id);
+                },
+                else => {},
+            }
+            continue;
+        }
+        const inv = keymap.match1(e, if (sheet_editing) kmode("sheet.edit") else kmode("sheet")) orelse continue;
         if (inv.action == kact("sheet.move")) {
             e.handle(@src(), box.data());
             sheetMove(inv.arg);
-            dvui.refresh(null, @src(), box.data().id);
-        }
+        } else if (inv.action == kact("sheet.edit")) {
+            e.handle(@src(), box.data());
+            sheetEdit(true);
+        } else if (inv.action == kact("sheet.edit.leave")) {
+            e.handle(@src(), box.data());
+            sheetEdit(false);
+        } else continue;
+        dvui.refresh(null, @src(), box.data().id);
     };
     var bad_rows: std.ArrayList(usize) = .empty;
     var bad_cols: std.ArrayList(usize) = .empty;
@@ -7857,6 +8167,10 @@ fn sheetView(v: u8) void {
     }
     var scroll = dvui.scrollArea(@src(), .{ .horizontal = .auto }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
+    // A row as tall as a cell's editor (its line, padding, border and
+    // margin), so a cell takes the same room in either mode.
+    const row_h: f32 = cell_font.lineHeight() + 14;
+    const ink_text = dvui.themeGet().color(.content, .text);
     for (sh.rows.items, 0..) |row, r| {
         const sel_row = r == sheet_sel.row;
         const missing = std.mem.indexOfScalar(usize, bad_rows.items, r) != null;
@@ -7866,18 +8180,19 @@ fn sheetView(v: u8) void {
             const w = if (c == 0) sheet_name_w else sheet_col_w;
             const text = if (c == 0) row.key else if (c - 1 < row.cells.items.len) row.cells.items[c - 1] else "";
             const selected = active and sel_row and c == sheet_sel.col;
-            if (selected) {
-                // Edited where it is.
+            if (selected and sheet_editing) {
+                // Edit mode: its markup, edited where it is.
                 var te = dvui.textEntry(@src(), .{ .text_initial = if (c == 0 and sheet_name_edit != null) sheet_name_edit.?.text[0..sheet_name_edit.?.len] else text }, .{ .min_size_content = .{ .w = w - 8 }, .max_size_content = .width(w - 8), .font = cell_font, .id_extra = (r << 8) + c, .margin = .all(1) });
                 defer te.deinit();
                 sheet_editor_id = te.data().id;
-                // The keyboard, once: when the cell is newly selected or
-                // the sheet becomes active (not every frame, which would
-                // take it from a menu or a field elsewhere).
+                // The keyboard, once: when the edit starts (not every
+                // frame, which would take it from a menu or a field
+                // elsewhere), the caret at the end.
                 const here = (@as(u64, r) << 16) | c | (@as(u64, @intFromEnum(id)) << 32);
                 if (sheet_focus_for != here) {
                     sheet_focus_for = here;
                     dvui.focusWidget(te.data().id, null, null);
+                    te.textLayout.selection.moveCursor(te.len, false);
                 }
                 const now = te.textGet();
                 if (c == 0) {
@@ -7887,7 +8202,6 @@ fn sheetView(v: u8) void {
                         @memcpy(ne.text[0..ne.len], now[0..ne.len]);
                         sheet_name_edit = ne;
                     }
-                    if (te.enter_pressed) commitSheetName();
                 } else if (te.text_changed) {
                     // Typed here: the cell takes it.
                     if (!std.mem.eql(u8, now, text)) _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), r, c }), .setSheetCell, .{ id, r, c, now }) catch {};
@@ -7897,30 +8211,129 @@ fn sheetView(v: u8) void {
                     // it, rather than writing its old text back over it.
                     te.textSet(text, false);
                 }
-            } else {
-                const ink: ?dvui.Color = if (c == 0 and missing) colors.overflow else null;
-                if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
-                    .min_size_content = .{ .w = w },
-                    .max_size_content = .width(w),
-                    .font = cell_font,
-                    .padding = .{ .x = 6, .y = 4, .h = 4 },
-                    .color_text = if (ink) |k| .{ .color = k } else null,
-                    // The row's highlight shows through; the name column
-                    // a shade apart.
-                    .background = true,
-                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
-                    .border = .{ .x = if (c == 0) 0 else 1 },
-                    .color_border = .{ .color = colors.edge.opacity(0.15) },
-                    .id_extra = (r << 8) + c,
-                })) {
+                continue;
+            }
+            // Display mode: names as text, cells as the glyphics they set
+            // (by the canvas's text path, in the style of what shows them).
+            const ink: dvui.Color = if (c == 0 and missing) colors.overflow else ink_text;
+            var cell = dvui.box(@src(), .{}, .{
+                .min_size_content = .{ .w = w, .h = row_h },
+                .max_size_content = .{ .w = w, .h = row_h },
+                .padding = .{ .x = 6 },
+                // The row's highlight shows through; the name column a
+                // shade apart; the selected cell ringed.
+                .background = true,
+                .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
+                .border = if (selected) .all(1) else .{ .x = if (c == 0) 0 else 1 },
+                .color_border = .{ .color = if (selected) dvui.themeGet().focus else colors.edge.opacity(0.15) },
+                .id_extra = (r << 8) + c,
+            });
+            defer cell.deinit();
+            const rs = cell.data().contentRectScale();
+            if (c == 0 or !drawCellMarkup(rs.r, 0, cell_font.lineHeight() * 0.55 * rs.s, sheetCellStyle(si, r, c), text, ink)) {
+                dvui.labelNoFmt(@src(), text, .{}, .{ .font = cell_font, .gravity_y = 0.5, .padding = .{}, .color_text = .{ .color = ink } });
+            }
+            for (dvui.events()) |*e| {
+                if (!dvui.eventMatchSimple(e, cell.data())) continue;
+                if (e.evt != .mouse or e.evt.mouse.action != .press or !e.evt.mouse.button.pointer()) continue;
+                e.handle(@src(), cell.data());
+                // A click on the selected cell edits it; elsewhere, selects.
+                if (selected) {
+                    sheetEdit(true);
+                } else {
                     commitSheetName();
+                    sheet_editing = false;
                     sheet_sel = .{ .sheet = id, .row = r, .col = c };
+                    sheet_focus_for = 0;
                     sheetSelectKey(si);
-                    view_to_activate = v;
                 }
+                view_to_activate = v;
+                dvui.refresh(null, @src(), cell.data().id);
             }
         }
     }
+}
+
+/// The text style cell `col` of row `row` of sheet `si` is shown in: that
+/// of the slot it fills on its key (a legend sheet), or of the caption or
+/// track the row holds the text of (a text sheet); `.none` (the first
+/// style) when nothing says.
+fn sheetCellStyle(si: usize, row: usize, col: usize) layout.model.StyleId {
+    const m = &state.model;
+    const sh = m.sheets.items[si];
+    const link = sheetRowLink(si, row) orelse return .none;
+    if (sh.texts) {
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (sc.id == link) return sc.style;
+        if (m.trackWithId(link)) |t| return m.regionsIn(t.parent)[t.region].style orelse .none;
+        return .none;
+    }
+    if (col == 0 or col > sh.columns.items.len) return .none;
+    if (m.tileIndex(link) == null) return .none;
+    const slot = sh.columns.items[col - 1];
+    var near: std.ArrayList(TileId) = .empty;
+    m.companions(dvui.currentWindow().arena(), link, &near) catch return .none;
+    for (near.items) |t| if (m.tileTrackNamed(t, slot)) |track| {
+        for (m.prototypeOf(t).tracks) |tt| if (tt.id == track) return tt.style;
+    };
+    return .none;
+}
+
+/// Draws legend markup `markup` in style `style` as the canvas does (the
+/// same renders, the same glyph atlas), on one line in `rect`: its cap
+/// height `cap_px` (that of the interface's text beside it; less, if
+/// its lines would not fit the height), `pad`
+/// in from the left, centred up and down, clipped to it. False when it
+/// cannot be set (no usable style, markup that does not parse), so the
+/// caller shows the markup as text.
+fn drawCellMarkup(rect: dvui.Rect.Physical, pad: f32, cap_px: f32, style: layout.model.StyleId, markup: []const u8, ink: dvui.Color) bool {
+    if (markup.len == 0) return true;
+    if (!(rect.h > 2 and rect.w > 0)) return true;
+    const labels = if (state.labels) |*l| l else return false;
+    const st = labels.context(style) orelse return false;
+    const r = (labels.line(style, markup) catch return false) orelse return false;
+    if (!(st.cap_height > 0)) return false;
+    var s: f64 = cap_px / st.cap_height;
+    const d = r.design;
+    const dh = d.y1 - d.y0;
+    const room: f64 = rect.h - 2;
+    if (dh > 0 and dh * s > room) s = room / dh;
+    const fr: PxFrame = .{ .ox = rect.x + pad - d.x0 * s, .oy = rect.y + rect.h / 2 + (d.y0 + d.y1) / 2 * s, .s = s };
+    const prev_clip = dvui.clip(rect);
+    defer dvui.clipSet(prev_clip);
+    const from_atlas = drawRenderGlyphs(rect, r, fr, ink);
+    const pieces = state.flat.getWith(r, faceTable(), from_atlas) catch return from_atlas;
+    for (pieces) |piece| {
+        const color: dvui.Color = switch (piece.kind) {
+            .ink => ink,
+            .faint => ink.opacity(0.35),
+            .placeholder => colors.select.opacity(0.7),
+        };
+        fillRegionIn(piece.region, fr, .{ .flat = color });
+    }
+    return true;
+}
+
+/// Starts (`on`) or ends the selected cell's edit mode, where its markup
+/// is typed; ending it keeps what was typed (each change went to the
+/// sheet as it was typed) and gives the name column's name to its key.
+fn sheetEdit(on: bool) void {
+    if (!on) commitSheetName();
+    sheet_editing = on;
+    sheet_focus_for = 0;
+}
+
+/// Typing on a shown cell: it is edited anew, with what was typed.
+fn sheetEditWith(typed: []const u8) void {
+    const id = sheet_sel.sheet;
+    if (sheet_sel.col == 0) {
+        var ne: @TypeOf(sheet_name_edit.?) = .{ .sheet = id, .row = sheet_sel.row };
+        ne.len = @min(typed.len, ne.text.len);
+        @memcpy(ne.text[0..ne.len], typed[0..ne.len]);
+        sheet_name_edit = ne;
+    } else {
+        _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), sheet_sel.row, sheet_sel.col }), .setSheetCell, .{ id, sheet_sel.row, sheet_sel.col, typed }) catch {};
+    }
+    sheetEdit(true);
 }
 
 /// The properties while a sheet view is active: the sheet, the selected
@@ -8860,19 +9273,47 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
 /// glyph atlas. False (nothing drawn) when one is too large to raster, so
 /// the caller draws the label from its outlines.
 fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.Point, ink: dvui.Color) bool {
+    return drawRenderGlyphs(area, r, PxFrame.ofView(area, at), ink);
+}
+
+/// Where a render's mm go on screen: x right and y up from a pixel origin,
+/// `s` pixels a mm. The canvas's view is one (with a label's place folded
+/// in); a sheet's cell is another, so both draw text by the same path.
+const PxFrame = struct {
+    ox: f64,
+    oy: f64,
+    s: f64,
+
+    /// Canvas view `state.view` in `area`, offset to worksheet point `at`.
+    fn ofView(area: dvui.Rect.Physical, at: geom.Point) PxFrame {
+        const v = state.view;
+        return .{
+            .ox = area.x + area.w / 2 + (at.x - v.cx) * v.ppm,
+            .oy = area.y + area.h / 2 - (at.y - v.cy) * v.ppm,
+            .s = v.ppm,
+        };
+    }
+
+    fn px(f: PxFrame, p: geom.Point) dvui.Point.Physical {
+        return .{ .x = @floatCast(f.ox + p.x * f.s), .y = @floatCast(f.oy - p.y * f.s) };
+    }
+};
+
+/// Draws the glyphs of render `r` through frame `fr` from the glyph atlas,
+/// skipping those outside `area`. False (nothing drawn) when one is too
+/// large to raster, so the caller draws it from its outlines.
+fn drawRenderGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, fr: PxFrame, ink: dvui.Color) bool {
     const faces = faceTable();
     const lifo = dvui.currentWindow().lifo();
     const ga = glyphAtlas();
     var quads: std.ArrayList(glyphs.Quad) = .empty;
     defer quads.deinit(lifo);
-    const ppm: f64 = state.view.ppm;
+    const ppm: f64 = fr.s;
     const Map = struct {
         m: geom.Affine,
-        at: geom.Point,
-        area: dvui.Rect.Physical,
+        fr: PxFrame,
         pub fn map(self: @This(), q: geom.Point) dvui.Point.Physical {
-            const p = self.m.apply(q);
-            return state.view.toPx(self.area, .{ .x = p.x + self.at.x, .y = p.y + self.at.y });
+            return self.fr.px(self.m.apply(q));
         }
     };
     for (r.items) |item| {
@@ -8886,7 +9327,7 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.P
         // mm per font unit (the transform's scale, rotation aside).
         const mm = @sqrt(@abs(m.a * m.d - m.b * m.c));
         if (!(mm > 0)) continue;
-        const map: Map = .{ .m = m, .at = at, .area = area };
+        const map: Map = .{ .m = m, .fr = fr };
         // Off the canvas: nothing to draw, and no field or raster made for it.
         {
             const ob = (face.outline(g.gid) catch return false).bounds();
@@ -8937,6 +9378,11 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.P
 /// they are, then a band one pixel wide fading out past each loop, for
 /// antialiasing.
 fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point, paint: Paint) void {
+    fillRegionIn(region, PxFrame.ofView(area, at), paint);
+}
+
+/// Fills a resolved region through frame `fr` (see `fillRegion`).
+fn fillRegionIn(region: geom.fill.Region, fr: PxFrame, paint: Paint) void {
     const lifo = dvui.currentWindow().lifo();
     const Index = dvui.Vertex.Index;
     // Vertex indices may be 16-bit: the triangles go in batches.
@@ -8948,7 +9394,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         defer b.deinit(lifo);
         for (tris, 0..) |t, k| {
             var v: [3]dvui.Point.Physical = undefined;
-            for (t, &v) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+            for (t, &v) |q, *out| out.* = fr.px(q);
             for (v, t) |pos, q| b.appendVertex(.{ .pos = pos, .col = paint.at(q) });
             const i: Index = @intCast(3 * k);
             b.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
@@ -8962,7 +9408,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         defer b.deinit(lifo);
         const pts = lifo.alloc(dvui.Point.Physical, n) catch return;
         defer lifo.free(pts);
-        for (loop, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+        for (loop, pts) |q, *out| out.* = fr.px(q);
         for (pts, 0..) |p, i| {
             // Loops keep the filled side on their left, so outward is to
             // the right of each edge.
@@ -11649,6 +12095,10 @@ fn manufactureView(v: u8) void {
         look.ppm = 0.9 * @min(area.w / @max(b.width(), 1), area.h / @max(b.height(), 1));
     }
     const cam = &cams[v];
+    if (mfg_reveal) |rv| if (rv.view == v) {
+        mfg_reveal = null;
+        if (!cam.on) _ = revealIn(&look, rv.box, area, area, @min(area.w, area.h));
+    };
     for (dvui.events()) |*e| {
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
@@ -13014,6 +13464,7 @@ fn updateModeStack() void {
         push(&st, &n, kmode("start"));
     } else if (activeKind() == .sheet) {
         push(&st, &n, kmode("sheet"));
+        if (sheet_editing) push(&st, &n, kmode("sheet.edit"));
     } else if (sketch_edit != null) {
         push(&st, &n, kmode("sketch"));
         push(&st, &n, kmode("view"));
@@ -13290,6 +13741,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
     const drawing = state.tool != .select;
     canvas_id = box.data().id;
+    if (canvas_focus_next) {
+        canvas_focus_next = false;
+        dvui.focusWidget(box.data().id, null, null);
+    }
     validateCursor();
     followLeading();
     for (dvui.events()) |*e| {

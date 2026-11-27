@@ -79,7 +79,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 | `GRAVEN_EXACT_TEXT=1` | text from outlines instead of the glyph atlas |
 | `GRAVEN_TEXT_GAMMA`, `GRAVEN_TEXT_DARKEN` | display gamma (2.2), stem darkening (0) |
 | `GRAVEN_FIELDS_INLINE=1` | glyph fields made on the drawing thread |
-| `GRAVEN_FRAME_LOG=1` | each frame's time printed |
+| `GRAVEN_FRAME_LOG=1` | each frame's time printed, with the glyph atlas's counts and its rastering and upload times |
 | `GRAVEN_DUMP_OUTLINES=file.svg` | exact glyph outlines in window pixels, for `scripts/text-overlay.py` |
 | `GRAVEN_FONTS_WINDOW=1` | the Fonts window opens at start |
 | `GRAVEN_DISPLAY=gamma,white` | display correction for the run (e.g. `1.5,0.85`) |
@@ -87,6 +87,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 | `GRAVEN_KEY_LOG=1` | each action a key asks for printed, with the active modes |
 | `GRAVEN_DRAWN_SPARK=1` | a point standing in for the pointer is drawn on the canvas (25 frames a second), not made the animated cursor |
 | `GRAVEN_SKETCH_EDIT=1` | with `GRAVEN_SAMPLE=sketch-panel`: its sketch opened in the editor, in its own space (tag visibility, Ink only: W) |
+| `GRAVEN_SHEET=1` | the document's first sheet opened beside the canvas (e.g. with `GRAVEN_SAMPLE=hp15c`) |
 | `GRAVEN_FIGURE=file.svg` | that SVG drawing imported as a figure at start (File, Import figure), made the context |
 
 `graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.
