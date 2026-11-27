@@ -1238,6 +1238,47 @@ fn typeInto(r: *Run, tag: []const u8, text: []const u8) !void {
     try r.frames(2);
 }
 
+test "the log: what is said collects, a repeat counted; the checks' counts noted as they change; Clear empties it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.frames(3);
+    const before = api.logEntries().len;
+    // Nothing to undo, twice: one message, counted twice.
+    try r.key(.z, .lcontrol);
+    try r.frames(2);
+    try r.key(.z, .lcontrol);
+    try r.frames(2);
+    var e = api.logEntries();
+    try std.testing.expectEqual(before + 1, e.len);
+    try std.testing.expectEqualStrings("Nothing to undo.", e[e.len - 1].text);
+    try std.testing.expectEqual(@as(u32, 2), e[e.len - 1].count);
+    // A panel with a track, then the panel made narrower than its track:
+    // the track reaches past its outline, a warning in the log.
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("tool.add-panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    try r.press("tool.layout-single-track");
+    try r.drag(try screen(.{ 15, 20 }), try screen(.{ 75, 21 }));
+    try r.frames(3);
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    try r.field("panel.width", "30");
+    try r.frames(4);
+    e = api.logEntries();
+    var warned = false;
+    for (e) |x| if (x.level == .warning and std.mem.indexOf(u8, x.text, "past their panel's outline") != null) {
+        warned = true;
+    };
+    if (!warned) for (e) |x| std.debug.print("log: {s} {s}\n", .{ @tagName(x.level), x.text });
+    try std.testing.expect(warned);
+    api.showLog(true);
+    try r.frames(3);
+    try r.press("log.clear");
+    try r.frames(2);
+    try std.testing.expectEqual(@as(usize, 0), api.logEntries().len);
+}
+
 test "a field changes nothing while typed; leaving it or Enter accepts, one undo step each" {
     var r = try Run.start();
     defer r.stop();

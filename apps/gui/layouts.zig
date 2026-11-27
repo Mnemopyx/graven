@@ -3,7 +3,7 @@
 //! Every pane has an official name, used in the config and (as a message
 //! ID) for its label: `browser` (the document's tree), `tools`,
 //! `properties`, `expression-bar` (the expression line and the status
-//! line). A layout gives each its mode, its size and its text scale:
+//! line), `log` (the messages said; its size is its height). A layout gives each its mode, its size and its text scale:
 //!
 //!     [panes]
 //!     layout = "compact"              # the one in use (local.toml)
@@ -35,6 +35,8 @@ pub const PaneId = enum {
     tools,
     properties,
     @"expression-bar",
+    /// The messages said (messages.zig), above the bar at its right.
+    log,
 
     pub fn name(p: PaneId) []const u8 {
         return @tagName(p);
@@ -95,6 +97,7 @@ pub const builtins = [_]Builtin{
         .{ .mode = .auto, .size = 320 },
         .{ .mode = .auto, .size = 320 },
         .{ .mode = .pinned },
+        .{ .mode = .auto, .size = 200 },
     } } },
     // For a small window: the side panes out of the way until wanted,
     // narrower, their text a little smaller.
@@ -103,6 +106,7 @@ pub const builtins = [_]Builtin{
         .{ .mode = .auto, .size = 290, .text_scale = 0.9 },
         .{ .mode = .auto, .size = 290, .text_scale = 0.9 },
         .{ .mode = .pinned, .text_scale = 0.9 },
+        .{ .mode = .auto, .size = 160, .text_scale = 0.9 },
     }, .tools_height = 200 } },
     // Larger text and controls throughout, the panes widened to match.
     .{ .name = "large-text", .layout = .{ .panes = .{
@@ -110,6 +114,7 @@ pub const builtins = [_]Builtin{
         .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
         .{ .mode = .auto, .size = 400, .text_scale = 1.25 },
         .{ .mode = .pinned, .text_scale = 1.25 },
+        .{ .mode = .auto, .size = 260, .text_scale = 1.25 },
     }, .tools_height = 300 } },
 };
 
