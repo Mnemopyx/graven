@@ -2639,6 +2639,12 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    // GRAVEN_SHEET=1: the document's first sheet opened beside the canvas,
+    // once (for looking at sheets under a test display).
+    if (!env_sheet_opened and state.model.sheets.items.len > 0) {
+        env_sheet_opened = true;
+        if (platform.env("GRAVEN_SHEET") != null) open_texts_sheet = state.model.sheets.items[0].id;
+    }
     if (open_texts_sheet) |id| {
         open_texts_sheet = null;
         openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
@@ -7702,6 +7708,14 @@ var sheet_focus_for: u64 = 0;
 /// The selected cell's editor, as last drawn: the sheet's keys act while
 /// it has the keyboard.
 var sheet_editor_id: ?dvui.Id = null;
+/// Whether GRAVEN_SHEET has been looked at (see `frame`).
+var env_sheet_opened = false;
+/// Whether the selected cell is in edit mode (its markup in an editor)
+/// rather than display mode (the glyphics it sets).
+var sheet_editing: bool = false;
+/// `sheet_focus_for`'s value once the sheet itself has the keyboard
+/// (display mode).
+const sheet_display_focus: u64 = std.math.maxInt(u64);
 /// A name being typed, kept until done.
 var sheet_name_edit: ?struct { sheet: layout.model.ObjectId, row: usize, text: [128]u8 = undefined, len: usize = 0 } = null;
 
@@ -7745,6 +7759,7 @@ fn sheetMove(dir: i32) void {
     const rows = sh.rows.items.len;
     const cols = sh.columns.items.len + 1;
     if (rows == 0) return;
+    if (sheet_editing) sheetEdit(false);
     commitSheetName();
     switch (dir) {
         0 => if (sheet_sel.row > 0) {
@@ -7795,7 +7810,10 @@ fn sheetView(v: u8) void {
     const si = state.model.sheetIndex(id) orelse return;
     const active = v == vl.active;
     if (!active) sheet_focus_for = 0;
-    if (sheet_sel.sheet != id) sheet_sel = .{ .sheet = id };
+    if (sheet_sel.sheet != id) {
+        sheet_sel = .{ .sheet = id };
+        sheet_editing = false;
+    }
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper }, .id_extra = v });
     defer box.deinit();
     // A press activates it (cells take their own clicks too).
@@ -7823,16 +7841,49 @@ fn sheetView(v: u8) void {
             }
         }
     }
-    // Its keys: the moves between cells, while its cell has the keyboard
-    // (not a dialog's field, a menu or a pane's).
-    const editing = if (sheet_editor_id) |eid| dvui.focusedWidgetId() == eid else false;
-    if (active and editing) for (dvui.events()) |*e| {
-        const inv = keymap.match1(e, kmode("sheet")) orelse continue;
+    // Its keys, while it or its cell's editor has the keyboard (not a
+    // dialog's field, a menu or a pane's). Showing (mode `sheet`): the
+    // moves between cells; Enter or F2 edits the cell, and typing edits it
+    // anew with what is typed. Editing (`sheet.edit`): the moves (which
+    // end the edit) and Escape, which ends it where it is.
+    const focused = dvui.focusedWidgetId();
+    const in_editor = if (sheet_editor_id) |eid| focused == eid else false;
+    const on_sheet = focused == box.data().id;
+    if (active and !sheet_editing and sheet_focus_for != sheet_display_focus) {
+        // The keyboard, once (not every frame, which would take it from
+        // a menu or a field elsewhere).
+        sheet_focus_for = sheet_display_focus;
+        dvui.focusWidget(box.data().id, null, null);
+    }
+    if (active and on_sheet and !sheet_editing) {
+        const rs = box.data().contentRectScale();
+        dvui.wantTextInput(rs.r.toNatural());
+    }
+    if (active and (in_editor or on_sheet)) for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        if (on_sheet and !sheet_editing and e.evt == .text and e.target_widgetId == box.data().id) {
+            switch (e.evt.text.action) {
+                .value => |tv| if (tv.txt.len > 0) {
+                    e.handle(@src(), box.data());
+                    sheetEditWith(tv.txt);
+                    dvui.refresh(null, @src(), box.data().id);
+                },
+                else => {},
+            }
+            continue;
+        }
+        const inv = keymap.match1(e, if (sheet_editing) kmode("sheet.edit") else kmode("sheet")) orelse continue;
         if (inv.action == kact("sheet.move")) {
             e.handle(@src(), box.data());
             sheetMove(inv.arg);
-            dvui.refresh(null, @src(), box.data().id);
-        }
+        } else if (inv.action == kact("sheet.edit")) {
+            e.handle(@src(), box.data());
+            sheetEdit(true);
+        } else if (inv.action == kact("sheet.edit.leave")) {
+            e.handle(@src(), box.data());
+            sheetEdit(false);
+        } else continue;
+        dvui.refresh(null, @src(), box.data().id);
     };
     var bad_rows: std.ArrayList(usize) = .empty;
     var bad_cols: std.ArrayList(usize) = .empty;
@@ -7856,6 +7907,10 @@ fn sheetView(v: u8) void {
     }
     var scroll = dvui.scrollArea(@src(), .{ .horizontal = .auto }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
+    // A row as tall as a cell's editor (its line, padding, border and
+    // margin), so a cell takes the same room in either mode.
+    const row_h: f32 = cell_font.lineHeight() + 14;
+    const ink_text = dvui.themeGet().color(.content, .text);
     for (sh.rows.items, 0..) |row, r| {
         const sel_row = r == sheet_sel.row;
         const missing = std.mem.indexOfScalar(usize, bad_rows.items, r) != null;
@@ -7865,18 +7920,19 @@ fn sheetView(v: u8) void {
             const w = if (c == 0) sheet_name_w else sheet_col_w;
             const text = if (c == 0) row.key else if (c - 1 < row.cells.items.len) row.cells.items[c - 1] else "";
             const selected = active and sel_row and c == sheet_sel.col;
-            if (selected) {
-                // Edited where it is.
+            if (selected and sheet_editing) {
+                // Edit mode: its markup, edited where it is.
                 var te = dvui.textEntry(@src(), .{ .text_initial = if (c == 0 and sheet_name_edit != null) sheet_name_edit.?.text[0..sheet_name_edit.?.len] else text }, .{ .min_size_content = .{ .w = w - 8 }, .max_size_content = .width(w - 8), .font = cell_font, .id_extra = (r << 8) + c, .margin = .all(1) });
                 defer te.deinit();
                 sheet_editor_id = te.data().id;
-                // The keyboard, once: when the cell is newly selected or
-                // the sheet becomes active (not every frame, which would
-                // take it from a menu or a field elsewhere).
+                // The keyboard, once: when the edit starts (not every
+                // frame, which would take it from a menu or a field
+                // elsewhere), the caret at the end.
                 const here = (@as(u64, r) << 16) | c | (@as(u64, @intFromEnum(id)) << 32);
                 if (sheet_focus_for != here) {
                     sheet_focus_for = here;
                     dvui.focusWidget(te.data().id, null, null);
+                    te.textLayout.selection.moveCursor(te.len, false);
                 }
                 const now = te.textGet();
                 if (c == 0) {
@@ -7886,7 +7942,6 @@ fn sheetView(v: u8) void {
                         @memcpy(ne.text[0..ne.len], now[0..ne.len]);
                         sheet_name_edit = ne;
                     }
-                    if (te.enter_pressed) commitSheetName();
                 } else if (te.text_changed) {
                     // Typed here: the cell takes it.
                     if (!std.mem.eql(u8, now, text)) _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), r, c }), .setSheetCell, .{ id, r, c, now }) catch {};
@@ -7896,30 +7951,129 @@ fn sheetView(v: u8) void {
                     // it, rather than writing its old text back over it.
                     te.textSet(text, false);
                 }
-            } else {
-                const ink: ?dvui.Color = if (c == 0 and missing) colors.overflow else null;
-                if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
-                    .min_size_content = .{ .w = w },
-                    .max_size_content = .width(w),
-                    .font = cell_font,
-                    .padding = .{ .x = 6, .y = 4, .h = 4 },
-                    .color_text = if (ink) |k| .{ .color = k } else null,
-                    // The row's highlight shows through; the name column
-                    // a shade apart.
-                    .background = true,
-                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
-                    .border = .{ .x = if (c == 0) 0 else 1 },
-                    .color_border = .{ .color = colors.edge.opacity(0.15) },
-                    .id_extra = (r << 8) + c,
-                })) {
+                continue;
+            }
+            // Display mode: names as text, cells as the glyphics they set
+            // (by the canvas's text path, in the style of what shows them).
+            const ink: dvui.Color = if (c == 0 and missing) colors.overflow else ink_text;
+            var cell = dvui.box(@src(), .{}, .{
+                .min_size_content = .{ .w = w, .h = row_h },
+                .max_size_content = .{ .w = w, .h = row_h },
+                .padding = .{ .x = 6 },
+                // The row's highlight shows through; the name column a
+                // shade apart; the selected cell ringed.
+                .background = true,
+                .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
+                .border = if (selected) .all(1) else .{ .x = if (c == 0) 0 else 1 },
+                .color_border = .{ .color = if (selected) dvui.themeGet().focus else colors.edge.opacity(0.15) },
+                .id_extra = (r << 8) + c,
+            });
+            defer cell.deinit();
+            const rs = cell.data().contentRectScale();
+            if (c == 0 or !drawCellMarkup(rs.r, 0, cell_font.lineHeight() * 0.55 * rs.s, sheetCellStyle(si, r, c), text, ink)) {
+                dvui.labelNoFmt(@src(), text, .{}, .{ .font = cell_font, .gravity_y = 0.5, .padding = .{}, .color_text = .{ .color = ink } });
+            }
+            for (dvui.events()) |*e| {
+                if (!dvui.eventMatchSimple(e, cell.data())) continue;
+                if (e.evt != .mouse or e.evt.mouse.action != .press or !e.evt.mouse.button.pointer()) continue;
+                e.handle(@src(), cell.data());
+                // A click on the selected cell edits it; elsewhere, selects.
+                if (selected) {
+                    sheetEdit(true);
+                } else {
                     commitSheetName();
+                    sheet_editing = false;
                     sheet_sel = .{ .sheet = id, .row = r, .col = c };
+                    sheet_focus_for = 0;
                     sheetSelectKey(si);
-                    view_to_activate = v;
                 }
+                view_to_activate = v;
+                dvui.refresh(null, @src(), cell.data().id);
             }
         }
     }
+}
+
+/// The text style cell `col` of row `row` of sheet `si` is shown in: that
+/// of the slot it fills on its key (a legend sheet), or of the caption or
+/// track the row holds the text of (a text sheet); `.none` (the first
+/// style) when nothing says.
+fn sheetCellStyle(si: usize, row: usize, col: usize) layout.model.StyleId {
+    const m = &state.model;
+    const sh = m.sheets.items[si];
+    const link = sheetRowLink(si, row) orelse return .none;
+    if (sh.texts) {
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (sc.id == link) return sc.style;
+        if (m.trackWithId(link)) |t| return m.regionsIn(t.parent)[t.region].style orelse .none;
+        return .none;
+    }
+    if (col == 0 or col > sh.columns.items.len) return .none;
+    if (m.tileIndex(link) == null) return .none;
+    const slot = sh.columns.items[col - 1];
+    var near: std.ArrayList(TileId) = .empty;
+    m.companions(dvui.currentWindow().arena(), link, &near) catch return .none;
+    for (near.items) |t| if (m.tileTrackNamed(t, slot)) |track| {
+        for (m.prototypeOf(t).tracks) |tt| if (tt.id == track) return tt.style;
+    };
+    return .none;
+}
+
+/// Draws legend markup `markup` in style `style` as the canvas does (the
+/// same renders, the same glyph atlas), on one line in `rect`: its cap
+/// height `cap_px` (that of the interface's text beside it; less, if
+/// its lines would not fit the height), `pad`
+/// in from the left, centred up and down, clipped to it. False when it
+/// cannot be set (no usable style, markup that does not parse), so the
+/// caller shows the markup as text.
+fn drawCellMarkup(rect: dvui.Rect.Physical, pad: f32, cap_px: f32, style: layout.model.StyleId, markup: []const u8, ink: dvui.Color) bool {
+    if (markup.len == 0) return true;
+    if (!(rect.h > 2 and rect.w > 0)) return true;
+    const labels = if (state.labels) |*l| l else return false;
+    const st = labels.context(style) orelse return false;
+    const r = (labels.line(style, markup) catch return false) orelse return false;
+    if (!(st.cap_height > 0)) return false;
+    var s: f64 = cap_px / st.cap_height;
+    const d = r.design;
+    const dh = d.y1 - d.y0;
+    const room: f64 = rect.h - 2;
+    if (dh > 0 and dh * s > room) s = room / dh;
+    const fr: PxFrame = .{ .ox = rect.x + pad - d.x0 * s, .oy = rect.y + rect.h / 2 + (d.y0 + d.y1) / 2 * s, .s = s };
+    const prev_clip = dvui.clip(rect);
+    defer dvui.clipSet(prev_clip);
+    const from_atlas = drawRenderGlyphs(rect, r, fr, ink);
+    const pieces = state.flat.getWith(r, faceTable(), from_atlas) catch return from_atlas;
+    for (pieces) |piece| {
+        const color: dvui.Color = switch (piece.kind) {
+            .ink => ink,
+            .faint => ink.opacity(0.35),
+            .placeholder => colors.select.opacity(0.7),
+        };
+        fillRegionIn(piece.region, fr, .{ .flat = color });
+    }
+    return true;
+}
+
+/// Starts (`on`) or ends the selected cell's edit mode, where its markup
+/// is typed; ending it keeps what was typed (each change went to the
+/// sheet as it was typed) and gives the name column's name to its key.
+fn sheetEdit(on: bool) void {
+    if (!on) commitSheetName();
+    sheet_editing = on;
+    sheet_focus_for = 0;
+}
+
+/// Typing on a shown cell: it is edited anew, with what was typed.
+fn sheetEditWith(typed: []const u8) void {
+    const id = sheet_sel.sheet;
+    if (sheet_sel.col == 0) {
+        var ne: @TypeOf(sheet_name_edit.?) = .{ .sheet = id, .row = sheet_sel.row };
+        ne.len = @min(typed.len, ne.text.len);
+        @memcpy(ne.text[0..ne.len], typed[0..ne.len]);
+        sheet_name_edit = ne;
+    } else {
+        _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), sheet_sel.row, sheet_sel.col }), .setSheetCell, .{ id, sheet_sel.row, sheet_sel.col, typed }) catch {};
+    }
+    sheetEdit(true);
 }
 
 /// The properties while a sheet view is active: the sheet, the selected
@@ -8859,19 +9013,47 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
 /// glyph atlas. False (nothing drawn) when one is too large to raster, so
 /// the caller draws the label from its outlines.
 fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.Point, ink: dvui.Color) bool {
+    return drawRenderGlyphs(area, r, PxFrame.ofView(area, at), ink);
+}
+
+/// Where a render's mm go on screen: x right and y up from a pixel origin,
+/// `s` pixels a mm. The canvas's view is one (with a label's place folded
+/// in); a sheet's cell is another, so both draw text by the same path.
+const PxFrame = struct {
+    ox: f64,
+    oy: f64,
+    s: f64,
+
+    /// Canvas view `state.view` in `area`, offset to worksheet point `at`.
+    fn ofView(area: dvui.Rect.Physical, at: geom.Point) PxFrame {
+        const v = state.view;
+        return .{
+            .ox = area.x + area.w / 2 + (at.x - v.cx) * v.ppm,
+            .oy = area.y + area.h / 2 - (at.y - v.cy) * v.ppm,
+            .s = v.ppm,
+        };
+    }
+
+    fn px(f: PxFrame, p: geom.Point) dvui.Point.Physical {
+        return .{ .x = @floatCast(f.ox + p.x * f.s), .y = @floatCast(f.oy - p.y * f.s) };
+    }
+};
+
+/// Draws the glyphs of render `r` through frame `fr` from the glyph atlas,
+/// skipping those outside `area`. False (nothing drawn) when one is too
+/// large to raster, so the caller draws it from its outlines.
+fn drawRenderGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, fr: PxFrame, ink: dvui.Color) bool {
     const faces = faceTable();
     const lifo = dvui.currentWindow().lifo();
     const ga = glyphAtlas();
     var quads: std.ArrayList(glyphs.Quad) = .empty;
     defer quads.deinit(lifo);
-    const ppm: f64 = state.view.ppm;
+    const ppm: f64 = fr.s;
     const Map = struct {
         m: geom.Affine,
-        at: geom.Point,
-        area: dvui.Rect.Physical,
+        fr: PxFrame,
         pub fn map(self: @This(), q: geom.Point) dvui.Point.Physical {
-            const p = self.m.apply(q);
-            return state.view.toPx(self.area, .{ .x = p.x + self.at.x, .y = p.y + self.at.y });
+            return self.fr.px(self.m.apply(q));
         }
     };
     for (r.items) |item| {
@@ -8885,7 +9067,7 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.P
         // mm per font unit (the transform's scale, rotation aside).
         const mm = @sqrt(@abs(m.a * m.d - m.b * m.c));
         if (!(mm > 0)) continue;
-        const map: Map = .{ .m = m, .at = at, .area = area };
+        const map: Map = .{ .m = m, .fr = fr };
         // Off the canvas: nothing to draw, and no field or raster made for it.
         {
             const ob = (face.outline(g.gid) catch return false).bounds();
@@ -8936,6 +9118,11 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.P
 /// they are, then a band one pixel wide fading out past each loop, for
 /// antialiasing.
 fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point, paint: Paint) void {
+    fillRegionIn(region, PxFrame.ofView(area, at), paint);
+}
+
+/// Fills a resolved region through frame `fr` (see `fillRegion`).
+fn fillRegionIn(region: geom.fill.Region, fr: PxFrame, paint: Paint) void {
     const lifo = dvui.currentWindow().lifo();
     const Index = dvui.Vertex.Index;
     // Vertex indices may be 16-bit: the triangles go in batches.
@@ -8947,7 +9134,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         defer b.deinit(lifo);
         for (tris, 0..) |t, k| {
             var v: [3]dvui.Point.Physical = undefined;
-            for (t, &v) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+            for (t, &v) |q, *out| out.* = fr.px(q);
             for (v, t) |pos, q| b.appendVertex(.{ .pos = pos, .col = paint.at(q) });
             const i: Index = @intCast(3 * k);
             b.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
@@ -8961,7 +9148,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         defer b.deinit(lifo);
         const pts = lifo.alloc(dvui.Point.Physical, n) catch return;
         defer lifo.free(pts);
-        for (loop, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+        for (loop, pts) |q, *out| out.* = fr.px(q);
         for (pts, 0..) |p, i| {
             // Loops keep the filled side on their left, so outward is to
             // the right of each edge.
@@ -13013,6 +13200,7 @@ fn updateModeStack() void {
         push(&st, &n, kmode("start"));
     } else if (activeKind() == .sheet) {
         push(&st, &n, kmode("sheet"));
+        if (sheet_editing) push(&st, &n, kmode("sheet.edit"));
     } else if (sketch_edit != null) {
         push(&st, &n, kmode("sketch"));
         push(&st, &n, kmode("view"));
