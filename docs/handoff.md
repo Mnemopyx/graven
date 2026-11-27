@@ -40,8 +40,8 @@ Built: distance fields per glyph at three resolutions, error correction, an atla
 
 ## 5. HP-15C legends
 
-- **State:** `examples/hp15c.graven`, in the Libertinus package (since 2026-11-19 a document; `graven hp15c` is gone) (Geist SemiBold with Libertinus Math: operators, bold Greek, italic variables at 1.2×, π at 1.2×); drawn arrows (solid acute heads, short shafts; ⇄ as two notched heads); keys 8 × 7.2 mm at 11.43 × 12.7 mm pitch; legends: white 1.9 mm, blue 1.25 mm, gold 1.4 mm cap height; superscripts raised 0.5, subscripts dropped 0.24 of cap height.
-- **Open:** ⇄ reads as chevrons at small sizes; ∫ with limits is cramped; gold and blue legend colours are not set; reconcile the legend list with EverCalc's (`tools/legend/hp15c.py` in the EverCalc repo); the GUI's HP-15C sample uses the default face, not the package.
+- **State (2026-11-27):** `examples/hp15c.graven` rebuilt from EverCalc's measurements and legend list (see `docs/status.md`, "HP-15C sample"): STIX Two package; keycaps 7.7 × 7.0 mm, ENTER 7.7 × 19.7, at 11.43 × 12.7 mm on the 10 × 4 array; white 2.1, blue 1.1, gold 1.5, CLEAR 1.0 mm caps; EverCalc's gold and blue on the fabrication layers. Made by `make15c` in `apps/gui/harness_test.zig` (it saves the made document to `/tmp/graven-gui-test/hp15c.graven` before comparing; to renew the example, copy that and `graven compact` it).
+- **Open:** ENTER's word turned 90° (needs a turned baseline in placement); the CLEAR bracket's rules and ticks; gold f and blue g keycaps; the keypad's place in the 128 × 79 mm face; legend colours from the colour design once decided.
 
 ## 6. Math fonts
 

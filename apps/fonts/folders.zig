@@ -1,7 +1,9 @@
 //! Font folders a document's fonts are found in before the installed ones:
 //! a `fonts` folder beside the document (the examples' `examples/fonts`),
-//! then `$GRAVEN_FONTS`, else a `fonts` folder in the working folder (the
-//! math packages' fonts, from scripts/fetch-fonts.py). The GUI and the CLI
+//! then `$GRAVEN_FONTS`, else a `fonts` folder beside the executable when
+//! there is one (a packaged build, such as the Windows one), else a `fonts`
+//! folder in the working folder (the math packages' fonts, from
+//! scripts/fetch-fonts.py). The GUI and the CLI
 //! both look there first, so a document sets the same in either.
 //!
 //! Every font in those folders is loaded and named by family and style
@@ -18,15 +20,27 @@ const Allocator = std.mem.Allocator;
 
 /// The folders for the document at `doc_path` (null: no document), in
 /// order, without repeats; allocated from `a`.
-pub fn dirsFor(a: Allocator, doc_path: ?[]const u8) Allocator.Error![]const []const u8 {
+pub fn dirsFor(a: Allocator, io: std.Io, doc_path: ?[]const u8) Allocator.Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (doc_path) |p| try out.append(a, try std.fs.path.join(a, &.{ std.fs.path.dirname(p) orelse ".", "fonts" }));
     const set = platform.env("GRAVEN_FONTS") orelse "";
-    const shared: []const u8 = if (set.len > 0) set else "fonts";
+    const shared: []const u8 = if (set.len > 0) set else try besideExe(a, io) orelse "fonts";
     for (out.items) |o| {
         if (std.mem.eql(u8, o, shared) or (std.mem.eql(u8, o, "./fonts") and std.mem.eql(u8, shared, "fonts"))) break;
     } else try out.append(a, shared);
     return out.items;
+}
+
+/// The `fonts` folder beside the executable, when there is one.
+fn besideExe(a: Allocator, io: std.Io) Allocator.Error!?[]const u8 {
+    const dir = std.process.executableDirPathAlloc(io, a) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    const path = try std.fs.path.join(a, &.{ dir, "fonts" });
+    var d = std.Io.Dir.cwd().openDir(io, path, .{}) catch return null;
+    d.close(io);
+    return path;
 }
 
 /// Fonts loaded and named: every font in some folders, or font files.
@@ -107,10 +121,10 @@ test "a document's folders: beside it, then the shared one, once each" {
     defer arena.deinit();
     const a = arena.allocator();
     if (platform.env("GRAVEN_FONTS") != null) return;
-    const dirs = try dirsFor(a, "examples/hp15c.graven");
+    const dirs = try dirsFor(a, std.testing.io, "examples/hp15c.graven");
     try std.testing.expectEqual(@as(usize, 2), dirs.len);
     try std.testing.expectEqualStrings("examples/fonts", dirs[0]);
     try std.testing.expectEqualStrings("fonts", dirs[1]);
-    try std.testing.expectEqual(@as(usize, 1), (try dirsFor(a, "doc.graven")).len);
-    try std.testing.expectEqual(@as(usize, 1), (try dirsFor(a, null)).len);
+    try std.testing.expectEqual(@as(usize, 1), (try dirsFor(a, std.testing.io, "doc.graven")).len);
+    try std.testing.expectEqual(@as(usize, 1), (try dirsFor(a, std.testing.io, null)).len);
 }

@@ -51,7 +51,7 @@ test "the PC keyboard: 104 keys in 22.5 × 6.5 u, nothing overflowing, its legen
     try testing.expectEqualStrings("words", sh.columns.items[2]);
 }
 
-test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legends, fabrication layers" {
+test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legends and CLEAR, fabrication layers" {
     var o = try open(@embedFile("hp15c.graven"));
     defer close(&o);
     const m = &o.model;
@@ -70,11 +70,12 @@ test "the HP-15C: 39 keys and holes at 11.43 mm, ENTER over two rows, gold legen
     const z = m.instanceBox(.{ .panel = keys }, 0, m.instanceAt(.{ .panel = keys }, 0, caps, 4, 0).?).?;
     try testing.expectApproxEqAbs(11.43, (z.x0 + z.x1) / 2 - (a.x0 + a.x1) / 2, 1e-9);
     const enter = m.instanceBox(.{ .panel = keys }, 0, m.instanceAt(.{ .panel = keys }, 0, caps, 5, 3).?).?;
-    try testing.expectApproxEqAbs(7.2 + 12.7, enter.height(), 1e-9);
+    try testing.expectApproxEqAbs(7.0 + 12.7, enter.height(), 1e-9);
     // Plate: black, holes cut, gold inlaid; keys: black, white and blue.
     try testing.expectEqual(3, m.panels.items[plate].fab.layers.len);
     try testing.expectEqual(3, m.panels.items[keys].fab.layers.len);
-    try testing.expectEqualStrings("f", m.panels.items[plate].fab.layers[2].source.text);
+    // The gold layer takes every label on the plate: the f legends and CLEAR.
+    try testing.expectEqualStrings("", m.panels.items[plate].fab.layers[2].source.text);
     // Both made with the one 0.2 mm FDM profile the file keeps.
     try testing.expectEqual(1, m.processes.items.len);
     for ([_]usize{ plate, keys }) |p| {

@@ -194,6 +194,69 @@ pub fn isUserFontPath(path: []const u8) bool {
     return std.mem.indexOf(u8, path, "/.local/share/fonts/") != null or std.mem.indexOf(u8, path, "/.fonts/") != null;
 }
 
+/// Registers the user font file at `path` (in `userFontDir`) with the
+/// system, so other applications see it too. On Windows a font copied
+/// into the per-user folder is not installed until it is listed under
+/// HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts (as the
+/// Settings app does); it is also loaded for this session and the change
+/// announced. Elsewhere the folder is enough: nothing to do.
+pub fn registerUserFont(a: Allocator, path: []const u8) !void {
+    if (!is_windows) return;
+    const w = win32;
+    const value = try fontValueName(a, path);
+    const name16 = try std.unicode.utf8ToUtf16LeAllocZ(a, value);
+    const path16 = try std.unicode.utf8ToUtf16LeAllocZ(a, path);
+    const bytes: u32 = @intCast((path16.len + 1) * 2);
+    if (w.RegSetKeyValueW(w.HKEY_CURRENT_USER, w.fonts_key, name16.ptr, w.REG_SZ, path16.ptr, bytes) != 0) return error.RegistryFailed;
+    _ = w.AddFontResourceW(path16.ptr);
+    _ = w.PostMessageW(w.HWND_BROADCAST, w.WM_FONTCHANGE, 0, 0);
+}
+
+/// Takes the user font file at `path` off the system's list (Windows; see
+/// `registerUserFont`), before it is deleted.
+pub fn unregisterUserFont(a: Allocator, path: []const u8) void {
+    if (!is_windows) return;
+    const w = win32;
+    const value = fontValueName(a, path) catch return;
+    const name16 = std.unicode.utf8ToUtf16LeAllocZ(a, value) catch return;
+    const path16 = std.unicode.utf8ToUtf16LeAllocZ(a, path) catch return;
+    _ = w.RemoveFontResourceW(path16.ptr);
+    _ = w.RegDeleteKeyValueW(w.HKEY_CURRENT_USER, w.fonts_key, name16.ptr);
+    _ = w.PostMessageW(w.HWND_BROADCAST, w.WM_FONTCHANGE, 0, 0);
+}
+
+/// The registry value a user font file is listed under: its file name
+/// without the extension, marked as Windows marks font values
+/// ("Inter-Bold (TrueType)"; OpenType outlines too, as Windows lists them).
+pub fn fontValueName(a: Allocator, path: []const u8) ![]u8 {
+    // Either separator: the path may be Windows's, read anywhere.
+    const base = if (std.mem.lastIndexOfAny(u8, path, "/\\")) |k| path[k + 1 ..] else path;
+    const stem = base[0 .. base.len - std.fs.path.extension(base).len];
+    return std.fmt.allocPrint(a, "{s} (TrueType)", .{stem});
+}
+
+/// What registering fonts needs from Windows.
+const win32 = if (is_windows) struct {
+    const HKEY = *opaque {};
+    const HWND = ?*opaque {};
+    const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0x80000001);
+    const HWND_BROADCAST: HWND = @ptrFromInt(0xffff);
+    const REG_SZ: u32 = 1;
+    const WM_FONTCHANGE: u32 = 0x001D;
+    const fonts_key = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts");
+    extern "advapi32" fn RegSetKeyValueW(key: HKEY, sub: [*:0]const u16, name: [*:0]const u16, kind: u32, data: ?*const anyopaque, size: u32) callconv(.winapi) i32;
+    extern "advapi32" fn RegDeleteKeyValueW(key: HKEY, sub: [*:0]const u16, name: [*:0]const u16) callconv(.winapi) i32;
+    extern "gdi32" fn AddFontResourceW(file: [*:0]const u16) callconv(.winapi) c_int;
+    extern "gdi32" fn RemoveFontResourceW(file: [*:0]const u16) callconv(.winapi) c_int;
+    extern "user32" fn PostMessageW(wnd: HWND, msg: u32, wp: usize, lp: isize) callconv(.winapi) c_int;
+} else struct {};
+
+test "a user font's registry value is named for its file" {
+    const n = try fontValueName(testing.allocator, "C:\\Users\\t\\AppData\\Local\\Microsoft\\Windows\\Fonts\\Inter-Bold.ttf");
+    defer testing.allocator.free(n);
+    try testing.expectEqualStrings("Inter-Bold (TrueType)", n);
+}
+
 /// `path` made absolute, its links followed, from `a`; null when it does
 /// not lead to a file.
 pub fn absolutePath(io: std.Io, a: Allocator, path: []const u8) ?[:0]u8 {
