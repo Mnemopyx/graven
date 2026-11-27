@@ -1,0 +1,32 @@
+Graven
+Copyright (C) 2026 the Graven authors
+
+Graven is free software, under two licences by part:
+
+  lib/, bridge/      The libraries (the legend engine, layout, geometry,
+                     constraints, sketches, fonts, platform and the rest,
+                     and the OCCT bridge). GNU Lesser General Public
+                     License, version 3 or (at your option) any later
+                     version: LICENSES/LGPL-3.0-or-later.txt, which adds
+                     its permissions to LICENSES/GPL-3.0-or-later.txt.
+                     SPDX-License-Identifier: LGPL-3.0-or-later
+
+  everything else    The applications (apps/: the editor, graven,
+                     graven-fab, the font tool), scripts, tools, examples
+                     and documentation. GNU Affero General Public License,
+                     version 3 or (at your option) any later version:
+                     LICENSES/AGPL-3.0-or-later.txt.
+                     SPDX-License-Identifier: AGPL-3.0-or-later
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the licences for details.
+
+What you make with Graven (your documents and the SVG, 3MF and STEP files
+it writes from them) is yours; these licences do not cover it.
+
+Third-party parts keep their own licences: OCCT (LGPL 2.1 with the Open
+CASCADE exception, in its archive), HarfBuzz, SDL, DVUI and the other
+packages named in build.zig.zon (each package's own licence file), and
+fonts (as each font states, mostly the SIL Open Font License; see
+examples/README.md and the Fonts window).
