@@ -147,8 +147,10 @@ fn roles(s: *const Sketch, a: Allocator, g: *const group.Group) Error![]Role {
     return out.toOwnedSlice(a);
 }
 
-/// Where the object is now, to make it again there.
-const Placement = union(enum) {
+/// Where an object is: a polygon's centre and a corner; a polar array's
+/// centre, outer radius and first border's angle (radians); a rectangular
+/// array's box.
+pub const Placement = union(enum) {
     polygon: struct { c: Point, corner: Point },
     polar: struct { c: Point, r: f64, first: f64 },
     rect: geom.Box,
@@ -228,6 +230,125 @@ pub fn sealedConstraint(s: *const Sketch, c: root.ConstraintId) bool {
 /// names is in one. One naming something outside too is external.
 pub fn sealsConstraint(s: *const Sketch, c: Constraint) bool {
     return s.groups.objectOf(s.groups.home(s.geometry.items, c)) != group.none;
+}
+
+/// Where object `id` is now.
+pub fn placementOf(s: *const Sketch, id: GroupId) Error!Placement {
+    return placement(s, try s.groups.get(id));
+}
+
+/// A map of the plane: `p' = (xx·x + xy·y + tx, yx·x + yy·y + ty)`.
+const Map = struct {
+    xx: f64 = 1,
+    xy: f64 = 0,
+    yx: f64 = 0,
+    yy: f64 = 1,
+    tx: f64 = 0,
+    ty: f64 = 0,
+
+    fn at(m: Map, p: Point) Point {
+        return .{ .x = m.xx * p.x + m.xy * p.y + m.tx, .y = m.yx * p.x + m.yy * p.y + m.ty };
+    }
+
+    fn dir(m: Map, d: Point) Point {
+        return .{ .x = m.xx * d.x + m.xy * d.y, .y = m.yx * d.x + m.yy * d.y };
+    }
+
+    /// The scale it gives lengths, when it keeps shapes (else null).
+    fn scale(m: Map) ?f64 {
+        if (@abs(m.xx - m.yy) > 1e-12 * @max(1, @abs(m.xx)) or @abs(m.xy + m.yx) > 1e-12 * @max(1, @abs(m.xy))) return null;
+        return std.math.hypot(m.xx, m.yx);
+    }
+
+    /// Turning by `t` and scaling by `k` about `from`, then moving it to `to`.
+    fn similar(from: Point, to: Point, t: f64, k: f64) Map {
+        const c = k * @cos(t);
+        const sn = k * @sin(t);
+        return .{ .xx = c, .xy = -sn, .yx = sn, .yy = c, .tx = to.x - (c * from.x - sn * from.y), .ty = to.y - (sn * from.x + c * from.y) };
+    }
+};
+
+/// Moves object `id` to `to` (of its own kind): its geometry is mapped
+/// there (a rectangular array's box scaled and moved; a polygon or a polar
+/// array turned, scaled and moved about its centre), its IDs kept, so what
+/// holds them (grids, inks, constraints from outside) is unchanged. The
+/// sketch is not solved: its caller solves it.
+pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
+    const now = try placementOf(s, id);
+    if (std.meta.activeTag(now) != std.meta.activeTag(to)) return error.WrongKind;
+    const map: Map = switch (now) {
+        .rect => |b| blk: {
+            const t = to.rect;
+            if (!(b.x1 > b.x0 and b.y1 > b.y0 and t.x1 > t.x0 and t.y1 > t.y0)) return error.WrongKind;
+            const sx = (t.x1 - t.x0) / (b.x1 - b.x0);
+            const sy = (t.y1 - t.y0) / (b.y1 - b.y0);
+            break :blk .{ .xx = sx, .yy = sy, .tx = t.x0 - sx * b.x0, .ty = t.y0 - sy * b.y0 };
+        },
+        .polar => |p| blk: {
+            const t = to.polar;
+            if (!(p.r > 0 and t.r > 0)) return error.WrongKind;
+            break :blk Map.similar(p.c, t.c, t.first - p.first, t.r / p.r);
+        },
+        .polygon => |p| blk: {
+            const t = to.polygon;
+            const r0 = std.math.hypot(p.corner.x - p.c.x, p.corner.y - p.c.y);
+            const r1 = std.math.hypot(t.corner.x - t.c.x, t.corner.y - t.c.y);
+            if (!(r0 > 0 and r1 > 0)) return error.WrongKind;
+            const turn = std.math.atan2(t.corner.y - t.c.y, t.corner.x - t.c.x) - std.math.atan2(p.corner.y - p.c.y, p.corner.x - p.c.x);
+            break :blk Map.similar(p.c, t.c, turn, r1 / r0);
+        },
+    };
+    var members: std.ArrayList(GeomId) = .empty;
+    defer members.deinit(a);
+    try s.groups.internalGeometry(a, id, &members);
+    // Checked first, so a map that cannot be made changes nothing.
+    for (members.items) |g| switch (s.geometry.items[g].kind) {
+        .circle => if (map.scale() == null) return error.WrongKind,
+        .affine => return error.WrongKind,
+        else => {},
+    };
+    const v = s.vars.items;
+    const P = struct {
+        fn set(vars: []f64, m: Map, p: root.Pt) void {
+            const q = m.at(.{ .x = vars[p.x], .y = vars[p.y] });
+            vars[p.x] = q.x;
+            vars[p.y] = q.y;
+        }
+    };
+    for (members.items) |g| {
+        const geo = s.geometry.items[g];
+        if (geo.removed or geo.reference) continue;
+        switch (geo.kind) {
+            .point => |p| P.set(v, map, p),
+            .segment => |sg| {
+                P.set(v, map, sg.a);
+                P.set(v, map, sg.b);
+            },
+            .circle => |c| {
+                P.set(v, map, c.c);
+                v[c.r] *= map.scale().?;
+            },
+            .arc => |ar| {
+                P.set(v, map, ar.c);
+                P.set(v, map, ar.a);
+                P.set(v, map, ar.b);
+            },
+            .ray => |ry| {
+                P.set(v, map, ry.o);
+                const d = map.dir(.{ .x = @cos(v[ry.angle]), .y = @sin(v[ry.angle]) });
+                v[ry.angle] = std.math.atan2(d.y, d.x);
+            },
+            .line => |ln| {
+                const n: Point = .{ .x = @cos(v[ln.theta]), .y = @sin(v[ln.theta]) };
+                const p = map.at(.{ .x = v[ln.rho] * n.x, .y = v[ln.rho] * n.y });
+                const d = map.dir(.{ .x = -n.y, .y = n.x });
+                const theta = std.math.atan2(d.y, d.x) + std.math.pi / 2.0;
+                v[ln.theta] = theta;
+                v[ln.rho] = @cos(theta) * p.x + @sin(theta) * p.y;
+            },
+            .affine => unreachable,
+        }
+    }
 }
 
 /// Removes object (or group) `id` whole: every member, the constraints on
@@ -416,4 +537,32 @@ test "a sealed object: its members and own constraints refused one by one, remov
     try testing.expect(s.constraints.items.len < before);
     try testing.expectError(error.NoSuchGroup, s.groups.get(id));
     try testing.expect(!sealedGeometry(&s, side));
+}
+
+test "an object placed: a rectangular array to a new box, a polar one turned and sized, its IDs kept" {
+    const al = std.testing.allocator;
+    var s = try Sketch.init(al);
+    defer s.deinit(al);
+    const q = try addRect(&s, al, .{ .x0 = 0, .y0 = 0, .x1 = 30, .y1 = 20 }, 3, 2);
+    _ = try s.solve(al);
+    const ids_before = (try s.groups.get(q)).geometry.items.len;
+    try place(&s, al, q, .{ .rect = .{ .x0 = 6.85, .y0 = 5.55, .x1 = 6.85 + 3 * 11.43, .y1 = 5.55 + 2 * 12.7 } });
+    _ = try s.solve(al);
+    const b = (try placementOf(&s, q)).rect;
+    try std.testing.expectApproxEqAbs(6.85, b.x0, 1e-9);
+    try std.testing.expectApproxEqAbs(6.85 + 34.29, b.x1, 1e-9);
+    try std.testing.expectApproxEqAbs(5.55 + 25.4, b.y1, 1e-9);
+    try std.testing.expectEqual(ids_before, (try s.groups.get(q)).geometry.items.len);
+    const r = try arrayRefs(&s, q);
+    const cl = try arrays.cells(&s, r);
+    try std.testing.expectApproxEqAbs(6.85, cl.rect.x0, 1e-9);
+
+    const p = try addPolar(&s, al, .{ .x = 50, .y = 0 }, 10, std.math.pi / 2.0, 2 * std.math.pi, 6, 2);
+    _ = try s.solve(al);
+    try place(&s, al, p, .{ .polar = .{ .c = .{ .x = 60, .y = 5 }, .r = 15, .first = std.math.pi / 3.0 } });
+    _ = try s.solve(al);
+    const pp = (try placementOf(&s, p)).polar;
+    try std.testing.expectApproxEqAbs(60, pp.c.x, 1e-9);
+    try std.testing.expectApproxEqAbs(15, pp.r, 1e-9);
+    try std.testing.expectApproxEqAbs(std.math.pi / 3.0, pp.first, 1e-9);
 }

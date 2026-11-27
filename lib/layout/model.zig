@@ -1492,6 +1492,9 @@ pub const SketchEdit = union(enum) {
     /// rings, rows): the object made again where it is
     /// (`sketch_.composite.setProp`).
     object_prop: struct { object: sketch_.GroupId, name: []const u8, value: f64 },
+    /// A composite object moved, turned or sized to `to` (its geometry
+    /// mapped there, its IDs kept: `sketch_.composite.place`).
+    object_place: struct { object: sketch_.GroupId, to: sketch_.composite.Placement },
     /// A composite object (or group) removed whole: its members, the
     /// constraints on them, the group.
     remove_object: sketch_.GroupId,
@@ -3448,7 +3451,16 @@ pub const Model = struct {
         var p = m.panels.items[panel];
         p.origin = origin;
         if (!m.gripsSheet(p.box())) return error.OffSheet;
+        const was = m.panels.items[panel].origin;
         m.panels.items[panel].origin = origin;
+        // Its arrays' sketches move with it (their views are in the space).
+        const space = m.spaceOf(panel);
+        if (space < m.spaces.items.len) for (m.panels.items[panel].grids.items) |g| {
+            if (g.sketch == .none) continue;
+            for (m.spaces.items[space].sketch_views.items) |*v| if (v.sketch == g.sketch) {
+                v.at = .{ .x = v.at.x + origin.x - was.x, .y = v.at.y + origin.y - was.y };
+            };
+        };
         m.revision += 1;
     }
 
@@ -4224,12 +4236,16 @@ pub const Model = struct {
     /// The shape grid `gi` of panel `panel` has: its own, or the one it
     /// follows (through any chain of links).
     pub fn gridShape(m: *const Model, parent: Parent, gi: usize) GridShape {
+        return m.gridShapeFrom(parent, gi, 0);
+    }
+
+    /// Grid `gi`'s shape, `hops` links from the grid asked about: an
+    /// array's from its sketch, wherever in the chain it is.
+    fn gridShapeFrom(m: *const Model, parent: Parent, gi: usize, hops: usize) GridShape {
         if (m.arrayLayout(parent, gi)) |al| return al.shape;
-        var g = &m.gridsIn(parent)[gi];
-        var hops: usize = 0;
-        while (g.link != .none and hops < 16) : (hops += 1) {
-            const at = m.findGrid(g.link) orelse break;
-            g = &m.gridsIn(at.parent)[at.index];
+        const g = m.gridsIn(parent)[gi];
+        if (g.link != .none and hops < 16) {
+            if (m.findGrid(g.link)) |at| return m.gridShapeFrom(at.parent, at.index, hops + 1);
         }
         return g.shape;
     }
@@ -4253,6 +4269,60 @@ pub const Model = struct {
             return .{ .x = go.x + r * @cos(ang), .y = go.y + r * @sin(ang) };
         }
         return .{ .x = go.x + col * sh.stepX(), .y = go.y - row * sh.stepY() };
+    }
+
+    /// An array grid made as an object: its sketch (by index), the object,
+    /// and where the sketch's origin is in the grid's parent's frame.
+    fn arrayFrame(m: *const Model, parent: Parent, gi: usize) ?struct { sketch: usize, object: sketch_.GroupId, at: geom.Point } {
+        const g = m.gridsIn(parent)[gi];
+        const si = m.sketchIndex(g.sketch) orelse return null;
+        const obj = g.object orelse return null;
+        const space = switch (parent) {
+            .space => |i| i,
+            .panel => |pi| m.spaceOf(pi),
+        };
+        if (space >= m.spaces.items.len) return null;
+        for (m.spaces.items[space].sketch_views.items) |v| if (v.sketch == g.sketch) {
+            var o = v.at;
+            if (parent == .panel) {
+                const po = m.panels.items[parent.panel].origin;
+                o = .{ .x = o.x - po.x, .y = o.y - po.y };
+            }
+            return .{ .sketch = si, .object = obj, .at = o };
+        };
+        return null;
+    }
+
+    /// Array grid `gi` given `shape` and point (0, 0) at `origin` (its
+    /// parent's frame): its object's counts set (made again), then the
+    /// object moved and sized so its cells' middles are those points. A
+    /// polar array's angle between columns follows its count unless it
+    /// goes part way round (then its sweep takes the angle); its first
+    /// ring's radius is half its ring spacing, always.
+    fn shapeArray(m: *Model, parent: Parent, gi: usize, shape: GridShape, origin: geom.Point) Error!void {
+        const fr = m.arrayFrame(parent, gi) orelse return error.NoSuchItem;
+        const sk = &m.sketches.items[fr.sketch].sketch;
+        const obj = sk.groups.get(fr.object) catch return error.NoSuchItem;
+        const polar = obj.kind == .polar_array;
+        const old = m.gridsIn(parent)[gi].shape;
+        if (shape.cols != old.cols) _ = try m.editSketch(fr.sketch, .{ .object_prop = .{ .object = fr.object, .name = "columns", .value = @floatFromInt(shape.cols) } });
+        if (shape.rows != old.rows) _ = try m.editSketch(fr.sketch, .{ .object_prop = .{ .object = fr.object, .name = if (polar) "rings" else "rows", .value = @floatFromInt(shape.rows) } });
+        const px = shape.pitch_x * shape.stretch_x;
+        const py = shape.pitch_y * shape.stretch_y;
+        const cols: f64 = @floatFromInt(shape.cols);
+        const rows: f64 = @floatFromInt(shape.rows);
+        const o: geom.Point = .{ .x = origin.x - fr.at.x, .y = origin.y - fr.at.y };
+        const to: sketch_.composite.Placement = if (polar) blk: {
+            const sweep = (sk.groups.get(fr.object) catch return error.NoSuchItem).prop("sweep") orelse 2 * std.math.pi;
+            var step = sweep / cols;
+            if (sweep < 2 * std.math.pi - 1e-9 and @abs(std.math.degreesToRadians(px) - step) > 1e-12) {
+                step = std.math.degreesToRadians(px);
+                _ = try m.editSketch(fr.sketch, .{ .object_prop = .{ .object = fr.object, .name = "sweep", .value = @min(2 * std.math.pi, step * cols) } });
+            }
+            const start = if (shape.polar) |pol| pol.start else 90;
+            break :blk .{ .polar = .{ .c = o, .r = rows * py, .first = std.math.degreesToRadians(start) + step / 2 } };
+        } else .{ .rect = .{ .x0 = o.x - px / 2, .x1 = o.x - px / 2 + cols * px, .y0 = o.y + py / 2 - rows * py, .y1 = o.y + py / 2 } };
+        _ = try m.editSketch(fr.sketch, .{ .object_place = .{ .object = fr.object, .to = to } });
     }
 
     /// An array grid's shape and origin (in its parent's frame), from its
@@ -4520,6 +4590,12 @@ pub const Model = struct {
                 }
             }
         };
+        if (m.arrayFrame(parent, gi) != null) {
+            // An array's shape is its sketch's: the object is set to it.
+            try m.shapeArray(parent, gi, shape, m.gridOrigin(parent, gi));
+            m.revision += 1;
+            return;
+        }
         const g = &m.gridsIn(parent)[gi];
         g.shape = shape;
         g.link = .none;
@@ -4541,6 +4617,12 @@ pub const Model = struct {
     /// Moves grid `gi`'s point (0, 0) to `origin`.
     pub fn moveGrid(m: *Model, parent: Parent, gi: usize, origin: geom.Point) Error!void {
         if (!m.hasParent(parent) or gi >= m.gridsIn(parent).len) return error.NoSuchItem;
+        if (m.arrayFrame(parent, gi) != null) {
+            // An array's points are its sketch's: the object is moved.
+            try m.shapeArray(parent, gi, m.gridShape(parent, gi), origin);
+            m.revision += 1;
+            return;
+        }
         m.gridsIn(parent)[gi].origin = origin;
         m.revision += 1;
     }
@@ -6130,6 +6212,7 @@ pub const Model = struct {
                 for (m.panels.items) |*pn| for (pn.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
                 for (m.spaces.items) |*sp| for (sp.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
             },
+            .object_place => |e| sketch_.composite.place(sk, al, e.object, e.to) catch |err| return compositeError(err),
             .remove_object => |id| sketch_.composite.removeObject(sk, al, id) catch |err| return compositeError(err),
             .construction => |e| try sk.setConstruction(e.g, e.on),
             .remove => |g| try sk.removeGeometry(g),
@@ -10761,4 +10844,40 @@ test "removing a sketch removes its own space and its drawings, with their place
     try std.testing.expectEqual(null, m.homeOf(sid));
     try std.testing.expectEqual(0, m.figures.items.len);
     try std.testing.expectEqual(0, m.panels.items[p].art.items.len);
+}
+
+test "an array grid's spacing and first point, typed, move its object; a grid following it takes its shape; its panel carries it" {
+    var m: Model = .init(std.testing.allocator);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const plate = try m.addPanel("Plate", 128, 62);
+    const keys = try m.addPanel("Keys", 128, 62);
+    try m.movePanel(keys, .{ .x = 143, .y = 0 });
+    const gi = try m.addArray(.{ .panel = plate }, .{ .x = 10, .y = 50 }, false, 4, 3, .{ .x = 40, .y = 30 }, 0);
+    var sh = m.gridShape(.{ .panel = plate }, gi);
+    try std.testing.expectApproxEqAbs(10, sh.pitch_x, 1e-9);
+    sh.cols = 10;
+    sh.rows = 4;
+    sh.pitch_x = 11.43;
+    sh.pitch_y = 12.7;
+    try m.setGridShape(.{ .panel = plate }, gi, sh, .remove);
+    try m.moveGrid(.{ .panel = plate }, gi, .{ .x = 12.565, .y = 50 });
+    const got = m.gridShape(.{ .panel = plate }, gi);
+    try std.testing.expectEqual(@as(u32, 10), got.cols);
+    try std.testing.expectEqual(@as(u32, 4), got.rows);
+    try std.testing.expectApproxEqAbs(11.43, got.pitch_x, 1e-9);
+    try std.testing.expectApproxEqAbs(12.7, got.pitch_y, 1e-9);
+    const p = m.gridPoint(.{ .panel = plate }, gi, 9, 3);
+    try std.testing.expectApproxEqAbs(12.565 + 9 * 11.43, p.x, 1e-9);
+    try std.testing.expectApproxEqAbs(50 - 3 * 12.7, p.y, 1e-9);
+    // The keys' grid follows it.
+    const kg = try m.addLinkedGrid(.{ .panel = keys }, m.gridOrigin(.{ .panel = plate }, gi), m.panels.items[plate].grids.items[gi].id);
+    const ks = m.gridShape(.{ .panel = keys }, kg);
+    try std.testing.expectApproxEqAbs(11.43, ks.pitch_x, 1e-9);
+    try std.testing.expectEqual(@as(u32, 10), ks.cols);
+    try std.testing.expectApproxEqAbs(12.565, m.gridOrigin(.{ .panel = keys }, kg).x, 1e-9);
+    // The plate moved: its array with it.
+    try m.movePanel(plate, .{ .x = 5, .y = 7 });
+    try std.testing.expectApproxEqAbs(12.565, m.gridOrigin(.{ .panel = plate }, gi).x, 1e-9);
+    try std.testing.expectApproxEqAbs(50, m.gridOrigin(.{ .panel = plate }, gi).y, 1e-9);
 }
