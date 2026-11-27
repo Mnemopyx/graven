@@ -62,7 +62,7 @@ pub const modes = [_]M{
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
-    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end", "sketch.show" } },
+    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end", "sketch.show", "sketch.palette" } },
     .{ .name = "sketch.summary", .kind = .sub, .parent = "sketch", .allows = &.{"sketch.summary"} },
     // Text being typed somewhere, the canvas or a field (whatever asked
     // for text input last frame): the digraph key, and the two characters
@@ -619,6 +619,17 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "shift+tab", .action = "sketch.tab", .arg = 1 },
     .{ .mode = "sketch", .chord = "escape", .action = "sketch.cancel" },
 } ++ enters("sketch", "sketch.finish") ++ [_]B{
+    // The palette (2026-11-27): S select, G construction (as on the
+    // canvas), 1 to 7 its geometry buttons in order.
+    .{ .mode = "sketch", .chord = "s", .action = "sketch.palette.select" },
+    .{ .mode = "sketch", .chord = "g", .action = "sketch.palette.construction" },
+    .{ .mode = "sketch", .chord = "one", .action = "sketch.palette.*", .arg = 0 },
+    .{ .mode = "sketch", .chord = "two", .action = "sketch.palette.*", .arg = 1 },
+    .{ .mode = "sketch", .chord = "three", .action = "sketch.palette.*", .arg = 2 },
+    .{ .mode = "sketch", .chord = "four", .action = "sketch.palette.*", .arg = 3 },
+    .{ .mode = "sketch", .chord = "five", .action = "sketch.palette.*", .arg = 4 },
+    .{ .mode = "sketch", .chord = "six", .action = "sketch.palette.*", .arg = 5 },
+    .{ .mode = "sketch", .chord = "seven", .action = "sketch.palette.*", .arg = 6 },
     .{ .mode = "sketch", .chord = "delete", .action = "sketch.delete" },
     .{ .mode = "sketch", .chord = "backspace", .action = "sketch.delete" },
     .{ .mode = "sketch", .chord = "c", .action = "sketch.constraint.coincident" },
@@ -660,7 +671,12 @@ const all_action_defs = blk: {
     for (elements.button_actions) |name| {
         for (action_defs) |d| {
             if (std.mem.eql(u8, d.name, name)) break;
-        } else out = out ++ [_]A{.{ .name = name }};
+        } else out = out ++ [_]A{.{
+            .name = name,
+            // A list's button (`*`) stands for one of its items: a key
+            // bound to it says which.
+            .param = if (std.mem.indexOfScalar(u8, name, '*') != null) .int else .none,
+        }};
     }
     const fixed = out[0..out.len].*;
     break :blk fixed;

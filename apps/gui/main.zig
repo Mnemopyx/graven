@@ -47,6 +47,7 @@ const glyphs = @import("glyphs.zig");
 const accepted = @import("fields.zig");
 /// The interface's elements, named in logical groups (`elements.zig`).
 const elements = @import("elements.zig");
+const ui_labels = @import("labels.zig");
 
 const geom = layout.geom;
 /// An object's boundary as a path (Select boundaries).
@@ -1248,6 +1249,7 @@ fn docUnits() layout.model.Units {
 
 /// Starts over with an empty document and asks for the new canvas's units.
 fn newCanvas() void {
+    label_store.forget();
     // Nothing of the last document's clicks or editing carries over: a
     // first click in the new one picks, not "again, further out".
     last_click = null;
@@ -1436,9 +1438,9 @@ fn displayWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
-        keyButton(@src(), "Screen size…", 0, .{});
-        keyButton(@src(), "Reset", 0, .{});
-        keyButton(@src(), "Close", 0, .{});
+        keyButton(@src(), "screen-size", 0, .{});
+        keyButton(@src(), "reset", 0, .{});
+        keyButton(@src(), "close", 0, .{});
     }
     if (!std.meta.eql(dc, before)) {
         display.set(dc);
@@ -1687,9 +1689,9 @@ fn sizeWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
         defer row.deinit();
-        keyButton(@src(), "Use estimate", 0, .{});
-        keyButton(@src(), "Cancel", 0, .{});
-        keyButton(@src(), "Save", 0, .{ .style = .highlight });
+        keyButton(@src(), "use-estimate", 0, .{});
+        keyButton(@src(), "cancel", 0, .{});
+        keyButton(@src(), "save", 0, .{ .style = .highlight });
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) do_save = true;
         if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
@@ -1934,8 +1936,8 @@ fn exportPrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        keyButton(@src(), "Cancel", 0, .{});
-        keyButton(@src(), "Export", 0, .{});
+        keyButton(@src(), "cancel", 0, .{});
+        keyButton(@src(), "export", 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
         if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
@@ -2728,6 +2730,8 @@ fn frame() !dvui.App.Result {
             if (std.mem.eql(u8, which, "hp15c")) openExample("examples/hp15c.graven") else if (std.mem.eql(u8, which, "keyboard")) openExample("examples/pc-keyboard.graven") else if (std.mem.eql(u8, which, "text")) _ = loadText() catch {} else if (std.mem.eql(u8, which, "sketch")) loadSketchSample() else if (std.mem.eql(u8, which, "diameters")) loadDiametersSample() else if (std.mem.eql(u8, which, "sketch-panel")) loadSketchPanelSample() else if (std.mem.eql(u8, which, "sketch-texts")) {
                 sample_texts = true;
                 loadSketchPanelSample();
+            } else if (std.mem.eql(u8, which, "interface")) {
+                loadInterfaceSample();
             } else if (std.mem.eql(u8, which, "connections")) {
                 sample_connections = true;
                 loadSketchPanelSample();
@@ -3554,6 +3558,7 @@ fn openExample(path: []const u8) void {
 /// Makes `opened` the document open, from `path`.
 fn install(opened: *history.Opened, path: []const u8) void {
     newCanvas();
+    label_store.forget();
     forgetThreads();
     state.model.deinit();
     state.model = opened.model;
@@ -3603,9 +3608,9 @@ fn recoveryPrompt() void {
     if (rec.opened.damaged) dvui.labelNoFmt(@src(), "The end of the file was damaged: the last of them are lost.", .{}, .{});
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    keyButton(@src(), "Cancel", 0, .{});
-    keyButton(@src(), "Discard them", 0, .{});
-    keyButton(@src(), "Keep them", 0, .{});
+    keyButton(@src(), "cancel", 0, .{});
+    keyButton(@src(), "discard-them", 0, .{});
+    keyButton(@src(), "keep-them", 0, .{});
 }
 
 /// Installs the recovered document and writes its file afresh under this
@@ -3634,10 +3639,10 @@ fn contentionPrompt() void {
         contention = null;
         return;
     }
-    keyButton(@src(), "Not now", 0, .{});
-    keyButton(@src(), "Load theirs", 0, .{});
-    keyButton(@src(), "Save mine as…", 0, .{});
-    keyButton(@src(), "Overwrite with mine", 0, .{});
+    keyButton(@src(), "not-now", 0, .{});
+    keyButton(@src(), "load-theirs", 0, .{});
+    keyButton(@src(), "save-mine-as", 0, .{});
+    keyButton(@src(), "overwrite-with-mine", 0, .{});
 }
 
 /// Asks for a file to open, import, save or export as: the system's file
@@ -3810,13 +3815,13 @@ fn filePrompt(kind: FilePromptKind) void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        keyButton(@src(), "Cancel", 0, .{});
+        keyButton(@src(), "cancel", 0, .{});
         keyButton(@src(), switch (kind) {
-            .open => "Open",
-            .save_as => "Save",
-            .import_text, .import_sheet, .import_figure, .replace_figure => "Import",
-            .open_profile => "Use",
-            .export_sheet, .export_3mf, .export_drawing, .export_drawing_outlined => "Export",
+            .open => "open",
+            .save_as => "save",
+            .import_text, .import_sheet, .import_figure, .replace_figure => "import",
+            .open_profile => "use",
+            .export_sheet, .export_3mf, .export_drawing, .export_drawing_outlined => "export",
         }, 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
@@ -3857,9 +3862,9 @@ fn leavePrompt(p: Pending) void {
     dvui.label(@src(), "Save them before {s}?", .{doing}, .{ .margin = .{ .y = 6 } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 10 } });
     defer row.deinit();
-    keyButton(@src(), "Cancel", 0, .{});
-    keyButton(@src(), "Don't save", 0, .{});
-    keyButton(@src(), "Save", 0, .{});
+    keyButton(@src(), "cancel", 0, .{});
+    keyButton(@src(), "don-t-save", 0, .{});
+    keyButton(@src(), "save", 0, .{});
 }
 
 // Undo -------------------------------------------------------------------------
@@ -4330,6 +4335,7 @@ fn loadPrefs() void {
     if (ps.problem()) |msg| state.status = msg;
     loadRecent(&ps);
     loadDigraphs(&ps);
+    loadLabels(&ps);
     prefs_store = ps;
     saved_prefs = currentPrefs();
 }
@@ -4604,8 +4610,8 @@ fn layoutPrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        keyButton(@src(), "Cancel", 0, .{});
-        keyButton(@src(), "Save", 0, .{ .style = .highlight });
+        keyButton(@src(), "cancel", 0, .{});
+        keyButton(@src(), "save", 0, .{ .style = .highlight });
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
         if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
@@ -5492,11 +5498,31 @@ fn windowButtons(buttons: []const desktop.Button) ?dvui.App.Result {
     return null;
 }
 
-/// A menu item that runs action `a` (with `arg`), its shortcut in mode
-/// `mode_name` shown at its right from the keymap, so the two never
-/// disagree; `faint` when there is nothing for it to do. Whether it was
-/// chosen (and the action run).
-fn menuAction(label: []const u8, comptime mode_name: []const u8, a: keymap.ActionId, arg: i32, faint: bool, id: usize) bool {
+/// A menu item's text: its label after a bullet when `mark` is on (DVUI's
+/// interface font has no check mark), indented as far when it is off, as
+/// it is when there is no mark.
+fn menuText(label: []const u8, mark: ?bool) []const u8 {
+    const on = mark orelse return label;
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}{s}", .{ if (on) "•  " else "    ", label }) catch label;
+}
+
+/// A name as an id part at compile time: `light_table`: light-table.
+fn kebabName(comptime name: []const u8) []const u8 {
+    comptime {
+        var out: [name.len]u8 = undefined;
+        for (name, 0..) |c, i| out[i] = if (c == '_') '-' else c;
+        const r = out;
+        return &r;
+    }
+}
+
+/// A menu item that runs action `a` (with `arg`), labelled by element
+/// `label_id` (`mark`: see `menuText`), its shortcut in mode `mode_name`
+/// shown at its right from the keymap, so the two never disagree; `faint`
+/// when there is nothing for it to do. Whether it was chosen (and the
+/// action run).
+fn menuAction(comptime label_id: []const u8, mark: ?bool, comptime mode_name: []const u8, a: keymap.ActionId, arg: i32, faint: bool, id: usize) bool {
+    const label = menuText(ui_labels.get(label_id), mark);
     // Its id is its action's name: menu.file.save.
     const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "menu.{s}", .{keymap.R.actionName(a)}) catch "menu");
     var mi = dvui.menuItem(@src(), .{}, .{ .expand = .horizontal, .id_extra = id, .tag = tag });
@@ -5519,25 +5545,25 @@ fn menu() ?dvui.App.Result {
     var m = dvui.menu(@src(), .horizontal, .{ .gravity_y = 0.5 });
     frameHole(m.data().borderRectScale().r);
     defer m.deinit();
-    if (tmenu(@src(), "File", .{ .submenu = true }, .{})) |r| {
+    if (tmenuE(@src(), "menu.file", null, .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (menuAction("New canvas…", "global", kact("file.new"), 0, false, 1)) m.close();
-        if (menuAction("New drawing", "global", kact("file.new-drawing"), 0, false, 5)) m.close();
-        if (menuAction("Open…", "global", kact("file.open"), 0, false, 2)) m.close();
+        if (menuAction("menu.file.new", null, "global", kact("file.new"), 0, false, 1)) m.close();
+        if (menuAction("menu.file.new-drawing", null, "global", kact("file.new-drawing"), 0, false, 5)) m.close();
+        if (menuAction("menu.file.open", null, "global", kact("file.open"), 0, false, 2)) m.close();
         if (!canvas_prompt) {
-            if (menuAction("Save", "global", kact("file.save"), 0, false, 3)) m.close();
-            if (menuAction("Save As…", "global", kact("file.save-as"), 0, false, 4)) m.close();
+            if (menuAction("menu.file.save", null, "global", kact("file.save"), 0, false, 3)) m.close();
+            if (menuAction("menu.file.save-as", null, "global", kact("file.save-as"), 0, false, 4)) m.close();
         }
-        if (!canvas_prompt) if (tmenu(@src(), "Import text…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.import-text", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             askForFile(.import_text);
         };
-        if (!canvas_prompt) if (tmenu(@src(), "Import figure (SVG)…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.import-figure", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             askForFile(.import_figure);
         };
-        if (!canvas_prompt) if (tmenu(@src(), "Export legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.export-legend-sheet", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetToExport() == null) {
                 state.status = "Show or choose a legend sheet first: it is what is exported. ";
@@ -5545,7 +5571,7 @@ fn menu() ?dvui.App.Result {
                 askForFile(.export_sheet);
             }
         };
-        if (!canvas_prompt) if (tmenu(@src(), "Export panel as 3MF…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.export-3mf", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (exportPart()) |pi| {
                 if (state.model.panels.items[pi].fab.layers.len == 0) {
@@ -5555,19 +5581,19 @@ fn menu() ?dvui.App.Result {
                 }
             } else state.status = "Choose a panel first: it is what is exported. ";
         };
-        if (!canvas_prompt) if (tmenu(@src(), "Export drawing as SVG…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.export-drawing-svg", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             askForDrawingSvg(false);
         };
-        if (!canvas_prompt) if (tmenu(@src(), "Export drawing as SVG, strokes outlined…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.export-drawing-svg-outlined", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             askForDrawingSvg(true);
         };
-        if (!canvas_prompt) if (menuAction("Check fabrication", "view", kact("fab.check"), 0, false, 40)) {
+        if (!canvas_prompt) if (menuAction("menu.fab.check", null, "view", kact("fab.check"), 0, false, 40)) {
             m.close();
             runChecks(checkTarget());
         };
-        if (!canvas_prompt) if (tmenu(@src(), "Import legend sheet (CSV)…", .{}, .{ .expand = .horizontal }) != null) {
+        if (!canvas_prompt) if (tmenuE(@src(), "menu.file.import-legend-sheet", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (sheetImportTarget() == null) {
                 state.status = "Choose a sheet, or a grid, track or panel of keys, first: the table goes into it. ";
@@ -5575,7 +5601,7 @@ fn menu() ?dvui.App.Result {
                 askForFile(.import_sheet);
             }
         };
-        if (tmenu(@src(), "Place image…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenuE(@src(), "menu.file.place-image", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             if (!canvas_prompt and openCanvas()) {
                 image_prompt = true;
@@ -5583,43 +5609,43 @@ fn menu() ?dvui.App.Result {
                 image_prompt_system = systemFileDialog();
             }
         }
-        if (tmenu(@src(), "Export SVG…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenuE(@src(), "menu.file.export-svg", null, .{}, .{ .expand = .horizontal }) != null) {
             m.close();
             exportSvg();
         }
         // The example documents (examples/, from where Graven was started),
         // each opened as an untitled copy.
-        inline for (.{ .{ "Open example: PC keyboard", "examples/pc-keyboard.graven" }, .{ "Open example: HP-15C keypad", "examples/hp15c.graven" } }, 0..) |ex, k| {
-            if (tmenu(@src(), ex[0], .{}, .{ .expand = .horizontal, .id_extra = k }) != null) {
+        inline for (.{ .{ "menu.file.example-pc-keyboard", "examples/pc-keyboard.graven" }, .{ "menu.file.example-hp15c", "examples/hp15c.graven" } }, 0..) |ex, k| {
+            if (tmenuE(@src(), ex[0], null, .{}, .{ .expand = .horizontal, .id_extra = k }) != null) {
                 leave(.{ .example = ex[1] });
                 m.close();
             }
         }
-        if (tmenu(@src(), "Quit", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenuE(@src(), "menu.file.quit", null, .{}, .{ .expand = .horizontal }) != null) {
             leave(.quit);
             m.close();
         }
     }
-    if (tmenu(@src(), "Edit", .{ .submenu = true }, .{})) |r| {
+    if (tmenuE(@src(), "menu.edit", null, .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (menuAction("Undo", "global", kact("edit.undo"), 0, !hist.canUndo(), 1)) m.close();
-        if (menuAction("Redo", "global", kact("edit.redo"), 0, !hist.canRedo(), 2)) {
+        if (menuAction("menu.edit.undo", null, "global", kact("edit.undo"), 0, !hist.canUndo(), 1)) m.close();
+        if (menuAction("menu.edit.redo", null, "global", kact("edit.redo"), 0, !hist.canRedo(), 2)) {
             m.close();
         }
         // Text in a track, at the flow cursor.
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
         const no_sel = track_cursor == null or flowSelection() == null;
-        if (menuAction("Cut", "canvas.flow", kact("text.edit.cut"), 0, no_sel, 3)) m.close();
-        if (menuAction("Copy", "canvas.flow", kact("text.edit.copy"), 0, no_sel, 4)) m.close();
-        if (menuAction("Paste", "canvas.flow", kact("text.edit.paste"), 0, track_cursor == null, 5)) m.close();
-        if (menuAction("Paste plain", "canvas.flow", kact("text.edit.paste-plain"), 0, track_cursor == null, 7)) m.close();
-        if (menuAction("Select all", "canvas.flow", kact("text.select.all"), 0, track_cursor == null, 6)) m.close();
+        if (menuAction("menu.text.edit.cut", null, "canvas.flow", kact("text.edit.cut"), 0, no_sel, 3)) m.close();
+        if (menuAction("menu.text.edit.copy", null, "canvas.flow", kact("text.edit.copy"), 0, no_sel, 4)) m.close();
+        if (menuAction("menu.text.edit.paste", null, "canvas.flow", kact("text.edit.paste"), 0, track_cursor == null, 5)) m.close();
+        if (menuAction("menu.text.edit.paste-plain", null, "canvas.flow", kact("text.edit.paste-plain"), 0, track_cursor == null, 7)) m.close();
+        if (menuAction("menu.text.select.all", null, "canvas.flow", kact("text.select.all"), 0, track_cursor == null, 6)) m.close();
     }
-    if (tmenu(@src(), "Text", .{ .submenu = true }, .{})) |r| {
+    if (tmenuE(@src(), "menu.text", null, .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (tmenu(@src(), "Fonts…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenuE(@src(), "menu.text.fonts", null, .{}, .{ .expand = .horizontal }) != null) {
             fontwin.open = true;
             m.close();
         }
@@ -5627,105 +5653,98 @@ fn menu() ?dvui.App.Result {
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 91 });
         const no_text = track_cursor == null;
         const no_sel = no_text or flowSelection() == null;
-        if (menuAction("Bold", "canvas.flow", kact("text.style.bold"), 0, no_text, 11)) m.close();
-        if (menuAction("Italic", "canvas.flow", kact("text.style.italic"), 0, no_text, 12)) m.close();
+        if (menuAction("menu.text.style.bold", null, "canvas.flow", kact("text.style.bold"), 0, no_text, 11)) m.close();
+        if (menuAction("menu.text.style.italic", null, "canvas.flow", kact("text.style.italic"), 0, no_text, 12)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
-        if (menuAction("UPPER CASE", "canvas.flow", kact("text.edit.case-upper"), 0, no_sel, 13)) m.close();
-        if (menuAction("lower case", "canvas.flow", kact("text.edit.case-lower"), 0, no_sel, 14)) m.close();
-        if (menuAction("Title Case", "canvas.flow", kact("text.edit.case-title"), 0, no_sel, 15)) m.close();
+        if (menuAction("menu.text.edit.case-upper", null, "canvas.flow", kact("text.edit.case-upper"), 0, no_sel, 13)) m.close();
+        if (menuAction("menu.text.edit.case-lower", null, "canvas.flow", kact("text.edit.case-lower"), 0, no_sel, 14)) m.close();
+        if (menuAction("menu.text.edit.case-title", null, "canvas.flow", kact("text.edit.case-title"), 0, no_sel, 15)) m.close();
     }
-    if (tmenu(@src(), "View", .{ .submenu = true }, .{})) |r| {
+    if (tmenuE(@src(), "menu.view", null, .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        if (menuAction("    Zoom to context", "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
-        if (menuAction("    Zoom to everything", "view", kact("view.zoom-all"), 0, false, 2)) m.close();
-        if (menuAction("    Frame the edit", "view", kact("view.frame-edit"), 0, false, 7)) m.close();
-        if (menuAction("    Reveal the context", "view", kact("view.reveal"), 0, false, 9)) m.close();
-        if (menuAction("    Show or hide auto-hide panes", "global", kact("panes.toggle-auto"), 0, false, 8)) m.close();
+        if (menuAction("menu.view.zoom-fit", false, "view", kact("view.zoom-fit"), 0, false, 1)) m.close();
+        if (menuAction("menu.view.zoom-all", false, "view", kact("view.zoom-all"), 0, false, 2)) m.close();
+        if (menuAction("menu.view.frame-edit", false, "view", kact("view.frame-edit"), 0, false, 7)) m.close();
+        if (menuAction("menu.view.reveal", false, "view", kact("view.reveal"), 0, false, 9)) m.close();
+        if (menuAction("menu.panes.toggle-auto", false, "global", kact("panes.toggle-auto"), 0, false, 8)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
-        if (menuAction("    New view side by side", "global", kact("views.split-across"), 0, false, 20)) m.close();
-        if (menuAction("    New view stacked", "global", kact("views.split-down"), 0, false, 21)) m.close();
-        if (menuAction(if (vl.maximized != docviews.none) "•  Fill the window with this view" else "    Fill the window with this view", "global", kact("views.maximize"), 0, false, 22)) m.close();
-        if (menuAction("    Next view", "global", kact("views.next"), 0, false, 23)) m.close();
-        if (menuAction("    Close this view", "global", kact("views.close"), 0, vl.open[vl.active] and blk: {
+        if (menuAction("menu.views.split-across", false, "global", kact("views.split-across"), 0, false, 20)) m.close();
+        if (menuAction("menu.views.split-down", false, "global", kact("views.split-down"), 0, false, 21)) m.close();
+        if (menuAction("menu.views.maximize", vl.maximized != docviews.none, "global", kact("views.maximize"), 0, false, 22)) m.close();
+        if (menuAction("menu.views.next", false, "global", kact("views.next"), 0, false, 23)) m.close();
+        if (menuAction("menu.views.close", false, "global", kact("views.close"), 0, vl.open[vl.active] and blk: {
             var c: usize = 0;
             for (vl.open) |o| {
                 if (o) c += 1;
             }
             break :blk c <= 1;
         }, 24)) m.close();
-        if (menuAction("    Actual size", "view", kact("view.zoom-to"), 100, false, 3)) m.close();
-        if (menuAction("    200 %", "view", kact("view.zoom-to"), 200, false, 4)) m.close();
-        if (menuAction("    Zoom in", "view", kact("view.zoom-in"), 0, false, 5)) m.close();
-        if (menuAction("    Zoom out", "view", kact("view.zoom-out"), 0, false, 6)) m.close();
+        if (menuAction("menu.view.actual-size", false, "view", kact("view.zoom-to"), 100, false, 3)) m.close();
+        if (menuAction("menu.view.zoom-200", false, "view", kact("view.zoom-to"), 200, false, 4)) m.close();
+        if (menuAction("menu.view.zoom-in", false, "view", kact("view.zoom-in"), 0, false, 5)) m.close();
+        if (menuAction("menu.view.zoom-out", false, "view", kact("view.zoom-out"), 0, false, 6)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 91 });
         // DVUI's interface font has no check mark; a bullet marks what is on.
         // The grid: whether this canvas or frame has one (the document's),
         // and how grids are drawn (a preference): lines, dots or pluses.
         {
             const on = ViewLayer.grid.shown();
-            if (tmenu(@src(), if (on) "•  Grid" else "    Grid", .{}, .{ .expand = .horizontal, .id_extra = 3 }) != null) {
+            if (tmenuE(@src(), "menu.view.grid", on, .{}, .{ .expand = .horizontal, .id_extra = 3 }) != null) {
                 ViewLayer.grid.toggle();
                 m.close();
             }
         }
-        for ([_]bg_grid.Mode{ .lines, .dots, .pluses }, [_][]const u8{ "Grids as lines", "Grids as dots", "Grids as pluses" }, 0..) |gm, label, gi| {
-            var lb: [48]u8 = undefined;
-            const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (gridLook() == gm) "•  " else "    ", label }) catch label;
-            if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = gi }) != null) {
+        inline for (.{ bg_grid.Mode.lines, bg_grid.Mode.dots, bg_grid.Mode.pluses }, 0..) |gm, gi| {
+            if (tmenuE(@src(), "menu.view.grids-as." ++ @tagName(gm), gridLook() == gm, .{}, .{ .expand = .horizontal, .id_extra = gi }) != null) {
                 grid_mode = gm;
                 m.close();
             }
         }
-        if (menuAction(if (snap_grid) "•  Snap to grid" else "    Snap to grid", "view", kact("view.snap-grid"), 0, false, 9)) m.close();
-        if (menuAction(if (snap_objects) "•  Snap to objects" else "    Snap to objects", "view", kact("view.snap-objects"), 0, false, 10)) m.close();
+        if (menuAction("menu.view.snap-grid", snap_grid, "view", kact("view.snap-grid"), 0, false, 9)) m.close();
+        if (menuAction("menu.view.snap-objects", snap_objects, "view", kact("view.snap-objects"), 0, false, 10)) m.close();
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 94 });
         inline for (canvas_theme.all, 0..) |t, ti| {
-            const text = if (canvas_theme.current == t) "•  " ++ comptime t.label() else "    " ++ comptime t.label();
-            if (menuAction(text, "view", kact("view.canvas-theme"), @intFromEnum(t), false, 40 + ti)) m.close();
+            if (menuAction("menu.view.theme." ++ comptime kebabName(@tagName(t)), canvas_theme.current == t, "view", kact("view.canvas-theme"), @intFromEnum(t), false, 40 + ti)) m.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 93 });
-        if (menuAction(if (scroll_mode == .auto) "•  Scrolling: trackpad pans, wheel zooms" else "    Scrolling: trackpad pans, wheel zooms", "view", kact("view.scrolling"), 0, false, 30)) m.close();
-        if (menuAction(if (scroll_mode == .zoom) "•  Scrolling zooms" else "    Scrolling zooms", "view", kact("view.scrolling"), 1, false, 31)) m.close();
-        if (menuAction(if (scroll_mode == .pan) "•  Scrolling pans" else "    Scrolling pans", "view", kact("view.scrolling"), 2, false, 32)) m.close();
-        if (tmenu(@src(), "    Display correction…", .{}, .{ .expand = .horizontal }) != null) {
+        if (menuAction("menu.view.scrolling-auto", scroll_mode == .auto, "view", kact("view.scrolling"), 0, false, 30)) m.close();
+        if (menuAction("menu.view.scrolling-zoom", scroll_mode == .zoom, "view", kact("view.scrolling"), 1, false, 31)) m.close();
+        if (menuAction("menu.view.scrolling-pan", scroll_mode == .pan, "view", kact("view.scrolling"), 2, false, 32)) m.close();
+        if (tmenuE(@src(), "menu.view.display-correction", false, .{}, .{ .expand = .horizontal }) != null) {
             display_window = true;
             m.close();
         }
-        if (tmenu(@src(), "    Calibrate screen size…", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenuE(@src(), "menu.view.calibrate-screen-size", false, .{}, .{ .expand = .horizontal }) != null) {
             openSizeWindow();
             m.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
-        if (tmenu(@src(), if (show_construction) "•  Show text construction" else "    Show text construction", .{}, .{ .expand = .horizontal }) != null) {
+        if (tmenuE(@src(), "menu.view.show-text-construction", show_construction, .{}, .{ .expand = .horizontal }) != null) {
             show_construction = !show_construction;
             m.close();
         }
         // Pane layouts: which is in use, and saving or resetting it.
-        if (tmenu(@src(), "    Pane layout", .{ .submenu = true }, .{ .expand = .horizontal })) |lr| {
+        if (tmenuE(@src(), "menu.view.pane-layout", false, .{ .submenu = true }, .{ .expand = .horizontal })) |lr| {
             var lm = dvui.floatingMenu(@src(), .{ .from = lr }, .{});
             defer lm.deinit();
             for (layoutNames(), 0..) |n, li| {
-                var lb: [64]u8 = undefined;
                 const on = std.mem.eql(u8, n, layout_name);
-                const text = std.fmt.bufPrint(&lb, "{s}{s}", .{ if (on) "•  " else "    ", n }) catch n;
-                if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = li }) != null) {
+                if (tmenu(@src(), menuText(n, on), .{}, .{ .expand = .horizontal, .id_extra = li }) != null) {
                     useLayout(n);
                     m.close();
                 }
             }
             _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
-            if (menuAction("    Next layout", "global", kact("panes.layout-next"), 0, false, 20)) m.close();
-            if (menuAction("    Save layout as…", "global", kact("panes.layout-save-as"), 0, false, 21)) m.close();
-            if (menuAction("    Reset this layout", "global", kact("panes.layout-reset"), 0, false, 22)) m.close();
+            if (menuAction("menu.panes.layout-next", false, "global", kact("panes.layout-next"), 0, false, 20)) m.close();
+            if (menuAction("menu.panes.layout-save-as", false, "global", kact("panes.layout-save-as"), 0, false, 21)) m.close();
+            if (menuAction("menu.panes.layout-reset", false, "global", kact("panes.layout-reset"), 0, false, 22)) m.close();
         }
         // Each pane pinned in or auto-hide, as a click on its tab sets it.
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 9 });
         for (all_panes, 0..) |pane, pi| {
-            var buf: [64]u8 = undefined;
-            const on = pane.pinned;
-            const text = std.fmt.bufPrint(&buf, "{s}{s}: pinned", .{ if (on) "•  " else "    ", pane.name }) catch pane.name;
-            if (tmenu(@src(), text, .{}, .{ .expand = .horizontal, .id_extra = 40 + pi }) != null) {
+            var buf: [96]u8 = undefined;
+            if (tmenuNamed(@src(), "menu.view.pane-pinned", menuText(ui_labels.fill(&buf, ui_labels.get("menu.view.pane-pinned"), .{pane.name}), pane.pinned), .{}, .{ .expand = .horizontal, .id_extra = 40 + pi }) != null) {
                 applyTab(pane, .toggle);
                 m.close();
             }
@@ -5868,8 +5887,8 @@ fn sheetProperties(id: layout.model.ObjectId) void {
             if (tdropdown(@src(), sh.columns.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7 })) actV(.setSheetShown, .{ id, choice });
         }
         propText("", "Each row names a text holder (a caption, or a track of that name). They show the column chosen; an empty cell shows the default. Editing the text edits its cell.", .{}, 6);
-        keyButton(@src(), "Open it beside the canvas", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-        keyButton(@src(), "Remove sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "open-it-beside-the-canvas", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "remove-sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         return;
     }
     const a = dvui.currentWindow().arena();
@@ -5879,8 +5898,8 @@ fn sheetProperties(id: layout.model.ObjectId) void {
     if (rows.items.len > 0) propText("Not found", "{d} row{s} name no key", .{ rows.items.len, if (rows.items.len == 1) "" else "s" }, 4);
     if (cols.items.len > 0) propText("Unused", "{d} column{s} match no slot", .{ cols.items.len, if (cols.items.len == 1) "" else "s" }, 5);
     propText("", "Its keys' legends come from it; editing one on its key edits its cell.", .{}, 6);
-    keyButton(@src(), "Open it beside the canvas", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    keyButton(@src(), "Remove sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "open-it-beside-the-canvas", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "remove-sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// A track's name with where it is: its panel's name, unless it lies on
@@ -6042,7 +6061,7 @@ fn treeNodeSalted(ctx: Context, text: []const u8, depth: usize, has_children: bo
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id, .margin = .{ .x = @floatFromInt(depth * 14) } });
     defer row.deinit();
     if (has_children) {
-        if (tbuttonIcon(@src(), if (open) "Close" else "Open", if (open) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{}, .{}, .{
+        if (tbuttonIcon(@src(), if (open) ui_labels.get("tree.close") else ui_labels.get("tree.open"), if (open) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{}, .{}, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .padding = .all(1),
             .margin = .all(1),
@@ -7080,7 +7099,7 @@ fn dividerGrip(n: u8, area: dvui.Rect) void {
     if (bw.clicked()) pushButtonEvent(tag, @as(i32, n) + 1);
     const rs = bw.data().borderRectScale().r;
     divider_from[n] = rs.toNatural();
-    dvui.tooltip(@src(), .{ .active_rect = rs }, "Split: click for options; drag the divider to resize; double-click it to even out", .{}, .{ .id_extra = n });
+    dvui.tooltip(@src(), .{ .active_rect = rs }, "{s}", .{ui_labels.tip("views.divider", false)}, .{ .id_extra = n });
     bw.deinit();
     // From the frame after it was asked for: the click that asked would
     // close it (a press outside a pop-up).
@@ -7248,7 +7267,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
                 } else tab_click = .{ .view = shown, .ms = now };
                 if (shown != vl.active) view_to_activate = shown else vl.select(shown);
             }
-            stripIcon(@src(), .caret_down, "views.add", "This window's tabs, and the document's contexts", @as(i32, shown) + 1, leaf, &tab_add_from[leaf]);
+            stripIcon(@src(), .caret_down, "views.add", @as(i32, shown) + 1, leaf, &tab_add_from[leaf]);
         }
         // A paged context: its page, and flipping.
         if (vl.open[shown]) pageControl(shown, leaf);
@@ -7263,7 +7282,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             }
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        stripIcon(@src(), .square_split_horizontal, "views.split-across", "Split (Alt: stacked)", @as(i32, shown) + 1, leaf, null);
+        stripIcon(@src(), .square_split_horizontal, "views.split-across", @as(i32, shown) + 1, leaf, null);
     }
     if (tab_add_leaf == leaf) tabAddPopup(leaf);
     if (!vl.open[shown]) return;
@@ -7287,13 +7306,13 @@ fn canvasView(v: u8) void {
 
 /// A window's strip button (`id`, an action of the registry), its tooltip
 /// saying its key; `rect_out` takes where it was drawn.
-fn stripIcon(src: std.builtin.SourceLocation, comptime i: icons.Icon, comptime id: []const u8, tip: []const u8, arg: i32, leaf: u8, rect_out: ?*dvui.Rect.Natural) void {
-    _ = comptime elements.get(id);
+fn stripIcon(src: std.builtin.SourceLocation, comptime i: icons.Icon, comptime id: []const u8, arg: i32, leaf: u8, rect_out: ?*dvui.Rect.Natural) void {
+    const tip = if ((comptime elements.get(id)).tip.len > 0) ui_labels.tip(id, false) else ui_labels.get(id);
     const tag = uniqueTag(id);
     recordDrawn(tag, arg);
     var tb: [96]u8 = undefined;
     var kb: [48]u8 = undefined;
-    const full = if (keymap.shortcut(&kb, kmode("global"), comptime kact(id), 0)) |sc| std.fmt.bufPrint(&tb, "{s} ({s})", .{ tip, sc }) catch tip else tip;
+    const full = if (badgeText(&kb, id, 0)) |sc| std.fmt.bufPrint(&tb, "{s} ({s})", .{ tip, sc }) catch tip else tip;
     var alt = false;
     if (icons.button(src, i, full, .{ .size = 15, .id_extra = leaf, .rect_out = rect_out, .opts = .{ .gravity_y = 0.5, .padding = .all(3), .margin = .{ .x = 2, .w = 2 }, .tag = tag } })) {
         alt = dvui.currentWindow().modifiers.alt();
@@ -7315,9 +7334,9 @@ fn pageControl(v: u8, leaf: u8) void {
     const n_pages = pageCount(v);
     if (n_pages < 2) return;
     const p = @min(vl.views[v].page, n_pages - 1);
-    stripIcon(@src(), .caret_down, "views.page-prev", "The page before (PgUp; Home: the first)", @as(i32, v) + 1, leaf, null);
+    stripIcon(@src(), .caret_down, "views.page-prev", @as(i32, v) + 1, leaf, null);
     dvui.label(@src(), "{d} / {d}", .{ p + 1, n_pages }, .{ .gravity_y = 0.5, .font = dvui.Font.theme(.body).larger(-2), .id_extra = leaf });
-    stripIcon(@src(), .caret_down, "views.page-next", "The next page (PgDn; End: the last)", @as(i32, v) + 1, leaf, null);
+    stripIcon(@src(), .caret_down, "views.page-next", @as(i32, v) + 1, leaf, null);
 }
 
 /// View `v` flipped `by` pages (to the first or last when `ends`).
@@ -7453,7 +7472,7 @@ fn tabAddPopup(leaf: u8) void {
             if (bw.clicked()) pushButtonEvent(tag, t);
             bw.drawFocus();
             bw.deinit();
-            if (tabs.len > 1 or vl.views[t].kind != .canvas) keyIcon(@src(), "Remove from tabs", dvui.entypo.cross, @as(i32, t) + 1, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(3), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k, .tag = uniqueTag("views.close") });
+            if (tabs.len > 1 or vl.views[t].kind != .canvas) keyIcon(@src(), "remove-from-tabs", dvui.entypo.cross, @as(i32, t) + 1, .{ .min_size_content = .{ .w = 9, .h = 9 }, .padding = .all(3), .gravity_y = 0.5, .background = false, .border = .all(0), .id_extra = k, .tag = uniqueTag("views.close") });
         }
         if (any) _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = 4, .h = 2 }, .id_extra = 2001 });
     }
@@ -7485,7 +7504,7 @@ fn tabAddPopup(leaf: u8) void {
         const saved_group = pushGroup("views");
         defer popGroup(saved_group);
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = 4, .h = 2 }, .id_extra = 2002 });
-        keyButton(@src(), "New sketch, in its own space", 0, .{ .expand = .horizontal });
+        keyButton(@src(), "new-sketch", 0, .{ .expand = .horizontal });
     }
     if (enter) {
         if (first_tab != null and filter.len > 0) {
@@ -7803,7 +7822,8 @@ fn sheetView(v: u8) void {
     defer scroll.deinit();
     for (sh.rows.items, 0..) |row, r| {
         const sel_row = r == sheet_sel.row;
-        const missing = std.mem.indexOfScalar(usize, bad_rows.items, r) != null;
+        // A row naming an interface element is a label, not a link.
+        const missing = std.mem.indexOfScalar(usize, bad_rows.items, r) != null and !interfaceRow(row.key);
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = r, .background = true, .color_fill = .{ .color = if (sel_row) colors.paper.lerp(dvui.themeGet().focus, if (active) 0.08 else 0.2) else colors.paper }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.15) } });
         defer line.deinit();
         for (0..sh.columns.items.len + 1) |c| {
@@ -7901,11 +7921,11 @@ fn sheetViewProperties() void {
         }
     }
     if (!sh.texts) {
-        keyButton(@src(), "Name tiles by grid position (R1C1…)", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-        keyButton(@src(), "Name tiles by their first legend", 0, .{ .expand = .horizontal });
+        keyButton(@src(), "name-tiles-by-grid-position-r1c1", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "name-tiles-by-their-first-legend", 0, .{ .expand = .horizontal });
     }
-    keyButton(@src(), "Add a row", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    if (sh.rows.items.len > 0) keyButton(@src(), "Remove this row", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "add-a-row", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    if (sh.rows.items.len > 0) keyButton(@src(), "remove-this-row", 0, .{ .expand = .horizontal });
 }
 
 /// Names every key of sheet `si`: by its grid place (R1C1, from row 1,
@@ -8179,7 +8199,7 @@ fn frameProperties(space: usize) !void {
         if (p.space == spaceId(space)) panels += 1;
     }
     propText("Panels", "{d}", .{panels}, 4);
-    keyButton(@src(), "Fit frame to its contents", 0, .{ .margin = .{ .y = 8 } });
+    keyButton(@src(), "fit-frame-to-its-contents", 0, .{ .margin = .{ .y = 8 } });
     layersList(space);
     placeViewButtons(space);
 }
@@ -8193,7 +8213,7 @@ fn groupProperties(id: layout.model.ObjectId) !void {
     propText("Members", "{d}", .{g.members.items.len}, 2);
     if (state.model.parentGroup(id)) |p| if (state.model.group(p)) |pg| propText("In group", "{s}", .{pg.name}, 3);
     propText("Moves", "{s}", .{"arrow keys, 1 mm, all together"}, 4);
-    keyButton(@src(), "Ungroup", 0, .{ .margin = .{ .y = 8 } });
+    keyButton(@src(), "ungroup", 0, .{ .margin = .{ .y = 8 } });
 }
 
 /// Objects picked with Select area: how many, and what can be done with
@@ -8211,14 +8231,14 @@ fn selectionProperties() !void {
         if (parent != .space) break false;
     } else true;
     if (!in_space) return;
-    keyButton(@src(), "Group", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
-    keyButton(@src(), "Move to a new frame", 0, .{ .expand = .horizontal });
-    keyButton(@src(), "Copy to a new frame", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "group", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+    keyButton(@src(), "move-to-a-new-frame", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "copy-to-a-new-frame", 0, .{ .expand = .horizontal });
     for (state.model.spaces.items, 0..) |sp, si| {
         if (si == shown_space or sp.home != .none) continue;
         var buf: [96]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "Move to {s}", .{if (si == 0) "the canvas" else sp.name}) catch "Move";
-        keyButton(@src(), text, @intCast(si), .{ .expand = .horizontal, .id_extra = si });
+        const text = if (si == 0) ui_labels.get("selection.move-to-canvas") else ui_labels.fill(&buf, ui_labels.get("selection.move-to-frame"), .{sp.name});
+        keyButtonText(@src(), text, @intCast(si), .{ .expand = .horizontal, .id_extra = si, .tag = uniqueTag(if (si == 0) "selection.move-to-canvas" else "selection.move-to-frame") });
     }
 }
 
@@ -8564,7 +8584,7 @@ fn artProperties(pi: usize, index: usize) !void {
                 state.status = "A width must be more than 0. ";
             };
         };
-        keyButton(@src(), "Show figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+        keyButton(@src(), "show-figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         borderProps(pa.id, pa.border, 22);
     }
     const b = pa.box();
@@ -9338,9 +9358,9 @@ fn panelFab(pi: usize) !void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n, .margin = .{ .y = 6 } });
             defer row.deinit();
             dvui.label(@src(), "{d}. {s}", .{ li + 1, l.name }, .{ .font = dvui.Font.theme(.heading), .gravity_y = 0.5 });
-            if (li + 1 < layers.len) keyIcon(@src(), "Later", dvui.entypo.arrow_down, @intCast(li), .{ .gravity_x = 1, .id_extra = 1 });
-            if (li > 0) keyIcon(@src(), "Earlier", dvui.entypo.arrow_up, @intCast(li), .{ .gravity_x = 1, .id_extra = 2 });
-            keyIcon(@src(), "Remove layer", dvui.entypo.cross, @intCast(li), .{ .gravity_x = 1, .id_extra = 3 });
+            if (li + 1 < layers.len) keyIcon(@src(), "later", dvui.entypo.arrow_down, @intCast(li), .{ .gravity_x = 1, .id_extra = 1 });
+            if (li > 0) keyIcon(@src(), "earlier", dvui.entypo.arrow_up, @intCast(li), .{ .gravity_x = 1, .id_extra = 2 });
+            keyIcon(@src(), "remove-layer", dvui.entypo.cross, @intCast(li), .{ .gravity_x = 1, .id_extra = 3 });
         }
         if (textProp("Name", l.name, n + 1)) |v| {
             l.name = v;
@@ -9496,7 +9516,7 @@ fn panelFab(pi: usize) !void {
     setTagScope("{s}", .{"fabrication"});
     // After its layers, the fabrication's own.
     setGroup("{s}", .{base_group});
-    keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } });
+    keyButton(@src(), "add-layer", 0, .{ .expand = .horizontal, .id_extra = 398, .margin = .{ .y = 6 } });
     if (!changed) return;
     next.layers = layers;
     const done = if (key != 0) actM(key, .setPanelFab, .{ pi, next }) else act(.setPanelFab, .{ pi, next });
@@ -9512,9 +9532,9 @@ fn panelGrids(pi: usize) !void {
     const panel = state.model.panels.items[pi];
     heading("Grids", .{}, 300);
     for (panel.grids.items, 0..) |g, gi| {
-        keyButton(@src(), g.name, @intCast(gi), .{ .expand = .horizontal, .id_extra = 301 + gi, .tag = listTag("panel.grids", g.name) });
+        keyButtonText(@src(), g.name, @intCast(gi), .{ .expand = .horizontal, .id_extra = 301 + gi, .tag = listTag("panel.grids", g.name) });
     }
-    keyButton(@src(), "Add grid", 0, .{ .expand = .horizontal, .id_extra = 299 });
+    keyButton(@src(), "add-grid", 0, .{ .expand = .horizontal, .id_extra = 299 });
 }
 
 /// A grid: its shape (counts, spacing, stretch), where it starts, what it
@@ -9593,13 +9613,13 @@ fn gridProperties(pi: Parent, gi: usize) !void {
     propValue("Name", g.default_name, "{s}", .{g.name}, 1);
     propText("On", "{s}", .{state.model.parentName(pi)}, 2);
     // An array: its sketch, where its borders and captions are edited.
-    if (g.sketch != .none) keyButton(@src(), "Edit its sketch", 0, .{ .expand = .horizontal, .id_extra = 7 });
+    if (g.sketch != .none) keyButton(@src(), "edit-its-sketch", 0, .{ .expand = .horizontal, .id_extra = 7 });
     // Its keys' legends as a sheet (theirs and those beside them).
-    if (g.instances.items.len > 0) keyButton(@src(), "Make a legend sheet", 0, .{ .expand = .horizontal, .id_extra = 6 });
+    if (g.instances.items.len > 0) keyButton(@src(), "make-a-legend-sheet", 0, .{ .expand = .horizontal, .id_extra = 6 });
     if (state.model.findGrid(g.link)) |src| {
         const sg = state.model.gridsIn(src.parent)[src.index];
         propText("Follows", "{s} on {s}", .{ sg.name, state.model.parentName(src.parent) }, 3);
-        keyButton(@src(), "Show the grid it follows", 0, .{ .expand = .horizontal, .id_extra = 4 });
+        keyButton(@src(), "show-the-grid-it-follows", 0, .{ .expand = .horizontal, .id_extra = 4 });
         propText("", "Changing its shape here stops it following.", .{}, 5);
     } else {
         var followers: usize = 0;
@@ -9720,8 +9740,8 @@ fn gridProperties(pi: Parent, gi: usize) !void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = n + 8 });
             defer row.deinit();
-            keyButton(@src(), "Fill empty points", @intCast(si), .{ .id_extra = n + 8 });
-            keyButton(@src(), "Remove stamp", @intCast(si), .{ .id_extra = n + 9 });
+            keyButton(@src(), "fill-empty-points", @intCast(si), .{ .id_extra = n + 8 });
+            keyButton(@src(), "remove-stamp", @intCast(si), .{ .id_extra = n + 9 });
         }
     }
     heading("Add a stamp", .{}, 90);
@@ -9729,7 +9749,7 @@ fn gridProperties(pi: Parent, gi: usize) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 91 });
         defer row.deinit();
-        inline for (.{ .{ "Parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "Holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "Legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
+        inline for (.{ .{ "parts", layout.model.GridRole.part, 0.75, 0.75, 0.0 }, .{ "holes", layout.model.GridRole.hole, 0.85, 0.85, 0.0 }, .{ "legends", layout.model.GridRole.legend, 0.8, 0.25, 0.6 } }, 0..) |kind, k| {
             keyButton(@src(), kind[0], 0, .{ .id_extra = 92 + k });
         }
     }
@@ -9760,7 +9780,7 @@ fn gridProperties(pi: Parent, gi: usize) !void {
     }
     // The grid's own, after its stamps.
     setGroup("{s}", .{base_group});
-    keyButton(@src(), "Remove grid", 0, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } });
+    keyButton(@src(), "remove-grid", 0, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 8 } });
 }
 
 /// A tile bound to a grid: its point, how many points it spans, and
@@ -9773,11 +9793,11 @@ fn instanceProperties(pi: Parent, gi: usize, ii: usize) !void {
     const sh = state.model.gridShape(pi, gi);
     _ = sh;
     next_element = "instance.grid";
-    keyButton(@src(), g.name, 0, .{ .expand = .horizontal, .id_extra = 40 });
+    keyButtonText(@src(), g.name, 0, .{ .expand = .horizontal, .id_extra = 40 });
     if (state.model.stampIndex(pi, gi, inst.stamp)) |si| propText("Stamp", "{s}", .{g.stamps.items[si].name}, 41);
     if (inst.loose) |c| {
         propText("Point", "none: left at ({d:.2}, {d:.2}) mm", .{ c.x, c.y }, 42);
-        keyButton(@src(), "Bind to the nearest point", 0, .{ .expand = .horizontal, .id_extra = 43 });
+        keyButton(@src(), "bind-to-the-nearest-point", 0, .{ .expand = .horizontal, .id_extra = 43 });
     } else {
         propText("Point", "column {d}, row {d}", .{ inst.col + 1, inst.row + 1 }, 42);
         if (numberProp("Spans columns", @floatFromInt(inst.cols), 1, 200, 44)) |v| act(.setInstanceSpan, .{ pi, gi, ii, @as(u32, @intFromFloat(@round(v))), inst.rows }) catch {
@@ -9788,7 +9808,7 @@ fn instanceProperties(pi: Parent, gi: usize, ii: usize) !void {
         };
     }
     if (state.model.instanceBox(pi, gi, ii)) |b| propText("Box", "{d:.2} × {d:.2} mm", .{ b.width(), b.height() }, 46);
-    keyButton(@src(), "Remove from the grid", 0, .{ .expand = .horizontal, .id_extra = 47 });
+    keyButton(@src(), "remove-from-the-grid", 0, .{ .expand = .horizontal, .id_extra = 47 });
 }
 
 // Panel editing ---------------------------------------------------------------
@@ -10032,12 +10052,12 @@ fn panelEditHeader() void {
             var choice: usize = @min(p.stamp, names.items.len - 1);
             if (tdropdown(@src(), names.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 7004 })) p.stamp = choice;
         }
-        keyButton(@src(), "Grid settings", 0, .{ .expand = .horizontal, .id_extra = 7005 });
+        keyButton(@src(), "grid-settings", 0, .{ .expand = .horizontal, .id_extra = 7005 });
     }
     inline for (.{ "Click a point: place or pick.", "Drag across points: span them.", "Delete removes the picked one." }, 0..) |line, k| {
         dvui.labelNoFmt(@src(), line, .{}, .{ .id_extra = 7010 + k, .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
     }
-    keyButton(@src(), "Leave panel editing", 0, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } });
+    keyButton(@src(), "leave-panel-editing", 0, .{ .expand = .horizontal, .id_extra = 7007, .margin = .{ .y = 6, .h = 10 } });
 }
 
 // Layers and images ---------------------------------------------------------
@@ -10369,7 +10389,7 @@ fn borderProps(obj: layout.model.ObjectId, b: layout.model.FigureBorder, n: usiz
             if (list[0] >= 0) border_pending.radius = list[0] else state.status = "A radius cannot be negative. ";
         };
     }
-    keyButton(@src(), "Apply border", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    keyButton(@src(), "apply-border", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
 fn figurePlaceProperties(space: usize, index: usize) void {
@@ -10387,7 +10407,7 @@ fn figurePlaceProperties(space: usize, index: usize) void {
         };
     };
     propText("Height", "{d:.2} mm (keeps its proportions)", .{fp.h}, 5);
-    keyButton(@src(), "Show figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    keyButton(@src(), "show-figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
     var mb: [32]u8 = undefined;
     if (sizesProp("Margin, mm", std.fmt.bufPrint(&mb, "{d:.2}", .{fp.margin}) catch "", 6)) |list| if (list.len == 1) {
         act(.setFigurePlace, .{ space, index, fp.at, fp.w, list[0], fp.layer }) catch {
@@ -10395,7 +10415,7 @@ fn figurePlaceProperties(space: usize, index: usize) void {
         };
     };
     borderProps(fp.id, fp.border, 7);
-    keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "remove-figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Space `space`'s layers, bottom first, each at its opacity: its images,
@@ -10690,14 +10710,14 @@ fn plansProperties() void {
     const m = &state.model;
     propText("Plans", "{d}", .{m.plans.items.len}, 1);
     if (m.activePlan()) |p| propText("Exported", "{s}", .{p.name}, 2);
-    keyButton(@src(), "Add a plan", 0, .{ .expand = .horizontal, .id_extra = 3, .margin = .{ .y = 6 } });
+    keyButton(@src(), "add-a-plan", 0, .{ .expand = .horizontal, .id_extra = 3, .margin = .{ .y = 6 } });
 }
 
 /// A plan in the Browser: opened in a manufacturing view, and edited.
 fn planProperties(id: ObjectId) void {
     const saved_group = pushGroup("plan");
     defer popGroup(saved_group);
-    keyButton(@src(), "Open in a manufacturing view", 0, .{ .expand = .horizontal, .id_extra = 90 });
+    keyButton(@src(), "open-in-a-manufacturing-view", 0, .{ .expand = .horizontal, .id_extra = 90 });
     planEditor(id);
 }
 
@@ -10848,7 +10868,7 @@ fn planEditor(id: ObjectId) void {
     }
     if (m.active_plan == id) {
         propText("Exported", "{s}", .{"this plan"}, 102);
-    } else keyButton(@src(), "Export this plan (make it active)", 0, .{ .expand = .horizontal, .id_extra = 102 });
+    } else keyButton(@src(), "export-this-plan-make-it-active", 0, .{ .expand = .horizontal, .id_extra = 102 });
 
     // How the plan's view shows it, when one is active.
     if (activeKind() == .manufacture and vl.views[vl.active].target == @intFromEnum(id)) {
@@ -10900,7 +10920,7 @@ fn planEditor(id: ObjectId) void {
 
     // Operations, in order (a new one goes last).
     heading("Operations", .{}, 189);
-    keyButton(@src(), "Add an operation", 0, .{ .expand = .horizontal, .id_extra = 190 });
+    keyButton(@src(), "add-an-operation", 0, .{ .expand = .horizontal, .id_extra = 190 });
     for (0..p.operations.len) |k| operationEditor(id, p, k, 200 + 100 * k) catch {};
 
     // What is worth a second look.
@@ -10913,7 +10933,7 @@ fn planEditor(id: ObjectId) void {
         tl.deinit();
     }
     endSection();
-    keyButton(@src(), "Remove this plan", 0, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 10 } });
+    keyButton(@src(), "remove-this-plan", 0, .{ .expand = .horizontal, .id_extra = 98, .margin = .{ .y = 10 } });
 }
 
 /// Operation `k` of plan `p`: shown in the view, moved, removed; its name,
@@ -10932,9 +10952,9 @@ fn operationEditor(id: ObjectId, p: manufacture.Plan, k: usize, n0: usize) !void
         if (tcheckbox(@src(), &shown, "Shown", .{ .id_extra = n0 })) {
             if (shown) _ = op_hidden.remove(opKey(id, k)) else op_hidden.put(state.gpa, opKey(id, k), {}) catch {};
         }
-        if (k > 0) keyButton(@src(), "Earlier", @intCast(k), .{ .id_extra = n0 + 1 });
-        if (k + 1 < p.operations.len) keyButton(@src(), "Later", @intCast(k), .{ .id_extra = n0 + 2 });
-        keyButton(@src(), "Remove", @intCast(k), .{ .id_extra = n0 + 3 });
+        if (k > 0) keyButton(@src(), "earlier", @intCast(k), .{ .id_extra = n0 + 1 });
+        if (k + 1 < p.operations.len) keyButton(@src(), "later", @intCast(k), .{ .id_extra = n0 + 2 });
+        keyButton(@src(), "remove", @intCast(k), .{ .id_extra = n0 + 3 });
     }
     if (textProp("Name", op.name, n0 + 4)) |v| {
         const n = planCopy(p);
@@ -11027,7 +11047,7 @@ fn materialsProperties() void {
     propText("Materials", "{d}", .{state.model.materials.items.len}, 1);
     heading("Add from the library", .{}, 10);
     for (manufacture.library, 0..) |lm, i| {
-        keyButton(@src(), lm.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("materials.library", lm.name) });
+        keyButtonText(@src(), lm.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("materials.library", lm.name) });
     }
 }
 
@@ -11063,12 +11083,12 @@ fn materialProperties(id: ObjectId) void {
     for (m.plans.items, 0..) |pl, k| for (pl.parts) |pt| if (pt.material == id) {
         var lb: [160]u8 = undefined;
         const text = std.fmt.bufPrint(&lb, "{s}: {s}", .{ pl.name, panelNameOf(pt.panel) }) catch pl.name;
-        keyButton(@src(), text, idArg(pl.id), .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used, .tag = listTag("material.plan", text) });
+        keyButtonText(@src(), text, idArg(pl.id), .{ .expand = .horizontal, .id_extra = 21 + 50 * k + used, .tag = listTag("material.plan", text) });
         used += 1;
     };
     if (used == 0) {
         propText("Parts", "none", .{}, 19);
-        keyButton(@src(), "Remove this material", 0, .{ .expand = .horizontal, .id_extra = 18, .margin = .{ .y = 8 } });
+        keyButton(@src(), "remove-this-material", 0, .{ .expand = .horizontal, .id_extra = 18, .margin = .{ .y = 8 } });
     }
 }
 
@@ -11233,7 +11253,7 @@ fn planChecksSection(id: ObjectId) void {
     defer popGroup(saved_group);
     const stale = planChecksFor(id) and plan_checks_rev != state.model.revision;
     headingAs("plan.checks", "{s}", .{if (stale) "Checks (out of date)" else "Checks"}, 140);
-    keyButton(@src(), "Check this plan", 0, .{ .expand = .horizontal, .id_extra = 141 });
+    keyButton(@src(), "check-this-plan", 0, .{ .expand = .horizontal, .id_extra = 141 });
     if (!planChecksFor(id)) return;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 142 });
@@ -11241,7 +11261,7 @@ fn planChecksSection(id: ObjectId) void {
         _ = tcheckbox(@src(), &plan_findings_shown, "Findings", .{ .id_extra = 143 });
         _ = tcheckbox(@src(), &plan_simulation_shown, "Simulation", .{ .id_extra = 144 });
     }
-    keyButton(@src(), "Clear results", 0, .{ .expand = .horizontal, .id_extra = 145 });
+    keyButton(@src(), "clear-results", 0, .{ .expand = .horizontal, .id_extra = 145 });
 }
 
 /// A plan's check results over its view: per operation shown, its
@@ -11983,8 +12003,8 @@ fn checkLayersList(space: usize) void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 610 });
         defer row.deinit();
-        keyButton(@src(), "Check again", 0, .{ .expand = .horizontal, .id_extra = 611 });
-        keyButton(@src(), "Clear results", 0, .{ .expand = .horizontal, .id_extra = 612 });
+        keyButton(@src(), "check-again", 0, .{ .expand = .horizontal, .id_extra = 611 });
+        keyButton(@src(), "clear-results", 0, .{ .expand = .horizontal, .id_extra = 612 });
     }
 }
 
@@ -11993,7 +12013,7 @@ fn checkLayersList(space: usize) void {
 fn panelChecks(pi: usize) void {
     const saved_group = pushGroup("panel.checks");
     defer popGroup(saved_group);
-    keyButton(@src(), "Check this panel", 0, .{ .expand = .horizontal, .id_extra = 420, .margin = .{ .y = 6 } });
+    keyButton(@src(), "check-this-panel", 0, .{ .expand = .horizontal, .id_extra = 420, .margin = .{ .y = 6 } });
     if (!checksCurrent()) return;
     const ck = for (checks) |c| {
         if (c.panel == pi) break c;
@@ -12039,10 +12059,10 @@ fn layersList(space: usize) void {
         }
         var buf: [96]u8 = undefined;
         const active = l.id == newObjectLayer();
-        const text = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ l.name, if (l.locked) " (locked)" else "", if (active) " · new objects" else "", if (flagged) " · flagged" else "" }) catch l.name;
-        keyButton(@src(), text, @intCast(li), .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null });
+        const text = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ l.name, if (l.locked) ui_labels.get("layers.locked-mark") else "", if (active) ui_labels.get("layers.new-objects-mark") else "", if (flagged) ui_labels.get("layers.flagged-mark") else "" }) catch l.name;
+        keyButtonText(@src(), text, @intCast(li), .{ .id_extra = li, .expand = .horizontal, .color_text = if (flagged) .{ .color = colors.overflow } else null });
     }
-    keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    keyButton(@src(), "add-layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
 /// A layer's properties: shown, locked, opacity, blend, output, its place
@@ -12134,9 +12154,9 @@ fn layerProperties(space: usize, li: usize) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
         defer row.deinit();
-        keyButton(@src(), "Move up", 0, .{});
-        keyButton(@src(), "Move down", 0, .{});
-        keyButton(@src(), "Remove", 0, .{});
+        keyButton(@src(), "move-up", 0, .{});
+        keyButton(@src(), "move-down", 0, .{});
+        keyButton(@src(), "remove", 0, .{});
     }
 }
 
@@ -12175,7 +12195,7 @@ fn imageProperties(space: usize, index: usize) !void {
     propText("Resolution", "{d:.0} dpi at this size", .{im.dpi()}, 7);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 8);
     if (state.model.spaces.items[space].layerIndex(im.layer)) |li| layerFlags(space, li, 9);
-    keyButton(@src(), "Remove image", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "remove-image", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// Moves the selected image 1 mm the way an arrow points.
@@ -12264,8 +12284,8 @@ fn imagePrompt() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        keyButton(@src(), "Cancel", 0, .{});
-        keyButton(@src(), "Place", 0, .{});
+        keyButton(@src(), "cancel", 0, .{});
+        keyButton(@src(), "place", 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
         if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
@@ -12475,8 +12495,8 @@ fn viewProperties(host: usize, index: usize) !void {
     propText("Reads as", "{s}", .{scaleText(sv.scale)}, 6);
     propText("Moves", "{s}", .{"arrow keys, 1 mm"}, 7);
     propText("Edits", "{s}", .{"in its source: it shows them at once"}, 8);
-    keyButton(@src(), "Show its source", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    keyButton(@src(), "Remove view", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "show-its-source", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "remove-view", 0, .{ .expand = .horizontal });
 }
 
 /// Buttons placing a view of space `space` in each other space it may
@@ -12492,8 +12512,8 @@ fn placeViewButtons(space: usize) void {
             any = true;
         }
         var buf: [96]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "Place a view in {s}", .{if (host == 0) "the canvas" else sp.name}) catch "Place a view";
-        keyButton(@src(), text, @intCast(host), .{ .expand = .horizontal, .id_extra = host });
+        const text = if (host == 0) ui_labels.get("view.place-in.canvas") else ui_labels.fill(&buf, ui_labels.get("view.place-in.frame"), .{sp.name});
+        keyButtonText(@src(), text, @intCast(host), .{ .expand = .horizontal, .id_extra = host, .tag = uniqueTag(if (host == 0) "view.place-in.canvas" else "view.place-in.frame") });
     }
 }
 
@@ -12988,6 +13008,125 @@ fn updateModeStack() void {
     if (text_wanted != null or dg_entry.active()) push(&st, &n, kmode("text-entry"));
     if (dg_entry.active()) push(&st, &n, kmode("digraph"));
     keymap.setStack(st[0..n]);
+}
+
+// Labels -------------------------------------------------------------------
+//
+// Every label is its element's property (labels.zig): text, or a text
+// sheet's cell. The sheets are the open document's.
+
+var label_store: ui_labels.Store = .{ .gpa = std.heap.page_allocator };
+
+/// The labels' sheets: the open document's text sheets.
+const label_sheets: ui_labels.Sheets = .{ .ctx = undefined, .find = labelSheetFind, .cell = labelSheetCell };
+
+fn labelSheetFind(_: *anyopaque, name: []const u8) ?u64 {
+    for (state.model.sheets.items) |sh| if (sh.texts and std.mem.eql(u8, sh.name, name)) return @intFromEnum(sh.id);
+    return null;
+}
+
+fn labelSheetCell(_: *anyopaque, id: u64, row: []const u8, column: ?[]const u8) ?[]const u8 {
+    const si = state.model.sheetIndex(@enumFromInt(@as(u32, @intCast(id)))) orelse return null;
+    const sh = &state.model.sheets.items[si];
+    const col: usize = if (column) |c| blk: {
+        if (c.len == 0) break :blk 0;
+        // A language as the column's name, or its first part ("de" for
+        // "de-CH").
+        for (sh.columns.items, 0..) |n, k| if (std.ascii.eqlIgnoreCase(n, c)) break :blk k;
+        const lang = c[0 .. std.mem.indexOfAny(u8, c, "-_") orelse c.len];
+        for (sh.columns.items, 0..) |n, k| if (std.ascii.eqlIgnoreCase(n, lang)) break :blk k;
+        return null;
+    } else sh.shown;
+    for (sh.rows.items) |r| if (std.mem.eql(u8, r.key, row)) return if (col < r.cells.items.len) r.cells.items[col] else "";
+    return null;
+}
+
+/// The labels set in the config's `[labels]` table (each key an element
+/// id, each value text or `=Sheet!row[!column]`), and `[interface]`'s
+/// `sheet` (the sheet every other label is looked for in; `Interface`)
+/// and `language` (the column read; else the sheet's shown one).
+fn loadLabels(ps: *const settings_file.Store) void {
+    label_store.clear();
+    ui_labels.store = &label_store;
+    ui_labels.reader = label_sheets;
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const keys = ps.keys(arena.allocator()) catch return;
+    for (keys) |k| {
+        if (!std.mem.startsWith(u8, k, "labels.")) continue;
+        const v = ps.get(k) orelse continue;
+        if (v == .string) label_store.put(k["labels.".len..], v.string) catch {};
+    }
+    if (ps.get("interface.sheet")) |v| if (v == .string) label_store.setSheet(v.string) catch {};
+    if (ps.get("interface.language")) |v| if (v == .string) label_store.setLanguage(v.string) catch {};
+}
+
+/// Whether `key` names an interface element (or a tooltip of one): an
+/// interface sheet's row.
+fn interfaceRow(key: []const u8) bool {
+    const base = key[0 .. std.mem.indexOfScalar(u8, key, ':') orelse key.len];
+    if (elements.find(base) != null) return true;
+    for (elements.groups) |g| if (std.mem.eql(u8, g.id, base)) return true;
+    return false;
+}
+
+/// The document's sheets: how many, and making the interface sheet.
+fn sheetsProperties() void {
+    const saved_group = pushGroup("sheets");
+    defer popGroup(saved_group);
+    propText("Legend sheets", "{d}", .{state.model.sheets.items.len}, 1);
+    if (labelSheetFind(undefined, label_store.sheet) == null) keyButton(@src(), "make-interface-sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+}
+
+/// A text sheet of the interface's labels (named as `[interface]`'s
+/// `sheet` says, `Interface` by default): a row for each button's, menu
+/// item's and menu's label and each tooltip, by its id, its text the
+/// default; a column for each language, empty. Filled in, it is what the
+/// interface says (the language column the sheet shows, or the one set).
+fn makeInterfaceSheet() void {
+    const ar = dvui.currentWindow().arena();
+    var rows: std.ArrayList([]const u8) = .empty;
+    for (elements.groups) |g| if (std.mem.startsWith(u8, g.id, "menu.") and std.mem.indexOfScalar(u8, g.id["menu.".len..], '.') == null) {
+        rows.appendSlice(ar, &.{ g.id, g.label }) catch return;
+    };
+    for (elements.all) |e| {
+        if (e.kind != .button and e.kind != .item) continue;
+        if (std.mem.indexOfScalar(u8, e.id, '*') != null) continue;
+        rows.appendSlice(ar, &.{ e.id, e.label }) catch return;
+        if (e.tip.len > 0) rows.appendSlice(ar, &.{ std.fmt.allocPrint(ar, "{s}:tip", .{e.id}) catch return, e.tip }) catch return;
+        if (e.tip_alt.len > 0) rows.appendSlice(ar, &.{ std.fmt.allocPrint(ar, "{s}:tip-alt", .{e.id}) catch return, e.tip_alt }) catch return;
+    }
+    if (act(.makeRowsSheet, .{ label_store.sheet, @as([]const []const u8, &.{ "de", "fr" }), @as([]const []const u8, rows.items) })) |id| {
+        state.context = .{ .sheet = id };
+        openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
+        state.status = "Interface sheet made, open beside the canvas: a row a label, by its element's id; type a language's labels into its column and show that column. ";
+    } else |_| state.status = "The sheet was not made. ";
+}
+
+/// GRAVEN_SAMPLE=interface: the PC keyboard example with an interface
+/// sheet, some of its German column filled in and shown: the interface's
+/// labels from a sheet.
+fn loadInterfaceSample() void {
+    openExample("examples/pc-keyboard.graven");
+    makeInterfaceSheet();
+    const id = state.model.sheets.items[state.model.sheets.items.len - 1].id;
+    const de = [_][2][]const u8{
+        .{ "menu.file", "Datei" },            .{ "menu.edit", "Bearbeiten" },
+        .{ "menu.text", "Text" },             .{ "menu.view", "Ansicht" },
+        .{ "menu.file.new", "Neue Leinwand…" }, .{ "menu.file.open", "Öffnen…" },
+        .{ "menu.file.save", "Speichern" },   .{ "menu.file.save-as", "Speichern unter…" },
+        .{ "menu.file.quit", "Beenden" },     .{ "tool.add-panel", "Platte hinzufügen" },
+        .{ "tool.add-panel:tip", "Platte hinzufügen: ihren Umriss auf dem Blatt aufziehen" },
+        .{ "tool.constrain", "Bemaßen" },     .{ "tool.new-sketch", "Neue Skizze" },
+        .{ "sheets.make-interface-sheet", "Oberflächenblatt anlegen" },
+        .{ "sheet.cell.add-a-row", "Zeile hinzufügen" }, .{ "sheet.cell.remove-this-row", "Diese Zeile entfernen" },
+        .{ "sheet.open-it-beside-the-canvas", "Neben der Leinwand öffnen" }, .{ "sheet.remove-sheet", "Blatt entfernen" },
+    };
+    const sh = state.model.sheets.items[state.model.sheets.items.len - 1];
+    for (de) |pair| for (sh.rows.items, 0..) |r, ri| if (std.mem.eql(u8, r.key, pair[0])) {
+        _ = act(.setSheetCell, .{ id, ri, 2, pair[1] }) catch {};
+    };
+    _ = act(.setSheetShown, .{ id, @as(usize, 1) }) catch {};
 }
 
 // Digraphs ----------------------------------------------------------------
@@ -14700,7 +14839,7 @@ fn layersPalette() void {
                 checkElement(tag, .button, "Show or hide this layer");
                 recordDrawn(tag, arg);
                 const eye_opts: icons.ButtonOptions = .{ .size = 16, .id_extra = id_extra, .opts = .{ .tag = tag, .padding = .all(3), .gravity_y = 0.5 } };
-                const pressed = if (visible) icons.button(@src(), .eye, "Shown: click to hide", eye_opts) else icons.button(@src(), .eye_slash, "Hidden: click to show", eye_opts);
+                const pressed = if (visible) icons.button(@src(), .eye, ui_labels.get("layers-palette.shown"), eye_opts) else icons.button(@src(), .eye_slash, ui_labels.get("layers-palette.hidden"), eye_opts);
                 if (pressed) pushButtonEvent(tag, arg);
             }
             // Its name chooses it, its settings shown beside the list; the
@@ -14738,7 +14877,7 @@ fn layersPalette() void {
         if (reorder.finalSlot()) before = m;
     }
     if (removed) |r| if (before) |b| moveInStack(space, entries, r, b);
-    keyButton(@src(), "Add layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("layers-palette.add-layer") });
+    keyButton(@src(), "add-layer", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("layers-palette.add-layer") });
 }
 
 /// The entry shown at row `r` (top first) of `entries`, dropped before row
@@ -15250,31 +15389,32 @@ fn toolBar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
-    keyIcon(@src(), "Zoom to context", icons.graven(.zoom_to_context) orelse dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
-    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Zoom to fit the {s}", .{lowerKind()}, .{});
+    keyIcon(@src(), "zoom-to-context", icons.graven(.zoom_to_context) orelse dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
+    var ztb: [96]u8 = undefined;
+    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{ui_labels.fill(&ztb, ui_labels.tip("tool.zoom-to-context", false), .{lowerKind()})}, .{});
     {
         const on = state.tool == .constrain;
         var cwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Constrain", icons.graven(.constrain) orelse dvui.entypo.ruler, 0, .{
+        keyIcon(@src(), "constrain", icons.graven(.constrain) orelse dvui.entypo.ruler, 0, .{
             .data_out = &cwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = cwd.borderRectScale().r }, "Constrain: pick a feature of what is to move, then what it keeps to; set the distance or size", .{}, .{});
+        elementTip(@src(), cwd.borderRectScale().r, "tool.constrain", false, 0);
     }
 
     switch (state.context) {
         .prototypes => {
             var pwd: dvui.WidgetData = undefined;
-            keyIcon(@src(), "Add prototype", dvui.entypo.squared_plus, 0, .{ .data_out = &pwd });
-            dvui.tooltip(@src(), .{ .active_rect = pwd.borderRectScale().r }, "Add a tile prototype", .{}, .{});
+            keyIcon(@src(), "add-prototype", dvui.entypo.squared_plus, 0, .{ .data_out = &pwd });
+            elementTip(@src(), pwd.borderRectScale().r, "tool.add-prototype", false, 0);
         },
         .prototype => {
             var dwd: dvui.WidgetData = undefined;
-            keyIcon(@src(), "Duplicate prototype", dvui.entypo.copy, 0, .{ .data_out = &dwd });
-            dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "Duplicate: a copy to make a variant of", .{}, .{});
+            keyIcon(@src(), "duplicate-prototype", dvui.entypo.copy, 0, .{ .data_out = &dwd });
+            elementTip(@src(), dwd.borderRectScale().r, "tool.duplicate-prototype", false, 0);
             var rwd: dvui.WidgetData = undefined;
-            keyIcon(@src(), "Delete prototype", dvui.entypo.trash, 0, .{ .data_out = &rwd });
-            dvui.tooltip(@src(), .{ .active_rect = rwd.borderRectScale().r }, "Delete: only while no tile is made from it", .{}, .{});
+            keyIcon(@src(), "delete-prototype", dvui.entypo.trash, 0, .{ .data_out = &rwd });
+            elementTip(@src(), rwd.borderRectScale().r, "tool.delete-prototype", false, 0);
         },
         else => {},
     }
@@ -15291,11 +15431,11 @@ fn toolBar() void {
         defer dvui.alphaSet(prev_a);
         const on = state.tool == .new_sketch;
         var swd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "New sketch", icons.graven(.new_sketch) orelse dvui.entypo.pencil, 0, .{
+        keyIcon(@src(), "new-sketch", icons.graven(.new_sketch) orelse dvui.entypo.pencil, 0, .{
             .data_out = &swd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "New sketch: click where its origin goes, then draw and constrain it", .{}, .{});
+        elementTip(@src(), swd.borderRectScale().r, "tool.new-sketch", false, 0);
     }
 
     // Line art only inside a panel: on the canvas's own panel (or a
@@ -15304,11 +15444,11 @@ fn toolBar() void {
         const art_on = state.tool == .add_art;
         var awd: dvui.WidgetData = undefined;
         ribbon_next_drop = .shape;
-        keyIcon(@src(), "Add shape", icons.graven(.add_shape) orelse dvui.entypo.circle, 0, .{
+        keyIcon(@src(), "add-shape", icons.graven(.add_shape) orelse dvui.entypo.circle, 0, .{
             .data_out = &awd,
             .color_fill = if (art_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add shape: drag out line art on the panel; tracks under it flow around its ink", .{}, .{});
+        elementTip(@src(), awd.borderRectScale().r, "tool.add-shape", false, 0);
     }
     // Containers: tracks, on a panel or on the canvas (or a frame).
     if (showTool(state.context == .panel or state.context == .space)) {
@@ -15319,11 +15459,11 @@ fn toolBar() void {
         // And a third: one track, laid out where it is drawn, running the
         // way the drag goes.
         inline for (.{
-            .{ layout.model.Major.row, "Layout: column of rows", dvui.entypo.menu, "Layout: column of rows, a content layout drawn out on the panel; content flows through its rows in order, a row added as it needs one", layout.model.TileRegion.Kind.region },
-            .{ layout.model.Major.column, "Layout: row of columns", dvui.entypo.bar_graph, "Layout: row of columns, a content layout drawn out on the panel; content flows through its columns in order, a column added as it needs one", layout.model.TileRegion.Kind.region },
-            .{ layout.model.Major.row, "Layout: single track", dvui.entypo.flow_line, "Layout: single track, one line where it is drawn, running right or down as dragged; its own flow, or continuing another's", layout.model.TileRegion.Kind.track },
+            .{ layout.model.Major.row, "tool.layout-column-of-rows", dvui.entypo.menu, layout.model.TileRegion.Kind.region },
+            .{ layout.model.Major.column, "tool.layout-row-of-columns", dvui.entypo.bar_graph, layout.model.TileRegion.Kind.region },
+            .{ layout.model.Major.row, "tool.layout-single-track", dvui.entypo.flow_line, layout.model.TileRegion.Kind.track },
         }, 0..) |mode, mi| {
-            const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[4] and (mode[4] == .track or tracks_tool.major == mode[0]);
+            const mode_on = state.tool == .add_tracks and tracks_tool.kind == mode[3] and (mode[3] == .track or tracks_tool.major == mode[0]);
             var twd: dvui.WidgetData = undefined;
             if (mi == 0) ribbon_next_drop = .tracks;
             const own: ?[]const u8 = switch (mi) {
@@ -15332,11 +15472,12 @@ fn toolBar() void {
                 else => icons.graven(.add_track),
             };
             keyIcon(@src(), mode[1], own orelse mode[2], 0, .{
+                .tag = uniqueTag(mode[1]),
                 .id_extra = mi,
                 .data_out = &twd,
                 .color_fill = if (mode_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
             });
-            dvui.tooltip(@src(), .{ .active_rect = twd.borderRectScale().r }, mode[3], .{}, .{ .id_extra = mi });
+            elementTip(@src(), twd.borderRectScale().r, mode[1], false, mi);
         }
     }
     // Array: a grid of cells, its counts chosen in its drop, then dragged
@@ -15347,50 +15488,50 @@ fn toolBar() void {
         const on = state.tool == .add_array;
         var awd: dvui.WidgetData = undefined;
         ribbon_next_drop = .array;
-        keyIcon(@src(), "Add array", dvui.entypo.grid, 0, .{
+        keyIcon(@src(), "add-array", dvui.entypo.grid, 0, .{
             .data_out = &awd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add array: choose its columns and rows, Apply, then drag out its cells", .{}, .{});
+        elementTip(@src(), awd.borderRectScale().r, "tool.add-array", false, 0);
     }
     if (showTool(state.context == .region)) {
         const prev_a = faintUnless(state.context == .region);
         defer dvui.alphaSet(prev_a);
         // Fit to tiles: the tracks shrink to what has been put in them.
         var fwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Fit to tiles", icons.graven(.fit_to_tiles) orelse dvui.entypo.crop, 0, .{ .data_out = &fwd });
-        dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Fit to tiles: make the rows or columns as long as the longest paragraph", .{}, .{});
+        keyIcon(@src(), "fit-to-tiles", icons.graven(.fit_to_tiles) orelse dvui.entypo.crop, 0, .{ .data_out = &fwd });
+        elementTip(@src(), fwd.borderRectScale().r, "tool.fit-to-tiles", false, 0);
     }
     {
         // Select boundaries: a mode, kept until toggled.
         const on = boundary_mode;
         var bwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Select boundaries", icons.graven(.select_boundaries) orelse dvui.entypo.resize_full_screen, 0, .{
+        keyIcon(@src(), "select-boundaries", icons.graven(.select_boundaries) orelse dvui.entypo.resize_full_screen, 0, .{
             .data_out = &bwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = bwd.borderRectScale().r }, "Select boundaries (B): while on, the boundary nearest the pointer is highlighted and a click selects its container, its drag points haloed", .{}, .{});
+        elementTip(@src(), bwd.borderRectScale().r, "tool.select-boundaries", false, 0);
     }
     if (state.model.spaces.items.len > 0) {
         // Construction line: a mode tool on a canvas or in a frame.
         const on = state.tool == .construction;
         var gwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Construction line", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, .{
+        keyIcon(@src(), "construction-line", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, .{
             .data_out = &gwd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = gwd.borderRectScale().r }, "Construction line: an infinite guide line, from two points (a drag, or two clicks)", .{}, .{});
+        elementTip(@src(), gwd.borderRectScale().r, "tool.construction-line", false, 0);
     }
     if (showTool(on_canvas or state.context == .selection or state.context == .group)) {
         const prev_a = faintUnless(on_canvas or state.context == .selection or state.context == .group);
         defer dvui.alphaSet(prev_a);
         const sel_on = state.tool == .select_area;
         var swd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Select area", icons.graven(.select_area) orelse dvui.entypo.select_arrows, 0, .{
+        keyIcon(@src(), "select-area", icons.graven(.select_area) orelse dvui.entypo.select_arrows, 0, .{
             .data_out = &swd,
             .color_fill = if (sel_on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = swd.borderRectScale().r }, "Select area: drag around objects to pick them together, to move or copy into a frame", .{}, .{});
+        elementTip(@src(), swd.borderRectScale().r, "tool.select-area", false, 0);
     }
     if (showTool(state.context == .worksheet or on_canvas)) {
         const prev_a = faintUnless(state.context == .worksheet or on_canvas);
@@ -15398,11 +15539,11 @@ fn toolBar() void {
         // A mode tool: shown pressed while active; pressing again cancels.
         const on = state.tool == .add_panel;
         var awd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Add panel", icons.graven(.add_panel) orelse dvui.entypo.squared_plus, 0, .{
+        keyIcon(@src(), "add-panel", icons.graven(.add_panel) orelse dvui.entypo.squared_plus, 0, .{
             .data_out = &awd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
-        dvui.tooltip(@src(), .{ .active_rect = awd.borderRectScale().r }, "Add panel: drag out its outline on the sheet", .{}, .{});
+        elementTip(@src(), awd.borderRectScale().r, "tool.add-panel", false, 0);
     }
     // Insert figure: the figure chosen in the Browser, dragged out on the
     // canvas or frame shown.
@@ -15413,11 +15554,11 @@ fn toolBar() void {
             defer dvui.alphaSet(prev_a);
             const on = state.tool == .insert_figure;
             var fwd: dvui.WidgetData = undefined;
-            keyIcon(@src(), "Insert figure", dvui.entypo.flower, 0, .{
+            keyIcon(@src(), "insert-figure", dvui.entypo.flower, 0, .{
                 .data_out = &fwd,
                 .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
             });
-            dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Insert figure: drag out where the figure chosen in the Browser goes, or click for its own size", .{}, .{});
+            elementTip(@src(), fwd.borderRectScale().r, "tool.insert-figure", false, 0);
         }
     }
 }
@@ -16064,26 +16205,53 @@ fn virtualKey(clicked: bool, tag: []const u8) bool {
 
 /// A button as a virtual key whose effect is a handler
 /// (`button_handlers`): drawn, a click is an event for its action, with
-/// `arg` (which of several things it stands for).
-fn keyButton(src: std.builtin.SourceLocation, label: []const u8, arg: i32, opts: dvui.Options) void {
+/// `arg` (which of several things it stands for). `name` is its id's last
+/// part in the current group (`cancel`; or its whole id, `.tag`); its
+/// label is the element's (labels.zig), never written here.
+fn keyButton(src: std.builtin.SourceLocation, name: []const u8, arg: i32, opts: dvui.Options) void {
     var o = opts;
     if (o.tag == null) {
         next_kind = .button;
-        o.tag = tagFor(label);
+        o.tag = tagFor(name);
+    }
+    keyButtonText(src, ui_labels.of(o.tag.?) orelse name, arg, o);
+}
+
+/// A button whose text is a name (a list's item: a grid, a material) or
+/// a label with something filled in (`ui_labels.fmt`); tagged by it in
+/// the current scope unless `.tag` is given.
+fn keyButtonText(src: std.builtin.SourceLocation, text: []const u8, arg: i32, opts: dvui.Options) void {
+    var o = opts;
+    if (o.tag == null) {
+        next_kind = .button;
+        o.tag = tagFor(text);
     }
     const tag = o.tag.?;
     recordDrawn(tag, arg);
-    if (dvui.button(src, label, .{}, o)) pushButtonEvent(tag, arg);
+    if (dvui.button(src, text, .{}, o)) pushButtonEvent(tag, arg);
 }
 
-/// An icon button as a virtual key (see `keyButton`).
-fn keyIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, opts: dvui.Options) void {
+/// Element `id`'s tooltip over `r` (`alt`: its other one, see
+/// `Element.tip_alt`), its key from the keymap after it.
+fn elementTip(src: std.builtin.SourceLocation, r: dvui.Rect.Physical, comptime id: []const u8, alt: bool, id_extra: usize) void {
+    const text = ui_labels.tip(id, alt);
+    var kb: [48]u8 = undefined;
+    if (badgeText(&kb, id, 0)) |k| {
+        dvui.tooltip(src, .{ .active_rect = r }, "{s} ({s})", .{ text, k }, .{ .id_extra = id_extra });
+    } else dvui.tooltip(src, .{ .active_rect = r }, "{s}", .{text}, .{ .id_extra = id_extra });
+}
+
+/// An icon button as a virtual key (see `keyButton`): `name` its id's last
+/// part (or `.tag`), its label (the icon's name, a ribbon key's text) the
+/// element's.
+fn keyIcon(src: std.builtin.SourceLocation, name_part: []const u8, tvg: []const u8, arg: i32, opts: dvui.Options) void {
     var o = opts;
     if (o.tag == null) {
         next_kind = .button;
-        o.tag = if (elem_group.len > 0) tagFor(name) else uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "tool.{s}", .{lowerCamel(name)}) catch "tool");
+        o.tag = if (elem_group.len > 0) tagFor(name_part) else uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "tool.{s}", .{name_part}) catch "tool");
     }
     const tag = o.tag.?;
+    const name = ui_labels.of(tag) orelse name_part;
     recordDrawn(tag, arg);
     var wd: dvui.WidgetData = undefined;
     const out = o.data_out;
@@ -16677,7 +16845,7 @@ fn arrayMenu() void {
         propName("Sweep, °");
         if (accepted.numberField(@src(), f64, array_tool.sweep, 1, 360, .{ .id_extra = 3, .expand = .horizontal })) |v| array_tool.sweep = v;
     }
-    keyButton(@src(), "Apply", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+    keyButton(@src(), "apply", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
 }
 
 const track_names = [_][]const u8{ "Layout: column of rows", "Layout: row of columns", "Layout: single track" };
@@ -16739,7 +16907,7 @@ fn stylesPanel() void {
             if (bw.clicked()) pushButtonEvent(tag, arg);
             bw.deinit();
         }
-        keyButton(@src(), "Add a style", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("styles-palette.add-style") });
+        keyButton(@src(), "add-a-style", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 }, .tag = uniqueTag("styles-palette.add-style") });
     }
     var right = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 380 }, .max_size_content = .width(380), .padding = .{ .x = 16, .y = 6 } });
     defer right.deinit();
@@ -16843,9 +17011,15 @@ var in_ribbon = false;
 fn badgeText(buf: *[48]u8, tag: []const u8, arg: i32) ?[]const u8 {
     const a = buttonActionId(tag) orelse return null;
     var kb: [48]u8 = undefined;
-    // The canvas's keys, then the view's (0 zooms to the context); a
-    // single key over a chorded one.
-    const sc = keymap.shortcutPreferring(&kb, kmode("canvas"), a, arg, false) orelse keymap.shortcutPreferring(&kb, kmode("view"), a, arg, false) orelse return null;
+    // The active modes' keys, innermost first (a sketch's), then the
+    // canvas's, then the view's (0 zooms to the context); a single key
+    // over a chorded one.
+    const st = keymap.stack();
+    var i = st.len;
+    const sc = while (i > 0) {
+        i -= 1;
+        if (keymap.shortcutPreferring(&kb, st[i], a, arg, false)) |x| break x;
+    } else keymap.shortcutPreferring(&kb, kmode("canvas"), a, arg, false) orelse keymap.shortcutPreferring(&kb, kmode("view"), a, arg, false) orelse return null;
     // Modifiers come as symbols already (⇧R).
     @memcpy(buf[0..sc.len], sc);
     return buf[0..sc.len];
@@ -16908,15 +17082,15 @@ fn ribbon() void {
     if (state.model.spaces.items.len > 0) {
         _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 } });
         var lwd: dvui.WidgetData = undefined;
-        const r = keyIconData(@src(), "Layers", icons.graven(.layers) orelse dvui.entypo.layers, &lwd, "ribbon.layers");
+        const r = keyIconData(@src(), "layers", icons.graven(.layers) orelse dvui.entypo.layers, &lwd, "ribbon.layers");
         drop_anchor.set(.layers, r.toNatural());
-        dvui.tooltip(@src(), .{ .active_rect = r }, "Layers: show or hide each, drag to reorder the stack, the chosen layer's settings (L; held, or clicked)", .{}, .{});
+        elementTip(@src(), r, "ribbon.layers", false, 0);
     }
     {
         var swd: dvui.WidgetData = undefined;
-        const r = keyIconData(@src(), "Text style", icons.graven(.text_style) orelse dvui.entypo.text, &swd, "ribbon.styles");
+        const r = keyIconData(@src(), "styles", icons.graven(.text_style) orelse dvui.entypo.text, &swd, "ribbon.styles");
         drop_anchor.set(.styles, r.toNatural());
-        dvui.tooltip(@src(), .{ .active_rect = r }, "Text style: the one new text and text rows are set in, and its settings (Y)", .{}, .{});
+        elementTip(@src(), r, "ribbon.styles", false, 0);
     }
 }
 
@@ -17438,6 +17612,11 @@ const button_handlers = [_]ButtonHandler{
         }
     }.f),
     // A grid.
+    handler("sheets.make-interface-sheet", struct {
+        fn f(_: i32) void {
+            makeInterfaceSheet();
+        }
+    }.f),
     handler("sketches.make-a-text-sheet", struct {
         fn f(_: i32) void {
             var nb: [96]u8 = undefined;
@@ -18410,7 +18589,7 @@ const button_handlers = [_]ButtonHandler{
             finishSketch();
         }
     }.f),
-    handler("sketch-mode.finish-sketch-enter", struct {
+    handler("sketch-mode.finish-sketch", struct {
         fn f(_: i32) void {
             sk_nclicks = 0;
             sk_summary = true;
@@ -18432,12 +18611,7 @@ const button_handlers = [_]ButtonHandler{
             layFlashEnd(arg);
         }
     }.f),
-    handler("fill.fill-selection-f", struct {
-        fn f(_: i32) void {
-            skFill();
-        }
-    }.f),
-    handler("fill.take-off-fill-f", struct {
+    handler("sketch.fill", struct {
         fn f(_: i32) void {
             skFill();
         }
@@ -18447,7 +18621,7 @@ const button_handlers = [_]ButtonHandler{
             newFillStyle();
         }
     }.f),
-    handler("ink.ink-selection-i", struct {
+    handler("sketch.ink", struct {
         fn f(_: i32) void {
             skInk();
         }
@@ -18457,12 +18631,12 @@ const button_handlers = [_]ButtonHandler{
             newStrokeStyle();
         }
     }.f),
-    handler("caption.add-caption-n", struct {
+    handler("sketch.caption", struct {
         fn f(_: i32) void {
             skAddCaption();
         }
     }.f),
-    handler("caption.connect-j", struct {
+    handler("sketch.connect", struct {
         fn f(_: i32) void {
             skConnect();
         }
@@ -19007,7 +19181,24 @@ fn tbuttonIcon(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u
     return virtualKey(dvui.buttonIcon(src, name, tvg, init_opts, icon_opts, o), o.tag.?);
 }
 
-/// `dvui.menuItemLabel`, tagged "menu/<label>" (without its mark).
+/// A menu item that is element (or menu group) `id`, labelled by it
+/// (`mark`: see `menuText`).
+fn tmenuE(src: std.builtin.SourceLocation, comptime id: []const u8, mark: ?bool, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
+    return tmenuNamed(src, id, menuText(ui_labels.any(id), mark), init_opts, opts);
+}
+
+/// A menu item that is element `id`, its text `text` (its label with
+/// something filled in, or a name).
+fn tmenuNamed(src: std.builtin.SourceLocation, comptime id: []const u8, text: []const u8, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
+    var o = opts;
+    if (o.tag == null) o.tag = uniqueTag(id);
+    const r = dvui.menuItemLabel(src, text, init_opts, o);
+    if (r == null and pressedByScript(o.tag)) return dvui.Rect.Natural{};
+    return r;
+}
+
+/// `dvui.menuItemLabel` for a menu item that is a name (a pane layout's),
+/// tagged "menu.<name>" (without its mark).
 fn tmenu(src: std.builtin.SourceLocation, label: []const u8, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
     var o = opts;
     if (o.tag == null) {
@@ -19316,8 +19507,8 @@ fn propFont(name: []const u8, n: usize) !void {
     defer lifo.free(names);
     for (state.fonts, 0..) |f, i| names[i] = f.name;
     if (tdropdown(@src(), names, .{ .choice = &state.font_choice }, .{}, .{ .expand = .horizontal, .max_size_content = .width(120), .font = styled(.theme(.body), !state.font_set) })) state.font_set = true;
-    keyIcon(@src(), "Previous font", dvui.entypo.chevron_left, 0, .{});
-    keyIcon(@src(), "Next font", dvui.entypo.chevron_right, 0, .{});
+    keyIcon(@src(), "previous-font", dvui.entypo.chevron_left, 0, .{});
+    keyIcon(@src(), "next-font", dvui.entypo.chevron_right, 0, .{});
 }
 
 fn properties() !void {
@@ -19522,7 +19713,7 @@ fn properties() !void {
         },
         .flows => flowsProperties(),
         .flow => |id| flowProperties(id),
-        .sheets => propText("Legend sheets", "{d}", .{state.model.sheets.items.len}, 1),
+        .sheets => sheetsProperties(),
         .styles => try stylesProperties(),
         .style => |sid| try styleProperties(sid),
         .templates => propText("Style templates", "{d}", .{state.model.templates.items.len}, 1),
@@ -19762,15 +19953,15 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
         if (changed) actM(mergeKey(.{ "proto track", id, tt.id }), .setPrototypeTrack, .{ id, tt.id, next }) catch {
             state.status = "That track cannot be set so. ";
         };
-        keyButton(@src(), "Remove track", @intCast(k), .{ .id_extra = n + 9, .gravity_x = 1 });
+        keyButton(@src(), "remove-track", @intCast(k), .{ .id_extra = n + 9, .gravity_x = 1 });
     }
     endSection();
-    keyButton(@src(), "Add track", 0, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } });
+    keyButton(@src(), "add-track", 0, .{ .id_extra = 799, .gravity_x = 1, .margin = .{ .y = 8 } });
 
     heading("Art", .{}, 600);
     const art = p.art orelse {
         propText("Look", "plain, from the insets", .{}, 601);
-        keyButton(@src(), "Add keycap art", 0, .{ .id_extra = 602, .gravity_x = 1 });
+        keyButton(@src(), "add-keycap-art", 0, .{ .id_extra = 602, .gravity_x = 1 });
         return;
     };
     for (art.layers, 0..) |layer, li| {
@@ -19782,8 +19973,8 @@ fn prototypeProperties(id: layout.model.PrototypeId) !void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_x = 1, .id_extra = 690, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (!isKeycap(p.art)) keyButton(@src(), "Redraw from insets", 0, .{ .id_extra = 691 });
-        keyButton(@src(), "Remove art", 0, .{ .id_extra = 692 });
+        if (!isKeycap(p.art)) keyButton(@src(), "redraw-from-insets", 0, .{ .id_extra = 691 });
+        keyButton(@src(), "remove-art", 0, .{ .id_extra = 692 });
     }
 }
 
@@ -20213,7 +20404,7 @@ fn paragraphProperties(pi: Parent, ri: usize) !void {
     }
     // A new style from this paragraph's settings: its own button, below
     // (beside the dropdown it was pushed out of the pane).
-    if (icons.button(@src(), .plus_circle, "New paragraph style, for this paragraph", .{ .id_extra = 902, .opts = .{ .gravity_x = 1, .tag = tagFor("New paragraph style") } })) {
+    if (icons.button(@src(), .plus_circle, ui_labels.tip("paragraph.new-paragraph-style", false), .{ .id_extra = 902, .opts = .{ .gravity_x = 1, .tag = tagFor("new-paragraph-style") } })) {
         var buf: [32]u8 = undefined;
         var base: layout.model.ParagraphStyle = if (current) |cid| (if (m.paraStyle(cid)) |ps| ps.* else .{ .name = "" }) else .{ .name = "" };
         base.name = m.nextParagraphStyleName(&buf);
@@ -20354,7 +20545,7 @@ fn expressionProperties() !void {
             var v = own orelse glyphic.param.def(p).default;
             const changed = valueEditor(p, &v, own == null, 4100 + k);
             var cleared = false;
-            if (own != null and icons.button(@src(), .x, "Back to its style's", .{ .id_extra = 4200 + k, .size = 14 })) cleared = true;
+            if (own != null and icons.button(@src(), .x, ui_labels.get("typography.back-to-style"), .{ .id_extra = 4200 + k, .size = 14 })) cleared = true;
             if (!changed and !cleared) continue;
             if (cleared) e.clear(id, p) else e.set(id, p, v) catch continue;
             target.store(try glyphic.entry.rewriteCall(a, src, spans.get(id), &e, id)) catch {
@@ -20434,12 +20625,12 @@ fn styleRules(sid: layout.model.StyleId) !void {
                 _ = actM(key, .setStyleRule, .{ sid, r.kind, r.param, @as(?glyphic.Value, v) }) catch {};
             }
         }
-        if (icons.button(@src(), .trash, "Remove this rule", .{ .id_extra = 5000 + k, .size = 14 })) {
+        if (icons.button(@src(), .trash, ui_labels.get("style.rules.remove-rule"), .{ .id_extra = 5000 + k, .size = 14 })) {
             _ = act(.setStyleRule, .{ sid, r.kind, r.param, null }) catch {};
             return;
         }
     }
-    keyButton(@src(), "Add a rule", idArg(sid), .{ .id_extra = 5100, .margin = .{ .y = 4 } });
+    keyButton(@src(), "add-a-rule", idArg(sid), .{ .id_extra = 5100, .margin = .{ .y = 4 } });
 }
 
 /// A style's em (its font size), mm, as its font resolves it.
@@ -21027,7 +21218,7 @@ fn processesProperties() void {
     propText("Profiles", "{d}", .{state.model.processes.items.len}, 1);
     heading("Add a profile", .{}, 10);
     for (process.builtins, 0..) |b, i| {
-        keyButton(@src(), b.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("processes.builtin", b.name) });
+        keyButtonText(@src(), b.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i, .tag = listTag("processes.builtin", b.name) });
     }
 }
 
@@ -21145,7 +21336,7 @@ fn processProperties(id: layout.model.ObjectId) void {
     const l = p.limits();
     if (l.layer) |lh| propText("Depths", "whole layers of {d} mm, {d} at least", .{ lh, l.min_layers }, 40);
     propText("Colours", "{d} at most in a part", .{l.colours}, 41);
-    if (own) keyButton(@src(), "Use the limits its settings give", 0, .{ .expand = .horizontal, .id_extra = 42 });
+    if (own) keyButton(@src(), "use-the-limits-its-settings-give", 0, .{ .expand = .horizontal, .id_extra = 42 });
     if (changed) {
         const done = if (key != 0) actM(key, .setProcess, .{ id, next }) else act(.setProcess, .{ id, next });
         done catch {
@@ -21155,12 +21346,12 @@ fn processProperties(id: layout.model.ObjectId) void {
     heading("Used by", .{}, 50);
     var used: usize = 0;
     for (state.model.panels.items, 0..) |pn, pi| if (pn.fab.process == id) {
-        keyButton(@src(), pn.name, @intCast(pi), .{ .expand = .horizontal, .id_extra = 51 + pi, .tag = listTag("process.panel", pn.name) });
+        keyButtonText(@src(), pn.name, @intCast(pi), .{ .expand = .horizontal, .id_extra = 51 + pi, .tag = listTag("process.panel", pn.name) });
         used += 1;
     };
     if (used == 0) {
         propText("Panels", "none", .{}, 49);
-        keyButton(@src(), "Remove this profile", 0, .{ .expand = .horizontal, .id_extra = 48, .margin = .{ .y = 8 } });
+        keyButton(@src(), "remove-this-profile", 0, .{ .expand = .horizontal, .id_extra = 48, .margin = .{ .y = 8 } });
     }
 }
 
@@ -21211,11 +21402,11 @@ fn stylesProperties() !void {
     const saved_group = pushGroup("styles");
     defer popGroup(saved_group);
     propText("Text styles", "{d}", .{state.model.styles.items.len}, 1);
-    keyButton(@src(), "Add a style", 0, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } });
+    keyButton(@src(), "add-a-style", 0, .{ .expand = .horizontal, .id_extra = 2, .margin = .{ .y = 6 } });
     heading("From a math package", .{}, 10);
     for (layout.fonts.packages, 0..) |pkg, i| {
         var lb: [64]u8 = undefined;
-        keyButton(@src(), std.fmt.bufPrint(&lb, "Add a {s} style", .{pkg.name}) catch pkg.name, @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i , .tag = listTag("styles.package", pkg.name)});
+        keyButtonText(@src(), ui_labels.fmt(&lb, "styles.package.add", .{pkg.name}), @intCast(i), .{ .expand = .horizontal, .id_extra = 11 + i , .tag = listTag("styles.package", pkg.name)});
     }
 }
 
@@ -21284,7 +21475,7 @@ fn styleProperties(sid: layout.model.StyleId) !void {
         if (std.mem.eql(u8, f.role, "text")) continue;
         propText(faceItem("style.face", f.role), "{s} {s}", .{ f.font.family, f.font.style }, 30 + k);
     }
-    keyButton(@src(), "Fonts… (every face, and searching the installed fonts)", 0, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } });
+    keyButton(@src(), "fonts-every-face", 0, .{ .expand = .horizontal, .id_extra = 29, .margin = .{ .y = 4 } });
     styleFeatureProps(sid);
     try styleRules(sid);
 }
@@ -21552,8 +21743,8 @@ fn statusContent() void {
         const pct = zoomPercent();
         const zt = std.fmt.bufPrint(&zb, "{d:.0} %{s}", .{ pct, if (display.measuredPxPerMm() == null) "*" else "" }) catch "";
         var zwd: dvui.WidgetData = undefined;
-        keyButton(@src(), zt, 0, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd });
-        dvui.tooltip(@src(), .{ .active_rect = zwd.borderRectScale().r }, "{s}", .{if (display.measuredPxPerMm() == null) "Zoom against actual size, estimated (View › Calibrate screen size…). Click: actual size." else "Zoom against actual size. Click: actual size."}, .{});
+        keyButtonText(@src(), zt, 0, .{ .gravity_y = 0.5, .padding = .{ .x = 6, .w = 6, .y = 1, .h = 1 }, .margin = .{}, .font = .theme(.mono), .data_out = &zwd });
+        dvui.tooltip(@src(), .{ .active_rect = zwd.borderRectScale().r }, "{s}", .{ui_labels.tip("status.zoom", display.measuredPxPerMm() == null)}, .{});
     }
 
     var counts_buf: [260]u8 = undefined;
@@ -24431,7 +24622,7 @@ fn guideProperties(space: usize, index: usize) void {
             actM(mergeKey(.{ "guide lock", g.id }), .setGuide, .{ space, index, g.at, g.angle, @as(layout.model.GuideLock, @enumFromInt(c)) }) catch {};
         }
     }
-    keyButton(@src(), "Remove", 0, .{ .expand = .horizontal, .id_extra = 6, .margin = .{ .y = 6 }, .tag = "guide.remove" });
+    keyButton(@src(), "remove", 0, .{ .expand = .horizontal, .id_extra = 6, .margin = .{ .y = 6 }, .tag = "guide.remove" });
 }
 
 /// Select boundaries: what the pointer would pick, its whole boundary (an
@@ -27628,8 +27819,8 @@ fn constrainPromptWindow() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        keyButton(@src(), "Cancel", 0, .{});
-        keyButton(@src(), "Apply", 0, .{});
+        keyButton(@src(), "cancel", 0, .{});
+        keyButton(@src(), "apply", 0, .{});
         // Its buttons as Enter and Esc: the answer pressed.
         if (dialogAnswered(kact("dialog.confirm"))) go = true;
         if (dialogAnswered(kact("dialog.cancel"))) cancel = true;
@@ -27871,9 +28062,9 @@ fn pickedConstraintProperties() bool {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
         defer row.deinit();
-        keyButton(@src(), "Driving or reference", 0, .{});
-        keyButton(@src(), "Place it as at first", 0, .{});
-        keyButton(@src(), "Remove", 0, .{});
+        keyButton(@src(), "driving-or-reference", 0, .{});
+        keyButton(@src(), "place-it-as-at-first", 0, .{});
+        keyButton(@src(), "remove", 0, .{});
     }
     return true;
 }
@@ -27928,11 +28119,11 @@ fn constraintsProperties() void {
     };
     propText("Constraints", "{d}", .{m.constraints.items.len}, 9650);
     propText("Abandoned", "{d}", .{gone}, 9651);
-    if (gone > 0) keyButton(@src(), "Remove abandoned", 0, .{});
+    if (gone > 0) keyButton(@src(), "remove-abandoned", 0, .{});
     for (m.constraints.items, 0..) |c, ci| {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = ci, .margin = .{ .y = 2 } });
         defer row.deinit();
-        if (icons.button(@src(), .trash, "Remove this constraint", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+        if (icons.button(@src(), .trash, ui_labels.get("constraints.remove-constraint"), .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
             act(.removeConstraint, .{c.id}) catch {};
             return;
         }
@@ -28159,7 +28350,7 @@ fn constraintProperties() void {
         else
             std.fmt.bufPrint(&b3, "{s} from {s}", .{ endText(&b1, c.a, id), endText(&b2, c.b, c.a.object) }) catch "";
         const pad: dvui.Rect = .all(2);
-        keyIcon(@src(), "Constraint", icons.gravenAny(layConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = what } });
+        keyIcon(@src(), "constraint", icons.gravenAny(layConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = what } });
         // A set: each member; else the two ends.
         const eb: [2]ConstraintEnd = .{ c.a, c.b };
         const n_ends = if (c.isSet()) @min(c.peers.items.len, 255) else 2;
@@ -28169,7 +28360,7 @@ fn constraintProperties() void {
             const on = if (lay_flash) |f| f.c == c.id and f.end == ei else false;
             var nb: [120]u8 = undefined;
             const tip = if (c.kind == .equal_size) (std.fmt.bufPrint(&nb, "{s} size", .{if (e.object == .none) "The parent's" else objectName(e.object)}) catch "") else endText(&nb, e, null);
-            keyIcon(@src(), "Constraint object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 256 + ei), .{
+            keyIcon(@src(), "constraint-object", icons.gravenAny(if (c.kind == .equal_size) .geo_edge else .geo_segment) orelse dvui.entypo.dot_single, @intCast(ci * 256 + ei), .{
                 .id_extra = 1 + ei,
                 .gravity_y = 0.5,
                 .padding = pad,
@@ -28184,7 +28375,7 @@ fn constraintProperties() void {
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (c.isSet()) {
             // Taking this object out: the rest stay equal.
-            if (icons.button(@src(), .trash, "Take this out of the set (the rest stay equal)", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+            if (icons.button(@src(), .trash, ui_labels.get("constraints.take-out-of-set"), .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
                 act(.removeConstraintMember, .{ c.id, id }) catch {};
                 return;
             }
@@ -28198,7 +28389,7 @@ fn constraintProperties() void {
             accepted.label_unit = if (k == 1) .mm else .in;
             if (accepted.numberField(@src(), f64, v0, -100000, 100000, .{ .min_size_content = .{ .w = 60 }, .max_size_content = .{ .w = 70, .h = 100 }, .gravity_y = 0.5, .id_extra = ci })) |v| setConstraintValue(c.id, v / k);
         }
-        if (icons.button(@src(), .trash, "Remove this constraint", .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
+        if (icons.button(@src(), .trash, ui_labels.get("constraints.remove-constraint"), .{ .id_extra = ci, .size = 14, .opts = .{ .gravity_y = 0.5 } })) {
             act(.removeConstraint, .{c.id}) catch {};
             return;
         }
@@ -28247,7 +28438,7 @@ fn originPicker(id: layout.model.ObjectId) void {
         for (xs, 0..) |x, xi| {
             const on = holds.x == x and holds.y == y;
             var nb: [16]u8 = undefined;
-            keyButton(@src(), "", @intCast(yi * 3 + xi), .{
+            keyButtonText(@src(), "", @intCast(yi * 3 + xi), .{
                 // Which point of it is its origin: constraints.origin-at.high-low …
                 .tag = listTag("constraints.origin-at", std.fmt.bufPrint(&nb, "{s} {s}", .{ @tagName(y), @tagName(x) }) catch "x"),
                 .id_extra = yi * 3 + xi,
@@ -29071,7 +29262,7 @@ fn sketchInkProperties() void {
         }
         strokeDashProps(st);
     } else propText("Pen", "{s}", .{"0.3 mm black, made with the first ink"}, 8196);
-    keyButton(@src(), "New stroke style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    keyButton(@src(), "new-stroke-style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
 /// The dash presets, as multiples of the pen's width (on, off, …), for
@@ -29263,7 +29454,7 @@ fn sketchFillProperties() void {
             state.status = "A hatch's lines must be narrower than their spacing. ";
         };
     }
-    keyButton(@src(), "New fill style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    keyButton(@src(), "new-fill-style", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
 /// A new fill style, like the current one (or a 45° hatch), made current.
@@ -30874,7 +31065,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.end.update") => if (sketch_edit) |r| skAccept(r.sketch),
             kact("sketch.end.discard") => skDiscard(),
             kact("sketch.show.ink-only") => skToggleInkOnly(),
-            else => used = false,
+            // A button's action on a key of the sketch's (the palette's
+            // tools): its handler, as a click on the button runs it.
+            else => used = runButtonAction(inv),
         }
         if (used) {
             e.handle(@src(), box.data());
@@ -31834,8 +32027,8 @@ fn skSummary(area: dvui.Rect.Physical) void {
     dvui.labelNoFmt(@src(), "Enter accepts and leaves · Esc goes back to sketching", .{}, .{ .margin = .{ .y = 8 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.65) } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
-    keyButton(@src(), "Accept and leave", 0, .{});
-    keyButton(@src(), "Back to sketching", 0, .{});
+    keyButton(@src(), "accept-and-leave", 0, .{});
+    keyButton(@src(), "back-to-sketching", 0, .{});
 }
 
 // Palette and properties ----------------------------------------------------------
@@ -31853,9 +32046,9 @@ fn sketchPalette() void {
         defer popGroup(saved_group);
         var geo = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
         defer geo.deinit();
-        skPaletteKey(@src(), "Select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none, "Select: pick geometry and constraints; drag points");
-        skPaletteKey(@src(), "Construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction, "Construction: what is drawn next is construction geometry (dashed)");
-        const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Polygon", "Array" };
+        skPaletteKey(@src(), "sketch.palette.select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none);
+        skPaletteKey(@src(), "sketch.palette.construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction);
+        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array" };
         const tvgs = [_][]const u8{
             icons.graven(.geo_point) orelse dvui.entypo.dot_single,
             icons.graven(.geo_segment) orelse dvui.entypo.flow_line,
@@ -31865,9 +32058,9 @@ fn sketchPalette() void {
             dvui.entypo.triangle_up,
             dvui.entypo.grid,
         };
-        for (names, tvgs, 0..) |name, tvg, gi| {
+        inline for (names, 0..) |name, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
-            skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on, name);
+            skPaletteKey(@src(), name, tvgs[gi], @intCast(gi), 10 + gi, on);
         }
         below = geo.data().borderRectScale().r;
     }
@@ -31884,23 +32077,24 @@ fn sketchPalette() void {
             const prev_a = faintUnless(pending);
             defer dvui.alphaSet(prev_a);
             var uwd: dvui.WidgetData = undefined;
-            ribbon_next_badge = "U";
-            keyIcon(@src(), "Update", dvui.entypo.cycle, 0, .{ .data_out = &uwd, .color_fill = if (pending) .{ .color = colors.overflow.opacity(0.25) } else null });
-            dvui.tooltip(@src(), .{ .active_rect = uwd.borderRectScale().r }, "{s}", .{if (pending) "Update: accept the changes so far, so what uses the sketch follows them, and keep editing (U)" else "Update: nothing to accept; what uses the sketch shows it as it is (U)"}, .{});
+            keyIcon(@src(), "update", dvui.entypo.cycle, 0, .{ .data_out = &uwd, .color_fill = if (pending) .{ .color = colors.overflow.opacity(0.25) } else null });
+            elementTip(@src(), uwd.borderRectScale().r, "sketch.end.update", !(pending), 0);
         }
         {
             const pending = skPending();
             const prev_a = faintUnless(pending);
             defer dvui.alphaSet(prev_a);
             var dwd: dvui.WidgetData = undefined;
-            ribbon_next_badge = "X";
-            keyIcon(@src(), "Discard", dvui.entypo.back_in_time, 0, .{ .data_out = &dwd });
-            dvui.tooltip(@src(), .{ .active_rect = dwd.borderRectScale().r }, "{s}", .{if (pending) "Discard: drop the changes since the last update, back to the sketch as its uses see it (X)" else "Discard: no changes to drop (X)"}, .{});
+            keyIcon(@src(), "discard", dvui.entypo.back_in_time, 0, .{ .data_out = &dwd });
+            elementTip(@src(), dwd.borderRectScale().r, "sketch.end.discard", !(pending), 0);
         }
-        ribbon_next_badge = "\u{21B5}";
+        // Its key as a ribbon key's fade shows it: Enter as ↵, to fit.
+        var fkb: [48]u8 = undefined;
+        const fk = keymap.shortcutPreferring(&fkb, kmode("sketch"), kact("sketch.finish"), 0, false);
+        ribbon_next_badge = if (fk != null and std.mem.eql(u8, fk.?, "Enter")) "\u{21B5}" else fk;
         var fwd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Finish", dvui.entypo.check, 0, .{ .data_out = &fwd });
-        dvui.tooltip(@src(), .{ .active_rect = fwd.borderRectScale().r }, "Finish: accept the sketch and leave (Enter shows its summary first)", .{}, .{});
+        keyIcon(@src(), "finish", dvui.entypo.check, 0, .{ .data_out = &fwd });
+        elementTip(@src(), fwd.borderRectScale().r, "sketch.end.finish", false, 0);
     }
     _ = on_fill;
     const g = skGeoOf(sk_tool) orelse return;
@@ -31908,13 +32102,14 @@ fn sketchPalette() void {
 }
 
 /// A key of the sketch ribbon's Geometry group, tinted while on.
-fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool, tip: []const u8) void {
+fn skPaletteKey(src: std.builtin.SourceLocation, comptime id: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool) void {
     // Its own parent, so its tooltip's ID is its own.
     var b = dvui.box(src, .{}, .{ .id_extra = id_extra, .gravity_y = 0.5 });
     defer b.deinit();
     var wd: dvui.WidgetData = undefined;
-    keyIcon(@src(), name, tvg, arg, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
-    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{tip}, .{});
+    keyIcon(@src(), id, tvg, arg, .{ .data_out = &wd, .tag = uniqueTag(id), .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+    const e = comptime elements.get(id);
+    if (e.tip.len > 0) elementTip(@src(), wd.borderRectScale().r, id, false, 0) else dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{ui_labels.get(id)}, .{});
 }
 
 /// The sketch ribbon's Constrain group: a key for each kind, its single
@@ -31922,35 +32117,38 @@ fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const 
 fn sketchConstrainKeys() void {
     const saved_group = pushGroup("sketch.constrain");
     defer popGroup(saved_group);
-    const kinds = [_]struct { k: SkKind, name: []const u8, key: ?[]const u8 = null, icon: icons.GIcon }{
-        .{ .k = .coincident, .name = "Coincident", .key = "C", .icon = .con_coincident },
-        .{ .k = .horizontal, .name = "Horizontal", .key = "H", .icon = .con_horizontal },
-        .{ .k = .vertical, .name = "Vertical", .key = "V", .icon = .con_vertical },
-        .{ .k = .point_on, .name = "On object", .key = "O", .icon = .con_on_object },
-        .{ .k = .tangent, .name = "Tangent", .key = "T", .icon = .con_tangent },
-        .{ .k = .perpendicular, .name = "Perpendicular", .key = "P", .icon = .con_perpendicular },
-        .{ .k = .parallel, .name = "Parallel", .icon = .con_parallel },
-        .{ .k = .equal, .name = "Equal", .key = "E", .icon = .con_equal },
-        .{ .k = .symmetric, .name = "Symmetric", .icon = .con_symmetric },
-        .{ .k = .distance, .name = "Distance", .key = "D", .icon = .con_distance },
-        .{ .k = .distance_x, .name = "Horizontal distance", .icon = .con_distance_x },
-        .{ .k = .distance_y, .name = "Vertical distance", .icon = .con_distance_y },
-        .{ .k = .radius, .name = "Radius", .key = "R", .icon = .con_radius },
-        .{ .k = .diameter, .name = "Diameter", .icon = .con_diameter },
-        .{ .k = .angle, .name = "Angle", .key = "A", .icon = .con_angle },
-        .{ .k = .fixed, .name = "Lock", .key = "L", .icon = .con_locked },
+    const kinds = [_]struct { k: SkKind, id: []const u8, key_action: ?[]const u8 = null, icon: icons.GIcon }{
+        .{ .k = .coincident, .id = "sketch.constrain.coincident", .key_action = "sketch.constraint.coincident", .icon = .con_coincident },
+        .{ .k = .horizontal, .id = "sketch.constrain.horizontal", .key_action = "sketch.constraint.horizontal", .icon = .con_horizontal },
+        .{ .k = .vertical, .id = "sketch.constrain.vertical", .key_action = "sketch.constraint.vertical", .icon = .con_vertical },
+        .{ .k = .point_on, .id = "sketch.constrain.on-object", .key_action = "sketch.constraint.point-on", .icon = .con_on_object },
+        .{ .k = .tangent, .id = "sketch.constrain.tangent", .key_action = "sketch.constraint.tangent", .icon = .con_tangent },
+        .{ .k = .perpendicular, .id = "sketch.constrain.perpendicular", .key_action = "sketch.constraint.perpendicular", .icon = .con_perpendicular },
+        .{ .k = .parallel, .id = "sketch.constrain.parallel", .icon = .con_parallel },
+        .{ .k = .equal, .id = "sketch.constrain.equal", .key_action = "sketch.constraint.equal", .icon = .con_equal },
+        .{ .k = .symmetric, .id = "sketch.constrain.symmetric", .icon = .con_symmetric },
+        .{ .k = .distance, .id = "sketch.constrain.distance", .key_action = "sketch.constraint.distance", .icon = .con_distance },
+        .{ .k = .distance_x, .id = "sketch.constrain.horizontal-distance", .icon = .con_distance_x },
+        .{ .k = .distance_y, .id = "sketch.constrain.vertical-distance", .icon = .con_distance_y },
+        .{ .k = .radius, .id = "sketch.constrain.radius", .key_action = "sketch.constraint.radius", .icon = .con_radius },
+        .{ .k = .diameter, .id = "sketch.constrain.diameter", .icon = .con_diameter },
+        .{ .k = .angle, .id = "sketch.constrain.angle", .key_action = "sketch.constraint.angle", .icon = .con_angle },
+        .{ .k = .fixed, .id = "sketch.constrain.lock", .key_action = "sketch.constraint.lock", .icon = .con_locked },
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
     defer row.deinit();
-    for (kinds, 0..) |k, i| {
+    inline for (kinds, 0..) |k, i| {
         var buf: [8]skl.Constraint = undefined;
         const fits = skConstraintsFor(k.k, &buf) > 0;
         const prev_a = faintUnless(fits);
         defer dvui.alphaSet(prev_a);
-        ribbon_next_badge = k.key;
+        // Its key: the keymap's for the constraint, in the sketch's keys.
+        var kb: [48]u8 = undefined;
+        ribbon_next_badge = if (k.key_action) |ka| keymap.shortcutPreferring(&kb, kmode("sketch"), kact(ka), 0, false) else null;
         var wd: dvui.WidgetData = undefined;
-        keyIcon(@src(), k.name, icons.gravenAny(k.icon) orelse dvui.entypo.link, @intFromEnum(k.k), .{ .id_extra = 100 + i, .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}: constrain the selection", .{k.name}, .{ .id_extra = 100 + i });
+        keyIcon(@src(), k.id, icons.gravenAny(k.icon) orelse dvui.entypo.link, @intFromEnum(k.k), .{ .id_extra = 100 + i, .data_out = &wd, .tag = uniqueTag(k.id) });
+        var tb: [96]u8 = undefined;
+        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{ui_labels.fill(&tb, ui_labels.get("sketch.constrain.tip"), .{ui_labels.get(k.id)})}, .{ .id_extra = 100 + i });
     }
 }
 
@@ -31967,35 +32165,31 @@ fn sketchInkKeys() void {
         defer popGroup(saved_group);
         const prev_a = faintUnless(gs.len > 0);
         defer dvui.alphaSet(prev_a);
-        ribbon_next_badge = "I";
         var wd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Ink selection  I", dvui.entypo.brush, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Ink: stroke the selected lines and arcs, or pieces of them (Shift+click one between its crossings), in the current stroke style, or take their ink off", .{}, .{});
+        keyIcon(@src(), "ink-selection", dvui.entypo.brush, 0, .{ .data_out = &wd });
+        elementTip(@src(), wd.borderRectScale().r, "ink.ink-selection", false, 0);
     }
     {
         const saved_group = pushGroup("fill");
         defer popGroup(saved_group);
         const prev_a = faintUnless(gs.len > 0);
         defer dvui.alphaSet(prev_a);
-        ribbon_next_badge = "F";
         var wd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Fill selection  F", dvui.entypo.drop, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Fill: fill the area the selection closes in the current fill style, or take its fill off (Shift+click inside an area selects the path round it)", .{}, .{});
+        keyIcon(@src(), "fill-selection", dvui.entypo.drop, 0, .{ .data_out = &wd });
+        elementTip(@src(), wd.borderRectScale().r, "fill.fill-selection", false, 0);
     }
     {
         const saved_group = pushGroup("caption");
         defer popGroup(saved_group);
         const prev_a = faintUnless(skCaptionFrom() != null);
         defer dvui.alphaSet(prev_a);
-        ribbon_next_badge = "N";
         var wd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Add caption  N", dvui.entypo.message, 0, .{ .data_out = &wd });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "Add caption: a leader out square to the selected side or curve (or from the selected point on one), jogged level, and a track of text held to its end (N)", .{}, .{});
+        keyIcon(@src(), "add-caption", dvui.entypo.message, 0, .{ .data_out = &wd });
+        elementTip(@src(), wd.borderRectScale().r, "caption.add-caption", false, 0);
         dvui.alphaSet(prev_a);
-        ribbon_next_badge = "J";
         var wj: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Connect  J", dvui.entypo.flow_line, 0, .{ .data_out = &wj });
-        dvui.tooltip(@src(), .{ .active_rect = wj.borderRectScale().r }, "Connect: a connection from the selected point, side or curve (or from nowhere), to the second selected point if there is one (J)", .{}, .{});
+        keyIcon(@src(), "connect", dvui.entypo.flow_line, 0, .{ .data_out = &wj });
+        elementTip(@src(), wj.borderRectScale().r, "caption.connect", false, 0);
     }
     {
         // Ink only: the sketch's layer shows its ink alone (`layout.tags`),
@@ -32003,10 +32197,9 @@ fn sketchInkKeys() void {
         const saved_group = pushGroup("sketch.show");
         defer popGroup(saved_group);
         const on = if (skItem()) |it| it.hidden.eql(layout.tags.Preset.ink_only.hidden()) else false;
-        ribbon_next_badge = "W";
         var wd: dvui.WidgetData = undefined;
-        keyIcon(@src(), "Ink only", dvui.entypo.eye, 0, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
-        dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{if (on) "Ink only: on. Everything else on the sketch's layer is hidden; W shows it all again (the Layers panel sets each kind)" else "Ink only: show the drawing alone, as it will be output, hiding construction, points, constraints and dimensions (W)"}, .{});
+        keyIcon(@src(), "ink-only", dvui.entypo.eye, 0, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+        elementTip(@src(), wd.borderRectScale().r, "sketch.show.ink-only", on, 0);
     }
 }
 
@@ -32045,8 +32238,8 @@ fn skDrawingChoice() void {
         }
     }
     var wd: dvui.WidgetData = undefined;
-    keyIcon(@src(), "New drawing", dvui.entypo.add_to_list, 0, .{ .data_out = &wd });
-    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "New drawing: another ink context over this sketch (its own ink and fills), made the one ink goes into", .{}, .{});
+    keyIcon(@src(), "new-drawing", dvui.entypo.add_to_list, 0, .{ .data_out = &wd });
+    elementTip(@src(), wd.borderRectScale().r, "ink.new-drawing", false, 0);
 }
 
 /// The overlay below the geometry buttons for the active one: its
@@ -32089,7 +32282,7 @@ fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
                 continue;
             }
             const on = sk_tool == t;
-            keyButton(@src(), name, @intFromEnum(t), .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+            keyButton(@src(), skToolId(t), @intFromEnum(t), .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
         }
     }
     const faint = dvui.themeGet().color(.control, .text).opacity(0.65);
@@ -32122,7 +32315,7 @@ fn skArrayCounts() void {
 }
 
 /// The polygon tool's sides: the common ones by name, or any number.
-const polygon_names = [_][]const u8{ "Triangle", "Square", "Pentagon", "Hexagon", "Heptagon", "Octagon" };
+const polygon_names = [_][]const u8{ "triangle", "square", "pentagon", "hexagon", "heptagon", "octagon" };
 fn skPolygonSides() void {
     const saved = pushGroup("polygon");
     defer popGroup(saved);
@@ -32141,21 +32334,17 @@ fn skPolygonSides() void {
     if (accepted.numberField(@src(), f64, @floatFromInt(polygon_sides), 3, 360, .{ .expand = .horizontal })) |v| polygon_sides = @intFromFloat(@round(v));
 }
 
+/// A sketch tool's label (its element, `sketch.tool.<name>`).
 fn skToolName(t: SkTool) []const u8 {
     return switch (t) {
-        .none => "Select",
-        .point => "Point",
-        .segment => "Segment",
-        .ray => "Ray",
-        .line => "Line",
-        .polyline => "Polyline",
-        .arc_centre => "Centre",
-        .arc_3pt => "3 points",
-        .circle => "Centre",
-        .circle_3pt => "3 points",
-        .polar_array => "Polar",
-        .rect_array => "Rectangular",
-        .polygon => "Polygon",
+        inline else => |x| ui_labels.get("sketch.tool." ++ comptime kebabName(@tagName(x))),
+    };
+}
+
+/// A sketch tool's element id's last part.
+fn skToolId(t: SkTool) []const u8 {
+    return switch (t) {
+        inline else => |x| comptime kebabName(@tagName(x)),
     };
 }
 
@@ -32347,12 +32536,12 @@ fn skConstraintList(it: SkPlace) void {
         var tb: [96]u8 = undefined;
         const text = skConstraintText(&tb, c);
         const pad: dvui.Rect = .all(2);
-        keyIcon(@src(), "Constraint", icons.gravenAny(skConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = text } });
+        keyIcon(@src(), "constraint", icons.gravenAny(skConstraintIcon(c)) orelse dvui.entypo.link, @intCast(ci), .{ .id_extra = 0, .gravity_y = 0.5, .padding = pad, .min_size_content = .{ .w = 22, .h = 22 }, .label = .{ .text = text } });
         var rb: [4]skl.Ref = undefined;
         for (skl.refs(c, &rb), 0..) |r, k| {
             var nb: [64]u8 = undefined;
             const on = sk_flash != null and std.meta.eql(sk_flash.?, r);
-            keyIcon(@src(), "Constraint object", icons.gravenAny(skRefIcon(s, r)) orelse dvui.entypo.dot_single, @intCast(ci * 4 + k), .{
+            keyIcon(@src(), "constraint-object", icons.gravenAny(skRefIcon(s, r)) orelse dvui.entypo.dot_single, @intCast(ci * 4 + k), .{
                 .id_extra = 1 + k,
                 .gravity_y = 0.5,
                 .padding = pad,
@@ -32376,7 +32565,7 @@ fn skConstraintList(it: SkPlace) void {
         if (c.isDimension()) {
             keyButton(@src(), if (c.driving) "drive" else "ref", @intCast(ci), .{ .gravity_y = 0.5, .padding = .{ .x = 5, .w = 5, .y = 2, .h = 2 } });
         }
-        keyIcon(@src(), "Remove constraint", dvui.entypo.cross, @intCast(ci), .{ .gravity_y = 0.5 });
+        keyIcon(@src(), "remove-constraint", dvui.entypo.cross, @intCast(ci), .{ .gravity_y = 0.5 });
     }
     if (shown == 0) dvui.labelNoFmt(@src(), if (np == 0) "None yet." else "None on the selection.", .{}, .{ .font = dvui.Font.theme(.body).larger(-2), .color_text = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.65) } });
 }
@@ -32515,7 +32704,7 @@ fn sketchPhysicalWhen(it: SkPlace) void {
     var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = sk_pw_text[0..63] }, .placeholder = "parameter (empty: never)" }, .{ .expand = .horizontal, .font = .theme(.mono) });
     const enter = te.enter_pressed;
     te.deinit();
-    keyButton(@src(), "Set", 0, .{ .gravity_y = 0.5 });
+    keyButton(@src(), "set", 0, .{ .gravity_y = 0.5 });
     if (enter) skSetPhysicalWhen();
 }
 
@@ -32542,7 +32731,7 @@ fn sketchParameters(it: SkPlace) void {
             sk_param_text[line.len] = 0;
             sk_param_reset = true;
         }
-        keyIcon(@src(), "Remove parameter", dvui.entypo.cross, @intCast(pi), .{ .gravity_y = 0.5 });
+        keyIcon(@src(), "remove-parameter", dvui.entypo.cross, @intCast(pi), .{ .gravity_y = 0.5 });
     }
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 9999 });
     defer row.deinit();
@@ -32554,7 +32743,7 @@ fn sketchParameters(it: SkPlace) void {
     }
     enter = te.enter_pressed;
     te.deinit();
-    keyButton(@src(), "Set", 0, .{ .gravity_y = 0.5 });
+    keyButton(@src(), "set", 0, .{ .gravity_y = 0.5 });
     if (enter) skSetParam();
 }
 
@@ -32573,9 +32762,9 @@ fn sketchProperties(space: usize, index: usize) void {
     if (it.sketch.analyse(state.gpa, arena.allocator())) |x| {
         propText("Constrained", "{s}", .{if (x.fully_constrained) "fully" else "not fully"}, 4);
     } else |_| {}
-    keyButton(@src(), "Edit sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "edit-sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     // An enclosed sketch may be made a panel (or part) here.
-    keyButton(@src(), "Make panel", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "make-panel", 0, .{ .expand = .horizontal });
 }
 
 /// A sketch of the document (from the tree): its views, and where to place
@@ -32585,12 +32774,12 @@ fn sketchesProperties() void {
     const saved_group = pushGroup("sketches");
     defer popGroup(saved_group);
     propText("Sketches", "{d}", .{state.model.sketches.items.len}, 1);
-    keyButton(@src(), "New sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "new-sketch", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
     // Their captions' texts as a sheet: a row a caption, by name; the
     // default text, then a column a language.
     var captions: usize = 0;
     for (state.model.sketches.items) |it| captions += it.captions.items.len;
-    if (captions > 0) keyButton(@src(), "Make a text sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    if (captions > 0) keyButton(@src(), "make-a-text-sheet", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 fn sketchDefProperties(index: usize) void {
@@ -32616,11 +32805,11 @@ fn sketchDefProperties(index: usize) void {
     // Shown in a canvas or a frame: a view of it at the middle of what is
     // shown, or (enclosed) a panel there, its edge the sketch's outline.
     if (!state.model.isHome(shown_space)) {
-        keyButton(@src(), "Place a view here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-        keyButton(@src(), "Insert as a panel here", 0, .{ .expand = .horizontal, .margin = .{ .y = 2 } });
-        keyButton(@src(), "Edit in its own space", 0, .{ .expand = .horizontal, .margin = .{ .y = 2, .h = 8 } });
+        keyButton(@src(), "place-a-view-here", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+        keyButton(@src(), "insert-as-a-panel-here", 0, .{ .expand = .horizontal, .margin = .{ .y = 2 } });
+        keyButton(@src(), "edit-in-its-own-space", 0, .{ .expand = .horizontal, .margin = .{ .y = 2, .h = 8 } });
     }
-    keyButton(@src(), "Delete sketch", 0, .{ .expand = .horizontal });
+    keyButton(@src(), "delete-sketch", 0, .{ .expand = .horizontal });
 }
 
 /// The document's figures: how many, and Import SVG.
@@ -32628,7 +32817,7 @@ fn figuresProperties() void {
     const saved_group = pushGroup("figures");
     defer popGroup(saved_group);
     propText("Figures", "{d}", .{state.model.figures.items.len}, 1);
-    keyButton(@src(), "Import SVG…", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "import-svg", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
 }
 
 /// A figure's properties: its name, where it came from, its size and
@@ -32659,8 +32848,8 @@ fn figureProperties(index: usize) void {
         defer box.deinit();
         drawInk(box.data().contentRectScale().r, index, ink, b);
     }
-    if (over == null) keyButton(@src(), "Replace from SVG…", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
-    keyButton(@src(), "Remove figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
+    if (over == null) keyButton(@src(), "replace-from-svg", 0, .{ .expand = .horizontal, .margin = .{ .y = 8 } });
+    keyButton(@src(), "remove-figure", 0, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
 }
 
 /// Remove figure pressed once on a figure still placed: the figure's id,
@@ -32846,7 +33035,7 @@ fn sketchPanelProperties(pi: usize) void {
     }
     var islands = pn.islands;
     if (tcheckbox(@src(), &islands, "Islands: a hole's holes stay solid", .{ .id_extra = 71 })) actV(.setPanelIslands, .{ pi, islands });
-    keyButton(@src(), "Edit its sketch", 0, .{ .expand = .horizontal, .id_extra = 72 });
+    keyButton(@src(), "edit-its-sketch", 0, .{ .expand = .horizontal, .id_extra = 72 });
 }
 
 // Tiles from sketches -------------------------------------------------------------
@@ -32892,8 +33081,8 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 8406 });
             defer row.deinit();
-            if (from_ref != null) keyButton(@src(), "Apply again", 0, .{});
-            keyButton(@src(), "Remove", 0, .{});
+            if (from_ref != null) keyButton(@src(), "apply-again", 0, .{});
+            keyButton(@src(), "remove", 0, .{});
         }
     }
     // Apply a sketch: which one, its size parameters, the offset.
@@ -32934,7 +33123,7 @@ fn prototypeSketch(id: layout.model.PrototypeId) void {
         propName(label);
         _ = dvui.textEntryNumber(@src(), f64, .{ .value = &proto_sk_off[k], .min = -1000, .max = 1000 }, .{ .expand = .horizontal });
     }
-    keyButton(@src(), "Apply sketch to this prototype", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
+    keyButton(@src(), "apply-sketch-to-this-prototype", 0, .{ .expand = .horizontal, .margin = .{ .y = 6 } });
 }
 
 fn applyError(err: anyerror) []const u8 {

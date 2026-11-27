@@ -58,6 +58,7 @@ pub const actions = [_][:0]const u8{
     "nameKeysInPanel", "setOverlay", "setGridSpacing",
     "addFigure", "placeFigure", "placeFigureOnPanel", "setFigureArtWidth", "replaceFigure", "setPlaceBorder", "setArtBorder", "setFigurePlace", "removeFigurePlace", "renameFigure", "removeFigure",
     "setMeasureUnit",
+    "makeRowsSheet",
 };
 
 fn Fn(comptime name: []const u8) type {

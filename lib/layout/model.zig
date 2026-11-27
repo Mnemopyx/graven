@@ -5632,6 +5632,28 @@ pub const Model = struct {
         return sh.id;
     }
 
+    /// A text sheet named `name` with the rows given, `rows` in pairs (a
+    /// row's name, its default text), and a column for each of
+    /// `languages` after the default, empty. Rows that name nothing in
+    /// the document stand on their own: the interface's labels are such
+    /// rows, named by element ids (the GUI's `labels.zig`). Returns its ID.
+    pub fn makeRowsSheet(m: *Model, name: []const u8, languages: []const []const u8, rows: []const []const u8) Error!ObjectId {
+        var sh: LegendSheet = .{ .id = m.newId(), .name = try m.a().dupe(u8, name), .scope = .none, .texts = true };
+        try sh.columns.append(m.a(), "Default");
+        for (languages) |l| try sh.columns.append(m.a(), try m.a().dupe(u8, l));
+        var i: usize = 0;
+        while (i + 1 < rows.len) : (i += 2) {
+            var row: SheetRow = .{ .key = try m.a().dupe(u8, rows[i]) };
+            try row.cells.append(m.a(), try m.a().dupe(u8, rows[i + 1]));
+            for (languages) |_| try row.cells.append(m.a(), "");
+            try sh.rows.append(m.a(), row);
+        }
+        try m.sheets.append(m.a(), sh);
+        m.revision += 1;
+        try m.syncSheets();
+        return sh.id;
+    }
+
     /// Which of text sheet `id`'s columns its text holders show (0: the
     /// default).
     pub fn setSheetShown(m: *Model, id: ObjectId, col: usize) Error!void {

@@ -18,6 +18,7 @@ const layout = @import("graven_layout");
 const fs = @import("graven_fontsearch");
 const local = @import("graven_fonts_local");
 const icons = @import("icons.zig");
+const labels = @import("labels.zig");
 
 const geom = layout.geom;
 const model = layout.model;
@@ -288,9 +289,9 @@ pub fn window(host: Host, allocator: Allocator) void {
         var top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .all(6) });
         defer top.deinit();
         dvui.labelNoFmt(@src(), status, .{}, .{ .gravity_y = 0.5 });
-        if (icons.button(@src(), .x, "Close the fonts window", .{ .opts = .{ .gravity_x = 1 } })) open = false;
-        if (icons.button(@src(), .arrows_clockwise, "Scan system and user fonts again", .{ .opts = .{ .gravity_x = 1 } })) reindex(allocator);
-        if (icons.button(@src(), .download_simple, "Install font files as user fonts…", .{ .opts = .{ .gravity_x = 1 } })) {
+        if (icons.button(@src(), .x, labels.get("fonts.close"), .{ .opts = .{ .gravity_x = 1 } })) open = false;
+        if (icons.button(@src(), .arrows_clockwise, labels.get("fonts.rescan"), .{ .opts = .{ .gravity_x = 1 } })) reindex(allocator);
+        if (icons.button(@src(), .download_simple, labels.get("fonts.install"), .{ .opts = .{ .gravity_x = 1 } })) {
             install_open = true;
             install_new = true;
             install_report.clearRetainingCapacity();
@@ -347,10 +348,10 @@ fn criteria() void {
             if (like) |l| {
                 var buf: [96]u8 = undefined;
                 dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{s} {s}", .{ records[l].family, records[l].style }) catch "", .{}, .{ .gravity_y = 0.5 });
-                if (icons.button(@src(), .x_circle, "Stop ranking by likeness", .{ .opts = .{ .gravity_x = 1 } })) like = null;
+                if (icons.button(@src(), .x_circle, labels.get("fonts.stop-likeness"), .{ .opts = .{ .gravity_x = 1 } })) like = null;
             } else dvui.labelNoFmt(@src(), "any", .{}, .{ .gravity_y = 0.5 });
             if (selected) |sl| if (like == null or like.? != sl) {
-                if (icons.button(@src(), .magnet, "Rank by likeness to the selected font", .{ .opts = .{ .gravity_x = 1 } })) like = sl;
+                if (icons.button(@src(), .magnet, labels.get("fonts.rank-likeness"), .{ .opts = .{ .gravity_x = 1 } })) like = sl;
             };
         }
     }
@@ -701,9 +702,9 @@ fn familyRow(a: Allocator, f: fs.Family, fk: usize, n_files: usize, is_open: boo
         const visible = rect.y < clip.y + clip.h + 40 and rect.y + 60 > clip.y;
         var tb: [160]u8 = undefined;
         const toggle = if (is_open)
-            icons.button(@src(), .caret_down, std.fmt.bufPrint(&tb, "Close {s}", .{f.name}) catch "Close", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } })
+            icons.button(@src(), .caret_down, labels.fill(&tb, labels.get("fonts.close-family"), .{f.name}), .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } })
         else
-            icons.button(@src(), .caret_right, std.fmt.bufPrint(&tb, "Open {s}", .{f.name}) catch "Open", .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } });
+            icons.button(@src(), .caret_right, labels.fill(&tb, labels.get("fonts.open-family"), .{f.name}), .{ .id_extra = fk, .size = 14, .opts = .{ .gravity_y = 0.5 } });
         clicked = toggle;
         dvui.labelNoFmt(@src(), f.name, .{}, .{ .id_extra = fk, .font = dvui.Font.theme(.body).withWeight(.bold), .gravity_y = 0.5, .min_size_content = .{ .w = 150 }, .max_size_content = .width(150) });
         group_x = styleGroup(fk, 0, members, false, up, visible);
@@ -770,9 +771,9 @@ fn fileRow(loc: []const u8, info: FileInfo, by_record: []const ?fs.Hit, id: usiz
     const rect = row.data().rectScale().r;
     const visible = rect.y < clip.y + clip.h + 40 and rect.y + 60 > clip.y;
     const pin = if (isPinned(lead))
-        icons.button(@src(), .push_pin_slash, "Unpin: take out of the comparison", .{ .id_extra = id, .size = 14, .opts = .{ .gravity_y = 0.5 } })
+        icons.button(@src(), .push_pin_slash, labels.get("fonts.unpin"), .{ .id_extra = id, .size = 14, .opts = .{ .gravity_y = 0.5 } })
     else
-        icons.button(@src(), .push_pin, "Pin: keep in the comparison", .{ .id_extra = id, .size = 14, .opts = .{ .gravity_y = 0.5 } });
+        icons.button(@src(), .push_pin, labels.get("fonts.pin"), .{ .id_extra = id, .size = 14, .opts = .{ .gravity_y = 0.5 } });
     if (pin) togglePin(lead);
     for (info.faces, 0..) |j, k| {
         styleIcon(id * 64 + k, j, records[j].style, visible);
@@ -805,7 +806,7 @@ fn fileRow(loc: []const u8, info: FileInfo, by_record: []const ?fs.Hit, id: usiz
     if (faint) w.writeAll(" · not in these results") catch {};
     dvui.labelNoFmt(@src(), w.buffered(), .{}, tc.override(.{ .id_extra = id, .gravity_y = 0.5, .margin = .{ .x = 8 }, .font = dvui.Font.theme(.body).larger(-3) }));
     if (scope == .user) {
-        if (icons.button(@src(), .trash, "Remove this user font file…", .{ .id_extra = id, .size = 14, .opts = .{ .gravity_x = 1, .gravity_y = 0.5 } })) removing = first;
+        if (icons.button(@src(), .trash, labels.get("fonts.remove-file"), .{ .id_extra = id, .size = 14, .opts = .{ .gravity_x = 1, .gravity_y = 0.5 } })) removing = first;
     }
     for (dvui.events()) |*e| {
         if (!dvui.eventMatchSimple(e, row.data())) continue;
@@ -897,11 +898,11 @@ fn installPrompt(allocator: Allocator, area: dvui.Rect) void {
         }
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
         defer row.deinit();
-        if (dvui.button(@src(), "Install more", .{}, .{})) {
+        if (dvui.button(@src(), labels.get("fonts.install-more"), .{}, .{})) {
             install_report.clearRetainingCapacity();
             install_new = true;
         }
-        if (dvui.button(@src(), "Done", .{}, .{}) or cancel) install_open = false;
+        if (dvui.button(@src(), labels.get("fonts.done"), .{}, .{}) or cancel) install_open = false;
         return;
     }
     {
@@ -909,7 +910,7 @@ fn installPrompt(allocator: Allocator, area: dvui.Rect) void {
         defer row.deinit();
         dvui.labelNoFmt(@src(), "Font files or folders, one per line", .{}, .{ .gravity_y = 0.5 });
         if (dvui.useTinyFileDialogs) {
-            if (icons.button(@src(), .folder_open, "Choose font files…", .{ .opts = .{ .gravity_x = 1 } })) {
+            if (icons.button(@src(), .folder_open, labels.get("fonts.choose-files"), .{ .opts = .{ .gravity_x = 1 } })) {
                 const chosen = dvui.dialogNativeFileOpenMultiple(fa, .{
                     .title = "Install fonts",
                     .filters = &.{ "*.ttf", "*.otf", "*.ttc", "*.otc", "*.woff", "*.woff2" },
@@ -945,11 +946,11 @@ fn installPrompt(allocator: Allocator, area: dvui.Rect) void {
     _ = dvui.checkbox(@src(), &install_replace, "Install over a user font of the same family and style", .{ .margin = .{ .y = 6 } });
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
     defer row.deinit();
-    if (dvui.button(@src(), "Cancel", .{}, .{}) or cancel) {
+    if (dvui.button(@src(), labels.get("fonts.cancel"), .{}, .{}) or cancel) {
         install_open = false;
         return;
     }
-    if (dvui.button(@src(), "Install", .{}, .{})) runInstall(allocator, entered);
+    if (dvui.button(@src(), labels.get("fonts.install-files"), .{}, .{})) runInstall(allocator, entered);
 }
 
 /// The font files `entered` names (folders searched), installed one by
@@ -1161,12 +1162,12 @@ fn removePrompt(host: Host, allocator: Allocator, i: usize, area: dvui.Rect) voi
     }
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .margin = .{ .y = 8 } });
     defer row.deinit();
-    if (dvui.button(@src(), "Cancel", .{}, .{}) or cancel) {
+    if (dvui.button(@src(), labels.get("fonts.cancel"), .{}, .{}) or cancel) {
         removing = null;
         return;
     }
     var lb: [64]u8 = undefined;
-    if (dvui.button(@src(), std.fmt.bufPrint(&lb, "Remove the file ({d} face{s})", .{ in_file.len, if (in_file.len == 1) "" else "s" }) catch "Remove the file", .{}, .{})) {
+    if (dvui.button(@src(), labels.fill(&lb, if (in_file.len == 1) labels.get("fonts.remove-the-file-one") else labels.get("fonts.remove-the-file"), .{in_file.len}), .{}, .{})) {
         removing = null;
         const name = fa.dupe(u8, std.fs.path.basename(file)) catch "the file";
         local.removeFile(dvui.io, gpa, fa, records, file) catch |e| {
@@ -1208,9 +1209,9 @@ fn compare(a: Allocator, width: f32) void {
         keep(&sample, &sample_len, te.textGet());
         te.deinit();
         const flip = if (overlay)
-            icons.button(@src(), .rows, "Show side by side", .{})
+            icons.button(@src(), .rows, labels.get("fonts.side-by-side"), .{})
         else
-            icons.button(@src(), .stack, "Overlay glyph by glyph", .{});
+            icons.button(@src(), .stack, labels.get("fonts.overlay"), .{});
         if (flip) overlay = !overlay;
     }
     // The selected font joins the comparison until pinned or replaced.
@@ -1543,12 +1544,12 @@ fn compose(host: Host) void {
         const cur = st.face(r.role);
         var tb: [200]u8 = undefined;
         if (sel) |s| {
-            if (icons.button(@src(), .arrow_square_in, std.fmt.bufPrint(&tb, "Use {s} as the {s} face", .{ sel_label, r.role }) catch "Use the selected font", .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, r.role, nameOf(s));
+            if (icons.button(@src(), .arrow_square_in, labels.fill(&tb, labels.get("fonts.use-as-face"), .{ sel_label, r.role }), .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, r.role, nameOf(s));
         }
         if (cur == null) {
             // The clear button's room, so the names line up.
             _ = dvui.spacer(@src(), .{ .id_extra = k, .min_size_content = .{ .w = 22 } });
-        } else if (icons.button(@src(), .x, "None: from its base, else the default", .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, r.role, null);
+        } else if (icons.button(@src(), .x, labels.get("fonts.no-face"), .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, r.role, null);
         var buf: [256]u8 = undefined;
         const shown = if (cur) |n| std.fmt.bufPrint(&buf, "{s}: {s} {s}", .{ r.name, n.family, n.style }) catch "" else std.fmt.bufPrint(&buf, "{s}: none", .{r.name}) catch "";
         dvui.labelNoFmt(@src(), shown, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
@@ -1558,8 +1559,8 @@ fn compose(host: Host) void {
         defer row.deinit();
         dvui.labelNoFmt(@src(), "Selected:", .{}, .{ .gravity_y = 0.5, .margin = .{ .w = 4 } });
         var tb: [200]u8 = undefined;
-        if (icons.button(@src(), .text_aa, std.fmt.bufPrint(&tb, "Use {s} as the text face, with its family's italic and bolds", .{sel_label}) catch "Use as the text face", .{})) host.setStyleFamily(st.id, nameOf(s), familyVariants(s));
-        if (icons.button(@src(), .list_plus, std.fmt.bufPrint(&tb, "Add {s} as a fallback", .{sel_label}) catch "Add as a fallback", .{})) {
+        if (icons.button(@src(), .text_aa, labels.fill(&tb, labels.get("fonts.use-as-text-face"), .{sel_label}), .{})) host.setStyleFamily(st.id, nameOf(s), familyVariants(s));
+        if (icons.button(@src(), .list_plus, labels.fill(&tb, labels.get("fonts.add-fallback"), .{sel_label}), .{})) {
             // The first fallback name the style does not use yet.
             var n: usize = 1;
             var nb: [32]u8 = undefined;
@@ -1577,7 +1578,7 @@ fn compose(host: Host) void {
         any = true;
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .expand = .horizontal, .margin = .{ .h = 2 } });
         defer row.deinit();
-        if (icons.button(@src(), .trash, "Remove this fallback", .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, sf.role, null);
+        if (icons.button(@src(), .trash, labels.get("fonts.remove-fallback"), .{ .id_extra = k, .size = 14 })) host.setStyleFace(st.id, sf.role, null);
         var buf: [160]u8 = undefined;
         dvui.labelNoFmt(@src(), std.fmt.bufPrint(&buf, "{s} {s}", .{ sf.font.family, sf.font.style }) catch "", .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .margin = .{ .x = 4 } });
     }

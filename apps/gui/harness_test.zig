@@ -550,7 +550,7 @@ fn makeKeyboard(r: *Run) !void {
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/keyboard-legends.csv", .data = csv });
     try r.select(panel_path);
     try r.click("menu.file");
-    try r.click("menu.importLegendSheetCSV");
+    try r.click("menu.file.import-legend-sheet");
     try dvui.testing.pressKey(.a, .lcontrol);
     try r.frames(1);
     try dvui.testing.writeText(scratch ++ "/keyboard-legends.csv");
@@ -930,7 +930,7 @@ fn make15c(r: *Run) !void {
     };
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scratch ++ "/hp15c-legends.csv", .data = out.written() });
     try r.click("menu.file");
-    try r.click("menu.importLegendSheetCSV");
+    try r.click("menu.file.import-legend-sheet");
     try dvui.testing.pressKey(.a, .lcontrol);
     try r.frames(1);
     try dvui.testing.writeText(scratch ++ "/hp15c-legends.csv");
@@ -1121,8 +1121,8 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
 fn openExample(r: *Run, label: []const u8) !void {
     var b: [64]u8 = undefined;
     try r.click("menu.file");
-    var ib: [64]u8 = undefined;
-    try r.click(try std.fmt.bufPrint(&b, "menu.openExample{s}", .{layout.names.identifier(&ib, label, "x")}));
+    _ = &b;
+    try r.click(if (std.mem.eql(u8, label, "PC keyboard")) "menu.file.example-pc-keyboard" else "menu.file.example-hp15c");
     try r.frames(5);
 }
 
