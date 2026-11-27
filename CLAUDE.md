@@ -33,7 +33,7 @@ Fonts for the math packages are not in git: `python3 scripts/fetch-fonts.py` put
 
 ## Building and checking
 
-Cross-builds from Linux: `$Z build -Dtarget=x86_64-windows-gnu` (CLI) and `$Z build gui-build -Dtarget=x86_64-windows-gnu` (GUI) make Windows executables that need only system DLLs; `-Dtarget=aarch64-macos` builds the CLI tools (the GUI needs Apple's SDK). Not yet run on Windows.
+Cross-builds from Linux: `$Z build -Dtarget=x86_64-windows-gnu` (CLI) and `$Z build gui-build -Dtarget=x86_64-windows-gnu` (GUI) make Windows executables that need only system DLLs; `-Dtarget=aarch64-macos` builds the CLI tools (the GUI needs Apple's SDK). `scripts/package-windows.sh` makes the testers' zip (tester notes in `packaging/windows`). Run under Wine (both examples' SVGs identical to Linux's; the GUI draws), not yet on real Windows.
 
 ```sh
 $Z build test                 # all library tests; silent means pass (long after a cache loss: allow ~10 min)
