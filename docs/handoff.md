@@ -31,12 +31,11 @@ Before that work began, the GUI was inconsistent: no principles have been applie
 
 ## 4. Text display (MSDF), to do
 
-Built: distance fields per glyph at three resolutions, error correction, an atlas of rasters, upright glyphs on the pixel grid, gamma 2.2, fields made off the drawing thread, culling. To do:
+Built: distance fields per glyph at three resolutions, error correction, an atlas of rasters, upright glyphs on the pixel grid, gamma 2.2, fields made off the drawing thread, culling, least-recently-used eviction (atlas pages and fields), uploads of changed rows only. To do:
 
 1. Round the cap height up rather than to the nearest pixel.
 2. Fit vertical stems to pixel columns (autohinter-style).
-3. Least-recently-used eviction in the atlas.
-4. Time a dense document.
+3. Time a dense document, on a real GPU (`GRAVEN_FRAME_LOG=1` gives rastering and upload times); if uploads cost there, upload pages once a frame before drawing.
 
 ## 5. HP-15C legends
 

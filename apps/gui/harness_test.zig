@@ -1403,6 +1403,8 @@ test "the discovery path: a track's groups and elements, and which are shown now
 test {
     // The element registry's own tests (ids, the discovery walk).
     _ = @import("elements.zig");
+    // The glyph atlas's own tests (eviction).
+    _ = @import("glyphs.zig");
 }
 
 test "every button in the registry is an action with a handler" {
