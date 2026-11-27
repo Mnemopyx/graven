@@ -8334,6 +8334,16 @@ pub const Model = struct {
     /// run there, else onto the end of the run before, else as a new run in
     /// `style`. Returns the place after it.
     pub fn insertText(m: *Model, parent: Parent, region: usize, at: FlowPos, text: []const u8, style: StyleId) Error!FlowPos {
+        return m.insertSource(parent, region, at, text, style, false);
+    }
+
+    /// As `insertText`, but `markup` is a legend's source (one line of it,
+    /// emphasis and all: copied text pasted), put in as it is.
+    pub fn insertMarkup(m: *Model, parent: Parent, region: usize, at: FlowPos, markup: []const u8, style: StyleId) Error!FlowPos {
+        return m.insertSource(parent, region, at, markup, style, true);
+    }
+
+    fn insertSource(m: *Model, parent: Parent, region: usize, at: FlowPos, text: []const u8, style: StyleId, markup: bool) Error!FlowPos {
         var pos = at;
         var lines = std.mem.splitScalar(u8, text, '\n');
         var first = true;
@@ -8344,7 +8354,7 @@ pub const Model = struct {
             if (line.len == 0) continue;
             var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
             defer scratch.deinit();
-            const esc = try edit_.escape(scratch.allocator(), line);
+            const esc = if (markup) line else try edit_.escape(scratch.allocator(), line);
             const items = m.flow(parent, region).items;
             if (pos.index > items.len) return error.NoSuchItem;
             const here = m.runAt(parent, region, pos.index);
@@ -8432,6 +8442,119 @@ pub const Model = struct {
         };
         m.revision += 1;
         return result;
+    }
+
+    /// Sets emphasis `which` (bold or italic) on the text between `from`
+    /// and `to`, or takes it off (`on` false): in each run of text the
+    /// range covers, its characters are tagged (`edit.setEmphasis`);
+    /// equations are left alone. With an empty range, the caret is marked:
+    /// an empty group to type into (in the run there, else the run before,
+    /// else a new run in `style`). Returns the range as it now is (the
+    /// caret, twice).
+    pub fn setEmphasis(m: *Model, parent: Parent, region: usize, from: FlowPos, to: FlowPos, which: edit_.Emphasis, on: bool, style: StyleId) Error![2]FlowPos {
+        var f = from;
+        var t = to;
+        if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
+        var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const items = m.flow(parent, region).items;
+        if (f.index > items.len or t.index > items.len) return error.NoSuchItem;
+        if (f.index == t.index and f.offset == t.offset) {
+            // The caret: in the run at it, else at the end of the run before.
+            var at = f;
+            const here = m.runAt(parent, region, at.index);
+            if (here == null or here.?.equation) {
+                const before = if (at.index > 0) m.runAt(parent, region, at.index - 1) else null;
+                if (at.offset == 0 and before != null and !before.?.equation) {
+                    at = .{ .index = at.index - 1, .offset = @intCast(before.?.content.len) };
+                } else {
+                    try m.place(parent, region, at.index, .{ .what = .{ .run = .{ .style = style, .content = "" } } });
+                    at.offset = 0;
+                }
+            }
+            const r = m.runAt(parent, region, at.index).?;
+            const e = try edit_.setEmphasis(sa, r.content, at.offset, at.offset, which, on);
+            r.content = try m.a().dupe(u8, e.src);
+            m.revision += 1;
+            const p: FlowPos = .{ .index = at.index, .offset = e.from };
+            return .{ p, p };
+        }
+        var rf = f;
+        var rt = t;
+        var k = f.index;
+        while (k <= t.index and k < items.len) : (k += 1) {
+            const r = m.runAt(parent, region, k) orelse continue;
+            if (r.equation) continue;
+            const lo: u32 = if (k == f.index) f.offset else 0;
+            const hi: u32 = if (k == t.index) t.offset else @intCast(r.content.len);
+            if (hi <= lo) continue;
+            const e = try edit_.setEmphasis(sa, r.content, lo, hi, which, on);
+            r.content = try m.a().dupe(u8, e.src);
+            if (k == f.index and f.offset > 0) rf.offset = e.from;
+            if (k == t.index) rt.offset = e.to;
+        }
+        m.revision += 1;
+        return .{ rf, rt };
+    }
+
+    /// Whether all the text between `from` and `to` has emphasis `which`
+    /// (with an empty range: whether text typed there would).
+    pub fn emphasisOver(m: *const Model, al: Allocator, parent: Parent, region: usize, from: FlowPos, to: FlowPos, which: edit_.Emphasis) Allocator.Error!bool {
+        var f = from;
+        var t = to;
+        if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
+        const items = m.flowItems(parent, region);
+        const runOf = struct {
+            fn g(its: []const Item, k: usize) ?Run {
+                if (k >= its.len or its[k].what != .run or its[k].what.run.equation) return null;
+                return its[k].what.run;
+            }
+        }.g;
+        if (f.index == t.index and f.offset == t.offset) {
+            if (runOf(items, f.index)) |r| return edit_.emphasisAt(al, r.content, f.offset, which);
+            if (f.offset == 0 and f.index > 0) if (runOf(items, f.index - 1)) |r| return edit_.emphasisAt(al, r.content, @intCast(r.content.len), which);
+            return false;
+        }
+        var any = false;
+        var k = f.index;
+        while (k <= t.index and k < items.len) : (k += 1) {
+            const r = runOf(items, k) orelse continue;
+            const lo: u32 = if (k == f.index) f.offset else 0;
+            const hi: u32 = if (k == t.index) t.offset else @intCast(r.content.len);
+            if (hi <= lo) continue;
+            if (!try edit_.emphasisAll(al, r.content, lo, hi, which)) return false;
+            any = true;
+        }
+        return any;
+    }
+
+    /// Puts the plain letters of the text between `from` and `to` in upper,
+    /// lower or title case (`edit.changeCase`); equations, escapes and
+    /// commands are left alone. Returns the range as it now is.
+    pub fn changeCase(m: *Model, parent: Parent, region: usize, from: FlowPos, to: FlowPos, how: edit_.Case) Error![2]FlowPos {
+        var f = from;
+        var t = to;
+        if (t.index < f.index or (t.index == f.index and t.offset < f.offset)) std.mem.swap(FlowPos, &f, &t);
+        var scratch: std.heap.ArenaAllocator = .init(m.arena.child_allocator);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const items = m.flow(parent, region).items;
+        if (f.index > items.len or t.index > items.len) return error.NoSuchItem;
+        var rt = t;
+        var k = f.index;
+        while (k <= t.index and k < items.len) : (k += 1) {
+            const r = m.runAt(parent, region, k) orelse continue;
+            if (r.equation) continue;
+            const lo: u32 = if (k == f.index) f.offset else 0;
+            const hi: u32 = if (k == t.index) t.offset else @intCast(r.content.len);
+            if (hi <= lo) continue;
+            const c = try edit_.changeCase(sa, r.content, lo, hi, how);
+            r.content = try m.a().dupe(u8, c.src);
+            if (k == t.index) rt.offset = c.to;
+        }
+        m.revision += 1;
+        return .{ f, rt };
     }
 
     /// Puts a new, empty equation at `at`, in `style`: inside a run of text
