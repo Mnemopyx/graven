@@ -21933,7 +21933,7 @@ var problems_arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
 var problems_logged: std.AutoHashMapUnmanaged(u64, void) = .empty;
 
 fn problemKey(kind: ProblemKind, parts: []const u64, name: []const u8) u64 {
-    var h = std.hash.Wyhash.init(@backingInt(kind) + 1);
+    var h = std.hash.Wyhash.init(@as(u64, @backingInt(kind)) + 1);
     h.update(std.mem.sliceAsBytes(parts));
     h.update(name);
     return h.final() | 1;
