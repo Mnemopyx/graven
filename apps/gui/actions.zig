@@ -315,6 +315,12 @@ pub fn Registry(
             return comptime @intCast(findAction(actions, name) orelse @compileError("no action \"" ++ name ++ "\""));
         }
 
+        /// Whether there is an action named `name`.
+        pub fn hasAction(comptime name: []const u8) bool {
+            comptime @setEvalBranchQuota(1_000_000);
+            return comptime findAction(actions, name) != null;
+        }
+
         /// The mode named `name`; an unknown name fails the build.
         pub fn mode(comptime name: []const u8) ModeId {
             comptime @setEvalBranchQuota(1_000_000);

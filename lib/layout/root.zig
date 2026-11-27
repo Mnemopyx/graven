@@ -24,6 +24,7 @@ pub const fonts = @import("fonts.zig");
 pub const import = @import("import.zig");
 pub const constrain = @import("constrain.zig");
 pub const edit = @import("edit.zig");
+pub const caret = @import("caret.zig");
 pub const fab = @import("fab.zig");
 pub const check = @import("check.zig");
 pub const threemf = @import("threemf.zig");
