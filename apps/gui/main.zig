@@ -2715,10 +2715,15 @@ fn frame() !dvui.App.Result {
     defer {
         const end: std.Io.Timestamp = .now(dvui.io, .awake);
         recordFrame(end.nanoseconds, frame_start.durationTo(end).nanoseconds);
-        if (frame_log) std.debug.print("frame {d:.2} ms\n", .{@as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6});
+        if (frame_log) {
+            const ms = @as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6;
+            if (atlas) |*ga| {
+                std.debug.print("frame {d:.2} ms  atlas: {d} pages ({d} emptied), {d} rasters, {d} fields ({d:.1} MB, {d} forgotten); raster {d:.1} ms, upload {d:.1} ms\n", .{ ms, ga.pages.items.len, ga.evicted_pages, ga.made_rasters, ga.fields.count(), @as(f64, @floatFromInt(ga.field_bytes)) / (1 << 20), ga.evicted_fields, @as(f64, @floatFromInt(ga.raster_ns)) / 1e6, @as(f64, @floatFromInt(ga.upload_ns)) / 1e6 });
+            } else std.debug.print("frame {d:.2} ms\n", .{ms});
+        }
     }
     // Glyph fields made since the last frame.
-    if (atlas) |*ga| _ = ga.collect();
+    if (atlas) |*ga| _ = ga.beginFrame();
     if (dump_path) |p| {
         dump_frame += 1;
         if (dump_svg.items.len > 0) {

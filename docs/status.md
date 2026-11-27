@@ -383,11 +383,13 @@ Fields come at three resolutions, chosen by the size a glyph is drawn: 32 texels
 
 Fields are made off the drawing thread, by up to 4 worker threads (one fewer than the processors): the drawing thread asks for a field, keeps drawing the glyph from the finest coarser field it has (or the label from its outlines), and takes the finished fields in at the start of a frame; the workers wake it when some are done. Release build, HP-15C keypad, worst frame on opening: 139 to 205 ms with fields made inline, 22 to 56 ms now. `GRAVEN_FIELDS_INLINE=1` makes them inline, to compare.
 
+Eviction (2026-11-27): the atlas keeps what was drawn most recently. When its 8 pages are full, the page drawn least recently is emptied and filled again (its rasters made anew when next drawn, its texture replaced so what was drawn from it this frame keeps its pixels), not the whole atlas; a page is added past 8 (up to 16) only while every page holds a raster drawn this frame. Fields are kept to 128 MB: past it the least recently used are forgotten, down to 96 MB, never one used this frame. A page uploads only the rows changed since its last upload, not all 4 MB, and gamma comes from a table. `GRAVEN_FRAME_LOG=1` now also prints the atlas's pages, pages emptied, rasters made, fields kept (and their MB), fields forgotten, and the frame's rastering and upload times. Release build, HP-15C, zoom sweeps under Xvfb at 2880 × 1920: rastering at most 5 ms a frame; frames with new rasters 60 to 170 ms, nearly all of it in the texture upload, which under Xvfb's software OpenGL is drawing pulled forward into the frame (a page changed while earlier draws from it wait); frames with nothing new 2 to 4 ms. An atlas forced to 1 page emptied pages 3 times in a zoom sweep and drew the same pixels as 8 pages. Tests: `gui-test -Dgui-filter=atlas`.
+
 ### Text display: to do
 
 - Round the cap height up (when more than about 0.3 px past a whole pixel) rather than to the nearest pixel, so capitals' tops are not trimmed.
 - Fit vertical stems to pixel columns (stem detection and a per-size outline distortion, in the manner of FreeType's autohinter).
-- Least-recently-used eviction in the atlas, in place of starting again when its 8 pages are full.
+- Pages uploaded once a frame, before anything is drawn from them (today a label's new rasters are uploaded before it is drawn, mid-frame); to be timed on a real GPU first.
 - Frame timing on a dense document.
 
 The status bar shows the average frame time over the last 30 s (building and drawing the UI, from the start of the frame to its end); `GRAVEN_FRAME_LOG=1` prints each frame's.

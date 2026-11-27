@@ -79,7 +79,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 | `GRAVEN_EXACT_TEXT=1` | text from outlines instead of the glyph atlas |
 | `GRAVEN_TEXT_GAMMA`, `GRAVEN_TEXT_DARKEN` | display gamma (2.2), stem darkening (0) |
 | `GRAVEN_FIELDS_INLINE=1` | glyph fields made on the drawing thread |
-| `GRAVEN_FRAME_LOG=1` | each frame's time printed |
+| `GRAVEN_FRAME_LOG=1` | each frame's time printed, with the glyph atlas's counts and its rastering and upload times |
 | `GRAVEN_DUMP_OUTLINES=file.svg` | exact glyph outlines in window pixels, for `scripts/text-overlay.py` |
 | `GRAVEN_FONTS_WINDOW=1` | the Fonts window opens at start |
 | `GRAVEN_DISPLAY=gamma,white` | display correction for the run (e.g. `1.5,0.85`) |
