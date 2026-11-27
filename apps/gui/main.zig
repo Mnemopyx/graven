@@ -1325,8 +1325,9 @@ fn createCanvas(units: layout.model.Units) void {
 
 const start_pane_width = 300;
 
-/// What the splash says the licence is (no licence file yet).
-const licence_text = "Licence: not yet chosen";
+/// What the splash says the licence is (LICENSE: the libraries LGPL, the
+/// applications AGPL).
+const licence_text = "Licence: AGPL-3.0 (libraries LGPL-3.0)";
 
 /// Files opened or saved lately, the latest first (absolute paths), kept
 /// in the local config as `files.recent`.

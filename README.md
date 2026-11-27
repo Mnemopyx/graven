@@ -152,3 +152,7 @@ Notes for bridge code:
 - Every shim function catches OCCT and C++ exceptions and returns an error code.
 - Write the shim in OCCT 8 style (`NCollection_Array1<gp_Pnt>`, `true`/`false`); deprecated typedefs fail under Zig's default flags.
 - XDE stores colours as 32-bit floats.
+
+## Licence
+
+The libraries (`lib/`, `bridge/`) are under the GNU Lesser General Public License, version 3 or later; the applications (`apps/`) and everything else under the GNU Affero General Public License, version 3 or later. See [LICENSE](LICENSE) and the texts in `LICENSES/`. What you make with Graven is yours. Third-party packages and fonts keep their own licences.

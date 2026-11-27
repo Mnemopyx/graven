@@ -8,7 +8,7 @@ The editor is `apps/gui` (DVUI on SDL3, about 15,500 lines; `main.zig` is most o
 
 What the app opens on, before there is a document: none of the canvas's interface (no rulers, tree, tools, properties or bottom bar; the menus stay in the title bar).
 
-- **Splash**, centred on the desk: Graven's mark (a keycap with G and √x on it), the name, a line on what it does, the version, the licence ("not yet chosen": there is no licence file).
+- **Splash**, centred on the desk: Graven's mark (a keycap with G and √x on it), the name, a line on what it does, the version, the licence ("AGPL-3.0 (libraries LGPL-3.0)", from `LICENSE`).
 - **News** pane, left: the message of the day for this version (`motd/<version>.md` in the repository, fetched at most daily on a thread of its own and cached; a built-in welcome until then), a note at the foot on where it came from.
 - **Start** pane, right: New canvas, millimetres (M); New canvas, inches (I); Open file… (O); then Recent: up to nine files opened or saved, latest first, each with its folder (shortened from the left) and its key (1 to 9); one no longer there is faint, and dropped when chosen.
 - Choosing a canvas, opening a file, or a `GRAVEN_SAMPLE` launches the main interface; File › New canvas (after asking about unsaved changes) comes back here.
