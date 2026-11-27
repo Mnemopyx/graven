@@ -9642,8 +9642,9 @@ fn gridProperties(pi: Parent, gi: usize) !void {
     if (changed) actM(mergeKey(.{ "grid", pi, gi }), .setGridShape, .{ pi, gi, sh, grid_dropped }) catch {
         state.status = "That shape cannot be used. ";
     };
-    if (numberProp("First point across, mm", g.origin.x, -10000, 10000, 18)) |v| try actM(mergeKey(.{ "gridat", pi, gi }), .moveGrid, .{ pi, gi, geom.Point{ .x = v, .y = g.origin.y } });
-    if (numberProp("First point up, mm", g.origin.y, -10000, 10000, 19)) |v| try actM(mergeKey(.{ "gridat", pi, gi }), .moveGrid, .{ pi, gi, geom.Point{ .x = g.origin.x, .y = v } });
+    const go = state.model.gridOrigin(pi, gi);
+    if (numberProp("First point across, mm", go.x, -10000, 10000, 18)) |v| try actM(mergeKey(.{ "gridat", pi, gi }), .moveGrid, .{ pi, gi, geom.Point{ .x = v, .y = go.y } });
+    if (numberProp("First point up, mm", go.y, -10000, 10000, 19)) |v| try actM(mergeKey(.{ "gridat", pi, gi }), .moveGrid, .{ pi, gi, geom.Point{ .x = go.x, .y = v } });
 
     // Its stamps.
     const lifo = dvui.currentWindow().lifo();
@@ -9737,7 +9738,7 @@ fn gridProperties(pi: Parent, gi: usize) !void {
             others.append(arena, "choose a part…") catch {};
             if (tdropdown(@src(), others.items, .{ .choice = &choice }, .{}, .{ .expand = .horizontal, .id_extra = 96 }) and choice < which.items.len) {
                 const qi = which.items[choice];
-                const ngi = try act(.addLinkedGrid, .{ Parent{ .panel = qi }, g.origin, g.id });
+                const ngi = try act(.addLinkedGrid, .{ Parent{ .panel = qi }, state.model.gridOrigin(pi, gi), g.id });
                 state.context = .{ .grid = .{ .parent = .{ .panel = qi }, .index = ngi } };
                 return;
             }

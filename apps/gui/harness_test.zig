@@ -807,12 +807,17 @@ fn make15c(r: *Run) !void {
     try make15cPanel(r, "Panel1", "HP-15C plate", .{ 10, 10 }, "0");
     try make15cPanel(r, "Panel1", "HP-15C keys", .{ 60, 80 }, "143");
 
-    // The plate's grid: 10 × 4 points, 11.43 mm across, 12.7 mm down;
-    // its holes (rounded rectangles, r 1 mm) and its gold legends.
+    // The plate's grid: a rectangular array (a Cartesian grid object, the
+    // keys centred in its cells), 10 × 4, dragged out over the plate, then
+    // typed exactly: 11.43 mm across, 12.7 mm down, its first cell's middle
+    // 12.565 mm in and 50 mm up (the cells 6.85 mm in from each side). Its
+    // holes (rounded rectangles, r 1 mm) and its gold legends.
     try r.select("\"HP-15C plate\"");
-    try r.press("panel.grids.add-grid");
-    try r.field("grid.columns", "10");
-    try r.field("grid.rows", "4");
+    try r.press("tool.add-array");
+    try r.field("array.columns", "10");
+    try r.field("array.rows", "4");
+    try r.press("array.apply");
+    try r.drag(try screen(.{ 15, 15 }), try screen(.{ 115, 55 }));
     try r.field("grid.spacing-across", "11.43");
     try r.field("grid.spacing-down", "12.7");
     try r.field("grid.first-point-across", "12.565");
