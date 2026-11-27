@@ -65,10 +65,12 @@ pub const dvui_app: dvui.App = .{
 /// without the fifo-v1 protocol (COSMIC, for one), where it cannot see the
 /// display scale; an editor wants correct scaling over frame pacing, so
 /// Wayland comes first. SDL_VIDEO_DRIVER in the environment still wins.
+/// Only where those drivers exist: on Windows or macOS the hint would leave
+/// SDL with no driver at all.
 fn start() dvui.App.StartOptions {
     if (dvui.backend.kind == .sdl3) {
         const c = dvui.backend.c;
-        _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+        if (!platform.is_windows and !platform.is_macos) _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
         // The identifier becomes the Wayland app id, which the desktop uses
         // to find Graven's .desktop file and icon.
         _ = c.SDL_SetAppMetadata("Graven", layout.version, "com.mnemopyx.graven");
@@ -2416,7 +2418,7 @@ fn syncDocFonts() bool {
     doc_fonts_loaded = true;
     var arena: std.heap.ArenaAllocator = .init(state.gpa);
     defer arena.deinit();
-    const dirs = folders.dirsFor(arena.allocator(), want) catch return true;
+    const dirs = folders.dirsFor(arena.allocator(), dvui.io, want) catch return true;
     for (dirs) |d| doc_fonts.addDir(state.gpa, dvui.io, d) catch {};
     return true;
 }
