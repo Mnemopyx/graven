@@ -1747,3 +1747,22 @@ test "ink on a piece between crossings: a point made where they cross; undone, g
     try testing.expectEqual(n, m.sketches.items[si].sketch.geometry.items.len);
     try testing.expect(!m.pieceInked(si, f));
 }
+
+test "an array grid shaped by typing replays the same" {
+    const gpa = testing.allocator;
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const c = try m.addPanel("Panel", 128, 62);
+    var h: History = .init(gpa);
+    defer h.deinit();
+    try h.reset(&m);
+    const P = @import("model.zig").Parent;
+    const gi = try h.do(&m, .addArray, .{ P{ .panel = c }, @import("graven_geom").Point{ .x = 15, .y = 55 }, false, @as(u32, 10), @as(u32, 4), @import("graven_geom").Point{ .x = 100, .y = 40 }, @as(f64, 0) });
+    var sh = m.gridShape(.{ .panel = c }, gi);
+    sh.pitch_x = 11.43;
+    try h.do(&m, .setGridShape, .{ P{ .panel = c }, gi, sh, .remove });
+    try testing.expectApproxEqAbs(11.43, m.gridShape(.{ .panel = c }, gi).pitch_x, 1e-9);
+    try h.rebuild(&m);
+    try testing.expectApproxEqAbs(11.43, m.gridShape(.{ .panel = c }, gi).pitch_x, 1e-9);
+}

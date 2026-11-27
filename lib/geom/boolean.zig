@@ -409,6 +409,85 @@ pub const Rule = struct {
     inside: *const fn (ctx: *const anyopaque, in: []const bool) bool,
 };
 
+/// Whether `p` lies inside `o` (even-odd), exactly: crossings of the ray
+/// right from `p` with the curves, a ray through a vertex moved off it by
+/// a hair first.
+pub fn contains(o: Outline, p0: Point) bool {
+    const b = o.bounds();
+    if (b.isEmpty()) return false;
+    const scale = @max(1.0, @max(b.width(), b.height()));
+    var p = p0;
+    var tries: usize = 0;
+    while (tries < 8) : (tries += 1) {
+        const eps = 1e-12 * scale;
+        const clear = scan: {
+            for (o.contours) |c| for (c.segments) |s| if (@abs(s.start().y - p.y) <= eps) break :scan false;
+            break :scan true;
+        };
+        if (clear) break;
+        p.y += 7.3e-12 * scale;
+    }
+    var inside = false;
+    for (o.contours) |c| for (c.segments) |s| {
+        const sb = s.bounds();
+        if (p.y < sb.y0 or p.y > sb.y1 or sb.x1 <= p.x) continue;
+        var roots: [3]f64 = undefined;
+        for (rootsAtY(s, p.y, &roots)) |t| {
+            if (s.at(t).x > p.x) inside = !inside;
+        }
+    };
+    return inside;
+}
+
+/// Whether segment `s` between parameters `t0` and `t1` comes into box
+/// `b`: its bounds, halved until clear of `b` or a hair's size (a curve's
+/// box is far bigger than the curve near its corner).
+fn reaches(s: Segment, t0: f64, t1: f64, b: Box, depth: usize) bool {
+    const piece = if (t0 == 0 and t1 == 1) s else sub(s, t0, t1);
+    if (!overlaps(piece.bounds(), b, 0)) return false;
+    if (s == .line or depth >= 16) return true;
+    const mid = (t0 + t1) / 2;
+    return reaches(s, t0, mid, b, depth + 1) or reaches(s, mid, t1, b, depth + 1);
+}
+
+/// Whether the boundary of `o` comes into box `b`.
+pub fn touches(o: Outline, b: Box) bool {
+    for (o.contours) |c| for (c.segments) |s| if (reaches(s, 0, 1, b, 0)) return true;
+    return false;
+}
+
+/// Each of `pieces` (each filled even-odd) cut down to the part of it
+/// inside `bound`: a piece clear of the bound's edge is kept as it is
+/// (inside) or dropped (outside) without cutting, so content already
+/// within is unchanged to the last bit; one crossing it is cut exactly.
+/// The one clip step for whatever must stay within an outline (a panel's
+/// content for manufacture). Allocated from `a`.
+pub fn clip(a: Allocator, pieces: []const Outline, bound: Outline) Error![]const Outline {
+    var out: std.ArrayList(Outline) = .empty;
+    const R = struct {
+        fn inside(_: *const anyopaque, in: []const bool) bool {
+            return in[0] and in[1];
+        }
+    };
+    for (pieces) |pc| {
+        if (pc.contours.len == 0) continue;
+        const pb = pc.bounds();
+        const crosses = touches(bound, pb);
+        if (!crosses) {
+            // Clear of the edge: wholly on one side of it, so any of its
+            // points says which.
+            const first = for (pc.contours) |c| {
+                if (c.segments.len > 0) break c.segments[0].start();
+            } else continue;
+            if (contains(bound, first)) try out.append(a, pc);
+            continue;
+        }
+        const r = try combine(a, &.{ pc, bound }, .{ .ctx = undefined, .inside = R.inside });
+        if (r.contours.len > 0) try out.append(a, r);
+    }
+    return out.toOwnedSlice(a);
+}
+
 /// `base` with every one of `cutters` cut out of it (see the file's
 /// comment). The result is allocated from `a`.
 pub fn cut(a: Allocator, base: Outline, cutters: []const Outline) Error!Outline {
@@ -854,4 +933,21 @@ test "lines shorter than the joining tolerance are merged: a dashed ring's fine 
         }
     };
     _ = try combine(a, &.{ border, ink, far }, .{ .ctx = undefined, .inside = R.inside });
+}
+
+test "clip: inside kept as it is, outside dropped, across the edge cut to it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const panel = try circle(a, .{ .x = 0, .y = 0 }, 10);
+    const in = try rect(a, -2, -2, 2, 2);
+    const out = try rect(a, 20, 20, 22, 22);
+    const across = try rect(a, 5, -1, 15, 1);
+    const kept = try clip(a, &.{ in, out, across }, panel);
+    try testing.expectEqual(@as(usize, 2), kept.len);
+    try testing.expectEqual(in.contours.ptr, kept[0].contours.ptr);
+    const b = kept[1].bounds();
+    try testing.expect(b.x1 <= 10 + 1e-9 and b.x1 > 9.9);
+    try testing.expect(contains(panel, .{ .x = 0, .y = 0 }));
+    try testing.expect(!contains(panel, .{ .x = 0, .y = 10.5 }));
 }
