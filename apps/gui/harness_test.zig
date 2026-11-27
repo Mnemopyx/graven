@@ -1279,6 +1279,37 @@ test "the log: what is said collects, a repeat counted; the checks' counts noted
     try std.testing.expectEqual(@as(usize, 0), api.logEntries().len);
 }
 
+test "a style's font not installed is a problem: logged once, its fixes offered; the first opens the Fonts window on the style" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.frames(3);
+    const m = api.model();
+    const st = try m.addStyle("Missing", .{ .cap_height = 3 });
+    try m.setStyleFace(st, "text", .{ .family = "Nowhere Sans", .style = "Regular" });
+    m.revision += 1;
+    try r.frames(4);
+    try std.testing.expectEqual(@as(usize, 1), api.problemCount());
+    var logged: usize = 0;
+    for (api.logEntries()) |e| if (e.problem != 0 and std.mem.indexOf(u8, e.text, "Nowhere Sans") != null) {
+        logged += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), logged);
+    // Found again after another change: not logged again.
+    m.revision += 1;
+    try r.frames(3);
+    logged = 0;
+    for (api.logEntries()) |e| if (e.problem != 0) {
+        logged += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), logged);
+    api.openProblem(0);
+    try r.frames(2);
+    try r.press("problem.fix.0");
+    try r.frames(2);
+    try std.testing.expect(api.fontsWindowOpen());
+}
+
 test "a field changes nothing while typed; leaving it or Enter accepts, one undo step each" {
     var r = try Run.start();
     defer r.stop();

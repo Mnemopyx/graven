@@ -33,6 +33,9 @@ pub const Entry = struct {
     time: i64,
     /// How many times in a row it was said.
     count: u32 = 1,
+    /// The problem it reports (main.zig's `Problem.key`), 0 for none: a
+    /// right-click on it offers the problem's fixes.
+    problem: u64 = 0,
 };
 
 pub const capacity = 500;
@@ -58,6 +61,11 @@ pub const Log = struct {
 
     /// Says `text` (trimmed; nothing when empty) at `level`, at `time`.
     pub fn post(l: *Log, level: Level, text: []const u8, time: i64) void {
+        l.postAbout(level, text, time, 0);
+    }
+
+    /// As `post`, reporting problem `key` (0: none).
+    pub fn postAbout(l: *Log, level: Level, text: []const u8, time: i64, key: u64) void {
         const t = std.mem.trim(u8, text, " \t\r\n");
         if (t.len == 0) return;
         l.revision +%= 1;
@@ -67,7 +75,7 @@ pub const Log = struct {
         }
         if (l.entries.items.len > 0) {
             const last = &l.entries.items[l.entries.items.len - 1];
-            if (last.level == level and std.mem.eql(u8, last.text, t)) {
+            if (last.level == level and last.problem == key and std.mem.eql(u8, last.text, t)) {
                 last.count +|= 1;
                 last.time = time;
                 return;
@@ -78,7 +86,7 @@ pub const Log = struct {
             l.gpa.free(l.entries.items[0].text);
             _ = l.entries.orderedRemove(0);
         }
-        l.entries.append(l.gpa, .{ .level = level, .text = owned, .time = time }) catch l.gpa.free(owned);
+        l.entries.append(l.gpa, .{ .level = level, .text = owned, .time = time, .problem = key }) catch l.gpa.free(owned);
     }
 
     pub fn postFmt(l: *Log, level: Level, time: i64, comptime fmt: []const u8, args: anytype) void {

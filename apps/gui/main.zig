@@ -602,6 +602,19 @@ pub const testing_api = struct {
     pub fn logEntries() []const messages.Entry {
         return msg_log.entries.items;
     }
+    /// The problems found (a check's, with their fixes): their kinds'
+    /// names, for tests.
+    pub fn problemCount() usize {
+        return problems.len;
+    }
+    /// Opens problem `i`'s fixes pop-up, as a right-click on it does.
+    pub fn openProblem(i: usize) void {
+        problem_menu = .{ .key = problems[i].key, .from = .{ .x = 100, .y = 100, .w = 1, .h = 1 } };
+        problem_menu_frame = 0;
+    }
+    pub fn fontsWindowOpen() bool {
+        return fontwin.open;
+    }
     /// The log pane pinned in (`on`) or sent out.
     pub fn showLog(on: bool) void {
         if (log_pane.mode != .auto) log_pane.mode = .auto;
@@ -2381,22 +2394,9 @@ fn resolveFonts(labels: *layout.Labels) void {
     if (resolved_gen != fontwin.generation) state.placed_rev = std.math.maxInt(u64);
     resolved_gen = fontwin.generation;
     labels.syncResolved(&resolved.?) catch {};
-    // Said once, when it changes: re-resolving after every edit would
-    // otherwise put it over whatever the edit had to say.
-    if (resolved.?.substitutions.items.len > 0) {
-        const sub = resolved.?.substitutions.items[0];
-        var tmp: [160]u8 = undefined;
-        const msg = std.fmt.bufPrint(&tmp, "Font {s} {s} is not installed: {s}. ", .{ sub.wanted.family, sub.wanted.style, if (sub.got) |g| g.style else "left out" }) catch "";
-        const h = std.hash.Wyhash.hash(0, msg);
-        if (h != font_status_hash) {
-            font_status_hash = h;
-            @memcpy(font_status_buf[0..msg.len], msg);
-            tell(font_status_buf[0..msg.len]);
-        }
-    } else font_status_hash = 0;
+    // A font not installed is a problem (`refreshProblems`): logged,
+    // highlighted, with its fixes.
 }
-var font_status_buf: [160]u8 = undefined;
-var font_status_hash: u64 = 0;
 
 /// The document's font folders' fonts (a fonts folder beside it, then
 /// $GRAVEN_FONTS or fonts/), loaded for the folder they are for.
@@ -4986,6 +4986,7 @@ fn overlays() !void {
     if (leave_prompt) |p| leavePrompt(p);
     if (recovery != null) recoveryPrompt();
     if (contention != null) contentionPrompt();
+    if (problem_menu != null and problem_menu_frame != dvui.frameTimeNS()) problemMenu();
 }
 
 /// The bottom area: the expression line, then the status line.
@@ -8105,6 +8106,7 @@ fn canvas(active: bool, view: u8) void {
     }
     if (open) drawFrameBound(area);
     if (open) drawSketches(area);
+    drawProblems(area);
     // What only the active view shows: modes and the pointer's marks.
     if (!active) {
         drawPicked(area);
@@ -13298,6 +13300,15 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             }
             continue;
         }
+        // A right-click on a problem's highlight: its fixes.
+        if (e.evt == .mouse and !e.handled) {
+            const me = e.evt.mouse;
+            if (me.action == .press and me.button == .right and area.contains(me.p)) if (problemAt(area, me.p)) |key| {
+                e.handle(@src(), box.data());
+                openProblemMenu(key, me.p);
+                continue;
+            };
+        }
         // The view's keys (zoom), in any mode the canvas is in; an
         // unchorded one only while no text field has the keyboard. The
         // sketch editor's own keys come first (C, U).
@@ -17121,6 +17132,15 @@ fn handler(comptime name: []const u8, f: *const fn (arg: i32) void) ButtonHandle
 
 /// The buttons' effects (an unknown action fails the build).
 const button_handlers = [_]ButtonHandler{
+    handler("problem.fix", struct {
+        fn f(arg: i32) void {
+            const pm = problem_menu orelse return;
+            problem_menu = null;
+            const p = problemByKey(pm.key) orelse return;
+            const fs = fixes(p.kind);
+            if (arg >= 0 and arg < fs.len) fs[@intCast(arg)].run(p);
+        }
+    }.f),
     handler("log.clear", struct {
         fn f(_: i32) void {
             msg_log.clear();
@@ -21719,7 +21739,6 @@ var last_checks: CheckCounts = .{};
 const check_notes = [_]struct { field: []const u8, what: []const u8, level: messages.Level }{
     .{ .field = "outside", .what = "Tracks reaching past their panel's outline (what lies past it is clipped when made)", .level = .warning },
     .{ .field = "off_sheet", .what = "Panels out of compliance (past the sheet, or ink past its ink area)", .level = .warning },
-    .{ .field = "missing", .what = "Texts with glyphs no font has", .level = .warning },
     .{ .field = "lacking", .what = "Texts asking for bold or italic their font lacks (set in its regular face)", .level = .info },
     .{ .field = "overflow", .what = "Overflows (content running past its track)", .level = .warning },
     .{ .field = "margins", .what = "Ink in a panel's margins", .level = .warning },
@@ -21753,6 +21772,7 @@ fn checkNotices() void {
         }
     }
     last_checks = n;
+    refreshProblems();
 }
 
 /// On the log's tab: its name, and the warnings not yet seen.
@@ -21819,6 +21839,18 @@ fn logContent() void {
                 var nb: [16]u8 = undefined;
                 tl.addText(std.fmt.bufPrint(&nb, "  ×{d}", .{e.count}) catch "", .{ .color_text = .{ .color = ink.opacity(0.5) } });
             }
+            // A problem still there: a right-click offers its fixes.
+            if (e.problem != 0 and problemByKey(e.problem) != null) {
+                tl.addText("  · right-click to fix", .{ .color_text = .{ .color = ink.opacity(0.45) } });
+                const r = tl.data().borderRectScale().r;
+                for (dvui.events()) |*ev| {
+                    if (ev.evt != .mouse or ev.handled) continue;
+                    const me = ev.evt.mouse;
+                    if (me.action != .press or me.button != .right or !r.contains(me.p)) continue;
+                    ev.handle(@src(), tl.data());
+                    openProblemMenu(e.problem, me.p);
+                }
+            }
         }
     }
     // Following the newest: what was added is scrolled to once the area
@@ -21829,6 +21861,231 @@ fn logContent() void {
             dvui.refresh(null, @src(), null);
         }
         log_drawn_rev = msg_log.revision;
+    }
+}
+
+// Problems -----------------------------------------------------------------
+//
+// One primitive for anything a check finds that the user can fix (the
+// owner, 2026-11-27): a `Problem` has a kind, a level, what it says, and
+// where it is (areas on the sheet). Each shows twice: highlighted on the
+// canvas in the checks' warning colour, and as a line in the log. A
+// right-click on either pops up its fixes (`fixes`), each opening what
+// corrects it. A new check adds a kind, how it is found (in
+// `refreshProblems`) and its fixes; drawing, logging and the pop-up are
+// shared.
+
+const ProblemKind = enum {
+    /// A style's font is not installed: set in another style of its family,
+    /// or left out.
+    missing_font,
+    /// Text has characters no face of its style covers.
+    missing_glyph,
+};
+
+/// Where a problem shows: a box on the sheet (mm), in a parent's frame
+/// moved onto the sheet, and the parent (shown only with it).
+const ProblemArea = struct { parent: Parent, box: geom.Box };
+
+const Problem = struct {
+    kind: ProblemKind,
+    /// Its identity across checks (its kind and what it is about): a
+    /// problem still there is not logged again.
+    key: u64,
+    level: messages.Level,
+    text: []const u8,
+    /// The style it is about, when it is about one.
+    style: ?layout.model.StyleId = null,
+    areas: []const ProblemArea = &.{},
+};
+
+/// A way to correct a problem: its label in the pop-up, and what it does.
+const Fix = struct { label: []const u8, run: *const fn (p: *const Problem) void };
+
+/// The fixes for a kind of problem, in the order offered.
+fn fixes(kind: ProblemKind) []const Fix {
+    return switch (kind) {
+        .missing_font => &.{
+            .{ .label = "Choose another font for the style…", .run = fixChooseFont },
+            .{ .label = "Install the font from a file…", .run = fixInstallFont },
+        },
+        .missing_glyph => &.{
+            .{ .label = "Choose a font for the style that has them…", .run = fixChooseFont },
+            .{ .label = "Install a font from a file…", .run = fixInstallFont },
+        },
+    };
+}
+
+fn fixChooseFont(p: *const Problem) void {
+    const st = p.style orelse return fontwin.openFor(0, false);
+    fontwin.openFor(state.model.styleIndex(st) orelse 0, false);
+}
+
+fn fixInstallFont(p: *const Problem) void {
+    const st = if (p.style) |s| state.model.styleIndex(s) orelse 0 else 0;
+    fontwin.openFor(st, true);
+}
+
+/// The problems as last found, in `problems_arena`.
+var problems: []const Problem = &.{};
+var problems_arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
+/// The keys of the problems logged, so each is logged once while it lasts.
+var problems_logged: std.AutoHashMapUnmanaged(u64, void) = .empty;
+
+fn problemKey(kind: ProblemKind, parts: []const u64, name: []const u8) u64 {
+    var h = std.hash.Wyhash.init(@backingInt(kind) + 1);
+    h.update(std.mem.sliceAsBytes(parts));
+    h.update(name);
+    return h.final() | 1;
+}
+
+fn problemByKey(key: u64) ?*const Problem {
+    for (problems) |*p| if (p.key == key) return p;
+    return null;
+}
+
+fn styleName(id: layout.model.StyleId) []const u8 {
+    const k = state.model.styleIndex(id) orelse return "?";
+    return state.model.styles.items[k].name;
+}
+
+/// Every parent's placed content, with the parent.
+fn placedParents(a: std.mem.Allocator) []const struct { parent: Parent, placed: *const layout.place.Placed } {
+    const Item = struct { parent: Parent, placed: *const layout.place.Placed };
+    var out: std.ArrayList(Item) = .empty;
+    for (0..state.model.spaces.items.len) |si| if (placedOf(.{ .space = si })) |pl| out.append(a, .{ .parent = .{ .space = si }, .placed = pl }) catch {};
+    for (0..state.model.panels.items.len) |pi| if (placedOf(.{ .panel = pi })) |pl| out.append(a, .{ .parent = .{ .panel = pi }, .placed = pl }) catch {};
+    return @ptrCast(out.items);
+}
+
+/// Finds the problems again (after placement and the checks ran); logs
+/// those that are new.
+fn refreshProblems() void {
+    _ = problems_arena.reset(.retain_capacity);
+    const a = problems_arena.allocator();
+    var list: std.ArrayList(Problem) = .empty;
+    const where = placedParents(a);
+    // Fonts not installed, each style's once.
+    if (resolved) |*r| for (r.substitutions.items) |sub| {
+        var areas: std.ArrayList(ProblemArea) = .empty;
+        for (where) |w| for (w.placed.labels) |l| if (l.style == sub.style) areas.append(a, .{ .parent = w.parent, .box = onSheet(w.parent, l.box) }) catch {};
+        const text = std.fmt.allocPrint(a, "Font {s} {s} is not installed (style “{s}”): set {s}.", .{ sub.wanted.family, sub.wanted.style, styleName(sub.style), if (sub.got) |g| std.fmt.allocPrint(a, "in {s} {s} instead", .{ g.family, g.style }) catch "in another style" else "in the default face instead" }) catch continue;
+        list.append(a, .{ .kind = .missing_font, .key = problemKey(.missing_font, &.{@backingInt(sub.style)}, std.fmt.allocPrint(a, "{s}/{s}", .{ sub.wanted.family, sub.wanted.style }) catch ""), .level = .warning, .text = text, .style = sub.style, .areas = areas.items }) catch {};
+    };
+    // Text with characters no face has: one problem per text.
+    for (where) |w| {
+        for (w.placed.issues) |iss| {
+            if (iss.kind != .missing_glyph) continue;
+            var areas: std.ArrayList(ProblemArea) = .empty;
+            var style: ?layout.model.StyleId = null;
+            for (w.placed.labels) |l| {
+                const same = if (iss.tile) |t| (l.tile != null and l.tile.? == t and (iss.slot == null or iss.slot.? == l.slot)) else if (l.run) |run| (iss.item != null and run.item == iss.item.? and (iss.region == null or run.region == iss.region.?)) else false;
+                if (!same) continue;
+                style = l.style;
+                areas.append(a, .{ .parent = w.parent, .box = onSheet(w.parent, l.box) }) catch {};
+            }
+            const pk: u64 = switch (w.parent) {
+                .space => |si| si,
+                .panel => |pi| pi + (1 << 32),
+            };
+            const subject: u64 = if (iss.tile) |t| @backingInt(t) else (iss.item orelse 0) + ((iss.region orelse 0) << 24);
+            const text = std.fmt.allocPrint(a, "Characters no font has, in text set in style “{s}”: drawn as boxes.", .{if (style) |s| styleName(s) else "?"}) catch continue;
+            list.append(a, .{ .kind = .missing_glyph, .key = problemKey(.missing_glyph, &.{ pk, subject, iss.slot orelse 0 }, ""), .level = .warning, .text = text, .style = style, .areas = areas.items }) catch {};
+        }
+    }
+    problems = list.items;
+    // Newly found: logged once (a missing font on the status line too, as
+    // before); gone: forgotten, so it is logged again should it come back.
+    var still: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    const now = nowSeconds();
+    for (problems) |*p| {
+        still.put(std.heap.smp_allocator, p.key, {}) catch {};
+        if (problems_logged.contains(p.key)) continue;
+        if (p.kind == .missing_font) {
+            state.status = p.text;
+            logged_status = statusKey(p.text);
+        }
+        msg_log.postAbout(p.level, p.text, now, p.key);
+    }
+    problems_logged.deinit(std.heap.smp_allocator);
+    problems_logged = still;
+    if (problem_menu) |pm| if (problemByKey(pm.key) == null and !pm.gone) {
+        problem_menu.?.gone = true;
+    };
+}
+
+/// The problems' highlights over the canvas: each area washed and outlined
+/// in the checks' warning colour, with a glow (DRC-style).
+fn drawProblems(area: dvui.Rect.Physical) void {
+    const px = dvui.windowNaturalScale();
+    const hot = if (problem_menu) |pm| pm.key else 0;
+    for (problems) |p| for (p.areas) |ar| {
+        if (!shownIn(ar.parent)) continue;
+        const r = state.view.rect(area, ar.box).outsetAll(2 * px);
+        const c = colors.overflow;
+        r.fill(.round(2 * px), .{ .color = .{ .color = c.opacity(if (p.key == hot) 0.22 else 0.10) } });
+        glowRect(r, 2 * px, px, c);
+        r.stroke(.round(2 * px), .{ .thickness = (if (p.key == hot) @as(f32, 2) else 1) * px, .color = .{ .color = c.opacity(0.85) } });
+    };
+}
+
+/// The problem highlighted at `pt` (physical) on the canvas, if any.
+fn problemAt(area: dvui.Rect.Physical, pt: dvui.Point.Physical) ?u64 {
+    const px = dvui.windowNaturalScale();
+    for (problems) |p| for (p.areas) |ar| {
+        if (!shownIn(ar.parent)) continue;
+        if (state.view.rect(area, ar.box).outsetAll(2 * px).contains(pt)) return p.key;
+    };
+    return null;
+}
+
+/// The fixes' pop-up: for which problem, from where (natural), and
+/// whether the problem has gone since.
+var problem_menu: ?struct { key: u64, from: dvui.Rect.Natural, gone: bool = false } = null;
+var problem_menu_frame: i128 = 0;
+var problem_menu_root: bool = false;
+
+fn openProblemMenu(key: u64, p: dvui.Point.Physical) void {
+    const ns = dvui.windowNaturalScale();
+    problem_menu = .{ .key = key, .from = .{ .x = p.x / ns, .y = p.y / ns, .w = 1, .h = 1 } };
+    problem_menu_frame = dvui.frameTimeNS();
+    dvui.refresh(null, @src(), null);
+}
+
+fn problemMenuClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
+    problem_menu = null;
+}
+
+/// The pop-up: what the problem is, then its fixes (or that it has gone).
+fn problemMenu() void {
+    const pm = problem_menu orelse return;
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&problem_menu_root), .close = problemMenuClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var fm = dvui.floatingMenu(@src(), .{ .from = pm.from, .style = .popup }, .{});
+    defer fm.deinit();
+    const saved_group = pushGroup("problem");
+    defer popGroup(saved_group);
+    const p = problemByKey(pm.key) orelse {
+        dvui.labelNoFmt(@src(), "Fixed: this problem has gone.", .{}, .{ .padding = .{ .x = 8, .w = 8, .y = 4, .h = 4 } });
+        return;
+    };
+    {
+        var tl = dvui.textLayout(@src(), .{}, .{ .background = false, .max_size_content = .width(360), .padding = .{ .x = 8, .w = 8, .y = 4, .h = 4 } });
+        defer tl.deinit();
+        tl.addText(p.text, .{ .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.75) } });
+    }
+    _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    for (fixes(p.kind), 0..) |f, i| {
+        const tag = uniqueTag(std.fmt.allocPrint(dvui.currentWindow().arena(), "problem.fix.{d}", .{i}) catch "problem.fix.0");
+        recordDrawn(tag, @intCast(i));
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{}, .{ .expand = .horizontal, .id_extra = i, .tag = tag, .margin = .all(1), .padding = .{ .x = 8, .w = 8, .y = 3, .h = 4 } });
+        bw.processEvents();
+        bw.drawBackground();
+        dvui.labelNoFmt(@src(), f.label, .{}, .{ .padding = .all(0), .margin = .all(0) });
+        if (bw.clicked()) pushButtonEvent(tag, @intCast(i));
+        bw.drawFocus();
+        bw.deinit();
     }
 }
 
