@@ -33,7 +33,7 @@ Fonts for the math packages are not in git: `python3 scripts/fetch-fonts.py` put
 
 ## Building and checking
 
-Cross-builds from Linux: `$Z build -Dtarget=x86_64-windows-gnu` (CLI) and `$Z build gui-build -Dtarget=x86_64-windows-gnu` (GUI) make Windows executables that need only system DLLs; `-Dtarget=aarch64-macos` builds the CLI tools (the GUI needs Apple's SDK). Not yet run on Windows.
+Cross-builds from Linux: `$Z build -Dtarget=x86_64-windows-gnu` (CLI) and `$Z build gui-build -Dtarget=x86_64-windows-gnu` (GUI) make Windows executables that need only system DLLs; `-Dtarget=aarch64-macos` builds the CLI tools (the GUI needs Apple's SDK). `scripts/package-windows.sh` makes the testers' zip (tester notes in `packaging/windows`). Run under Wine (both examples' SVGs identical to Linux's; the GUI draws), not yet on real Windows.
 
 ```sh
 $Z build test                 # all library tests; silent means pass (long after a cache loss: allow ~10 min)
@@ -87,6 +87,7 @@ Screen points for clicks are device pixels (twice the layout's). Environment swi
 | `GRAVEN_KEY_LOG=1` | each action a key asks for printed, with the active modes |
 | `GRAVEN_DRAWN_SPARK=1` | a point standing in for the pointer is drawn on the canvas (25 frames a second), not made the animated cursor |
 | `GRAVEN_SKETCH_EDIT=1` | with `GRAVEN_SAMPLE=sketch-panel`: its sketch opened in the editor, in its own space (tag visibility, Ink only: W) |
+| `GRAVEN_SHEET=1` | the document's first sheet opened beside the canvas (e.g. with `GRAVEN_SAMPLE=hp15c`) |
 | `GRAVEN_FIGURE=file.svg` | that SVG drawing imported as a figure at start (File, Import figure), made the context |
 
 `graven-gui file.graven` opens a document. `scripts/xclick.py x,y [x,y …]` clicks at screen points (XTest), to drive it.

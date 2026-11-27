@@ -166,27 +166,14 @@ pub const Layout = struct {
     /// view, or null when no more fit.
     pub fn split(l: *Layout, v: u8, dir: Dir, view: View) ?u8 {
         const leaf = l.leafOf(v) orelse return null;
-        const a = l.newNode() orelse return null;
-        const b = l.newNode() orelse {
-            l.nodes[a] = .{};
-            return null;
-        };
-        const nv = l.newView(view) orelse {
-            l.nodes[a] = .{};
-            l.nodes[b] = .{};
-            return null;
-        };
-        // The first part takes the leaf's tabs; the leaf becomes the split.
-        l.nodes[a] = l.nodes[leaf];
-        l.nodes[a].parent = leaf;
-        l.nodes[b].parent = leaf;
-        l.nodes[b].tabs[0] = nv;
-        l.nodes[b].tab_count = 1;
-        const parent = l.nodes[leaf].parent;
-        l.nodes[leaf] = .{ .used = true, .parent = parent, .split = true, .dir = dir, .first = a, .second = b };
-        l.maximized = none;
-        l.select(nv);
-        return nv;
+        // Room for its two parts (every split needs two).
+        var free: usize = 0;
+        for (l.nodes) |n| {
+            if (!n.used) free += 1;
+        }
+        if (free < 2) return null;
+        const nv = l.newView(view) orelse return null;
+        return l.splitLeaf(leaf, dir, nv, false);
     }
 
     /// Closes view `v`. A leaf left empty goes, its split's other part
@@ -199,27 +186,10 @@ pub const Layout = struct {
         if (count <= 1 or v >= max_views or !l.open[v]) return false;
         const leaf = l.leafOf(v) orelse return false;
         const n = &l.nodes[leaf];
-        const k = std.mem.indexOfScalar(u8, n.tabList(), v).?;
-        std.mem.copyForwards(u8, n.tabs[k .. n.tab_count - 1], n.tabs[k + 1 .. n.tab_count]);
-        n.tab_count -= 1;
-        n.tabs[n.tab_count] = none;
-        if (n.current >= n.tab_count and n.current > 0) n.current -= 1;
+        l.takeOut(leaf, v);
         l.open[v] = false;
         if (l.maximized == v) l.maximized = none;
-        if (n.tab_count == 0) {
-            // The other part of its split takes the split's place.
-            const p = n.parent;
-            const other = if (l.nodes[p].first == leaf) l.nodes[p].second else l.nodes[p].first;
-            const grand = l.nodes[p].parent;
-            l.nodes[p] = l.nodes[other];
-            l.nodes[p].parent = grand;
-            if (l.nodes[p].split) {
-                l.nodes[l.nodes[p].first].parent = p;
-                l.nodes[l.nodes[p].second].parent = p;
-            }
-            l.nodes[leaf] = .{};
-            l.nodes[other] = .{};
-        }
+        if (n.tab_count == 0) l.prune(leaf);
         if (l.active == v) {
             // The view now current where it was, or any open one.
             l.active = for (0..max_views) |i| {
@@ -230,6 +200,143 @@ pub const Layout = struct {
             if (shown != none) l.active = shown;
         }
         return true;
+    }
+
+    /// Takes view `v` out of leaf `leaf`'s tabs, its current tab kept
+    /// where it can be (open still).
+    fn takeOut(l: *Layout, leaf: u8, v: u8) void {
+        const n = &l.nodes[leaf];
+        const k = std.mem.indexOfScalar(u8, n.tabList(), v) orelse return;
+        const cur = n.tabs[n.current];
+        std.mem.copyForwards(u8, n.tabs[k .. n.tab_count - 1], n.tabs[k + 1 .. n.tab_count]);
+        n.tab_count -= 1;
+        n.tabs[n.tab_count] = none;
+        n.current = if (cur != v) @intCast(std.mem.indexOfScalar(u8, n.tabList(), cur).?) else if (n.current >= n.tab_count and n.current > 0) n.current - 1 else n.current;
+    }
+
+    /// Leaf `leaf`, left empty, goes: the other part of its split takes
+    /// the split's place.
+    fn prune(l: *Layout, leaf: u8) void {
+        const p = l.nodes[leaf].parent;
+        if (p == none) return;
+        const other = if (l.nodes[p].first == leaf) l.nodes[p].second else l.nodes[p].first;
+        const grand = l.nodes[p].parent;
+        l.nodes[p] = l.nodes[other];
+        l.nodes[p].parent = grand;
+        if (l.nodes[p].split) {
+            l.nodes[l.nodes[p].first].parent = p;
+            l.nodes[l.nodes[p].second].parent = p;
+        }
+        l.nodes[leaf] = .{};
+        l.nodes[other] = .{};
+    }
+
+    /// Takes view `v` from its window (a window left empty goes) and
+    /// puts it among the tabs of the window showing view `dest`: before
+    /// tab `before` (in that window), or last when `before` is `none`.
+    /// Current and active. The same window: the tab moved along. False
+    /// when nothing moves.
+    pub fn moveTab(l: *Layout, v: u8, dest: u8, before: u8) bool {
+        if (v >= max_views or !l.open[v] or before == v) return false;
+        const src = l.leafOf(v) orelse return false;
+        const dl0 = l.leafOf(dest) orelse return false;
+        if (before != none and l.leafOf(before) != dl0) return false;
+        if (src == dl0 and before == none and l.nodes[src].tabs[l.nodes[src].tab_count - 1] == v) {
+            l.select(v);
+            return false;
+        }
+        l.takeOut(src, v);
+        if (src != dl0 and l.nodes[src].tab_count == 0) l.prune(src);
+        // The destination found again: pruning may have moved it.
+        const dl = if (src == dl0) src else l.leafOf(dest).?;
+        const n = &l.nodes[dl];
+        const at = if (before == none) n.tab_count else std.mem.indexOfScalar(u8, n.tabList(), before).?;
+        std.mem.copyBackwards(u8, n.tabs[at + 1 .. n.tab_count + 1], n.tabs[at..n.tab_count]);
+        n.tabs[at] = v;
+        n.tab_count += 1;
+        if (l.maximized != none) l.maximized = none;
+        l.select(v);
+        return true;
+    }
+
+    /// Takes view `v` from its window (a window left empty goes) and
+    /// splits the window showing view `at` in two, `dir`: `v` alone in its
+    /// first part when `first`, else its second. Active. False when
+    /// nothing moves (`v` alone in that window already).
+    pub fn moveToSplit(l: *Layout, v: u8, at: u8, dir: Dir, first: bool) bool {
+        if (v >= max_views or !l.open[v]) return false;
+        const src = l.leafOf(v) orelse return false;
+        const al = l.leafOf(at) orelse return false;
+        if (src == al and l.nodes[src].tab_count == 1) return false;
+        // Its own window: found again by another of its tabs.
+        const at_other = if (at == v) l.tabAlong(v, 1) else at;
+        l.takeOut(src, v);
+        if (l.nodes[src].tab_count == 0) l.prune(src);
+        const leaf = l.leafOf(at_other).?;
+        _ = l.splitLeaf(leaf, dir, v, first) orelse return false;
+        return true;
+    }
+
+    /// Splits leaf `leaf` in two, `dir`: what it held in one part, view
+    /// `v` (open, in no leaf) alone in the other, the first when `first`.
+    /// `v` active; null when no nodes are left.
+    fn splitLeaf(l: *Layout, leaf: u8, dir: Dir, v: u8, first: bool) ?u8 {
+        const a = l.newNode() orelse return null;
+        const b = l.newNode() orelse {
+            l.nodes[a] = .{};
+            return null;
+        };
+        // One part takes the leaf's tabs; the leaf becomes the split.
+        l.nodes[a] = l.nodes[leaf];
+        l.nodes[a].parent = leaf;
+        l.nodes[b].parent = leaf;
+        l.nodes[b].tabs[0] = v;
+        l.nodes[b].tab_count = 1;
+        const parent = l.nodes[leaf].parent;
+        l.nodes[leaf] = .{ .used = true, .parent = parent, .split = true, .dir = dir, .first = if (first) b else a, .second = if (first) a else b };
+        l.maximized = none;
+        l.select(v);
+        return v;
+    }
+
+    /// The windows (leaves) in order: left to right, top to bottom.
+    pub fn leaves(l: *const Layout, out: []u8) []u8 {
+        var n: usize = 0;
+        l.leavesUnder(l.root, out, &n, 0);
+        return out[0..n];
+    }
+
+    fn leavesUnder(l: *const Layout, node: u8, out: []u8, n: *usize, depth: usize) void {
+        if (node >= max_nodes or depth > max_nodes) return;
+        const nd = &l.nodes[node];
+        if (!nd.split) {
+            if (n.* < out.len) out[n.*] = node;
+            n.* += 1;
+            return;
+        }
+        l.leavesUnder(nd.first, out, n, depth + 1);
+        l.leavesUnder(nd.second, out, n, depth + 1);
+    }
+
+    /// The tab `by` along from view `v` in its window (wrapping round).
+    pub fn tabAlong(l: *const Layout, v: u8, by: i32) u8 {
+        const leaf = l.leafOf(v) orelse return v;
+        const tl = l.nodes[leaf].tabList();
+        const k: i32 = @intCast(std.mem.indexOfScalar(u8, tl, v).?);
+        const len: i32 = @intCast(tl.len);
+        return tl[@intCast(@mod(k + by, len))];
+    }
+
+    /// Moves view `v` to the window after its own (`back`: before), last
+    /// among its tabs. With one window, it is split: `v` beside the rest.
+    pub fn moveToNextWindow(l: *Layout, v: u8, back: bool) bool {
+        const src = l.leafOf(v) orelse return false;
+        var buf: [max_nodes]u8 = undefined;
+        const ls = l.leaves(&buf);
+        if (ls.len < 2) return l.moveToSplit(v, v, .across, back);
+        const k = std.mem.indexOfScalar(u8, ls, src).?;
+        const to = ls[if (back) (k + ls.len - 1) % ls.len else (k + 1) % ls.len];
+        return l.moveTab(v, l.currentOf(to), none);
     }
 
     /// The split holding view `v`'s window, if it is in one.
@@ -395,4 +502,59 @@ test "a split's parts swapped, evened out, turned" {
     l.turn(n);
     try std.testing.expectEqual(.down, l.nodes[n].dir);
     try std.testing.expect(l.splitOf(0) != null and Layout.init(.{}).splitOf(0) == null);
+}
+
+test "a tab dragged to another window, and a window left empty goes" {
+    var l = Layout.init(.{ .target = 1 });
+    const b = l.addTab(0, .{ .target = 2 }).?;
+    const c = l.split(b, .across, .{ .target = 3 }).?;
+    // b to c's window, before c.
+    try testing.expect(l.moveTab(b, c, c));
+    try testing.expect(l.valid());
+    try testing.expectEqualSlices(u8, &.{ b, c }, l.nodes[l.leafOf(c).?].tabList());
+    try testing.expectEqual(b, l.active);
+    // 0 too: its window empties and goes, the split with it.
+    try testing.expect(l.moveTab(0, c, none));
+    try testing.expect(l.valid());
+    try testing.expect(!l.nodes[l.root].split);
+    try testing.expectEqualSlices(u8, &.{ b, c, 0 }, l.nodes[l.root].tabList());
+    // Within one window: moved along.
+    try testing.expect(l.moveTab(0, b, b));
+    try testing.expectEqualSlices(u8, &.{ 0, b, c }, l.nodes[l.root].tabList());
+}
+
+test "a tab dragged to a window's edge splits it" {
+    var l = Layout.init(.{ .target = 1 });
+    const b = l.addTab(0, .{ .target = 2 }).?;
+    // Its own window, alone: nothing.
+    const c = l.split(b, .across, .{ .target = 3 }).?;
+    try testing.expect(!l.moveToSplit(c, c, .down, true));
+    // b above c: c's window stacked, b first.
+    try testing.expect(l.moveToSplit(b, c, .down, true));
+    try testing.expect(l.valid());
+    const p = l.splitOf(b).?;
+    try testing.expectEqual(.down, l.nodes[p].dir);
+    try testing.expectEqual(l.leafOf(b).?, l.nodes[p].first);
+    try testing.expectEqual(p, l.splitOf(c).?);
+    // c to the left of 0, its window going: three views, two splits.
+    try testing.expect(l.moveToSplit(c, 0, .across, true));
+    try testing.expect(l.valid());
+    try testing.expectEqual(c, l.active);
+}
+
+test "tabs by key: along their window, and to the next window" {
+    var l = Layout.init(.{});
+    const b = l.addTab(0, .{ .target = 2 }).?;
+    try testing.expectEqual(0, l.tabAlong(b, 1));
+    try testing.expectEqual(0, l.tabAlong(b, -1));
+    // One window: b split off beside it.
+    try testing.expect(l.moveToNextWindow(b, false));
+    try testing.expect(l.valid());
+    var buf: [max_nodes]u8 = undefined;
+    try testing.expectEqual(2, l.leaves(&buf).len);
+    try testing.expectEqual(l.leafOf(b).?, l.leaves(&buf)[1]);
+    // Back again: its window goes.
+    try testing.expect(l.moveToNextWindow(b, true));
+    try testing.expect(l.valid());
+    try testing.expectEqual(1, l.leaves(&buf).len);
 }

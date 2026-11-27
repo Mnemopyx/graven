@@ -22,38 +22,43 @@
   "transparent": "#ff00ff",
   "overrides": [
    {
-    "key": "#8fd1c3",
-    "name": "container"
-   },
-   {
-    "key": "#f4c95d",
-    "name": "track"
-   },
-   {
-    "key": "#f29b6b",
-    "name": "drawn"
-   },
-   {
-    "key": "#b8a2e3",
-    "name": "guide"
-   },
-   {
-    "key": "#8fc1f0",
-    "name": "select"
-   },
-   {
-    "key": "#c9d6a3",
-    "name": "view"
+    "key": "#fbfaf7",
+    "name": "paper"
    },
    {
     "key": "#d6d3cc",
-    "name": "layer"
+    "name": "neutral"
    },
    {
-    "key": "#ffffff",
-    "name": "paper"
+    "key": "#8fd1c3",
+    "name": "base"
+   },
+   {
+    "key": "#f4c95d",
+    "name": "subject"
+   },
+   {
+    "key": "#f0907a",
+    "name": "mark"
+   },
+   {
+    "key": "#8fc1f0",
+    "name": "focus"
    }
-  ]
+  ],
+  "schemes": {
+   "dark": {
+    "ink": "#ece6f2",
+    "slots": {
+     "paper": "#3e3150",
+     "neutral": "#5d5468",
+     "base": "#2f7e70",
+     "subject": "#a77f12",
+     "mark": "#b14a33",
+     "focus": "#2a6fae"
+    }
+   }
+  }
  },
  "glyphs": [
   {
