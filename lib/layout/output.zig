@@ -12,6 +12,9 @@ pub const SvgOptions = struct {
     /// Margin around `box`, mm.
     margin: f64 = 1,
     fill: []const u8 = "#000",
+    /// Drawn as lines in this colour, not filled (a cutter's paths).
+    stroke: ?[]const u8 = null,
+    stroke_width: f64 = 0.01,
 };
 
 /// Outlines (mm, y up) as one SVG path per outline, filled nonzero, with
@@ -30,7 +33,10 @@ pub fn svg(gpa: std.mem.Allocator, outlines: []const geom.Outline, box: geom.Box
         .{ width, height, width, height },
     );
     // Flip y: SVG's y points down.
-    try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\" fill=\"{s}\" fill-rule=\"nonzero\">\n", .{ -x0, y1, opts.fill });
+    if (opts.stroke) |st|
+        try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\" fill=\"none\" stroke=\"{s}\" stroke-width=\"{d}\">\n", .{ -x0, y1, st, opts.stroke_width })
+    else
+        try w.print("<g transform=\"matrix(1 0 0 -1 {d} {d})\" fill=\"{s}\" fill-rule=\"nonzero\">\n", .{ -x0, y1, opts.fill });
     for (outlines) |o| {
         if (o.contours.len == 0) continue;
         try w.writeAll("<path d=\"");

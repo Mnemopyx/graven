@@ -28,6 +28,7 @@ pub const caret = @import("caret.zig");
 pub const fab = @import("fab.zig");
 pub const check = @import("check.zig");
 pub const threemf = @import("threemf.zig");
+pub const produce = @import("produce.zig");
 pub const ground = @import("ground.zig");
 pub const legend = @import("legend.zig");
 pub const render = @import("render.zig");

@@ -39,6 +39,12 @@ const usage =
     \\         gives one part per colour, bands one per colour and height band; --bed
     \\         bottom (the default) stands each part on its lowest face, top on its top.
     \\         The examples: graven export examples/hp15c.graven hp15c.3mf
+    \\       graven export --plan <name> [--font <file>] <document> [<folder>]
+    \\         Writes a manufacturing plan's files into the folder (else "<document> <plan>"
+    \\         beside the document): each part's print as 3MF (what its FDM operations
+    \\         make, in the plan's colours), and an SVG for each operation that cuts or
+    \\         engraves a part (cuts as red hairlines, engravings filled), registered on the
+    \\         part's outline. STEP: graven-fab --plan.
     \\       graven export --drawing <name> [--outline-strokes] <document> <out.svg>
     \\         Writes one drawing (a sketch's inked geometry, or a figure) as SVG, its ink
     \\         only: strokes as centrelines with stroke attributes (colour, width, caps,
@@ -72,6 +78,8 @@ pub fn main(init: std.process.Init) !void {
                 opts.svg = args[k + 1];
             } else if (std.mem.eql(u8, args[k], "--panel")) {
                 opts.panel = args[k + 1];
+            } else if (!checking and std.mem.eql(u8, args[k], "--plan")) {
+                opts.plan = args[k + 1];
             } else if (std.mem.eql(u8, args[k], "--drawing")) {
                 opts.drawing = args[k + 1];
             } else if (std.mem.eql(u8, args[k], "--outline-strokes")) {
@@ -89,6 +97,7 @@ pub fn main(init: std.process.Init) !void {
             opts.outline_strokes = true;
             k += 1;
         }
+        if (!checking and opts.plan != null and args.len - k == 1) return exportDocument(init, args[k], "", opts);
         if (!checking and opts.drawing != null and args.len - k == 2) return exportDrawing(init, args[k], args[k + 1], opts);
         if (!checking and args.len - k == 2) return exportDocument(init, args[k], args[k + 1], opts);
         if (checking and args.len - k == 1) return exportDocument(init, args[k], "", opts);
@@ -613,6 +622,9 @@ const ExportOptions = struct {
     /// panel drawn with its findings over it.
     check: bool = false,
     svg: ?[]const u8 = null,
+    /// A manufacturing plan, by name: its files written into a folder (the
+    /// output named, else its own beside the document; `layout.produce`).
+    plan: ?[]const u8 = null,
 };
 
 /// graven export: each panel of a document (or the one named) as SVG or
@@ -706,6 +718,37 @@ fn printChecks(init: std.process.Init, m: *const layout.Model, pi: usize, placed
     }
 }
 
+/// graven export --plan: plan `want`'s files (`layout.produce`) into
+/// `out_dir`, else the plan's own folder beside the document.
+fn writePlan(init: std.process.Init, m: *layout.Model, doc_path: []const u8, out_dir: []const u8, want: []const u8, labels: *layout.Labels, faces: []const *layout.Face) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const plan = for (m.plans.items) |p| {
+        if (std.mem.eql(u8, p.name, want)) break p;
+    } else {
+        std.debug.print("{s}: no plan named {s}; there are:\n", .{ doc_path, want });
+        for (m.plans.items) |p| std.debug.print("  {s}\n", .{p.name});
+        std.process.exit(1);
+    };
+    const dir = if (out_dir.len > 0) out_dir else try layout.produce.folder(a, doc_path, plan);
+    try std.Io.Dir.cwd().createDirPath(init.io, dir);
+    var n: usize = 0;
+    for (plan.parts) |pt| {
+        const pi = m.panelIndex(pt.panel) orelse continue;
+        var placed = try layout.solve(init.gpa, m, .{ .panel = pi }, labels);
+        defer placed.deinit();
+        const out = try layout.produce.part(a, m, plan, pi, &placed, faces);
+        for (out.files) |f| {
+            const path = try std.fs.path.join(a, &.{ dir, f.name });
+            try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = f.data });
+            std.debug.print("{s}: {d} bytes{s}{s}\n", .{ path, f.data.len, if (f.op != null) ", operation " else "", if (f.op) |k| plan.operations[k].name else "" });
+            n += 1;
+        }
+    }
+    if (n == 0) std.debug.print("{s}: {s} makes nothing yet (its operations need processes and layers)\n", .{ doc_path, plan.name });
+}
+
 /// graven export --drawing: one drawing as SVG, its ink only (see
 /// `layout.output.figureSvg`).
 fn exportDrawing(init: std.process.Init, doc_path: []const u8, out_path: []const u8, opts: ExportOptions) !void {
@@ -741,7 +784,7 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
     const arena = arena_state.allocator();
     const ext = std.fs.path.extension(out_path);
     const as_3mf = std.ascii.eqlIgnoreCase(ext, ".3mf");
-    if (!opts.check and !as_3mf and !std.ascii.eqlIgnoreCase(ext, ".svg")) {
+    if (opts.plan == null and !opts.check and !as_3mf and !std.ascii.eqlIgnoreCase(ext, ".svg")) {
         std.debug.print("{s}: the output must end in .svg or .3mf\n", .{out_path});
         std.process.exit(2);
     }
@@ -794,6 +837,8 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
     var labels: layout.Labels = .init(gpa, faces);
     defer labels.deinit();
     try labels.syncResolved(&res);
+
+    if (opts.plan) |want| return writePlan(init, m, doc_path, out_path, want, &labels, faces);
 
     var chosen: std.ArrayList(usize) = .empty;
     for (m.panels.items, 0..) |p, pi| {

@@ -1159,6 +1159,24 @@ test "a manufacturing plan made in the GUI: parts of materials, operations in or
     // Plan 1 stays the one exported.
     try std.testing.expectEqual(m.plans.items[0].id, m.active_plan);
     try saveAs(&r, scratch ++ "/hp15c-plans.graven");
+    // Each plan writes its own files, beside the document: Plan 2 a drawing
+    // for each operation on the plate (it prints nothing); Plan 1 a 3MF for
+    // each part.
+    const io = std.testing.io;
+    std.Io.Dir.cwd().deleteTree(io, scratch ++ "/hp15c-plans Plan2") catch {};
+    try r.select("Plans.Plan2");
+    try r.press("plan.write-files-for-this-plan");
+    try r.frames(2);
+    var buf: [64]u8 = undefined;
+    const cut = try std.Io.Dir.cwd().readFile(io, scratch ++ "/hp15c-plans Plan2/HP-15C plate 2 Operation1.svg", &buf);
+    try std.testing.expect(std.mem.startsWith(u8, cut, "<svg"));
+    _ = try std.Io.Dir.cwd().statFile(io, scratch ++ "/hp15c-plans Plan2/HP-15C plate 1 Operation2.svg", .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, scratch ++ "/hp15c-plans Plan2/HP-15C keys.3mf", .{}));
+    try r.select("Plans.Plan1");
+    try r.press("plan.write-files-for-this-plan");
+    try r.frames(2);
+    _ = try std.Io.Dir.cwd().statFile(io, scratch ++ "/hp15c-plans Plan1/HP-15C keys.3mf", .{});
+    _ = try std.Io.Dir.cwd().statFile(io, scratch ++ "/hp15c-plans Plan1/HP-15C plate.3mf", .{});
 }
 
 // Known bugs, kept fixed --------------------------------------------------------
