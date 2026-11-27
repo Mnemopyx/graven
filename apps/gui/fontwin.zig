@@ -233,6 +233,19 @@ var overlay = false;
 /// The style whose faces are being set.
 var style_choice: usize = 0;
 
+/// Opens the window on style `style` (its index in the document's
+/// styles), to choose its faces: what a missing font's fix does. With
+/// `install`, the install prompt opens too.
+pub fn openFor(style: usize, install: bool) void {
+    open = true;
+    style_choice = style;
+    if (install) {
+        install_open = true;
+        install_new = true;
+        install_report.clearRetainingCapacity();
+    }
+}
+
 /// The comparison's ground: Graven's paper.
 const paper: dvui.Color = .{ .r = 0xfb, .g = 0xfa, .b = 0xf7 };
 

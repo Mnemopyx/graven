@@ -808,7 +808,7 @@ fn exportDocument(init: std.process.Init, doc_path: []const u8, out_path: []cons
         for (m.styles.items) |st| for (st.faces.items) |sf| try m.setStyleFace(st.id, sf.role, name);
         cat = forced.catalog();
     } else {
-        for (try folders.dirsFor(arena, doc_path)) |d| try dirs.addDir(gpa, io, d);
+        for (try folders.dirsFor(arena, io, doc_path)) |d| try dirs.addDir(gpa, io, d);
         cat = dirs.catalog();
     }
     const default = if (forced.faces.items.len > 0) forced.faces.items[0] else if (dirs.faces.items.len > 0) dirs.faces.items[0] else blk: {

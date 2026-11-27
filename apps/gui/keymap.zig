@@ -32,7 +32,7 @@ pub const modes = [_]M{
     .{ .name = "dialog.calibrate-size", .kind = .dialog, .lifetime = .until_left, .parent = "global", .extends = "dialog", .allows = &.{"dialog.calibrate-size"} },
     // The view of the canvas, a sketch or a panel being edited: zoom.
     // Layered on those major modes; its unchorded keys give way to typing.
-    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{ "view", "fab" } },
+    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{ "view", "views", "fab" } },
     // No document yet.
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
@@ -56,9 +56,11 @@ pub const modes = [_]M{
     .{ .name = "expression-line", .kind = .sub, .parent = "canvas", .takes_text = true, .allows = &.{"expression-line.tab"} },
     .{ .name = "expression-line.completion", .kind = .sub, .parent = "expression-line", .allows = &.{"expression-line.completion"} },
     .{ .name = "expression-line.run", .kind = .sub, .parent = "expression-line", .allows = &.{"expression-line.run"} },
-    // A legend sheet's view: its cell edited where it is (typed text),
-    // and moving between cells.
+    // A sheet's view: its cells shown as the glyphics they set, moving
+    // between them, and typing starting an edit.
     .{ .name = "sheet", .kind = .major, .parent = "global", .takes_text = true, .allows = &.{"sheet"} },
+    // A sheet's cell in edit mode: its markup typed, in an editor.
+    .{ .name = "sheet.edit", .kind = .sub, .parent = "sheet", .takes_text = true, .allows = &.{"sheet"} },
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
@@ -99,11 +101,20 @@ pub const action_defs = [_]A{
     .{ .name = "views.close" },
     .{ .name = "views.maximize" },
     .{ .name = "views.next", .repeat = true, .param = .int },
+    // The tab after (arg 1) or before (-1) in the active view's window.
+    .{ .name = "views.tab-next", .repeat = true, .param = .int },
+    // The active view's tab to the next window (0) or the one before (1);
+    // with one window, split off beside it.
+    .{ .name = "views.move-tab", .param = .int },
     // A paged context's pages: arg 0 one page, 1 to the first or last.
     .{ .name = "views.page-prev", .repeat = true, .param = .int },
     .{ .name = "views.page-next", .repeat = true, .param = .int },
     // To the cell above (0), below (1), after (2) or before (3).
     .{ .name = "sheet.move", .repeat = true, .param = .int },
+    // The selected cell's edit mode (its markup), and back to display mode
+    // (the glyphics it sets).
+    .{ .name = "sheet.edit" },
+    .{ .name = "sheet.edit.leave" },
     // The pane layouts (layouts.zig): the next one, the panes as they are
     // saved as a new one, this machine's changes to the one in use dropped.
     .{ .name = "panes.layout-next" },
@@ -360,9 +371,18 @@ pub const binds = [_]B{
     .{ .mode = "global", .chord = "primary+tab", .action = "views.next", .arg = 0 },
     .{ .mode = "sheet", .chord = "up", .action = "sheet.move", .arg = 0 },
     .{ .mode = "sheet", .chord = "down", .action = "sheet.move", .arg = 1 },
-    .{ .mode = "sheet", .chord = "enter", .action = "sheet.move", .arg = 1 },
+    .{ .mode = "sheet", .chord = "right", .action = "sheet.move", .arg = 2 },
+    .{ .mode = "sheet", .chord = "left", .action = "sheet.move", .arg = 3 },
     .{ .mode = "sheet", .chord = "tab", .action = "sheet.move", .arg = 2 },
     .{ .mode = "sheet", .chord = "shift+tab", .action = "sheet.move", .arg = 3 },
+    .{ .mode = "sheet", .chord = "enter", .action = "sheet.edit" },
+    .{ .mode = "sheet", .chord = "f2", .action = "sheet.edit" },
+    .{ .mode = "sheet.edit", .chord = "up", .action = "sheet.move", .arg = 0 },
+    .{ .mode = "sheet.edit", .chord = "down", .action = "sheet.move", .arg = 1 },
+    .{ .mode = "sheet.edit", .chord = "enter", .action = "sheet.move", .arg = 1 },
+    .{ .mode = "sheet.edit", .chord = "tab", .action = "sheet.move", .arg = 2 },
+    .{ .mode = "sheet.edit", .chord = "shift+tab", .action = "sheet.move", .arg = 3 },
+    .{ .mode = "sheet.edit", .chord = "escape", .action = "sheet.edit.leave" },
     .{ .mode = "global", .chord = "primary+shift+tab", .action = "views.next", .arg = 1 },
     .{ .mode = "global", .chord = "primary+o", .action = "file.open" },
     .{ .mode = "global", .chord = "primary+t", .action = "views.add" },
@@ -406,6 +426,18 @@ pub const binds = [_]B{
     // U for ultraviolet: the next canvas theme (Light Table, Black Light Table).
     .{ .mode = "view", .chord = "u", .action = "view.canvas-theme", .arg = -1 },
     .{ .mode = "view", .chord = "c", .action = "fab.check" },
+    // The views, a key each where nothing takes typed text: \ splits side
+    // by side (Shift: stacked), Q closes, ` fills the window, ] and [ go
+    // along the window's tabs, Shift (} and {) moves the tab to the next
+    // window or the one before.
+    .{ .mode = "view", .chord = "backslash", .action = "views.split-across" },
+    .{ .mode = "view", .chord = "shift+backslash", .action = "views.split-down" },
+    .{ .mode = "view", .chord = "q", .action = "views.close" },
+    .{ .mode = "view", .chord = "grave", .action = "views.maximize" },
+    .{ .mode = "view", .chord = "right_bracket", .action = "views.tab-next", .arg = 1 },
+    .{ .mode = "view", .chord = "left_bracket", .action = "views.tab-next", .arg = -1 },
+    .{ .mode = "view", .chord = "shift+right_bracket", .action = "views.move-tab", .arg = 0 },
+    .{ .mode = "view", .chord = "shift+left_bracket", .action = "views.move-tab", .arg = 1 },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
     // Vim's digraph key (RFC 1345's mnemonics), where text is typed.

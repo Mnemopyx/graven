@@ -16,6 +16,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const layout = @import("graven_layout");
+const platform = @import("graven_platform");
 const geom = layout.geom;
 
 const Allocator = std.mem.Allocator;
@@ -35,10 +36,15 @@ fn levelFor(cap_px: f64) u2 {
     while (level < max_level and cap_px > field_texels * 2 * @as(f64, @floatFromInt(@as(u32, 1) << level))) level += 1;
     return level;
 }
-/// An atlas page's side, pixels, and how many pages before the atlas starts
-/// again.
+/// An atlas page's side, pixels. Pages past `max_pages` are made only while
+/// every page holds a raster drawn this frame (up to `hard_max_pages`);
+/// otherwise the least recently drawn page is emptied and filled again.
 const page_side = 1024;
 const max_pages = 8;
+const hard_max_pages = 16;
+/// Fields kept, bytes: past it the least recently used are forgotten (down
+/// to three quarters of it), never one used this frame.
+const field_budget = 128 << 20;
 /// Glyphs drawn larger than this (raster height, pixels) are drawn exactly.
 pub const max_px = 256.0;
 
@@ -98,6 +104,11 @@ const Page = struct {
     shelf_h: u32 = 0,
     next_x: u32 = 0,
     dirty: bool = false,
+    /// The rows changed since the last upload (`dirty`): only they are sent.
+    dirty_y0: u32 = page_side,
+    dirty_y1: u32 = 0,
+    /// The frame a raster on it was last drawn (see `Atlas.frame`).
+    used: u32 = 0,
 };
 
 /// Makes glyph fields on threads of its own, so the drawing thread never
@@ -194,13 +205,30 @@ pub const Atlas = struct {
     /// Bumped when the fields are forgotten: fields made for an older
     /// generation (of faces since freed) are dropped when they come back.
     generation: u32 = 0,
-    fields: std.AutoHashMapUnmanaged(FieldKey, ?geom.msdf.Field) = .empty,
+    fields: std.AutoHashMapUnmanaged(FieldKey, Kept) = .empty,
+    /// The fields' sizes together, bytes.
+    field_bytes: usize = 0,
     slots: std.AutoHashMapUnmanaged(SlotKey, ?Slot) = .empty,
     pages: std.ArrayList(Page) = .empty,
-    /// Counters for the status bar: fields made, rasters made, rebuilds.
+    /// The page being filled.
+    current: usize = 0,
+    /// Counts frames (`beginFrame`): what was used when, for eviction.
+    frame: u32 = 1,
+    /// Counters: fields made, rasters made, pages emptied for reuse, fields
+    /// forgotten.
     made_fields: usize = 0,
     made_rasters: usize = 0,
-    restarts: usize = 0,
+    evicted_pages: usize = 0,
+    evicted_fields: usize = 0,
+    /// Drawing-thread time this frame, ns: rastering, uploading pages.
+    raster_ns: u64 = 0,
+    upload_ns: u64 = 0,
+    /// Coverage to stored value under `gamma` (made for `lut_gamma`).
+    lut: [256]u8 = undefined,
+    lut_gamma: f64 = -1,
+
+    /// A field kept, and the frame it was last used.
+    const Kept = struct { field: ?geom.msdf.Field, used: u32 };
 
     pub fn init(gpa: Allocator) Atlas {
         return .{ .gpa = gpa };
@@ -215,8 +243,18 @@ pub const Atlas = struct {
         at.maker = fm;
     }
 
+    /// Starts a frame: what is drawn from now on counts as used in it.
+    /// Takes in the fields made since the last; true if any came.
+    pub fn beginFrame(at: *Atlas) bool {
+        at.frame +%= 1;
+        if (at.frame == 0) at.frame = 1;
+        at.raster_ns = 0;
+        at.upload_ns = 0;
+        return at.collect();
+    }
+
     /// Takes in the fields made since the last frame; true if any came.
-    pub fn collect(at: *Atlas) bool {
+    fn collect(at: *Atlas) bool {
         const fm = at.maker orelse return false;
         fm.mutex.lockUncancelable(fm.io);
         defer fm.mutex.unlock(fm.io);
@@ -227,11 +265,63 @@ pub const Atlas = struct {
                 continue;
             }
             _ = at.pending.remove(d.key);
-            at.fields.put(at.gpa, d.key, d.field) catch if (d.field) |f| f.deinit(at.gpa);
-            at.made_fields += 1;
+            at.keep(d.key, d.field);
         }
         fm.done.clearRetainingCapacity();
+        if (any) at.trimFields();
         return any;
+    }
+
+    fn fieldSize(f: ?geom.msdf.Field) usize {
+        return if (f) |ff| ff.data.len * @sizeOf(f32) else 0;
+    }
+
+    /// Keeps a field made (freed if it cannot be kept).
+    fn keep(at: *Atlas, key: FieldKey, f: ?geom.msdf.Field) void {
+        const gop = at.fields.getOrPut(at.gpa, key) catch {
+            if (f) |ff| ff.deinit(at.gpa);
+            return;
+        };
+        if (gop.found_existing) {
+            at.field_bytes -= fieldSize(gop.value_ptr.field);
+            if (gop.value_ptr.field) |old| old.deinit(at.gpa);
+        }
+        gop.value_ptr.* = .{ .field = f, .used = at.frame };
+        at.field_bytes += fieldSize(f);
+        at.made_fields += 1;
+    }
+
+    /// The field kept for `key`, marked used this frame.
+    fn kept(at: *Atlas, key: FieldKey) ??geom.msdf.Field {
+        const k = at.fields.getPtr(key) orelse return null;
+        k.used = at.frame;
+        return k.field;
+    }
+
+    /// Past the budget: forgets the least recently used fields (not those
+    /// used this frame) down to three quarters of it.
+    fn trimFields(at: *Atlas) void {
+        if (at.field_bytes <= field_budget) return;
+        const Old = struct { used: u32, key: FieldKey };
+        var olds: std.ArrayList(Old) = .empty;
+        defer olds.deinit(at.gpa);
+        var it = at.fields.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.used == at.frame or e.value_ptr.field == null) continue;
+            olds.append(at.gpa, .{ .used = e.value_ptr.used, .key = e.key_ptr.* }) catch return;
+        }
+        std.mem.sortUnstable(Old, olds.items, {}, struct {
+            fn lt(_: void, a: Old, b: Old) bool {
+                return a.used < b.used;
+            }
+        }.lt);
+        for (olds.items) |o| {
+            if (at.field_bytes <= field_budget / 4 * 3) break;
+            const e = at.fields.fetchRemove(o.key) orelse continue;
+            at.field_bytes -= fieldSize(e.value.field);
+            if (e.value.field) |f| f.deinit(at.gpa);
+            at.evicted_fields += 1;
+        }
     }
 
     /// Frees the atlas's memory; its textures go with the window.
@@ -257,11 +347,13 @@ pub const Atlas = struct {
             at.gpa.free(p.pixels);
         }
         at.pages.clearRetainingCapacity();
+        at.current = 0;
         at.slots.clearRetainingCapacity();
         if (fields) {
             var it = at.fields.valueIterator();
-            while (it.next()) |f| if (f.*) |ff| ff.deinit(at.gpa);
+            while (it.next()) |k| if (k.field) |ff| ff.deinit(at.gpa);
             at.fields.clearRetainingCapacity();
+            at.field_bytes = 0;
             at.pending.clearRetainingCapacity();
             at.generation +%= 1;
         }
@@ -272,19 +364,19 @@ pub const Atlas = struct {
     /// none is ready yet. Made off the drawing thread when there is a maker.
     fn field(at: *Atlas, face: *layout.Face, gid: u32, level: u2) !struct { field: ?geom.msdf.Field, level: u2 } {
         const key: FieldKey = .{ .face = face, .gid = gid, .level = level };
-        if (at.fields.get(key)) |f| return .{ .field = f, .level = level };
+        if (at.kept(key)) |f| return .{ .field = f, .level = level };
         const o = try face.outline(gid);
         const cap = (try face.capHeight()) orelse @as(f64, @floatFromInt(face.upem)) * 0.7;
         const k: f64 = @floatFromInt(@as(u32, 1) << level);
         const opts: geom.msdf.Options = .{ .scale = field_texels * k / cap, .range = field_range * k };
         const fm = at.maker orelse {
             const f: ?geom.msdf.Field = if (o.contours.len == 0) null else try geom.msdf.generate(at.gpa, o, opts);
-            try at.fields.put(at.gpa, key, f);
-            at.made_fields += 1;
+            at.keep(key, f);
+            at.trimFields();
             return .{ .field = f, .level = level };
         };
         if (o.contours.len == 0) {
-            try at.fields.put(at.gpa, key, null);
+            at.keep(key, null);
             return .{ .field = null, .level = level };
         }
         if (!at.pending.contains(key)) {
@@ -301,7 +393,7 @@ pub const Atlas = struct {
         var lv = level;
         while (lv > 0) {
             lv -= 1;
-            if (at.fields.get(.{ .face = face, .gid = gid, .level = lv })) |f| return .{ .field = f, .level = lv };
+            if (at.kept(.{ .face = face, .gid = gid, .level = lv })) |f| return .{ .field = f, .level = lv };
         }
         return error.Pending;
     }
@@ -319,7 +411,7 @@ pub const Atlas = struct {
         const want = levelFor(cap0 * s);
         // A raster made already at the right level: no field needed.
         const want_key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step, .level = want };
-        if (at.slots.get(want_key)) |sl| return sl;
+        if (at.slots.get(want_key)) |sl| return at.touch(sl);
 
         const g = @as(f64, @floatFromInt(grow_step)) / 8 / s;
         const b = (try face.outline(gid)).bounds();
@@ -335,7 +427,7 @@ pub const Atlas = struct {
         const got = try at.field(face, gid, want);
         var key = want_key;
         key.level = got.level;
-        if (at.slots.get(key)) |sl| return sl;
+        if (at.slots.get(key)) |sl| return at.touch(sl);
         const f = got.field orelse {
             try at.slots.put(at.gpa, key, null);
             return null;
@@ -367,7 +459,7 @@ pub const Atlas = struct {
         const cap_px = cap * sx;
         const want = levelFor(cap_px);
         const want_key: SlotKey = .{ .face = face, .gid = gid, .size = size_step, .grow = grow_step, .phase = phase, .level = want };
-        if (at.slots.get(want_key)) |sl| return sl;
+        if (at.slots.get(want_key)) |sl| return at.touch(sl);
         const sy = if (cap_px >= 4) @round(cap_px) / cap else sx;
         const g = @as(f64, @floatFromInt(grow_step)) / 8 / sx;
         const b = (try face.outline(gid)).bounds();
@@ -389,7 +481,7 @@ pub const Atlas = struct {
         const got = try at.field(face, gid, want);
         var key = want_key;
         key.level = got.level;
-        if (at.slots.get(key)) |sl| return sl;
+        if (at.slots.get(key)) |sl| return at.touch(sl);
         const f = got.field orelse {
             try at.slots.put(at.gpa, key, null);
             return null;
@@ -401,34 +493,50 @@ pub const Atlas = struct {
         return sl;
     }
 
+    /// Marks the page of raster `sl` drawn this frame.
+    fn touch(at: *Atlas, sl: ?Slot) ?Slot {
+        if (sl) |s| at.pages.items[s.page].used = at.frame;
+        return sl;
+    }
+
     /// Samples field `f` into a `w` × `h` raster (pixel to font units by
     /// `m`, `px` font units a pixel), grown by `g`, with the gamma, and
     /// packs it.
     fn raster(at: *Atlas, f: geom.msdf.Field, w: u32, h: u32, m: geom.Affine, px: f64, g: f64, origin: geom.Point, unit: f64) !Slot {
+        const t0 = platform.monotonicNs();
+        defer at.raster_ns += @intCast(@max(0, platform.monotonicNs() - t0));
         const place = try at.pack(w, h);
         var arena: std.heap.ArenaAllocator = .init(at.gpa);
         defer arena.deinit();
         const cov = try f.rasterize(arena.allocator(), w, h, m, px, g);
         const page = &at.pages.items[place.page];
-        const inv = 1 / gamma;
+        if (at.lut_gamma != gamma) {
+            const inv = 1 / gamma;
+            for (&at.lut, 0..) |*v, c0| v.* = if (c0 == 0 or c0 == 255 or gamma == 1) @intCast(c0) else @intFromFloat(@round(255 * std.math.pow(f64, @as(f64, @floatFromInt(c0)) / 255, inv)));
+            at.lut_gamma = gamma;
+        }
         // Rows from the bottom in the raster, from the top in the page.
         for (0..h) |j| for (0..w) |i| {
-            const c0 = cov[j * w + i];
-            const c: u8 = if (c0 == 0 or c0 == 255 or gamma == 1) c0 else @intFromFloat(@round(255 * std.math.pow(f64, @as(f64, @floatFromInt(c0)) / 255, inv)));
+            const c = at.lut[cov[j * w + i]];
             page.pixels[(place.y + (h - 1 - j)) * page_side + place.x + i] = .{ .r = c, .g = c, .b = c, .a = c };
         };
         page.dirty = true;
+        page.dirty_y0 = @min(page.dirty_y0, place.y);
+        page.dirty_y1 = @max(page.dirty_y1, place.y + h);
+        page.used = at.frame;
         at.made_rasters += 1;
         return .{ .page = @intCast(place.page), .x = @intCast(place.x), .y = @intCast(place.y), .w = @intCast(w), .h = @intCast(h), .origin = origin, .unit = unit };
     }
 
     /// Room for a `w` × `h` raster (plus a pixel's gap), on a new shelf or
-    /// page if need be; the atlas starts again when it is full.
+    /// page if need be. When the pages are all full, the least recently
+    /// drawn one is emptied and filled again; a page is added past
+    /// `max_pages` only while each holds a raster drawn this frame.
     fn pack(at: *Atlas, w: u32, h: u32) !struct { page: usize, x: u32, y: u32 } {
         const gw = w + 1;
         const gh = h + 1;
-        if (at.pages.items.len > 0) {
-            const p = &at.pages.items[at.pages.items.len - 1];
+        if (at.current < at.pages.items.len) {
+            const p = &at.pages.items[at.current];
             if (p.next_x + gw > page_side) {
                 p.shelf_y += p.shelf_h;
                 p.shelf_h = 0;
@@ -438,31 +546,76 @@ pub const Atlas = struct {
                 const x = p.next_x;
                 p.next_x += gw;
                 p.shelf_h = @max(p.shelf_h, gh);
-                return .{ .page = at.pages.items.len - 1, .x = x, .y = p.shelf_y };
+                return .{ .page = at.current, .x = x, .y = p.shelf_y };
             }
         }
-        if (at.pages.items.len >= max_pages) {
-            // Full: start again (the glyphs in view are rastered anew).
-            at.clear(false);
-            at.restarts += 1;
+        // The least recently drawn page.
+        var lru: usize = 0;
+        for (at.pages.items, 0..) |p, i| {
+            if (p.used < at.pages.items[lru].used) lru = i;
         }
-        const pixels = try at.gpa.alloc(dvui.Color.PMA, page_side * page_side);
-        @memset(pixels, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
-        try at.pages.append(at.gpa, .{ .pixels = pixels, .next_x = gw, .shelf_h = gh });
-        return .{ .page = at.pages.items.len - 1, .x = 0, .y = 0 };
+        const n = at.pages.items.len;
+        if (n < max_pages or (n < hard_max_pages and at.pages.items[lru].used == at.frame)) {
+            const pixels = try at.gpa.alloc(dvui.Color.PMA, page_side * page_side);
+            @memset(pixels, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
+            try at.pages.append(at.gpa, .{ .pixels = pixels, .next_x = gw, .shelf_h = gh, .used = at.frame });
+            at.current = n;
+            return .{ .page = n, .x = 0, .y = 0 };
+        }
+        at.evictPage(lru);
+        at.current = lru;
+        const p = &at.pages.items[lru];
+        p.next_x = gw;
+        p.shelf_h = gh;
+        return .{ .page = lru, .x = 0, .y = 0 };
+    }
+
+    /// Empties page `i` for reuse: its rasters are forgotten (made again
+    /// when next drawn) and its texture made anew, so what was drawn from
+    /// the old one this frame keeps its pixels.
+    fn evictPage(at: *Atlas, i: usize) void {
+        var gone: std.ArrayList(SlotKey) = .empty;
+        defer gone.deinit(at.gpa);
+        var all = false;
+        var it = at.slots.iterator();
+        while (it.next()) |e| if (e.value_ptr.*) |sl| {
+            if (sl.page == i) gone.append(at.gpa, e.key_ptr.*) catch {
+                all = true;
+                break;
+            };
+        };
+        // Out of memory for the list: every raster forgotten instead.
+        if (all) at.slots.clearRetainingCapacity() else for (gone.items) |k| {
+            _ = at.slots.remove(k);
+        }
+        const p = &at.pages.items[i];
+        if (p.texture) |t| dvui.Texture.destroyLater(t);
+        p.texture = null;
+        @memset(p.pixels, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
+        p.shelf_y = 0;
+        p.shelf_h = 0;
+        p.next_x = 0;
+        p.dirty = true;
+        p.used = at.frame;
+        at.evicted_pages += 1;
     }
 
     /// Uploads pages changed since they were last drawn. Call before
     /// drawing quads from them.
     pub fn flush(at: *Atlas) void {
+        const t0 = platform.monotonicNs();
+        defer at.upload_ns += @intCast(@max(0, platform.monotonicNs() - t0));
         for (at.pages.items) |*p| {
             if (!p.dirty and p.texture != null) continue;
             if (p.texture) |*t| {
-                t.update(p.pixels) catch {};
+                // Only the rows changed.
+                if (p.dirty_y1 > p.dirty_y0) t.updateSubRect(@ptrCast(p.pixels.ptr), 0, p.dirty_y0, page_side, p.dirty_y1 - p.dirty_y0) catch {};
             } else {
                 p.texture = dvui.Texture.create(p.pixels, .{ .width = page_side, .height = page_side, .interpolation = .linear }) catch null;
             }
             p.dirty = false;
+            p.dirty_y0 = page_side;
+            p.dirty_y1 = 0;
         }
     }
 
@@ -566,4 +719,44 @@ pub fn drawQuads(at: *Atlas, lifo: Allocator, quads: []const Quad) void {
             done += m;
         }
     }
+}
+
+test "a full atlas empties its least recently drawn page, keeping the others' rasters" {
+    var at: Atlas = .init(std.testing.allocator);
+    defer at.deinit();
+    const face: *layout.Face = @ptrFromInt(@alignOf(layout.Face));
+    // 200 px rasters: 25 a page. Fill every page, one a frame, a raster of
+    // each kept as a slot.
+    var gid: u32 = 0;
+    for (0..max_pages) |_| {
+        _ = at.beginFrame();
+        for (0..25) |_| {
+            const pl = try at.pack(200, 200);
+            try at.slots.put(at.gpa, .{ .face = face, .gid = gid, .size = 0, .grow = 0 }, .{ .page = @intCast(pl.page), .x = @intCast(pl.x), .y = @intCast(pl.y), .w = 200, .h = 200, .origin = .{ .x = 0, .y = 0 }, .unit = 1 });
+            at.pages.items[pl.page].used = at.frame;
+            gid += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, max_pages), at.pages.items.len);
+    // Page 0 drawn again now: page 1 is the least recently drawn.
+    _ = at.beginFrame();
+    _ = at.touch(at.slots.get(.{ .face = face, .gid = 0, .size = 0, .grow = 0 }).?);
+    const pl = try at.pack(200, 200);
+    try std.testing.expectEqual(@as(usize, 1), pl.page);
+    try std.testing.expectEqual(@as(usize, 1), at.evicted_pages);
+    try std.testing.expectEqual(@as(usize, max_pages), at.pages.items.len);
+    // Page 1's rasters forgotten, the rest kept.
+    try std.testing.expect(at.slots.get(.{ .face = face, .gid = 25, .size = 0, .grow = 0 }) == null);
+    try std.testing.expect(at.slots.get(.{ .face = face, .gid = 0, .size = 0, .grow = 0 }) != null);
+    try std.testing.expect(at.slots.get(.{ .face = face, .gid = 50, .size = 0, .grow = 0 }) != null);
+    try std.testing.expectEqual(@as(usize, 25 * max_pages - 25), at.slots.count());
+}
+
+test "an atlas whose every page was drawn this frame grows past its limit rather than empty one" {
+    var at: Atlas = .init(std.testing.allocator);
+    defer at.deinit();
+    _ = at.beginFrame();
+    for (0..25 * max_pages + 1) |_| _ = try at.pack(200, 200);
+    try std.testing.expectEqual(@as(usize, max_pages + 1), at.pages.items.len);
+    try std.testing.expectEqual(@as(usize, 0), at.evicted_pages);
 }

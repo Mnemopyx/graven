@@ -693,14 +693,27 @@ fn sameAsExample(m: *layout.Model, path: []const u8, names: []const []const u8) 
 }
 
 // The HP-15C, made in the GUI ------------------------------------------------
+//
+// Measured, as EverCalc's legend bench has it (its tools/legend/hp15c.py and
+// docs/legend.md, "Grid sizes": a plan-view photo of an HP-15C scaled to the
+// case's 128 mm width): the Voyager grid, 11.43 mm (0.45 in) across and
+// 12.7 mm (0.5 in) down; keycaps 7.7 × 7.0 mm in plan, the top 4.9 mm and
+// the front face, as seen from above, 2.1 mm; ENTER a row pitch taller,
+// 7.7 × 19.7 mm. Legends: white 2.1 mm caps on the keycap's top; gold f
+// legends on the plate above each key, 1.5 mm caps (HP's are about 1.05;
+// EverCalc's, for legibility), the baseline 1.1 mm above the keycap; blue g
+// legends on the front face, 1.1 mm caps; the gold CLEAR over the f legends
+// of GSB to ←, 1.0 mm caps, in a band 2.8 to 4.7 mm above their keycaps.
+// The grid's points are the keycaps' middles.
 
-/// A legend style on the Libertinus style: its cap height, 1.5 cap
-/// heights between lines, superscripts raised and subscripts dropped.
+/// A legend style on the STIX Two style (EverCalc's faces: Geist SemiBold
+/// text, STIX Two Math): its cap height, 1.5 cap heights between lines,
+/// superscripts raised and subscripts dropped.
 fn make15cStyle(r: *Run, name: []const u8, cap: []const u8) !void {
     try r.select("Styles");
     try r.press("styles.add-a-style");
     try r.field("style.name", name);
-    try r.choose("style.based-on", "Libertinus");
+    try r.choose("style.based-on", "STIX Two");
     try r.field("style.cap-height", cap);
     try r.field("style.line-pitch", "1.5");
     try r.press("style.rules.add-a-rule");
@@ -744,15 +757,22 @@ fn addTrack(r: *Run, after: []const u8, number: usize, name: []const u8) !void {
     try r.field("prototype.slot.track1.name", name);
 }
 
-/// The HP-15C's keys, row by row: their white, blue and gold legends.
+/// The HP-15C's keys, row by row: the white legend on the keycap's top
+/// (`top`), the blue one on its front face (`g`) and the gold one on the
+/// plate above it (`f`). EverCalc's list (tools/legend/hp15c.py, KEYS).
+/// Colour is the slots' (the plate's and the keys' fabrication layers), so
+/// a legend's colour comes with its slot, never with its text.
 const Key15 = struct { top: []const u8, g: []const u8 = "", f: []const u8 = "" };
 
 const keys15 = [4][10]Key15{
-    .{ .{ .top = "$\\sqrt{x}$", .g = "$x^2$", .f = "A" }, .{ .top = "$e^x$", .g = "LN", .f = "B" }, .{ .top = "$10^x$", .g = "LOG", .f = "C" }, .{ .top = "$y^x$", .g = "\\%", .f = "D" }, .{ .top = "$1/x$", .g = "Δ\\%", .f = "E" }, .{ .top = "CHS", .g = "ABS", .f = "MATRIX" }, .{ .top = "7", .g = "DEG", .f = "FIX" }, .{ .top = "8", .g = "RAD", .f = "SCI" }, .{ .top = "9", .g = "GRD", .f = "ENG" }, .{ .top = "÷", .g = "$x<0$", .f = "$x\\le y$" } },
-    .{ .{ .top = "SST", .g = "BST", .f = "LBL" }, .{ .top = "GTO", .g = "$\\mathrm{HYP}^{-1}$", .f = "HYP" }, .{ .top = "SIN", .g = "$\\mathrm{SIN}^{-1}$", .f = "DIM" }, .{ .top = "COS", .g = "$\\mathrm{COS}^{-1}$", .f = "(i)" }, .{ .top = "TAN", .g = "$\\mathrm{TAN}^{-1}$", .f = "I" }, .{ .top = "EEX", .g = "π", .f = "RESULT" }, .{ .top = "4", .g = "SF", .f = "$x$⇄" }, .{ .top = "5", .g = "CF", .f = "DSE" }, .{ .top = "6", .g = "F?", .f = "ISG" }, .{ .top = "×", .g = "$x=0$", .f = "$\\int_y^x$" } },
-    .{ .{ .top = "R/S", .g = "P/R", .f = "PSE" }, .{ .top = "GSB", .g = "RTN", .f = "Σ" }, .{ .top = "R↓", .g = "R↑", .f = "PRGM" }, .{ .top = "$x$⇄$y$", .g = "RND", .f = "REG" }, .{ .top = "←", .g = "CL$x$", .f = "PREFIX" }, .{ .top = "ENTER", .g = "LST$x$", .f = "RAN#" }, .{ .top = "1", .g = "→P", .f = "→R" }, .{ .top = "2", .g = "→H", .f = "→H.MS" }, .{ .top = "3", .g = "→DEG", .f = "→RAD" }, .{ .top = "−", .g = "TEST", .f = "Re⇄Im" } },
-    .{ .{ .top = "ON" }, .{ .top = "f" }, .{ .top = "g" }, .{ .top = "STO", .g = "INT", .f = "FRAC" }, .{ .top = "RCL", .g = "MEM", .f = "USER" }, .{ .top = "" }, .{ .top = "0", .g = "$\\bar{x}$", .f = "$x!$" }, .{ .top = ".", .g = "$s$", .f = "$\\hat{y},r$" }, .{ .top = "Σ+", .g = "Σ−", .f = "L.R." }, .{ .top = "+", .g = "C$y,x$", .f = "P$y,x$" } },
+    .{ .{ .top = "$\\sqrt{x}$", .g = "$x^2$", .f = "A" }, .{ .top = "$e^x$", .g = "LN", .f = "B" }, .{ .top = "$10^x$", .g = "LOG", .f = "C" }, .{ .top = "$y^x$", .g = "\\%", .f = "D" }, .{ .top = "$1/x$", .g = "Δ\\%", .f = "E" }, .{ .top = "CHS", .g = "ABS", .f = "MATRIX" }, .{ .top = "7", .g = "DEG", .f = "FIX" }, .{ .top = "8", .g = "RAD", .f = "SCI" }, .{ .top = "9", .g = "GRD", .f = "ENG" }, .{ .top = "$\\div$", .g = "$x\\le y$", .f = "SOLVE" } },
+    .{ .{ .top = "SST", .g = "BST", .f = "LBL" }, .{ .top = "GTO", .g = "$\\mathrm{HYP}^{-1}$", .f = "HYP" }, .{ .top = "SIN", .g = "$\\mathrm{SIN}^{-1}$", .f = "DIM" }, .{ .top = "COS", .g = "$\\mathrm{COS}^{-1}$", .f = "$(i)$" }, .{ .top = "TAN", .g = "$\\mathrm{TAN}^{-1}$", .f = "I" }, .{ .top = "EEX", .g = "π", .f = "RESULT" }, .{ .top = "4", .g = "SF", .f = "$x≷$" }, .{ .top = "5", .g = "CF", .f = "DSE" }, .{ .top = "6", .g = "F?", .f = "ISG" }, .{ .top = "$\\times$", .g = "$x=0$", .f = "$\\int_x^y$" } },
+    .{ .{ .top = "R/S", .g = "P/R", .f = "PSE" }, .{ .top = "GSB", .g = "RTN", .f = "Σ" }, .{ .top = "R↓", .g = "R↑", .f = "PRGM" }, .{ .top = "$x≷y$", .g = "RND", .f = "REG" }, .{ .top = "$\\gets$", .g = "$\\mathrm{CL}x$", .f = "PREFIX" }, .{ .top = "ENTER", .g = "$\\mathrm{LST}x$", .f = "RAN #" }, .{ .top = "1", .g = "→P", .f = "→R" }, .{ .top = "2", .g = "→H", .f = "→H.MS" }, .{ .top = "3", .g = "→DEG", .f = "→RAD" }, .{ .top = "$-$", .g = "TEST", .f = "$\\mathrm{Re}≷\\mathrm{Im}$" } },
+    .{ .{ .top = "ON" }, .{ .top = "f" }, .{ .top = "g" }, .{ .top = "STO", .g = "INT", .f = "FRAC" }, .{ .top = "RCL", .g = "MEM", .f = "USER" }, .{ .top = "" }, .{ .top = "0", .g = "$\\bar{x}$", .f = "$x!$" }, .{ .top = ".", .g = "$s$", .f = "$\\hat{y},r$" }, .{ .top = "Σ+", .g = "Σ−", .f = "L.R." }, .{ .top = "$+$", .g = "$\\mathrm{C}_{y,x}$", .f = "$\\mathrm{P}_{y,x}$" } },
 };
+
+/// The gold word over the CLEAR group (row 3, GSB to ←), in its own slot.
+const clear15 = .{ .row = 2, .first = 1, .last = 4, .word = "CLEAR" };
 
 /// A panel drawn out on the canvas at `at` (mm), then typed exactly: its
 /// name, origin, 128 × 62 mm and 3 mm margins.
@@ -770,48 +790,59 @@ fn make15cPanel(r: *Run, default: []const u8, name: []const u8, at: [2]f64, orig
 }
 
 /// Places the stamp chosen by `places` at a grid point by a click on it,
-/// or across two points by a drag.
-fn place(r: *Run, editing: []const u8, places: []const u8, pi: usize, c: u32, row: u32, span_down: bool) !void {
+/// or across two points by a drag (to the point `to` columns right and
+/// rows down).
+fn place(r: *Run, editing: []const u8, places: []const u8, pi: usize, c: u32, row: u32, to: [2]u32) !void {
     _ = editing;
     try r.choose("panel.editing.places", places);
     const at = api.gridPoint(pi, 0, c, row) orelse return error.NoGrid;
-    if (span_down) {
-        try r.drag(at, api.gridPoint(pi, 0, c, row + 1) orelse return error.NoGrid);
+    if (to[0] != 0 or to[1] != 0) {
+        try r.drag(at, api.gridPoint(pi, 0, c + to[0], row + to[1]) orelse return error.NoGrid);
     } else try r.clickAt(at);
 }
 
 fn make15c(r: *Run) !void {
     try r.key(.m, .none);
     try r.select("Styles");
-    try r.press("styles.package.libertinus");
-    try make15cStyle(r, "15C key", "1.9");
-    try make15cStyle(r, "15C g", "1.25");
-    try make15cStyle(r, "15C f", "1.4");
+    try r.press("styles.package.stix-two");
+    try make15cStyle(r, "15C key", "2.1");
+    try make15cStyle(r, "15C g", "1.1");
+    try make15cStyle(r, "15C f", "1.5");
+    try make15cStyle(r, "15C CLEAR", "1.0");
 
-    try makePlainPrototype(r, "15C key", "0.4");
-    try setTrack(r, "top", "15C key", "centre", .{ "0", "0", "0.7", "2.65" });
+    // The key: its top (4.9 mm) above its front face (2.1 mm). The white
+    // legend on the top, the blue one on the front face.
+    try makePlainPrototype(r, "15C key", "0");
+    try setTrack(r, "top", "15C key", "centre", .{ "0", "0", top15_inset, "2.1" });
     try addTrack(r, "top", 2, "g");
-    try setTrack(r, "g", "15C g", "centre", .{ "0", "0", "4.5", "0" });
+    try setTrack(r, "g", "15C g", "centre", .{ "0", "0", g15_inset, "0" });
 
-    try makePlainPrototype(r, "15C ENTER key", "0.4");
-    try setTrack(r, "top", "15C key", "centre", .{ "2.175", "2.175", "1", "2.65" });
+    // ENTER: as tall as a key and a row pitch; its word down the top.
+    try makePlainPrototype(r, "15C ENTER key", "0");
+    try setTrack(r, "top", "15C key", "centre", .{ "2.175", "2.175", "1", "2.1" });
     try r.choose("prototype.slot.top.runs", "down columns");
     try addTrack(r, "top", 2, "g");
-    try setTrack(r, "g", "15C g", "centre", .{ "0", "0", "17.2", "0" });
+    try setTrack(r, "g", "15C g", "centre", .{ "0", "0", enter_g15_inset, "0" });
 
     try makePlainPrototype(r, "15C gold legend", "0");
     try r.field("prototype.slot.top.name", "f");
     try setTrack(r, "f", "15C f", "centre", .{ "0", "0", "0", "0" });
+
+    try makePlainPrototype(r, "15C CLEAR", "0");
+    try r.field("prototype.slot.top.name", "clear");
+    try setTrack(r, "clear", "15C CLEAR", "centre", .{ "0", "0", "0", "0" });
 
     // The plate and the keys, side by side, 15 mm apart.
     try make15cPanel(r, "Panel1", "HP-15C plate", .{ 10, 10 }, "0");
     try make15cPanel(r, "Panel1", "HP-15C keys", .{ 60, 80 }, "143");
 
     // The plate's grid: a rectangular array (a Cartesian grid object, the
-    // keys centred in its cells), 10 × 4, dragged out over the plate, then
-    // typed exactly: 11.43 mm across, 12.7 mm down, its first cell's middle
-    // 12.565 mm in and 50 mm up (the cells 6.85 mm in from each side). Its
-    // holes (rounded rectangles, r 1 mm) and its gold legends.
+    // keys centred on its points), 10 × 4, dragged out over the plate, then
+    // typed exactly: 11.43 mm across, 12.7 mm down, its first point 12.565
+    // mm in and 50 mm up (the keycaps 6.85 mm in from each side less half
+    // a pitch). Its holes (the keycap and 0.25 mm round it, corners r 1 mm),
+    // its gold legends (above each keycap: from its edge 3 mm up, the
+    // pitch's width) and the CLEAR band (2.8 to 4.7 mm above the keycaps).
     try r.select("\"HP-15C plate\"");
     try r.press("tool.add-array");
     try r.field("array.columns", "10");
@@ -824,15 +855,20 @@ fn make15c(r: *Run) !void {
     try r.field("grid.first-point-up", "50");
     try r.press("grid.add-stamp.holes");
     try r.choose("grid.stamp.holes.prototype", "15C key");
-    try r.field("grid.stamp.holes.width", "8.5");
-    try r.field("grid.stamp.holes.height", "7.7");
+    try r.field("grid.stamp.holes.width", "8.2");
+    try r.field("grid.stamp.holes.height", "7.5");
     try r.choose("grid.stamp.holes.shape", "Rounded rectangle");
     try r.field("grid.stamp.holes.r", "1");
     try r.press("grid.add-stamp.legends");
     try r.choose("grid.stamp.legends.prototype", "15C gold legend");
     try r.field("grid.stamp.legends.width", "11");
-    try r.field("grid.stamp.legends.height", "2.4");
-    try r.field("grid.stamp.legends.offset-up", "5.15");
+    try r.field("grid.stamp.legends.height", "3");
+    try r.field("grid.stamp.legends.offset-up", "4.975");
+    try r.press("grid.add-stamp.legends");
+    try r.choose("grid.stamp.legends-2.prototype", "15C CLEAR");
+    try r.field("grid.stamp.legends-2.width", "7.7");
+    try r.field("grid.stamp.legends-2.height", "1.9");
+    try r.field("grid.stamp.legends-2.offset-up", "7.25");
 
     // The keys' grid follows the plate's; on it, the keys themselves.
     try r.choose("grid.add-stamp.follow-it-on", "HP-15C keys");
@@ -840,11 +876,11 @@ fn make15c(r: *Run) !void {
     try r.press("panel.grids.grid1");
     try r.press("grid.add-stamp.parts");
     try r.choose("grid.stamp.parts.prototype", "15C key");
-    try r.field("grid.stamp.parts.width", "8");
-    try r.field("grid.stamp.parts.height", "7.2");
+    try r.field("grid.stamp.parts.width", "7.7");
+    try r.field("grid.stamp.parts.height", "7");
 
-    // Placed point by point in panel editing, as the code placed them:
-    // row by row, a hole then its gold legend; ENTER over two rows.
+    // Placed point by point in panel editing: row by row, a hole then its
+    // gold legend; ENTER over two rows; CLEAR across four columns.
     const plate = api.panelNamed("HP-15C plate").?;
     const keys = api.panelNamed("HP-15C keys").?;
     try r.select("\"HP-15C plate\"");
@@ -853,9 +889,10 @@ fn make15c(r: *Run) !void {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
         if (c == 5 and rw == 3) continue;
-        try place(r, "HP-15C plate", "Holes", plate, c, rw, c == 5 and rw == 2);
-        if (k.f.len > 0) try place(r, "HP-15C plate", "Legends", plate, c, rw, false);
+        try place(r, "HP-15C plate", "Holes", plate, c, rw, if (c == 5 and rw == 2) .{ 0, 1 } else .{ 0, 0 });
+        if (k.f.len > 0) try place(r, "HP-15C plate", "Legends", plate, c, rw, .{ 0, 0 });
     };
+    try place(r, "HP-15C plate", "Legends 2", plate, clear15.first, clear15.row, .{ clear15.last - clear15.first, 0 });
     try r.press("panel.editing.leave-panel-editing");
     try r.select("\"HP-15C keys\"");
     try r.press("panel.edit");
@@ -863,7 +900,7 @@ fn make15c(r: *Run) !void {
         const c: u32 = @intCast(ci);
         const rw: u32 = @intCast(ri);
         if (c == 5 and rw == 3) continue;
-        try place(r, "HP-15C keys", "Parts", keys, c, rw, c == 5 and rw == 2);
+        try place(r, "HP-15C keys", "Parts", keys, c, rw, if (c == 5 and rw == 2) .{ 0, 1 } else .{ 0, 0 });
     };
     // ENTER picked (a click on it) and given its own prototype.
     try r.clickAt(api.gridPoint(keys, 0, 5, 2).?);
@@ -871,8 +908,9 @@ fn make15c(r: *Run) !void {
     try r.press("panel.editing.leave-panel-editing");
 
     // Fabrication: the plate black with its holes cut through and its gold
-    // legends inlaid; the keys black with white and blue legends inlaid.
-    // Made with a 0.2 mm nozzle: 0.4 mm cannot hold its legends.
+    // legends inlaid (the f legends and CLEAR); the keys black with white
+    // and blue legends inlaid. EverCalc's gold and blue. Made with a 0.2 mm
+    // nozzle: 0.4 mm cannot hold its legends.
     try r.select("\"HP-15C plate\"");
     try r.choose("panel.fab.process", "Generic FDM, 0.2 mm nozzle (built in)");
     try r.field("panel.fab.thickness", "2");
@@ -885,9 +923,8 @@ fn make15c(r: *Run) !void {
     try r.press("panel.fab.layer.2.through-the-whole-part");
     try r.press("panel.fab.add-layer");
     try r.field("panel.fab.layer.3.name", "Gold legends");
-    try r.choose("panel.fab.layer.3.slot", "f");
     try r.field("panel.fab.layer.3.colour-name", "gold");
-    try r.field("panel.fab.layer.3.colour", "#c9a227");
+    try r.field("panel.fab.layer.3.colour", "#c8961e");
     try r.select("\"HP-15C keys\"");
     try r.choose("panel.fab.process", "Generic FDM, 0.2 mm nozzle");
     try r.field("panel.fab.thickness", "5");
@@ -901,7 +938,7 @@ fn make15c(r: *Run) !void {
     try r.field("panel.fab.layer.3.name", "Blue legends");
     try r.choose("panel.fab.layer.3.slot", "g");
     try r.field("panel.fab.layer.3.colour-name", "blue");
-    try r.field("panel.fab.layer.3.colour", "#3a7bd5");
+    try r.field("panel.fab.layer.3.colour", "#3a7fc0");
 
     // The legends: a sheet over the keys' grid, its keys named by their
     // place, a table imported into it.
@@ -911,11 +948,12 @@ fn make15c(r: *Run) !void {
     var out: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
     defer out.deinit();
     const w = &out.writer;
-    try w.writeAll("name,top,g,f\r\n");
+    try w.writeAll("name,top,g,f,clear\r\n");
     for (keys15, 0..) |row, ri| for (row, 0..) |k, ci| {
         if (ci == 5 and ri == 3) continue;
         try w.print("R{d}C{d}", .{ ri + 1, ci + 1 });
-        for ([_][]const u8{ k.top, k.g, k.f }) |cell| {
+        const clear = if (ri == clear15.row and ci == clear15.first) clear15.word else "";
+        for ([_][]const u8{ k.top, k.g, k.f, clear }) |cell| {
             try w.writeByte(',');
             if (std.mem.indexOfAny(u8, cell, ",\"") != null) {
                 try w.writeByte('"');
@@ -939,11 +977,20 @@ fn make15c(r: *Run) !void {
     try r.frames(3);
 }
 
+/// The white legend's track: from the keycap's back edge down to the front
+/// face. The blue one's: the front face. ENTER's blue: its front face, a
+/// row pitch lower.
+const top15_inset = "1.175";
+const g15_inset = "5.125";
+const enter_g15_inset = "17.825";
+
 test "the HP-15C, made in the GUI" {
     var r = try Run.start();
     defer r.stop();
     try make15c(&r);
     const m = api.model();
+    // Saved first: a document to make the example from when it changes.
+    try saveAs(&r, scratch ++ "/hp15c.graven");
     try sameAsExample(m, "examples/hp15c.graven", &.{ "HP-15C plate", "HP-15C keys" });
     // Both panels made with the one 0.2 mm profile, kept in the document.
     try std.testing.expectEqual(@as(usize, 1), m.processes.items.len);
@@ -952,7 +999,6 @@ test "the HP-15C, made in the GUI" {
         try std.testing.expectEqual(0.2, pr.params.fdm.nozzle);
         try std.testing.expectEqual(@as(?f64, 0.1), pr.limits().layer);
     }
-    try saveAs(&r, scratch ++ "/hp15c.graven");
 }
 
 test "a process profile added from the built-ins, edited, its limits overridden and given back" {
@@ -1256,6 +1302,78 @@ fn typeInto(r: *Run, tag: []const u8, text: []const u8) !void {
     try r.frames(2);
 }
 
+test "the log: what is said collects, a repeat counted; the checks' counts noted as they change; Clear empties it" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.frames(3);
+    const before = api.logEntries().len;
+    // Nothing to undo, twice: one message, counted twice.
+    try r.key(.z, .lcontrol);
+    try r.frames(2);
+    try r.key(.z, .lcontrol);
+    try r.frames(2);
+    var e = api.logEntries();
+    try std.testing.expectEqual(before + 1, e.len);
+    try std.testing.expectEqualStrings("Nothing to undo.", e[e.len - 1].text);
+    try std.testing.expectEqual(@as(u32, 2), e[e.len - 1].count);
+    // A panel with a track, then the panel made narrower than its track:
+    // the track reaches past its outline, a warning in the log.
+    try r.click("tree/untitled/Canvas, mm");
+    try r.click("tool.add-panel");
+    try r.drag(try screen(.{ 10, 10 }), try screen(.{ 80, 50 }));
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    try r.press("tool.layout-single-track");
+    try r.drag(try screen(.{ 15, 20 }), try screen(.{ 75, 21 }));
+    try r.frames(3);
+    try r.click("tree/untitled/Canvas, mm/Panel1");
+    try r.field("panel.width", "30");
+    try r.frames(4);
+    e = api.logEntries();
+    var warned = false;
+    for (e) |x| if (x.level == .warning and std.mem.indexOf(u8, x.text, "past their panel's outline") != null) {
+        warned = true;
+    };
+    if (!warned) for (e) |x| std.debug.print("log: {s} {s}\n", .{ @tagName(x.level), x.text });
+    try std.testing.expect(warned);
+    api.showLog(true);
+    try r.frames(3);
+    try r.press("log.clear");
+    try r.frames(2);
+    try std.testing.expectEqual(@as(usize, 0), api.logEntries().len);
+}
+
+test "a style's font not installed is a problem: logged once, its fixes offered; the first opens the Fonts window on the style" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try r.frames(3);
+    const m = api.model();
+    const st = try m.addStyle("Missing", .{ .cap_height = 3 });
+    try m.setStyleFace(st, "text", .{ .family = "Nowhere Sans", .style = "Regular" });
+    m.revision += 1;
+    try r.frames(4);
+    try std.testing.expectEqual(@as(usize, 1), api.problemCount());
+    var logged: usize = 0;
+    for (api.logEntries()) |e| if (e.problem != 0 and std.mem.indexOf(u8, e.text, "Nowhere Sans") != null) {
+        logged += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), logged);
+    // Found again after another change: not logged again.
+    m.revision += 1;
+    try r.frames(3);
+    logged = 0;
+    for (api.logEntries()) |e| if (e.problem != 0) {
+        logged += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), logged);
+    api.openProblem(0);
+    try r.frames(2);
+    try r.press("problem.fix.0");
+    try r.frames(2);
+    try std.testing.expect(api.fontsWindowOpen());
+}
+
 test "a field changes nothing while typed; leaving it or Enter accepts, one undo step each" {
     var r = try Run.start();
     defer r.stop();
@@ -1421,6 +1539,8 @@ test "the discovery path: a track's groups and elements, and which are shown now
 test {
     // The element registry's own tests (ids, the discovery walk).
     _ = @import("elements.zig");
+    // The glyph atlas's own tests (eviction).
+    _ = @import("glyphs.zig");
 }
 
 test "every button in the registry is an action with a handler" {
@@ -2035,6 +2155,33 @@ test "reveal: a choice in the Browser brings it into view, moving only as much a
     try r.run("view.reveal");
     try r.frames(2);
     try std.testing.expect(inside(api.contextOnScreen().?));
+}
+
+test "reveal: a manufacturing view stays when the Browser chooses what it shows, and reveals it there" {
+    var r = try Run.start();
+    defer r.stop();
+    try r.key(.m, .none);
+    try openExample(&r, "HP-15C keypad");
+    try r.select("Plans.Plan1");
+    try r.press("plan.open-in-a-manufacturing-view");
+    try r.frames(2);
+    try std.testing.expectEqual(.manufacture, api.activeView().kind);
+    const v0 = api.activeView();
+    // Looking far off: the keys' panel, chosen in the Browser, is brought
+    // in, the zoom kept, the plan's view still the one shown.
+    api.setActiveLook(v0.cx + 3000, v0.cy, v0.ppm);
+    try r.frames(2);
+    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
+    try r.frames(3);
+    const v1 = api.activeView();
+    try std.testing.expectEqual(.manufacture, v1.kind);
+    try std.testing.expect(v1.ppm == v0.ppm);
+    try std.testing.expect(@abs(v1.cx - v0.cx) < 1000);
+    // Chosen again, already in view: nothing moves.
+    try r.click("tree/untitled/Canvas, mm/HP-15C keys");
+    try r.frames(3);
+    const v2 = api.activeView();
+    try std.testing.expect(v2.cx == v1.cx and v2.cy == v1.cy and v2.ppm == v1.ppm);
 }
 
 test "reveal: a Browser choice brings up the view that shows it, forwarding the window's tab for it" {
