@@ -134,11 +134,19 @@ const Resolver = struct {
             try s.note(style, want, null);
             return null;
         };
-        const id = if (s.loaded.get(hit.index)) |id| id else blk: {
-            const f = s.catalog.load(s.catalog.ctx, hit.index) orelse {
-                try s.note(style, want, null);
-                return null;
-            };
+        const id = (try s.load(hit.index)) orelse {
+            try s.note(style, want, null);
+            return null;
+        };
+        if (!hit.exact) try s.note(style, want, s.catalog.names[hit.index]);
+        return id;
+    }
+
+    /// Catalog face `index` in the face table (loaded once); null when it
+    /// cannot be loaded.
+    fn load(s: *Resolver, index: usize) Allocator.Error!?FaceId {
+        return if (s.loaded.get(index)) |id| id else blk: {
+            const f = s.catalog.load(s.catalog.ctx, index) orelse return null;
             // The same face as one in the table (the default, say): its id.
             const id: FaceId = for (s.r.faces.items, 0..) |e, i| {
                 if (e == f) break @intCast(i);
@@ -146,11 +154,37 @@ const Resolver = struct {
                 try s.r.faces.append(s.r.gpa, f);
                 break :id @intCast(s.r.faces.items.len - 1);
             };
-            try s.loaded.put(s.r.gpa, hit.index, id);
+            try s.loaded.put(s.r.gpa, index, id);
             break :blk id;
         };
-        if (!hit.exact) try s.note(style, want, s.catalog.names[hit.index]);
-        return id;
+    }
+
+    /// The face for treatment `t` (bold, italic, bold italic) when a style
+    /// names none: of its text face `text`'s family, as `fontspec` derives
+    /// it (bold 700, italic slanted). Null when the family has no face that
+    /// is bolder or slanted as asked (glyphic then makes it, or falls back).
+    fn derived(s: *Resolver, text: FontName, t: glyphic.fontspec.Treatment) Allocator.Error!?FaceId {
+        const names = s.catalog.names;
+        var buf: [512]glyphic.fontspec.Described = undefined;
+        var idx: [512]usize = undefined;
+        var n: usize = 0;
+        var text_d: ?glyphic.fontspec.Described = null;
+        for (names, 0..) |nm, i| {
+            if (!std.ascii.eqlIgnoreCase(nm.family, text.family)) continue;
+            if (n == buf.len) break;
+            buf[n] = if (s.catalog.described) |d| d[i] else glyphic.fontspec.describe(nm.family, nm.style);
+            if (nm.eql(text)) text_d = buf[n];
+            idx[n] = i;
+            n += 1;
+        }
+        const td = text_d orelse glyphic.fontspec.describe(text.family, text.style);
+        const want = t.derived(.{ .family = text.family, .weight = td.weight, .slant = td.slant, .width = td.width }) orelse return null;
+        const m = glyphic.fontspec.match(buf[0..n], want) orelse return null;
+        const got = buf[m.index];
+        const bold_ok = want.weight <= td.weight or got.weight > td.weight;
+        const slant_ok = want.slant == .upright or got.slant != .upright;
+        if (!bold_ok or !slant_ok) return null;
+        return s.load(idx[m.index]);
     }
 
     fn note(s: *Resolver, style: StyleId, want: FontName, got: ?FontName) Allocator.Error!void {
@@ -164,6 +198,13 @@ const Resolver = struct {
 /// base). A font not found leaves its role out. The faces stay the app's;
 /// `Resolved` holds pointers to them.
 pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default: *font.Face) Allocator.Error!Resolved {
+    return resolveWith(gpa, m, catalog, default, null);
+}
+
+/// As `resolve`, the default face known by name (`default_name`): a style
+/// set in it (one that names no text face and has no base) takes its bold
+/// and italic from its family.
+pub fn resolveWith(gpa: Allocator, m: *const model.Model, catalog: Catalog, default: *font.Face, default_name: ?FontName) Allocator.Error!Resolved {
     var r: Resolved = .{ .gpa = gpa };
     errdefer r.deinit();
     try r.faces.append(gpa, default);
@@ -173,10 +214,29 @@ pub fn resolve(gpa: Allocator, m: *const model.Model, catalog: Catalog, default:
     defer gpa.free(starts);
     for (m.styles.items, starts) |st, *start| {
         start.* = r.roles.items.len;
+        var text: ?FontName = null;
         for (st.faces.items) |f| {
+            if (std.mem.eql(u8, f.role, "text")) text = f.font;
             const id = (try s.face(st.id, f.font)) orelse continue;
             try r.roles.append(gpa, .{ .role = f.role, .face = id });
         }
+        // Bold, italic and bold italic the style names none for: from its
+        // text face's family.
+        // A style with a math face takes its italic from it (variables
+        // in the math font's italic), so only bold is derived there.
+        const has_math = for (st.faces.items) |f| {
+            if (std.mem.eql(u8, f.role, "math")) break true;
+        } else false;
+        if (text == null and st.base == .none) text = default_name;
+        if (text) |tf| for ([_]glyphic.fontspec.Treatment{ .bold, .italic, .bold_italic }) |t| {
+            if (has_math and t != .bold) continue;
+            const named = for (st.faces.items) |f| {
+                if (std.mem.eql(u8, f.role, t.role())) break true;
+            } else false;
+            if (named) continue;
+            const id = (try s.derived(tf, t)) orelse continue;
+            try r.roles.append(gpa, .{ .role = t.role(), .face = id });
+        };
     }
     for (m.styles.items, starts, 0..) |st, start, i| {
         const end = if (i + 1 < starts.len) starts[i + 1] else r.roles.items.len;
@@ -345,8 +405,34 @@ test "fonts not found as named are substituted and reported" {
     try testing.expectEqual(2, r.substitutions.items.len);
     try testing.expectEqualStrings("Regular", r.substitutions.items[0].got.?.style);
     try testing.expectEqual(null, r.substitutions.items[1].got);
-    // The math role is left out.
-    try testing.expectEqual(1, r.of(st).len);
+    // The math role is left out (bold is taken from the text face's
+    // family: the test family has a Bold).
+    for (r.of(st)) |rf| try testing.expect(!std.mem.eql(u8, rf.role, "math"));
+}
+
+test "a style that names no bold or italic takes them from its text face's family" {
+    var t = try TestFonts.init();
+    defer t.deinit();
+    var m: model.Model = .init(testing.allocator);
+    defer m.deinit();
+    const st = try m.addStyle("Legend", .{ .cap_height = 3 });
+    try m.setStyleFace(st, "text", .{ .family = "Graven Test", .style = "Regular" });
+    var r = try resolve(testing.allocator, &m, t.catalog(), t.faces[0]);
+    defer r.deinit();
+    var bold = false;
+    for (r.of(st)) |rf| if (std.mem.eql(u8, rf.role, "bold")) {
+        bold = true;
+    };
+    try testing.expect(bold);
+    // Set in the default face, known by name: the same.
+    const plain = try m.addStyle("Plain", .{ .cap_height = 3 });
+    var r2 = try resolveWith(testing.allocator, &m, t.catalog(), t.faces[0], .{ .family = "Graven Test", .style = "Regular" });
+    defer r2.deinit();
+    bold = false;
+    for (r2.of(plain)) |rf| if (std.mem.eql(u8, rf.role, "bold")) {
+        bold = true;
+    };
+    try testing.expect(bold);
 }
 
 test "a label cache given resolved fonts keeps them when the model syncs it again" {
