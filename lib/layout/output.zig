@@ -77,7 +77,9 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     const w = &out.writer;
-    const box = placed.bounds;
+    // A panel's drawing is the panel: its content is clipped to its edge
+    // (below), so the edge bounds it.
+    const box = if (placed.edge) |e| e.bounds() else placed.bounds;
     const x0 = box.x0 - opts.margin;
     const y1 = box.y1 + opts.margin;
     const width = box.width() + 2 * opts.margin;
@@ -108,7 +110,16 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     for (placed.art) |pa| if (!pa.cutout) try shapes.appendSlice(a, pa.shapes);
     // Paragraph rules, in their pens' colours.
     for (placed.rules) |r| try shapes.appendSlice(a, r.shapes);
-    for (shapes.items) |s| {
+    // Whatever lies over a panel is clipped to its edge, as made (fab.zig):
+    // fills and glyphs exactly (geom.boolean.clip), a stroke reaching the
+    // edge by the panel's outline as a clip path.
+    var clip_written = false;
+    for (shapes.items) |s0| {
+        var s = s0;
+        if (placed.edge) |e| {
+            const kept = try geom.boolean.clip(a, &.{s.outline}, e);
+            s.outline = if (kept.len > 0) kept[0] else continue;
+        }
         if (s.outline.contours.len == 0) continue;
         var fill_buf: [32]u8 = undefined;
         const fill: []const u8 = switch (s.paint.fill) {
@@ -124,7 +135,22 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
                 break :blk try std.fmt.bufPrint(&fill_buf, "url(#g{d})", .{gradients - 1});
             },
         };
+        // A stroke reaching the edge: clipped by the panel's outline.
+        const clipped = if (placed.edge) |pe| blk: {
+            if (s.paint.edge == null) break :blk false;
+            const hw = s.paint.edge_width / 2;
+            const ob = s.outline.bounds();
+            if (!geom.boolean.touches(pe, .{ .x0 = ob.x0 - hw, .y0 = ob.y0 - hw, .x1 = ob.x1 + hw, .y1 = ob.y1 + hw })) break :blk false;
+            if (!clip_written) {
+                try w.writeAll("<clipPath id=\"panel-edge\"><path d=\"");
+                try pathData(w, pe);
+                try w.writeAll("\"/></clipPath>\n");
+                clip_written = true;
+            }
+            break :blk true;
+        } else false;
         try w.print("<path fill=\"{s}\"", .{fill});
+        if (clipped) try w.writeAll(" clip-path=\"url(#panel-edge)\"");
         if (s.paint.edge) |e| {
             var b: [16]u8 = undefined;
             try w.print(" stroke=\"{s}\" stroke-width=\"{d}\"", .{ try colour(&b, e), s.paint.edge_width });
@@ -139,7 +165,9 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
         const outlines = try l.render.outlines(a, faces);
         for (outlines) |o| {
             const moved = try o.transformed(a, .translate(l.origin.x, l.origin.y));
-            try path(w, moved);
+            if (placed.edge) |e| {
+                for (try geom.boolean.clip(a, &.{moved}, e)) |k| try path(w, k);
+            } else try path(w, moved);
         }
     };
     try w.writeAll("</g>\n</g>\n</svg>\n");

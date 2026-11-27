@@ -51,7 +51,7 @@ pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const pl
             const n = d / lh;
             if (@abs(n - @round(n)) > 1e-6) try off.append(a, li);
         };
-        const pieces = try source(a, m, panel, placed, faces, l.source);
+        const pieces = try within(a, m, panel, placed, l.source, try source(a, m, panel, placed, faces, l.source));
         if (pieces.len == 0) continue;
         const z = extent(fab, l, lo - 1, hi + 1);
         // The active plan's colour for it, where it gives one; else the
@@ -170,19 +170,33 @@ fn extent(fab: model.Fab, l: model.FabLayer, lo: f64, hi: f64) [2]f64 {
     };
 }
 
+/// The panel's outline: its edge as placed, else its rectangle.
+fn edgeOf(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed) !geom.Outline {
+    if (placed.edge) |e| return e;
+    const p = m.panels.items[panel];
+    const shapes = try art.primitive(a, "edge", .{ .rect = .{ .w = p.w, .h = p.h } }, .{});
+    return shapes[0].outline;
+}
+
+/// A layer's pieces kept within the panel's outline: whatever the panel
+/// holds (text, captions, ink, fills, figures, parts) is clipped to its
+/// edge, so nothing is made beyond the part (a caption hanging off a panel
+/// would print in the air). One step for every kind of content; the edge
+/// itself and the cutouts (holes cut from it) are left as they are.
+fn within(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, src: model.FabSource, pieces: []const geom.Outline) ![]const geom.Outline {
+    switch (src) {
+        .edge, .cutouts => return pieces,
+        .text, .ink, .fills, .parts => {},
+    }
+    if (pieces.len == 0) return pieces;
+    return geom.boolean.clip(a, pieces, try edgeOf(a, m, panel, placed));
+}
+
 /// The outlines source `src` takes from the placed part.
 fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face, src: model.FabSource) ![]const geom.Outline {
     var out: std.ArrayList(geom.Outline) = .empty;
     switch (src) {
-        .edge => {
-            if (placed.edge) |e| {
-                try out.append(a, e);
-            } else {
-                const p = m.panels.items[panel];
-                const shapes = try art.primitive(a, "edge", .{ .rect = .{ .w = p.w, .h = p.h } }, .{});
-                try out.append(a, shapes[0].outline);
-            }
-        },
+        .edge => try out.append(a, try edgeOf(a, m, panel, placed)),
         .cutouts => {
             for (placed.art) |pa| if (pa.cutout) for (pa.shapes) |sh| try out.append(a, sh.outline);
             for (placed.tiles) |t| if (t.grid == .hole) for (t.shapes) |sh| try out.append(a, sh.outline);
