@@ -6,12 +6,20 @@
     python3 scripts/icons.py sheet ATLAS.json OUT.png   # a contact sheet
     python3 scripts/icons.py ribbon ATLAS.json OUT.png  # as the ribbon draws them
 
-The style rules, as the owner chose them (blueprint, "Icon style and ribbon
-keys"): outlined in one ink at a thin stroke, on a light ground; regions
-filled in one solid colour by the kind of thing they show (KIND); a dashed
-outline for the container a tool works inside (what it makes is solid); a
-ringed + for a tool that adds; the lowest band left light for the key's
-fade.
+The style rules: style B of the icon style guide, the owner's choice
+(2026-11-27; https://claude.ai/artifact/5rY6HHY3TZef3JNcbsZSoS, blueprint
+"Icon style guide: style B"). Every filled region outlined in the one ink,
+1.35 on the 24 grid, round caps and joins; gaps of at least 1.5 units
+between inks, dashes 2 on 1.5 off. Fills flat, each one of six slots named
+by role (SLOT), at most three chromatic slots an icon: paper (knock-outs,
+blank sheets, the ring of a +), neutral (things with no part in the
+action), base (what a tool works in: containers, views), subject (what it
+makes or acts on: tracks, text, tiles), mark (drawn geometry, points,
+attention), focus (selection, choosing). A dashed outline for the
+container a tool works inside (what it makes is solid); a ringed + for a
+tool that adds; the lowest band (below LIGHT_BELOW) left light for the
+key's fade. On a dark ground the ink is drawn light (DARK_INK) and the
+slots take the deeper DARK values (the JSON's `schemes.dark`).
 
 The icon file (the owner's choice, 2026-11-22): one PNG and its JSON, the
 JSON in msdf-atlas-gen's layout (`atlas`, `glyphs` with `atlasBounds`), its
@@ -21,7 +29,7 @@ type Graven's own ("graven-ink"). Each icon is a cell of the PNG.
        detail is not asked of it. Two kinds of colour are read specially,
        both named in the JSON: the transparent key (saturated magenta), where
        whatever lies behind the icon shows; and the override keys, each a
-       named slot ("container", "track" ...) whose colour the program may
+       named slot ("base", "subject" ...) whose colour the program may
        replace (a theme, a colour-blind set). An override key is the slot's
        default colour itself, so the PNG looks right as it is.
   A    the ink, one colour chosen when drawing: 0.5 - d / range, d the
@@ -38,18 +46,29 @@ shrinking, worked out per texel and averaged, so thin ink keeps its weight).
 """
 import json, math, os, sys
 
-STROKE = 1.2  # on the 24-unit grid
+STROKE = 1.35  # on the 24-unit grid
 INK = "#2a2530"
 LIGHT_BELOW = 19
-KIND = {
-    "container": "#8fd1c3",
-    "track": "#f4c95d",
-    "drawn": "#f29b6b",
-    "guide": "#b8a2e3",
-    "select": "#8fc1f0",
-    "view": "#c9d6a3",
-    "layer": "#d6d3cc",
-    "paper": "#ffffff",
+# The fills' slots, by role, and their default colours (each colour is the
+# slot's override key in the file).
+SLOT = {
+    "paper": "#fbfaf7",
+    "neutral": "#d6d3cc",
+    "base": "#8fd1c3",
+    "subject": "#f4c95d",
+    "mark": "#f0907a",
+    "focus": "#8fc1f0",
+}
+# On a dark ground (the panes): the ink light, the slots deeper. A first
+# set, to be tuned on the panes.
+DARK_INK = "#ece6f2"
+DARK = {
+    "paper": "#3e3150",
+    "neutral": "#5d5468",
+    "base": "#2f7e70",
+    "subject": "#a77f12",
+    "mark": "#b14a33",
+    "focus": "#2a6fae",
 }
 KEY = "#ff00ff"  # transparent
 
@@ -145,7 +164,7 @@ def dashes(points, on=2.0, off=1.5):
     return out
 
 
-def container(x, y, w, h, kind="container"):
+def container(x, y, w, h, kind="base"):
     """The container a tool works inside: filled, its outline dashed."""
     p = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
     return [("fill", p, kind)] + dashes(closed(p))
@@ -218,36 +237,36 @@ def ring(cx, cy, r, a0=0.0, a1=2 * math.pi, n=32):
 
 def dot(x, y, r=1.7):
     """A sketch point."""
-    return circle(x, y, r, "drawn")
+    return circle(x, y, r, "mark")
 
 
 ICONS = {
     # Containers made on the canvas.
-    "add-panel": rect(2.5, 3, 15, 13, "container") + adds(),
-    "add-rows": container(2.5, 2, 19, 16) + rect(4.5, 4, 15, 3.4, "track", 0.6) + rect(4.5, 8.3, 15, 3.4, "track", 0.6) + rect(4.5, 12.6, 15, 3.4, "track", 0.6),
-    "add-columns": container(2.5, 2, 19, 16) + rect(4.5, 4, 3.4, 12, "track", 0.6) + rect(10.3, 4, 3.4, 12, "track", 0.6) + rect(16.1, 4, 3.4, 12, "track", 0.6),
-    "add-track": rect(2, 7.5, 14, 4.5, "track", 0.8) + arrow(17, 9.75, 22.5, 9.75),
-    "fit-to-tiles": container(2.5, 3, 19, 5.5) + rect(2.5, 3, 9, 5.5, "track", 0.6) + container(2.5, 10.5, 19, 5.5) + rect(2.5, 10.5, 13, 5.5, "track", 0.6) + arrow(21, 5.75, 13, 5.75) + arrow(21, 13.25, 17, 13.25),
+    "add-panel": rect(2.5, 3, 15, 13, "base") + adds(),
+    "add-rows": container(2.5, 2, 19, 16) + rect(4.5, 4, 15, 3.4, "subject", 0.6) + rect(4.5, 8.3, 15, 3.4, "subject", 0.6) + rect(4.5, 12.6, 15, 3.4, "subject", 0.6),
+    "add-columns": container(2.5, 2, 19, 16) + rect(4.5, 4, 3.4, 12, "subject", 0.6) + rect(10.3, 4, 3.4, 12, "subject", 0.6) + rect(16.1, 4, 3.4, 12, "subject", 0.6),
+    "add-track": rect(2, 7.5, 14, 4.5, "subject", 0.8) + arrow(17, 9.75, 22.5, 9.75),
+    "fit-to-tiles": container(2.5, 3, 19, 5.5) + rect(2.5, 3, 9, 5.5, "subject", 0.6) + container(2.5, 10.5, 19, 5.5) + rect(2.5, 10.5, 13, 5.5, "subject", 0.6) + arrow(21, 5.75, 13, 5.75) + arrow(21, 13.25, 17, 13.25),
     # Guides.
-    "construction-line": dashes([(1.5, 16.5), (22.5, 3.5)], 2.4, 1.8) + circle(7, 13.1, 1.9, "guide") + circle(17, 6.9, 1.9, "guide"),
+    "construction-line": dashes([(1.5, 16.5), (22.5, 3.5)], 2.4, 1.8) + circle(7, 13.1, 1.9, "mark") + circle(17, 6.9, 1.9, "mark"),
     # The view's layers.
-    "layers": polygon([(12, 2), (21, 6.5), (12, 11), (3, 6.5)], "layer") + polyline([(3, 10), (12, 14.5), (21, 10)]) + polyline([(3, 13.5), (12, 18), (21, 13.5)]),
+    "layers": polygon([(12, 2), (21, 6.5), (12, 11), (3, 6.5)], "neutral") + polyline([(3, 10), (12, 14.5), (21, 10)]) + polyline([(3, 13.5), (12, 18), (21, 13.5)]),
     # The view: what is chosen, framed.
-    "zoom-to-context": [("fill", [(3, 2), (21, 2), (21, 17), (3, 17)], "view")] + corners(3, 2, 21, 17, 4) + rect(8, 6.5, 8, 6, "select", 0.8),
+    "zoom-to-context": [("fill", [(3, 2), (21, 2), (21, 17), (3, 17)], "base")] + corners(3, 2, 21, 17, 4) + rect(8, 6.5, 8, 6, "focus", 0.8),
     # Choosing: a container's boundary (haloed), an area.
-    "select-boundaries": [("fill", rounded(1.2, 1.2, 17.6, 15.6, 2.4), "select")] + rect(3, 3, 14, 12, "container") + rect(5, 7.2, 10, 3.6, "track", 0.6) + pointer(15.5, 9.5),
-    "select-area": container(3, 2.5, 15, 12, "select") + pointer(15.5, 9.5),
+    "select-boundaries": [("fill", rounded(1.2, 1.2, 17.6, 15.6, 2.4), "focus")] + rect(3, 3, 14, 12, "base") + rect(5, 7.2, 10, 3.6, "subject", 0.6) + pointer(15.5, 9.5),
+    "select-area": container(3, 2.5, 15, 12, "focus") + pointer(15.5, 9.5),
     # Sketching inside a sketch: one made; a shape drawn; constrained.
-    "new-sketch": container(2.5, 2.5, 14.5, 13, "paper") + curve([(4.5, 12.5), (6, 6), (10, 5), (12, 10), (15, 6.5)]) + circle(15, 6.5, 1.5, "drawn") + circle(4.5, 12.5, 1.5, "drawn") + adds(),
-    "add-shape": circle(7.5, 7.5, 4.5, "drawn") + rect(9.5, 8.5, 7, 7, "drawn", 0.4) + adds(),
+    "new-sketch": container(2.5, 2.5, 14.5, 13, "paper") + curve([(4.5, 12.5), (6, 6), (10, 5), (12, 10), (15, 6.5)]) + circle(15, 6.5, 1.5, "mark") + circle(4.5, 12.5, 1.5, "mark") + adds(),
+    "add-shape": circle(7.5, 7.5, 4.5, "mark") + rect(9.5, 8.5, 7, 7, "mark", 0.4) + adds(),
     # Text: a style (a line of text set in it, on its track).
-    "text-style": rect(2.5, 9.5, 19, 6.5, "track", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
-    "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "drawn") + circle(18, 9, 1.8, "drawn") + dimension((4, 15), (18, 9), 4.2),
+    "text-style": rect(2.5, 9.5, 19, 6.5, "subject", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
+    "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "mark") + circle(18, 9, 1.8, "mark") + dimension((4, 15), (18, 9), 4.2),
     # Panes, each named by its official name ("pane-" + its id): drawn in
     # its heading and on its tab, so a pane is known at a glance wherever
     # it is docked.
-    "pane-browser": rect(2.5, 2.5, 9, 4.5, "container", 0.8) + polyline([(5.5, 7), (5.5, 16.5), (9, 16.5)]) + line(5.5, 11.5, 9, 11.5) + rect(9, 9.25, 12.5, 4.5, "track", 0.8) + rect(9, 14.25, 12.5, 4.5, "track", 0.8),
-    "pane-properties": rect(3, 2, 18, 17.5, "paper", 1.2) + line(5.5, 6, 10, 6) + rect(12, 4.25, 7, 3.5, "select", 0.5) + line(5.5, 10.75, 10, 10.75) + rect(12, 9, 7, 3.5, "select", 0.5) + line(5.5, 15.5, 10, 15.5) + rect(12, 13.75, 7, 3.5, "select", 0.5),
+    "pane-browser": rect(2.5, 2.5, 9, 4.5, "base", 0.8) + polyline([(5.5, 7), (5.5, 16.5), (9, 16.5)]) + line(5.5, 11.5, 9, 11.5) + rect(9, 9.25, 12.5, 4.5, "subject", 0.8) + rect(9, 14.25, 12.5, 4.5, "subject", 0.8),
+    "pane-properties": rect(3, 2, 18, 17.5, "paper", 1.2) + line(5.5, 6, 10, 6) + rect(12, 4.25, 7, 3.5, "focus", 0.5) + line(5.5, 10.75, 10, 10.75) + rect(12, 9, 7, 3.5, "focus", 0.5) + line(5.5, 15.5, 10, 15.5) + rect(12, 13.75, 7, 3.5, "focus", 0.5),
     "pane-expression-bar": rect(1.5, 6, 21, 9, "paper", 1.2) + polyline([(4, 11), (5.5, 10.2), (7, 13), (9, 8.2), (14, 8.2)]) + line(10, 10, 13, 13) + line(13, 10, 10, 13) + line(16.5, 8, 16.5, 13.2),
     "pane-log": rect(4, 2, 16, 17.5, "paper", 1.2) + dot(7, 6.5, 1.1) + line(9.5, 6.5, 17.5, 6.5) + dot(7, 10.75, 1.1) + line(9.5, 10.75, 16, 10.75) + dot(7, 15, 1.1) + line(9.5, 15, 17.5, 15),
     # Sketch geometry, as Properties names a constraint's objects.
@@ -257,13 +276,13 @@ ICONS = {
     "geo-arc": ring(12, 13, 8, math.pi, 2 * math.pi, 16) + dot(4, 13) + dot(20, 13) + dot(12, 13, 1.3),
     "geo-line": dashes([(2, 18), (22, 4)], 2.4, 1.6),
     "geo-ray": dot(4, 16) + arrow(4, 16, 21, 5),
-    "geo-edge": [("fill", [(4, 4), (20, 4), (20, 18), (4, 18)], "container")] + line(4, 4, 4, 18) + dashes([(4, 4), (20, 4), (20, 18), (4, 18)], 2, 1.5),
+    "geo-edge": [("fill", [(4, 4), (20, 4), (20, 18), (4, 18)], "base")] + line(4, 4, 4, 18) + dashes([(4, 4), (20, 4), (20, 18), (4, 18)], 2, 1.5),
     # Constraint kinds.
     "con-coincident": line(3, 17, 12, 10) + line(12, 10, 21, 15) + dot(12, 10, 2.4),
     "con-horizontal": line(4, 12, 20, 12) + dot(4, 12) + dot(20, 12) + line(12, 5, 12, 8),
     "con-vertical": line(12, 3, 12, 19) + dot(12, 3) + dot(12, 19) + line(5, 11, 8, 11),
     "con-on-object": ring(12, 20, 13, math.pi * 1.15, math.pi * 1.85, 16) + dot(12, 7, 2.2),
-    "con-locked": rect(6, 10, 12, 9, "drawn", 1.0) + ring(12, 10, 4, math.pi, 2 * math.pi, 12) + line(12, 13.5, 12, 15.5),
+    "con-locked": rect(6, 10, 12, 9, "mark", 1.0) + ring(12, 10, 4, math.pi, 2 * math.pi, 12) + line(12, 13.5, 12, 15.5),
     "con-distance": dot(4, 16) + dot(20, 8) + dimension((4, 16), (20, 8), 3.5),
     "con-distance-x": dot(4, 16) + dot(20, 16) + line(4, 14, 4, 6) + line(20, 14, 20, 6) + arrow(12, 8, 4, 8, 2.2) + arrow(12, 8, 20, 8, 2.2),
     "con-distance-y": dot(6, 3.5) + dot(6, 18.5) + line(8, 3.5, 18, 3.5) + line(8, 18.5, 18, 18.5) + arrow(16, 11, 16, 3.5, 2.2) + arrow(16, 11, 16, 18.5, 2.2),
@@ -288,7 +307,7 @@ def to_svg(parts):
     d = lambda p: "M" + " L".join(f"{x:.2f} {y:.2f}" for x, y in p)
     for part in parts:
         if part[0] == "fill":
-            out.append(f'<path d="{d(part[1])} Z" fill="{KIND[part[2]]}"/>')
+            out.append(f'<path d="{d(part[1])} Z" fill="{SLOT[part[2]]}"/>')
         else:
             out.append(f'<path d="{d(part[1])}" fill="none" stroke="{INK}" stroke-width="{STROKE}" stroke-linecap="round" stroke-linejoin="round"/>')
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{"".join(out)}</svg>\n'
@@ -349,7 +368,7 @@ def cell_image(parts):
             with np.errstate(divide="ignore", invalid="ignore"):
                 xi = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
             inside ^= cross & (px < xi)
-        rgb[inside] = hexrgb(KIND[part[2]])
+        rgb[inside] = hexrgb(SLOT[part[2]])
         depth = seg_dist(poly + [poly[0]]) * s
         dist = np.where(inside, np.minimum(dist, -depth), dist)
     return dist, rgb
@@ -394,7 +413,8 @@ def build():
             "art": {"grid": BUTTON, "left": MARGIN, "top": MARGIN, "size": ART},
             "ink": INK,
             "transparent": KEY,
-            "overrides": [{"key": KIND[k], "name": k} for k in KIND],
+            "overrides": [{"key": SLOT[k], "name": k} for k in SLOT],
+            "schemes": {"dark": {"ink": DARK_INK, "slots": DARK}},
         },
         "glyphs": glyphs,
     }
@@ -487,10 +507,9 @@ def sheet(json_path, out_path):
     meta = json.load(open(json_path))
     atlas = np.array(Image.open(os.path.join(os.path.dirname(json_path), "graven.png")).convert("RGBA"))
     sizes = [16, 26, 32, 64, 96, 128]
-    dark = {"container": "#3f8f80", "track": "#b88a1e", "drawn": "#b9603a", "guide": "#7a64b0", "layer": "#6d6a64", "paper": "#3a3044"}
     columns = [
         ("light", (246, 245, 242), None, {}),
-        ("dark ground, light ink, overrides", (44, 34, 54), "#e8e4ee", dark),
+        ("dark pane: light ink, the dark slots", (44, 34, 54), DARK_INK, DARK),
     ]
     glyphs = meta["glyphs"]
     colw = sum(s + 12 for s in sizes) + 20

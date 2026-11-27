@@ -39,6 +39,10 @@ pub const Sheet = struct {
     ink: Rgb,
     transparent: Rgb,
     overrides: []const Override,
+    /// The dark scheme: its ink, and each slot's colour (by name; `key`
+    /// holding the colour).
+    dark_ink: ?Rgb = null,
+    dark_slots: []const Override = &.{},
 };
 
 /// An icon: its file and its cell's top left there.
@@ -50,30 +54,29 @@ var loaded = false;
 
 const Cached = struct { name: []const u8, px: u32, ink: u32, scheme: Scheme, tex: dvui.Texture };
 
-/// The colours an icon's override keys take: its file's own (the keys are
-/// their slots' default colours), or a set for a dark ground (as
-/// `scripts/icons.py sheet` shows them), where light fills would glare
-/// under light ink.
+/// The colours an icon's override slots take: its file's own (the keys are
+/// their slots' default colours), or its file's scheme for a dark ground
+/// (`schemes.dark` in the JSON: a light ink, deeper slots), where light
+/// fills would glare under light ink.
 pub const Scheme = enum {
     own,
     dark,
 
-    fn colour(s: Scheme, slot: []const u8) ?Rgb {
+    fn colour(s: Scheme, sheet: *const Sheet, slot: []const u8) ?Rgb {
         if (s == .own) return null;
-        const table = [_]struct { []const u8, Rgb }{
-            .{ "container", .{ 0x3f, 0x8f, 0x80 } },
-            .{ "track", .{ 0xb8, 0x8a, 0x1e } },
-            .{ "drawn", .{ 0xb9, 0x60, 0x3a } },
-            .{ "guide", .{ 0x7a, 0x64, 0xb0 } },
-            .{ "select", .{ 0x3d, 0x6f, 0xa8 } },
-            .{ "view", .{ 0x6b, 0x7a, 0x45 } },
-            .{ "layer", .{ 0x6d, 0x6a, 0x64 } },
-            .{ "paper", .{ 0x3a, 0x30, 0x44 } },
-        };
-        for (table) |e| if (std.mem.eql(u8, e[0], slot)) return e[1];
+        for (sheet.dark_slots) |o| if (std.mem.eql(u8, o.name, slot)) return o.key;
         return null;
     }
 };
+
+/// The ink icon cell `c` takes under `scheme`, if its file names one.
+pub fn schemeInk(c: Cell, scheme: Scheme) ?dvui.Color {
+    const rgb = switch (scheme) {
+        .own => c.sheet.ink,
+        .dark => c.sheet.dark_ink orelse return null,
+    };
+    return .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] };
+}
 var cached: std.ArrayList(Cached) = .empty;
 
 /// Reads Graven's file and the user's (once).
@@ -127,6 +130,9 @@ const Json = struct {
         ink: []const u8 = "#2a2530",
         transparent: []const u8 = "#ff00ff",
         overrides: []const struct { key: []const u8, name: []const u8 } = &.{},
+        schemes: struct {
+            dark: ?struct { ink: []const u8, slots: std.json.ArrayHashMap([]const u8) = .{} } = null,
+        } = .{},
     } = .{},
     glyphs: []const struct {
         icon: ?[]const u8 = null,
@@ -147,6 +153,13 @@ fn add(a: std.mem.Allocator, json: []const u8, png: []const u8, what: []const u8
     const sheet = try a.create(Sheet);
     var ov: std.ArrayList(Override) = .empty;
     for (j.graven.overrides) |o| try ov.append(a, .{ .key = try hex(o.key), .name = o.name });
+    var dark_slots: std.ArrayList(Override) = .empty;
+    var dark_ink: ?Rgb = null;
+    if (j.graven.schemes.dark) |d| {
+        dark_ink = try hex(d.ink);
+        var it = d.slots.map.iterator();
+        while (it.next()) |e| try dark_slots.append(a, .{ .key = try hex(e.value_ptr.*), .name = e.key_ptr.* });
+    }
     sheet.* = .{
         .width = @intCast(w),
         .height = @intCast(h),
@@ -156,6 +169,8 @@ fn add(a: std.mem.Allocator, json: []const u8, png: []const u8, what: []const u8
         .ink = try hex(j.graven.ink),
         .transparent = try hex(j.graven.transparent),
         .overrides = ov.items,
+        .dark_ink = dark_ink,
+        .dark_slots = dark_slots.items,
     };
     const bottom = std.mem.eql(u8, j.atlas.yOrigin, "bottom");
     for (j.glyphs) |g| {
@@ -309,7 +324,7 @@ fn resolve(c: Cell, x: i64, y: i64, scheme: Scheme) [4]f32 {
     if (t[0] == k[0] and t[1] == k[1] and t[2] == k[2]) return .{ 0, 0, 0, 0 };
     if (scheme != .own) for (c.sheet.overrides) |o| {
         if (t[0] == o.key[0] and t[1] == o.key[1] and t[2] == o.key[2]) {
-            if (scheme.colour(o.name)) |rgb| t = .{ rgb[0], rgb[1], rgb[2], t[3] };
+            if (scheme.colour(c.sheet, o.name)) |rgb| t = .{ rgb[0], rgb[1], rgb[2], t[3] };
             break;
         }
     };

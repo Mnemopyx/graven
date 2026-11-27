@@ -390,17 +390,18 @@ pub fn iconName(p: *const Pane, buf: []u8) []const u8 {
 pub const heading_icon: f32 = 20;
 
 /// Draws pane `p`'s icon (from the icon files) filling `r`: on the dark
-/// pane (`on_dark`) light ink and dark fills, on its lighter tab the
+/// pane (`on_dark`) in its file's dark scheme, on its lighter tab in the
 /// file's own colours; nothing if no file has it.
 pub fn drawIcon(p: *const Pane, r: dvui.Rect.Physical, on_dark: bool) void {
     var buf: [64]u8 = undefined;
     const name = iconName(p, &buf);
     const white = display.fix(dvui.Color.white);
-    if (on_dark) {
-        _ = iconfile.drawIn(name, r, display.fix(oklch(dark.text, 0.012, p.look.hue, 1)), white, .dark);
-    } else if (iconfile.get(name)) |c| {
-        _ = iconfile.drawIn(name, r, display.fix(iconfile.inkOf(c)), white, .own);
-    }
+    const c = iconfile.get(name) orelse return;
+    const scheme: iconfile.Scheme = if (on_dark) .dark else .own;
+    // The file's ink for the scheme; on the dark pane, failing that, the
+    // pane's text colour.
+    const ink = iconfile.schemeInk(c, scheme) orelse oklch(dark.text, 0.012, p.look.hue, 1);
+    _ = iconfile.drawIn(name, r, display.fix(ink), white, scheme);
 }
 
 /// Pane `p`'s heading: its icon and name, in a row across the pane's top
