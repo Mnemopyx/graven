@@ -624,6 +624,15 @@ pub const Labels = struct {
         return null;
     }
 
+    /// `markup` (a legend: text with math between dollars) set on one line
+    /// in style `style` (`.none`: the first style), as a label is: from the
+    /// cache or made now; null when the style cannot be used or the markup
+    /// does not set. Its geometry is mm, its origin on the baseline at the
+    /// start; owned by the cache, valid until it next changes.
+    pub fn line(l: *Labels, style: StyleId, markup: []const u8) Allocator.Error!?*const rendering.Render {
+        return l.get(.{ .style = style, .anchor = .start, .box = null, .markup = markup });
+    }
+
     /// The render for a label, from the cache or made now; null when the
     /// style cannot be used.
     fn get(l: *Labels, k: Key) Allocator.Error!?*const rendering.Render {

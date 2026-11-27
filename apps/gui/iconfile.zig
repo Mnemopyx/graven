@@ -39,6 +39,10 @@ pub const Sheet = struct {
     ink: Rgb,
     transparent: Rgb,
     overrides: []const Override,
+    /// The dark scheme: its ink, and each slot's colour (by name; `key`
+    /// holding the colour).
+    dark_ink: ?Rgb = null,
+    dark_slots: []const Override = &.{},
 };
 
 /// An icon: its file and its cell's top left there.
@@ -48,7 +52,31 @@ var arena_state: ?std.heap.ArenaAllocator = null;
 var cells: std.StringHashMapUnmanaged(Cell) = .empty;
 var loaded = false;
 
-const Cached = struct { name: []const u8, px: u32, ink: u32, tex: dvui.Texture };
+const Cached = struct { name: []const u8, px: u32, ink: u32, scheme: Scheme, tex: dvui.Texture };
+
+/// The colours an icon's override slots take: its file's own (the keys are
+/// their slots' default colours), or its file's scheme for a dark ground
+/// (`schemes.dark` in the JSON: a light ink, deeper slots), where light
+/// fills would glare under light ink.
+pub const Scheme = enum {
+    own,
+    dark,
+
+    fn colour(s: Scheme, sheet: *const Sheet, slot: []const u8) ?Rgb {
+        if (s == .own) return null;
+        for (sheet.dark_slots) |o| if (std.mem.eql(u8, o.name, slot)) return o.key;
+        return null;
+    }
+};
+
+/// The ink icon cell `c` takes under `scheme`, if its file names one.
+pub fn schemeInk(c: Cell, scheme: Scheme) ?dvui.Color {
+    const rgb = switch (scheme) {
+        .own => c.sheet.ink,
+        .dark => c.sheet.dark_ink orelse return null,
+    };
+    return .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] };
+}
 var cached: std.ArrayList(Cached) = .empty;
 
 /// Reads Graven's file and the user's (once).
@@ -102,6 +130,9 @@ const Json = struct {
         ink: []const u8 = "#2a2530",
         transparent: []const u8 = "#ff00ff",
         overrides: []const struct { key: []const u8, name: []const u8 } = &.{},
+        schemes: struct {
+            dark: ?struct { ink: []const u8, slots: std.json.ArrayHashMap([]const u8) = .{} } = null,
+        } = .{},
     } = .{},
     glyphs: []const struct {
         icon: ?[]const u8 = null,
@@ -122,6 +153,13 @@ fn add(a: std.mem.Allocator, json: []const u8, png: []const u8, what: []const u8
     const sheet = try a.create(Sheet);
     var ov: std.ArrayList(Override) = .empty;
     for (j.graven.overrides) |o| try ov.append(a, .{ .key = try hex(o.key), .name = o.name });
+    var dark_slots: std.ArrayList(Override) = .empty;
+    var dark_ink: ?Rgb = null;
+    if (j.graven.schemes.dark) |d| {
+        dark_ink = try hex(d.ink);
+        var it = d.slots.map.iterator();
+        while (it.next()) |e| try dark_slots.append(a, .{ .key = try hex(e.value_ptr.*), .name = e.key_ptr.* });
+    }
     sheet.* = .{
         .width = @intCast(w),
         .height = @intCast(h),
@@ -131,6 +169,8 @@ fn add(a: std.mem.Allocator, json: []const u8, png: []const u8, what: []const u8
         .ink = try hex(j.graven.ink),
         .transparent = try hex(j.graven.transparent),
         .overrides = ov.items,
+        .dark_ink = dark_ink,
+        .dark_slots = dark_slots.items,
     };
     const bottom = std.mem.eql(u8, j.atlas.yOrigin, "bottom");
     for (j.glyphs) |g| {
@@ -169,18 +209,23 @@ pub fn inkOf(c: Cell) dvui.Color {
 /// Draws icon `name` filling `r` (it is the whole button), its ink `ink`.
 /// False when no file has the icon (the caller draws something else).
 pub fn draw(name: []const u8, r: dvui.Rect.Physical, ink: dvui.Color, colormod: dvui.Color) bool {
+    return drawIn(name, r, ink, colormod, .own);
+}
+
+/// `draw`, its override slots coloured by `scheme`.
+pub fn drawIn(name: []const u8, r: dvui.Rect.Physical, ink: dvui.Color, colormod: dvui.Color, scheme: Scheme) bool {
     const c = get(name) orelse return false;
     const px: u32 = @intFromFloat(@max(1, @round(@min(r.w, r.h))));
     const ink_key: u32 = @bitCast([4]u8{ ink.r, ink.g, ink.b, ink.a });
     const tex = for (cached.items) |e| {
-        if (e.px == px and e.ink == ink_key and std.mem.eql(u8, e.name, name)) break e.tex;
+        if (e.px == px and e.ink == ink_key and e.scheme == scheme and std.mem.eql(u8, e.name, name)) break e.tex;
     } else blk: {
         const gpa = dvui.currentWindow().gpa;
         const pma = gpa.alloc(dvui.Color.PMA, px * px) catch return false;
         defer gpa.free(pma);
-        raster(c, px, .{ ink.r, ink.g, ink.b }, pma);
+        raster(c, px, .{ ink.r, ink.g, ink.b }, scheme, pma);
         const t = dvui.textureCreate(pma, .{ .width = px, .height = px, .interpolation = .nearest }) catch return false;
-        cached.append(gpa, .{ .name = name, .px = px, .ink = ink_key, .tex = t }) catch {};
+        cached.append(gpa, .{ .name = name, .px = px, .ink = ink_key, .scheme = scheme, .tex = t }) catch {};
         break :blk t;
     };
     const fp: f32 = @floatFromInt(px);
@@ -190,7 +235,7 @@ pub fn draw(name: []const u8, r: dvui.Rect.Physical, ink: dvui.Color, colormod: 
 }
 
 /// Icon `c` as `px` x `px` premultiplied pixels, its ink `ink`.
-pub fn raster(c: Cell, px: u32, ink: Rgb, out: []dvui.Color.PMA) void {
+pub fn raster(c: Cell, px: u32, ink: Rgb, scheme: Scheme, out: []dvui.Color.PMA) void {
     const s = c.sheet;
     const k = s.size / @as(f32, @floatFromInt(px)); // texels a pixel
     const inkf: [3]f32 = .{ @as(f32, @floatFromInt(ink[0])) / 255, @as(f32, @floatFromInt(ink[1])) / 255, @as(f32, @floatFromInt(ink[2])) / 255 };
@@ -211,7 +256,7 @@ pub fn raster(c: Cell, px: u32, ink: Rgb, out: []dvui.Color.PMA) void {
                 while (@as(f32, @floatFromInt(tx)) < x1 and tx < cell_n) : (tx += 1) {
                     const fx0: f32 = @floatFromInt(tx);
                     const wx = @min(x1, fx0 + 1) - @max(x0, fx0);
-                    const col = resolve(c, tx, ty);
+                    const col = resolve(c, tx, ty, scheme);
                     const cov = std.math.clamp((0.5 - field(c, tx, ty)) * s.range + 0.5, 0, 1);
                     const p = over(col, inkf, cov);
                     for (0..4) |i| acc[i] += p[i] * wx * wy;
@@ -236,7 +281,7 @@ pub fn raster(c: Cell, px: u32, ink: Rgb, out: []dvui.Color.PMA) void {
                 .{ .dx = 1, .dy = 1, .w = fu * fv },
             };
             for (taps) |t| {
-                const r = resolve(c, iu + t.dx, iv + t.dy);
+                const r = resolve(c, iu + t.dx, iv + t.dy, scheme);
                 for (0..4) |i| col[i] += r[i] * t.w;
                 a += field(c, iu + t.dx, iv + t.dy) * t.w;
             }
@@ -271,11 +316,17 @@ fn field(c: Cell, x: i64, y: i64) f32 {
     return @as(f32, @floatFromInt(texel(c, x, y)[3])) / 255;
 }
 
-/// A texel's ground, resolved and premultiplied: the key transparent.
-/// (Override keys keep their colour: no program replaces them yet.)
-fn resolve(c: Cell, x: i64, y: i64) [4]f32 {
-    const t = texel(c, x, y);
+/// A texel's ground, resolved and premultiplied: the key transparent, an
+/// override key the colour `scheme` gives its slot.
+fn resolve(c: Cell, x: i64, y: i64, scheme: Scheme) [4]f32 {
+    var t = texel(c, x, y);
     const k = c.sheet.transparent;
     if (t[0] == k[0] and t[1] == k[1] and t[2] == k[2]) return .{ 0, 0, 0, 0 };
+    if (scheme != .own) for (c.sheet.overrides) |o| {
+        if (t[0] == o.key[0] and t[1] == o.key[1] and t[2] == o.key[2]) {
+            if (scheme.colour(c.sheet, o.name)) |rgb| t = .{ rgb[0], rgb[1], rgb[2], t[3] };
+            break;
+        }
+    };
     return .{ @as(f32, @floatFromInt(t[0])) / 255, @as(f32, @floatFromInt(t[1])) / 255, @as(f32, @floatFromInt(t[2])) / 255, 1 };
 }

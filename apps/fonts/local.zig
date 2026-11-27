@@ -345,9 +345,16 @@ pub fn install(io: Io, gpa: Allocator, a: Allocator, bytes: []const u8, records:
     if (result.outcome != .already_installed) {
         try Io.Dir.cwd().createDirPath(io, dir);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = sfnt });
-        for (others.items) |o| Io.Dir.cwd().deleteFile(io, o) catch {};
+        for (others.items) |o| {
+            platform.unregisterUserFont(a, o);
+            Io.Dir.cwd().deleteFile(io, o) catch {};
+        }
         result.replaced = others.items;
     }
+    // Listed with the system (Windows: the per-user folder alone does not
+    // install it), already there or not, so a copy put there by hand is
+    // registered too.
+    platform.registerUserFont(a, file) catch {};
 
     // Provenance: this file's record replaces any earlier one, and those of
     // the files it replaced go.
@@ -403,6 +410,7 @@ pub fn removeFile(io: Io, gpa: Allocator, a: Allocator, records: []const Record,
         if (std.mem.eql(u8, r.location, file)) break r.scope == .user;
     } else return RemoveError.NotInstalled;
     if (!user) return RemoveError.SystemFont;
+    platform.unregisterUserFont(a, file);
     try Io.Dir.cwd().deleteFile(io, file);
     var list: std.ArrayList(Provenance) = .empty;
     for (loadProvenance(io, a)) |p| {
