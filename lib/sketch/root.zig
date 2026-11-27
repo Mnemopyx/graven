@@ -683,6 +683,54 @@ pub const Sketch = struct {
         }
     }
 
+    /// The first output geometry of `s` (a sketch solved from `drawn`, its
+    /// geometry in the same order) that has turned over against the sketch
+    /// as drawn: a segment running backwards (its sides crossed, as a
+    /// rounded rectangle's are when its corner radius is over half a side),
+    /// or an arc whose sweep went round the other way. A sketch solved
+    /// inside out: its shape is not the one drawn. Null when none has.
+    pub fn turnedOver(s: *const Sketch, drawn: *const Sketch) ?GeomId {
+        const n = @min(s.geometry.items.len, drawn.geometry.items.len);
+        for (s.geometry.items[0..n], drawn.geometry.items[0..n], 0..) |g, d, i| {
+            if (!s.isOutput(g)) continue;
+            switch (g.kind) {
+                .segment => |sg| {
+                    const dg = switch (d.kind) {
+                        .segment => |x| x,
+                        else => continue,
+                    };
+                    const p0 = s.val(sg.a);
+                    const p1 = s.val(sg.b);
+                    const q0 = drawn.val(dg.a);
+                    const q1 = drawn.val(dg.b);
+                    const dot = (p1.x - p0.x) * (q1.x - q0.x) + (p1.y - p0.y) * (q1.y - q0.y);
+                    const ls = std.math.hypot(p1.x - p0.x, p1.y - p0.y);
+                    const ld = std.math.hypot(q1.x - q0.x, q1.y - q0.y);
+                    if (ls > 1e-9 and ld > 1e-9 and dot < -1e-9 * ls * ld) return @intCast(i);
+                },
+                .arc => |ar| {
+                    const da = switch (d.kind) {
+                        .arc => |x| x,
+                        else => continue,
+                    };
+                    const sweep = struct {
+                        fn f(sk: *const Sketch, c: Pt, a0: Pt, b0: Pt) f64 {
+                            const cc = sk.val(c);
+                            const p = sk.val(a0);
+                            const q = sk.val(b0);
+                            var w = std.math.atan2(q.y - cc.y, q.x - cc.x) - std.math.atan2(p.y - cc.y, p.x - cc.x);
+                            if (w <= 0) w += 2 * std.math.pi;
+                            return w;
+                        }
+                    }.f;
+                    if (@abs(sweep(s, ar.c, ar.a, ar.b) - sweep(drawn, da.c, da.a, da.b)) > std.math.pi) return @intCast(i);
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
     fn val(s: *const Sketch, p: Pt) Point {
         return .{ .x = s.vars.items[p.x], .y = s.vars.items[p.y] };
     }

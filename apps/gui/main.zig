@@ -2745,7 +2745,7 @@ fn frame() !dvui.App.Result {
             } else if (std.mem.eql(u8, which, "sketch-fab")) {
                 sample_fab = true;
                 loadSketchPanelSample();
-            } else if (std.mem.eql(u8, which, "drawing-panel")) loadDrawingPanelSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
+            } else if (std.mem.eql(u8, which, "drawing-panel")) loadDrawingPanelSample() else if (std.mem.eql(u8, which, "faults")) loadFaultsSample() else if (std.mem.eql(u8, which, "array")) loadArraySample() else if (std.mem.eql(u8, which, "sketch-space")) {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
@@ -21881,6 +21881,12 @@ const ProblemKind = enum {
     missing_font,
     /// Text has characters no face of its style covers.
     missing_glyph,
+    /// A tile's (or a grid's instance's) sketch gives no shape at its size:
+    /// it solves inside out, conflicts, is left free, or has an expression
+    /// with no value there. Drawn plain; what it says gives the reason.
+    sketch_fault,
+    /// Two holes on a panel overlap: it is cut by their union.
+    holes_overlap,
 };
 
 /// Where a problem shows: a box on the sheet (mm), in a parent's frame
@@ -21896,6 +21902,13 @@ const Problem = struct {
     text: []const u8,
     /// The style it is about, when it is about one.
     style: ?layout.model.StyleId = null,
+    /// The tile it is about (the first, for two), and its parent.
+    tile: ?TileId = null,
+    parent: ?Parent = null,
+    /// The grid it is about (index in its parent's grids).
+    grid: ?usize = null,
+    /// The document sketch it is about (index in `Model.sketches`).
+    sketch: ?usize = null,
     areas: []const ProblemArea = &.{},
 };
 
@@ -21913,7 +21926,88 @@ fn fixes(kind: ProblemKind) []const Fix {
             .{ .label = "Choose a font for the style that has them…", .run = fixChooseFont },
             .{ .label = "Install a font from a file…", .run = fixInstallFont },
         },
+        .sketch_fault => &.{
+            .{ .label = "Choose the instance: its size and parameters…", .run = fixChooseTile },
+            .{ .label = "Choose its array: the stamp's parameters…", .run = fixChooseGrid },
+            .{ .label = "Edit the sketch…", .run = fixEditSketch },
+        },
+        .holes_overlap => &.{
+            .{ .label = "Choose their array: its spacing and the holes' size…", .run = fixChooseGrid },
+            .{ .label = "Choose the first hole…", .run = fixChooseTile },
+        },
     };
+}
+
+/// Properties brought in, showing the context just chosen.
+fn showProperties() void {
+    if (props_pane.mode == .auto) ghost_pane.activate(&all_panes, &props_pane);
+}
+
+fn fixChooseTile(p: *const Problem) void {
+    const t = p.tile orelse return;
+    if (sketch_edit != null) leaveSketch();
+    state.context = .{ .tile = t };
+    showProperties();
+}
+
+fn fixChooseGrid(p: *const Problem) void {
+    const parent = p.parent orelse return;
+    const g = p.grid orelse return fixChooseTile(p);
+    if (sketch_edit != null) leaveSketch();
+    state.context = .{ .grid = .{ .parent = parent, .index = g } };
+    showProperties();
+}
+
+fn fixEditSketch(p: *const Problem) void {
+    const index = p.sketch orelse return;
+    const home = act(.homeSpace, .{index}) catch {
+        state.status = "The sketch's own space was not made. ";
+        return;
+    };
+    openHome(home);
+}
+
+/// The sketch a tile is drawn from, and the grid holding it (if it is an
+/// array's instance): the stamp's sketch, else its prototype's.
+fn tileSketch(parent: Parent, tile: TileId) struct { sketch: ?usize = null, grid: ?usize = null, params: []const layout.model.TileParam = &.{} } {
+    const m = &state.model;
+    for (m.gridsIn(parent), 0..) |g, gi| for (g.instances.items) |inst| {
+        if (inst.tile != tile) continue;
+        const st = g.stamps.items[m.stampIndex(parent, gi, inst.stamp) orelse continue];
+        if (st.sketch != .none) return .{ .sketch = m.sketchIndex(st.sketch), .grid = gi, .params = st.params };
+        const proto = m.proto(m.tileConst(tile).prototype);
+        return .{ .sketch = if (proto.sketch) |ps| m.sketchIndex(ps.from) else null, .grid = gi };
+    };
+    const proto = m.proto(m.tileConst(tile).prototype);
+    return .{ .sketch = if (proto.sketch) |ps| m.sketchIndex(ps.from) else null };
+}
+
+/// Why a sketch gives no shape, in words, with what it was solved for.
+fn sketchFaultText(a: std.mem.Allocator, fault: ?layout.place.SketchFault, sketch: ?usize, tile: TileId, box: geom.Box, stamp_params: []const layout.model.TileParam) []const u8 {
+    const m = &state.model;
+    const sk: ?*const layout.model.SketchItem = if (sketch) |i| &m.sketches.items[i] else null;
+    const name = if (sk) |x| x.name else "?";
+    const who = m.tileConst(tile).designator;
+    const why: []const u8 = if (fault) |f| switch (f) {
+        .turned_over => "it solves inside out: its sides cross, so the shape is not the one drawn (a corner radius over half a side, say)",
+        .conflicting => |ci| blk: {
+            const c = if (sk) |x| (if (ci < x.sketch.constraints.items.len) x.sketch.constraints.items[ci] else null) else null;
+            break :blk if (c) |cc| std.fmt.allocPrint(a, "its constraints cannot all hold (the {s}{s}{s} conflicts)", .{ @tagName(cc.kind), if (cc.expr.len > 0) " = " else "", cc.expr }) catch "its constraints cannot all hold" else "its constraints cannot all hold";
+        },
+        .not_solved => "it does not solve there",
+        .free => |n| std.fmt.allocPrint(a, "it is not fully constrained there ({d} degree{s} of freedom left)", .{ n, if (n == 1) "" else "s" }) catch "it is not fully constrained there",
+        .expression => |ci| blk: {
+            const c = if (sk) |x| (if (ci < x.sketch.constraints.items.len) x.sketch.constraints.items[ci] else null) else null;
+            break :blk if (c) |cc| std.fmt.allocPrint(a, "its dimension {s} has no value there", .{cc.expr}) catch "a dimension has no value there" else "a dimension has no value there";
+        },
+        .no_profile => "its lines close no shape",
+    } else "it does not solve there";
+    // What it was solved with: the stamp's parameters, then the tile's.
+    var with: std.ArrayList(u8) = .empty;
+    for ([_][]const layout.model.TileParam{ stamp_params, m.tileConst(tile).params.items }) |ps| for (ps) |tp| {
+        with.print(a, ", {s} {d}", .{ tp.name, tp.value }) catch {};
+    };
+    return std.fmt.allocPrint(a, "{s}: sketch “{s}” at {d:.2} × {d:.2} mm{s}: {s}. Drawn plain.", .{ who, name, box.width(), box.height(), with.items, why }) catch "A tile's sketch gives no shape.";
 }
 
 fn fixChooseFont(p: *const Problem) void {
@@ -21991,6 +22085,38 @@ fn refreshProblems() void {
             const subject: u64 = if (iss.tile) |t| @backingInt(t) else (iss.item orelse 0) + ((iss.region orelse 0) << 24);
             const text = std.fmt.allocPrint(a, "Characters no font has, in text set in style “{s}”: drawn as boxes.", .{if (style) |s| styleName(s) else "?"}) catch continue;
             list.append(a, .{ .kind = .missing_glyph, .key = problemKey(.missing_glyph, &.{ pk, subject, iss.slot orelse 0 }, ""), .level = .warning, .text = text, .style = style, .areas = areas.items }) catch {};
+        }
+    }
+    // Sketches that give no shape for a tile, and holes that overlap.
+    for (where) |w| {
+        const pk: u64 = switch (w.parent) {
+            .space => |si| si,
+            .panel => |pi| pi + (1 << 32),
+        };
+        for (w.placed.issues) |iss| {
+            if (iss.kind != .tile_sketch and iss.kind != .holes_overlap) continue;
+            const t = iss.tile orelse continue;
+            var areas: std.ArrayList(ProblemArea) = .empty;
+            var box: geom.Box = .empty;
+            var other: geom.Box = .empty;
+            var pitch: geom.Box = .empty;
+            for (w.placed.tiles) |pt| {
+                if (pt.id == t) pitch = pt.pitch_box;
+                if (pt.id == t) box = if (pt.shapes.len > 0) pt.shapes[0].outline.bounds() else pt.pitch_box;
+                if (iss.other != null and pt.id == iss.other.?) other = if (pt.shapes.len > 0) pt.shapes[0].outline.bounds() else pt.pitch_box;
+            }
+            // A failing instance: its box; holes that overlap: where they do.
+            const shown: geom.Box = if (iss.kind == .holes_overlap) .{ .x0 = @max(box.x0, other.x0), .y0 = @max(box.y0, other.y0), .x1 = @min(box.x1, other.x1), .y1 = @min(box.y1, other.y1) } else box;
+            if (shown.x1 > shown.x0 and shown.y1 > shown.y0) areas.append(a, .{ .parent = w.parent, .box = onSheet(w.parent, shown) }) catch {};
+            const ts = tileSketch(w.parent, t);
+            if (iss.kind == .tile_sketch) {
+                const text = sketchFaultText(a, iss.sketch_fault, ts.sketch, t, pitch, ts.params);
+                list.append(a, .{ .kind = .sketch_fault, .key = problemKey(.sketch_fault, &.{ pk, @backingInt(t) }, if (iss.sketch_fault) |f| @tagName(f) else ""), .level = .warning, .text = text, .tile = t, .parent = w.parent, .grid = ts.grid, .sketch = ts.sketch, .areas = areas.items }) catch {};
+            } else {
+                const o = iss.other.?;
+                const text = std.fmt.allocPrint(a, "Holes {s} and {s} overlap ({d:.2} mm² shared): the panel is cut by their union.", .{ state.model.tileConst(t).designator, state.model.tileConst(o).designator, iss.amount }) catch continue;
+                list.append(a, .{ .kind = .holes_overlap, .key = problemKey(.holes_overlap, &.{ pk, @backingInt(t), @backingInt(o) }, ""), .level = .warning, .text = text, .tile = t, .parent = w.parent, .grid = ts.grid, .sketch = ts.sketch, .areas = areas.items }) catch {};
+            }
         }
     }
     problems = list.items;
@@ -29371,6 +29497,27 @@ fn loadDrawingPanelSample() void {
     state.view.cy = 25;
     state.view.ppm = 9;
     state.view.fit = null;
+}
+
+/// GRAVEN_SAMPLE=faults: a plate with two arrays of rounded-rectangle
+/// holes, the top one's corner radius over half the holes' height (each
+/// instance solves inside out), the bottom one spaced closer than the
+/// holes are wide (neighbours overlap): problems to see and fix.
+fn loadFaultsSample() void {
+    const m = &state.model;
+    const pi = m.addPanel("Plate", 70, 40) catch return;
+    const key = m.addPrototype(.{ .name = "Hole" }) catch return;
+    const rr = act(.addShapeSketch, .{layout.model.ShapeSketch.rounded_rectangle}) catch return;
+    const sk = m.sketches.items[rr].id;
+    const top = m.addGrid(.{ .panel = pi }, .{ .x = 14, .y = 28 }, .{ .cols = 4, .rows = 1, .pitch_x = 14, .pitch_y = 12 }) catch return;
+    _ = m.addStamp(.{ .panel = pi }, top, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 9.5, .h = 8.5, .sketch = sk, .params = &.{.{ .name = "r", .value = 4.5 }} }) catch return;
+    _ = m.fillGrid(.{ .panel = pi }, top, 0) catch return;
+    const low = m.addGrid(.{ .panel = pi }, .{ .x = 14, .y = 12 }, .{ .cols = 5, .rows = 1, .pitch_x = 9, .pitch_y = 12 }) catch return;
+    _ = m.addStamp(.{ .panel = pi }, low, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 9.5, .h = 8.5, .sketch = sk, .params = &.{.{ .name = "r", .value = 2 }} }) catch return;
+    _ = m.fillGrid(.{ .panel = pi }, low, 0) catch return;
+    hist.snapshot(m) catch {};
+    state.context = .{ .panel = pi };
+    state.view.fit = .{ .x0 = -5, .y0 = -5, .x1 = 75, .y1 = 45 };
 }
 
 /// Edits sketch `index` with its origin at `at` in space `space`.

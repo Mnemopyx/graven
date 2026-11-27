@@ -81,6 +81,30 @@ pub const PlacedLabel = struct {
     render: *const rendering.Render,
 };
 
+/// Why a prototype sketch gives no shape for a tile's size and parameters.
+pub const SketchFault = union(enum) {
+    /// A driving dimension's expression has no value here (the constraint).
+    expression: u32,
+    /// Its constraints cannot all hold together (the first that conflicts).
+    conflicting: u32,
+    /// The solver found no solution, with nothing named in conflict.
+    not_solved,
+    /// Not fully constrained here: this many degrees of freedom left.
+    free: usize,
+    /// Solved inside out: this geometry turned over against the sketch as
+    /// drawn (a corner radius over half a side, say).
+    turned_over: u32,
+    /// It solved, but its output closes no profile.
+    no_profile,
+};
+
+/// A prototype sketch solved for one size: its closed profiles in the
+/// sketch's frame, or why there are none.
+pub const SketchSolved = struct {
+    contours: ?[]const geom.Contour = null,
+    fault: ?SketchFault = null,
+};
+
 pub const Issue = struct {
     kind: enum {
         /// A segment's content runs past its end (past the last segment's,
@@ -115,8 +139,12 @@ pub const Issue = struct {
         /// it is drawn plain.
         tile_art,
         /// A tile's prototype sketch cannot be solved for its size (or is
-        /// not fully constrained there); the tile is drawn plain.
+        /// not fully constrained there, or solves inside out); the tile is
+        /// drawn plain. `sketch_fault` says why.
         tile_sketch,
+        /// Two holes on a panel overlap (`tile` and `other`): the panel is
+        /// cut by their union, which is seldom what was meant.
+        holes_overlap,
         /// A track's direction or its content's rotation is not one of the
         /// axis cases placement sets yet (rows, columns): it is placed as
         /// the nearest of them.
@@ -132,6 +160,10 @@ pub const Issue = struct {
     amount: f64 = 0,
     /// For a markup error, the first problem the parse found.
     syntax: ?rendering.Syntax = null,
+    /// For a tile's sketch, why it gives no shape there.
+    sketch_fault: ?SketchFault = null,
+    /// For holes that overlap, the other tile.
+    other: ?TileId = null,
 };
 
 /// A segment as placed: where its band lies.
@@ -338,7 +370,7 @@ pub const Labels = struct {
     /// Prototype sketches solved for a tile's size and parameters: their
     /// closed profiles in the sketch's frame (null: it did not solve), by
     /// a hash of the copy's ID, the size and the parameters.
-    sketches: std.AutoHashMapUnmanaged(u64, ?[]const geom.Contour) = .empty,
+    sketches: std.AutoHashMapUnmanaged(u64, SketchSolved) = .empty,
     sketch_arena: ?std.heap.ArenaAllocator = null,
 
     /// A style as last synced: a hash of all that sets its legends (size,
@@ -391,12 +423,14 @@ pub const Labels = struct {
         return .{ .gpa = gpa, .faces = faces };
     }
 
-    /// A tile's shapes from its prototype's sketch: the sketch solved with
-    /// its size parameters set to the pitch box's size (mm) and the tile's
-    /// own parameters, its closed profiles placed at the pitch box's corner
-    /// plus the offset, each drawn as an outline. Null when it does not
-    /// solve to full constraint. Solutions are cached.
-    pub fn sketchShapes(l: *Labels, a: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) Allocator.Error!?[]const art.Shape {
+    /// Why prototype sketch `ps` gave no shapes for `box` and `params`
+    /// (null: it did, or it was never asked for there).
+    pub fn sketchFault(l: *const Labels, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) ?SketchFault {
+        const got = l.sketches.get(sketchKey(ps, params, box)) orelse return null;
+        return got.fault;
+    }
+
+    fn sketchKey(ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) u64 {
         var h: std.hash.Wyhash = .init(1);
         h.update(std.mem.asBytes(&ps.id));
         h.update(std.mem.asBytes(&ps.version));
@@ -406,18 +440,28 @@ pub const Labels = struct {
             h.update(p.name);
             h.update(std.mem.asBytes(&p.value));
         }
-        const key = h.final();
-        const contours = if (l.sketches.get(key)) |hit| hit else blk: {
+        return h.final();
+    }
+
+    /// A tile's shapes from its prototype's sketch: the sketch solved with
+    /// its size parameters set to the pitch box's size (mm) and the tile's
+    /// own parameters, its closed profiles placed at the pitch box's corner
+    /// plus the offset, each drawn as an outline. Null when it does not
+    /// solve to full constraint, or solves inside out (`sketchFault` says
+    /// why). Solutions are cached.
+    pub fn sketchShapes(l: *Labels, a: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) Allocator.Error!?[]const art.Shape {
+        const key = sketchKey(ps, params, box);
+        const got = if (l.sketches.get(key)) |hit| hit else blk: {
             if (l.sketch_arena == null) l.sketch_arena = .init(l.gpa);
             const got = solveTileSketch(l.gpa, l.sketch_arena.?.allocator(), ps, params, box) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // Anything else: it does not solve here.
-                else => null,
+                else => SketchSolved{ .fault = .not_solved },
             };
             try l.sketches.put(l.gpa, key, got);
             break :blk got;
         };
-        const cs = contours orelse return null;
+        const cs = got.contours orelse return null;
         const move = geom.Affine.translate(box.x0 + ps.offset.x, box.y0 + ps.offset.y);
         const shapes = try a.alloc(art.Shape, cs.len);
         for (cs, shapes) |c, *sh| {
@@ -432,7 +476,7 @@ pub const Labels = struct {
         return shapes;
     }
 
-    fn solveTileSketch(gpa: Allocator, keep: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) !?[]const geom.Contour {
+    fn solveTileSketch(gpa: Allocator, keep: Allocator, ps: model.PrototypeSketch, params: []const model.TileParam, box: Box) !SketchSolved {
         var scratch: std.heap.ArenaAllocator = .init(gpa);
         defer scratch.deinit();
         const sa = scratch.allocator();
@@ -446,15 +490,19 @@ pub const Labels = struct {
         // An expression with no value at this size would leave the value
         // from the size it was drawn at: it does not solve here.
         for (sk.constraints.items, 0..) |c, ci| {
-            if (c.driving and sk.exprError(@intCast(ci)) != null) return null;
+            if (c.driving and sk.exprError(@intCast(ci)) != null) return .{ .fault = .{ .expression = @intCast(ci) } };
         }
         const res = try sk.solve(gpa);
         const an = try sk.analyse(gpa, sa);
-        if (!res.solved or !an.fully_constrained) return null;
+        if (!res.solved or an.conflicting.len > 0) return .{ .fault = if (an.conflicting.len > 0) .{ .conflicting = an.conflicting[0] } else .not_solved };
+        if (!an.fully_constrained) return .{ .fault = .{ .free = an.dof } };
+        // Solved, but inside out: not the shape drawn.
+        if (sk.turnedOver(&ps.sketch)) |g| return .{ .fault = .{ .turned_over = g } };
         const prof = try sk.profiles(sa);
+        if (prof.contours.len == 0) return .{ .fault = .no_profile };
         const out = try keep.alloc(geom.Contour, prof.contours.len);
         for (prof.contours, out) |c, *o| o.* = .{ .segments = try keep.dupe(geom.Segment, c.segments) };
-        return out;
+        return .{ .contours = out };
     }
 
     pub fn deinit(l: *Labels) void {
@@ -1376,7 +1424,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                 } else t.params.items;
                 const from_sketch: ?[]const art.Shape = if (stamp_sketch orelse proto.sketch) |ps| s: {
                     const got = try labels.sketchShapes(a, ps, params, box);
-                    if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = inst.tile });
+                    if (got == null) try issues.append(a, .{ .kind = .tile_sketch, .tile = inst.tile, .sketch_fault = labels.sketchFault(ps, params, box) });
                     break :s got;
                 } else null;
                 const all = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, box) catch |err| switch (err) {
@@ -1407,6 +1455,19 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
         try tiles.append(a, .{ .id = inst.tile, .region = 0, .row = 0, .pitch_box = box, .body = body, .face = proto.face_inset.inset(body), .shapes = shapes, .grid = st.role });
         if (st.role != .legend) bounds = bounds.join(box);
     };
+    // Holes that overlap: the panel is cut by their union, seldom what was
+    // meant. Each pair once, the first hole's tile named first.
+    for (tiles.items, 0..) |t, i| {
+        if (t.grid != .hole or t.shapes.len == 0) continue;
+        for (tiles.items[i + 1 ..]) |u| {
+            if (u.grid != .hole or u.shapes.len == 0) continue;
+            const shared = geom.boolean.overlapArea(a, t.shapes[0].outline, u.shapes[0].outline) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => 0,
+            };
+            if (shared > 1e-6) try issues.append(a, .{ .kind = .holes_overlap, .tile = t.id, .other = u.id, .amount = shared });
+        }
+    }
 
     // Tracks: the panel's own, then (once the tiles are placed) the
     // tracks of each tile on it, laid out by the same pass. A tile's track
@@ -1864,7 +1925,7 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
                         }
                         const from_sketch: ?[]const art.Shape = if (proto.sketch) |ps| blk: {
                             const got = try labels.sketchShapes(a, ps, m.tileConst(pid).params.items, pitch_box);
-                            if (got == null) try out_issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg });
+                            if (got == null) try out_issues.append(a, .{ .kind = .tile_sketch, .tile = pid, .region = ri, .row = sg, .sketch_fault = labels.sketchFault(ps, m.tileConst(pid).params.items, pitch_box) });
                             break :blk got;
                         } else null;
                         const shapes = if (from_sketch) |fs| fs else if (proto.art) |pa| art.stretch(a, pa, unit, pitch_box) catch |err| switch (err) {
@@ -2885,6 +2946,53 @@ test "a grid stamp drawn from a ready-made sketch: each hole is the sketch solve
         len.* = longest;
     }
     try testing.expectApproxEqAbs(@as(f64, 4), lens[0] - lens[1], 1e-6);
+}
+
+test "a hole's sketch solved inside out is flagged, with why; overlapping holes are flagged" {
+    const gpa = testing.allocator;
+    const face = try font.Face.init(gpa, testdata.truetype, 0);
+    defer face.deinit();
+    const faces = [_]*font.Face{face};
+    var m: Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const plate = try m.placePanel(.{ .name = "Plate", .space = m.spaces.items[0].id, .origin = .{ .x = 0, .y = 0 }, .w = 60, .h = 30 });
+    const key = try m.addPrototype(.{ .name = "Key" });
+    const rr = try m.addShapeSketch(.rounded_rectangle);
+    const g = try m.addGrid(.{ .panel = plate }, .{ .x = 10, .y = 15 }, .{ .cols = 3, .rows = 1, .pitch_x = 15, .pitch_y = 12 });
+    // A radius over half the height (8.5 / 2): the sides cross.
+    _ = try m.addStamp(.{ .panel = plate }, g, .{ .name = "Holes", .prototype = key, .role = .hole, .w = 9.5, .h = 8.5, .sketch = m.sketches.items[rr].id, .params = &.{.{ .name = "r", .value = 4.5 }} });
+    _ = try m.fillGrid(.{ .panel = plate }, g, 0);
+    var labels: Labels = .init(gpa, &faces);
+    defer labels.deinit();
+    {
+        var placed = try solve(gpa, &m, .{ .panel = plate }, &labels);
+        defer placed.deinit();
+        var turned: usize = 0;
+        for (placed.issues) |i| {
+            try testing.expect(i.kind != .holes_overlap);
+            if (i.kind == .tile_sketch and i.sketch_fault != null and i.sketch_fault.? == .turned_over) turned += 1;
+        }
+        try testing.expectEqual(@as(usize, 3), turned);
+    }
+    // A radius that fits; then the pitch closed up below the holes' width.
+    m.panels.items[plate].grids.items[g].stamps.items[0].params = &.{.{ .name = "r", .value = 2 }};
+    m.panels.items[plate].grids.items[g].shape.pitch_x = 8;
+    m.revision += 1;
+    {
+        var placed = try solve(gpa, &m, .{ .panel = plate }, &labels);
+        defer placed.deinit();
+        var overlaps: usize = 0;
+        for (placed.issues) |i| {
+            try testing.expect(i.kind != .tile_sketch);
+            if (i.kind == .holes_overlap) {
+                overlaps += 1;
+                try testing.expect(i.other != null and i.amount > 0);
+            }
+        }
+        // Neighbours only: 1 with 2, 2 with 3.
+        try testing.expectEqual(@as(usize, 2), overlaps);
+    }
 }
 
 test "text on a sketch's panel flows round the sketch's ink" {

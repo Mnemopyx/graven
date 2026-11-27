@@ -488,6 +488,27 @@ pub fn clip(a: Allocator, pieces: []const Outline, bound: Outline) Error![]const
     return out.toOwnedSlice(a);
 }
 
+/// The area `x` and `y` share (each filled even-odd), mm²: zero when they
+/// only touch. Clear boxes are not cut.
+pub fn overlapArea(a: Allocator, x: Outline, y: Outline) Error!f64 {
+    const bx = x.bounds();
+    const by = y.bounds();
+    if (bx.x1 <= by.x0 or by.x1 <= bx.x0 or bx.y1 <= by.y0 or by.y1 <= bx.y0) return 0;
+    const R = struct {
+        fn inside(_: *const anyopaque, in: []const bool) bool {
+            return in[0] and in[1];
+        }
+    };
+    const both = try combine(a, &.{ x, y }, .{ .ctx = undefined, .inside = R.inside });
+    var area: f64 = 0;
+    for (both.contours) |c| {
+        var one: f64 = 0;
+        for (c.segments) |sg| one += sg.areaTerm();
+        area += one;
+    }
+    return @abs(area);
+}
+
 /// `base` with every one of `cutters` cut out of it (see the file's
 /// comment). The result is allocated from `a`.
 pub fn cut(a: Allocator, base: Outline, cutters: []const Outline) Error!Outline {
