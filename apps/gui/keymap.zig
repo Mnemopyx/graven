@@ -32,7 +32,7 @@ pub const modes = [_]M{
     .{ .name = "dialog.calibrate-size", .kind = .dialog, .lifetime = .until_left, .parent = "global", .extends = "dialog", .allows = &.{"dialog.calibrate-size"} },
     // The view of the canvas, a sketch or a panel being edited: zoom.
     // Layered on those major modes; its unchorded keys give way to typing.
-    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{ "view", "fab" } },
+    .{ .name = "view", .kind = .minor, .parent = "global", .allows = &.{ "view", "views", "fab" } },
     // No document yet.
     .{ .name = "start", .kind = .major, .parent = "global", .allows = &.{"start"} },
     // The canvas, and what nests in it.
@@ -99,6 +99,11 @@ pub const action_defs = [_]A{
     .{ .name = "views.close" },
     .{ .name = "views.maximize" },
     .{ .name = "views.next", .repeat = true, .param = .int },
+    // The tab after (arg 1) or before (-1) in the active view's window.
+    .{ .name = "views.tab-next", .repeat = true, .param = .int },
+    // The active view's tab to the next window (0) or the one before (1);
+    // with one window, split off beside it.
+    .{ .name = "views.move-tab", .param = .int },
     // A paged context's pages: arg 0 one page, 1 to the first or last.
     .{ .name = "views.page-prev", .repeat = true, .param = .int },
     .{ .name = "views.page-next", .repeat = true, .param = .int },
@@ -406,6 +411,18 @@ pub const binds = [_]B{
     // U for ultraviolet: the next canvas theme (Light Table, Black Light Table).
     .{ .mode = "view", .chord = "u", .action = "view.canvas-theme", .arg = -1 },
     .{ .mode = "view", .chord = "c", .action = "fab.check" },
+    // The views, a key each where nothing takes typed text: \ splits side
+    // by side (Shift: stacked), Q closes, ` fills the window, ] and [ go
+    // along the window's tabs, Shift (} and {) moves the tab to the next
+    // window or the one before.
+    .{ .mode = "view", .chord = "backslash", .action = "views.split-across" },
+    .{ .mode = "view", .chord = "shift+backslash", .action = "views.split-down" },
+    .{ .mode = "view", .chord = "q", .action = "views.close" },
+    .{ .mode = "view", .chord = "grave", .action = "views.maximize" },
+    .{ .mode = "view", .chord = "right_bracket", .action = "views.tab-next", .arg = 1 },
+    .{ .mode = "view", .chord = "left_bracket", .action = "views.tab-next", .arg = -1 },
+    .{ .mode = "view", .chord = "shift+right_bracket", .action = "views.move-tab", .arg = 0 },
+    .{ .mode = "view", .chord = "shift+left_bracket", .action = "views.move-tab", .arg = 1 },
 } ++ enters("dialog", "dialog.confirm") ++ [_]B{
     .{ .mode = "dialog", .chord = "escape", .action = "dialog.cancel" },
     // Vim's digraph key (RFC 1345's mnemonics), where text is typed.
