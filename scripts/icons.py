@@ -243,6 +243,13 @@ ICONS = {
     # Text: a style (a line of text set in it, on its track).
     "text-style": rect(2.5, 9.5, 19, 6.5, "track", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
     "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "drawn") + circle(18, 9, 1.8, "drawn") + dimension((4, 15), (18, 9), 4.2),
+    # Panes, each named by its official name ("pane-" + its id): drawn in
+    # its heading and on its tab, so a pane is known at a glance wherever
+    # it is docked.
+    "pane-browser": rect(2.5, 2.5, 9, 4.5, "container", 0.8) + polyline([(5.5, 7), (5.5, 16.5), (9, 16.5)]) + line(5.5, 11.5, 9, 11.5) + rect(9, 9.25, 12.5, 4.5, "track", 0.8) + rect(9, 14.25, 12.5, 4.5, "track", 0.8),
+    "pane-properties": rect(3, 2, 18, 17.5, "paper", 1.2) + line(5.5, 6, 10, 6) + rect(12, 4.25, 7, 3.5, "select", 0.5) + line(5.5, 10.75, 10, 10.75) + rect(12, 9, 7, 3.5, "select", 0.5) + line(5.5, 15.5, 10, 15.5) + rect(12, 13.75, 7, 3.5, "select", 0.5),
+    "pane-expression-bar": rect(1.5, 6, 21, 9, "paper", 1.2) + polyline([(4, 11), (5.5, 10.2), (7, 13), (9, 8.2), (14, 8.2)]) + line(10, 10, 13, 13) + line(13, 10, 10, 13) + line(16.5, 8, 16.5, 13.2),
+    "pane-log": rect(4, 2, 16, 17.5, "paper", 1.2) + dot(7, 6.5, 1.1) + line(9.5, 6.5, 17.5, 6.5) + dot(7, 10.75, 1.1) + line(9.5, 10.75, 16, 10.75) + dot(7, 15, 1.1) + line(9.5, 15, 17.5, 15),
     # Sketch geometry, as Properties names a constraint's objects.
     "geo-point": dot(12, 11, 2.6),
     "geo-segment": line(5, 17, 19, 5) + dot(5, 17) + dot(19, 5),
