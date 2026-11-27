@@ -19013,7 +19013,15 @@ fn addStampKind(name: []const u8, role: layout.model.GridRole, w: f64, h: f64, d
     const g = contextGrid() orelse return;
     const sh = state.model.gridShape(g.parent, g.index);
     const proto_id = if (state.model.prototypes.items.len == 0) (act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) catch return) else state.model.prototypes.items[0].id;
-    _ = act(.addStamp, .{ g.parent, g.index, layout.model.Stamp{ .name = name, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
+    // A second stamp of a kind is numbered ("Legends 2"): each has a name
+    // of its own in the grid, to be told apart where it is chosen.
+    var nb: [64]u8 = undefined;
+    var free = name;
+    var k: usize = 2;
+    while (for (state.model.gridsIn(g.parent)[g.index].stamps.items) |st| {
+        if (std.mem.eql(u8, st.name, free)) break true;
+    } else false) : (k += 1) free = std.fmt.bufPrint(&nb, "{s} {d}", .{ name, k }) catch return;
+    _ = act(.addStamp, .{ g.parent, g.index, layout.model.Stamp{ .name = free, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
         tell("The stamp could not be added. ");
     };
 }
