@@ -46,7 +46,7 @@ pub const modes = [_]M{
     // The constraints for the containers chosen (K with them chosen),
     // while their pop-up is open.
     .{ .name = "canvas.constrain-objects", .kind = .sub, .parent = "canvas", .allows = &.{"constrain-objects"} },
-    .{ .name = "canvas.flow", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{"canvas.flow"} },
+    .{ .name = "canvas.flow", .kind = .sub, .lifetime = .until_left, .parent = "canvas", .takes_text = true, .allows = &.{ "canvas.flow", "text" } },
     // Choosing a case (Ctrl+Space in a flow): a digit picks one, Space goes
     // back to the case before.
     .{ .name = "canvas.flow.case-picker", .kind = .sub, .lifetime = .until_left, .parent = "canvas.flow", .takes_text = true, .allows = &.{"canvas.flow.case-picker"} },
@@ -185,41 +185,25 @@ pub const action_defs = [_]A{
     .{ .name = "canvas.selection.nudge", .repeat = true, .param = .direction },
     .{ .name = "canvas.selection.nudge-far", .repeat = true, .param = .direction },
 
-    .{ .name = "canvas.flow.caret.char-left", .repeat = true },
-    .{ .name = "canvas.flow.caret.char-right", .repeat = true },
-    .{ .name = "canvas.flow.caret.word-left", .repeat = true },
-    .{ .name = "canvas.flow.caret.word-right", .repeat = true },
-    .{ .name = "canvas.flow.caret.line-start", .repeat = true },
-    .{ .name = "canvas.flow.caret.line-end", .repeat = true },
-    .{ .name = "canvas.flow.caret.text-start", .repeat = true },
-    .{ .name = "canvas.flow.caret.text-end", .repeat = true },
-    .{ .name = "canvas.flow.caret.line-up", .repeat = true },
-    .{ .name = "canvas.flow.caret.line-down", .repeat = true },
-    .{ .name = "canvas.flow.select.char-left", .repeat = true },
-    .{ .name = "canvas.flow.select.char-right", .repeat = true },
-    .{ .name = "canvas.flow.select.word-left", .repeat = true },
-    .{ .name = "canvas.flow.select.word-right", .repeat = true },
-    .{ .name = "canvas.flow.select.line-start", .repeat = true },
-    .{ .name = "canvas.flow.select.line-end", .repeat = true },
-    .{ .name = "canvas.flow.select.text-start", .repeat = true },
-    .{ .name = "canvas.flow.select.text-end", .repeat = true },
-    .{ .name = "canvas.flow.select.line-up", .repeat = true },
-    .{ .name = "canvas.flow.select.line-down", .repeat = true },
-    .{ .name = "canvas.flow.select.all" },
-    .{ .name = "canvas.flow.copy" },
-    .{ .name = "canvas.flow.cut" },
-    .{ .name = "canvas.flow.paste" },
+} ++ textActions() ++ [_]A{
+    .{ .name = "text.select.all" },
+    .{ .name = "text.edit.copy" },
+    .{ .name = "text.edit.cut" },
+    .{ .name = "text.edit.paste" },
+    .{ .name = "text.edit.paste-plain" },
+    .{ .name = "text.edit.new-paragraph", .repeat = true },
+    .{ .name = "text.edit.new-line", .repeat = true },
+    .{ .name = "text.edit.transpose", .repeat = true },
+    .{ .name = "text.edit.case-upper" },
+    .{ .name = "text.edit.case-lower" },
+    .{ .name = "text.edit.case-title" },
+    // The whole displayed line (linenoise's Ctrl+U).
+    .{ .name = "text.delete.line", .repeat = true },
+    .{ .name = "text.style.bold" },
+    .{ .name = "text.style.italic" },
     .{ .name = "canvas.flow.edit-equation" },
     // 0 forward, 1 back.
     .{ .name = "canvas.flow.tab", .repeat = true, .param = .int },
-    .{ .name = "canvas.flow.new-paragraph", .repeat = true },
-    .{ .name = "canvas.flow.new-line", .repeat = true },
-    .{ .name = "canvas.flow.delete-back", .repeat = true },
-    .{ .name = "canvas.flow.delete-forward", .repeat = true },
-    .{ .name = "canvas.flow.delete-line-end", .repeat = true },
-    .{ .name = "canvas.flow.delete-line", .repeat = true },
-    .{ .name = "canvas.flow.delete-word-back", .repeat = true },
-    .{ .name = "canvas.flow.transpose", .repeat = true },
     .{ .name = "canvas.flow.choose-case" },
     .{ .name = "canvas.flow.case-picker.pick", .param = .int },
     .{ .name = "canvas.flow.case-picker.previous", .param = .int },
@@ -332,19 +316,40 @@ fn enters(comptime md: []const u8, comptime ac: []const u8) [2]B {
     };
 }
 
+/// The motions of text (`layout.caret.Motion`, by its names), each with the
+/// operators move and select; those that delete too.
+const text_motions = [_][]const u8{
+    "char-prev",      "char-next",      "word-prev",       "word-next",     "line-start", "line-end",
+    "line-up",        "line-down",      "paragraph-prev",  "paragraph-next", "paragraph-start",
+    "paragraph-end",  "flow-start",     "flow-end",        "style-prev",    "style-next",
+};
+const text_deletes = [_][]const u8{ "char-prev", "char-next", "word-prev", "word-next", "line-start", "line-end" };
+
+/// Every text action that is an operator on a motion: `text.move.<motion>`,
+/// `text.select.<motion>`, `text.delete.<motion>`.
+fn textActions() [2 * text_motions.len + text_deletes.len]A {
+    var out: [2 * text_motions.len + text_deletes.len]A = undefined;
+    for (text_motions, 0..) |m, i| {
+        out[2 * i] = .{ .name = "text.move." ++ m, .repeat = true };
+        out[2 * i + 1] = .{ .name = "text.select." ++ m, .repeat = true };
+    }
+    for (text_deletes, 0..) |m, i| out[2 * text_motions.len + i] = .{ .name = "text.delete." ++ m, .repeat = true };
+    return out;
+}
+
 /// A flow's caret movements, each from the toolkit's text-field binding
 /// (so as the platform has them), with and without selecting.
 fn flowMoves() [20]B {
     const pairs = [_][2][]const u8{
-        .{ "char_left", "char-left" },   .{ "char_right", "char-right" }, .{ "word_left", "word-left" },
-        .{ "word_right", "word-right" }, .{ "line_start", "line-start" }, .{ "line_end", "line-end" },
-        .{ "text_start", "text-start" }, .{ "text_end", "text-end" },     .{ "char_up", "line-up" },
+        .{ "char_left", "char-prev" },   .{ "char_right", "char-next" }, .{ "word_left", "word-prev" },
+        .{ "word_right", "word-next" },  .{ "line_start", "line-start" }, .{ "line_end", "line-end" },
+        .{ "text_start", "flow-start" }, .{ "text_end", "flow-end" },     .{ "char_up", "line-up" },
         .{ "char_down", "line-down" },
     };
     var out: [20]B = undefined;
     for (pairs, 0..) |p, i| {
-        out[2 * i] = .{ .mode = "canvas.flow", .chord = "bind:" ++ p[0], .action = "canvas.flow.caret." ++ p[1] };
-        out[2 * i + 1] = .{ .mode = "canvas.flow", .chord = "bind:" ++ p[0] ++ "_select", .action = "canvas.flow.select." ++ p[1] };
+        out[2 * i] = .{ .mode = "canvas.flow", .chord = "bind:" ++ p[0], .action = "text.move." ++ p[1] };
+        out[2 * i + 1] = .{ .mode = "canvas.flow", .chord = "bind:" ++ p[0] ++ "_select", .action = "text.select." ++ p[1] };
     }
     return out;
 }
@@ -472,31 +477,63 @@ pub const binds = [_]B{
     .{ .mode = "canvas.selection", .chord = "shift+tab", .action = "canvas.selection.hunt", .arg = 1 },
     .{ .mode = "canvas.selection", .chord = "escape", .action = "canvas.selection.clear" },
 } ++ flowMoves() ++ [_]B{
-    .{ .mode = "canvas.flow", .chord = "bind:copy", .action = "canvas.flow.copy" },
-    .{ .mode = "canvas.flow", .chord = "bind:cut", .action = "canvas.flow.cut" },
-    .{ .mode = "canvas.flow", .chord = "bind:paste", .action = "canvas.flow.paste" },
+    .{ .mode = "canvas.flow", .chord = "bind:copy", .action = "text.edit.copy" },
+    .{ .mode = "canvas.flow", .chord = "bind:cut", .action = "text.edit.cut" },
+    .{ .mode = "canvas.flow", .chord = "bind:paste", .action = "text.edit.paste" },
+    .{ .mode = "canvas.flow", .chord = "primary+shift+v", .action = "text.edit.paste-plain" },
     // Ctrl+A is linenoise's line start in text (Travis, 2026-11-24): select
     // all is Cmd+A on a Mac, Ctrl+Shift+A elsewhere.
-    .{ .mode = "canvas.flow", .chord = "bind:select_all", .action = "canvas.flow.select.all", .os = .mac },
-    .{ .mode = "canvas.flow", .chord = "ctrl+shift+a", .action = "canvas.flow.select.all", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "bind:select_all", .action = "text.select.all", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+shift+a", .action = "text.select.all", .os = .not_mac },
     .{ .mode = "canvas.flow", .chord = "primary+backslash", .action = "canvas.flow.edit-equation" },
     .{ .mode = "canvas.flow", .chord = "tab", .action = "canvas.flow.tab", .arg = 0 },
     .{ .mode = "canvas.flow", .chord = "shift+tab", .action = "canvas.flow.tab", .arg = 1 },
-    .{ .mode = "canvas.flow", .chord = "enter", .action = "canvas.flow.new-paragraph" },
-    .{ .mode = "canvas.flow", .chord = "kp_enter", .action = "canvas.flow.new-paragraph" },
-    .{ .mode = "canvas.flow", .chord = "shift+enter", .action = "canvas.flow.new-line" },
-    .{ .mode = "canvas.flow", .chord = "shift+kp_enter", .action = "canvas.flow.new-line" },
-    .{ .mode = "canvas.flow", .chord = "backspace", .action = "canvas.flow.delete-back" },
-    .{ .mode = "canvas.flow", .chord = "delete", .action = "canvas.flow.delete-forward" },
+    .{ .mode = "canvas.flow", .chord = "enter", .action = "text.edit.new-paragraph" },
+    .{ .mode = "canvas.flow", .chord = "kp_enter", .action = "text.edit.new-paragraph" },
+    .{ .mode = "canvas.flow", .chord = "shift+enter", .action = "text.edit.new-line" },
+    .{ .mode = "canvas.flow", .chord = "shift+kp_enter", .action = "text.edit.new-line" },
+    .{ .mode = "canvas.flow", .chord = "backspace", .action = "text.delete.char-prev" },
+    // Words, and to the line's start or end: Ctrl (Alt and Cmd on a Mac).
+    .{ .mode = "canvas.flow", .chord = "ctrl+backspace", .action = "text.delete.word-prev", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+delete", .action = "text.delete.word-next", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+shift+backspace", .action = "text.delete.line-start", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+shift+delete", .action = "text.delete.line-end", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "alt+backspace", .action = "text.delete.word-prev", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "alt+delete", .action = "text.delete.word-next", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "cmd+backspace", .action = "text.delete.line-start", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "cmd+delete", .action = "text.delete.line-end", .os = .mac },
+    // Paragraphs: Ctrl+Up and Down (Alt on a Mac); a change of character
+    // style: Alt+Left and Right (Ctrl+Alt on a Mac). Shift selects.
+    .{ .mode = "canvas.flow", .chord = "ctrl+up", .action = "text.move.paragraph-prev", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+down", .action = "text.move.paragraph-next", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+shift+up", .action = "text.select.paragraph-prev", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+shift+down", .action = "text.select.paragraph-next", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "alt+up", .action = "text.move.paragraph-prev", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "alt+down", .action = "text.move.paragraph-next", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "alt+shift+up", .action = "text.select.paragraph-prev", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "alt+shift+down", .action = "text.select.paragraph-next", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "alt+left", .action = "text.move.style-prev", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "alt+right", .action = "text.move.style-next", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "alt+shift+left", .action = "text.select.style-prev", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "alt+shift+right", .action = "text.select.style-next", .os = .not_mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+alt+left", .action = "text.move.style-prev", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+alt+right", .action = "text.move.style-next", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+alt+shift+left", .action = "text.select.style-prev", .os = .mac },
+    .{ .mode = "canvas.flow", .chord = "ctrl+alt+shift+right", .action = "text.select.style-next", .os = .mac },
+    // Bold and italic on the selection, or for what is typed next (Ctrl+B
+    // was linenoise's character back: the Left arrow does that).
+    .{ .mode = "canvas.flow", .chord = "primary+b", .action = "text.style.bold" },
+    .{ .mode = "canvas.flow", .chord = "primary+i", .action = "text.style.italic" },
+    .{ .mode = "canvas.flow", .chord = "delete", .action = "text.delete.char-next" },
     .{ .mode = "canvas.flow", .chord = "escape", .action = "canvas.flow.leave" },
     // linenoise's (readline's) keys, with Ctrl on every system; in text
     // they win over Graven's own (Travis, 2026-11-24): new file, new and
     // closed views work outside text, and the digraph key is Ctrl+Shift+K.
-    .{ .mode = "canvas.flow", .chord = "ctrl+a", .action = "canvas.flow.caret.line-start" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+e", .action = "canvas.flow.caret.line-end" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+n", .action = "canvas.flow.caret.line-down" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+k", .action = "canvas.flow.delete-line-end" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+t", .action = "canvas.flow.transpose" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+a", .action = "text.move.line-start" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+e", .action = "text.move.line-end" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+n", .action = "text.move.line-down" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+k", .action = "text.delete.line-end" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+t", .action = "text.edit.transpose" },
     // Cases of sorts: Ctrl+Space, then type part of a name, a digit (by
     // position: the number row's keys, whatever the layout types there) for a
     // row (0: the first), Enter for the highlighted one, Space for the case
@@ -520,13 +557,12 @@ pub const binds = [_]B{
     .{ .mode = "canvas.flow.case-picker", .chord = "@E07", .action = "canvas.flow.case-picker.pick", .arg = 7 },
     .{ .mode = "canvas.flow.case-picker", .chord = "@E08", .action = "canvas.flow.case-picker.pick", .arg = 8 },
     .{ .mode = "canvas.flow.case-picker", .chord = "@E09", .action = "canvas.flow.case-picker.pick", .arg = 9 },
-    .{ .mode = "canvas.flow", .chord = "ctrl+w", .action = "canvas.flow.delete-word-back" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+b", .action = "canvas.flow.caret.char-left" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+f", .action = "canvas.flow.caret.char-right" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+p", .action = "canvas.flow.caret.line-up" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+d", .action = "canvas.flow.delete-forward" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+h", .action = "canvas.flow.delete-back" },
-    .{ .mode = "canvas.flow", .chord = "ctrl+u", .action = "canvas.flow.delete-line" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+w", .action = "text.delete.word-prev" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+f", .action = "text.move.char-next" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+p", .action = "text.move.line-up" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+d", .action = "text.delete.char-next" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+h", .action = "text.delete.char-prev" },
+    .{ .mode = "canvas.flow", .chord = "ctrl+u", .action = "text.delete.line" },
 
     .{ .mode = "canvas.equation", .chord = "primary+backslash", .action = "canvas.equation.leave" },
     .{ .mode = "canvas.equation", .chord = "escape", .action = "canvas.equation.leave" },

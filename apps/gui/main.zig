@@ -2325,9 +2325,9 @@ fn faceTable() []const *layout.Face {
 
 /// Resolves the document's styles' fonts again when the document changed.
 fn resolveFonts(labels: *layout.Labels) void {
-    const uses = for (state.model.styles.items) |st| {
-        if (st.faces.items.len > 0) break true;
-    } else false;
+    // Any style: one that names no faces still takes its bold and italic
+    // from the default face's family.
+    const uses = state.model.styles.items.len > 0;
     if (!uses) {
         if (resolved) |*r| {
             labels.resolved = null;
@@ -2356,7 +2356,10 @@ fn resolveFonts(labels: *layout.Labels) void {
         (if (installed) |i| layout.fonts.join(names_arena.allocator(), doc_fonts.catalog(), i) catch return else doc_fonts.catalog())
     else
         installed orelse return;
-    const next = layout.fonts.resolve(state.gpa, &state.model, cat, state.faces[0]) catch return;
+    // The default face by name: a style set in it takes its bold and
+    // italic from its family.
+    const default_name: ?layout.model.FontName = if (state.fonts.len > 0) .{ .family = state.fonts[state.font_choice].family, .style = state.fonts[state.font_choice].style } else null;
+    const next = layout.fonts.resolveWith(state.gpa, &state.model, cat, state.faces[0], default_name) catch return;
     if (doc_changed) state.placed_rev = std.math.maxInt(u64);
     if (resolved) |*old| old.deinit();
     facesChanged();
@@ -5607,10 +5610,11 @@ fn menu() ?dvui.App.Result {
         // Text in a track, at the flow cursor.
         _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 90 });
         const no_sel = track_cursor == null or flowSelection() == null;
-        if (menuAction("Cut", "canvas.flow", kact("canvas.flow.cut"), 0, no_sel, 3)) m.close();
-        if (menuAction("Copy", "canvas.flow", kact("canvas.flow.copy"), 0, no_sel, 4)) m.close();
-        if (menuAction("Paste", "canvas.flow", kact("canvas.flow.paste"), 0, track_cursor == null, 5)) m.close();
-        if (menuAction("Select all", "canvas.flow", kact("canvas.flow.select.all"), 0, track_cursor == null, 6)) m.close();
+        if (menuAction("Cut", "canvas.flow", kact("text.edit.cut"), 0, no_sel, 3)) m.close();
+        if (menuAction("Copy", "canvas.flow", kact("text.edit.copy"), 0, no_sel, 4)) m.close();
+        if (menuAction("Paste", "canvas.flow", kact("text.edit.paste"), 0, track_cursor == null, 5)) m.close();
+        if (menuAction("Paste plain", "canvas.flow", kact("text.edit.paste-plain"), 0, track_cursor == null, 7)) m.close();
+        if (menuAction("Select all", "canvas.flow", kact("text.select.all"), 0, track_cursor == null, 6)) m.close();
     }
     if (tmenu(@src(), "Text", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -5619,6 +5623,16 @@ fn menu() ?dvui.App.Result {
             fontwin.open = true;
             m.close();
         }
+        // At the flow cursor: bold and italic, and letter case.
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 91 });
+        const no_text = track_cursor == null;
+        const no_sel = no_text or flowSelection() == null;
+        if (menuAction("Bold", "canvas.flow", kact("text.style.bold"), 0, no_text, 11)) m.close();
+        if (menuAction("Italic", "canvas.flow", kact("text.style.italic"), 0, no_text, 12)) m.close();
+        _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = 92 });
+        if (menuAction("UPPER CASE", "canvas.flow", kact("text.edit.case-upper"), 0, no_sel, 13)) m.close();
+        if (menuAction("lower case", "canvas.flow", kact("text.edit.case-lower"), 0, no_sel, 14)) m.close();
+        if (menuAction("Title Case", "canvas.flow", kact("text.edit.case-title"), 0, no_sel, 15)) m.close();
     }
     if (tmenu(@src(), "View", .{ .submenu = true }, .{})) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -21929,245 +21943,77 @@ fn textDragTo(at: geom.Point) void {
 
 // The character cursor ------------------------------------------------------
 //
-// The flow cursor stops before each item and at each character of the text
-// set: before every glyph of a run, and at the end of each piece of it (so
-// at both sides of a space between words). Its keys are dvui's text-field
-// bindings: character, word, line (segment) start and end, text start and
-// end, and the line before or after; Shift selects.
+// The places the flow cursor can stop, and the motions over them, are the
+// library's (`layout.caret`): every text action is an operator (move,
+// select, delete) applied to a motion, named `text.<operator>.<motion>`.
 
-/// A place the flow cursor can stop: before item `index`, or `offset`
-/// bytes into the run there; where it shows: on panel `panel`, in flow
-/// segment `segment`, `along` mm into it.
-const Stop = struct { index: usize, offset: u32, parent: Parent, segment: usize, along: f64 };
-
-fn stopBefore(x: Stop, y: Stop) bool {
-    return x.index < y.index or (x.index == y.index and x.offset < y.offset);
-}
+const Stop = layout.caret.Stop;
+const Motion = layout.caret.Motion;
 
 /// Every place the cursor can stop in the flow of track `fr` of panel `fp`
 /// (the first of its thread), in order, from the last solve.
 fn flowStops(fp: Parent, fr: usize) []Stop {
-    const a = dvui.currentWindow().arena();
-    var list: std.ArrayList(Stop) = .empty;
-    if (!state.model.hasParent(fp) or fr >= state.model.regionsIn(fp).len) return &.{};
-    const items = state.model.flowItems(fp, fr);
-    var last: ?Stop = null;
-    for (state.solved.items, 0..) |pl, k| {
-        const pi = state.model.parentAt(k);
-        for (pl.items) |it| {
-            if (!it.flow_parent.eql(fp) or it.region != fr or it.index >= items.len) continue;
-            list.append(a, .{ .index = it.index, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[0] }) catch {};
-            var end: Stop = .{ .index = it.index + 1, .offset = 0, .parent = pi, .segment = it.segment, .along = it.span[1] };
-            // After a break or paragraph end the cursor is at the next
-            // line's start, even when nothing is set there yet (Enter at the
-            // end of the text).
-            if (items[it.index].breaks()) for (pl.tracks) |t| {
-                if (t.flow_parent.eql(fp) and t.region == fr and t.track == it.segment + 1) {
-                    end.segment = t.track;
-                    end.along = 0;
-                    break;
-                }
-            };
-            if (last == null or !stopBefore(end, last.?)) last = end;
-        }
-        // The characters of the runs set here.
-        for (pl.labels) |l| {
-            const r = l.run orelse continue;
-            if (!r.parent.eql(fp) or r.region != fr or r.item >= items.len or items[r.item].what != .run) continue;
-            const content = items[r.item].what.run.content;
-            const t = trackHolding(pi, fp, fr, l.origin) orelse continue;
-            const add = struct {
-                fn f(lst: *std.ArrayList(Stop), al: std.mem.Allocator, item: usize, off: u32, len: usize, parent: Parent, seg: usize, along: f64) void {
-                    const s0: Stop = if (off >= len) .{ .index = item + 1, .offset = 0, .parent = parent, .segment = seg, .along = along } else .{ .index = item, .offset = off, .parent = parent, .segment = seg, .along = along };
-                    lst.append(al, s0) catch {};
-                }
-            }.f;
-            // Its characters (grapheme clusters: a letter and its accents
-            // are one), for text: no stop inside one, and one at each
-            // start, inside a ligature too.
-            const cs: []const layout.edit.Char = if (items[r.item].what.run.equation) &.{} else layout.edit.chars(a, content, false) catch &.{};
-            for (l.render.items) |ri| switch (ri) {
-                .glyph => |g| {
-                    if (g.source < r.from or g.source >= r.from + r.len) continue;
-                    if (insideChar(cs, g.source)) continue;
-                    add(&list, a, r.item, g.source, content.len, pi, t.track, l.origin.x + g.transform.e - t.box.x0);
-                },
-                else => {},
-            };
-            const piece_end = r.from + r.len;
-            for (cs) |ch| {
-                if (ch.start < r.from or ch.start >= piece_end) continue;
-                if (l.render.caret(ch.start)) |cr| add(&list, a, r.item, ch.start, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
-            }
-            if (l.render.caret(piece_end)) |cr| add(&list, a, r.item, piece_end, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
-            // An equation's anchor points, where Tab puts the cursor (an
-            // empty slot has no glyph to stop at).
-            if (items[r.item].what.run.equation) for (layout.edit.slots(a, content) catch &.{}) |at| {
-                if (at < r.from or at >= piece_end) continue;
-                if (l.render.caret(at)) |cr| add(&list, a, r.item, at, content.len, pi, t.track, l.origin.x + cr.x - t.box.x0);
-            };
-        }
-    }
-    if (last) |e| list.append(a, e) catch {};
-    if (list.items.len == 0) {
-        // An empty flow: its first segment's start.
-        for (state.solved.items, 0..) |pl, k| for (pl.tracks) |t| {
-            if (t.flow_parent.eql(fp) and t.region == fr and t.track == 0) return a.dupe(Stop, &.{.{ .index = 0, .offset = 0, .parent = state.model.parentAt(k), .segment = 0, .along = 0 }}) catch &.{};
-        };
-        return &.{};
-    }
-    std.mem.sort(Stop, list.items, {}, struct {
-        fn lt(_: void, x: Stop, y: Stop) bool {
-            return stopBefore(x, y);
-        }
-    }.lt);
-    // One stop per place: the first found (a run's start in its first piece).
-    var w: usize = 0;
-    for (list.items) |st| {
-        if (w > 0 and list.items[w - 1].index == st.index and list.items[w - 1].offset == st.offset) continue;
-        list.items[w] = st;
-        w += 1;
-    }
-    return list.items[0..w];
-}
-
-/// Whether source byte `at` falls inside one of characters `cs`, past its
-/// start (an accent on its letter).
-fn insideChar(cs: []const layout.edit.Char, at: u32) bool {
-    for (cs) |c| {
-        if (c.start < at and at < c.end) return true;
-        if (c.start >= at) break;
-    }
-    return false;
-}
-
-/// The placed segment of the flow of track `fr` of panel `fp` on panel
-/// `pi` that holds point `p` (panel frame): the one whose band it is in.
-fn trackHolding(pi: Parent, fp: Parent, fr: usize, p: geom.Point) ?layout.place.PlacedTrack {
-    var best: ?layout.place.PlacedTrack = null;
-    var best_d: f64 = std.math.inf(f64);
-    const pl = placedOf(pi) orelse return null;
-    for (pl.tracks) |t| {
-        if (!t.flow_parent.eql(fp) or t.region != fr) continue;
-        const b = t.box;
-        const dy = if (p.y < b.y0) b.y0 - p.y else if (p.y > b.y1) p.y - b.y1 else 0;
-        const dx = if (p.x < b.x0) b.x0 - p.x else if (p.x > b.x1) p.x - b.x1 else 0;
-        const d = dx + dy;
-        if (d < best_d) {
-            best_d = d;
-            best = t;
-        }
-    }
-    return best;
+    return layout.caret.stops(dvui.currentWindow().arena(), &state.model, state.solved.items, fp, fr) catch &.{};
 }
 
 /// The stop for flow position (`index`, `offset`): its own, else the last
 /// before it.
 fn stopAt(stops: []const Stop, index: usize, offset: u32) ?usize {
-    if (stops.len == 0) return null;
-    var k: usize = 0;
-    for (stops, 0..) |st, i| {
-        if (st.index < index or (st.index == index and st.offset <= offset)) k = i else break;
-    }
-    return k;
+    return layout.caret.at(stops, .{ .index = index, .offset = offset });
 }
 
-/// The character at a stop, for telling words apart: none (null) before an
-/// item that is not text.
-fn stopChar(fp: Parent, fr: usize, st: Stop) ?u8 {
-    const items = state.model.flowItems(fp, fr);
-    if (st.index >= items.len or items[st.index].what != .run) return null;
-    const content = items[st.index].what.run.content;
-    return if (st.offset < content.len) content[st.offset] else null;
-}
+/// Where up and down keep the cursor: the distance along where vertical
+/// movement began (any other motion forgets it).
+var caret_column: ?f64 = null;
 
-fn isWordChar(ch: ?u8) bool {
-    const c = ch orelse return false;
-    return std.mem.indexOfScalar(u8, dvui.TextLayoutWidget.word_breaks, c) == null;
-}
-
-/// A movement key for the flow cursor (dvui's text-field bindings), with
-/// Shift selecting. Whether it was one.
-/// A caret movement of the flow (`canvas.flow.caret.*`, or with Shift
-/// `canvas.flow.select.*`); whether `a` was one.
-/// A caret motion through a flow's stops.
-const Move = enum { char_left, char_right, word_left, word_right, line_start, line_end, text_start, text_end, char_up, char_down };
-
-/// Where motion `move` takes the cursor `c`: the stop it lands on. The one
-/// place motions are worked out, for moving, selecting and deleting.
-fn motionStop(c: TrackCursor, move: Move) ?Stop {
+/// Where motion `move` takes the cursor `c`: the stop it lands on. Home and
+/// End pressed where they would go already go on to the paragraph's start
+/// or end.
+fn motionStop(c: TrackCursor, move: Motion) ?Stop {
     const stops = flowStops(c.parent, c.region);
     const i = stopAt(stops, c.index, c.offset) orelse return null;
-    const here = stops[i];
-    var j = i;
-    switch (move) {
-        .char_left => j = i -| 1,
-        .char_right => j = @min(i + 1, stops.len - 1),
-        .word_left => {
-            j = i -| 1;
-            while (j > 0 and !(isWordChar(stopChar(c.parent, c.region, stops[j])) and !isWordChar(stopChar(c.parent, c.region, stops[j - 1])))) j -= 1;
-        },
-        .word_right => {
-            j = @min(i + 1, stops.len - 1);
-            while (j + 1 < stops.len and !(isWordChar(stopChar(c.parent, c.region, stops[j])) and !isWordChar(stopChar(c.parent, c.region, stops[j - 1])))) j += 1;
-        },
-        .line_start => while (j > 0 and stops[j - 1].parent.eql(here.parent) and stops[j - 1].segment == here.segment) {
-            j -= 1;
-        },
-        .line_end => while (j + 1 < stops.len and stops[j + 1].parent.eql(here.parent) and stops[j + 1].segment == here.segment) {
-            j += 1;
-        },
-        .text_start => j = 0,
-        .text_end => j = stops.len - 1,
-        .char_up, .char_down => {
-            // The nearest stop on the line before or after.
-            const down = move == .char_down;
-            var target: ?usize = null;
-            var best_seg: usize = 0;
-            for (stops) |st| {
-                const ok = if (down) st.segment > here.segment else st.segment < here.segment;
-                if (!ok) continue;
-                if (target == null or (if (down) st.segment < best_seg else st.segment > best_seg)) {
-                    best_seg = st.segment;
-                    target = 0;
-                }
-            }
-            if (target != null) {
-                var best: ?usize = null;
-                for (stops, 0..) |st, n| {
-                    if (st.segment != best_seg) continue;
-                    if (best == null or @abs(st.along - here.along) < @abs(stops[best.?].along - here.along)) best = n;
-                }
-                if (best) |b| j = b;
-            } else if (down) {
-                // On the last line, Down goes to its end; on the first,
-                // Up to its start.
-                while (j + 1 < stops.len and stops[j + 1].parent.eql(here.parent) and stops[j + 1].segment == here.segment) j += 1;
-            } else while (j > 0 and stops[j - 1].parent.eql(here.parent) and stops[j - 1].segment == here.segment) {
-                j -= 1;
-            }
-        },
-    }
+    const items = state.model.flowItems(c.parent, c.region);
+    var j = layout.caret.motion(stops, items, i, move, caret_column);
+    if (j == i and move == .line_start) j = layout.caret.motion(stops, items, i, .paragraph_start, null);
+    if (j == i and move == .line_end) j = layout.caret.motion(stops, items, i, .paragraph_end, null);
     return stops[j];
 }
 
+/// The motion an action names (`text.move.word-next`), and its operator.
+fn textMotion(a: keymap.ActionId) ?struct { move: Motion, op: enum { move, select, delete } } {
+    inline for (comptime std.enums.values(Motion)) |mo| {
+        const n = comptime mo.name();
+        if (comptime keymap.R.hasAction("text.move." ++ n)) if (a == kact("text.move." ++ n)) return .{ .move = mo, .op = .move };
+        if (comptime keymap.R.hasAction("text.select." ++ n)) if (a == kact("text.select." ++ n)) return .{ .move = mo, .op = .select };
+        if (comptime keymap.R.hasAction("text.delete." ++ n)) if (a == kact("text.delete." ++ n)) return .{ .move = mo, .op = .delete };
+    }
+    return null;
+}
+
+/// A caret motion of the flow (`text.move.*`, or with Shift
+/// `text.select.*`); whether `a` was one.
 fn flowMoveAction(a: keymap.ActionId) bool {
     const c = track_cursor orelse return false;
-    const moves = [_]struct { name: []const u8, move: Move }{
-        .{ .name = "char-left", .move = .char_left },   .{ .name = "char-right", .move = .char_right },
-        .{ .name = "word-left", .move = .word_left },   .{ .name = "word-right", .move = .word_right },
-        .{ .name = "line-start", .move = .line_start }, .{ .name = "line-end", .move = .line_end },
-        .{ .name = "text-start", .move = .text_start }, .{ .name = "text-end", .move = .text_end },
-        .{ .name = "line-up", .move = .char_up },       .{ .name = "line-down", .move = .char_down },
+    const tm = textMotion(a) orelse return false;
+    if (tm.op == .delete) return false;
+    const vertical = tm.move == .line_up or tm.move == .line_down;
+    // Without Shift, a selection collapses to its start or end first.
+    if (tm.op == .move and !vertical and (tm.move == .char_prev or tm.move == .char_next)) if (orderedSelection()) |sel| {
+        const to = if (tm.move == .char_prev) sel[0] else sel[1];
+        flow_anchor = null;
+        caret_column = null;
+        track_cursor.?.index = to.index;
+        track_cursor.?.offset = to.offset;
+        return true;
     };
-    var found: ?struct { move: Move, select: bool } = null;
-    inline for (moves) |m| {
-        if (a == kact("canvas.flow.caret." ++ m.name)) found = .{ .move = m.move, .select = false };
-        if (a == kact("canvas.flow.select." ++ m.name)) found = .{ .move = m.move, .select = true };
-    }
-    const f = found orelse return false;
-    const j = motionStop(c, f.move) orelse return true;
-    if (f.select) {
+    if (vertical) {
+        if (caret_column == null) {
+            const stops = flowStops(c.parent, c.region);
+            if (stopAt(stops, c.index, c.offset)) |k| caret_column = stops[k].along;
+        }
+    } else caret_column = null;
+    const j = motionStop(c, tm.move) orelse return true;
+    if (tm.op == .select) {
         if (flow_anchor == null) flow_anchor = .{ .index = c.index, .offset = c.offset };
     } else flow_anchor = null;
     track_cursor.?.index = j.index;
@@ -22314,14 +22160,28 @@ fn flowAction(inv: keymap.Invocation) bool {
     const region = state.model.regionsIn(c.parent)[c.region];
     const len = state.model.flowItems(c.parent, c.region).len;
     switch (inv.action) {
-        kact("canvas.flow.copy") => copyFlowSelection(false),
-        kact("canvas.flow.cut") => copyFlowSelection(true),
-        kact("canvas.flow.paste") => {
+        kact("text.edit.copy") => copyFlowSelection(false),
+        kact("text.edit.cut") => copyFlowSelection(true),
+        kact("text.edit.paste"), kact("text.edit.paste-plain") => {
+            // Copied here, with its emphasis, unless plain is asked for.
             const text = dvui.clipboardText();
-            if (text.len > 0) typeIntoFlow(text);
+            if (inv.action == kact("text.edit.paste") and flow_clip.markup.len > 0 and std.mem.eql(u8, text, flow_clip.plain)) {
+                pasteMarkup();
+            } else if (text.len > 0) typeIntoFlow(text);
             typing_seq += 1;
         },
-        kact("canvas.flow.select.all") => {
+        kact("text.edit.case-upper"), kact("text.edit.case-lower"), kact("text.edit.case-title") => {
+            const sel = flowSelection() orelse return true;
+            const how: layout.edit.Case = if (inv.action == kact("text.edit.case-upper")) .upper else if (inv.action == kact("text.edit.case-lower")) .lower else .title;
+            const r = act(.changeCase, .{ c.parent, c.region, sel[0], sel[1], how }) catch return true;
+            setFlowSelection(r[0], r[1]);
+            typing_seq += 1;
+        },
+        kact("text.style.bold"), kact("text.style.italic") => {
+            toggleEmphasis(if (inv.action == kact("text.style.bold")) .bold else .italic);
+            typing_seq += 1;
+        },
+        kact("text.select.all") => {
             const stops = flowStops(c.parent, c.region);
             if (stops.len > 0) {
                 flow_anchor = .{ .index = stops[0].index, .offset = stops[0].offset };
@@ -22340,15 +22200,15 @@ fn flowAction(inv: keymap.Invocation) bool {
         // In text, Enter ends the paragraph and Shift+Enter the line (a run
         // is split where the cursor is); in a track of tiles, Enter ends
         // the row.
-        kact("canvas.flow.new-paragraph"), kact("canvas.flow.new-line") => {
+        kact("text.edit.new-paragraph"), kact("text.edit.new-line") => {
             _ = deleteFlowSelection();
             const cc = track_cursor.?;
-            const line = inv.action == kact("canvas.flow.new-line");
+            const line = inv.action == kact("text.edit.new-line");
             const pos = act(.breakAt, .{ cc.parent, cc.region, flowPos(cc), !(line or region.style == null) }) catch return true;
             setFlowPos(pos);
             typing_seq += 1;
         },
-        kact("canvas.flow.delete-back") => {
+        kact("text.delete.char-prev") => {
             if (deleteFlowSelection()) return true;
             const from = charBeforeCursor(c) orelse return true;
             const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, from, flowPos(c) }) catch return true;
@@ -22357,25 +22217,20 @@ fn flowAction(inv: keymap.Invocation) bool {
         // linenoise's kills: to the line's end (at it, the break after
         // it), the whole line, the word before; and swapping two
         // characters.
-        kact("canvas.flow.delete-line-end") => {
+        kact("text.delete.line-end") => {
             if (deleteFlowSelection()) return true;
             var to = motionStop(c, .line_end) orelse return true;
-            if (to.index == c.index and to.offset == c.offset) to = motionStop(c, .char_right) orelse return true;
+            if (to.index == c.index and to.offset == c.offset) to = motionStop(c, .char_next) orelse return true;
             deleteFlowTo(c, .{ .index = to.index, .offset = to.offset });
         },
-        kact("canvas.flow.delete-line") => {
+        kact("text.delete.line") => {
             if (deleteFlowSelection()) return true;
             const from = motionStop(c, .line_start) orelse return true;
             const to = motionStop(c, .line_end) orelse return true;
             const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, layout.model.FlowPos{ .index = from.index, .offset = from.offset }, layout.model.FlowPos{ .index = to.index, .offset = to.offset } }) catch return true;
             setFlowPos(pos);
         },
-        kact("canvas.flow.delete-word-back") => {
-            if (deleteFlowSelection()) return true;
-            const from = motionStop(c, .word_left) orelse return true;
-            deleteFlowTo(c, .{ .index = from.index, .offset = from.offset });
-        },
-        kact("canvas.flow.transpose") => transposeChars(c),
+        kact("text.edit.transpose") => transposeChars(c),
         kact("canvas.flow.choose-case") => {
             case_picker = true;
             case_query_len = 0;
@@ -22414,7 +22269,7 @@ fn flowAction(inv: keymap.Invocation) bool {
             chooseCase(prev_case);
         },
         kact("canvas.flow.case-picker.cancel") => case_picker = false,
-        kact("canvas.flow.delete-forward") => {
+        kact("text.delete.char-next") => {
             if (deleteFlowSelection()) return true;
             const to = charAfterCursor(c, len) orelse return true;
             const pos = actM(typingKey(), .deleteRange, .{ c.parent, c.region, flowPos(c), to }) catch return true;
@@ -22428,7 +22283,14 @@ fn flowAction(inv: keymap.Invocation) bool {
             }
             track_cursor = null;
         },
-        else => return false,
+        else => {
+            // Deleting to where a motion goes (a word, the line's start).
+            const tm = textMotion(inv.action) orelse return false;
+            if (tm.op != .delete) return false;
+            if (deleteFlowSelection()) return true;
+            const to = motionStop(c, tm.move) orelse return true;
+            deleteFlowTo(c, to.pos());
+        },
     }
     return true;
 }
@@ -22825,17 +22687,74 @@ fn typeIntoFlow(text: []const u8) void {
     setFlowPos(pos);
 }
 
-/// Copies the selection as plain text (and with `cut`, deletes it).
+/// What was last copied from text here: as plain text (what went to the
+/// clipboard) and, when it lay within one run of text, as markup with its
+/// emphasis. Paste puts the markup in while the clipboard still holds that
+/// text; Paste plain never does.
+var flow_clip: struct { plain: []u8 = &.{}, markup: []u8 = &.{} } = .{};
+
+/// The selection's two ends in flow order.
+fn orderedSelection() ?[2]layout.model.FlowPos {
+    const sel = flowSelection() orelse return null;
+    const swap = sel[1].index < sel[0].index or (sel[1].index == sel[0].index and sel[1].offset < sel[0].offset);
+    return if (swap) .{ sel[1], sel[0] } else sel;
+}
+
+/// Selects from `from` to `to` (the cursor there).
+fn setFlowSelection(from: layout.model.FlowPos, to: layout.model.FlowPos) void {
+    if (track_cursor) |*c| {
+        c.index = to.index;
+        c.offset = to.offset;
+    }
+    flow_anchor = .{ .index = from.index, .offset = from.offset };
+}
+
+/// Copies the selection as plain text (and with `cut`, deletes it); within
+/// one run of text, its markup is kept too, for Paste.
 fn copyFlowSelection(cut: bool) void {
     const c = track_cursor orelse return;
-    const sel = flowSelection() orelse return;
+    const sel = orderedSelection() orelse return;
     const text = state.model.flowText(state.gpa, c.parent, c.region, sel[0], sel[1]) catch return;
     defer state.gpa.free(text);
     dvui.clipboardTextSet(text);
+    state.gpa.free(flow_clip.plain);
+    state.gpa.free(flow_clip.markup);
+    flow_clip = .{};
+    flow_clip.plain = state.gpa.dupe(u8, text) catch &.{};
+    const items = state.model.flowItems(c.parent, c.region);
+    const to_end = sel[1].index == sel[0].index + 1 and sel[1].offset == 0;
+    if ((sel[1].index == sel[0].index or to_end) and sel[0].index < items.len and items[sel[0].index].what == .run and !items[sel[0].index].what.run.equation) {
+        const content = items[sel[0].index].what.run.content;
+        const hi: u32 = if (to_end) @intCast(content.len) else sel[1].offset;
+        const m = layout.edit.slice(dvui.currentWindow().arena(), content, sel[0].offset, hi) catch "";
+        flow_clip.markup = state.gpa.dupe(u8, m) catch &.{};
+    }
     if (cut) {
         _ = deleteFlowSelection();
         typing_seq += 1;
     }
+}
+
+/// Puts in what was last copied here, as markup (its emphasis kept), over
+/// the selection.
+fn pasteMarkup() void {
+    _ = deleteFlowSelection();
+    const c = track_cursor orelse return;
+    const style = state.model.regionsIn(c.parent)[c.region].style orelse (labelStyle() catch return);
+    const pos = actM(typingKey(), .insertMarkup, .{ c.parent, c.region, flowPos(c), flow_clip.markup, style }) catch return;
+    setFlowPos(pos);
+}
+
+/// Bold or italic on the selection: on, unless all of it has it already,
+/// then off. With no selection, for what is typed next at the cursor.
+fn toggleEmphasis(which: layout.edit.Emphasis) void {
+    const c = track_cursor orelse return;
+    const a = dvui.currentWindow().arena();
+    const style = state.model.regionsIn(c.parent)[c.region].style orelse (labelStyle() catch return);
+    const sel = orderedSelection() orelse [2]layout.model.FlowPos{ flowPos(c), flowPos(c) };
+    const all = state.model.emphasisOver(a, c.parent, c.region, sel[0], sel[1], which) catch return;
+    const r = act(.setEmphasis, .{ c.parent, c.region, sel[0], sel[1], which, !all, style }) catch return;
+    if (flowSelection() != null) setFlowSelection(r[0], r[1]) else setFlowPos(r[0]);
 }
 
 /// Where the character before the cursor starts: in the run it is in,

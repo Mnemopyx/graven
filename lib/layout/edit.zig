@@ -276,6 +276,352 @@ pub fn escape(a: Allocator, text: []const u8) Allocator.Error![]u8 {
     return w.written();
 }
 
+// Emphasis: bold and italic over a range ------------------------------------
+//
+// A run's text may be tagged bold or italic: \textbf{…} and \textit{…} (or
+// \emph{…}) in its source. To tag a range, or take a tag off it, the
+// source is read as a list of atoms, each a character (or a piece kept
+// whole: math between dollars, an escape, a command and what it holds)
+// with the groups open around it; the atoms in the range have the group
+// added or taken out; and the source is written again, opening and
+// closing groups only where what is open changes. So the text reads as
+// it did, but for the change; empty groups go, and groups of one kind
+// side by side become one.
+
+pub const Emphasis = enum {
+    bold,
+    italic,
+
+    fn opener(e: Emphasis) []const u8 {
+        return switch (e) {
+            .bold => "\\textbf{",
+            .italic => "\\textit{",
+        };
+    }
+
+    /// Whether group opener `o` gives this emphasis.
+    fn given(e: Emphasis, o: []const u8) bool {
+        return switch (e) {
+            .bold => std.mem.eql(u8, o, "\\textbf{"),
+            .italic => std.mem.eql(u8, o, "\\textit{") or std.mem.eql(u8, o, "\\emph{"),
+        };
+    }
+};
+
+/// A piece of a legend's source with the groups open around it (their
+/// openers, outermost first). A caret (`start` = `end`, `caret`) is a
+/// place, not a piece.
+const Atom = struct {
+    start: u32,
+    end: u32,
+    open: []const []const u8,
+    caret: bool = false,
+};
+
+const Atoms = struct {
+    atoms: []Atom,
+    /// Where an emphasis group's opener starts and where its closing brace
+    /// is: the places either side of a change of emphasis.
+    edges: []u32,
+};
+
+/// Where the group opened by the `{` at `at` closes (its `}`), past
+/// escapes; the end when it does not.
+fn groupEnd(src: []const u8, at: usize) usize {
+    var level: usize = 0;
+    var i = at;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '\\' => i += 1,
+            '{' => level += 1,
+            '}' => {
+                level -= 1;
+                if (level == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return src.len;
+}
+
+fn atomsOf(a: Allocator, src: []const u8) Allocator.Error!Atoms {
+    var out: std.ArrayList(Atom) = .empty;
+    var edges: std.ArrayList(u32) = .empty;
+    var open: std.ArrayList([]const u8) = .empty;
+    // Where each open group's opener started.
+    var starts: std.ArrayList(u32) = .empty;
+    var i: usize = 0;
+    while (i < src.len) {
+        const c = src[i];
+        const here = try a.dupe([]const u8, open.items);
+        const opened = for (openers) |o| {
+            if (std.mem.startsWith(u8, src[i..], o)) break o;
+        } else null;
+        if (opened) |o| {
+            try open.append(a, o);
+            try starts.append(a, @intCast(i));
+            if (o.len > 1) try edges.append(a, @intCast(i));
+            i += o.len;
+            continue;
+        }
+        if (c == '}' and open.items.len > 0) {
+            const o = open.pop().?;
+            _ = starts.pop();
+            if (o.len > 1) try edges.append(a, @intCast(i));
+            i += 1;
+            continue;
+        }
+        var end: usize = i + 1;
+        if (c == '$') {
+            // Math, kept whole: to its closing dollar (or the end).
+            const two = i + 1 < src.len and src[i + 1] == '$';
+            const close = if (two) "$$" else "$";
+            var j = i + close.len;
+            end = src.len;
+            while (j < src.len) : (j += 1) {
+                if (src[j] == '\\') {
+                    j += 1;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, src[j..], close)) {
+                    end = j + close.len;
+                    break;
+                }
+            }
+        } else if (c == '\\') {
+            end = sourceEnd(src, @intCast(i));
+            // A command with arguments (\set(…){…}, \textsc{…}) is kept
+            // whole with them.
+            if (end < src.len and src[end] == '(') {
+                var level: usize = 0;
+                var j = end;
+                while (j < src.len) : (j += 1) {
+                    if (src[j] == '(') level += 1;
+                    if (src[j] == ')') {
+                        level -= 1;
+                        if (level == 0) break;
+                    }
+                }
+                end = @min(src.len, j + 1);
+            }
+            while (end < src.len and src[end] == '{') end = @min(src.len, groupEnd(src, end) + 1);
+        } else {
+            end = sourceEnd(src, @intCast(i));
+        }
+        try out.append(a, .{ .start = @intCast(i), .end = @intCast(@max(end, i + 1)), .open = here });
+        i = @max(end, i + 1);
+    }
+    return .{ .atoms = out.items, .edges = edges.items };
+}
+
+/// The groups open at byte `at` of `src`.
+fn openAt(a: Allocator, src: []const u8, at: u32) Allocator.Error![]const []const u8 {
+    var open: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    var math = false;
+    while (i < at and i < src.len) {
+        const c = src[i];
+        if (c == '$') math = !math;
+        if (math or c == '$') {
+            i += if (c == '\\') 2 else 1;
+            continue;
+        }
+        const opened = for (openers) |o| {
+            if (std.mem.startsWith(u8, src[i..], o)) break o;
+        } else null;
+        if (opened) |o| {
+            if (i + o.len > at) break;
+            try open.append(a, o);
+            i += o.len;
+            continue;
+        }
+        if (c == '}') {
+            if (open.items.len > 0) _ = open.pop();
+            i += 1;
+            continue;
+        }
+        i = @max(sourceEnd(src, @intCast(i)), i + 1);
+    }
+    return open.items;
+}
+
+fn has(open: []const []const u8, e: Emphasis) bool {
+    for (open) |o| if (e.given(o)) return true;
+    return false;
+}
+
+/// The places in legend `src` either side of each change of emphasis: an
+/// emphasis group's opener's start (just outside it) and its closing
+/// brace (just inside it). In order.
+pub fn emphasisEdges(a: Allocator, src: []const u8) Allocator.Error![]u32 {
+    const e = (try atomsOf(a, src)).edges;
+    std.mem.sort(u32, e, {}, std.sort.asc(u32));
+    return e;
+}
+
+/// Whether text at byte `at` of legend `src` (typed there, say) is set
+/// with emphasis `e`.
+pub fn emphasisAt(a: Allocator, src: []const u8, at: u32, e: Emphasis) Allocator.Error!bool {
+    return has(try openAt(a, src, at), e);
+}
+
+/// Whether every character starting in [`from`, `to`) of legend `src` has
+/// emphasis `e`; with none there, false.
+pub fn emphasisAll(a: Allocator, src: []const u8, from: u32, to: u32, e: Emphasis) Allocator.Error!bool {
+    var any = false;
+    for ((try atomsOf(a, src)).atoms) |at| {
+        if (at.start < from or at.start >= to or src[at.start] == '$') continue;
+        if (!has(at.open, e)) return false;
+        any = true;
+    }
+    return any;
+}
+
+pub const Emphasized = struct {
+    src: []u8,
+    /// Where the range now starts and ends (with an empty range: where the
+    /// caret goes, inside the groups it set).
+    from: u32,
+    to: u32,
+};
+
+/// Legend `src` with emphasis `e` set (`on`) or taken off the characters
+/// starting in [`from`, `to`). An empty range marks the caret: typing
+/// there then has the emphasis (or not). Allocated from `a`.
+pub fn setEmphasis(a: Allocator, src: []const u8, from: u32, to: u32, e: Emphasis, on: bool) Allocator.Error!Emphasized {
+    const parsed = try atomsOf(a, src);
+    var atoms: std.ArrayList(Atom) = .empty;
+    try atoms.appendSlice(a, parsed.atoms);
+    const change = struct {
+        fn f(al: Allocator, open: []const []const u8, em: Emphasis, set: bool) Allocator.Error![]const []const u8 {
+            if (set) {
+                if (has(open, em)) return open;
+                const out = try al.alloc([]const u8, open.len + 1);
+                @memcpy(out[0..open.len], open);
+                out[open.len] = em.opener();
+                return out;
+            }
+            var out: std.ArrayList([]const u8) = .empty;
+            for (open) |o| if (!em.given(o)) try out.append(al, o);
+            return out.items;
+        }
+    }.f;
+    if (from == to) {
+        var k: usize = 0;
+        while (k < atoms.items.len and atoms.items[k].start < from) k += 1;
+        try atoms.insert(a, k, .{ .start = from, .end = from, .caret = true, .open = try change(a, try openAt(a, src, from), e, on) });
+    } else for (atoms.items) |*at| {
+        if (at.start >= from and at.start < to) at.open = try change(a, at.open, e, on);
+    }
+    // Written again: groups opened and closed where what is open changes.
+    var out: std.ArrayList(u8) = .empty;
+    var cur: []const []const u8 = &.{};
+    var r_from: ?u32 = null;
+    var r_to: u32 = 0;
+    for (atoms.items) |at| {
+        var common: usize = 0;
+        while (common < cur.len and common < at.open.len and std.mem.eql(u8, cur[common], at.open[common])) common += 1;
+        for (cur[common..]) |_| try out.append(a, '}');
+        for (at.open[common..]) |o| try out.appendSlice(a, o);
+        cur = at.open;
+        const in = if (from == to) at.caret else at.start >= from and at.start < to;
+        if (in and r_from == null) r_from = @intCast(out.items.len);
+        try out.appendSlice(a, src[at.start..at.end]);
+        if (in) r_to = @intCast(out.items.len);
+    }
+    for (cur) |_| try out.append(a, '}');
+    const f = r_from orelse @as(u32, @intCast(out.items.len));
+    return .{ .src = out.items, .from = f, .to = @max(f, r_to) };
+}
+
+/// The characters starting in [`from`, `to`) of legend `src` as markup
+/// that reads as they do there: with the emphasis groups open around them
+/// (for copying with emphasis). Allocated from `a`.
+pub fn slice(a: Allocator, src: []const u8, from: u32, to: u32) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var cur: []const []const u8 = &.{};
+    for ((try atomsOf(a, src)).atoms) |at| {
+        if (at.start < from or at.start >= to) continue;
+        var common: usize = 0;
+        while (common < cur.len and common < at.open.len and std.mem.eql(u8, cur[common], at.open[common])) common += 1;
+        for (cur[common..]) |_| try out.append(a, '}');
+        for (at.open[common..]) |o| try out.appendSlice(a, o);
+        cur = at.open;
+        try out.appendSlice(a, src[at.start..at.end]);
+    }
+    for (cur) |_| try out.append(a, '}');
+    return out.items;
+}
+
+// Letter case --------------------------------------------------------------
+
+pub const Case = enum { upper, lower, title };
+
+/// `cp` in upper or lower case: ASCII, Latin-1, Latin Extended-A, Greek and
+/// Cyrillic by their regular offsets; anything else as it is.
+fn caseOf(cp: u21, upper: bool) u21 {
+    if (upper) {
+        return switch (cp) {
+            'a'...'z' => cp - 32,
+            0xE0...0xFE => if (cp == 0xF7) cp else cp - 32,
+            0x100...0x17F => if (cp % 2 == 1 and cp != 0x131 and cp != 0x138 and cp != 0x149 and !(cp >= 0x139 and cp <= 0x148) and !(cp >= 0x179)) cp - 1 else if ((cp >= 0x139 and cp <= 0x148) or cp >= 0x179) (if (cp % 2 == 0) cp - 1 else cp) else cp,
+            0x3B1...0x3C9 => if (cp == 0x3C2) 0x3A3 else cp - 32,
+            0x430...0x44F => cp - 32,
+            0x450...0x45F => cp - 80,
+            else => cp,
+        };
+    }
+    return switch (cp) {
+        'A'...'Z' => cp + 32,
+        0xC0...0xDE => if (cp == 0xD7) cp else cp + 32,
+        0x100...0x17F => if (cp % 2 == 0 and cp != 0x130 and cp != 0x138 and !(cp >= 0x139 and cp <= 0x148) and !(cp >= 0x179)) cp + 1 else if ((cp >= 0x139 and cp <= 0x148) or cp >= 0x179) (if (cp % 2 == 1 and cp != 0x149 and cp != 0x17F) cp + 1 else cp) else cp,
+        0x391...0x3A9 => if (cp == 0x3A2) cp else cp + 32,
+        0x410...0x42F => cp + 32,
+        0x400...0x40F => cp + 80,
+        else => cp,
+    };
+}
+
+fn isLetter(cp: u21) bool {
+    return caseOf(cp, true) != cp or caseOf(cp, false) != cp;
+}
+
+/// Legend `src` with the plain characters starting in [`from`, `to`) put
+/// in upper case, lower case, or title case (a word's first letter upper,
+/// the rest lower). Escapes, commands and math are left as they are.
+/// Returns the source and where the range now ends. Allocated from `a`.
+pub fn changeCase(a: Allocator, src: []const u8, from: u32, to: u32, how: Case) Allocator.Error!struct { src: []u8, to: u32 } {
+    const cs = try chars(a, src, false);
+    var out: std.ArrayList(u8) = .empty;
+    var at: u32 = 0;
+    var new_to: ?u32 = null;
+    var after_letter = false;
+    for (cs) |c| {
+        const s = src[c.start..c.end];
+        const plain = s.len > 0 and s[0] != '\\' and mathAt(src, c.start) == null;
+        const cp: ?u21 = if (plain) std.unicode.utf8Decode(s) catch null else null;
+        if (c.start >= to and new_to == null) new_to = @intCast(out.items.len + (c.start - at));
+        if (c.start >= from and c.start < to and cp != null and c.start >= at) {
+            const upper = switch (how) {
+                .upper => true,
+                .lower => false,
+                .title => !after_letter,
+            };
+            const mapped = caseOf(cp.?, upper);
+            try out.appendSlice(a, src[at..c.start]);
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(mapped, &buf) catch 0;
+            try out.appendSlice(a, if (n > 0) buf[0..n] else s);
+            at = c.end;
+        }
+        after_letter = if (cp) |p| isLetter(p) or (p >= '0' and p <= '9') or p == '\'' else plain;
+    }
+    try out.appendSlice(a, src[@min(at, src.len)..]);
+    const tail: u32 = @intCast(src.len - @min(src.len, @max(to, at)));
+    const t = new_to orelse @as(u32, @intCast(out.items.len)) - tail;
+    return .{ .src = out.items, .to = @min(t, @as(u32, @intCast(out.items.len))) };
+}
+
 // Tests ---------------------------------------------------------------------
 
 const testing = std.testing;
@@ -367,4 +713,56 @@ test "a legend's math regions: between dollars, ends included; escaped dollars a
     try testing.expectEqual(@as(?[2]u32, null), mathAt("Area $\\pi r$ \\$5", 13));
     // Still being typed: open to the end.
     try testing.expectEqual(@as(?[2]u32, .{ 3, 5 }), mathAt("a $x^", 5));
+}
+
+test "bold set over a range and taken off again" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // "brown" in "the brown fox" made bold.
+    const r = try setEmphasis(a, "the brown fox", 4, 9, .bold, true);
+    try testing.expectEqualStrings("the \\textbf{brown} fox", r.src);
+    try testing.expectEqualStrings("brown", r.src[r.from..r.to]);
+    try testing.expect(try emphasisAll(a, r.src, r.from, r.to, .bold));
+    try testing.expect(!try emphasisAll(a, r.src, 0, r.to, .bold));
+    // Then off its middle: two groups.
+    const r2 = try setEmphasis(a, r.src, r.from + 1, r.from + 4, .bold, false);
+    try testing.expectEqualStrings("the \\textbf{b}row\\textbf{n} fox", r2.src);
+    // And on over the whole: one group again.
+    const r3 = try setEmphasis(a, r2.src, 4, @intCast(r2.src.len), .bold, true);
+    try testing.expectEqualStrings("the \\textbf{brown fox}", r3.src);
+    // Italic inside bold nests; math is kept whole.
+    const r4 = try setEmphasis(a, "a \\textbf{bc} $x^2$ d", 11, 21, .italic, true);
+    try testing.expectEqualStrings("a \\textbf{b\\textit{c}}\\textit{ $x^2$ d}", r4.src);
+    try testing.expect(try emphasisAll(a, r4.src, r4.from, r4.to, .italic));
+    // \emph counts as italic, and comes off.
+    const r5 = try setEmphasis(a, "\\emph{word}", 0, 11, .italic, false);
+    try testing.expectEqualStrings("word", r5.src);
+}
+
+test "emphasis at a caret: an empty group to type into" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try setEmphasis(a, "ab", 1, 1, .bold, true);
+    try testing.expectEqualStrings("a\\textbf{}b", r.src);
+    try testing.expectEqual(@as(u32, 9), r.from);
+    // Inside bold, off: the group closed there and opened again.
+    const r2 = try setEmphasis(a, "\\textbf{ab}", 9, 9, .bold, false);
+    try testing.expectEqualStrings("\\textbf{a}\\textbf{b}", r2.src);
+    try testing.expectEqual(@as(u32, 10), r2.from);
+    try testing.expect(try emphasisAt(a, "x\\textbf{ab}", 10, .bold));
+    try testing.expect(!try emphasisAt(a, "x\\textbf{ab}", 1, .bold));
+    try testing.expectEqualSlices(u32, &.{ 1, 11 }, try emphasisEdges(a, "x\\textbf{ab}y"));
+    try testing.expectEqualStrings("\\textbf{b}y", try slice(a, "x\\textbf{ab}y", 10, 13));
+}
+
+test "letter case of a range" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("the BROWN fox", (try changeCase(a, "the brown fox", 4, 9, .upper)).src);
+    try testing.expectEqualStrings("The Brown Fox", (try changeCase(a, "the bROWN fox", 0, 13, .title)).src);
+    try testing.expectEqualStrings("\\textbf{ÉTÉ} \\% $x$", (try changeCase(a, "\\textbf{été} \\% $x$", 0, 20, .upper)).src);
+    try testing.expectEqualStrings("αβγ", (try changeCase(a, "ΑΒΓ", 0, 6, .lower)).src);
 }
