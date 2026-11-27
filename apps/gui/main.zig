@@ -8071,6 +8071,7 @@ fn canvas(active: bool, view: u8) void {
 
     drawPicked(area);
     drawSelection(area);
+    drawSegmentPicks(area);
     drawPolygonDraft(area);
     drawTrackPath(area);
     drawConstraintMarks(area);
@@ -13707,6 +13708,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
+                // A plain press lets go of the segment picks.
+                if (state.tool == .select and me.button.pointer() and !me.mod.shift()) segment_picks.clearRetainingCapacity();
                 if (state.tool == .construction and me.button.pointer()) {
                     // Construction line: a drag from its first point, or a
                     // click there and a click at its second.
@@ -13765,6 +13768,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
+                } else if (state.tool == .select and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and outlinePress(state.view.toMm(area, me.p))) {
+                    // On the outline of line art (or the like) drawn in a
+                    // text track: that, not the text.
+                    state.press_consumed = true;
+                    last_click = null;
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (state.tool == .select and me.button.pointer() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and textPress(state.view.toMm(area, me.p), me.mod.shift())) {
                     // Well inside a used segment of a text track: the text
                     // cursor there, typing (see "Clicking into text").
@@ -13785,6 +13794,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     state.press_consumed = true;
                     last_click = null;
                     dvui.refresh(null, @src(), box.data().id);
+                } else if (state.tool == .select and me.button.pointer() and me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and segmentPress(state.view.toMm(area, me.p))) {
+                    // Shift+click on a boundary: the segment of its path
+                    // there (see "Segments of paths").
+                    state.press_consumed = true;
+                    last_click = null;
                 } else if (state.tool == .select and me.button.pointer() and (me.mod.shift() or primaryMod(me.mod))) {
                     // Shift-click (or Ctrl-click): the container there in
                     // or out of the selection.
@@ -14198,6 +14212,7 @@ fn levelFirstChild(c: Context) ?Context {
 fn levelSet(c: Context) void {
     state.context = c;
     selection.clearRetainingCapacity();
+    segment_picks.clearRetainingCapacity();
     hunt_clear();
     last_click = null;
     dvui.refresh(null, @src(), null);
@@ -14549,6 +14564,7 @@ fn pick(at: geom.Point) void {
     // Empty space is the worksheet, or on a canvas the shown space itself.
     state.context = workspaceContext();
     selection.clearRetainingCapacity();
+    segment_picks.clearRetainingCapacity();
     // An image, then a view, by their boxes; anything over them wins.
     if (imageUnder(at)) |im| state.context = im;
     if (figurePlaceUnder(at)) |fc| {
@@ -14567,8 +14583,10 @@ fn pick(at: geom.Point) void {
         if (!shownIn(pi)) continue;
         if (pi.panelIndex()) |i| {
             if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(i), panelLayer(i))) continue;
+            // Inside its boundary path: a panel made from a sketch is its
+            // edge's shape, not its bounding box.
             const b = state.model.panels.items[i].box();
-            if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = i };
+            if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1 and insideBoundary(.{ .panel = i }, at)) state.context = .{ .panel = i };
         } else if (!layerOpen(shown_space, state.model.spaces.items[shown_space].base_layer)) continue;
         const pl = placedOf(pi) orelse continue;
         for (pl.tiles) |t| {
@@ -14578,7 +14596,7 @@ fn pick(at: geom.Point) void {
         // Line art, by its box: drawn over the tracks, it is picked over
         // what is under it.
         if (pi.panelIndex()) |i| for (pl.art) |pa| {
-            if (contains(onSheet(pi, pa.box), at)) state.context = .{ .art = .{ .panel = i, .index = pa.index } };
+            if (contains(onSheet(pi, pa.box), at) and insideBoundary(.{ .art = .{ .panel = i, .index = pa.index } }, at)) state.context = .{ .art = .{ .panel = i, .index = pa.index } };
         };
         for (pl.labels) |l| {
             if (l.tile != null) continue;
@@ -24046,6 +24064,13 @@ const HoverTarget = union(enum) {
     figure_place: struct { space: usize, index: usize, box: geom.Box },
     /// Near a construction line: the line (its part in view).
     guide: struct { space: usize, index: usize, seg: [2]geom.Point },
+    /// The shown frame, by its boundary's edge.
+    frame: usize,
+    /// A view of another space, a raster image, a sketch's view: by their
+    /// boundaries.
+    view: struct { space: usize, index: usize },
+    image: struct { space: usize, index: usize },
+    sketch: struct { space: usize, index: usize },
     /// Inside a tile, a slot's text: its label, and where in its source.
     slot: struct { tile: TileId, parent: Parent, label: usize, box: geom.Box, offset: u32 },
     /// In an expression being edited: near an object's box (chosen by a
@@ -24178,20 +24203,12 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
             return .{ .slot = .{ .tile = t.id, .parent = pi, .label = hit.k, .box = hit.box, .offset = nearestCaret(pi, l, p, renderEnd(l)) } };
         }
     }
-    // A track's outline, then a panel's.
-    for (state.solved.items, 0..) |placed, k| {
-        const pi = state.model.parentAt(k);
-        if (!shownIn(pi)) continue;
-        for (placed.tracks) |t| {
-            const b = onSheet(pi, t.box);
-            if (outlineDistance(b, p) <= tol) return .{ .track = .{ .parent = t.parent, .region = t.member, .box = b } };
-        }
-    }
-    for (state.model.panels.items, 0..) |panel, pi| {
-        if (!shownPanel(pi)) continue;
-        const b = panel.box();
-        if (outlineDistance(b, p) <= tol) return .{ .panel = .{ .panel = pi, .box = b } };
-    }
+    // Any other boundary by its path (a track round all its rows, a
+    // panel's edge path, line art's outlines, a grid, a placed figure, the
+    // shown frame's edge): the nearest within the edge's width. Images,
+    // views and sketches pick by their whole area here (a press inside
+    // moves them); Select boundaries reaches them by their edges too.
+    if (nearestBoundaryWithin(p, tol, false, .default)) |h| return h.target;
     return null;
 }
 
@@ -24440,16 +24457,29 @@ const BoundaryHit = struct {
     target: HoverTarget,
     boundary: Boundary,
     at: geom.Point,
+    /// The ring and edge of `boundary` that `at` lies on.
+    ring: usize = 0,
+    edge: usize = 0,
 };
 
 /// Select boundaries: the object whose boundary path is nearest worksheet
 /// point `p` (tiles, tracks with all their rows, line art, panels by their
-/// edge, construction lines), within reach of it (the pointer inside, or
-/// near: 40 px); the smaller of two as near. Each object gives its whole
-/// boundary (`objectBoundary`), so any part of it picks the object.
+/// edge, construction lines, the shown frame's edge, views, images,
+/// sketches), within reach of it (the pointer inside, or near: 40 px); the
+/// smaller of two as near. Each object gives its whole boundary
+/// (`eachBoundary`), so any part of it picks the object.
 fn nearestBoundary(p: geom.Point) ?BoundaryHit {
-    const reach = 40 * edgeMm() / edge_px;
-    const a = dvui.currentWindow().arena();
+    return nearestBoundaryWithin(p, 40 * edgeMm() / edge_px, true, .all);
+}
+
+/// Which objects a search for boundaries looks at: all of them (Select
+/// boundaries), or those plain pointing picks by their outlines (images,
+/// views and sketches are picked by their areas, so a press inside drags).
+const BoundaryKinds = enum { all, default };
+
+/// The object whose boundary is nearest `p` within `reach` mm (or, with
+/// `inside_counts`, with `p` inside it); see `nearestBoundary`.
+fn nearestBoundaryWithin(p: geom.Point, reach: f64, inside_counts: bool, kinds: BoundaryKinds) ?BoundaryHit {
     var best: ?BoundaryHit = null;
     var best_d: f64 = std.math.inf(f64);
     var best_area: f64 = std.math.inf(f64);
@@ -24457,6 +24487,8 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
     const Pick = struct {
         p: geom.Point,
         reach: f64,
+        inside_counts: bool,
+        kinds: BoundaryKinds,
         best: *?BoundaryHit,
         best_d: *f64,
         best_area: *f64,
@@ -24466,9 +24498,16 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         /// decides: a line first (it has no inside), then the one the
         /// pointer is inside, the smallest of those (from inside a track,
         /// its row); from outside them all, the largest (the container).
-        fn consider(k: @This(), t: HoverTarget, bd: Boundary) void {
+        /// An edge only (a frame's) counts only near its edge.
+        fn consider(k: @This(), t: HoverTarget, bd: Boundary, edge_only: bool) void {
+            if (k.kinds == .default) switch (t) {
+                // A track is pointed at by its outline (its segments by
+                // Select boundaries).
+                .view, .image, .sketch, .row => return,
+                else => {},
+            };
             const n = bd.nearest(k.p) orelse return;
-            const inside = bd.contains(k.p);
+            const inside = k.inside_counts and !edge_only and bd.contains(k.p);
             if (n.d > k.reach and !inside) return;
             const ar = bd.area();
             const tie = @abs(n.d - k.best_d.*) <= 1e-6;
@@ -24481,14 +24520,25 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
             else
                 ar > k.best_area.*;
             if (better) {
-                k.best.* = .{ .target = t, .boundary = bd, .at = n.at };
+                k.best.* = .{ .target = t, .boundary = bd, .at = n.at, .ring = n.ring, .edge = n.edge };
                 k.best_d.* = n.d;
                 k.best_area.* = ar;
                 k.best_inside.* = inside;
             }
         }
     };
-    const cand: Pick = .{ .p = p, .reach = reach, .best = &best, .best_d = &best_d, .best_area = &best_area, .best_inside = &best_inside };
+    eachBoundary(Pick{ .p = p, .reach = reach, .inside_counts = inside_counts, .kinds = kinds, .best = &best, .best_d = &best_d, .best_area = &best_area, .best_inside = &best_inside });
+    return best;
+}
+
+/// Every object of the shown space that can be pointed at, with its
+/// boundary path (`geom.path`), handed to `k.consider(target, boundary,
+/// edge_only)`: the one hit-test behind pointing, Select boundaries, the
+/// halos and segment picks (the owner's item 48, 2026-11-27: irregular
+/// paths are picked and haloed by their real outlines, never a box
+/// standing in for them).
+fn eachBoundary(k: anytype) void {
+    const a = dvui.currentWindow().arena();
     // Curves flattened to a tenth of a pixel.
     const tol = 0.1 * edgeMm() / edge_px;
     for (state.solved.items, 0..) |placed, pk| {
@@ -24504,7 +24554,7 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                 Boundary.outline(a, t.shapes[0].outline, tol, o)
             else
                 Boundary.box(a, b)) catch continue;
-            cand.consider(.{ .tile = .{ .id = t.id, .box = b } }, bd);
+            k.consider(.{ .tile = .{ .id = t.id, .box = b } }, bd, false);
         }
         // Each track once, whole: every row (or column) it has, filled or
         // not, inside one outline.
@@ -24514,7 +24564,7 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
             var b = geom.Box.empty;
             for (pts) |q| b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
             const bd = Boundary.polygon(a, pts) catch continue;
-            cand.consider(.{ .track = .{ .parent = pi, .region = ri, .box = b } }, bd);
+            k.consider(.{ .track = .{ .parent = pi, .region = ri, .box = b } }, bd, false);
         }
         // Grids: the outline round all their cells (half a cell beyond
         // the outer rows and columns, as they are drawn).
@@ -24530,13 +24580,13 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                 q.* = .{ .x = g.x + o.x, .y = g.y + o.y };
             }
             const bd = Boundary.polygon(a, pts) catch continue;
-            cand.consider(.{ .grid = .{ .parent = pi, .index = gi } }, bd);
+            k.consider(.{ .grid = .{ .parent = pi, .index = gi } }, bd, false);
         }
         // Its segments that hold content, each a boundary within it.
         for (placed.tracks) |t| {
             const b = onSheet(pi, t.box);
             const bd = Boundary.box(a, b) catch continue;
-            cand.consider(.{ .row = .{ .parent = t.flow_parent, .region = t.region, .row = t.track, .box = b } }, bd);
+            k.consider(.{ .row = .{ .parent = t.flow_parent, .region = t.region, .row = t.track, .box = b } }, bd, false);
         }
         if (pi.panelIndex()) |ai| for (placed.art) |pa| {
             const b = onSheet(pi, pa.box);
@@ -24555,7 +24605,7 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                     } else |_| {}
                 }
             }
-            cand.consider(.{ .art = .{ .panel = ai, .index = pa.index, .box = b } }, bd);
+            k.consider(.{ .art = .{ .panel = ai, .index = pa.index, .box = b } }, bd, false);
         };
     }
     for (0..state.model.panels.items.len) |pi| {
@@ -24565,17 +24615,17 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         // rectangle.
         const edge: ?geom.Outline = if (placedOf(.{ .panel = pi })) |pl| pl.edge else null;
         const bd = (if (edge) |e| Boundary.outline(a, e, tol, panelOrigin(pi)) else Boundary.box(a, b)) catch continue;
-        cand.consider(.{ .panel = .{ .panel = pi, .box = b } }, bd);
+        k.consider(.{ .panel = .{ .panel = pi, .box = b } }, bd, false);
     }
     // Placed figures: their boundaries.
-    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items, 0..) |fp, k| {
+    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items, 0..) |fp, fk| {
         if (!layerOpen(shown_space, fp.layer)) continue;
         const b = fp.box();
         const bd = (if (fp.border.fractions() != null)
             Boundary.outline(a, fp.border.outline(a, fp.inkBox(), fp.margin) catch continue, tol, .{ .x = 0, .y = 0 })
         else
             Boundary.box(a, b)) catch continue;
-        cand.consider(.{ .figure_place = .{ .space = shown_space, .index = k, .box = b } }, bd);
+        k.consider(.{ .figure_place = .{ .space = shown_space, .index = fk, .box = b } }, bd, false);
     };
     // Construction lines in the shown space (while their layer shows): a
     // boundary too, by their distance from the pointer; a line has no
@@ -24586,10 +24636,213 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         for (state.model.spaces.items[shown_space].guides.items, 0..) |g, gi| {
             const seg = g.clip(clip) orelse continue;
             const bd = Boundary.segment(a, seg[0], seg[1]) catch continue;
-            cand.consider(.{ .guide = .{ .space = shown_space, .index = gi, .seg = seg } }, bd);
+            k.consider(.{ .guide = .{ .space = shown_space, .index = gi, .seg = seg } }, bd, false);
         }
     }
-    return best;
+    // The shown frame: its boundary's edge (inside it is the frame's
+    // content; a press there chooses the frame as a plain click does).
+    if (shown_space < state.model.spaces.items.len) if (state.model.spaces.items[shown_space].bound) |fb| {
+        if (Boundary.box(a, fb)) |bd| k.consider(.{ .frame = shown_space }, bd, true) else |_| {}
+    };
+    if (shown_space < state.model.spaces.items.len) {
+        const sp = state.model.spaces.items[shown_space];
+        // Views of other spaces, by the window they show.
+        for (sp.views.items, 0..) |sv, vi| {
+            if (!layerOpen(shown_space, sv.layer)) continue;
+            const bd = Boundary.box(a, viewBox(sv)) catch continue;
+            k.consider(.{ .view = .{ .space = shown_space, .index = vi } }, bd, false);
+        }
+        // Raster images, by their boxes (an image is its rectangle).
+        for (sp.images.items, 0..) |im, ii| {
+            if (!layerOpen(shown_space, im.layer)) continue;
+            const bd = Boundary.box(a, im.box()) catch continue;
+            k.consider(.{ .image = .{ .space = shown_space, .index = ii } }, bd, false);
+        }
+        // Sketches' views, by their bounds (a sketch is a container).
+        for (sp.sketch_views.items, 0..) |_, i| {
+            const b = sketchBox(viewPlace(shown_space, i) orelse continue) orelse continue;
+            const bd = Boundary.box(a, b) catch continue;
+            k.consider(.{ .sketch = .{ .space = shown_space, .index = i } }, bd, false);
+        }
+    }
+}
+
+/// The context a pointed-at object is (what a press on its boundary
+/// chooses); null for what is inside an expression or a slot.
+fn targetContext(t: HoverTarget) ?Context {
+    return switch (t) {
+        .tile => |x| .{ .tile = x.id },
+        .track => |x| .{ .region = .{ .parent = x.parent, .region = x.region } },
+        .row => |x| .{ .row = .{ .parent = x.parent, .region = x.region, .row = x.row } },
+        .panel => |x| .{ .panel = x.panel },
+        .grid => |x| .{ .grid = .{ .parent = x.parent, .index = x.index } },
+        .art => |x| .{ .art = .{ .panel = x.panel, .index = x.index } },
+        .figure_place => |x| .{ .figure_place = .{ .space = x.space, .index = x.index } },
+        .guide => |x| .{ .guide = .{ .space = x.space, .index = x.index } },
+        .frame => |si| .{ .space = si },
+        .view => |x| .{ .view = .{ .space = x.space, .index = x.index } },
+        .image => |x| .{ .image = .{ .space = x.space, .index = x.index } },
+        .sketch => |x| .{ .sketch = .{ .space = x.space, .index = x.index } },
+        .slot, .eq_object, .eq_caret => null,
+    };
+}
+
+/// The boundary path of the object context `c` names, in the shown space
+/// (the same paths pointing measures: `eachBoundary`).
+fn boundaryOf(c: Context) ?Boundary {
+    var found: ?Boundary = null;
+    const Find = struct {
+        want: Context,
+        found: *?Boundary,
+        fn consider(k: @This(), t: HoverTarget, bd: Boundary, _: bool) void {
+            if (k.found.* != null) return;
+            const tc = targetContext(t) orelse return;
+            if (std.meta.eql(tc, k.want)) k.found.* = bd;
+        }
+    };
+    eachBoundary(Find{ .want = c, .found = &found });
+    return found;
+}
+
+/// Whether `at` is inside the boundary path of `c`, or on it (within the
+/// edge's width); true when it has none to measure.
+fn insideBoundary(c: Context, at: geom.Point) bool {
+    const bd = boundaryOf(c) orelse return true;
+    if (bd.contains(at)) return true;
+    const n = bd.nearest(at) orelse return true;
+    return n.d <= edgeMm();
+}
+
+/// The boundary paths of containers `ids` (panels, tracks, line art,
+/// images, placed figures) as shown, into `out` (null where not shown):
+/// one walk of `eachBoundary` for them all.
+fn boundariesOfObjects(ids: []const layout.model.ObjectId, out: []?Boundary) void {
+    @memset(out, null);
+    const Find = struct {
+        ids: []const layout.model.ObjectId,
+        out: []?Boundary,
+        fn consider(k: @This(), t: HoverTarget, bd: Boundary, _: bool) void {
+            switch (t) {
+                .row => return, // a track's segment: the track is the object
+                else => {},
+            }
+            const tc = targetContext(t) orelse return;
+            const oid = objectOfContext(tc) orelse return;
+            const i = std.mem.indexOfScalar(layout.model.ObjectId, k.ids, oid) orelse return;
+            if (k.out[i] == null) k.out[i] = bd;
+        }
+    };
+    eachBoundary(Find{ .ids = ids, .out = out });
+}
+
+// Segments of paths (the owner's item 48, 2026-11-27): Shift+click on an
+// object's boundary picks the segment of it there, the smooth run between
+// its corners (`geom.path.segmentRun`: a side of a panel's edge path, an
+// arc of line art's outline, a frame's side, a construction line), and
+// adds it to the segment picks, or takes it out; each is haloed along its
+// real path. Shift held near a boundary previews the segment a click
+// would pick. As in a sketch, Shift+click on a curve is its piece; away
+// from every boundary, Shift+click keeps its meaning (the container there
+// into the selection). A pick is held by its object and its place
+// relative to the object's boundary, so it follows the object when it
+// moves, and is found again from it each frame.
+
+/// A turn sharper than this ends a segment.
+const segment_corner_deg: f64 = 20;
+
+const SegmentPick = struct {
+    owner: Context,
+    /// The picked place, from the corner of the owner's boundary's bounds.
+    rel: geom.Point,
+};
+
+var segment_picks: std.ArrayList(SegmentPick) = .empty;
+
+fn pathBounds(bd: Boundary) geom.Box {
+    var b = geom.Box.empty;
+    for (bd.rings) |r| for (r.pts) |q| {
+        b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+    };
+    return b;
+}
+
+/// The segment of boundary `bd` at its ring `ring`, edge `edge`.
+fn segmentOf(bd: Boundary, ring: usize, edge: usize) ?geom.path.Ring {
+    return (geom.path.segmentRun(dvui.currentWindow().arena(), bd, ring, edge, segment_corner_deg) catch return null) orelse null;
+}
+
+/// A pick's segment as it is now (its owner's boundary found again).
+fn pickedSegment(sp: SegmentPick) ?geom.path.Ring {
+    const bd = boundaryOf(sp.owner) orelse return null;
+    const b = pathBounds(bd);
+    const n = bd.nearest(.{ .x = b.x0 + sp.rel.x, .y = b.y0 + sp.rel.y }) orelse return null;
+    return segmentOf(bd, n.ring, n.edge);
+}
+
+/// The boundary under `p` near enough for a segment pick (the edge's
+/// width), and its segment there.
+fn segmentAt(p: geom.Point) ?struct { hit: BoundaryHit, run: geom.path.Ring } {
+    const h = nearestBoundaryWithin(p, edgeMm(), false, .all) orelse return null;
+    if (targetContext(h.target) == null) return null;
+    const run = segmentOf(h.boundary, h.ring, h.edge) orelse return null;
+    return .{ .hit = h, .run = run };
+}
+
+/// Shift+click at `p`: the segment there in or out of the picks. Whether
+/// there was one.
+fn segmentPress(p: geom.Point) bool {
+    const s = segmentAt(p) orelse return false;
+    const owner = targetContext(s.hit.target).?;
+    // Already picked (the same run of the same object): out.
+    for (segment_picks.items, 0..) |sp, i| {
+        if (!std.meta.eql(sp.owner, owner)) continue;
+        const run = pickedSegment(sp) orelse continue;
+        if (sameRun(run, s.run)) {
+            _ = segment_picks.orderedRemove(i);
+            state.status = "Segment taken out of the picks. ";
+            dvui.refresh(null, @src(), null);
+            return true;
+        }
+    }
+    const b = pathBounds(s.hit.boundary);
+    segment_picks.append(state.gpa, .{ .owner = owner, .rel = .{ .x = s.hit.at.x - b.x0, .y = s.hit.at.y - b.y0 } }) catch return false;
+    const B = struct {
+        var buf: [128]u8 = undefined;
+    };
+    const len = geom.path.ringLength(s.run);
+    const chord = if (s.run.pts.len >= 2) std.math.hypot(s.run.pts[s.run.pts.len - 1].x - s.run.pts[0].x, s.run.pts[s.run.pts.len - 1].y - s.run.pts[0].y) else 0;
+    const shape = if (s.run.closed) "closed" else if (@abs(len - chord) <= 1e-6 * @max(len, 1)) "straight" else "curved";
+    state.status = std.fmt.bufPrint(&B.buf, "Segment of {s} picked: {d:.2} mm, {s} ({d} picked; Shift+click again takes it out). ", .{ owner.kindName(), len, shape, segment_picks.items.len }) catch "";
+    dvui.refresh(null, @src(), null);
+    return true;
+}
+
+fn sameRun(x: geom.path.Ring, y: geom.path.Ring) bool {
+    if (x.pts.len == 0 or y.pts.len == 0 or x.closed != y.closed) return false;
+    const eq = struct {
+        fn f(u: geom.Point, v: geom.Point) bool {
+            return @abs(u.x - v.x) < 1e-6 and @abs(u.y - v.y) < 1e-6;
+        }
+    }.f;
+    if (x.closed) return x.pts.len == y.pts.len and eq(x.pts[0], y.pts[0]);
+    const xa = x.pts[0];
+    const xb = x.pts[x.pts.len - 1];
+    const ya = y.pts[0];
+    const yb = y.pts[y.pts.len - 1];
+    return (eq(xa, ya) and eq(xb, yb)) or (eq(xa, yb) and eq(xb, ya));
+}
+
+/// The segment picks haloed along their paths, and with Shift held the
+/// segment a click would pick, fainter.
+fn drawSegmentPicks(area: dvui.Rect.Physical) void {
+    for (segment_picks.items) |sp| {
+        const run = pickedSegment(sp) orelse continue;
+        haloPath(area, .{ .rings = &.{run} }, colors.select);
+    }
+    if (state.tool != .select or !shiftHeld() or state.drag != null or sketch_edit != null) return;
+    const m = state.mouse orelse return;
+    const s = segmentAt(m) orelse return;
+    haloPath(area, .{ .rings = &.{s.run} }, colors.select.opacity(0.55));
 }
 
 /// A highlighted boundary path that is not a plain rectangle: the core
@@ -24795,7 +25048,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
         skRing(c, 3 * px, colors.select, 1.5 * px);
     };
     switch (t) {
-        .tile, .track, .row, .panel, .grid, .art, .guide, .figure_place => {},
+        .tile, .track, .row, .panel, .grid, .art, .guide, .figure_place, .frame, .view, .image, .sketch => {},
         .slot => |x| {
             state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
             state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
@@ -24811,6 +25064,23 @@ fn drawHover(area: dvui.Rect.Physical) void {
 /// the caret put). Whether it took the press.
 fn hoverPress(p: geom.Point) bool {
     const t = (if (boundary_mode) (if (nearestBoundary(p)) |h| h.target else null) else hoverTargetAt(p)) orelse return false;
+    return pressTarget(t);
+}
+
+/// A press right on the outline of something drawn inside a text track's
+/// segment (line art, a placed figure, an image, a construction line …):
+/// that thing, before the press would go into the text (item 48: what is
+/// drawn there is picked by its real outline). Whether it took the press.
+fn outlinePress(p: geom.Point) bool {
+    const h = nearestBoundaryWithin(p, edgeMm(), false, if (boundary_mode) .all else .default) orelse return false;
+    switch (h.target) {
+        .art, .figure_place, .grid, .guide, .image, .view, .sketch => return pressTarget(h.target),
+        else => return false,
+    }
+}
+
+/// Takes what pointing found (see `hoverPress`).
+fn pressTarget(t: HoverTarget) bool {
     switch (t) {
         .tile => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
@@ -24859,6 +25129,28 @@ fn hoverPress(p: geom.Point) bool {
             levelSet(.{ .art = .{ .panel = x.panel, .index = x.index } });
             // The container is the selection: its drag points show.
             if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+        },
+        .frame => |si| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .space = si });
+        },
+        .view => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .view = .{ .space = x.space, .index = x.index } });
+        },
+        .image => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .image = .{ .space = x.space, .index = x.index } });
+            if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+        },
+        .sketch => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            selection.clearRetainingCapacity();
+            pickSketch(.{ .space = x.space, .index = x.index });
         },
         .slot => |x| return slotPress(x),
         .eq_object => |x| {
@@ -27217,7 +27509,16 @@ fn drawPointerMark() void {
 fn drawSelection(area: dvui.Rect.Physical) void {
     if (selection.items.len == 0) return;
     const px = dvui.windowNaturalScale();
-    for (selection.items) |id| {
+    const bds = dvui.currentWindow().arena().alloc(?Boundary, selection.items.len) catch return;
+    boundariesOfObjects(selection.items, bds);
+    for (selection.items, bds) |id, maybe| {
+        // A container whose boundary is not a plain rectangle (a panel
+        // made from a sketch, line art, a figure's wrap): haloed along its
+        // real path, not a box standing in for it.
+        if (maybe) |bd| if (bd.asBox() == null) {
+            haloPath(area, bd, colors.select);
+            continue;
+        };
         const b = containerBox(id) orelse continue;
         const r = state.view.rect(area, b);
         r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.14) } });

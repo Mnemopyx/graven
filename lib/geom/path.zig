@@ -22,6 +22,9 @@ pub const Ring = struct {
 pub const Nearest = struct {
     d: f64,
     at: Point,
+    /// Which ring, and which of its edges (from point `edge` to the next).
+    ring: usize = 0,
+    edge: usize = 0,
 };
 
 pub const Path = struct {
@@ -73,15 +76,15 @@ pub const Path = struct {
     /// The nearest point of the path to `p`; null for an empty one.
     pub fn nearest(bd: Path, p: Point) ?Nearest {
         var best: ?Nearest = null;
-        for (bd.rings) |r| {
+        for (bd.rings, 0..) |r, ri| {
             const n = r.pts.len;
             if (n == 0) continue;
             if (n == 1) {
-                consider(&best, p, r.pts[0]);
+                consider(&best, p, r.pts[0], ri, 0);
                 continue;
             }
             const edges = if (r.closed) n else n - 1;
-            for (0..edges) |i| consider(&best, p, closestOnSegment(p, r.pts[i], r.pts[(i + 1) % n]));
+            for (0..edges) |i| consider(&best, p, closestOnSegment(p, r.pts[i], r.pts[(i + 1) % n]), ri, i);
         }
         return best;
     }
@@ -135,9 +138,99 @@ pub const Path = struct {
     }
 };
 
-fn consider(best: *?Nearest, p: Point, q: Point) void {
+fn consider(best: *?Nearest, p: Point, q: Point, ring: usize, edge: usize) void {
     const d = std.math.hypot(q.x - p.x, q.y - p.y);
-    if (best.* == null or d < best.*.?.d) best.* = .{ .d = d, .at = q };
+    if (best.* == null or d < best.*.?.d) best.* = .{ .d = d, .at = q, .ring = ring, .edge = edge };
+}
+
+/// A path's segments (the owner's item 48, 2026-11-27): a ring's smooth
+/// runs between its corners, a corner being where the path turns by more
+/// than `corner_deg` at once (a flattened curve turns by a little at each
+/// of its points, so a run holds a whole curve: a rectangle's side, an
+/// arc between the straight sides it meets). The run of ring `ring` that
+/// holds edge `edge`, as an open line (a ring with no corner, a circle,
+/// is one closed run). Its points are `bd`'s, copied into `a`.
+pub fn segmentRun(a: std.mem.Allocator, bd: Path, ring: usize, edge: usize, corner_deg: f64) std.mem.Allocator.Error!?Ring {
+    if (ring >= bd.rings.len) return null;
+    const r = bd.rings[ring];
+    const n = r.pts.len;
+    if (n < 2) return null;
+    const edges = if (r.closed) n else n - 1;
+    if (edge >= edges) return null;
+    const cos_max = @cos(corner_deg * std.math.pi / 180);
+    const Dir = struct {
+        d: Point,
+        l: f64,
+        /// Edge `i`'s direction and length, or null when it has none.
+        fn of(pts: []const Point, i: usize) ?@This() {
+            const u = pts[i];
+            const v = pts[(i + 1) % pts.len];
+            const l = std.math.hypot(v.x - u.x, v.y - u.y);
+            return if (l > 1e-12) .{ .d = .{ .x = (v.x - u.x) / l, .y = (v.y - u.y) / l }, .l = l } else null;
+        }
+    };
+    // Whether a segment ends at point `i` (between edges i-1 and i, the
+    // nearest with length either side): the path turns sharply there, or
+    // the edges' lengths jump (a straight side meeting a flattened curve
+    // along its tangent: one long edge, then the curve's short steps).
+    const corner = struct {
+        fn at(pts: []const Point, closed: bool, i: usize, es: usize, cm: f64) bool {
+            if (!closed and (i == 0 or i == pts.len - 1)) return true;
+            var k: usize = 0;
+            var before: ?Dir = null;
+            var j = (i + es - 1) % es;
+            while (k < es) : (k += 1) {
+                before = Dir.of(pts, j);
+                if (before != null) break;
+                j = (j + es - 1) % es;
+            }
+            var after: ?Dir = null;
+            j = i % es;
+            k = 0;
+            while (k < es) : (k += 1) {
+                after = Dir.of(pts, j);
+                if (after != null) break;
+                j = (j + 1) % es;
+            }
+            const b = before orelse return false;
+            const f = after orelse return false;
+            if (b.d.x * f.d.x + b.d.y * f.d.y < cm) return true;
+            return @max(b.l, f.l) > 3 * @min(b.l, f.l);
+        }
+    }.at;
+    // Back from the edge's start to a corner, and on from its end.
+    var start = edge;
+    var steps: usize = 0;
+    while (!corner(r.pts, r.closed, start, edges, cos_max)) : (steps += 1) {
+        if (steps >= edges) {
+            // No corner anywhere: the whole ring.
+            return .{ .pts = try a.dupe(Point, r.pts), .closed = r.closed };
+        }
+        start = (start + edges - 1) % edges;
+        if (!r.closed and start == 0) break;
+    }
+    var end = (edge + 1) % n;
+    while (!corner(r.pts, r.closed, end, edges, cos_max)) {
+        end = (end + 1) % n;
+        if (!r.closed and end == n - 1) break;
+    }
+    var out: std.ArrayList(Point) = .empty;
+    var i = start;
+    while (true) {
+        try out.append(a, r.pts[i]);
+        if (i == end) break;
+        i = (i + 1) % n;
+    }
+    return .{ .pts = out.items, .closed = false };
+}
+
+/// A line's length (a ring's, round to its start).
+pub fn ringLength(r: Ring) f64 {
+    var s: f64 = 0;
+    if (r.pts.len < 2) return 0;
+    for (1..r.pts.len) |i| s += std.math.hypot(r.pts[i].x - r.pts[i - 1].x, r.pts[i].y - r.pts[i - 1].y);
+    if (r.closed) s += std.math.hypot(r.pts[0].x - r.pts[r.pts.len - 1].x, r.pts[0].y - r.pts[r.pts.len - 1].y);
+    return s;
 }
 
 /// The point of segment `a`–`b` nearest `p`.
@@ -183,4 +276,41 @@ test "a line has no inside and no area" {
     try std.testing.expect(!bd.contains(.{ .x = 5, .y = 0 }));
     try std.testing.expectEqual(0, bd.area());
     try std.testing.expectApproxEqAbs(2, bd.nearest(.{ .x = 12, .y = 0 }).?.d, 1e-12);
+}
+
+test "a segment of a path: a box's side, a rounded end's arc, a circle whole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bx = try Path.box(a, .{ .x0 = 0, .y0 = 0, .x1 = 4, .y1 = 2 });
+    const n = bx.nearest(.{ .x = 2, .y = 2.1 }).?;
+    const side = (try segmentRun(a, bx, n.ring, n.edge, 20)).?;
+    try std.testing.expectEqual(@as(usize, 2), side.pts.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), ringLength(side), 1e-9);
+    // A stadium: two straight sides and two half circles of 24 steps.
+    var pts: std.ArrayList(Point) = .empty;
+    for (0..25) |k| {
+        const t = std.math.pi * (-0.5 + @as(f64, @floatFromInt(k)) / 24);
+        try pts.append(a, .{ .x = 4 + @cos(t), .y = 1 + @sin(t) });
+    }
+    for (0..25) |k| {
+        const t = std.math.pi * (0.5 + @as(f64, @floatFromInt(k)) / 24);
+        try pts.append(a, .{ .x = @cos(t), .y = 1 + @sin(t) });
+    }
+    const st = try Path.polygon(a, pts.items);
+    const on_arc = st.nearest(.{ .x = 5.2, .y = 1 }).?;
+    const arc = (try segmentRun(a, st, on_arc.ring, on_arc.edge, 20)).?;
+    try std.testing.expectApproxEqAbs(std.math.pi, ringLength(arc), 0.01);
+    const on_top = st.nearest(.{ .x = 2, .y = 2.2 }).?;
+    const top = (try segmentRun(a, st, on_top.ring, on_top.edge, 20)).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 4), ringLength(top), 1e-9);
+    // A circle has no corner: the whole ring.
+    var c: std.ArrayList(Point) = .empty;
+    for (0..48) |k| {
+        const t = 2 * std.math.pi * @as(f64, @floatFromInt(k)) / 48;
+        try c.append(a, .{ .x = @cos(t), .y = @sin(t) });
+    }
+    const circle = try Path.polygon(a, c.items);
+    const whole = (try segmentRun(a, circle, 0, 5, 20)).?;
+    try std.testing.expect(whole.closed);
 }
