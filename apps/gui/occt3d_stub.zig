@@ -24,6 +24,11 @@ pub fn meshSlabs(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, o
     return error.Unavailable;
 }
 
+pub fn writeStep(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, name: []const u8, path: []const u8) Error!void {
+    _ = .{ gpa, a, slabs, name, path };
+    return error.Unavailable;
+}
+
 pub fn lastError() []const u8 {
     return "this build has no OCCT (build it with -Docct-prebuilt)";
 }

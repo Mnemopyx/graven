@@ -5212,14 +5212,7 @@ pub const Model = struct {
     /// `panel`, if it gives one: the last operation's that does.
     pub fn planColour(m: *const Model, panel: usize, layer: []const u8) ?manufacture.Finish {
         const pl = m.activePlan() orelse return null;
-        const pid = m.panels.items[panel].id;
-        var found: ?manufacture.Finish = null;
-        for (pl.operations) |op| for (op.targets) |t| {
-            if (t.panel == pid and std.mem.eql(u8, t.layer, layer)) if (t.colour) |c| {
-                found = c;
-            };
-        };
-        return found;
+        return pl.makes(m.panels.items[panel].id, layer, null).colour;
     }
 
     /// An older document's fabrication, as a plan: its panels with
