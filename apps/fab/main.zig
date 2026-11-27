@@ -16,6 +16,9 @@ const usage =
     \\         Fonts as the GUI finds them: a fonts folder beside the document, then
     \\         $GRAVEN_FONTS or fonts/; --font sets every style in that one font file.
     \\         --check also runs OCCT's checker and measures the solids' volumes (slower).
+    \\         --plan <name> writes that manufacturing plan's prints instead: each part its
+    \\         FDM operations make, in the plan's colours, as <folder>/<part>.step (the
+    \\         folder named in place of <out.step>; graven export --plan writes the rest).
     \\         The example: graven-fab examples/hp15c.graven hp15c.step
     \\
 ;
@@ -26,6 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const args: []const [:0]const u8 = try init.minimal.args.toSlice(init.arena.allocator());
     var font: ?[]const u8 = null;
     var panel: ?[]const u8 = null;
+    var plan: ?[]const u8 = null;
     var k: usize = 1;
     while (k < args.len and std.mem.startsWith(u8, args[k], "--")) : (k += 1) {
         if (std.mem.eql(u8, args[k], "--check")) {
@@ -33,17 +37,20 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[k], "--font") and k + 1 < args.len) {
             k += 1;
             font = args[k];
+        } else if (std.mem.eql(u8, args[k], "--plan") and k + 1 < args.len) {
+            k += 1;
+            plan = args[k];
         } else if (std.mem.eql(u8, args[k], "--panel") and k + 1 < args.len) {
             k += 1;
             panel = args[k];
         } else break;
     }
-    if (args.len - k == 2) return document(init, args[k], args[k + 1], font, panel);
+    if (args.len - k == 2) return document(init, args[k], args[k + 1], font, panel, plan);
     std.debug.print("{s}", .{usage});
     std.process.exit(2);
 }
 
-fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, font: ?[]const u8, only: ?[]const u8) !void {
+fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, font: ?[]const u8, only: ?[]const u8, plan_name: ?[]const u8) !void {
     const gpa = init.gpa;
     const io = init.io;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -83,6 +90,23 @@ fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, 
     defer labels.deinit();
     try labels.syncResolved(&res);
 
+    if (plan_name) |want| {
+        const mp = for (m.plans.items) |p| {
+            if (std.mem.eql(u8, p.name, want)) break p;
+        } else {
+            std.debug.print("{s}: no plan named {s}\n", .{ doc_path, want });
+            std.process.exit(1);
+        };
+        try std.Io.Dir.cwd().createDirPath(io, out_path);
+        var failed = false;
+        for (mp.parts) |pt| {
+            const pi = m.panelIndex(pt.panel) orelse continue;
+            if (only) |w| if (!std.mem.eql(u8, m.panels.items[pi].name, w)) continue;
+            if (!try onePart(gpa, m, pi, out_path, &labels, faces, mp)) failed = true;
+        }
+        if (failed) std.process.exit(1);
+        return;
+    }
     var chosen: std.ArrayList(usize) = .empty;
     for (m.panels.items, 0..) |p, pi| {
         if (p.fab.layers.len == 0) continue;
@@ -98,13 +122,15 @@ fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, 
     var failed = false;
     for (chosen.items) |pi| {
         const path = if (chosen.items.len == 1) out_path else try std.fmt.allocPrint(arena, "{s}-{s}{s}", .{ stem, m.panels.items[pi].name, if (ext.len > 0) ext else ".step" });
-        if (!try onePart(gpa, m, pi, path, &labels, faces)) failed = true;
+        if (!try onePart(gpa, m, pi, path, &labels, faces, null)) failed = true;
     }
     if (failed) std.process.exit(1);
 }
 
-/// Builds and writes one part; false when its solids are not sound.
-fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const u8, labels: *layout.Labels, faces: []const *layout.Face) !bool {
+/// Builds and writes one part; false when its solids are not sound. With
+/// a plan, what its FDM operations print, into folder `path` (nothing when
+/// they print none of it).
+fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path_or_dir: []const u8, labels: *layout.Labels, faces: []const *layout.Face, mp: ?layout.model.manufacture.Plan) !bool {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -121,7 +147,16 @@ fn onePart(gpa: std.mem.Allocator, m: *layout.Model, panel: usize, path: []const
     std.debug.print("{s}: {d} layers, {d} steps\n", .{ name, stack.layers.len, p.steps.len });
     const layer_h: f64 = if (m.processOf(panel)) |pr| pr.limits().layer orelse 0 else 0;
     for (p.off_layers) |li| std.debug.print("  flag: {s}: depth not a whole number of {d} mm layers\n", .{ names[li], layer_h });
-    const slabs = try layout.fab.slabs(a, p.steps);
+    var path = path_or_dir;
+    const slabs = if (mp) |pl| blk: {
+        const out = try layout.produce.part(a, m, pl, panel, &placed, faces);
+        if (out.printed.len == 0) {
+            std.debug.print("  {s} prints none of it\n", .{pl.name});
+            return true;
+        }
+        path = try std.fmt.allocPrint(a, "{s}/{s}.step", .{ path_or_dir, out.print_stem });
+        break :blk out.printed;
+    } else try layout.fab.slabs(a, p.steps);
     std.debug.print("  2D: {d} slabs in {d:.0} ms\n", .{ slabs.len, clock.lap() });
     const r = fab.build(gpa, a, slabs, .{ .trace = true, .check = check_solids }) catch |err| {
         std.debug.print("  OCCT: {s}\n", .{fab.lastError()});

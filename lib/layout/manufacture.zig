@@ -233,6 +233,29 @@ pub const Plan = struct {
         for (p.parts) |pt| if (pt.panel == panel) return pt;
         return null;
     }
+
+    /// Whether the plan's operations (those `ops` marks, by index; null:
+    /// all) make stackup layer `layer` of panel `panel`, and the colour
+    /// they give it: the last that gives one.
+    pub fn makes(p: Plan, panel: ObjectId, layer: []const u8, ops: ?[]const bool) struct { made: bool, colour: ?Finish = null } {
+        var made = false;
+        var colour: ?Finish = null;
+        for (p.operations, 0..) |op, k| {
+            if (ops) |mask| if (k >= mask.len or !mask[k]) continue;
+            for (op.targets) |t| {
+                if (t.panel != panel or !std.mem.eql(u8, t.layer, layer)) continue;
+                made = true;
+                if (t.colour) |c| colour = c;
+            }
+        }
+        return .{ .made = made, .colour = colour };
+    }
+
+    /// Whether operation `k` works on panel `panel` at all.
+    pub fn touches(p: Plan, k: usize, panel: ObjectId) bool {
+        for (p.operations[k].targets) |t| if (t.panel == panel) return true;
+        return false;
+    }
 };
 
 /// Something about a plan worth a second look; never a refusal.

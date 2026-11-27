@@ -10689,7 +10689,7 @@ fn plansProperties() void {
     defer popGroup(saved_group);
     const m = &state.model;
     propText("Plans", "{d}", .{m.plans.items.len}, 1);
-    if (m.activePlan()) |p| propText("Exported", "{s}", .{p.name}, 2);
+    if (m.activePlan()) |p| propText("Active", "{s}", .{p.name}, 2);
     keyButton(@src(), "Add a plan", 0, .{ .expand = .horizontal, .id_extra = 3, .margin = .{ .y = 6 } });
 }
 
@@ -10846,9 +10846,15 @@ fn planEditor(id: ObjectId) void {
         n.name = v;
         actM(mergeKey(.{ "plan name", id }), .setPlan, .{ id, n }) catch {};
     }
+    // Its own output: its parts' prints and its cutting and engraving
+    // drawings, into its folder.
+    keyButton(@src(), "Write files for this plan", 0, .{ .expand = .horizontal, .id_extra = 105 });
+    propText("Folder", "{s}", .{layout.produce.folder(ar, file_path, p) catch ""}, 106);
+    // The active plan: the one the canvas's colours and a plain 3MF
+    // export follow.
     if (m.active_plan == id) {
-        propText("Exported", "{s}", .{"this plan"}, 102);
-    } else keyButton(@src(), "Export this plan (make it active)", 0, .{ .expand = .horizontal, .id_extra = 102 });
+        propText("Active", "{s}", .{"this plan"}, 102);
+    } else keyButton(@src(), "Make this plan active", 0, .{ .expand = .horizontal, .id_extra = 102 });
 
     // How the plan's view shows it, when one is active.
     if (activeKind() == .manufacture and vl.views[vl.active].target == @intFromEnum(id)) {
@@ -11210,6 +11216,64 @@ fn runPlanChecks(id: ObjectId) void {
     dvui.refresh(null, @src(), null);
 }
 
+var plan_write_status: [600]u8 = undefined;
+
+/// Writes plan `id`'s files into its folder (`produce.folder`): each
+/// part's print as 3MF (and STEP, where this build has OCCT), and a
+/// drawing for each operation that cuts or engraves it.
+fn writePlanFiles(id: ObjectId) void {
+    const m = &state.model;
+    const pi = m.planIndex(id) orelse return;
+    const plan = m.plans.items[pi];
+    if (state.placed_rev != m.revision) {
+        state.status = "The panels are still being laid out: write again in a moment. ";
+        return;
+    }
+    var arena: std.heap.ArenaAllocator = .init(state.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = layout.produce.folder(a, file_path, plan) catch return;
+    std.Io.Dir.cwd().createDirPath(dvui.io, dir) catch {
+        state.status = std.fmt.bufPrint(&plan_write_status, "The folder {s} could not be made. ", .{dir}) catch "The folder could not be made. ";
+        return;
+    };
+    var written: usize = 0;
+    var bytes: usize = 0;
+    var steps: usize = 0;
+    var failed: ?[]const u8 = null;
+    for (plan.parts) |pt| {
+        const panel = m.panelIndex(pt.panel) orelse continue;
+        const placed = placedOf(.{ .panel = panel }) orelse continue;
+        const out = layout.produce.part(a, m, plan, panel, placed, faceTable()) catch {
+            failed = m.panels.items[panel].name;
+            continue;
+        };
+        for (out.files) |f| {
+            const path = std.fs.path.join(a, &.{ dir, f.name }) catch continue;
+            std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = f.data }) catch {
+                failed = f.name;
+                continue;
+            };
+            written += 1;
+            bytes += f.data.len;
+        }
+        if (occt3d.available and out.printed.len > 0) {
+            const path = std.fmt.allocPrint(a, "{s}/{s}.step", .{ dir, out.print_stem }) catch continue;
+            occt3d.writeStep(state.gpa, a, out.printed, m.panels.items[panel].name, path) catch {
+                failed = std.fs.path.basename(path);
+                continue;
+            };
+            steps += 1;
+        }
+    }
+    state.status = if (failed) |f|
+        std.fmt.bufPrint(&plan_write_status, "Wrote {d} of {s}'s files to {s}; {s} could not be made. ", .{ written + steps, plan.name, dir, f }) catch "Some files could not be written. "
+    else if (written == 0)
+        std.fmt.bufPrint(&plan_write_status, "{s} makes nothing yet: give its operations processes and layers. ", .{plan.name}) catch "Nothing to write. "
+    else
+        std.fmt.bufPrint(&plan_write_status, "Wrote {d} file{s} of {s} to {s} ({d} KB){s}. ", .{ written + steps, if (written + steps == 1) "" else "s", plan.name, dir, bytes / 1024, if (occt3d.available) "" else "; STEP needs a build with OCCT" }) catch "Written. ";
+}
+
 /// Operation `k`'s last results, summed over its parts.
 fn opCheckCounts(id: ObjectId, k: usize) ?struct { fails: usize, marginal: usize, paths: usize } {
     if (!planChecksFor(id)) return null;
@@ -11300,34 +11364,9 @@ var mesh_gen: u64 = 0;
 var mesh_ms: f64 = 0;
 var mesh_failed: ?[]const u8 = null;
 
-/// Part `pi`'s fabrication steps as plan `plan` makes them: only the
-/// stackup layers its operations work on, each added one in the colour the
-/// plan gives it, else the part's material's, else its own.
+/// Part `pi`'s fabrication steps as plan `plan` makes them (`fab.madeBy`).
 fn planSteps(a: std.mem.Allocator, plan: manufacture.Plan, pi: usize) ![]const layout.fab.Step {
-    const m = &state.model;
-    const pn = m.panels.items[pi];
-    const part = plan.part(pn.id) orelse return &.{};
-    const mat_colour: ?layout.model.FabColour = if (m.materialIndex(part.material)) |mi| (if (m.materials.items[mi].material.finishes.len > 0) m.materials.items[mi].material.finishes[0] else null) else null;
-    const fp = try layout.fab.plan(a, m, pi, placedOf(.{ .panel = pi }) orelse return &.{}, faceTable());
-    var out: std.ArrayList(layout.fab.Step) = .empty;
-    for (fp.steps) |st| {
-        const name = pn.fab.layers[st.layer].name;
-        var made = false;
-        var given: ?layout.model.FabColour = null;
-        for (plan.operations) |op| for (op.targets) |t| {
-            if (t.panel != pn.id or !std.mem.eql(u8, t.layer, name)) continue;
-            made = true;
-            if (t.colour) |c| given = c;
-        };
-        if (!made) continue;
-        var s2 = st;
-        switch (st.op) {
-            .add => |own| s2.op = .{ .add = given orelse mat_colour orelse own },
-            .subtract => {},
-        }
-        try out.append(a, s2);
-    }
-    return out.items;
+    return layout.fab.madeBy(a, &state.model, plan, null, pi, placedOf(.{ .panel = pi }) orelse return &.{}, faceTable());
 }
 
 /// A 3D build in the background: the slabs made here, OCCT's sweeping and
@@ -17038,7 +17077,7 @@ fn planRibbon() void {
     ribbonButton(@src(), "plan.checks.check-this-plan", dvui.entypo.check, 3);
     ribbonButton(@src(), "plan.checks.clear-results", dvui.entypo.erase, 4);
     ribbonGap(5);
-    ribbonButton(@src(), "plan.export-this-plan-make-it-active", dvui.entypo.text_document, 6);
+    ribbonButton(@src(), "plan.write-files-for-this-plan", dvui.entypo.save, 6);
 }
 
 /// A ribbon icon button tagged `id` (its badge after it); its rect.
@@ -17567,10 +17606,16 @@ const button_handlers = [_]ButtonHandler{
         }
     }.f),
     // A plan and its operations.
-    handler("plan.export-this-plan-make-it-active", struct {
+    handler("plan.make-this-plan-active", struct {
         fn f(_: i32) void {
             const c = contextPlan() orelse return;
             act(.setActivePlan, .{c.id}) catch {};
+        }
+    }.f),
+    handler("plan.write-files-for-this-plan", struct {
+        fn f(_: i32) void {
+            const c = contextPlan() orelse return;
+            writePlanFiles(c.id);
         }
     }.f),
     handler("plan.add-an-operation", struct {

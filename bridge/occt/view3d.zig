@@ -51,6 +51,19 @@ pub fn meshSlabs(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, o
     into.* = .{ .pos = pos.items, .tris = tris.items, .colour = colour.items, .skipped = into.skipped + built.skipped.len };
 }
 
+/// `slabs` as OCCT solids, one a colour, written as STEP at `path` (each
+/// solid named `name` and its colour), as graven-fab writes a part.
+pub fn writeStep(gpa: Allocator, a: Allocator, slabs: []const layout.fab.Slab, name: []const u8, path: []const u8) Error!void {
+    var built = try fab.build(gpa, a, slabs, .{});
+    defer built.deinit(gpa);
+    var doc: ?*c.os_doc = null;
+    if (c.os_doc_new(&doc) != c.OS_OK) return error.Occt;
+    defer c.os_doc_free(doc);
+    try built.addTo(doc.?, name, a);
+    const z = try a.dupeSentinel(u8, path, 0);
+    if (c.os_doc_write_step(doc.?, z.ptr) != c.OS_OK) return error.Occt;
+}
+
 /// The bridge's last error, for messages.
 pub fn lastError() []const u8 {
     return fab.lastError();

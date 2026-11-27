@@ -9,6 +9,7 @@ const font = @import("graven_font");
 const model = @import("model.zig");
 const place = @import("place.zig");
 const art = @import("art.zig");
+const manufacture = model.manufacture;
 const geom = @import("graven_geom");
 const Allocator = std.mem.Allocator;
 
@@ -33,6 +34,36 @@ pub const Plan = struct {
 /// The plan for panel `panel` as `placed` lays it out; `faces` are the
 /// faces the labels were set in. Allocated from `a`.
 pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face) !Plan {
+    return planWith(a, m, panel, placed, faces, if (m.activePlan()) |p| p.* else null);
+}
+
+/// Panel `panel`'s steps as manufacturing plan `mp` makes them: only the
+/// stackup layers its operations (those `ops` marks, by index; null: all)
+/// make, each added one in the colour they give it, else the part's
+/// material's first finish, else the layer's own. Every plan's output
+/// (`produce.zig`) and its views are made from these.
+pub fn madeBy(a: Allocator, m: *const model.Model, mp: manufacture.Plan, ops: ?[]const bool, panel: usize, placed: *const place.Placed, faces: []const *font.Face) ![]const Step {
+    const pn = m.panels.items[panel];
+    const part = mp.part(pn.id) orelse return &.{};
+    const mat_colour: ?model.FabColour = if (m.materialIndex(part.material)) |mi| (if (m.materials.items[mi].material.finishes.len > 0) m.materials.items[mi].material.finishes[0] else null) else null;
+    const own = try planWith(a, m, panel, placed, faces, null);
+    var out: std.ArrayList(Step) = .empty;
+    for (own.steps) |st| {
+        const made = mp.makes(pn.id, pn.fab.layers[st.layer].name, ops);
+        if (!made.made) continue;
+        var s2 = st;
+        switch (st.op) {
+            .add => |c| s2.op = .{ .add = made.colour orelse mat_colour orelse c },
+            .subtract => {},
+        }
+        try out.append(a, s2);
+    }
+    return out.items;
+}
+
+/// As `plan`, colours from plan `colours` where it gives them (null: the
+/// layers' own).
+fn planWith(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed, faces: []const *font.Face, colours: ?manufacture.Plan) !Plan {
     const fab = m.panels.items[panel].fab;
     // The extent of everything but the through layers, for those to cut
     // clean through.
@@ -54,9 +85,9 @@ pub fn plan(a: Allocator, m: *const model.Model, panel: usize, placed: *const pl
         const pieces = try within(a, m, panel, placed, l.source, try source(a, m, panel, placed, faces, l.source));
         if (pieces.len == 0) continue;
         const z = extent(fab, l, lo - 1, hi + 1);
-        // The active plan's colour for it, where it gives one; else the
-        // layer's own (a document without plans).
-        const planned = m.planColour(panel, l.name);
+        // The plan's colour for it, where it gives one; else the layer's
+        // own (a document without plans).
+        const planned = if (colours) |p| p.makes(m.panels.items[panel].id, l.name, null).colour else null;
         switch (l.op) {
             .add => |own| {
                 const c = planned orelse own;
@@ -171,7 +202,7 @@ fn extent(fab: model.Fab, l: model.FabLayer, lo: f64, hi: f64) [2]f64 {
 }
 
 /// The panel's outline: its edge as placed, else its rectangle.
-fn edgeOf(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed) !geom.Outline {
+pub fn edgeOf(a: Allocator, m: *const model.Model, panel: usize, placed: *const place.Placed) !geom.Outline {
     if (placed.edge) |e| return e;
     const p = m.panels.items[panel];
     const shapes = try art.primitive(a, "edge", .{ .rect = .{ .w = p.w, .h = p.h } }, .{});
