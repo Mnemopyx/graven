@@ -70,7 +70,7 @@ fn document(init: std.process.Init, doc_path: []const u8, out_path: []const u8, 
     if (font) |f| {
         try fonts.addFile(gpa, io, f);
         for (m.styles.items) |st| for (st.faces.items) |sf| try m.setStyleFace(st.id, sf.role, fonts.names.items[0]);
-    } else for (try folders.dirsFor(arena, doc_path)) |d| try fonts.addDir(gpa, io, d);
+    } else for (try folders.dirsFor(arena, io, doc_path)) |d| try fonts.addDir(gpa, io, d);
     if (fonts.faces.items.len == 0) {
         std.debug.print("no fonts: none beside the document or in fonts/ (scripts/fetch-fonts.py), and no --font\n", .{});
         std.process.exit(1);

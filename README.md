@@ -56,7 +56,7 @@ Early, with a working editor. For the full inventory, what is agreed but not bui
 **Manufacture.**
 - **Colour 3D printing:** each part has a stack of layer operations (add, subtract, inlay), built into one closed mesh per colour and height range and written as 3MF (`graven export [--parts colours|bands] [--bed bottom|top] <document> <out.3mf>`, or File › Export panel as 3MF); `graven-fab <document> <out.step>` (built with OCCT, `zig build fab`) writes the same parts as STEP solids.
 
-**Examples.** Two documents made in the GUI, in `examples/`: a PC keyboard (its output is the regression check) and a rough HP-15C keypad (`graven export examples/hp15c.graven hp15c.svg`, or `.3mf`). `zig build gui-test` makes both again in the GUI, driven headless, and checks them against these files.
+**Examples.** Two documents made in the GUI, in `examples/`: a PC keyboard (its output is the regression check) and the HP-15C keypad, from EverCalc's measurements (`graven export examples/hp15c.graven hp15c.svg`, or `.3mf`). `zig build gui-test` makes both again in the GUI, driven headless, and checks them against these files.
 
 **Not yet built.**
 - **Design-rule checks and per-process output:** not started beyond a layer-height flag.
@@ -108,7 +108,7 @@ Equations need a math font. Graven's math font packages (`lib/layout/fonts.zig`)
 
 ```sh
 scripts/fetch-fonts.py          # into fonts/ (git ignores it), or $GRAVEN_FONTS
-zig build run -- hp15c stix-two plate.svg keys.svg
+zig build run -- export examples/hp15c.graven hp15c.svg   # the HP-15C, set in STIX Two
 ```
 
 A missing glyph is reported, never taken silently from a system font.

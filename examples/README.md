@@ -5,7 +5,7 @@ Documents and inputs for trying Graven from the repository root.
 | Path | What |
 | --- | --- |
 | `pc-keyboard.graven` | A PC keyboard (ANSI, 104 keys) in one track of tiles: each key's legends one a slot (`top`, `bottom`, `words`), set in Inter Medium |
-| `hp15c.graven` | A rough HP-15C keypad: a plate with key holes and gold legends, and the keys, on a rectangular array (a Cartesian grid object: the keys centred in its cells) and a grid that follows it; legends in the Libertinus math package; fabrication layers for 3MF |
+| `hp15c.graven` | The HP-15C keypad, from EverCalc's measurements and legend list: a plate with key holes, gold legends and CLEAR, and the keys with white and blue legends, on a rectangular array (a Cartesian grid object: the keys centred on its points) and a grid that follows it; legends in the STIX Two math package; fabrication layers for 3MF |
 | `fonts/Inter-Medium.otf` | Inter Medium, the keyboard's legend font. SIL Open Font License 1.1: see `fonts/OFL.txt` |
 | `examples_test.zig` | Checks that each document opens and lays out as it should (part of `zig build test`) |
 

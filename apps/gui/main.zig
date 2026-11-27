@@ -66,10 +66,12 @@ pub const dvui_app: dvui.App = .{
 /// without the fifo-v1 protocol (COSMIC, for one), where it cannot see the
 /// display scale; an editor wants correct scaling over frame pacing, so
 /// Wayland comes first. SDL_VIDEO_DRIVER in the environment still wins.
+/// Only where those drivers exist: on Windows or macOS the hint would leave
+/// SDL with no driver at all.
 fn start() dvui.App.StartOptions {
     if (dvui.backend.kind == .sdl3) {
         const c = dvui.backend.c;
-        _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+        if (!platform.is_windows and !platform.is_macos) _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland,x11");
         // The identifier becomes the Wayland app id, which the desktop uses
         // to find Graven's .desktop file and icon.
         _ = c.SDL_SetAppMetadata("Graven", layout.version, "com.mnemopyx.graven");
@@ -657,6 +659,12 @@ pub const testing_api = struct {
         const b = cursorBox(c) orelse return null;
         const cf = canvas_free orelse return null;
         return state.view.rect(cf.area, b);
+    }
+    /// Where the active view (a manufacturing view) looks.
+    pub fn setActiveLook(cx: f64, cy: f64, ppm: f64) void {
+        vl.views[vl.active].cx = cx;
+        vl.views[vl.active].cy = cy;
+        vl.views[vl.active].ppm = ppm;
     }
     pub fn setView(cx: f64, cy: f64, ppm: f64) void {
         state.view.cx = cx;
@@ -2427,7 +2435,7 @@ fn syncDocFonts() bool {
     doc_fonts_loaded = true;
     var arena: std.heap.ArenaAllocator = .init(state.gpa);
     defer arena.deinit();
-    const dirs = folders.dirsFor(arena.allocator(), want) catch return true;
+    const dirs = folders.dirsFor(arena.allocator(), dvui.io, want) catch return true;
     for (dirs) |d| doc_fonts.addDir(state.gpa, dvui.io, d) catch {};
     return true;
 }
@@ -2637,6 +2645,12 @@ fn frame() !dvui.App.Result {
     const step_from = stepSignature();
     // Buttons pressed last frame (or by a script): their actions.
     dispatchButtons();
+    // GRAVEN_SHEET=1: the document's first sheet opened beside the canvas,
+    // once (for looking at sheets under a test display).
+    if (!env_sheet_opened and state.model.sheets.items.len > 0) {
+        env_sheet_opened = true;
+        if (platform.env("GRAVEN_SHEET") != null) open_texts_sheet = state.model.sheets.items[0].id;
+    }
     if (open_texts_sheet) |id| {
         open_texts_sheet = null;
         openBeside(.{ .kind = .sheet, .target = @intFromEnum(id) });
@@ -2701,10 +2715,15 @@ fn frame() !dvui.App.Result {
     defer {
         const end: std.Io.Timestamp = .now(dvui.io, .awake);
         recordFrame(end.nanoseconds, frame_start.durationTo(end).nanoseconds);
-        if (frame_log) std.debug.print("frame {d:.2} ms\n", .{@as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6});
+        if (frame_log) {
+            const ms = @as(f64, @floatFromInt(frame_start.durationTo(end).nanoseconds)) / 1e6;
+            if (atlas) |*ga| {
+                std.debug.print("frame {d:.2} ms  atlas: {d} pages ({d} emptied), {d} rasters, {d} fields ({d:.1} MB, {d} forgotten); raster {d:.1} ms, upload {d:.1} ms\n", .{ ms, ga.pages.items.len, ga.evicted_pages, ga.made_rasters, ga.fields.count(), @as(f64, @floatFromInt(ga.field_bytes)) / (1 << 20), ga.evicted_fields, @as(f64, @floatFromInt(ga.raster_ns)) / 1e6, @as(f64, @floatFromInt(ga.upload_ns)) / 1e6 });
+            } else std.debug.print("frame {d:.2} ms\n", .{ms});
+        }
     }
     // Glyph fields made since the last frame.
-    if (atlas) |*ga| _ = ga.collect();
+    if (atlas) |*ga| _ = ga.beginFrame();
     if (dump_path) |p| {
         dump_frame += 1;
         if (dump_svg.items.len > 0) {
@@ -4043,9 +4062,17 @@ fn runAction(inv: keymap.Invocation) bool {
                 .pan => "Scrolling pans; Ctrl and scrolling zooms. ",
             };
         },
-        kact("views.split-across"), kact("views.split-down"), kact("views.close"), kact("views.maximize"), kact("views.next") => {
+        kact("views.split-across"), kact("views.split-down"), kact("views.close"), kact("views.maximize"), kact("views.next"), kact("views.tab-next"), kact("views.move-tab") => {
             if (canvas_prompt) return false;
             switch (inv.action) {
+                kact("views.tab-next") => {
+                    const to = vl.tabAlong(vl.active, if (inv.arg < 0) -1 else 1);
+                    if (to != vl.active) activateView(to);
+                },
+                kact("views.move-tab") => {
+                    // After the views are drawn: they are being drawn now.
+                    tab_move_key = inv.arg == 1;
+                },
                 kact("views.split-across") => splitView(.across),
                 kact("views.split-down") => splitView(.down),
                 kact("views.close") => if (vl.open[vl.active]) closeView(vl.active),
@@ -6516,32 +6543,67 @@ fn revealContext() void {
 /// says.
 fn revealNow(b: geom.Box, area: dvui.Rect.Physical) void {
     const cf = canvas_free orelse return;
-    if (!(state.view.ppm > 0)) return;
     const free = cf.free;
-    // The clear part less the rulers (top and left) and the margin.
-    const m: f64 = reveal_margin * @min(free.w, free.h);
-    const x0: f64 = free.x + cf.rw + m;
-    const y0: f64 = free.y + cf.rw + m;
-    const x1: f64 = free.x + free.w - m;
-    const y1: f64 = free.y + free.h - m;
-    if (x1 <= x0 or y1 <= y0) return;
+    // The clear part less the rulers (top and left).
+    const clear: dvui.Rect.Physical = .{ .x = free.x + cf.rw, .y = free.y + cf.rw, .w = free.w - cf.rw, .h = free.h - cf.rw };
+    if (revealIn(&state.view, b, area, clear, @min(free.w, free.h))) dvui.refresh(null, @src(), null);
+}
+
+/// Box `b` (worksheet mm) brought inside `clear` (physical pixels, within
+/// `area`) by view `look`, less the margin (`reveal_margin` of `side`):
+/// nothing when it is inside already; else the least pan, zooming out
+/// only when it cannot fit, just enough. Whether the view moved. Shared by
+/// canvas views and manufacturing views (both look at worksheet mm).
+fn revealIn(look: *View, b: geom.Box, area: dvui.Rect.Physical, clear: dvui.Rect.Physical, side: f32) bool {
+    if (!(look.ppm > 0)) return false;
+    const m: f64 = reveal_margin * side;
+    const x0: f64 = clear.x + m;
+    const y0: f64 = clear.y + m;
+    const x1: f64 = clear.x + clear.w - m;
+    const y1: f64 = clear.y + clear.h - m;
+    if (x1 <= x0 or y1 <= y0) return false;
     // Too big at this zoom: out just enough.
     const need = @min((x1 - x0) / @max(b.width(), 1e-9), (y1 - y0) / @max(b.height(), 1e-9));
-    if (need < state.view.ppm) state.view.ppm = need;
-    const r = state.view.rect(area, b);
+    const zoomed = need < look.ppm;
+    if (zoomed) look.ppm = need;
+    const r = look.rect(area, b);
     const rx0: f64 = r.x;
     const ry0: f64 = r.y;
     const rx1: f64 = r.x + r.w;
     const ry1: f64 = r.y + r.h;
     // The least shift, in pixels, that brings it inside.
-    const sx: f64 = if (rx0 < x0) x0 - rx0 else if (rx1 > x1) x1 - rx1 else 0;
-    const sy: f64 = if (ry0 < y0) y0 - ry0 else if (ry1 > y1) y1 - ry1 else 0;
-    if (sx == 0 and sy == 0 and need >= state.view.ppm) return;
+    // Within half a pixel counts as inside (what a reveal left at the
+    // margin, rounded).
+    const sx: f64 = if (rx0 < x0 - 0.5) x0 - rx0 else if (rx1 > x1 + 0.5) x1 - rx1 else 0;
+    const sy: f64 = if (ry0 < y0 - 0.5) y0 - ry0 else if (ry1 > y1 + 0.5) y1 - ry1 else 0;
+    if (sx == 0 and sy == 0 and !zoomed) return false;
     // A fit still in force would undo it next frame.
-    state.view.fit = null;
-    state.view.cx -= sx / state.view.ppm;
-    state.view.cy += sy / state.view.ppm;
-    dvui.refresh(null, @src(), null);
+    look.fit = null;
+    look.cx -= sx / look.ppm;
+    look.cy += sy / look.ppm;
+    return true;
+}
+
+/// A reveal waiting for a manufacturing view's next frame: the view, and
+/// what (worksheet mm).
+var mfg_reveal: ?struct { view: u8, box: geom.Box } = null;
+
+/// What of context `ctx` (the context now) manufacturing view `v` shows:
+/// its box, when it lies on one of the plan's parts (a part, or what a
+/// part holds); else null.
+fn planShows(v: u8, ctx: Context) ?geom.Box {
+    const m = &state.model;
+    if (vl.views[v].kind != .manufacture) return null;
+    const pidx = m.planIndex(@enumFromInt(vl.views[v].target)) orelse return null;
+    const b = revealBox() orelse return null;
+    const sp = spaceOfContext(ctx);
+    for (m.plans.items[pidx].parts) |pt| {
+        const pi = m.panelIndex(pt.panel) orelse continue;
+        if (!std.meta.eql(spaceOfContext(.{ .panel = pi }), sp)) continue;
+        const pb = panelBox(pi);
+        if (b.x0 < pb.x1 and b.x1 > pb.x0 and b.y0 < pb.y1 and b.y1 > pb.y0) return b;
+    }
+    return null;
 }
 
 /// The space a context lives in, when it lives in one.
@@ -6575,6 +6637,12 @@ fn spaceOfContext(ctx: Context) ?usize {
 /// (a flow, a style) is revealed in the active view if that is a canvas.
 fn bringUpContext(ctx: Context) void {
     const leaf = vl.leafOf(vl.active) orelse return;
+    // A manufacturing view that shows it stays, and reveals it there.
+    if (planShows(vl.active, ctx)) |b| {
+        mfg_reveal = .{ .view = vl.active, .box = b };
+        dvui.refresh(null, @src(), null);
+        return;
+    }
     const want: ?struct { view: docviews.View, space: usize } = switch (ctx) {
         .sheet => |id| .{ .view = .{ .kind = .sheet, .target = @intFromEnum(id) }, .space = 0 },
         .plan => |id| .{ .view = .{ .kind = .manufacture, .target = @intFromEnum(id) }, .space = 0 },
@@ -7034,13 +7102,201 @@ fn viewArea() void {
         const r = box.data().contentRectScale().r;
         region_rect = .{ .x = r.x / ns, .y = r.y / ns + tab_strip_h, .w = r.w / ns, .h = @max(0, r.h / ns - tab_strip_h) };
     }
+    tab_hit_n = 0;
+    leaf_drawn = @splat(false);
     if (vl.maximized != docviews.none) {
         if (vl.leafOf(vl.maximized)) |leaf| viewLeaf(leaf, vl.maximized);
     } else viewNode(vl.root);
+    tabDrag();
+    if (tab_move_key) |back| {
+        tab_move_key = null;
+        const v = vl.active;
+        if (vl.moveToNextWindow(v, back)) movedView(v);
+        dvui.refresh(null, @src(), null);
+    }
     if (view_to_activate) |v| {
         view_to_activate = null;
         if (v < docviews.max_views and vl.open[v]) activateView(v);
     }
+}
+
+/// A tab as drawn this frame: its view, its window (a leaf), where.
+const TabHit = struct { view: u8, leaf: u8, r: dvui.Rect.Physical };
+var tab_hits: [docviews.max_views]TabHit = undefined;
+var tab_hit_n: usize = 0;
+/// Each window drawn this frame: its tab strip and its body.
+var leaf_drawn: [docviews.max_nodes]bool = @splat(false);
+var leaf_strip: [docviews.max_nodes]dvui.Rect.Physical = @splat(.{});
+var leaf_body: [docviews.max_nodes]dvui.Rect.Physical = @splat(.{});
+
+fn tabHit(v: u8, leaf: u8, r: dvui.Rect.Physical) void {
+    if (tab_hit_n == tab_hits.len) return;
+    tab_hits[tab_hit_n] = .{ .view = v, .leaf = leaf, .r = r };
+    tab_hit_n += 1;
+}
+
+/// A tab pressed, and once it has moved far enough, dragged: its view,
+/// where the press was, where the pointer is.
+var tab_drag: struct { view: u8 = docviews.none, start: dvui.Point.Physical = .{}, at: dvui.Point.Physical = .{}, moving: bool = false } = .{};
+
+/// Where a dragged tab would go: among a window's tabs (before `before`,
+/// or last), or to one side of a window, splitting it.
+const TabDrop = union(enum) {
+    tabs: struct { leaf: u8, before: u8 },
+    side: struct { leaf: u8, dir: docviews.Dir, first: bool },
+
+    fn leafOf(d: TabDrop) u8 {
+        return switch (d) {
+            inline else => |x| x.leaf,
+        };
+    }
+};
+
+/// The drop for a tab let go at `p`: over a strip, among its tabs; over
+/// a window's body, its outer quarter by the nearest edge a split, its
+/// middle among its tabs. Null outside every window, and where nothing
+/// would change.
+fn tabDropAt(p: dvui.Point.Physical, v: u8) ?TabDrop {
+    const src = vl.leafOf(v) orelse return null;
+    for (0..docviews.max_nodes) |k| {
+        if (!leaf_drawn[k]) continue;
+        const leaf: u8 = @intCast(k);
+        if (leaf_strip[k].contains(p)) {
+            var before: u8 = docviews.none;
+            for (tab_hits[0..tab_hit_n]) |h| if (h.leaf == leaf and h.r.contains(p)) {
+                before = h.view;
+            };
+            if (before == v) return null;
+            return .{ .tabs = .{ .leaf = leaf, .before = before } };
+        }
+        const b = leaf_body[k];
+        if (!b.contains(p) or b.w <= 0 or b.h <= 0) continue;
+        const fx = (p.x - b.x) / b.w;
+        const fy = (p.y - b.y) / b.h;
+        const edge = @min(@min(fx, 1 - fx), @min(fy, 1 - fy));
+        if (edge < 0.25 and !(leaf == src and vl.nodes[leaf].tab_count == 1)) {
+            if (edge == fx) return .{ .side = .{ .leaf = leaf, .dir = .across, .first = true } };
+            if (edge == 1 - fx) return .{ .side = .{ .leaf = leaf, .dir = .across, .first = false } };
+            if (edge == fy) return .{ .side = .{ .leaf = leaf, .dir = .down, .first = true } };
+            return .{ .side = .{ .leaf = leaf, .dir = .down, .first = false } };
+        }
+        if (leaf == src) return null;
+        return .{ .tabs = .{ .leaf = leaf, .before = docviews.none } };
+    }
+    return null;
+}
+
+/// Where a drop would land, to show it: a window's body, or its half.
+fn tabDropRect(d: TabDrop) dvui.Rect.Physical {
+    const k = d.leafOf();
+    const b = leaf_body[k];
+    return switch (d) {
+        .tabs => |t| blk: {
+            // Over the strip: a bar where the tab goes.
+            const s = dvui.windowNaturalScale();
+            const st = leaf_strip[k];
+            if (t.before != docviews.none) for (tab_hits[0..tab_hit_n]) |h| if (h.view == t.before) break :blk .{ .x = h.r.x - 2 * s, .y = st.y, .w = 3 * s, .h = st.h };
+            if (leaf_strip[k].contains(tab_drag.at)) {
+                var right = st.x;
+                for (tab_hits[0..tab_hit_n]) |h| if (h.leaf == k) {
+                    right = @max(right, h.r.x + h.r.w);
+                };
+                break :blk .{ .x = right + 2 * s, .y = st.y, .w = 3 * s, .h = st.h };
+            }
+            break :blk b;
+        },
+        .side => |sd| if (sd.dir == .across)
+            .{ .x = if (sd.first) b.x else b.x + b.w / 2, .y = b.y, .w = b.w / 2, .h = b.h }
+        else
+            .{ .x = b.x, .y = if (sd.first) b.y else b.y + b.h / 2, .w = b.w, .h = b.h / 2 },
+    };
+}
+
+/// Moves view `v` as drop `d` says, and makes it active.
+fn dropTab(v: u8, d: TabDrop) void {
+    const at = vl.currentOf(d.leafOf());
+    const moved = switch (d) {
+        .tabs => |t| vl.moveTab(v, at, t.before),
+        .side => |sd| vl.moveToSplit(v, at, sd.dir, sd.first),
+    };
+    if (moved) movedView(v);
+}
+
+/// After view `v` has moved to another window: kept (no longer a
+/// preview), active, and the keys its (the canvas's widget is made anew
+/// there, so focused when next drawn).
+fn movedView(v: u8) void {
+    view_preview[v] = false;
+    activateView(v);
+    if (vl.views[v].kind == .canvas) canvas_focus_next = true else dvui.focusWidget(null, null, null);
+}
+
+/// The canvas takes the keys when next drawn.
+var canvas_focus_next = false;
+/// The active view's tab to go to the next window (false) or the one
+/// before (true), once the views are drawn (Shift+] and Shift+[).
+var tab_move_key: ?bool = null;
+
+/// A tab dragged: pressed on its label and moved, to another window's
+/// tabs, or to a window's side to split it there (Escape: left where it
+/// was). Drawn over the views: where it would go, and the tab's name by
+/// the pointer.
+fn tabDrag() void {
+    const s = dvui.windowNaturalScale();
+    for (dvui.events()) |*e| switch (e.evt) {
+        .mouse => |m| switch (m.action) {
+            .press => if (m.button.pointer()) {
+                tab_drag = .{};
+                for (tab_hits[0..tab_hit_n]) |h| if (h.r.contains(m.p)) {
+                    tab_drag = .{ .view = h.view, .start = m.p, .at = m.p };
+                };
+            },
+            .motion => if (tab_drag.view != docviews.none) {
+                tab_drag.at = m.p;
+                if (!tab_drag.moving and @abs(m.p.x - tab_drag.start.x) + @abs(m.p.y - tab_drag.start.y) > 6 * s) tab_drag.moving = true;
+            },
+            .release => if (m.button.pointer() and tab_drag.view != docviews.none) {
+                const v = tab_drag.view;
+                const was_moving = tab_drag.moving;
+                tab_drag = .{};
+                if (was_moving and v < docviews.max_views and vl.open[v]) {
+                    if (tabDropAt(m.p, v)) |d| dropTab(v, d);
+                    e.handle(@src(), dvui.currentWindow().data());
+                }
+            },
+            else => {},
+        },
+        .key => |ke| if (tab_drag.moving and ke.code == .escape and ke.action == .down) {
+            tab_drag = .{};
+            e.handle(@src(), dvui.currentWindow().data());
+        },
+        else => {},
+    };
+    if (!tab_drag.moving) return;
+    const v = tab_drag.view;
+    if (v >= docviews.max_views or !vl.open[v]) {
+        tab_drag = .{};
+        return;
+    }
+    dvui.cursorSet(.hand);
+    const prev_clip = dvui.clipGet();
+    dvui.clipSet(dvui.windowRectPixels());
+    defer dvui.clipSet(prev_clip);
+    if (tabDropAt(tab_drag.at, v)) |d| {
+        const r = tabDropRect(d);
+        r.fill(.all(3 * s), .{ .color = .{ .color = colors.select.opacity(0.18) } });
+        r.stroke(.all(3 * s), .{ .thickness = 1.5 * s, .color = .{ .color = colors.select.opacity(0.8) } });
+    }
+    // The tab's name by the pointer.
+    var lb: [96]u8 = undefined;
+    const label = viewLabel(&lb, v);
+    const font = dvui.Font.theme(.body).larger(-2);
+    const size = font.textSize(label);
+    const box: dvui.Rect.Physical = .{ .x = tab_drag.at.x + 12 * s, .y = tab_drag.at.y + 8 * s, .w = (size.w + 12) * s, .h = (size.h + 6) * s };
+    box.fill(.all(4 * s), .{ .color = .{ .color = colors.titlebar.opacity(0.95) } });
+    box.stroke(.all(4 * s), .{ .thickness = s, .color = .{ .color = colors.edge.opacity(0.6) } });
+    dvui.renderText(.{ .font = font, .text = label, .rs = .{ .r = box, .s = s }, .p = .{ .x = box.x + 6 * s, .y = box.y + 3 * s }, .color = dvui.themeGet().color(.window, .text) }) catch {};
+    dvui.refresh(null, @src(), null);
 }
 
 fn viewNode(n: u8) void {
@@ -7277,6 +7533,8 @@ fn viewLeaf(leaf: u8, shown: u8) void {
         var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = tab_strip_h - 1 }, .max_size_content = .{ .w = dvui.max_float_safe, .h = tab_strip_h - 1 }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) } });
         defer strip.deinit();
         const n = vl.nodes[leaf];
+        leaf_strip[leaf] = strip.data().borderRectScale().r;
+        leaf_drawn[leaf] = true;
         const at_left = strip.data().rect.x <= 0.5 and @abs(strip.data().borderRectScale().r.x / dvui.windowNaturalScale() - region_rect.x) < 1;
         const tab_font = dvui.Font.theme(.body).larger(-2);
         // The window's tab shown, a folder's tab joined to its view: its
@@ -7289,6 +7547,7 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             });
             defer tab.deinit();
             if (vl.open[shown]) folderTab(tab.data().borderRectScale().r, strip.data().borderRectScale().r, vl.views[shown].kind);
+            tabHit(shown, leaf, tab.data().borderRectScale().r);
             var lb: [96]u8 = undefined;
             const label = if (vl.open[shown]) viewLabel(&lb, shown) else "";
             // Room for descenders: no margin, a little padding below.
@@ -7311,7 +7570,10 @@ fn viewLeaf(leaf: u8, shown: u8) void {
             var lb: [96]u8 = undefined;
             const label = viewLabel(&lb, v);
             const f = if (view_preview[v]) tab_font.withStyle(.italic) else tab_font;
-            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = f, .id_extra = k, .gravity_y = 0.5, .margin = .{ .x = 6 }, .padding = .{ .x = 2, .w = 2, .y = 1, .h = 3 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } })) {
+            var other = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = k, .gravity_y = 0.5, .margin = .{ .x = 6 } });
+            defer other.deinit();
+            tabHit(v, leaf, other.data().borderRectScale().r);
+            if (dvui.labelClick(@src(), "{s}", .{label}, .{}, .{ .font = f, .id_extra = k, .gravity_y = 0.5, .margin = .all(0), .padding = .{ .x = 2, .w = 2, .y = 1, .h = 3 }, .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.55) } })) {
                 if (v != vl.active) view_to_activate = v else vl.select(v);
             }
         }
@@ -7319,6 +7581,11 @@ fn viewLeaf(leaf: u8, shown: u8) void {
         stripIcon(@src(), .square_split_horizontal, "views.split-across", "Split (Alt: stacked)", @as(i32, shown) + 1, leaf, null);
     }
     if (tab_add_leaf == leaf) tabAddPopup(leaf);
+    {
+        const whole = col.data().borderRectScale().r;
+        const top = leaf_strip[leaf].y + leaf_strip[leaf].h;
+        leaf_body[leaf] = .{ .x = whole.x, .y = top, .w = whole.w, .h = @max(0, whole.y + whole.h - top) };
+    }
     if (!vl.open[shown]) return;
     switch (vl.views[shown].kind) {
         .canvas => canvasView(shown),
@@ -7700,6 +7967,14 @@ var sheet_focus_for: u64 = 0;
 /// The selected cell's editor, as last drawn: the sheet's keys act while
 /// it has the keyboard.
 var sheet_editor_id: ?dvui.Id = null;
+/// Whether GRAVEN_SHEET has been looked at (see `frame`).
+var env_sheet_opened = false;
+/// Whether the selected cell is in edit mode (its markup in an editor)
+/// rather than display mode (the glyphics it sets).
+var sheet_editing: bool = false;
+/// `sheet_focus_for`'s value once the sheet itself has the keyboard
+/// (display mode).
+const sheet_display_focus: u64 = std.math.maxInt(u64);
 /// A name being typed, kept until done.
 var sheet_name_edit: ?struct { sheet: layout.model.ObjectId, row: usize, text: [128]u8 = undefined, len: usize = 0 } = null;
 
@@ -7743,6 +8018,7 @@ fn sheetMove(dir: i32) void {
     const rows = sh.rows.items.len;
     const cols = sh.columns.items.len + 1;
     if (rows == 0) return;
+    if (sheet_editing) sheetEdit(false);
     commitSheetName();
     switch (dir) {
         0 => if (sheet_sel.row > 0) {
@@ -7793,7 +8069,10 @@ fn sheetView(v: u8) void {
     const si = state.model.sheetIndex(id) orelse return;
     const active = v == vl.active;
     if (!active) sheet_focus_for = 0;
-    if (sheet_sel.sheet != id) sheet_sel = .{ .sheet = id };
+    if (sheet_sel.sheet != id) {
+        sheet_sel = .{ .sheet = id };
+        sheet_editing = false;
+    }
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = colors.paper }, .id_extra = v });
     defer box.deinit();
     // A press activates it (cells take their own clicks too).
@@ -7821,16 +8100,49 @@ fn sheetView(v: u8) void {
             }
         }
     }
-    // Its keys: the moves between cells, while its cell has the keyboard
-    // (not a dialog's field, a menu or a pane's).
-    const editing = if (sheet_editor_id) |eid| dvui.focusedWidgetId() == eid else false;
-    if (active and editing) for (dvui.events()) |*e| {
-        const inv = keymap.match1(e, kmode("sheet")) orelse continue;
+    // Its keys, while it or its cell's editor has the keyboard (not a
+    // dialog's field, a menu or a pane's). Showing (mode `sheet`): the
+    // moves between cells; Enter or F2 edits the cell, and typing edits it
+    // anew with what is typed. Editing (`sheet.edit`): the moves (which
+    // end the edit) and Escape, which ends it where it is.
+    const focused = dvui.focusedWidgetId();
+    const in_editor = if (sheet_editor_id) |eid| focused == eid else false;
+    const on_sheet = focused == box.data().id;
+    if (active and !sheet_editing and sheet_focus_for != sheet_display_focus) {
+        // The keyboard, once (not every frame, which would take it from
+        // a menu or a field elsewhere).
+        sheet_focus_for = sheet_display_focus;
+        dvui.focusWidget(box.data().id, null, null);
+    }
+    if (active and on_sheet and !sheet_editing) {
+        const rs = box.data().contentRectScale();
+        dvui.wantTextInput(rs.r.toNatural());
+    }
+    if (active and (in_editor or on_sheet)) for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        if (on_sheet and !sheet_editing and e.evt == .text and e.target_widgetId == box.data().id) {
+            switch (e.evt.text.action) {
+                .value => |tv| if (tv.txt.len > 0) {
+                    e.handle(@src(), box.data());
+                    sheetEditWith(tv.txt);
+                    dvui.refresh(null, @src(), box.data().id);
+                },
+                else => {},
+            }
+            continue;
+        }
+        const inv = keymap.match1(e, if (sheet_editing) kmode("sheet.edit") else kmode("sheet")) orelse continue;
         if (inv.action == kact("sheet.move")) {
             e.handle(@src(), box.data());
             sheetMove(inv.arg);
-            dvui.refresh(null, @src(), box.data().id);
-        }
+        } else if (inv.action == kact("sheet.edit")) {
+            e.handle(@src(), box.data());
+            sheetEdit(true);
+        } else if (inv.action == kact("sheet.edit.leave")) {
+            e.handle(@src(), box.data());
+            sheetEdit(false);
+        } else continue;
+        dvui.refresh(null, @src(), box.data().id);
     };
     var bad_rows: std.ArrayList(usize) = .empty;
     var bad_cols: std.ArrayList(usize) = .empty;
@@ -7854,6 +8166,10 @@ fn sheetView(v: u8) void {
     }
     var scroll = dvui.scrollArea(@src(), .{ .horizontal = .auto }, .{ .expand = .both, .background = false });
     defer scroll.deinit();
+    // A row as tall as a cell's editor (its line, padding, border and
+    // margin), so a cell takes the same room in either mode.
+    const row_h: f32 = cell_font.lineHeight() + 14;
+    const ink_text = dvui.themeGet().color(.content, .text);
     for (sh.rows.items, 0..) |row, r| {
         const sel_row = r == sheet_sel.row;
         const missing = std.mem.indexOfScalar(usize, bad_rows.items, r) != null;
@@ -7863,18 +8179,19 @@ fn sheetView(v: u8) void {
             const w = if (c == 0) sheet_name_w else sheet_col_w;
             const text = if (c == 0) row.key else if (c - 1 < row.cells.items.len) row.cells.items[c - 1] else "";
             const selected = active and sel_row and c == sheet_sel.col;
-            if (selected) {
-                // Edited where it is.
+            if (selected and sheet_editing) {
+                // Edit mode: its markup, edited where it is.
                 var te = dvui.textEntry(@src(), .{ .text_initial = if (c == 0 and sheet_name_edit != null) sheet_name_edit.?.text[0..sheet_name_edit.?.len] else text }, .{ .min_size_content = .{ .w = w - 8 }, .max_size_content = .width(w - 8), .font = cell_font, .id_extra = (r << 8) + c, .margin = .all(1) });
                 defer te.deinit();
                 sheet_editor_id = te.data().id;
-                // The keyboard, once: when the cell is newly selected or
-                // the sheet becomes active (not every frame, which would
-                // take it from a menu or a field elsewhere).
+                // The keyboard, once: when the edit starts (not every
+                // frame, which would take it from a menu or a field
+                // elsewhere), the caret at the end.
                 const here = (@as(u64, r) << 16) | c | (@as(u64, @intFromEnum(id)) << 32);
                 if (sheet_focus_for != here) {
                     sheet_focus_for = here;
                     dvui.focusWidget(te.data().id, null, null);
+                    te.textLayout.selection.moveCursor(te.len, false);
                 }
                 const now = te.textGet();
                 if (c == 0) {
@@ -7884,7 +8201,6 @@ fn sheetView(v: u8) void {
                         @memcpy(ne.text[0..ne.len], now[0..ne.len]);
                         sheet_name_edit = ne;
                     }
-                    if (te.enter_pressed) commitSheetName();
                 } else if (te.text_changed) {
                     // Typed here: the cell takes it.
                     if (!std.mem.eql(u8, now, text)) _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), r, c }), .setSheetCell, .{ id, r, c, now }) catch {};
@@ -7894,30 +8210,129 @@ fn sheetView(v: u8) void {
                     // it, rather than writing its old text back over it.
                     te.textSet(text, false);
                 }
-            } else {
-                const ink: ?dvui.Color = if (c == 0 and missing) colors.overflow else null;
-                if (dvui.labelClick(@src(), "{s}", .{text}, .{}, .{
-                    .min_size_content = .{ .w = w },
-                    .max_size_content = .width(w),
-                    .font = cell_font,
-                    .padding = .{ .x = 6, .y = 4, .h = 4 },
-                    .color_text = if (ink) |k| .{ .color = k } else null,
-                    // The row's highlight shows through; the name column
-                    // a shade apart.
-                    .background = true,
-                    .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
-                    .border = .{ .x = if (c == 0) 0 else 1 },
-                    .color_border = .{ .color = colors.edge.opacity(0.15) },
-                    .id_extra = (r << 8) + c,
-                })) {
+                continue;
+            }
+            // Display mode: names as text, cells as the glyphics they set
+            // (by the canvas's text path, in the style of what shows them).
+            const ink: dvui.Color = if (c == 0 and missing) colors.overflow else ink_text;
+            var cell = dvui.box(@src(), .{}, .{
+                .min_size_content = .{ .w = w, .h = row_h },
+                .max_size_content = .{ .w = w, .h = row_h },
+                .padding = .{ .x = 6 },
+                // The row's highlight shows through; the name column a
+                // shade apart; the selected cell ringed.
+                .background = true,
+                .color_fill = .{ .color = if (c == 0) colors.titlebar.opacity(0.5) else if (sh.texts and c - 1 == @min(sh.shown, sh.columns.items.len -| 1)) dvui.themeGet().focus.opacity(0.06) else colors.paper.opacity(0) },
+                .border = if (selected) .all(1) else .{ .x = if (c == 0) 0 else 1 },
+                .color_border = .{ .color = if (selected) dvui.themeGet().focus else colors.edge.opacity(0.15) },
+                .id_extra = (r << 8) + c,
+            });
+            defer cell.deinit();
+            const rs = cell.data().contentRectScale();
+            if (c == 0 or !drawCellMarkup(rs.r, 0, cell_font.lineHeight() * 0.55 * rs.s, sheetCellStyle(si, r, c), text, ink)) {
+                dvui.labelNoFmt(@src(), text, .{}, .{ .font = cell_font, .gravity_y = 0.5, .padding = .{}, .color_text = .{ .color = ink } });
+            }
+            for (dvui.events()) |*e| {
+                if (!dvui.eventMatchSimple(e, cell.data())) continue;
+                if (e.evt != .mouse or e.evt.mouse.action != .press or !e.evt.mouse.button.pointer()) continue;
+                e.handle(@src(), cell.data());
+                // A click on the selected cell edits it; elsewhere, selects.
+                if (selected) {
+                    sheetEdit(true);
+                } else {
                     commitSheetName();
+                    sheet_editing = false;
                     sheet_sel = .{ .sheet = id, .row = r, .col = c };
+                    sheet_focus_for = 0;
                     sheetSelectKey(si);
-                    view_to_activate = v;
                 }
+                view_to_activate = v;
+                dvui.refresh(null, @src(), cell.data().id);
             }
         }
     }
+}
+
+/// The text style cell `col` of row `row` of sheet `si` is shown in: that
+/// of the slot it fills on its key (a legend sheet), or of the caption or
+/// track the row holds the text of (a text sheet); `.none` (the first
+/// style) when nothing says.
+fn sheetCellStyle(si: usize, row: usize, col: usize) layout.model.StyleId {
+    const m = &state.model;
+    const sh = m.sheets.items[si];
+    const link = sheetRowLink(si, row) orelse return .none;
+    if (sh.texts) {
+        for (m.sketches.items) |it| for (it.captions.items) |sc| if (sc.id == link) return sc.style;
+        if (m.trackWithId(link)) |t| return m.regionsIn(t.parent)[t.region].style orelse .none;
+        return .none;
+    }
+    if (col == 0 or col > sh.columns.items.len) return .none;
+    if (m.tileIndex(link) == null) return .none;
+    const slot = sh.columns.items[col - 1];
+    var near: std.ArrayList(TileId) = .empty;
+    m.companions(dvui.currentWindow().arena(), link, &near) catch return .none;
+    for (near.items) |t| if (m.tileTrackNamed(t, slot)) |track| {
+        for (m.prototypeOf(t).tracks) |tt| if (tt.id == track) return tt.style;
+    };
+    return .none;
+}
+
+/// Draws legend markup `markup` in style `style` as the canvas does (the
+/// same renders, the same glyph atlas), on one line in `rect`: its cap
+/// height `cap_px` (that of the interface's text beside it; less, if
+/// its lines would not fit the height), `pad`
+/// in from the left, centred up and down, clipped to it. False when it
+/// cannot be set (no usable style, markup that does not parse), so the
+/// caller shows the markup as text.
+fn drawCellMarkup(rect: dvui.Rect.Physical, pad: f32, cap_px: f32, style: layout.model.StyleId, markup: []const u8, ink: dvui.Color) bool {
+    if (markup.len == 0) return true;
+    if (!(rect.h > 2 and rect.w > 0)) return true;
+    const labels = if (state.labels) |*l| l else return false;
+    const st = labels.context(style) orelse return false;
+    const r = (labels.line(style, markup) catch return false) orelse return false;
+    if (!(st.cap_height > 0)) return false;
+    var s: f64 = cap_px / st.cap_height;
+    const d = r.design;
+    const dh = d.y1 - d.y0;
+    const room: f64 = rect.h - 2;
+    if (dh > 0 and dh * s > room) s = room / dh;
+    const fr: PxFrame = .{ .ox = rect.x + pad - d.x0 * s, .oy = rect.y + rect.h / 2 + (d.y0 + d.y1) / 2 * s, .s = s };
+    const prev_clip = dvui.clip(rect);
+    defer dvui.clipSet(prev_clip);
+    const from_atlas = drawRenderGlyphs(rect, r, fr, ink);
+    const pieces = state.flat.getWith(r, faceTable(), from_atlas) catch return from_atlas;
+    for (pieces) |piece| {
+        const color: dvui.Color = switch (piece.kind) {
+            .ink => ink,
+            .faint => ink.opacity(0.35),
+            .placeholder => colors.select.opacity(0.7),
+        };
+        fillRegionIn(piece.region, fr, .{ .flat = color });
+    }
+    return true;
+}
+
+/// Starts (`on`) or ends the selected cell's edit mode, where its markup
+/// is typed; ending it keeps what was typed (each change went to the
+/// sheet as it was typed) and gives the name column's name to its key.
+fn sheetEdit(on: bool) void {
+    if (!on) commitSheetName();
+    sheet_editing = on;
+    sheet_focus_for = 0;
+}
+
+/// Typing on a shown cell: it is edited anew, with what was typed.
+fn sheetEditWith(typed: []const u8) void {
+    const id = sheet_sel.sheet;
+    if (sheet_sel.col == 0) {
+        var ne: @TypeOf(sheet_name_edit.?) = .{ .sheet = id, .row = sheet_sel.row };
+        ne.len = @min(typed.len, ne.text.len);
+        @memcpy(ne.text[0..ne.len], typed[0..ne.len]);
+        sheet_name_edit = ne;
+    } else {
+        _ = actM(mergeKey(.{ "sheet cell", @intFromEnum(id), sheet_sel.row, sheet_sel.col }), .setSheetCell, .{ id, sheet_sel.row, sheet_sel.col, typed }) catch {};
+    }
+    sheetEdit(true);
 }
 
 /// The properties while a sheet view is active: the sheet, the selected
@@ -8125,6 +8540,7 @@ fn canvas(active: bool, view: u8) void {
 
     drawPicked(area);
     drawSelection(area);
+    drawSegmentPicks(area);
     drawPolygonDraft(area);
     drawTrackPath(area);
     drawConstraintMarks(area);
@@ -8856,19 +9272,47 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
 /// glyph atlas. False (nothing drawn) when one is too large to raster, so
 /// the caller draws the label from its outlines.
 fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.Point, ink: dvui.Color) bool {
+    return drawRenderGlyphs(area, r, PxFrame.ofView(area, at), ink);
+}
+
+/// Where a render's mm go on screen: x right and y up from a pixel origin,
+/// `s` pixels a mm. The canvas's view is one (with a label's place folded
+/// in); a sheet's cell is another, so both draw text by the same path.
+const PxFrame = struct {
+    ox: f64,
+    oy: f64,
+    s: f64,
+
+    /// Canvas view `state.view` in `area`, offset to worksheet point `at`.
+    fn ofView(area: dvui.Rect.Physical, at: geom.Point) PxFrame {
+        const v = state.view;
+        return .{
+            .ox = area.x + area.w / 2 + (at.x - v.cx) * v.ppm,
+            .oy = area.y + area.h / 2 - (at.y - v.cy) * v.ppm,
+            .s = v.ppm,
+        };
+    }
+
+    fn px(f: PxFrame, p: geom.Point) dvui.Point.Physical {
+        return .{ .x = @floatCast(f.ox + p.x * f.s), .y = @floatCast(f.oy - p.y * f.s) };
+    }
+};
+
+/// Draws the glyphs of render `r` through frame `fr` from the glyph atlas,
+/// skipping those outside `area`. False (nothing drawn) when one is too
+/// large to raster, so the caller draws it from its outlines.
+fn drawRenderGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, fr: PxFrame, ink: dvui.Color) bool {
     const faces = faceTable();
     const lifo = dvui.currentWindow().lifo();
     const ga = glyphAtlas();
     var quads: std.ArrayList(glyphs.Quad) = .empty;
     defer quads.deinit(lifo);
-    const ppm: f64 = state.view.ppm;
+    const ppm: f64 = fr.s;
     const Map = struct {
         m: geom.Affine,
-        at: geom.Point,
-        area: dvui.Rect.Physical,
+        fr: PxFrame,
         pub fn map(self: @This(), q: geom.Point) dvui.Point.Physical {
-            const p = self.m.apply(q);
-            return state.view.toPx(self.area, .{ .x = p.x + self.at.x, .y = p.y + self.at.y });
+            return self.fr.px(self.m.apply(q));
         }
     };
     for (r.items) |item| {
@@ -8882,7 +9326,7 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.P
         // mm per font unit (the transform's scale, rotation aside).
         const mm = @sqrt(@abs(m.a * m.d - m.b * m.c));
         if (!(mm > 0)) continue;
-        const map: Map = .{ .m = m, .at = at, .area = area };
+        const map: Map = .{ .m = m, .fr = fr };
         // Off the canvas: nothing to draw, and no field or raster made for it.
         {
             const ob = (face.outline(g.gid) catch return false).bounds();
@@ -8933,6 +9377,11 @@ fn drawLabelGlyphs(area: dvui.Rect.Physical, r: *const layout.Render, at: geom.P
 /// they are, then a band one pixel wide fading out past each loop, for
 /// antialiasing.
 fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point, paint: Paint) void {
+    fillRegionIn(region, PxFrame.ofView(area, at), paint);
+}
+
+/// Fills a resolved region through frame `fr` (see `fillRegion`).
+fn fillRegionIn(region: geom.fill.Region, fr: PxFrame, paint: Paint) void {
     const lifo = dvui.currentWindow().lifo();
     const Index = dvui.Vertex.Index;
     // Vertex indices may be 16-bit: the triangles go in batches.
@@ -8944,7 +9393,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         defer b.deinit(lifo);
         for (tris, 0..) |t, k| {
             var v: [3]dvui.Point.Physical = undefined;
-            for (t, &v) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+            for (t, &v) |q, *out| out.* = fr.px(q);
             for (v, t) |pos, q| b.appendVertex(.{ .pos = pos, .col = paint.at(q) });
             const i: Index = @intCast(3 * k);
             b.appendTriangles(&ccw(v[0], v[1], v[2], i, i + 1, i + 2));
@@ -8958,7 +9407,7 @@ fn fillRegion(area: dvui.Rect.Physical, region: geom.fill.Region, at: geom.Point
         defer b.deinit(lifo);
         const pts = lifo.alloc(dvui.Point.Physical, n) catch return;
         defer lifo.free(pts);
-        for (loop, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+        for (loop, pts) |q, *out| out.* = fr.px(q);
         for (pts, 0..) |p, i| {
             // Loops keep the filled side on their left, so outward is to
             // the right of each edge.
@@ -11645,6 +12094,10 @@ fn manufactureView(v: u8) void {
         look.ppm = 0.9 * @min(area.w / @max(b.width(), 1), area.h / @max(b.height(), 1));
     }
     const cam = &cams[v];
+    if (mfg_reveal) |rv| if (rv.view == v) {
+        mfg_reveal = null;
+        if (!cam.on) _ = revealIn(&look, rv.box, area, area, @min(area.w, area.h));
+    };
     for (dvui.events()) |*e| {
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
@@ -13010,6 +13463,7 @@ fn updateModeStack() void {
         push(&st, &n, kmode("start"));
     } else if (activeKind() == .sheet) {
         push(&st, &n, kmode("sheet"));
+        if (sheet_editing) push(&st, &n, kmode("sheet.edit"));
     } else if (sketch_edit != null) {
         push(&st, &n, kmode("sketch"));
         push(&st, &n, kmode("view"));
@@ -13286,6 +13740,10 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
     // A tool waiting for the canvas: Add panel (a drag) or Add label (a click).
     const drawing = state.tool != .select;
     canvas_id = box.data().id;
+    if (canvas_focus_next) {
+        canvas_focus_next = false;
+        dvui.focusWidget(box.data().id, null, null);
+    }
     validateCursor();
     followLeading();
     for (dvui.events()) |*e| {
@@ -13770,6 +14228,8 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
             .press => if ((me.button.pointer() or me.button == .middle) and area.contains(me.p)) {
                 e.handle(@src(), box.data());
                 dvui.captureMouse(box.data(), e.num);
+                // A plain press lets go of the segment picks.
+                if (state.tool == .select and me.button.pointer() and !me.mod.shift()) segment_picks.clearRetainingCapacity();
                 if (state.tool == .construction and me.button.pointer()) {
                     // Construction line: a drag from its first point, or a
                     // click there and a click at its second.
@@ -13828,6 +14288,12 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     // Space held: a drag pans, whatever is under it.
                     state.press_at = null;
                     dvui.dragPreStart(me.button, me.p, .{ .cursor = .hand });
+                } else if (state.tool == .select and me.button.pointer() and !me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and outlinePress(state.view.toMm(area, me.p))) {
+                    // On the outline of line art (or the like) drawn in a
+                    // text track: that, not the text.
+                    state.press_consumed = true;
+                    last_click = null;
+                    dvui.refresh(null, @src(), box.data().id);
                 } else if (state.tool == .select and me.button.pointer() and !primaryMod(me.mod) and !engagingPoint() and !selectionHandleAt(state.view.toMm(area, me.p)) and textPress(state.view.toMm(area, me.p), me.mod.shift())) {
                     // Well inside a used segment of a text track: the text
                     // cursor there, typing (see "Clicking into text").
@@ -13848,6 +14314,11 @@ fn canvasEvents(box: *dvui.BoxWidget, area: dvui.Rect.Physical) void {
                     state.press_consumed = true;
                     last_click = null;
                     dvui.refresh(null, @src(), box.data().id);
+                } else if (state.tool == .select and me.button.pointer() and me.mod.shift() and !primaryMod(me.mod) and !engagingPoint() and segmentPress(state.view.toMm(area, me.p))) {
+                    // Shift+click on a boundary: the segment of its path
+                    // there (see "Segments of paths").
+                    state.press_consumed = true;
+                    last_click = null;
                 } else if (state.tool == .select and me.button.pointer() and (me.mod.shift() or primaryMod(me.mod))) {
                     // Shift-click (or Ctrl-click): the container there in
                     // or out of the selection.
@@ -14261,6 +14732,7 @@ fn levelFirstChild(c: Context) ?Context {
 fn levelSet(c: Context) void {
     state.context = c;
     selection.clearRetainingCapacity();
+    segment_picks.clearRetainingCapacity();
     hunt_clear();
     last_click = null;
     dvui.refresh(null, @src(), null);
@@ -14612,6 +15084,7 @@ fn pick(at: geom.Point) void {
     // Empty space is the worksheet, or on a canvas the shown space itself.
     state.context = workspaceContext();
     selection.clearRetainingCapacity();
+    segment_picks.clearRetainingCapacity();
     // An image, then a view, by their boxes; anything over them wins.
     if (imageUnder(at)) |im| state.context = im;
     if (figurePlaceUnder(at)) |fc| {
@@ -14630,8 +15103,10 @@ fn pick(at: geom.Point) void {
         if (!shownIn(pi)) continue;
         if (pi.panelIndex()) |i| {
             if (state.model.spaces.items.len > 0 and !layerOpen(state.model.spaceOf(i), panelLayer(i))) continue;
+            // Inside its boundary path: a panel made from a sketch is its
+            // edge's shape, not its bounding box.
             const b = state.model.panels.items[i].box();
-            if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1) state.context = .{ .panel = i };
+            if (at.x >= b.x0 and at.x <= b.x1 and at.y >= b.y0 and at.y <= b.y1 and insideBoundary(.{ .panel = i }, at)) state.context = .{ .panel = i };
         } else if (!layerOpen(shown_space, state.model.spaces.items[shown_space].base_layer)) continue;
         const pl = placedOf(pi) orelse continue;
         for (pl.tiles) |t| {
@@ -14641,7 +15116,7 @@ fn pick(at: geom.Point) void {
         // Line art, by its box: drawn over the tracks, it is picked over
         // what is under it.
         if (pi.panelIndex()) |i| for (pl.art) |pa| {
-            if (contains(onSheet(pi, pa.box), at)) state.context = .{ .art = .{ .panel = i, .index = pa.index } };
+            if (contains(onSheet(pi, pa.box), at) and insideBoundary(.{ .art = .{ .panel = i, .index = pa.index } }, at)) state.context = .{ .art = .{ .panel = i, .index = pa.index } };
         };
         for (pl.labels) |l| {
             if (l.tile != null) continue;
@@ -15289,20 +15764,10 @@ fn toolPalette() void {
     const saved_group = pushGroup("tool");
     defer popGroup(saved_group);
     if (sketch_edit != null) return sketchPalette();
-    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    var col = keyRow(@src(), .{ .gravity_y = 0.5 });
     defer col.deinit();
+    // (The shape to draw is chosen in Add shape's drop, not here.)
     toolBar();
-    if (state.tool != .add_art) return;
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = 260 }, .padding = .{ .x = 8, .w = 8 }, .gravity_y = 0.5 });
-    defer row.deinit();
-    propName("Shape");
-    const names = [_][]const u8{ "Rectangle", "Rounded rectangle", "Circle", "Ellipse", "Slot", "Polygon" };
-    var choice: usize = @intFromEnum(shape_kind);
-    if (tdropdown(@src(), &names, .{ .choice = &choice }, .{}, .{ .expand = .horizontal })) {
-        shape_kind = @enumFromInt(choice);
-        polygon_pts.clearRetainingCapacity();
-        state.drag = null;
-    }
 }
 
 fn toolBar() void {
@@ -15310,7 +15775,7 @@ fn toolBar() void {
     defer popGroup(saved_group);
     // In the ribbon, the keys fill its height: no padding above or below.
     const pad_y: f32 = if (in_ribbon) 0 else 3;
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .padding = .{ .x = 2, .w = 2, .y = pad_y, .h = pad_y }, .gravity_y = 0.5 });
     defer bar.deinit();
     var wd: dvui.WidgetData = undefined;
     keyIcon(@src(), "Zoom to context", icons.graven(.zoom_to_context) orelse dvui.entypo.resize_full_screen, 0, .{ .data_out = &wd });
@@ -16408,8 +16873,10 @@ fn ribbonKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8,
         b.appendTriangles(&ccw(p[0], p[2], p[3], 0, 2, 3));
         dvui.renderTriangles(b.build_unowned(), null) catch {};
     }
-    // On, hovered, pressed: tints over the shade.
+    // On, hovered, pressed: tints over the shade; its drop open, the
+    // panel's tint.
     if (o.color_fill) |cf| r.fill(.all(2 * s), .{ .color = cf });
+    if (drop != null and drop_open == drop) r.fill(.all(2 * s), .{ .color = .{ .color = openKeyTint() } });
     if (bw.pressed()) {
         r.fill(.all(2 * s), .{ .color = .{ .color = dvui.Color.black.opacity(0.10) } });
     } else if (bw.hovered()) r.fill(.all(2 * s), .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.12) } });
@@ -16544,16 +17011,15 @@ fn openDrop(d: ?Drop) void {
         drop_open = null;
         return;
     }
+    // The keyboard's place, to give back when it goes (not while another
+    // drop had it).
+    if (drop_open == null) drop_focus_back = .{ .widget = dvui.focusedWidgetId(), .sub = dvui.focusedSubwindowId() };
     drop_open = d;
     drop_frame = dvui.frameTimeNS();
     drop_focus = true;
     drop_entered = false;
     if (d) |x| drop_from = drop_anchor.get(x);
     dvui.refresh(null, @src(), null);
-}
-
-fn dropClosed(_: *anyopaque, _: dvui.MenuWidget.CloseReason) void {
-    drop_open = null;
 }
 
 /// The ▾ after a ribbon button: its drop's button. Returns its rect.
@@ -16586,8 +17052,8 @@ fn dropCorner(d: Drop, cz: dvui.Rect.Physical, key: dvui.Rect.Physical, id_extra
     for (p) |q| tb.appendVertex(.{ .pos = q, .col = col });
     tb.appendTriangles(&ccw(p[0], p[1], p[2], 0, 1, 2));
     dvui.renderTriangles(tb.build_unowned(), null) catch {};
-    // The drop hangs below the key (a pop-up opens at its anchor's top).
-    drop_anchor.set(d, (dvui.Rect.Physical{ .x = key.x, .y = key.y + key.h, .w = key.w, .h = 0 }).toNatural());
+    // The drop hangs from the key.
+    drop_anchor.set(d, key.toNatural());
 }
 
 /// A ribbon key's drop corner's side, logical.
@@ -16595,7 +17061,9 @@ fn dropCorner_() f32 {
     return 12 * ribbonScale();
 }
 
-/// Each frame: a key held long enough opens its drop; the drop open drawn.
+/// Each frame: a key held long enough opens its drop; the drop open drawn
+/// (a hanging panel, as every drop is); a drop just closed gives the
+/// keyboard back.
 fn ribbonDrops() void {
     if (key_hold) |*h| if (!h.opened) {
         const now = std.Io.Clock.awake.now(dvui.io).toMilliseconds();
@@ -16604,79 +17072,135 @@ fn ribbonDrops() void {
             if (Drop.heldBy(h.inv.action)) |d| if (drop_open != d) openDrop(d);
         } else dvui.timer(dvui.currentWindow().data().id, @intCast((hold_ms - (now - h.t0)) * 1000));
     };
-    const d = drop_open orelse return;
-    if (d.panel() and activeKind() != .canvas) {
-        drop_open = null;
+    if (drop_open != null and activeKind() != .canvas) drop_open = null;
+    const d = drop_open orelse {
+        dropGiveBack();
         return;
-    }
+    };
     // From the frame after it was asked for.
     if (drop_frame == dvui.frameTimeNS()) {
         dvui.refresh(null, @src(), null);
         return;
     }
-    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = @ptrCast(&drop_open), .close = dropClosed });
-    defer _ = dvui.MenuWidget.Root.set(prev_root);
-    if (d.panel()) {
-        // The window's width, under the ribbon, dark as the panes. A plain
-        // floating window, not a pop-up: a row dragged in it floats in a
-        // window of its own, which would close a pop-up. It closes itself:
-        // Esc, a press outside it, the pointer leaving.
-        const win = dvui.windowRect();
-        const prev = dvui.themeGet();
-        dvui.themeSet(ghost_pane.darkTheme(prev));
-        defer dvui.themeSet(prev);
-        const S = struct {
-            var rect: dvui.Rect = .{};
-        };
-        const first = drop_focus;
-        S.rect.x = 0;
-        S.rect.y = ribbon_bottom;
-        // Its key joined to it (drawn here, over the strips under the
-        // ribbon; the panel covers the bridge's foot).
-        dropBridge(drop_anchor.get(d).scale(dvui.windowNaturalScale(), dvui.Rect.Physical), dvui.themeGet().color(.window, .fill).opacity(0.97));
-        S.rect.w = win.w;
-        var fw = dvui.floatingWindow(@src(), .{ .rect = &S.rect, .resize = .none }, .{ .id_extra = @intFromEnum(d), .min_size_content = .{ .w = win.w - 2 }, .background = true, .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.97) }, .border = .{ .h = 1 }, .corners = .all(0), .box_shadow = null });
-        defer fw.deinit();
-        // Its height follows its content (layers added while it is open).
-        _ = first;
-        fw.autoSize();
-        dropFocus(fw.data().id);
-        const r = fw.data().borderRectScale().r;
-        drop_rect = r;
-        for (dvui.events()) |*e| switch (e.evt) {
-            .key => |k| if (k.action == .down and k.code == .escape and !e.handled) {
-                e.handle(@src(), fw.data());
-                drop_open = null;
-            },
-            .mouse => |m| if (m.action == .press and !r.contains(m.p) and !drop_from.scale(dvui.windowNaturalScale(), dvui.Rect.Physical).contains(m.p)) {
-                drop_open = null;
-            },
-            else => {},
-        };
-        dropLeave(r);
-        switch (d) {
-            .layers => layersPanel(),
-            .styles => stylesPanel(),
-            else => {},
-        }
-    } else {
-        var fm = dvui.floatingMenu(@src(), .{ .from = drop_from, .style = .popup }, .{ .id_extra = @intFromEnum(d) });
-        defer fm.deinit();
-        dropFocus(fm.data().id);
-        dropLeave(fm.data().borderRectScale().r);
-        switch (d) {
-            .shape => shapeMenu(),
-            .tracks => tracksMenu(),
-            .array => arrayMenu(),
-            else => {},
-        }
+    var hp = hangBegin(@src(), drop_anchor.get(d).scale(dvui.windowNaturalScale(), dvui.Rect.Physical), @intFromEnum(d), true);
+    defer hp.end();
+    drop_rect = hp.rect;
+    drop_win = hp.fw.data().id;
+    dropFocus(hp.fw.data().id);
+    // It closes itself: Esc, a press outside it (its key's own press
+    // toggles it), the pointer leaving once it has been in.
+    for (dvui.events()) |*e| switch (e.evt) {
+        .key => |k| if (k.action == .down and k.code == .escape and !e.handled) {
+            e.handle(@src(), hp.fw.data());
+            drop_open = null;
+        },
+        .mouse => |m| if (m.action == .press and !hp.rect.contains(m.p) and !drop_from.scale(dvui.windowNaturalScale(), dvui.Rect.Physical).contains(m.p)) {
+            drop_open = null;
+        },
+        else => {},
+    };
+    dropLeave(hp.rect);
+    switch (d) {
+        .layers => layersPanel(),
+        .styles => stylesPanel(),
+        .shape => shapeMenu(),
+        .tracks => tracksMenu(),
+        .array => arrayMenu(),
     }
+}
+
+/// The drop's window, while it is drawn (its keyboard given back when it
+/// goes), and where the keyboard was when it opened.
+var drop_win: ?dvui.Id = null;
+var drop_focus_back: struct { widget: ?dvui.Id = null, sub: ?dvui.Id = null } = .{};
+
+/// A drop gone: the keyboard back where it was, unless something else has
+/// taken it since (a click into a pane).
+fn dropGiveBack() void {
+    const w = drop_win orelse return;
+    drop_win = null;
+    if (dvui.focusedSubwindowId() != w) return;
+    dvui.focusSubwindow(drop_focus_back.sub, null);
+    dvui.focusWidget(drop_focus_back.widget, drop_focus_back.sub, null);
+    dvui.refresh(null, @src(), null);
 }
 
 fn dropFocus(id: dvui.Id) void {
     if (!drop_focus) return;
     drop_focus = false;
     dvui.focusSubwindow(id, null);
+}
+
+// Hanging panels ----------------------------------------------------------------
+//
+// What hangs from the ribbon is drawn one way (the owner, 2026-11-27:
+// drop panels to behave consistently): a panel as dark as the panes, its
+// top under its key, as wide as its content (the window's top edge
+// stays free beside it), its left edge under the key it hangs from (moved
+// in to stay on the window), the key carried down into it by the bridge.
+// Not moved, not resized; its height follows its content. Every drop is
+// one (Layers, Text style, Add shape, Add rows, Add array: opened by the
+// ▾, the key held or the key itself, gone on Esc, a press outside or the
+// pointer leaving), and so are the sketch tools' options, which stay
+// while their tool is on.
+
+/// Where each hanging panel was (its size, from its content).
+var hang_rects: [8]dvui.Rect = @splat(.{});
+/// The sketch tools' options' slot (the drops' are their `Drop` value).
+const hang_sketch_tool = 7;
+
+const Hanging = struct {
+    fw: *dvui.FloatingWindowWidget,
+    prev_theme: dvui.Theme,
+    /// Its border rect, physical.
+    rect: dvui.Rect.Physical,
+
+    fn end(h: *Hanging) void {
+        h.fw.deinit();
+        dvui.themeSet(h.prev_theme);
+    }
+};
+
+/// A panel hanging from ribbon key `key` (physical), slot `slot`: drawn
+/// into until `end`.
+/// A floating window takes the keyboard when it first shows: a drop keeps
+/// it (`take_focus`), the sketch tools' options give it straight back (the
+/// canvas's keys go on working); a click into it takes it, as any window.
+fn hangBegin(src: std.builtin.SourceLocation, key: dvui.Rect.Physical, slot: usize, take_focus: bool) Hanging {
+    const ns = dvui.windowNaturalScale();
+    const had_sub = dvui.focusedSubwindowId();
+    const had_widget = dvui.focusedWidgetId();
+    const prev = dvui.themeGet();
+    dvui.themeSet(ghost_pane.darkTheme(prev));
+    const fill = dvui.themeGet().color(.window, .fill).opacity(0.97);
+    // Under its own key, not the whole ribbon (whose keys may run to more
+    // rows; the owner, 2026-11-27): a hair below the key, as the ribbon's
+    // border is below a key in its last row.
+    const top = (key.y + key.h) / ns + 1;
+    // Its key joined to it (drawn first: the panel covers the bridge's foot).
+    dropBridge(key, top, fill);
+    const win = dvui.windowRect();
+    const r = &hang_rects[slot];
+    r.y = top;
+    r.x = @max(0, @min(key.x / ns, win.w - r.w));
+    const fw = dvui.floatingWindow(src, .{ .rect = r, .resize = .none }, .{
+        .id_extra = slot,
+        .min_size_content = .{ .w = key.w / ns },
+        .background = true,
+        .color_fill = .{ .color = fill },
+        .border = .{ .x = 1, .w = 1, .h = 1 },
+        .color_border = .{ .color = dvui.Color.black.opacity(0.5) },
+        .corners = .{ .bl = .theme(5), .br = .theme(5) },
+        .box_shadow = null,
+    });
+    fw.autoSize();
+    if (!take_focus and dvui.focusedSubwindowId() == fw.data().id and had_sub != fw.data().id) {
+        if (dvui.firstFrame(fw.data().id)) {
+            dvui.focusSubwindow(had_sub, null);
+            dvui.focusWidget(had_widget, had_sub, null);
+        }
+    }
+    return .{ .fw = fw, .prev_theme = prev, .rect = fw.data().borderRectScale().r };
 }
 
 /// Once the pointer has been in the drop (`r`) and is away from it and
@@ -16938,7 +17462,10 @@ fn keyBadge(r: dvui.Rect.Physical, text: []const u8) void {
 /// The ribbon: under the menu bar, the window's width, the active view's
 /// tools (a canvas view's today), each with its key.
 fn ribbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbonH() }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
+    // Its keys flow into more rows when one is full (the owner, 2026-11-27):
+    // the rows of keys are the ribbon's own, not boxes of their own
+    // (`keyRow`), so they wrap key by key.
+    var bar = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .min_size_content = .{ .h = ribbonH() }, .background = true, .color_fill = .{ .color = colors.titlebar }, .border = .{ .h = 1 }, .color_border = .{ .color = colors.edge.opacity(0.4) }, .padding = .{ .x = 6, .w = 6 } });
     defer bar.deinit();
     {
         const br = bar.data().borderRectScale();
@@ -16969,7 +17496,7 @@ fn ribbon() void {
     toolPalette();
     // The palettes, as drop panels.
     if (state.model.spaces.items.len > 0) {
-        _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 } });
+        ribbonGap(90);
         var lwd: dvui.WidgetData = undefined;
         const r = keyIconData(@src(), "Layers", icons.graven(.layers) orelse dvui.entypo.layers, &lwd, "ribbon.layers");
         drop_anchor.set(.layers, r.toNatural());
@@ -16988,7 +17515,7 @@ fn ribbon() void {
 /// shows it, in the key's fade) running into the panel's `colour`, and
 /// flaring into the panel with concave fillets at the sides, so the key and
 /// its panel read as one (a folder tab's join; the owner, 2026-11-22).
-fn dropBridge(key: dvui.Rect.Physical, colour: dvui.Color) void {
+fn dropBridge(key: dvui.Rect.Physical, panel_top: f32, colour: dvui.Color) void {
     const s = dvui.windowNaturalScale();
     // The key's foot: its lower shade tinted as an open key is, under the
     // fade's ink at its strength there.
@@ -17000,8 +17527,8 @@ fn dropBridge(key: dvui.Rect.Physical, colour: dvui.Color) void {
     const x0 = key.x + 1 * s;
     const x1 = key.x + key.w - 1 * s;
     const top = key.y + key.h - 1 * s;
-    // Across the panel's 2 logical inset below the ribbon, a hair into it.
-    const bottom = ribbon_bottom * s + 2.5 * s;
+    // Down to the panel's top (`panel_top`, logical), a hair into it.
+    const bottom = panel_top * s + 1.5 * s;
     if (bottom <= top) return;
     const f = @max(1, @min(4 * s, bottom - top));
     const at = struct {
@@ -17066,14 +17593,30 @@ fn ribbonButton(src: std.builtin.SourceLocation, comptime id: []const u8, tvg: [
     dvui.tooltip(src, .{ .active_rect = wd.borderRectScale().r }, "{s}", .{e.label}, .{ .id_extra = id_extra });
 }
 
+/// A divider between groups of keys: a key's height (in the ribbon's
+/// flow, nothing stretches it).
 fn ribbonGap(id_extra: usize) void {
-    _ = dvui.separator(@src(), .{ .expand = .vertical, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 }, .id_extra = id_extra });
+    _ = dvui.separator(@src(), .{ .expand = .vertical, .min_size_content = .{ .h = ribbonPitch() - 8 }, .margin = .{ .x = 6, .w = 6, .y = 4, .h = 4 }, .id_extra = id_extra });
+}
+
+/// A row of keys: in the ribbon, nothing of its own (its keys go straight
+/// into the ribbon's flow, so they wrap one by one); elsewhere a
+/// horizontal box with options `opts`.
+const KeyRow = struct {
+    box: ?*dvui.BoxWidget,
+    fn deinit(r: *KeyRow) void {
+        if (r.box) |b| b.deinit();
+    }
+};
+fn keyRow(src: std.builtin.SourceLocation, opts: dvui.Options) KeyRow {
+    if (in_ribbon) return .{ .box = null };
+    return .{ .box = dvui.box(src, .{ .dir = .horizontal }, opts) };
 }
 
 /// A legend sheet view's ribbon: its rows, its keys' names, and the canvas
 /// beside it. (No single keys: letters type into the cells.)
 fn sheetRibbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
     defer bar.deinit();
     ribbonButton(@src(), "sheet.cell.add-a-row", dvui.entypo.add_to_list, 1);
     ribbonButton(@src(), "sheet.cell.remove-this-row", dvui.entypo.circle_with_minus, 2);
@@ -17091,7 +17634,7 @@ fn sheetRibbon() void {
 /// A manufacturing view's ribbon: its plan's operations, checks and export.
 /// The buttons act on the view's plan (pressed with it as the context).
 fn planRibbon() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .padding = .{ .x = 2, .w = 2, .y = 3, .h = 3 }, .gravity_y = 0.5 });
     defer bar.deinit();
     const prev = state.context;
     defer state.context = prev;
@@ -17109,8 +17652,14 @@ fn keyIconData(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u
     _ = comptime elements.get(id);
     // Open: tinted with its panel's colour, which the bridge carries down.
     const open = if (drop_open) |d| std.mem.eql(u8, d.id(), id) else false;
-    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (open) .{ .color = ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3) } else null });
+    keyIcon(src, name, tvg, 0, .{ .data_out = wd, .tag = uniqueTag(id), .color_fill = if (open) .{ .color = openKeyTint() } else null });
     return wd.borderRectScale().r;
+}
+
+/// A key whose drop is open: tinted with its panel's colour, which the
+/// bridge carries down.
+fn openKeyTint() dvui.Color {
+    return ghost_pane.darkTheme(dvui.themeGet()).color(.window, .fill).opacity(0.3);
 }
 
 /// The ribbon's height, logical: its keys' and no more (the owner,
@@ -18921,7 +19470,15 @@ fn addStampKind(name: []const u8, role: layout.model.GridRole, w: f64, h: f64, d
     const g = contextGrid() orelse return;
     const sh = state.model.gridShape(g.parent, g.index);
     const proto_id = if (state.model.prototypes.items.len == 0) (act(.addPrototype, .{layout.model.TilePrototype{ .name = "Key", .tracks = &.{.{ .name = "top", .alignment = .centre }} }}) catch return) else state.model.prototypes.items[0].id;
-    _ = act(.addStamp, .{ g.parent, g.index, layout.model.Stamp{ .name = name, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
+    // A second stamp of a kind is numbered ("Legends 2"): each has a name
+    // of its own in the grid, to be told apart where it is chosen.
+    var nb: [64]u8 = undefined;
+    var free = name;
+    var k: usize = 2;
+    while (for (state.model.gridsIn(g.parent)[g.index].stamps.items) |st| {
+        if (std.mem.eql(u8, st.name, free)) break true;
+    } else false) : (k += 1) free = std.fmt.bufPrint(&nb, "{s} {d}", .{ name, k }) catch return;
+    _ = act(.addStamp, .{ g.parent, g.index, layout.model.Stamp{ .name = free, .prototype = proto_id, .role = role, .w = sh.stepX() * w, .h = sh.stepY() * h, .offset = .{ .x = 0, .y = sh.stepY() * dy } } }) catch {
         tell("The stamp could not be added. ");
     };
 }
@@ -24668,6 +25225,13 @@ const HoverTarget = union(enum) {
     figure_place: struct { space: usize, index: usize, box: geom.Box },
     /// Near a construction line: the line (its part in view).
     guide: struct { space: usize, index: usize, seg: [2]geom.Point },
+    /// The shown frame, by its boundary's edge.
+    frame: usize,
+    /// A view of another space, a raster image, a sketch's view: by their
+    /// boundaries.
+    view: struct { space: usize, index: usize },
+    image: struct { space: usize, index: usize },
+    sketch: struct { space: usize, index: usize },
     /// Inside a tile, a slot's text: its label, and where in its source.
     slot: struct { tile: TileId, parent: Parent, label: usize, box: geom.Box, offset: u32 },
     /// In an expression being edited: near an object's box (chosen by a
@@ -24800,20 +25364,12 @@ fn hoverTargetAt(p: geom.Point) ?HoverTarget {
             return .{ .slot = .{ .tile = t.id, .parent = pi, .label = hit.k, .box = hit.box, .offset = nearestCaret(pi, l, p, renderEnd(l)) } };
         }
     }
-    // A track's outline, then a panel's.
-    for (state.solved.items, 0..) |placed, k| {
-        const pi = state.model.parentAt(k);
-        if (!shownIn(pi)) continue;
-        for (placed.tracks) |t| {
-            const b = onSheet(pi, t.box);
-            if (outlineDistance(b, p) <= tol) return .{ .track = .{ .parent = t.parent, .region = t.member, .box = b } };
-        }
-    }
-    for (state.model.panels.items, 0..) |panel, pi| {
-        if (!shownPanel(pi)) continue;
-        const b = panel.box();
-        if (outlineDistance(b, p) <= tol) return .{ .panel = .{ .panel = pi, .box = b } };
-    }
+    // Any other boundary by its path (a track round all its rows, a
+    // panel's edge path, line art's outlines, a grid, a placed figure, the
+    // shown frame's edge): the nearest within the edge's width. Images,
+    // views and sketches pick by their whole area here (a press inside
+    // moves them); Select boundaries reaches them by their edges too.
+    if (nearestBoundaryWithin(p, tol, false, .default)) |h| return h.target;
     return null;
 }
 
@@ -25062,16 +25618,29 @@ const BoundaryHit = struct {
     target: HoverTarget,
     boundary: Boundary,
     at: geom.Point,
+    /// The ring and edge of `boundary` that `at` lies on.
+    ring: usize = 0,
+    edge: usize = 0,
 };
 
 /// Select boundaries: the object whose boundary path is nearest worksheet
 /// point `p` (tiles, tracks with all their rows, line art, panels by their
-/// edge, construction lines), within reach of it (the pointer inside, or
-/// near: 40 px); the smaller of two as near. Each object gives its whole
-/// boundary (`objectBoundary`), so any part of it picks the object.
+/// edge, construction lines, the shown frame's edge, views, images,
+/// sketches), within reach of it (the pointer inside, or near: 40 px); the
+/// smaller of two as near. Each object gives its whole boundary
+/// (`eachBoundary`), so any part of it picks the object.
 fn nearestBoundary(p: geom.Point) ?BoundaryHit {
-    const reach = 40 * edgeMm() / edge_px;
-    const a = dvui.currentWindow().arena();
+    return nearestBoundaryWithin(p, 40 * edgeMm() / edge_px, true, .all);
+}
+
+/// Which objects a search for boundaries looks at: all of them (Select
+/// boundaries), or those plain pointing picks by their outlines (images,
+/// views and sketches are picked by their areas, so a press inside drags).
+const BoundaryKinds = enum { all, default };
+
+/// The object whose boundary is nearest `p` within `reach` mm (or, with
+/// `inside_counts`, with `p` inside it); see `nearestBoundary`.
+fn nearestBoundaryWithin(p: geom.Point, reach: f64, inside_counts: bool, kinds: BoundaryKinds) ?BoundaryHit {
     var best: ?BoundaryHit = null;
     var best_d: f64 = std.math.inf(f64);
     var best_area: f64 = std.math.inf(f64);
@@ -25079,6 +25648,8 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
     const Pick = struct {
         p: geom.Point,
         reach: f64,
+        inside_counts: bool,
+        kinds: BoundaryKinds,
         best: *?BoundaryHit,
         best_d: *f64,
         best_area: *f64,
@@ -25088,9 +25659,16 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         /// decides: a line first (it has no inside), then the one the
         /// pointer is inside, the smallest of those (from inside a track,
         /// its row); from outside them all, the largest (the container).
-        fn consider(k: @This(), t: HoverTarget, bd: Boundary) void {
+        /// An edge only (a frame's) counts only near its edge.
+        fn consider(k: @This(), t: HoverTarget, bd: Boundary, edge_only: bool) void {
+            if (k.kinds == .default) switch (t) {
+                // A track is pointed at by its outline (its segments by
+                // Select boundaries).
+                .view, .image, .sketch, .row => return,
+                else => {},
+            };
             const n = bd.nearest(k.p) orelse return;
-            const inside = bd.contains(k.p);
+            const inside = k.inside_counts and !edge_only and bd.contains(k.p);
             if (n.d > k.reach and !inside) return;
             const ar = bd.area();
             const tie = @abs(n.d - k.best_d.*) <= 1e-6;
@@ -25103,14 +25681,25 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
             else
                 ar > k.best_area.*;
             if (better) {
-                k.best.* = .{ .target = t, .boundary = bd, .at = n.at };
+                k.best.* = .{ .target = t, .boundary = bd, .at = n.at, .ring = n.ring, .edge = n.edge };
                 k.best_d.* = n.d;
                 k.best_area.* = ar;
                 k.best_inside.* = inside;
             }
         }
     };
-    const cand: Pick = .{ .p = p, .reach = reach, .best = &best, .best_d = &best_d, .best_area = &best_area, .best_inside = &best_inside };
+    eachBoundary(Pick{ .p = p, .reach = reach, .inside_counts = inside_counts, .kinds = kinds, .best = &best, .best_d = &best_d, .best_area = &best_area, .best_inside = &best_inside });
+    return best;
+}
+
+/// Every object of the shown space that can be pointed at, with its
+/// boundary path (`geom.path`), handed to `k.consider(target, boundary,
+/// edge_only)`: the one hit-test behind pointing, Select boundaries, the
+/// halos and segment picks (the owner's item 48, 2026-11-27: irregular
+/// paths are picked and haloed by their real outlines, never a box
+/// standing in for them).
+fn eachBoundary(k: anytype) void {
+    const a = dvui.currentWindow().arena();
     // Curves flattened to a tenth of a pixel.
     const tol = 0.1 * edgeMm() / edge_px;
     for (state.solved.items, 0..) |placed, pk| {
@@ -25126,7 +25715,7 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                 Boundary.outline(a, t.shapes[0].outline, tol, o)
             else
                 Boundary.box(a, b)) catch continue;
-            cand.consider(.{ .tile = .{ .id = t.id, .box = b } }, bd);
+            k.consider(.{ .tile = .{ .id = t.id, .box = b } }, bd, false);
         }
         // Each track once, whole: every row (or column) it has, filled or
         // not, inside one outline.
@@ -25136,7 +25725,7 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
             var b = geom.Box.empty;
             for (pts) |q| b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
             const bd = Boundary.polygon(a, pts) catch continue;
-            cand.consider(.{ .track = .{ .parent = pi, .region = ri, .box = b } }, bd);
+            k.consider(.{ .track = .{ .parent = pi, .region = ri, .box = b } }, bd, false);
         }
         // Grids: the outline round all their cells (half a cell beyond
         // the outer rows and columns, as they are drawn).
@@ -25152,13 +25741,13 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                 q.* = .{ .x = g.x + o.x, .y = g.y + o.y };
             }
             const bd = Boundary.polygon(a, pts) catch continue;
-            cand.consider(.{ .grid = .{ .parent = pi, .index = gi } }, bd);
+            k.consider(.{ .grid = .{ .parent = pi, .index = gi } }, bd, false);
         }
         // Its segments that hold content, each a boundary within it.
         for (placed.tracks) |t| {
             const b = onSheet(pi, t.box);
             const bd = Boundary.box(a, b) catch continue;
-            cand.consider(.{ .row = .{ .parent = t.flow_parent, .region = t.region, .row = t.track, .box = b } }, bd);
+            k.consider(.{ .row = .{ .parent = t.flow_parent, .region = t.region, .row = t.track, .box = b } }, bd, false);
         }
         if (pi.panelIndex()) |ai| for (placed.art) |pa| {
             const b = onSheet(pi, pa.box);
@@ -25177,7 +25766,7 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
                     } else |_| {}
                 }
             }
-            cand.consider(.{ .art = .{ .panel = ai, .index = pa.index, .box = b } }, bd);
+            k.consider(.{ .art = .{ .panel = ai, .index = pa.index, .box = b } }, bd, false);
         };
     }
     for (0..state.model.panels.items.len) |pi| {
@@ -25187,17 +25776,17 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         // rectangle.
         const edge: ?geom.Outline = if (placedOf(.{ .panel = pi })) |pl| pl.edge else null;
         const bd = (if (edge) |e| Boundary.outline(a, e, tol, panelOrigin(pi)) else Boundary.box(a, b)) catch continue;
-        cand.consider(.{ .panel = .{ .panel = pi, .box = b } }, bd);
+        k.consider(.{ .panel = .{ .panel = pi, .box = b } }, bd, false);
     }
     // Placed figures: their boundaries.
-    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items, 0..) |fp, k| {
+    if (shown_space < state.model.spaces.items.len) for (state.model.spaces.items[shown_space].figure_places.items, 0..) |fp, fk| {
         if (!layerOpen(shown_space, fp.layer)) continue;
         const b = fp.box();
         const bd = (if (fp.border.fractions() != null)
             Boundary.outline(a, fp.border.outline(a, fp.inkBox(), fp.margin) catch continue, tol, .{ .x = 0, .y = 0 })
         else
             Boundary.box(a, b)) catch continue;
-        cand.consider(.{ .figure_place = .{ .space = shown_space, .index = k, .box = b } }, bd);
+        k.consider(.{ .figure_place = .{ .space = shown_space, .index = fk, .box = b } }, bd, false);
     };
     // Construction lines in the shown space (while their layer shows): a
     // boundary too, by their distance from the pointer; a line has no
@@ -25208,10 +25797,213 @@ fn nearestBoundary(p: geom.Point) ?BoundaryHit {
         for (state.model.spaces.items[shown_space].guides.items, 0..) |g, gi| {
             const seg = g.clip(clip) orelse continue;
             const bd = Boundary.segment(a, seg[0], seg[1]) catch continue;
-            cand.consider(.{ .guide = .{ .space = shown_space, .index = gi, .seg = seg } }, bd);
+            k.consider(.{ .guide = .{ .space = shown_space, .index = gi, .seg = seg } }, bd, false);
         }
     }
-    return best;
+    // The shown frame: its boundary's edge (inside it is the frame's
+    // content; a press there chooses the frame as a plain click does).
+    if (shown_space < state.model.spaces.items.len) if (state.model.spaces.items[shown_space].bound) |fb| {
+        if (Boundary.box(a, fb)) |bd| k.consider(.{ .frame = shown_space }, bd, true) else |_| {}
+    };
+    if (shown_space < state.model.spaces.items.len) {
+        const sp = state.model.spaces.items[shown_space];
+        // Views of other spaces, by the window they show.
+        for (sp.views.items, 0..) |sv, vi| {
+            if (!layerOpen(shown_space, sv.layer)) continue;
+            const bd = Boundary.box(a, viewBox(sv)) catch continue;
+            k.consider(.{ .view = .{ .space = shown_space, .index = vi } }, bd, false);
+        }
+        // Raster images, by their boxes (an image is its rectangle).
+        for (sp.images.items, 0..) |im, ii| {
+            if (!layerOpen(shown_space, im.layer)) continue;
+            const bd = Boundary.box(a, im.box()) catch continue;
+            k.consider(.{ .image = .{ .space = shown_space, .index = ii } }, bd, false);
+        }
+        // Sketches' views, by their bounds (a sketch is a container).
+        for (sp.sketch_views.items, 0..) |_, i| {
+            const b = sketchBox(viewPlace(shown_space, i) orelse continue) orelse continue;
+            const bd = Boundary.box(a, b) catch continue;
+            k.consider(.{ .sketch = .{ .space = shown_space, .index = i } }, bd, false);
+        }
+    }
+}
+
+/// The context a pointed-at object is (what a press on its boundary
+/// chooses); null for what is inside an expression or a slot.
+fn targetContext(t: HoverTarget) ?Context {
+    return switch (t) {
+        .tile => |x| .{ .tile = x.id },
+        .track => |x| .{ .region = .{ .parent = x.parent, .region = x.region } },
+        .row => |x| .{ .row = .{ .parent = x.parent, .region = x.region, .row = x.row } },
+        .panel => |x| .{ .panel = x.panel },
+        .grid => |x| .{ .grid = .{ .parent = x.parent, .index = x.index } },
+        .art => |x| .{ .art = .{ .panel = x.panel, .index = x.index } },
+        .figure_place => |x| .{ .figure_place = .{ .space = x.space, .index = x.index } },
+        .guide => |x| .{ .guide = .{ .space = x.space, .index = x.index } },
+        .frame => |si| .{ .space = si },
+        .view => |x| .{ .view = .{ .space = x.space, .index = x.index } },
+        .image => |x| .{ .image = .{ .space = x.space, .index = x.index } },
+        .sketch => |x| .{ .sketch = .{ .space = x.space, .index = x.index } },
+        .slot, .eq_object, .eq_caret => null,
+    };
+}
+
+/// The boundary path of the object context `c` names, in the shown space
+/// (the same paths pointing measures: `eachBoundary`).
+fn boundaryOf(c: Context) ?Boundary {
+    var found: ?Boundary = null;
+    const Find = struct {
+        want: Context,
+        found: *?Boundary,
+        fn consider(k: @This(), t: HoverTarget, bd: Boundary, _: bool) void {
+            if (k.found.* != null) return;
+            const tc = targetContext(t) orelse return;
+            if (std.meta.eql(tc, k.want)) k.found.* = bd;
+        }
+    };
+    eachBoundary(Find{ .want = c, .found = &found });
+    return found;
+}
+
+/// Whether `at` is inside the boundary path of `c`, or on it (within the
+/// edge's width); true when it has none to measure.
+fn insideBoundary(c: Context, at: geom.Point) bool {
+    const bd = boundaryOf(c) orelse return true;
+    if (bd.contains(at)) return true;
+    const n = bd.nearest(at) orelse return true;
+    return n.d <= edgeMm();
+}
+
+/// The boundary paths of containers `ids` (panels, tracks, line art,
+/// images, placed figures) as shown, into `out` (null where not shown):
+/// one walk of `eachBoundary` for them all.
+fn boundariesOfObjects(ids: []const layout.model.ObjectId, out: []?Boundary) void {
+    @memset(out, null);
+    const Find = struct {
+        ids: []const layout.model.ObjectId,
+        out: []?Boundary,
+        fn consider(k: @This(), t: HoverTarget, bd: Boundary, _: bool) void {
+            switch (t) {
+                .row => return, // a track's segment: the track is the object
+                else => {},
+            }
+            const tc = targetContext(t) orelse return;
+            const oid = objectOfContext(tc) orelse return;
+            const i = std.mem.indexOfScalar(layout.model.ObjectId, k.ids, oid) orelse return;
+            if (k.out[i] == null) k.out[i] = bd;
+        }
+    };
+    eachBoundary(Find{ .ids = ids, .out = out });
+}
+
+// Segments of paths (the owner's item 48, 2026-11-27): Shift+click on an
+// object's boundary picks the segment of it there, the smooth run between
+// its corners (`geom.path.segmentRun`: a side of a panel's edge path, an
+// arc of line art's outline, a frame's side, a construction line), and
+// adds it to the segment picks, or takes it out; each is haloed along its
+// real path. Shift held near a boundary previews the segment a click
+// would pick. As in a sketch, Shift+click on a curve is its piece; away
+// from every boundary, Shift+click keeps its meaning (the container there
+// into the selection). A pick is held by its object and its place
+// relative to the object's boundary, so it follows the object when it
+// moves, and is found again from it each frame.
+
+/// A turn sharper than this ends a segment.
+const segment_corner_deg: f64 = 20;
+
+const SegmentPick = struct {
+    owner: Context,
+    /// The picked place, from the corner of the owner's boundary's bounds.
+    rel: geom.Point,
+};
+
+var segment_picks: std.ArrayList(SegmentPick) = .empty;
+
+fn pathBounds(bd: Boundary) geom.Box {
+    var b = geom.Box.empty;
+    for (bd.rings) |r| for (r.pts) |q| {
+        b = b.join(.{ .x0 = q.x, .y0 = q.y, .x1 = q.x, .y1 = q.y });
+    };
+    return b;
+}
+
+/// The segment of boundary `bd` at its ring `ring`, edge `edge`.
+fn segmentOf(bd: Boundary, ring: usize, edge: usize) ?geom.path.Ring {
+    return (geom.path.segmentRun(dvui.currentWindow().arena(), bd, ring, edge, segment_corner_deg) catch return null) orelse null;
+}
+
+/// A pick's segment as it is now (its owner's boundary found again).
+fn pickedSegment(sp: SegmentPick) ?geom.path.Ring {
+    const bd = boundaryOf(sp.owner) orelse return null;
+    const b = pathBounds(bd);
+    const n = bd.nearest(.{ .x = b.x0 + sp.rel.x, .y = b.y0 + sp.rel.y }) orelse return null;
+    return segmentOf(bd, n.ring, n.edge);
+}
+
+/// The boundary under `p` near enough for a segment pick (the edge's
+/// width), and its segment there.
+fn segmentAt(p: geom.Point) ?struct { hit: BoundaryHit, run: geom.path.Ring } {
+    const h = nearestBoundaryWithin(p, edgeMm(), false, .all) orelse return null;
+    if (targetContext(h.target) == null) return null;
+    const run = segmentOf(h.boundary, h.ring, h.edge) orelse return null;
+    return .{ .hit = h, .run = run };
+}
+
+/// Shift+click at `p`: the segment there in or out of the picks. Whether
+/// there was one.
+fn segmentPress(p: geom.Point) bool {
+    const s = segmentAt(p) orelse return false;
+    const owner = targetContext(s.hit.target).?;
+    // Already picked (the same run of the same object): out.
+    for (segment_picks.items, 0..) |sp, i| {
+        if (!std.meta.eql(sp.owner, owner)) continue;
+        const run = pickedSegment(sp) orelse continue;
+        if (sameRun(run, s.run)) {
+            _ = segment_picks.orderedRemove(i);
+            state.status = "Segment taken out of the picks. ";
+            dvui.refresh(null, @src(), null);
+            return true;
+        }
+    }
+    const b = pathBounds(s.hit.boundary);
+    segment_picks.append(state.gpa, .{ .owner = owner, .rel = .{ .x = s.hit.at.x - b.x0, .y = s.hit.at.y - b.y0 } }) catch return false;
+    const B = struct {
+        var buf: [128]u8 = undefined;
+    };
+    const len = geom.path.ringLength(s.run);
+    const chord = if (s.run.pts.len >= 2) std.math.hypot(s.run.pts[s.run.pts.len - 1].x - s.run.pts[0].x, s.run.pts[s.run.pts.len - 1].y - s.run.pts[0].y) else 0;
+    const shape = if (s.run.closed) "closed" else if (@abs(len - chord) <= 1e-6 * @max(len, 1)) "straight" else "curved";
+    state.status = std.fmt.bufPrint(&B.buf, "Segment of {s} picked: {d:.2} mm, {s} ({d} picked; Shift+click again takes it out). ", .{ owner.kindName(), len, shape, segment_picks.items.len }) catch "";
+    dvui.refresh(null, @src(), null);
+    return true;
+}
+
+fn sameRun(x: geom.path.Ring, y: geom.path.Ring) bool {
+    if (x.pts.len == 0 or y.pts.len == 0 or x.closed != y.closed) return false;
+    const eq = struct {
+        fn f(u: geom.Point, v: geom.Point) bool {
+            return @abs(u.x - v.x) < 1e-6 and @abs(u.y - v.y) < 1e-6;
+        }
+    }.f;
+    if (x.closed) return x.pts.len == y.pts.len and eq(x.pts[0], y.pts[0]);
+    const xa = x.pts[0];
+    const xb = x.pts[x.pts.len - 1];
+    const ya = y.pts[0];
+    const yb = y.pts[y.pts.len - 1];
+    return (eq(xa, ya) and eq(xb, yb)) or (eq(xa, yb) and eq(xb, ya));
+}
+
+/// The segment picks haloed along their paths, and with Shift held the
+/// segment a click would pick, fainter.
+fn drawSegmentPicks(area: dvui.Rect.Physical) void {
+    for (segment_picks.items) |sp| {
+        const run = pickedSegment(sp) orelse continue;
+        haloPath(area, .{ .rings = &.{run} }, colors.select);
+    }
+    if (state.tool != .select or !shiftHeld() or state.drag != null or sketch_edit != null) return;
+    const m = state.mouse orelse return;
+    const s = segmentAt(m) orelse return;
+    haloPath(area, .{ .rings = &.{s.run} }, colors.select.opacity(0.55));
 }
 
 /// A highlighted boundary path that is not a plain rectangle: the core
@@ -25417,7 +26209,7 @@ fn drawHover(area: dvui.Rect.Physical) void {
         skRing(c, 3 * px, colors.select, 1.5 * px);
     };
     switch (t) {
-        .tile, .track, .row, .panel, .grid, .art, .guide, .figure_place => {},
+        .tile, .track, .row, .panel, .grid, .art, .guide, .figure_place, .frame, .view, .image, .sketch => {},
         .slot => |x| {
             state.view.rect(area, x.box).fill(.square, .{ .color = .{ .color = colors.select.opacity(0.08) } });
             state.view.rect(area, x.box).stroke(.square, .{ .thickness = px, .color = .{ .color = hover } });
@@ -25433,6 +26225,23 @@ fn drawHover(area: dvui.Rect.Physical) void {
 /// the caret put). Whether it took the press.
 fn hoverPress(p: geom.Point) bool {
     const t = (if (boundary_mode) (if (nearestBoundary(p)) |h| h.target else null) else hoverTargetAt(p)) orelse return false;
+    return pressTarget(t);
+}
+
+/// A press right on the outline of something drawn inside a text track's
+/// segment (line art, a placed figure, an image, a construction line …):
+/// that thing, before the press would go into the text (item 48: what is
+/// drawn there is picked by its real outline). Whether it took the press.
+fn outlinePress(p: geom.Point) bool {
+    const h = nearestBoundaryWithin(p, edgeMm(), false, if (boundary_mode) .all else .default) orelse return false;
+    switch (h.target) {
+        .art, .figure_place, .grid, .guide, .image, .view, .sketch => return pressTarget(h.target),
+        else => return false,
+    }
+}
+
+/// Takes what pointing found (see `hoverPress`).
+fn pressTarget(t: HoverTarget) bool {
     switch (t) {
         .tile => |x| {
             if (canvas_eq != null) leaveCanvasEquation();
@@ -25481,6 +26290,28 @@ fn hoverPress(p: geom.Point) bool {
             levelSet(.{ .art = .{ .panel = x.panel, .index = x.index } });
             // The container is the selection: its drag points show.
             if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+        },
+        .frame => |si| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .space = si });
+        },
+        .view => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .view = .{ .space = x.space, .index = x.index } });
+        },
+        .image => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            levelSet(.{ .image = .{ .space = x.space, .index = x.index } });
+            if (objectOfContext(state.context)) |id| selection.append(state.gpa, id) catch {};
+        },
+        .sketch => |x| {
+            if (canvas_eq != null) leaveCanvasEquation();
+            track_cursor = null;
+            selection.clearRetainingCapacity();
+            pickSketch(.{ .space = x.space, .index = x.index });
         },
         .slot => |x| return slotPress(x),
         .eq_object => |x| {
@@ -27839,7 +28670,16 @@ fn drawPointerMark() void {
 fn drawSelection(area: dvui.Rect.Physical) void {
     if (selection.items.len == 0) return;
     const px = dvui.windowNaturalScale();
-    for (selection.items) |id| {
+    const bds = dvui.currentWindow().arena().alloc(?Boundary, selection.items.len) catch return;
+    boundariesOfObjects(selection.items, bds);
+    for (selection.items, bds) |id, maybe| {
+        // A container whose boundary is not a plain rectangle (a panel
+        // made from a sketch, line art, a figure's wrap): haloed along its
+        // real path, not a box standing in for it.
+        if (maybe) |bd| if (bd.asBox() == null) {
+            haloPath(area, bd, colors.select);
+            continue;
+        };
         const b = containerBox(id) orelse continue;
         const r = state.view.rect(area, b);
         r.fill(.square, .{ .color = .{ .color = colors.select.opacity(0.14) } });
@@ -32488,16 +33328,17 @@ fn sketchPalette() void {
     // editor, its tools in the ribbon): Geometry, Constrain, Ink; Update
     // and Finish at the far right.
     const on_fill = dvui.themeGet().focus.opacity(0.35);
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 2, .w = 2 }, .gravity_y = 0.5 });
+    var bar = keyRow(@src(), .{ .expand = .horizontal, .padding = .{ .x = 2, .w = 2 }, .gravity_y = 0.5 });
     defer bar.deinit();
-    var below: dvui.Rect.Physical = undefined;
+    // The key the tool's options hang from.
+    var below: dvui.Rect.Physical = .{};
     {
         const saved_group = pushGroup("sketch.palette");
         defer popGroup(saved_group);
-        var geo = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+        var geo = keyRow(@src(), .{ .gravity_y = 0.5 });
         defer geo.deinit();
-        skPaletteKey(@src(), "Select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none, "Select: pick geometry and constraints; drag points");
-        skPaletteKey(@src(), "Construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction, "Construction: what is drawn next is construction geometry (dashed)");
+        _ = skPaletteKey(@src(), "Select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none, "Select: pick geometry and constraints; drag points");
+        _ = skPaletteKey(@src(), "Construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction, "Construction: what is drawn next is construction geometry (dashed)");
         const names = [_][]const u8{ "Point", "Line", "Polyline", "Arc", "Circle", "Polygon", "Array" };
         const tvgs = [_][]const u8{
             icons.graven(.geo_point) orelse dvui.entypo.dot_single,
@@ -32510,9 +33351,9 @@ fn sketchPalette() void {
         };
         for (names, tvgs, 0..) |name, tvg, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
-            skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on, name);
+            const kr = skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on, name);
+            if (on) below = kr;
         }
-        below = geo.data().borderRectScale().r;
     }
     ribbonGap(1);
     sketchConstrainKeys();
@@ -32551,13 +33392,15 @@ fn sketchPalette() void {
 }
 
 /// A key of the sketch ribbon's Geometry group, tinted while on.
-fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool, tip: []const u8) void {
+fn skPaletteKey(src: std.builtin.SourceLocation, name: []const u8, tvg: []const u8, arg: i32, id_extra: usize, on: bool, tip: []const u8) dvui.Rect.Physical {
     // Its own parent, so its tooltip's ID is its own.
     var b = dvui.box(src, .{}, .{ .id_extra = id_extra, .gravity_y = 0.5 });
     defer b.deinit();
     var wd: dvui.WidgetData = undefined;
     keyIcon(@src(), name, tvg, arg, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
-    dvui.tooltip(@src(), .{ .active_rect = wd.borderRectScale().r }, "{s}", .{tip}, .{});
+    const r = wd.borderRectScale().r;
+    dvui.tooltip(@src(), .{ .active_rect = r }, "{s}", .{tip}, .{});
+    return r;
 }
 
 /// The sketch ribbon's Constrain group: a key for each kind, its single
@@ -32583,7 +33426,7 @@ fn sketchConstrainKeys() void {
         .{ .k = .angle, .name = "Angle", .key = "A", .icon = .con_angle },
         .{ .k = .fixed, .name = "Lock", .key = "L", .icon = .con_locked },
     };
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    var row = keyRow(@src(), .{ .gravity_y = 0.5 });
     defer row.deinit();
     for (kinds, 0..) |k, i| {
         var buf: [8]skl.Constraint = undefined;
@@ -32602,7 +33445,7 @@ fn sketchConstrainKeys() void {
 fn sketchInkKeys() void {
     var buf: [256]skl.pieces.Found = undefined;
     const gs = skFound(&buf);
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+    var row = keyRow(@src(), .{ .gravity_y = 0.5 });
     defer row.deinit();
     skDrawingChoice();
     {
@@ -32695,33 +33538,17 @@ fn skDrawingChoice() void {
 /// The overlay below the geometry buttons for the active one: its
 /// sub-options first (M goes to the next), then the step being placed,
 /// with typed values for it.
-fn skToolOverlay(g: SkGeo, buttons: dvui.Rect.Physical) void {
+fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
     const saved_group = pushGroup("sketch.tool");
     defer popGroup(saved_group);
-    const ns = dvui.windowNaturalScale();
     const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
     const tools = sk_geo_tools[@intFromEnum(g)];
-    // Floating over what is below the buttons, as tall as its rows.
-    const fields: f32 = @floatFromInt(skStepFieldCount());
-    const hint_rows: f32 = if (tools.len > 1) (if (g == .line and !sk_construction) 2 else 1) else 0;
-    const counts: f32 = if (g == .array) (if (sk_tool == .polar_array) 3 else 2) else if (g == .polygon) 3 else 0;
-    const h: f32 = 20 + (if (tools.len > 1) @as(f32, 32) else 0) + hint_rows * 24 + 28 + (fields + counts) * 40;
-    var fw: dvui.FloatingWidget = undefined;
-    fw.init(@src(), .{}, .{
-        .rect = .{ .x = buttons.x / ns, .y = (buttons.y + buttons.h) / ns + 4, .w = buttons.w / ns, .h = h },
-        .background = true,
-        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
-        .border = .all(1),
-        .corners = .all(6),
-        .padding = .all(6),
-    });
-    defer fw.deinit();
-    // Clicked, it takes the keyboard (a floating widget's own fields get
-    // keys only while its subwindow has focus), as floating windows do.
-    for (dvui.events()) |*e| {
-        if (!dvui.eventMatch(e, .{ .id = fw.data().id, .r = fw.data().rectScale().r })) continue;
-        if (e.evt == .mouse and e.evt.mouse.action == .focus) dvui.focusSubwindow(fw.data().id, e.num);
-    }
+    // Hanging from the tool's key, as every drop does; it stays while the
+    // tool is on.
+    var hp = hangBegin(@src(), key, hang_sketch_tool, false);
+    defer hp.end();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .min_size_content = .{ .w = 300 }, .padding = .all(6) });
+    defer body.deinit();
     if (tools.len > 1) {
         var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
         defer flex.deinit();
