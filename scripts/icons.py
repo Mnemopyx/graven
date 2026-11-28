@@ -26,8 +26,10 @@ it shows the points the user clicks as hot points (slot "hot", used for
 nothing else: large, thinly ringed so the colour carries at the smallest
 size), any construction geometry those points sit on thin (THIN) and
 dashed, and the result in full ink over a subtle cool fill (slot
-"result"). The order of the clicks is not shown (too busy; a try or two
-teaches it). On a dark ground the ink is drawn light (DARK_INK) and the
+"result"; a container or track a tool makes keeps its own role slot).
+The order of the clicks is not shown (too busy; a try or two teaches it),
+and the hot points stand in for the ringed + of adding. Each variant of a
+tool has its icon (`tool-*`, `roundrect-*`). On a dark ground the ink is drawn light (DARK_INK) and the
 slots take the deeper DARK values (the JSON's `schemes.dark`).
 
 The icon file (the owner's choice, 2026-11-22): one PNG and its JSON, the
@@ -319,15 +321,150 @@ def roundrect_centre():
             + hot(mx, my) + hot(x1, y1) + hot(cx, cy))
 
 
+# --- Drawing tools (the click-point rule) -------------------------------------
+# Each shows the points its user clicks (hot), the construction they sit on
+# (thin, dashed) and what it makes (ink; a closed result over its fill: the
+# result slot for drawn geometry, the made thing's own role slot for a
+# container or a track). Variants of one tool share one frame.
+
+
+def pt(cx, cy, r, a):
+    """The point at angle `a` (radians, clockwise on screen from +x) on the
+    circle about (cx, cy) of radius `r`."""
+    return (cx + r * math.cos(a), cy + r * math.sin(a))
+
+
+def closed_fill(outline, kind="result"):
+    """A closed result: its fill, its ink outline."""
+    return [("fill", outline, kind), ("ink", closed(outline))]
+
+
+def tool_point():
+    c = (12, 10)
+    return (construction([(c[0] - 8, c[1]), (c[0] + 8, c[1])]) + construction([(c[0], c[1] - 8), (c[0], c[1] + 8)])
+            + hot(*c, 2.6))
+
+
+def tool_segment():
+    return line(4, 16, 20, 4) + hot(4, 16) + hot(20, 4)
+
+
+def tool_ray():
+    # Rays are construction: what it makes is dashed, at full weight.
+    a, b = (3.5, 16.5), (11, 10.5)
+    end = (20.5, 2.9)
+    return dashes([a, end], 2.0, 1.5) + arrow(a[0], a[1], end[0], end[1], 3.0)[1:] + hot(*a) + hot(*b)
+
+
+def tool_line():
+    return dashes([(1.5, 17.5), (22.5, 1.5)], 2.0, 1.5) + hot(7, 13.3) + hot(17, 5.7)
+
+
+def tool_polyline():
+    p = [(3, 16), (8, 4.5), (15, 13.5), (21, 3.5)]
+    return polyline(p) + sum((hot(*q) for q in p), [])
+
+
+ARC = (12, 15, 9.5, math.pi + 0.2, 2 * math.pi - 0.2)  # centre, radius, from, to
+
+
+def tool_arc_centre():
+    cx, cy, r, a0, a1 = ARC
+    s, e = pt(cx, cy, r, a0), pt(cx, cy, r, a1)
+    return (construction([(cx, cy), s]) + construction([(cx, cy), e]) + ring(cx, cy, r, a0, a1, 24)
+            + hot(cx, cy) + hot(*s) + hot(*e))
+
+
+def tool_arc_3pt():
+    cx, cy, r, a0, a1 = ARC
+    return ring(cx, cy, r, a0, a1, 24) + hot(*pt(cx, cy, r, a0)) + hot(*pt(cx, cy, r, 1.5 * math.pi)) + hot(*pt(cx, cy, r, a1))
+
+
+CIRCLE = (12, 10, 7.5)
+
+
+def tool_circle_centre():
+    cx, cy, r = CIRCLE
+    rim = pt(cx, cy, r, -math.pi / 4)
+    return (closed_fill(arc(cx, cy, r, 0, 2 * math.pi, 40)[:-1]) + construction([(cx, cy), rim])
+            + hot(cx, cy) + hot(*rim))
+
+
+def tool_circle_3pt():
+    cx, cy, r = CIRCLE
+    return (closed_fill(arc(cx, cy, r, 0, 2 * math.pi, 40)[:-1])
+            + sum((hot(*pt(cx, cy, r, a)) for a in (-math.pi / 2, math.pi * 5 / 6, math.pi / 6)), []))
+
+
+def tool_polygon():
+    cx, cy, r = 12, 10, 8.5
+    vs = [pt(cx, cy, r, -math.pi / 2 + k * math.pi / 3) for k in range(6)]
+    return closed_fill(vs) + construction([(cx, cy), vs[1]]) + hot(cx, cy) + hot(*vs[1])
+
+
+def tool_rect_array():
+    x0, y0, x1, y1 = 2.5, 2.5, 21.5, 17.5
+    out = closed_fill([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    for k in (1, 2):
+        x = x0 + (x1 - x0) * k / 3
+        out += line(x, y0, x, y1)
+    out += line(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2)
+    return out + hot(x0, y0) + hot(x1, y1)
+
+
+SWEEP = (12, 17.5, 12, 6, math.pi + math.pi / 6, 2 * math.pi - math.pi / 6)  # centre, outer and inner radius, from, to
+
+
+def tool_polar_grid():
+    cx, cy, r, ri, a0, a1 = SWEEP
+    fan = [(cx, cy)] + arc(cx, cy, r, a0, a1, 24)
+    out = [("fill", fan, "result")] + ring(cx, cy, r, a0, a1, 24) + ring(cx, cy, ri, a0, a1, 16)
+    for a in (a0, (a0 + a1) / 2, a1):
+        out += line(cx, cy, *pt(cx, cy, r, a))
+    return out + hot(cx, cy) + hot(*pt(cx, cy, r, a0)) + hot(*pt(cx, cy, r, a1))
+
+
+def tool_dial():
+    cx, cy, r = 12, 10.5, 8.5
+    a0, a1 = math.pi * 0.75, math.pi * 2.25  # a 270 degree gauge, through the top
+    out = closed_fill(arc(cx, cy, r, 0, 2 * math.pi, 40)[:-1])
+    for k in range(5):
+        a = a0 + (a1 - a0) * k / 4
+        out += line(*pt(cx, cy, r - 2.6, a), *pt(cx, cy, r - 0.6, a))
+    return out + hot(cx, cy) + hot(*pt(cx, cy, r, a0)) + hot(*pt(cx, cy, r, a1))
+
+
+def hexagon(cx, cy, r):
+    return [pt(cx, cy, r, k * math.pi / 3) for k in range(6)]
+
+
+def tool_tessellate():
+    # The closed path it fills (there already: paper, in ink), its tiles
+    # what it makes, the click inside.
+    out = rect(1.5, 1.5, 21, 16.5, "paper", 4.0)
+    r = 3.6
+    h = r * math.sqrt(3) / 2
+    x0, y0 = 6.5, 6.0
+    for cx, cy in ((x0, y0), (x0 + 1.5 * r, y0 + h), (x0 + 3 * r, y0), (x0, y0 + 2 * h)):
+        out += closed_fill(hexagon(cx, cy, r))
+    return out + hot(x0 + 1.5 * r, y0 + h)
+
+
+def drag_corners(x0, y0, x1, y1):
+    """The two corners a drag runs between."""
+    return hot(x0, y0) + hot(x1, y1)
+
+
 ICONS = {
     # Containers made on the canvas.
-    "add-panel": rect(2.5, 3, 15, 13, "base") + adds(),
-    "add-rows": container(2.5, 2, 19, 16) + rect(4.5, 4, 15, 3.4, "subject", 0.6) + rect(4.5, 8.3, 15, 3.4, "subject", 0.6) + rect(4.5, 12.6, 15, 3.4, "subject", 0.6),
-    "add-columns": container(2.5, 2, 19, 16) + rect(4.5, 4, 3.4, 12, "subject", 0.6) + rect(10.3, 4, 3.4, 12, "subject", 0.6) + rect(16.1, 4, 3.4, 12, "subject", 0.6),
-    "add-track": rect(2, 7.5, 14, 4.5, "subject", 0.8) + arrow(17, 9.75, 22.5, 9.75),
+    # Dragged out: the panel between its two corners.
+    "add-panel": rect(2.5, 2.5, 19, 15, "base") + drag_corners(2.5, 2.5, 21.5, 17.5),
+    "add-rows": container(2.5, 2, 19, 16) + rect(4.5, 4, 15, 3.4, "subject", 0.6) + rect(4.5, 8.3, 15, 3.4, "subject", 0.6) + rect(4.5, 12.6, 15, 3.4, "subject", 0.6) + drag_corners(4.5, 4, 19.5, 16),
+    "add-columns": container(2.5, 2, 19, 16) + rect(4.5, 4, 3.4, 12, "subject", 0.6) + rect(10.3, 4, 3.4, 12, "subject", 0.6) + rect(16.1, 4, 3.4, 12, "subject", 0.6) + drag_corners(4.5, 4, 19.5, 16),
+    "add-track": rect(2.5, 7.5, 19, 4.5, "subject", 0.8) + hot(2.5, 9.75) + hot(21.5, 9.75),
     "fit-to-tiles": container(2.5, 3, 19, 5.5) + rect(2.5, 3, 9, 5.5, "subject", 0.6) + container(2.5, 10.5, 19, 5.5) + rect(2.5, 10.5, 13, 5.5, "subject", 0.6) + arrow(21, 5.75, 13, 5.75) + arrow(21, 13.25, 17, 13.25),
     # Guides.
-    "construction-line": dashes([(1.5, 16.5), (22.5, 3.5)], 2.4, 1.8) + circle(7, 13.1, 1.9, "mark") + circle(17, 6.9, 1.9, "mark"),
+    "construction-line": dashes([(1.5, 16.5), (22.5, 3.5)], 2.4, 1.8) + hot(7, 13.1) + hot(17, 6.9),
     # The view's layers.
     "layers": polygon([(12, 2), (21, 6.5), (12, 11), (3, 6.5)], "neutral") + polyline([(3, 10), (12, 14.5), (21, 10)]) + polyline([(3, 13.5), (12, 18), (21, 13.5)]),
     # The view: what is chosen, framed.
@@ -336,14 +473,31 @@ ICONS = {
     "select-boundaries": [("fill", rounded(1.2, 1.2, 17.6, 15.6, 2.4), "focus")] + rect(3, 3, 14, 12, "base") + rect(5, 7.2, 10, 3.6, "subject", 0.6) + pointer(15.5, 9.5),
     "select-area": container(3, 2.5, 15, 12, "focus") + pointer(15.5, 9.5),
     # Sketching inside a sketch: one made; a shape drawn; constrained.
-    "new-sketch": container(2.5, 2.5, 14.5, 13, "paper") + curve([(4.5, 12.5), (6, 6), (10, 5), (12, 10), (15, 6.5)]) + circle(15, 6.5, 1.5, "mark") + circle(4.5, 12.5, 1.5, "mark") + adds(),
-    "add-shape": circle(7.5, 7.5, 4.5, "mark") + rect(9.5, 8.5, 7, 7, "mark", 0.4) + adds(),
+    # One click: where its origin goes (its axes dashed), a drawing in it.
+    "new-sketch": container(2.5, 2.5, 19, 15, "paper") + construction([(7, 2.5), (7, 17.5)]) + construction([(2.5, 13), (21.5, 13)]) + curve([(9.5, 10.5), (12, 5.5), (15.5, 9), (19, 5)]) + hot(7, 13),
+    # Dragged out on a panel: line art between two corners.
+    "add-shape": construction(closed([(2.5, 2.5), (21.5, 2.5), (21.5, 17.5), (2.5, 17.5)])) + circle(9, 8.5, 5.2, "result") + rect(10.5, 9, 9, 7.5, "result", 0.4) + drag_corners(2.5, 2.5, 21.5, 17.5),
     # Text: a style (a line of text set in it, on its track).
     "text-style": rect(2.5, 9.5, 19, 6.5, "subject", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
     # Drawing tools (the click-point rule): the points clicked hot, the
     # construction thin and dashed, the result inked over a subtle cool fill.
     "roundrect-corners": roundrect_corners(),
     "roundrect-centre": roundrect_centre(),
+    # The sketch editor's geometry tools, a variant each.
+    "tool-point": tool_point(),
+    "tool-segment": tool_segment(),
+    "tool-ray": tool_ray(),
+    "tool-line": tool_line(),
+    "tool-polyline": tool_polyline(),
+    "tool-arc-centre": tool_arc_centre(),
+    "tool-arc-3pt": tool_arc_3pt(),
+    "tool-circle-centre": tool_circle_centre(),
+    "tool-circle-3pt": tool_circle_3pt(),
+    "tool-polygon": tool_polygon(),
+    "tool-rect-array": tool_rect_array(),
+    "tool-polar-grid": tool_polar_grid(),
+    "tool-dial": tool_dial(),
+    "tool-tessellate": tool_tessellate(),
     "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "mark") + circle(18, 9, 1.8, "mark") + dimension((4, 15), (18, 9), 4.2),
     # Panes, each named by its official name ("pane-" + its id): drawn in
     # its heading and on its tab, so a pane is known at a glance wherever

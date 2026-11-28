@@ -4,7 +4,7 @@
   "distanceRange": 4.0,
   "size": 64,
   "width": 576,
-  "height": 2080,
+  "height": 2736,
   "yOrigin": "top"
  },
  "graven": {
@@ -329,7 +329,7 @@
   },
   {
    "index": 15,
-   "icon": "constrain",
+   "icon": "tool-point",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -346,7 +346,7 @@
   },
   {
    "index": 16,
-   "icon": "pane-browser",
+   "icon": "tool-segment",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -363,7 +363,7 @@
   },
   {
    "index": 17,
-   "icon": "pane-properties",
+   "icon": "tool-ray",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -380,7 +380,7 @@
   },
   {
    "index": 18,
-   "icon": "pane-expression-bar",
+   "icon": "tool-line",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -397,7 +397,7 @@
   },
   {
    "index": 19,
-   "icon": "pane-log",
+   "icon": "tool-polyline",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -414,7 +414,7 @@
   },
   {
    "index": 20,
-   "icon": "geo-point",
+   "icon": "tool-arc-centre",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -431,7 +431,7 @@
   },
   {
    "index": 21,
-   "icon": "geo-segment",
+   "icon": "tool-arc-3pt",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -448,7 +448,7 @@
   },
   {
    "index": 22,
-   "icon": "geo-circle",
+   "icon": "tool-circle-centre",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -465,7 +465,7 @@
   },
   {
    "index": 23,
-   "icon": "geo-arc",
+   "icon": "tool-circle-3pt",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -482,7 +482,7 @@
   },
   {
    "index": 24,
-   "icon": "geo-line",
+   "icon": "tool-polygon",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -499,7 +499,7 @@
   },
   {
    "index": 25,
-   "icon": "geo-ray",
+   "icon": "tool-rect-array",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -516,7 +516,7 @@
   },
   {
    "index": 26,
-   "icon": "geo-edge",
+   "icon": "tool-polar-grid",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -533,7 +533,7 @@
   },
   {
    "index": 27,
-   "icon": "con-coincident",
+   "icon": "tool-dial",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -550,7 +550,7 @@
   },
   {
    "index": 28,
-   "icon": "con-horizontal",
+   "icon": "tool-tessellate",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -567,7 +567,7 @@
   },
   {
    "index": 29,
-   "icon": "con-vertical",
+   "icon": "constrain",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -584,7 +584,7 @@
   },
   {
    "index": 30,
-   "icon": "con-on-object",
+   "icon": "pane-browser",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -601,7 +601,7 @@
   },
   {
    "index": 31,
-   "icon": "con-locked",
+   "icon": "pane-properties",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -618,7 +618,7 @@
   },
   {
    "index": 32,
-   "icon": "con-distance",
+   "icon": "pane-expression-bar",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -635,7 +635,7 @@
   },
   {
    "index": 33,
-   "icon": "con-distance-x",
+   "icon": "pane-log",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -652,7 +652,7 @@
   },
   {
    "index": 34,
-   "icon": "con-distance-y",
+   "icon": "geo-point",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -669,7 +669,7 @@
   },
   {
    "index": 35,
-   "icon": "con-line-distance",
+   "icon": "geo-segment",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -686,7 +686,7 @@
   },
   {
    "index": 36,
-   "icon": "con-radius",
+   "icon": "geo-circle",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -703,7 +703,7 @@
   },
   {
    "index": 37,
-   "icon": "con-diameter",
+   "icon": "geo-arc",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -720,7 +720,7 @@
   },
   {
    "index": 38,
-   "icon": "con-angle",
+   "icon": "geo-line",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -737,7 +737,7 @@
   },
   {
    "index": 39,
-   "icon": "con-parallel",
+   "icon": "geo-ray",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -754,7 +754,7 @@
   },
   {
    "index": 40,
-   "icon": "con-perpendicular",
+   "icon": "geo-edge",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -771,7 +771,7 @@
   },
   {
    "index": 41,
-   "icon": "con-tangent",
+   "icon": "con-coincident",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -788,7 +788,7 @@
   },
   {
    "index": 42,
-   "icon": "con-equal",
+   "icon": "con-horizontal",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -805,7 +805,7 @@
   },
   {
    "index": 43,
-   "icon": "con-equal-distance",
+   "icon": "con-vertical",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -822,7 +822,7 @@
   },
   {
    "index": 44,
-   "icon": "con-symmetric",
+   "icon": "con-on-object",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -839,7 +839,58 @@
   },
   {
    "index": 45,
-   "icon": "add-panel",
+   "icon": "con-locked",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 364,
+    "right": 428,
+    "bottom": 428
+   }
+  },
+  {
+   "index": 46,
+   "icon": "con-distance",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 364,
+    "right": 500,
+    "bottom": 428
+   }
+  },
+  {
+   "index": 47,
+   "icon": "con-distance-x",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 364,
+    "right": 572,
+    "bottom": 428
+   }
+  },
+  {
+   "index": 48,
+   "icon": "con-distance-y",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -850,68 +901,13 @@
    "atlasBounds": {
     "left": 4,
     "top": 436,
-    "right": 52,
-    "bottom": 484
-   },
-   "px": 24
-  },
-  {
-   "index": 46,
-   "icon": "add-rows",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 60,
-    "top": 436,
-    "right": 108,
-    "bottom": 484
-   },
-   "px": 24
-  },
-  {
-   "index": 47,
-   "icon": "add-columns",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 116,
-    "top": 436,
-    "right": 164,
-    "bottom": 484
-   },
-   "px": 24
-  },
-  {
-   "index": 48,
-   "icon": "add-track",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 172,
-    "top": 436,
-    "right": 220,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 68,
+    "bottom": 500
+   }
   },
   {
    "index": 49,
-   "icon": "fit-to-tiles",
+   "icon": "con-line-distance",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -920,16 +916,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 228,
+    "left": 76,
     "top": 436,
-    "right": 276,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 140,
+    "bottom": 500
+   }
   },
   {
    "index": 50,
-   "icon": "construction-line",
+   "icon": "con-radius",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -938,16 +933,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 284,
+    "left": 148,
     "top": 436,
-    "right": 332,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 212,
+    "bottom": 500
+   }
   },
   {
    "index": 51,
-   "icon": "layers",
+   "icon": "con-diameter",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -956,16 +950,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 340,
+    "left": 220,
     "top": 436,
-    "right": 388,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 284,
+    "bottom": 500
+   }
   },
   {
    "index": 52,
-   "icon": "zoom-to-context",
+   "icon": "con-angle",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -974,16 +967,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 396,
+    "left": 292,
     "top": 436,
-    "right": 444,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 356,
+    "bottom": 500
+   }
   },
   {
    "index": 53,
-   "icon": "select-boundaries",
+   "icon": "con-parallel",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -992,16 +984,32 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 452,
+    "left": 364,
     "top": 436,
-    "right": 500,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 428,
+    "bottom": 500
+   }
   },
   {
    "index": 54,
-   "icon": "select-area",
+   "icon": "con-perpendicular",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 436,
+    "right": 500,
+    "bottom": 500
+   }
+  },
+  {
+   "index": 55,
+   "icon": "con-tangent",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1012,14 +1020,13 @@
    "atlasBounds": {
     "left": 508,
     "top": 436,
-    "right": 556,
-    "bottom": 484
-   },
-   "px": 24
+    "right": 572,
+    "bottom": 500
+   }
   },
   {
-   "index": 55,
-   "icon": "new-sketch",
+   "index": 56,
+   "icon": "con-equal",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1029,33 +1036,14 @@
    },
    "atlasBounds": {
     "left": 4,
-    "top": 492,
-    "right": 52,
-    "bottom": 540
-   },
-   "px": 24
-  },
-  {
-   "index": 56,
-   "icon": "add-shape",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 60,
-    "top": 492,
-    "right": 108,
-    "bottom": 540
-   },
-   "px": 24
+    "top": 508,
+    "right": 68,
+    "bottom": 572
+   }
   },
   {
    "index": 57,
-   "icon": "text-style",
+   "icon": "con-equal-distance",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1064,16 +1052,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 116,
-    "top": 492,
-    "right": 164,
-    "bottom": 540
-   },
-   "px": 24
+    "left": 76,
+    "top": 508,
+    "right": 140,
+    "bottom": 572
+   }
   },
   {
    "index": 58,
-   "icon": "roundrect-corners",
+   "icon": "con-symmetric",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1082,16 +1069,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 172,
-    "top": 492,
-    "right": 220,
-    "bottom": 540
-   },
-   "px": 24
+    "left": 148,
+    "top": 508,
+    "right": 212,
+    "bottom": 572
+   }
   },
   {
    "index": 59,
-   "icon": "roundrect-centre",
+   "icon": "add-panel",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1100,16 +1086,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 228,
-    "top": 492,
-    "right": 276,
-    "bottom": 540
+    "left": 4,
+    "top": 580,
+    "right": 52,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 60,
-   "icon": "constrain",
+   "icon": "add-rows",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1118,16 +1104,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 284,
-    "top": 492,
-    "right": 332,
-    "bottom": 540
+    "left": 60,
+    "top": 580,
+    "right": 108,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 61,
-   "icon": "pane-browser",
+   "icon": "add-columns",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1136,16 +1122,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 340,
-    "top": 492,
-    "right": 388,
-    "bottom": 540
+    "left": 116,
+    "top": 580,
+    "right": 164,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 62,
-   "icon": "pane-properties",
+   "icon": "add-track",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1154,16 +1140,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 396,
-    "top": 492,
-    "right": 444,
-    "bottom": 540
+    "left": 172,
+    "top": 580,
+    "right": 220,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 63,
-   "icon": "pane-expression-bar",
+   "icon": "fit-to-tiles",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1172,16 +1158,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 452,
-    "top": 492,
-    "right": 500,
-    "bottom": 540
+    "left": 228,
+    "top": 580,
+    "right": 276,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 64,
-   "icon": "pane-log",
+   "icon": "construction-line",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1190,16 +1176,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 508,
-    "top": 492,
-    "right": 556,
-    "bottom": 540
+    "left": 284,
+    "top": 580,
+    "right": 332,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 65,
-   "icon": "geo-point",
+   "icon": "layers",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1208,16 +1194,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 548,
-    "right": 52,
-    "bottom": 596
+    "left": 340,
+    "top": 580,
+    "right": 388,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 66,
-   "icon": "geo-segment",
+   "icon": "zoom-to-context",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1226,16 +1212,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 60,
-    "top": 548,
-    "right": 108,
-    "bottom": 596
+    "left": 396,
+    "top": 580,
+    "right": 444,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 67,
-   "icon": "geo-circle",
+   "icon": "select-boundaries",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1244,16 +1230,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 116,
-    "top": 548,
-    "right": 164,
-    "bottom": 596
+    "left": 452,
+    "top": 580,
+    "right": 500,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 68,
-   "icon": "geo-arc",
+   "icon": "select-area",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1262,16 +1248,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 172,
-    "top": 548,
-    "right": 220,
-    "bottom": 596
+    "left": 508,
+    "top": 580,
+    "right": 556,
+    "bottom": 628
    },
    "px": 24
   },
   {
    "index": 69,
-   "icon": "geo-line",
+   "icon": "new-sketch",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1280,16 +1266,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 228,
-    "top": 548,
-    "right": 276,
-    "bottom": 596
+    "left": 4,
+    "top": 636,
+    "right": 52,
+    "bottom": 684
    },
    "px": 24
   },
   {
    "index": 70,
-   "icon": "geo-ray",
+   "icon": "add-shape",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1298,124 +1284,16 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 284,
-    "top": 548,
-    "right": 332,
-    "bottom": 596
+    "left": 60,
+    "top": 636,
+    "right": 108,
+    "bottom": 684
    },
    "px": 24
   },
   {
    "index": 71,
-   "icon": "geo-edge",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 340,
-    "top": 548,
-    "right": 388,
-    "bottom": 596
-   },
-   "px": 24
-  },
-  {
-   "index": 72,
-   "icon": "con-coincident",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 396,
-    "top": 548,
-    "right": 444,
-    "bottom": 596
-   },
-   "px": 24
-  },
-  {
-   "index": 73,
-   "icon": "con-horizontal",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 452,
-    "top": 548,
-    "right": 500,
-    "bottom": 596
-   },
-   "px": 24
-  },
-  {
-   "index": 74,
-   "icon": "con-vertical",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 508,
-    "top": 548,
-    "right": 556,
-    "bottom": 596
-   },
-   "px": 24
-  },
-  {
-   "index": 75,
-   "icon": "con-on-object",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 4,
-    "top": 604,
-    "right": 52,
-    "bottom": 652
-   },
-   "px": 24
-  },
-  {
-   "index": 76,
-   "icon": "con-locked",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 60,
-    "top": 604,
-    "right": 108,
-    "bottom": 652
-   },
-   "px": 24
-  },
-  {
-   "index": 77,
-   "icon": "con-distance",
+   "icon": "text-style",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1425,15 +1303,15 @@
    },
    "atlasBounds": {
     "left": 116,
-    "top": 604,
+    "top": 636,
     "right": 164,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 78,
-   "icon": "con-distance-x",
+   "index": 72,
+   "icon": "roundrect-corners",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1443,15 +1321,15 @@
    },
    "atlasBounds": {
     "left": 172,
-    "top": 604,
+    "top": 636,
     "right": 220,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 79,
-   "icon": "con-distance-y",
+   "index": 73,
+   "icon": "roundrect-centre",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1461,15 +1339,15 @@
    },
    "atlasBounds": {
     "left": 228,
-    "top": 604,
+    "top": 636,
     "right": 276,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 80,
-   "icon": "con-line-distance",
+   "index": 74,
+   "icon": "tool-point",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1479,15 +1357,15 @@
    },
    "atlasBounds": {
     "left": 284,
-    "top": 604,
+    "top": 636,
     "right": 332,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 81,
-   "icon": "con-radius",
+   "index": 75,
+   "icon": "tool-segment",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1497,15 +1375,15 @@
    },
    "atlasBounds": {
     "left": 340,
-    "top": 604,
+    "top": 636,
     "right": 388,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 82,
-   "icon": "con-diameter",
+   "index": 76,
+   "icon": "tool-ray",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1515,15 +1393,15 @@
    },
    "atlasBounds": {
     "left": 396,
-    "top": 604,
+    "top": 636,
     "right": 444,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 83,
-   "icon": "con-angle",
+   "index": 77,
+   "icon": "tool-line",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1533,15 +1411,15 @@
    },
    "atlasBounds": {
     "left": 452,
-    "top": 604,
+    "top": 636,
     "right": 500,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 84,
-   "icon": "con-parallel",
+   "index": 78,
+   "icon": "tool-polyline",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1551,15 +1429,15 @@
    },
    "atlasBounds": {
     "left": 508,
-    "top": 604,
+    "top": 636,
     "right": 556,
-    "bottom": 652
+    "bottom": 684
    },
    "px": 24
   },
   {
-   "index": 85,
-   "icon": "con-perpendicular",
+   "index": 79,
+   "icon": "tool-arc-centre",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1569,15 +1447,15 @@
    },
    "atlasBounds": {
     "left": 4,
-    "top": 660,
+    "top": 692,
     "right": 52,
-    "bottom": 708
+    "bottom": 740
    },
    "px": 24
   },
   {
-   "index": 86,
-   "icon": "con-tangent",
+   "index": 80,
+   "icon": "tool-arc-3pt",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1587,15 +1465,15 @@
    },
    "atlasBounds": {
     "left": 60,
-    "top": 660,
+    "top": 692,
     "right": 108,
-    "bottom": 708
+    "bottom": 740
    },
    "px": 24
   },
   {
-   "index": 87,
-   "icon": "con-equal",
+   "index": 81,
+   "icon": "tool-circle-centre",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1605,15 +1483,15 @@
    },
    "atlasBounds": {
     "left": 116,
-    "top": 660,
+    "top": 692,
     "right": 164,
-    "bottom": 708
+    "bottom": 740
    },
    "px": 24
   },
   {
-   "index": 88,
-   "icon": "con-equal-distance",
+   "index": 82,
+   "icon": "tool-circle-3pt",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1623,15 +1501,15 @@
    },
    "atlasBounds": {
     "left": 172,
-    "top": 660,
+    "top": 692,
     "right": 220,
-    "bottom": 708
+    "bottom": 740
    },
    "px": 24
   },
   {
-   "index": 89,
-   "icon": "con-symmetric",
+   "index": 83,
+   "icon": "tool-polygon",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -1641,14 +1519,626 @@
    },
    "atlasBounds": {
     "left": 228,
-    "top": 660,
+    "top": 692,
     "right": 276,
-    "bottom": 708
+    "bottom": 740
+   },
+   "px": 24
+  },
+  {
+   "index": 84,
+   "icon": "tool-rect-array",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 284,
+    "top": 692,
+    "right": 332,
+    "bottom": 740
+   },
+   "px": 24
+  },
+  {
+   "index": 85,
+   "icon": "tool-polar-grid",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 340,
+    "top": 692,
+    "right": 388,
+    "bottom": 740
+   },
+   "px": 24
+  },
+  {
+   "index": 86,
+   "icon": "tool-dial",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 396,
+    "top": 692,
+    "right": 444,
+    "bottom": 740
+   },
+   "px": 24
+  },
+  {
+   "index": 87,
+   "icon": "tool-tessellate",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 452,
+    "top": 692,
+    "right": 500,
+    "bottom": 740
+   },
+   "px": 24
+  },
+  {
+   "index": 88,
+   "icon": "constrain",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 692,
+    "right": 556,
+    "bottom": 740
+   },
+   "px": 24
+  },
+  {
+   "index": 89,
+   "icon": "pane-browser",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 748,
+    "right": 52,
+    "bottom": 796
    },
    "px": 24
   },
   {
    "index": 90,
+   "icon": "pane-properties",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 60,
+    "top": 748,
+    "right": 108,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 91,
+   "icon": "pane-expression-bar",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 116,
+    "top": 748,
+    "right": 164,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 92,
+   "icon": "pane-log",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 172,
+    "top": 748,
+    "right": 220,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 93,
+   "icon": "geo-point",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 228,
+    "top": 748,
+    "right": 276,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 94,
+   "icon": "geo-segment",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 284,
+    "top": 748,
+    "right": 332,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 95,
+   "icon": "geo-circle",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 340,
+    "top": 748,
+    "right": 388,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 96,
+   "icon": "geo-arc",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 396,
+    "top": 748,
+    "right": 444,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 97,
+   "icon": "geo-line",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 452,
+    "top": 748,
+    "right": 500,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 98,
+   "icon": "geo-ray",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 748,
+    "right": 556,
+    "bottom": 796
+   },
+   "px": 24
+  },
+  {
+   "index": 99,
+   "icon": "geo-edge",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 804,
+    "right": 52,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 100,
+   "icon": "con-coincident",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 60,
+    "top": 804,
+    "right": 108,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 101,
+   "icon": "con-horizontal",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 116,
+    "top": 804,
+    "right": 164,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 102,
+   "icon": "con-vertical",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 172,
+    "top": 804,
+    "right": 220,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 103,
+   "icon": "con-on-object",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 228,
+    "top": 804,
+    "right": 276,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 104,
+   "icon": "con-locked",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 284,
+    "top": 804,
+    "right": 332,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 105,
+   "icon": "con-distance",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 340,
+    "top": 804,
+    "right": 388,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 106,
+   "icon": "con-distance-x",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 396,
+    "top": 804,
+    "right": 444,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 107,
+   "icon": "con-distance-y",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 452,
+    "top": 804,
+    "right": 500,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 108,
+   "icon": "con-line-distance",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 804,
+    "right": 556,
+    "bottom": 852
+   },
+   "px": 24
+  },
+  {
+   "index": 109,
+   "icon": "con-radius",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 860,
+    "right": 52,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 110,
+   "icon": "con-diameter",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 60,
+    "top": 860,
+    "right": 108,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 111,
+   "icon": "con-angle",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 116,
+    "top": 860,
+    "right": 164,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 112,
+   "icon": "con-parallel",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 172,
+    "top": 860,
+    "right": 220,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 113,
+   "icon": "con-perpendicular",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 228,
+    "top": 860,
+    "right": 276,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 114,
+   "icon": "con-tangent",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 284,
+    "top": 860,
+    "right": 332,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 115,
+   "icon": "con-equal",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 340,
+    "top": 860,
+    "right": 388,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 116,
+   "icon": "con-equal-distance",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 396,
+    "top": 860,
+    "right": 444,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 117,
+   "icon": "con-symmetric",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 452,
+    "top": 860,
+    "right": 500,
+    "bottom": 908
+   },
+   "px": 24
+  },
+  {
+   "index": 118,
    "icon": "add-panel",
    "advance": 1.0,
    "planeBounds": {
@@ -1659,518 +2149,770 @@
    },
    "atlasBounds": {
     "left": 4,
-    "top": 716,
+    "top": 916,
     "right": 68,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 91,
-   "icon": "add-rows",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 76,
-    "top": 716,
-    "right": 140,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 92,
-   "icon": "add-columns",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 148,
-    "top": 716,
-    "right": 212,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 93,
-   "icon": "add-track",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 220,
-    "top": 716,
-    "right": 284,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 94,
-   "icon": "fit-to-tiles",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 292,
-    "top": 716,
-    "right": 356,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 95,
-   "icon": "construction-line",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 364,
-    "top": 716,
-    "right": 428,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 96,
-   "icon": "layers",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 436,
-    "top": 716,
-    "right": 500,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 97,
-   "icon": "zoom-to-context",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 508,
-    "top": 716,
-    "right": 572,
-    "bottom": 780
-   },
-   "px": 32
-  },
-  {
-   "index": 98,
-   "icon": "select-boundaries",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 4,
-    "top": 788,
-    "right": 68,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 99,
-   "icon": "select-area",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 76,
-    "top": 788,
-    "right": 140,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 100,
-   "icon": "new-sketch",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 148,
-    "top": 788,
-    "right": 212,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 101,
-   "icon": "add-shape",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 220,
-    "top": 788,
-    "right": 284,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 102,
-   "icon": "text-style",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 292,
-    "top": 788,
-    "right": 356,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 103,
-   "icon": "roundrect-corners",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 364,
-    "top": 788,
-    "right": 428,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 104,
-   "icon": "roundrect-centre",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 436,
-    "top": 788,
-    "right": 500,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 105,
-   "icon": "constrain",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 508,
-    "top": 788,
-    "right": 572,
-    "bottom": 852
-   },
-   "px": 32
-  },
-  {
-   "index": 106,
-   "icon": "pane-browser",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 4,
-    "top": 860,
-    "right": 68,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 107,
-   "icon": "pane-properties",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 76,
-    "top": 860,
-    "right": 140,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 108,
-   "icon": "pane-expression-bar",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 148,
-    "top": 860,
-    "right": 212,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 109,
-   "icon": "pane-log",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 220,
-    "top": 860,
-    "right": 284,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 110,
-   "icon": "geo-point",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 292,
-    "top": 860,
-    "right": 356,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 111,
-   "icon": "geo-segment",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 364,
-    "top": 860,
-    "right": 428,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 112,
-   "icon": "geo-circle",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 436,
-    "top": 860,
-    "right": 500,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 113,
-   "icon": "geo-arc",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 508,
-    "top": 860,
-    "right": 572,
-    "bottom": 924
-   },
-   "px": 32
-  },
-  {
-   "index": 114,
-   "icon": "geo-line",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 4,
-    "top": 932,
-    "right": 68,
-    "bottom": 996
-   },
-   "px": 32
-  },
-  {
-   "index": 115,
-   "icon": "geo-ray",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 76,
-    "top": 932,
-    "right": 140,
-    "bottom": 996
-   },
-   "px": 32
-  },
-  {
-   "index": 116,
-   "icon": "geo-edge",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 148,
-    "top": 932,
-    "right": 212,
-    "bottom": 996
-   },
-   "px": 32
-  },
-  {
-   "index": 117,
-   "icon": "con-coincident",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 220,
-    "top": 932,
-    "right": 284,
-    "bottom": 996
-   },
-   "px": 32
-  },
-  {
-   "index": 118,
-   "icon": "con-horizontal",
-   "advance": 1.0,
-   "planeBounds": {
-    "left": 0.0,
-    "top": 0.0,
-    "right": 1.0,
-    "bottom": 1.0
-   },
-   "atlasBounds": {
-    "left": 292,
-    "top": 932,
-    "right": 356,
-    "bottom": 996
+    "bottom": 980
    },
    "px": 32
   },
   {
    "index": 119,
+   "icon": "add-rows",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 916,
+    "right": 140,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 120,
+   "icon": "add-columns",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 916,
+    "right": 212,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 121,
+   "icon": "add-track",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 916,
+    "right": 284,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 122,
+   "icon": "fit-to-tiles",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 916,
+    "right": 356,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 123,
+   "icon": "construction-line",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 916,
+    "right": 428,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 124,
+   "icon": "layers",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 916,
+    "right": 500,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 125,
+   "icon": "zoom-to-context",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 916,
+    "right": 572,
+    "bottom": 980
+   },
+   "px": 32
+  },
+  {
+   "index": 126,
+   "icon": "select-boundaries",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 988,
+    "right": 68,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 127,
+   "icon": "select-area",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 988,
+    "right": 140,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 128,
+   "icon": "new-sketch",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 988,
+    "right": 212,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 129,
+   "icon": "add-shape",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 988,
+    "right": 284,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 130,
+   "icon": "text-style",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 988,
+    "right": 356,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 131,
+   "icon": "roundrect-corners",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 988,
+    "right": 428,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 132,
+   "icon": "roundrect-centre",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 988,
+    "right": 500,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 133,
+   "icon": "tool-point",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 988,
+    "right": 572,
+    "bottom": 1052
+   },
+   "px": 32
+  },
+  {
+   "index": 134,
+   "icon": "tool-segment",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 1060,
+    "right": 68,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 135,
+   "icon": "tool-ray",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 1060,
+    "right": 140,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 136,
+   "icon": "tool-line",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 1060,
+    "right": 212,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 137,
+   "icon": "tool-polyline",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 1060,
+    "right": 284,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 138,
+   "icon": "tool-arc-centre",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 1060,
+    "right": 356,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 139,
+   "icon": "tool-arc-3pt",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 1060,
+    "right": 428,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 140,
+   "icon": "tool-circle-centre",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 1060,
+    "right": 500,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 141,
+   "icon": "tool-circle-3pt",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 1060,
+    "right": 572,
+    "bottom": 1124
+   },
+   "px": 32
+  },
+  {
+   "index": 142,
+   "icon": "tool-polygon",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 1132,
+    "right": 68,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 143,
+   "icon": "tool-rect-array",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 1132,
+    "right": 140,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 144,
+   "icon": "tool-polar-grid",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 1132,
+    "right": 212,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 145,
+   "icon": "tool-dial",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 1132,
+    "right": 284,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 146,
+   "icon": "tool-tessellate",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 1132,
+    "right": 356,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 147,
+   "icon": "constrain",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 1132,
+    "right": 428,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 148,
+   "icon": "pane-browser",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 1132,
+    "right": 500,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 149,
+   "icon": "pane-properties",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 1132,
+    "right": 572,
+    "bottom": 1196
+   },
+   "px": 32
+  },
+  {
+   "index": 150,
+   "icon": "pane-expression-bar",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 1204,
+    "right": 68,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 151,
+   "icon": "pane-log",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 1204,
+    "right": 140,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 152,
+   "icon": "geo-point",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 1204,
+    "right": 212,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 153,
+   "icon": "geo-segment",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 1204,
+    "right": 284,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 154,
+   "icon": "geo-circle",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 1204,
+    "right": 356,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 155,
+   "icon": "geo-arc",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 364,
+    "top": 1204,
+    "right": 428,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 156,
+   "icon": "geo-line",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 436,
+    "top": 1204,
+    "right": 500,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 157,
+   "icon": "geo-ray",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 508,
+    "top": 1204,
+    "right": 572,
+    "bottom": 1268
+   },
+   "px": 32
+  },
+  {
+   "index": 158,
+   "icon": "geo-edge",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 1276,
+    "right": 68,
+    "bottom": 1340
+   },
+   "px": 32
+  },
+  {
+   "index": 159,
+   "icon": "con-coincident",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 76,
+    "top": 1276,
+    "right": 140,
+    "bottom": 1340
+   },
+   "px": 32
+  },
+  {
+   "index": 160,
+   "icon": "con-horizontal",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 148,
+    "top": 1276,
+    "right": 212,
+    "bottom": 1340
+   },
+   "px": 32
+  },
+  {
+   "index": 161,
    "icon": "con-vertical",
    "advance": 1.0,
    "planeBounds": {
@@ -2180,15 +2922,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 364,
-    "top": 932,
-    "right": 428,
-    "bottom": 996
+    "left": 220,
+    "top": 1276,
+    "right": 284,
+    "bottom": 1340
    },
    "px": 32
   },
   {
-   "index": 120,
+   "index": 162,
    "icon": "con-on-object",
    "advance": 1.0,
    "planeBounds": {
@@ -2198,15 +2940,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 436,
-    "top": 932,
-    "right": 500,
-    "bottom": 996
+    "left": 292,
+    "top": 1276,
+    "right": 356,
+    "bottom": 1340
    },
    "px": 32
   },
   {
-   "index": 121,
+   "index": 163,
    "icon": "con-locked",
    "advance": 1.0,
    "planeBounds": {
@@ -2216,15 +2958,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 508,
-    "top": 932,
-    "right": 572,
-    "bottom": 996
+    "left": 364,
+    "top": 1276,
+    "right": 428,
+    "bottom": 1340
    },
    "px": 32
   },
   {
-   "index": 122,
+   "index": 164,
    "icon": "con-distance",
    "advance": 1.0,
    "planeBounds": {
@@ -2234,15 +2976,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1004,
-    "right": 68,
-    "bottom": 1068
+    "left": 436,
+    "top": 1276,
+    "right": 500,
+    "bottom": 1340
    },
    "px": 32
   },
   {
-   "index": 123,
+   "index": 165,
    "icon": "con-distance-x",
    "advance": 1.0,
    "planeBounds": {
@@ -2252,15 +2994,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 76,
-    "top": 1004,
-    "right": 140,
-    "bottom": 1068
+    "left": 508,
+    "top": 1276,
+    "right": 572,
+    "bottom": 1340
    },
    "px": 32
   },
   {
-   "index": 124,
+   "index": 166,
    "icon": "con-distance-y",
    "advance": 1.0,
    "planeBounds": {
@@ -2270,15 +3012,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 148,
-    "top": 1004,
-    "right": 212,
-    "bottom": 1068
+    "left": 4,
+    "top": 1348,
+    "right": 68,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 125,
+   "index": 167,
    "icon": "con-line-distance",
    "advance": 1.0,
    "planeBounds": {
@@ -2288,15 +3030,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 220,
-    "top": 1004,
-    "right": 284,
-    "bottom": 1068
+    "left": 76,
+    "top": 1348,
+    "right": 140,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 126,
+   "index": 168,
    "icon": "con-radius",
    "advance": 1.0,
    "planeBounds": {
@@ -2306,15 +3048,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 292,
-    "top": 1004,
-    "right": 356,
-    "bottom": 1068
+    "left": 148,
+    "top": 1348,
+    "right": 212,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 127,
+   "index": 169,
    "icon": "con-diameter",
    "advance": 1.0,
    "planeBounds": {
@@ -2324,15 +3066,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 364,
-    "top": 1004,
-    "right": 428,
-    "bottom": 1068
+    "left": 220,
+    "top": 1348,
+    "right": 284,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 128,
+   "index": 170,
    "icon": "con-angle",
    "advance": 1.0,
    "planeBounds": {
@@ -2342,15 +3084,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 436,
-    "top": 1004,
-    "right": 500,
-    "bottom": 1068
+    "left": 292,
+    "top": 1348,
+    "right": 356,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 129,
+   "index": 171,
    "icon": "con-parallel",
    "advance": 1.0,
    "planeBounds": {
@@ -2360,15 +3102,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 508,
-    "top": 1004,
-    "right": 572,
-    "bottom": 1068
+    "left": 364,
+    "top": 1348,
+    "right": 428,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 130,
+   "index": 172,
    "icon": "con-perpendicular",
    "advance": 1.0,
    "planeBounds": {
@@ -2378,15 +3120,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1076,
-    "right": 68,
-    "bottom": 1140
+    "left": 436,
+    "top": 1348,
+    "right": 500,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 131,
+   "index": 173,
    "icon": "con-tangent",
    "advance": 1.0,
    "planeBounds": {
@@ -2396,15 +3138,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 76,
-    "top": 1076,
-    "right": 140,
-    "bottom": 1140
+    "left": 508,
+    "top": 1348,
+    "right": 572,
+    "bottom": 1412
    },
    "px": 32
   },
   {
-   "index": 132,
+   "index": 174,
    "icon": "con-equal",
    "advance": 1.0,
    "planeBounds": {
@@ -2414,15 +3156,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 148,
-    "top": 1076,
-    "right": 212,
-    "bottom": 1140
+    "left": 4,
+    "top": 1420,
+    "right": 68,
+    "bottom": 1484
    },
    "px": 32
   },
   {
-   "index": 133,
+   "index": 175,
    "icon": "con-equal-distance",
    "advance": 1.0,
    "planeBounds": {
@@ -2432,15 +3174,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 220,
-    "top": 1076,
-    "right": 284,
-    "bottom": 1140
+    "left": 76,
+    "top": 1420,
+    "right": 140,
+    "bottom": 1484
    },
    "px": 32
   },
   {
-   "index": 134,
+   "index": 176,
    "icon": "con-symmetric",
    "advance": 1.0,
    "planeBounds": {
@@ -2450,15 +3192,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 292,
-    "top": 1076,
-    "right": 356,
-    "bottom": 1140
+    "left": 148,
+    "top": 1420,
+    "right": 212,
+    "bottom": 1484
    },
    "px": 32
   },
   {
-   "index": 135,
+   "index": 177,
    "icon": "add-panel",
    "advance": 1.0,
    "planeBounds": {
@@ -2469,14 +3211,14 @@
    },
    "atlasBounds": {
     "left": 4,
-    "top": 1148,
+    "top": 1492,
     "right": 100,
-    "bottom": 1244
+    "bottom": 1588
    },
    "px": 48
   },
   {
-   "index": 136,
+   "index": 178,
    "icon": "add-rows",
    "advance": 1.0,
    "planeBounds": {
@@ -2487,14 +3229,14 @@
    },
    "atlasBounds": {
     "left": 108,
-    "top": 1148,
+    "top": 1492,
     "right": 204,
-    "bottom": 1244
+    "bottom": 1588
    },
    "px": 48
   },
   {
-   "index": 137,
+   "index": 179,
    "icon": "add-columns",
    "advance": 1.0,
    "planeBounds": {
@@ -2505,14 +3247,14 @@
    },
    "atlasBounds": {
     "left": 212,
-    "top": 1148,
+    "top": 1492,
     "right": 308,
-    "bottom": 1244
+    "bottom": 1588
    },
    "px": 48
   },
   {
-   "index": 138,
+   "index": 180,
    "icon": "add-track",
    "advance": 1.0,
    "planeBounds": {
@@ -2523,14 +3265,14 @@
    },
    "atlasBounds": {
     "left": 316,
-    "top": 1148,
+    "top": 1492,
     "right": 412,
-    "bottom": 1244
+    "bottom": 1588
    },
    "px": 48
   },
   {
-   "index": 139,
+   "index": 181,
    "icon": "fit-to-tiles",
    "advance": 1.0,
    "planeBounds": {
@@ -2541,14 +3283,14 @@
    },
    "atlasBounds": {
     "left": 420,
-    "top": 1148,
+    "top": 1492,
     "right": 516,
-    "bottom": 1244
+    "bottom": 1588
    },
    "px": 48
   },
   {
-   "index": 140,
+   "index": 182,
    "icon": "construction-line",
    "advance": 1.0,
    "planeBounds": {
@@ -2559,14 +3301,14 @@
    },
    "atlasBounds": {
     "left": 4,
-    "top": 1252,
+    "top": 1596,
     "right": 100,
-    "bottom": 1348
+    "bottom": 1692
    },
    "px": 48
   },
   {
-   "index": 141,
+   "index": 183,
    "icon": "layers",
    "advance": 1.0,
    "planeBounds": {
@@ -2577,14 +3319,14 @@
    },
    "atlasBounds": {
     "left": 108,
-    "top": 1252,
+    "top": 1596,
     "right": 204,
-    "bottom": 1348
+    "bottom": 1692
    },
    "px": 48
   },
   {
-   "index": 142,
+   "index": 184,
    "icon": "zoom-to-context",
    "advance": 1.0,
    "planeBounds": {
@@ -2595,14 +3337,14 @@
    },
    "atlasBounds": {
     "left": 212,
-    "top": 1252,
+    "top": 1596,
     "right": 308,
-    "bottom": 1348
+    "bottom": 1692
    },
    "px": 48
   },
   {
-   "index": 143,
+   "index": 185,
    "icon": "select-boundaries",
    "advance": 1.0,
    "planeBounds": {
@@ -2613,14 +3355,14 @@
    },
    "atlasBounds": {
     "left": 316,
-    "top": 1252,
+    "top": 1596,
     "right": 412,
-    "bottom": 1348
+    "bottom": 1692
    },
    "px": 48
   },
   {
-   "index": 144,
+   "index": 186,
    "icon": "select-area",
    "advance": 1.0,
    "planeBounds": {
@@ -2631,14 +3373,14 @@
    },
    "atlasBounds": {
     "left": 420,
-    "top": 1252,
+    "top": 1596,
     "right": 516,
-    "bottom": 1348
+    "bottom": 1692
    },
    "px": 48
   },
   {
-   "index": 145,
+   "index": 187,
    "icon": "new-sketch",
    "advance": 1.0,
    "planeBounds": {
@@ -2649,14 +3391,14 @@
    },
    "atlasBounds": {
     "left": 4,
-    "top": 1356,
+    "top": 1700,
     "right": 100,
-    "bottom": 1452
+    "bottom": 1796
    },
    "px": 48
   },
   {
-   "index": 146,
+   "index": 188,
    "icon": "add-shape",
    "advance": 1.0,
    "planeBounds": {
@@ -2667,14 +3409,14 @@
    },
    "atlasBounds": {
     "left": 108,
-    "top": 1356,
+    "top": 1700,
     "right": 204,
-    "bottom": 1452
+    "bottom": 1796
    },
    "px": 48
   },
   {
-   "index": 147,
+   "index": 189,
    "icon": "text-style",
    "advance": 1.0,
    "planeBounds": {
@@ -2685,14 +3427,14 @@
    },
    "atlasBounds": {
     "left": 212,
-    "top": 1356,
+    "top": 1700,
     "right": 308,
-    "bottom": 1452
+    "bottom": 1796
    },
    "px": 48
   },
   {
-   "index": 148,
+   "index": 190,
    "icon": "roundrect-corners",
    "advance": 1.0,
    "planeBounds": {
@@ -2703,14 +3445,14 @@
    },
    "atlasBounds": {
     "left": 316,
-    "top": 1356,
+    "top": 1700,
     "right": 412,
-    "bottom": 1452
+    "bottom": 1796
    },
    "px": 48
   },
   {
-   "index": 149,
+   "index": 191,
    "icon": "roundrect-centre",
    "advance": 1.0,
    "planeBounds": {
@@ -2721,14 +3463,266 @@
    },
    "atlasBounds": {
     "left": 420,
-    "top": 1356,
+    "top": 1700,
     "right": 516,
-    "bottom": 1452
+    "bottom": 1796
    },
    "px": 48
   },
   {
-   "index": 150,
+   "index": 192,
+   "icon": "tool-point",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 1804,
+    "right": 100,
+    "bottom": 1900
+   },
+   "px": 48
+  },
+  {
+   "index": 193,
+   "icon": "tool-segment",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 108,
+    "top": 1804,
+    "right": 204,
+    "bottom": 1900
+   },
+   "px": 48
+  },
+  {
+   "index": 194,
+   "icon": "tool-ray",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 212,
+    "top": 1804,
+    "right": 308,
+    "bottom": 1900
+   },
+   "px": 48
+  },
+  {
+   "index": 195,
+   "icon": "tool-line",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 316,
+    "top": 1804,
+    "right": 412,
+    "bottom": 1900
+   },
+   "px": 48
+  },
+  {
+   "index": 196,
+   "icon": "tool-polyline",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 420,
+    "top": 1804,
+    "right": 516,
+    "bottom": 1900
+   },
+   "px": 48
+  },
+  {
+   "index": 197,
+   "icon": "tool-arc-centre",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 1908,
+    "right": 100,
+    "bottom": 2004
+   },
+   "px": 48
+  },
+  {
+   "index": 198,
+   "icon": "tool-arc-3pt",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 108,
+    "top": 1908,
+    "right": 204,
+    "bottom": 2004
+   },
+   "px": 48
+  },
+  {
+   "index": 199,
+   "icon": "tool-circle-centre",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 212,
+    "top": 1908,
+    "right": 308,
+    "bottom": 2004
+   },
+   "px": 48
+  },
+  {
+   "index": 200,
+   "icon": "tool-circle-3pt",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 316,
+    "top": 1908,
+    "right": 412,
+    "bottom": 2004
+   },
+   "px": 48
+  },
+  {
+   "index": 201,
+   "icon": "tool-polygon",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 420,
+    "top": 1908,
+    "right": 516,
+    "bottom": 2004
+   },
+   "px": 48
+  },
+  {
+   "index": 202,
+   "icon": "tool-rect-array",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 4,
+    "top": 2012,
+    "right": 100,
+    "bottom": 2108
+   },
+   "px": 48
+  },
+  {
+   "index": 203,
+   "icon": "tool-polar-grid",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 108,
+    "top": 2012,
+    "right": 204,
+    "bottom": 2108
+   },
+   "px": 48
+  },
+  {
+   "index": 204,
+   "icon": "tool-dial",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 212,
+    "top": 2012,
+    "right": 308,
+    "bottom": 2108
+   },
+   "px": 48
+  },
+  {
+   "index": 205,
+   "icon": "tool-tessellate",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 316,
+    "top": 2012,
+    "right": 412,
+    "bottom": 2108
+   },
+   "px": 48
+  },
+  {
+   "index": 206,
    "icon": "constrain",
    "advance": 1.0,
    "planeBounds": {
@@ -2738,15 +3732,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1460,
-    "right": 100,
-    "bottom": 1556
+    "left": 420,
+    "top": 2012,
+    "right": 516,
+    "bottom": 2108
    },
    "px": 48
   },
   {
-   "index": 151,
+   "index": 207,
    "icon": "pane-browser",
    "advance": 1.0,
    "planeBounds": {
@@ -2756,15 +3750,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 108,
-    "top": 1460,
-    "right": 204,
-    "bottom": 1556
+    "left": 4,
+    "top": 2116,
+    "right": 100,
+    "bottom": 2212
    },
    "px": 48
   },
   {
-   "index": 152,
+   "index": 208,
    "icon": "pane-properties",
    "advance": 1.0,
    "planeBounds": {
@@ -2774,15 +3768,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 212,
-    "top": 1460,
-    "right": 308,
-    "bottom": 1556
+    "left": 108,
+    "top": 2116,
+    "right": 204,
+    "bottom": 2212
    },
    "px": 48
   },
   {
-   "index": 153,
+   "index": 209,
    "icon": "pane-expression-bar",
    "advance": 1.0,
    "planeBounds": {
@@ -2792,15 +3786,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 316,
-    "top": 1460,
-    "right": 412,
-    "bottom": 1556
+    "left": 212,
+    "top": 2116,
+    "right": 308,
+    "bottom": 2212
    },
    "px": 48
   },
   {
-   "index": 154,
+   "index": 210,
    "icon": "pane-log",
    "advance": 1.0,
    "planeBounds": {
@@ -2810,15 +3804,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 420,
-    "top": 1460,
-    "right": 516,
-    "bottom": 1556
+    "left": 316,
+    "top": 2116,
+    "right": 412,
+    "bottom": 2212
    },
    "px": 48
   },
   {
-   "index": 155,
+   "index": 211,
    "icon": "geo-point",
    "advance": 1.0,
    "planeBounds": {
@@ -2828,15 +3822,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1564,
-    "right": 100,
-    "bottom": 1660
+    "left": 420,
+    "top": 2116,
+    "right": 516,
+    "bottom": 2212
    },
    "px": 48
   },
   {
-   "index": 156,
+   "index": 212,
    "icon": "geo-segment",
    "advance": 1.0,
    "planeBounds": {
@@ -2846,15 +3840,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 108,
-    "top": 1564,
-    "right": 204,
-    "bottom": 1660
+    "left": 4,
+    "top": 2220,
+    "right": 100,
+    "bottom": 2316
    },
    "px": 48
   },
   {
-   "index": 157,
+   "index": 213,
    "icon": "geo-circle",
    "advance": 1.0,
    "planeBounds": {
@@ -2864,15 +3858,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 212,
-    "top": 1564,
-    "right": 308,
-    "bottom": 1660
+    "left": 108,
+    "top": 2220,
+    "right": 204,
+    "bottom": 2316
    },
    "px": 48
   },
   {
-   "index": 158,
+   "index": 214,
    "icon": "geo-arc",
    "advance": 1.0,
    "planeBounds": {
@@ -2882,15 +3876,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 316,
-    "top": 1564,
-    "right": 412,
-    "bottom": 1660
+    "left": 212,
+    "top": 2220,
+    "right": 308,
+    "bottom": 2316
    },
    "px": 48
   },
   {
-   "index": 159,
+   "index": 215,
    "icon": "geo-line",
    "advance": 1.0,
    "planeBounds": {
@@ -2900,15 +3894,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 420,
-    "top": 1564,
-    "right": 516,
-    "bottom": 1660
+    "left": 316,
+    "top": 2220,
+    "right": 412,
+    "bottom": 2316
    },
    "px": 48
   },
   {
-   "index": 160,
+   "index": 216,
    "icon": "geo-ray",
    "advance": 1.0,
    "planeBounds": {
@@ -2918,15 +3912,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1668,
-    "right": 100,
-    "bottom": 1764
+    "left": 420,
+    "top": 2220,
+    "right": 516,
+    "bottom": 2316
    },
    "px": 48
   },
   {
-   "index": 161,
+   "index": 217,
    "icon": "geo-edge",
    "advance": 1.0,
    "planeBounds": {
@@ -2936,15 +3930,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 108,
-    "top": 1668,
-    "right": 204,
-    "bottom": 1764
+    "left": 4,
+    "top": 2324,
+    "right": 100,
+    "bottom": 2420
    },
    "px": 48
   },
   {
-   "index": 162,
+   "index": 218,
    "icon": "con-coincident",
    "advance": 1.0,
    "planeBounds": {
@@ -2954,15 +3948,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 212,
-    "top": 1668,
-    "right": 308,
-    "bottom": 1764
+    "left": 108,
+    "top": 2324,
+    "right": 204,
+    "bottom": 2420
    },
    "px": 48
   },
   {
-   "index": 163,
+   "index": 219,
    "icon": "con-horizontal",
    "advance": 1.0,
    "planeBounds": {
@@ -2972,15 +3966,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 316,
-    "top": 1668,
-    "right": 412,
-    "bottom": 1764
+    "left": 212,
+    "top": 2324,
+    "right": 308,
+    "bottom": 2420
    },
    "px": 48
   },
   {
-   "index": 164,
+   "index": 220,
    "icon": "con-vertical",
    "advance": 1.0,
    "planeBounds": {
@@ -2990,15 +3984,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 420,
-    "top": 1668,
-    "right": 516,
-    "bottom": 1764
+    "left": 316,
+    "top": 2324,
+    "right": 412,
+    "bottom": 2420
    },
    "px": 48
   },
   {
-   "index": 165,
+   "index": 221,
    "icon": "con-on-object",
    "advance": 1.0,
    "planeBounds": {
@@ -3008,15 +4002,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1772,
-    "right": 100,
-    "bottom": 1868
+    "left": 420,
+    "top": 2324,
+    "right": 516,
+    "bottom": 2420
    },
    "px": 48
   },
   {
-   "index": 166,
+   "index": 222,
    "icon": "con-locked",
    "advance": 1.0,
    "planeBounds": {
@@ -3026,15 +4020,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 108,
-    "top": 1772,
-    "right": 204,
-    "bottom": 1868
+    "left": 4,
+    "top": 2428,
+    "right": 100,
+    "bottom": 2524
    },
    "px": 48
   },
   {
-   "index": 167,
+   "index": 223,
    "icon": "con-distance",
    "advance": 1.0,
    "planeBounds": {
@@ -3044,15 +4038,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 212,
-    "top": 1772,
-    "right": 308,
-    "bottom": 1868
+    "left": 108,
+    "top": 2428,
+    "right": 204,
+    "bottom": 2524
    },
    "px": 48
   },
   {
-   "index": 168,
+   "index": 224,
    "icon": "con-distance-x",
    "advance": 1.0,
    "planeBounds": {
@@ -3062,15 +4056,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 316,
-    "top": 1772,
-    "right": 412,
-    "bottom": 1868
+    "left": 212,
+    "top": 2428,
+    "right": 308,
+    "bottom": 2524
    },
    "px": 48
   },
   {
-   "index": 169,
+   "index": 225,
    "icon": "con-distance-y",
    "advance": 1.0,
    "planeBounds": {
@@ -3080,15 +4074,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 420,
-    "top": 1772,
-    "right": 516,
-    "bottom": 1868
+    "left": 316,
+    "top": 2428,
+    "right": 412,
+    "bottom": 2524
    },
    "px": 48
   },
   {
-   "index": 170,
+   "index": 226,
    "icon": "con-line-distance",
    "advance": 1.0,
    "planeBounds": {
@@ -3098,15 +4092,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1876,
-    "right": 100,
-    "bottom": 1972
+    "left": 420,
+    "top": 2428,
+    "right": 516,
+    "bottom": 2524
    },
    "px": 48
   },
   {
-   "index": 171,
+   "index": 227,
    "icon": "con-radius",
    "advance": 1.0,
    "planeBounds": {
@@ -3116,15 +4110,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 108,
-    "top": 1876,
-    "right": 204,
-    "bottom": 1972
+    "left": 4,
+    "top": 2532,
+    "right": 100,
+    "bottom": 2628
    },
    "px": 48
   },
   {
-   "index": 172,
+   "index": 228,
    "icon": "con-diameter",
    "advance": 1.0,
    "planeBounds": {
@@ -3134,15 +4128,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 212,
-    "top": 1876,
-    "right": 308,
-    "bottom": 1972
+    "left": 108,
+    "top": 2532,
+    "right": 204,
+    "bottom": 2628
    },
    "px": 48
   },
   {
-   "index": 173,
+   "index": 229,
    "icon": "con-angle",
    "advance": 1.0,
    "planeBounds": {
@@ -3152,15 +4146,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 316,
-    "top": 1876,
-    "right": 412,
-    "bottom": 1972
+    "left": 212,
+    "top": 2532,
+    "right": 308,
+    "bottom": 2628
    },
    "px": 48
   },
   {
-   "index": 174,
+   "index": 230,
    "icon": "con-parallel",
    "advance": 1.0,
    "planeBounds": {
@@ -3170,15 +4164,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 420,
-    "top": 1876,
-    "right": 516,
-    "bottom": 1972
+    "left": 316,
+    "top": 2532,
+    "right": 412,
+    "bottom": 2628
    },
    "px": 48
   },
   {
-   "index": 175,
+   "index": 231,
    "icon": "con-perpendicular",
    "advance": 1.0,
    "planeBounds": {
@@ -3188,15 +4182,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 4,
-    "top": 1980,
-    "right": 100,
-    "bottom": 2076
+    "left": 420,
+    "top": 2532,
+    "right": 516,
+    "bottom": 2628
    },
    "px": 48
   },
   {
-   "index": 176,
+   "index": 232,
    "icon": "con-tangent",
    "advance": 1.0,
    "planeBounds": {
@@ -3206,15 +4200,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 108,
-    "top": 1980,
-    "right": 204,
-    "bottom": 2076
+    "left": 4,
+    "top": 2636,
+    "right": 100,
+    "bottom": 2732
    },
    "px": 48
   },
   {
-   "index": 177,
+   "index": 233,
    "icon": "con-equal",
    "advance": 1.0,
    "planeBounds": {
@@ -3224,15 +4218,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 212,
-    "top": 1980,
-    "right": 308,
-    "bottom": 2076
+    "left": 108,
+    "top": 2636,
+    "right": 204,
+    "bottom": 2732
    },
    "px": 48
   },
   {
-   "index": 178,
+   "index": 234,
    "icon": "con-equal-distance",
    "advance": 1.0,
    "planeBounds": {
@@ -3242,15 +4236,15 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 316,
-    "top": 1980,
-    "right": 412,
-    "bottom": 2076
+    "left": 212,
+    "top": 2636,
+    "right": 308,
+    "bottom": 2732
    },
    "px": 48
   },
   {
-   "index": 179,
+   "index": 235,
    "icon": "con-symmetric",
    "advance": 1.0,
    "planeBounds": {
@@ -3260,10 +4254,10 @@
     "bottom": 1.0
    },
    "atlasBounds": {
-    "left": 420,
-    "top": 1980,
-    "right": 516,
-    "bottom": 2076
+    "left": 316,
+    "top": 2636,
+    "right": 412,
+    "bottom": 2732
    },
    "px": 48
   }

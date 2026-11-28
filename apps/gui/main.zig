@@ -16099,7 +16099,7 @@ fn toolBar() void {
         const on = state.tool == .add_array;
         var awd: dvui.WidgetData = undefined;
         ribbon_next_drop = .array;
-        keyIcon(@src(), "add-array", dvui.entypo.grid, 0, .{
+        keyIcon(@src(), "add-array", (if (array_tool.polar) icons.graven(.tool_polar_grid) else icons.graven(.tool_rect_array)) orelse dvui.entypo.grid, 0, .{
             .data_out = &awd,
             .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null,
         });
@@ -30661,6 +30661,29 @@ var tess_whole = false;
 /// The polygon tool's number of sides.
 var polygon_sides: u32 = 6;
 
+/// A geometry tool's icon (the click-point rule: its clicks hot).
+fn skToolIcon(t: SkTool) icons.GIcon {
+    return switch (t) {
+        .point => .tool_point,
+        .segment => .tool_segment,
+        .ray => .tool_ray,
+        .line => .tool_line,
+        .polyline => .tool_polyline,
+        .arc_centre => .tool_arc_centre,
+        .arc_3pt => .tool_arc_3pt,
+        .circle => .tool_circle_centre,
+        .circle_3pt => .tool_circle_3pt,
+        .polygon => .tool_polygon,
+        .polar_grid => .tool_polar_grid,
+        .rect_array => .tool_rect_array,
+        .tessellate => .tool_tessellate,
+        .dial => .tool_dial,
+        .round_rect_centre => .roundrect_centre,
+        .round_rect_corners => .roundrect_corners,
+        else => .geo_point,
+    };
+}
+
 /// The geometry button tool `t` belongs to.
 fn skGeoOf(t: SkTool) ?SkGeo {
     for (sk_geo_tools, 0..) |tools, g| for (tools) |x| {
@@ -34369,22 +34392,11 @@ fn sketchPalette() void {
         _ = skPaletteKey(@src(), "sketch.palette.select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none);
         _ = skPaletteKey(@src(), "sketch.palette.construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction);
         const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array", "sketch.palette.tessellate", "sketch.palette.dial", "sketch.palette.round-rect" };
-        const tvgs = [_][]const u8{
-            icons.graven(.geo_point) orelse dvui.entypo.dot_single,
-            icons.graven(.geo_segment) orelse dvui.entypo.flow_line,
-            dvui.entypo.line_graph,
-            icons.graven(.geo_arc) orelse dvui.entypo.circle,
-            icons.graven(.geo_circle) orelse dvui.entypo.circle,
-            dvui.entypo.triangle_up,
-            dvui.entypo.grid,
-            dvui.entypo.network,
-            dvui.entypo.gauge,
-            // The variant it places next.
-            (if (sk_geo_last[@intFromEnum(SkGeo.round_rect)] == .round_rect_centre) icons.graven(.roundrect_centre) else icons.graven(.roundrect_corners)) orelse dvui.entypo.progress_empty,
-        };
         inline for (names, 0..) |name, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
-            const kr = skPaletteKey(@src(), name, tvgs[gi], @intCast(gi), 10 + gi, on);
+            // The icon of the variant it places next.
+            const tvg = icons.gravenAny(skToolIcon(sk_geo_last[gi])) orelse dvui.entypo.dot_single;
+            const kr = skPaletteKey(@src(), name, tvg, @intCast(gi), 10 + gi, on);
             if (on) below = kr;
         }
     }

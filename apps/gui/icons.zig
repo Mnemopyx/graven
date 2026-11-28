@@ -105,6 +105,20 @@ pub const GIcon = enum {
     con_symmetric,
     roundrect_corners,
     roundrect_centre,
+    tool_point,
+    tool_segment,
+    tool_ray,
+    tool_line,
+    tool_polyline,
+    tool_arc_centre,
+    tool_arc_3pt,
+    tool_circle_centre,
+    tool_circle_3pt,
+    tool_polygon,
+    tool_rect_array,
+    tool_polar_grid,
+    tool_dial,
+    tool_tessellate,
 
     fn svg(comptime g: GIcon) []const u8 {
         const name = comptime blk: {
