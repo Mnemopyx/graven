@@ -165,7 +165,7 @@ fn carrier(s: *const Sketch, g: Geometry) ?Carrier {
         },
         // A macro's sections are not pieces yet (they have no IDs of
         // their own to choose).
-        .point, .affine, .polar_grid => return null,
+        .point, .affine, .polar_grid, .tessellation => return null,
     }
 }
 

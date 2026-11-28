@@ -2712,6 +2712,10 @@ fn frame() !dvui.App.Result {
             }
         }
     }
+    if (sample_tessellation) {
+        sample_tessellation = false;
+        loadTessellationSample();
+    }
     skPruneSelection();
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
@@ -2773,6 +2777,8 @@ fn frame() !dvui.App.Result {
                 sample_sketch_space = true;
             } else if (std.mem.eql(u8, which, "objects")) {
                 sample_objects = true;
+            } else if (std.mem.eql(u8, which, "tessellation")) {
+                sample_tessellation = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
@@ -8450,6 +8456,7 @@ var status_name_buf: [64]u8 = undefined;
 /// the first frame (once the views are set up).
 var sample_sketch_space = false;
 var sample_objects = false;
+var sample_tessellation = false;
 var sample_texts = false;
 /// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
 /// connection, its end free, a dot at its end.
@@ -19186,6 +19193,21 @@ const button_handlers = [_]ButtonHandler{
             skChooseTool(if (skToolAllowed(want)) want else sk_geo_tools[g][0]);
         }
     }.f),
+    handler("tessellate.triangles", struct {
+        fn f(arg: i32) void {
+            tess_sides = @intCast(arg);
+        }
+    }.f),
+    handler("tessellate.squares", struct {
+        fn f(arg: i32) void {
+            tess_sides = @intCast(arg);
+        }
+    }.f),
+    handler("tessellate.hexagons", struct {
+        fn f(arg: i32) void {
+            tess_sides = @intCast(arg);
+        }
+    }.f),
     handler("polygon.triangle", struct {
         fn f(arg: i32) void {
             if (arg >= 3) polygon_sides = @intCast(arg);
@@ -20790,11 +20812,13 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
         .rect_array => "Rectangular array",
         .polar_array => "Polar array",
         .polar_grid => "Polar grid",
+        .tessellation => "Tessellation",
         .connection => "Connection",
         .caption => "Caption",
         .plain => "Group",
     };
     propText(asElement("object.kind"), "{s}", .{kind_name}, 9700);
+    if (g.kind == .tessellation) return tessellationProperties(it, obj);
     const Field = struct { id: []const u8, label: []const u8, prop: []const u8, min: f64 };
     const fields = [_]Field{
         .{ .id = "object.sides", .label = comptime elements.get("object.sides").label, .prop = "sides", .min = 3 },
@@ -20817,6 +20841,81 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
                     if (skItem()) |now| skSelectObject(now.sketch, obj, false, null);
                 }
             }
+        }
+    }
+}
+
+/// GRAVEN_SAMPLE=tessellation: a new sketch with three closed paths, each
+/// filled by a tessellation: hexagons cut to a D of segments and an arc,
+/// squares turned 15° in a square, whole tiles only, a 2 mm margin, and
+/// triangles in a circle, cut, a 1.5 mm margin. The last is chosen, so
+/// Properties shows it.
+fn loadTessellationSample() void {
+    newSketchInOwnSpace();
+    followHome();
+    if (sketch_edit == null) return;
+    _ = skEdit(.{ .segment = .{ .a = .{ .x = -62, .y = -15 }, .b = .{ .x = -42, .y = -15 } } });
+    _ = skEdit(.{ .arc = .{ .c = .{ .x = -42, .y = 0 }, .a = .{ .x = -42, .y = -15 }, .b = .{ .x = -42, .y = 15 } } });
+    _ = skEdit(.{ .segment = .{ .a = .{ .x = -42, .y = 15 }, .b = .{ .x = -62, .y = 15 } } });
+    _ = skEdit(.{ .segment = .{ .a = .{ .x = -62, .y = 15 }, .b = .{ .x = -62, .y = -15 } } });
+    const square = [_]geom.Point{ .{ .x = -15, .y = -15 }, .{ .x = 15, .y = -15 }, .{ .x = 15, .y = 15 }, .{ .x = -15, .y = 15 } };
+    for (square, 0..) |p, i| _ = skEdit(.{ .segment = .{ .a = p, .b = square[(i + 1) % 4] } });
+    _ = skEdit(.{ .circle = .{ .c = .{ .x = 40, .y = 0 }, .r = 15 } });
+    const Made = struct {
+        fn obj(g: ?u32) ?skl.GroupId {
+            const it = skItem() orelse return null;
+            return skl.composite.objectOf(it.sketch, g orelse return null);
+        }
+        fn set(o: ?skl.GroupId, name: []const u8, v: f64) void {
+            _ = skEdit(.{ .object_prop = .{ .object = o orelse return, .name = name, .value = v } });
+        }
+    };
+    _ = skEdit(.{ .tessellate = .{ .at = .{ .x = -50, .y = 0 }, .sides = 6, .spacing = 6 } });
+    const s = Made.obj(skEdit(.{ .tessellate = .{ .at = .{ .x = 0, .y = 0 }, .sides = 4, .spacing = 7, .whole = true } }));
+    Made.set(s, "angle", 15 * std.math.pi / 180.0);
+    Made.set(s, "margin", 2);
+    const t = Made.obj(skEdit(.{ .tessellate = .{ .at = .{ .x = 40, .y = 0 }, .sides = 3, .spacing = 5 } }));
+    Made.set(t, "margin", 1.5);
+    if (t) |o| if (skItem()) |it| skSelectObject(it.sketch, o, false, null);
+}
+
+/// A tessellation's properties: its tile and whether only whole tiles are
+/// kept, then its driving values (spacing centre to centre, turn, margin,
+/// the offset of the tile centred where it was clicked). Each change is a
+/// step; nothing is made again (a macro: its tiles follow these).
+fn tessellationProperties(it: SkPlace, obj: skl.GroupId) void {
+    const m = skl.composite.macroGeometry(it.sketch, obj) orelse return;
+    const t = switch (it.sketch.geometry.items[m].kind) {
+        .tessellation => |x| x,
+        else => return,
+    };
+    const v = it.sketch.vars.items;
+    const Set = struct {
+        fn f(o: skl.GroupId, name: []const u8, value: f64) void {
+            _ = skEdit(.{ .object_prop = .{ .object = o, .name = name, .value = value } });
+        }
+    };
+    var cur: usize = 2;
+    for (tess_tile_sides, 0..) |n, i| if (n == t.sides) {
+        cur = i;
+    };
+    next_element = "object.tile";
+    if (choiceRow(comptime elements.get("object.tile").label, &tess_names, cur, 9720)) |k| Set.f(obj, "sides", @floatFromInt(tess_tile_sides[k]));
+    var whole = t.whole;
+    if (tcheckbox(@src(), &whole, comptime elements.get("object.whole-tiles-only").label, .{ .id_extra = 9721 })) Set.f(obj, "whole", if (whole) 1 else 0);
+    const Field = struct { id: []const u8, label: []const u8, prop: []const u8, value: f64, min: f64, max: f64, k: f64 };
+    const deg = 180.0 / std.math.pi;
+    const fields = [_]Field{
+        .{ .id = "object.spacing", .label = comptime elements.get("object.spacing").label, .prop = "spacing", .value = v[t.spacing], .min = 0.01, .max = 10_000, .k = 1 },
+        .{ .id = "object.turn", .label = comptime elements.get("object.turn").label, .prop = "angle", .value = v[t.angle] * deg, .min = -360, .max = 360, .k = deg },
+        .{ .id = "object.margin", .label = comptime elements.get("object.margin").label, .prop = "margin", .value = v[t.margin], .min = 0, .max = 10_000, .k = 1 },
+        .{ .id = "object.offset-x", .label = comptime elements.get("object.offset-x").label, .prop = "x", .value = v[t.c.x], .min = -1e6, .max = 1e6, .k = 1 },
+        .{ .id = "object.offset-y", .label = comptime elements.get("object.offset-y").label, .prop = "y", .value = v[t.c.y], .min = -1e6, .max = 1e6, .k = 1 },
+    };
+    inline for (fields, 0..) |f, k| {
+        next_element = f.id;
+        if (numberProp(f.label, f.value, f.min, f.max, 9722 + k)) |nv| {
+            if (nv != f.value) Set.f(obj, f.prop, nv / f.k);
         }
     }
 }
@@ -30283,13 +30382,17 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return p;
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
-const SkGeo = enum { point, line, polyline, arc, circle, polygon, array };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array } };
-var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid };
+const SkGeo = enum { point, line, polyline, arc, circle, polygon, array, tessellate };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate} };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid, .tessellate };
+/// The tessellate tool's tile (its sides) and whether it keeps whole
+/// tiles only, for the next tessellation.
+var tess_sides: u32 = 6;
+var tess_whole = false;
 /// The polygon tool's number of sides.
 var polygon_sides: u32 = 6;
 
@@ -31332,7 +31435,7 @@ fn skLineOf(s: *const skl.Sketch, g: skl.Geometry) ?struct { p: geom.Point, d: g
 /// The nearest place on geometry `g` to `q`, if it has one there.
 fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point {
     switch (g.kind) {
-        .point, .affine, .polar_grid => return null,
+        .point, .affine, .polar_grid, .tessellation => return null,
         .segment, .line, .ray => {
             const l = skLineOf(s, g) orelse return null;
             var t = (q.x - l.p.x) * l.d.x + (q.y - l.p.y) * l.d.y;
@@ -31394,6 +31497,7 @@ fn skPointsOf(g: skl.Geometry, buf: *[sk_points_max]skl.PointRef, id: skl.GeomId
         .arc => &.{ .centre, .start, .end },
         .ray => &.{.origin},
         .line, .polar_grid => &.{},
+        .tessellation => &.{.centre},
     };
     for (roles, 0..) |r, i| buf[i] = .{ .geom = id, .role = r };
     return buf[0..roles.len];
@@ -31578,7 +31682,7 @@ fn skSnapper(it: SkPlace, moving: ?geom.Point) *const geom.snap.Snapper {
                     s.addLine(a, .{ .x = rho * @cos(th) + o.x, .y = rho * @sin(th) + o.y }, .{ .x = -@sin(th), .y = @cos(th) }) catch {};
                 },
                 // A macro's centre and bind points.
-                .polar_grid => {
+                .polar_grid, .tessellation => {
                     var buf: [sk_points_max]skl.PointRef = undefined;
                     for (skPointsOf(g, &buf, id)) |r| if (sk.point(r) catch null) |q| Add.pt(&s, a, q, o, moving);
                 },
@@ -31629,6 +31733,7 @@ fn skToolClicks(t: SkTool) usize {
         .point => 1,
         .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon => 2,
         .arc_centre, .arc_3pt, .circle_3pt, .polar_grid => 3,
+        .tessellate => 1,
     };
 }
 
@@ -31699,6 +31804,17 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
         // A regular polygon: its centre, then a corner.
         .polygon => if (skDist(c[0], c[1]) > 1e-9) {
             _ = skEdit(.{ .polygon = .{ .c = c[0], .corner = c[1], .sides = polygon_sides, .construction = cons } });
+        },
+        // A tessellation (the owner, 2026-11-28): one click inside a
+        // closed path fills it, a tile centred there; its spacing, turn,
+        // margin and offset are its properties after.
+        .tessellate => if (skEdit(.{ .tessellate = .{ .at = c[0], .sides = tess_sides, .whole = tess_whole } })) |g| {
+            if (skItem()) |it| if (skl.composite.objectOf(it.sketch, g)) |o| {
+                skSelectObject(it.sketch, o, false, null);
+            };
+            tell("Tessellation made: drag its centre to move the pattern; its spacing, turn and margin are in Properties. ");
+        } else {
+            tell("No closed path round that place to fill. ");
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
             made = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
@@ -32654,6 +32770,7 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
                 .point => |pp| skVal(sk_, pp),
                 .affine => .{ .x = 0, .y = 0 },
                 .polar_grid => |pg| skVal(sk_, pg.c),
+                .tessellation => |t| skVal(sk_, t.c),
             };
         }
     }.f;
@@ -33244,8 +33361,9 @@ fn skDrawGeometry(area: dvui.Rect.Physical, it: SkPlace, g: skl.Geometry, colour
     switch (g.kind) {
         .point => |p| skDot(skPx(area, it, skVal(s, p)), 2.5 * dvui.windowNaturalScale(), colour),
         .affine => {},
-        // A macro's sections, each stroked on its own.
-        .polar_grid => {
+        // A macro's sections (a tessellation's edges), each stroked on
+        // its own.
+        .polar_grid, .tessellation => {
             var segs: std.ArrayList(geom.Segment) = .empty;
             s.appendSegments(a, g, &segs) catch return;
             for (segs.items) |seg| {
@@ -33790,7 +33908,7 @@ fn sketchPalette() void {
         defer geo.deinit();
         _ = skPaletteKey(@src(), "sketch.palette.select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none);
         _ = skPaletteKey(@src(), "sketch.palette.construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction);
-        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array" };
+        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array", "sketch.palette.tessellate" };
         const tvgs = [_][]const u8{
             icons.graven(.geo_point) orelse dvui.entypo.dot_single,
             icons.graven(.geo_segment) orelse dvui.entypo.flow_line,
@@ -33799,6 +33917,7 @@ fn sketchPalette() void {
             icons.graven(.geo_circle) orelse dvui.entypo.circle,
             dvui.entypo.triangle_up,
             dvui.entypo.grid,
+            dvui.entypo.network,
         };
         inline for (names, 0..) |name, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
@@ -34020,6 +34139,11 @@ fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
     // properties, set once it is placed.
     if (g == .array and sk_tool != .polar_grid) skArrayCounts();
     if (g == .polygon) skPolygonSides();
+    if (g == .tessellate) {
+        skTessOptions();
+        dvui.labelNoFmt(@src(), "Click inside a closed path to fill it", .{}, .{ .color_text = .{ .color = faint } });
+        return;
+    }
     if (sk_tool == .polar_grid) {
         const steps = [_][]const u8{ "click its centre", "click its first side: its angle and radius", "turn either way, click its second side: its angle and radius (at the centre: 0)" };
         dvui.label(@src(), "Polar grid, step {d} of 3: {s}", .{ sk_nclicks + 1, steps[@min(sk_nclicks, 2)] }, .{ .color_text = .{ .color = faint } });
@@ -34047,6 +34171,24 @@ fn skArrayCounts() void {
             if (accepted.numberField(@src(), f64, @floatFromInt(cur.*), 1, 999, .{ .id_extra = i, .expand = .horizontal })) |v| cur.* = @intFromFloat(@round(v));
         }
     };
+}
+
+/// The tessellate tool's tile, and whether only whole tiles are kept.
+const tess_names = [_][]const u8{ "triangles", "squares", "hexagons" };
+const tess_tile_sides = [_]u32{ 3, 4, 6 };
+fn skTessOptions() void {
+    const saved = pushGroup("tessellate");
+    defer popGroup(saved);
+    const pad: dvui.Rect = .{ .x = 6, .w = 6, .y = 3, .h = 3 };
+    {
+        var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+        defer flex.deinit();
+        for (tess_names, tess_tile_sides, 0..) |name, n, i| {
+            const on = tess_sides == n;
+            keyButton(@src(), name, @intCast(n), .{ .id_extra = i, .margin = .all(1), .padding = pad, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+        }
+    }
+    _ = tcheckbox(@src(), &tess_whole, "Whole tiles only", .{});
 }
 
 /// The polygon tool's sides: the common ones by name, or any number.
@@ -34371,6 +34513,7 @@ fn skRefIcon(s: *const skl.Sketch, r: skl.Ref) icons.GIcon {
     return switch (s.geometry.items[g].kind) {
         .point, .affine => .geo_point,
         .polar_grid => .geo_circle,
+        .tessellation => .geo_segment,
         .segment => .geo_segment,
         .circle => .geo_circle,
         .arc => .geo_arc,
@@ -34396,6 +34539,7 @@ fn skRefName(buf: []u8, s: *const skl.Sketch, r: skl.Ref) []const u8 {
         .line => "construction line",
         .ray => "ray",
         .polar_grid => "polar grid",
+        .tessellation => "tessellation",
     };
     var nb: [48]u8 = undefined;
     const role: []const u8 = switch (r) {

@@ -128,6 +128,9 @@ pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) root.Error!Analysis {
             .polar_grid => |pg| for (pg.unknowns()) |v| {
                 if (free_var[v]) break true;
             } else false,
+            .tessellation => |t| for (t.unknowns()) |v| {
+                if (free_var[v]) break true;
+            } else false,
         };
         if (any) try free.append(out, @intCast(gi));
     }

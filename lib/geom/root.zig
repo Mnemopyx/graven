@@ -29,6 +29,9 @@ pub const wrap = @import("wrap.zig");
 /// An open path shortened at its ends by lengths along it, and its end
 /// directions (a connection stopping at its end marks).
 pub const trim = @import("trim.zig");
+/// An area filled with tiles sharing their vertices (triangles, squares,
+/// hexagons), cut to it or whole only.
+pub const tessellate = @import("tessellate.zig");
 /// Snapping drags to targets (edges, centres, lines, points, the grid),
 /// with the guides that show it.
 pub const snap = @import("snap.zig");
@@ -544,6 +547,7 @@ test {
     _ = path;
     _ = stroke;
     _ = trim;
+    _ = tessellate;
     _ = wrap;
     _ = snap;
 }

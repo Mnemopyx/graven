@@ -60,6 +60,8 @@ pub const Geometry = struct {
         /// A macro (see `PolarGrid`): its driving geometry as unknowns,
         /// its counts as properties.
         polar_grid: PolarGrid,
+        /// A macro (see `Tessellation`): an area filled with tiles.
+        tessellation: Tessellation,
     },
     /// Construction geometry guides and is constrained like any other, but
     /// is never output. Infinite lines and rays are always construction.
@@ -153,6 +155,31 @@ pub const PolarGrid = struct {
     /// Its unknowns.
     pub fn unknowns(g: PolarGrid) [6]VarId {
         return .{ g.c.x, g.c.y, g.r[0], g.r[1], g.t[0], g.t[1] };
+    }
+};
+
+/// A tessellation, a macro object (the owner, 2026-11-28): an area of
+/// the sketch filled with tiles sharing their vertices (`geom.tessellate`).
+/// Held by its driving values alone: a tile's centre `c` (the pattern's
+/// offset, dragged or constrained like any point), the spacing of tile
+/// centres, the pattern's turn and the margin kept clear inside the area,
+/// all unknowns; its tile's sides and whether only whole tiles are kept
+/// are properties. The area is a closed path of the sketch's own curves
+/// (`outline`: its index in `Sketch.tilings`), followed as they change.
+/// Its tiles are never stored: they are worked out from these.
+pub const Tessellation = struct {
+    c: Pt,
+    spacing: VarId,
+    angle: VarId,
+    margin: VarId,
+    /// 3, 4 or 6.
+    sides: u32 = 6,
+    /// Whole tiles only (else those crossing the edge are cut to it).
+    whole: bool = false,
+    outline: u32 = 0,
+
+    pub fn unknowns(t: Tessellation) [5]VarId {
+        return .{ t.c.x, t.c.y, t.spacing, t.angle, t.margin };
     }
 };
 
@@ -277,6 +304,7 @@ pub const Store = struct {
             .line => error.NoSuchPoint,
             // Its bind points have no unknowns of their own: see `point`.
             .polar_grid => |pg| if (r.role == .centre) pg.c else error.NoSuchPoint,
+            .tessellation => |t| if (r.role == .centre) t.c else error.NoSuchPoint,
         };
     }
 
@@ -657,7 +685,7 @@ pub const Local = struct {
                         const cc = l.p(ar.c);
                         break :blk (try l.ref(po.p)).sub(cc).len().sub(l.p(ar.a).sub(cc).len());
                     },
-                    .point, .affine, .polar_grid => return error.WrongKind,
+                    .point, .affine, .polar_grid, .tessellation => return error.WrongKind,
                 };
             },
             .fixed => |f| {
