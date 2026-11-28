@@ -103,6 +103,8 @@ pub const GIcon = enum {
     con_equal,
     con_equal_distance,
     con_symmetric,
+    roundrect_corners,
+    roundrect_centre,
 
     fn svg(comptime g: GIcon) []const u8 {
         const name = comptime blk: {

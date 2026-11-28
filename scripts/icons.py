@@ -18,7 +18,15 @@ makes or acts on: tracks, text, tiles), mark (drawn geometry, points,
 attention), focus (selection, choosing). A dashed outline for the
 container a tool works inside (what it makes is solid); a ringed + for a
 tool that adds; the lowest band (below LIGHT_BELOW) left light for the
-key's fade. On a dark ground the ink is drawn light (DARK_INK) and the
+key's fade.
+
+A drawing tool's icon follows the click-point rule (the owner, 2026-11-28):
+it shows the points the user clicks as hot points (slot "hot", used for
+nothing else: large, thinly ringed so the colour carries at the smallest
+size), any construction geometry those points sit on thin (THIN) and
+dashed, and the result in full ink over a subtle cool fill (slot
+"result"). The order of the clicks is not shown (too busy; a try or two
+teaches it). On a dark ground the ink is drawn light (DARK_INK) and the
 slots take the deeper DARK values (the JSON's `schemes.dark`).
 
 The icon file (the owner's choice, 2026-11-22): one PNG and its JSON, the
@@ -47,6 +55,7 @@ shrinking, worked out per texel and averaged, so thin ink keeps its weight).
 import json, math, os, sys
 
 STROKE = 1.35  # on the 24-unit grid
+THIN = 0.75  # construction geometry in a tool's icon
 INK = "#2a2530"
 LIGHT_BELOW = 19
 # The fills' slots, by role, and their default colours (each colour is the
@@ -58,6 +67,10 @@ SLOT = {
     "subject": "#f4c95d",
     "mark": "#f0907a",
     "focus": "#8fc1f0",
+    # A tool's icon (the click-point rule): where the user clicks, and the
+    # subtle cool fill of what the tool makes.
+    "hot": "#ff5a1f",
+    "result": "#d4e4ef",
 }
 # On a dark ground (the panes): the ink light, the slots deeper. A first
 # set, to be tuned on the panes.
@@ -69,6 +82,8 @@ DARK = {
     "subject": "#a77f12",
     "mark": "#b14a33",
     "focus": "#2a6fae",
+    "hot": "#ff7a3d",
+    "result": "#34495a",
 }
 KEY = "#ff00ff"  # transparent
 
@@ -131,6 +146,11 @@ def circle(cx, cy, r, kind):
 
 def line(x1, y1, x2, y2):
     return [("ink", [(x1, y1), (x2, y2)])]
+
+
+def width(parts, w):
+    """`parts` with their ink drawn `w` wide (construction: THIN)."""
+    return [(p[0], p[1], w) if p[0] == "ink" else p for p in parts]
 
 
 def dashes(points, on=2.0, off=1.5):
@@ -240,6 +260,61 @@ def dot(x, y, r=1.7):
     return circle(x, y, r, "mark")
 
 
+def hot(x, y, r=2.4):
+    """A point the user clicks, in a tool's icon (the click-point rule):
+    large, ringed thinly, so its colour carries at the smallest size."""
+    return width(circle(x, y, r, "hot"), 0.9)
+
+
+def construction(points, on=1.6, off=1.2):
+    """Construction geometry in a tool's icon: thin, dashed, each piece
+    dashed from its start (so a corner gets a dash)."""
+    out = []
+    for a, b in zip(points, points[1:]):
+        out += dashes([a, b], on, off)
+    return width(out, THIN)
+
+
+def made(outline):
+    """What a tool makes: the result's fill, subtle and cool (no ink)."""
+    return [("fill", outline, "result")]
+
+
+def drawn(outline):
+    """The result's outline, in full ink, over what it covers."""
+    return [("ink", closed(outline))]
+
+
+# The round rectangle tools' frame: a rectangle 20 x 16, corners radius 4.5.
+RR = (2.0, 1.5, 22.0, 17.5, 4.5)
+
+
+def roundrect_corners():
+    """Round rectangle by opposite corners: the two corners dragged between
+    (hot) on the dashed construction rectangle, and the third click, the
+    centre of a corner's arc (hot), its radii to the arc's ends dashed."""
+    x0, y0, x1, y1, r = RR
+    rr = rounded(x0, y0, x1 - x0, y1 - y0, r)
+    cx, cy = x1 - r, y0 + r
+    return (made(rr) + construction(closed([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]))
+            + construction([(cx, y0), (cx, cy), (x1, cy)]) + drawn(rr)
+            + hot(x0, y0) + hot(x1, y1) + hot(cx, cy, 2.0))
+
+
+def roundrect_centre():
+    """Round rectangle by its centre, mirrored: the centre (hot) where the
+    dashed mirror axes cross, one corner (hot) on the dashed construction
+    rectangle, and the centre of a corner's arc (hot)."""
+    x0, y0, x1, y1, r = RR
+    rr = rounded(x0, y0, x1 - x0, y1 - y0, r)
+    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+    cx, cy = x0 + r, y0 + r
+    return (made(rr) + construction(closed([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]))
+            + construction([(mx, y0 - 1.2), (mx, y1 + 1.2)]) + construction([(x0 - 1.2, my), (x1 + 1.2, my)])
+            + construction([(cx, y0), (cx, cy), (x0, cy)]) + drawn(rr)
+            + hot(mx, my) + hot(x1, y1) + hot(cx, cy, 2.0))
+
+
 ICONS = {
     # Containers made on the canvas.
     "add-panel": rect(2.5, 3, 15, 13, "base") + adds(),
@@ -261,6 +336,10 @@ ICONS = {
     "add-shape": circle(7.5, 7.5, 4.5, "mark") + rect(9.5, 8.5, 7, 7, "mark", 0.4) + adds(),
     # Text: a style (a line of text set in it, on its track).
     "text-style": rect(2.5, 9.5, 19, 6.5, "subject", 0.8) + polyline([(5, 3), (13, 3)]) + line(9, 3, 9, 13.5) + polyline([(14.5, 13.5), (17, 6.5), (19.5, 13.5)]) + line(15.4, 11, 18.6, 11),
+    # Drawing tools (the click-point rule): the points clicked hot, the
+    # construction thin and dashed, the result inked over a subtle cool fill.
+    "roundrect-corners": roundrect_corners(),
+    "roundrect-centre": roundrect_centre(),
     "constrain": line(4, 15, 18, 9) + circle(4, 15, 1.8, "mark") + circle(18, 9, 1.8, "mark") + dimension((4, 15), (18, 9), 4.2),
     # Panes, each named by its official name ("pane-" + its id): drawn in
     # its heading and on its tab, so a pane is known at a glance wherever
@@ -309,7 +388,8 @@ def to_svg(parts):
         if part[0] == "fill":
             out.append(f'<path d="{d(part[1])} Z" fill="{SLOT[part[2]]}"/>')
         else:
-            out.append(f'<path d="{d(part[1])}" fill="none" stroke="{INK}" stroke-width="{STROKE}" stroke-linecap="round" stroke-linejoin="round"/>')
+            w = part[2] if len(part) > 2 else STROKE
+            out.append(f'<path d="{d(part[1])}" fill="none" stroke="{INK}" stroke-width="{w:g}" stroke-linecap="round" stroke-linejoin="round"/>')
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{"".join(out)}</svg>\n'
 
 
@@ -356,7 +436,8 @@ def cell_image(parts):
     rgb[:] = hexrgb(KEY)
     for part in parts:
         if part[0] == "ink":
-            dist = np.maximum(dist, (STROKE / 2 - seg_dist(part[1])) * s)
+            w = part[2] if len(part) > 2 else STROKE
+            dist = np.maximum(dist, (w / 2 - seg_dist(part[1])) * s)
             continue
         poly = part[1]
         inside = np.zeros((CELL, CELL), dtype=bool)
