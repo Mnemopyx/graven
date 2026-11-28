@@ -1078,7 +1078,7 @@ pub const all = [_]Element{
     .{ .id = "sketch.tool.circle-3pt", .kind = .button, .action = "sketch.tool.*", .label = "3 points" },
     .{ .id = "sketch.tool.line", .kind = .button, .action = "sketch.tool.*", .label = "Line" },
     .{ .id = "sketch.tool.ray", .kind = .button, .action = "sketch.tool.*", .label = "Ray" },
-    .{ .id = "sketch.tool.polar-array", .kind = .button, .action = "sketch.tool.*", .label = "Polar" },
+    .{ .id = "sketch.tool.polar-grid", .kind = .button, .action = "sketch.tool.*", .label = "Polar grid" },
     .{ .id = "sketch.tool.rect-array", .kind = .button, .action = "sketch.tool.*", .label = "Rectangular" },
     .{ .id = "sketch.tool.polygon", .kind = .button, .action = "sketch.tool.*", .label = "Polygon" },
     .{ .id = "sketch.tool.*", .kind = .button, .label = "A sketch tool" },

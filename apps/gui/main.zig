@@ -20789,6 +20789,7 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
         .regular_polygon => "Regular polygon",
         .rect_array => "Rectangular array",
         .polar_array => "Polar array",
+        .polar_grid => "Polar grid",
         .connection => "Connection",
         .caption => "Caption",
         .plain => "Group",
@@ -20806,12 +20807,15 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
             next_element = f.id;
             if (numberProp(f.label, v, f.min, 256, 9701 + k)) |nv| {
                 const n = @round(nv);
-                if (n != v) if (skEdit(.{ .object_prop = .{ .object = obj, .name = f.prop, .value = n } }) != null) {
+                const set = n != v and skEdit(.{ .object_prop = .{ .object = obj, .name = f.prop, .value = n } }) != null;
+                // A macro's bind points may have gone (or come back).
+                if (set) refreshProblems();
+                if (set and !skl.composite.isMacro(g.kind)) {
                     // Made again: its old pieces are gone, so one of its
                     // new ones is chosen, keeping it in Properties.
                     sk_sel.clearRetainingCapacity();
                     if (skItem()) |now| skSelectObject(now.sketch, obj, false, null);
-                };
+                }
             }
         }
     }
@@ -22681,6 +22685,10 @@ const ProblemKind = enum {
     sketch_fault,
     /// Two holes on a panel overlap: it is cut by their union.
     holes_overlap,
+    /// A constraint on a macro object's bind point that its counts no
+    /// longer give (fewer columns or rings): kept, holding nothing until
+    /// the count is back or it is removed.
+    bind_point_gone,
 };
 
 /// Where a problem shows: a box on the sheet (mm), in a parent's frame
@@ -22703,6 +22711,12 @@ const Problem = struct {
     grid: ?usize = null,
     /// The document sketch it is about (index in `Model.sketches`).
     sketch: ?usize = null,
+    /// The sketch constraint it is about, the object it names, and the
+    /// counts that object needs for it to hold again.
+    constraint: ?u32 = null,
+    object: ?u32 = null,
+    need_columns: ?u32 = null,
+    need_rings: ?u32 = null,
     areas: []const ProblemArea = &.{},
 };
 
@@ -22729,7 +22743,36 @@ fn fixes(kind: ProblemKind) []const Fix {
             .{ .label = "Choose their array: its spacing and the holes' size…", .run = fixChooseGrid },
             .{ .label = "Choose the first hole…", .run = fixChooseTile },
         },
+        .bind_point_gone => &.{
+            .{ .label = "Raise its count back, so the point is there again", .run = fixRaiseCount },
+            .{ .label = "Remove the constraint", .run = fixRemoveConstraint },
+            .{ .label = "Edit the sketch…", .run = fixEditSketch },
+        },
     };
+}
+
+/// An edit to document sketch `index`: its draft while it is being edited.
+fn fixSketchEdit(index: usize, edit: layout.model.SketchEdit) bool {
+    const done = if (sketch_edit != null and sketch_edit.?.sketch == index)
+        act(.editSketchDraft, .{ index, edit })
+    else
+        act(.editSketch, .{ index, edit });
+    _ = done catch return false;
+    refreshProblems();
+    return true;
+}
+
+fn fixRaiseCount(p: *const Problem) void {
+    const index = p.sketch orelse return;
+    const obj = p.object orelse return;
+    if (p.need_columns) |n| _ = fixSketchEdit(index, .{ .object_prop = .{ .object = obj, .name = "columns", .value = @floatFromInt(n) } });
+    if (p.need_rings) |n| _ = fixSketchEdit(index, .{ .object_prop = .{ .object = obj, .name = "rings", .value = @floatFromInt(n) } });
+}
+
+fn fixRemoveConstraint(p: *const Problem) void {
+    const index = p.sketch orelse return;
+    const c = p.constraint orelse return;
+    _ = fixSketchEdit(index, .{ .unconstrain = c });
 }
 
 /// Properties brought in, showing the context just chosen.
@@ -22911,6 +22954,43 @@ fn refreshProblems() void {
                 const text = std.fmt.allocPrint(a, "Holes {s} and {s} overlap ({d:.2} mm² shared): the panel is cut by their union.", .{ state.model.tileConst(t).designator, state.model.tileConst(o).designator, iss.amount }) catch continue;
                 list.append(a, .{ .kind = .holes_overlap, .key = problemKey(.holes_overlap, &.{ pk, @backingInt(t), @backingInt(o) }, ""), .level = .warning, .text = text, .tile = t, .parent = w.parent, .grid = ts.grid, .sketch = ts.sketch, .areas = areas.items }) catch {};
             }
+        }
+    }
+    // Constraints on bind points a macro object's counts took away.
+    for (state.model.sketches.items, 0..) |*item, k| {
+        const sk = &item.sketch;
+        var lost: std.ArrayList(skl.ConstraintId) = .empty;
+        skl.composite.abandoned(sk, a, &lost) catch continue;
+        for (lost.items) |ci| {
+            const c = sk.constraints.items[ci];
+            var rb: [4]skl.Ref = undefined;
+            var grid: ?skl.GeomId = null;
+            for (skl.refs(c, &rb)) |r| switch (r) {
+                .point => |pr| if (pr.role == .node) {
+                    grid = pr.geom;
+                },
+                .geom => {},
+            };
+            const g = grid orelse continue;
+            const obj = skl.composite.objectOf(sk, g);
+            // Where it shows: the grid, in every view of the sketch.
+            var areas: std.ArrayList(ProblemArea) = .empty;
+            var segs: std.ArrayList(geom.Segment) = .empty;
+            sk.appendSegments(a, sk.geometry.items[g], &segs) catch {};
+            var gb: geom.Box = .empty;
+            for (segs.items) |sg| gb = gb.join(sg.bounds());
+            if (!gb.isEmpty()) for (state.model.spaces.items, 0..) |sp, si| for (sp.sketch_views.items) |v| {
+                if (state.model.sketchIndex(v.sketch) != k) continue;
+                areas.append(a, .{ .parent = .{ .space = si }, .box = onSheet(.{ .space = si }, .{ .x0 = gb.x0 + v.at.x, .y0 = gb.y0 + v.at.y, .x1 = gb.x1 + v.at.x, .y1 = gb.y1 + v.at.y }) }) catch {};
+            };
+            const nc = skl.composite.countNeeded(sk, c, "columns");
+            const nr = skl.composite.countNeeded(sk, c, "rings");
+            var wb: [64]u8 = undefined;
+            const want = if (nc != null and nr != null)
+                std.fmt.bufPrint(&wb, "{d} columns and {d} rings", .{ nc.?, nr.? }) catch ""
+            else if (nc) |n| std.fmt.bufPrint(&wb, "{d} columns", .{n}) catch "" else if (nr) |n| std.fmt.bufPrint(&wb, "{d} rings", .{n}) catch "" else "more";
+            const text = std.fmt.allocPrint(a, "Sketch “{s}”: a {s} constraint is on a bind point its polar grid no longer has (it needs {s}): kept, holding nothing.", .{ item.name, @tagName(c.kind), want }) catch continue;
+            list.append(a, .{ .kind = .bind_point_gone, .key = problemKey(.bind_point_gone, &.{ k, ci }, ""), .level = .warning, .text = text, .sketch = k, .constraint = ci, .object = obj, .need_columns = nc, .need_rings = nr, .areas = areas.items }) catch {};
         }
     }
     problems = list.items;
@@ -30203,13 +30283,13 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return p;
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_array, rect_array, polygon };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
 const SkGeo = enum { point, line, polyline, arc, circle, polygon, array };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_array, .rect_array } };
-var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_array };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array } };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid };
 /// The polygon tool's number of sides.
 var polygon_sides: u32 = 6;
 
@@ -31252,7 +31332,7 @@ fn skLineOf(s: *const skl.Sketch, g: skl.Geometry) ?struct { p: geom.Point, d: g
 /// The nearest place on geometry `g` to `q`, if it has one there.
 fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point {
     switch (g.kind) {
-        .point, .affine => return null,
+        .point, .affine, .polar_grid => return null,
         .segment, .line, .ray => {
             const l = skLineOf(s, g) orelse return null;
             var t = (q.x - l.p.x) * l.d.x + (q.y - l.p.y) * l.d.y;
@@ -31285,15 +31365,35 @@ fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point
     }
 }
 
-/// The points of a geometry, with their roles.
-fn skPointsOf(g: skl.Geometry, buf: *[3]skl.PointRef, id: skl.GeomId) []skl.PointRef {
+/// At most this many points of one geometry are offered (a polar grid's
+/// bind points).
+const sk_points_max = 1024;
+
+/// The points of a geometry, with their roles: a macro's bind points too,
+/// the last of each run as `last` (it stays the last as counts change).
+fn skPointsOf(g: skl.Geometry, buf: *[sk_points_max]skl.PointRef, id: skl.GeomId) []skl.PointRef {
+    switch (g.kind) {
+        .polar_grid => |pg| {
+            buf[0] = .{ .geom = id, .role = .centre };
+            var n: usize = 1;
+            for (0..pg.rings + 1) |j| for (0..pg.cols + 1) |i| {
+                if (n >= buf.len) break;
+                const ii: u32 = if (i == pg.cols) skl.geometry.last else @intCast(i);
+                const jj: u32 = if (j == pg.rings) skl.geometry.last else @intCast(j);
+                buf[n] = .{ .geom = id, .role = .node, .i = ii, .j = jj };
+                n += 1;
+            };
+            return buf[0..n];
+        },
+        else => {},
+    }
     const roles: []const @FieldType(skl.PointRef, "role") = switch (g.kind) {
         .point, .affine => &.{.point},
         .segment => &.{ .start, .end },
         .circle => &.{.centre},
         .arc => &.{ .centre, .start, .end },
         .ray => &.{.origin},
-        .line => &.{},
+        .line, .polar_grid => &.{},
     };
     for (roles, 0..) |r, i| buf[i] = .{ .geom = id, .role = r };
     return buf[0..roles.len];
@@ -31312,7 +31412,7 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64, hidden: Tags) vo
         if (g.removed) continue;
         const tags = layout.tags.ofGeometry(g);
         if (!hidden.shows(tags)) continue;
-        var buf: [3]skl.PointRef = undefined;
+        var buf: [sk_points_max]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, @intCast(gi))) |r| {
             if (!hidden.showsTag(.points) and !g.reference) break;
             const p = s.point(r) catch continue;
@@ -31477,6 +31577,11 @@ fn skSnapper(it: SkPlace, moving: ?geom.Point) *const geom.snap.Snapper {
                     const rho = sk.vars.items[l.rho];
                     s.addLine(a, .{ .x = rho * @cos(th) + o.x, .y = rho * @sin(th) + o.y }, .{ .x = -@sin(th), .y = @cos(th) }) catch {};
                 },
+                // A macro's centre and bind points.
+                .polar_grid => {
+                    var buf: [sk_points_max]skl.PointRef = undefined;
+                    for (skPointsOf(g, &buf, id)) |r| if (sk.point(r) catch null) |q| Add.pt(&s, a, q, o, moving);
+                },
             }
         }
         s.addCrossings(a) catch {};
@@ -31522,8 +31627,8 @@ fn skToolClicks(t: SkTool) usize {
     return switch (t) {
         .none => 0,
         .point => 1,
-        .segment, .polyline, .circle, .line, .ray, .polar_array, .rect_array, .polygon => 2,
-        .arc_centre, .arc_3pt, .circle_3pt => 3,
+        .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon => 2,
+        .arc_centre, .arc_3pt, .circle_3pt, .polar_grid => 3,
     };
 }
 
@@ -31578,8 +31683,15 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
         },
         // An array: its centre then its edge (its first border there), or
         // two corners; its counts from the array tool's.
-        .polar_array => if (skDist(c[0], c[1]) > 1e-9) {
-            _ = skEdit(.{ .array = .{ .polar = true, .at = c[0], .to = c[1], .cols = array_tool.around, .rows = array_tool.rings, .sweep = array_tool.sweep } });
+        // A polar grid, placed in stages (the owner, 2026-11-27): its
+        // centre, held; its first angle and radius, held; its second
+        // angle and radius (the sweep as the pointer went round). Its
+        // counts are the last used, changed after in its properties.
+        .polar_grid => if (skPolarGridStaged(c[0], c[1], c[2])) |pg| {
+            made = skEdit(.{ .polar_grid = .{ .c = pg.c, .r = pg.r, .t = pg.t, .cols = array_tool.around, .rings = array_tool.rings } });
+            roles = .{ .{ .point = .centre }, .{ .node = .{ 0, 0 } }, .{ .node = .{ skl.geometry.last, skl.geometry.last } } };
+        } else {
+            tell("A polar grid needs a radius and an angle between its two sides. ");
         },
         .rect_array => if (@abs(c[0].x - c[1].x) > 1e-9 and @abs(c[0].y - c[1].y) > 1e-9) {
             _ = skEdit(.{ .array = .{ .polar = false, .at = c[0], .to = c[1], .cols = array_tool.cols, .rows = array_tool.rows } });
@@ -31626,11 +31738,67 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
     } else sk_nclicks = 0;
 }
 
+/// The polar grid tool's sweep: how far the pointer has turned about the
+/// grid's centre since its first side was placed (signed; at most a turn,
+/// and a turn when within a few degrees of one), followed frame by frame
+/// so it may go either way, and all the way round. Where the first side
+/// was clicked at the centre (radius 0), its angle is the pointer's as it
+/// first leaves the centre.
+var sk_grid: struct { from: ?geom.Point = null, last: ?f64 = null, t0: ?f64 = null, sweep: f64 = 0 } = .{};
+
+/// Within this of a polar grid's centre a click's radius is 0 (mm).
+fn skGridZero() f64 {
+    return snapTol();
+}
+
+/// Follows the pointer at `p` for the polar grid's sweep (its third step).
+fn skGridFollow(p: geom.Point) void {
+    if (sk_tool != .polar_grid or sk_nclicks != 2) return;
+    const c = sk_clicks[0];
+    const first = sk_clicks[1];
+    if (sk_grid.from == null or skDist(sk_grid.from.?, first) > 1e-12) {
+        sk_grid = .{ .from = first };
+        if (skDist(first, c) > skGridZero()) sk_grid.t0 = std.math.atan2(first.y - c.y, first.x - c.x);
+        sk_grid.last = sk_grid.t0;
+    }
+    // At the centre the angle means nothing: the sweep stays as it was.
+    if (skDist(p, c) <= skGridZero()) return;
+    const ang = std.math.atan2(p.y - c.y, p.x - c.x);
+    if (sk_grid.t0 == null) {
+        sk_grid.t0 = ang;
+        sk_grid.last = ang;
+        return;
+    }
+    var d = ang - sk_grid.last.?;
+    while (d > std.math.pi) d -= 2 * std.math.pi;
+    while (d <= -std.math.pi) d += 2 * std.math.pi;
+    sk_grid.sweep = std.math.clamp(sk_grid.sweep + d, -2 * std.math.pi, 2 * std.math.pi);
+    sk_grid.last = ang;
+}
+
+/// The polar grid the three clicks (or two and the pointer) give: centre
+/// `c`, first side at `a` (its angle and radius), second at `b` (its
+/// radius, and the sweep followed to it). Null when it has no area: no
+/// sweep, or both radii the same.
+fn skPolarGridStaged(c: geom.Point, a: geom.Point, b: geom.Point) ?struct { c: geom.Point, r: [2]f64, t: [2]f64 } {
+    skGridFollow(b);
+    const z = skGridZero();
+    const ra = if (skDist(a, c) <= z) 0 else skDist(a, c);
+    const rb = if (skDist(b, c) <= z) 0 else skDist(b, c);
+    const t0 = sk_grid.t0 orelse return null;
+    var sweep = sk_grid.sweep;
+    if (@abs(sweep) > 2 * std.math.pi - std.math.degreesToRadians(4)) sweep = std.math.copysign(@as(f64, 2 * std.math.pi), sweep);
+    if (@abs(sweep) < 1e-6 or @abs(ra - rb) < 1e-9) return null;
+    return .{ .c = c, .r = .{ ra, rb }, .t = .{ t0, t0 + sweep } };
+}
+
 /// A drawing tool click's part of the geometry it made.
 const SkClickRole = union(enum) {
     none,
     /// One of its points.
     point: @FieldType(skl.PointRef, "role"),
+    /// One of a macro's bind points (its indices).
+    node: [2]u32,
     /// A point on it.
     on,
 };
@@ -31656,6 +31824,7 @@ fn skClickConstraints(g: skl.GeomId, roles: [3]SkClickRole) void {
         const gv = sk_given[i];
         const own: ?skl.PointRef = switch (role) {
             .point => |r| .{ .geom = g, .role = r },
+            .node => |ij| .{ .geom = g, .role = .node, .i = ij[0], .j = ij[1] },
             else => null,
         };
         // Locked onto something: there, whatever was typed.
@@ -32484,6 +32653,7 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
                 },
                 .point => |pp| skVal(sk_, pp),
                 .affine => .{ .x = 0, .y = 0 },
+                .polar_grid => |pg| skVal(sk_, pg.c),
             };
         }
     }.f;
@@ -32963,7 +33133,7 @@ fn skBoxSelect(s: *const skl.Sketch, a: geom.Point, b: geom.Point, add: bool) vo
     const bx = [4]f64{ x0, x1, y0, y1 };
     for (s.geometry.items, 0..) |g, gi| {
         if (g.removed or g.reference) continue;
-        var buf: [3]skl.PointRef = undefined;
+        var buf: [sk_points_max]skl.PointRef = undefined;
         const pts = skPointsOf(g, &buf, @intCast(gi));
         var all = pts.len > 0 and g.kind != .ray;
         for (pts) |r| {
@@ -33074,6 +33244,21 @@ fn skDrawGeometry(area: dvui.Rect.Physical, it: SkPlace, g: skl.Geometry, colour
     switch (g.kind) {
         .point => |p| skDot(skPx(area, it, skVal(s, p)), 2.5 * dvui.windowNaturalScale(), colour),
         .affine => {},
+        // A macro's sections, each stroked on its own.
+        .polar_grid => {
+            var segs: std.ArrayList(geom.Segment) = .empty;
+            s.appendSegments(a, g, &segs) catch return;
+            for (segs.items) |seg| {
+                var pts: std.ArrayList(geom.Point) = .empty;
+                pts.append(a, seg.start()) catch return;
+                flatten(a, &pts, seg, 0.5 / state.view.ppm) catch return;
+                const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+                for (pts.items, phys) |p, *o| o.* = skPx(area, it, p);
+                if (dashed) {
+                    skDashed(phys, colour, thick);
+                } else dvui.Path.stroke(.{ .points = phys }, .{ .thickness = thick, .color = .{ .color = colour } });
+            }
+        },
         .segment, .circle, .arc => {
             var segs: std.ArrayList(geom.Segment) = .empty;
             s.appendSegments(a, g, &segs) catch return;
@@ -33265,7 +33450,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
         if (skSelected(.{ .curve = id })) colour = colors.select;
         skDrawGeometry(area, it, g, if (g.construction) colour.opacity(0.75) else colour, if (g.construction) px else 2 * px, g.construction);
         if (!it.shows(.points)) continue;
-        var buf: [3]skl.PointRef = undefined;
+        var buf: [sk_points_max]skl.PointRef = undefined;
         for (skPointsOf(g, &buf, id)) |r| {
             const p = s.point(r) catch continue;
             const sel = skSelected(.{ .point = r });
@@ -33394,6 +33579,22 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 if (r > 1e-9 and sweep > 1e-9) skPreview(area, it, geom.arc(c0, r, a0, sweep, &buf4));
                 dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c0), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
             } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } }),
+            // A polar grid: after its centre, the circle its first side's
+            // radius gives and that side; after the first side, the whole
+            // grid as it would be placed, with its counts.
+            .polar_grid => if (sk_nclicks == 1) {
+                const c0 = sk_clicks[0];
+                const r = skDist(c0, p);
+                var buf4: [4]geom.Segment = undefined;
+                if (r > 1e-9) skPreviewFaint(area, it, geom.arc(c0, r, 0, 2 * std.math.pi, &buf4));
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c0), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+            } else if (skPolarGridStaged(sk_clicks[0], sk_clicks[1], p)) |pg| {
+                const ar = dvui.currentWindow().arena();
+                var segs: std.ArrayList(geom.Segment) = .empty;
+                skl.polarGridShape(ar, pg.c, pg.r, pg.t, array_tool.around, array_tool.rings, &segs) catch {};
+                for (segs.items) |sg| skPreview(area, it, &.{sg});
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } }),
             .polygon => if (skDist(sk_clicks[0], p) > 1e-9) {
                 const c0 = sk_clicks[0];
                 const r = skDist(c0, p);
@@ -33432,6 +33633,17 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
     }
     skDimEntry(area);
     if (sk_summary) skSummary(area);
+}
+
+/// A guide while placing (a radius's circle): faint.
+fn skPreviewFaint(area: dvui.Rect.Physical, it: SkPlace, segs: []const geom.Segment) void {
+    const a = dvui.currentWindow().arena();
+    var pts: std.ArrayList(geom.Point) = .empty;
+    pts.append(a, segs[0].start()) catch return;
+    for (segs) |seg| flatten(a, &pts, seg, 0.5 / state.view.ppm) catch return;
+    const phys = a.alloc(dvui.Point.Physical, pts.items.len) catch return;
+    for (pts.items, phys) |p, *o| o.* = skPx(area, it, p);
+    skDashed(phys, colors.select.opacity(0.5), dvui.windowNaturalScale());
 }
 
 fn skPreview(area: dvui.Rect.Physical, it: SkPlace, segs: []const geom.Segment) void {
@@ -33804,8 +34016,15 @@ fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
     const faint = dvui.themeGet().color(.control, .text).opacity(0.65);
     if (tools.len > 1) dvui.labelNoFmt(@src(), "M: next option", .{}, .{ .color_text = .{ .color = faint } });
     if (g == .line and !sk_construction) dvui.labelNoFmt(@src(), "Ray and line: construction only", .{}, .{ .color_text = .{ .color = faint } });
-    if (g == .array) skArrayCounts();
+    // A polar grid has no options to set first: its counts are its
+    // properties, set once it is placed.
+    if (g == .array and sk_tool != .polar_grid) skArrayCounts();
     if (g == .polygon) skPolygonSides();
+    if (sk_tool == .polar_grid) {
+        const steps = [_][]const u8{ "click its centre", "click its first side: its angle and radius", "turn either way, click its second side: its angle and radius (at the centre: 0)" };
+        dvui.label(@src(), "Polar grid, step {d} of 3: {s}", .{ sk_nclicks + 1, steps[@min(sk_nclicks, 2)] }, .{ .color_text = .{ .color = faint } });
+        return;
+    }
     dvui.label(@src(), "{s}: point {d} of {d}", .{ skToolName(sk_tool), sk_nclicks + 1, skToolClicks(sk_tool) }, .{ .color_text = .{ .color = faint } });
     skStepFields();
 }
@@ -33815,7 +34034,7 @@ fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
 fn skArrayCounts() void {
     const saved = pushGroup("array");
     defer popGroup(saved);
-    const polar = sk_tool == .polar_array;
+    const polar = false;
     const labels: [3][]const u8 = if (polar) .{ "Around", "Rings", "Sweep, °" } else .{ "Columns", "Rows", "" };
     inline for (0..3) |i| if (i < 2 or polar) {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
@@ -34151,6 +34370,7 @@ fn skRefIcon(s: *const skl.Sketch, r: skl.Ref) icons.GIcon {
     if (g >= s.geometry.items.len) return .geo_point;
     return switch (s.geometry.items[g].kind) {
         .point, .affine => .geo_point,
+        .polar_grid => .geo_circle,
         .segment => .geo_segment,
         .circle => .geo_circle,
         .arc => .geo_arc,
@@ -34175,7 +34395,9 @@ fn skRefName(buf: []u8, s: *const skl.Sketch, r: skl.Ref) []const u8 {
         .arc => if (geo.construction) "construction arc" else "arc",
         .line => "construction line",
         .ray => "ray",
+        .polar_grid => "polar grid",
     };
+    var nb: [48]u8 = undefined;
     const role: []const u8 = switch (r) {
         .geom => "",
         .point => |p| switch (p.role) {
@@ -34184,11 +34406,22 @@ fn skRefName(buf: []u8, s: *const skl.Sketch, r: skl.Ref) []const u8 {
             .end => "end of ",
             .centre => "centre of ",
             .origin => "origin of ",
+            .node => skNodeName(&nb, p),
         },
     };
     const text = if (geo.reference) std.fmt.bufPrint(buf, "{s}{s}", .{ role, kind }) catch kind else std.fmt.bufPrint(buf, "{s}{s} {d}", .{ role, kind, g }) catch kind;
     if (text.len > 0) buf[0] = std.ascii.toUpper(buf[0]);
     return text;
+}
+
+/// A bind point named by where it is: "side 1, ring 2 of ", "last side,
+/// last ring of ".
+fn skNodeName(buf: []u8, p: skl.PointRef) []const u8 {
+    var ib: [16]u8 = undefined;
+    var jb: [16]u8 = undefined;
+    const i = if (p.i == skl.geometry.last) "last side" else std.fmt.bufPrint(&ib, "side {d}", .{p.i + 1}) catch "side";
+    const j = if (p.j == skl.geometry.last) "last ring" else std.fmt.bufPrint(&jb, "ring {d}", .{p.j + 1}) catch "ring";
+    return std.fmt.bufPrint(buf, "{s}, {s} of ", .{ i, j }) catch "bind point of ";
 }
 
 var sk_pw_text: [64]u8 = @splat(0);

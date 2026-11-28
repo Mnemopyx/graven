@@ -163,7 +163,9 @@ fn carrier(s: *const Sketch, g: Geometry) ?Carrier {
             if (sweep <= 0) sweep = 2 * std.math.pi;
             return .{ .round = .{ .c = c, .r = r, .a0 = a0, .sweep = sweep, .closed = false } };
         },
-        .point, .affine => return null,
+        // A macro's sections are not pieces yet (they have no IDs of
+        // their own to choose).
+        .point, .affine, .polar_grid => return null,
     }
 }
 

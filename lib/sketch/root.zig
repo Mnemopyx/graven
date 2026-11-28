@@ -71,6 +71,34 @@ pub const origin: GeomId = 0;
 pub const h_axis: GeomId = 1;
 pub const v_axis: GeomId = 2;
 
+/// A polar grid's sections as drawn, from its values: each ring (an arc
+/// from its first border to its last, or a circle when they are a turn
+/// apart; none at radius 0), then each radial border from its first ring
+/// to its last. Also its outline while it is being placed.
+pub fn polarGridShape(a: Allocator, c: Point, r: [2]f64, t: [2]f64, cols: u32, rings: u32, out: *std.ArrayList(geom.Segment)) Allocator.Error!void {
+    var buf: [4]geom.Segment = undefined;
+    const sweep = t[1] - t[0];
+    const full = @abs(@abs(sweep) - 2 * std.math.pi) < 1e-9;
+    const nr = @max(rings, 1);
+    const nc = @max(cols, 1);
+    for (0..nr + 1) |j| {
+        const rj = r[0] + (r[1] - r[0]) * @as(f64, @floatFromInt(j)) / @as(f64, @floatFromInt(nr));
+        if (!(rj > 1e-9)) continue;
+        if (full) {
+            try out.appendSlice(a, geom.arc(c, rj, 0, 2 * std.math.pi, &buf));
+        } else if (@abs(sweep) > 1e-12) {
+            // geom.arc runs counter-clockwise: from the smaller angle.
+            try out.appendSlice(a, geom.arc(c, rj, if (sweep > 0) t[0] else t[0] + sweep, @abs(sweep), &buf));
+        }
+    }
+    const n: u32 = if (full) nc else nc + 1;
+    if (@abs(r[1] - r[0]) > 1e-9) for (0..n) |i| {
+        const ti = t[0] + sweep * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(nc));
+        const d: Point = .{ .x = @cos(ti), .y = @sin(ti) };
+        try out.append(a, .{ .line = .{ .{ .x = c.x + r[0] * d.x, .y = c.y + r[0] * d.y }, .{ .x = c.x + r[1] * d.x, .y = c.y + r[1] * d.y } } });
+    };
+}
+
 /// A sketch's data, unmanaged: whoever holds it passes the allocator its
 /// lists live in (`a`), and scratch space for solving (`gpa`).
 pub const Sketch = struct {
@@ -182,6 +210,21 @@ pub const Sketch = struct {
         return s.add(a, .{ .kind = .{ .ray = .{ .o = try s.pt(a, o, false), .angle = try s.newVar(a, angle, false) } }, .construction = true });
     }
 
+    /// A polar grid (`geometry.PolarGrid`, a macro object's geometry):
+    /// about `c`, from radius `r0` to `r1` and angle `t0` to `t1`
+    /// (radians), `cols` sections round and `rings` out. Construction
+    /// unless `construction` is false.
+    pub fn addPolarGrid(s: *Sketch, a: Allocator, c: Point, r0: f64, r1: f64, t0: f64, t1: f64, cols: u32, rings: u32, construction: bool) Error!GeomId {
+        if (cols == 0 or rings == 0) return error.WrongKind;
+        return s.add(a, .{ .kind = .{ .polar_grid = .{
+            .c = try s.pt(a, c, false),
+            .r = .{ try s.newVar(a, @max(r0, 0), false), try s.newVar(a, @max(r1, 0), false) },
+            .t = .{ try s.newVar(a, t0, false), try s.newVar(a, t1, false) },
+            .cols = cols,
+            .rings = rings,
+        } }, .construction = construction });
+    }
+
     /// Removes geometry `g` and every constraint on it. Its ID stays
     /// taken; its unknowns are fixed, so they count for nothing.
     pub fn removeGeometry(s: *Sketch, g: GeomId) Error!void {
@@ -209,6 +252,7 @@ pub const Sketch = struct {
             .arc => |ar| &.{ ar.c.x, ar.c.y, ar.a.x, ar.a.y, ar.b.x, ar.b.y },
             .line => |ln| &.{ ln.theta, ln.rho },
             .ray => |ry| &.{ ry.o.x, ry.o.y, ry.angle },
+            .polar_grid => |pg| &.{ pg.c.x, pg.c.y, pg.r[0], pg.r[1], pg.t[0], pg.t[1] },
         };
         @memcpy(buf[0..list.len], list);
         return buf[0..list.len];
@@ -218,7 +262,7 @@ pub const Sketch = struct {
     /// sketch is solved with the point held at `to`, then without, so it
     /// settles back onto what its constraints allow, the least way.
     pub fn drag(s: *Sketch, a: Allocator, gpa: Allocator, r: PointRef, to: Point) Error!solver.Result {
-        _ = try s.pointOf(r);
+        _ = try s.point(r);
         try s.constraints.append(a, .{ .kind = .{ .fixed = .{ .p = r, .at = to } } });
         _ = try solver.solve(s, gpa);
         _ = s.constraints.pop();
@@ -754,8 +798,15 @@ pub const Sketch = struct {
                 segs[segs.len - 1].conic.p[2] = p1;
                 try out.appendSlice(a, segs);
             },
+            .polar_grid => |pg| try s.polarGridSegments(a, pg, out),
             .point, .affine, .line, .ray => {},
         }
+    }
+
+    /// A polar grid's sections as drawn (`polarGridShape`).
+    pub fn polarGridSegments(s: *const Sketch, a: Allocator, pg: geometry.PolarGrid, out: *std.ArrayList(geom.Segment)) Allocator.Error!void {
+        const v = s.vars.items;
+        try polarGridShape(a, s.val(pg.c), .{ v[pg.r[0]], v[pg.r[1]] }, .{ v[pg.t[0]], v[pg.t[1]] }, pg.cols, pg.rings, out);
     }
 
     /// The sketch's box: the bounds of its bounded geometry, construction

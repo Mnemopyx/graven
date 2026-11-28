@@ -1485,6 +1485,11 @@ pub const SketchEdit = union(enum) {
     /// rings over `sweep` degrees; or rectangular, `cols` × `rows` cells
     /// between corners `at` and `to`.
     array: struct { polar: bool, at: geom.Point, to: geom.Point, cols: u32, rows: u32, sweep: f64 = 360 },
+    /// A polar grid, a macro object (`sketch_.composite.addPolarGrid`):
+    /// about `c`, from radius `r[0]` to `r[1]` and angle `t[0]` to `t[1]`
+    /// (radians, either order; a turn apart: all the way round), `cols`
+    /// sections round and `rings` out.
+    polar_grid: struct { c: geom.Point, r: [2]f64, t: [2]f64, cols: u32, rings: u32 },
     /// A regular polygon (see `sketch_.polygon`) of `sides`, centred at
     /// `c`, a corner at `corner`.
     polygon: struct { c: geom.Point, corner: geom.Point, sides: u32, construction: bool = false },
@@ -6212,6 +6217,10 @@ pub const Model = struct {
                     .polar => |p| p.centre,
                     .rect => |q| q.left,
                 };
+            },
+            .polar_grid => |e| {
+                const obj = sketch_.composite.addPolarGrid(sk, al, e.c, e.r[0], e.r[1], e.t[0], e.t[1], e.cols, e.rings) catch |err| return compositeError(err);
+                out = sketch_.composite.macroGeometry(sk, obj) orelse return error.BadSize;
             },
             .polygon => |e| {
                 const obj = sketch_.composite.addPolygon(sk, al, e.c, e.corner, e.sides, e.construction) catch |err| return compositeError(err);

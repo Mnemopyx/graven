@@ -48,6 +48,9 @@ pub const Kind = enum {
     regular_polygon,
     rect_array,
     polar_array,
+    /// A polar grid, a macro object: one `geometry.PolarGrid`, its counts
+    /// properties (`columns`, `rings`).
+    polar_grid,
     connection,
     caption,
 };

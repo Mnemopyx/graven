@@ -57,6 +57,9 @@ pub const Geometry = struct {
         line: struct { theta: VarId, rho: VarId },
         /// From `o` in direction (cos angle, sin angle), without end.
         ray: struct { o: Pt, angle: VarId },
+        /// A macro (see `PolarGrid`): its driving geometry as unknowns,
+        /// its counts as properties.
+        polar_grid: PolarGrid,
     },
     /// Construction geometry guides and is constrained like any other, but
     /// is never output. Infinite lines and rays are always construction.
@@ -75,10 +78,82 @@ pub const Geometry = struct {
 };
 
 /// A point of a geometry: a point itself, a segment's or arc's start or
-/// end, a circle's or arc's centre, a ray's origin.
+/// end, a circle's or arc's centre, a ray's origin; a macro's bind point
+/// (`node`: a polar grid's `i`th angle, `j`th radius, either `last` for
+/// the last, which stays the last whatever its count).
 pub const PointRef = struct {
     geom: GeomId,
-    role: enum { point, start, end, centre, origin } = .point,
+    role: enum { point, start, end, centre, origin, node } = .point,
+    i: u32 = 0,
+    j: u32 = 0,
+};
+
+/// A bind point's index meaning the last, whatever the count.
+pub const last: u32 = std.math.maxInt(u32);
+
+/// A polar grid, a macro object (the owner, 2026-11-27): held by its
+/// driving geometry alone, a centre `c`, two radii `r` and two angles `t`
+/// (radians), and by its counts, which are properties, not geometry. Its
+/// sections run from angle `t[0]` to `t[1]` (`cols` of them; all the way
+/// round when they are a turn apart) and from radius `r[0]` to `r[1]`
+/// (`rings`); neither pair has an order, and a radius may be 0 (an inner
+/// one over 0 leaves room, a switch stem's say). Changing a count moves no
+/// unknown: only how many sections are drawn, and which bind points there
+/// are, change. Its bind points (`PointRef.node`) are where its radial
+/// borders meet its rings: computed from its unknowns, so the solver sees
+/// them as it sees any point.
+pub const PolarGrid = struct {
+    c: Pt,
+    r: [2]VarId,
+    t: [2]VarId,
+    cols: u32 = 1,
+    rings: u32 = 1,
+
+    /// Index `k` of a run of `n`, `last` read as `n`; null when past it.
+    pub fn index(k: u32, n: u32) ?u32 {
+        if (k == last) return n;
+        return if (k <= n) k else null;
+    }
+
+    /// Whether it has bind point (i, j).
+    pub fn has(g: PolarGrid, i: u32, j: u32) bool {
+        return index(i, g.cols) != null and index(j, g.rings) != null;
+    }
+
+    /// Its whole sweep (radians, signed: from t[0] to t[1]).
+    pub fn sweep(g: PolarGrid, vars: []const f64) f64 {
+        return vars[g.t[1]] - vars[g.t[0]];
+    }
+
+    /// Whether it goes all the way round (its last border its first).
+    pub fn full(g: PolarGrid, vars: []const f64) bool {
+        return @abs(@abs(g.sweep(vars)) - 2 * std.math.pi) < 1e-9;
+    }
+
+    /// Its `i`th border's angle, `j`th ring's radius (indices in range).
+    pub fn angle(g: PolarGrid, vars: []const f64, i: u32) f64 {
+        const f = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(@max(g.cols, 1)));
+        return vars[g.t[0]] + (vars[g.t[1]] - vars[g.t[0]]) * f;
+    }
+
+    pub fn radius(g: PolarGrid, vars: []const f64, j: u32) f64 {
+        const f = @as(f64, @floatFromInt(j)) / @as(f64, @floatFromInt(@max(g.rings, 1)));
+        return vars[g.r[0]] + (vars[g.r[1]] - vars[g.r[0]]) * f;
+    }
+
+    /// Where bind point (i, j) is now.
+    pub fn node(g: PolarGrid, vars: []const f64, i: u32, j: u32) Error!Point {
+        const ii = index(i, g.cols) orelse return error.NoSuchPoint;
+        const jj = index(j, g.rings) orelse return error.NoSuchPoint;
+        const r = g.radius(vars, jj);
+        const t = g.angle(vars, ii);
+        return .{ .x = vars[g.c.x] + r * @cos(t), .y = vars[g.c.y] + r * @sin(t) };
+    }
+
+    /// Its unknowns.
+    pub fn unknowns(g: PolarGrid) [6]VarId {
+        return .{ g.c.x, g.c.y, g.r[0], g.r[1], g.t[0], g.t[1] };
+    }
 };
 
 /// A distance that can be held equal to another: between two points (straight,
@@ -200,6 +275,8 @@ pub const Store = struct {
             },
             .ray => |ry| if (r.role == .origin) ry.o else error.NoSuchPoint,
             .line => error.NoSuchPoint,
+            // Its bind points have no unknowns of their own: see `point`.
+            .polar_grid => |pg| if (r.role == .centre) pg.c else error.NoSuchPoint,
         };
     }
 
@@ -207,10 +284,28 @@ pub const Store = struct {
     pub fn point(s: Store, r: PointRef) Error!Point {
         if (r.geom < s.geometry.len and !s.geometry[r.geom].removed) switch (s.geometry[r.geom].kind) {
             .affine => |af| return if (r.role == .point) .{ .x = af.x.at(s.vars), .y = af.y.at(s.vars) } else error.NoSuchPoint,
+            .polar_grid => |pg| if (r.role == .node) return pg.node(s.vars, r.i, r.j),
             else => {},
         };
         const p = try s.pointOf(r);
         return .{ .x = s.vars[p.x], .y = s.vars[p.y] };
+    }
+
+    /// Whether `c` names a bind point its macro no longer has (its count
+    /// was lowered): it is kept, flagged, and left out of solving.
+    pub fn abandoned(s: Store, c: Constraint) bool {
+        var buf: [4]Ref = undefined;
+        for (refs(c, &buf)) |r| switch (r) {
+            .point => |p| if (p.role == .node) {
+                if (p.geom >= s.geometry.len or s.geometry[p.geom].removed) return true;
+                switch (s.geometry[p.geom].kind) {
+                    .polar_grid => |pg| if (!pg.has(p.i, p.j)) return true,
+                    else => return true,
+                }
+            },
+            .geom => {},
+        };
+        return false;
     }
 
     /// The rows a solve takes (`solve.Rows`): each arc's own equation
@@ -226,8 +321,10 @@ pub const Store = struct {
             else => {},
         };
         for (constraints, 0..) |c, ci| {
-            // A reference dimension only reports.
-            if (!c.driving) continue;
+            // A reference dimension only reports; one on a bind point a
+            // count took away holds nothing until it is back (a problem
+            // to fix: `abandoned`).
+            if (!c.driving or s.abandoned(c)) continue;
             var l: Local = .{ .s = s };
             var res: [2]D = undefined;
             const k = try l.residuals(c, &res);
@@ -415,6 +512,20 @@ pub const Local = struct {
     pub fn ref(l: *Local, r: PointRef) Error!V {
         if (r.geom < l.s.geometry.len and !l.s.geometry[r.geom].removed) switch (l.s.geometry[r.geom].kind) {
             .affine => |af| return if (r.role == .point) .{ .x = l.coord(af.x), .y = l.coord(af.y) } else error.NoSuchPoint,
+            .polar_grid => |pg| if (r.role == .node) {
+                // c + r_j (cos t_i, sin t_i), each interpolated between
+                // the grid's two.
+                const ii = PolarGrid.index(r.i, pg.cols) orelse return error.NoSuchPoint;
+                const jj = PolarGrid.index(r.j, pg.rings) orelse return error.NoSuchPoint;
+                const fi = @as(f64, @floatFromInt(ii)) / @as(f64, @floatFromInt(@max(pg.cols, 1)));
+                const fj = @as(f64, @floatFromInt(jj)) / @as(f64, @floatFromInt(@max(pg.rings, 1)));
+                const r0 = l.get(pg.r[0]);
+                const t0 = l.get(pg.t[0]);
+                const rad = r0.add(l.get(pg.r[1]).sub(r0).scale(fj));
+                const t = t0.add(l.get(pg.t[1]).sub(t0).scale(fi));
+                const c = l.p(pg.c);
+                return .{ .x = c.x.add(rad.mul(t.cos())), .y = c.y.add(rad.mul(t.sin())) };
+            },
             else => {},
         };
         return l.p(try l.s.pointOf(r));
@@ -546,7 +657,7 @@ pub const Local = struct {
                         const cc = l.p(ar.c);
                         break :blk (try l.ref(po.p)).sub(cc).len().sub(l.p(ar.a).sub(cc).len());
                     },
-                    .point, .affine => return error.WrongKind,
+                    .point, .affine, .polar_grid => return error.WrongKind,
                 };
             },
             .fixed => |f| {

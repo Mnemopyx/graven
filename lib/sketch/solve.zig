@@ -71,8 +71,9 @@ fn joinCoincident(s: *Sketch, gpa: Allocator) root.Error!void {
     var any = false;
     for (s.constraints.items) |c| switch (c.kind) {
         .coincident => |ps| {
-            const p = try s.pointOf(ps[0]);
-            const q = try s.pointOf(ps[1]);
+            // A bind point (no unknowns of its own) is not joined.
+            const p = s.pointOf(ps[0]) catch continue;
+            const q = s.pointOf(ps[1]) catch continue;
             ys[p.x] = p.y;
             ys[q.x] = q.y;
             var rp = find(parent, p.x);
@@ -88,7 +89,7 @@ fn joinCoincident(s: *Sketch, gpa: Allocator) root.Error!void {
     if (!any) return;
     for (s.constraints.items) |c| switch (c.kind) {
         .coincident => |ps| for (ps) |r| {
-            const p = try s.pointOf(r);
+            const p = s.pointOf(r) catch continue;
             const lead = find(parent, p.x);
             if (lead == p.x or s.fixed.items[p.x]) continue;
             s.vars.items[p.x] = s.vars.items[lead];
@@ -124,6 +125,9 @@ pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) root.Error!Analysis {
             .arc => |ar| free_var[ar.c.x] or free_var[ar.c.y] or free_var[ar.a.x] or free_var[ar.a.y] or free_var[ar.b.x] or free_var[ar.b.y],
             .line => |ln| free_var[ln.theta] or free_var[ln.rho],
             .ray => |ry| free_var[ry.o.x] or free_var[ry.o.y] or free_var[ry.angle],
+            .polar_grid => |pg| for (pg.unknowns()) |v| {
+                if (free_var[v]) break true;
+            } else false,
         };
         if (any) try free.append(out, @intCast(gi));
     }

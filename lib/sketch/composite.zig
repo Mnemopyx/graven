@@ -85,6 +85,55 @@ pub fn addPolar(s: *Sketch, a: Allocator, c: Point, r: f64, first_angle: f64, sw
     return id;
 }
 
+/// A polar grid as a macro object (the owner, 2026-11-27): one geometry,
+/// `Sketch.addPolarGrid`'s, its driving unknowns a centre, two radii and
+/// two angles; its counts are properties. See `setCount`.
+pub fn addPolarGrid(s: *Sketch, a: Allocator, c: Point, r0: f64, r1: f64, t0: f64, t1: f64, cols: u32, rings: u32) Error!GroupId {
+    const first = s.geometry.items.len;
+    _ = try s.addPolarGrid(a, c, r0, r1, t0, t1, cols, rings, true);
+    const id = try seal(s, a, first, .polar_grid);
+    try s.groups.setProp(a, id, "columns", @floatFromInt(cols));
+    try s.groups.setProp(a, id, "rings", @floatFromInt(rings));
+    return id;
+}
+
+/// A macro object's one geometry (a polar grid's), if it is one.
+pub fn macroGeometry(s: *const Sketch, id: GroupId) ?GeomId {
+    const g = s.groups.get(id) catch return null;
+    if (g.kind != .polar_grid or g.geometry.items.len == 0) return null;
+    const m = g.geometry.items[0];
+    if (m >= s.geometry.items.len or s.geometry.items[m].kind != .polar_grid) return null;
+    return m;
+}
+
+/// The constraints on bind points a macro object no longer has (a count
+/// lowered): kept, left out of solving, each a problem to fix (raise the
+/// count again, or remove the constraint). Into `out`.
+pub fn abandoned(s: *const Sketch, a: Allocator, out: *std.ArrayList(root.ConstraintId)) Allocator.Error!void {
+    const st = s.store();
+    for (s.constraints.items, 0..) |c, ci| if (st.abandoned(c)) try out.append(a, @intCast(ci));
+}
+
+/// The count a constraint on a vanished bind point needs back: the least
+/// value of property `name` (`columns` or `rings`) under which every bind
+/// point it names is there again (null: not that).
+pub fn countNeeded(s: *const Sketch, c: Constraint, name: []const u8) ?u32 {
+    var buf: [4]root.Ref = undefined;
+    var need: ?u32 = null;
+    for (root.refs(c, &buf)) |r| switch (r) {
+        .point => |p| if (p.role == .node and p.geom < s.geometry.items.len) switch (s.geometry.items[p.geom].kind) {
+            .polar_grid => |pg| {
+                const k = if (std.mem.eql(u8, name, "columns")) p.i else p.j;
+                const n = if (std.mem.eql(u8, name, "columns")) pg.cols else pg.rings;
+                if (k != root.geometry.last and k > n) need = @max(need orelse 0, k);
+            },
+            else => {},
+        },
+        .geom => {},
+    };
+    return need;
+}
+
 /// A rectangular array (`arrays.addRect`) as an object.
 pub fn addRect(s: *Sketch, a: Allocator, b: geom.Box, cols: u32, rows: u32) Error!GroupId {
     const first = s.geometry.items.len;
@@ -152,6 +201,9 @@ fn roles(s: *const Sketch, a: Allocator, g: *const group.Group) Error![]Role {
 /// array's box.
 pub const Placement = union(enum) {
     polygon: struct { c: Point, corner: Point },
+    /// A polar grid's centre, outer radius and first angle, as a polar
+    /// array's (its other radius and angle follow in proportion).
+    grid: struct { c: Point, r: f64, first: f64 },
     polar: struct { c: Point, r: f64, first: f64 },
     rect: geom.Box,
 };
@@ -168,6 +220,15 @@ fn placement(s: *const Sketch, g: *const group.Group) Error!Placement {
             const c = try s.point(.{ .geom = m[0] });
             const e = try s.point(.{ .geom = m[1], .role = .end });
             return .{ .polar = .{ .c = c, .r = std.math.hypot(e.x - c.x, e.y - c.y), .first = std.math.atan2(e.y - c.y, e.x - c.x) } };
+        },
+        .polar_grid => {
+            if (m.len < 1) return error.NotAnObject;
+            const pg = switch (s.geometry.items[m[0]].kind) {
+                .polar_grid => |x| x,
+                else => return error.NotAnObject,
+            };
+            const v = s.vars.items;
+            return .{ .grid = .{ .c = .{ .x = v[pg.c.x], .y = v[pg.c.y] }, .r = @max(v[pg.r[0]], v[pg.r[1]]), .first = v[pg.t[0]] } };
         },
         .rect_array => {
             const cols = count(g, "columns");
@@ -223,13 +284,28 @@ pub fn sealedGeometry(s: *const Sketch, g: GeomId) bool {
 /// Constraint `c` is internal to an object.
 pub fn sealedConstraint(s: *const Sketch, c: root.ConstraintId) bool {
     if (c >= s.constraints.items.len) return false;
-    return s.groups.objectOf(s.constraints.items[c].group) != group.none;
+    return sealedBy(s, s.groups.objectOf(s.constraints.items[c].group));
 }
 
 /// Constraint `c`, added, would be internal to an object: everything it
 /// names is in one. One naming something outside too is external.
 pub fn sealsConstraint(s: *const Sketch, c: Constraint) bool {
-    return s.groups.objectOf(s.groups.home(s.geometry.items, c)) != group.none;
+    return sealedBy(s, s.groups.objectOf(s.groups.home(s.geometry.items, c)));
+}
+
+/// Whether a constraint homed in object `o` is its own (not editable). A
+/// macro object has no constraints of its own: every constraint on its
+/// bind points, even between two of them (its radius as a distance from
+/// its centre), is the user's, how it is held.
+fn sealedBy(s: *const Sketch, o: GroupId) bool {
+    if (o == group.none) return false;
+    const g = s.groups.get(o) catch return true;
+    return !isMacro(g.kind);
+}
+
+/// A macro object: driving geometry and counts, made by no constraints.
+pub fn isMacro(kind: group.Kind) bool {
+    return kind == .polar_grid;
 }
 
 /// Where object `id` is now.
@@ -289,6 +365,11 @@ pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
             if (!(p.r > 0 and t.r > 0)) return error.WrongKind;
             break :blk Map.similar(p.c, t.c, t.first - p.first, t.r / p.r);
         },
+        .grid => |p| blk: {
+            const t = to.grid;
+            if (!(p.r > 0 and t.r > 0)) return error.WrongKind;
+            break :blk Map.similar(p.c, t.c, t.first - p.first, t.r / p.r);
+        },
         .polygon => |p| blk: {
             const t = to.polygon;
             const r0 = std.math.hypot(p.corner.x - p.c.x, p.corner.y - p.c.y);
@@ -303,7 +384,7 @@ pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
     try s.groups.internalGeometry(a, id, &members);
     // Checked first, so a map that cannot be made changes nothing.
     for (members.items) |g| switch (s.geometry.items[g].kind) {
-        .circle => if (map.scale() == null) return error.WrongKind,
+        .circle, .polar_grid => if (map.scale() == null) return error.WrongKind,
         .affine => return error.WrongKind,
         else => {},
     };
@@ -346,6 +427,16 @@ pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
                 v[ln.theta] = theta;
                 v[ln.rho] = @cos(theta) * p.x + @sin(theta) * p.y;
             },
+            .polar_grid => |pg| {
+                // Its centre mapped, its radii scaled, its angles turned.
+                P.set(v, map, pg.c);
+                const k = map.scale() orelse 1;
+                v[pg.r[0]] *= k;
+                v[pg.r[1]] *= k;
+                const turn = std.math.atan2(map.yx, map.xx);
+                v[pg.t[0]] += turn;
+                v[pg.t[1]] += turn;
+            },
             .affine => unreachable,
         }
     }
@@ -370,6 +461,7 @@ pub fn removeObject(s: *Sketch, a: Allocator, id: GroupId) Error!void {
 pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64, remap: *Remap) Error!void {
     const g = try s.groups.get(id);
     if (g.kind == .plain or g.kind == .connection or g.kind == .caption) return error.NotAnObject;
+    if (g.kind == .polar_grid) return setCount(s, a, id, name, value, remap);
     const kind = g.kind;
     const where = try placement(s, g);
     const old_roles = try roles(s, a, g);
@@ -407,6 +499,7 @@ pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f
     switch (where) {
         .polygon => |p| _ = try polygon.addRegular(s, a, p.c, p.corner, count(gg, "sides"), (gg.prop("construction") orelse 0) != 0),
         .polar => |p| _ = try arrays.addPolar(s, a, p.c, p.r, p.first, gg.prop("sweep").?, count(gg, "columns"), count(gg, "rings")),
+        .grid => unreachable,
         .rect => |b| _ = try arrays.addRect(s, a, b, count(gg, "columns"), count(gg, "rows")),
     }
     const made = try since(s, a, first);
@@ -442,6 +535,29 @@ pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f
             .free => {},
         }
         if (k.normal) |n| k.normal = remap.get(n) orelse n;
+    }
+}
+
+/// A macro object's count set (the owner, 2026-11-27): nothing is made
+/// again and no unknown moves; only how many sections are drawn and which
+/// bind points there are change. Constraints on bind points it no longer
+/// has are kept, out of the solve, and counted in `remap.dropped` (each is
+/// a problem with its fixes: see `abandoned`); they hold again should the
+/// count come back.
+fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64, remap: *Remap) Error!void {
+    const m = macroGeometry(s, id) orelse return error.NotAnObject;
+    const n: u32 = @intFromFloat(@max(0, @round(value)));
+    if (n < 1 or n > 10_000) return error.WrongKind;
+    const pg = &s.geometry.items[m].kind.polar_grid;
+    if (std.mem.eql(u8, name, "columns")) {
+        pg.cols = n;
+    } else if (std.mem.eql(u8, name, "rings")) {
+        pg.rings = n;
+    } else return error.WrongKind;
+    try s.groups.setProp(a, id, name, @floatFromInt(n));
+    const st = s.store();
+    for (s.constraints.items) |c| {
+        if (root.refersTo(c, m) and st.abandoned(c)) remap.dropped += 1;
     }
 }
 
@@ -565,4 +681,58 @@ test "an object placed: a rectangular array to a new box, a polar one turned and
     try std.testing.expectApproxEqAbs(60, pp.c.x, 1e-9);
     try std.testing.expectApproxEqAbs(15, pp.r, 1e-9);
     try std.testing.expectApproxEqAbs(std.math.pi / 3.0, pp.first, 1e-9);
+}
+
+test "a polar grid macro: counts are properties, bind points follow them, lost ones flagged" {
+    const al = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(al);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try Sketch.init(a);
+    // A stem's room in the middle: radius 3 to 12, a quarter turn the
+    // "wrong" way (angles in either order), 4 sections round, 3 out.
+    const id = try addPolarGrid(&s, a, .{ .x = 0, .y = 0 }, 12, 3, std.math.pi / 2.0, 0, 4, 3);
+    const m = macroGeometry(&s, id).?;
+    const vars_before = s.vars.items.len;
+    // The outer corner held to a point outside it.
+    const p = try s.addPoint(a, .{ .x = 30, .y = 1 }, false);
+    _ = try s.addConstraint(a, .{ .kind = .{ .fixed = .{ .p = .{ .geom = p }, .at = .{ .x = 20, .y = 0 } } } });
+    _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = m, .role = .node, .i = root.geometry.last, .j = 0 }, .{ .geom = p } } } });
+    // Its centre to the origin; the inner radius's corner held at x 3 on it.
+    _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = m, .role = .centre }, .{ .geom = root.origin } } } });
+    // A constraint on the third border's middle bind point.
+    _ = try s.addConstraint(a, .{ .kind = .{ .distance = .{ .a = .{ .geom = m, .role = .node, .i = 3, .j = 1 }, .b = .{ .geom = root.origin }, .value = 9 } } });
+    const res = try s.solve(a);
+    try testing.expect(res.solved);
+    const corner = try s.point(.{ .geom = m, .role = .node, .i = root.geometry.last, .j = 0 });
+    try testing.expectApproxEqAbs(20, corner.x, 1e-6);
+    try testing.expectApproxEqAbs(0, corner.y, 1e-6);
+
+    // Fewer columns: nothing made again, no unknown added; the constraint
+    // on border 3 is abandoned (kept, flagged), the corner's still holds.
+    var remap: Remap = .{};
+    try setProp(&s, a, id, "columns", 2, &remap);
+    try testing.expectEqual(vars_before, s.vars.items.len - 2);
+    try testing.expectEqual(@as(usize, 1), remap.dropped);
+    var lost: std.ArrayList(root.ConstraintId) = .empty;
+    try abandoned(&s, a, &lost);
+    try testing.expectEqual(@as(usize, 1), lost.items.len);
+    try testing.expectEqual(@as(?u32, 3), countNeeded(&s, s.constraints.items[lost.items[0]], "columns"));
+    try testing.expect((try s.solve(a)).solved);
+    const corner2 = try s.point(.{ .geom = m, .role = .node, .i = root.geometry.last, .j = 0 });
+    try testing.expectApproxEqAbs(20, corner2.x, 1e-6);
+    // Back to four: it holds again.
+    try setProp(&s, a, id, "columns", 4, &remap);
+    lost.clearRetainingCapacity();
+    try abandoned(&s, a, &lost);
+    try testing.expectEqual(@as(usize, 0), lost.items.len);
+    try testing.expectEqual(@as(?f64, 4), (try s.groups.get(id)).prop("columns"));
+    // Drawn: 4 rings (radius 0 would draw none) and 5 borders.
+    var segs: std.ArrayList(geom.Segment) = .empty;
+    try s.appendSegments(a, s.geometry.items[m], &segs);
+    var lines: usize = 0;
+    for (segs.items) |sg| if (sg == .line) {
+        lines += 1;
+    };
+    try testing.expectEqual(@as(usize, 5), lines);
 }
