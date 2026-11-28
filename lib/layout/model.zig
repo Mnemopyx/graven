@@ -1512,7 +1512,9 @@ pub const SketchEdit = union(enum) {
     segment: struct { a: geom.Point, b: geom.Point, construction: bool = false },
     circle: struct { c: geom.Point, r: f64, construction: bool = false },
     /// About `c`, counter-clockwise from `a` to `b`'s angle.
-    arc: struct { c: geom.Point, a: geom.Point, b: geom.Point, construction: bool = false },
+    /// As a library object (`sketch_.library.addArc`: its radius, start
+    /// and end angles its parameters) when `object`.
+    arc: struct { c: geom.Point, a: geom.Point, b: geom.Point, construction: bool = false, object: bool = false },
     line: struct { through: geom.Point, angle: f64 },
     ray: struct { o: geom.Point, angle: f64 },
     /// An array's geometry (see `sketch_.arrays`): polar, centred at `at`
@@ -6471,7 +6473,10 @@ pub const Model = struct {
             .point => |e| out = try sk.addPoint(al, e.at, e.construction),
             .segment => |e| out = try sk.addSegment(al, e.a, e.b, e.construction),
             .circle => |e| out = try sk.addCircle(al, e.c, e.r, e.construction),
-            .arc => |e| out = try sk.addArc(al, e.c, e.a, e.b, e.construction),
+            .arc => |e| out = if (e.object)
+                sketch_.library.addArc(sk, al, e.c, e.a, e.b, e.construction) catch |err| return libraryError(err)
+            else
+                try sk.addArc(al, e.c, e.a, e.b, e.construction),
             .line => |e| out = try sk.addLine(al, e.through, e.angle),
             .ray => |e| out = try sk.addRay(al, e.o, e.angle),
             .array => |e| {

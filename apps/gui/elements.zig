@@ -1102,6 +1102,7 @@ pub const all = [_]Element{
     .{ .id = "sketch.tool.polyline", .kind = .button, .action = "sketch.tool.*", .label = "Polyline" },
     .{ .id = "sketch.tool.arc-centre", .kind = .button, .action = "sketch.tool.*", .label = "Centre" },
     .{ .id = "sketch.tool.arc-3pt", .kind = .button, .action = "sketch.tool.*", .label = "3 points" },
+    .{ .id = "sketch.tool.arc-tangent", .kind = .button, .action = "sketch.tool.*", .label = "Tangent" },
     .{ .id = "sketch.tool.circle", .kind = .button, .action = "sketch.tool.*", .label = "Centre" },
     .{ .id = "sketch.tool.circle-3pt", .kind = .button, .action = "sketch.tool.*", .label = "3 points" },
     .{ .id = "sketch.tool.line", .kind = .button, .action = "sketch.tool.*", .label = "Line" },
