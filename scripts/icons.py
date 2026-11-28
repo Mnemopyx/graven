@@ -287,31 +287,34 @@ def drawn(outline):
 
 # The round rectangle tools' frame: a rectangle 20 x 16, corners radius 5.
 RR = (2.0, 1.5, 22.0, 17.5, 5.0)
+H = math.sqrt(0.5)  # an arc's radius at 45 degrees
 
 
 def roundrect_corners():
     """Round rectangle by opposite corners: the two corners dragged between
     (hot) on the dashed construction rectangle, and the third click, the
-    centre of a corner's arc (hot), its radii to the arc's ends dashed."""
+    centre of a corner's arc (hot), a dashed radius from it to the arc at 45
+    degrees."""
     x0, y0, x1, y1, r = RR
     rr = rounded(x0, y0, x1 - x0, y1 - y0, r)
     cx, cy = x1 - r, y0 + r
     return (made(rr) + construction(closed([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]))
-            + construction([(cx, y0), (cx, cy), (x1, cy)]) + drawn(rr)
+            + construction([(cx, cy), (cx + r * H, cy - r * H)]) + drawn(rr)
             + hot(x0, y0) + hot(x1, y1) + hot(cx, cy))
 
 
 def roundrect_centre():
     """Round rectangle by its centre, mirrored: the centre (hot) where the
     dashed mirror axes cross, one corner (hot) on the dashed construction
-    rectangle, and the centre of a corner's arc (hot)."""
+    rectangle, and the centre of a corner's arc (hot), a dashed radius from
+    it to the arc at 45 degrees."""
     x0, y0, x1, y1, r = RR
     rr = rounded(x0, y0, x1 - x0, y1 - y0, r)
     mx, my = (x0 + x1) / 2, (y0 + y1) / 2
     cx, cy = x0 + r, y0 + r
     return (made(rr) + construction(closed([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]))
             + construction([(mx, y0 - 1.2), (mx, y1 + 1.2)]) + construction([(x0 - 1.2, my), (x1 + 1.2, my)])
-            + construction([(cx, y0), (cx, cy), (x0, cy)]) + drawn(rr)
+            + construction([(cx, cy), (cx - r * H, cy - r * H)]) + drawn(rr)
             + hot(mx, my) + hot(x1, y1) + hot(cx, cy))
 
 
