@@ -20,6 +20,14 @@
 //! by half or more, worked out per texel and averaged (thin ink keeps its
 //! weight); otherwise from the field, bilinear. Rasters are cached per
 //! icon, size in device pixels and ink colour.
+//!
+//! Hinted cells: a glyph with `px` is its icon hinted for a button exactly
+//! that many device pixels square (its horizontal and vertical lines on
+//! that size's pixel grid; scripts/icons.py, "Hinting"), its cell a whole
+//! multiple of px. Drawn at that size, the icon comes from it; at any
+//! other, from the free cell. A hinted cell is only used with the free
+//! cell of its own file, so a user's icon replacing Graven's is never
+//! drawn as Graven's hinted one.
 
 const std = @import("std");
 const dvui = @import("dvui");
@@ -45,8 +53,8 @@ pub const Sheet = struct {
     dark_slots: []const Override = &.{},
 };
 
-/// An icon: its file and its cell's top left there.
-pub const Cell = struct { sheet: *const Sheet, x: u32, y: u32 };
+/// An icon: its file, its cell's top left there and its side (texels).
+pub const Cell = struct { sheet: *const Sheet, x: u32, y: u32, size: u32 };
 
 var arena_state: ?std.heap.ArenaAllocator = null;
 var cells: std.StringHashMapUnmanaged(Cell) = .empty;
@@ -136,6 +144,7 @@ const Json = struct {
     } = .{},
     glyphs: []const struct {
         icon: ?[]const u8 = null,
+        px: ?u32 = null,
         atlasBounds: ?struct { left: f32, top: f32, right: f32, bottom: f32 } = null,
     },
 };
@@ -176,12 +185,14 @@ fn add(a: std.mem.Allocator, json: []const u8, png: []const u8, what: []const u8
     for (j.glyphs) |g| {
         const name = g.icon orelse continue;
         const b = g.atlasBounds orelse continue;
+        const side = if (g.px != null) @abs(b.right - b.left) else j.atlas.size;
         const top = if (bottom) @as(f32, @floatFromInt(h)) - b.top else b.top;
-        if (b.left < 0 or top < 0 or b.left + j.atlas.size > @as(f32, @floatFromInt(w)) or top + j.atlas.size > @as(f32, @floatFromInt(h))) {
+        if (side < 1 or b.left < 0 or top < 0 or b.left + side > @as(f32, @floatFromInt(w)) or top + side > @as(f32, @floatFromInt(h))) {
             std.log.warn("icons: {s}: {s} lies outside its image", .{ what, name });
             continue;
         }
-        try cells.put(a, try a.dupe(u8, name), .{ .sheet = sheet, .x = @intFromFloat(b.left), .y = @intFromFloat(top) });
+        const key = if (g.px) |px| try std.fmt.allocPrint(a, "{s}@{d}", .{ name, px }) else try a.dupe(u8, name);
+        try cells.put(a, key, .{ .sheet = sheet, .x = @intFromFloat(b.left), .y = @intFromFloat(top), .size = @intFromFloat(side) });
     }
 }
 
@@ -201,6 +212,16 @@ pub fn get(name: []const u8) ?Cell {
     return cells.get(name);
 }
 
+/// Icon `name`'s cell hinted for `px` device pixels, if `free`'s file has
+/// one.
+fn hinted(free: Cell, name: []const u8, px: u32) ?Cell {
+    if (platform.env("GRAVEN_ICON_HINTS")) |v| if (std.mem.eql(u8, v, "0")) return null;
+    var buf: [128]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}@{d}", .{ name, px }) catch return null;
+    const h = cells.get(key) orelse return null;
+    return if (h.sheet == free.sheet) h else null;
+}
+
 /// The ink colour icon `name`'s file asks for.
 pub fn inkOf(c: Cell) dvui.Color {
     return .{ .r = c.sheet.ink[0], .g = c.sheet.ink[1], .b = c.sheet.ink[2] };
@@ -214,8 +235,9 @@ pub fn draw(name: []const u8, r: dvui.Rect.Physical, ink: dvui.Color, colormod: 
 
 /// `draw`, its override slots coloured by `scheme`.
 pub fn drawIn(name: []const u8, r: dvui.Rect.Physical, ink: dvui.Color, colormod: dvui.Color, scheme: Scheme) bool {
-    const c = get(name) orelse return false;
+    const free = get(name) orelse return false;
     const px: u32 = @intFromFloat(@max(1, @round(@min(r.w, r.h))));
+    const c = hinted(free, name, px) orelse free;
     const ink_key: u32 = @bitCast([4]u8{ ink.r, ink.g, ink.b, ink.a });
     const tex = for (cached.items) |e| {
         if (e.px == px and e.ink == ink_key and e.scheme == scheme and std.mem.eql(u8, e.name, name)) break e.tex;
@@ -237,9 +259,9 @@ pub fn drawIn(name: []const u8, r: dvui.Rect.Physical, ink: dvui.Color, colormod
 /// Icon `c` as `px` x `px` premultiplied pixels, its ink `ink`.
 pub fn raster(c: Cell, px: u32, ink: Rgb, scheme: Scheme, out: []dvui.Color.PMA) void {
     const s = c.sheet;
-    const k = s.size / @as(f32, @floatFromInt(px)); // texels a pixel
+    const k = @as(f32, @floatFromInt(c.size)) / @as(f32, @floatFromInt(px)); // texels a pixel
     const inkf: [3]f32 = .{ @as(f32, @floatFromInt(ink[0])) / 255, @as(f32, @floatFromInt(ink[1])) / 255, @as(f32, @floatFromInt(ink[2])) / 255 };
-    const cell_n: i64 = @intFromFloat(s.size);
+    const cell_n: i64 = c.size;
     for (0..px) |oy| for (0..px) |ox| {
         var acc: [4]f32 = .{ 0, 0, 0, 0 };
         if (k >= 2) {
@@ -304,7 +326,7 @@ fn over(col: [4]f32, ink: [3]f32, cov: f32) [4]f32 {
 
 /// Texel (x, y) of cell `c` (clamped to the cell), straight RGBA bytes.
 fn texel(c: Cell, x: i64, y: i64) [4]u8 {
-    const n: i64 = @intFromFloat(c.sheet.size);
+    const n: i64 = c.size;
     const tx: usize = @intCast(@as(i64, c.x) + std.math.clamp(x, 0, n - 1));
     const ty: usize = @intCast(@as(i64, c.y) + std.math.clamp(y, 0, n - 1));
     const i = (ty * c.sheet.width + tx) * 4;
