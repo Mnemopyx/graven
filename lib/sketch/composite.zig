@@ -145,6 +145,22 @@ pub fn addPolarGrid(s: *Sketch, a: Allocator, c: Point, r0: f64, r1: f64, t0: f6
     return id;
 }
 
+/// A dial as a macro object (the owner, 2026-11-28; `geometry.PolarGrid.
+/// Dial`): a polar grid whose borders are ticks, its driving unknowns a
+/// centre, four radii (outer, large ticks' and small ticks' inner ends,
+/// labels) and two angles; its properties `large` (large ticks' intervals),
+/// `small` (small ticks between two large) and `clockwise` (which way it
+/// runs from its first angle, whose order its angles keep).
+pub fn addDial(s: *Sketch, a: Allocator, c: Point, radii: [4]f64, t0: f64, t1: f64, large: u32, per: u32) Error!GroupId {
+    const first = s.geometry.items.len;
+    _ = try s.addDial(a, c, radii, t0, t1, large, per, true);
+    const id = try seal(s, a, first, .dial);
+    try s.groups.setProp(a, id, "large", @floatFromInt(large));
+    try s.groups.setProp(a, id, "small", @floatFromInt(per));
+    try s.groups.setProp(a, id, "clockwise", if (t1 < t0) 1 else 0);
+    return id;
+}
+
 /// A tessellation as a macro object (the owner, 2026-11-28): one
 /// geometry (`tessellation.add`'s), filling the closed path `outline`,
 /// its driving unknowns a tile's centre, the spacing, the turn and the
@@ -222,6 +238,12 @@ pub fn countNeeded(s: *const Sketch, c: Constraint, name: []const u8) ?u32 {
     for (root.refs(c, &buf)) |r| switch (r) {
         .point => |p| if (p.role == .node and p.geom < s.geometry.items.len) switch (s.geometry.items[p.geom].kind) {
             .polar_grid => |pg| {
+                // A dial's ticks: as many large ones as reach it.
+                if (pg.dial) |d| {
+                    if (std.mem.eql(u8, name, "large") and p.i != root.geometry.last and p.i > pg.cols)
+                        need = @max(need orelse 0, std.math.divCeil(u32, p.i, d.per + 1) catch p.i);
+                    continue;
+                }
                 const k = if (std.mem.eql(u8, name, "columns")) p.i else p.j;
                 const n = if (std.mem.eql(u8, name, "columns")) pg.cols else pg.rings;
                 if (k != root.geometry.last and k > n) need = @max(need orelse 0, k);
@@ -320,7 +342,7 @@ fn placement(s: *const Sketch, g: *const group.Group) Error!Placement {
             const e = try s.point(.{ .geom = m[1], .role = .end });
             return .{ .polar = .{ .c = c, .r = std.math.hypot(e.x - c.x, e.y - c.y), .first = std.math.atan2(e.y - c.y, e.x - c.x) } };
         },
-        .polar_grid => {
+        .polar_grid, .dial => {
             if (m.len < 1) return error.NotAnObject;
             const pg = switch (s.geometry.items[m[0]].kind) {
                 .polar_grid => |x| x,
@@ -404,7 +426,7 @@ fn sealedBy(s: *const Sketch, o: GroupId) bool {
 
 /// A macro object: driving geometry and counts, made by no constraints.
 pub fn isMacro(kind: group.Kind) bool {
-    return kind == .polar_grid or kind == .tessellation;
+    return kind == .polar_grid or kind == .dial or kind == .tessellation;
 }
 
 /// Where object `id` is now.
@@ -532,6 +554,10 @@ pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
                 const k = map.scale() orelse 1;
                 v[pg.r[0]] *= k;
                 v[pg.r[1]] *= k;
+                if (pg.dial) |d| {
+                    v[d.small] *= k;
+                    v[d.label] *= k;
+                }
                 const turn = std.math.atan2(map.yx, map.xx);
                 v[pg.t[0]] += turn;
                 v[pg.t[1]] += turn;
@@ -567,7 +593,7 @@ pub fn removeObject(s: *Sketch, a: Allocator, id: GroupId) Error!void {
 pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64, remap: *Remap) Error!void {
     const g = try s.groups.get(id);
     if (g.kind == .plain or g.kind == .connection or g.kind == .caption) return error.NotAnObject;
-    if (g.kind == .polar_grid) return setCount(s, a, id, name, value, remap);
+    if (g.kind == .polar_grid or g.kind == .dial) return setCount(s, a, id, name, value, remap);
     if (g.kind == .tessellation) return setTessellation(s, a, id, name, value);
     const kind = g.kind;
     const where = try placement(s, g);
@@ -655,12 +681,58 @@ pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f
 /// hand first (`boundIndices` says how many there are).
 fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64, remap: *Remap) Error!void {
     const m = macroGeometry(s, id) orelse return error.NotAnObject;
+    if (s.geometry.items[m].kind.polar_grid.dial != null) return setDial(s, a, id, m, name, value, remap);
     const n: u32 = @intFromFloat(@max(0, @round(value)));
     if (n < 1 or n > 10_000) return error.WrongKind;
     const cols = std.mem.eql(u8, name, "columns");
     if (!cols and !std.mem.eql(u8, name, "rings")) return error.WrongKind;
     const pg = &s.geometry.items[m].kind.polar_grid;
     const old = if (cols) pg.cols else pg.rings;
+    try remapRun(s, a, m, cols, old, n, remap);
+    if (cols) pg.cols = n else pg.rings = n;
+    try s.groups.setProp(a, id, name, @floatFromInt(n));
+}
+
+/// A dial's property set: `large` (its large ticks' intervals), `small`
+/// (small ticks between two large: 0 for none) or `clockwise` (0 or 1:
+/// its second angle put the other way round from its first, the same
+/// sweep). The counts change its borders' count (large × (small + 1)),
+/// bindings following as a grid's do, so a large tick stays a large tick.
+fn setDial(s: *Sketch, a: Allocator, id: GroupId, m: GeomId, name: []const u8, value: f64, remap: *Remap) Error!void {
+    const eq = std.mem.eql;
+    if (!std.math.isFinite(value)) return error.WrongKind;
+    const pg = &s.geometry.items[m].kind.polar_grid;
+    const v = s.vars.items;
+    if (eq(u8, name, "clockwise")) {
+        const cw = value != 0;
+        const sw = v[pg.t[1]] - v[pg.t[0]];
+        if ((sw < 0) != cw) v[pg.t[1]] = v[pg.t[0]] - sw;
+        try s.groups.setProp(a, id, name, if (cw) 1 else 0);
+        return;
+    }
+    const n: u32 = @intFromFloat(@max(0, @round(value)));
+    var large = pg.largeCount();
+    var per = pg.dial.?.per;
+    if (eq(u8, name, "large")) {
+        if (n < 1 or n > 1000) return error.WrongKind;
+        large = n;
+    } else if (eq(u8, name, "small")) {
+        if (n > 100) return error.WrongKind;
+        per = n;
+    } else return error.WrongKind;
+    const cols = large * (per + 1);
+    try remapRun(s, a, m, true, pg.cols, cols, remap);
+    pg.cols = cols;
+    pg.dial.?.per = per;
+    try s.groups.setProp(a, id, "large", @floatFromInt(large));
+    try s.groups.setProp(a, id, "small", @floatFromInt(per));
+}
+
+/// A macro's run (`cols`: its borders, else its rings) from `old` to `n`:
+/// every binding along it renumbered to the same fraction along (in
+/// order, kept apart, ends staying ends), into `remap.run`; refused
+/// (`TooFewBindPoints`) when there are more bindings than places.
+fn remapRun(s: *Sketch, a: Allocator, m: GeomId, cols: bool, old: u32, n: u32, remap: *Remap) Error!void {
     if (n != old) {
         // The distinct bound indices along this run, in order.
         const bound = try boundIndices(s, a, m, cols, remap.held);
@@ -696,8 +768,6 @@ fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64,
             }
         }
     }
-    if (cols) pg.cols = n else pg.rings = n;
-    try s.groups.setProp(a, id, name, @floatFromInt(n));
 }
 
 /// The distinct indices along a macro's run (`cols`: its borders, else its
@@ -749,9 +819,20 @@ pub fn boundIndices(s: *const Sketch, a: Allocator, m: GeomId, cols: bool, held:
 /// enough bind points for every binding along that run (at least 1).
 pub fn countFloor(s: *const Sketch, a: Allocator, id: GroupId, name: []const u8, held: []const Piece) Allocator.Error!u32 {
     const m = macroGeometry(s, id) orelse return 1;
-    const b = try boundIndices(s, a, m, std.mem.eql(u8, name, "columns"), held);
+    const pg = switch (s.geometry.items[m].kind) {
+        .polar_grid => |x| x,
+        else => return 1,
+    };
+    const eq = std.mem.eql;
+    const b = try boundIndices(s, a, m, if (pg.dial != null) true else eq(u8, name, "columns"), held);
     defer a.free(b);
-    return @max(1, @as(u32, @intCast(b.len)) -| 1);
+    const need = @max(1, @as(u32, @intCast(b.len)) -| 1);
+    // A dial's borders are its large count times one more than its small.
+    if (pg.dial) |d| {
+        if (eq(u8, name, "large")) return @max(1, std.math.divCeil(u32, need, d.per + 1) catch need);
+        if (eq(u8, name, "small")) return (std.math.divCeil(u32, need, @max(pg.largeCount(), 1)) catch need) -| 1;
+    }
+    return need;
 }
 
 fn mapOne(r: *Remap, g: GeomId) ?GeomId {
@@ -1000,4 +1081,55 @@ test "a polar grid's rings and borders as curves: pieces, cells, a point held on
     try testing.expectEqual(@as(u32, 1), moved.from.?.i);
     try testing.expectEqual(@as(u32, 2), moved.to.?.i);
     try testing.expectEqual(@as(u32, 1), moved.part.k);
+}
+
+test "a dial macro: large and small ticks as properties, a bound large tick stays a large tick" {
+    const al = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(al);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try Sketch.init(a);
+    // A clock face: all the way round clockwise from the top, 12 hours,
+    // 4 minute ticks between.
+    const top = std.math.pi / 2.0;
+    const id = try addDial(&s, a, .{ .x = 0, .y = 0 }, .{ 20, 16, 18, 12 }, top, top - 2 * std.math.pi, 12, 4);
+    const m = macroGeometry(&s, id).?;
+    const pg = s.geometry.items[m].kind.polar_grid;
+    try testing.expectEqual(@as(u32, 60), pg.cols);
+    try testing.expectEqual(@as(?f64, 1), (try s.groups.get(id)).prop("clockwise"));
+    // 60 ticks and the rim: 12 long, 48 short.
+    var segs: std.ArrayList(geom.Segment) = .empty;
+    try s.appendSegments(a, s.geometry.items[m], &segs);
+    var long: usize = 0;
+    var short: usize = 0;
+    for (segs.items) |sg| if (sg == .line) {
+        const l = std.math.hypot(sg.line[1].x - sg.line[0].x, sg.line[1].y - sg.line[0].y);
+        if (@abs(l - 4) < 1e-9) long += 1 else if (@abs(l - 2) < 1e-9) short += 1;
+    };
+    try testing.expectEqual(@as(usize, 12), long);
+    try testing.expectEqual(@as(usize, 48), short);
+    // Three o'clock's label point is to the right of the centre.
+    const three = try s.point(.{ .geom = m, .role = .node, .i = 15, .j = 3 });
+    try testing.expectApproxEqAbs(12, three.x, 1e-9);
+    try testing.expectApproxEqAbs(0, three.y, 1e-9);
+    // A point held on three o'clock's tick end; one small tick between
+    // large ones: it is still three o'clock's.
+    const p = try s.addPoint(a, .{ .x = 16, .y = 0 }, false);
+    _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = m, .role = .node, .i = 15, .j = 1 }, .{ .geom = p } } } });
+    var remap: Remap = .{};
+    try setProp(&s, a, id, "small", 1, &remap);
+    const now = s.geometry.items[m].kind.polar_grid;
+    try testing.expectEqual(@as(u32, 24), now.cols);
+    const c = s.constraints.items[s.constraints.items.len - 1].kind.coincident;
+    try testing.expectEqual(@as(u32, 6), c[0].i);
+    try testing.expect(now.large(c[0].i));
+    // Anticlockwise now: the same sweep the other way.
+    try setProp(&s, a, id, "clockwise", 0, &remap);
+    try testing.expect(s.geometry.items[m].kind.polar_grid.sweep(s.vars.items) > 0);
+    // A tick is a curve, from the rim in to its own end.
+    var k: std.ArrayList(geom.Segment) = .empty;
+    try root.pieces.appendSegments(&s, a, .{ .geom = m, .part = .{ .role = .border, .k = 1 } }, &k);
+    try testing.expectEqual(@as(usize, 1), k.items.len);
+    const ln = k.items[0].line;
+    try testing.expectApproxEqAbs(2, std.math.hypot(ln[1].x - ln[0].x, ln[1].y - ln[0].y), 1e-9);
 }

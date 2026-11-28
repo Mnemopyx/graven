@@ -918,6 +918,11 @@ pub const TileRegion = struct {
     /// angles are kept and flagged (`unsupported_direction`).
     direction: f64 = 0,
     rotation: f64 = 0,
+    /// A single track's turn, degrees anticlockwise about its origin: it
+    /// is placed as it would be unturned, then turned whole, its baseline
+    /// and what stands on it (a dial's label along its tangent). 0 for a
+    /// region, whose tracks run `direction`'s way.
+    turn: f64 = 0,
     stack: Side = .right,
     /// Its object origin on its soft area; by default the top-left corner,
     /// where `origin` is.
@@ -954,6 +959,11 @@ pub const TileRegion = struct {
     caption_copy: []const Item = &.{},
     /// Its text is its own, not the base's: edited in place.
     caption_own: bool = false,
+    /// A use's track for a dial's label (`SketchDial.id`), and which:
+    /// the label at its `dial_tick`th large tick. Made, kept and removed
+    /// by `syncDials`.
+    dial: ObjectId = .none,
+    dial_tick: u32 = 0,
     /// A track a text sheet drives: the text it last wrote there, to tell
     /// an edit made in the track (which goes into the cell shown) from a
     /// change to the sheet. Null while no sheet drives it.
@@ -1414,6 +1424,29 @@ pub const SketchCaption = struct {
     connector: u32 = 0,
 };
 
+/// A dial's labels (the owner, 2026-11-28): a sequence of glyphs round
+/// a dial (`sketch_.composite.addDial`), one at each large tick from its
+/// first angle on, in its own track in every use of the sketch (made and
+/// kept there by `syncDials`), each one's text a cell of a sheet's column:
+/// row k at tick k. Its sheet is held by ID; its column by place, its
+/// name kept as last seen so it is found again should columns move.
+pub const SketchDial = struct {
+    id: ObjectId = .none,
+    /// The dial: an object (group) of the sketch.
+    object: u32,
+    sheet: ObjectId = .none,
+    column: []const u8 = "",
+    col: usize = 0,
+    style: StyleId,
+    /// Each label's track: its line pitch and length, mm.
+    pitch: f64,
+    length: f64,
+    /// Upright (every label's baseline level), else along the dial's
+    /// tangent, tops outward, turned on by `offset` degrees.
+    upright: bool = true,
+    offset: f64 = 0,
+};
+
 pub const SketchItem = struct {
     id: ObjectId = .none,
     name: []const u8,
@@ -1439,6 +1472,8 @@ pub const SketchItem = struct {
     /// Its captions (Add caption): every use of the sketch shows each as
     /// a track of its own (`syncCaptions`).
     captions: std.ArrayList(SketchCaption) = .empty,
+    /// Its dials' labels (`SketchDial`).
+    dials: std.ArrayList(SketchDial) = .empty,
 
     /// What its uses read: the accepted sketch while a draft is pending,
     /// else the sketch itself.
@@ -1490,6 +1525,12 @@ pub const SketchEdit = union(enum) {
     /// (radians, either order; a turn apart: all the way round), `cols`
     /// sections round and `rings` out.
     polar_grid: struct { c: geom.Point, r: [2]f64, t: [2]f64, cols: u32, rings: u32 },
+    /// A dial, a macro object (`sketch_.composite.addDial`): about `c`,
+    /// its radii outer, large ticks' and small ticks' inner ends, labels;
+    /// from angle `t[0]` to `t[1]` (radians: the order is the way it
+    /// runs), `large` large ticks' intervals, `small` small ticks between
+    /// two large.
+    dial: struct { c: geom.Point, radii: [4]f64, t: [2]f64, large: u32, small: u32 },
     /// A tessellation, a macro object (`sketch_.composite.addTessellation`):
     /// the smallest closed path of the sketch's curves round `at` filled
     /// with tiles of `sides` (3, 4, 6), one centred at `at`, `spacing` mm
@@ -5563,6 +5604,191 @@ pub const Model = struct {
         }
     }
 
+    /// Sets dial `object` of sketch `index`'s labels: from column `col`
+    /// of sheet `sheet` (`.none`: no labels), in `style` at line pitch
+    /// `pitch`, each label's track `length` long (mm). Returns its ID.
+    pub fn setDialLabels(m: *Model, index: usize, object: u32, sheet: ObjectId, col: usize, style: StyleId, pitch: f64, length: f64) Error!ObjectId {
+        if (index >= m.sketches.items.len) return error.NoSuchItem;
+        if (!(pitch > 0) or !(length > 0)) return error.BadSize;
+        if (m.styleIndex(style) == null) return error.NoSuchStyle;
+        const item = &m.sketches.items[index];
+        if (sketch_.composite.macroGeometry(&item.sketch, object) == null) return error.NoSuchItem;
+        var column: []const u8 = "";
+        if (sheet != .none) {
+            const sh = for (m.sheets.items) |*x| {
+                if (x.id == sheet) break x;
+            } else return error.NoSuchItem;
+            if (col >= sh.columns.items.len) return error.NoSuchItem;
+            column = try m.a().dupe(u8, sh.columns.items[col]);
+        }
+        const d = m.dialOf(index, object) orelse blk: {
+            try item.dials.append(m.a(), .{ .id = m.newId(), .object = object, .style = style, .pitch = pitch, .length = length });
+            break :blk &item.dials.items[item.dials.items.len - 1];
+        };
+        d.sheet = sheet;
+        d.col = col;
+        d.column = column;
+        d.style = style;
+        d.pitch = pitch;
+        d.length = length;
+        m.revision += 1;
+        try m.syncDials();
+        return d.id;
+    }
+
+    /// Sets how dial `object` of sketch `index`'s labels stand: upright,
+    /// or along its tangent turned on by `offset` degrees.
+    pub fn setDialOrientation(m: *Model, index: usize, object: u32, upright: bool, offset: f64) Error!void {
+        if (!std.math.isFinite(offset)) return error.BadSize;
+        const d = m.dialOf(index, object) orelse return error.NoSuchItem;
+        d.upright = upright;
+        d.offset = offset;
+        m.revision += 1;
+        try m.syncDials();
+    }
+
+    /// Dial `object` of sketch `index`'s labels, if it has any set.
+    pub fn dialOf(m: *Model, index: usize, object: u32) ?*SketchDial {
+        if (index >= m.sketches.items.len) return null;
+        for (m.sketches.items[index].dials.items) |*d| if (d.object == object) return d;
+        return null;
+    }
+
+    /// Where a dial's label `k` goes and how it turns, in its sketch's
+    /// frame: the centre of its track, and the turn (degrees). Null when
+    /// the dial has no such label.
+    pub fn dialLabelAt(sk: *const sketch_.Sketch, d: SketchDial, k: u32) ?struct { at: geom.Point, turn: f64 } {
+        const mg = sketch_.composite.macroGeometry(sk, d.object) orelse return null;
+        const pg = switch (sk.geometry.items[mg].kind) {
+            .polar_grid => |x| x,
+            else => return null,
+        };
+        const dl = pg.dial orelse return null;
+        if (k >= dialLabelCount(sk, d)) return null;
+        const i = k * (dl.per + 1);
+        const at = sk.point(.{ .geom = mg, .role = .node, .i = i, .j = 3 }) catch return null;
+        const theta = std.math.radiansToDegrees(pg.angle(sk.vars.items, i));
+        return .{ .at = at, .turn = if (d.upright) 0 else theta - 90 + d.offset };
+    }
+
+    /// How many labels a dial has: one at each large tick (the last is
+    /// the first when it goes all the way round).
+    pub fn dialLabelCount(sk: *const sketch_.Sketch, d: SketchDial) u32 {
+        const mg = sketch_.composite.macroGeometry(sk, d.object) orelse return 0;
+        const pg = switch (sk.geometry.items[mg].kind) {
+            .polar_grid => |x| x,
+            else => return 0,
+        };
+        if (pg.dial == null or d.sheet == .none) return 0;
+        const n = pg.largeCount();
+        return if (pg.full(sk.vars.items)) n else n + 1;
+    }
+
+    /// Writes every dial's labels into each use of its sketch: a track a
+    /// label, at its bind point on the labels' ring, turned as the dial
+    /// says, its text the sheet column's cell (row k for label k; an edit
+    /// made in the track goes into that cell, as a text sheet's do). A
+    /// sketch view on a workspace shows the sketch as it is being edited;
+    /// a sketch panel, as last accepted. Labels a dial no longer has (a
+    /// count lowered, its sheet unset, the dial gone) are removed.
+    pub fn syncDials(m: *Model) Error!void {
+        const al = m.arena.child_allocator;
+        const Use = struct { parent: Parent, off: geom.Point, sk: *const sketch_.Sketch, item: usize };
+        var uses: std.ArrayList(Use) = .empty;
+        defer uses.deinit(al);
+        for (m.sketches.items, 0..) |*item, ii| {
+            if (item.dials.items.len == 0) continue;
+            // Its own space, where it is defined and edited, at its origin.
+            if (m.homeOf(item.id)) |hs| try uses.append(al, .{ .parent = .{ .space = hs }, .off = .{ .x = 0, .y = 0 }, .sk = &item.sketch, .item = ii });
+            for (m.spaces.items, 0..) |sp, si| for (sp.sketch_views.items) |v| {
+                if (v.sketch == item.id) try uses.append(al, .{ .parent = .{ .space = si }, .off = v.at, .sk = &item.sketch, .item = ii });
+            };
+            for (m.panels.items, 0..) |p, pi| {
+                if (p.sketch == item.id) try uses.append(al, .{ .parent = .{ .panel = pi }, .off = .{ .x = p.sketch_at.x - p.origin.x, .y = p.sketch_at.y - p.origin.y }, .sk = item.used(), .item = ii });
+            }
+        }
+        // Labels no longer wanted, in every parent.
+        for (0..m.parentCount()) |pk| {
+            const parent = m.parentAt(pk);
+            var ri: usize = m.regionsIn(parent).len;
+            while (ri > 0) {
+                ri -= 1;
+                const r = m.regionsIn(parent)[ri];
+                if (r.dial == .none) continue;
+                const keep = for (uses.items) |u| {
+                    if (!u.parent.eql(parent)) continue;
+                    const d = for (m.sketches.items[u.item].dials.items) |x| {
+                        if (x.id == r.dial) break x;
+                    } else continue;
+                    break r.dial_tick < dialLabelCount(u.sk, d);
+                } else false;
+                if (!keep) try m.removeRegion(parent, ri);
+            }
+        }
+        for (uses.items) |u| {
+            for (m.sketches.items[u.item].dials.items) |d| {
+                const sh = for (m.sheets.items) |*x| {
+                    if (x.id == d.sheet) break x;
+                } else continue;
+                // Its column found again by name should it have moved.
+                var col = d.col;
+                if (col >= sh.columns.items.len or !std.mem.eql(u8, sh.columns.items[col], d.column)) {
+                    for (sh.columns.items, 0..) |c, ci| if (std.mem.eql(u8, c, d.column)) {
+                        col = ci;
+                    };
+                }
+                const n = dialLabelCount(u.sk, d);
+                for (0..n) |kk| {
+                    const k: u32 = @intCast(kk);
+                    const spot = dialLabelAt(u.sk, d, k) orelse continue;
+                    const c: geom.Point = .{ .x = u.off.x + spot.at.x, .y = u.off.y + spot.at.y };
+                    const t = std.math.degreesToRadians(spot.turn);
+                    // Its origin, so that its band's centre, turned about
+                    // it, is on the label's place.
+                    const hx = d.length / 2;
+                    const hy = -d.pitch / 2;
+                    const origin: geom.Point = .{ .x = c.x - (@cos(t) * hx - @sin(t) * hy), .y = c.y - (@sin(t) * hx + @cos(t) * hy) };
+                    const ri = for (m.regionsIn(u.parent), 0..) |r, x| {
+                        if (r.dial == d.id and r.dial_tick == k) break x;
+                    } else blk: {
+                        if (m.styleIndex(d.style) == null) break;
+                        var name_buf: [32]u8 = undefined;
+                        const name = m.freshName(&name_buf, m.containerOf(u.parent), "Label");
+                        const x = try m.addTracks(u.parent, .{ .name = name, .origin = origin, .kind = .track, .style = d.style, .count = 1, .length = d.length / d.pitch, .pitch = d.pitch });
+                        const r = &m.regionsIn(u.parent)[x];
+                        r.dial = d.id;
+                        r.dial_tick = k;
+                        r.alignment = .centre;
+                        break :blk x;
+                    };
+                    const r = &m.regionsIn(u.parent)[ri];
+                    if (r.origin.x != origin.x or r.origin.y != origin.y or r.turn != spot.turn) {
+                        r.origin = origin;
+                        r.turn = spot.turn;
+                        m.revision += 1;
+                    }
+                    // Its text: the cell (an edit in the track into it).
+                    if (k >= sh.rows.items.len or col >= sh.columns.items.len) continue;
+                    const row = &sh.rows.items[k];
+                    while (row.cells.items.len < sh.columns.items.len) try row.cells.append(m.a(), "");
+                    const fi = m.flowIndex(r.flow) orelse continue;
+                    const f = &m.flows.items[fi];
+                    const now = try itemsText(al, f.items.items);
+                    defer al.free(now);
+                    if (r.sheet_copy) |last| if (!std.mem.eql(u8, now, last)) {
+                        row.cells.items[col] = try m.a().dupe(u8, now);
+                    };
+                    const text = row.cells.items[col];
+                    if (!std.mem.eql(u8, now, text)) {
+                        try m.setItemsText(&f.items, d.style, text);
+                        m.revision += 1;
+                    }
+                    if (r.sheet_copy == null or !std.mem.eql(u8, r.sheet_copy.?, text)) r.sheet_copy = try m.a().dupe(u8, text);
+                }
+            }
+        }
+    }
+
     /// Whether track `r` is a use's copy of a caption (which follows its
     /// base, not a sheet).
     fn isCaptionCopy(m: *const Model, r: *const TileRegion) bool {
@@ -5593,6 +5819,8 @@ pub const Model = struct {
                     const pi = m.parentAt(k);
                     for (m.regionsIn(pi)) |*r| {
                         if (!(r.id == link or (r.caption == link and !m.isCaptionCopy(r)))) continue;
+                        // A dial's label is its dial's sheet column's.
+                        if (r.dial != .none) continue;
                         const fi = m.flowIndex(r.flow) orelse continue;
                         const f = &m.flows.items[fi];
                         const now = try itemsText(al, f.items.items);
@@ -5680,6 +5908,7 @@ pub const Model = struct {
         try m.linkSheetRows();
         try m.syncTextSheets();
         try m.syncCaptions();
+        try m.syncDials();
         if (m.sheets.items.len == 0) return;
         const al = m.arena.child_allocator;
         var near: std.ArrayList(TileId) = .empty;
@@ -6263,6 +6492,10 @@ pub const Model = struct {
             },
             .polar_grid => |e| {
                 const obj = sketch_.composite.addPolarGrid(sk, al, e.c, e.r[0], e.r[1], e.t[0], e.t[1], e.cols, e.rings) catch |err| return compositeError(err);
+                out = sketch_.composite.macroGeometry(sk, obj) orelse return error.BadSize;
+            },
+            .dial => |e| {
+                const obj = sketch_.composite.addDial(sk, al, e.c, e.radii, e.t[0], e.t[1], e.large, e.small) catch |err| return compositeError(err);
                 out = sketch_.composite.macroGeometry(sk, obj) orelse return error.BadSize;
             },
             .polygon => |e| {
