@@ -5,6 +5,7 @@
     python3 scripts/icons.py build            # apps/gui/icons/graven.png + .json
     python3 scripts/icons.py sheet ATLAS.json OUT.png   # a contact sheet
     python3 scripts/icons.py ribbon ATLAS.json OUT.png  # as the ribbon draws them
+    python3 scripts/icons.py hints ATLAS.json OUT.png [a,b]  # before/after hinting
 
 The style rules: style B of the icon style guide, the owner's choice
 (2026-11-27; https://claude.ai/artifact/5rY6HHY3TZef3JNcbsZSoS, blueprint
@@ -380,6 +381,95 @@ ICONS = {
     "con-symmetric": dashes([(12, 2), (12, 20)], 2, 1.5) + dot(5, 11) + dot(19, 11) + arrow(9.5, 11, 6.5, 11, 2) + arrow(14.5, 11, 17.5, 11, 2),
 }
 
+# --- Hinting -----------------------------------------------------------------
+#
+# The field scales freely, but at small sizes a line that falls between two
+# pixel columns is drawn as two grey ones. For the sizes in HINT_SIZES
+# (device pixels a button; the owner, 2026-11-28: 24, 32 and 48) each icon
+# gets a cell of its own, hinted for that size: its horizontal and vertical
+# lines moved onto the pixel grid. The GUI draws that cell when it draws the
+# icon at exactly that size, and the free one otherwise.
+#
+# The rule (one primitive for every icon, nothing drawn per icon):
+#   1. The drawing is put in the size's pixels.
+#   2. Each ink's width is rounded to whole pixels (a width under one pixel
+#      is kept: thin construction stays lighter than the ink).
+#   3. Anchors, on each axis: every axis-aligned piece of ink (its centre to
+#      a pixel's centre when its width is odd or under a pixel, to a pixel
+#      boundary when even) and every axis-aligned edge of a fill (to a pixel
+#      boundary; an ink on the same line wins). Order is kept, and lines at
+#      least HINT_KEEP_APART pixels apart stay apart by at least their
+#      distance rounded (at least a pixel): snapping never closes a gap.
+#   4. Every point of the drawing is moved by the warp those anchors make:
+#      linear between neighbouring anchors, beyond the outermost moved as
+#      it is. So diagonals, arcs and dots follow the lines they meet.
+# The hinted cell is made at HINT_OVERSAMPLE texels a pixel, so the GUI
+# shrinks it by a whole factor, texels lying exactly in pixels.
+HINT_SIZES = (24, 32, 48)
+HINT_OVERSAMPLE = 2
+HINT_KEEP_APART = 0.75
+
+
+def hint(parts, px):
+    """`parts` in pixels of a `px` button, their ink widths in pixels,
+    hinted (the rule above)."""
+    s = px / BUTTON * ART / 24.0
+    off = px / BUTTON * MARGIN
+    to_px = lambda p: [(off + x * s, off + y * s) for x, y in p]
+    out = []
+    for part in parts:
+        if part[0] == "ink":
+            w = (part[2] if len(part) > 2 else STROKE) * s
+            out.append(("ink", to_px(part[1]), float(round(w)) if w >= 1 else w))
+        else:
+            out.append(("fill", to_px(part[1]), part[2]))
+
+    def snap(c, w):
+        if w is None:  # a fill's edge
+            return round(c)
+        return round(c) if (w >= 1 and round(w) % 2 == 0) else math.floor(c) + 0.5
+
+    warps = []
+    for axis in (0, 1):
+        other = 1 - axis
+        found = {}  # rounded position -> (position, target, from ink)
+        for part in out:
+            pts = part[1] + ([part[1][0]] if part[0] == "fill" else [])
+            w = part[2] if part[0] == "ink" else None
+            for a, b in zip(pts, pts[1:]):
+                if abs(a[axis] - b[axis]) > 1e-6 or abs(a[other] - b[other]) < 1e-6:
+                    continue
+                c = a[axis]
+                key = round(c, 3)
+                # An ink wins over a fill's edge, a wider ink over a thinner.
+                rank = -1 if w is None else w
+                if key in found and found[key][2] >= rank:
+                    continue
+                found[key] = (c, snap(c, w), rank)
+        anchors = sorted((c, t) for c, t, _ in found.values())
+        for i in range(1, len(anchors)):
+            (c0, t0), (c1, t1) = anchors[i - 1], anchors[i]
+            floor_t = t0 + (max(1, round(c1 - c0)) if c1 - c0 >= HINT_KEEP_APART else 0)
+            if t1 < floor_t:
+                anchors[i] = (c1, floor_t)
+        warps.append(anchors)
+
+    def warp(v, anchors):
+        if not anchors:
+            return v
+        if v <= anchors[0][0]:
+            return v + anchors[0][1] - anchors[0][0]
+        if v >= anchors[-1][0]:
+            return v + anchors[-1][1] - anchors[-1][0]
+        for (c0, t0), (c1, t1) in zip(anchors, anchors[1:]):
+            if c0 <= v <= c1:
+                return t0 + (v - c0) / (c1 - c0) * (t1 - t0) if c1 > c0 else t0
+        return v
+
+    moved = lambda p: [(warp(x, warps[0]), warp(y, warps[1])) for x, y in p]
+    return [(p[0], moved(p[1]), p[2]) for p in out]
+
+
 # --- SVG -------------------------------------------------------------------
 
 
@@ -407,7 +497,7 @@ def write_svgs():
 # --- The icon file -----------------------------------------------------------
 
 
-def cell_image(parts):
+def cell_image(parts, size=CELL, s=None, off=None):
     """An icon's cell: the ink's distance (pixels, positive inside) and its
     ground (RGB, the key where nothing is filled). Parts are painted in
     order, so a fill hides the ink beneath it: the distance there becomes
@@ -415,8 +505,10 @@ def cell_image(parts):
     max, exact where it matters, at the edges)."""
     import numpy as np
 
-    s = CELL / BUTTON * ART / 24.0  # pixels per drawing unit
-    off = CELL / BUTTON * MARGIN
+    if s is None:
+        s = size / BUTTON * ART / 24.0  # pixels per drawing unit
+        off = size / BUTTON * MARGIN
+    CELL = size
     ys, xs = np.mgrid[0:CELL, 0:CELL]
     px = (xs + 0.5 - off) / s
     py = (ys + 0.5 - off) / s
@@ -463,28 +555,46 @@ def build():
     from PIL import Image
 
     names = list(ICONS)
+    # The cells: each icon free (CELL), then hinted for each of HINT_SIZES
+    # (the glyph's "px" says for which size; its cell HINT_OVERSAMPLE
+    # texels a pixel). Packed in shelves, one size a shelf.
+    jobs = [(name, CELL, None) for name in names]
+    for px in HINT_SIZES:
+        jobs += [(name, px * HINT_OVERSAMPLE, px) for name in names]
     cols = min(8, len(names))
-    rows = (len(names) + cols - 1) // cols
-    step = CELL + 2 * PAD
-    W, H = cols * step, rows * step
+    W = cols * (CELL + 2 * PAD)
+    placed, x, y, shelf, last = [], 0, 0, 0, None
+    for name, size, px in jobs:
+        step = size + 2 * PAD
+        if x + step > W or (last is not None and size != last):
+            x, y, shelf = 0, y + shelf, 0
+        placed.append((name, size, px, x + PAD, y + PAD))
+        x += step
+        shelf = max(shelf, step)
+        last = size
+    H = y + shelf
     rgba = np.zeros((H, W, 4), dtype=np.uint8)
     rgba[..., :3] = hexrgb(KEY)
     rgba[..., 3] = 255
     glyphs = []
-    for i, name in enumerate(names):
-        dist, rgb = cell_image(ICONS[name])
-        x0 = (i % cols) * step + PAD
-        y0 = (i // cols) * step + PAD
+    for i, (name, size, px, x0, y0) in enumerate(placed):
+        if px is None:
+            dist, rgb = cell_image(ICONS[name])
+        else:
+            dist, rgb = cell_image(hint(ICONS[name], px), size, HINT_OVERSAMPLE, 0.0)
         a = np.clip(np.round((0.5 - dist / RANGE) * 255), 0, 255).astype(np.uint8)
         cell = np.dstack([rgb, a])
-        rgba[y0 - PAD:y0 + CELL + PAD, x0 - PAD:x0 + CELL + PAD] = np.pad(cell, ((PAD, PAD), (PAD, PAD), (0, 0)), mode="edge")
-        glyphs.append({
+        rgba[y0 - PAD:y0 + size + PAD, x0 - PAD:x0 + size + PAD] = np.pad(cell, ((PAD, PAD), (PAD, PAD), (0, 0)), mode="edge")
+        g = {
             "index": i,
             "icon": name,
             "advance": 1.0,
             "planeBounds": {"left": 0.0, "top": 0.0, "right": 1.0, "bottom": 1.0},
-            "atlasBounds": {"left": x0, "top": y0, "right": x0 + CELL, "bottom": y0 + CELL},
-        })
+            "atlasBounds": {"left": x0, "top": y0, "right": x0 + size, "bottom": y0 + size},
+        }
+        if px is not None:
+            g["px"] = px
+        glyphs.append(g)
     png = os.path.join(ICON_DIR, "graven.png")
     Image.fromarray(rgba, "RGBA").save(png, optimize=True)
     meta = {
@@ -493,6 +603,7 @@ def build():
             "format": "graven-icons 1",
             "about": "RGB: the icon's ground, a raster; `transparent` lets what is behind show, `overrides` name colours a program may replace. A: the ink, 0.5 - d / distanceRange (d px to the ink's edge, positive inside): 255 no ink, 128 the edge. Straight alpha, not premultiplied.",
             "button": "each cell is a whole button; its ground may fill it",
+            "hinted": "a glyph with `px` is its icon hinted for a button exactly px device pixels square (its lines on that size's pixel grid); its cell is atlasBounds' size, a whole multiple of px. Draw it at that size only; at any other, the glyph without `px`.",
             "grid": 24,
             "art": {"grid": BUTTON, "left": MARGIN, "top": MARGIN, "size": ART},
             "ink": INK,
@@ -504,7 +615,7 @@ def build():
     }
     with open(os.path.join(ICON_DIR, "graven.json"), "w") as f:
         json.dump(meta, f, indent=1)
-    print(f"{len(names)} icons into {os.path.normpath(png)} ({W} x {H}) and graven.json")
+    print(f"{len(names)} icons (hinted at {', '.join(map(str, HINT_SIZES))} px) into {os.path.normpath(png)} ({W} x {H}) and graven.json")
 
 
 # --- Reading it back ---------------------------------------------------------
@@ -545,7 +656,7 @@ def render(atlas, meta, glyph, px, ground, ink=None, recolour={}, shrink="averag
     from PIL import Image
 
     b = glyph["atlasBounds"]
-    size = meta["atlas"]["size"]
+    size = b["right"] - b["left"]
     rng = meta["atlas"]["distanceRange"]
     ink = np.array(hexrgb(ink or meta["graven"]["ink"])) / 255
     ground = np.asarray(ground, dtype=float) / 255  # a colour, or px x px x 3
@@ -595,7 +706,7 @@ def sheet(json_path, out_path):
         ("light", (246, 245, 242), None, {}),
         ("dark pane: light ink, the dark slots", (44, 34, 54), DARK_INK, DARK),
     ]
-    glyphs = meta["glyphs"]
+    glyphs = [g for g in meta["glyphs"] if "px" not in g]
     colw = sum(s + 12 for s in sizes) + 20
     W = 160 + colw * len(columns)
     rowh = max(sizes) + 16
@@ -643,7 +754,7 @@ def ribbon(json_path, out_path):
     B = 64
     fade_ink = np.array([0x2c, 0x20, 0x3a], dtype=float)  # oklch(0.26 0.07 305)
     rows = [("as now: 32 px band, 55 %", 32, 0.55), ("Alt held: 92 %", 32, 0.92), ("a 24 px band, 55 %", 24, 0.55)]
-    glyphs = meta["glyphs"]
+    glyphs = [g for g in meta["glyphs"] if "px" not in g]
     W = 40 + len(glyphs) * B + 40
     H = 30 + len(rows) * (B + 70)
     img = Image.new("RGB", (W, H), (0xf0, 0xee, 0xea))
@@ -678,6 +789,60 @@ def ribbon(json_path, out_path):
     print(f"ribbon into {out_path}")
 
 
+def hints(json_path, out_path, names=None, zoom=6):
+    """Before and after hinting: each icon at each of HINT_SIZES, from its
+    free cell and from its hinted one, on the ribbon key's shade (its middle), at size
+    and enlarged `zoom` times (pixels as squares)."""
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    meta = json.load(open(json_path))
+    atlas = np.array(Image.open(os.path.join(os.path.dirname(json_path), "graven.png")).convert("RGBA"))
+    free = {g["icon"]: g for g in meta["glyphs"] if "px" not in g}
+    hinted = {(g["icon"], g["px"]): g for g in meta["glyphs"] if "px" in g}
+    names = names or list(free)
+    label = ImageFont.truetype(os.path.join(HERE, "..", "apps", "gui", "uifont", "DejaVuSans.ttf"), 18)
+    gap = 14
+    big = sum(px * zoom * 2 + gap * 3 for px in HINT_SIZES)
+    small = sum(px * 2 + gap for px in HINT_SIZES)
+    left = 210
+    W = left + small + 30 + big
+    rowh = max(HINT_SIZES) * zoom + gap * 2
+    H = 50 + rowh * len(names)
+    img = Image.new("RGB", (W, H), (0xf0, 0xee, 0xea))
+    d = ImageDraw.Draw(img)
+    x = left
+    for px in HINT_SIZES:
+        d.text((x, 12), f"{px}", font=label, fill=(60, 56, 64))
+        x += px * 2 + gap
+    x += 30
+    for px in HINT_SIZES:
+        d.text((x, 12), f"{px} px, x{zoom}: free | hinted", font=label, fill=(60, 56, 64))
+        x += px * zoom * 2 + gap * 3
+    for r, name in enumerate(names):
+        y = 50 + r * rowh
+        d.text((10, y + rowh // 2 - 12), name, font=label, fill=(40, 40, 40))
+        tiles = []
+        for px in HINT_SIZES:
+            shade = (0xf1, 0xf0, 0xec)  # the key's shade, half way down
+            a = render(atlas, meta, free[name], px, shade)
+            b = render(atlas, meta, hinted.get((name, px), free[name]), px, shade)
+            tiles.append((px, a, b))
+        x = left
+        for px, a, b in tiles:
+            img.paste(Image.fromarray(a), (x, y))
+            img.paste(Image.fromarray(b), (x + px, y))
+            x += px * 2 + gap
+        x += 30
+        for px, a, b in tiles:
+            for k, im in enumerate((a, b)):
+                e = Image.fromarray(im).resize((px * zoom, px * zoom), Image.NEAREST)
+                img.paste(e, (x + k * (px * zoom + gap), y))
+            x += px * zoom * 2 + gap * 3
+    img.save(out_path)
+    print(f"hints into {out_path}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "svg"
     if cmd == "svg":
@@ -687,6 +852,8 @@ if __name__ == "__main__":
         build()
     elif cmd == "ribbon":
         ribbon(sys.argv[2], sys.argv[3])
+    elif cmd == "hints":
+        hints(sys.argv[2], sys.argv[3], sys.argv[4].split(",") if len(sys.argv) > 4 else None)
     elif cmd == "sheet":
         sheet(sys.argv[2], sys.argv[3])
     else:
